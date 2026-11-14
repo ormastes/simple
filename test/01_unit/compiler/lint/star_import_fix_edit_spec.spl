@@ -1,0 +1,120 @@
+"""
+## Purpose and audience
+Executable spec of the W0406 star-import fixer edit contract for lint and
+fix-pipeline maintainers. Scope: `use a.b.*` in a regular file is narrowed to
+`use a.b.{Name, ...}` listing only names the file uses from that module; an
+unresolved or ambiguous module yields no edit; no identity edit is ever offered.
+Out of scope: `export use X.*` facade narrowing (diagnostic-only by design).
+## Operator workflow
+Run: bin/simple test test/01_unit/compiler/lint/star_import_fix_edit_spec.spl
+## Compatibility and limitations
+Fixtures are written under build/test_tmp/star_import_fix_spec, a throwaway
+repo-shaped tree (src/lib, src/app) the resolver walks like the real repo.
+## Verification guidance and troubleshooting
+A failure names which contract broke: a missing or wrong narrowed import, an
+edit offered for an unresolved/ambiguous module, or a no-op replacement.
+"""
+# @feature: star-import-lint
+# @manual_section: star-import-fix-edit
+
+use std.spec.*
+use std.nogc_sync_mut.io_runtime.{file_write, mkdir_p}
+use std.tooling.easy_fix.types.{EasyFix, FixConfidence}
+use compiler.tools.fix.rules.impl_.lint_star_import.{check_star_import_text_with_lines}
+
+val ROOT = "build/test_tmp/star_import_fix_spec"
+
+fn _setup():
+    mkdir_p(ROOT + "/src/lib/common/alpha")
+    mkdir_p(ROOT + "/src/lib/common/beta")
+    mkdir_p(ROOT + "/src/lib/common/facade")
+    mkdir_p(ROOT + "/src/app/demo")
+    file_write(ROOT + "/src/lib/common/alpha/shapes.spl", "pub struct Point:\n    x: i64\n\npub fn area(w: i64, h: i64) -> i64:\n    w * h\n\nfn unused_helper() -> i64:\n    0\n")
+    file_write(ROOT + "/src/lib/common/beta/shapes2.spl", "pub fn area(w: i64, h: i64) -> i64:\n    w + h\n\npub fn perimeter(w: i64) -> i64:\n    4 * w\n")
+    file_write(ROOT + "/src/lib/common/facade/__init__.spl", "export alpha.shapes.*\n")
+
+fn _app(name: text) -> text:
+    ROOT + "/src/app/demo/" + name
+
+fn _edit_count(fixes: [EasyFix]) -> i64:
+    var n = 0
+    for f in fixes:
+        n = n + f.replacements.len()
+    n
+
+fn _identity_count(fixes: [EasyFix], lines: [text]) -> i64:
+    var n = 0
+    for f in fixes:
+        for r in f.replacements:
+            if r.line >= 1 and r.line <= lines.len() and lines[r.line - 1] == r.new_text:
+                n = n + 1
+    n
+
+describe "W0406 star import fixer":
+    """
+    The fixer narrows a resolvable star import to the names the file uses,
+    and offers no edit when the module surface is unknown or ambiguous.
+    """
+    it "narrows a resolved star import to the used names":
+        # @capture(statistics): replacement text for a single resolvable star import
+        step("Lint a file that uses Point and area from alpha.shapes")
+        _setup()
+        val lines = ["use std.alpha.shapes.*", "", "fn main():", "    val p = Point(x: 1)", "    print(area(p.x, 2))", ""]
+        val fixes = check_star_import_text_with_lines(_app("narrow.spl"), lines)
+        expect(fixes.len()).to_equal(1)  # oracle: one star import line
+        expect(_edit_count(fixes)).to_equal(1)  # oracle: one narrowed replacement
+        expect(fixes[0].replacements[0].new_text).to_equal("use std.alpha.shapes.{Point, area}")  # oracle: used names only, sorted; unused_helper dropped
+        expect(fixes[0].is_safe()).to_equal(true)  # oracle: unique resolution, no star re-export
+        expect(_identity_count(fixes, lines)).to_equal(0)  # oracle: never a no-op edit
+
+    it "keeps indentation, lazy and trailing comment":
+        # @capture(statistics): replacement text preserving line decorations
+        step("Lint an indented lazy star import with a comment")
+        _setup()
+        val lines = ["    use lazy std.alpha.shapes.*  # geometry", "fn f() -> i64:", "    area(1, 2)"]
+        val fixes = check_star_import_text_with_lines(_app("decor.spl"), lines)
+        expect(fixes[0].replacements[0].new_text).to_equal("    use lazy std.alpha.shapes.{" + "area}  # geometry")  # oracle: decorations kept
+
+    it "offers no edit for an unresolved module":
+        # @capture(statistics): replacement count for an unknown module path
+        step("Lint a star import of a module that does not exist")
+        _setup()
+        val lines = ["use std.no_such.module.*", "fn f() -> i64:", "    area(1, 2)"]
+        val fixes = check_star_import_text_with_lines(_app("unresolved.spl"), lines)
+        expect(fixes.len()).to_equal(1)  # oracle: diagnostic kept
+        expect(_edit_count(fixes)).to_equal(0)  # oracle: unknown surface -> no edit
+        expect(fixes[0].confidence == FixConfidence.Uncertain).to_equal(true)  # oracle: honest confidence
+
+    it "offers no edit when a used name is exported by two star imports":
+        # @capture(statistics): replacement count for an ambiguous used name
+        step("Lint a file whose used name area comes from both alpha and beta")
+        _setup()
+        val lines = ["use std.alpha.shapes.*", "use std.beta.shapes2.*", "fn f() -> i64:", "    area(1, 2) + perimeter(3)"]
+        val fixes = check_star_import_text_with_lines(_app("ambiguous.spl"), lines)
+        expect(fixes.len()).to_equal(2)  # oracle: both star lines diagnosed
+        expect(_edit_count(fixes)).to_equal(0)  # oracle: ambiguous provenance -> no edit for either line
+
+    it "offers no edit for a facade that re-exports with a star":
+        # @capture(statistics): replacement count for a star-re-exporting target
+        step("Lint a star import of a facade whose own surface is a star re-export")
+        _setup()
+        val lines = ["use std.facade.*", "fn f() -> i64:", "    area(1, 2)"]
+        val fixes = check_star_import_text_with_lines(_app("facade_user.spl"), lines)
+        expect(_edit_count(fixes)).to_equal(0)  # oracle: incomplete surface -> no edit
+
+    it "offers no edit when the file uses nothing from the module":
+        # @capture(statistics): replacement count for an empty used-name set
+        step("Lint a star import whose names are never referenced")
+        _setup()
+        val lines = ["use std.alpha.shapes.*", "fn f() -> i64:", "    7"]
+        val fixes = check_star_import_text_with_lines(_app("empty.spl"), lines)
+        expect(_edit_count(fixes)).to_equal(0)  # oracle: empty intersection -> no edit
+        expect(_identity_count(fixes, lines)).to_equal(0)  # oracle: never a no-op edit
+
+    it "offers no edit when a used name is private in the module":
+        # @capture(statistics): replacement count when a non-pub name would be named
+        step("Lint a file that uses unused_helper, which alpha.shapes does not pub/export")
+        _setup()
+        val lines = ["use std.alpha.shapes.*", "fn f() -> i64:", "    area(1, 2) + unused_helper()"]
+        val fixes = check_star_import_text_with_lines(_app("private_use.spl"), lines)
+        expect(_edit_count(fixes)).to_equal(0)  # oracle: explicit import of a private name would fail visibility

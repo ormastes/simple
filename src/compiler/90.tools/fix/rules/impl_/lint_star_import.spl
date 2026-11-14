@@ -4,21 +4,41 @@
 #   W0406: use module.* — prefer explicit named imports
 #
 # Skips __init__.spl and mod.spl files (re-export facades).
+#
+# Edit: `use a.b.*` is narrowed to `use a.b.{Name, ...}` listing the names the
+# file uses from that module. The module is resolved to ONE source file under
+# the repo root of the linted file (std.* via src/lib and its variant roots,
+# compiler.* via numbered layer dirs, app.*/lib.* via src/app and src/lib).
+# No edit (Uncertain, diagnostic only) when the module does not resolve to
+# exactly one file, when the target re-exports with `.*` (surface unknown),
+# when no used name comes from it, or when a used name is provided by two
+# star imports. `export use X.*` is not narrowed: that changes a facade's API.
 
 use std.tooling.easy_fix.types.{FixConfidence, Replacement, EasyFix}
-use std.tooling.easy_fix.*
-use compiler.tools.fix.rules.helpers.*
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read, dir_exists, dir_list_or_empty}
 
 # ============================================================================
 # Rule: star_import (W0406)
 # Detects `use X.*` lines in regular source files.
-# Confidence: Certain (syntactic match)
 # ============================================================================
 
 pub fn check_star_import_text(source: text, file: text) -> [EasyFix]:
     if file.ends_with("__init__.spl") or file.ends_with("mod.spl"):
         return []
     check_star_import_text_with_lines(file, source.split("\n"))
+
+# One `use X.*` site in the linted file.
+struct StarSite:
+    line_index: i64
+    byte_offset: i64
+    mod_path: text
+
+# Resolved public surface of one star-imported module.
+struct StarSurface:
+    resolved: bool
+    names: [text]
+    # Declared but neither pub nor exported: never named explicitly.
+    private_names: [text]
 
 pub fn check_star_import_text_with_lines(file: text, lines: [text]) -> [EasyFix]:
     # Skip re-export facade modules
@@ -40,40 +60,123 @@ pub fn check_star_import_text_with_lines(file: text, lines: [text]) -> [EasyFix]
     if saw_code and all_code_is_star_import:
         return []
 
+    val sites = _star_sites(lines)
+    if sites.len() == 0:
+        return []
+
+    # A file that allows star_import keeps its star imports on purpose.
+    val allowed = _allows_star_import(lines)
+    val root = _repo_root_of(file)
+    var surfaces: [StarSurface] = []
+    for site in sites:
+        if allowed:
+            surfaces.push(StarSurface(resolved: false, names: [], private_names: []))
+        else:
+            surfaces.push(_resolve_surface(root: root, mod_path: site.mod_path))
+
+    val used = _used_names(lines)
+    var site_names: [[text]] = []
+    var site_private: [text] = []
+    for i in 0..sites.len():
+        site_names.push(_intersect_used(surfaces[i], used))
+        site_private.push(_private_used(surfaces[i], used))
+
+    # A used name provided by two star imports: provenance is ambiguous.
+    var provided_by: {text: i64} = {}
+    var ambiguous: {text: bool} = {}
+    for i in 0..sites.len():
+        for name in site_names[i]:
+            if provided_by.contains_key(name):
+                ambiguous[name] = true
+            else:
+                provided_by[name] = i
+
     var fixes: [EasyFix] = []
-    var line_num = 0
-    var byte_offset = 0
-
-    for line in lines:
-        line_num = line_num + 1
-        val trimmed = line.trim()
-
-        # Match: use <path>.*  or  use <path>.* (with trailing comment)
-        if trimmed.starts_with("use ") and trimmed.contains(".*"):
-            val mod_path = extract_star_module(trimmed)
-            if mod_path != "":
-                var fix = EasyFix.create(
-                    id: "W0406:{line_num}",
-                    description: "wildcard import 'use {mod_path}.*' — prefer explicit named imports",
-                    confidence: FixConfidence.Certain
-                )
-                fix.add_replacement(Replacement.create(
-                    file: file,
-                    start: byte_offset,
-                    end: byte_offset + line.len(),
-                    line: line_num,
-                    column: 1,
-                    new_text: line
-                ))
-                fixes.push(fix)
-
-        byte_offset = byte_offset + line.len() + 1
-
+    for i in 0..sites.len():
+        val site = sites[i]
+        val line_num = site.line_index + 1
+        val line = lines[site.line_index]
+        val names = site_names[i]
+        var editable = surfaces[i].resolved and names.len() > 0 and site_private[i] == ""
+        for name in names:
+            if ambiguous.contains_key(name):
+                editable = false
+        val new_text = if editable: _narrowed_line(line, names) else: line
+        if new_text == line:
+            editable = false
+        if editable:
+            var fix = EasyFix.create(
+                id: "W0406:{line_num}",
+                description: "wildcard import 'use {site.mod_path}.*' — import only the used names",
+                confidence: FixConfidence.Safe
+            )
+            fix.add_replacement(Replacement.create(
+                file: file,
+                start: site.byte_offset,
+                end: site.byte_offset + line.byte_len(),
+                line: line_num,
+                column: 1,
+                new_text: new_text
+            ))
+            fixes.push(fix)
+        else:
+            # Diagnostic only: no machine edit is known to be correct.
+            fixes.push(EasyFix.create(
+                id: "W0406:{line_num}",
+                description: "wildcard import 'use {site.mod_path}.*' — prefer explicit named imports (no safe automatic edit: {_no_edit_reason(surface: surfaces[i], names: names, private_used: site_private[i], ambiguous: ambiguous)})",
+                confidence: FixConfidence.Uncertain
+            ))
     fixes
 
+fn _no_edit_reason(surface: StarSurface, names: [text], private_used: text, ambiguous: {text: bool}) -> text:
+    if not surface.resolved:
+        return "file allows star_import, or module surface not resolvable to one file without star re-exports"
+    if private_used != "":
+        return "'{private_used}' is used but not pub/exported by the module"
+    if names.len() == 0:
+        return "no used name found from this module"
+    for name in names:
+        if ambiguous.contains_key(name):
+            return "'{name}' is also provided by another star import"
+    "narrowed import would not change the line"
+
 # ============================================================================
-# Helpers
+# Site scan
 # ============================================================================
+
+fn _star_sites(lines: [text]) -> [StarSite]:
+    var sites: [StarSite] = []
+    var byte_offset = 0
+    var in_docstring = false
+    for i in 0..lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+        val quotes = _count_triple_quotes(line)
+        if not in_docstring and trimmed.starts_with("use ") and trimmed.contains(".*"):
+            val mod_path = extract_star_module(trimmed)
+            if mod_path != "":
+                sites.push(StarSite(line_index: i, byte_offset: byte_offset, mod_path: mod_path))
+        if quotes % 2 == 1:
+            in_docstring = not in_docstring
+        byte_offset = byte_offset + line.byte_len() + 1
+    sites
+
+fn _allows_star_import(lines: [text]) -> bool:
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("@allow(") and trimmed.contains("star_import"):
+            return true
+    false
+
+fn _count_triple_quotes(line: text) -> i64:
+    var n = 0
+    var rest = line
+    var pos = rest.find("\"\"\"")
+    while pos >= 0:
+        n = n + 1
+        rest = rest.slice(pos + 3)
+        pos = rest.find("\"\"\"")
+    n
 
 fn extract_star_module(trimmed: text) -> text:
     """Extract module path from 'use path.*' line. Returns "" if not a star import."""
@@ -87,3 +190,314 @@ fn extract_star_module(trimmed: text) -> text:
     if star_pos < 0:
         return ""
     rest.slice(0, star_pos)
+
+# `<indent>use [lazy ]<path>.*<tail>` -> `<indent>use [lazy ]<path>.{a, b}<tail>`
+fn _narrowed_line(line: text, names: [text]) -> text:
+    val star_pos = line.find(".*")
+    if star_pos < 0:
+        return line
+    val head = line.slice(0, star_pos)
+    val tail = line.slice(star_pos + 2)
+    head + ".{{" + names.join(", ") + "}}" + tail
+
+# ============================================================================
+# Used names in the linted file
+# ============================================================================
+
+# Identifiers referenced by the file, minus names it defines at top level and
+# names it imports explicitly. Over-approximates on purpose (member names,
+# interpolations): an extra listed name is harmless, a missing one breaks.
+fn _used_names(lines: [text]) -> {text: bool}:
+    var used: {text: bool} = {}
+    var local: {text: bool} = {}
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        if trimmed.starts_with("use ") or trimmed.starts_with("export use "):
+            if not trimmed.contains(".*"):
+                for name in _import_list_names(trimmed):
+                    local[name] = true
+            continue
+        if not line.starts_with(" ") and not line.starts_with("\t"):
+            val declared = _top_level_decl_name(trimmed)
+            if declared != "":
+                local[declared] = true
+        for ident in _identifiers(line):
+            used[ident] = true
+    var out: {text: bool} = {}
+    for key in used.keys():
+        if not local.contains_key(key):
+            out[key] = true
+    out
+
+fn _intersect_used(surface: StarSurface, used: {text: bool}) -> [text]:
+    var picked: [text] = []
+    if not surface.resolved:
+        return picked
+    var seen: {text: bool} = {}
+    for name in surface.names:
+        if used.contains_key(name) and not seen.contains_key(name):
+            seen[name] = true
+            picked.push(name)
+    _sorted(picked)
+
+# First used name that the module declares without pub/export ("" if none):
+# naming it explicitly would fail visibility, so such a site gets no edit.
+fn _private_used(surface: StarSurface, used: {text: bool}) -> text:
+    if not surface.resolved:
+        return ""
+    for name in surface.private_names:
+        if used.contains_key(name) and not surface.names.contains(name):
+            return name
+    ""
+
+fn _sorted(items: [text]) -> [text]:
+    var out: [text] = []
+    for item in items:
+        var placed = false
+        var next: [text] = []
+        for existing in out:
+            if not placed and item < existing:
+                next.push(item)
+                placed = true
+            next.push(existing)
+        if not placed:
+            next.push(item)
+        out = next
+    out
+
+fn _is_ident_start(c: text) -> bool:
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_"
+
+fn _is_ident_char(c: text) -> bool:
+    _is_ident_start(c) or (c >= "0" and c <= "9")
+
+fn _identifiers(line: text) -> [text]:
+    var out: [text] = []
+    var start = -1
+    val n = line.byte_len()
+    for i in 0..n:
+        val c = line.slice(i, i + 1)
+        if start < 0:
+            if _is_ident_start(c):
+                start = i
+        elif not _is_ident_char(c):
+            out.push(line.slice(start, i))
+            start = -1
+    if start >= 0:
+        out.push(line.slice(start, n))
+    out
+
+# Names listed by `use m.{a, b as c}` / `use m (a, b)` / `use m.a` (single line).
+fn _import_list_names(trimmed: text) -> [text]:
+    var out: [text] = []
+    var open = trimmed.find("{{")
+    var close = trimmed.find("}")
+    if open < 0:
+        open = trimmed.find("(")
+        close = trimmed.find(")")
+    if open >= 0:
+        val stop = if close > open: close else: trimmed.len()
+        for part in trimmed.slice(open + 1, stop).split(","):
+            val name = _alias_target(part.trim())
+            if name != "":
+                out.push(name)
+        return out
+    val path = trimmed.split(" ")
+    if path.len() > 0:
+        val last = path[path.len() - 1]
+        val dot = last.rfind(".")
+        val name = if dot >= 0: last.slice(dot + 1) else: last
+        if name != "":
+            out.push(name)
+    out
+
+fn _alias_target(entry: text) -> text:
+    val as_pos = entry.find(" as ")
+    val raw = if as_pos >= 0: entry.slice(as_pos + 4).trim() else: entry
+    val ids = _identifiers(raw)
+    if ids.len() == 0:
+        return ""
+    ids[ids.len() - 1]
+
+# ============================================================================
+# Module surface: public top-level names of the resolved module file
+# ============================================================================
+
+val DECL_KEYWORDS: [text] = ["fn", "class", "struct", "enum", "trait", "val", "var", "type", "const", "union", "mixin", "actor", "macro", "bitfield", "alias"]
+
+fn _top_level_decl_name(trimmed: text) -> text:
+    var rest = trimmed
+    var changed = true
+    while changed:
+        changed = false
+        for prefix in ["pub ", "export ", "extern ", "async ", "static ", "unsafe "]:
+            if rest.starts_with(prefix):
+                rest = rest.slice(prefix.byte_len()).trim()
+                changed = true
+    for kw in DECL_KEYWORDS:
+        if rest.starts_with(kw + " "):
+            val ids = _identifiers(rest.slice(kw.byte_len() + 1))
+            if ids.len() > 0:
+                return ids[0]
+    ""
+
+fn _surface_of_source(source: text) -> StarSurface:
+    # Top-level declarations, with `pub` / `export` (inline or listed) visible.
+    var declared: [text] = []
+    var visible: {text: bool} = {}
+    val lines = source.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+        i = i + 1
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        if line.starts_with(" ") or line.starts_with("\t"):
+            continue
+        if trimmed.starts_with("export "):
+            # Gather a multi-line export list until its bracket closes.
+            var stmt = trimmed
+            while ((stmt.contains("{{") and not stmt.contains("}}")) or (stmt.contains("(") and not stmt.contains(")")) or stmt.ends_with(",")) and i < lines.len():
+                stmt = stmt + " " + lines[i].trim()
+                i = i + 1
+            if stmt.contains(".*"):
+                return StarSurface(resolved: false, names: [], private_names: [])
+            var body = stmt.slice(7).trim()
+            if body.starts_with("use "):
+                body = body.slice(4).trim()
+                for name in _import_list_names("use " + body):
+                    declared.push(name)
+                    visible[name] = true
+                continue
+            val decl = _top_level_decl_name(trimmed)
+            if decl != "":
+                declared.push(decl)
+                visible[decl] = true
+                continue
+            for part in body.split(","):
+                val name = _alias_target(part.trim())
+                if name != "":
+                    val dot_ids = _identifiers(name)
+                    if dot_ids.len() > 0:
+                        val exported = dot_ids[dot_ids.len() - 1]
+                        declared.push(exported)
+                        visible[exported] = true
+            continue
+        val decl_name = _top_level_decl_name(trimmed)
+        if decl_name != "":
+            declared.push(decl_name)
+            if trimmed.starts_with("pub "):
+                visible[decl_name] = true
+    var names: [text] = []
+    var private_names: [text] = []
+    for name in declared:
+        if visible.contains_key(name):
+            names.push(name)
+        else:
+            private_names.push(name)
+    StarSurface(resolved: true, names: names, private_names: private_names)
+
+# ============================================================================
+# Module path resolution (unique file or unresolved)
+# ============================================================================
+
+val STD_VARIANT_ROOTS: [text] = ["common", "nogc_sync_mut", "nogc_async_mut", "gc_async_mut", "nogc_async_mut_noalloc", "gc_sync_mut", "nogc_sync_immut", "nogc_async_immut", "gc_sync_immut", "gc_async_immut"]
+
+fn _repo_root_of(file: text) -> text:
+    val path = file.replace("\\", "/")
+    if path.starts_with("src/"):
+        return "."
+    val idx = path.rfind("/src/")
+    if idx < 0:
+        return ""
+    if idx == 0:
+        return "/"
+    path.slice(0, idx)
+
+fn _resolve_surface(root: text, mod_path: text) -> StarSurface:
+    val unresolved = StarSurface(resolved: false, names: [], private_names: [])
+    if root == "" or mod_path == "":
+        return unresolved
+    val hits = _module_files(root: root, mod_path: mod_path)
+    if hits.len() != 1:
+        return unresolved
+    val source = file_read(hits[0])
+    if source == "":
+        return unresolved
+    _surface_of_source(source)
+
+fn _module_files(root: text, mod_path: text) -> [text]:
+    val parts = mod_path.split(".")
+    var hits: [text] = []
+    if parts.len() < 2:
+        return hits
+    val head = parts[0]
+    val tail = parts.slice(1)
+    if head == "std":
+        hits = _merge_hits(hits: hits, found: _resolve_plain(root + "/src/lib", tail))
+        for variant in STD_VARIANT_ROOTS:
+            hits = _merge_hits(hits: hits, found: _resolve_plain(root + "/src/lib/" + variant, tail))
+    elif head == "lib":
+        hits = _merge_hits(hits: hits, found: _resolve_plain(root + "/src/lib", tail))
+    elif head == "app":
+        hits = _merge_hits(hits: hits, found: _resolve_plain(root + "/src/app", tail))
+    elif head == "compiler":
+        hits = _merge_hits(hits: hits, found: _resolve_numbered(root + "/src/compiler", tail))
+    hits
+
+fn _merge_hits(hits: [text], found: [text]) -> [text]:
+    var out = hits
+    for f in found:
+        if not out.contains(f):
+            out.push(f)
+    out
+
+fn _module_file_at(base: text) -> text:
+    if file_exists(base + ".spl"):
+        return base + ".spl"
+    if file_exists(base + "/__init__.spl"):
+        return base + "/__init__.spl"
+    if file_exists(base + "/mod.spl"):
+        return base + "/mod.spl"
+    ""
+
+fn _resolve_plain(dir: text, parts: [text]) -> [text]:
+    val found = _module_file_at(dir + "/" + parts.join("/"))
+    if found == "":
+        return []
+    [found]
+
+# Each segment may match `seg` directly or a numbered layer dir `NN.seg`.
+fn _resolve_numbered(dir: text, parts: [text]) -> [text]:
+    var out: [text] = []
+    if parts.len() == 0:
+        return out
+    val seg = parts[0]
+    var candidates: [text] = [dir + "/" + seg]
+    for entry in dir_list_or_empty(dir):
+        val slash = entry.replace("\\", "/").rfind("/")
+        val name = if slash >= 0: entry.slice(slash + 1) else: entry
+        val dot = name.find(".")
+        if dot > 0 and name.slice(dot + 1) == seg and _all_digits(name.slice(0, dot)):
+            candidates.push(dir + "/" + name)
+    for cand in candidates:
+        if parts.len() == 1:
+            val found = _module_file_at(cand)
+            if found != "" and not out.contains(found):
+                out.push(found)
+        elif dir_exists(cand):
+            for found in _resolve_numbered(cand, parts.slice(1)):
+                if not out.contains(found):
+                    out.push(found)
+    out
+
+fn _all_digits(s: text) -> bool:
+    if s == "":
+        return false
+    for i in 0..s.len():
+        if not (s[i] >= "0" and s[i] <= "9"):
+            return false
+    true
