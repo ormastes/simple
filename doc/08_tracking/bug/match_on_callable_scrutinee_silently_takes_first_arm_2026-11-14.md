@@ -239,6 +239,13 @@ module dict as `Value::Enum { payload: None }`; payload variants stay
 `EnumVariantConstructor`. Same rule as `Enum.Variant` in
 `interpreter/expr/calls.rs`.
 
+Census: every `*_spec.spl` whose path names enum/match/pattern/variant (414
+files) was run on the branch binary. No output contained the new
+sub-pattern refusal. The 89 files that were not green on the branch were
+re-run on the base binary, and per-file results matched exactly (89/89).
+Perf: an interleaved interpreter A/B of a 300k-iteration match loop took
+base 1.26/1.27/0.98 s and branch 1.13/1.15/0.99 s, so there is no regression.
+
 Still open, pre-existing, not changed here (seen while writing the fixtures):
 
 - A `mod X:` dict is not visible inside function bodies (`fn main(): X.F32`
