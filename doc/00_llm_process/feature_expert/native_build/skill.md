@@ -233,6 +233,27 @@ fails returns false from `lower_to_mir` and was always counted, so a repro
 needs the bad module plus at least one good module in the same child. Bug:
 `doc/08_tracking/bug/mir_shard_go_to_end_failure_published_as_pass_2026-10-25.md`.
 
+## HIR pool entries must be readable by MIR workers (2026-11-14)
+
+- A HIR shard worker builds surfaces from `module_surface_skeleton_v1`; MIR
+  shard workers and the final worker build them from the full source. Both fold
+  every frozen surface into `hir_cache_closure_digest`, so ONE module whose
+  skeleton surface differs from its full-parse surface moves all keys: the pool
+  stores N entries, every consumer reports `phase=hir ... cached=0` and lowers
+  the closure again (run 31: 1664 modules, 20.2 min in the MIR worker).
+- Signature: `<cache>/hir/` holds two `.parser-v4.hir` files per module, and
+  the consumer's `[hir-cache-store] rate attempts=` climbs during `phase=hir`.
+  The pool's closure digest is line 1 of `hir/queue-<pid>-0/inventory`.
+- The parser derives function facts from the BODY: implicit-static promotion of
+  `fn new|create|default|from_*` (body text never mentions `self`) and
+  body-level contract clauses. Any new body-derived fact must be preserved by
+  the skeleton too; pin it in
+  `test/01_unit/compiler/80.driver/hir_worker_closure_digest_parity_spec.spl`.
+- To find the module: each `.tldr` companion stores the skeleton (`surface`)
+  and the full-parse digest (`surface-digest`); parse the skeleton and compare
+  `module_surface_canonical_digest_v1`.
+- Record: `doc/08_tracking/bug/hir_pool_entries_unreadable_skeleton_drops_body_derived_facts_2026-11-14.md`.
+
 ## Update Rule
 After native-build defects, closure-discovery changes, or cache logic shifts, refresh
 this skill with new open-bug links and concrete gotchas.

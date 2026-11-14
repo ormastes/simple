@@ -8,6 +8,17 @@
 # constant values, macro invocations (they regenerate their members on parse),
 # and generic / `@inline` / `const fn` bodies (importers need them).
 #
+# Two function facts are read from the BODY, so a blanked body must keep them:
+#   - implicit-static promotion (parser_decls_use.spl): `fn new|create|default|
+#     from_*` without a receiver is static only when its body text never
+#     mentions the word `self` (code, comment or string). A blanked body that
+#     mentioned it gets the stub `pass_do_nothing  # self`;
+#   - contract clauses (`in:`, `requires:`, `invariant:`, `ensures:`,
+#     `decreases:`, `out(r):`, `out_err(e):`, `proof uses:`) are statements
+#     retained on the function. A body holding one is kept verbatim.
+# Without them the skeleton surface differed from the full-parse surface and
+# moved hir_cache_closure_digest for the whole closure (bootstrap run 31).
+#
 # Because lines never move, every declaration keeps its source line, so
 # diagnostics from a surface built on the skeleton point at the real file.
 # Equality rule: parse(skeleton) and parse(source) must have the same
@@ -260,6 +271,29 @@ fn _skel_string_continuations_v1(lines: [text]) -> [bool]:
             continued_quote = ""
     out
 
+# The word `self` anywhere on a body line, by the parser's own rule
+# (source_mentions_self_word: identifier boundaries only, no lexing).
+fn _skel_mentions_self_v1(line: text) -> bool:
+    line.contains("self") and _skel_expr_has_word_v1(line, 0, line.byte_len(), "self")
+
+# A body line shaped like a contract clause (try_parse_contract_stmt). Any
+# match keeps the whole body, so a false positive only costs skeleton bytes.
+fn _skel_contract_clause_v1(trimmed: text) -> bool:
+    for word in ["in", "requires", "invariant", "ensures", "decreases"]:
+        if trimmed.starts_with(word) and trimmed.substring(word.byte_len()).trim().starts_with(":"):
+            return true
+    for word in ["out_err", "out"]:
+        if trimmed.starts_with(word):
+            val rest = trimmed.substring(word.byte_len()).trim()
+            val close = rest.index_of(")")
+            if rest.starts_with("(") and close > 0 and rest.substring(close + 1).trim().starts_with(":"):
+                return true
+    if trimmed.starts_with("proof ") or trimmed.starts_with("proof\t"):
+        val rest = trimmed.substring(6).trim()
+        if rest.starts_with("uses") and rest.substring(4).trim().starts_with(":"):
+            return true
+    false
+
 pub fn module_surface_skeleton_v1(source: text) -> text:
     val lines = source.replace("\r\n", "\n").split("\n")
     val in_string = _skel_string_continuations_v1(lines)
@@ -291,14 +325,26 @@ pub fn module_surface_skeleton_v1(source: text) -> text:
             out.push(lines[h])
             h = h + 1
         var k = header_end + 1
+        # Body-derived function facts (see the header): one pass over the body
+        # before it is blanked.
+        var keep = keep_body
+        var mentions_self = false
+        var scan = header_end + 1
+        while not keep and scan < lines.len() and (lines[scan].trim() == "" or _skel_indent_v1(lines[scan]) > indent or in_string[scan]):
+            if _skel_contract_clause_v1(lines[scan].trim()):
+                keep = true
+            elif not mentions_self and _skel_mentions_self_v1(lines[scan]):
+                mentions_self = true
+            scan = scan + 1
         var stubbed = false
         while k < lines.len() and (lines[k].trim() == "" or _skel_indent_v1(lines[k]) > indent or in_string[k]):
-            if keep_body:
+            if keep:
                 out.push(lines[k])
             elif lines[k].trim() == "" or stubbed:
                 out.push("")
             else:
-                out.push(lines[k].substring(0, _skel_indent_v1(lines[k])) + "pass_do_nothing")
+                out.push(lines[k].substring(0, _skel_indent_v1(lines[k])) + "pass_do_nothing" +
+                    (if mentions_self: "  # self" else: ""))
                 stubbed = true
             k = k + 1
         i = k

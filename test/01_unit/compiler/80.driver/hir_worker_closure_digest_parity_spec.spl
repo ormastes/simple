@@ -1,0 +1,117 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+## Purpose and audience
+A HIR shard worker builds every module surface from the SURFACE SKELETON
+(`module_surface_skeleton_v1`: non-generic bodies blanked) while MIR shard
+workers and the final worker build them from the full source. All three fold
+every frozen surface into `hir_cache_closure_digest`, the closure half of the
+HIR cache key, so the skeleton surface must equal the full-parse surface or
+the HIR pool warms entries nobody can read.
+
+Two function facts are derived from the BODY text and were lost with it:
+the implicit-static promotion of `fn new|create|default|from_*` (static only
+when the body never mentions `self`, parser_decls_use.spl) and body-level
+contract clauses (`in:`, `out(r):`, ... retained on the function). Bootstrap
+run 31 (2026-11-14): one such method in a 1664-module closure moved the
+closure digest, so the MIR shard worker missed all 1664 warm entries and
+lowered the whole closure a second time.
+Audience: compiler engineers maintaining the HIR cache and the shard route.
+"""
+
+# @tag: unit, compiler, driver, cache
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.driver.driver_hir_cache.{hir_cache_closure_digest, hir_cache_closure_fallback_count_v1}
+use compiler.driver.cache.module_surface_skeleton_v1.{module_surface_skeleton_v1}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use compiler.hir.hir_lowering.module_surface_canonical_digest_v1.{module_surface_canonical_digest_v1}
+use test.helpers.module_surface_owner_fixture.{module_surfaces_from_test_modules}
+
+# `create` is an implicitly-static NAME; its body decides: `body` mentioning
+# `self` keeps it an instance method, any other body makes it static.
+fn wcd_event(body: text) -> text:
+    "pub class Ev:\n    backend: i64\n\n    fn create() -> i64:\n        {body}\n\n    fn new() -> i64:\n        val seven = 7\n        seven\n"
+
+val WCD_USER: text = "use wcd.ev.\{Ev\}\n\npub fn run() -> i64:\n    val out = Ev.new()\n    out\n"
+val WCD_CONTRACT_IN: text = "pub fn div(a: i64, b: i64) -> i64:\n    in: b != 0\n    val q = a / b\n    q\n"
+val WCD_CONTRACT_OUT: text = "pub fn inc(a: i64) -> i64:\n    out(ret): ret > a\n    val next = a + 1\n    next\n"
+
+fn wcd_digest(source: text) -> text:
+    module_surface_canonical_digest_v1(parse_full_frontend(source, "wcd/ev.spl", "wcd.ev", Logger(level: 0)))
+
+fn wcd_skeleton_digest(source: text) -> text:
+    wcd_digest(module_surface_skeleton_v1(source))
+
+# Frozen two-module closure. `worker` true parses every module's skeleton, as
+# a HIR shard worker does; identity fields always come from the real source.
+fn wcd_registry(event_source: text, worker: bool) -> ModuleSurfacesByName:
+    val log = Logger(level: 0)
+    val ev_text = if worker: module_surface_skeleton_v1(event_source) else: event_source
+    val user_text = if worker: module_surface_skeleton_v1(WCD_USER) else: WCD_USER
+    var modules: Dict<text, ParserModule> = {}
+    modules["wcd.ev"] = parse_full_frontend(ev_text, "wcd/ev.spl", "wcd.ev", log)
+    modules["wcd.user"] = parse_full_frontend(user_text, "wcd/user.spl", "wcd.user", log)
+    val sources = [
+        SourceFile(path: "wcd/ev.spl", content: event_source, module_name: "wcd.ev"),
+        SourceFile(path: "wcd/user.spl", content: WCD_USER, module_name: "wcd.user")
+    ]
+    module_surfaces_from_test_modules(modules, sources).unwrap()
+
+describe "surface skeleton keeps body-derived function facts":
+    it "keeps an implicitly-static-named method that uses self an instance method":
+        val source = wcd_event("self.backend + 1")
+        expect(wcd_skeleton_digest(source)).to_equal(wcd_digest(source))
+
+    it "keeps a self mention that exists only in a body comment":
+        step("The parser is conservative: `self` anywhere in the body text counts")
+        val source = wcd_event("1  # self is unused here")
+        expect(wcd_skeleton_digest(source)).to_equal(wcd_digest(source))
+
+    it "leaves a body that never mentions self static and unmarked":
+        val source = wcd_event("41 + 1")
+        expect(wcd_skeleton_digest(source)).to_equal(wcd_digest(source))
+        expect(module_surface_skeleton_v1(source).contains("self")).to_equal(false)
+
+    it "does not take an identifier containing self for a mention":
+        val source = wcd_event("val selfish = 2\n        selfish")
+        expect(wcd_skeleton_digest(source)).to_equal(wcd_digest(source))
+        expect(module_surface_skeleton_v1(source).contains("self")).to_equal(false)
+
+    it "keeps a precondition clause written in the body":
+        expect(wcd_skeleton_digest(WCD_CONTRACT_IN)).to_equal(wcd_digest(WCD_CONTRACT_IN))
+
+    it "keeps a postcondition clause with a binding":
+        expect(wcd_skeleton_digest(WCD_CONTRACT_OUT)).to_equal(wcd_digest(WCD_CONTRACT_OUT))
+
+    it "still blanks the body and keeps every line on its source line":
+        val source = wcd_event("self.backend + 1")
+        val skeleton = module_surface_skeleton_v1(source)
+        expect(skeleton.contains("self.backend + 1")).to_equal(false)
+        expect(skeleton.contains("val seven = 7")).to_equal(false)
+        expect(skeleton.split("\n").len()).to_equal(source.split("\n").len())
+
+describe "HIR shard worker closure digest equals the full-surface digest":
+    it "matches when a closure module has a self-using create method":
+        step("Worker surfaces come from skeletons, consumer surfaces from full sources")
+        val source = wcd_event("self.backend + 1")
+        val fallbacks_before = hir_cache_closure_fallback_count_v1()
+        val consumer = hir_cache_closure_digest(wcd_registry(source, false))
+        val worker = hir_cache_closure_digest(wcd_registry(source, true))
+        expect(consumer.len()).to_equal(64)
+        expect(worker).to_equal(consumer)
+        step("Both closures were keyed by interface, none fell back to bytes")
+        expect(hir_cache_closure_fallback_count_v1()).to_equal(fallbacks_before)
+
+    it "still moves in the worker when the method really becomes static":
+        step("Same class; only whether create's body mentions self differs")
+        val instance = wcd_event("self.backend + 1")
+        val promoted = wcd_event("41 + 1")
+        expect(hir_cache_closure_digest(wcd_registry(promoted, false))).to_not_equal(hir_cache_closure_digest(wcd_registry(instance, false)))
+        expect(hir_cache_closure_digest(wcd_registry(promoted, true))).to_not_equal(hir_cache_closure_digest(wcd_registry(instance, true)))
