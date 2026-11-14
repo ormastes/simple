@@ -34,6 +34,7 @@ use compiler.mir._MirLoweringExpr.method_calls_literals.*
 use compiler.mir._MirLoweringExpr.enum_constructor_payload.*
 use compiler.mir._MirLoweringExpr.enum_payload_type_identity.{enum_payload_nominal_kind}
 use compiler.mir._MirLowering.global_initializer_guard.*
+use compiler.mir._MirLowering.named_call_arguments_v1.*
 # MIR Lowering - Expression Lowering
 #
 # Expression lowering from HIR to MIR:
@@ -9268,6 +9269,40 @@ impl MirLowering:
                         self.error_fatal("dynamic callable requires proven arity before indirect emission", Some(callee.span))
                         return self.builder.emit_const_int(0)
                     case _: ()
+        # Plan before effects; source order and declared slots are distinct.
+        var named_slots: [i64] = []
+        var named_binding_name = ""
+        var has_named_arguments = false
+        for argument in args:
+            if argument.has_name:
+                has_named_arguments = true
+                break
+        if is_direct and has_named_arguments:
+            named_binding_name = self.provider_callable_symbol_name(direct_symbol, direct_name)
+            match self.named_call_slots_v1(named_binding_name, args):
+                case Ok(slots): named_slots = slots
+                case Err(reason):
+                    self.error_fatal(reason, Some(callee.span))
+                    return self.builder.emit_const_int(0)
+        var source_call_args = args
+        var source_call_types = call_param_types
+        if named_slots.len() > 0:
+            if named_slots.len() < call_param_types.len() and self.provider_callable_call_origin_v1(direct_symbol) != MirCallOrigin.Source:
+                self.error_fatal("named omitted defaults require a source callable owner", Some(callee.span))
+                return self.builder.emit_const_int(0)
+            source_call_args = []
+            source_call_types = []
+            var source_index = 0
+            while source_index < args.len():
+                val slot = named_slots[source_index]
+                if slot >= call_param_types.len():
+                    self.error_fatal("named call lacks declared parameter types", Some(callee.span))
+                    return self.builder.emit_const_int(0)
+                val original = args[source_index]
+                source_call_args.push(HirCallArg(has_name: false, name: "", value: original.value, span: original.span))
+                source_call_types.push(call_param_types[slot])
+                source_index = source_index + 1
+        val supplied_semantic_arity = if named_slots.len() > 0: call_param_types.len() else: args.len()
         var direct_runtime_value_abi: i64 = 0
         if is_direct and self.runtime_value_extern_abis.has(direct_symbol.id):
             direct_runtime_value_abi = self.runtime_value_extern_abis[direct_symbol.id]
@@ -9287,11 +9322,11 @@ impl MirLowering:
             # Match the pair expander's applicability guards, including raw
             # machine-word overloads with a different semantic arity.
             if val pair_arity = text_extern_semantic_arity(text_boundary_name):
-                if args.len() != pair_arity:
+                if supplied_semantic_arity != pair_arity:
                     direct_pair_text_indices = []
             var in_range_pair_indices: [i64] = []
             for pair_index in direct_pair_text_indices:
-                if pair_index < args.len(): in_range_pair_indices = in_range_pair_indices.push(pair_index)
+                if pair_index < supplied_semantic_arity: in_range_pair_indices = in_range_pair_indices.push(pair_index)
             direct_pair_text_indices = in_range_pair_indices
             direct_text_pointer_bridge = true
         var direct_arg_index = 0
@@ -9304,7 +9339,7 @@ impl MirLowering:
         # alone read f64 == f64 afterwards).
         var int_literal_coerced_arg_indices: [i64] = []
         for arg in args:
-            val current_arg_index = direct_arg_index
+            val current_arg_index = if named_slots.len() > 0: named_slots[direct_arg_index] else: direct_arg_index
             direct_arg_index = direct_arg_index + 1
             val arg_value: HirExpr = arg.value
             val arg_kind: HirExprKind = arg_value.kind
@@ -9333,7 +9368,7 @@ impl MirLowering:
             # materialize a raw lifted fnptr or a closure handle.
             val lambda_disc = _sffi_enum_discriminant(HirExprKind.Lambda([], arg_value, []))
             if _sffi_enum_discriminant(arg_kind) == lambda_disc:
-                val expected_lambda_type: HirType? = if current_arg_index < call_param_types.len() and not arg.has_name:
+                val expected_lambda_type: HirType? = if current_arg_index < call_param_types.len() and (not arg.has_name or named_slots.len() > 0):
                     Some(call_param_types[current_arg_index])
                 else: None
                 # `callback_compare(a, z, \l, r: l.value - r.value)`: the
@@ -9342,7 +9377,7 @@ impl MirLowering:
                 # binder's record identity for the lift so the lambda's field
                 # reads resolve against the real layout instead of index 0.
                 val saved_callback_bindings = self.erased_callback_record_bindings
-                self.erased_callback_record_bindings = self.erased_callback_record_bindings_for_call(args, call_param_types, arg_operands)
+                self.erased_callback_record_bindings = self.erased_callback_record_bindings_for_call(source_call_args, source_call_types, arg_operands)
                 val lambda_operand = self.lower_lambda_value_for_type(arg_value, expected_lambda_type)
                 self.erased_callback_record_bindings = saved_callback_bindings
                 if lambda_operand != None:
@@ -9350,7 +9385,7 @@ impl MirLowering:
                     continue
             # `x: mut <primitive>` param: pass the caller local's address
             # (bug mut_param_annotation_no_reference_propagation_2026-07-20).
-            if current_arg_index < call_param_types.len() and not arg.has_name:
+            if current_arg_index < call_param_types.len() and (not arg.has_name or named_slots.len() > 0):
                 var mut_ref_operand: MirOperand? = None
                 match call_param_types[current_arg_index].kind:
                     case HirTypeKind.Ref(ref_inner, true):
@@ -9371,7 +9406,7 @@ impl MirLowering:
                 if val ref_operand = mut_ref_operand:
                     arg_operands = arg_operands.push(ref_operand)
                     continue
-            var arg_local = if current_arg_index < call_param_types.len() and not arg.has_name:
+            var arg_local = if current_arg_index < call_param_types.len() and (not arg.has_name or named_slots.len() > 0):
                 self.lower_expr_for_slot(arg_value, call_param_types[current_arg_index])
             elif current_arg_index < call_param_types.len():
                 # Named free-call args are passed in SOURCE order (HIR
@@ -9551,6 +9586,10 @@ impl MirLowering:
             else:
                 arg_operands = arg_operands.push(mir_operand_copy(arg_local))
 
+        val source_arg_operands = arg_operands
+        if named_slots.len() > 0:
+            arg_operands = self.complete_named_call_operands_v1(named_binding_name, arg_operands, named_slots)
+
         if is_direct:
             # A bare, unimported interpreter builtin (`env_get` without a `use`)
             # reaches here as HIR's module-less fallback symbol: it has no
@@ -9642,7 +9681,7 @@ impl MirLowering:
                 result = abi_builder.emit_binop(MirBinOp.Ne, mir_operand_copy(wide_result), mir_operand_copy(zero_result), MirType.bool())
                 self.builder = abi_builder
             self.remember_call_hir_return(result, direct_symbol)
-            self.infer_erased_call_result_records(result, direct_symbol, args, call_param_types, arg_operands, arg_source_locals)
+            self.infer_erased_call_result_records(result, direct_symbol, source_call_args, source_call_types, source_arg_operands, arg_source_locals)
             if stamped_struct_name != "" and not self.struct_value_syms.contains(result.id):
                 self.struct_value_syms[result.id] = stamped_struct_name
             if stamped_return != None:

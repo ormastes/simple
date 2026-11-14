@@ -325,27 +325,61 @@ impl MirLowering:
         None
 
     me pad_declaration_default_call_args_v1(callee_name: text, args: [MirOperand]) -> [MirOperand]:
-        if self.declaration_parameter_defaults_ambiguous.has(callee_name): return args
         if not self.declaration_parameter_defaults.has(callee_name): return args
+        if args.len() >= self.declaration_parameter_defaults[callee_name].function.params.len(): return args
+        var slots: [i64] = []
+        var index = 0
+        while index < args.len():
+            slots.push(index)
+            index = index + 1
+        match self.complete_declaration_call_args_v1(callee_name, args, slots):
+            case Ok(completed): completed
+            case Err(_): args
+
+    me complete_declaration_call_args_v1(callee_name: text, args: [MirOperand], slots: [i64]) -> Result<[MirOperand], text>:
+        if self.declaration_parameter_defaults_ambiguous.has(callee_name): return Err("ambiguous call default declaration")
+        if not self.declaration_parameter_defaults.has(callee_name): return Err("missing call default declaration")
         val defaults: MirHirCallableDefaultsV1 = self.declaration_parameter_defaults[callee_name]
         val params: [MirHirParamDeclarationV1] = defaults.function.params
-        if args.len() >= params.len(): return args
-        var index = args.len()
-        while index < params.len():
-            if not params[index].has_default: return args
+        var supplied: Dict<i64, MirOperand> = {}
+        if slots.len() != args.len(): return Err("call argument slot count mismatch")
+        var index = 0
+        while index < slots.len():
+            if slots[index] < 0 or slots[index] >= params.len() or supplied.has(slots[index]):
+                return Err("invalid or duplicate call argument slot")
+            supplied[slots[index]] = args[index]
             index = index + 1
-        var result = args
+        index = 0
+        while index < params.len():
+            if not supplied.has(index) and not params[index].has_default: return Err("missing required call argument")
+            index = index + 1
+        var result: [MirOperand] = []
+        if supplied.len() == params.len():
+            index = 0
+            while index < params.len():
+                result.push(supplied[index])
+                index = index + 1
+            return Ok(result)
+        if self.declaration_repository == None: return Err("call default declaration repository absent")
         val repository: MirHirDeclarationRepositoryV1 = self.declaration_repository.unwrap()
+        if not repository.modules.has(defaults.module_name): return Err("call default provider module absent")
         val provider: MirHirModuleDeclarationsV1 = repository.modules[defaults.module_name]
-        val frame = self.declaration_default_frame_v1(provider, defaults.function, args)
-        if frame.failed: return args
-        index = args.len()
+        val frame = self.declaration_default_frame_v1(provider, defaults.function, [])
+        if frame.failed: return Err("call default frame creation failed")
+        index = 0
         while index < params.len():
             val param: MirHirParamDeclarationV1 = params[index]
+            if supplied.has(index):
+                val operand = supplied[index]
+                result.push(operand)
+                self.declaration_default_bind_parameter_v1(param, operand, frame)
+                if frame.failed: return Err("call supplied parameter binding failed")
+                index = index + 1
+                continue
             if val artifact = param.default_artifact:
                 if val expression = self.load_declaration_raw_expression_v1(defaults.module_name, artifact):
                     val remapped = self.remap_declaration_default_expr_v1(expression, frame)
-                    if frame.failed: return args
+                    if frame.failed: return Err("call default remapping failed")
                     val declared = self.remap_declaration_default_type_v1(param.type_, frame)
                     val operand: MirOperand = if self.callable_has_any_word_abi(declared):
                         # The existing direct-argument owner admits the actual
@@ -354,7 +388,7 @@ impl MirLowering:
                             adapted
                         else:
                             self.error_fatal("parameter default lacks its declared tagged callable adapter", Some(param.span))
-                            return args
+                            return Err("call default tagged callable adapter failed")
                     else:
                         var local = self.lower_expr_for_slot(remapped, declared)
                         match declared.kind:
@@ -364,13 +398,13 @@ impl MirLowering:
                         mir_operand_copy(local)
                     result.push(operand)
                     self.declaration_default_bind_parameter_v1(param, operand, frame)
-                    if frame.failed: return args
-                else: return args
+                    if frame.failed: return Err("call default parameter binding failed")
+                else: return Err("call default expression artifact load failed")
             else:
                 self.error_fatal("declaration parameter default artifact is absent", Some(param.span))
-                return args
+                return Err("call default expression artifact absent")
             index = index + 1
-        result
+        Ok(result)
 
     me register_declaration_callable_link_v1(owner: text, symbols: SymbolTable,
             function: MirHirFunctionDeclarationV1, is_entry_module: bool = false):
