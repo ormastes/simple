@@ -16,8 +16,8 @@ extern fn rt_terminal_disable_raw_mode() -> bool
 extern fn rt_terminal_is_tty() -> bool
 @unsafe(reason: "raw runtime ABI: terminal size", capabilities: [ffi])
 extern fn rt_terminal_get_size() -> (i64, i64)
-@unsafe(reason: "raw runtime ABI: partial binary stdin read", capabilities: [ffi])
-extern fn rt_stdin_read(size: i64) -> [u8]
+@unsafe(reason: "raw runtime ABI: bounded poll + partial binary stdin read", capabilities: [ffi])
+extern fn rt_stdin_read_timeout_v1(size: i64, timeout_ms: i64) -> [u8]
 @unsafe(reason: "raw runtime ABI: terminal write", capabilities: [ffi])
 extern fn rt_term_write(data: text) -> i64
 @unsafe(reason: "raw runtime ABI: terminal flush", capabilities: [ffi])
@@ -25,6 +25,9 @@ extern fn rt_term_flush() -> i32
 
 val UNAVAILABLE = "interactive console provider unavailable in this runtime composition"
 val UNIX_HANDLE: i64 = 1
+# read() waits at most this long so polling loops (smux interactive_client
+# heartbeat) keep running; an empty result means "no input yet".
+val READ_POLL_MS: i64 = 20
 
 # Single exclusive owner: 0 = free, UNIX_HANDLE = opened and in raw mode.
 var console_owner: i64 = 0
@@ -45,10 +48,15 @@ pub fn open() -> Result<i64, text>:
     Ok(UNIX_HANDLE)
 
 pub fn read(handle: i64, max_bytes: i64) -> Result<[u8], text>:
+    read_timeout(handle, max_bytes, READ_POLL_MS)
+
+# Bounded read: waits up to timeout_ms (0..60000) for input, then one partial
+# read. Ok([]) on timeout; never blocks past the bound.
+pub fn read_timeout(handle: i64, max_bytes: i64, timeout_ms: i64) -> Result<[u8], text>:
     if not owns(handle): return Err("invalid console handle")
     if max_bytes <= 0: return Ok([])
     unsafe(capabilities: [ffi]):
-        return Ok(rt_stdin_read(max_bytes))
+        return Ok(rt_stdin_read_timeout_v1(max_bytes, timeout_ms))
 
 pub fn size(handle: i64) -> Result<[i64], text>:
     if not owns(handle): return Err("invalid console handle")

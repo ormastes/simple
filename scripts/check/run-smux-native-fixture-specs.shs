@@ -1,0 +1,99 @@
+#!/bin/sh
+# run-smux-native-fixture-specs.shs — provision the two compiled smux fixture
+# children and run the specs that need them:
+#   test/03_system/tools/smux_configured_launch_spec.spl
+#   test/03_system/tools/smux_literal_input_spec.spl
+# Children are built with the seed's Rust native_project pipeline
+# (SIMPLE_NATIVE_BUILD_RUST=1, per-module cache under a stable --cache-dir) and
+# rebuilt only when the fixture source is newer than the binary.
+# Verdict is the last stdout line: PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+# See doc/08_tracking/bug/smux_native_fixture_children_never_provisioned_2026-11-14.md
+#
+# Env knobs:
+#   SIMPLE_BIN                 test runner binary            (default bin/simple)
+#   SMUX_FIXTURE_BUILDER       native-build producer          (default $SIMPLE_BIN)
+#   SIMPLE_RUNTIME_PATH        dir with libsimple_native_all.a for the producer
+#   SMUX_FIXTURE_CACHE_DIR     stable native cache            (default build/smux_fixture_cache)
+#   SMUX_FIXTURE_OUT_DIR       child binary dir               (default build/smux_fixtures)
+#   SMUX_FIXTURE_BUILD_TIMEOUT seconds per child build        (default 2700)
+set -u
+root=$(cd "$(dirname "$0")/../.." && pwd) || { echo "ERROR — nothing was checked (no repo root)"; exit 2; }
+cd "$root" || { echo "ERROR — nothing was checked (cd failed)"; exit 2; }
+simple_bin=${SIMPLE_BIN:-bin/simple}
+builder=${SMUX_FIXTURE_BUILDER:-$simple_bin}
+cache_dir=${SMUX_FIXTURE_CACHE_DIR:-$root/build/smux_fixture_cache}
+out_dir=${SMUX_FIXTURE_OUT_DIR:-$root/build/smux_fixtures}
+build_timeout=${SMUX_FIXTURE_BUILD_TIMEOUT:-2700}
+fixtures=test/fixtures/coremux
+
+[ -x "$simple_bin" ] || { echo "ERROR — nothing was checked (no runner $simple_bin)"; exit 2; }
+[ -x "$builder" ] || { echo "ERROR — nothing was checked (no builder $builder)"; exit 2; }
+mkdir -p "$cache_dir" "$out_dir" || { echo "ERROR — nothing was checked (mkdir)"; exit 2; }
+
+build_child() {
+    name=$1
+    src=$fixtures/$name.spl
+    bin=$out_dir/$name
+    if [ -x "$bin" ] && [ ! "$src" -nt "$bin" ] && [ ! src/lib/sys/terminal_console.spl -nt "$bin" ]; then
+        echo "smux-fixture: $name up to date ($bin)"
+        return 0
+    fi
+    log=$out_dir/$name.build.log
+    start=$(date +%s)
+    # The fixture closure pulls sffi/host.spl & io hubs whose externs include
+    # 52 Rust-only rt_* symbols absent from the default core-c lane (rt_db_*,
+    # rt_local_unix_*_v1, ...). The children never call them; an accidental
+    # call SEGVs and fails the spec, it cannot fake a pass. Named gap in the
+    # bug record; remove this once the C lane backs them.
+    SIMPLE_ALLOW_UNRESOLVED_RUNTIME=1 \
+    SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NATIVE_INCREMENTAL=1 SIMPLE_RUST_SEED_WARNING=0 \
+    SIMPLE_BUILD_MEMORY_RESERVE_BYTES=${SIMPLE_BUILD_MEMORY_RESERVE_BYTES:-4294967296} \
+        timeout "$build_timeout" "$builder" native-build \
+        --source "$fixtures" --source src/lib --source src/app/io \
+        --entry "$src" --entry-closure --cache-dir "$cache_dir" -o "$bin.new" >"$log" 2>&1
+    rc=$?
+    secs=$(( $(date +%s) - start ))
+    receipt=$(grep '\[native-incremental\]' "$log" | tail -1)
+    echo "smux-fixture: $name build rc=$rc ${secs}s ${receipt:-no-receipt}"
+    if [ "$rc" -ne 0 ] || [ ! -x "$bin.new" ]; then
+        grep -m3 -E 'error|Build failed' "$log" | cut -c1-300
+        rm -f "$bin.new"
+        return 1
+    fi
+    mv -f "$bin.new" "$bin"
+}
+
+build_child configured_launch_child || { echo "ERROR — nothing was checked (configured_launch_child build failed)"; exit 2; }
+build_child literal_input_child || { echo "ERROR — nothing was checked (literal_input_child build failed)"; exit 2; }
+
+cwd_dir="$out_dir/configured cwd 한글"
+mkdir -p "$cwd_dir" || { echo "ERROR — nothing was checked (cwd mkdir)"; exit 2; }
+SIMPLE_TEST_CONFIGURED_CHILD="$out_dir/configured_launch_child"
+SIMPLE_TEST_CONFIGURED_CWD=$(cd "$cwd_dir" && pwd -P)
+SIMPLE_TEST_LITERAL_CHILD="$out_dir/literal_input_child"
+SMUX_CONFIGURED_REMOVE=erase-me
+SMUX_CONFIGURED_KEEP=parent-kept
+export SIMPLE_TEST_CONFIGURED_CHILD SIMPLE_TEST_CONFIGURED_CWD SIMPLE_TEST_LITERAL_CHILD \
+    SMUX_CONFIGURED_REMOVE SMUX_CONFIGURED_KEEP
+
+failed=0
+checked=0
+for spec in test/03_system/tools/smux_configured_launch_spec.spl test/03_system/tools/smux_literal_input_spec.spl; do
+    log=$out_dir/$(basename "$spec" .spl).log
+    "$simple_bin" test "$spec" >"$log" 2>&1
+    rc=$?
+    verdict=$(grep 'SPEC FILE VERDICT' "$log" | tail -1)
+    echo "smux-fixture: $spec rc=$rc ${verdict:-no-verdict}"
+    [ -n "$verdict" ] && checked=$((checked + 1))
+    case "$verdict" in
+        *outcome=OK*failed=0*) ;;
+        *) failed=$((failed + 1)) ;;
+    esac
+done
+[ "$checked" -eq 0 ] && { echo "ERROR — nothing was checked (no spec verdicts)"; exit 2; }
+if [ "$failed" -ne 0 ]; then
+    echo "FAIL — $checked spec file(s) checked, $failed not green"
+    exit 1
+fi
+echo "PASS — $checked spec file(s) checked, both compiled smux fixture children green"
+exit 0

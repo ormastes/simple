@@ -495,6 +495,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // terminal extern declarations (were missing from this table entirely — see
     // doc/08_tracking/bug/raw_mode_extern_registry_2026-07-03.md).
     insert_simple!("rt_stdin_read_byte", terminal::rt_stdin_read_byte);
+    insert_simple!("rt_stdin_read_timeout_v1", terminal::rt_stdin_read_timeout_v1);
     insert_simple!("rt_terminal_enable_raw_mode", terminal::rt_terminal_enable_raw_mode);
     insert_simple!("rt_terminal_disable_raw_mode", terminal::rt_terminal_disable_raw_mode);
     insert_simple!("rt_terminal_is_tty", terminal::rt_terminal_is_tty);

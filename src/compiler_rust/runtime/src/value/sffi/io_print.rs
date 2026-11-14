@@ -116,6 +116,54 @@ pub extern "C" fn rt_stdin_read(size: i64) -> RuntimeValue {
     unsafe { super::file_io::file_ops::bytes_to_runtime_array(&bytes) }
 }
 
+/// Wait up to `timeout_ms` (clamped to 0..=60000) for stdin to become
+/// readable, then perform ONE partial read of up to `size` bytes (16 MiB cap).
+/// Returns an empty array on timeout, EOF, or error. Non-Unix hosts refuse
+/// (empty array) — their console provider has no Unix fd 0 contract.
+#[no_mangle]
+pub extern "C" fn rt_stdin_read_timeout_v1(size: i64, timeout_ms: i64) -> RuntimeValue {
+    let bytes = stdin_read_timeout_bytes_v1(size, timeout_ms);
+    unsafe { super::file_io::file_ops::bytes_to_runtime_array(&bytes) }
+}
+
+/// Shared poll-then-read helper (also used by the interpreter lane).
+pub fn stdin_read_timeout_bytes_v1(size: i64, timeout_ms: i64) -> Vec<u8> {
+    if size <= 0 {
+        return Vec::new();
+    }
+    #[cfg(unix)]
+    {
+        let size = size.min(16 * 1024 * 1024) as usize;
+        let timeout = timeout_ms.clamp(0, 60_000) as libc::c_int;
+        let mut pfd = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+        let ready = loop {
+            let rc = unsafe { libc::poll(&mut pfd, 1, timeout) };
+            if rc < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            break rc;
+        };
+        if ready <= 0 || pfd.revents & (libc::POLLIN | libc::POLLHUP) == 0 {
+            return Vec::new();
+        }
+        let mut buf = vec![0u8; size];
+        let n = loop {
+            let n = unsafe { libc::read(0, buf.as_mut_ptr() as *mut libc::c_void, size) };
+            if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            break n;
+        };
+        buf.truncate(if n > 0 { n as usize } else { 0 });
+        buf
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = timeout_ms;
+        Vec::new()
+    }
+}
+
 /// Read binary stdin to EOF, retaining the prefix on read or growth failure.
 #[no_mangle]
 pub extern "C" fn rt_stdin_read_all() -> RuntimeValue {

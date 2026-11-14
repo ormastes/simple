@@ -33,7 +33,7 @@ owner handle; `open()` requires tty stdin and enters raw mode; `close()` /
 - Reproducer `test/03_system/tools/smux_literal_input_spec.spl`: still 0/3 —
   blocked on the compiled child, not on the provider.
 
-## Open gap (named, not filled)
+## Open gap (CLOSED 2026-11-14: `rt_stdin_read_timeout_v1`, see smux fixture record)
 `read()` blocks until >=1 byte: cfmakeraw leaves VMIN=1/VTIME=0 and no runtime
 extern exposes non-blocking/poll on fd 0 (`rt_io_tcp_set_nonblocking` only
 covers socket-registry handles). `src/os/apps/smux/interactive_client.spl:327`
