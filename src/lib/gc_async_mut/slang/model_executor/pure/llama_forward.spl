@@ -1,0 +1,212 @@
+# @gc — module uses GC runtime
+#
+# llama_forward — LLaMA-2 forward pass (HF LlamaForCausalLM layout) in pure
+# Simple: embedding, per layer pre-RMSNorm -> attention (RoPE, causal) ->
+# residual -> pre-RMSNorm -> SwiGLU MLP -> residual, final norm, lm_head.
+# All arithmetic goes through tensor_ops; this file only wires tensors.
+#
+# `llama_step` evaluates one position against per-layer K/V row buffers. The
+# no-cache forward (`llama_forward_logits`) builds fresh buffers for the whole
+# sequence and steps positions 0..T-1, which is exactly a causal-masked
+# full-sequence forward; logits are produced only for the last position.
+
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_zeros, tensor_row, tensor_matvec, tensor_rmsnorm, tensor_add, tensor_mul, tensor_silu, tensor_rope, tensor_argmax, tensor_kv_write, tensor_attention}
+use std.gc_async_mut.slang.model_executor.pure.weights.{PureWeights, pure_weights_load, pure_weights_find}
+use std.io_runtime.{file_exists, read_file}
+
+pub struct LlamaConfig:
+    dim: i64
+    n_layers: i64
+    n_heads: i64
+    head_dim: i64
+    hidden_dim: i64
+    vocab_size: i64
+    max_pos: i64
+    eps: f64
+    rope_theta: f64
+    bos_id: i64
+    eos_id: i64
+
+pub struct LlamaLayer:
+    attn_norm: PureTensor
+    wq: PureTensor
+    wk: PureTensor
+    wv: PureTensor
+    wo: PureTensor
+    ffn_norm: PureTensor
+    w_gate: PureTensor
+    w_up: PureTensor
+    w_down: PureTensor
+
+pub struct LlamaModel:
+    config: LlamaConfig
+    embed: PureTensor
+    layers: [LlamaLayer]
+    final_norm: PureTensor
+    lm_head: PureTensor
+
+# Per-layer K and V row buffers, each a [capacity, dim] tensor.
+pub struct LlamaKvRows:
+    keys: [PureTensor]
+    values: [PureTensor]
+
+pub struct LlamaStepOut:
+    hidden: PureTensor
+    kv: LlamaKvRows
+# Raw numeric token of `"key": <number>` in a flat JSON object such as
+# config.json. Returned as text: the seed mis-unboxes an f64 carried through
+# Result `?`, so numbers are parsed by the caller after the `?`.
+fn _json_raw(s: text, key: text) -> Result<text, text>:
+    val parts = s.split("\"{key}\"")
+    if parts.len() < 2:
+        return Err("config.json: missing {key}")
+    var rest = parts[1].trim()
+    if not rest.starts_with(":"):
+        return Err("config.json: malformed {key}")
+    rest = rest.substring(1, rest.byte_len()).trim()
+    var end: i64 = 0
+    while end < rest.byte_len():
+        val c = rest[end]
+        if c == ',' or c == '}' or c <= ' ':
+            break
+        end = end + 1
+    Ok(rest.substring(0, end))
+
+fn _to_f64(raw: text) -> f64:
+    if val v = raw.parse_f64():
+        return v
+    0.0
+
+fn _to_i64(raw: text) -> i64:
+    _to_f64(raw) as i64
+
+pub fn llama_config_from_json(s: text) -> Result<LlamaConfig, text>:
+    val dim = _to_i64(_json_raw(s, "hidden_size")?)
+    val n_heads = _to_i64(_json_raw(s, "num_attention_heads")?)
+    val n_kv = _to_i64(_json_raw(s, "num_key_value_heads")?)
+    if n_kv != n_heads:
+        return Err("config.json: grouped-query attention is not supported")
+    val n_layers = _to_i64(_json_raw(s, "num_hidden_layers")?)
+    val hidden_dim = _to_i64(_json_raw(s, "intermediate_size")?)
+    val vocab_size = _to_i64(_json_raw(s, "vocab_size")?)
+    val max_pos = _to_i64(_json_raw(s, "max_position_embeddings")?)
+    val eps = _to_f64(_json_raw(s, "rms_norm_eps")?)
+    val rope_theta = _to_f64(_json_raw(s, "rope_theta")?)
+    val bos_id = _to_i64(_json_raw(s, "bos_token_id")?)
+    val eos_id = _to_i64(_json_raw(s, "eos_token_id")?)
+    Ok(LlamaConfig(dim: dim, n_layers: n_layers, n_heads: n_heads, head_dim: dim / n_heads, hidden_dim: hidden_dim, vocab_size: vocab_size, max_pos: max_pos, eps: eps, rope_theta: rope_theta, bos_id: bos_id, eos_id: eos_id))
+
+fn _need(w: PureWeights, name: text) -> Result<PureTensor, text>:
+    if val t = pure_weights_find(w, name):
+        return Ok(t)
+    Err("missing tensor {name}")
+
+pub fn llama_model_from_weights(w: PureWeights, cfg: LlamaConfig) -> Result<LlamaModel, text>:
+    var layers: [LlamaLayer] = []
+    var l: i64 = 0
+    while l < cfg.n_layers:
+        val p = "model.layers.{l}."
+        layers.push(LlamaLayer(
+            attn_norm: _need(w, p + "input_layernorm.weight")?,
+            wq: _need(w, p + "self_attn.q_proj.weight")?,
+            wk: _need(w, p + "self_attn.k_proj.weight")?,
+            wv: _need(w, p + "self_attn.v_proj.weight")?,
+            wo: _need(w, p + "self_attn.o_proj.weight")?,
+            ffn_norm: _need(w, p + "post_attention_layernorm.weight")?,
+            w_gate: _need(w, p + "mlp.gate_proj.weight")?,
+            w_up: _need(w, p + "mlp.up_proj.weight")?,
+            w_down: _need(w, p + "mlp.down_proj.weight")?
+        ))
+        l = l + 1
+    # Tied checkpoints may store only one of embed_tokens / lm_head.
+    var embed_opt = pure_weights_find(w, "model.embed_tokens.weight")
+    var head_opt = pure_weights_find(w, "lm_head.weight")
+    if embed_opt.is_none():
+        embed_opt = head_opt
+    if head_opt.is_none():
+        head_opt = embed_opt
+    if embed_opt.is_none():
+        return Err("missing embedding / lm_head tensor")
+    Ok(LlamaModel(
+        config: cfg,
+        embed: embed_opt.unwrap(),
+        layers: layers,
+        final_norm: _need(w, "model.norm.weight")?,
+        lm_head: head_opt.unwrap()
+    ))
+
+# Load config.json + model.safetensors from a HF model directory.
+pub fn llama_load(model_dir: text) -> Result<LlamaModel, text>:
+    val cfg_path = model_dir + "/config.json"
+    if not file_exists(cfg_path):
+        return Err("config.json not found in {model_dir}")
+    val cfg = llama_config_from_json(read_file(cfg_path))?
+    val w = pure_weights_load(model_dir + "/model.safetensors")?
+    llama_model_from_weights(w, cfg)
+
+pub fn llama_kv_rows_new(cfg: LlamaConfig, capacity: i64) -> LlamaKvRows:
+    var keys: [PureTensor] = []
+    var values: [PureTensor] = []
+    var l: i64 = 0
+    while l < cfg.n_layers:
+        keys.push(tensor_zeros([capacity, cfg.dim]))
+        values.push(tensor_zeros([capacity, cfg.dim]))
+        l = l + 1
+    LlamaKvRows(keys: keys, values: values)
+
+# Evaluate token `token` at position `pos`; K/V rows [0, pos) must already be
+# filled. Returns the final residual stream and the K/V buffers with row `pos`.
+pub fn llama_step(m: LlamaModel, kv: LlamaKvRows, token: i64, pos: i64) -> LlamaStepOut:
+    val cfg = m.config
+    var x = tensor_row(m.embed, token)
+    var keys = kv.keys
+    var values = kv.values
+    var l: i64 = 0
+    while l < cfg.n_layers:
+        val layer = m.layers[l]
+        val xn = tensor_rmsnorm(x, layer.attn_norm, cfg.eps)
+        val q = tensor_rope(tensor_matvec(layer.wq, xn), pos, cfg.n_heads, cfg.head_dim, cfg.rope_theta)
+        val k = tensor_rope(tensor_matvec(layer.wk, xn), pos, cfg.n_heads, cfg.head_dim, cfg.rope_theta)
+        val v = tensor_matvec(layer.wv, xn)
+        keys[l] = tensor_kv_write(keys[l], pos, k)
+        values[l] = tensor_kv_write(values[l], pos, v)
+        val att = tensor_attention(q, keys[l], values[l], pos + 1, cfg.n_heads, cfg.head_dim)
+        x = tensor_add(x, tensor_matvec(layer.wo, att))
+        val hn = tensor_rmsnorm(x, layer.ffn_norm, cfg.eps)
+        val ff = tensor_mul(tensor_silu(tensor_matvec(layer.w_gate, hn)), tensor_matvec(layer.w_up, hn))
+        x = tensor_add(x, tensor_matvec(layer.w_down, ff))
+        l = l + 1
+    LlamaStepOut(hidden: x, kv: LlamaKvRows(keys: keys, values: values))
+
+pub fn llama_logits(m: LlamaModel, hidden: PureTensor) -> PureTensor:
+    tensor_matvec(m.lm_head, tensor_rmsnorm(hidden, m.final_norm, m.config.eps))
+
+pub fn llama_greedy_token(m: LlamaModel, hidden: PureTensor) -> i64:
+    tensor_argmax(llama_logits(m, hidden))
+
+# No-cache forward over the whole sequence; returns last-position logits.
+pub fn llama_forward_logits(m: LlamaModel, ids: [i64]) -> PureTensor:
+    var kv = llama_kv_rows_new(m.config, ids.len())
+    var hidden = tensor_zeros([m.config.dim])
+    var pos: i64 = 0
+    while pos < ids.len():
+        val out = llama_step(m, kv, ids[pos], pos)
+        kv = out.kv
+        hidden = out.hidden
+        pos = pos + 1
+    llama_logits(m, hidden)
+
+# Greedy generation without any cache: every step re-runs the full sequence.
+# Stops early at EOS. Returns only the generated ids.
+pub fn llama_generate_greedy_nocache(m: LlamaModel, prompt_ids: [i64], n_new: i64) -> [i64]:
+    var ids = prompt_ids
+    var generated: [i64] = []
+    var i: i64 = 0
+    while i < n_new and ids.len() < m.config.max_pos:
+        val next = tensor_argmax(llama_forward_logits(m, ids))
+        generated.push(next)
+        if next == m.config.eos_id:
+            break
+        ids.push(next)
+        i = i + 1
+    generated
