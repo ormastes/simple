@@ -336,3 +336,13 @@ empty-registry removal, mutated-output refusal, and missing-lease refusal. The l
 executing image but supplies a closed test-universe snapshot DTO; it is not a
 test of managed inventory admission. Neither fixture opens the canonical gate
 or establishes runtime, full pipeline, or performance readiness before execution.
+
+
+The mutable traversal fields now have one common owner,
+`TraversalSessionStateV1`, held by CompileContext. Each of the three real HIR
+lowering boundaries advances it with the actual source epoch; nonadvancing IDs
+are refused without resetting a woven epoch. Prepare/finish use that same
+owner directly, reducing dependency on the full compiler context for bounded
+native qualification. The full parser/context fixture remains separate from
+any projected coordinator fixture. This is an authored source refactor, not a
+new runtime PASS or cross-session lifetime guarantee.
