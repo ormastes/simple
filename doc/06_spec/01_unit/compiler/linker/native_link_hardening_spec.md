@@ -640,3 +640,23 @@ Retain invocation hashes and actual nonzero scenario results. Real Windows
 native-all MSVC/MinGW linking and five-host product qualification remain separate
 execution gates. This authored update does not replace the earlier generated
 manual's provenance or claim its scorecard was regenerated.
+
+
+## Ordinary Windows machine-policy SDK dependencies
+
+Status: **two added scenarios AUTHORED_NOT_RUN**. This section is authored,
+not regenerated docgen output. Existing historical evidence is unchanged.
+
+The production `MsvcConfig.default().build_args(...)` route must include
+`shell32.lib` for `SHGetKnownFolderPath` and `ole32.lib` for `CoTaskMemFree`
+without requiring a native-all object. A companion matrix checks those and the
+existing kernel, security and NT dependencies occur once across console/Windows
+subsystems and debug settings. The tests use actual SDK discovery and do not
+substitute a test linker. They assert arguments, not successful linking.
+
+The internal COFF optional-library resolver and the ordinary MSVC essential
+library list receive the same additions. Internal resolution still omits an
+unused SDK library if it is absent; required unresolved symbols remain errors.
+Actual linking of the Windows policy-owner fixture remains **NOT_RUN**, as do
+compiler/lib/MCP smoke checks and Windows runtime qualification. No exhausted
+bootstrap or native campaign was restarted for this source correction.
