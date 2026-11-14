@@ -4,6 +4,7 @@ use std.common.crypto.sha256.{sha256_text}
 use compiler.hir.hir_types.{HirModule}
 use compiler.common.mir_target_context.{MirTargetContext, mir_target_context_from, mir_target_context_identity_payload_v1}
 use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_unfrozen_module_input_v1.{mir_unfrozen_module_input_v1}
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir.verification_source_environment_v1.{verification_source_environment_v1}
 use compiler.mir.mir_instruction_graph.{MirModule, MirFunction}
@@ -35,8 +36,10 @@ fn verification_call_boundary_v1(module: MirModule) -> text:
 
 pub fn lower_module_with_resolved_calls_v1(module: HirModule
 ) -> Result<ResolvedCallLoweringV1, text>:
-    lower_module_with_resolved_calls_for_target_v1(module,
-        mir_target_context_from("", "unknown", "unknown", "llvm", -1))
+    # Legacy callers retain the intentionally unbound unknown context.
+    # This compatibility path does not claim strict target admission.
+    verification_lower_resolved_calls_v1(module,
+        mir_target_context_from("", "unknown", "unknown", "llvm", -1), false)
 
 fn verification_capture_target_key_v1(target: MirTargetContext) -> text:
     # v2 adds previously omitted profile/subarch/tier. Old receipts must miss,
@@ -46,6 +49,11 @@ fn verification_capture_target_key_v1(target: MirTargetContext) -> text:
 pub fn lower_module_with_resolved_calls_for_target_v1(module: HirModule,
     target: MirTargetContext
 ) -> Result<ResolvedCallLoweringV1, text>:
+    verification_lower_resolved_calls_v1(module, target, true)
+
+fn verification_lower_resolved_calls_v1(module: HirModule, target: MirTargetContext,
+    target_bound: bool
+) -> Result<ResolvedCallLoweringV1, text>:
     if module == None or module.symbols == None:
         return Err("FV2-E-CALL-SOURCE-OWNER: a retained source module and symbol environment are required")
     val symbols = verification_source_environment_v1(module.symbols)?
@@ -54,7 +62,12 @@ pub fn lower_module_with_resolved_calls_for_target_v1(module: HirModule,
     var lowering = MirLowering.new_for_target(symbols, target)
     lowering.allow_ambient_bootstrap_policy = false
     lowering.verification_capture_enabled = true
-    val mir = lowering.lower_module(owned_module)
+    val mir = if target_bound:
+        # Source-environment admission above remains mandatory before packaging.
+        val input = mir_unfrozen_module_input_v1(owned_module, target)?
+        lowering.lower_unfrozen_module_v1(input)?
+    else:
+        lowering.lower_module(owned_module)
     if lowering.verification_capture_error != "":
         return Err(lowering.verification_capture_error)
     if lowering.errors.len() > 0:
