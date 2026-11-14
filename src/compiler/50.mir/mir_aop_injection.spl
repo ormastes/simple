@@ -5,7 +5,7 @@
 
 use compiler.mir.mir_instructions.*
 use compiler.mir.mir_types.{MirConstValue, MirType, MirTypeKind, MirSignature}
-use compiler.frontend.core.aop.{MirBlockInfo, InstructionInfo, WeavingResult, AdviceCallInfo, JoinPointKind}
+use compiler.frontend.core.aop.{MirBlockInfo, InstructionInfo, WeavingResult, AdviceCallInfo, JoinPointKind, AdviceForm}
 
 # ============================================================================
 # AOP Weave Accounting (W2-B)
@@ -43,7 +43,7 @@ fn inject_before_advice(func: MirFunction, advice_fn_name: text) -> MirFunction:
     var bi = 0
     while bi < func.blocks.len():
         val block: MirBlock = func.blocks[bi]
-        if bi == 0:
+        if block.id.id == func.entry_block.id:
             # Prepend advice call to entry block
             val call_inst = make_advice_call_inst(advice_fn_name)
             var new_insts: [MirInst] = [call_inst]
@@ -149,10 +149,9 @@ fn inject_advice_at_instruction(func: MirFunction, block_id: i64, instruction_in
 # ============================================================================
 
 fn inject_around_advice(func: MirFunction, advice_fn_name: text) -> MirFunction:
-    """Wrap the function entry with a call to around advice.
-       The around advice receives a proceed context that calls the original body."""
-    # For around advice, prepend a call at entry that passes the function name
-    # as context. The around advice framework handles proceed() internally.
+    """Legacy entry pre-hook; this does not implement around/proceed semantics."""
+    # Retained for source compatibility only. Checked placement rejects Around;
+    # no arguments or proceed context are passed by this helper.
     if func.blocks.len() == 0:
         return func
     var new_blocks: [MirBlock] = []
@@ -212,23 +211,133 @@ fn classify_mir_inst_kind(kind: MirInstKind) -> text:
         case MirSimdStore(_, _, _): "assignment"
         case _: "other"
 
-fn apply_weaving_result(func: MirFunction, result: WeavingResult) -> MirFunction:
-    """Apply advice insertions from a WeavingResult to a MirFunction."""
+# Closed static placement contract. Around is reserved, but the existing
+# pre-hook helper does not implement proceed/replacement and is not admitted.
+pub enum AspectPlacementKindV1:
+    Before
+    AfterSuccess
+    AfterError
+    Around
+    AtInstruction
+
+pub trait Placement:
+    fn apply(func: MirFunction) -> Result<MirFunction, text>
+
+pub struct StaticAspectPlacementV1:
+    kind: AspectPlacementKindV1
+    advice_function: text
+    block_id: i64
+    instruction_index: i64
+    before: bool
+
+impl Placement for StaticAspectPlacementV1:
+    fn apply(func: MirFunction) -> Result<MirFunction, text>:
+        val validated = _validate_static_placement_v1(func, self)?
+        match self.kind:
+            case AspectPlacementKindV1.Before:
+                Ok(inject_before_advice(func, self.advice_function))
+            case AspectPlacementKindV1.AfterSuccess:
+                Ok(inject_after_success_advice(func, self.advice_function))
+            case AspectPlacementKindV1.AfterError:
+                Ok(inject_after_error_advice(func, self.advice_function))
+            case AspectPlacementKindV1.AtInstruction:
+                Ok(inject_advice_at_instruction(func, self.block_id,
+                    self.instruction_index, self.advice_function, self.before))
+            case AspectPlacementKindV1.Around:
+                Err("AOP-E-PLACEMENT: around/proceed is not implemented")
+
+pub fn aspect_static_placement_v1(call: AdviceCallInfo) -> Result<StaticAspectPlacementV1, text>:
+    if call.form == AdviceForm.Around:
+        return Err("AOP-E-PLACEMENT: around/proceed is not implemented")
+    var kind = AspectPlacementKindV1.Before
+    var before = true
+    match call.join_point_kind:
+        case JoinPointKind.Execution:
+            match call.form:
+                case AdviceForm.Before: kind = AspectPlacementKindV1.Before
+                case AdviceForm.AfterSuccess: kind = AspectPlacementKindV1.AfterSuccess
+                case AdviceForm.AfterError: kind = AspectPlacementKindV1.AfterError
+                case AdviceForm.Around: return Err("AOP-E-PLACEMENT: around/proceed is not implemented")
+        case JoinPointKind.FunctionCall:
+            if call.form == AdviceForm.AfterError:
+                return Err("AOP-E-PLACEMENT: instruction error outcome is unavailable")
+            kind = AspectPlacementKindV1.AtInstruction
+            before = call.form == AdviceForm.Before
+        case JoinPointKind.VariableAssignment:
+            if call.form == AdviceForm.AfterError:
+                return Err("AOP-E-PLACEMENT: instruction error outcome is unavailable")
+            kind = AspectPlacementKindV1.AtInstruction
+            before = call.form == AdviceForm.Before
+        case JoinPointKind.Error:
+            return Err("AOP-E-PLACEMENT: instruction error edge is unavailable")
+        case _:
+            return Err("AOP-E-PLACEMENT: unsupported join point")
+    Ok(StaticAspectPlacementV1(kind: kind, advice_function: call.advice_function,
+        block_id: call.block_id, instruction_index: call.instruction_index, before: before))
+
+fn _validate_static_placement_v1(func: MirFunction, placement: StaticAspectPlacementV1) -> Result<bool, text>:
+    if placement.advice_function == "": return Err("AOP-E-PLACEMENT: empty advice")
+    if placement.kind == AspectPlacementKindV1.AtInstruction:
+        var found = false
+        for block in func.blocks:
+            if block.id.id == placement.block_id and placement.instruction_index >= 0 and
+                    placement.instruction_index < block.instructions.len(): found = true
+        if not found: return Err("AOP-E-PLACEMENT: invalid original instruction coordinate")
+    if placement.kind == AspectPlacementKindV1.Before:
+        var found_entry = false
+        for block in func.blocks:
+            if block.id.id == func.entry_block.id: found_entry = true
+        if not found_entry: return Err("AOP-E-PLACEMENT: missing entry block")
+    if placement.kind == AspectPlacementKindV1.Around:
+        return Err("AOP-E-PLACEMENT: around/proceed is not implemented")
+    Ok(true)
+
+fn _instruction_placement_precedes_v1(a: StaticAspectPlacementV1,
+        b: StaticAspectPlacementV1) -> bool:
+    if a.block_id != b.block_id: return a.block_id > b.block_id
+    if a.instruction_index != b.instruction_index:
+        return a.instruction_index > b.instruction_index
+    # After inserts must happen before before-inserts at the same anchor.
+    not a.before and b.before
+
+pub fn apply_weaving_result_checked_v1(func: MirFunction,
+        result: WeavingResult) -> Result<MirFunction, text>:
+    var placements: [StaticAspectPlacementV1] = []
+    for call in result.advice_calls:
+        val placement = aspect_static_placement_v1(call)?
+        val validated = _validate_static_placement_v1(func, placement)?
+        placements.push(placement)
+    # Coordinates name the original function. Descending edits preserve them;
+    # reverse source order preserves advice order when insertions share a slot.
+    var instructions: [StaticAspectPlacementV1] = []
+    var i = placements.len() - 1
+    while i >= 0:
+        val placement = placements[i]
+        if placement.kind == AspectPlacementKindV1.AtInstruction:
+            var at = instructions.len()
+            instructions.push(placement)
+            while at > 0 and _instruction_placement_precedes_v1(placement, instructions[at - 1]):
+                instructions[at] = instructions[at - 1]
+                at = at - 1
+            instructions[at] = placement
+        i = i - 1
     var woven = func
-    for call_info in result.advice_calls:
-        match call_info.join_point_kind:
-            case Execution:
-                woven = inject_before_advice(woven, call_info.advice_function)
-            case FunctionCall:
-                woven = inject_advice_at_instruction(woven, call_info.block_id, call_info.instruction_index, call_info.advice_function, true)
-            case VariableAssignment:
-                woven = inject_advice_at_instruction(woven, call_info.block_id, call_info.instruction_index, call_info.advice_function, false)
-            case Error:
-                woven = inject_after_error_advice(woven, call_info.advice_function)
-            case _:
-                # Decision, Condition — inject at entry for now
-                woven = inject_before_advice(woven, call_info.advice_function)
-    woven
+    for placement in instructions: woven = placement.apply(woven)?
+    # Exit appends preserve source order, and cannot shift an original anchor.
+    for placement in placements:
+        if placement.kind == AspectPlacementKindV1.AfterSuccess or placement.kind == AspectPlacementKindV1.AfterError:
+            woven = placement.apply(woven)?
+    i = placements.len() - 1
+    while i >= 0:
+        if placements[i].kind == AspectPlacementKindV1.Before:
+            woven = placements[i].apply(woven)?
+        i = i - 1
+    Ok(woven)
+
+fn apply_weaving_result(func: MirFunction, result: WeavingResult) -> MirFunction:
+    # Compatibility entry point: unsupported requests fail explicitly. The
+    # compiler driver consumes Result and emits an ordinary diagnostic instead.
+    apply_weaving_result_checked_v1(func, result).unwrap()
 
 # ============================================================================
 # Helpers
