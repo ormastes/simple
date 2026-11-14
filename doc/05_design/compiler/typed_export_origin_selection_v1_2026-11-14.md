@@ -106,3 +106,8 @@ projection is Unavailable rather than proof of absence. This conservatively
 keeps affected name-only compatibility results and whole-surface cache identity
 unavailable until the real producer retains those declarations/absence facts.
 Typed available categories remain queryable; no complete-registry claim is made.
+
+Retention explicitly promotes the selected-index carrier plus its scalar arrays,
+replacement legacy origin carrier/map/arrays, and extended declaration-authority
+children. An old registry or surface raw carrier is not assumed to traverse newly
+allocated children. Actual transient-lifetime execution remains UNRUN.
