@@ -16,7 +16,9 @@ use std.nogc_sync_mut.io.windows_engine_pipe_abi_v1.{GetNamedPipeServerProcessId
 use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32,
     volatile_read_u64, volatile_write_u32, volatile_write_u64}
 use std.nogc_sync_mut.io.volatile_ops.volatile_write_u8
-use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
+use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure, time_sample_monotonic_nanos_or_failure}
+use std.common.process.windows_engine_control_v2.*
+use std.common.crypto.sha256.sha256_u8_hex
 use std.nogc_sync_mut.io.windows_job_stream_abi_v2.rt_windows_pty_owner_thread_guard_v1
 
 # Header0..511; read buffer512..66047; write buffer66048..131583.
@@ -45,6 +47,7 @@ struct PipeState:
     closed: bool = false
     failed: bool = false
     write_attempted: bool = false
+    control: WindowsEnginePipeControlStateV2? = None
 
 var slots: [PipeState] = []
 var active: i64 = 0
@@ -236,14 +239,40 @@ fn advance(state: PipeState) -> PipeState:
         val done = GetOverlappedResult(next.pipe, next.arena + 32, next.arena + 72, 0)
         if done != 0:
             next.write_pending = false
-            if volatile_read_u32(next.arena + 72) as i64 != next.write_requested:
-                next.failed = true # never replay an ambiguous accepted request
+            val actual = volatile_read_u32(next.arena + 72) as i64
+            if val original = next.control:
+                var control = original
+                control.pending = false
+                if val retained = control.last:
+                    var receipt = retained
+                    if actual < 0 or actual > receipt.attempt.requested_bytes:
+                        next.failed = true
+                        receipt.status = WindowsEnginePipeWriteStatusV2.Unknown
+                    else:
+                        receipt.status = WindowsEnginePipeWriteStatusV2.Completed
+                        receipt.accepted_bytes = actual
+                    control.last = Some(receipt)
+                else: next.failed = true
+                next.control = Some(control)
+            elif actual != next.write_requested:
+                next.failed = true # legacy exchange retains its existing semantics
         else:
             val result = windows_engine_pipe_completion_v1(GetLastError() as i64, next.closing, false)
             if result == "cancelled" or result == "failed-terminal":
                 next.write_pending = false
                 if result == "failed-terminal": next.failed = true
             elif result == "unknown": next.failed = true
+            if result != "pending":
+                if val original = next.control:
+                    var control = original
+                    control.pending = next.write_pending
+                    if val retained = control.last:
+                        var receipt = retained
+                        # Cancellation/failure cannot establish a zero prefix.
+                        # Keep the original attempt and freeze until cleanup.
+                        receipt.status = WindowsEnginePipeWriteStatusV2.Unknown
+                        control.last = Some(receipt)
+                    next.control = Some(control)
     next
 
 pub fn windows_engine_pipe_poll_v1(lease: WindowsEnginePipeLeaseV1) -> Result<WindowsEnginePipePollV1, text>:
@@ -315,6 +344,7 @@ pub fn windows_engine_pipe_read_some_v1(lease: WindowsEnginePipeLeaseV1, max_byt
 @unsafe(reason: "copies a bounded prefix and checks live admission immediately before WriteFile", capabilities: [ffi, raw_ptr])
 fn write(lease: WindowsEnginePipeLeaseV1, bytes: [u8], context: WindowsEnginePipeWriteContextV1?) -> Result<i64, text>:
     var state = load(lease)?
+    if state.control != None: return Err("engine-pipe-controlled-write-required")
     if state.closed or state.closing or state.failed or not state.admitted: return Err("engine-pipe-write-owner-unavailable")
     state = advance(state)
     state = store(lease, state)?
@@ -364,12 +394,159 @@ pub fn windows_engine_pipe_write_some_admitted_v1(lease: WindowsEnginePipeLeaseV
     val observed = windows_engine_pipe_observe_v1(lease)?
     write(lease, bytes, Some(context))
 
+# Trusted provider boundary only: these native barriers do not verify grants.
+# Binding is permanent for this exact connection; generic writes cannot bypass
+# it. Geometry pins the entire request wire digest before its first submission.
+pub fn windows_engine_pipe_bind_control_v2(lease: WindowsEnginePipeLeaseV1,
+        binding: WindowsEnginePipeControlBindingV2) -> Result<WindowsEnginePipeControlStateV2, text>:
+    val owner = entry()?
+    val reason = windows_engine_control_binding_reason_v2(binding)
+    if reason != "": return Err(reason)
+    var state = load(lease)?
+    if state.closed or state.closing or state.failed or not state.admitted:
+        return Err("engine-pipe-control-owner-unavailable")
+    if state.control != None: return Err("engine-pipe-control-already-bound")
+    if state.write_pending or (binding.kind == "geometry" and state.write_attempted):
+        return Err("engine-pipe-control-write-history-ineligible")
+    val control = WindowsEnginePipeControlStateV2(binding: Some(binding), current: None,
+        active: false, last: None, pending: false)
+    state.control = Some(control)
+    state = store(lease, state)?
+    Ok(control)
+
+pub fn windows_engine_pipe_control_state_v2(lease: WindowsEnginePipeLeaseV1) -> Result<WindowsEnginePipeControlStateV2, text>:
+    val owner = entry()?
+    var state = load(lease)?
+    if not state.closed:
+        state = advance(state)
+        state = store(lease, state)?
+    match state.control:
+        case Some(value): Ok(value)
+        case None: Err("engine-pipe-control-not-bound")
+
+pub fn windows_engine_pipe_install_control_v2(lease: WindowsEnginePipeLeaseV1,
+        current: WindowsEnginePipeControlV2) -> Result<WindowsEnginePipeControlStateV2, text>:
+    val owner = entry()?
+    val reason = windows_engine_control_reason_v2(current)
+    if reason != "": return Err(reason)
+    var state = load(lease)?
+    if state.closed or state.closing or state.failed or not state.admitted:
+        return Err("engine-pipe-control-owner-unavailable")
+    var control = match state.control:
+        case Some(value): value
+        case None: return Err("engine-pipe-control-not-bound")
+    val binding = match control.binding:
+        case Some(value): value
+        case None: return Err("engine-pipe-control-binding-missing")
+    if binding.target_digest != current.binding_digest or binding.kind != current.kind:
+        return Err("engine-pipe-control-target-kind-mismatch")
+    if state.write_pending or control.pending: return Err("engine-pipe-control-prior-write-pending")
+    if val previous = control.last:
+        if previous.status != WindowsEnginePipeWriteStatusV2.Completed:
+            return Err("engine-pipe-control-prior-write-unresolved")
+    if val previous = control.current:
+        if current.revision <= previous.revision: return Err("engine-pipe-control-revision-not-increasing")
+    val now = time_sample_monotonic_nanos_or_failure()
+    if now <= 0 or now >= current.expires_monotonic_ns: return Err("engine-pipe-control-expired")
+    control.current = Some(current)
+    control.active = true
+    state.control = Some(control)
+    state = store(lease, state)?
+    Ok(control)
+
+pub fn windows_engine_pipe_revoke_control_v2(lease: WindowsEnginePipeLeaseV1,
+        expected: WindowsEnginePipeControlV2) -> Result<WindowsEnginePipeControlStateV2, text>:
+    val owner = entry()?
+    var state = load(lease)?
+    if state.closed: return Err("engine-pipe-control-owner-closed")
+    var control = match state.control:
+        case Some(value): value
+        case None: return Err("engine-pipe-control-not-bound")
+    val current = match control.current:
+        case Some(value): value
+        case None: return Err("engine-pipe-control-not-installed")
+    if not windows_engine_control_equal_v2(current, expected): return Err("engine-pipe-control-revoke-mismatch")
+    control.active = false
+    # Retain queued/completed attempt attribution across revoke and later
+    # install. Revocation does not undo a previously submitted native write.
+    state.control = Some(control)
+    state = store(lease, state)?
+    Ok(control)
+
+@unsafe(reason: "exact owner-thread revision barrier, immutable full payload, pre-effect attempt record and retained overlapped IO", capabilities: [ffi, raw_ptr])
+pub fn windows_engine_pipe_write_controlled_v2(lease: WindowsEnginePipeLeaseV1,
+        attempt: WindowsEnginePipeAttemptV2, payload: [u8]) -> Result<WindowsEnginePipeWriteReceiptV2, text>:
+    val owner = entry()?
+    var state = load(lease)?
+    if state.closed or state.closing or state.failed or not state.admitted:
+        return Err("engine-pipe-control-owner-unavailable")
+    state = advance(state)
+    state = store(lease, state)?
+    if state.failed: return Err("engine-pipe-control-prior-write-uncertain")
+    var control = match state.control:
+        case Some(value): value
+        case None: return Err("engine-pipe-control-not-bound")
+    if state.write_pending: return Err("engine-pipe-control-prior-write-pending")
+    val reason = windows_engine_control_attempt_reason_v2(control, attempt, time_sample_monotonic_nanos_or_failure())
+    if reason != "": return Err(reason)
+    if payload.len() != attempt.payload_bytes or sha256_u8_hex(payload) != attempt.payload_digest:
+        return Err("engine-pipe-control-full-payload-mismatch")
+    for index in 0..attempt.requested_bytes:
+        volatile_write_u8(state.arena + 66048 + index, payload[attempt.offset + index] as i64)
+    for offset in [32, 40, 48]: volatile_write_u64(state.arena + offset, 0)
+    volatile_write_u32(state.arena + 72, 0)
+    if ResetEvent(state.write_event) == 0:
+        state.failed = true
+        val retained = store(lease, state)?
+        return Err("engine-pipe-control-event-reset-failed")
+    # Hashing/copying may consume the remaining window. The authoritative
+    # owner-thread state and clock are checked again at the syscall boundary.
+    val final_reason = windows_engine_control_attempt_reason_v2(control, attempt, time_sample_monotonic_nanos_or_failure())
+    if final_reason != "": return Err(final_reason)
+    var receipt = WindowsEnginePipeWriteReceiptV2(attempt: attempt,
+        status: WindowsEnginePipeWriteStatusV2.Unknown, accepted_bytes: 0)
+    control.last = Some(receipt)
+    control.pending = true
+    state.control = Some(control)
+    state.write_pending = true
+    state.write_requested = attempt.requested_bytes
+    state.write_attempted = true
+    state = store(lease, state)?
+    val submitted = WriteFile(state.pipe, state.arena + 66048,
+        attempt.requested_bytes as u32, state.arena + 72, state.arena + 32)
+    if submitted != 0:
+        val actual = volatile_read_u32(state.arena + 72) as i64
+        state.write_pending = false
+        if actual < 0 or actual > attempt.requested_bytes: state.failed = true
+        else:
+            receipt.status = WindowsEnginePipeWriteStatusV2.Completed
+            receipt.accepted_bytes = actual
+    else:
+        val error = GetLastError() as i64
+        if error == 997:
+            # Queued bytes are not accepted/delivered bytes. Only actual
+            # GetOverlappedResult completion may report the known prefix.
+            receipt.status = WindowsEnginePipeWriteStatusV2.Queued
+        else:
+            state.failed = true
+            val result = windows_engine_pipe_completion_v1(error, false, false)
+            if result != "pending" and result != "unknown": state.write_pending = false
+    control.last = Some(receipt)
+    control.pending = state.write_pending
+    state.control = Some(control)
+    state = store(lease, state)?
+    Ok(receipt)
+
 @unsafe(reason: "cancellation is request-only; pending buffers remain owned until observed completion", capabilities: [ffi, raw_ptr])
 pub fn windows_engine_pipe_cancel_v1(lease: WindowsEnginePipeLeaseV1) -> Result<WindowsEnginePipePollV1, text>:
     val owner = entry()?
     var state = load(lease)?
     if state.closed: return Ok(poll_value(state))
     state.closing = true
+    if val original = state.control:
+        var control = original
+        control.active = false
+        state.control = Some(control)
     state = store(lease, state)?
     if state.read_pending:
         if CancelIoEx(state.pipe, state.arena) == 0 and GetLastError() != 1168u32:
