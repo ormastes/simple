@@ -1,0 +1,100 @@
+# Authored canonical private-transport tests; not native qualification.
+use std.spec
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_instructions.{MirModule}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature}
+use compiler.mir.mir_compiler_private_function_v1.{MirCompilerPrivateFunctionV1}
+use compiler.mir.mir_compiler_private_encoding_v1.*
+use compiler.mir.mir_canonical_fingerprint.{mir_module_canonical_fingerprint_v1}
+use compiler.mir.mir_serialization.{serialize_mir_module}
+use compiler.driver.native_capsule_mir_identity.{compute_native_capsule_mir_identity_v1}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.smf.runtime_std_native_sections_v1.{runtime_std_mir_body_payload_v1}
+
+fn private_identity_binding() -> MirCompilerPrivateFunctionV1:
+    MirCompilerPrivateFunctionV1(schema_version: 1, symbol: SymbolId.new(100),
+        name: "__simple_accessor_identity", emission_owner: "app.owner",
+        canonical_key: "full|key\nwith delimiters", key_digest: "digest", defines_here: false,
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false,
+            params_known: true, declared_params: [], declared_params_known: true))
+
+fn private_identity_module(rows: [MirCompilerPrivateFunctionV1]) -> MirModule:
+    MirModule(name: "app.reader", functions: {}, statics: {}, constants: {}, types: {},
+        compiler_private_module_identity_v1: "app.reader", compiler_private_functions_v1: rows)
+
+describe "compiler-private MIR canonical transport":
+    it "preserves empty legacy report and fingerprint bytes":
+        val module = MirModule(name: "legacy", functions: {}, statics: {}, constants: {}, types: {})
+        expect(serialize_mir_compiler_private_module_v1(module)).to_equal("")
+        expect(serialize_mir_module(module)).to_equal("{\"name\":\"legacy\",\"functions\":[],\"collection_plan_explanations\":[]}")
+        expect(mir_module_canonical_fingerprint_v1(module)).to_equal("simple/mir-fp/v1:" + sha256_text("name:legacy"))
+
+    it "binds the complete key not only its digest and final linkage name":
+        val row = private_identity_binding()
+        val original = private_identity_module([row])
+        val changed = private_identity_module([MirCompilerPrivateFunctionV1(..row,
+            canonical_key: "another full key with the same index")])
+        expect(mir_module_canonical_fingerprint_v1(original) == mir_module_canonical_fingerprint_v1(changed)).to_equal(false)
+        expect(compute_native_capsule_mir_identity_v1(original) == compute_native_capsule_mir_identity_v1(changed)).to_equal(false)
+        expect(serialize_mir_module(original)).to_contain("MirCompilerPrivateModule-v1")
+        expect(serialize_mir_module(original)).to_contain("full|key\\nwith delimiters")
+
+    it "is independent of binding publication order":
+        val first = private_identity_binding()
+        val second = MirCompilerPrivateFunctionV1(..first, symbol: SymbolId.new(101),
+            name: "another_helper", canonical_key: "second", key_digest: "second-digest")
+        val one = private_identity_module([first, second])
+        val two = private_identity_module([second, first])
+        expect(serialize_mir_compiler_private_module_v1(one)).to_equal(serialize_mir_compiler_private_module_v1(two))
+        expect(mir_module_canonical_fingerprint_v1(one)).to_equal(mir_module_canonical_fingerprint_v1(two))
+
+    it "binds schema owner symbol linkage and definition status independently":
+        val row = private_identity_binding()
+        val original = serialize_mir_compiler_private_binding_v1(row)
+        val variants = [
+            MirCompilerPrivateFunctionV1(..row, schema_version: 2),
+            MirCompilerPrivateFunctionV1(..row, symbol: SymbolId.new(101)),
+            MirCompilerPrivateFunctionV1(..row, name: "renamed"),
+            MirCompilerPrivateFunctionV1(..row, emission_owner: "other.owner"),
+            MirCompilerPrivateFunctionV1(..row, key_digest: "other-digest"),
+            MirCompilerPrivateFunctionV1(..row, defines_here: true)]
+        for changed in variants:
+            expect(serialize_mir_compiler_private_binding_v1(changed) == original).to_equal(false)
+        val module = private_identity_module([row])
+        expect(serialize_mir_compiler_private_module_v1(MirModule(..module,
+            compiler_private_module_identity_v1: "another.reader")) ==
+            serialize_mir_compiler_private_module_v1(module)).to_equal(false)
+
+    it "retains declared ABI and coercion provenance absent from old generic signature JSON":
+        val row = private_identity_binding()
+        val signature = row.signature
+        val original = serialize_mir_compiler_private_binding_v1(row)
+        val signatures = [MirSignature(..signature, declared_params_known: false),
+            MirSignature(..signature, declared_params: [MirType.unit()]),
+            MirSignature(..signature, int_literal_coerced_params: [true]),
+            MirSignature(..signature, params_known: false),
+            MirSignature(..signature, is_variadic: true),
+            MirSignature(..signature, params: [MirType.unit()])]
+        for changed in signatures:
+            expect(serialize_mir_compiler_private_binding_v1(
+                MirCompilerPrivateFunctionV1(..row, signature: changed)) == original).to_equal(false)
+
+    it "rejects private metadata at the unversioned runtime std transport owner":
+        val module = private_identity_module([private_identity_binding()])
+        val result = runtime_std_mir_body_payload_v1(module, "src/app/reader.spl", sha256_text("source"))
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal("runtime-std-mir-compiler-private-transport-unavailable")
+        val stale_owner = private_identity_module([])
+        expect(runtime_std_mir_body_payload_v1(stale_owner, "src/app/reader.spl", sha256_text("source")).is_err()).to_equal(true)
+
+    it "binds nested function-pointer declared signatures through composite types":
+        val row = private_identity_binding()
+        val nested = row.signature
+        val changed = MirSignature(..nested, declared_params_known: false)
+        val first_type = MirType(kind: MirTypeKind.Slice(MirType(kind: MirTypeKind.FuncPtr(nested))))
+        val second_type = MirType(kind: MirTypeKind.Slice(MirType(kind: MirTypeKind.FuncPtr(changed))))
+        val first = MirCompilerPrivateFunctionV1(..row, signature: MirSignature(..row.signature,
+            params: [first_type], declared_params: [first_type]))
+        val second = MirCompilerPrivateFunctionV1(..row, signature: MirSignature(..row.signature,
+            params: [second_type], declared_params: [second_type]))
+        expect(serialize_mir_compiler_private_binding_v1(first) == serialize_mir_compiler_private_binding_v1(second)).to_equal(false)

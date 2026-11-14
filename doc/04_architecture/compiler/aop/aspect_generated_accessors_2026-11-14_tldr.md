@@ -15,3 +15,5 @@ Source owners: frontend advice/parser; HIR resolved field/place facts; MIR field
 Acceptance: full contract G1–G14 includes operand order, actual object mutation, visibility, zero-change off baseline, single helper emission, captured-value/liveness and native/interpreter parity. These are planned tests, not passes.
 
 Current [producer checkpoint](../../../09_report/compiler/aspect_accessor_producer_checkpoint_2026-11-14.md) connects source inventory, authenticated providers, named handlers, coordinator-reserved canonical type IDs and real MIR consumers. Native and cache/transport qualification remain open; public get/set stays rejected.
+
+The [private transport checkpoint](../../../09_report/compiler/aspect_accessor_private_transport_checkpoint_2026-11-15.md) binds complete helper linkage/ABI metadata into MIR and capsule identities, preserving legacy empty bytes. Early reuse without plan witnesses and unsupported transports are closed; new tests remain UNRUN.

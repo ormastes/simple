@@ -1044,6 +1044,9 @@ impl CompilerDriver:
         else:
             ""
         if allow_bootstrap_shortcuts and skip_mir_lower == "1":
+            if accessor_requested:
+                self.ctx.add_error("E-AOP-FIELD-TRANSPORT: selected field plans cannot skip MIR lowering")
+                return false
             if self.ctx.runtime_std_full_inventory_selection != nil:
                 self.ctx.add_error("full inventory cold MIR cannot skip lowering")
                 return false
@@ -1091,6 +1094,9 @@ impl CompilerDriver:
         # skip and context dispatch read the same variable; move them together.
         val bootstrap_whole_program = (sosix_env_get_nullable("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM") ?? "") == "1"
         if self.ctx.runtime_std_full_inventory_selection == nil and allow_bootstrap_shortcuts and bootstrap_entry_requested and bootstrap_whole_program and (sosix_env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") == "1" and (sosix_env_get_nullable("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
+            if accessor_requested:
+                self.ctx.add_error("E-AOP-FIELD-TRANSPORT: whole-program bootstrap does not consume accessor plans")
+                return false
             val bootstrap_hir = self.ctx.hir_modules["app.cli.bootstrap_main"]
             if bootstrap_hir == nil:
                 self.ctx.add_error("MIR lowering missing HIR module for app.cli.bootstrap_main during bootstrap")
@@ -1476,7 +1482,9 @@ impl CompilerDriver:
             # beside the MIR-keyed entries, and lowering proceeds as before.
             self.ctx.native_prelower_pending_keys = {}
             self.ctx.native_prelower_hit_objects = {}
-            if driver_native_prelower_build_admissible_v1(self.ctx,
+            # Prelower witnesses do not bind selected field plans or private
+            # linkage yet. Retain the normal post-MIR object cache instead.
+            if not accessor_requested and driver_native_prelower_build_admissible_v1(self.ctx,
                     native_entry_closure_mir, self.native_staged_codegen.active,
                     mir_shard_queue):
                 var prelower_names: [text] = []
@@ -1591,7 +1599,9 @@ impl CompilerDriver:
                     # cached object as the PASS instead of lowering it. Both
                     # output lowers anyway: the SMF part needs the module's MIR.
                     var reuse_plan = sosix_env_get_nullable(FILE_WORKER_REUSE_ENV_V1) ?? ""
-                    if driver_output_format_is_both(self.ctx.options.output_format):
+                    # File-worker reuse receipts likewise lack accessor plan
+                    # identity. The worker must consume its actual frozen plan.
+                    if accessor_requested or driver_output_format_is_both(self.ctx.options.output_format):
                         reuse_plan = ""
                     val reused_opt: FileWorkerReuseRowV1? = file_worker_inc_reuse_lookup_v1(reuse_plan, name_direct)
                     # @workaround bug=stage2_if_val_struct_option_binding_as_int_wide_2026-11-03 reason=see bootstrap_enum_hir above

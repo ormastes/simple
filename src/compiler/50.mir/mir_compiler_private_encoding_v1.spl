@@ -1,0 +1,85 @@
+# Canonical compiler-private linkage transport for MIR reports and cache identity.
+# This JSON is part of the existing explicit MIR interchange surface, not SDN
+# configuration. It is not an executable-module decoder or a cache admission.
+use compiler.mir.mir_instruction_graph.{MirModule, mir_sorted_positions}
+use compiler.mir.mir_compiler_private_function_v1.{MirCompilerPrivateFunctionV1}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature}
+use compiler.mir.mir_json.{serialize_mir_type, escape_json_string}
+
+fn private_quote_v1(value: text) -> text:
+    "\"" + escape_json_string(value) + "\""
+
+fn private_type_v1(value: MirType) -> text:
+    # The generic MIR JSON signature omits declared ABI facts. Descend through
+    # every composite so a nested function pointer cannot lose those facts.
+    match value.kind:
+        case MirTypeKind.FuncPtr(signature):
+            "{\"FuncPtr\":" + private_signature_v1(signature) + "}"
+        case MirTypeKind.Ptr(inner, mutable):
+            "{\"Ptr\":[" + private_type_v1(inner) + "," + (if mutable: "true" else: "false") + "]}"
+        case MirTypeKind.Ref(inner, mutable):
+            "{\"Ref\":[" + private_type_v1(inner) + "," + (if mutable: "true" else: "false") + "]}"
+        case MirTypeKind.Array(inner, size):
+            "{\"Array\":[" + private_type_v1(inner) + ",{size}]}"
+        case MirTypeKind.Dict(key, item):
+            "{\"Dict\":[" + private_type_v1(key) + "," + private_type_v1(item) + "]}"
+        case MirTypeKind.Slice(inner): "{\"Slice\":" + private_type_v1(inner) + "}"
+        case MirTypeKind.Tuple(elements):
+            val rows = [for item in elements: private_type_v1(item)]
+            "{\"Tuple\":[" + rows.join(",") + "]}"
+        case MirTypeKind.Union(elements):
+            val rows = [for item in elements: private_type_v1(item)]
+            "{\"Union\":[" + rows.join(",") + "]}"
+        case MirTypeKind.Result(ok, err):
+            "{\"Result\":[" + private_type_v1(ok) + "," + private_type_v1(err) + "]}"
+        case MirTypeKind.ScalableVec(inner, lanes):
+            "{\"ScalableVec\":[" + private_type_v1(inner) + ",{lanes}]}"
+        case MirTypeKind.Promise(inner): "{\"Promise\":" + private_type_v1(inner) + "}"
+        case MirTypeKind.Generator(yield_type, return_type):
+            "{\"Generator\":[" + private_type_v1(yield_type) + "," + private_type_v1(return_type) + "]}"
+        case MirTypeKind.ActorType(inner): "{\"ActorType\":" + private_type_v1(inner) + "}"
+        case _: serialize_mir_type(value)
+
+fn private_signature_v1(signature: MirSignature) -> text:
+    val params = [for item in signature.params: private_type_v1(item)]
+    val declared = [for item in signature.declared_params: private_type_v1(item)]
+    val coerced = [for item in signature.int_literal_coerced_params: if item: "true" else: "false"]
+    var rows: [text] = []
+    rows.push("\"params\":[" + params.join(",") + "]")
+    rows.push("\"return_type\":" + private_type_v1(signature.return_type))
+    rows.push("\"is_variadic\":" + (if signature.is_variadic: "true" else: "false"))
+    rows.push("\"params_known\":" + (if signature.params_known: "true" else: "false"))
+    rows.push("\"declared_params\":[" + declared.join(",") + "]")
+    rows.push("\"declared_params_known\":" + (if signature.declared_params_known: "true" else: "false"))
+    rows.push("\"int_literal_coerced_params\":[" + coerced.join(",") + "]")
+    "{" + rows.join(",") + "}"
+
+pub fn serialize_mir_compiler_private_binding_v1(binding: MirCompilerPrivateFunctionV1) -> text:
+    var rows: [text] = []
+    rows.push("\"schema_version\":{binding.schema_version}")
+    rows.push("\"symbol\":{binding.symbol.id}")
+    rows.push("\"name\":" + private_quote_v1(binding.name))
+    rows.push("\"emission_owner\":" + private_quote_v1(binding.emission_owner))
+    rows.push("\"canonical_key\":" + private_quote_v1(binding.canonical_key))
+    rows.push("\"key_digest\":" + private_quote_v1(binding.key_digest))
+    rows.push("\"defines_here\":" + (if binding.defines_here: "true" else: "false"))
+    rows.push("\"signature\":" + private_signature_v1(binding.signature))
+    "{" + rows.join(",") + "}"
+
+pub fn serialize_mir_compiler_private_module_v1(module: MirModule) -> text:
+    # Empty legacy modules retain their exact existing report/cache bytes.
+    if module.compiler_private_functions_v1.len() == 0 and
+            module.compiler_private_module_identity_v1 == "":
+        return ""
+    var names: [text] = []
+    var ids: [i64] = []
+    var encoded: [text] = []
+    for binding in module.compiler_private_functions_v1:
+        val row = serialize_mir_compiler_private_binding_v1(binding)
+        names.push(row)
+        ids.push(binding.symbol.id)
+        encoded.push(row)
+    val ordered = [for index in mir_sorted_positions(names, ids): encoded[index]]
+    "{\"schema\":\"MirCompilerPrivateModule-v1\",\"module_identity\":" +
+        private_quote_v1(module.compiler_private_module_identity_v1) +
+        ",\"functions\":[" + ordered.join(",") + "]}"
