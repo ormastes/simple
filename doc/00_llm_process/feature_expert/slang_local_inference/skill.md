@@ -153,6 +153,22 @@ cd <worktree> && SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=0 \
   JIT demotions to the interpreter (`_first_safetensors` bare `dir_list`;
   caret `telemetry().active_requests` inferred as `RingTelemetry`). Both still work.
 
+## Windows (llvm-mingw) (verified 2026-11-14, Windows 11, CPU)
+
+- **Build:** llama.cpp with llvm-mingw, `BUILD_SHARED_LIBS=ON`, into
+  `$LLAMA_ROOT/build-mingw`; then
+  `LLAMA_ROOT=/c/dev/tools/llama.cpp sh scripts/check/build-slang-ggml-shim.shs`.
+  mingw is the Windows default; clang-cl/lld-link is opt-in via `SLANG_SHIM_MSVC=1`.
+  `LLAMA_ROOT` is required on Windows (no Linux default).
+- **DLL naming trap:** mingw produces `libllama.dll` (import lib
+  `src/libllama.dll.a`), MSVC produces `llama.dll`/`llama.lib`. The mingw DLLs
+  also import `libc++.dll`/`libunwind.dll` from llvm-mingw's
+  `x86_64-w64-mingw32/bin`. The script copies all of them next to the shim and
+  `backend.spl` `_preload_windows_dll_siblings` preloads them, so no PATH edit
+  is needed. A missing sibling shows up only as "backend library could not be opened".
+- **Compiler trap:** a bare `clang` on PATH may target MSVC (ROCm ships one);
+  the script uses `$SIMPLE_MINGW_ROOT/bin/clang.exe` and checks `-dumpmachine`.
+
 ## Related
 
 `doc/05_design/ml/slang/slang_master_plan.md`,
