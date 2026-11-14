@@ -3,6 +3,33 @@
 This is a source integration proposal. It grants no qualification and is not
 evidence of a generated executable invoking the consumer.
 
+The concrete source fixture is now
+`test/fixtures/xray/xray_public_startup_v1.spl`. It uses the ordinary public
+facade and resolves an exact exported key through the actual image manifest.
+The selection helper accepts an empty owner only when the emitted key is
+globally unique; ambiguous keys fail. The fixture stores only copied issued
+handle scalars for main, then asserts real event identities and recording-only
+stop behavior. It must be built by the normal driver at opt-level 0 with the
+typed `xray_startup_consumer_v1` entry route. It is authored, not executed.
+
+Public prepare/start now revalidate `simple_xray_startup_current_owner_v1`
+under their normal control lock in addition to the unchanged qualification
+gate. The former unconditional quiescence-denial helper has been removed;
+the actual native association check is not advertised as a profile issuer.
+With valid image metadata but no qualified profile, the fixture returns
+UnsupportedProfile (status 2) and entry must seal and fail with exit 125 before
+main. Metadata/allocator failures propagate their real failure codes instead.
+Such a refusal run establishes only the paths it actually executes; it cannot
+establish capture or execute the fixture's later positive assertions.
+
+`xray_public_startup_refusal_v1.spl` is a separate expected-refusal fixture.
+Its oracle requires generated-entry exit 125 and diagnostic status 2, with
+user main unreachable. It resolves an actual image key and calls public
+prepare; a metadata error retains its own status, and unexpected preparation
+success returns BackendFailure (9), both failing the status-2 oracle. It must
+not be reported as capture or as an ordinary exit-0 test. The positive capture
+fixture remains a distinct future run requiring the real qualification issuer.
+
 ## Existing compiler route
 
 `compile_entry_point_c` in

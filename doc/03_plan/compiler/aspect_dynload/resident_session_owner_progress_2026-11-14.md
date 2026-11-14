@@ -50,8 +50,10 @@ high-water measurement.
   Capabilities advertise no admitted backend/profile; both public prepare and
   start return UnsupportedProfile before touching native/runtime state.
   The former candidate profile string no longer authorizes anything. Start
-  also requires a runtime-owned quiescent handoff, currently explicitly
-  unavailable. Neither runtime readiness nor a config enum proves quiescence.
+  also revalidates the actual native startup-window owner under control.
+  This association check supplements the still-closed profile qualification
+  gate; it cannot itself prove closed-world quiescence. Neither runtime
+  readiness nor a config enum proves quiescence.
   The private owner mechanisms remain source candidates with dynamic/raw-edge
   restrictions; no public route can invoke them to activate instrumentation.
 - Native integration and compiler-generated ABI execution have not run for

@@ -19,6 +19,7 @@ extern fn simple_xray_resident_control_enter_v1() -> i64
 extern fn simple_xray_resident_control_leave_v1()
 extern fn simple_xray_resident_runtime_is_ready_v1() -> i64
 extern fn simple_xray_resident_in_hook_v1() -> i64
+extern fn simple_xray_startup_current_owner_v1() -> i64
 extern fn simple_xray_llvm_resident_drained_v1() -> i64
 extern fn simple_xray_llvm_resident_loss_inexact_v1() -> i64
 extern fn simple_xray_thread_task_root_v1() -> i64
@@ -275,7 +276,10 @@ pub fn trace_resident_selection_candidate_v1(owner_name: text, keys: [text]
     for key in keys:
         var found = false
         for binding in manifest.bindings:
-            if binding.row.owner == owner_name and binding.row.key == key:
+            # An empty owner requests a globally unique emitted key (useful
+            # for exact C exports). Ambiguity never selects an arbitrary row.
+            if (owner_name == "" or binding.row.owner == owner_name) and binding.row.key == key:
+                if found: return Err(TraceFailureV1.InvalidMap)
                 for previous in sites:
                     if previous.site_id == binding.site_id: return Err(TraceFailureV1.InvalidMap)
                 sites.push(TraceSiteV1(module_instance: manifest.module_instance, site_id: binding.site_id))
@@ -291,17 +295,23 @@ impl TraceObserverV1 for TraceResidentObserverV1:
         trace_resident_require_qualified_v1()?
         trace_resident_enter_v1()?
         var owner = _trace_resident_owner_v1[0]
-        val result = owner.prepare(config, selection)
+        # Native thread-owned window association is checked while control is
+        # held. It is necessary in addition to the qualification gate above;
+        # the ledger/current-owner fact alone never grants profile admission.
+        val result = if simple_xray_startup_current_owner_v1() == 1:
+            owner.prepare(config, selection)
+        else: Err(TraceFailureV1.UnsupportedConsistency)
         _trace_resident_owner_v1[0] = owner
         simple_xray_resident_control_leave_v1()
         result
 
     me start(prepared: TracePreparedV1) -> Result<TraceSessionV1, TraceFailureV1>:
         trace_resident_require_qualified_v1()?
-        trace_resident_require_quiescent_handoff_v1()?
         trace_resident_enter_v1()?
         var owner = _trace_resident_owner_v1[0]
-        val result = owner.start(prepared)
+        val result = if simple_xray_startup_current_owner_v1() == 1:
+            owner.start(prepared)
+        else: Err(TraceFailureV1.UnsupportedConsistency)
         _trace_resident_owner_v1[0] = owner
         simple_xray_resident_control_leave_v1()
         result

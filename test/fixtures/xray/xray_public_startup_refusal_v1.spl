@@ -1,0 +1,41 @@
+# Expected-refusal integration case, separate from the future capture oracle.
+# Normal LLVM --xray --xray-startup-consumer, opt-level0, unqualified profile.
+# PASS oracle is generated-entry exit125 and diagnostic status=2, never exit0.
+# Reaching main or returning another startup status fails this refusal case.
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_config_v1.{trace_config_defaults_v1}
+use std.nogc_sync_mut.trace.observer_resident_owner_v1.*
+
+@export("C", name: "trace_startup_refusal_target_v1")
+fn trace_startup_refusal_target_v1(value: i64) -> i64:
+    value + 19
+
+@export("C", name: "__simple_xray_resident_startup_v1")
+fn __simple_xray_resident_startup_v1() -> i64:
+    # Resolve a real surviving emitted function through the loaded image.
+    # A metadata/allocator failure preserves its own code, failing status2.
+    val selected = trace_resident_selection_candidate_v1("", ["trace_startup_refusal_target_v1"])
+    var observer = TraceResidentObserverV1()
+    val capability = observer.capabilities()
+    if capability.backend != TraceBackendV1.None or capability.abi_profiles.len() != 0:
+        return trace_failure_code_v1(TraceFailureV1.BackendFailure) as i64
+    var config = trace_config_defaults_v1()
+    config.instrumentation = TraceInstrumentationV1.Dynamic
+    config.backend = TraceBackendV1.Llvm
+    config.abi_profile = "unqualified-startup-probe"
+    config.max_contexts = 1
+    config.max_resident_generations = 1
+    match selected:
+        case Err(failure): return trace_failure_code_v1(failure) as i64
+        case Ok(selection):
+            match observer.prepare(config, selection):
+                case Err(failure): return trace_failure_code_v1(failure) as i64
+                # Unexpected admission is a failed test, not successful capture.
+                case Ok(_): return trace_failure_code_v1(TraceFailureV1.BackendFailure) as i64
+
+fn main() -> i64:
+    # This reference retains the actual target in the ordinary object closure.
+    # Entry must refuse before executing it for this unqualified artifact.
+    if trace_startup_refusal_target_v1(2) != 21: return 98
+    print "ERROR: unqualified startup reached user main"
+    99
