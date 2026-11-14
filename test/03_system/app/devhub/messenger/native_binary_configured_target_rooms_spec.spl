@@ -21,10 +21,15 @@ fn cfg_bin() -> text:
         case Some(v): v
         case None: ""
 
-# Same schema as the shared fixture config, but the target is named `cfgdense`
-# (the validator requires default_target to name a declared target).
+# Two sqlcipher4 targets: the DEFAULT `decoy` names a store that does not exist,
+# and the non-default `cfgdense` names the committed dense fixture.
+# Target selection is observable: only cfgdense can yield ground-truth rooms.
 fn cfg_sdn(db_path: text) -> text:
-    cli_sdn_text(db_path).replace("messenger.dense", "messenger.cfgdense").replace("default_target: dense", "default_target: cfgdense")
+    val header = "messenger:\n    schema_version: 1\n    default_target: dense\n\n"
+    val decoy_db = db_path.replace(DENSE_BASE, "missing_decoy.sqlcipher4")
+    val decoy = cli_sdn_text(decoy_db).replace(header, "").replace("messenger.dense", "messenger.decoy")
+    val cfg = cli_sdn_text(db_path).replace(header, "").replace("messenger.dense", "messenger.cfgdense")
+    header.replace("default_target: dense", "default_target: decoy") + decoy + "\n" + cfg
 
 fn cfg_prepare(home: text) -> bool:
     val _mk = process_run("mkdir", ["-p", home + "/.config/devhub"])
@@ -41,6 +46,7 @@ val _home = cfg_prepare("build/tmp/devhub_cfg_home")
 val _s = env_set(DENSE_ENV, cf_pass)
 val cf_rooms = if cf_bin == "": ("", "", -1) else: process_run(cf_bin, ["messenger", "rooms", "--target", "cfgdense", "--json"])
 val cf_msgs = if cf_bin == "": ("", "", -1) else: process_run(cf_bin, ["messenger", "messages", "--target", "cfgdense", "--room", "1", "--limit", "2", "--json"])
+val cf_default = if cf_bin == "": ("", "", -1) else: process_run(cf_bin, ["messenger", "rooms", "--json"])
 val cf_wrong = "wrong-" + cf_pass
 val _w = env_set(DENSE_ENV, cf_wrong)
 val cf_bad = if cf_bin == "": ("", "", -1) else: process_run(cf_bin, ["messenger", "rooms", "--target", "cfgdense", "--json"])
@@ -62,6 +68,13 @@ describe "native devhub binary over a configured sqlcipher4 target":
         expect(tf(rooms[0], "name")).to_equal(cell_at(want, 0, 1))
         expect(tf(rooms[1], "id")).to_equal(cell_at(want, 1, 0))
         expect(tf(rooms[1], "name")).to_equal(cell_at(want, 1, 1))
+
+    it "uses the configured default target, not cfgdense, when --target is omitted":
+        # @req REQ-MSGR-NATIVE-CFG-005
+        step("Run `devhub messenger rooms --json` with no --target; the default `decoy` names a missing store")
+        expect(cf_default.2 != 0).to_equal(true)
+        expect(tf(payload_json(cf_default.0), "target")).to_equal("decoy")
+        expect(cf_default.0.contains(tf(cf_truth, "rooms_payload"))).to_equal(false)
 
     it "names the configured target in the error envelope when the passphrase is wrong":
         # @req REQ-MSGR-NATIVE-CFG-002
