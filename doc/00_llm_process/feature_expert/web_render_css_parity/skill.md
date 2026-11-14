@@ -1225,3 +1225,11 @@ Traps:
 
 Specs: `test/01_unit/browser_engine/font_family_list_resolution_spec.spl`,
 `font_family_generic_classification_spec.spl`.
+## Looking at a comparison yourself (2026-11-14)
+
+`SIMPLE_COMPARE_VIEW=stay|auto` (default off) makes Chrome-vs-Simple and
+Skia-vs-Simple-2D comparison sites write both buffers to
+`build/compare_view/<name>/` and open a viewer sized to the host screen
+(side by side -> tabs -> fit/scrollbars). New comparison code should call
+`compare_view_inspect` from `std.nogc_sync_mut.ui.compare_view_host`.
+Design and migrated sites: `doc/05_design/ui/web_diff/compare_view_inspection.md`.

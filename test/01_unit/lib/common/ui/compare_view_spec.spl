@@ -1,0 +1,156 @@
+# @cover src/lib/common/ui/compare_view.spl 80%
+# @tag: rendering, pixel-compare, inspection
+"""
+## Purpose and audience
+Proves the pure planning half of the compare-view inspection infra used by the
+Skia-vs-Simple-2D and Chrome-vs-Simple-web comparison tests: the open-mode
+option, the host-screen-fitting window plan (side by side -> tabs -> fit or
+scrollbars), the script-free inspection page, and the viewer launch arguments.
+Written for rendering-parity test owners.
+## Operator workflow
+`SIMPLE_COMPARE_VIEW=stay|auto|off bin/simple test <compare spec>`; default off.
+"""
+use std.spec.*
+use common.ui.compare_view.*
+
+describe "compare_view open mode":
+
+    it "is off by default and for unknown values":
+        expect(compare_view_mode_parse("")).to_equal("off")
+        expect(compare_view_mode_parse("off")).to_equal("off")
+        expect(compare_view_mode_parse("0")).to_equal("off")
+        expect(compare_view_mode_parse("banana")).to_equal("off")
+
+    it "parses stay and auto case-insensitively":
+        expect(compare_view_mode_parse("stay")).to_equal("stay")
+        expect(compare_view_mode_parse("1")).to_equal("stay")
+        expect(compare_view_mode_parse(" Auto ")).to_equal("auto")
+
+describe "compare_view screen size":
+
+    it "parses WxH":
+        val s = compare_view_screen_parse("1920x1040")
+        expect(s.w).to_equal(1920)
+        expect(s.h).to_equal(1040)
+
+    it "reports unknown as 0x0":
+        val s = compare_view_screen_parse("wide")
+        expect(s.w).to_equal(0)
+        expect(s.h).to_equal(0)
+
+describe "compare_view window plan":
+
+    it "shows both images side by side when they fit the host screen":
+        val p = compare_view_plan(1920, 1040, 320, 240, 320, 240)
+        expect(p.side_by_side).to_equal(true)
+        expect(p.needs_fit).to_equal(false)
+        expect(p.maximized).to_equal(false)
+        expect(p.window_w).to_equal(320 + 320 + COMPARE_VIEW_GAP + COMPARE_VIEW_DECOR_W)
+        expect(p.window_h).to_equal(240 + COMPARE_VIEW_BAR_H + COMPARE_VIEW_DECOR_H)
+
+    it "switches to tabs when the pair is wider than the screen":
+        val p = compare_view_plan(1920, 1040, 1200, 800, 1200, 800)
+        expect(p.side_by_side).to_equal(false)
+        expect(p.needs_fit).to_equal(false)
+        expect(p.window_w).to_equal(1200 + COMPARE_VIEW_DECOR_W)
+        expect(p.window_h).to_equal(800 + COMPARE_VIEW_BAR_H + COMPARE_VIEW_DECOR_H)
+
+    it "switches to tabs when the pair is taller than the screen":
+        val p = compare_view_plan(1920, 600, 300, 580, 300, 580)
+        expect(p.side_by_side).to_equal(false)
+        expect(p.needs_fit).to_equal(true)
+
+    it "clamps the window to the screen and asks for fit or scroll when one image is too big":
+        val p = compare_view_plan(1920, 1040, 4000, 3000, 3840, 2160)
+        expect(p.side_by_side).to_equal(false)
+        expect(p.needs_fit).to_equal(true)
+        expect(p.window_w).to_equal(1920)
+        expect(p.window_h).to_equal(1040)
+
+    it "sizes tabs for the larger of two different images":
+        val p = compare_view_plan(1000, 1040, 900, 300, 400, 700)
+        expect(p.side_by_side).to_equal(false)
+        expect(p.window_w).to_equal(900 + COMPARE_VIEW_DECOR_W)
+        expect(p.window_h).to_equal(700 + COMPARE_VIEW_BAR_H + COMPARE_VIEW_DECOR_H)
+
+    it "never plans a window larger than the host screen":
+        val p1 = compare_view_plan(800, 600, 790, 590, 10, 10)
+        expect(p1.window_w <= 800).to_equal(true)
+        expect(p1.window_h <= 600).to_equal(true)
+        val p2 = compare_view_plan(640, 480, 100, 5000, 100, 100)
+        expect(p2.window_w <= 640).to_equal(true)
+        expect(p2.window_h <= 480).to_equal(true)
+
+    it "keeps tiny images in a usable minimum window":
+        val p = compare_view_plan(1920, 1040, 4, 4, 4, 4)
+        expect(p.window_w).to_equal(COMPARE_VIEW_MIN_W)
+        expect(p.window_h).to_equal(COMPARE_VIEW_MIN_H)
+
+    it "maximizes when the host screen size is unknown":
+        val p = compare_view_plan(0, 0, 320, 240, 320, 240)
+        expect(p.maximized).to_equal(true)
+
+describe "compare_view inspection page":
+
+    it "embeds both images with their labels and sizes":
+        val html = compare_view_html("case02", "simple", "a.png", 320, 240, "skia", "b.png", 300, 200)
+        expect(html).to_contain("src=a.png")
+        expect(html).to_contain("src=b.png")
+        expect(html).to_contain("A: simple 320x240")
+        expect(html).to_contain("B: skia 300x200")
+
+    it "lays out side by side only when the window can hold both, else tabs":
+        val html = compare_view_html("t", "simple", "a.png", 320, 240, "chrome", "b.png", 300, 200)
+        expect(html).to_contain("@media (min-width:628px) and (min-height:276px)")
+        expect(html).to_contain("type=radio name=t id=ta checked")
+        expect(html).to_contain("type=radio name=t id=tb")
+
+    it "offers fit-to-window and falls back to scrollbars":
+        val html = compare_view_html("t", "a", "a.png", 9000, 9000, "b", "b.png", 9000, 9000)
+        expect(html).to_contain("type=checkbox id=fit checked")
+        expect(html).to_contain("object-fit:contain")
+        expect(html).to_contain("overflow:auto")
+
+    it "contains no script and escapes labels":
+        val html = compare_view_html("<t>", "a<b", "a.png", 1, 1, "c&d", "b.png", 1, 1)
+        expect(html.contains("<script")).to_equal(false)
+        expect(html).to_contain("a&lt;b")
+        expect(html).to_contain("c&amp;d")
+        expect(html).to_contain("<title>&lt;t&gt;</title>")
+
+describe "compare_view viewer launch":
+
+    it "opens an app window sized by the plan":
+        val p = compare_view_plan(1920, 1040, 320, 240, 320, 240)
+        val args = compare_view_browser_args("file:///x/index.html", p, "/x/.profile")
+        expect(args).to_contain("--app=file:///x/index.html")
+        expect(args).to_contain("--window-size=" + p.window_w.to_text() + "," + p.window_h.to_text())
+        expect(args).to_contain("--user-data-dir=/x/.profile")
+
+    it "starts maximized when the screen is unknown":
+        val p = compare_view_plan(0, 0, 320, 240, 320, 240)
+        val args = compare_view_browser_args("file:///x/index.html", p, "/x/.profile")
+        expect(args).to_contain("--start-maximized")
+
+    it "builds file URLs from Windows and POSIX paths":
+        expect(compare_view_file_url("C:\\dev\\out\\index.html")).to_equal("file:///C:/dev/out/index.html")
+        expect(compare_view_file_url("/tmp/out/index.html")).to_equal("file:///tmp/out/index.html")
+
+    it "makes a filesystem-safe artifact name":
+        expect(compare_view_slug("Chrome vs Simple: text/1")).to_equal("chrome_vs_simple__text_1")
+
+describe "compare_view pixel adapters":
+
+    it "converts RGBA8 bytes to ARGB words":
+        val bytes: [u8] = [0x11u8, 0x22u8, 0x33u8, 0xFFu8, 0x01u8, 0x02u8, 0x03u8, 0x80u8]
+        val argb = compare_view_argb_from_rgba8(bytes)
+        expect(argb.len()).to_equal(2)
+        expect(argb[0]).to_equal(0xFF112233u32)
+        expect(argb[1]).to_equal(0x80010203u32)
+
+describe "compare_view page stylesheet":
+
+    it "closes the side-by-side media block":
+        val html = compare_view_html("t", "a", "a.png", 10, 10, "b", "b.png", 20, 10)
+        expect(html).to_contain(r"label[for=tb]{width:20px}}</style>")
+        expect(html).to_contain(r"nav{height:36px}@media")

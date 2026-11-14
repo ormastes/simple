@@ -1,0 +1,147 @@
+# Compare-view inspection — effectful half.
+#
+# A comparison test calls compare_view_inspect(...) with its two ARGB buffers.
+# By default nothing happens. With SIMPLE_COMPARE_VIEW=stay|auto the two
+# buffers are written as PNGs next to a script-free inspection page under
+# build/compare_view/<name>/, and a viewer window sized to the host screen is
+# opened on it (stay: left open; auto: closed again after a delay).
+#
+# Options (environment):
+#   SIMPLE_COMPARE_VIEW          off (default) | auto | stay
+#   SIMPLE_COMPARE_VIEW_MS       auto-close delay, default 3000
+#   SIMPLE_COMPARE_VIEW_SCREEN   WxH override for the host screen work area
+#   SIMPLE_COMPARE_VIEW_BROWSER  viewer executable (Chromium family)
+#
+# The viewer is a Chromium-family app window: the interpreter lane has no
+# pixel-present entry point (rt_sdl2_present_rgba is native-link only and the
+# winit lane is feature-gated out of the deployed binary), and the page gets
+# tabs, fit-to-window and scrollbars from the platform for free.
+#
+# Design: doc/05_design/ui/web_diff/compare_view_inspection.md
+
+use common.ui.compare_view.{CompareViewSize, compare_view_mode_parse, compare_view_screen_parse, compare_view_plan, compare_view_html, compare_view_browser_args, compare_view_file_url, compare_view_slug, compare_view_argb_from_rgba8}
+use common.image.png_encode.{encode_argb_to_png}
+use std.io_runtime.{env_get, cwd, host_os, file_exists, file_write, file_write_bytes, dir_create_all, process_run, process_spawn_async, process_kill}
+use std.nogc_sync_mut.io.time_ops.{sleep_ms}
+
+val _CV_ROOT: text = "build/compare_view"
+
+fn _cv_first_existing(candidates: [text]) -> text:
+    for c in candidates:
+        if file_exists(c):
+            return c
+    ""
+
+# Explicit path wins (and must exist); otherwise the usual install locations.
+pub fn compare_view_find_browser(explicit: text) -> text:
+    if explicit != "":
+        return _cv_first_existing([explicit])
+    val os = host_os()
+    if os == "windows":
+        return _cv_first_existing([
+            "C:/Program Files/Google/Chrome/Application/chrome.exe",
+            "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
+            "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+            "C:/Program Files/Microsoft/Edge/Application/msedge.exe"])
+    if os == "macos":
+        return _cv_first_existing([
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"])
+    _cv_first_existing(["/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser", "/snap/bin/chromium"])
+
+# Host screen work area; 0x0 when it cannot be determined (viewer maximizes).
+pub fn compare_view_host_screen() -> CompareViewSize:
+    val forced = env_get("SIMPLE_COMPARE_VIEW_SCREEN")
+    if forced != "":
+        return compare_view_screen_parse(forced)
+    val os = host_os()
+    if os == "windows":
+        val r = process_run("powershell", ["-NoProfile", "-Command",
+            "Add-Type -AssemblyName System.Windows.Forms; $a=[System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea; Write-Output ('' + $a.Width + 'x' + $a.Height)"])
+        return compare_view_screen_parse(r.0)
+    if os == "linux" or os == "freebsd":
+        # "Screen 0: minimum 8 x 8, current 1920 x 1080, maximum ..."
+        val r = process_run("xrandr", ["--current"])
+        val at = r.0.index_of("current ")
+        if at >= 0:
+            val rest = r.0.substring(at + 8)
+            val stop = rest.index_of(",")
+            if stop > 0:
+                return compare_view_screen_parse(rest.substring(0, stop).replace(" ", ""))
+    CompareViewSize(w: 0, h: 0)
+
+# Explicit-option core, so specs can exercise it without the environment.
+# browser == "" means "no viewer": the artifacts are still written.
+# Returns one of: off | bad-buffer:<why> | write-failed:<path> |
+# no-viewer:<page> | spawn-failed:<page> | open:<page> | closed:<page>
+pub fn compare_view_inspect_with(mode: text, screen_w: i32, screen_h: i32, browser: text, auto_ms: i64,
+        name: text, label_a: text, a: [u32], aw: i32, ah: i32, label_b: text, b: [u32], bw: i32, bh: i32) -> text:
+    if mode != "auto" and mode != "stay":
+        return "off"
+    if aw <= 0 or ah <= 0 or a.len() != (aw as i64) * (ah as i64):
+        return "bad-buffer:" + label_a
+    if bw <= 0 or bh <= 0 or b.len() != (bw as i64) * (bh as i64):
+        return "bad-buffer:" + label_b
+    val dir = _CV_ROOT + "/" + compare_view_slug(name)
+    val page = dir + "/index.html"
+    dir_create_all(dir)
+    if not file_write_bytes(dir + "/a.png", encode_argb_to_png(a, aw, ah)):
+        return "write-failed:" + dir + "/a.png"
+    if not file_write_bytes(dir + "/b.png", encode_argb_to_png(b, bw, bh)):
+        return "write-failed:" + dir + "/b.png"
+    if not file_write(page, compare_view_html(name, label_a, "a.png", aw, ah, label_b, "b.png", bw, bh)):
+        return "write-failed:" + page
+    if browser == "":
+        print("compare-view: no viewer found; open " + page)
+        return "no-viewer:" + page
+    val plan = compare_view_plan(screen_w, screen_h, aw, ah, bw, bh)
+    val root = cwd().replace("\\", "/")
+    val args = compare_view_browser_args(compare_view_file_url(root + "/" + page), plan, root + "/" + _CV_ROOT + "/.profile")
+    val layout = if plan.side_by_side: "side-by-side" elif plan.needs_fit: "tabs+fit" else: "tabs"
+    print("compare-view: " + name + " (" + layout + ") " + page)
+    if mode == "auto":
+        val pid = process_spawn_async(browser, args)
+        if pid <= 0:
+            print("compare-view: could not start " + browser + "; open " + page)
+            return "spawn-failed:" + page
+        sleep_ms(auto_ms)
+        process_kill(pid)
+        return "closed:" + page
+    if not _cv_launch_detached(browser, args):
+        print("compare-view: could not start " + browser + "; open " + page)
+        return "spawn-failed:" + page
+    "open:" + page
+
+# stay mode: the viewer must outlive the test AND must not inherit its
+# stdout/stderr, or a runner capturing the test's output waits on the viewer
+# (measured: a piped run hung until the window was closed). On Windows a
+# direct spawn and `cmd /c start` both pass the pipe on; Start-Process goes
+# through ShellExecute, which inherits no handles.
+fn _cv_launch_detached(browser: text, args: [text]) -> bool:
+    if host_os() == "windows":
+        var list = ""
+        for a in args:
+            list = list + (if list == "": "" else: " ") + "\"" + a.replace("'", "''") + "\""
+        val ps = "Start-Process -FilePath '" + browser.replace("'", "''") + "' -ArgumentList '" + list + "'"
+        return process_spawn_async("powershell", ["-NoProfile", "-Command", ps]) > 0
+    val r = process_run("sh", ["-c", "nohup \"$0\" \"$@\" >/dev/null 2>&1 &", browser] + args)
+    r.2 == 0
+
+# What comparison tests call. Costs one env read when the option is off.
+pub fn compare_view_inspect(name: text, label_a: text, a: [u32], aw: i32, ah: i32, label_b: text, b: [u32], bw: i32, bh: i32) -> text:
+    val mode = compare_view_mode_parse(env_get("SIMPLE_COMPARE_VIEW"))
+    if mode == "off":
+        return "off"
+    val screen = compare_view_host_screen()
+    val ms_text = env_get("SIMPLE_COMPARE_VIEW_MS")
+    val ms = if ms_text == "": 3000 else: ms_text.to_i64()
+    compare_view_inspect_with(mode, screen.w, screen.h, compare_view_find_browser(env_get("SIMPLE_COMPARE_VIEW_BROWSER")), ms,
+        name, label_a, a, aw, ah, label_b, b, bw, bh)
+
+# RGBA8-byte variant (Skia CPU bitmaps, physical capture artifacts). The
+# conversion is skipped unless the option is on.
+pub fn compare_view_inspect_rgba8(name: text, label_a: text, a: [u8], aw: i32, ah: i32, label_b: text, b: [u8], bw: i32, bh: i32) -> text:
+    if compare_view_mode_parse(env_get("SIMPLE_COMPARE_VIEW")) == "off":
+        return "off"
+    compare_view_inspect(name, label_a, compare_view_argb_from_rgba8(a), aw, ah, label_b, compare_view_argb_from_rgba8(b), bw, bh)

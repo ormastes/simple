@@ -1,0 +1,144 @@
+# Compare-view inspection — pure planning half.
+#
+# Comparison tests (Simple 2D vs Skia, Simple web vs Chrome) hold two pixel
+# buffers. This module decides how to show them to a person on the host
+# screen and builds the script-free inspection page; the effectful half
+# (writing artifacts, opening the viewer window) is
+# std.nogc_sync_mut.ui.compare_view_host.
+#
+# Layout rule: both images side by side when they fit the host screen; else
+# one image per tab; else (one image alone does not fit) fit-to-window, with
+# scrollbars when fit is switched off. The planned window never exceeds the
+# host screen. The page re-applies the same rule with CSS media queries, so it
+# stays correct when the person resizes the window.
+#
+# Design: doc/05_design/ui/web_diff/compare_view_inspection.md
+
+val COMPARE_VIEW_GAP: i32 = 8          # px between the two images
+val COMPARE_VIEW_BAR_H: i32 = 36       # px tab/label bar
+val COMPARE_VIEW_DECOR_W: i32 = 20     # window border allowance
+val COMPARE_VIEW_DECOR_H: i32 = 48     # title bar + border allowance
+val COMPARE_VIEW_MIN_W: i32 = 480
+val COMPARE_VIEW_MIN_H: i32 = 240
+
+struct CompareViewSize:
+    w: i32
+    h: i32
+
+struct CompareViewPlan:
+    side_by_side: bool      # both images visible at once
+    needs_fit: bool         # an image exceeds the window: fit or scroll
+    maximized: bool         # host screen unknown: let the viewer maximize
+    window_w: i32
+    window_h: i32
+
+fn _cv_max(a: i32, b: i32) -> i32:
+    if a > b: a else: b
+
+fn _cv_min(a: i32, b: i32) -> i32:
+    if a < b: a else: b
+
+# "off" (default) | "auto" (open, then close by itself) | "stay" (open, leave open)
+pub fn compare_view_mode_parse(value: text) -> text:
+    val v = value.trim().lower()
+    if v == "auto":
+        return "auto"
+    if v == "stay" or v == "1" or v == "on":
+        return "stay"
+    "off"
+
+# "1920x1040" -> size; anything else -> 0x0 (unknown)
+pub fn compare_view_screen_parse(value: text) -> CompareViewSize:
+    val parts = value.trim().lower().split("x")
+    if parts.len() != 2:
+        return CompareViewSize(w: 0, h: 0)
+    val w = parts[0].trim().to_i64()
+    val h = parts[1].trim().to_i64()
+    if w <= 0 or h <= 0:
+        return CompareViewSize(w: 0, h: 0)
+    CompareViewSize(w: w.to_i32(), h: h.to_i32())
+
+pub fn compare_view_plan(screen_w: i32, screen_h: i32, aw: i32, ah: i32, bw: i32, bh: i32) -> CompareViewPlan:
+    val max_h = _cv_max(ah, bh)
+    val side_w = aw + bw + COMPARE_VIEW_GAP + COMPARE_VIEW_DECOR_W
+    val tab_w = _cv_max(aw, bw) + COMPARE_VIEW_DECOR_W
+    val need_h = max_h + COMPARE_VIEW_BAR_H + COMPARE_VIEW_DECOR_H
+    if screen_w <= 0 or screen_h <= 0:
+        return CompareViewPlan(side_by_side: false, needs_fit: false, maximized: true,
+            window_w: _cv_max(side_w, COMPARE_VIEW_MIN_W), window_h: _cv_max(need_h, COMPARE_VIEW_MIN_H))
+    val side = side_w <= screen_w and need_h <= screen_h
+    val want_w = if side: side_w else: tab_w
+    val fit = (not side) and (tab_w > screen_w or need_h > screen_h)
+    CompareViewPlan(
+        side_by_side: side,
+        needs_fit: fit,
+        maximized: false,
+        window_w: _cv_min(_cv_max(want_w, COMPARE_VIEW_MIN_W), screen_w),
+        window_h: _cv_min(_cv_max(need_h, COMPARE_VIEW_MIN_H), screen_h)
+    )
+
+fn _cv_escape(s: text) -> text:
+    s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+val _CV_CSS: text = r"html,body{margin:0;height:100%;background:#1e1e1e;color:#ddd;font:13px sans-serif}body{display:flex;flex-direction:column}input{position:absolute;opacity:0;pointer-events:none}nav{display:flex;gap:6px;align-items:center;padding:0 8px;box-sizing:border-box;flex:none;white-space:nowrap;overflow:hidden}nav label{padding:4px 10px;border-radius:4px;background:#333;cursor:pointer;box-sizing:border-box;overflow:hidden}#ta:checked~nav label[for=ta],#tb:checked~nav label[for=tb],#fit:checked~nav label[for=fit]{background:#2563eb;color:#fff}main{flex:1;min-height:0;display:flex}.pane{display:none;flex:1;min-width:0;overflow:auto}#ta:checked~main .a,#tb:checked~main .b{display:block}img{display:block;image-rendering:pixelated}#fit:checked~main .pane{overflow:hidden}#fit:checked~main img{max-width:100%;max-height:100%;object-fit:contain}"
+
+val _CV_SIDE_CSS: text = r"{nav{padding:0}.pane{display:block!important;flex:none;overflow:visible!important}nav label[for=ta],nav label[for=tb]{background:#333!important;color:#ddd!important;cursor:default;border-radius:0}nav label[for=fit]{display:none}"
+
+# Script-free inspection page. Tabs are radio inputs, fit-to-window is a
+# checkbox, scrollbars are plain overflow:auto, and the side-by-side layout is
+# a media query whose thresholds are the two image sizes.
+pub fn compare_view_html(title: text, label_a: text, src_a: text, aw: i32, ah: i32, label_b: text, src_b: text, bw: i32, bh: i32) -> text:
+    val bar = COMPARE_VIEW_BAR_H.to_text()
+    val gap = COMPARE_VIEW_GAP.to_text()
+    val side_w = (aw + bw + COMPARE_VIEW_GAP).to_text()
+    val side_h = (_cv_max(ah, bh) + COMPARE_VIEW_BAR_H).to_text()
+    val cap_a = "A: " + _cv_escape(label_a) + " " + aw.to_text() + "x" + ah.to_text()
+    val cap_b = "B: " + _cv_escape(label_b) + " " + bw.to_text() + "x" + bh.to_text()
+    var css = _CV_CSS + r"nav{height:" + bar + r"px}"
+    css = css + "@media (min-width:" + side_w + "px) and (min-height:" + side_h + "px)" + _CV_SIDE_CSS
+    css = css + r"nav,main{gap:" + gap + r"px}label[for=ta]{width:" + aw.to_text() + r"px}label[for=tb]{width:" + bw.to_text() + r"px}}"
+    var html = "<!doctype html><meta charset=utf-8><title>" + _cv_escape(title) + "</title><style>" + css + "</style>"
+    html = html + "<input type=radio name=t id=ta checked><input type=radio name=t id=tb><input type=checkbox id=fit checked>"
+    html = html + "<nav><label for=ta>" + cap_a + "</label><label for=tb>" + cap_b + "</label><label for=fit>fit to window</label></nav>"
+    html = html + "<main><div class='pane a'><img src=" + src_a + " alt=A></div><div class='pane b'><img src=" + src_b + " alt=B></div></main>"
+    html
+
+# Chromium-family app-window arguments. A private profile directory makes the
+# spawned process own the window, so killing that pid closes it (auto mode).
+pub fn compare_view_browser_args(url: text, plan: CompareViewPlan, profile_dir: text) -> [text]:
+    var args: [text] = ["--app=" + url, "--user-data-dir=" + profile_dir, "--no-first-run", "--no-default-browser-check"]
+    if plan.maximized:
+        args.push("--start-maximized")
+    else:
+        args.push("--window-size=" + plan.window_w.to_text() + "," + plan.window_h.to_text())
+        args.push("--window-position=0,0")
+    args
+
+pub fn compare_view_file_url(path: text) -> text:
+    val p = path.replace("\\", "/")
+    if p.starts_with("/"):
+        return "file://" + p
+    "file:///" + p
+
+pub fn compare_view_slug(name: text) -> text:
+    var out = ""
+    for c in name.lower().chars():
+        val ok = (c >= 'a' and c <= 'z') or (c >= '0' and c <= '9') or c == '-' or c == '.'
+        out = out + (if ok: c.to_text() else: "_")
+    out
+
+# Skia CPU bitmaps are RGBA8 bytes; the viewer and PNG encoder take ARGB words.
+pub fn compare_view_argb_from_rgba8(bytes: [u8]) -> [u32]:
+    var out: [u32] = []
+    var i = 0
+    while i + 3 < bytes.len():
+        val r = bytes[i] as u32
+        val g = bytes[i + 1] as u32
+        val b = bytes[i + 2] as u32
+        val a = bytes[i + 3] as u32
+        out.push((a << 24) | (r << 16) | (g << 8) | b)
+        i = i + 4
+    out
+
+export CompareViewSize, CompareViewPlan
+export COMPARE_VIEW_GAP, COMPARE_VIEW_BAR_H, COMPARE_VIEW_DECOR_W, COMPARE_VIEW_DECOR_H, COMPARE_VIEW_MIN_W, COMPARE_VIEW_MIN_H

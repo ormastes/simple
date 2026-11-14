@@ -1,0 +1,56 @@
+# @cover src/lib/nogc_sync_mut/ui/compare_view_host.spl 60%
+# @tag: rendering, pixel-compare, inspection
+"""
+## Purpose and audience
+Proves the effectful half of compare-view inspection without opening any
+window: off (the default) touches nothing, and an enabled run writes the two
+images plus the inspection page and reports where they are when no viewer is
+available. Written for rendering-parity test owners.
+## Operator workflow
+`SIMPLE_COMPARE_VIEW=stay|auto bin/simple test <compare spec>` opens the
+viewer; this spec never does.
+"""
+use std.spec.*
+use std.io_runtime.{file_exists, file_read, file_size, dir_remove_all}
+use std.nogc_sync_mut.ui.compare_view_host.{compare_view_inspect_with, compare_view_inspect, compare_view_find_browser}
+
+fn _solid(n: i64, argb: u32) -> [u32]:
+    var px: [u32] = []
+    var i = 0
+    while i < n:
+        px.push(argb)
+        i = i + 1
+    px
+
+describe "compare_view host":
+
+    it "does nothing when off":
+        dir_remove_all("build/compare_view/host_spec_off")
+        val status = compare_view_inspect_with("off", 1920, 1040, "", 0,
+            "host spec off", "simple", _solid(4, 0xFFFF0000u32), 2, 2, "ref", _solid(4, 0xFF00FF00u32), 2, 2)
+        expect(status).to_equal("off")
+        expect(file_exists("build/compare_view/host_spec_off/index.html")).to_equal(false)
+
+    it "is off through the environment default":
+        val status = compare_view_inspect("host spec env", "simple", _solid(4, 0xFFFF0000u32), 2, 2, "ref", _solid(4, 0xFF00FF00u32), 2, 2)
+        expect(status).to_equal("off")
+
+    it "writes both images and the page, and reports them when no viewer exists":
+        dir_remove_all("build/compare_view/host_spec_on")
+        val status = compare_view_inspect_with("stay", 1920, 1040, "", 0,
+            "host spec on", "simple", _solid(12, 0xFFFF0000u32), 4, 3, "chrome", _solid(12, 0xFF00FF00u32), 4, 3)
+        expect(status).to_start_with("no-viewer:")
+        expect(status).to_end_with("build/compare_view/host_spec_on/index.html")
+        expect(file_size("build/compare_view/host_spec_on/a.png") > 0).to_equal(true)
+        expect(file_size("build/compare_view/host_spec_on/b.png") > 0).to_equal(true)
+        val html = file_read("build/compare_view/host_spec_on/index.html")
+        expect(html).to_contain("A: simple 4x3")
+        expect(html).to_contain("B: chrome 4x3")
+
+    it "rejects a buffer whose length does not match its size":
+        val status = compare_view_inspect_with("stay", 1920, 1040, "", 0,
+            "host spec bad", "simple", _solid(3, 0xFFFF0000u32), 2, 2, "ref", _solid(4, 0xFF00FF00u32), 2, 2)
+        expect(status).to_start_with("bad-buffer:")
+
+    it "treats a missing viewer path as no viewer":
+        expect(compare_view_find_browser("definitely/not/a/browser.exe")).to_equal("")
