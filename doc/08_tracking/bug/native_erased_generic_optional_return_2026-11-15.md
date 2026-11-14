@@ -3,7 +3,7 @@
 **Status:** open. Pre-existing and involves no traits. The `Box<T>` and
 `G<T>` repros below were run on an older Stage 2 (run 33,
 `/home/yoon/dev/simple-boot-fable-20261112/build/bootstrap/pinned-src/pinned-8220cfef5b8a/build/bootstrap-fable-33/stage3/aarch64-unknown-linux-gnu/stage2-admitted/simple`)
-and on the Stage 2 built from `81625788a20`. The true pre-fix base is run 34
+and on the Stage 2 built from `81625788a20` (pre-rebase sha of `1570c5778b8`). The true pre-fix base is run 34
 (`.../pinned-43d59a399477/build/bootstrap-fable-34/stage3/aarch64-unknown-linux-gnu/stage2-admitted/simple`).
 The reviewer reproduced the trait-free SparseHash ÷8 below on it.
 
@@ -67,7 +67,7 @@ match g.set(5):
 
 Pre-fix Stage 2, cranelift: `set 1`.
 
-## Observed on the real module (Stage 2 `81625788a20`, cranelift)
+## Observed on the real module (Stage 2 `81625788a20` = rebased `1570c5778b8`, cranelift)
 
 The real module returns WRONG i64 values natively; this is not limited to the
 `set` bool. Results by shape (reviewer probes in

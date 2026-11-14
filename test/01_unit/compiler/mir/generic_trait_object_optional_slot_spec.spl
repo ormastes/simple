@@ -81,6 +81,11 @@ fn cell_src(ty: text) -> text:
 fn use_src(ty: text) -> text:
     "fn probe() -> bool:\n    var s: Store<{ty}> = store_with(\"x\", XCell(cell: None))\n    s.has(1)\n"
 
+fn reader_src(ty: text) -> text:
+    "trait Reader<T>:\n    fn read(node: i64) -> T?\n\n" +
+    "class RCell:\n    cell: {ty}?\n\nimpl Reader<{ty}> for RCell:\n    fn read(node: i64) -> {ty}?:\n        self.cell\n\n" +
+    "fn probe() -> bool:\n    val r: Reader<{ty}> = RCell(cell: None)\n    if val _v = r.read(1):\n        return true\n    false\n"
+
 fn joined(errors: [text]) -> text:
     var s = ""
     for e in errors:
@@ -140,22 +145,31 @@ describe "generic trait object in an optional slot":
 
     it "refuses Owner<bool> naming trait, method and type argument":
         val errors = joined(lower_errors(TRAIT + STORE + cell_src("bool") + use_src("bool"), true))
-        expect(errors).to_contain("incompatible native trait object signature")
-        expect(errors).to_contain("Owner for")
-        expect(errors).to_contain("method owner_")
-        expect(errors).to_contain("type argument T=optional[bool] is not supported through a generic trait slot natively")
+        expect(errors).to_contain("incompatible native trait object signature: generic_trait_probe::Owner for generic_trait_probe::XCell: method owner_read: return type argument T=optional[bool] is not supported through a generic trait slot natively (only i64, text, f64)")
 
     it "refuses Owner<[i64]>":
         val errors = joined(lower_errors(TRAIT + STORE + cell_src("[i64]") + use_src("[i64]"), true))
-        expect(errors).to_contain("type argument T=optional[array[")
+        expect(errors).to_contain("method owner_read: return type argument T=optional[array[")
 
-    it "refuses Owner<Point> with a non-empty actual type":
+    it "refuses Owner<Point> with a named, non-empty actual type":
+        # Bootstrap HIR keeps no recoverable declared `Point?` result for the
+        # implementation, so admission fails closed on the erased word.
         val point = "struct Point:\n    x: i64\n    y: f64\n\n"
         val errors = joined(lower_errors(TRAIT + STORE + point + cell_src("Point") + use_src("Point"), true))
-        expect(errors).to_contain("incompatible native trait object signature")
-        expect(errors).to_contain("XCell")
-        expect(errors.contains("actual=\n")).to_equal(false)
-        expect(errors.contains("actual=optional[]")).to_equal(false)
+        expect(errors).to_contain("incompatible native trait object signature: generic_trait_probe::Owner for generic_trait_probe::XCell: method owner_read: return type expected=T? actual=int:64:true")
+
+    # A read-only trait has no `T?` parameter: the result slot alone must
+    # bind T, though bootstrap HIR erases both sides' `-> X?` to i64.
+    it "refuses a read-only Reader<bool> in bootstrap mode":
+        expect(joined(lower_errors(reader_src("bool"), true))).to_contain("method read: return type argument T=optional[bool] is not supported")
+
+    it "admits a read-only Reader<i64> in bootstrap mode":
+        expect(joined(lower_errors(reader_src("i64"), true))).to_equal("")
+
+    it "rejects an inconsistent T binding in bootstrap mode":
+        val bad = "class XCell:\n    key: i64\n\nimpl Owner<i64> for XCell:\n    fn owner_read(node: i64) -> i64?:\n        None\n    me owner_write(node: i64, value: text?):\n        self.key = node\n\n"
+        val src = TRAIT + STORE + bad + "fn probe() -> bool:\n    var s: Store<i64> = store_with(\"x\", XCell(key: 1))\n    s.has(1)\n"
+        expect(joined(lower_errors(src, true))).to_contain("(bound T) actual=optional[text]")
 
     it "marks a bootstrap-erased `T?` dispatch result as an Option (if val tests rt_is_some)":
         # Bootstrap HIR erases the slot's declared `-> T?` to i64; the call
