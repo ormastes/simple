@@ -1,0 +1,149 @@
+# Caret observer -- stall classifier (design section 7.3), pure.
+#
+# classify(obs, policy) maps independent observed facts to ONE classification.
+# It never recommends kill/interrupt; the only output is a label, a
+# confidence and a reason naming the deciding evidence.
+#
+# Fixed precedence (first match wins):
+#   1. transport disconnected                       -> StateUnknown
+#   2. owner-detected exit/crash, confirmed timeout -> Failure
+#   3. process known dead, no owner-detected exit   -> StateUnknown (never Failure)
+#   4. structured approval / question               -> NeedsUser (StructuredOwner)
+#   5. known rate-limit reset                       -> QuotaWait
+#   6. waiting on running children                  -> WaitingChildren
+#   7. fresh job heartbeat, output silent >= quiet  -> WorkingQuiet
+#   8. deadline exceeded, or expected heartbeat
+#      missing >= stall threshold                   -> SuspectedStall
+#   9. alive, output silent >= quiet threshold      -> QuietObserve
+#  10. alive                                        -> Working
+# Anything else (liveness not known) -> Unknown / EvidenceConfidence.Unknown.
+#
+# A Fact that is Unknown is never read as No: it can only fail to trigger a
+# row. Screen-text prompts (screen_prompt_text) are untrusted heuristic
+# evidence: they never produce NeedsUser, only a note in the reason.
+
+use app.llm_caret.observer.state_axes.*
+
+enum Fact:
+    Unknown
+    No
+    Yes
+
+enum ClassKind:
+    StateUnknown
+    Failure
+    NeedsUser
+    QuotaWait
+    WaitingChildren
+    WorkingQuiet
+    SuspectedStall
+    QuietObserve
+    Working
+    Unknown
+
+# An age in integer milliseconds; ms is meaningful only when known.
+struct Age:
+    known: bool
+    ms: i64
+
+fn age_known(ms: i64) -> Age:
+    Age(known: true, ms: ms)
+
+fn age_unknown() -> Age:
+    Age(known: false, ms: 0)
+
+struct ObservationFacts:
+    transport_disconnected: Fact
+    process_alive: Fact
+    child_exited_or_crashed: Fact
+    tool_timeout_confirmed: Fact
+    structured_approval: Fact
+    structured_question: Fact
+    screen_prompt_text: Fact
+    rate_limit_reset_known: Fact
+    waiting_on_children: Fact
+    heartbeat_expected: Fact
+    deadline_exceeded: Fact
+    heartbeat_age: Age
+    last_output_age: Age
+
+# Every fact unknown.
+fn observation_unknown() -> ObservationFacts:
+    ObservationFacts(
+        transport_disconnected: Fact.Unknown, process_alive: Fact.Unknown,
+        child_exited_or_crashed: Fact.Unknown, tool_timeout_confirmed: Fact.Unknown,
+        structured_approval: Fact.Unknown, structured_question: Fact.Unknown,
+        screen_prompt_text: Fact.Unknown, rate_limit_reset_known: Fact.Unknown,
+        waiting_on_children: Fact.Unknown, heartbeat_expected: Fact.Unknown,
+        deadline_exceeded: Fact.Unknown, heartbeat_age: age_unknown(),
+        last_output_age: age_unknown())
+
+struct StallPolicy:
+    quiet_ms: i64
+    stall_ms: i64
+
+fn policy_default() -> StallPolicy:
+    StallPolicy(quiet_ms: 120000, stall_ms: 300000)
+
+struct Classification:
+    kind: ClassKind
+    confidence: EvidenceConfidence
+    reason: text
+    progress: TaskProgress
+    attention: Attention
+    resource: ResourceCondition
+
+fn make(kind: ClassKind, confidence: EvidenceConfidence, reason: text, progress: TaskProgress, attention: Attention, resource: ResourceCondition) -> Classification:
+    Classification(kind: kind, confidence: confidence, reason: reason, progress: progress, attention: attention, resource: resource)
+
+fn all_unknown(o: ObservationFacts) -> bool:
+    o.transport_disconnected == Fact.Unknown and o.process_alive == Fact.Unknown and
+        o.child_exited_or_crashed == Fact.Unknown and o.tool_timeout_confirmed == Fact.Unknown and
+        o.structured_approval == Fact.Unknown and o.structured_question == Fact.Unknown and
+        o.screen_prompt_text == Fact.Unknown and o.rate_limit_reset_known == Fact.Unknown and
+        o.waiting_on_children == Fact.Unknown and o.heartbeat_expected == Fact.Unknown and
+        o.deadline_exceeded == Fact.Unknown and not o.heartbeat_age.known and
+        not o.last_output_age.known
+
+fn classify(o: ObservationFacts, p: StallPolicy) -> Classification:
+    val unk = EvidenceConfidence.Unknown
+    val none = Attention.None
+    val noprog = TaskProgress.Unknown
+    val nores = ResourceCondition.Unknown
+    if all_unknown(o):
+        return make(ClassKind.Unknown, unk, "no evidence is known", noprog, none, nores)
+    if o.transport_disconnected == Fact.Yes:
+        return make(ClassKind.StateUnknown, EvidenceConfidence.ObservedProcess, "transport disconnected; reconcile, do not relaunch", noprog, none, nores)
+    if o.child_exited_or_crashed == Fact.Yes:
+        return make(ClassKind.Failure, EvidenceConfidence.StructuredOwner, "owner detected process or child exit/crash", noprog, Attention.Error, nores)
+    if o.tool_timeout_confirmed == Fact.Yes:
+        return make(ClassKind.Failure, EvidenceConfidence.StructuredOwner, "owner confirmed tool timeout", noprog, Attention.Error, nores)
+    if o.process_alive == Fact.No:
+        return make(ClassKind.StateUnknown, EvidenceConfidence.ObservedProcess, "process not alive but no owner-detected exit", noprog, none, nores)
+    if o.structured_approval == Fact.Yes:
+        return make(ClassKind.NeedsUser, EvidenceConfidence.StructuredOwner, "structured approval request", noprog, Attention.Approval, nores)
+    if o.structured_question == Fact.Yes:
+        return make(ClassKind.NeedsUser, EvidenceConfidence.StructuredOwner, "structured question", noprog, Attention.Question, nores)
+    if o.rate_limit_reset_known == Fact.Yes:
+        return make(ClassKind.QuotaWait, EvidenceConfidence.ObservedProcess, "known rate-limit reset", TaskProgress.Quiet, none, ResourceCondition.QuotaWait)
+    if o.waiting_on_children == Fact.Yes:
+        return make(ClassKind.WaitingChildren, EvidenceConfidence.ObservedProcess, "parent waiting on running children", TaskProgress.Quiet, none, nores)
+    val out_quiet = o.last_output_age.known and o.last_output_age.ms >= p.quiet_ms
+    val hb_fresh = o.heartbeat_age.known and o.heartbeat_age.ms < p.quiet_ms
+    if hb_fresh and out_quiet:
+        return make(ClassKind.WorkingQuiet, EvidenceConfidence.ObservedProcess, "job heartbeat advancing while output is silent", TaskProgress.Quiet, none, nores)
+    if o.deadline_exceeded == Fact.Yes:
+        return make(ClassKind.SuspectedStall, EvidenceConfidence.Heuristic, "tool deadline exceeded", TaskProgress.SuspectedStall, none, nores)
+    if o.heartbeat_expected == Fact.Yes and o.heartbeat_age.known and o.heartbeat_age.ms >= p.stall_ms:
+        return make(ClassKind.SuspectedStall, EvidenceConfidence.Heuristic, "expected heartbeat missing past stall threshold", TaskProgress.SuspectedStall, none, nores)
+    if o.process_alive != Fact.Yes:
+        return make(ClassKind.Unknown, unk, "process liveness not known", noprog, none, nores)
+    var note = ""
+    if o.screen_prompt_text == Fact.Yes:
+        note = "; prompt-like screen text is unconfirmed"
+    if out_quiet:
+        return make(ClassKind.QuietObserve, EvidenceConfidence.Heuristic, "alive, no output past quiet threshold; observe only" + note, TaskProgress.Quiet, none, nores)
+    make(ClassKind.Working, EvidenceConfidence.Heuristic, "alive with recent or unknown output" + note, noprog, none, nores)
+
+export Fact, ClassKind, Age, age_known, age_unknown, ObservationFacts, observation_unknown
+export StallPolicy, policy_default, Classification, classify
