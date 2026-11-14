@@ -20,7 +20,7 @@ use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
 use compiler.backend.runtime_compiler.{_get_temp_dir}
 use compiler.backend.cranelift_gemm_fusion.{GemmAddFusion, detect_gemm_add_pair}
 use compiler.backend.cranelift_global_address.*
-use compiler.backend.cranelift_runtime_imports.{translate_runtime_import_call_f64_i64, translate_runtime_import_call_i64_f64, translate_runtime_import_call_i64_i64_f64_i64, translate_runtime_import_call_i64, translate_runtime_import_call_void, cl_declare_import_function, cl_import_ledger_begin, cl_import_ledger_end, cl_jit_refuse_call_abi, cl_jit_import_refused}
+use compiler.backend.cranelift_runtime_imports.{translate_runtime_import_call_f64_i64, translate_runtime_import_call_i64_f64, translate_runtime_import_call_i64_i64_f64_i64, translate_runtime_import_call_i64, translate_runtime_import_call_void, cl_declare_import_function, cl_import_ledger_begin, cl_import_ledger_end, cl_jit_refuse_call_abi, cl_jit_import_refused, cl_aot_call_abi_begin, cl_aot_call_abi_end, cl_aot_refuse_call_abi}
 use compiler.backend.mir_target_context_provider.{backend_requested_aot_target_triple}
 use compiler.mir.mir_instruction_graph.{mir_module_functions_sorted, mir_module_statics_sorted}
 use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name, mir_runtime_owned_local_symbol}
@@ -266,7 +266,15 @@ pub fn cranelift_compile_module_direct(options: BackendCompileOptions, module: M
         return Err(compileerror_backend_error(BackendKind.Cranelift,
             "Failed to declare module statics"))
 
+    cl_aot_call_abi_begin(cl_module)
     val failed_function = cranelift_declare_and_compile_functions(cl_module, module, global_handles, false)
+    # Reported before a function failure: the placeholder a refused call
+    # leaves behind may be what failed that function.
+    val call_abi_refusals = cl_aot_call_abi_end()
+    if call_abi_refusals.len() > 0:
+        cranelift_free_module(cl_module)
+        return Err(compileerror_backend_error(BackendKind.Cranelift,
+            call_abi_refusals.join("; ")))
     if failed_function != "":
         cranelift_free_module(cl_module)
         return Err(compileerror_backend_error(BackendKind.Cranelift,
@@ -325,13 +333,27 @@ impl Codegen for CraneliftCodegenAdapter:
             val handle = cranelift_declare_function(cl_module, emit_name, sig, cranelift_function_linkage(func))
             func_handles[func.name] = handle
 
-        # Second pass: compile each function
+        # Second pass: compile each function. A refused cross-module call is
+        # recorded, not fatal: every function is still lowered so the module
+        # reports all of its refusals, and the module fails below -- before
+        # any object is emitted -- instead of aborting the codegen worker.
+        cl_aot_call_abi_begin(cl_module)
+        var failed_function = ""
         for func in mir_module_functions_sorted(module):
-            val result = compile_function(cl_module, func, func_handles, global_handles, false)
-            if not result:
-                cranelift_free_module(cl_module)
-                return Err(compileerror_backend_error(BackendKind.Cranelift,
-                    "Failed to compile function: {func.name}"))
+            if failed_function == "":
+                if not compile_function(cl_module, func, func_handles, global_handles, false):
+                    failed_function = func.name
+        # Reported before a function failure: the placeholder a refused call
+        # leaves behind may be what failed that function.
+        val call_abi_refusals = cl_aot_call_abi_end()
+        if call_abi_refusals.len() > 0:
+            cranelift_free_module(cl_module)
+            return Err(compileerror_backend_error(BackendKind.Cranelift,
+                call_abi_refusals.join("; ")))
+        if failed_function != "":
+            cranelift_free_module(cl_module)
+            return Err(compileerror_backend_error(BackendKind.Cranelift,
+                "Failed to compile function: {failed_function}"))
 
         # Emit object file
         val output_path = "{_get_temp_dir()}/simple_cranelift_{module.name}.o"
@@ -1740,6 +1762,10 @@ fn cl_translate_call(
                         if abi_error != "":
                             if cl_jit_refuse_call_abi(cl_module, "E-BACKEND-CRANELIFT-CALL-ABI: {external_name}: {abi_error}"):
                                 return cranelift_iconst(ctx, CL_TYPE_I64, 0)
+                            # AOT: this module's compile error, reported by
+                            # the AOT entry; the build goes on to the next.
+                            if cl_aot_refuse_call_abi(cl_module, "E-BACKEND-CRANELIFT-CALL-ABI: {external_name}: call in {func.name}: {abi_error}"):
+                                return cranelift_iconst(ctx, CL_TYPE_I64, 0)
                             panic("E-BACKEND-CRANELIFT-CALL-ABI: {external_name}: call in {func.name}: {abi_error}")
                         val signature = cl_import_call_signature(type_, args.len())
                         val handle = cl_declare_import_function(cl_module, external_name, signature)
@@ -1841,6 +1867,8 @@ fn cl_translate_call(
                         val abi_error = cl_import_call_abi_error(type_, args, ret_type, has_ret_dest, func)
                         if abi_error != "":
                             if cl_jit_refuse_call_abi(cl_module, "E-BACKEND-CRANELIFT-CALL-ABI: {name}: call in {func.name}: {abi_error}"):
+                                return cranelift_iconst(ctx, CL_TYPE_I64, 0)
+                            if cl_aot_refuse_call_abi(cl_module, "E-BACKEND-CRANELIFT-CALL-ABI: {name}: call in {func.name}: {abi_error}"):
                                 return cranelift_iconst(ctx, CL_TYPE_I64, 0)
                             eprint("[cranelift] E-BACKEND-CRANELIFT-CALL-ABI: call to {name} in {func.name}: {abi_error}")
                             panic("compile error: E-BACKEND-CRANELIFT-CALL-ABI: call to {name} in {func.name}: {abi_error}")

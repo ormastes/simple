@@ -59,7 +59,11 @@ Still uncovered, failing closed (loud): params the provider table does not
 prove (trait objects, type parameters, a unit/newtype whose name- and
 symbol-keyed records disagree, dict/tuple/result shapes holding a nominal
 type), a receiver that is not a plain class/struct, and an f64 result of an
-untyped callable.
+untyped callable. A refusal no longer aborts the build: the Cranelift AOT
+entry returns it as that module's compile error and codegen goes on to the
+next module (`cranelift_runtime_imports.spl` `cl_aot_refuse_call_abi`; spec
+`test/01_unit/compiler/backend/cranelift_aot_call_abi_refusal_spec.spl`,
+native fixture `test/fixtures/native_call_abi_refusal_module_error/`).
 
 Spec: `test/01_unit/compiler/mir/imported_untyped_callable_abi_params_spec.spl`.
 Native fixture: `test/fixtures/native_method_named_f64_call_abi/`.
