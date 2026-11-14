@@ -35,10 +35,10 @@ Owner file for every layout item:
    positive factor below 1 becomes 1): `flex:1.5` beside `flex:1` in 300 px
    gives 200 / 100, Chrome 180 / 120. Pinned as such in
    `flex_grow_definite_size_chrome159_spec.spl` AC-29.
-6. **Wrapping flex lines: an item frozen at its minimum does not hand its
-   unused share to its line-mates.** The nowrap path redistributes (AC-25);
-   the wrap path clamps the item and leaves the others at their first share,
-   so a line can overflow by the clamped amount.
+6. **Without a resolved face the flex minimum is a CELL estimate.** The
+   longest word is counted in `style_char_w` cells (the unit that lane wraps
+   with), so it can differ from the resolved-face minimum by the usual cell
+   vs advance error.
 7. **Min-content of a flex item** takes each text run and child on its own:
    adjacent inline boxes (`ab<b>cd</b>`) are not joined into one word, and a
    replaced child without a `width` counts as its padding and border.
@@ -70,35 +70,38 @@ Owner file for every layout item:
 16. **An auto-width float takes the wider of two max-content measurements**
     (`flex_item_max_content_width`, `intrinsic_text_width`) because neither
     covers both block children and replaced boxes.
-17. **RTL default alignment is a heuristic.** `direction: rtl` switches an
-    undeclared `text-align` to `start`; an INHERITED authored
-    `text-align: left` is indistinguishable from the default and is switched
-    too.
+17. **`Style.text_align_set` is set by CSS `text-align` / `text-align-all`
+    only.** A presentational `align="left"` attribute is not flagged, so
+    under `direction: rtl` it is still treated as the initial value.
+18. **`float_ctx_line_boxes` builds a pair for every line down to the lowest
+    float** (bounded at 4096 lines) before the run is wrapped, whatever the
+    run's length; only the pairs the run used are STORED. A lazy per-line
+    query needs the wrap to live beside the float context.
 
 ## Sub / sup
 
-18. **`<sup>` after a WRAPPED text run.** The reopened last line lowers its
+19. **`<sup>` after a WRAPPED text run.** The reopened last line lowers its
     baseline for the sup, but the run's own last line belongs to the tall text
     box placed with line 0 and does not move: words before and after a
     footnote marker can differ by 2-3 px in paint. Element geometry matches.
-19. **`vertical-align: sub | super` on inline-block and replaced boxes** keeps
+20. **`vertical-align: sub | super` on inline-block and replaced boxes** keeps
     the flat `font-size / 4` nudge.
 
 ## Inline layout, not float-related
 
-20. **A 100 px block wraps `one two three four …` into 9 lines; Chrome 7.**
+21. **A 100 px block wraps `one two three four …` into 9 lines; Chrome 7.**
     `one two three` is 96.95 px wide and fits 100 in Chrome. Fourteen words:
     Simple height 216, Chrome 168.
-21. **`<span>bb</span> cc <b>dd</b>` puts `<b>` 6 px right of Chrome** (49 vs
+22. **`<span>bb</span> cc <b>dd</b>` puts `<b>` 6 px right of Chrome** (49 vs
     42.69): the text run between two inline elements is advanced with both of
     its collapsible spaces plus a rounding step.
-22. **`line-height: normal` does not override an inherited unitless factor.**
+23. **`line-height: normal` does not override an inherited unitless factor.**
     `body{font:16px/1.5 …}` then `<div style="line-height:normal">`: Chrome
     line 18-21 px, Simple 24.
 
 ## Verification gaps
 
-23. **`check-simple-web-engine2d-js-bitmap-evidence.shs` cannot run on a host
+24. **`check-simple-web-engine2d-js-bitmap-evidence.shs` cannot run on a host
     without a self-hosted `bin/simple`**: it refuses the Rust seed
     (`simple_bin_status=forbidden`) and reports `unavailable`. The wiki makes
     that lane a hard bit-exact requirement after every renderer edit, so on
@@ -115,3 +118,11 @@ Owner file for every layout item:
   over-wide sibling was 1 px wide).
 - The float text inset was packed into `first_line_dx` as a negative code and
   the CPU layout execution port read the table raw.
+- Second review: a `flex:1` paragraph without a resolved face had a
+  paragraph-wide minimum; long words were chopped when the float-aware wrap
+  ran on unshortened lines; wrapping flex lines did not redistribute around a
+  frozen item; a formatting-context block beside floats was laid out twice
+  per nesting level; `direction: rtl` overrode an inherited authored
+  `text-align: left`; a nowrap run's minimum was one word; a border-box
+  child's width had its padding added again; three `flex:1` items in 400 px
+  sat at 0 / 133 / 266.

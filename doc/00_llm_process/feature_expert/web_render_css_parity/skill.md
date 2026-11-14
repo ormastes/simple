@@ -1492,3 +1492,32 @@ never cache an answer computed while exhausted) —
   a baselined id that matches, so its PASS line is the proof that no
   still-mismatching id was dropped.
 - Residue: `doc/08_tracking/bug/web_combo_matrix_float_subsup_flex_residue_2026-11-14.md`.
+
+## 2026-11-14 — second review round: fallbacks, long words, wrap freeze, trial reuse
+
+- **Trap — a "whole run" fallback is a floor of the whole paragraph.**
+  `text_longest_word_advance` returned the run's advance when the style had
+  no per-byte table (`compute_styles(..., vector_fonts: false)`), so every
+  `flex:1` paragraph froze at its full width. A minimum must fall back to a
+  WORD in the unit that lane wraps with (`style_char_w` cells), never to the
+  run. Spec row AC-30 lays out with `vector_fonts: false`; keep a no-face row
+  for any measurement that feeds a floor.
+- **Trap — a specialised wrap must keep the general wrap's arms.**
+  `compute_style_wrap_ranges_float_band` lacked the `word_end_byte` arm
+  (long word overflows whole) and was entered whenever a float existed below
+  the line, shortened or not (`line_boxes_shorten` is the precondition now).
+- **Wrapping flex lines** freeze per line after measuring
+  (`wrap_frozen` / `wrap_line_of`): a frozen item leaves
+  `line_grow_totals` and `line_zero_excess`, the rest share the line.
+- **Trial reuse.** The formatting-context fit stashes its trial layout into
+  `out_*` and the scalars (`trial_height`, margins); the real layout is
+  skipped when `(x, y, w)` are unchanged. Without it nested
+  `overflow:hidden` + float cost 2^depth (22 levels did not finish).
+- **`Style.text_align_set`** (inherited with `text_align`) separates an
+  authored `left` from the initial value for the RTL `start` default.
+- **Rounding.** Definite grow shares round to the NEAREST pixel
+  cumulatively, which reproduces Chrome's rounded item edges (400 / 3 ->
+  0, 133, 267).
+- Still open (residue record): the exact float bottom for a word moved
+  down inside a run, integer flex factors, the eager `float_ctx_line_boxes`
+  list, `align="left"` under RTL, cell-estimate minimum without a face.
