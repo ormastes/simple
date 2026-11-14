@@ -1,0 +1,143 @@
+# Trusted same-process Host primary attachment. Reuses the enrolled physical
+# capacity owner and previously admitted helper; no local signer or ledger.
+# Source foundation: not yet consumed by smux/Caret; settlement remains pending.
+use std.nogc_sync_mut.orchestration.host_local_root_v1.HostLocalRootV1
+use std.nogc_sync_mut.orchestration.host_local_command_v1.{host_local_resolve_execution_v2,
+    host_local_retained_execution_v2}
+use std.nogc_sync_mut.orchestration.host_helper_owner_v1.HostHelperLeaseV1
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.{host_helper_request_load_v1,
+    host_helper_request_encode_v1, host_helper_execution_proof_load_v1}
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.host_helper_stream_publish_v1
+use std.nogc_sync_mut.orchestration.host_primary_attach_record_v1.*
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.nogc_async_mut.container.primary_attach_v1.{simple_container_primary_attach_plan_v1,
+    simple_container_open_primary_attach_v1}
+use std.nogc_async_mut.container.terminal_session_v1.{ContainerPrimaryAttachSessionV1,
+    ContainerOwnedTerminalSessionV1, container_terminal_reference_v1}
+use std.common.contracts.container.primary_attach_v1.{ContainerPrimaryAttachPlanV1,
+    container_primary_attach_plan_encode_v1, container_primary_attach_admission_validate_v1}
+use std.common.contracts.container.stream_v2.{ContainerStreamPolicyV2, ContainerHelperAdmissionV2}
+use std.common.contracts.orchestration.host_helper_plan_v1.host_helper_plan_bytes_v1
+use std.common.contracts.orchestration.host_reservation_codec_v1.host_helper_reservation_match_receipt_v1
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.nogc_sync_mut.io.group_process_owner.group_process_stream_recover_v2
+use std.nogc_sync_mut.io.process_ops.PipedProcessOwnedSpawnV2
+use std.common.crypto.sha256.sha256_text
+
+# Retain this entire turn, including when error is nonempty. Successful native
+# cleanup is not Host settlement: neither charge nor lease is released here.
+pub struct HostPrimaryAttachTurnV1:
+    local: HostLocalRootV1
+    helper: HostHelperLeaseV1
+    plan: ContainerPrimaryAttachPlanV1
+    session: ContainerPrimaryAttachSessionV1? = nil
+    cleanup_spawn: PipedProcessOwnedSpawnV2? = nil
+    consumption_attempted: bool = false
+    recovery_required: bool = false
+    error: text = ""
+
+fn primary_failed_v1(turn: HostPrimaryAttachTurnV1, reason: text) -> HostPrimaryAttachTurnV1:
+    var retained = turn
+    retained.error = reason
+    # The supplied lease already represents an executing, charged helper.
+    retained.recovery_required = true
+    retained
+
+fn primary_consumption_v1(local: HostLocalRootV1, plan: ContainerPrimaryAttachPlanV1,
+        helper: HostHelperLeaseV1) -> Result<HostPrimaryAttachConsumedV1, text>:
+    val state = daemon_operation_exact_v2(local.capacity.journal, helper.operation)?
+    if state.state != "executing": return Err("host-primary-helper-executing-required")
+    val root = local.capacity.journal.root
+    val request = host_helper_request_load_v1(root, helper.operation.id)?
+    if (host_helper_plan_bytes_v1(request.plan)? != host_helper_plan_bytes_v1(helper.plan)? or
+            distributed_encode_operation_v2(request.operation)? != distributed_encode_operation_v2(helper.operation)?):
+        return Err("host-primary-retained-helper-mismatch")
+    val matched = host_helper_reservation_match_receipt_v1(helper.receipt, request.intent, helper.operation)?
+    val consumed = HostPrimaryAttachConsumedV1(operation_id: helper.operation.id,
+        operation_digest: sha256_text(distributed_encode_operation_v2(helper.operation)?),
+        packet_digest: sha256_text(host_helper_request_encode_v1(request)?),
+        execution_proof_digest: sha256_text(host_helper_execution_proof_load_v1(root, helper.operation.id)?),
+        prepared_receipt_digest: helper.receipt.receipt_digest,
+        deadline_unix_ms: helper.deadline.expires_at_unix_ms, primary_plan: plan)
+    val context = host_primary_attach_validate_record_v1(root, helper.operation, consumed)?
+    if (helper.grant_id != context.admission.grant_id or helper.issuer_id != context.admission.issuer_id or
+            helper.approver_id != context.admission.approver_id):
+        return Err("host-primary-helper-proof-mismatch")
+    val admission = ContainerHelperAdmissionV2(intent: helper.intent, plan: helper.plan,
+        operation: helper.operation, receipt: helper.receipt, deadline: helper.deadline,
+        grant_id: helper.grant_id, issuer_id: helper.issuer_id, approver_id: helper.approver_id,
+        cpu_millis: helper.cpu_millis, memory_bytes: helper.memory_bytes)
+    val checked = container_primary_attach_admission_validate_v1(plan, admission)?
+    Ok(consumed)
+
+# Session identity supplies correlation only. Canonical broker recovery validates
+# its actual retained native owner before publication; no PID becomes workload
+# identity and no transfer/session is reconstructed from persisted metadata.
+fn primary_session_archive_v1(turn: HostPrimaryAttachTurnV1,
+        session: ContainerPrimaryAttachSessionV1) -> Result<(), text>:
+    val reference = container_terminal_reference_v1(ContainerOwnedTerminalSessionV1.PrimaryAttach(session))?
+    val native = group_process_stream_recover_v2(reference.group_root, reference.group_identity)?
+    if native.launch.transport_generation != reference.generation:
+        return Err("host-primary-native-reference-mismatch")
+    host_primary_attach_native_store_v1(turn.local.capacity.journal.root, turn.helper.operation, native)
+
+# The caller obtains plan metadata first and uses the existing signed helper
+# prepare/begin flow. Here, resolve the parent again, reproduce that exact plan
+# with the actual provider, then consume the admitted helper once before spawn.
+pub fn host_primary_attach_open_v1(local: HostLocalRootV1, plan: ContainerPrimaryAttachPlanV1,
+        helper: HostHelperLeaseV1, policy: ContainerStreamPolicyV2) -> HostPrimaryAttachTurnV1:
+    var turn = HostPrimaryAttachTurnV1(local: local, helper: helper, plan: plan)
+    val validated = primary_consumption_v1(local, plan, helper)
+    if validated.is_err(): return primary_failed_v1(turn, validated.unwrap_err())
+    val parent = host_local_retained_execution_v2(local, plan.identity.parent_operation_id)
+    if parent.is_err(): return primary_failed_v1(turn, parent.unwrap_err())
+    val parent_state = daemon_operation_exact_v2(local.capacity.journal, parent.unwrap().operation)
+    if parent_state.is_err(): return primary_failed_v1(turn, parent_state.unwrap_err())
+    if parent_state.unwrap().state != "executing":
+        return primary_failed_v1(turn, "host-primary-parent-executing-required")
+    val resolved = host_local_resolve_execution_v2(local, plan.identity.parent_operation_id)
+    turn.local = resolved.local
+    if resolved.error != "": return primary_failed_v1(turn, resolved.error)
+    if resolved.execution == nil or resolved.observation == nil:
+        return primary_failed_v1(turn, "host-primary-parent-observation-required")
+    val planned = simple_container_primary_attach_plan_v1(turn.local.container, resolved.execution.unwrap(),
+        resolved.observation.unwrap().runtime, plan.identity, policy, plan.resources, plan.terminal_mode)
+    turn.local.container = planned.owner
+    if planned.error != "": return primary_failed_v1(turn, planned.error)
+    if planned.plan == nil: return primary_failed_v1(turn, "host-primary-plan-required")
+    val expected_bytes = container_primary_attach_plan_encode_v1(plan)
+    val actual_bytes = container_primary_attach_plan_encode_v1(planned.plan.unwrap())
+    if (expected_bytes.is_err() or actual_bytes.is_err() or expected_bytes.unwrap() != actual_bytes.unwrap()):
+        return primary_failed_v1(turn, "host-primary-observed-plan-changed")
+    # Recheck the same writer and all archived correlations after provider IO.
+    val refreshed = primary_consumption_v1(turn.local, plan, helper)
+    if refreshed.is_err(): return primary_failed_v1(turn, refreshed.unwrap_err())
+    val context = host_primary_attach_validate_record_v1(turn.local.capacity.journal.root,
+        helper.operation, refreshed.unwrap())
+    if context.is_err(): return primary_failed_v1(turn, context.unwrap_err())
+    val encoded = host_primary_attach_consumed_encode_v1(refreshed.unwrap())
+    if encoded.is_err(): return primary_failed_v1(turn, encoded.unwrap_err())
+    turn.consumption_attempted = true
+    val consumed = host_helper_stream_publish_v1(turn.local.capacity.journal.root, helper.operation.id,
+        "primary-consumed", encoded.unwrap(), true)
+    if consumed.is_err(): return primary_failed_v1(turn, consumed.unwrap_err())
+    # No fallible propagation may discard native owners beyond this boundary.
+    val opened = simple_container_open_primary_attach_v1(turn.local.container, resolved.execution.unwrap(),
+        resolved.observation.unwrap().runtime, plan, context.unwrap().admission, policy)
+    turn.local.container = opened.owner
+    turn.session = opened.session
+    turn.cleanup_spawn = opened.cleanup_spawn
+    turn.error = opened.error
+    turn.recovery_required = opened.error != ""
+    match opened.session:
+        case Some(session):
+            val archived = primary_session_archive_v1(turn, session)
+            if archived.is_err(): return primary_failed_v1(turn, archived.unwrap_err())
+        case nil:
+            match opened.cleanup_spawn:
+                case Some(PipedProcessOwnedSpawnV2.CleanupRequired(native, _, _)):
+                    val archived = host_primary_attach_native_store_v1(turn.local.capacity.journal.root, helper.operation, native)
+                    if archived.is_err(): return primary_failed_v1(turn, archived.unwrap_err())
+                case _:
+                    return primary_failed_v1(turn, if opened.error == "": "host-primary-session-unconfirmed" else: opened.error)
+    turn

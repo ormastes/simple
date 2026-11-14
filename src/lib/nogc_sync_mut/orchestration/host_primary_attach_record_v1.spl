@@ -1,0 +1,94 @@
+# Distinct primary-attach consumption evidence. This record never reconstructs
+# a session, native reference, input grant, or helper lease.
+use std.common.contracts.container.primary_attach_v1.{ContainerPrimaryAttachPlanV1,
+    container_primary_attach_plan_encode_v1, container_primary_attach_plan_decode_v1,
+    container_primary_attach_admission_validate_v1}
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.build_manager.group_process_stream_protocol_v2.{group_process_stream_template_digest_v3,
+    group_process_stream_launch_encode_profiled_v3}
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.{HostHelperAdmissionContextV1,
+    host_helper_stream_fields_v1, host_helper_stream_text_v1, host_helper_stream_path_v1,
+    host_helper_stream_publish_v1, host_helper_retained_admission_v1}
+use std.nogc_sync_mut.io.group_process_owner.{GroupProcessStreamOwnerV2, group_process_stream_owner_validate_v2}
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.string_core.str_len
+
+pub struct HostPrimaryAttachConsumedV1:
+    operation_id: text
+    operation_digest: text
+    packet_digest: text
+    execution_proof_digest: text
+    prepared_receipt_digest: text
+    deadline_unix_ms: i64
+    primary_plan: ContainerPrimaryAttachPlanV1
+
+pub fn host_primary_attach_consumed_encode_v1(record: HostPrimaryAttachConsumedV1) -> Result<text, text>:
+    if (not builder_identifier_valid_v1(record.operation_id) or record.deadline_unix_ms <= 0 or
+            record.operation_id != record.primary_plan.identity.operation_id):
+        return Err("host-primary-consumed-identity")
+    for digest in [record.operation_digest, record.packet_digest, record.execution_proof_digest, record.prepared_receipt_digest]:
+        if not builder_digest_valid_v1(digest): return Err("host-primary-consumed-digest")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-primary-attach-consumed"),
+        "operationId": SdnValue.String(record.operation_id), "operationDigest": SdnValue.String(record.operation_digest),
+        "packetDigest": SdnValue.String(record.packet_digest), "executionProofDigest": SdnValue.String(record.execution_proof_digest),
+        "preparedReceiptDigest": SdnValue.String(record.prepared_receipt_digest), "deadlineUnixMs": SdnValue.Int(record.deadline_unix_ms),
+        "primaryPlan": SdnValue.String(container_primary_attach_plan_encode_v1(record.primary_plan)?)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(source) > 8388608: return Err("host-primary-consumed-size")
+    Ok(source)
+
+pub fn host_primary_attach_consumed_decode_v1(source: text) -> Result<HostPrimaryAttachConsumedV1, text>:
+    val fields = host_helper_stream_fields_v1(source, "host-primary-attach-consumed", ["version", "kind", "operationId",
+        "operationDigest", "packetDigest", "executionProofDigest", "preparedReceiptDigest", "deadlineUnixMs", "primaryPlan"])?
+    val deadline = match fields["deadlineUnixMs"]:
+        case SdnValue.Int(value): value
+        case _: return Err("host-primary-consumed-deadline-type")
+    val record = HostPrimaryAttachConsumedV1(operation_id: host_helper_stream_text_v1(fields, "operationId")?,
+        operation_digest: host_helper_stream_text_v1(fields, "operationDigest")?,
+        packet_digest: host_helper_stream_text_v1(fields, "packetDigest")?,
+        execution_proof_digest: host_helper_stream_text_v1(fields, "executionProofDigest")?,
+        prepared_receipt_digest: host_helper_stream_text_v1(fields, "preparedReceiptDigest")?, deadline_unix_ms: deadline,
+        primary_plan: container_primary_attach_plan_decode_v1(host_helper_stream_text_v1(fields, "primaryPlan")?)?)
+    if host_primary_attach_consumed_encode_v1(record)? != source: return Err("host-primary-consumed-noncanonical")
+    Ok(record)
+
+pub fn host_primary_attach_validate_record_v1(root: text, operation: OperationEnvelopeV2,
+        consumed: HostPrimaryAttachConsumedV1) -> Result<HostHelperAdmissionContextV1, text>:
+    val encoded = host_primary_attach_consumed_encode_v1(consumed)?
+    val context = host_helper_retained_admission_v1(root, operation, consumed.operation_id,
+        consumed.operation_digest, consumed.packet_digest, consumed.execution_proof_digest,
+        consumed.prepared_receipt_digest, consumed.deadline_unix_ms)?
+    val matching = container_primary_attach_admission_validate_v1(consumed.primary_plan, context.admission)?
+    Ok(context)
+
+pub fn host_primary_attach_consumed_load_v1(root: text,
+        operation: OperationEnvelopeV2) -> Result<HostPrimaryAttachConsumedV1, text>:
+    val source = file_read_regular_no_follow_bounded(
+        host_helper_stream_path_v1(root, operation.id, "primary-consumed"), 8388608)?
+    val consumed = host_primary_attach_consumed_decode_v1(source)?
+    val checked = host_primary_attach_validate_record_v1(root, operation, consumed)?
+    Ok(consumed)
+
+# Archive only the real broker owner after matching the consumed primary plan.
+# The returned live session/cleanup carrier is retained independently by Host.
+pub fn host_primary_attach_native_store_v1(root: text, operation: OperationEnvelopeV2,
+        native: GroupProcessStreamOwnerV2) -> Result<(), text>:
+    val consumed = host_primary_attach_consumed_load_v1(root, operation)?
+    val invalid = group_process_stream_owner_validate_v2(native)
+    if invalid != "": return Err(invalid)
+    val template = consumed.primary_plan.launch_template
+    if (group_process_stream_template_digest_v3(native.launch)? != group_process_stream_template_digest_v3(template)? or
+            native.launch.request.launch_deadline_unix_ms != consumed.deadline_unix_ms or
+            native.launch.transport_generation <= 0 or native.launch.worker_id != operation.id or
+            native.launch.generation != consumed.primary_plan.workload.provider_generation):
+        return Err("host-primary-native-template-mismatch")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-primary-attach-native"),
+        "operationDigest": SdnValue.String(consumed.operation_digest),
+        "consumptionDigest": SdnValue.String(sha256_text(host_primary_attach_consumed_encode_v1(consumed)?)),
+        "identityDigest": SdnValue.String(native.identity_digest),
+        "launch": SdnValue.String(group_process_stream_launch_encode_profiled_v3(native.launch))}
+    host_helper_stream_publish_v1(root, operation.id, "primary-native", sdn_encode_canonical(SdnValue.Dict(fields)) + "\n", false)
