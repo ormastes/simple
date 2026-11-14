@@ -1,0 +1,93 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core_selectors.spl 1%
+# @tag: unit, browser_engine, css, selectors, complexity
+#
+# CSS is untrusted input: a selector must not be able to hang the style pass.
+# Chained subsequent-sibling combinators used to backtrack combinatorially
+# (about C(W, m+1) compound matches for m `~` over W siblings) and a single
+# `~` was quadratic per rule. Measured on the seed interpreter before the fix
+# (one style pass, same binary):
+#   a~b~b~b~b~b~b       over   22 <b>   10.4 s   (100 <b> would be ~1.6e10 steps)
+#   .x ~ div ~ div ~ div over  50 <div>  7.6 s   (2,000 would be ~6.7e11 steps)
+#   i ~ b               over  600 <b>    4.9 s   (quadratic)
+# The rows below run the same selectors at 100 / 2,000 siblings and must
+# finish inside WALL_MS each. None of them matches in Chrome either (there is
+# no <a>, .x or <i>), so the expected width is the 200px base.
+#
+# The step budget is the safety net behind the algorithmic fix: a selector
+# that still needs more than the budget in ONE match stops, does not match,
+# and bumps a diagnostic counter instead of hanging.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.{
+    simple_web_layout_debug_style_by_id
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core_selectors.{
+    simple_web_selector_budget_exhausted_count
+}
+
+extern fn rt_time_now_unix_millis() -> i64
+
+val WALL_MS: i64 = 60000
+
+fn _page(tag: text, count: i32, lead: text, css: text) -> text:
+    var items = ""
+    var i = 0
+    while i < count:
+        items = items + "<" + tag + "></" + tag + ">"
+        i = i + 1
+    "<html><head><style>" + tag + " {{ width:200px }} " + css + "</style></head><body><section id=\"s\">" + lead + items + "<" + tag + " id=\"last\"></" + tag + "></section></body></html>"
+
+describe "Sibling combinator complexity":
+
+    context "pathological chains finish and do not match":
+
+        it "a~b~b~b~b~b~b over 100 siblings":
+            val html = _page("b", 100, "", "a~b~b~b~b~b~b {{ width:50px }}")
+            val t0 = rt_time_now_unix_millis()
+            expect(simple_web_layout_debug_style_by_id(html, "last", "width")).to_equal("200")
+            expect(rt_time_now_unix_millis() - t0 < WALL_MS).to_equal(true)
+
+        it ".x ~ div ~ div ~ div over 2000 siblings":
+            val html = _page("div", 2000, "", ".x ~ div ~ div ~ div {{ width:50px }}")
+            val t0 = rt_time_now_unix_millis()
+            expect(simple_web_layout_debug_style_by_id(html, "last", "width")).to_equal("200")
+            expect(rt_time_now_unix_millis() - t0 < WALL_MS).to_equal(true)
+
+        it "i ~ b over 2000 siblings":
+            val html = _page("b", 2000, "", "i ~ b {{ width:50px }}")
+            val t0 = rt_time_now_unix_millis()
+            expect(simple_web_layout_debug_style_by_id(html, "last", "width")).to_equal("200")
+            expect(rt_time_now_unix_millis() - t0 < WALL_MS).to_equal(true)
+
+    context "the same chains still match when the left side exists":
+
+        it "a~b~b~b~b~b~b matches the sixth and later <b> after an <a>":
+            val html = _page("b", 100, "<a></a>", "a~b~b~b~b~b~b {{ width:50px }}")
+            expect(simple_web_layout_debug_style_by_id(html, "last", "width")).to_equal("50")
+
+        it "i ~ b matches every <b> after the <i>":
+            val html = _page("b", 2000, "<i></i>", "i ~ b {{ width:50px }}")
+            expect(simple_web_layout_debug_style_by_id(html, "last", "width")).to_equal("50")
+
+        it "a~b~b needs two <b> before it":
+            val html = "<html><head><style>b {{ width:200px }} a~b~b {{ width:50px }}</style></head><body><section><a></a><b id=\"one\"></b><b id=\"two\"></b></section></body></html>"
+            expect(simple_web_layout_debug_style_by_id(html, "one", "width")).to_equal("200")
+            expect(simple_web_layout_debug_style_by_id(html, "two", "width")).to_equal("50")
+
+    context "step budget":
+
+        it "stops a nested :has() chain, does not match, and counts it":
+            val before = simple_web_selector_budget_exhausted_count()
+            val html = _page("b", 400, "", "section:has(b:has(~ b:has(~ b:has(~ i)))) {{ width:50px }} section {{ height:7px }}")
+            val t0 = rt_time_now_unix_millis()
+            expect(simple_web_layout_debug_style_by_id(html, "s", "width") == "50").to_equal(false)
+            expect(rt_time_now_unix_millis() - t0 < WALL_MS).to_equal(true)
+            expect(simple_web_selector_budget_exhausted_count() > before).to_equal(true)
+
+        it "does not count an ordinary selector":
+            val before = simple_web_selector_budget_exhausted_count()
+            val html = _page("b", 50, "<i></i>", "i ~ b {{ width:50px }}")
+            expect(simple_web_layout_debug_style_by_id(html, "last", "width")).to_equal("50")
+            expect(simple_web_selector_budget_exhausted_count()).to_equal(before)
