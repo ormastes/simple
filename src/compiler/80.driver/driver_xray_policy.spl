@@ -23,6 +23,21 @@ use common.plugin.aspect_params.{AspectParamsV1}
 use common.trace.observer_contract_v1.{TraceFailureV1, trace_failure_code_v1}
 use common.trace.observer_aspect_config_v1.{trace_aspect_config_v1}
 use common.trace.observer_build_route_v1.{TraceBuildRouteKindV1, trace_build_route_v1}
+use compiler.common.driver_compile_options.{CompileOptions, TargetTraceCapabilityV1}
+
+# The current bootstrap index has no admitted debug-observer receipt. A route
+# candidate or static XRay request cannot substitute for that evidence. Keep
+# this failure visible until the runtime admission owner supplies its receipt.
+# This describes the automatic debug-aspect path, not ordinary static sleds.
+pub fn driver_target_trace_capability_v1(options: CompileOptions) -> TargetTraceCapabilityV1:
+    if options.native_target != "x86_64-unknown-linux-gnu" and
+            options.native_target != "aarch64-unknown-linux-gnu":
+        return TargetTraceCapabilityV1.Unavailable("trace-target-not-admitted-v1")
+    if options.backend == "llvm" or options.backend == "llvm-lib" or options.backend == "auto":
+        return TargetTraceCapabilityV1.Unavailable("llvm-observer-link-handler-not-admitted-v1")
+    if options.backend == "native":
+        return TargetTraceCapabilityV1.Unavailable("native-observer-admission-receipt-absent-v1")
+    TargetTraceCapabilityV1.Unavailable("trace-backend-not-admitted-v1")
 
 val XRAY_MODE_NONE: i64 = 0
 val XRAY_MODE_ENTRY_EXIT: i64 = 1
@@ -49,6 +64,8 @@ fn xray_unsupported(what: text) -> text:
 fn xray_policy_resolve(enabled: bool, compile_mode_text: text, backend: text, release: bool, output_format: text) -> Result<XrayBuildPolicy, text>:
     if not enabled:
         return Ok(XrayBuildPolicy.off())
+    if release:
+        return Err("TARGET-PROFILE-E-CONFLICT: release forbids XRay instrumentation")
     val effective = get_effective_backend_name(backend, release)
     if effective == "cranelift":
         return Err(xray_unsupported("with the Cranelift backend (it cannot emit XRay sleds); use --backend=llvm or --backend=native"))
