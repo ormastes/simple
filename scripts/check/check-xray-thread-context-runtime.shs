@@ -1,0 +1,148 @@
+#!/bin/sh
+# check-xray-thread-context-runtime.shs — Linux worker/adapter integration
+# fixture for the opt-in per-thread XRay resident context hooks.
+#
+# This builds the real runtime_thread.c, Linux XRay adapter, runtime_native.c,
+# and runtime_memory.c. The C fixture supplies only unrelated hosted-runtime
+# and compiler-rt API scaffolding; value and closure ABIs come from the real
+# runtime_native.c object. It does not patch XRay sleds or qualify a Simple
+# compiler-produced traced executable.
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+CC=${CLANG:-clang}
+NM=${LLVM_NM:-nm}
+STEP_TIMEOUT=${XRAY_THREAD_CONTEXT_TIMEOUT:-20}
+BUILD_TIMEOUT=${XRAY_THREAD_CONTEXT_BUILD_TIMEOUT:-120}
+OUT=${XRAY_THREAD_CONTEXT_OUT:-$ROOT/build/xray-thread-context-runtime}
+THREAD=$ROOT/src/runtime/runtime_thread.c
+NATIVE=$ROOT/src/runtime/runtime_native.c
+MEMORY=$ROOT/src/runtime/runtime_memory.c
+ADAPTER=$ROOT/src/runtime/xray/xray_llvm_adapter_linux.c
+FIXTURE=$ROOT/test/fixtures/xray/check-xray-thread-context-runtime.c
+
+mkdir -p "$OUT"
+
+fail() {
+    echo "FAIL — $* (artifacts: $OUT)"
+    exit 1
+}
+
+run_step() {
+    rs_label=$1
+    shift
+    (
+        printf '%s' "$1"
+        shift
+        for rs_arg do printf ' %s' "$rs_arg"; done
+        printf '\n'
+    ) > "$OUT/$rs_label.command"
+    "$@" > "$OUT/$rs_label.stdout" 2> "$OUT/$rs_label.stderr"
+    rs_status=$?
+    printf '%s\n' "$rs_status" > "$OUT/$rs_label.status"
+    if [ "$rs_status" -ne 0 ]; then
+        echo "FAIL — $rs_label exited $rs_status"
+        cat "$OUT/$rs_label.stdout"
+        cat "$OUT/$rs_label.stderr"
+        return 1
+    fi
+    echo "PASS $rs_label"
+    return 0
+}
+
+[ "$(uname -s)" = Linux ] || { echo "ERROR — Linux host required"; exit 2; }
+case "$(uname -m)" in
+    x86_64) ADAPTER_ARCH_FLAGS="" ;;
+    aarch64) ADAPTER_ARCH_FLAGS="-mno-outline-atomics" ;;
+    *) echo "ERROR — unsupported Linux architecture: $(uname -m)"; exit 2 ;;
+esac
+command -v "$CC" >/dev/null 2>&1 || { echo "ERROR — missing compiler: $CC"; exit 2; }
+command -v "$NM" >/dev/null 2>&1 || { echo "ERROR — missing symbol tool: $NM"; exit 2; }
+for source in "$THREAD" "$NATIVE" "$MEMORY" "$ADAPTER" "$FIXTURE"; do
+    [ -f "$source" ] || fail "missing source: $source"
+done
+
+{
+    uname -a
+    "$CC" --version | head -n 1
+    printf 'compiler_path=%s\n' "$(command -v "$CC")"
+    printf 'nm_path=%s\n' "$(command -v "$NM")"
+    printf 'fixture_scope=real runtime_thread + real resident adapter + real runtime_native/runtime_memory; compiler-rt APIs are fixture stand-ins; no sled patching'
+} > "$OUT/toolchain.txt" 2>&1
+sha256sum \
+    "$THREAD" "$NATIVE" "$MEMORY" "$ADAPTER" "$FIXTURE" \
+    "$ROOT/src/runtime/xray/xray_resident_admission_v1.h" \
+    "$ROOT/src/runtime/xray/xray_resident_descriptor_v1.h" \
+    "$ROOT/src/runtime/xray/xray_thread_context_v1.h" \
+    "$ROOT/src/runtime/xray/xray_channel_producer_v1.h" \
+    > "$OUT/sources.sha256" || fail "could not hash all source inputs"
+
+COMMON_FLAGS="-fPIC -O1 -ffunction-sections -fdata-sections -std=gnu11 -pthread -DSIMPLE_RUNTIME_MEMORY_OWNER=1 -DSIMPLE_RUNTIME_TIMESTAMP_OWNER=1 -DSIMPLE_RUNTIME_NO_RUST_ARRAY_PACKING=1 -DSIMPLE_CORE_C_STANDALONE=1 -DSIMPLE_RUNTIME_THREAD_CPU_COUNT_OWNER=1 -I$ROOT/src/runtime -I$ROOT/src/runtime/platform"
+
+# Keep these expanded command records alongside each output for CI artifact
+# inspection. The context-hook flag is only applied to runtime_thread.c.
+# shellcheck disable=SC2086
+run_step runtime_thread_compile timeout "$BUILD_TIMEOUT" "$CC" $COMMON_FLAGS \
+    -DSIMPLE_XRAY_CONTEXT_HOOKS_V1=1 -c "$THREAD" -o "$OUT/runtime_thread.o" || exit 1
+# shellcheck disable=SC2086
+run_step runtime_native_compile timeout "$BUILD_TIMEOUT" "$CC" $COMMON_FLAGS \
+    -c "$NATIVE" -o "$OUT/runtime_native.o" || exit 1
+# shellcheck disable=SC2086
+run_step runtime_memory_compile timeout "$BUILD_TIMEOUT" "$CC" $COMMON_FLAGS \
+    -c "$MEMORY" -o "$OUT/runtime_memory.o" || exit 1
+# shellcheck disable=SC2086
+run_step xray_adapter_compile timeout "$BUILD_TIMEOUT" "$CC" \
+    -fPIC -O1 -ffunction-sections -fdata-sections -std=gnu11 -pthread \
+    -mgeneral-regs-only $ADAPTER_ARCH_FLAGS -I"$ROOT/src/runtime" \
+    -I"$ROOT/src/runtime/xray" -c "$ADAPTER" -o "$OUT/xray_adapter.o" || exit 1
+# shellcheck disable=SC2086
+run_step fixture_compile timeout "$BUILD_TIMEOUT" "$CC" $COMMON_FLAGS -I"$ROOT/src/runtime/xray" \
+    -c "$FIXTURE" -o "$OUT/fixture.o" || exit 1
+
+run_step symbol_inventory "$NM" -A --defined-only \
+    "$OUT/runtime_thread.o" "$OUT/runtime_native.o" "$OUT/runtime_memory.o" \
+    "$OUT/xray_adapter.o" "$OUT/fixture.o" || exit 1
+grep -q 'runtime_native.o:.*rt_value_int$' "$OUT/symbol_inventory.stdout" ||
+    fail "rt_value_int is not owned by runtime_native.o"
+grep -q 'runtime_native.o:.*rt_value_unbox_int$' "$OUT/symbol_inventory.stdout" ||
+    fail "rt_value_unbox_int is not owned by runtime_native.o"
+grep -q 'runtime_native.o:.*rt_closure_func_ptr$' "$OUT/symbol_inventory.stdout" ||
+    fail "rt_closure_func_ptr is not owned by runtime_native.o"
+if grep -E 'fixture\.o:.* (rt_value_int|rt_value_unbox_int|rt_closure_func_ptr|rt_closure_retain|rt_closure_release)$' \
+        "$OUT/symbol_inventory.stdout" >/dev/null; then
+    fail "fixture object defines a value or closure ABI substitute"
+fi
+
+printf '%s\n' "timeout $BUILD_TIMEOUT $CC -pthread $OUT/fixture.o $OUT/runtime_thread.o $OUT/xray_adapter.o $OUT/runtime_native.o $OUT/runtime_memory.o -Wl,--gc-sections -Wl,-Map=$OUT/link.map -Wl,--print-gc-sections -ldl -lm -o $OUT/check-xray-thread-context-runtime" \
+    > "$OUT/link.command"
+if timeout "$BUILD_TIMEOUT" "$CC" -pthread "$OUT/fixture.o" "$OUT/runtime_thread.o" \
+    "$OUT/xray_adapter.o" "$OUT/runtime_native.o" "$OUT/runtime_memory.o" \
+    -Wl,--gc-sections -Wl,-Map="$OUT/link.map" \
+    -Wl,--print-gc-sections -ldl -lm \
+    -o "$OUT/check-xray-thread-context-runtime" \
+    > "$OUT/link.stdout" 2> "$OUT/link.stderr"; then
+    printf '0\n' > "$OUT/link.status"
+    echo "PASS link"
+else
+    link_status=$?
+    printf '%s\n' "$link_status" > "$OUT/link.status"
+    echo "FAIL — link exited $link_status"
+    cat "$OUT/link.stdout"
+    cat "$OUT/link.stderr"
+    exit 1
+fi
+
+for symbol in spl_pool_v1_boxed_task_dispatch rt_value_int rt_value_unbox_int \
+              rt_closure_func_ptr simple_xray_thread_task_root_v1; do
+    grep -q "$symbol" "$OUT/link.map" || fail "link map omits $symbol"
+done
+file "$OUT/check-xray-thread-context-runtime" > "$OUT/binary.txt" 2>&1
+sha256sum "$OUT/check-xray-thread-context-runtime" > "$OUT/binary.sha256"
+
+run_step fixture_run timeout "$STEP_TIMEOUT" \
+    "$OUT/check-xray-thread-context-runtime" || exit 1
+grep -q '^PASS — ' "$OUT/fixture_run.stdout" || fail "fixture lacks final PASS verdict"
+cat "$OUT/fixture_run.stdout"
+echo "artifacts: $OUT"
+echo "PASS — runtime thread context fixture (hosted worker/adapter integration; compiler-rt sled patching not covered)"
