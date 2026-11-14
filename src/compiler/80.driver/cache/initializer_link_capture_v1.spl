@@ -1,0 +1,90 @@
+use compiler.common.cache_contract.native_initializer_result_v2.{native_initializer_symbol_sets_match_v2}
+# Actual current-build join. Missing module/object observations preserve ordinary
+# linking but cannot create initializer authority from a retained link receipt.
+use compiler.driver.driver_types.{CompileContext}
+use compiler.backend.llvm_native_link.{NativeLinkOptions}
+use compiler.driver.driver_build.native_link_receipt_v1.{native_link_with_receipt_v1, native_link_with_receipt_v2}
+use compiler.common.cache_contract.mir_initializer_plan_v1.{MirInitializerObjectReceiptV1, MirInitializerBuildReceiptV1}
+use compiler.common.cache_contract.directory_category_projection_v2.{DirectoryCategoryProjectionV2, directory_category_projection_valid_v2}
+use compiler.common.cache_contract.physical_tld_v1.{three_payload_contract_digest_valid_v1}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
+
+fn _initializer_category_same_v1(a: DirectoryCategoryProjectionV2, b: DirectoryCategoryProjectionV2) -> bool:
+    a.canonical_path == b.canonical_path and a.source_identity == b.source_identity and
+        a.source_digest == b.source_digest and a.target_triple == b.target_triple and
+        a.preprocessed_digest == b.preprocessed_digest and a.cfg_decision_digest == b.cfg_decision_digest and
+        a.environment_policy_digest == b.environment_policy_digest and
+        a.trait_root == b.trait_root and a.extension_root == b.extension_root
+
+fn _initializer_objects_current_v1(rows: [MirInitializerObjectReceiptV1]) -> bool:
+    for row in rows:
+        val digest = file_hash_sha256(row.object_path)
+        if digest == nil or digest.unwrap() != row.object_digest: return false
+    true
+
+fn _initializer_link_rows_v1(ctx: CompileContext, objects: [text], options: NativeLinkOptions) -> [MirInitializerObjectReceiptV1]?:
+    if objects.len() == 0 or ctx.initializer_object_receipts_v1.len() == 0: return nil
+    if options.target_triple != "" and options.target_triple != ctx.native_target: return nil
+    var by_path: Dict<text, MirInitializerObjectReceiptV1> = {}
+    for module_name in ctx.initializer_object_receipts_v1.keys():
+        val row = ctx.initializer_object_receipts_v1[module_name]
+        if row.module_identity != module_name or row.object_path == "" or by_path.has(row.object_path): return nil
+        by_path[row.object_path] = row
+    var selected: [MirInitializerObjectReceiptV1] = []
+    var modules: Dict<text, bool> = {}
+    var sources: Dict<text, bool> = {}
+    var image = ""
+    for path in objects:
+        if not by_path.has(path): return nil
+        val row = by_path[path]
+        if modules.has(row.module_identity) or sources.has(row.source_path): return nil
+        if not ctx.directory_category_projections_v2.has(row.source_path): return nil
+        if not directory_category_projection_valid_v2(row.category) or
+                not _initializer_category_same_v1(row.category, ctx.directory_category_projections_v2[row.source_path]) or
+                row.target_triple != ctx.native_target or
+                row.environment_policy_digest != ctx.environment_variant_policy_digest or
+                row.category.source_digest != row.source_digest or row.category.canonical_path != row.source_path or
+                row.bodies.plan.module_identity != row.module_identity or
+                not three_payload_contract_digest_valid_v1(row.object_digest) or
+                not three_payload_contract_digest_valid_v1(row.executing_image_digest): return nil
+        if image != "" and image != row.executing_image_digest: return nil
+        image = row.executing_image_digest
+        modules[row.module_identity] = true
+        sources[row.source_path] = true
+        selected = selected.push(row)
+    val observed = ctx.kernel_image_digest_provider()
+    if observed.is_err() or observed.unwrap().sha256 != image: return nil
+    if not _initializer_objects_current_v1(selected): return nil
+    Some(selected)
+
+pub fn native_link_with_initializer_capture_v1(ctx: CompileContext, objects: [text],
+        output: text, options: NativeLinkOptions) -> Result<text, text>:
+    ctx.initializer_build_receipt_v1 = nil
+    val selected = _initializer_link_rows_v1(ctx, objects, options)
+    if selected == nil: return native_link_with_receipt_v1(objects, output, options)
+    # Fresh typed backend observation only. A retained v1/v2 record cannot fill
+    # the startup slot, even if its bytes and current key happen to agree.
+    val linked = native_link_with_receipt_v2(objects, output, options, true)
+    if linked.is_err(): return Err(linked.unwrap_err())
+    val artifact = linked.unwrap()
+    if artifact.startup == nil: return Ok(artifact.output_path)
+    val rows = selected.unwrap()
+    if not _initializer_objects_current_v1(rows): return Ok(artifact.output_path)
+    var expected: [text] = []
+    for row in rows:
+        val symbol = row.bodies.plan.emitted_init_symbol
+        if symbol != "":
+            expected = expected.push(symbol)
+        elif row.bodies.plan.ordered_steps.len() != 0:
+            return Ok(artifact.output_path)
+    val startup = artifact.startup.unwrap()
+    if not native_initializer_symbol_sets_match_v2(expected, startup.ordered_init_symbols):
+        return Ok(artifact.output_path)
+    val output_digest = file_hash_sha256(artifact.output_path)
+    if output_digest == nil or not three_payload_contract_digest_valid_v1(output_digest.unwrap()):
+        return Ok(artifact.output_path)
+    ctx.initializer_build_receipt_v1 = Some(MirInitializerBuildReceiptV1(
+        ordered_objects: rows, startup: startup, output_path: artifact.output_path,
+        output_digest: output_digest.unwrap(), executing_image_digest: rows[0].executing_image_digest,
+        target_triple: ctx.native_target, environment_policy_digest: ctx.environment_variant_policy_digest))
+    Ok(artifact.output_path)
