@@ -18599,30 +18599,33 @@ int64_t* rt_process_run_bounded_bytes_tuple(const char* cmd, uint64_t cmd_len, S
 }
 
 int64_t rt_file_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
-    if (!path_ptr || path_len > SIZE_MAX - 1) return 0;
+    /* Failure is nil (RuntimeValue::NIL, as the Rust definition returns), never a
+     * raw 0: the declared type is `[u8]?` and a 0 word is not nil, so a missing
+     * file read back as an empty success. */
+    if (!path_ptr || path_len > SIZE_MAX - 1) return rt_core_nil();
     char* path = (char*)rt_observed_malloc_v1((size_t)path_len + 1);
-    if (!path) return 0;
+    if (!path) return rt_core_nil();
     memcpy(path, path_ptr, (size_t)path_len);
     path[path_len] = '\0';
 
     FILE* f = RT_FOPEN_READ_SHARED(path);
     free(path);
-    if (!f) return 0;
+    if (!f) return rt_core_nil();
     if (fseek(f, 0, SEEK_END) != 0) {
         fclose(f);
-        return 0;
+        return rt_core_nil();
     }
     long file_len = ftell(f);
     if (file_len < 0 || fseek(f, 0, SEEK_SET) != 0) {
         fclose(f);
-        return 0;
+        return rt_core_nil();
     }
 
     SplArray* result = rt_byte_array_new_len((uint64_t)file_len);
     RtCoreArray* array = rt_core_array_ptr(result);
     if (!array || (file_len > 0 && fread(array->data, 1, (size_t)file_len, f) != (size_t)file_len)) {
         fclose(f);
-        return 0;
+        return rt_core_nil();
     }
     fclose(f);
     return (int64_t)(uintptr_t)result;

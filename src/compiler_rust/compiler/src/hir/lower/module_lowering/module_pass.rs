@@ -97,7 +97,7 @@ pub(crate) fn dynamic_module_initializer_name(module_path: &str) -> String {
     name
 }
 
-fn try_const_eval(expr: &Expr) -> Option<i64> {
+pub(crate) fn try_const_eval(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Integer(val) => Some(*val),
         // RuntimeValue nil is the tagged sentinel 0x3. Recording it here keeps

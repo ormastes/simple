@@ -1,0 +1,47 @@
+# Purpose and audience: regression spec for reading an UNANNOTATED module-level
+# `val` from another module. The declaring module infers i64 from the literal and
+# stores the raw word; the native lane's importer typed the same global Any and
+# read that word as a tagged value, so `val CAP = 200` arrived as 25 (200 >> 3).
+# devhub clamps history to MESSENGER_DEFAULT_MAX_READ_BATCH, so a natively built
+# devhub returned 25 of 41 stored messages with exit code 0.
+# Runs under both lanes; the native verdict is the one that matters.
+# @req REQ-SSPEC-UNIT
+# Bug: doc/08_tracking/bug/devhub_native_sqlcipher_history_truncated_at_25_rows_2026-11-14.md
+# Fix: src/compiler_rust/compiler/src/hir/lower/import_loader.rs
+#      (imported Let/Static globals infer the declaring module's literal type).
+
+"""
+I declare a limit once as `val CAP = 200` and use it from other modules. Whichever
+module reads it, and however the program was built, the value is 200.
+"""
+
+use std.spec
+use test.support.untyped_module_vals.{UNTYPED_CAP, UNTYPED_DERIVED, UNTYPED_ENABLED, UNTYPED_LABEL}
+use app.devhub.messenger.config.{MESSENGER_DEFAULT_MAX_READ_BATCH}
+
+fn clamp_to_cap(requested: i64) -> i64:
+    var bounded = requested
+    if bounded > UNTYPED_CAP:
+        bounded = UNTYPED_CAP
+    bounded
+
+describe("an unannotated module val read from another module"):
+    it("has the declared integer value in arithmetic and in text"):
+        val direct: i64 = UNTYPED_CAP
+        assert_equal(direct, 200)
+        assert_equal(UNTYPED_CAP + 1, 201)
+        assert_equal("{UNTYPED_CAP}", "200")
+        assert_equal(UNTYPED_DERIVED, 200)
+
+    it("bounds a request at the declared value and leaves smaller requests alone"):
+        assert_equal(clamp_to_cap(1000), 200)
+        assert_equal(clamp_to_cap(41), 41)
+
+    it("keeps a boolean and a text val unchanged"):
+        assert_equal(UNTYPED_ENABLED, true)
+        assert_equal(UNTYPED_LABEL, "cap")
+
+describe("the devhub messenger read batch limit"):
+    it("is 200 for a reader in another module, so 41 stored messages fit"):
+        assert_equal(MESSENGER_DEFAULT_MAX_READ_BATCH, 200)
+        assert_equal(41 > MESSENGER_DEFAULT_MAX_READ_BATCH, false)
