@@ -1,0 +1,119 @@
+# Request-scoped source reader shared by visibility CLI and resident LSP calls.
+# The default path reads disk. An LSP caller may install a reader for one query;
+# reads are memoized only for that query and the touched source identities are
+# returned for revision validation by the protocol owner.
+use app.cli.query_rich_common.{query_file_exists, query_file_read_rich}
+use std.nogc_sync_mut.lsp.lsp_visibility_provider_v1.{
+    LspVisibilitySourceStatusV1, LspVisibilitySourceV1, LspVisibilitySourceReaderV1,
+    LspVisibilityQueryStatusV1, LspVisibilityDependencyV1
+}
+
+pub struct QueryVisibilitySourceTraceV1:
+    status: LspVisibilityQueryStatusV1
+    dependencies: [LspVisibilityDependencyV1]
+
+var _VIS_SOURCE_ACTIVE: bool = false
+var _VIS_SOURCE_READER: LspVisibilitySourceReaderV1 = LspVisibilitySourceReaderV1(_vis_source_unavailable_v1)
+var _VIS_SOURCE_STATUS: LspVisibilityQueryStatusV1 = LspVisibilityQueryStatusV1.Ready
+var _VIS_SOURCE_EXPECTED_OVERLAY_GENERATION: i64 = -1
+var _VIS_SOURCE_PATHS: [text] = []
+var _VIS_SOURCE_CACHE: [LspVisibilitySourceV1] = []
+var _VIS_SOURCE_DEPENDENCIES: [LspVisibilityDependencyV1] = []
+
+fn _vis_source_unavailable_v1(path: text) -> LspVisibilitySourceV1:
+    LspVisibilitySourceV1(
+        status: LspVisibilitySourceStatusV1.Unavailable, path: path, uri: "",
+        source_kind: "", content: "", version: -1, lifetime_generation: -1,
+        overlay_generation: -1)
+
+pub fn query_visibility_source_begin_v1(reader: LspVisibilitySourceReaderV1, overlay_generation: i64):
+    _VIS_SOURCE_ACTIVE = true
+    _VIS_SOURCE_READER = reader
+    _VIS_SOURCE_EXPECTED_OVERLAY_GENERATION = overlay_generation
+    _VIS_SOURCE_STATUS = LspVisibilityQueryStatusV1.Ready
+    _VIS_SOURCE_PATHS = []
+    _VIS_SOURCE_CACHE = []
+    _VIS_SOURCE_DEPENDENCIES = []
+
+pub fn query_visibility_source_finish_v1() -> QueryVisibilitySourceTraceV1:
+    val trace = QueryVisibilitySourceTraceV1(_VIS_SOURCE_STATUS, _VIS_SOURCE_DEPENDENCIES)
+    _VIS_SOURCE_ACTIVE = false
+    _VIS_SOURCE_EXPECTED_OVERLAY_GENERATION = -1
+    _VIS_SOURCE_PATHS = []
+    _VIS_SOURCE_CACHE = []
+    _VIS_SOURCE_DEPENDENCIES = []
+    trace
+
+fn _vis_source_cache_index(path: text) -> i64:
+    var i = 0
+    while i < _VIS_SOURCE_PATHS.len():
+        if _VIS_SOURCE_PATHS[i] == path: return i
+        i = i + 1
+    -1
+
+fn _vis_source_record_dependency(source: LspVisibilitySourceV1):
+    if source.status != LspVisibilitySourceStatusV1.Ready and
+            source.status != LspVisibilitySourceStatusV1.Missing: return
+    var i = 0
+    while i < _VIS_SOURCE_DEPENDENCIES.len():
+        if _VIS_SOURCE_DEPENDENCIES[i].path == source.path: return
+        i = i + 1
+    val kind = if source.status == LspVisibilitySourceStatusV1.Missing: "missing" else: source.source_kind
+    _VIS_SOURCE_DEPENDENCIES.push(LspVisibilityDependencyV1(
+        path: source.path, uri: source.uri, source_kind: kind,
+        version: source.version, lifetime_generation: source.lifetime_generation,
+        content_snapshot: source.content))
+
+fn _vis_source_disk_read(path: text) -> LspVisibilitySourceV1:
+    if query_file_exists(path):
+        val content = query_file_read_rich(path)
+        if content != nil:
+            return LspVisibilitySourceV1(
+                status: LspVisibilitySourceStatusV1.Ready, path: path, uri: "",
+                source_kind: "disk", content: content ?? "", version: -1,
+                lifetime_generation: -1, overlay_generation: -1)
+        return _vis_source_unavailable_v1(path)
+    LspVisibilitySourceV1(
+            status: LspVisibilitySourceStatusV1.Missing, path: path, uri: "",
+            source_kind: "", content: "", version: -1,
+            lifetime_generation: -1, overlay_generation: -1)
+
+fn _vis_source_identity_valid(source: LspVisibilitySourceV1, path: text) -> bool:
+    if source.path != path: return false
+    if source.status != LspVisibilitySourceStatusV1.Ready: return true
+    if source.source_kind == "disk": return source.uri == ""
+    if source.source_kind == "overlay":
+        return source.uri != "" and source.version >= 0 and
+            source.lifetime_generation >= 0 and
+            source.overlay_generation == _VIS_SOURCE_EXPECTED_OVERLAY_GENERATION
+    false
+
+fn _vis_source_read(path: text) -> LspVisibilitySourceV1:
+    # The CLI has no request scope; never retain disk contents across calls.
+    if not _VIS_SOURCE_ACTIVE: return _vis_source_disk_read(path)
+    val cached = _vis_source_cache_index(path)
+    if cached >= 0: return _VIS_SOURCE_CACHE[cached]
+    var source = _VIS_SOURCE_READER.read(path)
+    if not _vis_source_identity_valid(source, path):
+        source = _vis_source_unavailable_v1(path)
+    _VIS_SOURCE_PATHS.push(path)
+    _VIS_SOURCE_CACHE.push(source)
+    _vis_source_record_dependency(source)
+    if source.status == LspVisibilitySourceStatusV1.OpenPending:
+        _VIS_SOURCE_STATUS = LspVisibilityQueryStatusV1.Pending
+    elif source.status == LspVisibilitySourceStatusV1.Unavailable and
+            _VIS_SOURCE_STATUS == LspVisibilityQueryStatusV1.Ready:
+        _VIS_SOURCE_STATUS = LspVisibilityQueryStatusV1.Unavailable
+    source
+
+pub fn query_visibility_source_exists_v1(path: text) -> bool:
+    _vis_source_read(path).status == LspVisibilitySourceStatusV1.Ready
+
+pub fn query_visibility_source_read_v1(path: text) -> text?:
+    val source = _vis_source_read(path)
+    if source.status == LspVisibilitySourceStatusV1.Ready: return Some(source.content)
+    nil
+
+export QueryVisibilitySourceTraceV1
+export query_visibility_source_begin_v1, query_visibility_source_finish_v1
+export query_visibility_source_exists_v1, query_visibility_source_read_v1

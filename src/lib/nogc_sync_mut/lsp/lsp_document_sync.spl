@@ -3,6 +3,12 @@
 use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_has, json_value_text_or}
 use std.nogc_sync_mut.lsp.server.{LspServer, DocumentInfo}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.io_runtime.{file_exists}
+use std.nogc_sync_mut.lsp.lsp_file_uri.{lsp_file_uri_to_path, lsp_query_file_argument_v1}
+use std.nogc_sync_mut.lsp.lsp_visibility_provider_v1.{
+    LspVisibilitySourceStatusV1, LspVisibilitySourceV1, LspVisibilitySourceReaderV1,
+    LspVisibilitySnapshotV1, LspVisibilityDependencyV1
+}
 
 var LSP_DOCUMENT_OWNER = LspServer.create()
 
@@ -20,6 +26,87 @@ pub fn lsp_document_snapshot_matches(snapshot: DocumentInfo) -> bool:
     if current == nil: return false
     val value = current.unwrap()
     value.lifetime_generation == snapshot.lifetime_generation and value.version == snapshot.version and value.content == snapshot.content
+
+pub fn lsp_document_overlay_generation_v1() -> i64:
+    LSP_DOCUMENT_OWNER.overlay_generation
+
+pub fn lsp_visibility_snapshot_v1(uri: text, path: text) -> LspVisibilitySnapshotV1?:
+    val snapshot = lsp_document_snapshot(uri)
+    if snapshot == nil: return nil
+    val value = snapshot.unwrap()
+    Some(LspVisibilitySnapshotV1(uri, lsp_query_file_argument_v1(path), value.version,
+        value.lifetime_generation, lsp_document_overlay_generation_v1()))
+
+pub fn lsp_visibility_snapshot_current_v1(snapshot: LspVisibilitySnapshotV1) -> bool:
+    val current = lsp_document_snapshot(snapshot.uri)
+    if snapshot.version < 0 or snapshot.lifetime_generation < 0:
+        return current == nil
+    if current == nil: return false
+    val value = current.unwrap()
+    value.version == snapshot.version and value.lifetime_generation == snapshot.lifetime_generation
+
+pub fn lsp_visibility_source_read_v1(path: text) -> LspVisibilitySourceV1:
+    val logical = lsp_query_file_argument_v1(path)
+    var index = 0
+    while index < LSP_DOCUMENT_OWNER.doc_uris.len():
+        val uri = LSP_DOCUMENT_OWNER.doc_uris[index]
+        val open_path = lsp_file_uri_to_path(uri)
+        if lsp_query_file_argument_v1(open_path) == logical:
+            val generation = lsp_document_overlay_generation_v1()
+            if not LSP_DOCUMENT_OWNER.doc_is_synchronized(uri):
+                return LspVisibilitySourceV1(
+                    status: LspVisibilitySourceStatusV1.OpenPending, path: logical,
+                    uri: uri, source_kind: "overlay", content: "", version: -1,
+                    lifetime_generation: -1, overlay_generation: generation)
+            val doc = LSP_DOCUMENT_OWNER.get_doc(uri)
+            return LspVisibilitySourceV1(
+                status: LspVisibilitySourceStatusV1.Ready, path: logical, uri: uri,
+                source_kind: "overlay", content: doc.content, version: doc.version,
+                lifetime_generation: doc.lifetime_generation, overlay_generation: generation)
+        index = index + 1
+    val generation = lsp_document_overlay_generation_v1()
+    if not file_exists(logical):
+        return LspVisibilitySourceV1(
+            status: LspVisibilitySourceStatusV1.Missing, path: logical, uri: "",
+            source_kind: "", content: "", version: -1,
+            lifetime_generation: -1, overlay_generation: generation)
+    match lsp_read_analyzed_source(logical):
+        case Ok(content):
+            LspVisibilitySourceV1(
+                status: LspVisibilitySourceStatusV1.Ready, path: logical, uri: "",
+                source_kind: "disk", content: content, version: -1,
+                lifetime_generation: -1, overlay_generation: generation)
+        case Err(_):
+            LspVisibilitySourceV1(
+                status: LspVisibilitySourceStatusV1.Unavailable, path: logical, uri: "",
+                source_kind: "", content: "", version: -1,
+                lifetime_generation: -1, overlay_generation: generation)
+
+pub fn lsp_visibility_source_reader_v1() -> LspVisibilitySourceReaderV1:
+    LspVisibilitySourceReaderV1(lsp_visibility_source_read_v1)
+
+pub fn lsp_visibility_dependencies_current_v1(dependencies: [LspVisibilityDependencyV1]) -> bool:
+    for dependency in dependencies:
+        if dependency.source_kind == "overlay":
+            val snapshot = lsp_document_snapshot(dependency.uri)
+            if snapshot == nil: return false
+            val value = snapshot.unwrap()
+            if value.version != dependency.version or
+                    value.lifetime_generation != dependency.lifetime_generation or
+                    value.content != dependency.content_snapshot:
+                return false
+        elif dependency.source_kind == "disk":
+            val source = lsp_visibility_source_read_v1(dependency.path)
+            if source.status != LspVisibilitySourceStatusV1.Ready or
+                    source.source_kind != "disk" or
+                    source.content != dependency.content_snapshot:
+                return false
+        elif dependency.source_kind == "missing":
+            if lsp_visibility_source_read_v1(dependency.path).status != LspVisibilitySourceStatusV1.Missing:
+                return false
+        else:
+            return false
+    true
 
 pub fn lsp_document_sync_uri(body: text) -> text:
     val parsed = json_parse_value_strict(body)
