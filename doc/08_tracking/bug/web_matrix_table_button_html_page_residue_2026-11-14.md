@@ -75,3 +75,20 @@ max-content of mixed inline content, control UA font reset, `h6` margins
     space** (`<span>ab </span>cd`): only `flex_item_max_content_width` got
     `inline_subtree_edge_is_space`. Inline boxes sized by the run loop can
     still be one space short.
+
+## Added after the second review
+
+18. **A percentage `max-width` is read as `none`, not resolved.** The
+    clamp slot `max_width_px` is px-only; until this lane `100%` was
+    parsed as 100 px, so `<td><input style="max-width:100%"></td>` was a
+    114 px table (Chrome 191) and the input 108 px (Chrome 185). It is now
+    left unset, which is right whenever the containing block is wider than
+    the box (the common `max-width:100%`) and wrong when it is narrower
+    (`max-width:50%` of a 900 px block does not clamp to 450). Same for
+    `max-inline-size` / `max-block-size`, which still go through
+    `parse_int`.
+19. **A button with an explicit height still finds its baseline only from
+    a direct `#text` child** (item 16 is the centring half of this).
+20. **AC-9 of `form_control_ua_font_reset_chrome159_spec` asserts the
+    `font-family: inherit` input only one-sided** (narrower than the sans
+    input). Chrome has 176; it becomes an exact row when item 14 lands.

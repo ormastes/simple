@@ -1474,7 +1474,7 @@ fn inline_subtree_edge_is_space(nodes: [HNode], styles: [Style], child_index: Ht
     if c < 0:
         return false
     if nodes[c].tag == "#text":
-        if styles[c].white_space_nowrap:
+        if styles[c].white_space_pre:
             return false
         return if leading: text_starts_with_collapsible_space(nodes[c].text_data) else: text_ends_with_collapsible_space(nodes[c].text_data)
     if styles[c].display != "inline" or grid_item_is_replaced(nodes[c]):
@@ -1519,9 +1519,9 @@ fn _lay_flex_item_max_content_width_inner(nodes: [HNode], styles: [Style], child
         if ctag == "#text":
             val txt: text = nodes[c].text_trimmed
             if txt.len() > 0:
-                if inline_run > 0 and (gap_pending or text_starts_with_collapsible_space(nodes[c].text_data)) and not cst.white_space_nowrap:
+                if inline_run > 0 and (gap_pending or text_starts_with_collapsible_space(nodes[c].text_data)) and not cst.white_space_pre:
                     inline_run = inline_run + resolved_space_advance(cst, text_codepoints(txt))
-                gap_pending = text_ends_with_collapsible_space(nodes[c].text_data) and not cst.white_space_nowrap
+                gap_pending = text_ends_with_collapsible_space(nodes[c].text_data) and not cst.white_space_pre
                 val resolved = cst.resolved_font_width
                 if resolved > 0:
                     inline_run = inline_run + resolved
@@ -1529,7 +1529,7 @@ fn _lay_flex_item_max_content_width_inner(nodes: [HNode], styles: [Style], child
                     val glyph_w = style_char_w(cst)
                     val ink_w = if glyph_w > 1: glyph_w - 1 else: glyph_w
                     inline_run = inline_run + (text_cell_width(txt) as i32) * ink_w
-            elif nodes[c].text_data.byte_len() > 0 and not cst.white_space_nowrap and inline_run > 0:
+            elif nodes[c].text_data.byte_len() > 0 and not cst.white_space_pre and inline_run > 0:
                 # A whitespace-only text node between two inline boxes
                 # (`<a>Edit</a> <a>Del</a>`) is one collapsible space.
                 gap_pending = true
@@ -1565,10 +1565,14 @@ fn _lay_flex_item_max_content_width_inner(nodes: [HNode], styles: [Style], child
                 if child_w > 0:
                     # A space may also sit INSIDE the neighbour: `<span>ab
                     # </span>cd` ends with one, `ab<span> cd</span>` starts
-                    # with one. Either way it is one space on this line.
-                    if inline_run > 0 and (gap_pending or inline_subtree_edge_is_space(nodes, styles, child_index, c, true)):
+                    # with one. Either way it is one space on this line. An
+                    # atomic box (inline-block, button, replaced) is not:
+                    # `ab<button> cd </button>ef` collapses those spaces INSIDE
+                    # the button, so they add nothing to this line.
+                    val edge_open = cst.display == "inline" and not grid_item_is_replaced(nodes[c])
+                    if inline_run > 0 and (gap_pending or (edge_open and inline_subtree_edge_is_space(nodes, styles, child_index, c, true))):
                         inline_run = inline_run + style_space_advance(styles[i])
-                    gap_pending = inline_subtree_edge_is_space(nodes, styles, child_index, c, false)
+                    gap_pending = edge_open and inline_subtree_edge_is_space(nodes, styles, child_index, c, false)
                 inline_run = inline_run + child_w
             else:
                 if inline_run > widest:

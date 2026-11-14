@@ -1640,6 +1640,16 @@ never cache an answer computed while exhausted) —
   `form_control_ua_font_reset_chrome159_spec`,
   `heading_ua_margins_chrome159_spec` (all in `test/01_unit/browser_engine`).
 - Residue: `doc/08_tracking/bug/web_matrix_table_button_html_page_residue_2026-11-14.md`.
+- **Trap — an atomic inline box keeps its edge spaces inside.**
+  `inline_subtree_edge_is_space` follows an inline element's first / last
+  text to find a space on the line; it must not be asked about an
+  inline-block, button or replaced child (`ab<button> cd </button>ef` is as
+  wide as `ab<button>cd</button>ef`). The call sites gate on
+  `display == "inline"` and not replaced. `white-space: nowrap` still
+  collapses (only `pre` keeps spaces), so a nowrap cell keeps the
+  inter-inline space in max-content.
+- **Trap — `max-width: <percent>` used to be N px.** The clamp slot is
+  px-only; a percentage is now `none` (residue item 18).
 - **Trap — a UA reset needs `inherit` to exist.** Resetting the control
   font exposed that NO font property resolved the `inherit` keyword
   (`font-family: inherit` stored the literal text; `font: inherit` cleared
