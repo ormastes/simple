@@ -23,7 +23,7 @@ typedef struct {
 } simple_xray_resident_admission_v1;
 
 #define SIMPLE_XRAY_RESIDENT_ADMISSION_INIT_V1 \
-    { ATOMIC_VAR_INIT(UINT64_C(1)), ATOMIC_VAR_INIT(NULL) }
+    { UINT64_C(1), NULL }
 
 /* Control owner only: publish is allowed after the previous generation closes
  * and drains. A failed publish changes neither descriptor nor admission. */

@@ -1,0 +1,57 @@
+name: XRay Linux native locator qualification (experimental)
+
+# Explicit operator qualification only. This does not change ordinary Windows
+# builds or advertise production Simple observer support.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xray-linux-native-qualification-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux-x64-locator:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/check
+            src/runtime/xray
+            test/fixtures/xray
+      - name: Install the explicit Linux LLVM profile
+        run: |
+          set -eu
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang-18 libclang-rt-18-dev
+      - name: Record actual toolchain and source identities
+        run: |
+          set -eu
+          mkdir -p build/xray-image-locator
+          clang-18 --version > build/xray-image-locator/compiler-version.txt
+          dpkg-query -W clang-18 libclang-rt-18-dev > build/xray-image-locator/packages.txt
+          compiler=$(readlink -f "$(command -v clang-18)")
+          archive=$(clang-18 --print-file-name=libclang_rt.xray.a)
+          test -f "$compiler"
+          test -f "$archive"
+          sha256sum "$compiler" "$archive" > build/xray-image-locator/toolchain-sha256.txt
+          printf 'schema: xray_linux_locator_qualification_v1\nsource_commit: "%s"\nrunner: "ubuntu-24.04"\narchitecture: "x86_64"\npublic_observer_admission: false\n' "$GITHUB_SHA" > build/xray-image-locator/provenance.sdn
+      - name: Execute the actual registered-image locator fixture
+        env:
+          CLANG: clang-18
+        run: |
+          set -eu
+          sh scripts/check/check-xray-llvm-image-locator.shs
+      - name: Retain native qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: xray-linux-x64-locator-${{ github.sha }}
+          path: build/xray-image-locator/
+          if-no-files-found: warn
+          retention-days: 14
