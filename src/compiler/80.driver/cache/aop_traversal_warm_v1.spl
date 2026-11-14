@@ -1,0 +1,195 @@
+# Session-local two-phase driver owner. Prepare restores certified baseline
+# before contract validation; finish uses the existing ordered forward weaver.
+use compiler.driver.driver_types.{CompileContext}
+use compiler.hir.hir_types.{HirModule}
+use compiler.common.cache_contract.directory_tldr_snapshot_v2.{DirectoryTldrSourceSnapshotV2}
+use compiler.common.cache_contract.traversal_output_cache_v1.{TraversalBatchStateV1,
+    TraversalModuleSnapshotV1, TraversalRetentionLedgerV1, traversal_output_cache_get_v1}
+use compiler.driver.cache.aop_traversal_inputs_v1.{AopTraversalInputsV1,
+    aop_traversal_inputs_capture_v1, aop_traversal_batch_capture_v1, aop_traversal_base_key_v1}
+use compiler.driver.cache.aop_traversal_snapshot_io_v1.{aop_traversal_session_id_v1,
+    aop_traversal_cache_create_v1, aop_traversal_cache_publish_v1,
+    aop_traversal_snapshots_match_v1, aop_traversal_restore_prepare_v1,
+    aop_traversal_restore_publish_v1}
+use compiler.driver.cache.aop_traversal_batch_identity_v1.{aop_traversal_all_claims_v1,
+    aop_traversal_ordered_identity_v1, aop_traversal_source_lineage_v1,
+    aop_traversal_union_selector_v1, aop_traversal_batch_apply_key_v1}
+use compiler.driver.cache.aop_match_cache_driver_v1.{aop_weave_forward_advice_cached_v1,
+    aop_match_driver_current_state_v1, aop_builtin_forward_match_acquire_v1,
+    aop_selector_plan_acquire_v1, aop_directory_snapshot_matches_v2, aop_directory_snapshots_cover_modules_v2}
+use compiler.common.cache_contract.aspect_match_shard_v1.{JoinPointFactV1, DirectoryJoinPointFactsV1}
+use compiler.common.cache_contract.aspect_traversal_v1.{TraversalPlugin, TraversalPriorStateV1,
+    BuiltinForwardTraversalV1, traversal_dir_view_v1, traversal_prior_v1}
+
+struct TraversalBatchDeltaV1:
+    priors: [TraversalPriorStateV1]
+    reusable: bool
+
+fn _aop_traversal_batch_delta_v1(modules: Dict<text, HirModule>,
+        snapshots: [DirectoryTldrSourceSnapshotV2], prepared: TraversalVisitPreparationV1) -> Result<TraversalBatchDeltaV1, text>:
+    val state = aop_match_driver_current_state_v1()
+    val selector_source = aop_traversal_union_selector_v1(aop_traversal_all_claims_v1(modules))
+    val selector = aop_selector_plan_acquire_v1(state, selector_source)
+    var priors: [TraversalPriorStateV1] = []
+    var reusable = prepared.previous != nil
+    var old: Dict<text, TraversalPriorStateV1> = {}
+    if prepared.previous != nil:
+        for prior in prepared.previous.unwrap().directory_priors: old[prior.scope_id] = prior
+        if old.len() != snapshots.len(): reusable = false
+    for snapshot in snapshots:
+        if not aop_directory_snapshot_matches_v2(snapshot, snapshot.facts):
+            return Err("traversal-batch-snapshot-invalid")
+        val acquired = aop_builtin_forward_match_acquire_v1(state, snapshot.executing_image_digest,
+            selector_source, snapshot.facts, "traversal-batch")?
+        var points: [JoinPointFactV1] = []
+        for point in snapshot.facts.sorted_join_points:
+            val sep = point.id.rfind("::")
+            if sep == nil or point.id.slice(sep! + 2) != point.symbol:
+                return Err("traversal-batch-symbol-invalid")
+            val base = aop_traversal_base_key_v1(prepared.inputs, point.id.slice(0, sep!), point.symbol)?
+            points.push(JoinPointFactV1(..point, base_body_digest: base))
+        val facts = DirectoryJoinPointFactsV1(..snapshot.facts, sorted_join_points: points)
+        var apply: Dict<text, text> = {}
+        for id in acquired.shard.sorted_matching_ids:
+            val sep = id.rfind("::")
+            if sep == nil: return Err("traversal-batch-id-invalid")
+            val base = aop_traversal_base_key_v1(prepared.inputs, id.slice(0, sep!), id.slice(sep! + 2))?
+            apply[id] = aop_traversal_batch_apply_key_v1(acquired.shard.match_digest,
+                prepared.ordered_claim_identity, base, snapshot.executing_image_digest)
+        val previous = if old.contains_key(snapshot.scope_id): Some(old[snapshot.scope_id]) else: nil
+        val view = traversal_dir_view_v1(snapshot.scope_id, "sha256:" + snapshot.executing_image_digest,
+            facts, selector, acquired.shard, apply, previous)?
+        val key = acquired.instance.key
+        if not state.traversal_instances.contains_key(key):
+            if state.traversal_instances.len() >= 256: return Err("traversal-instance-budget")
+            state.traversal_instances[key] = BuiltinForwardTraversalV1(instance_key: key)
+        val delta = state.traversal_instances[key].visit(view, selector)
+        if previous == nil or delta.weave.len() != 0 or delta.unweave.len() != 0 or delta.reweave.len() != 0:
+            reusable = false
+        priors.push(traversal_prior_v1(view))
+    Ok(TraversalBatchDeltaV1(priors: priors, reusable: reusable))
+
+pub struct TraversalVisitPreparationV1:
+    source_lineage: text
+    ordered_claim_identity: text
+    baseline: [TraversalModuleSnapshotV1]
+    inputs: AopTraversalInputsV1
+    previous: TraversalBatchStateV1?
+    previous_lease: i64
+
+# No optional graph is read until the independent scalar session guard passes.
+fn _aop_traversal_context_owner_v1(context: CompileContext) -> Result<bool, text>:
+    val session = aop_traversal_session_id_v1()
+    if context.aop_traversal_cache_session_v1 != session:
+        if context.aop_traversal_started_epoch_v1 != 0:
+            return Err("traversal-woven-session-changed-requires-lowering")
+        context.aop_traversal_cache_initialized_v1 = false
+        context.aop_traversal_output_lease_v1 = 0
+        context.aop_traversal_cache_session_v1 = session
+    if session <= 0: return Ok(false)
+    if not context.aop_traversal_cache_initialized_v1:
+        context.aop_traversal_cache_v1 = Some(aop_traversal_cache_create_v1(session)?)
+        context.aop_traversal_retention_v1 = Some(TraversalRetentionLedgerV1.create(
+            session, 33554432, 134217728)?)
+        context.aop_traversal_cache_initialized_v1 = true
+    Ok(true)
+
+pub fn aop_traversal_prepare_visit_v1(context: CompileContext,
+        modules: Dict<text, HirModule>, snapshots: [DirectoryTldrSourceSnapshotV2]) -> Result<TraversalVisitPreparationV1?, text>:
+    if context.aop_source_epoch_v2 <= 0: return Err("traversal-lowering-epoch-unavailable")
+    val repeated = context.aop_traversal_started_epoch_v1 != 0
+    val owner_result = _aop_traversal_context_owner_v1(context)
+    if owner_result.is_err():
+        if repeated: return Err("traversal-woven-owner-refused-requires-lowering")
+        return Ok(nil)
+    val owner = owner_result.unwrap()
+    if not owner:
+        if repeated: return Err("traversal-woven-owner-unavailable-requires-lowering")
+        return Ok(nil)
+    if not aop_directory_snapshots_cover_modules_v2(modules, snapshots):
+        if repeated: return Err("traversal-woven-snapshot-coverage-missing-requires-lowering")
+        return Ok(nil)
+    val lineage = aop_traversal_source_lineage_v1(snapshots)
+    if lineage.is_err():
+        if repeated: return Err("traversal-woven-authority-unavailable-requires-lowering")
+        return Ok(nil)
+    val ledger = context.aop_traversal_retention_v1.unwrap()
+    val previous_lease = context.aop_traversal_output_lease_v1
+    var previous: TraversalBatchStateV1? = nil
+    var baseline: [TraversalModuleSnapshotV1] = []
+    if repeated:
+        if context.aop_traversal_completed_epoch_v1 != context.aop_source_epoch_v2:
+            return Err("traversal-incomplete-visit-requires-lowering")
+        previous = traversal_output_cache_get_v1(context.aop_traversal_cache_v1.unwrap(),
+            context.aop_traversal_output_lease_v1)
+        if previous == nil: return Err("traversal-woven-baseline-missing-requires-lowering")
+        val prior = previous.unwrap()
+        if prior.origin_epoch != context.aop_source_epoch_v2 or prior.source_lineage != lineage.unwrap():
+            return Err("traversal-woven-lineage-changed-requires-lowering")
+        val exact = aop_traversal_snapshots_match_v1(modules, prior.output)?
+        if not exact: return Err("traversal-woven-output-mutated-requires-lowering")
+        val restored = aop_traversal_restore_prepare_v1(modules, prior.baseline, ledger)?
+        # All checks and allocations completed. Mark incomplete before writes;
+        # any subsequent validation failure requires a genuinely fresh lowering.
+        context.aop_traversal_completed_epoch_v1 = 0
+        context.aop_traversal_output_lease_v1 = 0
+        aop_traversal_restore_publish_v1(modules, restored)
+        baseline = prior.baseline
+    val claims = aop_traversal_all_claims_v1(modules)
+    if repeated:
+        val inputs = aop_traversal_inputs_capture_v1(modules, claims, 1024, 8388608)?
+        val ordered = aop_traversal_ordered_identity_v1(claims, inputs)?
+        return Ok(Some(TraversalVisitPreparationV1(source_lineage: lineage.unwrap(),
+            ordered_claim_identity: ordered, baseline: baseline, inputs: inputs, previous: previous, previous_lease: previous_lease)))
+    # Fresh input may retain a baseline only while the monotonic owner budget
+    # admits it. Refusal preserves the existing full-visit cold behavior.
+    val captured = aop_traversal_batch_capture_v1(modules, claims, 1024, 8388608, ledger)
+    if captured.is_err(): return Ok(nil)
+    val ordered = aop_traversal_ordered_identity_v1(claims, captured.unwrap().inputs)
+    if ordered.is_err(): return Ok(nil)
+    Ok(Some(TraversalVisitPreparationV1(source_lineage: lineage.unwrap(),
+        ordered_claim_identity: ordered.unwrap(), baseline: captured.unwrap().snapshots,
+        inputs: captured.unwrap().inputs, previous: nil, previous_lease: 0)))
+
+pub fn aop_traversal_finish_visit_v1(context: CompileContext,
+        modules: Dict<text, HirModule>, snapshots: [DirectoryTldrSourceSnapshotV2],
+        prepared: TraversalVisitPreparationV1?) -> Result<i64, text>:
+    if context.aop_traversal_cache_initialized_v1 and
+            context.aop_traversal_cache_session_v1 != aop_traversal_session_id_v1():
+        return Err("traversal-session-ended-during-validation")
+    # No successful early return for zero claims: a repeated visit has already
+    # restored the baseline, so removing every claim removes installed advice.
+    context.aop_traversal_started_epoch_v1 = context.aop_source_epoch_v2
+    var aggregate: TraversalBatchDeltaV1? = nil
+    if prepared != nil:
+        val plan = prepared.unwrap()
+        val computed = _aop_traversal_batch_delta_v1(modules, snapshots, plan)
+        if computed.is_ok(): aggregate = Some(computed.unwrap())
+        if aggregate != nil and aggregate.unwrap().reusable and plan.previous != nil and
+                plan.previous.unwrap().ordered_claim_identity == plan.ordered_claim_identity:
+            val restored = aop_traversal_restore_prepare_v1(modules, plan.previous.unwrap().output,
+                context.aop_traversal_retention_v1.unwrap())?
+            aop_traversal_restore_publish_v1(modules, restored)
+            context.aop_traversal_output_lease_v1 = plan.previous_lease
+            context.aop_traversal_completed_epoch_v1 = context.aop_source_epoch_v2
+            context.aop_traversal_reuse_hits_v1 = context.aop_traversal_reuse_hits_v1 + 1
+            # Existing return value counts this visit's actual weaver rewrites.
+            return Ok(0)
+    val inputs = if prepared == nil: nil else: Some(prepared.unwrap().inputs)
+    val woven = aop_weave_forward_advice_cached_v1(modules, Some(snapshots), inputs)
+    context.aop_traversal_completed_epoch_v1 = context.aop_source_epoch_v2
+    context.aop_traversal_output_lease_v1 = 0
+    if prepared == nil: return Ok(woven)
+    val plan = prepared.unwrap()
+    val ledger = context.aop_traversal_retention_v1.unwrap()
+    val output = aop_traversal_batch_capture_v1(modules, [], 1024, 8388608, ledger)
+    if output.is_err(): return Ok(woven)
+    val entry = TraversalBatchStateV1(origin_epoch: context.aop_source_epoch_v2,
+        source_lineage: plan.source_lineage, ordered_claim_identity: plan.ordered_claim_identity,
+        baseline: plan.baseline, output: output.unwrap().snapshots,
+        directory_priors: if aggregate == nil: [] else: aggregate.unwrap().priors, woven: woven)
+    val published = aop_traversal_cache_publish_v1(context.aop_traversal_cache_v1.unwrap(), entry)
+    if published.is_ok():
+        context.aop_traversal_cache_v1 = Some(published.unwrap().cache)
+        context.aop_traversal_output_lease_v1 = published.unwrap().lease
+    Ok(woven)

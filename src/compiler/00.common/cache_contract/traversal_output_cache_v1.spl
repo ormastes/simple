@@ -1,0 +1,150 @@
+# Session-owned immutable ordinary snapshots. No global cache or cross-session
+# admission: the driver checks the live session before dereferencing this graph.
+use compiler.common.cache_contract.aspect_traversal_v1.{TraversalPriorStateV1}
+
+pub struct TraversalModuleSnapshotV1:
+    module_key: text
+    module_name: text
+    module_path: text
+    blob: text
+    digest: text
+
+pub struct TraversalBatchStateV1:
+    origin_epoch: i64
+    source_lineage: text
+    ordered_claim_identity: text
+    baseline: [TraversalModuleSnapshotV1]
+    output: [TraversalModuleSnapshotV1]
+    directory_priors: [TraversalPriorStateV1]
+    woven: i64
+
+pub struct TraversalOutputCacheV1:
+    session_id: i64
+    max_entries: i64
+    max_bytes: i64
+    retained_bytes: i64
+    entries: [TraversalBatchStateV1]
+
+pub struct TraversalCachePublishV1:
+    cache: TraversalOutputCacheV1
+    lease: i64
+
+pub fn traversal_output_cache_new_v1(session_id: i64, max_entries: i64,
+        max_bytes: i64) -> Result<TraversalOutputCacheV1, text>:
+    if session_id <= 0 or max_entries <= 0 or max_bytes <= 0:
+        return Err("traversal-cache-owner-or-budget-invalid")
+    Ok(TraversalOutputCacheV1(session_id: session_id, max_entries: max_entries,
+        max_bytes: max_bytes, retained_bytes: 0, entries: []))
+
+pub fn traversal_snapshot_rows_equal_v1(left: [TraversalModuleSnapshotV1],
+        right: [TraversalModuleSnapshotV1]) -> bool:
+    if left.len() != right.len(): return false
+    for i in 0..left.len():
+        val a = left[i]
+        val b = right[i]
+        # Exact bytes are mandatory even when the digest matches.
+        if a.module_key != b.module_key or a.module_name != b.module_name or
+                a.module_path != b.module_path or a.digest != b.digest or a.blob != b.blob:
+            return false
+    true
+
+pub fn traversal_output_cache_get_v1(cache: TraversalOutputCacheV1,
+        lease: i64) -> TraversalBatchStateV1?:
+    if lease <= 0 or lease > cache.entries.len(): return nil
+    Some(cache.entries[lease - 1])
+
+pub fn traversal_output_cache_find_v1(cache: TraversalOutputCacheV1,
+        source_lineage: text, ordered_claim_identity: text,
+        baseline: [TraversalModuleSnapshotV1]) -> i64:
+    for i in 0..cache.entries.len():
+        val entry = cache.entries[i]
+        if entry.source_lineage == source_lineage and
+                entry.ordered_claim_identity == ordered_claim_identity and
+                traversal_snapshot_rows_equal_v1(entry.baseline, baseline): return i + 1
+    0
+
+fn _traversal_charge_texts_v1(total: i64, values: [text], cap: i64) -> Result<i64, text>:
+    var charged = total
+    for value in values:
+        val size = value.byte_len()
+        if size > cap - charged: return Err("traversal-cache-byte-budget")
+        charged = charged + size
+    Ok(charged)
+
+fn _traversal_charge_prior_v1(prior: TraversalPriorStateV1,
+        used: i64, cap: i64) -> Result<i64, text>:
+    var total = _traversal_charge_texts_v1(used, [prior.scope_id, prior.executing_image_digest,
+        prior.facts.scope_id, prior.facts.negative_root, prior.facts.active_guard_root,
+        prior.facts.facts_key, prior.selector.source, prior.selector.form, prior.selector.operand,
+        prior.selector.selector_digest, prior.shard.selector_digest,
+        prior.shard.dir_facts_key, prior.shard.match_digest], cap)?
+    total = _traversal_charge_texts_v1(total, prior.facts.sorted_member_files, cap)?
+    total = _traversal_charge_texts_v1(total, prior.facts.sorted_child_roots, cap)?
+    total = _traversal_charge_texts_v1(total, prior.shard.sorted_matching_ids, cap)?
+    for point in prior.facts.sorted_join_points:
+        total = _traversal_charge_texts_v1(total,
+            [point.id, point.kind, point.symbol, point.owner_file, point.base_body_digest], cap)?
+        total = _traversal_charge_texts_v1(total, point.attrs, cap)?
+    for node in prior.selector.nodes:
+        total = _traversal_charge_texts_v1(total, [node.op, node.form, node.operand], cap)?
+    for id in prior.apply.keys():
+        total = _traversal_charge_texts_v1(total, [id, prior.apply[id]], cap)?
+    Ok(total)
+
+# Append-only until session teardown: dropping a reference is not physical
+# reclamation of promoted session storage. No eviction/lease-id recycling.
+pub fn traversal_output_cache_append_v1(cache: TraversalOutputCacheV1,
+        entry: TraversalBatchStateV1) -> Result<TraversalCachePublishV1, text>:
+    if cache.entries.len() >= cache.max_entries: return Err("traversal-cache-entry-budget")
+    if entry.origin_epoch <= 0 or entry.source_lineage == "" or entry.ordered_claim_identity == "":
+        return Err("traversal-cache-entry-identity-invalid")
+    if entry.baseline.len() != entry.output.len(): return Err("traversal-cache-module-set-mismatch")
+    var total = _traversal_charge_texts_v1(cache.retained_bytes,
+        [entry.source_lineage, entry.ordered_claim_identity], cache.max_bytes)?
+    for i in 0..entry.baseline.len():
+        val base = entry.baseline[i]
+        val output = entry.output[i]
+        if base.module_key != output.module_key or base.module_name != output.module_name or
+                base.module_path != output.module_path: return Err("traversal-cache-module-identity-mismatch")
+        total = _traversal_charge_texts_v1(total, [base.module_key, base.module_name,
+            base.module_path, base.blob, base.digest, output.module_key, output.module_name,
+            output.module_path, output.blob, output.digest], cache.max_bytes)?
+    for prior in entry.directory_priors:
+        total = _traversal_charge_prior_v1(prior, total, cache.max_bytes)?
+    var entries: [TraversalBatchStateV1] = []
+    for old in cache.entries: entries.push(old)
+    entries.push(entry)
+    Ok(TraversalCachePublishV1(cache: TraversalOutputCacheV1(..cache,
+        retained_bytes: total, entries: entries), lease: entries.len()))
+
+# Monotonic session ledger includes candidates that never reach the cache.
+# These are separate logical bounds, not a claim about allocator RSS. Restore
+# reservations cover the admitted decoder modeled-allocation ceiling, even on failure.
+pub class TraversalRetentionLedgerV1:
+    session_id: i64
+    max_blob_bytes: i64
+    promoted_blob_bytes: i64
+    max_restore_allocation: i64
+    reserved_restore_allocation: i64
+
+    static fn create(session_id: i64, max_blob_bytes: i64,
+            max_restore_allocation: i64) -> Result<TraversalRetentionLedgerV1, text>:
+        if session_id <= 0 or max_blob_bytes <= 0 or max_restore_allocation <= 0:
+            return Err("traversal-retention-owner-or-budget-invalid")
+        Ok(TraversalRetentionLedgerV1(session_id: session_id, max_blob_bytes: max_blob_bytes,
+            promoted_blob_bytes: 0, max_restore_allocation: max_restore_allocation,
+            reserved_restore_allocation: 0))
+
+    fn blob_remaining() -> i64:
+        self.max_blob_bytes - self.promoted_blob_bytes
+
+    me charge_blob(size: i64) -> bool:
+        if size < 0 or size > self.blob_remaining(): return false
+        self.promoted_blob_bytes = self.promoted_blob_bytes + size
+        true
+
+    me reserve_restore(size: i64) -> bool:
+        if size <= 0 or size > self.max_restore_allocation - self.reserved_restore_allocation:
+            return false
+        self.reserved_restore_allocation = self.reserved_restore_allocation + size
+        true

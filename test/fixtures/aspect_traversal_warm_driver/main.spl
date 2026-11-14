@@ -1,0 +1,111 @@
+# AUTHORED / UNRUN. Actual driver validation/weaving caller, actual parser/HIR,
+# ordinary codec and native session. Snapshot DTOs describe this complete test
+# universe; they are NOT evidence of the managed inventory admission producer.
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.common.config.{Logger}
+use compiler.common.driver_compile_options.{CompileOptions}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_hir_pipeline_support.{driver_validate_value_struct_layout_declarations_v1}
+use compiler.driver.cache.aop_match_cache_driver_v1.{aop_directory_facts_from_hir_v1,
+    aop_match_driver_reset_before_session_end_v1}
+use compiler.common.cache_contract.directory_tldr_snapshot_v2.{DirectoryTldrSourceSnapshotV2}
+use compiler.frontend.aspect_registry.{aspect_registry_reset}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.transient.{rt_session_heap_begin, rt_session_heap_end,
+    transient_session_heap_id_v1}
+
+val WARM_SOURCE = "fn implementation(n: i64) -> i64:\n    n + 1\n\nfn facade(n: i64) -> i64:\n    implementation(n)\n\n@advice(forward, facade)\n@readonly\n@noalloc\n@bounded_time\nfn observe():\n    val marker = 1\n"
+
+fn warm_stmt_count(modules: Dict<text, HirModule>) -> i64:
+    for key in modules.keys():
+        for id in modules[key].functions.keys():
+            val function = modules[key].functions[id]
+            if function.name == "facade": return function.body.stmts.len()
+    -1
+
+fn mutate_warm_body(modules: Dict<text, HirModule>) -> HirFunction:
+    for key in modules.keys():
+        for id in modules[key].functions.keys():
+            val function = modules[key].functions[id]
+            if function.name == "facade":
+                val old_body = function.body
+                val old_value = old_body.value
+                val changed = HirExpr(..old_value, kind: HirExprKind.IntLit(777, nil))
+                val body = HirBlock(..old_body, value: changed)
+                modules[key].functions[id] = HirFunction(..function, body: body)
+                return function
+    panic("warm fixture forwarder missing")
+
+fn warm_test_snapshots(modules: Dict<text, HirModule>, executing_image: text) -> [DirectoryTldrSourceSnapshotV2]:
+    var snapshots: [DirectoryTldrSourceSnapshotV2] = []
+    val digest = sha256_text(WARM_SOURCE)
+    for facts in aop_directory_facts_from_hir_v1(modules, {"warm/fixture.spl": WARM_SOURCE}):
+        snapshots.push(DirectoryTldrSourceSnapshotV2(scope_id: facts.scope_id,
+            inventory_digest: digest, declared_producer_digest: digest,
+            executing_image_digest: executing_image, file_tldr_root_digest: digest, facts: facts))
+    snapshots
+
+fn main() -> i32:
+    assert(transient_session_heap_id_v1() == 0u32)
+    val context = CompileContext.create(CompileOptions.default())
+    context.aop_source_epoch_v2 = 1
+    var session: u32 = 0u32
+    unsafe(capabilities: [ffi]):
+        session = rt_session_heap_begin()
+    if session == 0u32: panic("native session runtime unavailable")
+    aspect_registry_reset()
+    val parsed = parse_full_frontend(WARM_SOURCE, "warm/fixture.spl", "warm_fixture", Logger(level: 0))
+    var lowering = HirLowering.with_filename("warm/fixture.spl")
+    val module = lowering.lower_module(parsed)
+    val modules = {"warm_fixture": module}
+    val image = context.kernel_image_digest_provider().unwrap()
+    val snapshots = warm_test_snapshots(modules, image.sha256)
+    val baseline = warm_stmt_count(modules)
+    assert(baseline >= 0)
+    val first = driver_validate_value_struct_layout_declarations_v1([], [], modules,
+        aop_snapshots: Some(snapshots), aop_context: Some(context))
+    assert(first.len() == 0)
+    assert(context.aop_traversal_output_lease_v1 > 0)
+    assert(warm_stmt_count(modules) == baseline + 1)
+    val bytes_after_cold = context.aop_traversal_retention_v1.unwrap().promoted_blob_bytes
+    val second = driver_validate_value_struct_layout_declarations_v1([], [], modules,
+        aop_snapshots: Some(snapshots), aop_context: Some(context))
+    assert(second.len() == 0)
+    assert(context.aop_traversal_reuse_hits_v1 == 1)
+    assert(warm_stmt_count(modules) == baseline + 1)
+    assert(context.aop_traversal_retention_v1.unwrap().promoted_blob_bytes == bytes_after_cold)
+    # Controlled registry update models an empty selected claim batch. No
+    # source/inventory admission claim is made for this test-only update.
+    aspect_registry_reset()
+    val removed = driver_validate_value_struct_layout_declarations_v1([], [], modules,
+        aop_snapshots: Some(snapshots), aop_context: Some(context))
+    assert(removed.len() == 0)
+    assert(warm_stmt_count(modules) == baseline)
+    val original_function = mutate_warm_body(modules)
+    val mutated = driver_validate_value_struct_layout_declarations_v1([], [], modules,
+        aop_snapshots: Some(snapshots), aop_context: Some(context))
+    assert(mutated.len() > 0)
+    # The checked refusal must not guess a baseline from mutated input.
+    match module.functions[original_function.symbol].body.value.kind:
+        case HirExprKind.IntLit(value, _): assert(value == 777)
+        case _: panic("mutated input was unexpectedly restored")
+    module.functions[original_function.symbol] = original_function
+    # A woven/revisited epoch without a retained lease must fail closed.
+    context.aop_traversal_output_lease_v1 = 0
+    val missing = driver_validate_value_struct_layout_declarations_v1([], [], modules,
+        aop_snapshots: Some(snapshots), aop_context: Some(context))
+    assert(missing.len() > 0)
+    assert(warm_stmt_count(modules) == baseline)
+    aop_match_driver_reset_before_session_end_v1()
+    var ended = false
+    unsafe(capabilities: [ffi]):
+        ended = rt_session_heap_end(session)
+    if not ended: panic("native session teardown refused")
+    # Registry globals are rebuilt outside the ended allocation owner.
+    aspect_registry_reset()
+    assert(ended)
+    0

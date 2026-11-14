@@ -1,0 +1,70 @@
+# F1 warm ownership contract. Pure data checks do not qualify native session
+# lifetime, decoder admission, or atomic body publication.
+use std.spec
+use compiler.common.cache_contract.traversal_output_cache_v1.*
+
+fn warm_row(blob: text) -> TraversalModuleSnapshotV1:
+    TraversalModuleSnapshotV1(module_key: "app", module_name: "app",
+        module_path: "src/app.spl", blob: blob, digest: "deliberate-same-digest")
+
+fn warm_entry(claims: text) -> TraversalBatchStateV1:
+    TraversalBatchStateV1(origin_epoch: 1, source_lineage: "source-epoch-1",
+        ordered_claim_identity: claims, baseline: [warm_row("baseline")],
+        output: [warm_row("output")], directory_priors: [], woven: 1)
+
+describe "session-owned traversal output cache":
+    it "refuses absent owner and nonpositive bounds":
+        expect(traversal_output_cache_new_v1(0, 4, 1024).is_err()).to_equal(true)
+        expect(traversal_output_cache_new_v1(1, 0, 1024).is_err()).to_equal(true)
+        expect(traversal_output_cache_new_v1(1, 4, 0).is_err()).to_equal(true)
+
+    it "checks exact bytes even when snapshot digests collide":
+        expect(traversal_snapshot_rows_equal_v1([warm_row("a")], [warm_row("b")])).to_equal(false)
+        expect(traversal_snapshot_rows_equal_v1([warm_row("a")], [warm_row("a")])).to_equal(true)
+
+    it "binds reuse to ordered claims and lineage":
+        val initial = traversal_output_cache_new_v1(11, 4, 4096).unwrap()
+        val published = traversal_output_cache_append_v1(initial, warm_entry("first;second")).unwrap()
+        expect(published.lease).to_equal(1)
+        expect(traversal_output_cache_find_v1(published.cache, "source-epoch-1",
+            "first;second", [warm_row("baseline")])).to_equal(1)
+        expect(traversal_output_cache_find_v1(published.cache, "source-epoch-1",
+            "second;first", [warm_row("baseline")])).to_equal(0)
+        expect(traversal_output_cache_find_v1(published.cache, "new-source",
+            "first;second", [warm_row("baseline")])).to_equal(0)
+        expect(traversal_output_cache_find_v1(published.cache, "source-epoch-1",
+            "first;second", [warm_row("mutated")])).to_equal(0)
+
+    it "never evicts or recycles an issued lease at capacity":
+        val initial = traversal_output_cache_new_v1(11, 1, 4096).unwrap()
+        val published = traversal_output_cache_append_v1(initial, warm_entry("one")).unwrap()
+        expect(traversal_output_cache_append_v1(published.cache, warm_entry("two")).is_err()).to_equal(true)
+        expect(traversal_output_cache_get_v1(published.cache, 1).unwrap().ordered_claim_identity).to_equal("one")
+        expect(traversal_output_cache_get_v1(published.cache, 0)).to_be_nil()
+        expect(traversal_output_cache_get_v1(published.cache, 2)).to_be_nil()
+
+    it "refuses retention beyond the UTF-8 payload budget":
+        val initial = traversal_output_cache_new_v1(11, 4, 1).unwrap()
+        expect(traversal_output_cache_append_v1(initial, warm_entry("one")).is_err()).to_equal(true)
+        expect(initial.retained_bytes).to_equal(0)
+        expect(initial.entries.len()).to_equal(0)
+
+    it "never refunds candidates or restore reservations after a later refusal":
+        val ledger = TraversalRetentionLedgerV1.create(11, 10, 32).unwrap()
+        expect(ledger.charge_blob(7)).to_equal(true)
+        expect(ledger.charge_blob(4)).to_equal(false)
+        expect(ledger.blob_remaining()).to_equal(3)
+        expect(ledger.reserve_restore(16)).to_equal(true)
+        expect(ledger.reserve_restore(17)).to_equal(false)
+        expect(ledger.reserved_restore_allocation).to_equal(16)
+        expect(ledger.reserve_restore(16)).to_equal(true)
+        expect(ledger.reserve_restore(1)).to_equal(false)
+
+    it "charges UTF-8 bytes rather than character count":
+        val cache = traversal_output_cache_new_v1(11, 4, 4096).unwrap()
+        val entry = warm_entry("one")
+        val ascii = TraversalBatchStateV1(..entry, baseline: [warm_row("a")], output: [warm_row("a")])
+        val unicode = TraversalBatchStateV1(..entry, baseline: [warm_row("한")], output: [warm_row("a")])
+        val ascii_cache = traversal_output_cache_append_v1(cache, ascii).unwrap().cache
+        val unicode_cache = traversal_output_cache_append_v1(cache, unicode).unwrap().cache
+        expect(unicode_cache.retained_bytes - ascii_cache.retained_bytes).to_equal(2)

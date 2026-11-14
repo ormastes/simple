@@ -230,6 +230,22 @@ pub fn aop_directory_snapshot_matches_v2(snapshot: DirectoryTldrSourceSnapshotV2
         three_payload_contract_digest_valid_v1(snapshot.declared_producer_digest) and
         three_payload_contract_digest_valid_v1(snapshot.executing_image_digest) and
         three_payload_contract_digest_valid_v1(snapshot.file_tldr_root_digest)
+pub fn aop_directory_snapshots_cover_modules_v2(modules: Dict<text, HirModule>,
+        snapshots: [DirectoryTldrSourceSnapshotV2]) -> bool:
+    var files: Dict<text, bool> = {}
+    var scopes: Dict<text, bool> = {}
+    for snapshot in snapshots:
+        if scopes.contains_key(snapshot.scope_id) or
+                not aop_directory_snapshot_matches_v2(snapshot, snapshot.facts): return false
+        scopes[snapshot.scope_id] = true
+        for path in snapshot.facts.sorted_member_files:
+            if files.contains_key(path) or _dir_of(path) != snapshot.scope_id: return false
+            files[path] = true
+    if files.len() != modules.len(): return false
+    for key in modules.keys():
+        if not files.contains_key(_module_file(key, modules[key])): return false
+    true
+
 pub struct AopPluginMatchAcquireV1:
     instance: PluginInstanceDescriptorV1
     instance_hit: bool
@@ -310,7 +326,8 @@ fn _aop_traversal_cold_ids_v1(state: AopMatchDriverStateV1,
 # per-module weaver, but module visits are driven by the matched shard ids.
 pub fn aop_weave_with_match_cache_v1(state: AopMatchDriverStateV1,
         modules: Dict<text, HirModule>,
-        snapshots: [DirectoryTldrSourceSnapshotV2]? = nil) -> i64:
+        snapshots: [DirectoryTldrSourceSnapshotV2]? = nil,
+        captured_inputs: AopTraversalInputsV1? = nil) -> i64:
     var woven: i64 = 0
     val module_ids = aspect_module_identity_index(modules)
     val claims = aspect_forward_weave_claims_v1(module_ids, forward_join_points(modules))
@@ -342,8 +359,8 @@ pub fn aop_weave_with_match_cache_v1(state: AopMatchDriverStateV1,
                 snapshot_coverage_complete = false
     # One immutable coarse body capture for the full ordered claim batch.
     # Failed authority/encoding never publishes a reusable or empty-success plan.
-    var traversal_inputs: AopTraversalInputsV1? = nil
-    if snapshots != nil and snapshot_coverage_complete:
+    var traversal_inputs: AopTraversalInputsV1? = captured_inputs
+    if snapshots != nil and snapshot_coverage_complete and traversal_inputs == nil:
         match aop_traversal_inputs_capture_v1(modules, claims, 1024, 8388608):
             case Ok(inputs): traversal_inputs = Some(inputs)
             case Err(_): pass
@@ -428,8 +445,9 @@ pub fn aop_match_driver_current_state_v1() -> AopMatchDriverStateV1:
     _aop_match_driver_state_v1.unwrap()
 
 pub fn aop_weave_forward_advice_cached_v1(modules: Dict<text, HirModule>,
-        snapshots: [DirectoryTldrSourceSnapshotV2]? = nil) -> i64:
-    aop_weave_with_match_cache_v1(aop_match_driver_current_state_v1(), modules, snapshots)
+        snapshots: [DirectoryTldrSourceSnapshotV2]? = nil,
+        captured_inputs: AopTraversalInputsV1? = nil) -> i64:
+    aop_weave_with_match_cache_v1(aop_match_driver_current_state_v1(), modules, snapshots, captured_inputs)
 
 export aop_weave_forward_advice_cached_v1, aop_match_driver_reset_before_session_end_v1
 export aop_match_driver_current_state_v1
