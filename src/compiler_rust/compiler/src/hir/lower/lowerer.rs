@@ -339,6 +339,37 @@ pub struct Lowerer {
     pub(super) untyped_empty_array_locals: HashSet<usize>,
 }
 
+thread_local! {
+    /// Private-fn references found by the lowering in progress; `Some` while
+    /// the gate is armed (JIT run lane only, see `arm_private_ref_gate`).
+    static PRIVATE_REF_VIOLATIONS: std::cell::RefCell<Option<Vec<PrivateRefViolation>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn private_ref_gate_armed() -> bool {
+    PRIVATE_REF_VIOLATIONS.with(|cell| cell.borrow().is_some())
+}
+
+/// Arm the private-fn reference gate for the lowerings that follow on this
+/// thread, until `take_private_ref_violations`.
+pub(crate) fn arm_private_ref_gate() {
+    PRIVATE_REF_VIOLATIONS.with(|cell| *cell.borrow_mut() = Some(Vec::new()));
+}
+
+/// A reference to a private fn of another directory found while lowering.
+pub struct PrivateRefViolation {
+    /// Emitted name of the function whose body holds the reference; `None`
+    /// for module-level code (a global initializer), which always runs.
+    pub function: Option<String>,
+    /// The visibility error, as the interpreter's call rule words it.
+    pub message: String,
+}
+
+/// Disarm the gate and return what it recorded: one entry per distinct
+/// (holding function, private fn) reference in the lowered unit.
+pub fn take_private_ref_violations() -> Vec<PrivateRefViolation> {
+    PRIVATE_REF_VIOLATIONS.with(|cell| cell.borrow_mut().take()).unwrap_or_default()
+}
+
 impl Lowerer {
     /// Create a new lowerer with STRICT memory mode (Rust-level safety)
     /// Memory safety violations are compile-time ERRORS by default.
@@ -1376,6 +1407,109 @@ impl Lowerer {
             .get(importer)?
             .get(ns)
             .map(String::as_str)
+    }
+
+    /// `(owner, name)` of the free function a bare `name`, referenced from the
+    /// function being lowered, binds to when ANOTHER module of the flattened
+    /// unit declares it: the definition its import names (selective, alias,
+    /// re-export facade, single glob source), else the unit's only definition
+    /// (the flattened namespace binds a bare name with no import at all).
+    /// `None` for the caller's own definition and for anything ambiguous.
+    fn flatten_foreign_callable_definer(&self, name: &str) -> Option<(String, String)> {
+        let current = self.current_function_owner.as_deref();
+        if self.flatten_owner_defines(current, name) {
+            return None;
+        }
+        let importer = current.unwrap_or("<entry>");
+        if let Some((source_owner, source_name)) = self
+            .flatten_owner_import_bindings
+            .get(importer)
+            .and_then(|bindings| bindings.get(name))
+        {
+            // An unresolved walk (hop budget, ambiguous facade) falls through to
+            // the glob and only-definition rules: the name still binds.
+            if let Some(definer) = self.flatten_reexport_definer(importer, source_owner, source_name) {
+                return Some(definer);
+            }
+        }
+        let mut declarers: Vec<(String, String)> = Vec::new();
+        for glob_owner in self.flatten_owner_glob_sources.get(importer).into_iter().flatten() {
+            if let Some(declarer) = self.flatten_reexport_definer(importer, glob_owner, name) {
+                if !declarers.contains(&declarer) {
+                    declarers.push(declarer);
+                }
+            }
+        }
+        match declarers.len() {
+            0 => {}
+            1 => return declarers.pop(),
+            _ => return None,
+        }
+        let owners = self.flatten_fn_owners.get(name)?;
+        let only = owners.first()?.clone()?;
+        owners
+            .iter()
+            .all(|owner| owner.as_deref() == Some(only.as_str()))
+            .then(|| (only, name.to_string()))
+    }
+
+    /// JIT run lane: a bare `name` lowered as a module-level callable (call,
+    /// value, alias) is a use of it by the module being lowered. Record it
+    /// when it reaches a private fn of another directory (the interpreter's
+    /// call rule, `check_private_call_visibility`, with a lexical caller).
+    /// jit_main_lane_skips_private_import_visibility_2026-11-13.
+    pub(super) fn gate_private_fn_ref(&self, name: &str) {
+        if !private_ref_gate_armed() {
+            return;
+        }
+        if let Some((owner, source_name)) = self.flatten_foreign_callable_definer(name) {
+            self.record_private_ref(&owner, &source_name);
+        }
+    }
+
+    /// `ns.member` through a whole-module import (see `gate_private_fn_ref`).
+    pub(super) fn gate_private_namespace_ref(&self, ns: &str, member: &str) {
+        if !private_ref_gate_armed() {
+            return;
+        }
+        let Some(source_owner) = self.flatten_namespace_owner(ns) else {
+            return;
+        };
+        let importer = self.current_function_owner.as_deref().unwrap_or("<entry>");
+        if let Some((owner, name)) = self.flatten_reexport_definer(importer, source_owner, member) {
+            self.record_private_ref(&owner, &name);
+        }
+    }
+
+    fn record_private_ref(&self, owner: &str, name: &str) {
+        use crate::interpreter::interpreter_module::check_private_call_visibility;
+        let caller: std::sync::Arc<str> = match (&self.current_function_owner, &self.current_file) {
+            (Some(owner), _) => std::sync::Arc::from(owner.as_str()),
+            (None, Some(entry)) => {
+                std::sync::Arc::from(crate::interpreter::normalize_path_key(entry).to_string_lossy().as_ref())
+            }
+            (None, None) => return,
+        };
+        let owner: std::sync::Arc<str> = std::sync::Arc::from(owner);
+        if let Err(error) = check_private_call_visibility(name, &owner, &caller) {
+            let message = error.to_string();
+            // Same name `lower_function` emits the function under: a method
+            // keeps `Type.method`, a free function its flatten symbol.
+            let function = self.current_function_name.as_ref().map(|name| {
+                if name.contains('.') {
+                    name.clone()
+                } else {
+                    self.flatten_emitted_symbol(self.current_function_owner.as_deref(), name)
+                }
+            });
+            PRIVATE_REF_VIOLATIONS.with(|cell| {
+                if let Some(found) = cell.borrow_mut().as_mut() {
+                    if !found.iter().any(|v| v.function == function && v.message == message) {
+                        found.push(PrivateRefViolation { function, message });
+                    }
+                }
+            });
+        }
     }
 
     /// Owner-exact symbol of free function `member` reached as `ns.member(...)`

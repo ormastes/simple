@@ -363,6 +363,54 @@ fn candidate_declared_by(
         .find(|candidate| function_module_owner(candidate).is_some_and(|o| *o == *owner))
 }
 
+/// The calling module's OWN declaration of `name`, when `found` (what a
+/// bare-name table handed back) belongs to another module. The flat function
+/// table and the flattened top-level env are last-registration-wins, so two
+/// modules with a same-named private helper used to reach whichever loaded
+/// last through a fn value, UFCS or a pipeline, and the private-call gate
+/// then judged the wrong definition.
+pub(crate) fn caller_own_function(name: &str, found: &Arc<FunctionDef>) -> Option<Arc<FunctionDef>> {
+    // Only a private helper is module-local by intent; a `pub` fn keeps the
+    // flat lookup (and costs nothing here on the UFCS hot path).
+    if !matches!(found.visibility, simple_parser::ast::Visibility::Private) {
+        return None;
+    }
+    let found_owner = function_module_owner(found)?;
+    let caller = crate::interpreter::interpreter_module::private_call_caller();
+    if *found_owner == *caller {
+        return None;
+    }
+    // Entry-file fns are owned by `<entry>`, not by the entry file's key.
+    let caller_is_entry = crate::interpreter::CURRENT_FILE.with(|c| {
+        c.borrow()
+            .as_deref()
+            .is_some_and(|entry| *crate::interpreter::normalize_path_key(entry).to_string_lossy() == *caller)
+    });
+    let caller_owner: &str = if caller_is_entry { "<entry>" } else { &caller };
+    if *found_owner == *caller_owner {
+        return None;
+    }
+    FUNCTION_OVERLOADS.with(|cell| {
+        cell.borrow().get(name).and_then(|candidates| {
+            candidates
+                .iter()
+                .find(|candidate| function_module_owner(candidate).is_some_and(|owner| *owner == *caller_owner))
+                .cloned()
+        })
+    })
+}
+
+/// The definition a bare `name` names for the code now running, at the
+/// fallbacks that take the flat table's entry (fn value, UFCS, pipeline):
+/// the calling module's own declaration first (`caller_own_function`).
+pub(crate) fn caller_bound_function(
+    name: &str,
+    functions: &HashMap<String, Arc<FunctionDef>>,
+) -> Option<Arc<FunctionDef>> {
+    let flat = functions.get(name)?;
+    Some(caller_own_function(name, flat).unwrap_or_else(|| Arc::clone(flat)))
+}
+
 /// True when module `owner` itself DECLARES `name` (owner-mangled symbol or an
 /// owner-matched candidate). Used when recording a re-export binding: a module
 /// that declares the function wins over any same-named symbol its own glob
@@ -1438,7 +1486,9 @@ pub(crate) fn evaluate_call(
             }
 
             // Fall back to global functions if module lookup failed
-            if let Some(func) = functions.get(field).cloned() {
+            if let Some(func) = caller_bound_function(field, functions) {
+                // A bare-name call spelled `m.f()`: same visibility rule.
+                gate_private_call(&func.name, &func)?;
                 return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
             } else if classes.contains_key(field) {
                 return core::instantiate_class(field, args, env, functions, classes, enums, impl_methods);
@@ -1727,7 +1777,9 @@ pub(crate) fn evaluate_call(
                 || GLOBAL_ENUMS.with(|cell| cell.borrow().contains_key(type_name))
                 || BITFIELDS.with(|cell| cell.borrow().contains_key(type_name));
             if !path_receiver_is_type {
-                if let Some(func) = functions.get(method_name).cloned() {
+                if let Some(func) = caller_bound_function(method_name, functions) {
+                    // A bare-name call spelled `m::f()`: same visibility rule.
+                    gate_private_call(&func.name, &func)?;
                     return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
                 } else if classes.contains_key(method_name) {
                     return core::instantiate_class(method_name, args, env, functions, classes, enums, impl_methods);

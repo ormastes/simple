@@ -107,13 +107,15 @@ caller's target fn was made `pub` (wave-3 style, `fn` -> `pub fn` only): 675
   twins compute the same value, so overload choice cannot change behaviour.
   Waves B, C and D add no duplicate names; none is pinned by an anchored needle.
 
-## Still open (not this fix)
+## Left open by this fix
+
+Both closed by the residuals change (see "Residuals closed" below):
 
 - `jit_main_lane_skips_private_import_visibility_2026-11-13`: `fn main` on the
-  default (JIT) lane is not gated.
+  default (JIT) lane was not gated.
 - `private_fn_registry_late_for_importer_top_level_2026-11-14`: a module loaded
-  only through another module's glob import is not yet in
-  `PRIVATE_FNS_BY_OWNER` when its importer's top-level initializers run.
+  only through another module's glob import was not yet in
+  `PRIVATE_FNS_BY_OWNER` when its importer's top-level initializers ran.
 
 ## Evidence
 
@@ -161,7 +163,8 @@ Review 3 fixes (this change):
   so a test lambda run by a src helper's `.map` is judged as the test, and a
   product lambda run inside a test closure no longer inherits the exemption.
 
-Review follow-ups not fixed here (no regression; recorded):
+Review follow-ups not fixed here (no regression; recorded; closed by the
+residuals change below except owner-less definitions):
 - an `as`-aliased import read as a VALUE (`use m.{secret as s}`;
   `run_cb(s)`) is not gated (the value gate keys on the name read);
 - UFCS / pipeline / value fallbacks gate whatever the flat function table
@@ -169,6 +172,148 @@ Review follow-ups not fixed here (no regression; recorded):
   helper can be mis-attributed;
 - dict-indexed calls (`m["secret"]()`), owner-less definitions, other threads
   (thread-local registry) and an unknown entry file stay fail-open.
+
+## Residuals closed (2026-11-14, `work/private-gate-residuals-20261114`)
+
+Model: Fable. Seed only; the product rule is unchanged (a private top-level
+`fn` is visible to its own directory, to test files and to baselined pairs).
+
+1. **`fn main` on the JIT lane**
+   (`jit_main_lane_skips_private_import_visibility_2026-11-13`). HIR lowering
+   on the JIT run lane (`lower_with_context_lenient_project_hint_and_duplicate_structs`,
+   the only lane that arms it) records every bare or `ns.f` reference that
+   binds to a private fn of another directory. The definer is the one the
+   lowering itself binds: the caller's import (selective, alias, re-export
+   facade, single glob source), else the unit's only definition. The caller
+   is lexical: the flatten owner of the function being lowered, or the entry
+   file. The verdict is `check_private_call_visibility`, so test callers,
+   same-directory callers and baselined pairs stay allowed.
+   `run_file_jit_inner` rejects the program right before it executes `main`
+   when a finding sits in module-level code or in a function `main` reaches
+   (`mir::reachable_function_names`). A program the JIT hands to the
+   interpreter (no `main`, a lowering gap) is judged per call there, as
+   before. Unreachable code is not judged on either lane.
+2. **Registry late for importer top-level initializers**
+   (`private_fn_registry_late_for_importer_top_level_2026-11-14`). The
+   flattening loader registers a module's private names when it parses the
+   module (`register_module_private_fns`), before any flattened initializer
+   runs. This also covers modules that reach the interpreter only as
+   flattened items and never pass `record_provided_names`.
+3. **Other threads.** The registry is process-wide (`RwLock`) behind a
+   per-thread cache keyed by a generation counter, so a call on another
+   thread is judged by the same names and the hot path still takes no lock.
+4. **Aliased import read as a value.** The identifier read gates a non-local
+   private fn when the name is the fn's own or when the binding's source
+   name is the fn's (`use m.{secret as s}`; `run_cb(s)`). A module global
+   that holds a fn value (`pub val H = own_fn`) is bound under the global's
+   name and is not judged.
+5. **Same-named private helpers in two directories.** The fn-value, UFCS
+   and pipeline fallbacks took whatever the flat table (or the flattened
+   top-level env) held, i.e. the last module registered: a module's own
+   helper was refused as the other directory's, or the other body ran.
+   `caller_own_function` / `caller_bound_function` pick the calling module's
+   own declaration first; the gate then judges the definition that runs.
+6. **Dict-indexed namespace.** `m["f"]` gates a private fn stored under its
+   own name (a module namespace). A dict that hands fns out under other keys
+   is its owner's data and is not judged.
+7. **Three ungated `m.f` fallbacks** found while probing the JIT lane:
+   `m.f` read as a value inside `fn main` (`calls.rs` shortcut), and the
+   "module lookup failed" / path-call fallbacks in `interpreter_call/mod.rs`.
+8. **`m.get("f")` and an aliased namespace `val ns = m; ns["f"]`** (second
+   review, Opus). Both returned the private fn with rc 0 on both lanes. The
+   Dict `get` method and the index read now also gate when the receiver is
+   a registered module namespace (`is_module_namespace_dict`); the memoised
+   filtered copy an importer holds is registered as that namespace too
+   (already filtered, so importers still layer it as a leaf). A dict program
+   code builds and hands out is still its owner's data. Matrix rows
+   `dictget`, `dictalias` (refused) and `dictgettest` (allowed).
+
+Still open:
+- `m.values()` / iterating a module namespace hands out its fns without a
+  verdict (same class as item 8, not changed).
+- Native-build / AOT lowering does not arm the reference gate (scope of this
+  change is the JIT run lane and the interpreter).
+- A definition with no recorded owner is not judged (owner tags are
+  thread-local; a flattened fn carries its owner attribute and is judged).
+- The import rule (rule 1) is not applied by the JIT lane: an unused braced
+  import of a private fn is refused by the interpreter and ignored by the
+  JIT. Every use of it is refused on both.
+- UFCS on a free function does not run on the JIT lane at all
+  (`Function 'P.secret_of' not found`, rc 70, for test callers too); not a
+  visibility question.
+
+### Evidence (residuals)
+
+Seeds are release builds from this tree (`CARGO_TARGET_DIR=.cargo-target-pg3-20261114`):
+base `seed-base` = `origin/release/1.0.0` at `ec758ee501c`; fix = this branch.
+Lanes: default and `SIMPLE_EXECUTION_MODE=interpret`.
+
+- `test_private_access_matrix_spec` (59 examples, 40 before this change):
+  base 50/59, fix 59/59. Red on base: the JIT `fn main` rows, the top-level
+  initializer rows, aliased value, dict index, twin helper by pipeline and as
+  a value, module-qualified value in `fn main`, fn-valued global.
+- Seed unit tests `private_call_visibility_tests`: 10/10 (the cross-thread
+  test now asserts the refusal; one new test for a name registered after a
+  cached miss).
+- Scratch fixture matrix (93 rows x 2 lanes): every visibility row as wanted;
+  the only mismatches are the pre-existing non-visibility ones (`t_it_lambda`,
+  `t_decorator`, and UFCS not running on the JIT).
+- **Static JIT census.** A census build of the seed (gate verdict printed,
+  nothing executed) over all 1204 files with `fn main` under `src`,
+  `examples`, `tools` and `scripts`: 796 lowered and judged, 314 fail HIR
+  lowering and 94 leave the JIT earlier (both run on the interpreter, judged
+  per call as before). 43 programs held a reference `main` can reach: 152
+  (module, fn) pairs, made `pub` as wave E below (`fn` -> `pub fn` only).
+  Re-checked after wave E on the fix seed: all 43 programs judge 0 live
+  references (`live=0`, rc 0).
+
+- Spec sweep, 127 specs (visibility, module loading, LSP, editor, decorator
+  and AOP specs), base seed vs fix seed, same tree, compared on rc and
+  executed/passed/failed: no green -> red. One regression found and fixed:
+  `src/app/cli/query_visibility.spl` calls `query_visibility_main` (a private
+  fn of `_QueryVisibility/query_commands.spl`, re-exported by that facade) at
+  top level. Its refusal was in the LSP child process, so the parent spec
+  showed `nv=0`. `lsp_public_view_handlers_spec` went 8/8 -> 1/8 -> 8/8 after
+  `query_visibility_main` became `pub`; `query_visibility_stdout_spec` back
+  to its base 1/2. The three red messenger specs fail identically on the base
+  seed. `editor_markdown_editing_subsystem_spec` timed out once under load and
+  is 8/9 on both seeds when re-run.
+- **Static top-level census** (the late-registration fix tightens module
+  initializers and entry top levels, which the `fn main` census does not
+  cover). Every column-0 statement and `val`/`var` initializer in 19,978
+  product `.spl` files was resolved through its braced, glob and `export use`
+  imports to the defining file: 69 references to a private fn, all
+  same-directory or baselined (0 live). Control: with `query_visibility_main`
+  private again it flags `query_visibility.spl:14`. Not covered: `m.f()`
+  qualified calls at top level (these were already gated before this change).
+
+- Hot path, 300k iterations on the interpreter lane, min of 5 (base -> fix,
+  loaded host): UFCS call 0.82 -> 0.67 s, fn passed as a value 1.45 -> 1.43 s,
+  qualified `m.f()` 0.80 -> 0.90 s, pipeline 0.54 -> 0.56 s; JIT loop
+  0.07 -> 0.04 s; max RSS 23-35 MB on both.
+- `check-private-import-baseline.shs --prune`: 11360 entries, 0 stale.
+- Needle and clash checks on the 152 names: no spec or script pins one with a
+  line-anchored `fn NAME`; no name became `pub` in two files.
+- Independent review (Fable, diff only): no product bypass rated P0. Fixed
+  from it: the dict gate also needs a non-local receiver name (a name-keyed
+  table a module hands out stays allowed), a fn-valued module global
+  (`val G = imported_private`) is judged on the JIT lane, an unresolved
+  re-export walk falls through instead of ending the check, and the two
+  `m.f()` fallbacks pick the caller's own twin. Recorded, not changed: the
+  JIT judges references `main` can reach, so a test-file `fn main` that
+  reaches PRODUCT code holding a violating branch is refused by the JIT even
+  when the branch is not taken (the interpreter refuses it when taken).
+- Second independent review (Opus, final diff incl. wave E): no P0. Its two
+  P1s (`m.get("f")`, aliased namespace index) were reproduced (rc 0, `42`)
+  and fixed (item 8). P2s recorded, not changed: a definition registered
+  only by the interpreter loader has no owner attribute on another thread;
+  `caller_own_function` allocates a path key per fallback reach; the JIT
+  keeps a finding whose holder matches no MIR fn (fails closed).
+- Final seed (after merging `origin/release/1.0.0`): matrix 59/59 examples (new rows `dictget`, `dictalias`,
+  `dictgettest`; the last-but-one seed was 58/59, red on exactly those two), `private_fn_call_visibility` 3/3,
+  `private_import_visibility_fail_closed` 2/2,
+  `private_import_test_importer_parity` 2/2; `check-private-import-baseline.shs`
+  11360 entries, 0 stale, 0 added.
 
 ## Pair list
 
@@ -332,3 +477,55 @@ A cross-dir product file glob-imports a facade that glob re-exports the definer,
 - `src/compiler/90.tools/lint/_LintMain/name_lints.spl` (1): `lint_accessor_and_parent_names`
 - `src/os/_QemuRunner/runner_targets.spl` (12): `_now_ms`, `_os_build_backend_for_target`, `_os_build_log_mode`, `_os_build_timeout_ms`, `_print_native_build_failure_hint`, `_qemu_command_binary`, `qemu_run_options_debug_gui`, `qemu_run_options_default`, `qemu_run_options_headless`, `_tail_lines`, `_write_bootstrap_result`, `_write_native_build_failure_log`
 - `src/os/tls13/_CertVerify/signature_verify.spl` (4): `extract_ed25519_pubkey_from_cert`, `extract_rsa_pubkey_spki_from_cert`, `verify_cert_chain`, `verify_certificate_verify_msg_scheme`
+
+### Wave E: reachable from a `fn main` on the JIT lane (152)
+
+- `examples/12_business/simple_erp/src/framework/guarded.spl` (2): `gate_write`, `session_valid`
+- `examples/12_business/simple_erp/src/report/summary.spl` (4): `lane_status`, `total_accepted`, `total_denied`, `total_revenue`
+- `examples/12_business/simple_erp/src/units/money.spl` (3): `is_zero`, `money_add`, `zero`
+- `examples/ui/rendering_widgets_core/rendering_widgets_core.spl` (3): `rendering_core_menu_items`, `rendering_widgets_core_tree`, `rendering_widgets_core_tui_tree`
+- `examples/ui/rendering_widgets_full/rendering_widgets_full.spl` (5): `rendering_all_kinds`, `rendering_kind_has_tui`, `rendering_tabs`, `rendering_tui_rendered_kinds`, `rendering_widgets_full_tree`
+- `src/app/io/context_ops.spl` (4): `context_file_exists`, `context_file_write`, `context_get_args`, `context_log_summary_file`
+- `src/app/llm_caret/infra_mail_starttls.spl` (1): `_state`
+- `src/app/package/registry/index.spl` (3): `deps_for_version`, `latest_version`, `search_packages`
+- `src/app/replay/record_session.spl` (1): `run_record`
+- `src/app/ui.electron/app.spl` (1): `run_electron`
+- `src/app/ui.none/app.spl` (1): `run_headless_with_access_store`
+- `src/app/ui.render/ansi.spl` (7): `ansi_bold`, `ansi_dim`, `ansi_green`, `ansi_red`, `ansi_reset`, `ansi_yellow`, `fg_256`
+- `src/app/ui.render/canvas2d.spl` (1): `scene_to_canvas_html`
+- `src/app/ui.render/colors.spl` (1): `get_theme_color`
+- `src/app/ui.render/table.spl` (1): `center`
+- `src/app/ui.test_api/json.spl` (1): `extract_json_field`
+- `src/app/ui.tui/app.spl` (1): `run_tui`
+- `src/app/ui.tui/input.spl` (2): `parse_input_line`, `read_user_input`
+- `src/app/ui.tui/screen.spl` (6): `ansi_cursor_home`, `ansi_disable_alt_screen`, `ansi_enable_alt_screen`, `ansi_hide_cursor`, `ansi_show_cursor`, `get_terminal_size`
+- `src/app/ui.web/html.spl` (2): `generate_html_page`, `wm_root_data_attrs`
+- `src/app/utils/text_replace.spl` (1): `extract_function_name`
+- `src/compiler/10.frontend/core/_AstExpr/accessors.spl` (12): `expr_mark_string_processed`, `expr_pass`, `expr_pass_dn`, `expr_pass_do_nothing`, `expr_pass_todo`, `expr_pass_todo_call`, `expr_pass_with_msg`, `expr_promote_interpolated_string`, `expr_suffixed_float`, `expr_suffixed_int`, `expr_suffixed_string`, `expr_unit`
+- `src/compiler/10.frontend/core/_AstExpr/nodes.spl` (35): `expr_array_repeat`, `expr_asm`, `expr_asm_assert`, `expr_asm_match`, `expr_asm_operands`, `expr_assign`, `expr_atom`, `expr_await`, `expr_block`, `expr_bool_lit`, `expr_break_expr`, `expr_compound_assign`, `expr_continue_expr`, `expr_custom_block`, `expr_dict_comp`, `expr_do_block`, `expr_exists_check`, `expr_float_lit`, `expr_force_unwrap`, `expr_for_expr`, `expr_list_comp`, `expr_method_call_named`, `expr_new_alloc`, `expr_nil_lit`, `expr_optional_chain`, `expr_range`, `expr_raw_string_lit`, `expr_return_expr`, `expr_spawn`, `expr_struct_lit`, `expr_try`, `expr_unsafe_block`, `expr_unsafe_block_with_caps`, `expr_while_expr`, `expr_yield`
+- `src/compiler/10.frontend/core/parser.spl` (1): `parser_warn`
+- `src/compiler/90.tools/fix/rules/impl_/deprecation.spl` (1): `check_struct_construction_parens_with_contexts`
+- `src/compiler/90.tools/fix/rules/impl_/lint_annotation.spl` (1): `check_unknown_annotation_with_contexts`
+- `src/compiler/90.tools/fix/rules/impl_/lint_bool.spl` (1): `check_bare_bool_with_lines`
+- `src/compiler/90.tools/fix/rules/impl_/lint_code.spl` (3): `check_non_exhaustive_match_with_lines`, `check_resource_leak_with_contexts`, `check_unnamed_duplicate_typed_args_with_view`
+- `src/compiler/90.tools/fix/rules/impl_/lint_module.spl` (3): `check_bypass_with_code_files_with_lines`, `check_export_outside_init_with_view`, `check_init_boundary_violation_with_contexts`
+- `src/compiler/90.tools/fix/rules/impl_/lint_script_language.spl` (1): `check_simple_script_required_with_lines`
+- `src/compiler/90.tools/fix/rules/impl_/lint_short_grammar.spl` (1): `check_short_grammar_refactor_with_contexts`
+- `src/compiler/90.tools/fix/rules/impl_/lint_star_import.spl` (1): `check_star_import_text_with_lines`
+- `src/compiler/90.tools/stats/json_formatter.spl` (1): `format_json`
+- `src/compiler/95.interp/interpreter/llvm/tools.spl` (1): `llc_available`
+- `src/compiler_rust/lib/std/src/fs/mod.spl` (10): `basename`, `dirname`, `extension`, `list_dir`, `read_lines`, `read_text`, `remove`, `separator`, `write_lines`, `write_text`
+- `src/lib/common/parser/parser.spl` (2): `parse`, `parse_expr`
+- `src/lib/common/ui/pixel_diff_core.spl` (1): `argb_channel_max_delta`
+- `src/lib/editor/70.backend/gui_backend.spl` (1): `gui_render_editor_area`
+- `src/lib/gc_async_mut/pure/runtime.spl` (5): `math_abs`, `math_max`, `math_min`, `math_pow`, `string_to_int`
+- `src/lib/nogc_sync_mut/http_client/request.spl` (5): `add_header`, `create_headers`, `create_request`, `request_add_header`, `request_set_body`
+- `src/lib/nogc_sync_mut/http_client/response.spl` (2): `response_get_body`, `response_get_status_code`
+- `src/lib/nogc_sync_mut/http_client/transport.spl` (1): `send_request`
+- `src/lib/nogc_sync_mut/imap/build.spl` (5): `imap_build_fetch`, `imap_build_login`, `imap_build_logout`, `imap_build_select`, `imap_build_uid_fetch`
+- `src/lib/nogc_sync_mut/imap/types.spl` (1): `imap_status_is_ok`
+- `src/lib/nogc_sync_mut/sffi/diag.spl` (1): `stdout_write`
+- `src/lib/nogc_sync_mut/tooling/easy_fix/accessor_core.spl` (1): `acc_header_accessor_name`
+- `src/lib/nogc_sync_mut/tooling/easy_fix/accessor_rewrite.spl` (2): `acc_process_file`, `acc_unsafe_setter_names`
+- `src/lib/scv/structural_match_source.spl` (1): `scv_cst_store_file`
+- `src/os/port/_BootstrapCross/cross_bootstrap_pipeline.spl` (1): `cross_bootstrap_main`

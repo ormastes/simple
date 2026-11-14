@@ -27,7 +27,7 @@ fn is_windows() -> bool:
 
 fn fixture_root(tag: text) -> text:
     val root = get_temp_dir().replace("\\", "/") + "/tpa_matrix_" + tag
-    for dir in ["/src/app/sub", "/src/app/runner", "/src/app/facade", "/src/app/other", "/test/unit"]:
+    for dir in ["/src/app/sub", "/src/app/runner", "/src/app/facade", "/src/app/other", "/src/app/third", "/test/unit"]:
         val _ = mkdir_p(root + dir)
     val _l = write_file(root + "/src/app/sub/lib_mod.spl", "fn secret_inc(x: i64) -> i64:\n    x + 1\nfn secret_helper() -> i64:\n    42\npub fn open_api() -> i64:\n    secret_helper()\n")
     val _f = write_file(root + "/src/app/sub/sub_facade.spl", "export use app.sub.lib_mod.{{secret_helper, open_api}}\n")
@@ -61,6 +61,26 @@ fn fixture_root(tag: text) -> text:
     val _al = write_file(root + "/src/app/other/alias_caller.spl", "use app.sub.sub_facade.{{secret_helper as s}}\npub fn call_al() -> i64:\n    s()\n")
     val _rm = write_file(root + "/src/app/runner/run2.spl", "pub fn run_map(f: fn(i64) -> i64) -> i64:\n    [41].map(f)[0]\n")
     val _pm = write_file(root + "/src/app/other/pm.spl", "use app.sub.lib_mod\npub fn pm() -> i64:\n    [41].map(\\x: lib_mod.secret_inc(x))[0]\n")
+    # Residuals lane (private_call_gate_skips_import_bound_and_entry_calls
+    # "Still open" + review follow-ups): an exported non-`pub` fn, same-named
+    # private helpers in two directories, an aliased facade import read as a
+    # value, a module handing out its own private fn (global and dict), a
+    # dict-indexed module namespace, dead code, and importer top-level
+    # initializers.
+    val _ex = write_file(root + "/src/app/sub/explib.spl", "fn exp_helper() -> i64:\n    42\nexport exp_helper\n")
+    val _tw = write_file(root + "/src/app/sub/twinlib.spl", "fn twin_inc(x: i64) -> i64:\n    x + 9\nfn twin_val() -> i64:\n    7\npub fn twin_open() -> i64:\n    twin_val()\n")
+    val _du = write_file(root + "/src/app/other/du.spl", "use app.sub.twinlib.{{twin_open}}\nfn twin_inc(x: i64) -> i64:\n    x + 1\npub fn du() -> i64:\n    val k = twin_open()\n    41.twin_inc()\npub fn du_pipe() -> i64:\n    41 |> twin_inc\npub fn du_val() -> i64:\n    val f = twin_inc\n    f(41)\n")
+    val _d2 = write_file(root + "/src/app/third/du2.spl", "use app.sub.twinlib.*\npub fn du2() -> i64:\n    33.twin_inc()\n")
+    val _av = write_file(root + "/src/app/other/av.spl", "use app.sub.sub_facade.{{secret_helper as s}}\nuse app.runner.run.{{run_cb}}\npub fn av() -> i64:\n    run_cb(s)\npub fn av_val() -> i64:\n    val f = s\n    f()\n")
+    val _hn = write_file(root + "/src/app/sub/hand.spl", "fn own3() -> i64:\n    42\npub val H = own3\npub fn table() -> Dict<text, fn() -> i64>:\n    {{\"k\": own3}}\npub fn named_table() -> Dict<text, fn() -> i64>:\n    {{\"own3\": own3}}\n")
+    val _hv = write_file(root + "/src/app/other/hv.spl", "use app.sub.hand.{{H as h2, table}}\nuse app.runner.run.{{run_cb}}\npub fn hv() -> i64:\n    run_cb(h2)\npub fn hd() -> i64:\n    val t = table()\n    t[\"k\"]()\n")
+    val _hn2 = write_file(root + "/src/app/other/hv2.spl", "use app.sub.hand.{{named_table}}\npub fn hd2() -> i64:\n    named_table()[\"own3\"]()\n")
+    val _di = write_file(root + "/src/app/other/di.spl", "use app.sub.lib_mod\npub fn di() -> i64:\n    lib_mod[\"secret_helper\"]()\npub fn di_val() -> i64:\n    val f = lib_mod[\"secret_helper\"]\n    f()\npub fn di_get() -> i64:\n    lib_mod.get(\"secret_helper\")()\npub fn di_alias() -> i64:\n    val ns = lib_mod\n    ns[\"secret_helper\"]()\n")
+    val _de = write_file(root + "/src/app/other/dead.spl", "use app.sub.lib_mod.*\npub fn never_called() -> i64:\n    secret_helper()\npub fn alive() -> i64:\n    42\n")
+    val _tg = write_file(root + "/src/app/other/topglob.spl", "use app.sub.lib_mod.*\nval TG = secret_helper()\npub fn get_tg() -> i64:\n    TG\n")
+    val _ts = write_file(root + "/src/app/sub/topsame.spl", "use app.sub.lib_mod.*\nval TS = secret_helper()\npub fn get_ts() -> i64:\n    TS\n")
+    val _tt = write_file(root + "/test/unit/toptest_helper.spl", "use app.sub.lib_mod.*\nval TT = secret_helper()\npub fn get_tt() -> i64:\n    TT\n")
+    val _pc = write_file(root + "/src/app/other/pub_caller.spl", "use app.sub.lib_mod.*\npub fn call_pub() -> i64:\n    open_api()\n")
     root
 
 # The fixture root itself must not look like a test path, or every product
@@ -261,3 +281,109 @@ describe "aliased imports and builtin-run lambdas follow the same rule":
 
     it "a test lambda with a qualified private call run by .map in a src helper is allowed":
         expect(allowed_on_every_lane("mapqualtest", "test/unit/mq_spec.spl", "use app.sub.lib_mod\nuse app.runner.run2.{{run_map}}\nprint run_map(\\x: lib_mod.secret_inc(x))\n")).to_equal(true)
+
+# Residuals lane. `main_src(uses, body)` is a `fn main` program: the seed runs
+# it on the JIT, which had no visibility rule at all
+# (jit_main_lane_skips_private_import_visibility_2026-11-13). The JIT judges
+# the references `main` can reach, with the lexical caller.
+fn main_src(uses: text, body: text) -> text:
+    uses + "\nfn main():\n    " + body + "\n"
+
+describe "a product fn main (JIT lane) is refused like a main-less program":
+    it "braced, aliased, glob-facade and braced-facade imports":
+        expect(refused_on_every_lane("jmbraced", "src/app/other/jm1.spl", main_src("use app.sub.lib_mod.{{secret_helper}}", "print secret_helper()"))).to_equal(true)
+        expect(refused_on_every_lane("jmalias", "src/app/other/jm2.spl", main_src("use app.sub.lib_mod.{{secret_helper as s}}", "print s()"))).to_equal(true)
+        expect(refused_on_every_lane("jmfacade", "src/app/other/jm3.spl", main_src("use app.facade.glob_facade.*", "print secret_helper()"))).to_equal(true)
+        expect(refused_on_every_lane("jmbfacade", "src/app/other/jm4.spl", main_src("use app.sub.sub_facade.{{secret_helper}}", "print secret_helper()"))).to_equal(true)
+
+    it "src fns reaching it by glob, qualified, through a facade and by alias":
+        expect(refused_on_every_lane("jmsrcglob", "src/app/jm5.spl", main_src("use app.other.glob_caller.{{call_glob}}", "print call_glob()"))).to_equal(true)
+        expect(refused_on_every_lane("jmsrcqual", "src/app/jm6.spl", main_src("use app.other.qual_caller.{{call_qual}}", "print call_qual()"))).to_equal(true)
+        expect(refused_on_every_lane("jmsrcfac", "src/app/jm7.spl", main_src("use app.other.facade_caller.{{call_facade}}", "print call_facade()"))).to_equal(true)
+        expect(refused_on_every_lane("jmsrcalias", "src/app/jm8.spl", main_src("use app.other.alias_caller.{{call_al}}", "print call_al()"))).to_equal(true)
+
+    it "as a value, as a callback and inside a lambda":
+        expect(refused_on_every_lane("jmvalue", "src/app/other/jm9.spl", main_src("use app.sub.lib_mod.*", "val f = secret_helper\n    print f()"))).to_equal(true)
+        expect(refused_on_every_lane("jmvalcb", "src/app/jm10.spl", main_src("use app.other.vf.{{vf_cb}}", "print vf_cb()"))).to_equal(true)
+        expect(refused_on_every_lane("jmlam", "src/app/other/jm11.spl", main_src("use app.sub.lib_mod.*\nuse app.runner.run.{{run_cb}}", "print run_cb(\\: secret_helper())"))).to_equal(true)
+
+describe "a product fn main (JIT lane) keeps every allowed access":
+    it "same directory, pub fn, exported non-pub fn":
+        expect(allowed_on_every_lane("jcsame", "src/app/sub/jc1.spl", main_src("use app.sub.lib_mod.*", "print secret_helper()"))).to_equal(true)
+        expect(allowed_on_every_lane("jcpub", "src/app/jc2.spl", main_src("use app.other.pub_caller.{{call_pub}}", "print call_pub()"))).to_equal(true)
+        expect(allowed_on_every_lane("jcexport", "src/app/other/jc3.spl", main_src("use app.sub.explib.{{exp_helper}}", "print exp_helper()"))).to_equal(true)
+        expect(allowed_on_every_lane("jcexportg", "src/app/other/jc4.spl", main_src("use app.sub.explib.*", "print exp_helper()"))).to_equal(true)
+
+    it "its own private fn, also when another module has a same-named one":
+        expect(allowed_on_every_lane("jcown", "src/app/other/jc5.spl", "fn mine() -> i64:\n    42\nfn main():\n    print mine()\n")).to_equal(true)
+        expect(allowed_on_every_lane("jcdupown", "src/app/other/jc6.spl", "use app.sub.twinlib.{{twin_open}}\nfn twin_val() -> i64:\n    42\nfn main():\n    val k = twin_open()\n    print twin_val()\n")).to_equal(true)
+
+    it "a lambda calling its writer's private fn, and code main cannot reach":
+        expect(allowed_on_every_lane("jclam", "src/app/other/jc7.spl", main_src("use app.sub.lamlib.{{make_lam}}", "val f = make_lam()\n    print f()"))).to_equal(true)
+        expect(allowed_on_every_lane("jcdead", "src/app/jc8.spl", main_src("use app.other.dead.{{alive}}", "print alive()"))).to_equal(true)
+
+describe "a test-file fn main (JIT lane) can call private fns":
+    it "braced, glob, alias and glob-facade imports":
+        expect(allowed_on_every_lane("jtbraced", "test/unit/jt1_spec.spl", main_src("use app.sub.lib_mod.{{secret_helper}}", "print secret_helper()"))).to_equal(true)
+        expect(allowed_on_every_lane("jtglob", "test/unit/jt2_spec.spl", main_src("use app.sub.lib_mod.*", "print secret_helper()"))).to_equal(true)
+        expect(allowed_on_every_lane("jtalias", "test/unit/jt3_spec.spl", main_src("use app.sub.lib_mod.{{secret_helper as s}}", "print s()"))).to_equal(true)
+        expect(allowed_on_every_lane("jtfacade", "test/unit/jt4_spec.spl", main_src("use app.facade.glob_facade.*", "print secret_helper()"))).to_equal(true)
+
+    it "as a value and inside a lambda run by a src helper":
+        expect(allowed_on_every_lane("jtvalue", "test/unit/jt5_spec.spl", main_src("use app.sub.lib_mod.*", "val f = secret_helper\n    print f()"))).to_equal(true)
+        expect(allowed_on_every_lane("jtlam", "test/unit/jt6_spec.spl", main_src("use app.sub.lib_mod.*\nuse app.runner.run.{{run_cb}}", "print run_cb(\\: secret_helper())"))).to_equal(true)
+
+# private_fn_registry_late_for_importer_top_level_2026-11-14: a module's
+# private names are known before any importer's top-level initializer runs.
+describe "an importer's top-level initializer follows the call rule":
+    it "another directory's initializer is refused, with and without fn main":
+        expect(refused_on_every_lane("topglob", "src/app/main_tg.spl", "use app.other.topglob.{{get_tg}}\nprint get_tg()\n")).to_equal(true)
+        expect(refused_on_every_lane("topglobmain", "src/app/main_tgm.spl", main_src("use app.other.topglob.{{get_tg}}", "print get_tg()"))).to_equal(true)
+
+    it "a same-directory initializer and a test helper's initializer are allowed":
+        expect(allowed_on_every_lane("topsame", "src/app/main_ts.spl", "use app.sub.topsame.{{get_ts}}\nprint get_ts()\n")).to_equal(true)
+        expect(allowed_on_every_lane("topsamemain", "src/app/main_tsm.spl", main_src("use app.sub.topsame.{{get_ts}}", "print get_ts()"))).to_equal(true)
+        expect(allowed_on_every_lane("toptest", "test/unit/tt_spec.spl", "use toptest_helper.{{get_tt}}\nprint get_tt()\n")).to_equal(true)
+
+describe "an aliased import read as a value follows the call rule":
+    it "product code passing or binding the alias is refused":
+        expect(refused_on_every_lane("aliasvalcb", "src/app/main_av.spl", "use app.other.av.{{av}}\nprint av()\n")).to_equal(true)
+        expect(refused_on_every_lane("aliasvalval", "src/app/main_av2.spl", "use app.other.av.{{av_val}}\nprint av_val()\n")).to_equal(true)
+
+    it "a test passing the alias, and a module's own fn handed out under an alias, are allowed":
+        expect(allowed_on_every_lane("aliasvaltest", "test/unit/av_spec.spl", "use app.sub.sub_facade.{{secret_helper as s}}\nuse app.runner.run.{{run_cb}}\nprint run_cb(s)\n")).to_equal(true)
+        expect(allowed_on_every_lane("handedalias", "src/app/main_hv.spl", "use app.other.hv.{{hv}}\nprint hv()\n")).to_equal(true)
+
+describe "a dict-indexed module namespace follows the call rule":
+    it "product code calling or binding m[name] is refused":
+        expect(refused_on_every_lane("dictcall", "src/app/main_di.spl", "use app.other.di.{{di}}\nprint di()\n")).to_equal(true)
+        expect(refused_on_every_lane("dictval", "src/app/main_di2.spl", "use app.other.di.{{di_val}}\nprint di_val()\n")).to_equal(true)
+        expect(refused_on_every_lane("dictget", "src/app/main_di3.spl", "use app.other.di.{{di_get}}\nprint di_get()\n")).to_equal(true)
+        expect(refused_on_every_lane("dictalias", "src/app/main_di4.spl", "use app.other.di.{{di_alias}}\nprint di_alias()\n")).to_equal(true)
+
+    it "a test indexing the namespace, and a dict a module hands out, are allowed":
+        expect(allowed_on_every_lane("dicttest", "test/unit/di_spec.spl", "use app.sub.lib_mod\nprint lib_mod[\"secret_helper\"]()\n")).to_equal(true)
+        expect(allowed_on_every_lane("dictgettest", "test/unit/dg_spec.spl", "use app.sub.lib_mod\nval ns = lib_mod\nprint ns.get(\"secret_helper\")()\nprint ns[\"secret_helper\"]()\n")).to_equal(true)
+        expect(allowed_on_every_lane("handeddict", "src/app/main_hd.spl", "use app.other.hv.{{hd}}\nprint hd()\n")).to_equal(true)
+
+describe "same-named private helpers in two directories":
+    it "a module reaches its own helper by UFCS, pipeline and as a value":
+        expect(allowed_on_every_lane("twinufcs", "src/app/main_du.spl", "use app.other.du.{{du}}\nprint du()\n")).to_equal(true)
+        expect(allowed_on_every_lane("twinpipe", "src/app/main_dup.spl", "use app.other.du.{{du_pipe}}\nprint du_pipe()\n")).to_equal(true)
+        expect(allowed_on_every_lane("twinval", "src/app/main_duv.spl", "use app.other.du.{{du_val}}\nprint du_val()\n")).to_equal(true)
+
+    it "a third directory without its own helper is refused":
+        expect(refused_fn_on_every_lane("twinreach", "src/app/main_du2.spl", "use app.other.du.{{du}}\nuse app.third.du2.{{du2}}\nval a = du()\nprint du2()\n", "twin_inc")).to_equal(true)
+
+describe "a module-qualified fn read as a value inside fn main follows the call rule":
+    it "product fn main binding it is refused, a test main is allowed":
+        expect(refused_on_every_lane("mainqualval", "src/app/other/jm12.spl", main_src("use app.sub.lib_mod", "val f = lib_mod.secret_helper\n    print f()"))).to_equal(true)
+        expect(allowed_on_every_lane("mainqualvaltest", "test/unit/jq_spec.spl", main_src("use app.sub.lib_mod", "val f = lib_mod.secret_helper\n    print f()"))).to_equal(true)
+
+    it "a dict a module hands out under the fn's own name is allowed":
+        expect(allowed_on_every_lane("handednamed", "src/app/main_hd2.spl", "use app.other.hv2.{{hd2}}\nprint hd2()\n")).to_equal(true)
+
+describe "a module global initialized with an imported private fn follows the call rule":
+    it "product fn main calling through the global is refused, a test main is allowed":
+        expect(refused_on_every_lane("globalfn", "src/app/other/jm13.spl", "use app.sub.lib_mod.*\nval G = secret_helper\nfn main():\n    print G()\n")).to_equal(true)
+        expect(allowed_on_every_lane("globalfntest", "test/unit/jg_spec.spl", "use app.sub.lib_mod.*\nval G = secret_helper\nfn main():\n    print G()\n")).to_equal(true)
