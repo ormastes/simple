@@ -476,9 +476,26 @@ SimpleOS XRay stays off. Rows below are assignments, not evidence.
 | xraywin | `work/xray-win64-native-20261114` | (1) native-backend COFF sled emission: V1 `X64Rel32` sled, `.sxray` with ADDR32NB text_base, `.pdata` consistent with the entry-sled admission rule; (2) one change admitting `x86_64-pc-windows-*` + backend Simple in `observer_build_route_v1.spl` and `driver_xray_policy.spl` with their specs, and the win64 resident runtime linked only into `--xray` DLLs; (3) Windows module registration through the PE locator; (4) `scripts/check/check-xray-native-win64-inprocess-e2e.shs` and Windows rows in `xray_spy_program_out_spec.spl`; (5) off identity: COFF objects byte-identical with `--xray` off |
 | tracesel | `work/trace-layer-feature-select-20261114` | Layer-to-layer and feature-to-feature tracing: a selector for call edges whose caller and callee differ in layer (or feature), a site-id -> (layer, feature) table, and a fold over the existing raw-edge stream giving count and inclusive/exclusive time per pair, with a log-profile line format. No new machine hook, no per-entry-point gate. Then container selection by config: static (`StoragePolicyId`, `.sprof`) and the opt-in runtime switch |
 
-Known risk for xraywin: the Windows self-dlsym / PE-export gap. The lane probes
-`rt_host_dynlib_open` / symbol lookup on a small DLL first; if that fails it is
-the lane's blocker and is filed, not worked around.
+**xraywin result (2026-11-14, same day): blocked at step 1, route changed.** The
+pure-Simple native backend has no Windows x64 target: `CodegenTarget` has no
+Windows member, `isel_x86_64.spl` knows only the SysV argument registers, and
+there is no COFF object writer or `.pdata`/`.xdata` emission (the `linker/coff`
+code parses objects and writes PE images only). Filed as
+`doc/08_tracking/bug/native_backend_no_win64_target_coff_emitter_2026-11-14.md`
+(on the lane branch). Deliverables (1)–(5) above wait on that backend work.
+Dynload is NOT the blocker: on a Windows host with the tip seed,
+`rt_host_dynlib_open` and `rt_host_dynlib_symbol` returned non-zero on a
+llvm-mingw DLL.
+
+Replacement route (lane xraywin2, same branch): the pure-Simple LLVM backend with
+**flag-guarded IR sleds** on Windows — at entry and before each return, load a
+per-site activation slot and call `__simple_xray_edge_v1(site, kind)` when set.
+No code patching, no VirtualProtect, no PE section parsing; the module exports
+one descriptor symbol. A new leaf on the existing `XrayLlvmLeafV1` port stores
+1/0 into the slot under the same `XrayLlvmAdapterV1` state machine, with its own
+sled kind and build-route value; records, profile fold and container switching
+are the shared code. Patched machine sleds on Windows stay refused. First step is
+a probe that a pure-Simple `--backend=llvm` Windows DLL builds and loads at all.
 
 Target matrix once these land (to be filled from executed runs only):
 
