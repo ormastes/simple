@@ -107,6 +107,12 @@ int64_t simple_xray_resident_control_enter_v1(void) {
     g_xray_control_owned = 1;
     return 1;
 }
+int64_t simple_xray_resident_control_is_owned_v1(void) {
+    return g_xray_control_owned && !g_xray_in_handler;
+}
+int64_t simple_xray_resident_never_published_v1(void) {
+    return g_xray_control_owned && !g_xray_in_handler && g_xray_last_generation == 0;
+}
 void simple_xray_resident_control_leave_v1(void) {
     if (!g_xray_control_owned) return;
     g_xray_control_owned = 0;
@@ -321,6 +327,10 @@ static int simple_xray_resident_descriptor_valid_v1(SimpleXrayResidentDescriptor
                 (uint32_t)(map[j].function_site >> 32) == site) return 0;
     }
     return 1;
+}
+int64_t simple_xray_resident_descriptor_check_v1(int64_t descriptor) {
+    return g_xray_control_owned && !g_xray_in_handler &&
+        simple_xray_resident_descriptor_valid_v1((void *)(intptr_t)descriptor);
 }
 int64_t simple_xray_llvm_resident_publish_v1(int64_t descriptor) {
     if (!g_xray_control_owned || !simple_xray_resident_runtime_is_ready_v1() ||
