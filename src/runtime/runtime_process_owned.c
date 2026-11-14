@@ -7150,6 +7150,8 @@ SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket, SplArray
 
 #if !defined(RT_PROCESS_OWNED_CORE_ONLY)
 #include "runtime_sosix_darwin_snapshot_v1_impl.h"
+/* SOSIX Darwin Seatbelt activation leaf; unsupported receipt elsewhere. */
+#include "runtime_sosix_darwin_sandbox_v1.h"
 #endif
 
 /* Group-stream broker mode is explicitly unavailable outside its admitted

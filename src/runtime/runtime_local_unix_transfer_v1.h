@@ -7,7 +7,7 @@ static int lu_transfer_binding_v1(const char* value,int64_t size) {
     for(int i=0;i<64;i++)if(!((value[i]>='0'&&value[i]<='9')||(value[i]>='a'&&value[i]<='f')))return 0;
     return 1;
 }
-#if defined(__linux__)
+#if LUV1_POSIX
 /* Explicit receive admits at most ONE FD over the whole connection. On ANY
  * malformed/extra/truncated control, dispose every NEW fd, retaining original. */
 static int lu_receive_control_v1(LuSlotV1* slot,struct msghdr* message,int allow) {
@@ -21,6 +21,10 @@ static int lu_receive_control_v1(LuSlotV1* slot,struct msghdr* message,int allow
         int* descriptors=(int*)CMSG_DATA(c);
         for(size_t i=0;i<number;i++) {
             if(descriptors[i]<0){bad=1;continue;}
+#if defined(__APPLE__)
+            /* No MSG_CMSG_CLOEXEC on Darwin: mark before any owner sees it. */
+            if(fcntl(descriptors[i],F_SETFD,FD_CLOEXEC))bad=1;
+#endif
             if(count<16)incoming[count++]=descriptors[i];
             else{(void)close(descriptors[i]);bad=1;}
         }
@@ -33,7 +37,7 @@ static int lu_receive_control_v1(LuSlotV1* slot,struct msghdr* message,int allow
     return 0;
 }
 static ssize_t lu_send_bytes_v1(LuSlotV1* slot,const unsigned char* data,size_t maximum) {
-    if(slot->transfer_phase!=1)return send(slot->fd,data,maximum,MSG_NOSIGNAL);
+    if(slot->transfer_phase!=1)return send(slot->fd,data,maximum,LUV1_SEND_FLAGS);
     if(slot->pending_fd<0){errno=EINVAL;return -1;}
     union {struct cmsghdr align;unsigned char bytes[CMSG_SPACE(sizeof(int))];} control;
     memset(&control,0,sizeof(control));struct iovec io={.iov_base=(void*)data,.iov_len=maximum};
@@ -41,7 +45,7 @@ static ssize_t lu_send_bytes_v1(LuSlotV1* slot,const unsigned char* data,size_t 
     message.msg_control=control.bytes;message.msg_controllen=sizeof(control.bytes);
     struct cmsghdr* c=CMSG_FIRSTHDR(&message);c->cmsg_level=SOL_SOCKET;c->cmsg_type=SCM_RIGHTS;
     c->cmsg_len=CMSG_LEN(sizeof(int));memcpy(CMSG_DATA(c),&slot->pending_fd,sizeof(int));
-    return sendmsg(slot->fd,&message,MSG_NOSIGNAL);
+    return sendmsg(slot->fd,&message,LUV1_SEND_FLAGS);
 }
 static int lu_note_sent_v1(LuSlotV1* slot,ssize_t count) {
     if(count<=0)return 0;
@@ -55,6 +59,9 @@ static int lu_note_sent_v1(LuSlotV1* slot,ssize_t count) {
     return 0;
 }
 #endif
+/* The process-pipe bridge (runtime_process.c) is Linux-only, so stage/adopt
+ * stay Linux-only: Darwin answers unsupported (-4) and never references the
+ * bridge symbols, which the Darwin Rust seed does not provide. */
 static SplArray* lu_stage_stdout_impl_v1(int64_t token,int64_t pid,int64_t generation,
         const char* root,int64_t root_size,const char* identity,int64_t identity_size,
         const char* binding,int64_t binding_size) {
@@ -115,11 +122,11 @@ done:
     return answer;
 }
 static SplArray* lu_handoff_state_impl_v1(int64_t token) {
-#if defined(__linux__)
+#if LUV1_POSIX
     if(!lu_origin_v1())return NULL;
 #endif
     SplArray* answer=lu_receipt_v1(2);if(!answer)return NULL;
-#if defined(__linux__)
+#if LUV1_POSIX
     int status;LuSlotV1* slot=lu_connection_lock_v1(token,&status);
     if(slot){lu_word_v1(answer,1,slot->transfer_phase);pthread_mutex_unlock(&slot->operation);}
     lu_word_v1(answer,0,status);

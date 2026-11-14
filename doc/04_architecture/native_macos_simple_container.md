@@ -62,6 +62,30 @@ macOS process handle. Both leaves return immutable common observations with
 exact attempt/generation/boot/native identity; the controller commits only a
 matching result. No VM path is a Simple Container backend.
 
+Darwin substrate for the separate custom-Seatbelt lane
+(`doc/05_design/simple_container_macos_seatbelt.md` §2.3, §9.1, §15.2; source
+only, NOT qualified on a Mac):
+
+- `local_ipc_v1` now has a Darwin implementation beneath the same owned
+  token/generation/close receipts (`src/runtime/runtime_local_unix_v1.h`).
+  Origin is the PID only (no PID namespace); paths are re-walked and compared
+  after connect/bind instead of `/proc/self/fd` anchoring; descriptor flags and
+  `SO_NOSIGPIPE` are applied right after creation/accept/receipt; peer identity
+  is `getpeereid` cross-checked against the `LOCAL_PEERTOKEN` audit token and
+  `LOCAL_PEERPID`. `local_unix_peer_identity_class_v1()` reports this as
+  `DarwinKernelObservedPeer`, weaker than Linux connect-time `SO_PEERCRED` and
+  never an incarnation credential. The process-pipe stdout handoff stays
+  Linux-only (unsupported on Darwin).
+- SOSIX owns the Seatbelt activation leaf
+  (`std.nogc_async_mut.sosix.darwin_sandbox_v1`, native call pair in
+  `src/runtime/runtime_sosix_darwin_sandbox_v1.h`): `sandbox_init(profile, 0,
+  &err)` + `sandbox_free_error`, a preallocated receipt, Simple-side profile
+  admission and error sanitization, no unrestricted fallback, and
+  `Unsupported` on every non-Darwin host without entering native code.
+- Pending Mac qualification: run `src/runtime/test/local_unix_v1_selfcheck.c`
+  (Darwin branch) and a disposable-child activation/deny probe before either
+  surface is advertised as a capability.
+
 Sources and code map:
 [domain research](../01_research/domain/native_macos_simple_container_2026-09-27.md),
 [local research](../01_research/local/native_macos_simple_container_2026-09-27.md).

@@ -102,3 +102,17 @@ or the cleanup deadline; EPERM alone never permits retirement. Initial denial
 still errors. Native and deterministic evidence is in
 `scripts/check/check-sosix-darwin-process.shs`; the executable SSpec and manual
 are `darwin_process_signal_race_spec` under the process system-test trees.
+
+## Darwin local IPC + Seatbelt activation leaf (2026-11-13, C7)
+
+Source-only, unqualified on a Mac. `runtime_local_unix_v1.h` now runs on
+`__APPLE__` (PID-only origin, post-effect parent re-walk, `getpeereid` +
+`LOCAL_PEERTOKEN`/`LOCAL_PEERPID` peer, `SO_NOSIGPIPE`, CLOEXEC set after
+creation/receipt); stdout stage/adopt stays Linux-only. Peer strength is read
+via `local_unix_peer_identity_class_v1()`. SOSIX owns
+`sosix_darwin_sandbox_apply_v1` (`nogc_async_mut/sosix/darwin_sandbox_v1.spl`,
+native pair in `runtime_sosix_darwin_sandbox_v1.h`, included by
+`runtime_process_owned.c`); non-Darwin answers `Unsupported` without native
+entry. The leaf is deliberately not `rt_*`. Mac evidence still owed: Darwin
+branch of `src/runtime/test/local_unix_v1_selfcheck.c` and a disposable-child
+activation/deny probe. Design: `doc/05_design/simple_container_macos_seatbelt.md` §2.3/§9.1/§15.2.
