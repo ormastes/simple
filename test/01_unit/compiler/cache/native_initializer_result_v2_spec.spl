@@ -1,0 +1,33 @@
+# @req REQ-DTA-A1 REQ-DTA-H1
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.native_initializer_result_v2.{native_initializer_startup_observe_v2,
+    native_link_without_startup_v2}
+
+describe "backend initializer observation consistency":
+    it "retains exactly the emitted startup order, including confirmed empty":
+        val source = sha256_text("int main(void) { return 0; }")
+        val object = sha256_text("bounded object observation fixture")
+        val names = ["__module_init_z", "__module_init_a"]
+        val observed = native_initializer_startup_observe_v2(true, true,
+            source, source, source, object, names)
+        expect(observed != nil).to_equal(true)
+        expect(observed.unwrap().ordered_init_symbols).to_equal(names)
+        expect(native_initializer_startup_observe_v2(true, true,
+            source, source, source, object, []).unwrap().ordered_init_symbols).to_equal([])
+
+    it "refuses unchecked discovery, failed writes and changing source bytes":
+        val source = sha256_text("current source")
+        val stale = sha256_text("stale source")
+        val object = sha256_text("object observation fixture")
+        expect(native_initializer_startup_observe_v2(false, true, source, source, source, object, []) == nil).to_equal(true)
+        expect(native_initializer_startup_observe_v2(true, false, source, source, source, object, []) == nil).to_equal(true)
+        expect(native_initializer_startup_observe_v2(true, true, source, stale, source, object, []) == nil).to_equal(true)
+        expect(native_initializer_startup_observe_v2(true, true, source, source, stale, object, []) == nil).to_equal(true)
+        expect(native_initializer_startup_observe_v2(true, true, source, source, source, "", []) == nil).to_equal(true)
+
+    it "keeps legacy success explicitly unknown and preserves errors":
+        val old = native_link_without_startup_v2(Ok("program"))
+        expect(old.unwrap().output_path).to_equal("program")
+        expect(old.unwrap().startup == nil).to_equal(true)
+        expect(native_link_without_startup_v2(Err("link failed")).unwrap_err()).to_equal("link failed")

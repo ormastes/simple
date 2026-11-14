@@ -1,3 +1,6 @@
+use compiler.common.cache_contract.native_initializer_result_v2.{NativeLinkedArtifactV2, NativeInitializerStartupV2}
+use compiler.driver.driver_build.native_link_receipt_codec_v2.{native_link_receipt_render_v2,
+    native_link_receipt_startup_read_v2}
 # Object-hash link receipt: skip the relink when nothing the link reads changed.
 #
 # After every successful native link a receipt `<output>.link-receipt` is
@@ -25,10 +28,10 @@
 # explicit and implicit libraries by content) is described at _toolchain_digests_v1.
 use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
 use std.io_runtime.{file_exists, file_read, file_rename, file_delete, getpid}
-use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read_regular_no_follow_bounded}
 use std.nogc_sync_mut.io_runtime.{file_read_bytes, is_file, dir_list_or_empty, env_get_opt}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-use compiler.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
+use compiler.backend.llvm_native_link.{link_llvm_native, link_llvm_native_with_receipt_v2, NativeLinkOptions}
 use compiler.backend.linker.native_config.{NativeLinkConfig}
 use compiler.backend.linker.linker_wrapper.{link_to_shared}
 use compiler.backend.linker.mold.{find_linker_path}
@@ -44,6 +47,8 @@ pub fn native_link_options_text_v1(opts: NativeLinkOptions) -> text:
         "pie={opts.pie}", "bare={opts.bare_metal}", "opt={opts.opt_level}",
         "backend=" + opts.stage4_backend, "compiler=" + opts.stage4_compiler_hash,
         "runtime=" + opts.runtime_path, "bundle=" + opts.runtime_bundle]
+    if opts.xray_thread_context_v1:
+        parts.push("xray-thread-context-v1=1")
     for library in opts.libraries:
         parts.push("lib=" + library)
     for path in opts.library_paths:
@@ -201,42 +206,74 @@ fn _publish_receipt_v1(path: text, content: text) -> bool:
 # Drop-in for link_llvm_native at the driver's final-link sites.
 pub fn native_link_with_receipt_v1(objects: [text], output: text,
         opts: NativeLinkOptions) -> Result<text, text>:
+    match native_link_with_receipt_v2(objects, output, opts):
+        case Ok(value): Ok(value.output_path)
+        case Err(message): Err(message)
+
+# Retained records describe an old output, not the current compiler's emission.
+# Full PackageInit production requests a fresh backend observation explicitly.
+# Unsupported backends still return an absent observation, never invented empty.
+pub fn native_link_with_receipt_v2(objects: [text], output: text,
+        opts: NativeLinkOptions, require_fresh_startup: bool = false) -> Result<NativeLinkedArtifactV2, text>:
     val mode = env_get_opt("SIMPLE_LINK_RECEIPT") ?? ""
     if mode == "0":
-        return link_llvm_native(objects, output, opts)
+        return link_llvm_native_with_receipt_v2(objects, output, opts)
     var object_digests: [text] = []
     for object in objects:
         val digest = _file_digest_v1(object)
         if digest == "":
-            # Unknown input: no receipt claim either way.
-            return link_llvm_native(objects, output, opts)
+            return link_llvm_native_with_receipt_v2(objects, output, opts)
         object_digests.push(digest)
-    # Toolchain (linker, CRT, explicit + implicit libraries): unkeyable => no claim.
     val toolchain = _toolchain_digests_v1(opts.libraries, opts.library_paths, opts.pie)
     if toolchain == nil:
-        return link_llvm_native(objects, output, opts)
+        return link_llvm_native_with_receipt_v2(objects, output, opts)
     var key_inputs = _runtime_digests_v1(opts.runtime_path)
     for row in toolchain!: key_inputs.push(row)
-    val key = native_link_key_v1(object_digests, output, native_link_options_text_v1(opts),
-        key_inputs)
+    val key = native_link_key_v1(object_digests, output, native_link_options_text_v1(opts), key_inputs)
     val receipt_path = output + ".link-receipt"
-    val recorded = if file_exists(receipt_path):
-        native_link_receipt_output_digest_v1(file_read(receipt_path), key)
-    else:
-        ""
-    val hit = recorded != "" and _file_digest_v1(output) == recorded
-    if hit and mode == "1":
+    val content = match file_read_regular_no_follow_bounded(receipt_path, 16777216):
+        case Ok(value): value
+        case Err(_): ""
+    val recorded = native_link_receipt_output_digest_v1(content, key)
+    val v2_candidate = content.starts_with("simple-link-receipt: 2\nkey: " + key + "\n")
+    val current_output = if recorded != "" or v2_candidate: _file_digest_v1(output) else: ""
+    val retained_startup = if v2_candidate and current_output != "":
+        native_link_receipt_startup_read_v2(content, key, current_output, object_digests)
+    else: nil
+    val hit = (recorded != "" and current_output == recorded) or retained_startup != nil
+    if hit and mode == "1" and not require_fresh_startup:
         eprint("[link-receipt] hit: {objects.len()} object(s) unchanged; relink skipped ({output})")
-        return Ok(output)
-    val linked = link_llvm_native(objects, output, opts)
-    if linked.is_ok():
-        val produced = _file_digest_v1(output)
-        if hit:
-            eprint("[link-receipt] shadow: would skip relink; fresh output identical={produced == recorded} ({output})")
-        if produced != "":
-            val _published = _publish_receipt_v1(receipt_path,
-                native_link_receipt_render_v1(key, produced))
-    linked
+        return Ok(NativeLinkedArtifactV2(output_path: output, startup: nil))
+    val linked = link_llvm_native_with_receipt_v2(objects, output, opts)
+    if linked.is_err(): return Err(linked.unwrap_err())
+    val artifact = linked.unwrap()
+    var final_startup = artifact.startup
+    val produced = _file_digest_v1(output)
+    if hit:
+        eprint("[link-receipt] shadow: would skip relink; fresh output identical={produced == current_output} ({output})")
+    # Only the new metadata claim requires stable input observations around
+    # linking. A failed/missing observation never fabricates an empty startup.
+    var publication_inputs_stable = true
+    if final_startup != nil:
+        var index = 0
+        while index < objects.len():
+            if _file_digest_v1(objects[index]) != object_digests[index]:
+                final_startup = nil
+                publication_inputs_stable = false
+            index = index + 1
+    if produced != "" and publication_inputs_stable:
+        var published_content = native_link_receipt_render_v1(key, produced)
+        if final_startup != nil:
+            val complete = native_link_receipt_render_v2(key, produced, object_digests, final_startup.unwrap())
+            if complete != nil:
+                published_content = complete.unwrap()
+            else:
+                final_startup = nil
+        val published = _publish_receipt_v1(receipt_path, published_content)
+        if not published: final_startup = nil
+    else:
+        final_startup = nil
+    Ok(NativeLinkedArtifactV2(output_path: artifact.output_path, startup: final_startup))
 
 export native_link_options_text_v1, native_link_key_v1
 export native_link_receipt_render_v1, native_link_receipt_output_digest_v1

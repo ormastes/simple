@@ -1,0 +1,80 @@
+# Observe final initializer bodies without serializing unrelated module code.
+# This validates retained plan consistency, not preservation of original effects
+# through transformations, and is never sufficient for object/cache admission.
+use compiler.common.cache_contract.mir_initializer_plan_v1.{MirInitializerStepV1, MirInitializerBodyReceiptV1}
+use compiler.common.cache_contract.physical_tld_v1.{three_payload_contract_max_items_v1}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_json.{serialize_mir_function}
+use compiler.mir._MirLowering.global_initializer_guard.{mir_global_initializer_wrapper_name}
+use compiler.mir._MirLowering.module_lowering.{mir_dynamic_module_init_name}
+use std.common.crypto.sha256.{sha256_text}
+
+fn _initializer_function_abi_v1(function: MirFunction, name: text) -> bool:
+    if function.name != name or not function.is_export_c or function.export_name != name or
+            function.signature.params.len() != 0 or function.signature.is_variadic or
+            function.blocks.len() == 0: return false
+    match function.signature.return_type.kind:
+        case MirTypeKind.Unit: true
+        case _: false
+
+fn _initializer_wrapper_calls_v1(function: MirFunction, target: text) -> bool:
+    var calls = 0
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, callee, args):
+                    match callee.kind:
+                        case MirOperandKind.Const(MirConstValue.Str(name), _):
+                            if name == target and args.len() == 0: calls = calls + 1
+                        case _: ()
+                case _: ()
+    calls == 1
+
+pub fn mir_initializer_plan_finalize_v1(module: MirModule) -> Result<MirInitializerBodyReceiptV1, text>:
+    if module.initializer_plan_v1 == nil: return Err("initializer-plan-unavailable")
+    val plan = module.initializer_plan_v1.unwrap()
+    if plan.module_identity == "" or plan.module_identity != module.name or
+            plan.bootstrap_module_index < -1 or
+            plan.ordered_steps.len() > three_payload_contract_max_items_v1(): return Err("initializer-plan-module-mismatch")
+    var ids: Dict<i64, bool> = {}
+    var names: Dict<text, bool> = {}
+    for raw_step in plan.ordered_steps:
+        val step: MirInitializerStepV1 = raw_step
+        if step.symbol_id < 0 or step.name == "" or ids.has(step.symbol_id) or names.has(step.name):
+            return Err("initializer-plan-duplicate-or-invalid-step")
+        ids[step.symbol_id] = true
+        names[step.name] = true
+    val wrapper_name = mir_global_initializer_wrapper_name(plan.module_identity)
+    var initializer: MirFunction? = nil
+    var wrapper: MirFunction? = nil
+    var startup_count = 0
+    for raw_function in module.functions.values():
+        val function: MirFunction = raw_function
+        if function.name == "__module_init" or function.name.starts_with("__module_init_") or
+                (function.is_export_c and (function.export_name == "__module_init" or
+                    function.export_name.starts_with("__module_init_"))):
+            startup_count = startup_count + 1
+        if function.name == plan.emitted_init_symbol:
+            if initializer != nil: return Err("initializer-body-duplicate")
+            initializer = Some(function)
+        if function.name == wrapper_name:
+            if wrapper != nil: return Err("initializer-wrapper-duplicate")
+            wrapper = Some(function)
+    if plan.ordered_steps.len() == 0:
+        if plan.emitted_init_symbol != "" or startup_count != 0 or wrapper != nil:
+            return Err("initializer-empty-plan-body-mismatch")
+        return Ok(MirInitializerBodyReceiptV1(plan: plan,
+            initializer_body_digest: sha256_text("simple/initializer-body/v1:empty"),
+            wrapper_body_digest: sha256_text("simple/initializer-wrapper/v1:empty")))
+    if plan.emitted_init_symbol != mir_dynamic_module_init_name(plan.module_identity, plan.bootstrap_module_index) or
+            startup_count != 1 or initializer == nil or wrapper == nil:
+        return Err("initializer-body-or-wrapper-unavailable")
+    val body = initializer.unwrap()
+    val wrapper_body = wrapper.unwrap()
+    if not _initializer_function_abi_v1(body, plan.emitted_init_symbol) or
+            not _initializer_function_abi_v1(wrapper_body, wrapper_name) or
+            not _initializer_wrapper_calls_v1(wrapper_body, plan.emitted_init_symbol):
+        return Err("initializer-body-abi-or-wrapper-link-mismatch")
+    Ok(MirInitializerBodyReceiptV1(plan: plan,
+        initializer_body_digest: sha256_text("simple/initializer-body/v1:" + serialize_mir_function(body)),
+        wrapper_body_digest: sha256_text("simple/initializer-wrapper/v1:" + serialize_mir_function(wrapper_body))))
