@@ -4,6 +4,7 @@ use std.common.math.ieee754_bits.{math_f64_round_to_f32_bits, math_f32_widen_bit
 use std.nogc_sync_mut.io_runtime.{cwd}
 # Part 1 of src/compiler/70.backend/backend/mir_to_llvm.spl
 use compiler.backend.mir_to_llvm.*
+use compiler.backend.llvm_xray_semantic_rows.{llvm_xray_semantic_attachment_v1}
 # MIR to LLVM IR Translation
 #
 # MirToLlvm class that translates MIR to LLVM IR.
@@ -506,6 +507,7 @@ impl MirTextCodegen for MirToLlvm:
         # module's functions. Off leaves both empty.
         self.fn_xray_mode = {}
         self.xray_module_on = false
+        self.xray_semantic_owner = module.name
         for fn_owner in mir_module_functions_sorted(module):
             # Source-facing runtime aliases can also have ordinary local bodies.
             # Remember their identity before emission: callers may sort before
@@ -1091,6 +1093,13 @@ impl MirTextCodegen for MirToLlvm:
         if ((is_small and xray_mode == 0) or self.fn_inline.has(name)) and not placement_naked:
             attrs = attrs + " alwaysinline"
         attrs = attrs + llvm_xray_function_attrs(xray_mode, self.xray_module_on)
+        var semantic_suffix = ""
+        if (xray_mode == 2 and self.target_os.starts_with("linux") and
+                self.native_int_type == "i64" and
+                (self.target_arch == "x86_64" or self.target_arch == "aarch64")):
+            match llvm_xray_semantic_attachment_v1(fn_name, self.xray_semantic_owner):
+                case Ok(attachment): semantic_suffix = attachment
+                case Err(reason): self.codegen_error(reason)
         if ir_handle >= 0 or placement_naked or placement_suffix != "" or placement_prefix != "define":
             val param_str = params.join(", ")
             var dbg_suffix = ""
@@ -1099,7 +1108,7 @@ impl MirTextCodegen for MirToLlvm:
             # two-default matches on the strict lane.
             if val did = dbg_id:
                 dbg_suffix = " !dbg !{did}"
-            val opening = "{placement_prefix} {effective_ret_ty} @{fn_name}({param_str}){attrs}{placement_suffix}{dbg_suffix} {{"
+            val opening = "{placement_prefix} {effective_ret_ty} @{fn_name}({param_str}){attrs}{placement_suffix}{dbg_suffix}{semantic_suffix} {{"
             if ir_handle >= 0:
                 if _sffi_string_builder_len(ir_handle) > 0:
                     val newline = "\n"
@@ -1115,7 +1124,7 @@ impl MirTextCodegen for MirToLlvm:
             # two-default matches on the strict lane.
             if val did = dbg_id:
                 dbg_suffix = " !dbg !{did}"
-            val opening = "define {effective_ret_ty} @{fn_name}({param_str}){attrs}{dbg_suffix} {{"
+            val opening = "define {effective_ret_ty} @{fn_name}({param_str}){attrs}{dbg_suffix}{semantic_suffix} {{"
             val builder_handle = llvm_ir_builder_handle(self.builder)
             llvm_ir_builder_push_line(opening, builder_handle)
         if bootstrap_debug:

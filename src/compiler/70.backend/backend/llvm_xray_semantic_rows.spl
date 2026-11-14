@@ -1,0 +1,31 @@
+# Compiler-authored physical-function identity for the private Linux observer.
+# LLVM emits this metadata only with a surviving function, without an IR use
+# that would root it. Schema: doc/04_architecture/compiler/xray/llvm_semantic_rows_v1.md.
+# Object encoding qualified only by the recorded Clang 18.1.3 AArch64 probe;
+# source implementation is not admission of a runtime profile.
+pub fn llvm_xray_semantic_attachment_v1(identity: text, owner: text) -> Result<text, text>:
+    val key_bytes = identity.bytes()
+    val owner_bytes = owner.bytes()
+    if key_bytes.len() < 1 or key_bytes.len() > 4096:
+        return Err("XRAY-E-SEMANTIC-KEY: emitted identity must contain 1..4096 UTF-8 bytes")
+    if owner_bytes.len() < 1 or owner_bytes.len() > 1024:
+        return Err("XRAY-E-SEMANTIC-OWNER: module identity must contain 1..1024 UTF-8 bytes")
+    val payload_size = 40 + key_bytes.len() + owner_bytes.len()
+    val row_size = ((payload_size + 7) / 8) * 8
+    var constants: [text] = ["i64 3552587323878299731", "i32 1", "i32 {row_size}",
+        "i32 {key_bytes.len()}", "i32 {owner_bytes.len()}", "i64 0"]
+    for byte in key_bytes:
+        if byte == 0:
+            return Err("XRAY-E-SEMANTIC-KEY: embedded NUL")
+        constants.push("i8 {byte}")
+    for byte in owner_bytes:
+        if byte == 0:
+            return Err("XRAY-E-SEMANTIC-OWNER: embedded NUL")
+        constants.push("i8 {byte}")
+    var padding = payload_size
+    while padding < row_size:
+        constants.push("i8 0")
+        padding = padding + 1
+    # No !C compression, pointers, llvm.used or ordinal derived from XRay.
+    val payload = constants.join(", ")
+    Ok(" !pcsections !{{!\"simple_xray_semantic_v1\", !{{{payload}}}}}")
