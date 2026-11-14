@@ -158,3 +158,27 @@ noise. The only new work with coverage off is one `is_coverage_enabled()`
   `run` on both), `test_runner_coverage_decisions_extraction_spec` 2 skipped on both;
   `spl_coverage_cli`, `coverage_module_report`, `coverage_runtime_ffi`,
   `spl_coverage_log_modes`, `coverage_aspect_pack` pass. Pre-existing, not caused here.
+
+## Review fix (2026-11-14): tail record limited to `if` / `match`
+
+The review found that the arm-tail record in `interpreter/expr/control.rs` ran
+for EVERY last statement of an arm, not only for the `if` / `match` it was added
+for. Any other tail (`val`, assignment, `return`, ...) falls through to
+`exec_node`, which records it again. In one file that is harmless: `record_line`
+stores a set. Inside a lambda that is invoked from another module, the two
+records go to two files: the lexical one to the writing module, and the
+`exec_node` one to the invoker. The same executed line then counted in both
+files. Repro (`covexpr_tail_let`, fixture line 147, a lambda invoked by
+`covexpr_helper.spl`): on the original change the line was recorded under the
+fixture AND under the helper, a phantom row at line 147 of a 7-line file.
+
+The fix guards the call with `matches!(stmt, Node::If(_) | Node::Match(_))`. The
+line is now recorded once, under the invoker, as it was on the base. Which file
+receives it is the open bug
+`coverage_closure_body_hits_filed_under_invoker_2026-11-14`. The spec asserts
+that the line lands in exactly one of the two files, and that the untaken arm
+(143) stays unrecorded. Fixture total: 78.9% (30/38).
+
+Spec `spl_coverage_module_spec.spl`: 10/10 passed on the reviewed seed. It failed
+9/10 on the original change (the exactly-one-file assertion) and 9/10 on the
+base `6a71372cabc` (the lambda-body lines).

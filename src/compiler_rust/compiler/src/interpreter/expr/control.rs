@@ -346,7 +346,13 @@ pub(super) fn eval_control_expr(
                             // of an arm of a value-position `match`
                             // (`val r = match`, `return match`) ran unrecorded
                             // -- the twin of the tail record in exec_block_fn.
-                            crate::interpreter::coverage_helpers::record_node_coverage_lexical(stmt);
+                            // Only for If/Match: any other tail falls through to
+                            // exec_node below, which records it itself (under the
+                            // invoker inside a closure body, which would put a
+                            // lambda line in a second file).
+                            if matches!(stmt, Node::If(_) | Node::Match(_)) {
+                                crate::interpreter::coverage_helpers::record_node_coverage_lexical(stmt);
+                            }
                             match stmt {
                                 Node::Expression(expr) => {
                                     result =
