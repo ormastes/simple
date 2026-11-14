@@ -32,6 +32,8 @@ use compiler.semantics.aspect_weave.{AspectForwardWeaveClaimV1,
 use compiler.semantics.join_point_model.{forward_join_points}
 use compiler.common.cache_contract.guard_id_v1.{GuardEvalV1, active_guard_root_v1}
 use compiler.common.cache_contract.aspect_match_shard_v1.{directory_join_point_facts_guarded_v1}
+use compiler.common.cache_contract.aspect_plugin_model_v1.{Pointcut, SelectorPointcutV1,
+    PluginDefinitionV1, PluginConfigValueV1, PluginInstanceDescriptorV1, PluginInstancePoolV1}
 use compiler.frontend.core.cfg_platform.{cfg_detect_os, cfg_detect_arch}
 use compiler.driver.cache.aop_guard_eval_v1.{aop_guard_profile_v1, aop_source_guard_evals_v1,
     aop_module_guard_evals_v1}
@@ -57,6 +59,7 @@ class AopMatchDriverStateV1:
     selector_parse_count: i64
     selector_plan_hits: i64
     selector_plan_evictions: i64
+    plugin_instances: PluginInstancePoolV1
 
     static fn create() -> AopMatchDriverStateV1:
         AopMatchDriverStateV1.create_with_selector_capacity(256).unwrap()
@@ -68,7 +71,8 @@ class AopMatchDriverStateV1:
             cache: pointcut_match_cache_new_v1(), flights: CacheSingleFlightV1.create(),
             shard_hits: 0, shard_misses: 0, fallbacks: 0, sources: {},
             selector_plans: {}, selector_plan_keys: [], selector_plan_capacity: capacity,
-            selector_parse_count: 0, selector_plan_hits: 0, selector_plan_evictions: 0))
+            selector_parse_count: 0, selector_plan_hits: 0, selector_plan_evictions: 0,
+            plugin_instances: PluginInstancePoolV1.create(256).unwrap()))
 
 fn _selector_plan_key(source: text) -> text:
     "aop-selector-runtime/v1\u0000" + source
@@ -115,7 +119,7 @@ pub fn aop_selector_plan_acquire_v1(state: AopMatchDriverStateV1,
     if state.selector_plans.contains_key(key):
         state.selector_plan_hits = state.selector_plan_hits + 1
         return state.selector_plans[key]
-    val parsed = pointcut_selector_parse_v1(source)
+    val parsed = SelectorPointcutV1(source: source).compile()
     state.selector_parse_count = state.selector_parse_count + 1
     val canonical = _selector_plan_canonical(state, parsed)
     _selector_plan_insert(state, key, canonical)
@@ -189,6 +193,10 @@ fn _encode_ids(ids: [text]) -> [u8]:
 pub fn aop_match_shard_acquire_v1(state: AopMatchDriverStateV1, selector: text,
         facts: DirectoryJoinPointFactsV1, request_id: text) -> PointcutMatchShardV1:
     val sel = aop_selector_plan_acquire_v1(state, selector)
+    _aop_match_shard_from_plan_v1(state, sel, facts, request_id)
+
+fn _aop_match_shard_from_plan_v1(state: AopMatchDriverStateV1, sel: PointcutSelectorV1,
+        facts: DirectoryJoinPointFactsV1, request_id: text) -> PointcutMatchShardV1:
     val key = cache_single_flight_key_v1("aop.match", pointcut_match_key_v1(sel, facts))
     val (role, _flight) = state.flights.join(key, request_id)
     val r = pointcut_match_cache_acquire_v1(state.cache, sel, facts)
@@ -215,6 +223,30 @@ pub fn aop_directory_snapshot_matches_v2(snapshot: DirectoryTldrSourceSnapshotV2
         three_payload_contract_digest_valid_v1(snapshot.inventory_digest) and
         three_payload_contract_digest_valid_v1(snapshot.provider_digest) and
         three_payload_contract_digest_valid_v1(snapshot.file_tldr_root_digest)
+pub struct AopPluginMatchAcquireV1:
+    instance: PluginInstanceDescriptorV1
+    instance_hit: bool
+    match_key: text
+    shard: PointcutMatchShardV1
+
+# The admitted producer supplies code identity and the closed config schema.
+# This is a pure matching API, not code loading or plugin admission. Scope
+# values cannot affect execution here: only the explicit selector and facts
+# feed the existing matcher. The caller must bind its directory input through
+# the directory-TLDR admission factory when using persisted facts.
+#
+# Existing legacy registry claims lack a code digest/config and keep their
+# original path. Never manufacture a code identity from an advice name.
+pub fn aop_plugin_match_shard_acquire_v1(state: AopMatchDriverStateV1,
+        definition: PluginDefinitionV1, config: [PluginConfigValueV1], selector: text,
+        facts: DirectoryJoinPointFactsV1, request_id: text) -> Result<AopPluginMatchAcquireV1, text>:
+    val sel = aop_selector_plan_acquire_v1(state, selector)
+    if not sel.supported or not facts.complete:
+        return Err("plugin-match-incomplete")
+    val instance = state.plugin_instances.acquire(definition, config)?
+    val shard = _aop_match_shard_from_plan_v1(state, sel, facts, request_id)
+    Ok(AopPluginMatchAcquireV1(instance: instance.instance, instance_hit: instance.hit,
+        match_key: pointcut_match_key_v1(sel, facts), shard: shard))
 
 # Cached replacement for aspect_weave.weave_forward_advice: same claims, same
 # per-module weaver, but module visits are driven by the matched shard ids.
