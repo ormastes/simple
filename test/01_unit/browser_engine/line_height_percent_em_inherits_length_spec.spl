@@ -1,0 +1,112 @@
+"""
+## Purpose and audience
+Purpose: Pin that a percentage or `em` `line-height` computes to a LENGTH on
+the element that declares it and is inherited as that length, while a unitless
+number is inherited as a factor (CSS 2.2 10.8.1). Both used to be stored as a
+factor, so a child with a larger font re-resolved `line-height: 150%` against
+its own size: 36 px where Chrome has 24.
+Audience: browser-engine style and layout maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless shell, 900x4000,
+`font: 16px sans-serif` on the wrapper, getBoundingClientRect height):
+
+| parent style                         | child style       | child height |
+|--------------------------------------|-------------------|--------------|
+| `line-height:150%`                   | `font-size:24px`  | 24           |
+| `line-height:2em`                    | `font-size:24px`  | 32           |
+| `line-height:1.5` (control, factor)  | `font-size:24px`  | 36           |
+| `font:16px/150% sans-serif`          | `font-size:24px`  | 24           |
+| `font-size:20px;line-height:1.2em`   | `font-size:10px`  | 24           |
+| `line-height:150%` (own text)        | —                 | parent 24    |
+
+Found by the combination matrix's `lh_normal` page
+(`ln-lhkid-pct150-*`, `ln-lhkid-em2-*`).
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-LINE-HEIGHT-PERCENT-EM-LENGTH-001 — percentage and em line-heights inherit as computed lengths, unitless ones as factors.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_decl_apply.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val HEAD: text = "<html><head><style>body{margin:0;font:16px sans-serif}</style></head><body>"
+val TAIL: text = "</body></html>"
+
+fn height(parent_style: text, child_style: text, id: text) -> text:
+    simple_web_layout_debug_layout_by_id(
+        HEAD + "<div id=\"p\" style=\"" + parent_style + "\"><div id=\"t\" style=\"" + child_style + "\">cd ef</div></div>" + TAIL,
+        900, 600, id, "h")
+
+describe "percentage and em line-heights inherit as lengths":
+    it "AC-1: line-height:150% on a 16 px parent is 24 px for a 24 px child":
+        step("Chrome 159: child 24 tall (not 36)")
+        expect(height("line-height:150%", "font-size:24px", "t")).to_equal("24")
+        expect(height("line-height:150%", "font-size:24px", "p")).to_equal("24")
+
+    it "AC-2: line-height:2em on a 16 px parent is 32 px for a 24 px child":
+        step("Chrome 159: child 32 tall (not 48)")
+        expect(height("line-height:2em", "font-size:24px", "t")).to_equal("32")
+
+    it "AC-3: control — a unitless factor is re-resolved against the child's font":
+        step("Chrome 159: 1.5 x 24 = 36")
+        expect(height("line-height:1.5", "font-size:24px", "t")).to_equal("36")
+
+    it "AC-4: the same through the font shorthand":
+        step("Chrome 159: font:16px/150% -> child 24 tall")
+        expect(height("font:16px/150% sans-serif", "font-size:24px", "t")).to_equal("24")
+
+    it "AC-5: em resolves against the declaring element's own font-size":
+        step("Chrome 159: 20px x 1.2 = 24 px, kept by a 10 px child")
+        expect(height("font-size:20px;line-height:1.2em", "font-size:10px", "t")).to_equal("24")
+
+    it "AC-6: control — the declaring element's own line is unchanged":
+        step("Chrome 159: 16px x 150% = 24")
+        expect(simple_web_layout_debug_layout_by_id(HEAD + "<div id=\"p\" style=\"line-height:150%\">cd ef</div>" + TAIL, 900, 600, "p", "h")).to_equal("24")
+
+# The length is computed from the element's FINAL font-size, wherever the
+# font-size declaration sits. Chrome 159, same wrapper, element height:
+#
+# | rules / inline style                                               | height |
+# |--------------------------------------------------------------------|--------|
+# | `.q{line-height:150%;font-size:24px}`                              | 36     |
+# | inline `line-height:150%;font-size:24px`                           | 36     |
+# | inline `font-size:24px;line-height:150%`                           | 36     |
+# | `.q{line-height:1.5em}` + inline `font-size:32px`                  | 48     |
+# | `.q{line-height:150%}` + `.r{font-size:24px}` (two classes)        | 36     |
+# | `.q{font-size:24px}` + later `.q{line-height:150%}`                | 36     |
+# | `.q{font:16px/150% sans-serif;font-size:24px}`                     | 36     |
+# | `.q{line-height:112.5%}` + inline `font-size:32px`                 | 36     |
+# | `.q{line-height:150%;font-size:24px}` with a `font-size:12px` child | child 36 |
+fn styled(css: text, attrs: text, inner: text, id: text) -> text:
+    simple_web_layout_debug_layout_by_id(
+        "<html><head><style>body{margin:0;font:16px sans-serif}" + css + "</style></head><body><div id=\"p\" " + attrs + ">" + inner + "</div></body></html>",
+        900, 600, id, "h")
+
+describe "the length uses the element's final font-size":
+    it "AC-7: line-height before font-size in one rule or one style attribute":
+        step("Chrome 159: 24px x 150% = 36 in either order")
+        expect(styled(".q{{line-height:150%;font-size:24px}}", "class=\"q\"", "cd ef", "p")).to_equal("36")
+        expect(styled("", "style=\"line-height:150%;font-size:24px\"", "cd ef", "p")).to_equal("36")
+        expect(styled("", "style=\"font-size:24px;line-height:150%\"", "cd ef", "p")).to_equal("36")
+
+    it "AC-8: font-size from a later-cascading source":
+        step("Chrome 159: class line-height:1.5em + inline font-size:32px -> 48")
+        expect(styled(".q{{line-height:1.5em}}", "class=\"q\" style=\"font-size:32px\"", "cd ef", "p")).to_equal("48")
+        step("Chrome 159: two classes, and the same class twice -> 36")
+        expect(styled(".q{{line-height:150%}}.r{{font-size:24px}}", "class=\"q r\"", "cd ef", "p")).to_equal("36")
+        expect(styled(".q{{font-size:24px}}.q{{line-height:150%}}", "class=\"q\"", "cd ef", "p")).to_equal("36")
+
+    it "AC-9: the font shorthand followed by a font-size longhand":
+        step("Chrome 159: font:16px/150% then font-size:24px -> 36")
+        expect(styled(".q{{font:16px/150% sans-serif;font-size:24px}}", "class=\"q\"", "cd ef", "p")).to_equal("36")
+
+    it "AC-10: a fractional percentage keeps its fraction":
+        step("Chrome 159: 32px x 112.5% = 36 (112% would give 35)")
+        expect(styled(".q{{line-height:112.5%}}", "class=\"q\" style=\"font-size:32px\"", "cd ef", "p")).to_equal("36")
+
+    it "AC-11: children still inherit the computed length":
+        step("Chrome 159: a 12 px child of the 24px/150% element is 36 tall")
+        expect(styled(".q{{line-height:150%;font-size:24px}}", "class=\"q\"", "<div id=\"t\" style=\"font-size:12px\">cd ef</div>", "t")).to_equal("36")

@@ -1065,7 +1065,7 @@ painted and over-tall), `html`, `forms-media`, `css-paint`, `css-layout`.
 ## 2026-11-14 — combination matrix vs Chrome 159 (tag x tag, tag x CSS, CSS x CSS)
 
 `sh scripts/check/check-web-combo-matrix-chrome.shs` (about 45 s; set
-`SIMPLE_BIN`): 849 generated cells / 3415 element ids in
+`SIMPLE_BIN`): 979 generated cells / 3880 element ids (849 / 3415 before the `lh_normal` page) in
 `test/fixtures/browser/combo_matrix/` (generator:
 `scripts/generate/generate-web-combo-matrix.shs`), each cell in its own 400x140
 slot and compared slot-relative at 1 px. It is a RATCHET on
@@ -1528,3 +1528,59 @@ never cache an answer computed while exhausted) —
   `<td align="left" style="direction:rtl">` probably still aligns `start`;
   the faceless cell wrap gives 6 lines where Chrome has 3 for the AC-30
   paragraph.
+
+## 2026-11-14 — combined tip check (floats + line-height normal + selector combinators) and the `lh_normal` matrix page
+
+- **No interaction regression.** At `2d9344c6eae` (three separately gated
+  lanes merged) the matrix is 152 / 849 cells with 263 ids, 0 new and 0
+  stale; the 8 catalog pages measure exactly their rows (tab-bar 0.68 against
+  0.63, inside the tolerance). Nothing to tighten in either baseline.
+- **Spec sweep.** 118 specs in `test/01_unit/browser_engine` plus the CPU
+  port spec: 107 green. The 11 red ones fail the SAME cases at the pre-lane
+  base `00afc10545b` (browser_renderer_utils closure 21/22, dom_identity_index
+  5/6, fractional_advance_accumulation 4/11, html5lib_tokenizer 7/11,
+  html_tree_builder_hardening 11/13, html_tree_builder 8/37, js_integration
+  0/12, kern_pair_advance_accumulation 1/9, platform_system_face_metrics
+  15/25, declarations closure 52/54, table_fractional_column_width 0/2).
+  `corpus_fifth_line_exact_pixel_spec` (0/1) is `@tag:in-development` and
+  documents its own expected failure.
+- **`lh_normal.html`** (generator `page_begin` takes the body font as a third
+  argument): 130 cells / 465 ids under `font: 16px sans-serif`, i.e. the
+  initial `line-height: normal`, which no fixture covered -- every other page
+  sets `16px/1.5`. Groups: tag-tag (7 parents x 10 children), font,
+  font-inline, line-height, line-height-inherit, line-height-reset, wrap,
+  box. Matrix is now 979 cells / 3880 ids.
+- **Found and fixed through it:** a percentage or `em` `line-height` was
+  stored as a factor, so a 24 px child of `line-height:150%` got 36 px
+  (Chrome 24). It computes to a LENGTH against the declaring element's own
+  font-size and is inherited as that length; only a unitless number stays a
+  factor. Spec:
+  `test/01_unit/browser_engine/line_height_percent_em_inherits_length_spec.spl`.
+- **Trap — the length needs the element's FINAL font-size.** Declarations
+  are applied once per matching rule, so `.a{line-height:1.5em}` plus an
+  inline `font-size:32px` saw the stale 16 px when the length was computed
+  at parse time (24 where Chrome has 48). The factor is kept on the Style as
+  `line_height_em_milli` (thousandths, so `112.5%` survives), converted to
+  `line_height_px` at the end of EVERY declaration application, reset by
+  `inherit_from` / never passed by `inherit_style`, so children get only the
+  length. Any other value that depends on a property which can cascade in
+  later needs the same pending form.
+- **Baselined clusters on the new page (17 cells, 27 ids):** `td` parents
+  (10 cells: the known table-cell max-content residue, the cell wraps to two
+  lines); inline button / small in `h1` / `h3` (3: baseline alignment of a
+  smaller or atomic inline in a heading, same as the 1.5 page); `pre` with
+  button / input (2: monospace form-control width, same as the 1.5 page);
+  `<span style="font-size:10px">` sits 2 px high (1: a smaller inline font's
+  baseline under the normal line height); `position:absolute` without
+  offsets is placed at the container top instead of its static position
+  (1: y 0 where Chrome has 18).
+- **Trap — `rem` is not `em`.** `_decl_line_height_own_font_milli` tests
+  `ends_with("em")` and must exclude `rem`, which still goes through the old
+  factor parse.
+- **4K lane (3840x2160, Vulkan on llvmpipe) fits in 8 GB:** 16 min 52 s,
+  max RSS 4.5 GB for all 8 pages. Measured at this tip: overview 0.24, html
+  2.77, css-layout 2.09, css-paint 2.47 (row 2.50), forms-media 1.96,
+  animation 2.23 (row 2.63), evidence 0.15, tab-bar 0.05. The two lower rows
+  were lowered. Run it with
+  `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json … --width 3840
+  --height 2160 --backend vulkan`.
