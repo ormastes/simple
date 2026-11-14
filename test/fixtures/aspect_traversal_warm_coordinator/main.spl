@@ -1,0 +1,137 @@
+# AUTHORED / UNRUN. Calls the actual production coordinator and validator with
+# real HIR records. Parser/CompileContext wiring and managed admission are NOT
+# executed by this bounded fixture. No codec or matcher variant is substituted.
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.attributes.{FunctionAttr}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTable,
+    HirSymbol, SymbolKind, ScopeId}
+use compiler.hir.hir_definitions.{HirFunction, HirExpr, HirExprKind, HirBlock, HirStmtKind}
+use compiler.common.cache_contract.traversal_session_state_v1.{TraversalSessionStateV1}
+use compiler.common.cache_contract.directory_tldr_snapshot_v2.{DirectoryTldrSourceSnapshotV2}
+use compiler.driver.cache.aop_traversal_warm_v1.{aop_traversal_prepare_visit_v1,
+    aop_traversal_finish_visit_v1}
+use compiler.driver.cache.aop_match_cache_driver_v1.{aop_directory_facts_from_hir_v1,
+    aop_match_driver_reset_before_session_end_v1}
+use compiler.frontend.aspect_registry.{aspect_registry_reset, aspect_registry_declare}
+use compiler.frontend.join_point_attr_registry.{join_point_attr_begin_epoch_v2, join_point_attr_record}
+use compiler.semantics.aspect_validation.{validate_aspect_contracts}
+use std.nogc_sync_mut.io.kernel_image_digest_v1.{kernel_image_digest_v1}
+use std.nogc_sync_mut.sffi.transient.{rt_session_heap_begin, rt_session_heap_end}
+use std.common.crypto.sha256.{sha256_text}
+
+val SOURCE = "fn implementation() -> i64:\n    42\n\nfn facade() -> i64:\n    implementation()\n\n@advice(forward, facade)\n@readonly\n@noalloc\n@bounded_time\nfn observe():\n    ()\n"
+
+fn expr(kind: HirExprKind, type_: HirType) -> HirExpr:
+    HirExpr(kind: kind, has_type_: true, type_: type_, span: Span.empty())
+
+fn function(id: i64, name: text, result: HirType, value: HirExpr) -> HirFunction:
+    # Actual production constructor fields; no stand-in type or body structure.
+    HirFunction(symbol: SymbolId(id: id), name: name, type_params: [], params: [],
+        return_type: result, body: HirBlock(stmts: [], has: true, value: value, span: Span.empty()),
+        effects: [], visibility: Visibility.Public, is_async: false, is_static: false,
+        is_public: true, is_method: false, is_mutable: false, is_const: false, is_extern: false,
+        func_attr: FunctionAttr.default(), has_export_attr: false, export_attr: nil,
+        has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_suspension: false, has_vhdl_metadata: false, vhdl_metadata: nil,
+        has_doc_comment: false, doc_comment: "", span: Span.empty(),
+        is_gpu_kernel: false, gpu_target: "", gpu_backend_order: "",
+        verification_contract: nil, is_generic_template: false)
+
+fn module_fixture() -> HirModule:
+    val int_type = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+    val unit_type = HirType(kind: HirTypeKind.Unit, span: Span.empty())
+    val implementation = function(10, "implementation", int_type, expr(HirExprKind.IntLit(42, nil), int_type))
+    val callee = expr(HirExprKind.NamedVar(SymbolId(id: 10), "implementation"),
+        HirType(kind: HirTypeKind.Function([], int_type, []), span: Span.empty()))
+    val facade = function(20, "facade", int_type, expr(HirExprKind.Call(callee, [], []), int_type))
+    val observer = function(30, "observe", unit_type, expr(HirExprKind.UnitLit, unit_type))
+    val symbols = SymbolTable.new()
+    for item in [implementation, facade, observer]:
+        symbols.symbols[item.symbol.id] = HirSymbol(id: item.symbol, name: item.name,
+            kind: SymbolKind.Function,
+            type_: Some(HirType(kind: HirTypeKind.Function([], item.return_type, []), span: Span.empty())),
+            scope: ScopeId(id: 0), span: Span.empty(), visibility: Visibility.Public,
+            is_public: true, is_mutable: false, defining_module: Some("fixture"), builtin_method_tag: 0)
+        join_point_attr_record("warm/fixture.spl", item.name, [])
+    symbols.next_symbol_id = 31
+    HirModule(name: "fixture", path: "warm/fixture.spl", imports: [], exports: [], domain_blocks: [],
+        symbols: symbols, functions: {implementation.symbol: implementation, facade.symbol: facade,
+            observer.symbol: observer}, gpu_function_targets: {}, gpu_function_backend_orders: {},
+        classes: {}, structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [], mock_decls: [],
+        types: [], extend_enums: [])
+
+fn snapshots_for(modules: Dict<text, HirModule>, image: text) -> [DirectoryTldrSourceSnapshotV2]:
+    var rows: [DirectoryTldrSourceSnapshotV2] = []
+    val source_digest = sha256_text(SOURCE)
+    for facts in aop_directory_facts_from_hir_v1(modules, {"warm/fixture.spl": SOURCE}):
+        rows.push(DirectoryTldrSourceSnapshotV2(scope_id: facts.scope_id,
+            inventory_digest: source_digest, declared_producer_digest: source_digest,
+            executing_image_digest: image, file_tldr_root_digest: source_digest, facts: facts))
+    rows
+
+fn main() -> i32:
+    # Observe the real executing image before the test allocation session.
+    # This avoids treating the separately open memo-lifetime bug as qualified.
+    val image = kernel_image_digest_v1().unwrap()
+    val state = TraversalSessionStateV1.create()
+    var session: u32 = 0u32
+    unsafe(capabilities: [ffi]):
+        session = rt_session_heap_begin()
+    assert(session != 0u32)
+    val epoch = join_point_attr_begin_epoch_v2()
+    assert(state.begin_epoch(epoch))
+    val module = module_fixture()
+    val modules = {"fixture": module}
+    aspect_registry_reset()
+    aspect_registry_declare("warm/fixture.spl", "observe", "forward", "facade", "static", true, true, true)
+    val snapshots = snapshots_for(modules, image.sha256)
+    val cold = aop_traversal_prepare_visit_v1(state, modules, snapshots).unwrap()
+    assert(cold != nil)
+    assert(validate_aspect_contracts(modules).len() == 0)
+    assert(aop_traversal_finish_visit_v1(state, modules, snapshots, cold).unwrap() == 1)
+    assert(state.output_lease > 0)
+    val facade = module.functions[SymbolId(id: 20)]
+    assert(facade.body.stmts.len() == 1)
+    match facade.body.stmts[0].kind:
+        case HirStmtKind.Expr(call):
+            match call.kind:
+                case HirExprKind.Call(callee, _, _):
+                    match callee.kind:
+                        case HirExprKind.NamedVar(_, name): assert(name == "observe")
+                        case _: panic("wrong advice callee kind")
+                case _: panic("missing inserted advice call")
+        case _: panic("missing inserted advice statement")
+    val retained = state.retention.unwrap().promoted_blob_bytes
+    val warm = aop_traversal_prepare_visit_v1(state, modules, snapshots).unwrap()
+    assert(module.functions[SymbolId(id: 20)].body.stmts.len() == 0)
+    assert(validate_aspect_contracts(modules).len() == 0)
+    assert(aop_traversal_finish_visit_v1(state, modules, snapshots, warm).unwrap() == 0)
+    assert(state.reuse_hits == 1)
+    assert(state.retention.unwrap().promoted_blob_bytes == retained)
+    assert(module.functions[SymbolId(id: 20)].body.stmts.len() == 1)
+    aspect_registry_reset()
+    val removed = aop_traversal_prepare_visit_v1(state, modules, snapshots).unwrap()
+    assert(validate_aspect_contracts(modules).len() == 0)
+    assert(aop_traversal_finish_visit_v1(state, modules, snapshots, removed).unwrap() == 0)
+    assert(module.functions[SymbolId(id: 20)].body.stmts.len() == 0)
+    # Refusal occurs before publication; restore only this deliberate test
+    # mutation to continue testing the independent missing-lease condition.
+    val original = module.functions[SymbolId(id: 20)]
+    val altered_value = HirExpr(..original.body.value, kind: HirExprKind.IntLit(777, nil))
+    module.functions[SymbolId(id: 20)] = HirFunction(..original,
+        body: HirBlock(..original.body, value: altered_value))
+    assert(aop_traversal_prepare_visit_v1(state, modules, snapshots).is_err())
+    module.functions[SymbolId(id: 20)] = original
+    state.output_lease = 0
+    assert(aop_traversal_prepare_visit_v1(state, modules, snapshots).is_err())
+    assert(not state.begin_epoch(epoch))
+    assert(not state.epoch_admitted)
+    assert(aop_traversal_prepare_visit_v1(state, modules, snapshots).is_err())
+    aop_match_driver_reset_before_session_end_v1()
+    var ended = false
+    unsafe(capabilities: [ffi]):
+        ended = rt_session_heap_end(session)
+    assert(ended)
+    0
