@@ -15,8 +15,8 @@ independent and closed.
 
 The named-owner schema is HIR v19 / canonical v9, source
 `75a60844a9d667003e7e8525e2c8d88f2b547cb8` (equivalent owner patch
-`62e239d7e53`). All nine declaration inputs and the three generator sources
-match the successful native generator's input worktree byte-for-byte. The
+`62e239d7e53`). At attempt 1, all nine declaration inputs and the three generator
+sources matched the successful native generator's input worktree byte-for-byte. The
 generated codec SHA-256 is
 `12f526cdad709b38e1f94d5c21c5e182d939c8f04468684d7cf057db41b51a35`.
 Prior generator receipts are reused; successful generation was not rerun.
@@ -69,3 +69,19 @@ decoded-HIR downstream execution, warm F1 restoration, and complete-cache
 authority require their own evidence. An extracted diagnostic projection, if
 later used, must remain explicitly provisional and cannot substitute for these
 unmet checks.
+
+## Source checkpoint after release PR #9191
+
+The fixture branch was rebased onto release `a132155869c`. Named-owner fields
+and HIR v19 / canonical v9 are preserved. The release change makes imported
+struct rows identity-only (`fields` stays empty); its edits to `hir_types.spl`
+and `hir_codec.spl` describe that semantic change without changing declaration
+fields. The generated codec bytes remain identical to the SHA-256 above.
+The historical attempt and input manifest still describe frozen source
+`9f273517679`, not the rebased checkpoint; no new generator or native execution
+is claimed. Marker-order assertions now require marker presence and compare
+ordinary integer prefix lengths, avoiding optional search-result ordering.
+
+No native retry is authorized while the current provisional phase-3 build is
+active. The prior 4 GiB failure does not itself authorize a larger memory cap,
+and a projected codec cannot substitute for actual-import qualification.
