@@ -134,9 +134,17 @@ land the resource channel of item 1 and delegate to the skia rasteriser.
 ### 9. `em` lengths resolve against the font-size known when the declaration is applied
 
 `width`/`height` in `em` now use `_decl_font_relative_length_px`, like
-`min-width`/`max-width`. When one rule sets `height:2em` and a LATER-applied
-rule changes `font-size`, the height keeps the earlier font-size; Chrome
-resolves `em` against the final computed font-size.
+`min-width`/`max-width`. Measured (16 px page font, the other value 20 px):
+
+| `height:2em` from | `font-size:20px` from | Chrome | Simple |
+|---|---|---|---|
+| stylesheet rule | inline `style` | 40 | **32** |
+| inline `style` | stylesheet rule | 40 | 40 |
+| rule `.c` | later rule `.b` | 40 | 40 |
+| same rule, either order | same rule | 40 | 40 |
+
+Only the first row differs: the rule's `em` is resolved before the inline
+`font-size` is applied.
 
 Unblock: store font-relative lengths unresolved and resolve them after the
 cascade.
@@ -147,3 +155,17 @@ The tree builder honours a self-closing start tag when the nearest open
 `svg`/`math` is reached before an open `foreignObject`. It does not implement
 the HTML "breakout" list (`<svg><div>` closing the svg) or the MathML text
 integration points.
+
+### 11. viewBox-only `<svg>` in a shrink-to-fit container
+
+`<svg viewBox="0 0 24 24">` with no width/height contributes 0 to its
+container's intrinsic width: inside `<div style="display:inline-block">` or a
+`<button>` Chrome lays it out **0x0** (the div is 0x24, the button 16x21). In
+a block or flex container it fills the available width (900x900 in a 900 px
+flex row). This renderer gives 300x300 in the inline-block and the button (it
+was 300x150 before the viewBox ratio was applied): the available-width branch
+of `replaced_auto_box_w` cannot tell a shrink-to-fit measurement from a
+definite available width.
+
+Unblock: pass the intrinsic-sizing mode to the replaced sizing helpers and
+return 0 for a ratio-only svg while measuring min/max-content.
