@@ -1437,3 +1437,14 @@ never cache an answer computed while exhausted) —
   STALE baseline rows outside the renderer (`src/app/spipe/model/canonical.spl
   _json_escape`, `src/compiler/80.driver/driver_compile_vhdl_source_map.spl
   _json_escape`), present on the release tip as well.
+- Base comparison (release tip `c1099bb7897` vs this change, same seed
+  `sha256 08aba9746a813ee7…`, 59,635,056 bytes, 2026-11-14 09:32, `--simple-only`
+  over overview + evidence + css-layout): mismatch identical on all three
+  (2.88 / 1.72 / 5.85), so the float, sub/sup and flex changes move NO catalog
+  pixel and the lowered rows record improvements that were already on the
+  release tip. Render time 54.1 / 32.1 / 260.4 s base vs 54.5 / 32.7 / 259.2 s;
+  max RSS 814 MB vs 820 MB. The text-len check FAILs identically on the base
+  (0 new, the same 2 stale rows).
+- A float's auto width takes the wider of `flex_item_max_content_width` and
+  `intrinsic_text_width`: only the second sizes a replaced child
+  (`svg_viewbox_percent_sizing_spec` AC-13 went 1 px wide without it).
