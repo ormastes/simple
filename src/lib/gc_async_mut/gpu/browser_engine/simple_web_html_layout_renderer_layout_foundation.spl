@@ -982,15 +982,26 @@ fn inline_widget_baseline_from_top(child_index: HtmlChildIndex, html_nodes: [HNo
     val h = bh[node_index]
     if node.tag != "button":
         return form_control_baseline_from_top(node, st, h)
-    if st.display != "inline-block" and st.display != "inline":
+    if st.display != "inline-block" and st.display != "inline" and st.display != "inline-flex" and st.display != "inline-grid":
         return -1
+    if child_index.first_child[node_index] < 0:
+        return h - st.border_b - st.pad_b
+    val line = style_line_h(st)
+    val descent = line - inline_line_strut_baseline_offset(st)
+    if st.height_px <= 0 and st.min_height_px <= 0 and st.max_height_px <= 0:
+        # Auto height: the content fills the content box, so the last line
+        # ends at its bottom whatever the content is -- a direct text label,
+        # a label inside `<b>`, several lines after a `<br>`, or an image
+        # (whose bottom edge is that line's baseline, with the strut's
+        # descent below it).
+        return h - st.border_b - st.pad_b - descent
+    # An explicit height (or a min- / max-height clamp) no longer equals the
+    # content: the label block is centred in the content box, or overflows
+    # it from the top.
     var label = child_index.first_child[node_index]
     while label >= 0 and html_nodes[label].tag != "#text":
         label = child_index.next_sibling[label]
-    if label < 0:
-        return h - st.border_b - st.pad_b
-    val line = style_line_h(st)
-    var label_h = bh[label]
+    var label_h = if label >= 0: bh[label] else: line
     if label_h < line:
         label_h = line
     var lead = (h - st.border_t - st.border_b - st.pad_t - st.pad_b - label_h) / 2
@@ -1449,9 +1460,31 @@ fn _lay_intrinsic_text_width_inner(nodes: [HNode], styles: [Style], child_index:
     out_widths[i] = width
     IntrinsicWidthResult(width: width, widths: out_widths)
 
+# True when the inline content of `i` starts (`leading`) or ends with a
+# collapsible space: the first / last text reached through its inline
+# descendants. A block, replaced or empty descendant ends the search.
+fn inline_subtree_edge_is_space(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, leading: bool) -> bool:
+    var c = child_index.first_child[i]
+    if not leading:
+        # Last child: walk the sibling list to its end.
+        var last = c
+        while last >= 0:
+            c = last
+            last = child_index.next_sibling[last]
+    if c < 0:
+        return false
+    if nodes[c].tag == "#text":
+        if styles[c].white_space_nowrap:
+            return false
+        return if leading: text_starts_with_collapsible_space(nodes[c].text_data) else: text_ends_with_collapsible_space(nodes[c].text_data)
+    if styles[c].display != "inline" or grid_item_is_replaced(nodes[c]):
+        return false
+    inline_subtree_edge_is_space(nodes, styles, child_index, c, leading)
+
 # Outer width of an `<input>` / `<textarea>` whose `width` is auto, as the
 # layout sizes it: `size` / `cols` columns in the control's UA font plus its
-# padding and border; 13 px for a checkbox or radio. 0 for anything else.
+# padding and border, clamped by min-width / max-width; 13 px for a checkbox
+# or radio. 0 for anything else.
 fn text_control_auto_outer_w(node: HNode, st: Style) -> i32:
     if st.width_px != 0 or (node.tag != "input" and node.tag != "textarea"):
         return 0
@@ -1461,7 +1494,8 @@ fn text_control_auto_outer_w(node: HNode, st: Style) -> i32:
             return constrained_outer_width(node, st, 13)
         if input_type == "hidden":
             return 0
-    form_control_intrinsic_content_w(node, st, form_control_cols(node)) + st.pad_l + st.pad_r + st.border_l + st.border_r
+    # min-width / max-width clamp it, as they clamp the laid-out control.
+    constrained_outer_width(node, st, form_control_intrinsic_content_w(node, st, form_control_cols(node)) + st.pad_l + st.pad_r + st.border_l + st.border_r)
 
 # Max-content width of a flex item, used as its flex base size when it has
 # neither `flex-basis` nor a `width` (CSS: `flex-basis: content`).
@@ -1495,6 +1529,10 @@ fn _lay_flex_item_max_content_width_inner(nodes: [HNode], styles: [Style], child
                     val glyph_w = style_char_w(cst)
                     val ink_w = if glyph_w > 1: glyph_w - 1 else: glyph_w
                     inline_run = inline_run + (text_cell_width(txt) as i32) * ink_w
+            elif nodes[c].text_data.byte_len() > 0 and not cst.white_space_nowrap and inline_run > 0:
+                # A whitespace-only text node between two inline boxes
+                # (`<a>Edit</a> <a>Del</a>`) is one collapsible space.
+                gap_pending = true
         elif ctag == "br" and cst.display == "inline":
             # A forced break ends the line being measured.
             if inline_run > widest:
@@ -1516,11 +1554,21 @@ fn _lay_flex_item_max_content_width_inner(nodes: [HNode], styles: [Style], child
             val control_w = text_control_auto_outer_w(nodes[c], cst)
             if control_w > child_w:
                 child_w = control_w
+            # Atomic inline boxes carry their horizontal margins on the line
+            # (the run loop's `inline_takes_margin`): a checkbox's 3 + 4 px.
+            if child_w > 0 and (cst.display == "inline-block" or ctag == "input" or ctag == "select" or ctag == "textarea"):
+                if cst.margin_l > 0:
+                    child_w = child_w + cst.margin_l
+                if cst.margin_r > 0:
+                    child_w = child_w + cst.margin_r
             if cst.display == "inline" or cst.display == "inline-block":
                 if child_w > 0:
-                    if gap_pending and inline_run > 0:
+                    # A space may also sit INSIDE the neighbour: `<span>ab
+                    # </span>cd` ends with one, `ab<span> cd</span>` starts
+                    # with one. Either way it is one space on this line.
+                    if inline_run > 0 and (gap_pending or inline_subtree_edge_is_space(nodes, styles, child_index, c, true)):
                         inline_run = inline_run + style_space_advance(styles[i])
-                    gap_pending = false
+                    gap_pending = inline_subtree_edge_is_space(nodes, styles, child_index, c, false)
                 inline_run = inline_run + child_w
             else:
                 if inline_run > widest:

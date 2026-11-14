@@ -1,83 +1,162 @@
 """
 ## Purpose and audience
-Purpose: Pin that form controls take their UA font as a whole. Chrome's
-html.css gives `button`, `input`, `select` (and `textarea`, monospace)
-`font: -webkit-small-control`, which resets family, weight and style as well
-as size. The tag defaults reset only the size and line height, so a button in
-an `<h1>` measured its label bold (32 px wide where Chrome has 30), and a
-button or input in a `<pre>` measured in monospace (button 33, input 153
-where Chrome has 30 and 185).
+Purpose: Pin that form controls take their UA font as a whole, and that an
+author `inherit` undoes it. Chrome's html.css gives `button`, `input`,
+`select` (and `textarea`, monospace) `font: -webkit-small-control`, which
+resets family, weight and style as well as size. The tag defaults reset only
+the size and line height, so a button in an `<h1>` measured its label bold
+(32 px wide where Chrome has 30), and a button or input in a `<pre>` measured
+in monospace (button 33, input 153 where Chrome has 30 and 185).
+
+`inherit` matters as much as the reset: normalize.css and Tailwind's
+preflight set `button, input { font: inherit }`. No font property resolved
+the keyword -- it only looked right while controls inherited by default --
+so the reset alone would have broken every such page.
 Audience: browser-engine style maintainers.
 
 Chrome oracle (Chrome 159.0.8154.6 headless shell, 900x4000,
-`body{margin:0;font:16px/1.5 sans-serif}`, getBoundingClientRect width):
+`body{margin:0;font:16px/1.5 sans-serif}`, getBoundingClientRect):
 
-| parent                               | control                              | width  |
-|--------------------------------------|--------------------------------------|--------|
-| `<div>` (control)                    | `<button>cd</button>`                | 30.08  |
-| `<h1>` (bold, 32 px)                 | `<button>cd</button>`                | 30.08  |
-| `<pre>` (monospace)                  | `<button>cd</button>`                | 30.08  |
-| `<pre>`                              | `<input value="cd">`                 | 185    |
-| `font-weight:bold;font-style:italic` | `<button>cd</button>`                | 30.08  |
-| `font-family:serif`                  | `<button>`, `<input>`, `<select>` (`cdcd`) | 30.08, 185, 51 |
-| `<pre>`                              | `<button style="font-family:inherit">` | 32   |
-| `<h1>`                               | `<button style="font-weight:inherit">` | 31.56 |
-| `<pre>` or `<div>`                   | `<textarea>cd</textarea>`            | 181    |
+| parent                               | control                                    | width (x height) |
+|--------------------------------------|--------------------------------------------|------------------|
+| `<div>` (control)                    | `<button>cd</button>`                      | 30.08            |
+| `<h1>` (bold, 32 px)                 | `<button>cd</button>`                      | 30.08            |
+| `<pre>` (monospace)                  | `<button>cd</button>`                      | 30.08            |
+| `<pre>`                              | `<input value="cd">`                       | 185              |
+| `font-weight:bold;font-style:italic` | `<button>cd</button>`                      | 30.08            |
+| `font-family:serif`                  | `<button>`, `<input>`, `<select>` (`cdcd`) | 30.08, 185, 51   |
+| `<pre>` or `<div>`                   | `<textarea>cd</textarea>`                  | 181              |
+| `<h1>`, sheet `button,input{font:inherit}` | `<button>cd</button>`                | 53.34 x 54       |
+| same                                 | `<input value="cd">`                       | 445 x 54         |
+| `<h1>`                               | `<button style="font-size:inherit">`       | 49.8 x 43        |
+| `<h1>`                               | `<button style="font-weight:inherit">`     | 31.56            |
+| `<pre>`                              | `<button style="font-family:inherit">`     | 32               |
+| `<pre>`                              | `<input style="font-family:inherit">`      | 176              |
+| `font:italic bold 20px serif`        | `<button style="font:inherit">`            | 34.89 x 29       |
 
-Widths are asserted within 1 px (whole-pixel layout); the two `inherit` rows
-assert that the author declaration still wins over the UA reset.
+Rows whose numbers depend on the installed faces run only on the measured
+Linux face set (`browser_host_has_measured_linux_face_set`); the relational
+rows -- a control is as wide in a heading or a `<pre>` as in a plain block,
+and `inherit` makes it wider or taller than the reset -- run everywhere.
+Widths are whole pixels here, so fractional Chrome values are asserted
+within 1 px.
 """
 
 """
-Traceability: REQ-BROWSER-ENGINE-FORM-CONTROL-UA-FONT-RESET-001 — form controls do not inherit font family, weight or style from their ancestors unless the author says so.
+Traceability: REQ-BROWSER-ENGINE-FORM-CONTROL-UA-FONT-RESET-001 — form controls do not inherit font family, weight or style from their ancestors unless the author says `inherit`, and `inherit` takes the parent's computed value.
 """
 # @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_declarations.spl 1%
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_debug_layout_by_id
 }
+use std.nogc_sync_mut.text_layout.font_provider.{browser_host_has_measured_linux_face_set}
 
-val HEAD: text = "<html><head><style>body{margin:0;font:16px/1.5 sans-serif}</style></head><body>"
+val HEAD: text = "<html><head><style>body{{margin:0;font:16px/1.5 sans-serif}}.inh button,.inh input{{font:inherit}}</style></head><body>"
 val TAIL: text = "</body></html>"
+val PLAIN: text = "<div>ab <button id=\"c\">cd</button> ef</div>"
+
+fn dim(inner: text, id: text, name: text) -> i32:
+    simple_web_layout_debug_layout_by_id(HEAD + inner + TAIL, 900, 600, id, name).to_int()
 
 fn width(inner: text, id: text) -> i32:
-    simple_web_layout_debug_layout_by_id(HEAD + inner + TAIL, 900, 600, id, "w").to_int()
+    dim(inner, id, "w")
 
 fn off(actual: i32, chrome: i32) -> i32:
     if actual > chrome: actual - chrome else: chrome - actual
 
 describe "form controls take the UA font as a whole":
     it "AC-1: control — a button in a plain block is 30 px wide":
-        step("Chrome 159: 30.08")
-        expect(off(width("<div>ab <button id=\"c\">cd</button> ef</div>", "c"), 30)).to_be_less_than(2)
+        if browser_host_has_measured_linux_face_set():
+            step("Chrome 159: 30.08")
+            expect(off(width(PLAIN, "c"), 30)).to_be_less_than(2)
 
-    it "AC-2: a button does not inherit a heading's weight":
-        step("Chrome 159: 30.08 inside <h1>")
-        expect(off(width("<h1 style=\"margin:0\">ab <button id=\"c\">cd</button> ef</h1>", "c"), 30)).to_be_less_than(2)
-        step("Chrome 159: 30.08 inside font-weight:bold;font-style:italic")
-        expect(off(width("<div style=\"font-weight:bold;font-style:italic\">ab <button id=\"c\">cd</button> ef</div>", "c"), 30)).to_be_less_than(2)
+    it "AC-2: a button does not inherit a heading's weight or an italic style":
+        step("as wide in <h1> and in a bold italic block as in a plain block (Chrome 159: 30.08 in all three)")
+        val plain = width(PLAIN, "c")
+        expect(width("<h1 style=\"margin:0\">ab <button id=\"c\">cd</button> ef</h1>", "c")).to_equal(plain)
+        expect(width("<div style=\"font-weight:bold;font-style:italic\">ab <button id=\"c\">cd</button> ef</div>", "c")).to_equal(plain)
 
     it "AC-3: a button or input does not inherit a monospace family":
-        step("Chrome 159: button 30.08, input 185 inside <pre>")
-        expect(off(width("<pre style=\"margin:0\">ab <button id=\"c\">cd</button> ef</pre>", "c"), 30)).to_be_less_than(2)
-        expect(width("<pre style=\"margin:0\">ab <input id=\"c\" value=\"cd\"> ef</pre>", "c")).to_equal(185)
+        step("as wide in <pre> as in a plain block (Chrome 159: button 30.08, input 185)")
+        expect(width("<pre style=\"margin:0\">ab <button id=\"c\">cd</button> ef</pre>", "c")).to_equal(width(PLAIN, "c"))
+        expect(width("<pre style=\"margin:0\">ab <input id=\"c\" value=\"cd\"> ef</pre>", "c")).to_equal(width("<div>ab <input id=\"c\" value=\"cd\"> ef</div>", "c"))
+        if browser_host_has_measured_linux_face_set():
+            expect(width("<pre style=\"margin:0\">ab <input id=\"c\" value=\"cd\"> ef</pre>", "c")).to_equal(185)
 
     it "AC-4: button, input and select ignore a serif parent":
-        step("Chrome 159: 30.08, 185, 51")
         val page = "<div style=\"font-family:serif\">ab <button id=\"c\">cd</button> <input id=\"i\" value=\"cd\"> <select id=\"s\"><option>cdcd</option></select></div>"
-        expect(off(width(page, "c"), 30)).to_be_less_than(2)
-        expect(width(page, "i")).to_equal(185)
-        expect(off(width(page, "s"), 51)).to_be_less_than(2)
+        val sans = "<div>ab <button id=\"c\">cd</button> <input id=\"i\" value=\"cd\"> <select id=\"s\"><option>cdcd</option></select></div>"
+        step("the same widths under a serif parent as under the sans-serif body")
+        expect(width(page, "c")).to_equal(width(sans, "c"))
+        expect(width(page, "i")).to_equal(width(sans, "i"))
+        expect(width(page, "s")).to_equal(width(sans, "s"))
+        if browser_host_has_measured_linux_face_set():
+            step("Chrome 159: 30.08, 185, 51")
+            expect(off(width(page, "c"), 30)).to_be_less_than(2)
+            expect(width(page, "i")).to_equal(185)
+            expect(off(width(page, "s"), 51)).to_be_less_than(2)
 
-    it "AC-5: an author `inherit` still wins over the UA reset":
-        step("Chrome 159: font-family:inherit in <pre> -> 32 (monospace label)")
-        val family = width("<pre style=\"margin:0\">ab <button id=\"c\" style=\"font-family:inherit\">cd</button> ef</pre>", "c")
-        expect(family).to_be_greater_than(31)
-        step("Chrome 159: font-weight:inherit in <h1> -> 31.56 (bold label)")
-        val weight = width("<h1 style=\"margin:0\">ab <button id=\"c\" style=\"font-weight:inherit\">cd</button> ef</h1>", "c")
-        expect(weight).to_be_greater_than(30)
+    it "AC-5: a textarea keeps its own monospace UA font everywhere":
+        step("as wide in <pre> as in <div> (Chrome 159: 181)")
+        expect(width("<pre style=\"margin:0\">ab <textarea id=\"c\">cd</textarea> ef</pre>", "c")).to_equal(width("<div>ab <textarea id=\"c\">cd</textarea> ef</div>", "c"))
+        if browser_host_has_measured_linux_face_set():
+            expect(width("<div>ab <textarea id=\"c\">cd</textarea> ef</div>", "c")).to_equal(181)
 
-    it "AC-6: a textarea keeps its own monospace UA font everywhere":
-        step("Chrome 159: 181 wide in <pre> and in <div>")
-        expect(width("<pre style=\"margin:0\">ab <textarea id=\"c\">cd</textarea> ef</pre>", "c")).to_equal(181)
-        expect(width("<div>ab <textarea id=\"c\">cd</textarea> ef</div>", "c")).to_equal(181)
+describe "an author `inherit` takes the parent's computed font":
+    it "AC-6: `font: inherit` from a stylesheet (normalize / preflight)":
+        val page = "<h1 class=\"inh\" style=\"margin:0\">ab <button id=\"c\">cd</button> <input id=\"i\" value=\"cd\"></h1>"
+        step("the button takes the heading's 32 px bold font and its 1.5 line height: taller than 40, wider than 45")
+        expect(dim(page, "c", "h")).to_be_greater_than(40)
+        expect(dim(page, "c", "w")).to_be_greater_than(45)
+        expect(dim(page, "i", "h")).to_be_greater_than(40)
+        if browser_host_has_measured_linux_face_set():
+            step("Chrome 159: button 53.34 x 54, input 445 x 54 (the input's WIDTH in a non-UA font is not modelled and is filed, so only its height is asserted)")
+            expect(off(dim(page, "c", "w"), 53)).to_be_less_than(2)
+            expect(dim(page, "c", "h")).to_equal(54)
+            expect(dim(page, "i", "h")).to_equal(54)
+
+    it "AC-7: `font-size: inherit` alone":
+        val page = "<h1 style=\"margin:0\">ab <button id=\"c\" style=\"font-size:inherit\">cd</button> ef</h1>"
+        step("32 px label in the UA family: far wider and taller than the 30 x 21 reset button")
+        expect(dim(page, "c", "w")).to_be_greater_than(44)
+        expect(dim(page, "c", "h")).to_be_greater_than(38)
+        if browser_host_has_measured_linux_face_set():
+            step("Chrome 159: 49.8 x 43")
+            expect(off(dim(page, "c", "w"), 50)).to_be_less_than(2)
+            expect(off(dim(page, "c", "h"), 43)).to_be_less_than(2)
+
+    it "AC-8: `font-weight: inherit` alone":
+        val inherit_w = width("<h1 style=\"margin:0\">ab <button id=\"c\" style=\"font-weight:inherit\">cd</button> ef</h1>", "c")
+        step("a bold label is wider than the reset label, by the bold advance only (Chrome 159: 31.56 against 30.08)")
+        expect(inherit_w).to_be_greater_than(width(PLAIN, "c"))
+        expect(inherit_w).to_be_less_than(width(PLAIN, "c") + 4)
+        if browser_host_has_measured_linux_face_set():
+            expect(off(inherit_w, 32)).to_be_less_than(2)
+
+    it "AC-9: `font-family: inherit` alone":
+        val button_w = width("<pre style=\"margin:0\">ab <button id=\"c\" style=\"font-family:inherit\">cd</button> ef</pre>", "c")
+        val input_w = width("<pre style=\"margin:0\">ab <input id=\"c\" style=\"font-family:inherit\" value=\"cd\"> ef</pre>", "c")
+        step("a monospace label is wider than the sans one; a monospace input has narrower columns than the sans one")
+        expect(button_w).to_be_greater_than(width(PLAIN, "c"))
+        expect(input_w).to_be_less_than(width("<div>ab <input id=\"c\" value=\"cd\"> ef</div>", "c"))
+        if browser_host_has_measured_linux_face_set():
+            step("Chrome 159: button 32, input 176 (the input's exact width in a non-UA font is filed, not asserted)")
+            expect(off(button_w, 32)).to_be_less_than(2)
+
+    it "AC-10: `font: inherit` in a style attribute takes size, family, weight, style and line height":
+        val page = "<div style=\"font:italic bold 20px serif\">ab <button id=\"c\" style=\"font:inherit\">cd</button> ef</div>"
+        step("20 px serif label with the parent's normal line height: taller than the 21 px reset button")
+        expect(dim(page, "c", "h")).to_be_greater_than(25)
+        if browser_host_has_measured_linux_face_set():
+            step("Chrome 159: 34.89 x 29")
+            expect(off(dim(page, "c", "w"), 35)).to_be_less_than(2)
+            expect(off(dim(page, "c", "h"), 29)).to_be_less_than(2)
+
+    it "AC-11: `inherit` on a non-control restores the parent's value over a tag default":
+        step("<b style=font-weight:inherit> inside a normal-weight span is not bold: as wide as plain text")
+        val plain = width("<div><span id=\"c\">cdcdcdcdcdcd</span></div>", "c")
+        val inherited = width("<div><span style=\"font-weight:normal\"><b id=\"c\" style=\"font-weight:inherit\">cdcdcdcdcdcd</b></span></div>", "c")
+        val bold = width("<div><b id=\"c\">cdcdcdcdcdcd</b></div>", "c")
+        expect(inherited).to_equal(plain)
+        expect(bold).to_be_greater_than(plain)

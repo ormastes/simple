@@ -12,7 +12,9 @@ Audience: browser-engine layout maintainers.
 Chrome oracle (Chrome 159.0.8154.6 headless shell, 900x4000,
 `body{margin:0;font:16px/1.5 sans-serif}`, `<div p>ab <button c>…</button>
 ef</div><div n>zz</div>`, getBoundingClientRect). The button's own font is
-13.33 px with a normal line height, so values are asserted within 1 px.
+13.33 px with a normal line height, so values are asserted within 1 px. The
+wrapped-label row depends on the label's measured width and runs only on the
+measured Linux face set.
 
 | button                         | line (p) h | button y, h | next block y |
 |--------------------------------|------------|-------------|--------------|
@@ -33,6 +35,7 @@ use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_debug_layout_by_id
 }
+use std.nogc_sync_mut.text_layout.font_provider.{browser_host_has_measured_linux_face_set}
 
 val HEAD: text = "<html><head><style>body{margin:0;font:16px/1.5 sans-serif}</style></head><body>"
 val TAIL: text = "</body></html>"
@@ -83,9 +86,10 @@ describe "an inline button sits on the line's baseline":
     it "AC-5: a wrapped label aligns on its LAST line":
         step("Chrome 159: width:40px, three label lines -> line 52, button y=0 h=51")
         val html = page("<button id=\"c\" style=\"width:40px\">cd ef gh</button>")
-        expect(off(field(html, "c", "h"), 51)).to_be_less_than(2)
-        expect(off(field(html, "c", "y"), 0)).to_be_less_than(2)
-        expect(off(field(html, "p", "h"), 52)).to_be_less_than(2)
+        if browser_host_has_measured_linux_face_set():
+            expect(off(field(html, "c", "h"), 51)).to_be_less_than(2)
+            expect(off(field(html, "c", "y"), 0)).to_be_less_than(2)
+            expect(off(field(html, "p", "h"), 52)).to_be_less_than(2)
 
     it "AC-6: an empty button aligns on the bottom of its content box":
         step("Chrome 159: empty button 16x6 at y=14 in a 24 px line")
@@ -98,3 +102,56 @@ describe "an inline button sits on the line's baseline":
         val html = HEAD + "<div id=\"p\">ab <b id=\"c\">cd</b> ef</div>" + TAIL
         expect(field(html, "p", "h")).to_equal(24)
         expect(field(html, "c", "y")).to_equal(3)
+
+# Review round: the label is not always one direct text child. Chrome 159,
+# same harness (`<div p>ab <button c>…</button> ef</div>`):
+#
+# | button content / style                  | line (p) h | button y, h |
+# |-----------------------------------------|------------|-------------|
+# | `<b>OK</b>`                             | 24         | 2, 21       |
+# | `<span>a</span> <i>b</i>`               | 24         | 2, 21       |
+# | `<img width=20 height=30>`              | 40         | 0, 39       |
+# | `ab<br>cd` (two lines)                  | 37         | 0, 36       |
+# | `cd`, `display:inline-flex`             | 24         | 2, 21       |
+val IMG20: text = "<img width=\"20\" height=\"30\" src=\"data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==\">"
+
+describe "the button's baseline comes from its content, whatever that is":
+    it "AC-8: a label wrapped in an inline element":
+        step("Chrome 159: <b>OK</b> and <span>a</span> <i>b</i> -> line 24, button y=2 h=21")
+        val bold = page("<button id=\"c\"><b>OK</b></button>")
+        expect(field(bold, "p", "h")).to_equal(24)
+        expect(off(field(bold, "c", "y"), 2)).to_be_less_than(2)
+        expect(field(bold, "c", "y")).to_be_greater_than(0)
+        expect(field(bold, "c", "h")).to_equal(21)
+        val mixed = page("<button id=\"c\"><span>a</span> <i>b</i></button>")
+        expect(field(mixed, "p", "h")).to_equal(24)
+        expect(off(field(mixed, "c", "y"), 2)).to_be_less_than(2)
+        expect(field(mixed, "c", "y")).to_be_greater_than(0)
+
+    it "AC-9: an image-only button aligns on the image's bottom":
+        step("Chrome 159: line 40, button y=0 h=39")
+        val html = page("<button id=\"c\">" + IMG20 + "</button>")
+        expect(off(field(html, "c", "h"), 39)).to_be_less_than(2)
+        expect(off(field(html, "c", "y"), 0)).to_be_less_than(2)
+        expect(off(field(html, "p", "h"), 40)).to_be_less_than(2)
+
+    it "AC-10: a forced line break: the LAST line is the baseline":
+        step("Chrome 159: `ab<br>cd` -> line 37, button y=0 h=36")
+        val html = page("<button id=\"c\">ab<br>cd</button>")
+        expect(off(field(html, "c", "h"), 36)).to_be_less_than(2)
+        expect(off(field(html, "c", "y"), 0)).to_be_less_than(2)
+        expect(off(field(html, "p", "h"), 37)).to_be_less_than(2)
+
+    it "AC-11: an inline-flex button aligns like an inline-block one":
+        step("Chrome 159: line 24, button y=2 h=21")
+        val html = page("<button id=\"c\" style=\"display:inline-flex\">cd</button>")
+        expect(field(html, "p", "h")).to_equal(24)
+        expect(off(field(html, "c", "y"), 2)).to_be_less_than(2)
+        expect(field(html, "c", "y")).to_be_greater_than(0)
+
+    it "AC-12: a max-height that clips the label keeps the label's baseline":
+        step("Chrome 159 (combination matrix `button/max-height:10px`): button y=2 h=10 -- the label line still starts at the content top")
+        val html = page("<button id=\"c\" style=\"max-height:10px\">cd</button>")
+        expect(field(html, "c", "h")).to_equal(10)
+        expect(off(field(html, "c", "y"), 2)).to_be_less_than(2)
+        expect(field(html, "p", "h")).to_equal(24)
