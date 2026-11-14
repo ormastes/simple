@@ -20,7 +20,9 @@ use app.llm_caret.multi_caret_manager.{MultiCaretManager, ManagedAgent,
     list_multi_caret_agents}
 use app.llm_caret.workbench.session_contract.{SessionId, SessionView,
     ProcessLifecycle, AgentTurn, Transport, CapabilityEvidence,
-    new_session_id}
+    ComposerDraft, Delivery, new_session_id, same_session, draft_targets}
+use app.llm_caret.workbench.pane_binding.{PaneBinding, PaneBindingResult,
+    input_target_allowed}
 
 # ============================================================================
 # State mapping
@@ -73,22 +75,70 @@ fn _evidence_for(agent: ManagedAgent) -> CapabilityEvidence:
         return CapabilityEvidence.Available
     CapabilityEvidence.Declared
 
-# ponytail: `ManagedAgent` (and `AgentProcess` beneath it) does not retain the
-# launch request's provider, so the roster cannot name it. upgrade: carry
-# `provider` on `AgentProcess` from `launch_agent_plan_with_all`.
-val MANAGED_PROVIDER: text = "process"
+# The manager's process table (`AgentProcess`) retains neither the launch
+# provider nor a restart count, so this file keeps the minimum itself: a
+# provider hint supplied by whoever launched the child, and a per-slot ledger
+# whose generation increases when a slot's live pid is replaced (a restart).
+# A provider nobody declared is "unknown", never a guess.
+val UNKNOWN_PROVIDER: text = "unknown"
 
-# ponytail: generation is fixed at 1 — `new_session_id` always starts there and
-# the manager has no restart path, so a slot's pid can only change by being
-# relaunched from outside. Until that exists the contract's stale-draft refusal
-# can never fire through this adapter. upgrade: bump the generation when a
-# slot's pid changes.
+struct AgentProviderHint:
+    agent_id: text
+    provider: text
+
+struct SessionLedgerEntry:
+    agent_id: text
+    last_pid: i64
+    generation: i64
+
+pub fn provider_for_agent(hints: [AgentProviderHint], agent_id: text) -> text:
+    for h in hints:
+        if h.agent_id == agent_id and h.provider != "":
+            return h.provider
+    UNKNOWN_PROVIDER
+
+# Immutable: returns the ledger after observing `agent`. A new slot starts at
+# generation 1. A live pid that differs from the last live pid is a restart:
+# generation + 1. A dead/never-spawned slot (pid <= 0) keeps its generation and
+# last live pid, so a later relaunch is still recognised as a restart.
+pub fn ledger_observe(ledger: [SessionLedgerEntry], agent: ManagedAgent) -> [SessionLedgerEntry]:
+    var out: [SessionLedgerEntry] = []
+    var found = false
+    for e in ledger:
+        if e.agent_id == agent.agent_id:
+            found = true
+            if agent.pid > 0 and e.last_pid > 0 and agent.pid != e.last_pid:
+                out.push(SessionLedgerEntry(agent_id: e.agent_id, last_pid: agent.pid,
+                    generation: e.generation + 1))
+            elif agent.pid > 0 and e.last_pid <= 0:
+                out.push(SessionLedgerEntry(agent_id: e.agent_id, last_pid: agent.pid,
+                    generation: e.generation))
+            else:
+                out.push(e)
+        else:
+            out.push(e)
+    if not found:
+        out.push(SessionLedgerEntry(agent_id: agent.agent_id, last_pid: agent.pid, generation: 1))
+    out
+
+pub fn ledger_generation(ledger: [SessionLedgerEntry], agent_id: text) -> i64:
+    for e in ledger:
+        if e.agent_id == agent_id:
+            return e.generation
+    1
+
 pub fn session_view_for_agent(agent: ManagedAgent) -> SessionView:
+    session_view_for_agent_at(agent, UNKNOWN_PROVIDER, 1)
+
+pub fn session_view_for_agent_at(agent: ManagedAgent, provider: text, generation: i64) -> SessionView:
     val lifecycle = lifecycle_for_agent(agent)
+    var shown_provider = provider
+    if shown_provider == "":
+        shown_provider = UNKNOWN_PROVIDER
     SessionView(
-        id: new_session_id(agent.agent_id),
+        id: SessionId(value: agent.agent_id, generation: generation),
         label: agent.agent_id,
-        provider: MANAGED_PROVIDER,
+        provider: shown_provider,
         lifecycle: lifecycle,
         # A raw child process exposes no semantic turn state. Guessing
         # `Working` from "the process is alive" is precisely the axis
@@ -99,10 +149,34 @@ pub fn session_view_for_agent(agent: ManagedAgent) -> SessionView:
         needs_attention: false)
 
 pub fn manager_session_views(manager: MultiCaretManager) -> [SessionView]:
+    var no_hints: [AgentProviderHint] = []
+    var no_ledger: [SessionLedgerEntry] = []
+    manager_session_views_with(manager, no_hints, no_ledger)
+
+pub fn manager_session_views_with(manager: MultiCaretManager,
+        hints: [AgentProviderHint], ledger: [SessionLedgerEntry]) -> [SessionView]:
     var views: [SessionView] = []
     for agent in list_multi_caret_agents(manager):
-        views.push(session_view_for_agent(agent))
+        views.push(session_view_for_agent_at(agent,
+            provider_for_agent(hints, agent.agent_id),
+            ledger_generation(ledger, agent.agent_id)))
     views
+
+# ============================================================================
+# Guarded send (REQ-CARET-UI-002, CU-019)
+# ============================================================================
+
+# A draft is delivered only if its captured (id, generation) still names the
+# live session AND an explicit pane binding for that exact generation exists.
+# Otherwise it is Rejected, never redirected to the new generation.
+pub fn send_draft_guarded(draft: ComposerDraft, live: SessionId,
+        binding: PaneBindingResult) -> ComposerDraft:
+    var delivery = Delivery.Rejected
+    if draft_targets(draft, live) and
+            input_target_allowed(binding, draft.target.value, draft.target.generation):
+        delivery = Delivery.Queued
+    ComposerDraft(target: draft.target, mode: draft.mode, body: draft.body,
+        delivery: delivery)
 
 # ============================================================================
 # Live publication
@@ -116,8 +190,17 @@ pub fn manager_session_views(manager: MultiCaretManager) -> [SessionView]:
 var _live_sessions: [SessionView] = []
 var _live_selected: text = ""
 
+var _live_hints: [AgentProviderHint] = []
+var _live_ledger: [SessionLedgerEntry] = []
+
+# The launcher declares the provider it spawned for a slot.
+pub fn declare_agent_provider(agent_id: text, provider: text):
+    _live_hints.push(AgentProviderHint(agent_id: agent_id, provider: provider))
+
 pub fn publish_manager_sessions(manager: MultiCaretManager):
-    val views = manager_session_views(manager)
+    for agent in list_multi_caret_agents(manager):
+        _live_ledger = ledger_observe(_live_ledger, agent)
+    val views = manager_session_views_with(manager, _live_hints, _live_ledger)
     _live_sessions = views
     if views.len() > 0:
         var still_present = false
@@ -142,7 +225,11 @@ pub fn live_selected() -> SessionId:
 
 pub fn clear_live_sessions():
     var empty: [SessionView] = []
+    var no_hints: [AgentProviderHint] = []
+    var no_ledger: [SessionLedgerEntry] = []
     _live_sessions = empty
+    _live_hints = no_hints
+    _live_ledger = no_ledger
     _live_selected = ""
 
 # ============================================================================
@@ -164,13 +251,38 @@ pub fn live_pane_id() -> text:
 pub fn live_pane_lines() -> [text]:
     _live_pane_lines
 
+var _live_bindings: [PaneBinding] = []
+var _live_pane_generation: i64 = 0
+
+# Explicit binding of a (session, generation) to the pane now being drained.
+pub fn publish_pane_binding(binding: PaneBinding):
+    var kept: [PaneBinding] = []
+    for b in _live_bindings:
+        if b.pane_id != binding.pane_id and not same_session(b.session, binding.session):
+            kept.push(b)
+    kept.push(binding)
+    _live_bindings = kept
+    _live_pane_generation = binding.pane_generation
+
+pub fn live_pane_bindings() -> [PaneBinding]:
+    _live_bindings
+
+pub fn live_pane_generation() -> i64:
+    _live_pane_generation
+
 pub fn clear_pane_output():
     var empty: [text] = []
+    var no_bindings: [PaneBinding] = []
     _live_pane_id = ""
     _live_pane_lines = empty
+    _live_bindings = no_bindings
+    _live_pane_generation = 0
 
-export lifecycle_for_agent, session_view_for_agent, manager_session_views,
-    MANAGED_PROVIDER
+export lifecycle_for_agent, session_view_for_agent, session_view_for_agent_at,
+    manager_session_views, manager_session_views_with, UNKNOWN_PROVIDER
+export AgentProviderHint, SessionLedgerEntry, provider_for_agent, ledger_observe,
+    ledger_generation, send_draft_guarded, declare_agent_provider
+export publish_pane_binding, live_pane_bindings, live_pane_generation
 export publish_manager_sessions, select_live_session, live_sessions,
     live_selected, clear_live_sessions
 export publish_pane_output, live_pane_id, live_pane_lines, clear_pane_output
