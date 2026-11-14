@@ -1,0 +1,39 @@
+# Static container selection from SDN `data_policy.rules` (B1).
+#
+# Glue over the existing W1 chain: SDN rule rows -> resolved policy for one
+# creation origin -> adapter decision -> apply to a freshly constructed
+# container. Default OFF: an empty SDN source returns the container untouched
+# (no rule loading, no decision), so off is behaviour-identical. Every failure
+# is an Err message; the container is never half-switched.
+use std.nogc_sync_mut.src.collections.adaptive_map.AdaptiveMap
+use std.nogc_sync_mut.src.collections.adaptive_set.AdaptiveSet
+use compiler.common.data.data_schema_resolver.{data_policy_rules_from_sdn_v1}
+use compiler.semantics.perf_facts.collection_contracts.{CollectionOriginV1}
+use compiler.semantics.perf.resolved_collection_policy.{resolved_collection_policy_for_site_v1}
+use compiler.semantics.perf.collection_policy_adapter.{CollectionPolicyAdapterDecisionV1, collection_policy_decide_v1,
+    collection_policy_apply_map_v1, collection_policy_apply_set_v1}
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveSetProfile}
+
+fn collection_static_decision_v1(origin: CollectionOriginV1, sdn_source: text, sdn_path: text, owner: text,
+                                 switch_policy: text, profile: AdaptiveSetProfile) -> Result<CollectionPolicyAdapterDecisionV1, text>:
+    val rules = match data_policy_rules_from_sdn_v1(sdn_source, sdn_path, owner):
+        case Ok(rows): rows
+        case Err(diagnostics):
+            var messages: [text] = []
+            for diagnostic in diagnostics:
+                messages.push(diagnostic.message)
+            return Err(messages.join("; "))
+    val policy = resolved_collection_policy_for_site_v1(origin, rules, switch_policy)?
+    collection_policy_decide_v1(policy, profile)
+
+pub fn collection_static_select_map_v1<K, V>(map: AdaptiveMap<K, V>, origin: CollectionOriginV1, sdn_source: text,
+                                             sdn_path: text, owner: text, switch_policy: text) -> Result<AdaptiveMap<K, V>, text>:
+    if sdn_source == "": return Ok(map)
+    val decision = collection_static_decision_v1(origin, sdn_source, sdn_path, owner, switch_policy, map.profile)?
+    collection_policy_apply_map_v1(map, decision)
+
+pub fn collection_static_select_set_v1<K>(set: AdaptiveSet<K>, origin: CollectionOriginV1, sdn_source: text,
+                                          sdn_path: text, owner: text, switch_policy: text) -> Result<AdaptiveSet<K>, text>:
+    if sdn_source == "": return Ok(set)
+    val decision = collection_static_decision_v1(origin, sdn_source, sdn_path, owner, switch_policy, set.inner.profile)?
+    collection_policy_apply_set_v1(set, decision)
