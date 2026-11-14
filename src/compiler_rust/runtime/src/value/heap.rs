@@ -740,13 +740,25 @@ static ARRAY_FREE_QUARANTINE: std::sync::OnceLock<Option<Mutex<HashSet<usize>>>>
 fn array_free_quarantine() -> Option<&'static Mutex<HashSet<usize>>> {
     ARRAY_FREE_QUARANTINE
         .get_or_init(|| {
-            std::env::var("SIMPLE_ARRAY_FREE_QUARANTINE")
-                .is_ok_and(|v| v == "1")
-                .then(|| Mutex::new(HashSet::new()))
+            let enabled = std::env::var("SIMPLE_ARRAY_FREE_QUARANTINE").is_ok_and(|v| v == "1");
+            if enabled {
+                // Evidence that a quarantine run exercised frees at all.
+                unsafe {
+                    libc::atexit(array_free_quarantine_report);
+                }
+            }
+            enabled.then(|| Mutex::new(HashSet::new()))
         })
         .as_ref()
 }
 
+
+extern "C" fn array_free_quarantine_report() {
+    if let Some(Some(set)) = ARRAY_FREE_QUARANTINE.get() {
+        let count = set.lock().map(|set| set.len()).unwrap_or(0);
+        eprintln!("[array-free-quarantine] quarantined={count} hits=0");
+    }
+}
 /// True when `rt_array_free` must quarantine instead of deallocating.
 pub fn array_free_quarantine_enabled() -> bool {
     array_free_quarantine().is_some()
