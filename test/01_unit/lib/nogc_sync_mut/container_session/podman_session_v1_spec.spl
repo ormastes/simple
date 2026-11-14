@@ -81,7 +81,39 @@ describe "Podman session argv":
             "--label", "io.simpleorch.session.instance=proc-1",
             "--interactive", "--tty", "--detach-keys=", "--network", "host", "--userns", "keep-id", "--timeout", "30",
             "--volume", "/work/tree:/work/tree:rw", "--volume", "/opt/seed:/opt/seed:ro",
-            "--workdir", "/work/tree", "--env", "TERM=xterm", "busybox:1.36", "echo", "container-ok"])
+            "--workdir", "/work/tree", "--env", "TERM=xterm", "--entrypoint", "", "busybox:1.36", "echo", "container-ok"])
+
+    it "clears the image entrypoint and preserves executable and argument bytes":
+        var spec = spec_v1("exact-command")
+        spec.keep_id = false
+        spec.command = ["/work/agent with spaces", "two words", "", "--flag", "$(touch /tmp/never)"]
+        expect(podman_session_run_argv_v1(spec).unwrap()).to_equal([
+            "podman", "run", "--rm", "--name", "exact-command",
+            "--label", "io.simpleorch.session.owner=owner-1",
+            "--label", "io.simpleorch.session.name=exact-command",
+            "--network", "none", "--entrypoint", "", "busybox:1.36",
+            "/work/agent with spaces", "two words", "", "--flag", "$(touch /tmp/never)"])
+
+    it "keeps a one-word or JSON-looking executable out of the entrypoint parser":
+        var spec = spec_v1("one-command")
+        spec.keep_id = false
+        spec.command = ["true"]
+        val prefix = ["podman", "run", "--rm", "--name", "one-command",
+            "--label", "io.simpleorch.session.owner=owner-1",
+            "--label", "io.simpleorch.session.name=one-command",
+            "--network", "none", "--entrypoint", "", "busybox:1.36"]
+        expect(podman_session_run_argv_v1(spec).unwrap()).to_equal(prefix + ["true"])
+        spec.command = ["[agent]"]
+        expect(podman_session_run_argv_v1(spec).unwrap()).to_equal(prefix + ["[agent]"])
+
+    it "rejects empty executables and NUL command elements before dispatch":
+        fake_reset("", [])
+        var spec = spec_v1("invalid-command")
+        spec.command = [""]
+        expect(podman_session_run_v1(spec, 1000, fake_runner).error).to_equal("podman-session-command-empty")
+        spec.command = ["echo", "bad\u{0}argument"]
+        expect(podman_session_run_v1(spec, 1000, fake_runner).error).to_equal("podman-session-command-invalid")
+        expect(fake_calls.len()).to_equal(0)
 
     it "renders the Go template with two braces, not the collapsed literal":
         val argv = podman_session_owned_argv_v1("owner-1")

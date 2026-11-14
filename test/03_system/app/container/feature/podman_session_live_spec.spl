@@ -22,6 +22,36 @@ fn smoke_owned() -> [text]:
     podman_session_owned_v1(smoke_owner(), podman_session_host_runner_v1).unwrap()
 
 describe "Podman session against the real engine (opt-in)":
+    it "replaces a failing image entrypoint and preserves empty and spaced arguments":
+        if smoke_enabled():
+            val fixture = env_get("SIMPLE_PODMAN_ENTRYPOINT_IMAGE") ?? ""
+            expect(fixture != "").to_equal(true)
+            if fixture != "":
+                var spec = smoke_spec("entrypoint", ["/bin/printf", "<%s><%s>", "two words", ""])
+                spec.image = fixture
+                val run = podman_session_run_v1(spec, 60000, podman_session_host_runner_v1)
+                expect(run.error).to_equal("")
+                expect(run.exit_code).to_equal(0)
+                expect(run.stdout).to_equal("<two words><>")
+                expect(run.reaped).to_equal(true)
+                # With no arguments printf fails without output. Retaining
+                # image CMD would instead print /bin/false and succeed.
+                spec = smoke_spec("entrypoint-one", ["/bin/printf"])
+                spec.image = fixture
+                val single = podman_session_run_v1(spec, 60000, podman_session_host_runner_v1)
+                expect(single.error).to_equal("")
+                expect(single.exit_code != 0).to_equal(true)
+                expect(single.stdout).to_equal("")
+                expect(single.reaped).to_equal(true)
+                # Missing executables remain failures; no image launcher may
+                # convert them into successful launches.
+                spec = smoke_spec("entrypoint-missing", ["/simple-no-such-executable"])
+                spec.image = fixture
+                val missing = podman_session_run_v1(spec, 60000, podman_session_host_runner_v1)
+                expect(missing.exit_code != 0).to_equal(true)
+                expect(missing.reaped).to_equal(true)
+                expect(smoke_owned().len()).to_equal(0)
+
     it "runs a workload to normal exit and leaves no container":
         if smoke_enabled():
             val run = podman_session_run_v1(smoke_spec("ok", ["echo", "container-ok"]), 60000, podman_session_host_runner_v1)
