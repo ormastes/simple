@@ -4,6 +4,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_types.{HirModule, SymbolTable, HirSymbol, SymbolId, ScopeId, SymbolKind, HirType, HirTypeKind}
 use compiler.hir.hir_definitions.{HirConst, HirExpr, HirExprKind}
+use compiler.blocks.value.{BlockValue}
 use compiler.hir.generated.hir_codec.{hc_enc_hir_module, hc_dec_hir_module}
 use compiler.hir.hir_codec_support.{HirCodecWriter}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
@@ -85,6 +86,21 @@ fn main() -> i64:
     assert(few_nodes.failure_kind == "bounds")
     print "PASS truncated input, decoder depth and node budgets"
 
+    var short_input = FlatPoolReader.new_bounded(blob, text_byte_len(blob) - 1,
+        134217728, 65536, 128, 1000000)
+    assert(not short_input.ok)
+    assert(short_input.failure_kind == "bounds")
+    var short_allocation = FlatPoolReader.new_bounded(blob, 8388608,
+        1, 65536, 128, 1000000)
+    assert(not short_allocation.ok)
+    assert(short_allocation.failure_kind == "bounds")
+    var short_work = FlatPoolReader.new_bounded(blob, 8388608,
+        134217728, 65536, 128, 1)
+    val short_work_module = hc_dec_hir_module(short_work)
+    assert(not short_work.ok)
+    assert(short_work.failure_kind == "bounds")
+    print "PASS reader input-byte, allocation and work budgets"
+
     var trailing = raw_reader(blob + "0\n", 65536, 128)
     val trailing_module = hc_dec_hir_module(trailing)
     assert(trailing.ok)
@@ -115,6 +131,17 @@ fn main() -> i64:
     assert(not allocation_limited.ok)
     assert(allocation_limited.failure_kind == "bounds")
     print "PASS writer output, work and allocation budgets"
+
+    var unsupported = fixture([3], [])
+    var constant = unsupported.constants[SymbolId(id: 3)]
+    constant.value = HirExpr(kind: HirExprKind.CustomBlock("opaque", BlockValue.Expr(7)),
+        has_type_: true, type_: constant.type_, span: Span.empty())
+    unsupported.constants[SymbolId(id: 3)] = constant
+    var refused = HirCodecWriter.create_canonical()
+    hc_enc_hir_module(refused, unsupported)
+    assert(not refused.ok)
+    assert(refused.unsupported == "BlockValue with a non-text payload")
+    print "PASS actual unsupported opaque HIR payload refused"
 
     assert(file_write("build/hir-canonical-qualification.raw.golden", blob))
     print "GOLDEN actual generated-codec bytes={text_byte_len(blob)}"
