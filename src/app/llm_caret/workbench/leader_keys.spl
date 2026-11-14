@@ -2,8 +2,8 @@
 #
 # Pure state machine: (state, key) -> (state, action). Ctrl+G is the proposed
 # default leader (plan §6.3). While a leader is pending, NO key is ever
-# reported as PassThrough, so nothing leaks to the child pane; an unbound
-# chord cancels with an explicit Unbound action. Leader twice sends a literal
+# reported as PassThrough, so a bound chord never reaches the child pane; an
+# unbound chord returns PassThroughChord (caller forwards leader then key). Leader twice sends a literal
 # leader to the foreground CLI. Keys are normalized names ("ctrl+g", "a").
 # No IO, no timers; decoding and the ambiguous-prefix timeout belong to the
 # input decoder, not here.
@@ -33,13 +33,14 @@ enum LeaderAction:
     Help
     # Leader pressed twice: send the literal leader key to the CLI.
     LiteralLeader
-    # Chord not bound: cancelled, key is NOT forwarded.
-    Unbound
+    # Chord not bound: back to Idle; caller forwards the leader key THEN `key`
+    # to the focused CLI, in that order (plan 6.3 explicit unknown-chord passthrough).
+    PassThroughChord
 
 struct LeaderOutcome:
     state: LeaderState
     action: LeaderAction
-    # The key the action concerns (PassThrough / LiteralLeader / Unbound).
+    # The key the action concerns (PassThrough / LiteralLeader / PassThroughChord).
     key: text
     # 1..9 for PinnedSlot, else 0.
     slot: i64
@@ -85,7 +86,7 @@ fn _chord(key: text) -> LeaderOutcome:
         if key == digits.slice(i, i + 1):
             return _out(idle, LeaderAction.PinnedSlot, key, i + 1)
         i = i + 1
-    _out(idle, LeaderAction.Unbound, key, 0)
+    _out(idle, LeaderAction.PassThroughChord, key, 0)
 
 fn leader_step(state: LeaderState, key: text) -> LeaderOutcome:
     if state == LeaderState.LeaderPending:
