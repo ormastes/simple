@@ -12,6 +12,7 @@
 #      `system-ui` is the UI SANS face in every browser. That is a live defect,
 #      fixed with this spec (round 10).
 use std.spec.*
+use std.nogc_sync_mut.sffi.io.{file_exists}
 use std.nogc_sync_mut.text_layout.font_provider.{
     browser_font_candidates_for_family, browser_sans_font_candidates,
     browser_serif_font_candidates, browser_mono_font_candidates
@@ -26,13 +27,31 @@ describe "generic font-family classification":
         expect(_first(browser_font_candidates_for_family("sans-serif")))
             .to_equal(_first(browser_sans_font_candidates()))
 
-    it "sends system-ui to the sans stack":
-        expect(_first(browser_font_candidates_for_family("system-ui")))
-            .to_equal(_first(browser_sans_font_candidates()))
+    it "sends system-ui to a sans face, never the serif stack":
+        # Corrected 2026-11-14 against Chrome 159 (Linux, 20-char probe at
+        # 16px): `system-ui` is 183.91 = DejaVu Sans, the fontconfig UI face,
+        # not the Arial alias (160.98) this example used to pin as the head.
+        # Where the host has DejaVu Sans that face leads and the sans stack
+        # follows it; elsewhere the sans stack leads as before.
+        val list = browser_font_candidates_for_family("system-ui")
+        val sans_head = _first(browser_sans_font_candidates())
+        if _first(list) == "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf":
+            expect(list[1]).to_equal(sans_head)
+        else:
+            expect(_first(list)).to_equal(sans_head)
 
-    it "sends -apple-system to the sans stack":
-        expect(_first(browser_font_candidates_for_family("-apple-system")))
-            .to_equal(_first(browser_sans_font_candidates()))
+    it "sends -apple-system to the sans stack only where the host serves it":
+        # Corrected 2026-11-14: Chrome 159 on Linux serves no `-apple-system`
+        # (147.69 = the default serif face; with a following name the walk
+        # continues to it). Only macOS maps it to the platform sans face.
+        if file_exists("/System/Library/Fonts/Helvetica.ttc"):
+            expect(_first(browser_font_candidates_for_family("-apple-system")))
+                .to_equal(_first(browser_sans_font_candidates()))
+        else:
+            expect(_first(browser_font_candidates_for_family("-apple-system")))
+                .to_equal(_first(browser_serif_font_candidates()))
+            expect(_first(browser_font_candidates_for_family("-apple-system, sans-serif")))
+                .to_equal(_first(browser_sans_font_candidates()))
 
     it "still sends a real serif family to the serif stack":
         expect(_first(browser_font_candidates_for_family("Times New Roman")))
@@ -43,5 +62,12 @@ describe "generic font-family classification":
     it "still sends monospace and its aliases to the mono stack":
         expect(_first(browser_font_candidates_for_family("monospace")))
             .to_equal(_first(browser_mono_font_candidates()))
-        expect(_first(browser_font_candidates_for_family("Courier New")))
-            .to_equal(_first(browser_mono_font_candidates()))
+        # Corrected 2026-11-14: `Courier New` is Liberation Mono in Chrome 159
+        # (192.03), the generic `monospace` is DejaVu Sans Mono (192.66). The
+        # alias face leads where the host has it, and the mono stack follows.
+        val courier = browser_font_candidates_for_family("Courier New")
+        val mono_head = _first(browser_mono_font_candidates())
+        if _first(courier) == "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf":
+            expect(courier[1]).to_equal(mono_head)
+        else:
+            expect(_first(courier)).to_equal(mono_head)
