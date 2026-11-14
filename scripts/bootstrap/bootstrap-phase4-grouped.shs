@@ -288,11 +288,40 @@ verify_image_set() {
   verify_image_pin "$authority_program" authority_program authority_sha256
 }
 
+# Read the same typed index option that admission bound into its variant.
+# Do not inherit native-build's unrelated aggressive optimization default.
+managed_optimization_flag() {
+  awk -F= -v wanted_phase="$2" -v wanted_backend="$3" -v wanted_target="$target" '
+    $1 == "phase" { phase_value=$2; phase_count++ }
+    $1 == "backend" { backend_value=$2; backend_count++ }
+    $1 == "target" { target_value=$2; target_count++ }
+    $1 ~ /^variant_normalized_option_[0-9]+$/ && $2 == "opt_level" {
+      level=$3; level_count++; if (NF != 3) malformed=1
+    }
+    END {
+      if (phase_count != 1 || backend_count != 1 || target_count != 1 ||
+          level_count != 1 || malformed || phase_value != wanted_phase ||
+          backend_value != wanted_backend || target_value != wanted_target) exit 1
+      if (wanted_phase == "phase3" && level == "0") print "none"
+      else if (wanted_phase == "phase4" && level == "2") print "standard"
+      else exit 1
+    }' "$1"
+}
+
 # The manager's worker runs in its own work root, so output and cache paths in
 # the compiler argv are relative. Output publication is hash checked by run.
 build_binary() {
   id=$1 entry=$2 output=$3 task_phase=$4 backend=$5
   output_kind=${6:-binary}
+  case "$task_phase:$backend" in
+    phase3:llvm) target_index_config=$phase3_llvm_index_config ;;
+    phase3:cranelift) target_index_config=$phase3_cranelift_index_config ;;
+    phase4:llvm) target_index_config=$llvm_index_config ;;
+    phase4:cranelift) target_index_config=$cranelift_index_config ;;
+    *) die "unsupported target phase/backend profile" ;;
+  esac
+  target_opt=$(managed_optimization_flag "$target_index_config" "$task_phase" "$backend") \
+    || die "typed index target optimization differs or is missing"
   case "$task_phase" in
     phase3) target_profile=dev ;;
     phase4) target_profile=prod ;;
@@ -319,7 +348,7 @@ build_binary() {
       --memory-policy "$memory_policy" \
       --manifest "$pending_manifest" -- \
       native-build --target "$target" --backend "$backend" \
-      --profile="$target_profile" --managed-build-phase="$task_phase" \
+      --profile="$target_profile" --managed-build-phase="$task_phase" --opt-level="$target_opt" --low-memory \
       --source "$cuda_selected_root" --source src/compositions/kernel_llvm_cranelift --source src/compiler --source src/app --source src/lib \
       --source src/os --source src/plugins --source src/package_ownership --source src/compositions \
       --entry-closure --entry "$entry" --threads "$threads" --mode dynload \

@@ -68,3 +68,26 @@ Artifacts: `/tmp/managed-profile-native-20261114/` (source hashes, preflight,
 three compiler logs and native execution log). Both edited shell scripts passed
 syntax checks. Receipt/index consumer wiring was source-reviewed; it was not
 represented as a completed persisted-resume experiment.
+
+## Managed command coherence followup
+
+Grouped artifact commands derive `--opt-level=none|standard` from the admitted
+phase/backend/target index and reject missing, duplicate or inconsistent values.
+Direct phase-4 commands and their argument digest explicitly select standard.
+Both paths transport `--low-memory`. Debug information retains the ordinary
+CompileOptions default (true), independently of release debug-aspect removal.
+The index describes native module artifacts; ordinary dynload binary packaging
+remains Both, recorded as such in the direct-product receipt. These are distinct
+artifact identities, not interchangeable cache variants.
+
+The exact shell selector passed nine positive/negative cases and two optimization
+wiring assertions; two additional low-memory wiring assertions passed separately.
+A focused native projection passed two new phase3/phase4 debug-info, optimization
+and low-memory scenarios, without repeating the earlier 30 cases. Its shared
+declarations are pinned to c065340a279 and managed declarations to the followup
+source snapshot. A preflight initially compared the older shared projection to
+newer owner source and failed; a missing shell fail-fast allowed compilation to
+complete before the owned scope was stopped. Before executing the artifact, all
+26 shared declarations were verified against c065340a279 and all 35 added spans
+against their exact sources. No product defect or full-manager pass is inferred.
+Artifacts: `/tmp/managed-profile-followup-20261114/`; full bootstrap remains UNRUN.
