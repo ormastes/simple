@@ -43,11 +43,18 @@ pub fn with_depth(command: text) -> text:
         return ""
     DEPTH_ENV + "=" + (workspace_depth() + 1).to_text() + " " + command
 
-# The pane this process itself runs in (tmux sets TMUX_PANE), or "".
+# The pane this process itself runs in, or "".
 # On smux, the owner gives each pane SMUX_PANE=<window id> at spawn.
-fn _own_pane_id() -> text:
+# tmux pane ids (`%N`) are numbered per SERVER, so TMUX_PANE names a pane of
+# `ws` only when $TMUX (`<socket path>,<pid>,<session>`) is this workspace own
+# `-L` socket; a caller inside some other tmux server has no pane here.
+fn _own_pane_id(ws: AgentWorkspace) -> text:
     if _smux():
         return env_get("SMUX_PANE")
+    val socket_path = env_get("TMUX").split(",")[0]
+    val parts = socket_path.split("/")
+    if parts[parts.len() - 1] != ws.socket:
+        return ""
     env_get("TMUX_PANE")
 
 struct AgentWorkspace:
@@ -608,7 +615,7 @@ pub fn send_to_pane(ws: AgentWorkspace, target: text, command: text) -> Workspac
 # it reached.
 pub fn send_to_each_pane(ws: AgentWorkspace, command: text) -> [text]:
     var reached: [text] = []
-    for target in list_panes_except(ws, _own_pane_id()):
+    for target in list_panes_except(ws, _own_pane_id(ws)):
         if send_to_pane(ws: ws, target: target, command: command).status == "ok":
             reached.push(target)
     reached
