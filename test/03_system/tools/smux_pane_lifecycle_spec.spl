@@ -22,7 +22,7 @@ use os.apps.smux.api.{smux_reset_for_test, smux_create_session, smux_new_window,
     smux_split_pane, smux_focus_pane, smux_focused_pane, smux_rollback_split,
     smux_pane_spawn, smux_pane_spawn_pty, smux_send_command, smux_capture}
 use std.sosix.time.{sosix_time_now_monotonic_ms, sosix_sleep_ms}
-use std.sosix.pty.{sosix_pty_cleanup_pending, sosix_pty_default_shell}
+use std.sosix.pty.{sosix_pty_cleanup_pending, sosix_pty_shell_command_v1, SOSIX_PTY_SHELL_NATIVE}
 use std.sosix.process.{sosix_process_exists}
 use std.platform.{is_windows}
 
@@ -66,9 +66,14 @@ fn pane_lifecycle_shell_args() -> [text]:
     if is_windows(): return ["/Q"]
     return []
 
+# The piped lane spawns the shell as a single program path, so it asks for the
+# native kind explicitly (hosts now default panes to the shs command line).
+fn pane_lifecycle_native_shell() -> text:
+    sosix_pty_shell_command_v1(SOSIX_PTY_SHELL_NATIVE).unwrap()
+
 fn pane_lifecycle_shell_line() -> text:
     if is_windows(): return "cmd.exe /Q"
-    return sosix_pty_default_shell()
+    return pane_lifecycle_native_shell()
 
 fn pane_lifecycle_sum(left: text, right: text) -> text:
     if is_windows(): return "set /a " + left + "+" + right
@@ -82,9 +87,9 @@ fn pane_lifecycle_native_case(use_pty: bool):
     val second = smux_split_pane(session.id, window.id, first.id, "vertical").unwrap()
     step("Spawn two real owned children; observe actual command output before closing")
     val target = if use_pty: smux_pane_spawn_pty(session.id, window.id, first.id, pane_lifecycle_shell_line())
-        else: smux_pane_spawn(session.id, window.id, first.id, sosix_pty_default_shell(), pane_lifecycle_shell_args())
+        else: smux_pane_spawn(session.id, window.id, first.id, pane_lifecycle_native_shell(), pane_lifecycle_shell_args())
     val survivor = if use_pty: smux_pane_spawn_pty(session.id, window.id, second.id, pane_lifecycle_shell_line())
-        else: smux_pane_spawn(session.id, window.id, second.id, sosix_pty_default_shell(), pane_lifecycle_shell_args())
+        else: smux_pane_spawn(session.id, window.id, second.id, pane_lifecycle_native_shell(), pane_lifecycle_shell_args())
     val first_sent = smux_send_command(session.id, window.id, first.id, pane_lifecycle_sum("3141", "2718"))
     val first_output = pane_lifecycle_output(session.id, window.id, first.id, "5859")
     # These Windows providers return real OS PIDs. Query arbitrary-PID presence through the existing host owner,
