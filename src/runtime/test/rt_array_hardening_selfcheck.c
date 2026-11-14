@@ -25,11 +25,15 @@
 extern int64_t rt_array_join_any(int64_t array, int64_t separator);
 extern int64_t rt_array_max(int64_t receiver);
 
-/* runtime.c owns spl_panic; this selfcheck links runtime_native.c alone. */
+/* runtime.c owns spl_panic; this selfcheck links runtime_native.c alone.
+ * Under the c-runtime test kind (SIMPLE_TEST_CORE_RUNTIME) the core-C owner
+ * runtime_legacy_core.c defines it instead. */
+#ifndef SIMPLE_TEST_CORE_RUNTIME
 void spl_panic(const char* msg) {
     fprintf(stderr, "panic: %s\n", msg);
     abort();
 }
+#endif
 
 static unsigned checks;
 #define CHECK(x) do { ++checks; if (!(x)) { fprintf(stderr, "FAIL line=%d check=%u\n", __LINE__, checks); return 1; } } while (0)

@@ -7,6 +7,16 @@
 #include <string.h>
 #include <unistd.h>
 
+#if defined(SIMPLE_TEST_CORE_RUNTIME)
+/* c-runtime test kind: the probe testing hooks exist only in a SIMPLE_RUNTIME_TESTING build of
+ * runtime.c / runtime_native.c, linked by scripts/check/check-file-exists-probe-c.shs.
+ * Exit 64 = needs its owning harness; never counted as a pass. */
+int main(void) {
+    fputs("rt_file_exists_probe_selfcheck: needs its owning harness (see file header)\n", stderr);
+    return 64;
+}
+#else
+
 /* This harness is linked once against runtime.c and once against
  * runtime_native.c.  It uses a PID-isolated path which must already be absent;
  * it never creates or deletes that fixture.  The runtime's testing hooks expose
@@ -61,3 +71,4 @@ int main(void) {
     if (rt_file_exists_probe_begin() != -3) return 28;
     return 0;
 }
+#endif /* SIMPLE_TEST_CORE_RUNTIME */
