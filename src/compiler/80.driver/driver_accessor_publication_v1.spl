@@ -25,6 +25,15 @@ pub fn driver_accessor_inventory_has_requests_v1(ctx: CompileContext) -> bool:
             if aop_predicate_has_field_selector_v1(advice.predicate_text): return true
     false
 
+pub fn driver_refresh_accessor_inventory_v1(ctx: CompileContext) -> bool:
+    val requested = driver_accessor_inventory_has_requests_v1(ctx)
+    # Reused compilation contexts cannot retain advice from an earlier source
+    # epoch. Empty/no-aspect contexts take no replacement-allocation path.
+    if ctx.accessor_plan_sets_v1.len() > 0: ctx.accessor_plan_sets_v1 = {}
+    ctx.accessor_no_field_aspects_v1 = not requested
+    ctx.accessor_inventory_checked_v1 = true
+    requested
+
 # Called once by the coordinator before canonical HIR snapshots and before
 # worker fork. Reserve allocator space too, so later synthetic/lambda symbols
 # cannot collide with helpers even if they were absent at selection time.
@@ -60,6 +69,11 @@ pub fn driver_accessor_plan_digest_v1(plan: AccessorPlanSetV1) -> text:
     var functions: [text] = []
     for function in plan.covered_functions:
         functions.push(canon_seq([canon_str(function.canonical_identity), canon_nat(function.symbol.id)]))
+    var type_bindings: [text] = []
+    for binding in plan.type_bindings:
+        type_bindings.push(canon_seq([canon_str(binding.canonical_key), canon_nat(binding.physical_symbol.id),
+            canon_str(binding.declaring_module), canon_str(binding.declaring_name),
+            canon_str(binding.layout_identity), canon_str(binding.provider_identity)]))
     var helpers: [text] = []
     for helper in plan.helpers:
         val actual_key = match accessor_helper_key_v1(helper.plan):
@@ -89,8 +103,9 @@ pub fn driver_accessor_plan_digest_v1(plan: AccessorPlanSetV1) -> text:
             canon_nat(row.site.start), canon_nat(row.site.end), canon_nat(row.site.line), canon_nat(row.site.col),
             canon_str(operation_tag), decision]))
     sha256_text(canon_field("simple/accessor-plan-set/v1", canon_seq([
-        canon_str(plan.source_snapshot), canon_str(plan.hir_snapshot), canon_str(plan.module_identity),
+        canon_str(plan.source_snapshot), canon_str(plan.hir_snapshot), canon_str(plan.module_identity), canon_str(plan.layout_mode),
         canon_seq(action_key_sort_texts(functions)), canon_seq(action_key_sort_texts(helpers)),
+        canon_seq(action_key_sort_texts(type_bindings)),
         canon_seq(action_key_sort_texts(sites))])))
 
 pub fn driver_publish_accessor_plans_v1(ctx: CompileContext, plans: [AccessorPlanSetV1]) -> Result<bool, text>:
@@ -107,6 +122,8 @@ pub fn driver_publish_accessor_plans_v1(ctx: CompileContext, plans: [AccessorPla
     var helpers_by_name: Dict<text, AccessorPreparedHelperV1> = {}
     var definition_counts: Dict<text, i64> = {}
     for draft in plans:
+        if draft.type_bindings != plans[0].type_bindings:
+            return Err("E-AOP-FIELD-TYPE: worker plans disagree on canonical type reservation")
         val plan = AccessorPlanSetV1(..draft, plan_digest: driver_accessor_plan_digest_v1(draft))
         val checked = accessor_plan_set_validate_v1(plan)?
         if published.has(plan.module_identity) or not ctx.hir_modules.has(plan.module_identity):

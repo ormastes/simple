@@ -1,0 +1,100 @@
+# Source-site inventory for the accessor coordinator. The generated HIR walker
+# supplies traversal coverage; it is not a second expression walker/weaver.
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirStmtKind, HirFunction}
+use compiler.hir.generated.hir_visitor.{HirWalkNode, walk_hir_block, walk_hir_expr}
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir.mir_accessor_plan_v1.{MirAccessorOperationV1}
+use compiler.mir.mir_accessor_plan_set_v1.{AccessorSiteKeyV1, accessor_site_equal_v1}
+
+struct AccessorSourceSiteV1:
+    key: AccessorSiteKeyV1
+    expression: HirExpr
+    compound_assignment: bool
+
+struct AccessorSiteInventoryV1:
+    module_identity: text
+    function_identity: text
+    writes: [Span]
+    compounds: [bool]
+    sites: [AccessorSourceSiteV1]
+    diagnostic: text
+
+fn accessor_span_equal_v1(left: Span, right: Span) -> bool:
+    left.start == right.start and left.end == right.end and
+        left.line == right.line and left.col == right.col
+
+fn accessor_lambda_has_field_v1(node: HirWalkNode, found: bool) -> bool:
+    if found: return true
+    match node:
+        case HirWalkNode.Expr(expression):
+            match expression.kind:
+                case HirExprKind.Field(_, _, _): return true
+                case _: ()
+        case _: ()
+    false
+
+fn accessor_collect_write_targets_v1(node: HirWalkNode, state: AccessorSiteInventoryV1) -> AccessorSiteInventoryV1:
+    var next = state
+    match node:
+        case HirWalkNode.Expr(expression):
+            match expression.kind:
+                case HirExprKind.Lambda(_, body, _):
+                    if walk_hir_expr<bool>(body, false, accessor_lambda_has_field_v1):
+                        next.diagnostic = "E-AOP-FIELD-COVERAGE: nested lambda fields require generated function identity"
+                case _: ()
+        case HirWalkNode.Stmt(statement):
+            match statement.kind:
+                case HirStmtKind.Assign(target, op, _):
+                    match target.kind:
+                        case HirExprKind.Field(_, _, _):
+                            for previous in next.writes:
+                                if accessor_span_equal_v1(previous, target.span):
+                                    next.diagnostic = "E-AOP-FIELD-COVERAGE: duplicate assignment target span"
+                                    return next
+                            next.writes.push(target.span)
+                            next.compounds.push(op.?)
+                        case _: ()
+                case _: ()
+        case _: ()
+    next
+
+fn accessor_collect_source_fields_v1(node: HirWalkNode, state: AccessorSiteInventoryV1) -> AccessorSiteInventoryV1:
+    var next = state
+    match node:
+        case HirWalkNode.Expr(expression):
+            match expression.kind:
+                case HirExprKind.Field(_, _, _):
+                    var operation = MirAccessorOperationV1.Read
+                    var compound = false
+                    for index in 0..next.writes.len():
+                        if accessor_span_equal_v1(next.writes[index], expression.span):
+                            operation = MirAccessorOperationV1.Write
+                            compound = next.compounds[index]
+                    val site = AccessorSiteKeyV1(module_identity: next.module_identity,
+                        function_identity: next.function_identity, start: expression.span.start,
+                        end: expression.span.end, line: expression.span.line, col: expression.span.col,
+                        operation: operation)
+                    if site.start < 0 or site.end <= site.start:
+                        next.diagnostic = "E-AOP-FIELD-COVERAGE: field has no stable source span"
+                        return next
+                    for previous in next.sites:
+                        if accessor_site_equal_v1(previous.key, site):
+                            next.diagnostic = "E-AOP-FIELD-COVERAGE: duplicate source field identity"
+                            return next
+                    next.sites.push(AccessorSourceSiteV1(key: site, expression: expression,
+                        compound_assignment: compound))
+                case _: ()
+        case _: ()
+    next
+
+pub fn driver_accessor_source_sites_v1(function: HirFunction, module_identity: text,
+    function_identity: text) -> Result<[AccessorSourceSiteV1], text>:
+    if module_identity == "" or function_identity == "" or not function.symbol.is_valid():
+        return Err("E-AOP-FIELD-OWNER: source inventory requires canonical function ownership")
+    val initial = AccessorSiteInventoryV1(module_identity: module_identity,
+        function_identity: function_identity, writes: [], compounds: [], sites: [], diagnostic: "")
+    val writes = walk_hir_block<AccessorSiteInventoryV1>(function.body, initial, accessor_collect_write_targets_v1)
+    if writes.diagnostic != "": return Err(writes.diagnostic)
+    val fields = walk_hir_block<AccessorSiteInventoryV1>(function.body, writes, accessor_collect_source_fields_v1)
+    if fields.diagnostic != "": return Err(fields.diagnostic)
+    Ok(fields.sites)

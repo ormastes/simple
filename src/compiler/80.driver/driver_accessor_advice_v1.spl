@@ -1,0 +1,91 @@
+# Resolve selected named advice against its actual owning HIR declaration.
+# This deliberately reuses the normal provider callable linkage owner.
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_accessor_selection_v1.{AccessorAdviceSelectionV1}
+use compiler.hir.hir_types.{HirTypeKind}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_function}
+use compiler.hir.hir_codec.{hir_canonical_codec_header, hir_canonical_codec_generated_available_v1}
+use compiler.mir.mir_accessor_plan_v1.{MirAccessorAdviceV1}
+use compiler.mir.mir_types.{MirType, MirSignature}
+use compiler.mir._MirLowering.provider_metadata.{mir_provider_function_name}
+use compiler.frontend.core.aop.{AdviceForm}
+use compiler.driver.cache.action_key.{canon_str, canon_seq, canon_field}
+use std.common.crypto.sha256.{sha256_text}
+
+pub fn driver_accessor_advice_v1(ctx: CompileContext, selected: AccessorAdviceSelectionV1,
+    entry_module: text, selection_scope_digest: text) -> Result<MirAccessorAdviceV1, text>:
+    val advice = selected.advice
+    if advice.aspect_module == "" or advice.aspect_name == "" or selection_scope_digest == "":
+        return Err("E-AOP-FIELD-ADVICE: unresolved named owner or selection scope")
+    if not ctx.hir_modules.has(advice.aspect_module):
+        return Err("E-AOP-FIELD-ADVICE: owning aspect module is not in the admitted HIR snapshot")
+    val module = ctx.hir_modules[advice.aspect_module]
+    var found: HirFunction? = None
+    for key in module.functions.keys():
+        val function: HirFunction = module.functions[key]
+        if function.name == advice.advice_function:
+            if found.?: return Err("E-AOP-FIELD-ADVICE: ambiguous handler declaration")
+            found = Some(function)
+    if not found.?:
+        return Err("E-AOP-FIELD-ADVICE: handler needs an authenticated declaring callable provider")
+    val function = found.unwrap()
+    if not function.symbol.is_valid() or function.params.len() != 0 or
+            function.return_type.kind != HirTypeKind.Unit or function.is_method or function.is_static or
+            function.is_async or function.is_extern or function.has_suspension or
+            function.is_generic_template or function.type_params.len() != 0 or function.has_export_attr:
+        return Err("E-AOP-FIELD-ADVICE: initial handler must be an ordinary synchronous parameterless unit function")
+    val form = match advice.form:
+        case "before": AdviceForm.Before
+        case "after_success": AdviceForm.AfterSuccess
+        case _: return Err("E-AOP-FIELD-ADVICE: selected advice form is not admitted")
+    val linkage = mir_provider_function_name(module.name, module.symbols, function,
+        advice.aspect_module == entry_module)
+    if linkage == "": return Err("E-AOP-FIELD-ADVICE: provider returned no callable linkage identity")
+    if not hir_canonical_codec_generated_available_v1():
+        return Err("E-AOP-FIELD-ADVICE: current canonical codec is unavailable")
+    var writer = HirCodecWriter.create_canonical()
+    hc_enc_hir_function(writer, function)
+    if not writer.ok: return Err("E-AOP-FIELD-ADVICE: canonical handler encoding failed")
+    val encoded = writer.finish_with_header(hir_canonical_codec_header())
+    if not writer.ok: return Err("E-AOP-FIELD-ADVICE: canonical handler encoding exceeded bounds")
+    val body_digest = sha256_text(encoded)
+    val interface_digest = sha256_text(canon_field("simple/accessor-handler-interface/v1",
+        canon_seq([canon_str(advice.aspect_module), canon_str(advice.aspect_name),
+            canon_str(linkage), canon_str("synchronous-unit-zero-arity"), canon_str(advice.form)])))
+    # Full canonical function includes declared effects. This conservative
+    # dependency is an identity, never an owner-lifetime or purity proof.
+    val effects_digest = sha256_text(canon_field("simple/accessor-handler-effects/v1", canon_str(encoded)))
+    Ok(MirAccessorAdviceV1(aspect_module: advice.aspect_module, aspect_name: advice.aspect_name,
+        symbol: function.symbol, function_name: linkage,
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false,
+            params_known: true, declared_params: [], declared_params_known: true),
+        form: form, interface_digest: interface_digest, body_digest: body_digest,
+        effects_digest: effects_digest, selector_digest: selected.selector_digest,
+        selection_scope_digest: selection_scope_digest))
+
+use compiler.frontend.core.aop.{MatchedAdvice, predicate_specificity, sort_matched_by_priority}
+
+pub fn driver_accessor_ordered_advice_v1(ctx: CompileContext, selected: [AccessorAdviceSelectionV1],
+    entry_module: text, selection_scope_digest: text) -> Result<[MirAccessorAdviceV1], text>:
+    var resolved: [MirAccessorAdviceV1] = []
+    var matches: [MatchedAdvice] = []
+    for row in selected:
+        val advice = driver_accessor_advice_v1(ctx, row, entry_module, selection_scope_digest)?
+        resolved.push(advice)
+        matches.push(MatchedAdvice(advice_function: advice.function_name, form: advice.form,
+            priority: row.advice.priority, specificity: predicate_specificity(row.advice.predicate_text)))
+    val ordered = sort_matched_by_priority(matches)
+    var consumed: [i64] = []
+    var result: [MirAccessorAdviceV1] = []
+    for row in ordered:
+        var found = -1
+        for index in 0..matches.len():
+            if not consumed.contains(index) and matches[index] == row:
+                found = index
+                break
+        if found < 0: return Err("E-AOP-FIELD-ADVICE: ordering lost a resolved advice occurrence")
+        consumed.push(found)
+        result.push(resolved[found])
+    Ok(result)

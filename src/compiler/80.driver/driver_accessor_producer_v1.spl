@@ -1,0 +1,175 @@
+# Cold source coordinator. Called only for actual field-selector requests.
+# Public grammar admission remains separately gated until native qualification.
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.common.mir_target_context.{MirTargetContext}
+use compiler.driver.driver_accessor_sites_v1.*
+use compiler.driver.driver_accessor_selection_v1.*
+use compiler.driver.driver_accessor_provider_v1.*
+use compiler.driver.driver_accessor_advice_v1.{driver_accessor_ordered_advice_v1}
+use compiler.driver.driver_accessor_physical_v1.*
+use compiler.driver.driver_accessor_freeze_v1.{accessor_helper_key_v1, freeze_accessor_helpers_v1}
+use compiler.driver.driver_accessor_publication_v1.{driver_reserve_accessor_symbols_v1, driver_publish_accessor_plans_v1, driver_accessor_source_identity_v1}
+use compiler.driver.cache.action_key.{canon_str, canon_nat, canon_seq, action_key_sort_texts}
+use compiler.hir.hir_types.{HirModule, HirTypeKind}
+use compiler.hir.hir_definitions.{HirAopAdvice, HirExprKind}
+use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
+use compiler.hir.hir_codec.{hir_module_encode_canonical}
+use compiler.mir._MirLowering.provider_metadata.{mir_provider_function_name}
+use compiler.mir.mir_accessor_plan_v1.*
+use compiler.mir.mir_accessor_plan_set_v1.*
+use compiler.mir.mir_target_hir_select.{mir_target_hir_mode_from_env}
+use std.common.crypto.sha256.{sha256_text}
+
+struct AccessorCandidateV1:
+    source: AccessorSourceSiteV1
+    provider: AccessorDeclaredProviderV1
+    advice: [MirAccessorAdviceV1]
+
+pub fn driver_accessor_is_builtin_field_v1(source: AccessorSourceSiteV1) -> bool:
+    if source.key.operation != MirAccessorOperationV1.Read: return false
+    match source.expression.kind:
+        case HirExprKind.Field(base, field_name, _):
+            # These are the exact declared-text length pseudo-properties in
+            # both existing MIR Field paths, not stored class fields named len.
+            return base.has_type_ and base.type_.kind == HirTypeKind.Str and
+                (field_name == "len" or field_name == "length")
+        case _: false
+
+pub fn driver_accessor_order_inventory_v1(input: [HirAopAdvice]) -> [HirAopAdvice]:
+    var by_key: Dict<text, HirAopAdvice> = {}
+    for advice in input:
+        val key = canon_seq([canon_str(advice.aspect_module), canon_str(advice.aspect_name),
+            canon_nat(advice.span.start), canon_nat(advice.span.end),
+            canon_str(advice.predicate_text), canon_str(advice.advice_function),
+            canon_str(advice.form), canon_str("{advice.priority}")])
+        # Same original declaration in retained and streaming inventories is
+        # one rule. Different source positions remain distinct occurrences.
+        by_key[key] = advice
+    var result: [HirAopAdvice] = []
+    for key in action_key_sort_texts(by_key.keys()): result.push(by_key[key])
+    result
+
+fn accessor_target_from_source_v1(module: HirModule, canonical_module: text,
+    source: AccessorSourceSiteV1) -> Result<AccessorFieldTargetV1, text>:
+    match source.expression.kind:
+        case HirExprKind.Field(base, field_name, _):
+            if not base.has_type_:
+                return Err("E-AOP-FIELD-TYPE: source field lacks resolved receiver type")
+            match base.type_.kind:
+                case HirTypeKind.Named(symbol, args):
+                    if args.len() != 0: return Err("E-AOP-FIELD-PROFILE: instantiated field selection is not yet admitted")
+                    val row = module.symbols.get_symbol_raw(symbol.id)
+                    if not row.?: return Err("E-AOP-FIELD-OWNER: receiver symbol is unavailable")
+                    val declaration = row.unwrap()
+                    var owner = hir_symbol_owner_module(declaration.defining_module ?? "")
+                    if owner == "":
+                        var locally_declared = false
+                        for local_key in module.classes.keys():
+                            if local_key.id == symbol.id: locally_declared = true
+                        if not locally_declared:
+                            return Err("E-AOP-FIELD-OWNER: receiver has no authenticated defining module")
+                        owner = canonical_module
+                    return Ok(AccessorFieldTargetV1(owner_module: owner, owner_type: declaration.name,
+                        field_name: field_name, operation: source.key.operation,
+                        lexical_owner: canonical_module, lexical_owner_known: true,
+                        attributes: [], attributes_known: false))
+                case _: return Err("E-AOP-FIELD-PROFILE: non-nominal field selection requires another semantic provider")
+        case _: Err("E-AOP-FIELD-OWNER: inventory entry is not an original field")
+
+pub fn driver_prepare_accessor_plans_v1(ctx: CompileContext, entry_module: text, actual_target: MirTargetContext) -> Result<bool, text>:
+    ctx.accessor_plan_sets_v1 = {}
+    if actual_target != driver_mir_target_context(ctx.options):
+        return Err("E-AOP-FIELD-PROFILE: explicit MIR target differs from coordinator target context")
+    if entry_module == "" or not ctx.hir_modules.has(entry_module):
+        return Err("E-AOP-FIELD-OWNER: exact scheduled entry module is unavailable")
+    # All sources must have passed the existing HIR diagnostics before this
+    # phase can turn an original plain Assign into a writable-place request.
+    if ctx.errors.len() != 0:
+        return Err("E-AOP-FIELD-ACCESS: original semantic diagnostics must pass before selection")
+    val layout_mode = mir_target_hir_mode_from_env()?
+    val module_names = action_key_sort_texts(ctx.hir_modules.keys())
+    var advices: [HirAopAdvice] = []
+    for advice in ctx.hir_aop_advices_saved:
+        if accessor_has_field_selector_v1(advice): advices.push(advice)
+    for name in module_names:
+        for advice in ctx.hir_modules[name].aop_advices:
+            if accessor_has_field_selector_v1(advice) and not advices.contains(advice): advices.push(advice)
+    advices = driver_accessor_order_inventory_v1(advices)
+    var coverage: Dict<text, [AccessorFunctionIdentityV1]> = {}
+    var rows: Dict<text, [AccessorSitePlanV1]> = {}
+    var candidates: [AccessorCandidateV1] = []
+    var providers: [AccessorDeclaredProviderV1] = []
+    for name in module_names:
+        val module = ctx.hir_modules[name]
+        var functions: [AccessorFunctionIdentityV1] = []
+        var decisions: [AccessorSitePlanV1] = []
+        for symbol in module.functions.keys():
+            val function = module.functions[symbol]
+            if function.is_extern: continue
+            val identity = mir_provider_function_name(module.name, module.symbols, function, name == entry_module)
+            functions.push(AccessorFunctionIdentityV1(symbol: function.symbol, canonical_identity: identity))
+            val sites = driver_accessor_source_sites_v1(function, name, identity)?
+            for site in sites:
+                if driver_accessor_is_builtin_field_v1(site):
+                    decisions.push(AccessorSitePlanV1(site: site.key, decision: AccessorSiteDecisionV1.Unmatched))
+                    continue
+                val target = accessor_target_from_source_v1(module, name, site)?
+                val selected = accessor_select_advices_v1(advices, target)?
+                if selected.len() == 0:
+                    decisions.push(AccessorSitePlanV1(site: site.key, decision: AccessorSiteDecisionV1.Unmatched))
+                    continue
+                if site.compound_assignment:
+                    return Err("E-AOP-FIELD-PROFILE: selected RMW requires an evaluation-once compound-place implementation")
+                val provider = if target.owner_module == hir_symbol_owner_module(name):
+                    driver_accessor_local_provider_v1(module, name, site.expression)?
+                else:
+                    driver_accessor_imported_provider_v1(ctx, module, name, site.expression)?
+                val scope_digest = sha256_text(canon_seq([canon_str(name), canon_str(target.lexical_owner)]))
+                val advice = driver_accessor_ordered_advice_v1(ctx, selected, entry_module, scope_digest)?
+                providers.push(provider)
+                candidates.push(AccessorCandidateV1(source: site, provider: provider, advice: advice))
+        coverage[name] = functions
+        rows[name] = decisions
+    val bindings = driver_accessor_type_reservation_v1(ctx, providers, layout_mode)?
+    var typed_plans: [MirAccessorPlanV1] = []
+    var candidate_keys: [text] = []
+    for candidate in candidates:
+        val operation = candidate.source.key.operation
+        val physical = driver_accessor_physical_v1(ctx, candidate.provider, operation,
+            operation == MirAccessorOperationV1.Write and not candidate.source.compound_assignment,
+            bindings, layout_mode)?
+        val plan = mir_accessor_prepare_v1(candidate.provider.field, physical, operation, candidate.advice)?
+        candidate_keys.push(accessor_helper_key_v1(plan)?)
+        typed_plans.push(plan)
+    # Reserve before canonical snapshots, including future synthetic function IDs.
+    val first_symbol = driver_reserve_accessor_symbols_v1(ctx, typed_plans.len())?
+    if first_symbol + typed_plans.len() >= 1000000000:
+        return Err("E-AOP-FIELD-SYMBOL: source helper range overlaps canonical type reservation")
+    val helpers = freeze_accessor_helpers_v1(typed_plans, first_symbol)?
+    var plans: [AccessorPlanSetV1] = []
+    for name in module_names:
+        var local_helpers: [AccessorPreparedHelperV1] = []
+        for helper in helpers:
+            var used = helper.emission_owner == name
+            for index in 0..candidates.len():
+                if candidates[index].source.key.module_identity == name and candidate_keys[index] == helper.canonical_key:
+                    used = true
+            if used: local_helpers.push(helper)
+        var decisions = rows[name]
+        for index in 0..candidates.len():
+            if candidates[index].source.key.module_identity != name: continue
+            var helper_index = -1
+            for local_index in 0..local_helpers.len():
+                if local_helpers[local_index].canonical_key == candidate_keys[index]: helper_index = local_index
+            if helper_index < 0: return Err("E-AOP-FIELD-COVERAGE: selected site lost its frozen helper")
+            decisions.push(AccessorSitePlanV1(site: candidates[index].source.key,
+                decision: AccessorSiteDecisionV1.Prepared(helper_index)))
+        val encoded = match hir_module_encode_canonical(ctx.hir_modules[name]):
+            case Ok(bytes): bytes
+            case Err(_): return Err("E-AOP-FIELD-SNAPSHOT: post-reservation canonical HIR encoding failed")
+        plans.push(AccessorPlanSetV1(source_snapshot: driver_accessor_source_identity_v1(ctx, name)?,
+            hir_snapshot: sha256_text(encoded), plan_digest: "pending", module_identity: name,
+            covered_functions: coverage[name], sites: decisions, helpers: local_helpers,
+            type_bindings: bindings, layout_mode: layout_mode))
+    driver_publish_accessor_plans_v1(ctx, plans)

@@ -1,0 +1,134 @@
+# Internal field-selection adapter. Public get/set validation remains E1507.
+# This resolves atoms, then delegates ALL Boolean grammar/evaluation to AOP.
+use compiler.hir.hir_definitions.{HirAopAdvice}
+use compiler.mir.mir_accessor_plan_v1.{MirAccessorOperationV1}
+use compiler.frontend.core.aop_predicate_parser.{aop_predicate_tokens, validate_predicate_tokens, aop_predicate_has_field_selector_v1}
+use compiler.frontend.core.aop.{aop_pointcut_matches}
+use compiler.driver.cache.action_key.{canon_str, canon_seq, canon_field}
+use std.common.crypto.sha256.{sha256_text}
+
+struct AccessorFieldTargetV1:
+    owner_module: text
+    owner_type: text
+    field_name: text
+    operation: MirAccessorOperationV1
+    # Authoritative lexical owner of the ACCESS SITE, never guessed from field owner.
+    lexical_owner: text
+    lexical_owner_known: bool
+    # Trusted resolved metadata, not arbitrary source annotations masquerading as exports.
+    attributes: [text]
+    attributes_known: bool
+
+struct AccessorAdviceSelectionV1:
+    advice: HirAopAdvice
+    source_ordinal: i64
+    selector_digest: text
+
+fn accessor_identifier_v1(token: text) -> bool:
+    if token == "": return false
+    var first = true
+    for ch in token.chars():
+        val letter = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+        val digit = ch >= "0" and ch <= "9"
+        if not letter and (first or not digit): return false
+        first = false
+    true
+
+fn accessor_pattern_v1(tokens: [text]) -> Result<text, text>:
+    if tokens.len() == 0: return Err("E-AOP-FIELD-SELECT: empty atom")
+    var pattern = ""
+    var component = true
+    var stars = 0
+    for index in 0..tokens.len():
+        val token = tokens[index]
+        if component:
+            if token == "*":
+                stars = stars + 1
+                if index != 0 and index != tokens.len() - 1:
+                    return Err("E-AOP-FIELD-SELECT: interior wildcard is unsupported")
+            elif not accessor_identifier_v1(token):
+                return Err("E-AOP-FIELD-SELECT: expected qualified field/name pattern, not a signature")
+        elif token != ".":
+            return Err("E-AOP-FIELD-SELECT: expected '.' between name components")
+        pattern = pattern + token
+        component = not component
+    if component or stars > 1:
+        return Err("E-AOP-FIELD-SELECT: incomplete or multiple-wildcard pattern")
+    Ok(pattern)
+
+fn accessor_pattern_matches_v1(pattern: text, target: text) -> bool:
+    aop_pointcut_matches("execution(* " + pattern + "(..))", target)
+
+pub fn accessor_has_field_selector_v1(advice: HirAopAdvice) -> bool:
+    aop_predicate_has_field_selector_v1(advice.predicate_text)
+
+fn accessor_atom_v1(selector: text, body: [text], target: AccessorFieldTargetV1) -> Result<bool, text>:
+    val pattern = accessor_pattern_v1(body)?
+    if selector == "get" or selector == "set":
+        val same_operation = if selector == "get": target.operation == MirAccessorOperationV1.Read else: target.operation == MirAccessorOperationV1.Write
+        val qualified = target.owner_module + "." + target.owner_type + "." + target.field_name
+        return Ok(same_operation and accessor_pattern_matches_v1(pattern, qualified))
+    if selector == "within":
+        if not target.lexical_owner_known or target.lexical_owner == "":
+            return Err("E-AOP-FIELD-SELECT: within requires resolved access-site lexical ownership")
+        return Ok(accessor_pattern_matches_v1(pattern, target.lexical_owner))
+    if selector == "attr":
+        if body.len() != 1 or not accessor_identifier_v1(pattern):
+            return Err("E-AOP-FIELD-SELECT: attr requires one resolved attribute name")
+        # Boundary-aware derived exports need a separately frozen boundary scope.
+        if pattern == "layer_public" or pattern == "feature_public":
+            return Err("E-AOP-FIELD-SELECT: derived visibility attributes require qualified field-boundary metadata")
+        if not target.attributes_known:
+            return Err("E-AOP-FIELD-SELECT: attr requires resolved field attribute metadata")
+        for attribute in target.attributes:
+            if attribute == pattern: return Ok(true)
+        return Ok(false)
+    Err("E-AOP-FIELD-SELECT: unsupported field selector '" + selector + "'")
+
+pub fn accessor_select_advices_v1(advices: [HirAopAdvice], target: AccessorFieldTargetV1) -> Result<[AccessorAdviceSelectionV1], text>:
+    if target.owner_module == "" or target.owner_type == "" or target.field_name == "":
+        return Err("E-AOP-FIELD-SELECT: incomplete canonical field identity")
+    var selected: [AccessorAdviceSelectionV1] = []
+    for ordinal in 0..advices.len():
+        val advice = advices[ordinal]
+        # Execution-only advice belongs to the existing execution owner.
+        if not accessor_has_field_selector_v1(advice): continue
+        if advice.aspect_module == "" or advice.aspect_name == "":
+            return Err("E-AOP-FIELD-SELECT: field advice requires resolved named aspect ownership")
+        val tokens = aop_predicate_tokens(advice.predicate_text)
+        var projected: [text] = []
+        var framed: [text] = []
+        for token in tokens: framed.push(canon_str(token))
+        var index = 0
+        while index < tokens.len():
+            val token = tokens[index]
+            if token == "!" or token == "&" or token == "|" or token == "(" or token == ")":
+                projected.push(token)
+                index = index + 1
+                continue
+            if index + 1 >= tokens.len() or tokens[index + 1] != "(":
+                return Err("E-AOP-FIELD-SELECT: expected selector atom; trailing text is invalid")
+            var body: [text] = []
+            index = index + 2
+            while index < tokens.len() and tokens[index] != ")":
+                if tokens[index] == "(":
+                    return Err("E-AOP-FIELD-SELECT: nested/typed field signatures are unsupported")
+                body.push(tokens[index])
+                index = index + 1
+            if index >= tokens.len(): return Err("E-AOP-FIELD-SELECT: unterminated selector")
+            index = index + 1
+            # Resolve every atom, even in logically dead branches: unknown is not false.
+            val matched = accessor_atom_v1(token, body, target)?
+            val name = if matched: "__accessor_true" else: "__accessor_false"
+            for part in aop_predicate_tokens("execution(* " + name + "(..))"):
+                projected.push(part)
+        val error = validate_predicate_tokens(projected)
+        if error != "": return Err(error)
+        var expression = ""
+        for part in projected: expression = expression + " " + part
+        if aop_pointcut_matches(expression, "__accessor_true"):
+            val digest = sha256_text(canon_seq([
+                canon_field("domain", canon_str("simple/accessor-selector/v1")),
+                canon_field("tokens", canon_seq(framed))]))
+            selected.push(AccessorAdviceSelectionV1(advice: advice, source_ordinal: ordinal, selector_digest: digest))
+    Ok(selected)

@@ -1,0 +1,45 @@
+# Real parsed handler resolution; source-authored, not native qualification.
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_definitions.{HirAopAdvice}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_accessor_selection_v1.{AccessorAdviceSelectionV1}
+use compiler.driver.driver_accessor_advice_v1.{driver_accessor_advice_v1}
+
+fn handler_context(source: text) -> CompileContext:
+    var lowering = HirLowering.new()
+    val module = lowering.lower_module(parse_and_build_module(source, "app/trace.spl"))
+    val context = CompileContext.create(driver_core_compile_options_default())
+    context.hir_modules["app.trace"] = module
+    context
+
+fn handler_selection(name: text) -> AccessorAdviceSelectionV1:
+    AccessorAdviceSelectionV1(advice: HirAopAdvice(predicate_text: "get(app.Box.value)",
+        advice_function: name, form: "before", priority: 0, span: Span.empty(),
+        aspect_module: "app.trace", aspect_name: "Trace"), source_ordinal: 0,
+        selector_digest: "selector")
+
+describe "accessor advice uses actual declaring callable":
+    it "resolves the real zero-arity unit function and preserves named ownership":
+        val context = handler_context("fn observe():\n    val marker = 1\n")
+        val result = driver_accessor_advice_v1(context, handler_selection("observe"), "app.main", "scope").unwrap()
+        expect(result.function_name).to_equal("app.trace.observe")
+        expect(result.aspect_module).to_equal("app.trace")
+        expect(result.aspect_name).to_equal("Trace")
+        expect(result.signature.params.len()).to_equal(0)
+        expect(result.body_digest.len()).to_equal(64)
+
+    it "rejects parameters and missing handlers instead of fabricating a signature":
+        val context = handler_context("fn observe(value: i64):\n    val marker = value\n")
+        expect(driver_accessor_advice_v1(context, handler_selection("observe"), "app.main", "scope").is_err()).to_equal(true)
+        expect(driver_accessor_advice_v1(context, handler_selection("missing"), "app.main", "scope").is_err()).to_equal(true)
+
+    it "binds actual handler body changes while preserving its interface identity":
+        val first = handler_context("fn observe():\n    val marker = 1\n")
+        val second = handler_context("fn observe():\n    val marker = 2\n")
+        val left = driver_accessor_advice_v1(first, handler_selection("observe"), "app.main", "scope").unwrap()
+        val right = driver_accessor_advice_v1(second, handler_selection("observe"), "app.main", "scope").unwrap()
+        expect(left.interface_digest).to_equal(right.interface_digest)
+        expect(left.body_digest == right.body_digest).to_equal(false)

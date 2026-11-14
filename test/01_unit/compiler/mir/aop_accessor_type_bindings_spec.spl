@@ -1,0 +1,59 @@
+# Actual canonical MIR owner tests; authored and UNRUN.
+use compiler.hir.hir_types.{SymbolTable, SymbolId, HirSymbol, SymbolKind, ScopeId}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.mir_target_context.{mir_target_context_from}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.accessor_type_bindings_v1.*
+use compiler.mir.mir_accessor_type_bindings_v1.*
+
+fn bound_worker(symbol_id: i64, owner: text) -> MirLowering:
+    var symbols = SymbolTable.new()
+    symbols.register_preserved_symbol(HirSymbol(id: SymbolId.new(symbol_id), name: "Box",
+        kind: SymbolKind.Class, type_: None, scope: ScopeId(id: 0), span: Span.empty(),
+        visibility: Visibility.Public, is_public: true, is_mutable: false,
+        defining_module: Some(owner)))
+    MirLowering.new_for_target(symbols,
+        mir_target_context_from("x86_64-unknown-linux-gnu", "x86_64", "linux", "llvm", 1))
+
+fn class_binding() -> AccessorTypeBindingV1:
+    AccessorTypeBindingV1(canonical_key: "app.box.Box", physical_symbol: SymbolId.new(1000000000),
+        declaring_module: "app.box", declaring_name: "Box", layout_identity: "layout",
+        provider_identity: "provider")
+
+describe "coordinator reservation through existing canonical MIR type owner":
+    it "keeps one class identity across worker encounter order and imported IDs":
+        var first = bound_worker(77, "src/app/box.spl")
+        var second = bound_worker(501, "app.box")
+        expect(first.install_accessor_type_bindings_v1([class_binding()]).is_ok()).to_equal(true)
+        expect(second.install_accessor_type_bindings_v1([class_binding()]).is_ok()).to_equal(true)
+        first.canonical_mir_type_symbol_for_key_v1("other.Left")
+        first.canonical_mir_type_symbol_for_key_v1("other.Right")
+        second.canonical_mir_type_symbol_for_key_v1("other.Right")
+        second.canonical_mir_type_symbol_for_key_v1("other.Left")
+        expect(first.canonical_mir_type_symbol(SymbolId.new(77)).id).to_equal(1000000000)
+        expect(second.canonical_mir_type_symbol(SymbolId.new(501)).id).to_equal(1000000000)
+        expect(first.canonical_type_symbol_names[1000000000]).to_equal("app.box.Box")
+        expect(second.canonical_type_symbol_names[1000000000]).to_equal("app.box.Box")
+
+    it "rejects an overlapping reservation without renumbering existing identities":
+        var worker = bound_worker(77, "src/app/box.spl")
+        val old = worker.canonical_mir_type_symbol_for_key_v1("other.Existing")
+        expect(worker.install_accessor_type_bindings_v1([class_binding()]).is_err()).to_equal(true)
+        expect(worker.canonical_type_symbols["other.Existing"]).to_equal(old.id)
+        expect(worker.canonical_type_symbols.has("app.box.Box")).to_equal(false)
+
+    it "does not mutate counters or maps for an empty reservation":
+        var worker = bound_worker(77, "app.box")
+        val before = worker.next_canonical_type_symbol
+        expect(worker.install_accessor_type_bindings_v1([]).is_ok()).to_equal(true)
+        expect(worker.next_canonical_type_symbol).to_equal(before)
+        expect(worker.canonical_type_symbols.len()).to_equal(0)
+
+    it "rejects duplicate physical IDs and wrong canonical declaration keys":
+        val first = class_binding()
+        val duplicate = AccessorTypeBindingV1(..first, canonical_key: "other.Box", declaring_module: "other")
+        expect(accessor_type_bindings_validate_v1([first, duplicate]).is_err()).to_equal(true)
+        val wrong = AccessorTypeBindingV1(..first, canonical_key: "wrong.Box")
+        expect(accessor_type_bindings_validate_v1([wrong]).is_err()).to_equal(true)

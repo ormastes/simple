@@ -1,0 +1,125 @@
+# Body-free physical preparation through the existing MIR layout owner.
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_accessor_provider_v1.{AccessorDeclaredProviderV1}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.driver.cache.action_key.{canon_str, canon_nat, canon_field, canon_seq, action_key_sort_texts}
+use compiler.hir.hir_types.{HirTypeKind, SymbolId}
+use compiler.hir.hir_codec.{hir_module_encode_canonical}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir._MirLowering.accessor_type_bindings_v1.*
+use compiler.mir.mir_accessor_type_bindings_v1.*
+use compiler.mir.mir_accessor_plan_v1.*
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirTypeDefKind}
+use compiler.mir.mir_accessor_layout_lookup_v1.{mir_accessor_layout_lookup_v1}
+use compiler.mir.mir_target_hir_select.{mir_target_hir_mode_from_env}
+use compiler.common.mir_target_context.{mir_collection_target_is_supported}
+use compiler.types.type_layout.{layoutattr_default_}
+use std.common.crypto.sha256.{sha256_text}
+
+pub fn driver_accessor_target_key_v1(ctx: CompileContext) -> Result<text, text>:
+    val target = driver_mir_target_context(ctx.options)
+    if ctx.options.backend != "llvm" or target.backend != "llvm" or target.os != "linux" or
+            not mir_collection_target_is_supported(target) or not ctx.options.gc_off:
+        return Err("E-AOP-FIELD-PROFILE: initial physical provider requires admitted LLVM Linux and explicit no-GC")
+    Ok(canon_seq([canon_str(target.arch), canon_str(target.os), canon_str(target.abi),
+        canon_str(target.backend), canon_nat(target.version), canon_str(target.cpu_tier)]))
+
+pub fn driver_accessor_type_reservation_v1(ctx: CompileContext,
+    providers: [AccessorDeclaredProviderV1], layout_mode: text) -> Result<[AccessorTypeBindingV1], text>:
+    val target_key = driver_accessor_target_key_v1(ctx)?
+    if mir_target_hir_mode_from_env()? != layout_mode:
+        return Err("E-AOP-FIELD-LAYOUT: target layout mode changed during preparation")
+    var by_key: Dict<text, AccessorDeclaredProviderV1> = {}
+    for provider in providers:
+        val key = accessor_type_key_v1(provider.field.owner_module, provider.field.owner_name)
+        if key == "": return Err("E-AOP-FIELD-TYPE: missing canonical declaration key")
+        if by_key.has(key):
+            if by_key[key].owner != provider.owner:
+                return Err("E-AOP-FIELD-TYPE: canonical class has conflicting defining declarations")
+        else: by_key[key] = provider
+    val keys = action_key_sort_texts(by_key.keys())
+    if keys.len() > 9223372035854775806:
+        return Err("E-AOP-FIELD-TYPE: selected type reservation exhausted")
+    var bindings: [AccessorTypeBindingV1] = []
+    for index in 0..keys.len():
+        val key = keys[index]
+        val provider = by_key[key]
+        if not ctx.hir_modules.has(provider.field.owner_module):
+            return Err("E-AOP-FIELD-PROVIDER: declaring HIR is not retained")
+        val module = ctx.hir_modules[provider.field.owner_module]
+        val encoded = match hir_module_encode_canonical(module):
+            case Ok(bytes): bytes
+            case Err(_): return Err("E-AOP-FIELD-PROVIDER: declaring HIR encoding failed")
+        var lowering = MirLowering.new_for_target(module.symbols, driver_mir_target_context(ctx.options))
+        lowering.current_module_id = mir_layout_canonical_module_name(module.name)
+        # This bounded profile does not implicitly qualify custom/managed
+        # siblings simply because the selected field itself is scalar.
+        for field in provider.owner.fields:
+            if field.has_bits_attr or field.has_fixed_address or field.is_volatile:
+                return Err("E-AOP-FIELD-LAYOUT: declaring class has unsupported field qualifiers")
+            match field.type_.kind:
+                case HirTypeKind.Bool: ()
+                case HirTypeKind.Int(bits, _):
+                    if not [8, 16, 32, 64].contains(bits):
+                        return Err("E-AOP-FIELD-LAYOUT: unsupported primitive field width")
+                case _: return Err("E-AOP-FIELD-LAYOUT: sibling field requires additional provider qualification")
+        val layout = lowering.lowering_struct_layout(provider.owner.name, provider.owner.fields, layoutattr_default_())
+        if lowering.errors.len() != 0 or layout.fields.len() != provider.owner.fields.len():
+            return Err("E-AOP-FIELD-LAYOUT: existing layout owner refused declaration")
+        var field_rows: [text] = []
+        for field_index in 0..layout.fields.len():
+            val actual = layout.fields[field_index]
+            # Retain this check until declaration/layout identity repair and
+            # backend consistency are integrated and qualified.
+            if actual.name != provider.owner.fields[field_index].name:
+                return Err("E-AOP-FIELD-LAYOUT: reordered field metadata requires identity-qualified lowering")
+            field_rows.push(canon_seq([canon_str(actual.name), canon_nat(actual.offset),
+                canon_nat(actual.size), canon_nat(actual.align)]))
+        val layout_identity = sha256_text(canon_seq([canon_str(target_key), canon_str(layout_mode),
+            canon_str(key), canon_seq(field_rows)]))
+        val provider_identity = sha256_text(canon_seq([canon_str(encoded), canon_str(layout_mode)]))
+        bindings.push(AccessorTypeBindingV1(canonical_key: key,
+            physical_symbol: SymbolId.new(1000000000 + index),
+            declaring_module: provider.field.owner_module, declaring_name: provider.field.owner_name,
+            layout_identity: layout_identity, provider_identity: provider_identity))
+    val checked = accessor_type_bindings_validate_v1(bindings)?
+    Ok(bindings)
+
+pub fn driver_accessor_physical_v1(ctx: CompileContext, provider: AccessorDeclaredProviderV1,
+    operation: MirAccessorOperationV1, original_plain_assignment: bool,
+    bindings: [AccessorTypeBindingV1], layout_mode: text) -> Result<MirAccessorPhysicalV1, text>:
+    val target_key = driver_accessor_target_key_v1(ctx)?
+    if mir_target_hir_mode_from_env()? != layout_mode:
+        return Err("E-AOP-FIELD-LAYOUT: target layout mode changed before physical preparation")
+    val key = accessor_type_key_v1(provider.field.owner_module, provider.field.owner_name)
+    for binding in bindings:
+        if binding.canonical_key != key: continue
+        val module = ctx.hir_modules[provider.field.owner_module]
+        var lowering = MirLowering.new_for_target(module.symbols, driver_mir_target_context(ctx.options))
+        lowering.current_module_id = mir_layout_canonical_module_name(module.name)
+        val seeded = lowering.install_accessor_type_bindings_v1(bindings)?
+        lowering.lower_class_type(provider.owner)
+        if lowering.errors.len() != 0:
+            return Err("E-AOP-FIELD-LAYOUT: actual class lowering did not produce reserved physical type")
+        val definition = mir_accessor_layout_lookup_v1(lowering.builder.module, binding.physical_symbol)?
+        match definition.kind:
+            case MirTypeDefKind.Struct(fields):
+                if provider.field.field_index < 0 or provider.field.field_index >= fields.len():
+                    return Err("E-AOP-FIELD-LAYOUT: physical declaration lost selected field")
+                var order: [text] = []
+                for field in fields: order.push(field.name)
+                return Ok(MirAccessorPhysicalV1(owner_module: provider.field.owner_module,
+                    owner_name: provider.field.owner_name,
+                    receiver_type: MirType(kind: MirTypeKind.Struct(binding.physical_symbol)),
+                    field_type: fields[provider.field.field_index].type_, field_order: order,
+                    layout_identity: binding.layout_identity, provider_identity: binding.provider_identity,
+                    target_abi: target_key, emission_owner: provider.field.owner_module,
+                    place: MirAccessorPlaceV1.DirectReference,
+                    writable: operation == MirAccessorOperationV1.Write and original_plain_assignment,
+                    nullable: false, atomic: false, volatile: false,
+                    memory_profile: MirAccessorMemoryProfileV1.NoGcSynchronous,
+                    receiver_identity_key: key))
+            case _: return Err("E-AOP-FIELD-LAYOUT: actual provider did not emit a class layout")
+    Err("E-AOP-FIELD-TYPE: canonical class has no coordinator reservation")
