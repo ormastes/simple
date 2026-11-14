@@ -12,18 +12,18 @@ Related docs:
 
 ## Lane status 2026-11-14
 
-Status is as reported by the coordinator on 2026-11-14. "in progress" means work is underway, not that anything is landed or verified. Pull-request numbers are the ones recorded at that time.
+Status as of 2026-11-14 after landing. "landed (pure core)" means the unit-tested pure module is merged on `release/1.0.0`; it is NOT wired into the running TUI/GUI unless the note says so, and runtime/native is verification-pending for every lane.
 
 | Lane | Backlog rank | Requirements | Status | PR |
 |---|---|---|---|---|
-| smux-owner | 1 | (unblocks CU-003) | in progress | none yet |
-| identity-binding (pane binding) | 2 | REQ-CARET-UI-001, REQ-CARET-UI-002 | in progress | #9200 |
-| ext-manifest-v2 | 3 | REQ-CARET-EXT-001, REQ-CARET-EXT-002 | in progress | none yet |
-| ide-tui-profile | 4 | REQ-CARET-EXT-003 | in progress | #9201 |
-| tui-cell-writer | 5 | REQ-CARET-UI-003 | in progress | #9202 |
-| leader-keys | 5 | REQ-CARET-UI-004 | in progress | none yet |
-| observer (core) | 6 | REQ-CARET-OBS-001..003 | in progress | #9203 |
-| trace-view-provider | 7 | REQ-CARET-TRC-001..003 | in progress | none yet |
+| smux-owner | 1 | (unblocks CU-003) | landed; native scenario needs a native rebuild + SIMPLE_BINARY | #9211 |
+| identity-binding (pane binding) | 2 | REQ-CARET-UI-001, REQ-CARET-UI-002 | landed (pure core); views not wired, provider/generation still constant | #9200 |
+| ext-manifest-v2 | 3 | REQ-CARET-EXT-001, REQ-CARET-EXT-002 | landed; host registers/drops v2 contributions, nothing consumes them yet | #9207 |
+| ide-tui-profile | 4 | REQ-CARET-EXT-003 | landed; TUI and GUI share one activation plan | #9201 |
+| tui-cell-writer | 5 | REQ-CARET-UI-003 | landed | #9202 |
+| leader-keys | 5 | REQ-CARET-UI-004 | landed (pure core); not wired into the TUI loop, no F10 remap | #9212 |
+| observer (core) | 6 | REQ-CARET-OBS-001..003 | landed (pure core); no IO wiring | #9203 |
+| trace-view-provider | 7 | REQ-CARET-TRC-001..003 | landed (pure core); no IDE view wiring | #9214 |
 
 Not started, still open TODO: P6 (review and CI gates), P7 (fleet and skills) and P8 (release qualification). Nothing in this program is release-qualified; the open PRs above are unmerged work and no acceptance row CU-001..CU-020 has execution evidence recorded here.
 
