@@ -21,6 +21,8 @@ use app.llm_caret.workbench.tui_layout.{Rect, WorkbenchLayout, CompactView}
 use app.llm_caret.workbench.session_contract.{
     SessionId, SessionView, ComposerDraft, InputMode, ProcessLifecycle,
     AgentTurn, Transport, CapabilityEvidence, same_session}
+use app.llm_caret.workbench.pane_binding.{PaneBinding, resolve_pane_binding,
+    pane_binding_label}
 
 # ============================================================================
 # Grid primitives
@@ -189,16 +191,29 @@ struct WorkbenchRenderInput:
     # identities are still distinct (see workbench/pane_source.spl).
     active_pane_id: text
     active_output: [text]
+    # Explicit pane bindings + the pane's observed generation. The terminal
+    # label comes from `pane_binding_label(resolve_pane_binding(..))`: a pane
+    # with no matching binding is "unbound terminal", never the selected agent's.
+    bindings: [PaneBinding]
+    pane_generation: i64
 
 pub fn new_render_input(sessions: [SessionView], selected: SessionId, draft: ComposerDraft, focus_label: text) -> WorkbenchRenderInput:
     var no_output: [text] = []
+    var no_bindings: [PaneBinding] = []
     WorkbenchRenderInput(sessions: sessions, selected: selected, draft: draft,
-        focus_label: focus_label, active_pane_id: "", active_output: no_output)
+        focus_label: focus_label, active_pane_id: "", active_output: no_output,
+        bindings: no_bindings, pane_generation: 0)
 
 pub fn new_render_input_with_output(sessions: [SessionView], selected: SessionId, draft: ComposerDraft, focus_label: text, active_pane_id: text, active_output: [text]) -> WorkbenchRenderInput:
+    var no_bindings: [PaneBinding] = []
+    new_render_input_with_binding(sessions, selected, draft, focus_label,
+        active_pane_id, active_output, no_bindings, 0)
+
+pub fn new_render_input_with_binding(sessions: [SessionView], selected: SessionId, draft: ComposerDraft, focus_label: text, active_pane_id: text, active_output: [text], bindings: [PaneBinding], pane_generation: i64) -> WorkbenchRenderInput:
     WorkbenchRenderInput(sessions: sessions, selected: selected, draft: draft,
         focus_label: focus_label, active_pane_id: active_pane_id,
-        active_output: active_output)
+        active_output: active_output, bindings: bindings,
+        pane_generation: pane_generation)
 
 fn _pending_count(sessions: [SessionView]) -> i64:
     var n = 0
@@ -268,7 +283,8 @@ fn _render_active(grid: Grid, r: Rect, input: WorkbenchRenderInput):
     if input.active_pane_id == "":
         _put_str(grid, r.x + 1, r.y + 4, r.w - 2, "Pane: none attached")
         return
-    _put_str(grid, r.x + 1, r.y + 4, r.w - 2, "Pane " + input.active_pane_id)
+    _put_str(grid, r.x + 1, r.y + 4, r.w - 2,
+        pane_binding_label(resolve_pane_binding(input.bindings, s.id, input.pane_generation)))
     var row = r.y + 5
     var i = 0
     while i < input.active_output.len() and row < r.y + r.h - 1:
