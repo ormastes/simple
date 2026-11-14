@@ -47,8 +47,12 @@ a 256 MiB cgroup cap and 30-second limit. The build reached native codegen for
 two modules, then the user-systemd journal recorded that the scope was killed
 by the OOM killer (`run-r8b3dd6a703bf42c9ae14b134b4d39b79.scope`, 2026-11-14
 22:29:46 +09:00); exit status was 143 and no probe binary was produced. This
-does not establish the helper's runtime RED result. No GREEN run or retry has
-been performed. The build log is retained at
+does not establish the helper's runtime RED result. At that checkpoint, no
+GREEN run or retry had been performed. Captured journal lines are retained at
+`doc/08_tracking/bug/evidence/source_manifest_membership_unicode_256m_journal_2026-11-14.txt`;
+they were queried with `journalctl --user --since '2026-11-14 22:29:40' --until
+'2026-11-14 22:30:05' --no-pager -o short-precise` and filtered to the recorded
+unit name. The build log is retained at
 `/tmp/scv-membership-unicode-native-red/build.log`.
 
 Exact wrapper command:
