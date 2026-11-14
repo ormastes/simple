@@ -1,0 +1,172 @@
+# Caret observer -- observation builder (design sections 7.2-7.4), pure.
+#
+# fold_observation turns an ordered list of observer events into the
+# ObservationFacts that stall_classifier.classify consumes. A fact with no
+# event stays Unknown. observe_session additionally feeds NeedsUser / Error
+# classifications into the attention inbox, keyed by
+# (session id, generation, operation id, kind); replaying an event is a no-op.
+#
+# Screen text is untrusted: ScreenPrompt only sets the screen_prompt_text
+# heuristic fact and can never create an attention entry or NeedsUser.
+
+use app.llm_caret.observer.state_axes.*
+use app.llm_caret.observer.stall_classifier.*
+use app.llm_caret.observer.attention_inbox.*
+
+enum ObserverEventKind:
+    # Provider-native structured events.
+    StructuredApproval
+    StructuredQuestion
+    ToolStart
+    ToolEnd
+    ToolTimeout
+    # Session/process/job owner.
+    ProcessAlive
+    ProcessExit
+    ChildCrash
+    ChildStarted
+    ChildFinished
+    JobHeartbeat
+    OutputActivity
+    # Provider rate-limit notice that carries a known reset.
+    RateLimitReset
+    TransportConnected
+    TransportDisconnected
+    # smux screen-cell heuristic (untrusted).
+    ScreenPrompt
+
+struct ObserverEvent:
+    session_id: text
+    generation: i64
+    operation_id: text
+    seq: i64
+    # Monotonic milliseconds at which the event was observed.
+    at_ms: i64
+    kind: ObserverEventKind
+    # ToolStart only: the tool's deadline in ms after its start; 0 = none.
+    deadline_ms: i64
+    summary: text
+
+fn observer_event(session: text, generation: i64, op: text, seq: i64, at_ms: i64, kind: ObserverEventKind, summary: text) -> ObserverEvent:
+    ObserverEvent(session_id: session, generation: generation, operation_id: op, seq: seq, at_ms: at_ms, kind: kind, deadline_ms: 0, summary: summary)
+
+fn tool_start_event(session: text, generation: i64, op: text, seq: i64, at_ms: i64, deadline_ms: i64, summary: text) -> ObserverEvent:
+    ObserverEvent(session_id: session, generation: generation, operation_id: op, seq: seq, at_ms: at_ms, kind: ObserverEventKind.ToolStart, deadline_ms: deadline_ms, summary: summary)
+
+fn fact_of(b: bool) -> Fact:
+    if b:
+        return Fact.Yes
+    Fact.No
+
+# Result of folding: the facts, plus the operation and summary of the event
+# that decided the attention-relevant facts (used as the inbox key).
+struct Observation:
+    facts: ObservationFacts
+    operation_id: text
+    summary: text
+
+# Fold events for ONE (session, generation) at time now_ms. Events of other
+# sessions or generations are ignored; the list is assumed ordered by seq.
+fn fold_observation(events: [ObserverEvent], session: text, generation: i64, now_ms: i64) -> Observation:
+    var f = observation_unknown()
+    var op = ""
+    var summary = ""
+    var open_children = 0
+    var tool_open = false
+    var tool_start_ms = 0
+    var tool_deadline = 0
+    var last_hb = -1
+    var last_out = -1
+    for e in events:
+        if e.session_id != session or e.generation != generation:
+            continue
+        match e.kind:
+            case ObserverEventKind.StructuredApproval:
+                f.structured_approval = Fact.Yes
+                op = e.operation_id
+                summary = e.summary
+            case ObserverEventKind.StructuredQuestion:
+                f.structured_question = Fact.Yes
+                op = e.operation_id
+                summary = e.summary
+            case ObserverEventKind.ToolStart:
+                # A started tool means any pending prompt was answered.
+                f.structured_approval = Fact.No
+                f.structured_question = Fact.No
+                tool_open = true
+                tool_start_ms = e.at_ms
+                tool_deadline = e.deadline_ms
+            case ObserverEventKind.ToolEnd:
+                f.structured_approval = Fact.No
+                f.structured_question = Fact.No
+                tool_open = false
+            case ObserverEventKind.ToolTimeout:
+                f.tool_timeout_confirmed = Fact.Yes
+                op = e.operation_id
+                summary = e.summary
+            case ObserverEventKind.ProcessAlive:
+                f.process_alive = Fact.Yes
+            case ObserverEventKind.ProcessExit:
+                f.process_alive = Fact.No
+                f.child_exited_or_crashed = Fact.Yes
+                op = e.operation_id
+                summary = e.summary
+            case ObserverEventKind.ChildCrash:
+                f.child_exited_or_crashed = Fact.Yes
+                op = e.operation_id
+                summary = e.summary
+            case ObserverEventKind.ChildStarted:
+                open_children = open_children + 1
+                f.waiting_on_children = Fact.Yes
+            case ObserverEventKind.ChildFinished:
+                if open_children > 0:
+                    open_children = open_children - 1
+                f.waiting_on_children = fact_of(open_children > 0)
+            case ObserverEventKind.JobHeartbeat:
+                f.heartbeat_expected = Fact.Yes
+                last_hb = e.at_ms
+            case ObserverEventKind.OutputActivity:
+                last_out = e.at_ms
+            case ObserverEventKind.RateLimitReset:
+                f.rate_limit_reset_known = Fact.Yes
+            case ObserverEventKind.TransportConnected:
+                f.transport_disconnected = Fact.No
+            case ObserverEventKind.TransportDisconnected:
+                f.transport_disconnected = Fact.Yes
+            case ObserverEventKind.ScreenPrompt:
+                f.screen_prompt_text = Fact.Yes
+    if last_hb >= 0:
+        f.heartbeat_age = age_known(now_ms - last_hb)
+    if last_out >= 0:
+        f.last_output_age = age_known(now_ms - last_out)
+    if tool_open and tool_deadline > 0:
+        f.deadline_exceeded = fact_of(now_ms - tool_start_ms > tool_deadline)
+    Observation(facts: f, operation_id: op, summary: summary)
+
+# Attention a classification should raise, if any. Only structured NeedsUser
+# and owner-detected Failure qualify; every other class raises nothing.
+fn attention_kind_for(c: Classification) -> Attention:
+    match c.kind:
+        case ClassKind.NeedsUser:
+            return c.attention
+        case ClassKind.Failure:
+            return Attention.Error
+        case _:
+            return Attention.None
+
+struct SessionObservation:
+    classification: Classification
+    inbox: AttentionInbox
+
+# Fold, classify, and add at most one attention entry (deduped by key).
+fn observe_session(inbox: AttentionInbox, events: [ObserverEvent], session: text, generation: i64, now_ms: i64, policy: StallPolicy) -> SessionObservation:
+    val obs = fold_observation(events, session, generation, now_ms)
+    val c = classify(obs.facts, policy)
+    val kind = attention_kind_for(c)
+    if kind == Attention.None:
+        return SessionObservation(classification: c, inbox: inbox)
+    val ev = AttentionEvent(session_id: session, generation: generation, operation_id: obs.operation_id, kind: kind, summary: obs.summary)
+    SessionObservation(classification: c, inbox: attention_add(inbox, ev))
+
+export ObserverEventKind, ObserverEvent, observer_event, tool_start_event
+export Observation, fold_observation, attention_kind_for, SessionObservation, observe_session
