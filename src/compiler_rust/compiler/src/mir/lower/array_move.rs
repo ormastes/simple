@@ -31,7 +31,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::hir::{HirExpr, HirExprKind, HirFunction, HirStmt, HirType, TypeId, TypeRegistry};
+use crate::hir::{HirContractClause, HirExpr, HirExprKind, HirFunction, HirStmt, HirType, TypeId, TypeRegistry};
 
 /// Copy sites that may hand the source buffer over instead of copying it.
 #[derive(Debug, Default, Clone)]
@@ -47,6 +47,11 @@ pub(crate) struct ArrayMoveSites {
     /// replaced buffer (bug seed_jit_array_copy_never_freed_2026-10-19).
     /// See `Analysis::release_bad` for the proof obligations.
     pub field_release_structs: HashSet<usize>,
+    /// S1 block-end release: scalar-element array locals whose declaring
+    /// statement list may `rt_array_free` them when it falls through. See
+    /// `Analysis::block_release_locals`; lowering additionally requires
+    /// that it stored a fresh buffer raw into the slot.
+    pub block_release_locals: HashSet<usize>,
 }
 
 /// `obj.f = Local(o)` field store of an array value: the hand-over candidate.
@@ -203,6 +208,7 @@ pub(crate) fn compute_array_move_sites(
                         && a.release_struct_fields(a.local_ty(*idx)).is_some()
                 })
                 .collect();
+            sites.block_release_locals = a.block_release_locals(func, &sites.let_locals);
             return sites;
         }
         for o in not_moved {
@@ -684,6 +690,381 @@ impl<'a> Analysis<'a> {
                 for child in children {
                     self.find_sites_in_expr(child, sites, proven);
                 }
+            }
+        }
+    }
+}
+
+// ---- S1 block-end release ----------------------------------------------------
+//
+// `doc/05_design/compiler/jit_memory/seed_jit_array_reclamation.md`, Option A
+// slice S1. A local is released (`rt_array_free`) when its declaring statement
+// list falls through, and only when every mention of it is on an ALLOWLIST.
+// The `owned` predicate above is a move-source predicate and stays true for
+// uses that leave a second holder (function result, struct-literal hand-over,
+// move source), so it is deliberately not reused here.
+
+/// Element types whose arrays hold no heap values: a shallow free is exact.
+/// `F32`/`F64` and `U64` are excluded: a float or u64 entering an array is
+/// heap-boxed (`RuntimeValue::from_float` / `from_u64`, every value), so a
+/// shallow free would leak every box. Measured: a 2,000,000-iteration
+/// `[1.5, 2.5, 3.5]` loop peaks at 212 MB with the release against 39 MB for
+/// the empty loop.
+fn is_release_scalar(ty: TypeId) -> bool {
+    matches!(
+        ty,
+        TypeId::BOOL
+            | TypeId::I8
+            | TypeId::I16
+            | TypeId::I32
+            | TypeId::I64
+            | TypeId::U8
+            | TypeId::U16
+            | TypeId::U32
+    )
+}
+
+fn is_release_index_ty(ty: TypeId) -> bool {
+    matches!(
+        ty,
+        TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+    )
+}
+
+/// Functions that initialise module globals; never release there.
+fn is_module_init_function(name: &str) -> bool {
+    name.starts_with("__module_init") || name.starts_with("__dyninit_part_")
+}
+
+/// Allowlist scan: every `Local` mention that is not one of the three allowed
+/// shapes lands in `bad`.
+struct ReleaseScan<'x, 'a> {
+    a: &'x Analysis<'a>,
+    bad: HashSet<usize>,
+    /// Locals whose (single) `Let` initializer is a fresh literal or a place.
+    init_ok: HashSet<usize>,
+}
+
+impl ReleaseScan<'_, '_> {
+    /// The use site must see the local at its declared type: the `len` and
+    /// index fast paths key on the expression type, and an `ANY`-typed
+    /// mention may dispatch elsewhere.
+    fn typed_as_local(&self, receiver: &HirExpr, idx: usize) -> bool {
+        receiver.ty == self.a.local_ty(idx)
+    }
+
+    /// Loop invariants are not lowered today; a local they mention is
+    /// disqualified so a future lowering cannot read a released slot.
+    fn poison_clauses(&mut self, clauses: &[HirContractClause]) {
+        for clause in clauses {
+            let mut locals = HashSet::new();
+            collect_locals_expr(&clause.condition, &mut locals);
+            self.bad.extend(locals);
+        }
+    }
+
+    /// Element type of an array of scalars, else `None`. A literal's inferred
+    /// type carries `size: Some(n)`; MIR and codegen never read `size`, and
+    /// every array value is the same `rt_array_new`-family heap handle.
+    fn scalar_array_elem(&self, ty: TypeId) -> Option<TypeId> {
+        match self.a.registry.get(ty) {
+            Some(HirType::Array { element, .. }) if is_release_scalar(*element) => Some(*element),
+            _ => None,
+        }
+    }
+
+    fn stmts(&mut self, stmts: &[HirStmt]) {
+        for stmt in stmts {
+            self.stmt(stmt);
+        }
+    }
+
+    fn stmt(&mut self, stmt: &HirStmt) {
+        match stmt {
+            HirStmt::Let { local_index, value, .. } => {
+                let Some(value) = value else {
+                    self.bad.insert(*local_index);
+                    return;
+                };
+                let elem = self.scalar_array_elem(self.a.local_ty(*local_index));
+                let fresh = match &value.kind {
+                    HirExprKind::Array(items) => items.iter().all(|it| is_release_scalar(it.ty)),
+                    HirExprKind::ArrayRepeat { value: item, .. } => is_release_scalar(item.ty),
+                    kind => is_place(kind),
+                };
+                // The initializer must be exactly the slot's type: no union,
+                // optional or `Any` wrapping between the buffer and the slot.
+                if elem.is_some() && fresh && value.ty == self.a.local_ty(*local_index) {
+                    self.init_ok.insert(*local_index);
+                }
+                self.expr(value);
+            }
+            HirStmt::Assign { target, value } => {
+                match &target.kind {
+                    // `a[i] = scalar`
+                    HirExprKind::Index { receiver, index } if matches!(receiver.kind, HirExprKind::Local(_)) => {
+                        if let HirExprKind::Local(idx) = &receiver.kind {
+                            if !(is_release_scalar(target.ty)
+                                && is_release_scalar(value.ty)
+                                && is_release_index_ty(index.ty)
+                                && self.typed_as_local(receiver, *idx))
+                            {
+                                self.bad.insert(*idx);
+                            }
+                        }
+                        self.expr(index);
+                    }
+                    _ => self.expr(target),
+                }
+                self.expr(value);
+            }
+            HirStmt::If {
+                condition,
+                then_block,
+                else_block,
+                ..
+            } => {
+                self.expr(condition);
+                self.stmts(then_block);
+                if let Some(else_block) = else_block {
+                    self.stmts(else_block);
+                }
+            }
+            HirStmt::While {
+                condition,
+                body,
+                invariants,
+                ..
+            } => {
+                self.poison_clauses(invariants);
+                self.expr(condition);
+                self.stmts(body);
+            }
+            HirStmt::Loop { body, .. } | HirStmt::Defer { body } => self.stmts(body),
+            HirStmt::For {
+                pattern_local,
+                iterable,
+                body,
+                invariants,
+                ..
+            } => {
+                self.poison_clauses(invariants);
+                if let Some(idx) = pattern_local {
+                    self.bad.insert(*idx);
+                }
+                self.expr(iterable);
+                self.stmts(body);
+            }
+            _ => {
+                for e in stmt_direct_exprs(stmt) {
+                    self.expr(e);
+                }
+            }
+        }
+    }
+
+    fn expr(&mut self, e: &HirExpr) {
+        match &e.kind {
+            HirExprKind::Local(idx) => {
+                self.bad.insert(*idx);
+            }
+            // `a[i]` read yielding a scalar.
+            HirExprKind::Index { receiver, index } => {
+                if let HirExprKind::Local(idx) = &receiver.kind {
+                    if !(is_release_scalar(e.ty) && is_release_index_ty(index.ty) && self.typed_as_local(receiver, *idx))
+                    {
+                        self.bad.insert(*idx);
+                    }
+                } else {
+                    self.expr(receiver);
+                }
+                self.expr(index);
+            }
+            // `a.len()`: lowered straight to `rt_array_len`, before any user
+            // method lookup. The other NON_ESCAPING_ARRAY_METHODS are left to
+            // a later stage (mutating ones can move the buffer; several
+            // dispatch through `MethodCallStatic` with a user fallback).
+            HirExprKind::MethodCall {
+                receiver, method, args, ..
+            } => {
+                if let HirExprKind::Local(idx) = &receiver.kind {
+                    if !(method == "len" && args.is_empty() && is_release_index_ty(e.ty) && self.typed_as_local(receiver, *idx))
+                    {
+                        self.bad.insert(*idx);
+                    }
+                } else {
+                    self.expr(receiver);
+                }
+                for arg in args {
+                    self.expr(arg);
+                }
+            }
+            HirExprKind::Lambda { .. }
+            | HirExprKind::GeneratorCreate { .. }
+            | HirExprKind::FutureCreate { .. }
+            | HirExprKind::ActorSpawn { .. } => {
+                // Lambda bodies are lowered inside this function's local index
+                // space (parameter indices included): none of them qualifies.
+                let mut locals = HashSet::new();
+                collect_locals_expr(e, &mut locals);
+                self.bad.extend(locals);
+            }
+            HirExprKind::LetIn { local_idx, value, body } => {
+                self.bad.insert(*local_idx);
+                self.expr(value);
+                self.expr(body);
+            }
+            HirExprKind::Block(stmts) | HirExprKind::UnsafeBlock { statements: stmts, .. } => self.stmts(stmts),
+            _ => {
+                let mut children = Vec::new();
+                expr_children(e, &mut children);
+                for child in children {
+                    self.expr(child);
+                }
+            }
+        }
+    }
+}
+
+/// `return` / `break` / `continue` anywhere inside `stmt`, at any depth,
+/// including expression blocks (`?` lowers to a `Return` inside a `Block`)
+/// and lambda bodies (conservative).
+fn stmt_has_exit(stmt: &HirStmt) -> bool {
+    match stmt {
+        HirStmt::Return(_) | HirStmt::Break | HirStmt::Continue => true,
+        HirStmt::If {
+            condition,
+            then_block,
+            else_block,
+            ..
+        } => {
+            expr_has_exit(condition)
+                || then_block.iter().any(stmt_has_exit)
+                || else_block.as_ref().is_some_and(|b| b.iter().any(stmt_has_exit))
+        }
+        HirStmt::While { condition, body, .. } => expr_has_exit(condition) || body.iter().any(stmt_has_exit),
+        HirStmt::Loop { body, .. } | HirStmt::Defer { body } => body.iter().any(stmt_has_exit),
+        HirStmt::For { iterable, body, .. } => expr_has_exit(iterable) || body.iter().any(stmt_has_exit),
+        _ => stmt_direct_exprs(stmt).into_iter().any(expr_has_exit),
+    }
+}
+
+fn expr_has_exit(e: &HirExpr) -> bool {
+    match &e.kind {
+        HirExprKind::Block(stmts) | HirExprKind::UnsafeBlock { statements: stmts, .. } => {
+            stmts.iter().any(stmt_has_exit)
+        }
+        _ => {
+            let mut children = Vec::new();
+            expr_children(e, &mut children);
+            children.into_iter().any(expr_has_exit)
+        }
+    }
+}
+
+impl Analysis<'_> {
+    /// S1 result set: see the section comment above. `moved` are the `Let`s
+    /// lowering turns into moves (their slot does not hold a private copy).
+    fn block_release_locals(&self, func: &HirFunction, moved: &HashSet<usize>) -> HashSet<usize> {
+        let mut out = HashSet::new();
+        if is_module_init_function(&func.name) {
+            return out;
+        }
+        let mut scan = ReleaseScan {
+            a: self,
+            bad: HashSet::new(),
+            init_ok: HashSet::new(),
+        };
+        scan.stmts(&func.body);
+        let mut total: HashMap<usize, usize> = HashMap::new();
+        let mut uses = Vec::new();
+        for stmt in &func.body {
+            collect_local_uses_stmt(stmt, &mut uses);
+        }
+        for idx in uses {
+            *total.entry(idx).or_insert(0) += 1;
+        }
+        let candidates: HashSet<usize> = scan
+            .init_ok
+            .iter()
+            .copied()
+            .filter(|idx| {
+                *idx >= self.nparams
+                    && !scan.bad.contains(idx)
+                    && !moved.contains(idx)
+                    && !self.closure_locals.contains(idx)
+                    && self.let_counts.get(idx) == Some(&1)
+            })
+            .collect();
+        if !candidates.is_empty() {
+            release_sites_in_stmts(&func.body, &candidates, &total, &mut out);
+        }
+        out
+    }
+}
+
+/// Keep the candidates whose every mention lies in the declaring statement
+/// list strictly after the `Let`, with no early exit from the `Let` onward.
+fn release_sites_in_stmts(
+    stmts: &[HirStmt],
+    candidates: &HashSet<usize>,
+    total: &HashMap<usize, usize>,
+    out: &mut HashSet<usize>,
+) {
+    for (i, stmt) in stmts.iter().enumerate() {
+        if let HirStmt::Let {
+            local_index,
+            value: Some(_),
+            ..
+        } = stmt
+        {
+            if candidates.contains(local_index) {
+                let later: usize = stmts[i + 1..].iter().map(|s| count_mentions_stmt(s, *local_index)).sum();
+                // The `Let` itself is one mention; a self-reference in the
+                // initializer or any mention outside `stmts[i + 1..]` (an
+                // earlier statement of a loop body, a sibling list) breaks
+                // the equality.
+                if total.get(local_index) == Some(&(later + 1)) && !stmts[i..].iter().any(stmt_has_exit) {
+                    out.insert(*local_index);
+                }
+            }
+        }
+        match stmt {
+            HirStmt::If {
+                then_block, else_block, ..
+            } => {
+                release_sites_in_stmts(then_block, candidates, total, out);
+                if let Some(else_block) = else_block {
+                    release_sites_in_stmts(else_block, candidates, total, out);
+                }
+            }
+            HirStmt::While { body, .. } | HirStmt::Loop { body, .. } | HirStmt::For { body, .. } => {
+                release_sites_in_stmts(body, candidates, total, out)
+            }
+            _ => {}
+        }
+        for e in stmt_direct_exprs(stmt) {
+            release_sites_in_expr(e, candidates, total, out);
+        }
+    }
+}
+
+fn release_sites_in_expr(
+    e: &HirExpr,
+    candidates: &HashSet<usize>,
+    total: &HashMap<usize, usize>,
+    out: &mut HashSet<usize>,
+) {
+    match &e.kind {
+        HirExprKind::Block(stmts) | HirExprKind::UnsafeBlock { statements: stmts, .. } => {
+            release_sites_in_stmts(stmts, candidates, total, out)
+        }
+        HirExprKind::Lambda { .. } => {}
+        _ => {
+            let mut children = Vec::new();
+            expr_children(e, &mut children);
+            for child in children {
+                release_sites_in_expr(child, candidates, total, out);
             }
         }
     }

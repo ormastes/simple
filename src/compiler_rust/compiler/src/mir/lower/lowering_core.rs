@@ -304,6 +304,13 @@ pub struct MirLowerer<'a> {
     /// instead of copying it; recomputed per function by
     /// `array_move::compute_array_move_sites`.
     pub(super) array_move_sites: super::array_move::ArrayMoveSites,
+    /// S1 block-end array release (`array_move.rs`): enabled only on the
+    /// in-process JIT lane (`lower_to_mir_jit`); other lanes keep the leak.
+    pub(super) block_array_release: bool,
+    /// Locals of the current function whose `Let` stored a fresh array buffer
+    /// raw into the slot (literal or emitted `rt_array_copy`), with the slot
+    /// type. A release needs this AND `array_move_sites.block_release_locals`.
+    pub(super) block_release_ready: HashMap<usize, TypeId>,
     /// Reference to trait infos for vtable slot resolution (static polymorphism)
     pub(super) trait_infos: Option<&'a std::collections::HashMap<String, crate::hir::HirTraitInfo>>,
     /// Project-wide trait implementations for cross-module vtable dispatch.
@@ -425,6 +432,8 @@ impl<'a> MirLowerer<'a> {
             local_trait_dispatch: HashMap::new(),
             type_value_kinds: HashMap::new(),
             array_move_sites: Default::default(),
+            block_array_release: false,
+            block_release_ready: HashMap::new(),
             trait_infos: None,
             global_trait_impls: None,
             di_config: None,
@@ -477,6 +486,8 @@ impl<'a> MirLowerer<'a> {
             local_trait_dispatch: HashMap::new(),
             type_value_kinds: HashMap::new(),
             array_move_sites: Default::default(),
+            block_array_release: false,
+            block_release_ready: HashMap::new(),
             trait_infos: None,
             global_trait_impls: None,
             di_config: None,
@@ -1182,6 +1193,12 @@ impl<'a> MirLowerer<'a> {
     /// so push emissions must capture the call result as the post-grow array
     /// value. Defaults to false (canonical hosted bool-return, stable-header
     /// push ABI).
+    /// Enable the S1 block-end `rt_array_free` emission (JIT lane only).
+    pub fn with_block_array_release(mut self, enabled: bool) -> Self {
+        self.block_array_release = enabled;
+        self
+    }
+
     pub fn with_signed_word_lane(mut self, enabled: bool) -> Self {
         self.signed_word_lane = enabled;
         self
@@ -2380,6 +2397,11 @@ impl<'a> MirLowerer<'a> {
         // recomputed (not accumulated) or one function's locals would be read
         // as another's.
         self.erased_local_class_types = compute_single_assignment_class_types(func, self.type_registry);
+        self.block_release_ready.clear();
+        // Keyed by function-scoped local indices: a stale entry would make a
+        // loop pre-header read another function's slot.
+        self.len_local_sources.clear();
+        self.array_capacity_local_sources.clear();
         self.array_move_sites =
             super::array_move::compute_array_move_sites(
                 func,
@@ -2476,6 +2498,10 @@ impl<'a> MirLowerer<'a> {
         for stmt in &func.body {
             self.lower_stmt(stmt, func.contract.as_ref())?;
         }
+
+        // S1: release proven-unique array locals of the body list. The tail
+        // value (never the array itself) is already computed.
+        self.emit_block_array_releases(&func.body)?;
 
         // Emit deferred blocks at end of function body (implicit return path)
         self.emit_deferred_blocks(func.contract.as_ref())?;

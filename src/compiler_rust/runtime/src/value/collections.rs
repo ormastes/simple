@@ -211,6 +211,66 @@ pub(crate) fn transient_promote_share_forget(addr: usize) {
     });
 }
 
+/// How far back `transient_untrack_freed` scans before using the index. A
+/// block-local array is freed a few allocations after it was tracked.
+const TRANSIENT_UNTRACK_WINDOW: usize = 64;
+
+/// Erase an array that `rt_array_free` is about to free from this thread's
+/// open transient scope and session. Without this the stale entry survives
+/// the free; if the allocator then hands the same address to an object the
+/// scope/session does NOT own (allocated while paused, or adopted elsewhere),
+/// scope/session end would free that live object, because it frees by
+/// registry membership of the address
+/// (doc/05_design/compiler/jit_memory/seed_jit_array_reclamation.md, Option A
+/// risk table). Entries are tombstoned to NIL, as promotion does.
+fn transient_untrack_freed(value: RuntimeValue) {
+    let addr = value.as_heap_ptr() as usize;
+    let _ = SESSION_HEAP.try_with(|slot| {
+        if let Ok(mut slot) = slot.try_borrow_mut() {
+            if let Some(session) = slot.as_mut() {
+                // `owned` is the membership truth; `rt_session_heap_end`
+                // frees only entries still in it.
+                session.owned.remove(&addr);
+            }
+        }
+    });
+    let _ = TRANSIENT_HEAP_SCOPE.try_with(|slot| {
+        let Ok(mut slot) = slot.try_borrow_mut() else {
+            return;
+        };
+        let Some(scope) = slot.as_mut() else {
+            return;
+        };
+        let len = scope.objects.len();
+        let window_start = len.saturating_sub(TRANSIENT_UNTRACK_WINDOW);
+        let same = |object: &RuntimeValue| object.is_heap() && object.as_heap_ptr() as usize == addr;
+        for pos in (window_start..len).rev() {
+            if same(&scope.objects[pos]) {
+                scope.objects[pos] = RuntimeValue::NIL;
+            }
+        }
+        // Every entry for this address must go, not just the newest: an
+        // older duplicate left behind would be freed at scope end once
+        // `promoted` no longer filters it.
+        if window_start > 0 {
+            scope.sync_index();
+            if scope.index_ambiguous {
+                for object in scope.objects[..window_start].iter_mut() {
+                    if same(object) {
+                        *object = RuntimeValue::NIL;
+                    }
+                }
+            } else if let Some(pos) = scope.by_ptr.get(&addr).copied() {
+                if same(&scope.objects[pos]) {
+                    scope.objects[pos] = RuntimeValue::NIL;
+                }
+            }
+        }
+        scope.by_ptr.remove(&addr);
+        scope.promoted.remove(&value.0);
+    });
+}
+
 /// True when the calling thread holds a transient heap scope that is paused,
 /// the only state in which `rt_transient_heap_promote` may succeed.
 pub fn transient_heap_scope_paused() -> bool {
@@ -3615,6 +3675,14 @@ pub extern "C" fn rt_session_heap_end(session: u32) -> bool {
     let Some(heap) = taken else {
         return false;
     };
+    // An entry `rt_array_free` already freed was erased from `owned`
+    // (`transient_untrack_freed`); its address may now belong to an object
+    // this session does not own.
+    let mut heap = heap;
+    let owned = std::mem::take(&mut heap.owned);
+    heap.objects
+        .retain(|object| object.is_heap() && owned.contains(&(object.as_heap_ptr() as usize)));
+    drop(owned);
     free_transient_objects(&heap.objects);
     // Release the session's own Vec/HashSet allocations before asking libc to
     // return unused arena pages. The TLS borrow and object registry locks are
@@ -3813,6 +3881,32 @@ pub fn rt_array_create_from_slice(values: &[RuntimeValue]) -> RuntimeValue {
 #[allow(clippy::unused_unit)]
 pub extern "C" fn rt_array_free(array: RuntimeValue) {
     let ptr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, ());
+    transient_untrack_freed(array);
+    if super::heap::array_free_quarantine_enabled() {
+        // Diagnostic mode: unregister and poison, never return the memory, so
+        // the address cannot be reused and every later use is a registry miss
+        // that aborts (`array_free_quarantine_check`).
+        unsafe {
+            if !(*ptr).data.is_null() {
+                let data_layout = if (*ptr).is_byte_packed() {
+                    byte_array_data_layout((*ptr).capacity)
+                } else {
+                    array_data_layout((*ptr).capacity)
+                };
+                note_aux_free(HeapObjectType::Array as u8, data_layout.size() as u64);
+            }
+            super::heap::array_free_quarantine_add(ptr as usize);
+            unregister_heap_ptr(ptr as *mut HeapHeader);
+            // Inlined JIT accessors skip the registry: give them a length
+            // every index passes and a null buffer, so a stale element read
+            // or write faults (SIGSEGV) instead of yielding a default. A
+            // stale `len()` reads i64::MAX.
+            (*ptr).len = i64::MAX as u64;
+            (*ptr).capacity = 0;
+            (*ptr).data = std::ptr::null_mut();
+        }
+        return;
+    }
     unsafe {
         if !(*ptr).data.is_null() {
             let data_layout = if (*ptr).is_byte_packed() {

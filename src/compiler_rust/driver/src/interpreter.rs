@@ -514,7 +514,7 @@ fn display_error_hints(parser: &Parser, source: &str) {
 pub fn run_jit(code: &str) -> Result<RunResult, String> {
     use simple_compiler::codegen::JitCompiler;
     use simple_compiler::hir;
-    use simple_compiler::mir::lower_to_mir;
+    use simple_compiler::mir::lower_to_mir_jit as lower_to_mir;
     use simple_parser::Parser;
 
     // Parse the same host-cfg-filtered text used for diagnostics and lowering.

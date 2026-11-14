@@ -719,8 +719,78 @@ pub fn is_registered_heap_ptr(ptr: *mut HeapHeader) -> bool {
         .unwrap_or(false);
     if present {
         validated_remember(addr, epoch);
+    } else {
+        array_free_quarantine_check(addr);
     }
     present
+}
+
+// ---- array-free quarantine (diagnostic) -------------------------------------
+//
+// `SIMPLE_ARRAY_FREE_QUARANTINE=1` turns `rt_array_free` into "unregister and
+// poison, never return the memory" (collections.rs). The address is recorded
+// here; because it is never handed back to the allocator it cannot be reused,
+// so a later registry MISS on it is exactly a use of a freed array, which
+// would otherwise read as the accessor's default value. That miss aborts.
+// Design: doc/05_design/compiler/jit_memory/seed_jit_array_reclamation.md
+// ("Verification common to all options").
+//
+// Lockless-rule exception (doc/04_architecture/language/concurrency/
+// concurrency_architecture.md): the set is guarded by a `Mutex`. It exists
+// only when the env var is set, which is a debugging mode that is off by
+// default; with it unset the `OnceLock` holds `None` and no lock is ever
+// taken. The set is touched on `rt_array_free` and on a registry miss, never
+// on a successful lookup. Owner: seed JIT memory lane.
+
+static ARRAY_FREE_QUARANTINE: std::sync::OnceLock<Option<Mutex<HashSet<usize>>>> = std::sync::OnceLock::new();
+
+fn array_free_quarantine() -> Option<&'static Mutex<HashSet<usize>>> {
+    ARRAY_FREE_QUARANTINE
+        .get_or_init(|| {
+            let enabled = std::env::var("SIMPLE_ARRAY_FREE_QUARANTINE").is_ok_and(|v| v == "1");
+            if enabled {
+                // Evidence that a quarantine run exercised frees at all.
+                unsafe {
+                    libc::atexit(array_free_quarantine_report);
+                }
+            }
+            enabled.then(|| Mutex::new(HashSet::new()))
+        })
+        .as_ref()
+}
+
+
+extern "C" fn array_free_quarantine_report() {
+    if let Some(Some(set)) = ARRAY_FREE_QUARANTINE.get() {
+        let count = set.lock().map(|set| set.len()).unwrap_or(0);
+        eprintln!("[array-free-quarantine] quarantined={count}");
+    }
+}
+/// True when `rt_array_free` must quarantine instead of deallocating.
+pub fn array_free_quarantine_enabled() -> bool {
+    array_free_quarantine().is_some()
+}
+
+/// Record a quarantined (unregistered, poisoned, never deallocated) header.
+pub fn array_free_quarantine_add(addr: usize) {
+    if let Some(set) = array_free_quarantine() {
+        if let Ok(mut set) = set.lock() {
+            set.insert(addr);
+        }
+    }
+}
+
+/// Registry-miss path only: abort when the missed address is a quarantined
+/// array, i.e. a freed array is being used (or freed twice).
+#[cold]
+fn array_free_quarantine_check(addr: usize) {
+    let Some(set) = array_free_quarantine() else {
+        return;
+    };
+    if set.lock().is_ok_and(|set| set.contains(&addr)) {
+        eprintln!("[array-free-quarantine] HIT: use of freed array at {addr:#x} (SIMPLE_ARRAY_FREE_QUARANTINE=1)");
+        std::process::abort();
+    }
 }
 
 /// Number of RuntimeValue heap objects known to the hosted runtime.
