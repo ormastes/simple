@@ -1,0 +1,171 @@
+"""
+## Purpose and audience
+Purpose: a restarted child bumps the session generation seen by the cs terminal
+surface and by guarded drafts, so a receipt captured against the old generation
+is rejected (CU-019) and no key or draft reaches a wrong (id, generation)
+across a seeded 1,000-op switch/focus/draft/scroll/restart run (CU-002).
+Audience: caret-suite workbench engineers.
+## Operator workflow
+Run `bin/simple test test/03_system/app/llm_caret/caret_workbench_generation_spec.spl`.
+Uses the tracked stand-in agent `test/fixtures/caret_workbench/agent_stub.shs`.
+"""
+use std.spec.*
+use app.llm_caret.agent_plan.{AgentLaunchRequest}
+use app.llm_caret.multi_caret_manager.{launch_multi_caret_manager,
+    poll_multi_caret_manager, stop_multi_caret_manager}
+use app.llm_caret.workbench.session_contract.{SessionId, InputMode, Delivery,
+    ComposerDraft, new_draft}
+use app.llm_caret.workbench.session_source.{publish_manager_sessions,
+    live_sessions, clear_live_sessions, clear_pane_output, send_draft_guarded,
+    live_pane_bindings, live_pane_generation, observe_agent_generation}
+use app.llm_caret.workbench.pane_binding.{resolve_pane_binding}
+use app.llm_caret.workbench.leader_keys.{new_leader_state}
+use app.llm_caret.workbench.key_resolver.{KeyFocus}
+use app.llm_caret.cs_dashboard.{CsAgent, CsDashboard, cs_dashboard_new}
+use app.llm_caret.cs_main.{cs_terminal_keys_via}
+
+val AGENT_STUB: text = "test/fixtures/caret_workbench/agent_stub.shs"
+
+# Injected recording send: module state because a send callback cannot
+# assign enclosing locals. The model fields say which (pane, generation) is
+# correct at the moment of the send.
+var _expect_pane: text = ""
+var _expect_gen: i64 = 0
+var _sent: i64 = 0
+var _wrong: i64 = 0
+
+fn _record(pane: text, bytes: [u8]) -> bool:
+    _sent = _sent + 1
+    if pane != _expect_pane or live_pane_generation() != _expect_gen:
+        _wrong = _wrong + 1
+    true
+
+fn _request(agent_md: text) -> AgentLaunchRequest:
+    AgentLaunchRequest(provider: "claude", agent_md_path: agent_md,
+        skill_path: "", task_desc: "generation spec", model: "",
+        session_id: "", extra_args: [])
+
+fn _row(id: text, pid: i64) -> CsAgent:
+    CsAgent(agent_id: id, spec: "stub", status: "running", pid: pid, pane_id: "%" + id,
+        cpu_pct: -1.0, rss_mb: -1, detail: "")
+
+fn _dash(agents: [CsAgent], selected: i64) -> CsDashboard:
+    val d = cs_dashboard_new("caret")
+    CsDashboard(session: d.session, manager_status: "connected", agents: agents,
+        selected: selected, input: "", log: [], screen: [], pins: [], mru: [])
+
+fn _guard(draft: ComposerDraft, live: SessionId) -> Delivery:
+    val b = resolve_pane_binding(live_pane_bindings(), live, live_pane_generation())
+    send_draft_guarded(draft, live, b).delivery
+
+fn _press(d: CsDashboard, key: [u8]) -> CsDashboard:
+    val keys: [[u8]] = [key]
+    val (nd, _s, _f, _r) = cs_terminal_keys_via(d, new_leader_state(),
+        KeyFocus.TerminalSurface, keys, _record)
+    nd
+
+describe "restart bumps the live generation":
+    it "rejects approval, draft and command receipts captured before a real restart":
+        # @req REQ-CARET-CU-019
+        step("launch a real child and observe generation 1")
+        clear_live_sessions()
+        clear_pane_output()
+        val m1 = launch_multi_caret_manager("caret-gen",
+            [_request("agents/alpha.md")], 4, AGENT_STUB, "", "", "", "")
+        publish_manager_sessions(poll_multi_caret_manager(m1))
+        val before = live_sessions()[0].id
+        expect(before.generation).to_equal(1)
+        val pid1 = m1.team.processes[0].pid
+        expect(observe_agent_generation(before.value, pid1)).to_equal(1)
+
+        step("capture an approval, a draft and a command receipt")
+        val approval = new_draft(before, InputMode.Message)
+        val draft = new_draft(before, InputMode.Message)
+        val command = new_draft(before, InputMode.WorkbenchCommand)
+
+        step("restart: stop the child and launch a replacement with a new pid")
+        val _stopped = stop_multi_caret_manager(m1)
+        val m2 = launch_multi_caret_manager("caret-gen",
+            [_request("agents/alpha.md")], 4, AGENT_STUB, "", "", "", "")
+        val pid2 = m2.team.processes[0].pid
+        expect(pid2 != pid1).to_equal(true)
+        val live2 = observe_agent_generation(before.value, pid2)
+        expect(live2).to_equal(2)
+        val now = SessionId(value: before.value, generation: live2)
+
+        step("old-generation receipts are Rejected")
+        expect(_guard(approval, now) == Delivery.Rejected).to_equal(true)
+        expect(_guard(draft, now) == Delivery.Rejected).to_equal(true)
+        expect(_guard(command, now) == Delivery.Rejected).to_equal(true)
+        val _final = stop_multi_caret_manager(m2)
+        clear_live_sessions()
+        clear_pane_output()
+
+describe "seeded switch/focus/draft/scroll/restart run":
+    it "never sends to a wrong (id, generation) over 1000 ops":
+        # @req REQ-CARET-CU-002
+        step("three sessions, injected recording send")
+        clear_live_sessions()
+        clear_pane_output()
+        var pids: [i64] = [100, 200, 300]
+        var gens: [i64] = [1, 1, 1]
+        val ids: [text] = ["a1", "a2", "a3"]
+        var sel = 0
+        var d = _dash([_row("a1", 100), _row("a2", 200), _row("a3", 300)], 0)
+        var seed = 20261115
+        var misjudged = 0
+        var drafts: [ComposerDraft] = []
+        var restarts = 0
+        var i = 0
+        while i < 1000:
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            val op = (seed / 65536) % 6
+            # The model's truth for the selected agent, read by the send hook.
+            _expect_pane = "%" + ids[sel]
+            _expect_gen = gens[sel]
+            if op == 0:
+                sel = (seed / 7) % 3
+                d = _dash(d.agents, sel)
+            elif op == 1:
+                _expect_pane = "%" + ids[sel]
+                _expect_gen = gens[sel]
+                d = _press(d, [120u8])
+            elif op == 2:
+                drafts.push(new_draft(SessionId(value: ids[sel], generation: gens[sel]),
+                    InputMode.Message))
+            elif op == 3:
+                d = _press(d, [27u8, 91u8, 53u8, 126u8])
+            elif op == 4:
+                val r = (seed / 11) % 3
+                pids[r] = pids[r] + 1000
+                gens[r] = gens[r] + 1
+                restarts = restarts + 1
+                d = _dash([_row("a1", pids[0]), _row("a2", pids[1]), _row("a3", pids[2])], sel)
+            else:
+                if drafts.len() > 0:
+                    val dr = drafts[0]
+                    var rest: [ComposerDraft] = []
+                    var n = 1
+                    while n < drafts.len():
+                        rest.push(drafts[n])
+                        n = n + 1
+                    drafts = rest
+                    var idx = 0
+                    var ti = 0
+                    while ti < 3:
+                        if ids[ti] == dr.target.value:
+                            idx = ti
+                        ti = ti + 1
+                    # Publish the live binding for that agent through the surface.
+                    _expect_pane = "%" + ids[idx]
+                    _expect_gen = gens[idx]
+                    val _pd = _press(_dash(d.agents, idx), [120u8])
+                    val live = SessionId(value: ids[idx], generation: gens[idx])
+                    val queued = _guard(dr, live) == Delivery.Queued
+                    if queued != (dr.target.generation == gens[idx]):
+                        misjudged = misjudged + 1
+            i = i + 1
+        expect(restarts > 20).to_equal(true)
+        expect(_sent > 50).to_equal(true)
+        expect(_wrong).to_equal(0)
+        expect(misjudged).to_equal(0)
