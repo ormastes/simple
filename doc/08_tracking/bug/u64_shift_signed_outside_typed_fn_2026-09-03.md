@@ -81,3 +81,16 @@ workaround (`src/lib/common/simd_lane_pure.spl` typed wrappers +
 `fn u64_text` in the tranche-E spec) remains the standing mitigation; a
 diagnostic on silent i64 demotion would be an acceptable interim per the
 record. Routed to the compiler lane.
+
+## Addendum 2026-11-14 — lane p3-batch-b: no longer reproduces (verified fixed)
+
+Seed: Rust seed built from `release/1.0.0` @ `bb2a83ed4da4` on Linux aarch64
+(md5 prefix `1f3d1c3645ed`). The record's exact repro now prints
+`18446744073709551615` / `18446744073709551614` / `9223372036854775807` under
+both `run` and `test` (interpreter). Pinned by
+`test/01_unit/bugs/u64_val_binding_unsigned_spec.spl` (6/6), with negative
+vectors: an `i64` binding still displays `-1` and keeps an arithmetic `>>`, and
+the `-> u64` typed-fn route is unchanged. Not re-measured on Windows x86_64,
+where the record was filed. The `u64_text` helper in
+`dual_run_tranche_e_spec.spl` is left in place: it also covers u64 array
+elements and extern-returned struct fields, which this spec does not pin.
