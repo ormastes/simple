@@ -1,3 +1,5 @@
+use compiler.frontend.core.aop_predicate_parser.{aop_predicate_tokens, validate_predicate_tokens}
+
 # Core AOP - Types, Pointcut Matching, and MIR-level Weaving
 #
 # Core-compatible AOP support for cross-cutting concerns.
@@ -345,11 +347,7 @@ struct AopPointcutBool:
     matched: bool
 
 fn aop_pointcut_tokenize(text_in: text) -> [text]:
-    var out: [text] = []
-    for tok in text_in.split(" "):
-        if tok.len() > 0:
-            out = out.push(tok)
-    out
+    aop_predicate_tokens(text_in)
 
 fn aop_pointcut_glob(pattern: text, target: text) -> bool:
     if pattern == "*":
@@ -386,12 +384,16 @@ fn aop_pointcut_eval_selector(tokens: [text], pos: i64, fn_name: text) -> AopPoi
         return AopPointcutBool(pos: p, matched: false)
     val open_idx = p
     val close_idx = aop_pointcut_skip_balanced(tokens, open_idx)
-    if name == "execution" or name == "call":
+    if name == "execution":
         # inner tokens: [RET, QNAME, "(", ...args..., ")"] — only QNAME (the
         # function-name glob) is matched; return type and arg patterns are
         # accepted but not filtered (core scope).
         if open_idx + 2 < close_idx:
-            val qname = tokens[open_idx + 2]
+            var qname = ""
+            var name_idx = open_idx + 2
+            while name_idx < close_idx and tokens[name_idx] != "(":
+                qname = qname + tokens[name_idx]
+                name_idx = name_idx + 1
             return AopPointcutBool(pos: close_idx, matched: aop_pointcut_glob(qname, fn_name))
         return AopPointcutBool(pos: close_idx, matched: false)
     # attr(...) / within(...) / other selectors: parsed (so combinators still
@@ -436,10 +438,12 @@ fn aop_pointcut_eval_primary(tokens: [text], pos: i64, fn_name: text) -> AopPoin
     aop_pointcut_eval_selector(tokens, pos, fn_name)
 
 pub fn aop_pointcut_matches(predicate_text: text, fn_name: text) -> bool:
-    """Match a parser-tokenized pointcut predicate (execution/call selectors
-    with &,|,!,() combinators) against a function name. Byte-mirror of
+    """Match a parser-tokenized pointcut predicate (execution selectors
+    with &,|,!,() combinators) against a function name. Shares lexing with
     interpreter_aop_weave.interp_aop_predicate_matches — see the parity spec."""
     val tokens = aop_pointcut_tokenize(predicate_text)
+    if validate_predicate_tokens(tokens) != "":
+        return false
     if tokens.len() == 0:
         return false
     val r = aop_pointcut_eval_or(tokens, 0, fn_name)
@@ -455,7 +459,7 @@ fn matches_predicate(predicate_text: text, ctx: JoinPointContext) -> bool:
         return glob_match(pred[7:], ctx.module_path)
     if pred.starts_with("effect:"):
         return ctx.effects.contains(pred[7:])
-    # Parser-tokenized pointcut form — `execution ( * name ( .. ) )`, `call(...)`
+    # Parser-tokenized pointcut form — `execution ( * name ( .. ) )`, unsupported `call(...)`
     # and &,|,!,() combinators (the shape parse_pointcut_text emits for standard
     # `on pc{ execution(...) }` aspects). Previously these fell through to a bare
     # glob against the whole predicate string and silently matched 0 (Gap 2 in

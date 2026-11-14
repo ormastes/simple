@@ -1,3 +1,5 @@
+use compiler.frontend.core.aop_predicate_parser.{aop_predicate_tokens, validate_predicate_tokens}
+
 # Interpreter AOP Weaving (task #31)
 #
 # The compiled path weaves declarative `on pc{...} use handler form priority`
@@ -53,11 +55,7 @@ var _interp_aop_running: bool = false
 # ============================================================================
 
 fn interp_aop_tokenize(text_in: text) -> [text]:
-    var out: [text] = []
-    for tok in text_in.split(" "):
-        if tok.len() > 0:
-            out = out.push(tok)
-    out
+    aop_predicate_tokens(text_in)
 
 fn interp_aop_glob(pattern: text, target: text) -> bool:
     if pattern == "*":
@@ -98,12 +96,16 @@ fn interp_aop_eval_selector(tokens: [text], pos: i64, fn_name: text) -> InterpAo
         return InterpAopBoolResult(pos: p, matched: false)
     val open_idx = p
     val close_idx = interp_aop_skip_balanced(tokens, open_idx)
-    if name == "execution" or name == "call":
+    if name == "execution":
         # inner tokens: [RET, QNAME, "(", ...args..., ")"] — only QNAME (the
         # function-name glob) is matched; return type and arg patterns are
         # accepted but not filtered (core scope).
         if open_idx + 2 < close_idx:
-            val qname = tokens[open_idx + 2]
+            var qname = ""
+            var name_idx = open_idx + 2
+            while name_idx < close_idx and tokens[name_idx] != "(":
+                qname = qname + tokens[name_idx]
+                name_idx = name_idx + 1
             return InterpAopBoolResult(pos: close_idx, matched: interp_aop_glob(qname, fn_name))
         return InterpAopBoolResult(pos: close_idx, matched: false)
     # attr(...) / within(...) / other selectors: parsed (so combinators still
@@ -149,6 +151,8 @@ fn interp_aop_eval_primary(tokens: [text], pos: i64, fn_name: text) -> InterpAop
 
 pub fn interp_aop_predicate_matches(predicate_text: text, fn_name: text) -> bool:
     val tokens = interp_aop_tokenize(predicate_text)
+    if validate_predicate_tokens(tokens) != "":
+        return false
     if tokens.len() == 0:
         return false
     val r = interp_aop_eval_or(tokens, 0, fn_name)
