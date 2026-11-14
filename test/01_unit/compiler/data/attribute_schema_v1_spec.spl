@@ -1,0 +1,107 @@
+"""
+## Purpose and audience
+One typed read/write/presence/retire API (`AttributeStoreV1`) over the three node
+attribute placements: embedded on the main node (owner delegate), dense column
+indexed by node id, and sparse hash. The placement is chosen once at construction
+from a storage token resolved by the W1 rule resolver; an access never compares a
+token string. Readers are compiler authors applying attributes to AST nodes.
+Category: Infrastructure.
+## Operator workflow
+bin/simple test test/01_unit/compiler/data/attribute_schema_v1_spec.spl
+## Compatibility and limitations
+Default OFF: nothing in the compiler constructs an AttributeStoreV1 yet; owner
+arrays are unchanged. Interpreter lane only.
+## Verification guidance and troubleshooting
+A RED on one backend only is a parity defect: all three must answer the same
+value, presence and absence for the same operation sequence.
+"""
+# @req NODEATTR-SCHEMA-01 NODEATTR-SCHEMA-02 NODEATTR-SCHEMA-03 NODEATTR-SCHEMA-04
+# @manual_section: Attribute schema over embedded, column and sparse hash
+
+use std.spec.*
+use compiler.common.data.attribute_schema_v1.*
+use compiler.common.data.data_schema_contracts.*
+
+fn pin_rule(site: text, token: text) -> DataPolicyRuleV1:
+    val at = data_decl_provenance_v1(DataDeclOriginV1.Sdn, "config/data_policy.sdn", 1, "compiler.ast")
+    data_policy_rule_v1(DataPolicyKindV1.Layout, site, DataRuleSpecificityV1.ExactSite, DataRuleStrengthV1.Pin, token, false, at)
+
+class OwnerCellsV1:
+    cells: [i64?]
+
+impl OwnerCellsV1:
+    static fn create() -> OwnerCellsV1:
+        OwnerCellsV1(cells: [])
+
+impl AttrOwnerV1<i64> for OwnerCellsV1:
+    fn owner_read(node: i64) -> i64?:
+        if node < 0 or node >= self.cells.len():
+            return None
+        self.cells[node]
+    me owner_write(node: i64, value: i64?):
+        while self.cells.len() <= node:
+            self.cells = self.cells.push(None)
+        self.cells[node] = value
+
+fn make_store(token: text, owner: OwnerCellsV1) -> AttributeStoreV1<i64>:
+    attr_store_for_token_v1("op", token, owner).unwrap()
+
+fn exercise(token: text):
+    val owner = OwnerCellsV1.create()
+    var store = make_store(token, owner)
+    expect(store.has(3)).to_equal(false)
+    expect(store.get(3).is_err()).to_equal(true)
+    expect(store.set(3, 42).is_ok()).to_equal(true)
+    expect(store.set(0, 7).is_ok()).to_equal(true)
+    expect(store.has(3)).to_equal(true)
+    expect(store.get(3).unwrap()).to_equal(42)
+    expect(store.get(0).unwrap()).to_equal(7)
+    expect(store.has(1)).to_equal(false)
+    expect(store.len()).to_equal(2)
+    expect(store.set(3, 43).is_ok()).to_equal(true)
+    expect(store.get(3).unwrap()).to_equal(43)
+    expect(store.len()).to_equal(2)
+    expect(store.retire(3)).to_equal(true)
+    expect(store.has(3)).to_equal(false)
+    expect(store.get(3).is_err()).to_equal(true)
+    expect(store.retire(3)).to_equal(false)
+    expect(store.len()).to_equal(1)
+    expect(store.set(-1, 1).is_err()).to_equal(true)
+
+describe "AttributeStoreV1 over three placements":
+    it "answers identical values, presence and retirement on the embedded placement":
+        exercise("direct")
+    it "answers identical values, presence and retirement on the column placement":
+        exercise("column")
+    it "answers identical values, presence and retirement on the sparse hash placement":
+        exercise("sparse_hash")
+    it "keeps a zero value present and distinct from absent on every placement":
+        for token in ["direct", "column", "sparse_hash"]:
+            val owner = OwnerCellsV1.create()
+            var store = make_store(token, owner)
+            expect(store.set(2, 0).is_ok()).to_equal(true)
+            expect(store.has(2)).to_equal(true)
+            expect(store.get(2).unwrap()).to_equal(0)
+            expect(store.has(1)).to_equal(false)
+    it "writes through to the owner only on the embedded placement":
+        val owner = OwnerCellsV1.create()
+        var emb = make_store("direct", owner)
+        emb.set(1, 9)
+        expect(owner.owner_read(1)).to_equal(Some(9))
+        val owner2 = OwnerCellsV1.create()
+        var col = make_store("column", owner2)
+        col.set(1, 9)
+        expect(owner2.owner_read(1)).to_equal(None)
+    it "rejects an unknown storage token once at construction":
+        val owner = OwnerCellsV1.create()
+        expect(attr_store_for_token_v1("op", "bogus", owner).is_err()).to_equal(true)
+    it "switches placement by SDN rule, resolved once, with the same answers":
+        val owner = OwnerCellsV1.create()
+        val rules = [pin_rule("BinaryExprView.op", "sparse_hash")]
+        var store = attr_store_resolve_v1("compiler.ast", "BinaryExprView", "op", rules, owner).unwrap()
+        expect(store.placement_token()).to_equal("sparse_hash")
+        store.set(5, 1)
+        expect(store.get(5).unwrap()).to_equal(1)
+        val none: [DataPolicyRuleV1] = []
+        val dflt = attr_store_resolve_v1("compiler.ast", "BinaryExprView", "op", none, owner).unwrap()
+        expect(dflt.placement_token()).to_equal("direct")

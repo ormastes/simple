@@ -1,0 +1,140 @@
+# Node attribute store over three placements (data plan W3b, plan P4).
+#
+# One typed read/write/presence/retire API for a node attribute whose value lives
+# either embedded on the main node (an owner delegate), in a dense column indexed
+# by node id, or in a sparse hash keyed by node id. The placement is a storage
+# token (`direct` | `column` | `sparse_hash`) resolved ONCE at construction by the
+# W1 rule resolver (`data_attr_storage_resolve_v1`); an access switches on the
+# `AttrPlacementV1` enum tag only, never on a string. Default OFF: nothing in the
+# compiler builds a store unless a rule or tag selects it, and the owner arrays
+# are untouched. Concurrency model: a store is owned by one writer per
+# (phase, module); readers share frozen snapshots (see phase_cell_*_v1).
+
+use compiler.common.data.data_schema_contracts.*
+use compiler.common.data.data_schema_resolver.*
+
+enum AttrPlacementV1:
+    Embedded
+    Column
+    SparseHash
+
+# The node's own field(s): the store delegates to the owner and keeps no copy.
+trait AttrOwnerV1<T>:
+    fn owner_read(node: i64) -> T?
+    me owner_write(node: i64, value: T?)
+
+class AttributeStoreV1<T>:
+    attr: text
+    placement: AttrPlacementV1
+    owner: AttrOwnerV1<T>?
+    slots: [T?]
+    present: i64
+    hash: Dict<i64, T>
+
+pub fn attr_placement_from_token_v1(token: text) -> Result<AttrPlacementV1, text>:
+    if token == "direct":
+        return Ok(AttrPlacementV1.Embedded)
+    if token == "column":
+        return Ok(AttrPlacementV1.Column)
+    if token == "sparse_hash":
+        return Ok(AttrPlacementV1.SparseHash)
+    Err("unknown attribute storage token '{token}' (expected direct, column or sparse_hash)")
+
+impl AttributeStoreV1<T>:
+    fn placement_token() -> text:
+        match self.placement:
+            case Embedded: "direct"
+            case Column: "column"
+            case SparseHash: "sparse_hash"
+
+    fn has(node: i64) -> bool:
+        match self.placement:
+            case Embedded:
+                if val o = self.owner:
+                    if val _v = o.owner_read(node):
+                        return true
+                return false
+            case Column:
+                if node >= 0 and node < self.slots.len():
+                    if val _v = self.slots[node]:
+                        return true
+                return false
+            case SparseHash:
+                return self.hash.contains_key(node)
+
+    fn get(node: i64) -> Result<T, text>:
+        match self.placement:
+            case Embedded:
+                match self.owner:
+                    case Some(o):
+                        match o.owner_read(node):
+                            case Some(v): return Ok(v)
+                            case None: pass
+                    case None: pass
+            case Column:
+                if node >= 0 and node < self.slots.len():
+                    match self.slots[node]:
+                        case Some(v): return Ok(v)
+                        case None: pass
+            case SparseHash:
+                if self.hash.contains_key(node):
+                    return Ok(self.hash[node])
+        Err("absent: no {self.attr} entry for node {node}")
+
+    me set(node: i64, value: T) -> Result<bool, text>:
+        if node < 0:
+            return Err("attribute {self.attr}: negative node id {node}")
+        match self.placement:
+            case Embedded:
+                match self.owner:
+                    case Some(o):
+                        val fresh = not self.has(node)
+                        o.owner_write(node, Some(value))
+                        if fresh:
+                            self.present = self.present + 1
+                    case None: return Err("attribute {self.attr}: embedded placement has no owner")
+            case Column:
+                while self.slots.len() <= node:
+                    self.slots = self.slots.push(None)
+                if not self.has(node):
+                    self.present = self.present + 1
+                self.slots[node] = Some(value)
+            case SparseHash:
+                self.hash[node] = value
+        Ok(true)
+
+    # Retire an entry (node freed or attribute cleared). True when it was present.
+    me retire(node: i64) -> bool:
+        if not self.has(node):
+            return false
+        match self.placement:
+            case Embedded:
+                match self.owner:
+                    case Some(o): o.owner_write(node, None)
+                    case None: pass
+                self.present = self.present - 1
+            case Column:
+                self.slots[node] = None
+                self.present = self.present - 1
+            case SparseHash:
+                self.hash.remove(node)
+        true
+
+    fn len() -> i64:
+        match self.placement:
+            case SparseHash: self.hash.len()
+            case _: self.present
+
+pub fn attr_store_for_token_v1<T>(attr: text, token: text, owner: AttrOwnerV1<T>) -> Result<AttributeStoreV1<T>, text>:
+    val placement = attr_placement_from_token_v1(token)?
+    val h: Dict<i64, T> = {}
+    val s: [T?] = []
+    Ok(AttributeStoreV1(attr: attr, placement: placement, owner: Some(owner), slots: s, present: 0, hash: h))
+
+# Resolve the placement once from SPL hints/pins and SDN rules (plan 8.4), then
+# build the store. Built-in default is `direct` (today's owner behaviour).
+pub fn attr_store_resolve_v1<T>(tree: text, view: text, attr: text, rules: [DataPolicyRuleV1],
+                                owner: AttrOwnerV1<T>) -> Result<AttributeStoreV1<T>, text>:
+    match data_attr_storage_resolve_v1(tree, view, attr, rules, "direct"):
+        case Ok(choice): attr_store_for_token_v1(attr, choice.choice, owner)
+        case Err(diag): Err(diag.message)
