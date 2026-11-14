@@ -12,6 +12,7 @@
 extern int64_t simple_xray_startup_owned_spawn_admit_v1(void);
 extern int64_t simple_xray_startup_no_owned_threads_begin_v1(void);
 extern int64_t simple_xray_startup_no_owned_threads_end_v1(void);
+extern int64_t simple_xray_startup_current_owner_v1(void);
 extern void simple_xray_startup_window_seal_v1(void);
 static inline int simple_xray_startup_pthread_create_v1(pthread_t *thread,
         const pthread_attr_t *attributes, void *(*entry)(void *), void *argument) {

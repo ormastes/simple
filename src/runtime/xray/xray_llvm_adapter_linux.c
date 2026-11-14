@@ -85,6 +85,7 @@ static uint64_t g_xray_startup_owned_threads;
 static uint64_t g_xray_last_generation;
 static uint64_t g_xray_admission_lost;
 static __thread __attribute__((tls_model("initial-exec"))) int g_xray_control_owned;
+static __thread __attribute__((tls_model("initial-exec"))) int g_xray_startup_window_owned;
 static __thread __attribute__((tls_model("initial-exec"))) int g_xray_in_handler;
 static __thread __attribute__((tls_model("initial-exec"))) uint64_t g_xray_context_sequence;
 
@@ -128,18 +129,29 @@ int64_t simple_xray_startup_no_owned_threads_begin_v1(void) {
     if (!g_xray_control_owned || g_xray_in_handler ||
         !__atomic_load_n(&g_xray_runtime_ready, __ATOMIC_ACQUIRE)) return 0;
     uint64_t expected = 0;
-    return __atomic_compare_exchange_n(&g_xray_startup_owned_threads, &expected,
-        1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) ? 1 : 0;
+    if (!__atomic_compare_exchange_n(&g_xray_startup_owned_threads, &expected,
+        1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return 0;
+    g_xray_startup_window_owned = 1;
+    return 1;
 }
-int64_t simple_xray_startup_no_owned_threads_end_v1(void) {
-    if (!g_xray_control_owned || g_xray_in_handler ||
+/* Necessary thread/window association only; never a qualified profile grant. */
+int64_t simple_xray_startup_current_owner_v1(void) {
+    if (!g_xray_control_owned || !g_xray_startup_window_owned || g_xray_in_handler ||
         !__atomic_load_n(&g_xray_runtime_ready, __ATOMIC_ACQUIRE)) return 0;
     uint64_t state = __atomic_load_n(&g_xray_startup_owned_threads, __ATOMIC_ACQUIRE);
+    return (state & 5u) == 1u;
+}
+int64_t simple_xray_startup_no_owned_threads_end_v1(void) {
+    if (!simple_xray_startup_current_owner_v1()) return 0;
+    uint64_t state = __atomic_load_n(&g_xray_startup_owned_threads, __ATOMIC_ACQUIRE);
     for (int attempt = 0; attempt < 8; ++attempt) {
-        if (!(state & 1u)) return 0;
+        if ((state & 5u) != 1u) return 0;
         uint64_t desired = (state | 4u) & ~UINT64_C(1);
         if (__atomic_compare_exchange_n(&g_xray_startup_owned_threads, &state,
-                desired, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return 1;
+                desired, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            g_xray_startup_window_owned = 0;
+            return 1;
+        }
     }
     return 0;
 }
@@ -148,6 +160,7 @@ int64_t simple_xray_startup_no_owned_threads_end_v1(void) {
 void simple_xray_startup_window_seal_v1(void) {
     __atomic_fetch_or(&g_xray_startup_owned_threads, 4, __ATOMIC_ACQ_REL);
     __atomic_fetch_and(&g_xray_startup_owned_threads, ~UINT64_C(1), __ATOMIC_ACQ_REL);
+    g_xray_startup_window_owned = 0;
 }
 static int64_t simple_xray_thread_attach_internal_v1(int cold_root) {
     if (g_xray_in_handler) return -1;

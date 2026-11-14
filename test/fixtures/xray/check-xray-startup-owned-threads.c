@@ -43,6 +43,18 @@ static void *count_entry(void *unused) {
     return NULL;
 }
 
+/* Deliberately foreign test thread: it cannot borrow another thread's window.
+ * This does not establish foreign-thread exclusion for an admitted profile. */
+static void *probe_other_window_owner(void *argument) {
+    int *valid = argument;
+    *valid = 0;
+    if (simple_xray_resident_control_enter_v1() != 1) return NULL;
+    *valid = simple_xray_startup_current_owner_v1() == 0 &&
+        simple_xray_startup_no_owned_threads_end_v1() == 0;
+    simple_xray_resident_control_leave_v1();
+    return NULL;
+}
+
 static int run_begin_and_spawn_case(void) {
     pthread_t thread;
     CHECK(simple_xray_startup_no_owned_threads_begin_v1() == 0,
@@ -56,6 +68,20 @@ static int run_begin_and_spawn_case(void) {
         "first begin acquires the one-shot window");
     CHECK(simple_xray_startup_no_owned_threads_begin_v1() == 0,
         "second begin is denied while held");
+    CHECK(simple_xray_startup_current_owner_v1() == 1,
+        "begin binds the current native thread");
+    simple_xray_resident_control_leave_v1();
+    CHECK(simple_xray_startup_current_owner_v1() == 0,
+        "query requires current control ownership");
+    int other_refused = 0;
+    CHECK(pthread_create(&thread, NULL, probe_other_window_owner, &other_refused) == 0,
+        "foreign diagnostic thread starts outside owned creation contract");
+    CHECK(pthread_join(thread, NULL) == 0, "foreign diagnostic thread joins");
+    CHECK(other_refused == 1, "another control owner cannot borrow or end window");
+    CHECK(simple_xray_resident_control_enter_v1() == 1,
+        "startup owner reacquires control after consumer handoff");
+    CHECK(simple_xray_startup_current_owner_v1() == 1,
+        "control release preserves native startup-thread association");
     CHECK(SIMPLE_XRAY_STARTUP_PTHREAD_CREATE_V1(&thread, NULL, count_entry, NULL) == EAGAIN,
         "owned spawn is refused while window is held");
     CHECK(atomic_load_explicit(&g_entry_calls, memory_order_relaxed) == 0,
@@ -100,6 +126,8 @@ static int run_seal_held_case(void) {
     CHECK(simple_xray_startup_no_owned_threads_begin_v1() == 1,
         "held-seal case begins window");
     simple_xray_startup_window_seal_v1();
+    CHECK(simple_xray_startup_current_owner_v1() == 0,
+        "seal invalidates local startup ownership");
     CHECK(simple_xray_startup_no_owned_threads_end_v1() == 0,
         "seal clears held state so end fails closed");
     CHECK(simple_xray_startup_no_owned_threads_begin_v1() == 0,
