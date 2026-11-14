@@ -23,3 +23,13 @@ Stage 3 (2026-11-13): Windows x64 Simple-owned pieces — twin `xray_native_tram
 spy-3 (2026-11-13): one real run of the pure-Simple spy — `check-xray-native-program-e2e.shs` builds `xray_inprocess_prog.spl` with `--backend=native --xray` and drives it from `xray_native_program_host.spl` (aspect dynload, log on/off, profile + exclusive fold on a real nested call, re-enable, container switch, injected-fault rollback, recover); spec `test/03_system/xray/xray_spy_program_out_spec.spl` (untagged, Linux). Traps: the spec runner exports `SIMPLE_MCDC_MODE=on` (unset it for native shared builds or dlopen fails), the pinned seed enforces cross-directory private imports, run-21 Stage 2 cannot yet build the controller (bug stage2_run21_native_build_cannot_build_xray_controller_2026-11-13). Matrix: status doc § "spy-3 lane".
 
 Edge selection (2026-11-14): cross-layer / cross-feature trace profile, default OFF. `src/lib/common/trace/trace_edge_select_v1.spl` adds aspect ext `simple.trace/observer-v1.edges` (lines `edge layer|feature [from=] [to=]`, `rule layer|feature prefix=class`), a function->(layer,feature) table from the admitted map names (layer default from module path, features by rule only), `trace_edge_selection_names_v1` -> `xray_native_selection_v1`, and a pure fold `trace_edge_fold_v1` over the raw-edge stream (caller from the per-context stack; same-class calls excluded). No new hook. Specs: `test/01_unit/lib/xray/trace_edge_select_spec.spl` + `sc_edge_layer_selection` row in the differential IN suite.
+## Windows host check (seed-tip, 2026-11-14, lane xraychk)
+
+First run on Windows of the xray / aspect-dynload / trace specs (74 specs). `xray_backend_differential_in_spec` =
+48/48 incl. `simple-win64`; `xray_native_pe_locate_v1`, `xray_native_trampoline_win64_v1`, `pe_image_v1`, `dynload_windows_pe_system`
+green. The ELF-only OUT lanes (`check-xray-native-inprocess-e2e.shs`, `check-xray-llvm-adapter-e2e.shs`,
+`check-xray-native-program-e2e.shs`) now fail with an explicit `BLOCKED:` naming the lane on a non-Linux host
+(they used to crash on empty stdout / hang 900 s). `xray_llvm_attrs_spec` host-default example asserts the
+`XRAY-E-UNSUPPORTED-TARGET` refusal naming `windows`. Open seed gaps (no pure-Simple fix possible):
+`doc/08_tracking/bug/seed_interpreter_missing_spl_externs_adaptive_containers_2026-11-14.md`,
+`doc/08_tracking/bug/seed_jit_strict_unresolved_os_import_root_2026-11-14.md`.
