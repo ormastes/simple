@@ -160,7 +160,12 @@ pub fn messenger_doctor_json(target: MessengerTarget, source: text, extra_warnin
 pub fn messenger_error_json(action: text, code: i64, message: text) -> text:
     """Structured error record (§11.2): machine code + human message, no
     secrets. code is the exit code (2/3/4)."""
-    _lb() + "\"target\":\"\",\"action\":\"{action}\",\"status\":\"error\",\"code\":{code}," +
+    messenger_error_json_for("", action, code, message)
+
+
+pub fn messenger_error_json_for(target: text, action: text, code: i64, message: text) -> text:
+    """Error record naming the requested/resolved target ("" when none)."""
+    _lb() + "\"target\":\"{_json_escape(target)}\",\"action\":\"{action}\",\"status\":\"error\",\"code\":{code}," +
         "\"error\":\"{_json_escape(message)}\",\"warnings\":[]" + _rb()
 
 
@@ -280,25 +285,28 @@ fn _cmd_read(verb: text, args: [text]) -> i64:
     (the same decrypt path the adapter specs cover). The payload is already
     JSON; on failure only the typed status/error is printed, never row data
     or secrets. Exit code is the port result's (0 ok, 3 denied, 4 unsupported)."""
+    val record = messenger_read_record(verb, args)
+    print record.1
+    record.0
+
+
+pub fn messenger_read_record(verb: text, args: [text]) -> (i64, text):
+    """rooms/messages verb body: (exit code, printed JSON record)."""
     val resolved = resolve_messenger_target(args)
     if resolved.0 == nil:
-        print messenger_error_json(verb, 2, resolved.2)
-        return 2
+        return (2, messenger_error_json_for(_extract_flag(args, "--target", ""), verb, 2, resolved.2))
     val target = resolved.0.?
     val result = if verb == "messages":
         val room = _extract_flag(args, "--room", "")
         if room == "":
-            print messenger_error_json(verb, 2, "messages requires --room")
-            return 2
+            return (2, messenger_error_json_for(target.name, verb, 2, "messages requires --room"))
         val limit = _extract_flag(args, "--limit", "50").to_i64() ?? 50
         messenger_sqlcipher4_history(target, room, limit, "user")
     else:
         messenger_sqlcipher4_list_rooms(target, "user")
     if result.exit_code != 0:
-        print messenger_error_json(verb, result.exit_code, "{result.status}: {result.error}")
-        return result.exit_code
-    print result.payload
-    0
+        return (result.exit_code, messenger_error_json_for(target.name, verb,result.exit_code, "{result.status}: {result.error}"))
+    (0, result.payload)
 
 
 fn _cmd_send_probe(args: [text], json_mode: bool) -> i64:
