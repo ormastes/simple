@@ -178,6 +178,14 @@ class LayoutResult:
     # instead of being added to the block's height. Without this
     # `<div><p>t</p></div>` measured 40 px where Chrome measures 24.
     leading_margin_t: i32 = 0
+    # Per node: how far the FIRST line of a wrapped `#text` run starts to the
+    # right of its box's left edge. A run that starts mid-line (after an
+    # inline sibling) shares that line box, and its continuation lines start
+    # at the line box's left edge -- so its box is the full line width and
+    # only line 0 is inset. Empty when no run in the document needs it.
+    # Filled by `layout()` from `g_text_first_line_dx`; read through
+    # `text_first_line_dx_at`.
+    first_line_dx: [i32] = []
 
 class LayoutSelectedResult:
     layout: LayoutResult
@@ -454,6 +462,8 @@ fn relative_layout_result(child_index: HtmlChildIndex, node_index: i32, st: Styl
 class TextWrapCache:
     starts: [[i32]]
     ends: [[i32]]
+    # See LayoutResult.first_line_dx.
+    first_line_dx: [i32] = []
 
 class IntrinsicWidthResult:
     width: i32
@@ -604,7 +614,7 @@ fn byte_advances_range_width(by: [i32], start: i32, endv: i32) -> i32:
 # once per text node and hands the SAME array to the width call and to the
 # glyph stepper).
 fn style_text_line_advance_width_with(by: [i32], txt: text, start: i32, endv: i32, advance: i32, space_advance: i32) -> i32:
-    if by.len() == txt.len() and start >= 0 and endv <= by.len():
+    if by.len() == txt.byte_len() and start >= 0 and endv <= by.len():
         return byte_advances_range_width(by, start, endv)
     text_line_advance_width(txt, start, endv, advance, space_advance)
 
@@ -1066,6 +1076,15 @@ pub fn text_starts_with_collapsible_space(raw: text) -> bool:
     val b = raw.bytes()[0]
     b == 32 or b == 9 or b == 10 or b == 13
 
+# The trailing-edge twin of `text_starts_with_collapsible_space`.
+pub fn text_ends_with_collapsible_space(raw: text) -> bool:
+    val tb = raw.bytes()
+    val n = tb.len()
+    if n == 0:
+        return false
+    val b = tb[n - 1]
+    b == 32 or b == 9 or b == 10 or b == 13
+
 # Advance of ONE space in the face the resolved metrics were measured with.
 # Prefer a real space advance out of the measured array; only when the measured
 # string carries no space at all does the flat estimate stand in.
@@ -1282,6 +1301,57 @@ fn _lay_ellipsize_text_for_width_inner(txt: text, start: i32, endv: i32, max_wid
 pub var g_float_band_bottom: i32 = -2147483648
 pub var g_float_band_indent: i32 = 0
 
+# First-line inset of wrapped `#text` runs that start mid-line (see
+# LayoutResult.first_line_dx). `g_text_first_line_dx_pending` hands the inset
+# from the inline run loop to the `#text` branch of `layout_with_style` for the
+# one node laid out next; `g_text_first_line_dx` accumulates the per-node
+# values for the layout pass and stays EMPTY until a run needs one, so a
+# document without such a run pays nothing.
+pub var g_text_first_line_dx_pending: i32 = 0
+pub var g_text_first_line_dx: [i32] = []
+
+fn text_first_line_dx_reset():
+    g_text_first_line_dx_pending = 0
+    g_text_first_line_dx = []
+
+# Record node `i`'s inset. Called for EVERY `#text` placed by the inline run
+# loop once the table exists, so a subtree that is laid out twice (flex/grid
+# measuring passes) cannot leave a stale inset behind.
+fn text_first_line_dx_record(node_count: i32, i: i32, dx: i32):
+    if g_text_first_line_dx.len() == 0:
+        if dx == 0:
+            return
+        g_text_first_line_dx = zero_i32_list(node_count)
+    g_text_first_line_dx[i] = dx
+
+fn text_first_line_dx_at(table: [i32], i: i32) -> i32:
+    if i < 0 or i >= table.len():
+        return 0
+    table[i]
+
+# A run whose lines start at the line box's left edge: the only alignment for
+# which the mid-line first-line inset is modelled. Centred / right-aligned /
+# justified and RTL runs keep their existing placement.
+fn text_run_aligns_line_left(st: Style) -> bool:
+    if st.direction_rtl:
+        return false
+    if st.text_align == "center" or st.text_align == "right" or st.text_align == "end" or st.text_align == "justify":
+        return false
+    if st.text_align_last == "center" or st.text_align_last == "right" or st.text_align_last == "end" or st.text_align_last == "justify":
+        return false
+    true
+
+# Advance of the LAST wrapped line of a run -- where the pen sits for the
+# inline sibling that follows the run on that line.
+fn text_last_line_advance(txt: text, st: Style, starts: [i32], ends: [i32]) -> i32:
+    val n = starts.len()
+    if n == 0:
+        return 0
+    style_text_line_advance_width_with(
+        style_run_byte_advances(st, txt), txt, starts[n - 1], ends[n - 1],
+        style_text_advance(st), style_space_advance(st)
+    )
+
 # Float-band-aware text wrap: lines whose index falls inside the band wrap to
 # narrow_w; later lines wrap to full_w. Mirrors compute_style_wrap_ranges'
 # font-advance path with a cell-width fallback.
@@ -1372,17 +1442,29 @@ fn _lay_compute_wrap_ranges_inner(txt: text, cpl: i32) -> LineWrapRanges:
 # offsets this loop already uses is exact, and a break can never land inside a
 # codepoint — a continuation byte adds 0 and therefore always fits.
 fn _lay_compute_style_wrap_ranges_inner(txt: text, max_width: i32, st: Style, fallback_cpl: i32) -> LineWrapRanges:
+    _lay_compute_style_wrap_ranges_first_inner(txt, max_width, max_width, st, fallback_cpl)
+
+# `first_width` is the width available to line 0 -- the remainder of a line
+# box the run shares with the inline siblings before it. Every later line gets
+# `max_width`, the whole line box (Chrome: `<li><code>x</code> long text</li>`
+# continues at the li's content-left, not under the text's own start).
+# The caller must have checked that the run has a per-byte advance table
+# (`style_run_byte_advances`); without one this degrades to the uniform wrap.
+fn compute_style_wrap_ranges_first_line(txt: text, first_width: i32, max_width: i32, st: Style, fallback_cpl: i32) -> LineWrapRanges:
+    _lay_compute_style_wrap_ranges_first_inner(txt, first_width, max_width, st, fallback_cpl)
+
+fn _lay_compute_style_wrap_ranges_first_inner(txt: text, first_width: i32, max_width: i32, st: Style, fallback_cpl: i32) -> LineWrapRanges:
     # Cheap gates first: building `by` decodes the whole run, so it must not run
     # for a style that cannot use it anyway.
     if st.resolved_font_identity == "" or max_width <= 0:
         return compute_wrap_ranges(txt, fallback_cpl)
     val by = style_run_byte_advances(st, txt)
-    if by.len() != txt.len():
+    if by.len() != txt.byte_len():
         return compute_wrap_ranges(txt, fallback_cpl)
     var starts: [i32] = []
     var ends: [i32] = []
     var start = 0
-    val n = txt.len()
+    val n = txt.byte_len()
     # BYTE-indexed space test. `char_code_at` is CODEPOINT-indexed in this text
     # API while `endv` is a byte offset (it is cut on with `substring`), so on
     # any run past its first non-ASCII codepoint the two disagree and the break
@@ -1392,7 +1474,8 @@ fn _lay_compute_style_wrap_ranges_inner(txt: text, max_width: i32, st: Style, fa
         var endv = start
         var used = 0
         var last_space = -1
-        while endv < n and used + by[endv] <= max_width:
+        val line_width = if start == 0: first_width else: max_width
+        while endv < n and used + by[endv] <= line_width:
             used = used + by[endv]
             if tb[endv] == 32:
                 last_space = endv
@@ -1440,7 +1523,7 @@ fn first_word_advance_width(node: HNode, st: Style) -> i32:
     if node.tag != "#text":
         return 0
     val txt = node.text_trimmed
-    val n = txt.len()
+    val n = txt.byte_len()
     if n == 0:
         return 0
     val by = style_run_byte_advances(st, txt)

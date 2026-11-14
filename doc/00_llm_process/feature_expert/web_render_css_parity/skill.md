@@ -1037,3 +1037,28 @@ Traps measured this round:
 Open, in size order: `animation` (wrapped inline text continues under its own
 run start instead of the line box's left edge; canvas/svg/audio/video row not
 painted and over-tall), `html`, `forms-media`, `css-paint`, `css-layout`.
+
+## 2026-11-14 — mid-line text runs wrap into the line box, not their own column
+
+- **Model.** A `#text` that starts mid-line (after an inline sibling) and wraps
+  owns the WHOLE line box (`bx` = line left, `bw` = line width); only line 0 is
+  inset, by `LayoutResult.first_line_dx[node]` (empty when no run needs it).
+  Both painters add the inset to line 0 exactly where `text_indent_px` is
+  added; read it through `text_first_line_dx_at`. Any new `LayoutResult(` /
+  `TextWrapCache(` that feeds a painter MUST copy the field, or the old
+  hanging-indent paint silently returns on that path.
+- **Three arms** in the inline run loop (`..._layout_engine.spl`): first word
+  fits the remainder -> inset run; it does not -> break the line BEFORE the
+  run (as `<wbr>` does); inline content after a wrapped run continues on the
+  run's LAST line behind its tail.
+- **Not modelled:** an inline ELEMENT that starts mid-line and wraps
+  (`text <span>long …</span>`), centred/right/RTL runs, float-band lines.
+- **Trap — Chrome's text-node rect includes the collapsed leading space.**
+  `Range.getClientRects()` line 0 x is the pen BEFORE the space; the first
+  glyph (what the renderer's box reports) is one space advance further right.
+- **Trap — `.len()` on `text` is codepoints in current seeds, bytes in the
+  Nov-5 seed.** The wrap path indexes bytes; a `by.len() != txt.len()` arity
+  check silently drops every non-ASCII run to the flat estimate. Use
+  `byte_len()` for byte arity. Still open elsewhere in the style/metrics stage:
+  a lone `<p>— partial; values</p>` measures 160 px on the current seed vs 119.
+- Spec: `test/01_unit/browser_engine/inline_text_wrap_line_box_spec.spl`.
