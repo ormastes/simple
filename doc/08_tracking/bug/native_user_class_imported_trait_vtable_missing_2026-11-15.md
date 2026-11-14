@@ -92,3 +92,14 @@ Spec: `test/01_unit/compiler/backend/native_imported_trait_vtable_spec.spl`
 (fixture `test/fixtures/imported_trait_vtable/main.spl`) — RED on seed-tip,
 GREEN on the fixed seed. The #9355 workaround stays until native verification.
 Simple compiler (`src/compiler/`) lowering not audited for the same gap.
+
+## Native evidence (2026-11-15, workaround removed)
+
+The #9355 workaround in `src/app/llm_caret/messaging/mcp/protocol.spl` has been
+reverted: `MessagingStdioTransport with Transport` is back and the worker now
+calls the std `mcp_serve`. Built `mcp_worker.spl` with the fixed seed
+(`seed-vtable.exe`): `Build complete: 168 compiled, 0 cached, 0 failed`. The
+link log contains no `__vtable__` stub. The native spec
+`test/03_system/app/devhub/messenger/native_binary_messaging_mcp_worker_spec.spl`
+gives `Results: 3 total, 3 passed, 0 failed`. The status stays
+verification-pending until a deployed compiler includes the fix.
