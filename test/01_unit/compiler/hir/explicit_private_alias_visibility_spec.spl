@@ -76,3 +76,23 @@ describe "explicit private targets cannot escape through transparent aliases":
             if diagnostic.message.contains("cannot import explicitly private declaration"):
                 rejected = true
         expect(rejected).to_equal(true)
+
+    it "rejects a selective private alias even when its canonical target is public":
+        val owner_path = "privacy/owner.spl"
+        val requester_path = "privacy/requester.spl"
+        val owner_text = "pub struct Target:\n    value: i64\npri type Alias = Target\n"
+        val requester_text = "use privacy.owner.\{Alias\}\nfn read(value: Alias) -> i64:\n    1\n"
+        val owner = parse_and_build_module(owner_text, owner_path)
+        val requester = parse_and_build_module(requester_text, requester_path)
+        val surfaces = module_surfaces_from_modules({"privacy.owner": owner, "privacy.requester": requester},
+            [SourceFile(path: owner_path, content: owner_text, module_name: "privacy.owner"),
+             SourceFile(path: requester_path, content: requester_text, module_name: "privacy.requester")])
+        expect(surfaces.is_ok()).to_equal(true)
+        val lowering = HirLowering.with_filename(requester_path)
+        lowering.module_surfaces = surfaces.unwrap()
+        val lowered = lowering.lower_module(requester)
+        var rejected = false
+        for diagnostic in lowering.errors:
+            if diagnostic.message.contains("cannot import explicitly private declaration `Alias`"):
+                rejected = true
+        expect(rejected).to_equal(true)

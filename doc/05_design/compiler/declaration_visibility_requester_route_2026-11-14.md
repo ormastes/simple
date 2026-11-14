@@ -132,13 +132,24 @@ when exact source intent is `pri` and the declaring physical file differs from
 the requester. Internal dependency registration does not invoke that boundary.
 Namespace, glob, late lookup and containing-type paths still require the full
 selected-binding consumer; this negative check does not claim those are done.
-Imported transparent aliases that share a public target's canonical symbol also
-require the selected alias binding's declaration authority; the canonical-symbol
-negative check alone cannot enforce that alias's privacy.
+Explicit selective imports now retain the actual registration branch category
+before transparent alias expansion. The negative check consults that typed
+authority, so a private alias sharing a public target's canonical symbol is
+rejected independently of the target's publicity. Namespace, glob and late
+source uses still require their selected alias binding's declaration authority.
 Authored frontend/HIR regressions cover public alias to pri Target, nested
 private targets, private defaults/bounds/intermediate aliases, neutral formal
 shadowing, caller-private generic arguments, public targets and direct
 selective import of pri Target. All remain UNRUN.
+
+The registration memo retains the actual selected category alongside its scalar
+key. Its identity includes registry generation, write scope, found binding scope,
+selected symbol ID and per-spelling mutation version. Recording happens after
+registration's writes. Warm reads reuse the category; same-ID rebinding, lexical
+shadowing and unbind tombstones cannot reuse a stale entry. Module reset and
+registry-generation changes clear the category owner with the existing memo.
+This is selection evidence; full route receipts and permission grants remain
+separate, unfinished work.
 
 ## Frozen manifest inputs
 
