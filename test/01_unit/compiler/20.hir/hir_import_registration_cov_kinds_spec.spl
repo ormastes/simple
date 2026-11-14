@@ -28,9 +28,10 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules, ModuleSurfacesByName}
+use std.nogc_sync_mut.io.env_ops.{env_set, env_unset}
 
 val kinds_a_src = "pub struct Point:\n    x: i64\n    y: i64\n\npub enum Color:\n    Red\n    Green(i64)\n\npub trait Shape:\n    fn area() -> i64\n\ntype PointAlias = Point\ntype Pairs = [Point]\ntype Gen<T> = [T]\ntype Dflt<T = Point> = [T]\n\npub val LIMIT: i64 = 7\npub val POINTS: [Point] = []\nval UNTYPED = 3\n\npub fn make() -> Point:\n    Point(x: 1, y: 2)\n"
-val kinds_b_src = "pub enum Color:\n    Up\n    Down\n"
+val kinds_b_src = "pub enum Color:\n    Up\n    Down\n\npub fn other() -> i64:\n    2\n"
 val kinds_c_src = "use lib.a.\{Point\}\n\ntype Pts = [Point]\n"
 
 fn kinds_registry() -> ModuleSurfacesByName:
@@ -124,6 +125,16 @@ describe "imported enum registration":
         expect(lowering.imported_enum_owners["lib.b::Color"]).to_equal("lib.b")
         expect(lowering.errors.len()).to_equal(0)
 
+    it "binds the second same-named enum identically with the payload trace on":
+        var lowering = import_one(importer(kinds_registry()), "lib.a", "Color", "Color", true)
+        env_set("SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE", "1")
+        lowering = import_one(lowering, "lib.b", "Color", "Color", true)
+        env_unset("SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE")
+        expect(lowering.imported_enum_owners["Color"]).to_equal("lib.a")
+        expect(lowering.imported_enum_owners["lib.b::Color"]).to_equal("lib.b")
+        expect(lowering.symbols.lookup_qualified_type_raw("lib.b", "Color") >= 0).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+
     it "re-binds the retained enum id when a function-scope import is repeated":
         var lowering = importer(kinds_registry())
         lowering.symbols.push_scope(ScopeKind.Function)
@@ -154,6 +165,38 @@ describe "imported trait registration":
         expect(symbol_named(lowering, "Outline").name).to_equal("Shape")
         expect(lowering.imported_traits.contains_key("Outline")).to_equal(true)
         expect(lowering.imported_traits.contains_key("Shape")).to_equal(false)
+
+    it "keeps one trait definition when a function-scope import is repeated":
+        var lowering = importer(kinds_registry())
+        lowering.symbols.push_scope(ScopeKind.Function)
+        lowering = import_one(lowering, "lib.a", "Shape", "Shape", true)
+        lowering.symbols.pop_scope()
+        expect(bound(lowering, "Shape")).to_equal(false)
+        lowering.symbols.push_scope(ScopeKind.Function)
+        lowering = import_one(lowering, "lib.a", "Shape", "Shape", true)
+        expect(bound(lowering, "Shape")).to_equal(true)
+        expect(lowering.imported_traits.len()).to_equal(1)
+        expect(lowering.registered_import_skip_count).to_equal(0)
+        lowering.symbols.pop_scope()
+
+describe "imported callable registration":
+    it "skips an exact repeat of the same callable under the same local name":
+        var lowering = import_one(importer(kinds_registry()), "lib.a", "make", "make", true)
+        val symbols_before = lowering.symbols.next_symbol_id
+        # Same callable, but asked without enum materialization: a new tuple
+        # for the memo, an exact repeat for the symbol table.
+        lowering = import_one(lowering, "lib.a", "make", "make", false)
+        expect(lowering.symbols.next_symbol_id).to_equal(symbols_before)
+        expect(lowering.registered_import_skip_count).to_equal(0)
+
+    it "registers another module's callable that competes for the same local name":
+        var lowering = import_one(importer(kinds_registry()), "lib.a", "make", "build", true)
+        val symbols_before = lowering.symbols.next_symbol_id
+        lowering = import_one(lowering, "lib.b", "other", "build", true)
+        expect(lowering.symbols.next_symbol_id > symbols_before).to_equal(true)
+        expect(bound(lowering, "build")).to_equal(true)
+        expect(symbol_named(lowering, "build").kind == SymbolKind.Function).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
 
 describe "imported type alias registration":
     it "binds a bare alias to its target declaration":
@@ -199,9 +242,14 @@ describe "imported type alias registration":
 
     it "keeps the first binding when the alias's local name is already taken":
         var lowering = import_one(importer(kinds_registry()), "lib.a", "make", "Taken", true)
+        val taken_id = symbol_named(lowering, "Taken").id.id
+        val symbols_before = lowering.symbols.next_symbol_id
         lowering = import_one(lowering, "lib.a", "Pairs", "Taken", true)
         expect(symbol_named(lowering, "Taken").kind == SymbolKind.Function).to_equal(true)
-        expect(lowering.symbols.lookup_qualified_type_raw("lib.a", "Pairs")).to_equal(-1)
+        expect(symbol_named(lowering, "Taken").id.id).to_equal(taken_id)
+        # No competing alias symbol is defined behind the taken name.
+        expect(lowering.symbols.next_symbol_id).to_equal(symbols_before)
+        expect(lowering.errors.len()).to_equal(0)
 
 describe "imported constant registration":
     it "types an annotated constant from its declaration":
