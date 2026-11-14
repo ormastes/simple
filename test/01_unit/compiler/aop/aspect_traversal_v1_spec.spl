@@ -1,0 +1,63 @@
+use std.spec.{describe, it, expect}
+use compiler.common.cache_contract.aspect_traversal_v1.*
+use compiler.common.cache_contract.aspect_match_shard_v1.{JoinPointFactV1,
+    directory_join_point_facts_v1, pointcut_selector_parse_v1,
+    pointcut_match_shard_compute_v1, PointcutMatchShardV1}
+
+fn traversal_test_facts():
+    directory_join_point_facts_v1("src/a", ["src/a/main.spl"], [
+        JoinPointFactV1("src/a::f", "forward", "f", ["logged"], "src/a/main.spl", "")], [], true)
+
+# Synthetic identity inputs test the pure boundary only; this is not evidence
+# that a real compiler snapshot or advice body has been admitted.
+fn traversal_test_provider() -> text:
+    "sha256:" + "1".repeat(64)
+
+fn traversal_test_apply() -> Dict<text, text>:
+    {"src/a::f": "sha256:" + "2".repeat(64)}
+
+describe "F1 checked pure traversal view":
+    it "computes cold, reuse, body-change and removal deltas with the existing matcher":
+        val facts = traversal_test_facts()
+        val selected = pointcut_selector_parse_v1("attr(logged)")
+        val shard = pointcut_match_shard_compute_v1(selected, facts)
+        val cold = traversal_dir_view_v1(facts.scope_id, traversal_test_provider(), facts,
+            selected, shard, traversal_test_apply(), nil).unwrap()
+        val plugin = BuiltinForwardTraversalV1(instance_key: "test-instance")
+        expect(plugin.visit(cold, selected).weave).to_equal(["src/a::f"])
+        val prior = traversal_prior_v1(cold)
+        val warm = traversal_dir_view_v1(facts.scope_id, traversal_test_provider(), facts,
+            selected, shard, traversal_test_apply(), Some(prior)).unwrap()
+        expect(plugin.visit(warm, selected).reuse).to_equal(["src/a::f"])
+        val changed = traversal_dir_view_v1(facts.scope_id, traversal_test_provider(), facts,
+            selected, shard, {"src/a::f": "sha256:" + "3".repeat(64)}, Some(prior)).unwrap()
+        expect(plugin.visit(changed, selected).reweave).to_equal(["src/a::f"])
+        val absent = pointcut_selector_parse_v1("attr(absent)")
+        val empty = pointcut_match_shard_compute_v1(absent, facts)
+        val removed = traversal_dir_view_v1(facts.scope_id, traversal_test_provider(), facts,
+            absent, empty, {}, Some(prior)).unwrap()
+        expect(plugin.visit(removed, absent).unweave).to_equal(["src/a::f"])
+
+    it "rejects incomplete, mismatched or corrupt selections instead of an empty successful delta":
+        val facts = traversal_test_facts()
+        val selected = pointcut_selector_parse_v1("attr(logged)")
+        val shard = pointcut_match_shard_compute_v1(selected, facts)
+        val partial = directory_join_point_facts_v1("src/a", [], [], [], false)
+        expect(traversal_dir_view_v1("src/a", traversal_test_provider(), partial,
+            selected, shard, traversal_test_apply(), nil).is_err()).to_equal(true)
+        expect(traversal_dir_view_v1("src/b", traversal_test_provider(), facts,
+            selected, shard, traversal_test_apply(), nil).is_err()).to_equal(true)
+        expect(traversal_dir_view_v1("src/a", traversal_test_provider(), facts,
+            selected, shard, {}, nil).is_err()).to_equal(true)
+        val corrupt = PointcutMatchShardV1(..shard, sorted_matching_ids: [])
+        expect(traversal_dir_view_v1("src/a", traversal_test_provider(), facts,
+            selected, corrupt, {}, nil).is_err()).to_equal(true)
+
+    it "refuses provider-change reuse even with identical match and apply keys":
+        val facts = traversal_test_facts()
+        val selected = pointcut_selector_parse_v1("attr(logged)")
+        val shard = pointcut_match_shard_compute_v1(selected, facts)
+        val current = traversal_dir_view_v1("src/a", traversal_test_provider(), facts,
+            selected, shard, traversal_test_apply(), nil).unwrap()
+        expect(traversal_dir_view_v1("src/a", "sha256:" + "4".repeat(64), facts,
+            selected, shard, traversal_test_apply(), Some(traversal_prior_v1(current))).is_err()).to_equal(true)

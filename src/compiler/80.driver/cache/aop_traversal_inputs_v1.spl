@@ -1,0 +1,102 @@
+# Cold F1 input capture. Canonical MODULE roots deliberately invalidate more
+# than function-only roots. Capture once before the ordered claim loop mutates
+# any HIR; retain digests only. This is not a retained restoration baseline.
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode_canonical}
+use compiler.hir.abi_interface.{hir_abi_function_digest_v1, HirAbiInterfaceEncoderV1}
+use compiler.semantics.aspect_validation.{aspect_contract_claims_v1}
+use compiler.semantics.aspect_weave.{AspectForwardWeaveClaimV1}
+use compiler.common.cache.canonical_identity.{canon_str, canon_field, canon_seq}
+use compiler.common.cache_contract.aspect_match_shard_v1.{AdviceFacetsV1}
+use std.common.crypto.sha256.{sha256_text}
+
+pub struct AopTraversalInputsV1:
+    module_roots: Dict<text, text>
+    function_roots: Dict<text, text>
+    advice_facets: Dict<text, AdviceFacetsV1>
+
+fn _traversal_content_key_v1(domain: text, fields: [text]) -> text:
+    var values: [text] = []
+    for field in fields: values.push(canon_str(field))
+    "sha256:" + sha256_text(canon_field(domain, canon_seq(values)))
+
+# This binds a physical emitted/lowered symbol to its coarse module snapshot.
+# The caller separately binds the executing compiler image in the view/code key.
+pub fn aop_traversal_base_key_v1(inputs: AopTraversalInputsV1,
+        module_key: text, symbol: text) -> Result<text, text>:
+    val id = module_key + "::" + symbol
+    if symbol == "" or not inputs.function_roots.contains_key(id):
+        return Err("traversal-base-module-or-symbol-missing")
+    Ok(inputs.function_roots[id])
+
+pub fn aop_traversal_inputs_capture_v1(modules: Dict<text, HirModule>,
+        claims: [AspectForwardWeaveClaimV1], max_modules: i64,
+        max_canonical_bytes: i64) -> Result<AopTraversalInputsV1, text>:
+    if max_modules <= 0 or max_canonical_bytes <= 0 or modules.len() > max_modules:
+        return Err("traversal-capture-budget")
+    var roots: Dict<text, text> = {}
+    var total: i64 = 0
+    var functions: Dict<text, text> = {}
+    for key in modules.keys():
+        val encoded = hir_module_encode_canonical(modules[key])
+        if encoded.is_err(): return Err("traversal-canonical-module-unavailable")
+        val bytes = encoded.unwrap()
+        if bytes.len() > max_canonical_bytes - total:
+            return Err("traversal-capture-budget")
+        total = total + bytes.len()
+        roots[key] = _traversal_content_key_v1("simple/aop-canonical-module/v1", [key, bytes])
+        val module = modules[key]
+        for symbol in module.functions.keys():
+            val function = module.functions[symbol]
+            val id = key + "::" + function.name
+            if function.name == "" or functions.contains_key(id):
+                return Err("traversal-base-function-ambiguous")
+            if functions.len() >= 65536: return Err("traversal-function-budget")
+            functions[id] = _traversal_content_key_v1("simple/aop-module-base/v1",
+                [key, function.name, roots[key]])
+    var facets: Dict<text, AdviceFacetsV1> = {}
+    val contracts = aspect_contract_claims_v1()
+    var order: i64 = 0
+    for claim in claims:
+        if facets.contains_key(claim.registry_key): return Err("traversal-duplicate-claim")
+        var owner_path = ""
+        var contract_count: i64 = 0
+        for contract in contracts:
+            if contract.registry_key == claim.registry_key:
+                if contract.kind != "forward" or contract.mode != "static" or
+                        contract.advice_fn != claim.advice_fn or contract.selector != claim.selector:
+                    return Err("traversal-advice-contract-mismatch")
+                owner_path = contract.path
+                contract_count = contract_count + 1
+        if contract_count != 1 or owner_path == "": return Err("traversal-advice-contract-missing")
+        var owner_key = ""
+        var owner_count: i64 = 0
+        for key in modules.keys():
+            val module = modules[key]
+            if key == owner_path or module.path == owner_path or module.name == owner_path:
+                owner_key = key
+                owner_count = owner_count + 1
+        if owner_count != 1: return Err("traversal-advice-owner-ambiguous")
+        val owner = modules[owner_key]
+        var function_count: i64 = 0
+        var signature = ""
+        var effects = ""
+        for symbol in owner.functions.keys():
+            val function = owner.functions[symbol]
+            if function.name != claim.advice_fn: continue
+            function_count = function_count + 1
+            val abi = hir_abi_function_digest_v1(owner, function)
+            if abi.is_err(): return Err("traversal-advice-abi-unavailable")
+            signature = "sha256:" + abi.unwrap()
+            var encoder = HirAbiInterfaceEncoderV1.new(owner)
+            val effect_bytes = encoder.effects_identity(function.effects)
+            if encoder.error != "": return Err("traversal-advice-effects-unavailable")
+            effects = _traversal_content_key_v1("simple/aop-advice-effects/v1", [effect_bytes])
+        if function_count != 1: return Err("traversal-advice-function-ambiguous")
+        # This concrete HIR weaver prepends static advice. It does not implement
+        # arbitrary forms from the independent physical MIR advice interface.
+        facets[claim.registry_key] = AdviceFacetsV1(advice_fn: claim.advice_fn,
+            mode: "before", activation: "static", signature_digest: signature,
+            effects_digest: effects, body_digest: roots[owner_key], order: order)
+        order = order + 1
+    Ok(AopTraversalInputsV1(module_roots: roots, function_roots: functions, advice_facets: facets))
