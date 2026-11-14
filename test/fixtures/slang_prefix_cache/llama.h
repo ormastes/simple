@@ -30,6 +30,7 @@ void llama_free(struct llama_context *);
 void llama_model_free(struct llama_model *);
 uint32_t llama_n_ctx(const struct llama_context *);
 uint32_t llama_n_ubatch(const struct llama_context *);
+bool llama_supports_gpu_offload(void);
 const char * llama_model_chat_template(const struct llama_model *, const char *);
 int32_t llama_chat_apply_template(const char *, const struct llama_chat_message *, size_t, bool, char *, int32_t);
 const struct llama_vocab * llama_model_get_vocab(const struct llama_model *);
