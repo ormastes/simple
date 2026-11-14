@@ -1,3 +1,5 @@
+use compiler.common.cache.visibility_manifest_read_v1.{visibility_manifest_reads_v1}
+use app.compiler_entrypoint.source_authority.{compiler_source_authority_open_published_v1, compiler_source_authority_visibility_maps_v1}
 # Entry-closure walker for `native-build --entry-closure`, split out of
 # compile_targets.spl so the slim parse-shard entry
 # (src/app/cli/parse_shard_main.spl) can compute the same source set without
@@ -356,6 +358,24 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text], library_mod
     _nb_scv_unfrozen_closure_v1 = not frozen.0
     val frozen_entry = if frozen.0: frozen.1 else: entry
     val frozen_source_dirs = if frozen.0: frozen.2 else: source_dirs
+    var manifest_inventory: Dict<text, text> = {}
+    var manifest_selected: Dict<text, text> = {}
+    var manifest_snapshot_id = ""
+    if frozen.0:
+        val checkout = _nb_path_absolute_raw(".")
+        if checkout == nil: return []
+        val authority_root = compile_source_inventory_plain_checkout_v1(checkout.unwrap())
+        val authority = compiler_source_authority_open_published_v1(authority_root)
+        if not authority.valid or authority.snapshot.snapshot_root != _nb_scv_snapshot_root_v1:
+            _cli_eprint("visibility manifest snapshot authority mismatch")
+            return []
+        val maps = compiler_source_authority_visibility_maps_v1(authority_root, authority)
+        if maps.is_err():
+            _cli_eprint(maps.unwrap_err())
+            return []
+        manifest_inventory = maps.unwrap().0
+        manifest_selected = maps.unwrap().1
+        manifest_snapshot_id = authority.snapshot.revision_id + ":" + authority.snapshot.inventory_digest
     val trace_closure = (env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE") ?? "") == "1"
     # Level-gated, default-off per-file timing probe. The 25-file checkpoint
     # above only shows aggregate progress; this prints a per-file elapsed-us
@@ -377,6 +397,18 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text], library_mod
         if trace_timing:
             timing_file_start_us = time_now_unix_micros()
         result.append(f)
+        if frozen.0:
+            # Enqueue manifests into this same BFS. Their imports are scanned
+            # normally, and the worker later parses their real source bytes.
+            val observations = visibility_manifest_reads_v1(f, _nb_scv_snapshot_root_v1,
+                frozen_source_dirs, manifest_snapshot_id, manifest_inventory, manifest_selected)
+            if observations.is_err():
+                _cli_eprint(observations.unwrap_err())
+                return []
+            for observation in observations.unwrap().reads:
+                if observation.exists and not discovered.contains_key(observation.manifest_path):
+                    discovered[observation.manifest_path] = true
+                    queue.append(observation.manifest_path)
         # A start marker must precede the cached scan: completion-only timing
         # cannot identify the physical source when that scan itself times out.
         driver_closure_scan_phase_trace("closure_node:start", f)

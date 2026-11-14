@@ -307,6 +307,7 @@ var decl_derives: [[text]] = []      # @derive(Eq, Hash, Debug) trait list
 # that parse_impl_decl otherwise drops -- without it, un-overridden trait
 # default methods never resolve on the native build path.
 var decl_impl_trait: [text] = []
+var decl_import_role_v1: [text] = []
 # 1 if this struct-shaped decl is actually a `trait` declaration (#157). A trait
 # is parsed via the struct-body path (parse_struct_or_trait_decl) and stored as a
 # DECL_STRUCT node; this marker lets module_assembly route it into module.traits
@@ -492,6 +493,7 @@ fn decl_push_default_slot(tag: i64, span_id: i64):
     decl_is_packed.push(0)
     decl_derives.push(decl_empty_text)
     decl_impl_trait.push("")
+    decl_import_role_v1.push("")
     decl_is_trait.push(0)
     decl_is_hardware.push(0)
     decl_clocked_args.push(decl_empty_text)
@@ -546,6 +548,7 @@ fn decl_ensure_slot(idx: i64, tag: i64, span_id: i64):
     decl_is_packed[idx] = 0
     decl_derives[idx] = decl_empty_text
     decl_impl_trait[idx] = ""
+    decl_import_role_v1[idx] = ""
     decl_is_trait[idx] = 0
     decl_is_hardware[idx] = 0
     decl_clocked_args[idx] = decl_empty_text
@@ -769,6 +772,27 @@ pub fn decl_type_alias(name: text, aliased_type_tag: i64, span_id: i64) -> i64:
     decl_name[idx] = name
     decl_ret_type[idx] = aliased_type_tag
     idx
+
+# Parser-owned role, distinct from source-spelled identifiers and ordinary use.
+# The pool is serialized, aligned, and validated with the complete AST pools.
+pub fn decl_set_manifest_role_v1(idx: i64, role: text):
+    if idx < 0 or idx >= decl_import_role_v1.len(): return
+    decl_import_role_v1[idx] = role
+
+pub fn decl_manifest_roles_refuse_v1():
+    for role_index in 0..decl_import_role_v1.len():
+        decl_import_role_v1[role_index] = ""
+
+pub fn decl_get_manifest_role_v1(idx: i64) -> text:
+    if idx < 0 or idx >= decl_import_role_v1.len(): return ""
+    decl_import_role_v1[idx]
+
+pub fn decl_set_manifest_facts_v1(idx: i64, facts: [text]):
+    if idx < 0 or idx >= decl_imports.len(): return
+    if not ast_decl_prefer_arena():
+        ast_decl_text_set(idx, "IMPORTS", ast_text_list_join(facts))
+        ast_decl_direct_set(ast_decl_imports_key(idx), ast_text_list_join(facts))
+    decl_imports[idx] = facts
 
 pub fn decl_use_import(module_path: text, imported_names: [text], span_id: i64) -> i64:
     val idx = decl_alloc(DECL_USE, span_id)
@@ -1755,6 +1779,7 @@ pub fn decl_pools_promote_transient_owners() -> bool:
     promoted = _decl_pool_promote_text([decl_gpu_target_arg_name_text]) and promoted
     promoted = _decl_pool_promote_text([decl_gpu_backends_text]) and promoted
     promoted = _decl_pool_promote_text([decl_impl_trait]) and promoted
+    promoted = _decl_pool_promote_text([decl_import_role_v1]) and promoted
     promoted = _decl_pool_promote_text([decl_param_mut_text]) and promoted
     promoted = _decl_pool_promote_text([decl_param_default_text]) and promoted
     promoted = _decl_pool_promote_text([decl_empty_text]) and promoted
@@ -1831,6 +1856,7 @@ pub fn flat_decl_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_text(decl_gpu_target_arg_name_text))
     parts = parts.push(flat_pool_enc_text(decl_gpu_target_text))
     parts = parts.push(flat_pool_enc_text(decl_impl_trait))
+    parts = parts.push(flat_pool_enc_text(decl_import_role_v1))
     parts = parts.push(flat_pool_enc_text_list(decl_imports))
     parts = parts.push(flat_pool_enc_i64(decl_is_async))
     parts = parts.push(flat_pool_enc_i64(decl_is_comptime))
@@ -1911,6 +1937,7 @@ pub fn flat_decl_pools_restore(r: FlatPoolReader) -> bool:
     decl_gpu_target_arg_name_text = flat_pool_dec_text_into(decl_gpu_target_arg_name_text, r)
     decl_gpu_target_text = flat_pool_dec_text_into(decl_gpu_target_text, r)
     decl_impl_trait = flat_pool_dec_text_into(decl_impl_trait, r)
+    decl_import_role_v1 = flat_pool_dec_text_into(decl_import_role_v1, r)
     decl_imports = flat_pool_dec_text_list_into(decl_imports, r)
     decl_is_async = flat_pool_dec_i64_into(decl_is_async, r)
     decl_is_comptime = flat_pool_dec_i64_into(decl_is_comptime, r)
@@ -2020,6 +2047,14 @@ pub fn flat_decl_pools_consistent() -> bool:
     if decl_is_packed.len() != count: return false
     if decl_derives.len() != count: return false
     if decl_impl_trait.len() != count: return false
+    if decl_import_role_v1.len() != count: return false
+    for role_index in 0..count:
+        val role = decl_import_role_v1[role_index]
+        if role == "child" or role == "child-invalid":
+            if decl_tag[role_index] != DECL_USE: return false
+        elif role == "domain":
+            if decl_tag[role_index] != DECL_VAL: return false
+        elif role != "": return false
     if decl_is_trait.len() != count: return false
     if decl_is_hardware.len() != count: return false
     if decl_clocked_args.len() != count: return false
@@ -2092,6 +2127,7 @@ pub struct DeclStoreState:
     decl_is_packed: [i64]
     decl_derives: [[text]]
     decl_impl_trait: [text]
+    decl_import_role_v1: [text]
     decl_is_trait: [i64]
     decl_is_hardware: [i64]
     decl_clocked_args: [[text]]
@@ -2168,6 +2204,7 @@ pub fn decl_store_state_take() -> DeclStoreState:
         decl_is_packed: decl_is_packed,
         decl_derives: decl_derives,
         decl_impl_trait: decl_impl_trait,
+        decl_import_role_v1: decl_import_role_v1,
         decl_is_trait: decl_is_trait,
         decl_is_hardware: decl_is_hardware,
         decl_clocked_args: decl_clocked_args,
@@ -2239,6 +2276,7 @@ pub fn decl_store_state_take() -> DeclStoreState:
     decl_is_packed = []
     decl_derives = []
     decl_impl_trait = []
+    decl_import_role_v1 = []
     decl_is_trait = []
     decl_is_hardware = []
     decl_clocked_args = []
@@ -2321,6 +2359,7 @@ pub fn decl_store_state_install(s: DeclStoreState):
     decl_is_packed = s.decl_is_packed
     decl_derives = s.decl_derives
     decl_impl_trait = s.decl_impl_trait
+    decl_import_role_v1 = s.decl_import_role_v1
     decl_is_trait = s.decl_is_trait
     decl_is_hardware = s.decl_is_hardware
     decl_clocked_args = s.decl_clocked_args
@@ -2458,6 +2497,8 @@ fn decl_pools_ensure_v1():
         decl_derives = []
     if decl_impl_trait == nil:
         decl_impl_trait = []
+    if decl_import_role_v1 == nil:
+        decl_import_role_v1 = []
     if decl_is_trait == nil:
         decl_is_trait = []
     if decl_is_hardware == nil:
@@ -2526,6 +2567,7 @@ fn decl_pools_clear_v1():
     decl_is_packed.clear()
     decl_derives.clear()
     decl_impl_trait.clear()
+    decl_import_role_v1.clear()
     decl_is_trait.clear()
     decl_is_hardware.clear()
     decl_clocked_args.clear()

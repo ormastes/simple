@@ -1,3 +1,5 @@
+use compiler.common.dependency.manifest_visibility_v1.{ParserManifestVisibilityV1}
+use compiler.core.ast.{decl_get_manifest_role_v1, decl_manifest_roles_refuse_v1}
 use compiler.frontend.core.parser_preprocessor.{preprocess_conditionals}
 # Flat AST Bridge: module assembly (flat_ast_to_module, parse_and_build_module).
 use compiler.frontend.flat_ast_bridge.*
@@ -357,6 +359,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
     var imports: [ParserImport] = []
     var exports: [Export] = []
     var domain_blocks: [DomainBlock] = []
+    var manifest_facts = ParserManifestVisibilityV1()
     var impls: [Impl] = []
     var aop_advices: [AopAdvice] = []
     var di_bindings: [DiBinding] = []
@@ -827,12 +830,25 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                     case ExprKind.Call(callee, args):
                         match callee.kind:
                             case ExprKind.Ident(helper_name):
-                                if helper_name == "__domain_block" and args.len() >= 2:
+                                if helper_name == "__domain_block" and args.len() >= 2 and decl_get_manifest_role_v1(idx) == "domain":
                                     match args[0].value.kind:
                                         case ExprKind.StringLit(kind, _):
                                             match args[1].value.kind:
                                                 case ExprKind.StringLit(payload, _):
                                                     domain_blocks.push(DomainBlock(kind, payload, "module", span))
+                                                    if kind == "arch":
+                                                        val fields = decl_get_imports(idx)
+                                                        if manifest_facts.has_arch or fields.len() < 3:
+                                                            manifest_facts.valid = false
+                                                        else:
+                                                            manifest_facts.valid = manifest_facts.valid and fields[0] == "valid"
+                                                            manifest_facts.dimension = fields[1]
+                                                            manifest_facts.layer = fields[2]
+                                                            var field_index = 3
+                                                            while field_index < fields.len():
+                                                                manifest_facts.expose_paths.push(fields[field_index])
+                                                                field_index = field_index + 1
+                                                        manifest_facts.has_arch = true
                                                     di = di + 1
                                                     continue
                                                 case _:
@@ -1103,6 +1119,15 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                     top_level_stmts.push(Stmt(kind: StmtKind.Val(c_name, script_binding_type, init), span: span))
         elif tag_text == "6":
             val module_path = decl_get_name(idx)
+            if decl_get_manifest_role_v1(idx) == "child-invalid":
+                manifest_facts.valid = false
+            elif decl_get_manifest_role_v1(idx) == "child":
+                val child_name = if module_path.starts_with("."): module_path.substring(1) else: ""
+                if child_name == "" or manifest_facts.child_names.contains(child_name):
+                    manifest_facts.valid = false
+                else:
+                    manifest_facts.child_names.push(child_name)
+                    manifest_facts.child_visibilities.push(decl_get_visibility_text(idx))
             val items_list = decl_get_imports(idx)
             var import_items: [ImportItem] = []
             var ii = 0
@@ -1366,6 +1391,10 @@ fn flat_ast_to_module(path: text) -> ParserModule:
         friends: module_friends,
         internal_exports: module_internal_exports
     )
+    if parser_has_errors():
+        manifest_facts.valid = false
+        decl_manifest_roles_refuse_v1()
+    built_module.manifest_visibility_v1 = manifest_facts
     built_module.function_headers = function_headers
     built_module.nogc_strict = module_nogc_strict
     built_module.required_init_mode = module_required_init_mode
@@ -1463,6 +1492,7 @@ pub fn flat_pools_restore_all(blob: text) -> bool:
 # stream of a packed .spab blob (FlatPoolReader.from_tokens).
 pub fn flat_pools_restore_reader_v1(r: FlatPoolReader) -> bool:
     representation_parser_refuse_restored_metadata_v1()
+    decl_manifest_roles_refuse_v1()
     parser_top_level_visibility_intent_clear_v1()
     val version = r.next()
     if version != FLAT_POOL_CODEC_VERSION:
@@ -1478,9 +1508,11 @@ pub fn flat_pools_restore_reader_v1(r: FlatPoolReader) -> bool:
     val restored = (ok_decl and ok_expr and ok_stmt and ok_type and ok_par and ok_ext and ok_pend and ok_lock and
         r.finish_canonical_frame() and flat_decl_pools_consistent())
     if not restored:
+        decl_manifest_roles_refuse_v1()
         parser_top_level_visibility_intent_clear_v1()
         return false
     if not parser_top_level_visibility_admit_restored_bindings_v1():
+        decl_manifest_roles_refuse_v1()
         parser_top_level_visibility_intent_clear_v1()
         return false
     true
