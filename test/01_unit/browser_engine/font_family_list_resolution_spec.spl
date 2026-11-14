@@ -1,0 +1,206 @@
+# A CSS `font-family` value is an ordered LIST, resolved name by name.
+#
+# CSS Fonts 4 §5: walk the comma-separated list in order, use the first name
+# the UA can serve, skip the ones it cannot, and fall back to the UA default
+# face when none is served. Until 2026-11-14 the provider ran substring tests
+# over the WHOLE value instead ("mono", "code", "sans", "arial", ...), with the
+# MONO stack as the unmatched default.
+#
+# Oracle: Chrome 159.0.8154.6 on Linux/fontconfig, 800x900, device scale 1,
+# `getBoundingClientRect()` of an inline-block span holding the 20-character
+# string "Hamburgefonstiv 0123" at 16px. The width identifies the face:
+#   Liberation Sans 160.98 | Liberation Serif 147.69 | Liberation Mono 192.03
+#   DejaVu Sans 183.91     | DejaVu Sans Mono 192.66
+#
+#   font-family                              Chrome   Simple before -> after
+#   "IBM Plex Sans", Arial, sans-serif       160.98   161 -> 161
+#   NoSuchFont, monospace                    192.66   193 -> 193
+#   "No Such Font", "Courier New", monospace 192.03   193 -> 192
+#   serif                                    147.69   148 -> 148
+#   system-ui                                183.91   161 -> 184
+#   ui-monospace                             147.69   193 -> 148
+#   NoSuchFont                               147.69   193 -> 148
+#   "Courier New"                            192.03   193 -> 192
+#   "Times New Roman"                        147.69   148 -> 148
+#   Helvetica                                160.98   161 -> 161
+#   sans-serif                               160.98   161 -> 161
+#   "Segoe UI"                               147.69   193 -> 148
+#   Roboto                                   147.69   193 -> 148
+#   Arial                                    160.98   161 -> 161
+#   monospace                                192.66   193 -> 193
+#   "Source Code Pro", Arial                 160.98   193 -> 161
+#   "DejaVu Sans"                            183.91   161 -> 184
+#   cursive / fantasy                        147.69   193 -> 148
+#   Verdana                                  147.69   193 -> 148
+#   ui-sans-serif                            147.69   161 -> 148
+#   NoSuch, cursive, Arial                   160.98   (walk continues past cursive)
+#   "sans-serif" (quoted: a family name)     147.69
+#
+# `monospace` is 192.66 (DejaVu Sans Mono) in Chrome and in the Playwright
+# "Chrome for Testing" build; the chrome-headless-shell build of the same
+# version answers 192.03 because it has no fixed-font preference and uses
+# Blink's "Courier New" default. The browser is the oracle here.
+#
+# Host faces are asserted only where the host has them, so the spec states the
+# same rule on a host without Liberation / DejaVu.
+use std.spec.*
+use std.nogc_sync_mut.sffi.io.{file_exists}
+use std.nogc_sync_mut.text_layout.font_provider.{
+    browser_font_candidates_for_family, browser_sans_font_candidates,
+    browser_serif_font_candidates, browser_mono_font_candidates,
+    browser_font_family_for_weight, browser_font_family_for_style,
+    browser_platform_sans_bold_faces, browser_platform_sans_italic_faces,
+    browser_bundled_font_path_for_family, browser_family_has_host_face,
+    browser_platform_sans_faces
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val LIBERATION_SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val LIBERATION_SERIF: text = "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf"
+val LIBERATION_MONO: text = "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf"
+val LIBERATION_MONO_BOLD: text = "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf"
+val DEJAVU_SANS: text = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+val MACOS_HELVETICA: text = "/System/Library/Fonts/Helvetica.ttc"
+
+fn _head(family: text) -> text:
+    val list = browser_font_candidates_for_family(family)
+    if list.len() > 0: list[0] else: ""
+
+fn _first(list: [text]) -> text:
+    if list.len() > 0: list[0] else: ""
+
+fn _linux_faces() -> bool:
+    (
+        file_exists(LIBERATION_SANS) and file_exists(LIBERATION_SERIF) and
+        file_exists(LIBERATION_MONO) and file_exists(DEJAVU_SANS) and
+        not file_exists(MACOS_HELVETICA)
+    )
+
+fn _width(family: text) -> text:
+    val html = (
+        "<html><body style='margin:0'><span id='probe' style='display:inline-block;" +
+        "font-size:16px;font-family:" + family + "'>Hamburgefonstiv 0123</span></body></html>"
+    )
+    simple_web_layout_debug_layout_by_id(html, 800, 900, "probe", "w")
+
+describe "font-family list resolution":
+    it "skips an unavailable first name and uses the next served one":
+        expect(_head("\"IBM Plex Sans\", Arial, sans-serif")).to_equal(_first(browser_sans_font_candidates()))
+        expect(_head("NoSuchFont, monospace")).to_equal(_first(browser_mono_font_candidates()))
+        expect(_head("NoSuchFont, serif")).to_equal(_first(browser_serif_font_candidates()))
+        expect(_head("\"Segoe UI\", Roboto, sans-serif")).to_equal(_first(browser_sans_font_candidates()))
+
+    it "classifies each name, not substrings of the whole value":
+        # Whole-value `contains("code")` called this monospace. Chrome: Arial.
+        expect(_head("\"Source Code Pro\", Arial")).to_equal(_first(browser_sans_font_candidates()))
+        # `contains("sans")` served a face for a family nothing provides.
+        expect(_head("\"Open Sans\", serif")).to_equal(_first(browser_serif_font_candidates()))
+        expect(_head("\"Fira Mono\", sans-serif")).to_equal(_first(browser_sans_font_candidates()))
+
+    it "falls back to the default serif face when no name is served":
+        # Chrome 147.69 for each (Liberation Serif); the default was the mono stack.
+        expect(_head("NoSuchFont")).to_equal(_first(browser_serif_font_candidates()))
+        expect(_head("Roboto")).to_equal(_first(browser_serif_font_candidates()))
+        expect(_head("\"Segoe UI\"")).to_equal(_first(browser_serif_font_candidates()))
+        expect(_head("Verdana")).to_equal(_first(browser_serif_font_candidates()))
+
+    it "does not serve generics Chrome on Linux has no face for":
+        if _linux_faces():
+            expect(_head("cursive")).to_equal(_first(browser_serif_font_candidates()))
+            expect(_head("fantasy")).to_equal(_first(browser_serif_font_candidates()))
+            expect(_head("ui-monospace")).to_equal(_first(browser_serif_font_candidates()))
+            expect(_head("ui-sans-serif")).to_equal(_first(browser_serif_font_candidates()))
+            # The walk continues PAST an unserved generic: Chrome 160.98.
+            expect(_head("NoSuch, cursive, Arial")).to_equal(_first(browser_sans_font_candidates()))
+
+    it "treats a quoted generic keyword as a family name":
+        # Chrome 147.69 for `"sans-serif"`: no family is literally named that.
+        expect(_head("\"sans-serif\"")).to_equal(_first(browser_serif_font_candidates()))
+        expect(_head("sans-serif")).to_equal(_first(browser_sans_font_candidates()))
+
+    it "serves the metric-compatible aliases by name":
+        expect(_head("Arial")).to_equal(_first(browser_sans_font_candidates()))
+        expect(_head("Helvetica")).to_equal(_first(browser_sans_font_candidates()))
+        expect(_head("\"Times New Roman\"")).to_equal(_first(browser_serif_font_candidates()))
+        expect(_head("Times")).to_equal(_first(browser_serif_font_candidates()))
+        if _linux_faces():
+            # Courier New -> Liberation Mono (192.03), not the generic
+            # stack's DejaVu Sans Mono (192.66).
+            expect(_head("\"Courier New\"")).to_equal(LIBERATION_MONO)
+            expect(_head("Courier")).to_equal(LIBERATION_MONO)
+            expect(_head("\"No Such Font\", \"Courier New\", monospace")).to_equal(LIBERATION_MONO)
+
+    it "resolves system-ui and installed families to their own face on Linux":
+        if _linux_faces():
+            # Chrome 183.91 for both: DejaVu Sans, not the Arial alias.
+            expect(_head("system-ui")).to_equal(DEJAVU_SANS)
+            expect(_head("\"DejaVu Sans\"")).to_equal(DEJAVU_SANS)
+            expect(_head("NoSuch, system-ui")).to_equal(DEJAVU_SANS)
+
+    it "passes an @font-face value through and classifies its own list":
+        val decorated = "__simple_font_face__|/nonexistent/Face.ttf|NoSuchFont, monospace"
+        val list = browser_font_candidates_for_family(decorated)
+        expect(list[0]).to_equal("/nonexistent/Face.ttf")
+        expect(list[1]).to_equal(_first(browser_mono_font_candidates()))
+        # The SOURCE PATH is not a family name: `.../Mono.ttf` must not make a
+        # serif list monospace.
+        val serif_list = browser_font_candidates_for_family("__simple_font_face__|/nonexistent/SansMono.ttf|serif")
+        expect(serif_list[1]).to_equal(_first(browser_serif_font_candidates()))
+
+    it "lets a bundled face win only when it is the first served name":
+        val bungee = browser_bundled_font_path_for_family("Bungee")
+        expect(bungee != "").to_equal(true)
+        expect(_head("Bungee")).to_equal(bungee)
+        expect(_head("NoSuchFont, Bungee, sans-serif")).to_equal(bungee)
+        expect(browser_bundled_font_path_for_family("NoSuchFont, Bungee")).to_equal(bungee)
+        expect(_head("Arial, Bungee")).to_equal(_first(browser_sans_font_candidates()))
+        expect(browser_bundled_font_path_for_family("Arial, Bungee")).to_equal("")
+
+    it "routes bold and italic to the same typeface the list resolved to":
+        val list_family = "\"IBM Plex Sans\", Arial, sans-serif"
+        val bold_faces = browser_platform_sans_bold_faces()
+        if bold_faces.len() > 0:
+            expect(browser_font_family_for_weight(list_family, true))
+                .to_equal("__simple_font_face__|" + bold_faces[0] + "|" + list_family)
+            # Whole-value `contains("code")` routed this to the MONO bold face.
+            expect(browser_font_family_for_weight("\"Source Code Pro\", Arial", true))
+                .to_equal("__simple_font_face__|" + bold_faces[0] + "|\"Source Code Pro\", Arial")
+        val italic_faces = browser_platform_sans_italic_faces()
+        if italic_faces.len() > 0:
+            expect(browser_font_family_for_style(list_family, false, true))
+                .to_equal("__simple_font_face__|" + italic_faces[0] + "|" + list_family)
+        if _linux_faces() and file_exists(LIBERATION_MONO_BOLD):
+            expect(browser_font_family_for_weight("\"Courier New\"", true))
+                .to_equal("__simple_font_face__|" + LIBERATION_MONO_BOLD + "|\"Courier New\"")
+
+    it "never swaps the typeface to synthesize bold":
+        # No name served -> default serif face; `contains("sans")` used to
+        # hand these the platform sans bold face.
+        expect(browser_font_family_for_weight("\"Open Sans\"", true)).to_equal("\"Open Sans\"")
+        expect(browser_font_family_for_weight("Roboto", true)).to_equal("Roboto")
+        expect(browser_font_family_for_weight("serif", true)).to_equal("serif")
+        expect(browser_font_family_for_weight("Bungee", true)).to_equal("Bungee")
+        val decorated = "__simple_font_face__|/nonexistent/Face.ttf|sans-serif"
+        expect(browser_font_family_for_weight(decorated, true)).to_equal(decorated)
+        expect(browser_font_family_for_style(decorated, true, true)).to_equal(decorated)
+
+    it "reports a host face only for a list the host serves":
+        if browser_platform_sans_faces().len() > 0:
+            expect(browser_family_has_host_face("\"IBM Plex Sans\", Arial, sans-serif")).to_equal(true)
+        expect(browser_family_has_host_face("\"Open Sans\"")).to_equal(false)
+        expect(browser_family_has_host_face("Bungee")).to_equal(false)
+
+    it "lays out each list at the width of the face Chrome picks":
+        if _linux_faces():
+            expect(_width("\"IBM Plex Sans\", Arial, sans-serif")).to_equal("161")  # Chrome 160.98
+            expect(_width("\"Source Code Pro\", Arial")).to_equal("161")          # Chrome 160.98
+            expect(_width("NoSuchFont")).to_equal("148")                          # Chrome 147.69
+            expect(_width("Roboto")).to_equal("148")                              # Chrome 147.69
+            expect(_width("\"Segoe UI\"")).to_equal("148")                        # Chrome 147.69
+            expect(_width("cursive")).to_equal("148")                             # Chrome 147.69
+            expect(_width("ui-monospace")).to_equal("148")                        # Chrome 147.69
+            expect(_width("system-ui")).to_equal("184")                           # Chrome 183.91
+            expect(_width("\"Courier New\"")).to_equal("192")                     # Chrome 192.03
+            expect(_width("NoSuchFont, monospace")).to_equal("193")               # Chrome 192.66
