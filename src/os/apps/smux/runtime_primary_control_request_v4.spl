@@ -1,0 +1,76 @@
+#![allow(REQC004)]
+# Immutable primary control metadata. Attempts and byte offsets are explicit
+# caller input; decoding never creates an attempt, retries, or native authority.
+use os.apps.smux.runtime_control_request_v1.{SmuxRuntimeControlRequestV1,
+    smux_runtime_control_request_validate_v1, smux_runtime_control_request_encode_v1,
+    smux_runtime_control_request_decode_v1, smux_runtime_control_field_text_v1, smux_runtime_control_field_int_v1}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.base_encoding.base64.{base64url_encode, base64url_decode_strict}
+use std.common.crypto.sha256.sha256_text
+
+pub struct SmuxPrimaryControlRequestV4:
+    control: SmuxRuntimeControlRequestV1
+    attempt_sequence: i64
+    offset: i64
+    maximum: i64
+
+pub fn smux_primary_control_request_validate_v4(request: SmuxPrimaryControlRequestV4) -> Result<(), text>:
+    smux_runtime_control_request_validate_v1(request.control)?
+    if request.control.action == "input":
+        if request.attempt_sequence < 1 or request.attempt_sequence > 1152921504606846975:
+            return Err("primary-control-request-attempt")
+        if request.offset < 0 or request.offset >= request.control.payload.bytes().len():
+            return Err("primary-control-request-offset")
+        if request.maximum < 1 or request.maximum > 4096: return Err("primary-control-request-maximum")
+    elif request.attempt_sequence != 0 or request.offset != 0 or request.maximum != 0:
+        return Err("primary-control-request-unexpected-attempt")
+    Ok(())
+
+pub fn smux_primary_control_request_encode_v4(request: SmuxPrimaryControlRequestV4) -> Result<text, text>:
+    smux_primary_control_request_validate_v4(request)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4),
+        "kind": SdnValue.String("smux-primary-control-request"),
+        "controlRequest": SdnValue.String(smux_runtime_control_request_encode_v1(request.control)?),
+        "attemptSequence": SdnValue.Int(request.attempt_sequence), "offset": SdnValue.Int(request.offset),
+        "maxBytes": SdnValue.Int(request.maximum)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields))
+    if bytes.bytes().len() > 2800: return Err("primary-control-request-size")
+    Ok(bytes)
+
+pub fn smux_primary_control_request_decode_v4(bytes: text) -> Result<SmuxPrimaryControlRequestV4, text>:
+    if bytes.bytes().len() == 0 or bytes.bytes().len() > 2800: return Err("primary-control-request-size")
+    val parsed = sdn_parse_strict_v1(bytes, SdnStrictLimitsV1(max_source_bytes: 2800,
+        max_depth: 2, max_nodes: 24, max_rows: 0, max_cells: 0, max_columns: 6))
+    if parsed.is_err(): return Err("primary-control-request-syntax")
+    val fields = match parsed.unwrap().value:
+        case SdnValue.Dict(value): value
+        case _: return Err("primary-control-request-object")
+    val keys = ["version", "kind", "controlRequest", "attemptSequence", "offset", "maxBytes"]
+    if fields.len() != keys.len(): return Err("primary-control-request-fields")
+    for key in keys:
+        if not fields.contains_key(key): return Err("primary-control-request-fields")
+    if fields["version"] != SdnValue.Int(4): return Err("primary-control-request-version")
+    if smux_runtime_control_field_text_v1(fields, "kind")? != "smux-primary-control-request":
+        return Err("primary-control-request-kind")
+    val request = SmuxPrimaryControlRequestV4(
+        control: smux_runtime_control_request_decode_v1(smux_runtime_control_field_text_v1(fields, "controlRequest")?)?,
+        attempt_sequence: smux_runtime_control_field_int_v1(fields, "attemptSequence")?,
+        offset: smux_runtime_control_field_int_v1(fields, "offset")?,
+        maximum: smux_runtime_control_field_int_v1(fields, "maxBytes")?)
+    if smux_primary_control_request_encode_v4(request)? != bytes: return Err("primary-control-request-noncanonical")
+    Ok(request)
+
+pub fn smux_primary_control_request_token_v4(request: SmuxPrimaryControlRequestV4) -> Result<text, text>:
+    Ok(base64url_encode(smux_primary_control_request_encode_v4(request)?))
+
+pub fn smux_primary_control_request_from_token_v4(token: text) -> Result<SmuxPrimaryControlRequestV4, text>:
+    if token.bytes().len() == 0 or token.bytes().len() > 3734: return Err("primary-control-request-token-size")
+    val bytes = base64url_decode_strict(token)?
+    if base64url_encode(bytes) != token: return Err("primary-control-request-token-noncanonical")
+    smux_primary_control_request_decode_v4(bytes)
+
+pub fn smux_primary_control_request_digest_v4(request: SmuxPrimaryControlRequestV4) -> Result<text, text>:
+    Ok(sha256_text(smux_primary_control_request_encode_v4(request)?))

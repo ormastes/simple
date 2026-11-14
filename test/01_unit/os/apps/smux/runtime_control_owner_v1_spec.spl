@@ -18,6 +18,9 @@ use os.apps.smux.smux_runtime_control_owner_v1.{smux_runtime_control_owner_new_v
 use os.apps.smux.runtime_control_request_v1.{SmuxRuntimeControlRequestV1, smux_runtime_control_request_token_v1}
 use os.apps.smux.runtime_control_reply_v1.{smux_runtime_control_reply_v1, smux_runtime_control_reply_fields_v1}
 use app.hosted_apps.smux_client.smux_client_request_reply_ok
+use os.apps.smux.runtime_primary_input_state_v4.SmuxPrimaryInputAttemptV4
+use os.apps.smux.runtime_primary_input_sync_v4.smux_primary_input_stop_allowed_v4
+use std.common.process.input_control_v1.ProcessInputWriteDispositionV1
 
 fn control_target_fixture_v1() -> SessionRuntimeControlTargetV1:
     val scope = ContainerHostScopeV2(physical_host_id: "host-a", service_scope_id: "scope-a",
@@ -41,6 +44,45 @@ fn control_policy_fields_v1() -> Dict<text, SdnValue>:
         "maxLeaseMs": SdnValue.Int(100)}
 
 describe "runtime control metadata and bounded issuer":
+    it "blocks input rotation and stop while preserving unknown receipts and independent geometry":
+        step("Retain unknown input across shared issuer lease rotation and selected-kind revoke")
+        val target = control_target_fixture_v1()
+        val original = smux_runtime_control_owner_new_v1(control_policy_fixture_v1(), target.service_incarnation).unwrap()
+        val issued = smux_runtime_control_issue_v1(original, target, SessionRuntimeControlKindV1.Input,
+            "e".repeat(32) + ":1", 1000, 0, "a".repeat(64), 100)
+        expect(issued.error).to_equal("")
+        var owner = issued.owner
+        val lease = issued.lease.unwrap()
+        # Outcome metadata only; this is not a fabricated native session/proof.
+        owner.input_attempts.push(SmuxPrimaryInputAttemptV4(binding_uid: target.binding_uid,
+            session_identity: "f".repeat(64), revision: lease.revision, sequence: 1,
+            request_digest: "1".repeat(64), target_digest: session_runtime_control_target_digest_v1(target).unwrap(),
+            nonce_digest: lease.nonce_digest, expires_ns: lease.expires_monotonic_ms * 1000000,
+            requested_bytes: 4, disposition: ProcessInputWriteDispositionV1.Unknown,
+            accepted_bytes: -1, error: "receipt-unavailable"))
+        val rotated = smux_runtime_control_issue_v1(owner, target, SessionRuntimeControlKindV1.Input,
+            "e".repeat(32) + ":1", 1000, lease.revision, "b".repeat(64), 101)
+        expect(rotated.error).to_equal("primary-input-prior-outcome-unknown")
+        expect(rotated.owner.input_attempts).to_equal(owner.input_attempts)
+        expect(smux_runtime_control_find_v1(rotated.owner, target.binding_uid, SessionRuntimeControlKindV1.Input).unwrap().nonce).to_equal(issued.nonce)
+        val replay = smux_runtime_control_issue_v1(rotated.owner, target, SessionRuntimeControlKindV1.Input,
+            "e".repeat(32) + ":1", 1000, 0, "b".repeat(64), 102)
+        expect(replay.replay).to_equal(true)
+        expect(replay.revision).to_equal(lease.revision)
+        expect(smux_primary_input_stop_allowed_v4(replay.owner)).to_equal(false)
+        val geometry = smux_runtime_control_issue_v1(replay.owner, target, SessionRuntimeControlKindV1.Geometry,
+            "e".repeat(32) + ":1", 1000, 0, "c".repeat(64), 103)
+        expect(geometry.error).to_equal("")
+        val revoked = smux_runtime_control_revoke_v1(geometry.owner, target.binding_uid,
+            SessionRuntimeControlKindV1.Input, lease.revision, 104)
+        expect(revoked.error).to_equal("")
+        expect(smux_runtime_control_find_v1(revoked.owner, target.binding_uid, SessionRuntimeControlKindV1.Geometry).unwrap().active).to_equal(true)
+        expect(revoked.owner.input_attempts).to_equal(owner.input_attempts)
+        expect(smux_primary_input_stop_allowed_v4(revoked.owner)).to_equal(false)
+        val denied = smux_runtime_control_issue_v1(revoked.owner, target, SessionRuntimeControlKindV1.Input,
+            "e".repeat(32) + ":1", 1000, lease.revision, "b".repeat(64), 105)
+        expect(denied.error).to_equal("primary-input-prior-outcome-unknown")
+
     it "correlates complete runtime target facts and permits only explicit holder handover":
         step("Reject stale capability and binding drift")
         val target = control_target_fixture_v1()

@@ -1,5 +1,6 @@
 # Process-local tagged ownership, never a decoder or an Input/Geometry grant.
-# Native input-control dependency is separately reviewed/landed. No writes here.
+# Native input controls consume the live trusted-local issuer check separately
+# from attachment admission; generic terminal writes remain unavailable.
 use std.common.contracts.container.primary_attach_v1.*
 use std.common.contracts.container.stream_v2.ContainerHelperAdmissionV2
 use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, group_process_stream_template_digest_v3}
@@ -16,7 +17,75 @@ use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedTransferV2, PipedProcessR
     process_validate_piped_owned_transfer_v2, process_piped_owned_transfer_equal_v2,
     process_cleanup_piped_owned_v2, process_retire_piped_owned_v2}
 use std.nogc_sync_mut.io.process_input_control_v1.{process_input_control_enable_ref_v1,
-    process_input_control_state_ref_v1, ProcessInputControlStateV1, ProcessInputWriteDispositionV1}
+    process_input_control_state_ref_v1, ProcessInputControlStateV1, ProcessInputWriteDispositionV1,
+    process_input_control_install_ref_v1, process_input_control_revoke_ref_v1,
+    process_write_stdin_some_controlled_ref_v1}
+use std.common.contracts.mux.session_runtime_control_v1.{SessionRuntimeControlTargetV1,
+    SessionRuntimeControlLeaseV1, SessionRuntimeControlKindV1, session_runtime_control_lease_check_v1,
+    session_runtime_control_target_digest_v1}
+use std.common.contracts.container.primary_input_v1.{container_primary_input_plan_match_v1, container_primary_input_deadline_v1}
+use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
+
+pub struct ContainerPrimaryInputWriteV1:
+    disposition: ProcessInputWriteDispositionV1
+    attempt_sequence: i64
+    accepted_bytes: i64
+    error: text
+
+# Session correlation is necessary, not issuer authorization. Only the trusted
+# local composition may call this port immediately after its live issuer check.
+fn primary_input_authorized_v1(session: ContainerPrimaryAttachSessionV1,
+        lease: SessionRuntimeControlLeaseV1, target: SessionRuntimeControlTargetV1,
+        principal: text, nonce: text) -> Result<text, text>:
+    if session.native_cleaned: return Err("primary-input-native-cleaned")
+    val adoption = match session.adoption:
+        case Some(value): value
+        case None: return Err("primary-input-not-adopted")
+    if (adoption.binding_uid != target.binding_uid or adoption.service_incarnation != target.service_incarnation or
+            adoption.session_id != target.session_id or adoption.window_id != target.window_id or
+            adoption.pane_id != target.pane_id or adoption.service_epoch != target.service_epoch or
+            adoption.child_incarnation != target.child_incarnation):
+        return Err("primary-input-adoption-mismatch")
+    container_primary_input_plan_match_v1(session.plan, target)?
+    val deadline = container_primary_input_deadline_v1(lease)?
+    val now = time_sample_monotonic_nanos_or_failure()
+    if now <= 0 or now >= deadline: return Err("primary-input-clock-or-expiry")
+    session_runtime_control_lease_check_v1(lease, target, SessionRuntimeControlKindV1.Input,
+        principal, sha256_text(nonce), lease.revision, now / 1000000)?
+    Ok(session_runtime_control_target_digest_v1(target)?)
+
+pub fn container_primary_input_state_v1(session: ContainerPrimaryAttachSessionV1) -> Result<ProcessInputControlStateV1, text>:
+    if session.native_cleaned: return Err("primary-input-native-cleaned")
+    if session.adoption == nil: return Err("primary-input-not-adopted")
+    process_input_control_state_ref_v1(session.transfer.reference)
+
+pub fn container_primary_input_install_v1(session: ContainerPrimaryAttachSessionV1,
+        lease: SessionRuntimeControlLeaseV1, target: SessionRuntimeControlTargetV1,
+        principal: text, nonce: text) -> Result<(), text>:
+    val digest = primary_input_authorized_v1(session, lease, target, principal, nonce)?
+    process_input_control_install_ref_v1(session.transfer.reference, digest, lease.nonce_digest,
+        lease.revision, container_primary_input_deadline_v1(lease)?)
+
+# Revocation can only remove the exact currently observed native gate. It never
+# reconstructs a lease, grants a new revision, or substitutes a workload PID.
+pub fn container_primary_input_revoke_v1(session: ContainerPrimaryAttachSessionV1) -> Result<(), text>:
+    if session.native_cleaned: return Ok(())
+    val state = container_primary_input_state_v1(session)?
+    if not state.active: return Ok(())
+    process_input_control_revoke_ref_v1(session.transfer.reference, state.target_digest,
+        state.nonce_digest, state.revision)
+
+pub fn container_primary_input_write_v1(session: ContainerPrimaryAttachSessionV1,
+        lease: SessionRuntimeControlLeaseV1, target: SessionRuntimeControlTargetV1,
+        principal: text, nonce: text, attempt: i64, data: text, offset: i64, maximum: i64) -> ContainerPrimaryInputWriteV1:
+    val checked = primary_input_authorized_v1(session, lease, target, principal, nonce)
+    if checked.is_err(): return ContainerPrimaryInputWriteV1(ProcessInputWriteDispositionV1.Rejected, attempt, 0, checked.unwrap_err())
+    if (attempt <= 0 or attempt > 1152921504606846975 or offset < 0 or
+            offset >= data.bytes().len() or maximum < 1 or maximum > 4096):
+        return ContainerPrimaryInputWriteV1(ProcessInputWriteDispositionV1.Rejected, attempt, 0, "primary-input-range")
+    val written = process_write_stdin_some_controlled_ref_v1(session.transfer.reference,
+        checked.unwrap(), lease.nonce_digest, lease.revision, attempt, data, offset, maximum)
+    ContainerPrimaryInputWriteV1(written.disposition, written.attempt_sequence, written.accepted_bytes, written.error)
 
 pub struct ContainerPrimaryAttachAdoptionV1:
     binding_uid: text

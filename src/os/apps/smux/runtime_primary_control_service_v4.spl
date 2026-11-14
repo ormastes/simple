@@ -1,0 +1,136 @@
+# Authenticated server only. The existing issuer owns principal/right/lease
+# decisions; the common session port owns the exact native gate and write.
+use os.apps.smux.runtime_binding_state_v3.SmuxRuntimeBindingOwnerV3
+use os.apps.smux.smux_runtime_control_owner_v1.{SmuxRuntimeControlOwnerV1,
+    smux_runtime_control_find_v1, smux_runtime_control_check_v1}
+use os.apps.smux.runtime_control_service_v1.smux_runtime_control_service_v1
+use os.apps.smux.runtime_control_target_v1.smux_runtime_control_target_v1
+use os.apps.smux.runtime_primary_control_request_v4.*
+use os.apps.smux.runtime_primary_control_reply_v4.smux_primary_control_reply_v4
+use os.apps.smux.runtime_primary_input_state_v4.*
+use os.apps.smux.runtime_primary_input_sync_v4.{smux_primary_input_sync_v4, smux_primary_input_installed_v4}
+use os.apps.smux.runtime_primary_inspection_v4.primary_pane_session_v4
+use os.apps.smux.runtime_primary_state_v4.smux_primary_index_v4
+use std.nogc_async_mut.container.terminal_session_v1.*
+use std.common.process.input_control_v1.ProcessInputWriteDispositionV1
+use std.common.contracts.mux.session_runtime_control_v1.{SessionRuntimeControlKindV1,
+    session_runtime_control_target_digest_v1}
+use std.sosix.time.sosix_time_now_monotonic_ms
+
+pub struct SmuxPrimaryControlTurnV4:
+    owner: SmuxRuntimeControlOwnerV1
+    reply: text
+
+# Receipt observation uses retained adoption, not an active input right. It
+# cannot reinstall, renew, or issue authority after expiry/revocation/detach.
+pub fn smux_primary_control_refresh_v4(binding: SmuxRuntimeBindingOwnerV3,
+        owner: SmuxRuntimeControlOwnerV1, uid: text) -> SmuxRuntimeControlOwnerV1:
+    var current = owner
+    val slot = smux_primary_attempt_index_v4(current.input_attempts, uid)
+    val index = smux_primary_index_v4(binding.primary_entries, uid)
+    if slot < 0 or index < 0: return current
+    if current.input_attempts[slot].disposition != ProcessInputWriteDispositionV1.Unknown: return current
+    val borrowed = primary_pane_session_v4(binding, binding.primary_entries[index])
+    if borrowed.is_err(): return current
+    if container_primary_attach_identity_v1(borrowed.unwrap()) != current.input_attempts[slot].session_identity: return current
+    val state = container_primary_input_state_v1(borrowed.unwrap())
+    if state.is_ok(): current.input_attempts[slot] = smux_primary_attempt_reconcile_v4(current.input_attempts[slot], state.unwrap())
+    current
+
+fn primary_control_reply_v4(owner: SmuxRuntimeControlOwnerV1, request: SmuxPrimaryControlRequestV4,
+        status: text, code: text, usable: bool = false, nonce: text = "", target: text = "") -> SmuxPrimaryControlTurnV4:
+    val entry = smux_runtime_control_find_v1(owner, request.control.binding_uid, request.control.control_kind)
+    var revision: i64 = 0
+    var digest = target
+    if entry != nil:
+        revision = entry.unwrap().lease.revision
+        if digest == "": digest = session_runtime_control_target_digest_v1(entry.unwrap().lease.target) ?? ""
+    val index = smux_primary_attempt_index_v4(owner.input_attempts, request.control.binding_uid)
+    val attempt = if index < 0: nil else: Some(owner.input_attempts[index])
+    SmuxPrimaryControlTurnV4(owner, smux_primary_control_reply_v4(request, owner.service_incarnation,
+        status, code, revision, nonce, digest, usable, attempt))
+
+pub fn smux_primary_control_service_v4(binding: SmuxRuntimeBindingOwnerV3,
+        owner: SmuxRuntimeControlOwnerV1, request: SmuxPrimaryControlRequestV4) -> SmuxPrimaryControlTurnV4:
+    if smux_primary_control_request_validate_v4(request).is_err():
+        return primary_control_reply_v4(owner, request, "rejected", "primary-control-request-invalid")
+    val operation = request.control
+    if operation.control_kind != SessionRuntimeControlKindV1.Input:
+        return primary_control_reply_v4(owner, request, "unsupported", "primary-geometry-port-unavailable")
+    val refreshed = smux_primary_control_refresh_v4(binding, owner, operation.binding_uid)
+    val authorized = smux_runtime_control_service_v1(binding, refreshed, operation)
+    var current = smux_primary_input_sync_v4(binding, authorized.owner)
+    current = smux_primary_control_refresh_v4(binding, current, operation.binding_uid)
+    # Every branch returns the updated issuer and pending native-sync error.
+    # A bad bearer never retires a healthy holder; V1 preserves that invariant.
+    if authorized.status == "rejected":
+        return primary_control_reply_v4(current, request, "rejected", authorized.reason)
+    val entry = smux_runtime_control_find_v1(current, operation.binding_uid, SessionRuntimeControlKindV1.Input)
+    var usable = false
+    var target = ""
+    if operation.action == "resolve":
+        val resolved = smux_runtime_control_target_v1(binding, operation.binding_uid, operation.client_id, operation.attachment_token)
+        if resolved.is_ok(): target = session_runtime_control_target_digest_v1(resolved.unwrap().target) ?? ""
+        return primary_control_reply_v4(current, request, authorized.status, authorized.reason, false, "", target)
+    if entry == nil or not entry.unwrap().active:
+        return primary_control_reply_v4(current, request, if current.input_sync_error != "": "native-pending" else: authorized.status,
+            if current.input_sync_error != "": current.input_sync_error else: authorized.reason)
+    val holder = entry.unwrap()
+    val resolved = smux_runtime_control_target_v1(binding, operation.binding_uid,
+        holder.lease.target.client_id, holder.attachment_token)
+    if resolved.is_err() or resolved.unwrap().primary == nil:
+        return primary_control_reply_v4(current, request, "unsupported", "primary-control-session-unavailable")
+    val session = resolved.unwrap().primary.unwrap()
+    val checked = smux_runtime_control_check_v1(current, operation.binding_uid, SessionRuntimeControlKindV1.Input,
+        holder.nonce, holder.lease.revision, resolved.unwrap().target, sosix_time_now_monotonic_ms())
+    current = checked.owner
+    if checked.error != "" or checked.lease == nil:
+        current = smux_primary_input_sync_v4(binding, current)
+        return primary_control_reply_v4(current, request, "rejected", checked.error)
+    val state = container_primary_input_state_v1(session)
+    if state.is_err(): return primary_control_reply_v4(current, request, "native-pending", state.unwrap_err())
+    usable = current.input_sync_error == "" and smux_primary_input_installed_v4(state.unwrap(), checked.lease.unwrap())
+    val identity = container_primary_attach_identity_v1(session)
+    val index = smux_primary_attempt_index_v4(current.input_attempts, operation.binding_uid)
+    if index >= 0 and current.input_attempts[index].session_identity == identity:
+        current.input_attempts[index] = smux_primary_attempt_reconcile_v4(current.input_attempts[index], state.unwrap())
+    if smux_primary_input_uncertain_v4(current.input_attempts, operation.binding_uid): usable = false
+    if operation.action != "input":
+        val status = if ["issued", "replayed"].contains(authorized.status) and not usable: "issued-pending-native" else: authorized.status
+        return primary_control_reply_v4(current, request, status,
+            if current.input_sync_error != "": current.input_sync_error else: authorized.reason, usable, authorized.nonce)
+    # This is the real bearer check returned by V1, not merely the inspect path.
+    if authorized.checked == nil:
+        return primary_control_reply_v4(current, request, "rejected", "primary-input-not-authorized")
+    val digest = smux_primary_control_request_digest_v4(request)
+    if digest.is_err(): return primary_control_reply_v4(current, request, "rejected", digest.unwrap_err())
+    if index >= 0:
+        val replay = smux_primary_attempt_replay_v4(current.input_attempts[index], identity,
+            holder.lease.revision, request.attempt_sequence, digest.unwrap())
+        if replay.is_err(): return primary_control_reply_v4(current, request, "rejected", replay.unwrap_err(), usable)
+        if replay.unwrap(): return primary_control_reply_v4(current, request, "attempt-replayed", "", usable)
+    if not usable: return primary_control_reply_v4(current, request, "native-pending", current.input_sync_error)
+    if (state.unwrap().current_attempt_sequence >= 1152921504606846975 or
+            request.attempt_sequence != state.unwrap().current_attempt_sequence + 1):
+        return primary_control_reply_v4(current, request, "rejected", "primary-input-attempt-not-next", usable)
+    if index < 0 and current.input_attempts.len() >= 16:
+        return primary_control_reply_v4(current, request, "rejected", "primary-input-receipt-capacity", usable)
+    val available = operation.payload.bytes().len() - request.offset
+    val limit = if available < request.maximum: available else: request.maximum
+    # Reserve full request identity as Unknown BEFORE invoking the effect. Every
+    # return afterwards retains it, including malformed/lost native receipts.
+    var attempt = SmuxPrimaryInputAttemptV4(binding_uid: operation.binding_uid, session_identity: identity,
+        revision: holder.lease.revision, sequence: request.attempt_sequence, request_digest: digest.unwrap(),
+        target_digest: state.unwrap().target_digest, nonce_digest: holder.lease.nonce_digest,
+        expires_ns: state.unwrap().expires_monotonic_ns, requested_bytes: limit,
+        disposition: ProcessInputWriteDispositionV1.Unknown, accepted_bytes: -1, error: "primary-input-awaiting-native-receipt")
+    val slot = if index < 0: current.input_attempts.len() else: index
+    if index < 0: current.input_attempts.push(attempt)
+    else: current.input_attempts[index] = attempt
+    val written = container_primary_input_write_v1(session, checked.lease.unwrap(), resolved.unwrap().target,
+        current.policy.principal_id, operation.nonce, request.attempt_sequence, operation.payload, request.offset, request.maximum)
+    attempt.disposition = written.disposition
+    attempt.accepted_bytes = written.accepted_bytes
+    attempt.error = written.error
+    current.input_attempts[slot] = attempt
+    primary_control_reply_v4(current, request, "attempt-observed", written.error, usable)
