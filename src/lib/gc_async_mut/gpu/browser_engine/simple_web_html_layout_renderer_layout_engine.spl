@@ -1718,6 +1718,49 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             out_bh[c] = 0
             c = child_index.next_sibling[c]
             continue
+        # HTML "rendered legend": a fieldset's leading `<legend>` is not an
+        # inline box sharing a line with the content that follows. It is a
+        # shrink-to-fit block that sits ON the fieldset's top border -- its
+        # top is the fieldset's border-box top -- and the fieldset's content
+        # (after padding-top) starts below it. Chrome 159, 16px/1.5:
+        # `<fieldset><legend>ab <span>cd</span> ef</legend>zz</fieldset>` has
+        # the legend at the fieldset's y, 24 tall, and the fieldset 66 tall
+        # (24 legend + 6 padding + 24 `zz` + 10 padding + 2 border); with a
+        # 30 px image in the legend the legend is 37 and the fieldset 79.
+        # Simple laid the legend out inline, so `zz` shared its line.
+        # Scope: the legend must be the fieldset's first content; the border
+        # is still painted through the legend (no cutout).
+        if (
+            node.tag == "fieldset" and nodes[c].tag == "legend" and
+            not cst.position_absolute and cst.float_mode == 0 and
+            cy == y + st.border_t + st.pad_t and inline_x == inline_start_x
+        ):
+            val legend_intrinsic = intrinsic_text_width(nodes, styles, child_index, c, out_intrinsic_widths)
+            out_intrinsic_widths = legend_intrinsic.widths
+            var legend_w = if cst.width_px > 0:
+                css_outer_width(nodes[c], cst, cst.width_px)
+            else:
+                legend_intrinsic.width
+            if legend_w > iw:
+                legend_w = iw
+            if legend_w < 1:
+                legend_w = 1
+            val legend = layout_with_style(nodes, styles, child_index, c, ix, y, legend_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, cst)
+            out_bx = legend.bx
+            out_by = legend.by
+            out_bw = legend.bw
+            out_bh = legend.bh
+            out_wrap_starts = legend.wrap_starts
+            out_wrap_ends = legend.wrap_ends
+            out_intrinsic_widths = legend.intrinsic_widths
+            val legend_top_h = if out_bh[c] > st.border_t: out_bh[c] else: st.border_t
+            cy = y + legend_top_h + st.pad_t
+            in_inline_run = false
+            inline_line_h = 0
+            prev_margin_b = 0
+            child_count = child_count + 1
+            c = child_index.next_sibling[c]
+            continue
         if cst.position_absolute:
             val absolute_containing_h = content_height_limit + st.pad_t + st.pad_b
             val ax = absolute_child_x(nodes, styles, child_index, c, x, st, nodes[c], cst, iw, viewport_w)

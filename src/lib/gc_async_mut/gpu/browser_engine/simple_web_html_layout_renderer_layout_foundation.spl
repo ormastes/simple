@@ -1099,16 +1099,41 @@ fn style_with_width(st: Style, width_px: i32) -> Style:
     out.contain_intrinsic_h_px = st.contain_intrinsic_h_px
     out
 
+# Width an inline replaced box (img/svg/video/input/...) will take on its
+# line: its CSS width, else its `width` attribute, else the UA default box,
+# clamped by min/max-width. 0 for anything that is not an inline replaced box.
+fn inline_replaced_predicted_width(node: HNode, st: Style) -> i32:
+    if st.display != "inline" or not grid_item_is_replaced(node):
+        return 0
+    if st.width_px > 0:
+        return css_outer_width(node, st, st.width_px)
+    if st.width_px < 0:
+        return 0
+    val attr_w = parse_int(attr_value(node.attrs_raw, "width"))
+    constrained_outer_width(
+        node, st, if attr_w > 0: attr_w else: replaced_default_box_w(node.tag)
+    )
+
 fn _lay_intrinsic_text_width_inner(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, widths: [i32]) -> IntrinsicWidthResult:
     if widths[i] >= 0:
         return IntrinsicWidthResult(width: widths[i], widths: widths)
     var out_widths = widths
     var width = 0
+    # One collapsed space separates two inline items when the white space
+    # between them survives collapsing (`ab <img> ef`): it sits at neither
+    # line edge, so it has an advance. `gap_pending` remembers that the
+    # content so far ENDED in such a space; a run that STARTS with one after
+    # earlier content charges it directly. Chrome 159: `<legend>ab
+    # <code>cd</code> ef</legend>` is 63 px, and 54 without the two spaces.
+    var gap_pending = false
     var c = child_index.first_child[i]
     while c >= 0:
         if nodes[c].tag == "#text":
             val txt: text = nodes[c].text_trimmed
             if txt.len() > 0:
+                if width > 0 and (gap_pending or text_starts_with_collapsible_space(nodes[c].text_data)) and not styles[c].white_space_nowrap:
+                    width = width + resolved_space_advance(styles[c], text_codepoints(txt))
+                gap_pending = text_ends_with_collapsible_space(nodes[c].text_data) and not styles[c].white_space_nowrap
                 val resolved = styles[c].resolved_font_width
                 if resolved > 0:
                     width = width + resolved
@@ -1125,7 +1150,19 @@ fn _lay_intrinsic_text_width_inner(nodes: [HNode], styles: [Style], child_index:
         ):
             val child = intrinsic_text_width(nodes, styles, child_index, c, out_widths)
             out_widths = child.widths
-            width = width + child.width
+            # An inline REPLACED child is as wide as its own box, which the
+            # text walk never sees (it has no text). Chrome 159:
+            # `<legend>ab <img width=40> ef</legend>` is 84 px; Simple
+            # measured 35 and wrapped the image onto its own line.
+            var child_w = child.width
+            val replaced_w = inline_replaced_predicted_width(nodes[c], styles[c])
+            if replaced_w > child_w:
+                child_w = replaced_w
+            if child_w > 0:
+                if gap_pending and width > 0:
+                    width = width + style_space_advance(styles[i])
+                gap_pending = false
+            width = width + child_w
         c = child_index.next_sibling[c]
     if nodes[i].tag != "#text":
         width = width + styles[i].pad_l + styles[i].pad_r + styles[i].border_l + styles[i].border_r
