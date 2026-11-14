@@ -1,0 +1,100 @@
+"""
+## Purpose and audience
+Purpose: Pin where an inline `<button>` sits in its line. A button is an
+inline-block whose baseline is the baseline of its (last) line of text; the
+layout never put it in the line's baseline set, so it stayed at the line top:
+y = 0 in a 24 px line where Chrome has 2, and a button with a margin, a larger
+font or padding did not grow the line (`margin:10px`: line 24 where Chrome has
+41). This one defect was the largest cluster in the combination matrix (the
+`*/button` and `button/*` cells).
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless shell, 900x4000,
+`body{margin:0;font:16px/1.5 sans-serif}`, `<div p>ab <button c>…</button>
+ef</div><div n>zz</div>`, getBoundingClientRect). The button's own font is
+13.33 px with a normal line height, so values are asserted within 1 px.
+
+| button                         | line (p) h | button y, h | next block y |
+|--------------------------------|------------|-------------|--------------|
+| `cd`                           | 24         | 2, 21       | 24           |
+| `cd`, `margin:10px`            | 41         | 10, 21      | 41           |
+| `cd`, `font-size:24px`         | 34         | 0, 34       | 34           |
+| `cd`, `padding:10px`           | 39         | 0, 39       | 39           |
+| `cd`, `height:40px`            | 40         | 0, 40       | 40           |
+| empty                          | 24         | 14, 6       | 24           |
+| `cd ef gh`, `width:40px` (3 lines) | 52     | 0, 51       | 52           |
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-INLINE-BUTTON-BASELINE-001 — an inline button aligns its last text line's baseline with the line and takes part in the line box height, as in Chrome 159.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val HEAD: text = "<html><head><style>body{margin:0;font:16px/1.5 sans-serif}</style></head><body>"
+val TAIL: text = "</body></html>"
+
+fn page(button: text) -> text:
+    HEAD + "<div id=\"p\">ab " + button + " ef</div><div id=\"n\">zz</div>" + TAIL
+
+fn field(html: text, id: text, name: text) -> i32:
+    simple_web_layout_debug_layout_by_id(html, 900, 600, id, name).to_int()
+
+fn off(actual: i32, chrome: i32) -> i32:
+    if actual > chrome: actual - chrome else: chrome - actual
+
+describe "an inline button sits on the line's baseline":
+    it "AC-1: a plain button is 2 px below the top of a 24 px line":
+        step("Chrome 159: line 24, button y=2 h=21, next block at 24")
+        val html = page("<button id=\"c\">cd</button>")
+        expect(field(html, "p", "h")).to_equal(24)
+        expect(off(field(html, "c", "y"), 2)).to_be_less_than(2)
+        expect(field(html, "c", "y")).to_be_greater_than(0)
+        expect(field(html, "c", "h")).to_equal(21)
+        expect(field(html, "n", "y")).to_equal(24)
+
+    it "AC-2: the button's margins grow the line":
+        step("Chrome 159: margin:10px -> line 41, button y=10, next block at 41")
+        val html = page("<button id=\"c\" style=\"margin:10px\">cd</button>")
+        expect(off(field(html, "p", "h"), 41)).to_be_less_than(2)
+        expect(off(field(html, "c", "y"), 10)).to_be_less_than(2)
+        expect(off(field(html, "n", "y"), 41)).to_be_less_than(2)
+
+    it "AC-3: a taller button grows the line and starts at its top":
+        step("Chrome 159: font-size:24px -> line 34, button y=0 h=34")
+        val big = page("<button id=\"c\" style=\"font-size:24px\">cd</button>")
+        expect(off(field(big, "p", "h"), 34)).to_be_less_than(2)
+        expect(off(field(big, "c", "y"), 0)).to_be_less_than(2)
+        step("Chrome 159: padding:10px -> line 39, button y=0 h=39")
+        val padded = page("<button id=\"c\" style=\"padding:10px\">cd</button>")
+        expect(off(field(padded, "p", "h"), 39)).to_be_less_than(2)
+        expect(off(field(padded, "c", "y"), 0)).to_be_less_than(2)
+        expect(off(field(padded, "n", "y"), 39)).to_be_less_than(2)
+
+    it "AC-4: an explicit height centres the label and the line holds the button":
+        step("Chrome 159: height:40px -> line 40, button y=0")
+        val html = page("<button id=\"c\" style=\"height:40px\">cd</button>")
+        expect(off(field(html, "p", "h"), 40)).to_be_less_than(2)
+        expect(off(field(html, "c", "y"), 0)).to_be_less_than(2)
+
+    it "AC-5: a wrapped label aligns on its LAST line":
+        step("Chrome 159: width:40px, three label lines -> line 52, button y=0 h=51")
+        val html = page("<button id=\"c\" style=\"width:40px\">cd ef gh</button>")
+        expect(off(field(html, "c", "h"), 51)).to_be_less_than(2)
+        expect(off(field(html, "c", "y"), 0)).to_be_less_than(2)
+        expect(off(field(html, "p", "h"), 52)).to_be_less_than(2)
+
+    it "AC-6: an empty button aligns on the bottom of its content box":
+        step("Chrome 159: empty button 16x6 at y=14 in a 24 px line")
+        val html = page("<button id=\"c\"></button>")
+        expect(field(html, "p", "h")).to_equal(24)
+        expect(off(field(html, "c", "y"), 14)).to_be_less_than(2)
+
+    it "AC-7: control — a line without a button is unchanged":
+        step("`ab <b>cd</b> ef`: line 24, b at y=3")
+        val html = HEAD + "<div id=\"p\">ab <b id=\"c\">cd</b> ef</div>" + TAIL
+        expect(field(html, "p", "h")).to_equal(24)
+        expect(field(html, "c", "y")).to_equal(3)

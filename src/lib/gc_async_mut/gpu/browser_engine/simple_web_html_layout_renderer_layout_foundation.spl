@@ -349,8 +349,8 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
         val node_index = nodes[baseline_i]
         val node_style = styles[node_index]
         val node_replaced = replaced_media_bottom_edge_tag(html_nodes[node_index].tag)
-        val widget_baseline = form_control_baseline_from_top(
-            html_nodes[node_index], node_style, bh[node_index]
+        val widget_baseline = inline_widget_baseline_from_top(
+            child_index, html_nodes, styles, node_index, bh
         )
         var node_ascent = if widget_baseline >= 0:
             margin_ts[baseline_i] + widget_baseline
@@ -382,8 +382,8 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
     baseline_i = 0
     while baseline_i < nodes.len():
         val node_index = nodes[baseline_i]
-        val node_widget_baseline = form_control_baseline_from_top(
-            html_nodes[node_index], styles[node_index], bh[node_index]
+        val node_widget_baseline = inline_widget_baseline_from_top(
+            child_index, html_nodes, styles, node_index, bh
         )
         val node_baseline_offset = if node_widget_baseline >= 0:
             node_widget_baseline
@@ -969,6 +969,35 @@ fn form_control_baseline_from_top(node: HNode, st: Style, h: i32) -> i32:
         lead = 0
     st.border_t + st.pad_t + lead + inline_line_strut_baseline_offset(st)
 
+fn inline_widget_baseline_from_top(child_index: HtmlChildIndex, html_nodes: [HNode], styles: [Style], node_index: i32, bh: [i32]) -> i32:
+    """Baseline of an inline widget measured from its border-box top, or -1.
+
+    A `<button>` is an inline-block: its baseline is the baseline of its LAST
+    line of label text (Chrome 159: a three-line 51 px button sits at the top
+    of a 52 px line), the label block being centred in the content box. An
+    empty button aligns on the bottom of its content box. Every other control
+    goes through `form_control_baseline_from_top`."""
+    val node = html_nodes[node_index]
+    val st = styles[node_index]
+    val h = bh[node_index]
+    if node.tag != "button":
+        return form_control_baseline_from_top(node, st, h)
+    if st.display != "inline-block" and st.display != "inline":
+        return -1
+    var label = child_index.first_child[node_index]
+    while label >= 0 and html_nodes[label].tag != "#text":
+        label = child_index.next_sibling[label]
+    if label < 0:
+        return h - st.border_b - st.pad_b
+    val line = style_line_h(st)
+    var label_h = bh[label]
+    if label_h < line:
+        label_h = line
+    var lead = (h - st.border_t - st.border_b - st.pad_t - st.pad_b - label_h) / 2
+    if lead < 0:
+        lead = 0
+    st.border_t + st.pad_t + lead + (label_h - line) + inline_line_strut_baseline_offset(st)
+
 fn replaced_default_is_content_size(tag: text) -> bool:
     """True when the tag's UA default box is its CONTENT size.
 
@@ -1420,6 +1449,20 @@ fn _lay_intrinsic_text_width_inner(nodes: [HNode], styles: [Style], child_index:
     out_widths[i] = width
     IntrinsicWidthResult(width: width, widths: out_widths)
 
+# Outer width of an `<input>` / `<textarea>` whose `width` is auto, as the
+# layout sizes it: `size` / `cols` columns in the control's UA font plus its
+# padding and border; 13 px for a checkbox or radio. 0 for anything else.
+fn text_control_auto_outer_w(node: HNode, st: Style) -> i32:
+    if st.width_px != 0 or (node.tag != "input" and node.tag != "textarea"):
+        return 0
+    if node.tag == "input":
+        val input_type = attr_value(node.attrs_raw, "type").trim().lower()
+        if input_type == "checkbox" or input_type == "radio":
+            return constrained_outer_width(node, st, 13)
+        if input_type == "hidden":
+            return 0
+    form_control_intrinsic_content_w(node, st, form_control_cols(node)) + st.pad_l + st.pad_r + st.border_l + st.border_r
+
 # Max-content width of a flex item, used as its flex base size when it has
 # neither `flex-basis` nor a `width` (CSS: `flex-basis: content`).
 #
@@ -1431,6 +1474,10 @@ fn _lay_intrinsic_text_width_inner(nodes: [HNode], styles: [Style], child_index:
 fn _lay_flex_item_max_content_width_inner(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32) -> i32:
     var inline_run = 0
     var widest = 0
+    # A collapsible space ended the previous inline piece: it is part of the
+    # line when another piece follows (`ab <span>cd</span> ef` is three pieces
+    # and two spaces), as in `intrinsic_text_width`.
+    var gap_pending = false
     var c = child_index.first_child[i]
     while c >= 0:  # cpu-lane-loop-ok: one pass over this item's children during flex base sizing, bounded by the child list, not on any paint path
         val cst = styles[c]
@@ -1438,6 +1485,9 @@ fn _lay_flex_item_max_content_width_inner(nodes: [HNode], styles: [Style], child
         if ctag == "#text":
             val txt: text = nodes[c].text_trimmed
             if txt.len() > 0:
+                if inline_run > 0 and (gap_pending or text_starts_with_collapsible_space(nodes[c].text_data)) and not cst.white_space_nowrap:
+                    inline_run = inline_run + resolved_space_advance(cst, text_codepoints(txt))
+                gap_pending = text_ends_with_collapsible_space(nodes[c].text_data) and not cst.white_space_nowrap
                 val resolved = cst.resolved_font_width
                 if resolved > 0:
                     inline_run = inline_run + resolved
@@ -1445,17 +1495,38 @@ fn _lay_flex_item_max_content_width_inner(nodes: [HNode], styles: [Style], child
                     val glyph_w = style_char_w(cst)
                     val ink_w = if glyph_w > 1: glyph_w - 1 else: glyph_w
                     inline_run = inline_run + (text_cell_width(txt) as i32) * ink_w
+        elif ctag == "br" and cst.display == "inline":
+            # A forced break ends the line being measured.
+            if inline_run > widest:
+                widest = inline_run
+            inline_run = 0
+            gap_pending = false
         elif cst.display != "none" and cst.display != "marker":
-            val child_w = if cst.width_px > 0:
+            var child_w = if cst.width_px > 0:
                 cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r
             else:
                 flex_item_max_content_width(nodes, styles, child_index, c)
+            # A replaced inline child (img, input, ...) has an intrinsic or
+            # default width the text walk above knows nothing about.
+            val replaced_w = inline_replaced_predicted_width(nodes[c], cst)
+            if replaced_w > child_w:
+                child_w = replaced_w
+            # A text control with no `width` is as wide as its `size` / `cols`
+            # columns in its own UA font (the layout's own rule).
+            val control_w = text_control_auto_outer_w(nodes[c], cst)
+            if control_w > child_w:
+                child_w = control_w
             if cst.display == "inline" or cst.display == "inline-block":
+                if child_w > 0:
+                    if gap_pending and inline_run > 0:
+                        inline_run = inline_run + style_space_advance(styles[i])
+                    gap_pending = false
                 inline_run = inline_run + child_w
             else:
                 if inline_run > widest:
                     widest = inline_run
                 inline_run = 0
+                gap_pending = false
                 if child_w > widest:
                     widest = child_w
         c = child_index.next_sibling[c]
