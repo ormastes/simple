@@ -40,6 +40,13 @@ pub val E_ASYNC_INIT_MISSING = "E_ASYNC_INIT_MISSING"
 pub val E_ASYNC_INIT_UNSUPPORTED = "E_ASYNC_INIT_UNSUPPORTED"
 pub val E_ATTR_TYPE_CONFLICT = "E_ATTR_TYPE_CONFLICT"
 pub val E_ATTR_NOT_READY = "E_ATTR_NOT_READY"
+pub val E_INIT_CAPABILITY_ESCAPE = "E_INIT_CAPABILITY_ESCAPE"
+
+# PROVISIONAL, default off: E_INIT_CAPABILITY_ESCAPE runs only when this is "on".
+pub val INIT_CAPABILITY_ESCAPE_ENV = "SIMPLE_INIT_CAPABILITY_ESCAPE"
+
+fn init_capability_escape_enabled_v1() -> bool:
+    (env_get_opt(INIT_CAPABILITY_ESCAPE_ENV) ?? "") == "on"
 
 # Library-level async producer binding (plan section 3.1 fallback): the
 # construction argument is a call to this name. P3 replaces the name with the
@@ -228,6 +235,22 @@ class RequiredInitCollectorV1:
                 false
             case _: false
 
+    # Names of `var` locals that are direct arguments of an `async_init(...)`
+    # producer call (PROVISIONAL region definition, see the open-questions doc).
+    fn producer_mutable_locals(producer: HirExpr) -> [text]:
+        var names: [text] = []
+        match producer.kind:
+            case HirExprKind.Call(_, args, _):
+                for arg in args:
+                    val id = self.local_symbol_of(arg.value)
+                    if id >= 0:
+                        if val present = self.symbols.get_symbol_raw(id):
+                            val sym: HirSymbol = present
+                            if sym.is_mutable:
+                                names.push(sym.name)
+            case _: ()
+        names
+
     fn is_source_nil(e: HirExpr) -> bool:
         match e.kind:
             case HirExprKind.NilLit: not e.is_uninit_marker
@@ -258,6 +281,16 @@ class RequiredInitCollectorV1:
                         "declare `@support_async_immutable(\"{entry.0}\")` on `{cls.name}` to authorize deferred initialization"),
                      required_init_fix_v1("required_init:sync:{entry.0}",
                         "initialize `{entry.0}` synchronously with a value of its declared type")])
+        if init_capability_escape_enabled_v1():
+            for entry in supplied:
+                if self.is_async_binding(entry.1) and self.async_authorized(cls, entry.0):
+                    for captured in self.producer_mutable_locals(entry.1):
+                        self.report(E_INIT_CAPABILITY_ESCAPE, cls, entry.0, entry.1.span,
+                            "mutable local `{captured}` is passed to the async producer of `{cls.name}.{entry.0}`; the producer runs after this function's borrow region ends",
+                            [required_init_fix_v1("required_init:immutable:{captured}",
+                                "pass an immutable copy: `val {captured}_snapshot = {captured}` and give the producer that"),
+                             required_init_fix_v1("required_init:sync:{entry.0}",
+                                "initialize `{entry.0}` synchronously with a value of its declared type")])
         for f in cls.fields:
             if not f.required:
                 continue
