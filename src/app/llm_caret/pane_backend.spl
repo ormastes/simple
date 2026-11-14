@@ -20,7 +20,7 @@ use os.apps.smux.api.{smux_create_session, smux_list_sessions,
     smux_send_text, smux_capture, smux_capture_styled,
     smux_paste_text}
 use std.nogc_sync_mut.io.{thread_sleep_ms}
-use app.io.mod.{env_get, env_set, file_write, file_remove, dir_remove}
+use app.io.mod.{env_get, env_set, file_write, file_remove, dir_remove, process_spawn_async, process_wait}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
 use std.nogc_sync_mut.package_sffi.{set_permissions}
 
@@ -91,6 +91,26 @@ fn smux_owner_argv(exe: text, interpreter: text, client: text, owner_file: text)
     if interpreter == "":
         return Err("smux owner needs a simple interpreter: set SIMPLE_BINARY (running as " + base + ")")
     Ok([interpreter] + tail)
+
+fn powershell_quote_arg(arg: text) -> text:
+    "'" + arg.replace("'", "''") + "'"
+
+# Starts argv hidden in `dir` on Windows so that it keeps running after this
+# call returns and after this process exits. Start-Process (ShellExecute)
+# hands the new process NO handles, so a caller reading this process through
+# a pipe still sees EOF while the started process lives.
+fn start_outliving_process(dir: text, argv: [text]) -> bool:
+    # Start-Process joins -ArgumentList with spaces, so each element is double-quoted.
+    var arglist: [text] = []
+    for a in argv[1:]:
+        arglist.push(powershell_quote_arg("\"" + a + "\""))
+    val start = "Start-Process -WindowStyle Hidden -WorkingDirectory " + powershell_quote_arg(dir) +
+        " -FilePath " + powershell_quote_arg(argv[0]) + " -ArgumentList " + arglist.join(",")
+    # Not process_run*: a natively built caret runs those children in a
+    # kill-on-close job, which would take the started process down as soon as
+    # this PowerShell hop returns. A spawned child is in no job.
+    val hop = process_spawn_async("powershell", ["-NoProfile", "-NonInteractive", "-Command", start])
+    hop > 0 and process_wait(hop, 30000) == 0
 
 # POSIX shell single-quoting: 'it'\''s'.
 fn posix_quote_arg(arg: text) -> text:
@@ -579,6 +599,7 @@ export pane_parse_line, pane_parse_lines
 export pane_list_argv, pane_select_argv, pane_zoom_argv, pane_kill_argv, pane_capture_argv
 export pane_send_literal_argv, pane_send_enter_argv
 export windows_quote_arg, windows_command_line, windows_spawn_command_line, smux_owner_argv
+export start_outliving_process
 export posix_quote_arg, posix_command_line, posix_exec_line
 export posix_pane_launcher_create, posix_pane_launcher_remove
 export pane_backend_name

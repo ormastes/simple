@@ -100,3 +100,41 @@ Note on `smux_owner_argv`: it treats only `simple`/`simple.exe` as an
 interpreter. An interpreter under another file name (for example a seed copy
 `seed_fix.exe`) with `SIMPLE_BINARY` unset now gets the explicit error where it
 previously started the owner.
+
+## Defect 1 fix (2026-11-14, lane `work/native-detached-owner-20261114`)
+
+Status stays verification-pending.
+
+Why it worked interpreted: the interpreter's `rt_process_run_timeout`
+(`src/compiler_rust/compiler/src/interpreter_extern/system.rs`) spawns with
+plain `std::process::Command` and no job on Windows, so the `Start-Process`
+grandchild survives. The native C runtime's bounded run uses a kill-on-close
+job. The C `rt_process_spawn_async` (`runtime_process.c`,
+`win_process_spawn_async_owned_environment_v1`) uses no job, `CREATE_NO_WINDOW`
+and NUL std handles.
+
+Fix (no runtime change, no new extern): `start_outliving_process`
+(`src/app/llm_caret/pane_backend.spl`) issues the same PowerShell
+`Start-Process` hop through `process_spawn_async` + `process_wait` instead of
+`process_run_timeout`; `_smux_owner_up` calls it. Kill-on-close for
+`process_run*` children is untouched; POSIX is untouched (the launcher is
+Windows-only).
+
+Spec `test/01_unit/app/llm_caret/outliving_process_spec.spl`, built as a native
+executable (`native-build <spec> -o x.exe`; `test --mode=native` on the seed
+reports "Ran on the interpreter" and is not a native measurement):
+
+- before: `finishes its work after the launching call has returned fail` /
+  `1 examples, 1 failures`
+- after: `... pass` / `1 examples, 0 failures`
+- interpreted (seed at `cda4d2d059a` + this change): `Results: 1 total, 1 passed, 0 failed`
+
+Also fixed here: the seed parser rejected `else: xs[i] = v` after an inline
+`if c: <call>` (the `runtime_primary_control_service_v4.spl:131` failure that
+blocked the native caret rebuild); `build/nb/llm_caret.exe` now builds.
+
+NOT measured in this lane (free disk fell under the lane floor, 9.8 GB, before
+the system specs could run): native and interpreted
+`workspace_cli_system_spec.spl`, native `caret_cli_help_system_spec`. The
+unblock condition above is therefore still open. A native caret still needs
+`SIMPLE_BINARY` pointing at a simple interpreter.
