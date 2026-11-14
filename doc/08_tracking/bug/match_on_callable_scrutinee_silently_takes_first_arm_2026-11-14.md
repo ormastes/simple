@@ -4,7 +4,9 @@
 - **Severity:** P2 (silent wrong value)
 - **Status:** fixed (seed interpreter); JIT enum-slot residual fixed
   2026-11-14 (HIR + interpreter call boundary); nested sub-pattern and
-  `mod` unit-variant residuals fixed 2026-11-14; JIT method-call arguments open
+  `mod` unit-variant residuals fixed 2026-11-14; `mod X:` block residuals
+  (function-body visibility, `X.Pay(3)`, `X.Kind`) fixed 2026-11-14;
+  JIT method-call arguments open
 - **Found by:** PR #9002 (`e4300d7920b`), left open in
   `opencl_backend_contract_plug_notfound_and_enum_variant_class_shadow_2026-11-13.md`
 
@@ -292,6 +294,16 @@ Fix:
 - `interpreter_method/mod.rs`, Dict receiver: an `EnumVariantConstructor`
   entry is applied through `construct_enum_variant`, the arity and payload
   code factored out of the plain-call arm in `interpreter_call/mod.rs`.
+
+Census: 99 `*_spec.spl` files whose path names enum/variant/module were run
+on the base seed (sha256 `a65b2e219cfb273a`, 54940824 bytes) and the branch
+seed (`3330c3e9e96da407`, 54934504 bytes): per-file results identical 99/99
+(89 green, the same 10 not green on both). The three neighbouring specs
+(`match_nested_callable_and_mod_unit_variant`, `enum_param_rejects_callable_value`,
+`match_callable_scrutinee_no_silent_first_arm`) are 5/5, 10/10, 3/3 on both.
+Perf: an interleaved interpreter A/B of a 300k-iteration loop (typed enum
+call, payload construction, match, `dict.len()`, `dict.get`) took base
+2.40/2.72/2.09 s and branch 2.14/2.24/2.12 s, so there is no regression.
 
 Decided, not changed:
 
