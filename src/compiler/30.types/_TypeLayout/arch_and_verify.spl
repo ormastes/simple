@@ -28,7 +28,9 @@ use compiler.types.type_layout.*
 use compiler.hir.hir_types.{HirType, SymbolId}
 use compiler.hir.hir_definitions.{HirStruct, HirClass, HirField}
 use compiler.common.diagnostics.span.{Span}
-use std.common.target.{TargetArch}
+use compiler.common.mir_target_context.{MirTargetContext, mir_target_context_normalize_arch}
+use compiler.common.target_scalar_alignment.{target_scalar_alignment}
+use std.common.target.{TargetArch, parse_target_arch}
 
 
 # Platform predicate model for @platform layout variants.
@@ -381,13 +383,25 @@ pub fn reorder_fields_by_size_for_arch(fields: [HirField], arch: TargetArch) -> 
 
 # Compute struct layout for a specific architecture
 pub fn compute_struct_layout_for_arch(fields: [HirField], attr: LayoutAttr, arch: TargetArch) -> TypeLayout:
+    _compute_struct_layout_for_policy(fields, attr, arch, "", "")
+
+# Explicit target entrypoint: the architecture-only API retains its historical
+# baseline, while real compile targets also carry operating-system ABI policy.
+pub fn compute_struct_layout_for_target(fields: [HirField], attr: LayoutAttr, target: MirTargetContext) -> Result<TypeLayout, text>:
+    val arch = parse_target_arch(target.arch)
+    if arch == nil or target.arch == "host":
+        return Err("target_layout_unsupported_arch: " + target.arch)
+    val policy_arch = mir_target_context_normalize_arch(target.arch)
+    Ok(_compute_struct_layout_for_policy(fields, attr, arch.unwrap(), policy_arch, target.os))
+
+fn _compute_struct_layout_for_policy(fields: [HirField], attr: LayoutAttr, arch: TargetArch, target_arch: text, target_os: text) -> TypeLayout:
     match attr.layout_kind:
         case TypeLayoutKind.Packed:
             compute_packed_layout_for_arch(fields, arch)
         case TypeLayoutKind.C:
-            compute_c_layout_for_arch(fields, attr, arch)
+            _compute_c_layout_for_policy(fields, attr, arch, target_arch, target_os)
         case TypeLayoutKind.Transparent:
-            compute_transparent_layout_for_arch(fields, arch)
+            _compute_transparent_layout_for_policy(fields, arch, target_arch, target_os)
         case TypeLayoutKind.Simple:
             if attr.is_compactq:
                 var compact_fields = fields
@@ -395,9 +409,9 @@ pub fn compute_struct_layout_for_arch(fields: [HirField], attr: LayoutAttr, arch
                     compact_fields = reorder_fields_by_size_for_arch(fields, arch)
                 compute_packed_layout_for_arch(compact_fields, arch)
             elif attr.is_preserve_order:
-                compute_c_layout_for_arch(fields, attr, arch)
+                _compute_c_layout_for_policy(fields, attr, arch, target_arch, target_os)
             else:
-                compute_c_layout_for_arch(reorder_fields_by_size_for_arch(fields, arch), attr, arch)
+                _compute_c_layout_for_policy(reorder_fields_by_size_for_arch(fields, arch), attr, arch, target_arch, target_os)
 
 pub fn compute_packed_layout_for_arch(fields: [HirField], arch: TargetArch) -> TypeLayout:
     var field_layouts: [FieldLayout] = []
@@ -429,6 +443,9 @@ pub fn compute_packed_layout_for_arch(fields: [HirField], arch: TargetArch) -> T
     )
 
 pub fn compute_c_layout_for_arch(fields: [HirField], attr: LayoutAttr, arch: TargetArch) -> TypeLayout:
+    _compute_c_layout_for_policy(fields, attr, arch, "", "")
+
+fn _compute_c_layout_for_policy(fields: [HirField], attr: LayoutAttr, arch: TargetArch, target_arch: text, target_os: text) -> TypeLayout:
     var field_layouts: [FieldLayout] = []
     var offset: i64 = 0
     var max_align: i64 = 1
@@ -442,7 +459,7 @@ pub fn compute_c_layout_for_arch(fields: [HirField], attr: LayoutAttr, arch: Tar
     for raw_field in fields:
         val field: HirField = raw_field
         val size = size_of_type_for_arch(field.type_, arch)
-        val align = align_of_type_for_arch(field.type_, arch)
+        val align = target_scalar_alignment(type__to_text(field.type_), target_arch, target_os, align_of_type_for_arch(field.type_, arch))
 
         if align > max_align:
             max_align = align
@@ -518,12 +535,15 @@ pub fn compute_c_layout_for_arch(fields: [HirField], attr: LayoutAttr, arch: Tar
     )
 
 pub fn compute_transparent_layout_for_arch(fields: [HirField], arch: TargetArch) -> TypeLayout:
+    _compute_transparent_layout_for_policy(fields, arch, "", "")
+
+fn _compute_transparent_layout_for_policy(fields: [HirField], arch: TargetArch, target_arch: text, target_os: text) -> TypeLayout:
     if fields.len() != 1:
-        return compute_c_layout_for_arch(fields, layoutattr_default_(), arch)
+        return _compute_c_layout_for_policy(fields, layoutattr_default_(), arch, target_arch, target_os)
 
     val field = fields[0]
     val size = size_of_type_for_arch(field.type_, arch)
-    val align = align_of_type_for_arch(field.type_, arch)
+    val align = target_scalar_alignment(type__to_text(field.type_), target_arch, target_os, align_of_type_for_arch(field.type_, arch))
     var field_bits_width: i64 = 0
     if field.has_bits_attr:
         field_bits_width = field.bits_width
