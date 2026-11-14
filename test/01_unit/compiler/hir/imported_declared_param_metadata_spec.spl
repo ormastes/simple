@@ -31,6 +31,20 @@ fn declared_params_fixture() -> HirModule:
     expect(lowering.errors.len()).to_equal(0)
     hir
 
+fn declared_params_generic_trait_fixture() -> HirModule:
+    val logger = Logger(level: 0)
+    val provider = "pub trait Emit<T>:\n    fn emit(value: T):\n        pass\n    fn marker() -> i64\n\npub class Concrete:\n    handle: i64\n\nimpl Emit<i64> for Concrete:\n    fn marker() -> i64:\n        0\n"
+    # Ambient same-name T must not impersonate the trait's declaration binder.
+    val consumer = "struct T:\n    decoy: i64\nuse params.traits.\{Concrete\}\nfn main() -> i64:\n    0\n"
+    var modules: Dict<text, ParserModule> = {}
+    modules["params.traits"] = parse_full_frontend(provider, "params.traits", "params.traits", logger)
+    val surfaces = module_surfaces_from_modules(modules, [SourceFile(path: "params/traits.spl", content: provider, module_name: "params.traits")])
+    expect(surfaces.is_ok()).to_equal(true)
+    var lowering = hirlowering_for_module("params.consumer", surfaces.unwrap())
+    val hir = lowering.lower_module(parse_full_frontend(consumer, "params.consumer", "params.consumer", logger))
+    expect(lowering.errors.len()).to_equal(0)
+    hir
+
 fn check_declared_params(hir: HirModule):
     val id = hir.symbols.lookup_or_invalid("params.owner.Builder::emit_const_float")
     expect(id.is_valid()).to_equal(true)
@@ -110,3 +124,11 @@ describe "imported callable declared parameter metadata":
             case F64: true
             case _: false
         expect(float_parameter).to_equal(true)
+
+    it "does not borrow an ambient type for an uninstantiated generic trait binder":
+        val hir = declared_params_generic_trait_fixture()
+        val id = hir.symbols.lookup_or_invalid("params.traits.Concrete::emit")
+        expect(id.is_valid()).to_equal(true)
+        val symbol: HirSymbol = hir.symbols.get_symbol(id).unwrap()
+        expect(symbol.type_ == nil).to_equal(true)
+        expect(symbol.declared_param_types_v1 == nil).to_equal(true)

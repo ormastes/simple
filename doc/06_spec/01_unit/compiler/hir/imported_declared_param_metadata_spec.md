@@ -16,5 +16,8 @@ Status: authored, UNRUN with the changed compiler. Codec generation alone passed
 5. Exercise the separate direct free-call resolver with nominal and f64 declared
    parameters while its return type remains absent.
 
+6. Reject generic-trait parameter metadata even for a nongeneric implementor; an
+   ambient same-name type must not substitute for the declaring trait binder.
+
 Public tracing, bootstrap admission, inferred return types and instantiated generic
 callable ABI qualification are not established by these scenarios.
