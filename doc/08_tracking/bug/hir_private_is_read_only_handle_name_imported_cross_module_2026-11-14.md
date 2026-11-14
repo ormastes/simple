@@ -1,7 +1,7 @@
 # `is_read_only_handle_name` is private but imported by two other HIR modules
 
 Bug ID: `hir_private_is_read_only_handle_name_imported_cross_module_2026-11-14`
-Severity: P1 (every seed spec that loads HIR lowering fails at load). Status: open.
+Severity: P1 (every seed spec that loads HIR lowering fails at load). Status: fixed (`pub fn`, this change).
 Layer: `20.hir`.
 
 ## Symptom
@@ -31,3 +31,13 @@ seed staleness; a Stage 2 built from this tip should meet the same rule.
 ## Fix
 
 Mark it `pub fn is_read_only_handle_name` (or export it), then re-run the three specs above.
+
+## Fix (2026-11-14)
+
+`hir_lowering/types.spl:45` is now `pub fn is_read_only_handle_name`. The seed's rule
+(`check_private_call_visibility`, `interpreter_module/module_loader.rs`) lets a private fn be
+called from the same directory, so `statements.spl` was fine; the caller in the `_Items/`
+subdirectory was the one refused.
+
+Seed `simple-covexpr-20261114/build/seed-base/simple`, at `3a99130752c`:
+`nil_unit_type_spec` 4 of 6 before, 6 of 6 after; `contextual_enum_payload_spec` 25 of 25 after.
