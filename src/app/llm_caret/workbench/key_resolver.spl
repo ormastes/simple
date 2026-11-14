@@ -1,0 +1,121 @@
+# Caret TUI workbench key resolver (REQ-CARET-UI-004, CU-005; plan 6.1-6.4).
+#
+# Pure: resolve_key(leader, state, key, focus) -> KeyResolution. Decides, per
+# key event, whether the key is a workbench action, bytes for the focused
+# pane's CLI (forwarded byte-for-byte), a widget-navigation key, or consumed.
+# Decoding raw input into KeyEvent (chunk boundaries, ambiguous-prefix
+# timeout) belongs to the input decoder, not here.
+
+use app.llm_caret.workbench.leader_keys.{LeaderState, LeaderAction,
+    LeaderOutcome, leader_step_with, LEADER_KEY}
+
+# A decoded key: normalized name ("ctrl+g", "a", "f10") plus the exact bytes
+# the terminal sent for it (kept so forwarding is byte-for-byte).
+struct KeyEvent:
+    name: text
+    bytes: [u8]
+
+enum KeyFocus:
+    # Native CLI pane: every non-leader key is raw CLI input.
+    TerminalSurface
+    # Native widget view: Tab/arrows etc. navigate widgets.
+    NativeView
+    # Modal/overlay active: keys go to the overlay, not the CLI.
+    Overlay
+
+enum KeyRouteKind:
+    # Send `bytes` to the focused pane's PTY.
+    Forward
+    # Run workbench action `action` (slot for PinnedSlot).
+    Action
+    # Leader swallowed; waiting for the chord (or nothing to forward here).
+    Consume
+    # Not terminal-bound: the focused widget/overlay handles `key`.
+    Widget
+
+struct KeyRoute:
+    kind: KeyRouteKind
+    action: LeaderAction
+    slot: i64
+    bytes: [u8]
+
+struct KeyResolution:
+    state: LeaderState
+    route: KeyRoute
+
+fn key_event(name: text, bytes: [u8]) -> KeyEvent:
+    KeyEvent(name: name, bytes: bytes)
+
+# Leader name from a user setting: empty or unsupported -> default ctrl+g.
+fn resolve_leader_name(raw: text) -> text:
+    val lowered = raw.trim().lower()
+    if lowered == "f10":
+        return "f10"
+    if lowered.len() == 6 and lowered.starts_with("ctrl+"):
+        val letter = lowered.slice(5, 6)
+        if "abcdefghijklmnopqrstuvwxyz".contains(letter):
+            return lowered
+    LEADER_KEY
+
+# Bytes a terminal sends for the leader (for literal-leader / unknown chord).
+fn leader_bytes(leader: text) -> [u8]:
+    if leader == "f10":
+        return [27, 91, 50, 49, 126]
+    val letters = "abcdefghijklmnopqrstuvwxyz"
+    var i = 0
+    while i < 26:
+        if leader == "ctrl+" + letters.slice(i, i + 1):
+            return [i + 1]
+        i = i + 1
+    [7]
+
+fn _route(kind: KeyRouteKind, action: LeaderAction, slot: i64, bytes: [u8]) -> KeyRoute:
+    KeyRoute(kind: kind, action: action, slot: slot, bytes: bytes)
+
+fn _resolution(state: LeaderState, route: KeyRoute) -> KeyResolution:
+    KeyResolution(state: state, route: route)
+
+# Concatenate leader bytes then key bytes, in order.
+fn _leader_then(leader: text, key: KeyEvent) -> [u8]:
+    var out: [u8] = leader_bytes(leader)
+    for b in key.bytes:
+        out.push(b)
+    out
+
+fn resolve_key(leader: text, state: LeaderState, key: KeyEvent, focus: KeyFocus) -> KeyResolution:
+    val out = leader_step_with(leader, state, key.name)
+    val terminal = focus == KeyFocus.TerminalSurface
+    if out.action == LeaderAction.PassThrough:
+        if terminal:
+            return _resolution(out.state, _route(KeyRouteKind.Forward, out.action, 0, key.bytes))
+        return _resolution(out.state, _route(KeyRouteKind.Widget, out.action, 0, key.bytes))
+    if out.action == LeaderAction.AwaitingChord:
+        return _resolution(out.state, _route(KeyRouteKind.Consume, out.action, 0, []))
+    if out.action == LeaderAction.LiteralLeader:
+        if terminal:
+            return _resolution(out.state, _route(KeyRouteKind.Forward, out.action, 0, leader_bytes(leader)))
+        return _resolution(out.state, _route(KeyRouteKind.Consume, out.action, 0, []))
+    if out.action == LeaderAction.PassThroughChord:
+        if terminal:
+            return _resolution(out.state, _route(KeyRouteKind.Forward, out.action, 0, _leader_then(leader, key)))
+        return _resolution(out.state, _route(KeyRouteKind.Consume, out.action, 0, []))
+    _resolution(out.state, _route(KeyRouteKind.Action, out.action, out.slot, []))
+
+# 1-based agent number a leader action selects (0 = not a selection, or no
+# such agent). `selected` is the current 0-based index, -1 when none.
+fn leader_switch_target(action: LeaderAction, slot: i64, selected: i64, count: i64) -> i64:
+    if count <= 0:
+        return 0
+    if action == LeaderAction.NextAgent:
+        if selected < 0:
+            return 1
+        return (selected + 1) % count + 1
+    if action == LeaderAction.PrevAgent:
+        if selected < 0:
+            return count
+        return (selected + count - 1) % count + 1
+    if action == LeaderAction.PinnedSlot and slot <= count:
+        return slot
+    0
+
+export KeyEvent, KeyFocus, KeyRouteKind, KeyRoute, KeyResolution, key_event, resolve_leader_name, leader_bytes, resolve_key, leader_switch_target
