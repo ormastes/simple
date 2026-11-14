@@ -11,6 +11,20 @@ use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 use crate::CompileError;
 
+/// Type of an imported module global declared without an annotation, for the
+/// scalar literal initializers the declaring module also infers
+/// (`module_pass.rs`, `Node::Let` / `Node::Static`). Both sides must agree: the
+/// declaring module stores a raw i64/bool word for these, and an importer that
+/// types the same global ANY reads that word as a tagged value (200 -> 25).
+fn unannotated_literal_global_type(value: Option<&Expr>) -> TypeId {
+    match value {
+        Some(Expr::Bool(_)) => TypeId::BOOL,
+        Some(Expr::String(_)) | Some(Expr::FString { .. }) => TypeId::STRING,
+        Some(expr) if super::module_lowering::try_const_eval(expr).is_some() => TypeId::I64,
+        _ => TypeId::ANY,
+    }
+}
+
 /// Read + parse an imported module, memoized per process.
 ///
 /// The memo itself is `module_cache::PARSED_SOURCE_CACHE`, which the
@@ -664,7 +678,7 @@ impl Lowerer {
                         let ty = if let Some(ref t) = static_stmt.ty {
                             self.resolve_type(t).unwrap_or(TypeId::ANY)
                         } else {
-                            TypeId::ANY
+                            unannotated_literal_global_type(Some(&static_stmt.value))
                         };
                         self.globals.insert(static_stmt.name.clone(), ty);
                         imported_count += 1;
@@ -697,7 +711,7 @@ impl Lowerer {
                             } else if let Some(t) = Self::extract_pattern_type(&let_stmt.pattern) {
                                 self.resolve_type(t).unwrap_or(TypeId::ANY)
                             } else {
-                                TypeId::ANY
+                                unannotated_literal_global_type(let_stmt.value.as_ref())
                             };
                             self.globals.insert(n, ty);
                             imported_count += 1;
@@ -2056,6 +2070,50 @@ fn available(backend: SelectedBackend) -> bool:
         assert!(lowered.imported_function_names.contains("public_api"));
         assert!(lowered.globals.iter().any(|(name, _)| name == "public_value"));
         assert!(!lowered.globals.iter().any(|(name, _)| name == "_yield_cache"));
+    }
+
+    /// An unannotated module `val` must have the SAME global type in an
+    /// importer as in its declaring module. The declaring module infers i64 /
+    /// bool / text from the literal and stores the raw word; an importer that
+    /// typed it ANY read that raw word as a tagged RuntimeValue, so native
+    /// `val CAP = 200` arrived as 25 (200 >> 3) — devhub history truncated at
+    /// 25 rows (devhub_native_sqlcipher_history_truncated_at_25_rows_2026-11-14).
+    #[test]
+    fn imported_unannotated_literal_val_keeps_declaring_module_type() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        fs::write(
+            src.join("limits.spl"),
+            "val UNTYPED_CAP = 200\nval DERIVED_CAP = 8 * 25\nval ENABLED = true\nval LABEL = \"cap\"\nstatic STATIC_CAP = 200\n",
+        )
+        .unwrap();
+        let main_path = src.join("main.spl");
+        fs::write(
+            &main_path,
+            "use limits.{UNTYPED_CAP, DERIVED_CAP, ENABLED, LABEL, STATIC_CAP}\nfn clamp(x: i64) -> i64:\n    if x > UNTYPED_CAP:\n        return UNTYPED_CAP\n    x\n",
+        )
+        .unwrap();
+
+        let source = crate::read_trace::rts(file!(), line!(), &main_path).unwrap();
+        let ast = Parser::new(&source).parse().expect("parse failed");
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+        let lowered = Lowerer::with_module_resolver(resolver, main_path)
+            .lower_module(&ast)
+            .expect("HIR lowering should succeed");
+
+        let global_type = |wanted: &str| {
+            lowered
+                .globals
+                .iter()
+                .find(|(name, _)| name == wanted)
+                .map(|(_, ty)| *ty)
+                .unwrap_or_else(|| panic!("{wanted} must be an importer global"))
+        };
+        assert_eq!(global_type("UNTYPED_CAP"), TypeId::I64);
+        assert_eq!(global_type("DERIVED_CAP"), TypeId::I64);
+        assert_eq!(global_type("ENABLED"), TypeId::BOOL);
+        assert_eq!(global_type("LABEL"), TypeId::STRING);
+        assert_eq!(global_type("STATIC_CAP"), TypeId::I64);
     }
 
     #[test]

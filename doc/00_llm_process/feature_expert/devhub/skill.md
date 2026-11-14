@@ -258,3 +258,16 @@ process that checks method, target, headers and body per scripted row. Survey an
 - Only the last failed `expect` in an `it` is printed. Check the emulator log before
   concluding which one failed.
 - Real gh reaches the emulator through `GH_HOST=github.localhost` plus `HTTP_PROXY`.
+
+## Native messenger reads: two fixed defects (2026-11-14)
+
+- Native history stopped at 25 rows because the clamp constant
+  `MESSENGER_DEFAULT_MAX_READ_BATCH` (unannotated `val = 200`, imported) was read as
+  200 >> 3. General seed defect: any unannotated integer `val` imported across modules.
+  Fixed in `hir/lower/import_loader.rs`; the b-tree was never at fault.
+  [bug](../../../08_tracking/bug/devhub_native_sqlcipher_history_truncated_at_25_rows_2026-11-14.md)
+- Native reported a missing store as `corrupt-source` because C `rt_file_read_bytes`
+  returned raw 0 instead of nil.
+  [bug](../../../08_tracking/bug/devhub_native_missing_store_reported_as_corrupt_source_2026-11-14.md)
+- Native-build needs llvm-mingw's `bin` first on PATH; the llvm-msvc activation script
+  makes the link fail on `libclang_rt.builtins.a`.
