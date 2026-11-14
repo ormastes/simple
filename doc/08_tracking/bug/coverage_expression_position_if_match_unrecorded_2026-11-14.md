@@ -1,9 +1,28 @@
 # Coverage: `if` / `match` in expression position is counted but never recorded (2026-11-14)
 
-**Status:** OPEN. **Area:** seed coverage collector
-(`src/compiler_rust/compiler/src/interpreter/coverage_helpers.rs`, `record_node_coverage`,
-called from `block_exec.rs:336` and `node_exec.rs:435`) versus the module report's
-denominator (`src/lib/common/coverage_module_report.spl`, `_cov_is_recordable`).
+**Status:** CLOSED — stale seed; already fixed by PR #9041 (`5667a9d4240`, "record tail
+match/if and one-line if/else lines"). Everything below was measured on the stale seed
+`simple-dynlib-20261113`, which predates #9041.
+
+## Resolution (re-measured 2026-11-14)
+
+On the seed `simple-covexpr-20261114/build/seed-base/simple` (built from release
+`6a71372cabc`, which contains #9041), with one `SIMPLE_COVERAGE=1` artifact per spec of
+the `work/stage3-mir-let-payload-20261114` branch:
+
+```
+<seed> spl-coverage module --min 90 --file 1.sdn ... --file 5.sdn \
+    src/compiler/50.mir/_MirLoweringExpr/enum_constructor_payload.spl
+coverage-module: ... lines=100.0% (237/237) decisions=85.3% (70/82 both outcomes) ...
+```
+
+Every expression-position header listed below is recorded. The 82.2% figure was an
+artifact of the old collector, not a property of the module or the report. Nothing in
+"Fix options" is needed. The one unrelated observation at the end ("Also seen while
+probing") was not re-checked and stays unverified.
+
+## Original report (stale seed)
+
 
 ## Symptom
 

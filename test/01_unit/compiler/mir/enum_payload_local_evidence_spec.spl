@@ -443,6 +443,55 @@ describe "enum payload construction from source":
         expect(_has(_errors(head + "    E.D({{1: 2}})\n"), "enum payload dictionary key type mismatch")).to_equal(true)
         expect(_has(_errors(head + "    E.D({{\"a\": \"b\"}})\n"), "enum payload dictionary value type mismatch")).to_equal(true)
 
+    it "checks a later dict literal entry, not only the first":
+        val head = "enum E:\n    D(d: Dict<text, i64>)\nfn mk() -> E:\n"
+        expect(_has(_errors(head + "    E.D({{\"a\": 1, \"b\": \"c\"}})\n"), "enum payload dictionary value type mismatch")).to_equal(true)
+        expect(_has(_errors(head + "    E.D({{\"a\": 1, 2: 3}})\n"), "enum payload dictionary key type mismatch")).to_equal(true)
+
+    it "checks a typed variable dict value by its declared type":
+        val head = "enum E:\n    D(d: Dict<text, i64>)\nfn mk() -> E:\n"
+        expect(_has(_errors(head + "    val x: text = \"b\"\n    E.D({{\"a\": x}})\n"), "enum payload dictionary value type mismatch")).to_equal(true)
+
+    it "refuses a nested dict value element of another type":
+        val head = "enum E:\n    L(xs: Dict<text, [f64]>)\nfn mk() -> E:\n"
+        expect(_has(_errors(head + "    E.L({{\"a\": [\"x\"]}})\n"), "payload type mismatch at 0")).to_equal(true)
+
+    it "keeps nil out of a non-optional dict literal value":
+        val head = "enum E:\n    D(d: Dict<text, i64>)\nfn mk() -> E:\n"
+        expect(_has(_errors(head + "    E.D({{\"a\": nil}})\n"), "enum payload dictionary nil entry into non-optional slot")).to_equal(true)
+        expect(_has(_errors(head + "    unsafe:\n        E.D({{\"a\": nil}})\n"), "enum payload dictionary nil entry into non-optional slot")).to_equal(true)
+        expect(_has(_errors(head + "    E.D({{\"a\": 1, \"b\": {{\"c\": nil}}}})\n"), "payload type mismatch at 0")).to_equal(true)
+
+    it "keeps nil out of a non-optional dict literal key":
+        val head = "enum E:\n    D(d: Dict<text, i64>)\nfn mk() -> E:\n"
+        expect(_has(_errors(head + "    E.D({{nil: 1}})\n"), "enum payload dictionary nil entry into non-optional slot")).to_equal(true)
+
+    it "keeps nil out of a nested non-optional dict literal value":
+        val head = "enum E:\n    M(m: Dict<text, Dict<text, i64>>)\nfn mk() -> E:\n"
+        expect(_errors(head + "    E.M({{\"a\": {{\"b\": 1}}}})\n").len()).to_equal(0)
+        expect(_has(_errors(head + "    E.M({{\"a\": {{\"b\": nil}}}})\n"), "enum payload dictionary nil entry into non-optional slot")).to_equal(true)
+
+    it "takes None, and nil only inside unsafe, for an optional dict entry":
+        val head = "enum E:\n    O(o: Dict<text, i64?>)\nfn mk() -> E:\n"
+        expect(_errors(head + "    E.O({{\"a\": None}})\n").len()).to_equal(0)
+        expect(_errors(head + "    unsafe:\n        E.O({{\"a\": nil}})\n").len()).to_equal(0)
+        expect(_has(_errors(head + "    E.O({{\"a\": nil}})\n"), "enum payload dictionary value type mismatch")).to_equal(true)
+
+    it "keeps None out of a non-optional dict literal value":
+        val head = "enum E:\n    D(d: Dict<text, i64>)\nfn mk() -> E:\n"
+        expect(_has(_errors(head + "    E.D({{\"a\": None}})\n"), "payload type mismatch at 0")).to_equal(true)
+
+    it "refuses a dict literal in a scalar slot":
+        val head = "enum E:\n    N(n: i64)\nfn mk() -> E:\n"
+        expect(_has(_errors(head + "    E.N({{\"a\": 1}})\n"), "payload type mismatch at 0")).to_equal(true)
+
+    it "refuses an optional dict local in a non-optional dict slot and names the unwrap":
+        val head = "enum E:\n    D(d: Dict<text, i64>)\nfn mk() -> E:\n"
+        expect(_has(_errors(head + "    val d: Dict<text, i64>? = None\n    E.D(d)\n"), "unwrap it first")).to_equal(true)
+
+    it "accepts a float array dict value in a float array dict slot":
+        val head = "enum E:\n    L(xs: Dict<text, [f64]>)\nfn mk() -> E:\n"
+        expect(_errors(head + "    E.L({{\"a\": [1.5]}})\n").len()).to_equal(0)
     it "accepts a tuple literal and refuses nil for a tuple or unit slot":
         val head = "enum E:\n    V(p: (i64, text))\n    U(u: ())\nfn mk() -> E:\n"
         expect(_errors(head + "    E.V((1, \"a\"))\n").len()).to_equal(0)

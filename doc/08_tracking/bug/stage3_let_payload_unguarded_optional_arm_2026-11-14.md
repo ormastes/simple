@@ -87,13 +87,15 @@ for this) and `contextual_enum_payload_spec`, `nil_singleton_type_pipeline_spec`
 `enum_payload_value_shapes_spec`, `nested_optional_text_nil_pattern_spec`:
 
 - before: 30.0% (69/230) from the first spec alone, 48.6% (112/230) with the neighbours;
-- after: **82.2% lines (190/231)**, decisions 87.6%, outcomes 93.8%. The three specs of
-  this change reach the same 190 on their own.
-
-90% is not reachable for this module with the current collector: the 41 missed lines are
-all `if` / `match` headers in expression position, which the collector never records
-(`coverage_expression_position_if_match_unrecorded_2026-11-14.md`, with the line list and
-the per-line proof of execution). Every line the collector can record is hit.
+- after, on a stale seed (`simple-dynlib-20261113`): 82.2% lines (190/231). That figure was
+  the old collector, which did not record expression-position `if` / `match` headers; PR
+  #9041 had already fixed it (`coverage_expression_position_if_match_unrecorded_2026-11-14.md`,
+  now closed).
+- after, re-measured on the current seed (`simple-covexpr-20261114/build/seed-base/simple`,
+  release `6a71372cabc`), five artifacts (the three new specs, `contextual_enum_payload_spec`,
+  `nil_singleton_type_pipeline_spec`), module including the dict-entry nil veto:
+  **100.0% lines (237/237)**, decisions 85.3% (70/82), outcomes 92.6%.
+  `enum_payload_local_evidence_spec` alone reaches 94.9% (225/237).
 
 Branches that source cannot reach and are driven directly on a `MirLowering` instead:
 a settled dict key or value ascription (HIR never writes one on a `DictLit`), a fixed-size

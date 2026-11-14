@@ -824,7 +824,11 @@ plain parameters still accept the same value silently. Red/green in about 30 s o
   (`test/01_unit/compiler/mir/enum_payload_local_evidence_spec.spl`). Add temps to
   `lowering.builder` inline in the `it` body: a lowering passed to a helper function is not
   updated in the caller. Private free functions come in through the module's wildcard import.
-- The seed collector never records an `if` / `match` in expression position (function tail,
-  match-arm tail), but the report counts those lines. This module tops out at 82.2% with
-  every recordable line hit. Record:
-  `doc/08_tracking/bug/coverage_expression_position_if_match_unrecorded_2026-11-14.md`.
+- Measure coverage on a seed that contains PR #9041. An older seed does not record an
+  `if` / `match` in expression position and made this module look capped at 82.2%; on the
+  current seed it is 100.0% (237/237) lines. Check the seed's base commit before believing a
+  coverage ceiling.
+- The per-entry check in `lower_dict_lit` reads nil's I64 carrier as an integer, so a dict
+  literal payload vetoes a `nil` key or value unless the declared entry type is optional or
+  `Nil` (`enum_payload_dict_entry_nil_vetoed`). A top-level `E.N(nil)` into an `i64` slot is
+  still accepted; see `doc/08_tracking/bug/enum_payload_nil_into_scalar_slot_accepted_2026-11-14.md`.

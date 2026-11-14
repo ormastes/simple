@@ -55,6 +55,19 @@ fn enum_payload_dict_key_is_ascribed(annotated_key: HirType) -> bool:
         case _: ()
     true
 
+# A nil key or value in a dict literal payload needs a declared optional
+# (or nil-singleton) entry type. The entry check alone would take nil's
+# I64 carrier as an integer, so an inline literal must not be the way nil
+# reaches a non-optional scalar slot (never widen nil).
+fn enum_payload_dict_entry_nil_vetoed(expected: HirType, expression: HirExpr) -> bool:
+    match expression.kind:
+        case HirExprKind.NilLit: ()
+        case _: return false
+    match expected.kind:
+        case HirTypeKind.Optional(_) | HirTypeKind.Nil: return false
+        case _: ()
+    true
+
 # Veto only source NilLit values that occupy declared Unit leaves. This
 # closes stale whole-tuple metadata without granting new payload acceptance.
 fn enum_payload_nested_unit_nil_veto_v1(expected: HirType, expression: HirExpr) -> bool:
@@ -322,6 +335,11 @@ impl MirLowering:
                         if val annotated = annotated_value:
                             if not enum_payload_types_alias_compatible(value_type, annotated, self.symbols):
                                 self.error_fatal("enum payload dictionary value annotation mismatch", Some(expression.span))
+                                return self.builder.emit_const_int(0)
+                        for entry in entries:
+                            val (key_expr, value_expr) = entry
+                            if enum_payload_dict_entry_nil_vetoed(key_type, key_expr) or enum_payload_dict_entry_nil_vetoed(value_type, value_expr):
+                                self.error_fatal("enum payload dictionary nil entry into non-optional slot; use an optional entry type", Some(expression.span))
                                 return self.builder.emit_const_int(0)
                         val local = self.lower_dict_lit(entries, Some(key_type), Some(value_type))
                         if self.errors.len() == errors_before:
