@@ -869,6 +869,35 @@ match value:
     case _("all remaining values use the fallback label"): "other"
 ```
 
+### No Arm Matched Is an Error
+
+A `match` whose scrutinee matches **no arm fails at runtime** — as a statement
+and as an expression alike (owner decision 2026-11-14). It never silently does
+nothing. An arm whose guard is false does not count as matched.
+
+```text
+match n:            # n == 7
+    case 1: print "one"
+    case 2: print "two"
+# error: invalid pattern: match statement exhausted without matching any
+#        pattern for i64 value 7; arms [...]
+```
+
+Say what you mean instead: add the missing arm, or an explicit catch-all when
+doing nothing is really the intent.
+
+```text
+match n:
+    case 1: print "one"
+    case _: pass    # explicit: every other value is ignored on purpose
+```
+
+Seed interpreter: error names the scrutinee type, value, source location and
+arms. Seed JIT/native: `rt_panic` with the same wording and the match line,
+then abort. The pure-Simple core interpreter still warns by default and aborts
+only under the `critical` profile (`doc/07_guide/language/strictness_tiers.md`);
+see `doc/08_tracking/bug/match_statement_no_arm_silent_noop_2026-11-14.md`.
+
 ### Pattern Guards
 
 ```text

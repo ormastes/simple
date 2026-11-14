@@ -441,22 +441,10 @@ pub(super) fn eval_control_expr(
                     return Ok(Some(result));
                 }
             }
-            let ctx = ErrorContext::new()
-                .with_code(codes::INVALID_PATTERN)
-                .with_help("add a wildcard pattern (_) or another pattern to handle this case");
-            let arm_patterns = arms
-                .iter()
-                .map(|arm| format!("{}:{} {:?}", arm.span.line, arm.span.column, arm.pattern))
-                .collect::<Vec<_>>()
-                .join(", ");
-            Err(CompileError::semantic_with_context(
-                format!(
-                    "invalid pattern: match expression exhausted without matching any pattern for {} value {}; arms [{}]",
-                    subject_val.type_name(),
-                    subject_val.to_display_string(),
-                    arm_patterns
-                ),
-                ctx,
+            Err(crate::interpreter::interpreter_control::match_no_arm_error(
+                "expression",
+                &subject_val,
+                arms,
             ))
         }
         Expr::DoBlock(nodes) => {

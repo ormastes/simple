@@ -19,6 +19,10 @@ fn body_produces_value(body: &[HirStmt]) -> bool {
     fn stmt_produces_value(stmt: &HirStmt) -> bool {
         match stmt {
             HirStmt::Return(Some(_)) => true,
+            // The "no arm matched" tail of a statement match diverges; it
+            // must not turn a procedural body into a value-returning one
+            // (it stands where a missing `else` used to be).
+            HirStmt::Expr(expr) if expr.is_match_exhausted_panic() => false,
             HirStmt::Expr(expr) => expr.ty != TypeId::VOID,
             HirStmt::If {
                 then_block,

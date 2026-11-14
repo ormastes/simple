@@ -5750,8 +5750,33 @@ pub(crate) fn exec_match_core(
         }
     }
 
-    // No arm matched
-    Ok((Control::Next, None))
+    // No arm matched: a match STATEMENT fails closed exactly like a match
+    // expression (owner decision 2026-11-14) instead of silently doing nothing.
+    Err(match_no_arm_error("statement", &subject, &match_stmt.arms))
+}
+
+/// The single "no arm matched" runtime error for both match forms. `form` is
+/// `"statement"` or `"expression"`; the message names the scrutinee's type and
+/// value plus every arm's location and pattern.
+pub(crate) fn match_no_arm_error(form: &str, subject: &Value, arms: &[simple_parser::ast::MatchArm]) -> CompileError {
+    let ctx = crate::error::ErrorContext::new()
+        .with_code(crate::error::codes::INVALID_PATTERN)
+        .with_help("add a wildcard pattern (_) or another pattern to handle this case");
+    let arm_patterns = arms
+        .iter()
+        .map(|arm| format!("{}:{} {:?}", arm.span.line, arm.span.column, arm.pattern))
+        .collect::<Vec<_>>()
+        .join(", ");
+    CompileError::semantic_with_context(
+        format!(
+            "invalid pattern: match {} exhausted without matching any pattern for {} value {}; arms [{}]",
+            form,
+            subject.type_name(),
+            subject.to_display_string(),
+            arm_patterns
+        ),
+        ctx,
+    )
 }
 
 pub(super) fn exec_match(

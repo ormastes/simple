@@ -40,3 +40,23 @@ The guard-count invariant (`E-HIR-MATCH-GUARD` / `E-MIR-MATCH-GUARD`, level via
 not lowered. Guide: `doc/07_guide/compiler/robustness/match-guard-invariant.md`.
 Specs: `test/01_unit/compiler/50.mir/match_guard/`. The seed
 `run` engine ignores a guard on `case _ if c:`; `simple test` evaluates it.
+
+## A match with no matching arm fails (owner decision 2026-11-14)
+
+Statement and expression form alike; an arm whose guard is false is not a
+match. Record: `doc/08_tracking/bug/match_statement_no_arm_silent_noop_2026-11-14.md`.
+Spec: `test/01_unit/compiler/control_flow/match_no_arm_fails_spec.spl`.
+
+- Seed interpreter: `match_no_arm_error` (`interpreter_control.rs`), used by
+  `exec_match_core`, both block-closure paths and the expression path.
+- Seed JIT/native: the arm chain ends in `rt_panic` built by
+  `match_exhausted_message` / `match_exhausted_panic` (`hir/lower/expr/control.rs`).
+- Trap: that panic tail stands where a missing `else` used to be. Any analysis
+  that asks "does this branch leave a value / of what type" must skip it with
+  `HirExpr::is_match_exhausted_panic`, or a float merge slot is demoted to I64
+  (value zeroed) and procedural bodies look value-returning.
+- Not yet on this rule: the pure-Simple core interpreter (warn unless
+  `critical`) and the self-hosted MIR lowering (warn-only for a non-total enum
+  match). Do not write specs that pin a silent fall-through.
+- Writing code: add the missing arm, or `case _: pass` with a comment when
+  ignoring the rest is intended.
