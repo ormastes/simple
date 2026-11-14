@@ -305,3 +305,14 @@ admit Stage 4, build the render carrier, or prove 8K execution.
 ## Default build mode (2026-11-04)
 
 - Default build mode (user policy 2026-11-04): unset `SIMPLE_FILE_WORKERS` resolves to `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "1"` (`native_file_worker_v1.spl`): file-based src → obj, one process per file (parse → HIR → MIR → obj), then link. Supersedes the 2026-10-26 opt-in. Opt-outs are per invocation only: `SIMPLE_FILE_WORKERS=0` (two-pass shard route), `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` (whole-program route), `SIMPLE_MIR_SHARDING=0`. Never flip a shared default (config, script-global env, constant) to suit one build; pass the option at the call site with a why-comment. Gap: per-package library archives are not yet the default link input. Runtime proof pending a stage3 binary: `sh scripts/check/check-per-file-overlap-receipt.shs <receipt dir>`. See `doc/07_guide/tooling/bootstrap_options.md` § Default build mode.
+
+## Single-file `compile` is an AOT input (2026-11-14)
+
+`cli_compile_pure_simple` sets `cli_mode_text` through
+`cli_compile_pure_simple_mode_text(output_format)`: `"aot"` for native output
+on every backend and host. Without it `driver_pipeline_lowering.spl`
+(`native_entry_closure_mir`) stubs the positional source to an empty MIR
+module and the library exports only `simple_empty_module_<name>` with rc=0.
+Spec: `test/03_system/native/pure_simple_compile_library_functions_spec.spl`
+(compiles, dlopens and calls). Record:
+`doc/08_tracking/bug/xray_llvm_simple_compiled_module_emits_zero_functions_2026-11-13.md`.
