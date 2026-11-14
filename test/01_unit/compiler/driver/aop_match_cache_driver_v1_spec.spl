@@ -105,7 +105,7 @@ describe "aop_weave_with_match_cache_v1":
         var snapshots: [DirectoryTldrSourceSnapshotV2] = []
         for directory in facts:
             snapshots.push(DirectoryTldrSourceSnapshotV2(scope_id: directory.scope_id,
-                inventory_digest: "a".repeat(64), provider_digest: "b".repeat(64),
+                inventory_digest: "a".repeat(64), declared_producer_digest: "b".repeat(64), executing_image_digest: "e".repeat(64),
                 file_tldr_root_digest: "c".repeat(64), facts: directory))
         # The capture owner has already frozen source input. The consumer must
         # not rebuild a different semantic snapshot from this mutable map.
@@ -118,6 +118,19 @@ describe "aop_weave_with_match_cache_v1":
         val modules = modules_with(ADVICE_V1, OTHER)
         val facts = aop_directory_facts_from_hir_v1(modules, no_guards())
         val partial = DirectoryTldrSourceSnapshotV2(scope_id: facts[0].scope_id,
-            inventory_digest: "a".repeat(64), provider_digest: "b".repeat(64),
+            inventory_digest: "a".repeat(64), declared_producer_digest: "b".repeat(64), executing_image_digest: "e".repeat(64),
             file_tldr_root_digest: "c".repeat(64), facts: facts[0])
         expect(aop_weave_with_match_cache_v1(state, modules, Some([partial]))).to_equal(1)
+
+    it "falls back when a snapshot lacks executing-image identity":
+        val state = AopMatchDriverStateV1.create()
+        val modules = modules_with(ADVICE_V1, OTHER)
+        val facts = aop_directory_facts_from_hir_v1(modules, no_guards())
+        var snapshots: [DirectoryTldrSourceSnapshotV2] = []
+        for directory in facts:
+            snapshots.push(DirectoryTldrSourceSnapshotV2(scope_id: directory.scope_id,
+                inventory_digest: "a".repeat(64), declared_producer_digest: "b".repeat(64),
+                executing_image_digest: "", file_tldr_root_digest: "c".repeat(64), facts: directory))
+        expect(aop_weave_with_match_cache_v1(state, modules, Some(snapshots))).to_equal(1)
+        expect(state.shard_misses).to_equal(0)
+        expect(state.fallbacks > 0).to_equal(true)

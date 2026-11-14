@@ -173,3 +173,18 @@ and combine the remaining real category/initializer receipts before PackageInit
 publication. No new cache cutoff or full-package admission is enabled here. The
 three structural transport scenarios and production full-parse hook are currently
 unrun; this checkpoint does not upgrade prior codec/row probe evidence.
+
+
+## Executing image versus declared producer
+
+Snapshots now carry `executing_image_digest` and `declared_producer_digest`
+separately. The latter remains checked managed inventory lineage. The former
+comes from the lazy typed `CompileContext.kernel_image_digest_provider`, which
+observes the Linux kernel executable image, caches success/unavailability once
+per process, and has no environment/argv fallback. Capture requests it only after
+aspect claims and basic lineage validation. Unsupported observation yields no
+snapshot and full traversal. The builtin plugin code key uses the executing-image
+digest plus its stable entry/schema; configured producer roles are not assumed
+equal to the running worker. Missing executing-image transport is rejected.
+These are process-local inputs, not serialized admission tokens. The owner and
+new fallback spec are source-reviewed but unrun; no native qualification is added.
