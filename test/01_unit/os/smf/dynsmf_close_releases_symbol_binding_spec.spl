@@ -1,0 +1,41 @@
+# Regression for the dynsmf_lifecycle_close_spec "empty loaded" red: symbol
+# bindings are process-global, so an unclosed session makes every later load of
+# the same export fail with "already bound" (loaded stays empty). Close must
+# release the binding.
+# @req REQ-DYNSMF-LIFECYCLE-CLOSE
+
+use std.spec.{describe, it, expect, step}
+use os.smf.dynsmf_session.{
+    DynSmfSession, dynsmf_policy_default, dynsmf_session_first_use_facet_admitted, dynsmf_session_new}
+use os.smf.dynsmf_lifecycle.{dynsmf_session_close}
+use test.helpers.dynsmf_admitted_startup_fixture.{dynsmf_admitted_startup_fixture}
+
+fn load_into(session_id: text, library_id: text, export_name: text):
+    val f = dynsmf_admitted_startup_fixture(
+        library_id, "build/dynsmf/" + library_id + ".smf", "test." + library_id, "1", export_name, false)
+    dynsmf_session_first_use_facet_admitted(
+        dynsmf_session_new(session_id, dynsmf_policy_default()), library_id, f.request, f.artifact_bytes)
+
+describe "dynSMF close releases process-global symbol bindings":
+    it "refuses a second load of a bound export until the first session is closed":
+        step("Load, load again unclosed, close, load a third time")
+        val first = load_into("bind-a", "close_bind_one", "render_close_bind_one")
+        expect(first.session.loaded.len()).to_equal(1)
+        val second = load_into("bind-b", "close_bind_one", "render_close_bind_one")
+        expect(second.session.loaded.len()).to_equal(0)
+        expect(second.session.evidence[0].reason).to_contain("already bound")
+        val closed = dynsmf_session_close(first.session)
+        expect(closed.loaded[0].status).to_equal("unloaded")
+        val third = load_into("bind-c", "close_bind_one", "render_close_bind_one")
+        expect(third.session.loaded.len()).to_equal(1)
+        expect(third.session.evidence[0].reason).to_equal("smf_dlopen_admitted")
+        dynsmf_session_close(third.session)
+
+    it "releases a different export's binding the same way":
+        step("Neighbouring pattern: another library id and export")
+        val a = load_into("bind-d", "close_bind_two", "render_close_bind_two")
+        expect(a.session.loaded.len()).to_equal(1)
+        dynsmf_session_close(a.session)
+        val b = load_into("bind-e", "close_bind_two", "render_close_bind_two")
+        expect(b.session.loaded.len()).to_equal(1)
+        dynsmf_session_close(b.session)
