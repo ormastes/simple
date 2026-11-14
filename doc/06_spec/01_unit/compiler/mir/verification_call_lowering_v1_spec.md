@@ -4,7 +4,7 @@ Source: `test/01_unit/compiler/mir/verification_call_lowering_v1_spec.spl`.
 Requirement: selected Verification 2.0 C1 typed VIR/call-identity transport (`REQ-FV2-C1`).
 Audience: compiler and formal-verification maintainers.
 
-This manual describes 20 authored SSpec scenarios. **Every scenario is UNRUN.** No compiler, test runner, native build, Lean checker, replay tool, or proof gate was executed for this source packet. The initial positive spec was saved before the new producer owner existed; this is tests-first source evidence, not an observed runtime RED or PASS.
+This manual describes 21 authored SSpec scenarios. **Every scenario is UNRUN.** No compiler, test runner, native build, Lean checker, replay tool, or proof gate was executed for this source packet. The initial positive spec was saved before the new producer owner existed; this is tests-first source evidence, not an observed runtime RED or PASS.
 
 ## Actual execution path under specification
 
@@ -66,3 +66,9 @@ The cycle-2 tests-first snapshot is retained separately under `revision2-tests-f
 ## Authority and remaining scope
 
 These tests do not authenticate caller-supplied provenance hashes or establish trusted producer admission. Cross-module relocation, general method/indirect/foreign call closure, monomorphizer integration, physical ABI refinement, authenticated checker/replay, and the remainder of C1/C2/C6/C7 remain open. A source review cannot replace the qualified execution and independent formal evidence required by the full ledger. No performance, native runtime, proof-completion, or blanket formal-GO claim is made.
+
+## Target-context receipt regression (2026-11-14)
+
+C1-CALL-21, “binds profile subarch and cpu tier into receipts even for identical MIR”, lowers real typed HIR containing `caller -> leaf` through the public target-bound producer. A repeated context must retain both module hash and receipt; independently changing profile, subarch, or CPU tier must preserve the neutral fixture's module hash but change its receipt. Every produced manifest must validate, and changed-context call sites retain the expected binding. The synthetic subarch value tests exact context retention, not admission or execution of an architecture. Existing TargetHIR golden and delimiter tests cover the shared framing helper without changing TargetHIR v2 bytes.
+
+Status: **UNEXECUTED**, including doc generation and runtime checks, under the user's verification waiver. This hand-maintained update is source intent, not a generated or native pass.
