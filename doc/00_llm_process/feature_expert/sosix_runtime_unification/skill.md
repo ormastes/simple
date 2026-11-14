@@ -113,6 +113,7 @@ via `local_unix_peer_identity_class_v1()`. SOSIX owns
 `sosix_darwin_sandbox_apply_v1` (`nogc_async_mut/sosix/darwin_sandbox_v1.spl`,
 native pair in `runtime_sosix_darwin_sandbox_v1.h`, included by
 `runtime_process_owned.c`); non-Darwin answers `Unsupported` without native
-entry. The leaf is deliberately not `rt_*`. Mac evidence still owed: Darwin
-branch of `src/runtime/test/local_unix_v1_selfcheck.c` and a disposable-child
-activation/deny probe. Design: `doc/05_design/simple_container_macos_seatbelt.md` §2.3/§9.1/§15.2.
+entry. The leaf is deliberately not `rt_*`. Mac-qualified 2026-11-14: Darwin
+`local_unix_v1_selfcheck.c` PASS and the disposable-child probe
+`src/runtime/test/sosix_darwin_sandbox_v1_selfcheck.c` 12/12 on the compiled
+attempt profile (see `doc/04_architecture/native_macos_simple_container.md`). Design: `doc/05_design/simple_container_macos_seatbelt.md` §2.3/§9.1/§15.2.
