@@ -1,0 +1,50 @@
+# P1 declaration admission only; does not claim accessor lowering is enabled.
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_definitions.{HirClass}
+use compiler.hir.hir_accessor_field_v1.{hir_accessor_field_admit_v1}
+use compiler.common.dependency.{MemberAccessScope, member_access_scope_for_modules}
+
+fn accessor_class(source: text) -> HirClass:
+    val parsed = parse_and_build_module(source, "app/box.spl")
+    var lowering = HirLowering.new()
+    val module = lowering.lower_module(parsed)
+    expect(module.classes.len()).to_equal(1)
+    module.classes[0]
+
+fn accessor_owner_scope() -> MemberAccessScope:
+    member_access_scope_for_modules("app/box.spl", "app", "app/box.spl", "app", [])
+
+describe "generated accessor typed declaration admission":
+    it "retains exact declared integer type and ordinal rather than guessing a word":
+        val owner = accessor_class("class Box:\n    enabled: bool\n    count: i32\n")
+        val field = hir_accessor_field_admit_v1(owner, "app.box", "count", accessor_owner_scope()).unwrap()
+        expect(field.owner_module).to_equal("app.box")
+        expect(field.owner_symbol.id).to_equal(owner.symbol.id)
+        expect(field.field_symbol.id).to_equal(owner.fields[1].symbol.id)
+        expect(field.field_index).to_equal(1)
+        expect(field.field_type.kind).to_equal(owner.fields[1].type_.kind)
+
+    it "does not treat a private declaration as accessible because legacy checking is off":
+        val owner = accessor_class("pri class Box:\n    pri count: i64\n")
+        val result = hir_accessor_field_admit_v1(owner, "app.box", "count", MemberAccessScope.unrelated())
+        expect(result.is_err()).to_equal(true)
+
+    it "checks private field access even when the containing class is public":
+        val owner = accessor_class("pub class Box:\n    pri count: i64\n")
+        val result = hir_accessor_field_admit_v1(owner, "app.box", "count", MemberAccessScope.unrelated())
+        match result:
+            case Err(message): expect(message).to_equal("E-AOP-FIELD-ACCESS: field is not accessible from the original site")
+            case Ok(_): expect(false).to_equal(true)
+
+    it "rejects an unresolved owner rather than inventing a module from a short name":
+        val owner = accessor_class("class Box:\n    count: i64\n")
+        expect(hir_accessor_field_admit_v1(owner, "", "count", accessor_owner_scope()).is_err()).to_equal(true)
+
+    it "rejects a field absent from the resolved declaration":
+        val owner = accessor_class("class Box:\n    count: i64\n")
+        expect(hir_accessor_field_admit_v1(owner, "app.box", "missing", accessor_owner_scope()).is_err()).to_equal(true)
+
+    it "does not silently admit managed values in the scalar pilot":
+        val owner = accessor_class("class Box:\n    label: text\n")
+        expect(hir_accessor_field_admit_v1(owner, "app.box", "label", accessor_owner_scope()).is_err()).to_equal(true)
