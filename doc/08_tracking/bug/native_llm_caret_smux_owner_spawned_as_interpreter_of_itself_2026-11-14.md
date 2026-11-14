@@ -1,6 +1,6 @@
 # Native `llm_caret workspace attach` cannot start the smux owner: it runs ITSELF as `<exe> run smux_client.spl`
 
-Status: open
+Status: fix landed, verification-pending (native rebuild required)
 Severity: P2 (native-only; workspace panes unusable from a standalone native caret on the smux backend)
 Found: 2026-11-14, lane `work/caret-native-defects-20261114`
 Seed: built from this branch (import_loader alias fix on `4118fda1a3e`)
@@ -42,3 +42,7 @@ interpreter explicitly instead of `cli_current_exe_path()`. Not chosen here.
 
 Native `workspace_cli_system_spec.spl` 4/4 and `workspace_recovery` green with
 `LLM_CARET_NATIVE_BIN` set.
+
+## Fix (2026-11-14)
+
+`smux_owner_argv` (`src/app/llm_caret/pane_backend.spl`) is a pure function choosing the owner argv: the own exe when it is `simple`/`simple.exe`, otherwise the interpreter from `SIMPLE_BINARY`, otherwise an explicit error (no self-exec). `_smux_owner_up` calls it. Spec: `test/01_unit/app/llm_caret/smux_owner_argv_spec.spl` (red 0/4 -> green 4/4). Native `workspace_cli_system_spec.spl` with `LLM_CARET_NATIVE_BIN` is unverified until a native rebuild; a native caret now needs `SIMPLE_BINARY` set to a simple interpreter.
