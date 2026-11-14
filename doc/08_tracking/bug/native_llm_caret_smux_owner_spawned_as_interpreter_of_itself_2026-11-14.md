@@ -1,6 +1,6 @@
 # Native `llm_caret workspace attach` cannot start the smux owner: it runs ITSELF as `<exe> run smux_client.spl`
 
-Status: fix landed, verification-pending (native rebuild required)
+Status: verification-pending (native re-verified 2026-11-15)
 Severity: P2 (native-only; workspace panes unusable from a standalone native caret on the smux backend)
 Found: 2026-11-14, lane `work/caret-native-defects-20261114`
 Seed: built from this branch (import_loader alias fix on `4118fda1a3e`)
@@ -231,3 +231,16 @@ red `function smux_owner_start not found` -> green `Results: 1 total, 1 passed, 
 - native `workspace_recovery_system_spec.spl` (`LLM_CARET_NATIVE_BIN=build/nb/llm_caret.exe`,
   existing exe from 2026-11-14 22:52, no rebuild, `SIMPLE_BINARY`=seed):
   `Results: 12 total, 12 passed, 0 failed` (exit 0)
+
+## Native re-verification 2026-11-15 (release/1.0.0 @ cd0630ec257, incl. #9298)
+
+`build/nb/llm_caret.exe` rebuilt with seed `native-build` (`compiled=712 reused=0`
+— the incremental cache was NOT reused this run; full rebuild). Run with
+`LLM_CARET_NATIVE_BIN` and `SIMPLE_BINARY=<seed>`:
+
+- workspace_cli_system_spec: `Results: 4 total, 4 passed, 0 failed`
+- workspace_recovery_system_spec: `Results: 12 total, 12 passed, 0 failed`
+- caret_cli_help_system_spec: `Results: 4 total, 4 passed, 0 failed`
+
+Manual, `SIMPLE_BINARY` unset, `llm_caret.exe workspace x attach agent-1` (rc=1):
+`error new_session_failed smux owner did not start: SIMPLE_BINARY not set (native llm_caret.exe needs a simple interpreter)`
