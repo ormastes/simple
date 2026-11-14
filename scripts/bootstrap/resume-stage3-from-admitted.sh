@@ -963,7 +963,14 @@ esac
 # Go-to-end: SIMPLE_BOOTSTRAP_GO_TO_END (default 1, 0 stops at the first
 # failing module), the same knob and default as the bootstrap-from-scratch.sh
 # Stage 3, forwarded as SIMPLE_NATIVE_GO_TO_END. Both reach the env -i worker
-# as per-file lane items (per-file:fw=0|1:gte=0|1), in that order.
+# as per-file lane items (per-file:fw=0|1:gte=0|1:msc=<n>), in that order.
+# MIR shard count: the MIR pool gives one worker ceil(schedule / count) modules
+# and count defaults to the number of LIVE workers, so a single admitted worker
+# claimed the whole closure (run 32: claimed=1664, 26.4 GiB, one codegen abort
+# failed all 1664). SIMPLE_MIR_SHARD_COUNT (caller) >
+# SIMPLE_BOOTSTRAP_STAGE3_MIR_SHARD_COUNT > 9, forwarded as
+# SIMPLE_MIR_SHARD_COUNT. It sets the claim size only: admission still prices
+# live workers, and the variable is outside the native cache identity.
 . "$root/scripts/bootstrap/bootstrap-jobs.shs"
 bootstrap_select_stage3_file_workers "$root/config/bootstrap.sdn" || exit 1
 echo "Stage 3 file workers: ${stage3_file_workers:-compiler default} (source: $stage3_file_workers_source)"
@@ -977,6 +984,16 @@ if [ "$stage3_lowering_lane" = per-file ]; then
   fi
   stage3_per_file_env="${stage3_per_file_env:+$stage3_per_file_env }SIMPLE_NATIVE_GO_TO_END=$stage3_go_to_end"
   stage3_per_file_lane="$stage3_per_file_lane:gte=$stage3_go_to_end"
+  stage3_mir_shard_count=${SIMPLE_MIR_SHARD_COUNT:-${SIMPLE_BOOTSTRAP_STAGE3_MIR_SHARD_COUNT:-9}}
+  case "$stage3_mir_shard_count" in
+    ''|*[!0-9]*|0*) stage3_mir_shard_count= ;;
+  esac
+  if [ -z "$stage3_mir_shard_count" ] || [ "$stage3_mir_shard_count" -gt 128 ]; then
+    echo "error: Stage 3 MIR shard count must be an integer 1..128 (SIMPLE_MIR_SHARD_COUNT or SIMPLE_BOOTSTRAP_STAGE3_MIR_SHARD_COUNT)" >&2
+    exit 1
+  fi
+  stage3_per_file_env="$stage3_per_file_env SIMPLE_MIR_SHARD_COUNT=$stage3_mir_shard_count"
+  stage3_per_file_lane="$stage3_per_file_lane:msc=$stage3_mir_shard_count"
   stage3_lowering_lane="per-file$stage3_per_file_lane"
 fi
 stage3_cold_init_env=
