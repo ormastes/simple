@@ -911,8 +911,10 @@ A spec that can only run on one host OS declares it in its header:
   `src/lib/nogc_sync_mut/spec/platform_os.spl`
   (spec: `test/01_unit/lib/spec/platform_os_tag_spec.spl`).
 - Do not tag specs that pick a shell per host and pass everywhere.
-- Limitation: the Rust seed's own test runner does not implement OS tags;
-  this is the pure-Simple runner (`src/app/test_runner_new`).
+- Implemented identically in every lane: the full runner
+  (`test_runner_main.spl`), the single-file/directory lane `bin/simple test
+  <file>` dispatches to (`test_runner_single.spl`), and the Rust seed runner
+  (`SIMPLE_TEST_RUNNER_RUST=1`, `driver/src/cli/test_runner/runner.rs`).
 
 ### Runtime Skip Helpers
 
