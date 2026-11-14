@@ -1,13 +1,15 @@
 """Trace view text rendering (pure): one fixed-width line model shared by TUI and GUI.
 
 Every journey calls the canonical service and renders its result; nothing is re-derived.
-Register `trace_view_lines` as the trace view provider's renderer (no registry call site
-exists under src/app/traceability or src/app/editor outside the extension-owned files)."""
+`trace_view_lines` is the renderer for the `trace.explorer_provider` view provider; the
+production caller is app.editor.trace_view_host.view_host_render."""
 # @req REQ-CARET-TRC-001 REQ-CARET-TRC-002 REQ-CARET-TRC-003
 use std.common.traceability.model.*
 use std.common.traceability.query.{query_trace_graph}
 use std.common.traceability.query_nodes_v1.{TraceNodeQueryV1}
 use std.common.traceability.query_refs_v1.{TraceReferenceQueryV1, TraceReferencePageV1, query_trace_references_v1}
+use std.common.encoding.utf8.{text_codepoints, char_from_codepoint}
+use std.common.layout.text_metrics.{codepoint_cells}
 use app.traceability.ide_view_provider.*
 
 pub enum TraceViewState:
@@ -20,12 +22,21 @@ val ID_WIDTH = 28
 val TITLE_WIDTH = 32
 
 fn fit(s: text, width: i64) -> text:
+    """Pad/cut to exactly `width` terminal cells (wide = 2); a wide char straddling the edge becomes a space."""
     var out = ""
     var n = 0
-    for ch in s.chars():
-        if n < width:
-            out = out + ch.to_text()
-            n = n + 1
+    val cps = text_codepoints(s)
+    var i = 0
+    while i < cps.len():
+        val w = codepoint_cells(cps[i])
+        if w == 0:
+            out = out + char_from_codepoint(cps[i])
+        else:
+            if n + w > width:
+                break
+            out = out + char_from_codepoint(cps[i])
+            n = n + w
+        i = i + 1
     while n < width:
         out = out + " "
         n = n + 1
