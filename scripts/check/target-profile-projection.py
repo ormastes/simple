@@ -28,7 +28,7 @@ while queue:
  queue.extend(x for x in re.findall(r'\b[A-Z][A-Za-z_0-9]*\b',cleaned) if x in index and x not in seen)
 parts=[text for path,text in seen.values()]
 for name in ['driver_core_compile_options_default','compileoptions_effective_mir_opt_level','compileoptions_normalize_mir_optimization','target_profile_normalize_v1','target_profile_identity_fields_v1','target_profile_identity_text_v1','compileoptions_target_profile_v1']:parts.append(decl(common,name))
-parts += [decl(aspect,'AspectParamsV1','impl'), 'pub const ASPECT_CUTOVER_ATOMIC_EXT_V1 = "simple.instrumentation.cutover/atomic"\n',decl(args,'focused_native_build_target_profile_v1'),decl(xray,'driver_target_trace_capability_v1'),decl(xray,'driver_target_profile_identity_v1')]
+parts += [decl(aspect,'AspectParamsV1','impl'), 'pub const ASPECT_CUTOVER_ATOMIC_EXT_V1 = "simple.instrumentation.cutover/atomic"\n',decl(args,'focused_native_build_target_profile_v1'),decl(xray,'driver_target_trace_capability_v1')]
 (out/'production.spl').write_text('\n'.join(parts))
 harness=(repo/'test/01_unit/compiler/driver/target_profile_native.spl').read_text();harness=re.sub(r'^use .*\n','',harness,flags=re.M)
 (out/'src/main.spl').write_text('\n'.join(parts)+'\n'+harness)

@@ -20,10 +20,10 @@ use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_instruction_graph.{MirFunction, MirModule}
 use compiler.backend.backend_helpers.{get_effective_backend_name}
 use common.plugin.aspect_params.{AspectParamsV1}
-use common.trace.observer_contract_v1.{TraceFailureV1, trace_failure_code_v1}
+use common.trace.observer_contract_v1.{TraceFailureV1, TraceConfigV1, TraceInstrumentationV1, trace_failure_code_v1}
 use common.trace.observer_aspect_config_v1.{trace_aspect_config_v1}
 use common.trace.observer_build_route_v1.{TraceBuildRouteKindV1, trace_build_route_v1}
-use compiler.common.driver_compile_options.{CompileOptions, TargetTraceCapabilityV1,
+use compiler.common.driver_compile_options.{CompileOptions, TargetTraceCapabilityV1, TargetDebugRequestV1,
     compileoptions_target_profile_v1, target_profile_identity_text_v1}
 
 # The current bootstrap index has no admitted debug-observer receipt. A route
@@ -241,6 +241,30 @@ export xray_policy_resolve, xray_policy_apply, xray_option_identity_suffix, xray
 export xray_observer_request_check, xray_observer_request_admit, xray_observer_request_error, xray_observer_request_error_for_build
 export xray_trace_instrumentation_enabled, xray_sdn_trace_instrumentation
 
+# Preserve extension presence at the same boundary used by cache/no-op identity.
+# An explicit Off extension is an opt-out; malformed/unsupported extensions may
+# never disappear into the Default request. Static sled policy stays separate.
+pub fn driver_target_debug_request_v1(request: TargetDebugRequestV1,
+        parsed: Result<TraceConfigV1?, TraceFailureV1>) -> Result<TargetDebugRequestV1, text>:
+    match parsed:
+        case Err(failure):
+            Err("TRACE-E-REQUEST: invalid observer extension (status={trace_failure_code_v1(failure)})")
+        case Ok(optional):
+            if val config = optional:
+                val explicit = match config.instrumentation:
+                    case Off: TargetDebugRequestV1.Disabled
+                    case Dynamic: TargetDebugRequestV1.Enabled
+                    case AlwaysOn:
+                        return Err("TRACE-E-REQUEST: always-on observer instrumentation is unavailable")
+                if request != TargetDebugRequestV1.Default and request != explicit:
+                    return Err("TARGET-PROFILE-E-CONFLICT: typed and extension debug requests differ")
+                return Ok(explicit)
+            Ok(request)
+
 pub fn driver_target_profile_identity_v1(options: CompileOptions) -> Result<text, text>:
-    val policy = compileoptions_target_profile_v1(options, driver_target_trace_capability_v1(options))?
+    val request = driver_target_debug_request_v1(options.target_debug_request,
+        trace_aspect_config_v1(options.aspect_params))?
+    var selected = options
+    selected.target_debug_request = request
+    val policy = compileoptions_target_profile_v1(selected, driver_target_trace_capability_v1(selected))?
     Ok(target_profile_identity_text_v1(policy))

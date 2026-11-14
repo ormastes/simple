@@ -6,7 +6,7 @@ Specs: `target_profile_spec.spl`, `target_profile_cache_spec.spl`, and updated
 Bounded native production projections PASS optimization/profile independence,
 managed requested-versus-unavailable policy, ordinary defaults, explicit opt-out,
 release/XRay refusal, contradictory CLI selection, SHA-256 cache identity,
-legacy-key invalidation, and no-op cache separation. The original normalizer
+legacy-key invalidation, no-op cache separation, and six observer-result presence/error cases. The original normalizer
 fails the optimized-development assertion.
 
 The full-import SSpec files are UNRUN. Full CLI/manager/bootstrap and actual

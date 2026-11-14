@@ -18,7 +18,7 @@ Disabled/Unavailable/Available observer resolution. Static XRay emission stays
 separate from observer activation. Ordinary defaults remain unchanged; managed
 Phase 3 requests development debug automatically. Missing actual observer
 admission yields a stable unavailable reason, not Available or active recording.
-Explicit unavailable observer requests fail. Release rejects explicit XRay or
+Present observer extensions map Off to Disabled and Dynamic to Enabled; malformed, conflicting, and AlwaysOn requests fail before cache lookup. Explicit unavailable observer requests fail. Release rejects explicit XRay or
 observer enablement and resolves automatic debug to Disabled.
 
 Compile caches frame profile identity separately from optimization and static
@@ -46,6 +46,7 @@ process-group RSS bound and 120-second deadline; no address-space limit.
   10.405 s. Ordinary, managed, and explicit-disabled identities differ; invalid
   release/XRay cannot produce a reusable identity. Its initial fixture extractor
   truncated a multiline declaration; that parse failure is retained.
+- Actual TraceConfig/defaults and observer-result policy boundary: six distinct presence/error cases PASS, 6.816 s. The existing SDN parser integration itself remains UNRUN.
 - Managed lane adds its own 30-case native profile/receipt projection evidence.
 
 [Retained commands, exits, logs, provenance, and extraction scripts](evidence/target_profile_2026_11_14/).
