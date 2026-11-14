@@ -82,9 +82,10 @@ The historical attempt and input manifest still describe frozen source
 is claimed. Marker-order assertions now require marker presence and compare
 ordinary integer prefix lengths, avoiding optional search-result ordering.
 
-No native retry is authorized while the current provisional phase-3 build is
-active. The prior 4 GiB failure does not itself authorize a larger memory cap,
-and a projected codec cannot substitute for actual-import qualification.
+The initial continuation was held while the provisional phase-3 build and
+another large bootstrap were active. The prior 4 GiB failure did not itself
+authorize a larger memory cap, and a projected codec cannot substitute for
+actual-import qualification.
 
 ## Expanded corpus and public-wrapper oracles — authored, UNRUN
 
@@ -112,7 +113,39 @@ also matched all 16 constructed record field sets against the production
 declarations without missing required or unknown fields. Neither review is a
 compiler check, runtime test, golden review, or gate admission.
 
-The expanded source invalidates the held attempt-2 plan for `19703eaed7a`.
-No second native attempt has started. A newly frozen source manifest and fresh
-resource admission are required before the pending 8 GiB / 600-second
-continuation. The earlier failed source, logs, and cache remain intact.
+The expanded source invalidated the held attempt-2 plan for `19703eaed7a`.
+The continuation below uses a newly frozen source manifest and fresh resource
+admission. The earlier failed source, logs, and cache remain intact.
+
+## Authorized native continuation 2 — RSS refusal, no executable
+
+After the provisional phase-3 build terminated, root explicitly readmitted one
+real-import continuation at 8 GiB / 600 seconds. The prelaunch observation was
+48,822,056 KiB available, exceeding the required 36 GiB. Source was clean at
+`bb7405d1ca81026fd1ea33b601deb4fd06436b41`; the producer, `core-c` bundle,
+one requested worker, entry, and isolated normal cache were unchanged. No
+address-space cap, worker-estimate override, or projected source was used.
+
+This attempt completed **458/458 HIR modules**, with zero reported compiler
+errors. The HIR phase completed at approximately 303.7 seconds. MIR started
+with `compiler.hir.generated.hir_codec` at approximately 308.1 seconds and
+completed **0/458 MIR modules** before the process-tree RSS watchdog stopped
+the build:
+
+- Status: `rss-cap-exceeded`; exit **88**.
+- Cap: **8,388,608 KiB**; observed peak: **8,412,324 KiB**.
+- Compiler root PID `1997038` no longer existed after termination; the guard
+  recorded no unexpected session PIDs.
+- No executable, runtime execution, golden files, or public admission result.
+  The fresh `attempt2-runtime/build` directory contained zero output files.
+
+Evidence is retained in the same directory: `compile2.log`,
+`compile2.rss.env`, `attempt2-admission.sdn`, `inputs-expanded.sdn`,
+`attempt2-plan.sdn`, and the normal reusable `cache/`. The invalidated older
+plan is retained separately as `attempt2-plan-19703ea-invalidated.sdn`.
+
+The concrete remaining build blocker is the generated codec's MIR lowering
+exceeding the admitted 8 GiB tree budget; its internal allocation cause is not
+yet diagnosed. No further retry or resource escalation was performed. Source
+and HIR compilation progress do not qualify the authored runtime assertions;
+the canonical public gate remains closed.
