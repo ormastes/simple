@@ -1,0 +1,526 @@
+# @req REQ-SSPEC-UNIT
+# @cover src/compiler/50.mir/_MirLoweringExpr/enum_constructor_payload.spl
+#
+# `enum_payload_local_compatible` and the lowering-side helpers around it,
+# called on a real MirLowering built from a small module. A synthetic temp
+# with a chosen MIR type and an expression with no source type isolate the
+# MIR-evidence arms; each arm gets an accepted and a refused carrier.
+# Record: doc/08_tracking/bug/stage3_let_payload_unguarded_optional_arm_2026-11-14.md
+use std.spec.*
+use std.nogc_sync_mut.io.env_ops.{env_set}
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.provider_metadata.*
+use compiler.mir._MirLoweringExpr.enum_constructor_payload.*
+
+fn ty(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn mty(kind: MirTypeKind) -> MirType:
+    MirType(kind: kind)
+
+fn ex(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: ty(HirTypeKind.Unit), span: Span.empty())
+
+# An expression no evidence source can type: an unbound, undeclared symbol.
+fn _untyped() -> HirExpr:
+    ex(HirExprKind.Var(SymbolId(id: 987654)))
+
+fn _lowered() -> MirLowering:
+    val source = "struct HT:\n    kind: i64\nstruct Other:\n    kind: i64\nclass CT:\n    kind: i64\nenum Inner:\n    A\n    B(v: i64)\nenum E:\n    K(t: HT)\n    N(n: i64)\nfn helper() -> i64:\n    1\nfn mk() -> E:\n    E.N(helper())\nfn reader(xs: [HT], named: Dict<text, Other>, owned: Dict<text, HT>) -> i64:\n    1\n"
+    val parsed = parse_full_frontend(source, "probe.spl", "probe.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("probe.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    lowering.lower_module(hir)
+    lowering
+
+fn _unlowered() -> MirLowering:
+    val source = "enum E:\n    N(n: i64)\n"
+    val parsed = parse_full_frontend(source, "probe.spl", "probe.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("probe.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    MirLowering.new(hir.symbols)
+
+fn _symbol(lowering: MirLowering, name: text) -> SymbolId:
+    for key in lowering.symbols.symbols.keys():
+        val symbol: HirSymbol = lowering.symbols.symbols[key]
+        if symbol.name == name:
+            return SymbolId(id: key)
+    SymbolId(id: -1)
+
+# Read-only: callers add temps to `lowering.builder` inline, because a
+# lowering passed to a helper is not updated in the caller.
+fn _admits(lowering: MirLowering, expected: HirTypeKind, local: LocalId) -> bool:
+    lowering.enum_payload_local_compatible(ty(expected), _untyped(), local)
+
+fn _errors(source: text) -> [text]:
+    val parsed = parse_full_frontend(source, "probe.spl", "probe.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("probe.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var errors: [text] = []
+    for error in hir_lowering.errors:
+        errors.push("HIR: " + error.message)
+    for error in lowering.errors:
+        errors.push("MIR: " + error.message)
+    if mir.functions.len() == 0:
+        errors.push("no lowered functions")
+    for error in errors:
+        print "PAYLOAD_EVIDENCE_DIAGNOSTIC={error}"
+    errors
+
+fn _has(errors: [text], needle: text) -> bool:
+    for error in errors:
+        if error.contains(needle):
+            return true
+    false
+
+describe "enum_payload_local_compatible on MIR evidence alone":
+    it "admits and refuses each primitive slot":
+        var lowering = _lowered()
+        var builder = lowering.builder
+        val bool_l = builder.new_temp(mty(MirTypeKind.Bool))
+        val char_l = builder.new_temp(mty(MirTypeKind.Char))
+        val i32_l = builder.new_temp(mty(MirTypeKind.I32))
+        val i64_l = builder.new_temp(mty(MirTypeKind.I64))
+        val f32_l = builder.new_temp(mty(MirTypeKind.F32))
+        val f64_l = builder.new_temp(mty(MirTypeKind.F64))
+        val str_l = builder.new_temp(mty(MirTypeKind.Opaque("str")))
+        lowering.builder = builder
+        expect(_admits(lowering, HirTypeKind.Bool, bool_l)).to_equal(true)
+        expect(_admits(lowering, HirTypeKind.Bool, i64_l)).to_equal(false)
+        expect(_admits(lowering, HirTypeKind.Char, char_l)).to_equal(true)
+        expect(_admits(lowering, HirTypeKind.Char, i64_l)).to_equal(false)
+        expect(_admits(lowering, HirTypeKind.Int(64, true), i32_l)).to_equal(true)
+        expect(_admits(lowering, HirTypeKind.Int(64, true), f64_l)).to_equal(false)
+        expect(_admits(lowering, HirTypeKind.Float(64), f32_l)).to_equal(true)
+        expect(_admits(lowering, HirTypeKind.Float(64), i64_l)).to_equal(false)
+        expect(_admits(lowering, HirTypeKind.Str, str_l)).to_equal(true)
+        expect(_admits(lowering, HirTypeKind.Str, i64_l)).to_equal(false)
+        expect(_admits(lowering, HirTypeKind.Any, i64_l)).to_equal(true)
+        expect(_admits(lowering, HirTypeKind.Result(ty(HirTypeKind.Bool), ty(HirTypeKind.Str)), i64_l)).to_equal(false)
+
+    it "refuses a local that has no MIR type at all":
+        var lowering = _lowered()
+        expect(_admits(lowering, HirTypeKind.Bool, LocalId(id: 987654))).to_equal(false)
+
+    it "binds a struct slot to its own layout, by id or by canonical owner":
+        var lowering = _lowered()
+        val ht_id = _symbol(lowering, "HT")
+        val other_id = _symbol(lowering, "Other")
+        var builder = lowering.builder
+        val own_l = builder.new_temp(mty(MirTypeKind.Struct(ht_id)))
+        val canonical_l = builder.new_temp(mty(MirTypeKind.Struct(SymbolId(id: lowering.canonical_type_symbols["probe.HT"]))))
+        val other_l = builder.new_temp(mty(MirTypeKind.Struct(other_id)))
+        val word_l = builder.new_temp(mty(MirTypeKind.I64))
+        lowering.builder = builder
+        expect(_admits(lowering, HirTypeKind.Named(ht_id, []), own_l)).to_equal(true)
+        expect(_admits(lowering, HirTypeKind.Named(ht_id, []), canonical_l)).to_equal(true)
+        expect(_admits(lowering, HirTypeKind.Named(ht_id, []), other_l)).to_equal(false)
+        expect(_admits(lowering, HirTypeKind.Named(ht_id, []), word_l)).to_equal(false)
+
+    it "binds a class slot through the recorded value owner only":
+        var lowering = _lowered()
+        val ct_id = _symbol(lowering, "CT")
+        val ht_id = _symbol(lowering, "HT")
+        var builder = lowering.builder
+        val owned = builder.new_temp(mty(MirTypeKind.I64))
+        val foreign = builder.new_temp(mty(MirTypeKind.I64))
+        lowering.builder = builder
+        lowering.struct_value_syms[owned.id] = mir_class_identity_raw(lowering.symbols, ct_id.id)
+        lowering.struct_value_syms[foreign.id] = "probe.Elsewhere"
+        expect(_admits(lowering, HirTypeKind.Named(ct_id, []), owned)).to_equal(true)
+        expect(_admits(lowering, HirTypeKind.Named(ct_id, []), foreign)).to_equal(false)
+        # A struct slot is not satisfied by a recorded owner name on a raw word.
+        expect(_admits(lowering, HirTypeKind.Named(ht_id, []), foreign)).to_equal(false)
+
+    it "admits container slots by carrier shape":
+        var lowering = _lowered()
+        val i64_t = ty(HirTypeKind.Int(64, true))
+        val bool_t = ty(HirTypeKind.Bool)
+        val i64_m = mty(MirTypeKind.I64)
+        val bool_m = mty(MirTypeKind.Bool)
+        var builder = lowering.builder
+        val pair_l = builder.new_temp(mty(MirTypeKind.Tuple([i64_m, bool_m])))
+        val word_l = builder.new_temp(i64_m)
+        val slice_l = builder.new_temp(mty(MirTypeKind.Slice(i64_m)))
+        val dict_l = builder.new_temp(mty(MirTypeKind.Dict(bool_m, bool_m)))
+        val unit_l = builder.new_temp(mty(MirTypeKind.Unit))
+        lowering.builder = builder
+        expect(_admits(lowering, HirTypeKind.Tuple([i64_t, bool_t]), pair_l)).to_equal(true)
+        expect(_admits(lowering, HirTypeKind.Tuple([i64_t, bool_t]), word_l)).to_equal(false)
+        expect(_admits(lowering, HirTypeKind.Array(i64_t, None), slice_l)).to_equal(true)
+        expect(_admits(lowering, HirTypeKind.Dict(bool_t, i64_t), dict_l)).to_equal(false)
+        expect(_admits(lowering, HirTypeKind.Unit, unit_l)).to_equal(true)
+
+    it "fills an optional slot from the optional carrier or a present heap handle":
+        var lowering = _lowered()
+        val ht_id = _symbol(lowering, "HT")
+        val helper_id = _symbol(lowering, "helper")
+        val ht = ty(HirTypeKind.Named(ht_id, []))
+        var builder = lowering.builder
+        val optional_l = builder.new_temp(mty(MirTypeKind.Tuple([mty(MirTypeKind.Bool), mty(MirTypeKind.Struct(ht_id))])))
+        val present_l = builder.new_temp(mty(MirTypeKind.Struct(ht_id)))
+        val word_l = builder.new_temp(mty(MirTypeKind.I64))
+        val str_l = builder.new_temp(mty(MirTypeKind.Opaque("str")))
+        lowering.builder = builder
+        expect(_admits(lowering, HirTypeKind.Optional(ht), optional_l)).to_equal(true)
+        expect(_admits(lowering, HirTypeKind.Optional(ht), present_l)).to_equal(true)
+        expect(_admits(lowering, HirTypeKind.Optional(ht), word_l)).to_equal(false)
+        expect(_admits(lowering, HirTypeKind.Optional(ty(HirTypeKind.Str)), str_l)).to_equal(true)
+        expect(_admits(lowering, HirTypeKind.Optional(ty(HirTypeKind.Str)), word_l)).to_equal(false)
+        # A raw scalar word may equal the nil sentinel: never a present `i64?`.
+        expect(_admits(lowering, HirTypeKind.Optional(ty(HirTypeKind.Int(64, true))), word_l)).to_equal(false)
+        expect(_admits(lowering, HirTypeKind.Optional(ty(HirTypeKind.Named(helper_id, []))), word_l)).to_equal(false)
+
+describe "enum_payload_local_compatible on remembered and literal evidence":
+    it "lets a remembered type decide before the MIR carrier is read":
+        var lowering = _lowered()
+        val ht = ty(HirTypeKind.Named(_symbol(lowering, "HT"), []))
+        val ct = ty(HirTypeKind.Named(_symbol(lowering, "CT"), []))
+        var local_builder = lowering.builder
+        val local = local_builder.new_temp(mty(MirTypeKind.I64))
+        lowering.builder = local_builder
+        lowering.remember_local_hir_type(local.id, ht, 0, 0)
+        expect(lowering.enum_payload_local_compatible(ht, _untyped(), local)).to_equal(true)
+        expect(lowering.enum_payload_local_compatible(ty(HirTypeKind.Optional(ht)), _untyped(), local)).to_equal(true)
+        expect(lowering.enum_payload_local_compatible(ct, _untyped(), local)).to_equal(false)
+        expect(lowering.enum_payload_local_compatible(ty(HirTypeKind.Optional(ct)), _untyped(), local)).to_equal(false)
+
+    it "admits the declared element type of an untyped container read":
+        var lowering = _lowered()
+        val ht = HirTypeKind.Named(_symbol(lowering, "HT"), [])
+        val zero = ex(HirExprKind.IntLit(0, None))
+        val from_array = ex(HirExprKind.Index(ex(HirExprKind.Var(_symbol(lowering, "xs"))), zero))
+        val from_foreign_dict = ex(HirExprKind.Index(ex(HirExprKind.Var(_symbol(lowering, "named"))), zero))
+        val from_dict = ex(HirExprKind.Index(ex(HirExprKind.Var(_symbol(lowering, "owned"))), zero))
+        var word_builder = lowering.builder
+        val word = word_builder.new_temp(mty(MirTypeKind.I64))
+        lowering.builder = word_builder
+        expect(lowering.enum_payload_local_compatible(ty(ht), from_array, word)).to_equal(true)
+        expect(lowering.enum_payload_local_compatible(ty(ht), from_dict, word)).to_equal(true)
+        expect(lowering.enum_payload_local_compatible(ty(ht), from_foreign_dict, word)).to_equal(false)
+
+    it "fills an optional from a present text or record and from nothing else":
+        var lowering = _lowered()
+        val ht = ty(HirTypeKind.Named(_symbol(lowering, "HT"), []))
+        val str_t = ty(HirTypeKind.Str)
+        val i64_t = ty(HirTypeKind.Int(64, true))
+        expect(lowering.enum_payload_present_fills_optional(ty(HirTypeKind.Optional(ht)), ht)).to_equal(true)
+        expect(lowering.enum_payload_present_fills_optional(ty(HirTypeKind.Optional(str_t)), str_t)).to_equal(true)
+        expect(lowering.enum_payload_present_fills_optional(ty(HirTypeKind.Optional(i64_t)), i64_t)).to_equal(false)
+        expect(lowering.enum_payload_present_fills_optional(ty(HirTypeKind.Optional(ht)), str_t)).to_equal(false)
+        expect(lowering.enum_payload_present_fills_optional(ht, ht)).to_equal(false)
+
+    it "takes nil for an optional slot only inside unsafe, and None always":
+        var lowering = _lowered()
+        val ht = ty(HirTypeKind.Named(_symbol(lowering, "HT"), []))
+        val optional = ty(HirTypeKind.Optional(ht))
+        var word_builder = lowering.builder
+        val word = word_builder.new_temp(mty(MirTypeKind.I64))
+        lowering.builder = word_builder
+        val none_e = ex(HirExprKind.NamedVar(SymbolId(id: 987655), "None"))
+        expect(lowering.enum_payload_local_compatible(optional, ex(HirExprKind.NilLit), word)).to_equal(false)
+        lowering.unsafe_depth = 1
+        expect(lowering.enum_payload_local_compatible(optional, ex(HirExprKind.NilLit), word)).to_equal(true)
+        lowering.unsafe_depth = 0
+        expect(lowering.enum_payload_local_compatible(optional, none_e, word)).to_equal(true)
+        expect(lowering.enum_payload_is_builtin_none(none_e)).to_equal(true)
+        expect(lowering.enum_payload_is_builtin_none(ex(HirExprKind.NamedVar(SymbolId(id: 987655), "Nothing")))).to_equal(false)
+        expect(lowering.enum_payload_is_builtin_none(ex(HirExprKind.NilLit))).to_equal(false)
+
+    it "keeps nil out of nominal and unit slots and in the nil singleton":
+        var lowering = _lowered()
+        var word_builder = lowering.builder
+        val word = word_builder.new_temp(mty(MirTypeKind.I64))
+        lowering.builder = word_builder
+        val nil_e = ex(HirExprKind.NilLit)
+        expect(lowering.enum_payload_local_compatible(ty(HirTypeKind.Named(_symbol(lowering, "HT"), [])), nil_e, word)).to_equal(false)
+        expect(lowering.enum_payload_local_compatible(ty(HirTypeKind.Named(_symbol(lowering, "CT"), [])), nil_e, word)).to_equal(false)
+        expect(lowering.enum_payload_local_compatible(ty(HirTypeKind.Named(_symbol(lowering, "Inner"), [])), nil_e, word)).to_equal(false)
+        expect(lowering.enum_payload_local_compatible(ty(HirTypeKind.Unit), nil_e, word)).to_equal(false)
+        expect(lowering.enum_payload_local_compatible(ty(HirTypeKind.Nil), nil_e, word)).to_equal(true)
+        expect(lowering.enum_payload_local_compatible(ty(HirTypeKind.Nil), ex(HirExprKind.IntLit(1, None)), word)).to_equal(false)
+
+describe "enum constructor registry helpers":
+    it "resolves a declaration symbol to its registered owner key":
+        var lowering = _lowered()
+        expect(lowering.enum_constructor_symbol_owner(_symbol(lowering, "E"))).to_equal("probe.E")
+        expect(lowering.enum_constructor_symbol_owner(_symbol(lowering, "HT"))).to_equal("")
+        expect(lowering.enum_constructor_symbol_owner(SymbolId(id: -1))).to_equal("")
+        var unlowered = _unlowered()
+        expect(unlowered.enum_constructor_symbol_owner(_symbol(unlowered, "E"))).to_equal("")
+        # A declaration with no defining module is keyed by its bare name.
+        val e_id = _symbol(lowering, "E")
+        var module_less: HirSymbol = lowering.symbols.symbols[e_id.id]
+        module_less.defining_module = None
+        lowering.symbols.symbols[e_id.id] = module_less
+        expect(lowering.enum_constructor_symbol_owner(e_id)).to_equal("")
+        lowering.enum_variant_index_q["E"] = ["K", "N"]
+        expect(lowering.enum_constructor_symbol_owner(e_id)).to_equal("E")
+
+    it "resolves a bare name only when exactly one declaration owns it":
+        var lowering = _lowered()
+        expect(lowering.enum_constructor_metadata_owner("probe.E")).to_equal("probe.E")
+        expect(lowering.enum_constructor_metadata_owner("E")).to_equal("probe.E")
+        expect(lowering.enum_constructor_metadata_owner("Missing")).to_equal("")
+        var bare_first = _unlowered()
+        bare_first.enum_variant_index_q["E"] = ["N"]
+        bare_first.enum_variant_index_q["probe.E"] = ["N"]
+        bare_first.enum_runtime_to_bare["probe.E"] = "E"
+        expect(bare_first.enum_constructor_metadata_owner("E")).to_equal("probe.E")
+        bare_first.enum_variant_index_q["other.E"] = ["N"]
+        bare_first.enum_runtime_to_bare["other.E"] = "E"
+        expect(bare_first.enum_constructor_metadata_owner("E")).to_equal("")
+        var qualified_first = _unlowered()
+        qualified_first.enum_variant_index_q["probe.E"] = ["N"]
+        qualified_first.enum_runtime_to_bare["probe.E"] = "E"
+        qualified_first.enum_variant_index_q["E"] = ["N"]
+        expect(qualified_first.enum_constructor_metadata_owner("E")).to_equal("probe.E")
+
+    it "names why a positional payload cannot be checked":
+        var lowering = _lowered()
+        expect(lowering.enum_positional_payload_reason("probe.E", "N", 1)).to_equal("")
+        expect(lowering.enum_positional_payload_reason("probe.E", "N", 2)).to_equal("payload arity mismatch")
+        expect(lowering.enum_positional_payload_reason("probe.E", "Nope", 1)).to_equal("unknown variant")
+        lowering.enum_variant_payload_kind["probe.E::N"] = "bogus"
+        expect(lowering.enum_positional_payload_reason("probe.E", "N", 1)).to_equal("invalid declared payload kind")
+        lowering.enum_variant_payload_kind.remove("probe.E::K")
+        lowering.enum_variant_payload_types.remove("probe.E::K")
+        expect(lowering.enum_positional_payload_reason("probe.E", "K", 1)).to_equal("missing declared payload metadata")
+
+    it "uses declared slots for a registered non-generic owner only":
+        var lowering = _lowered()
+        expect(lowering.enum_payload_key_uses_declared_slots("probe.E::N")).to_equal(true)
+        expect(lowering.enum_payload_key_uses_declared_slots("")).to_equal(false)
+        expect(lowering.enum_payload_key_uses_declared_slots("probe.E::Nope")).to_equal(false)
+        lowering.enum_variant_payload_types["flat"] = []
+        expect(lowering.enum_payload_key_uses_declared_slots("flat")).to_equal(false)
+        lowering.generic_enum_constructor_owners["probe.E"] = true
+        expect(lowering.enum_payload_key_uses_declared_slots("probe.E::N")).to_equal(false)
+
+describe "declared payload literals":
+    it "checks a fixed-size array slot against the literal length":
+        var lowering = _lowered()
+        val i64_t = ty(HirTypeKind.Int(64, true))
+        val one = ex(HirExprKind.IntLit(1, None))
+        val two_items = ex(HirExprKind.ArrayLit([one, one], None))
+        val fitted = lowering.lower_declared_enum_payload_expression(ty(HirTypeKind.Array(i64_t, Some(2))), two_items)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.find_local_hir_type(fitted.id).?).to_equal(true)
+        lowering.lower_declared_enum_payload_expression(ty(HirTypeKind.Array(i64_t, Some(3))), two_items)
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].message).to_equal("enum payload array length mismatch")
+
+    it "checks a settled dict literal ascription against the declared slot":
+        var lowering = _lowered()
+        val i64_t = ty(HirTypeKind.Int(64, true))
+        val str_t = ty(HirTypeKind.Str)
+        val slot = ty(HirTypeKind.Dict(str_t, i64_t))
+        val agreed = lowering.lower_declared_enum_payload_expression(slot, ex(HirExprKind.DictLit([], str_t, Some(i64_t))))
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.find_local_hir_type(agreed.id).?).to_equal(true)
+        lowering.lower_declared_enum_payload_expression(slot, ex(HirExprKind.DictLit([], i64_t, None)))
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].message).to_equal("enum payload dictionary key annotation mismatch")
+        lowering.lower_declared_enum_payload_expression(slot, ex(HirExprKind.DictLit([], str_t, Some(str_t))))
+        expect(lowering.errors.len()).to_equal(2)
+        expect(lowering.errors[1].message).to_equal("enum payload dictionary value annotation mismatch")
+
+    it "lowers None to the nil word for an undeclared non-generic slot":
+        var lowering = _lowered()
+        val none_e = ex(HirExprKind.NamedVar(SymbolId(id: 987655), "None"))
+        val word = lowering.lower_untyped_enum_payload_expression("probe.E::K", none_e)
+        expect(lowering.nil_locals.contains(word.id)).to_equal(true)
+        val declared = lowering.lower_declared_enum_payload_expression(ty(HirTypeKind.Optional(ty(HirTypeKind.Str))), none_e)
+        expect(lowering.nil_locals.contains(declared.id)).to_equal(true)
+
+describe "declared payload slot carriers":
+    it "casts a scalar of another width and leaves a matching one alone":
+        var lowering = _lowered()
+        val i64_t = ty(HirTypeKind.Int(64, true))
+        var narrow_builder = lowering.builder
+        val narrow = narrow_builder.new_temp(mty(MirTypeKind.I32))
+        lowering.builder = narrow_builder
+        var wide_builder = lowering.builder
+        val wide = wide_builder.new_temp(mty(MirTypeKind.I64))
+        lowering.builder = wide_builder
+        expect(lowering.adapt_declared_enum_payload(i64_t, narrow).id != narrow.id).to_equal(true)
+        expect(lowering.adapt_declared_enum_payload(i64_t, wide).id).to_equal(wide.id)
+        expect(lowering.adapt_declared_enum_payload(ty(HirTypeKind.Bool), wide).id).to_equal(wide.id)
+        expect(lowering.adapt_declared_enum_payload(ty(HirTypeKind.Any), wide).id != wide.id).to_equal(true)
+
+    it "boxes an unsigned 64-bit word before it enters the slot":
+        var lowering = _lowered()
+        var unsigned_builder = lowering.builder
+        val unsigned = unsigned_builder.new_temp(mty(MirTypeKind.U64))
+        lowering.builder = unsigned_builder
+        var signed_builder = lowering.builder
+        val signed = signed_builder.new_temp(mty(MirTypeKind.I64))
+        lowering.builder = signed_builder
+        expect(lowering.encode_declared_enum_payload_slot(unsigned).id != unsigned.id).to_equal(true)
+        expect(lowering.encode_declared_enum_payload_slot(signed).id).to_equal(signed.id)
+
+    it "restores the declared identity of a decoded slot":
+        var lowering = _lowered()
+        val i64_t = ty(HirTypeKind.Int(64, true))
+        val str_t = ty(HirTypeKind.Str)
+        val ht_id = _symbol(lowering, "HT")
+        val ct_id = _symbol(lowering, "CT")
+        var raw_builder = lowering.builder
+        val raw = raw_builder.new_temp(mty(MirTypeKind.I64))
+        lowering.builder = raw_builder
+        val as_dict = lowering.decode_declared_enum_payload_slot(raw, ty(HirTypeKind.Dict(str_t, i64_t)))
+        expect(lowering.runtime_dict_locals.contains(as_dict.id)).to_equal(true)
+        val as_array = lowering.decode_declared_enum_payload_slot(raw, ty(HirTypeKind.Array(i64_t, None)))
+        expect(lowering.runtime_array_locals.contains(as_array.id)).to_equal(true)
+        val as_struct = lowering.decode_declared_enum_payload_slot(raw, ty(HirTypeKind.Named(ht_id, [])))
+        expect(lowering.struct_value_syms.contains(as_struct.id)).to_equal(true)
+        val as_class = lowering.decode_declared_enum_payload_slot(raw, ty(HirTypeKind.Named(ct_id, [])))
+        expect(lowering.struct_value_syms[as_class.id]).to_equal(mir_class_identity_raw(lowering.symbols, ct_id.id))
+        val as_enum = lowering.decode_declared_enum_payload_slot(raw, ty(HirTypeKind.Named(_symbol(lowering, "Inner"), [])))
+        expect(lowering.is_runtime_value_local(as_enum.id)).to_equal(true)
+        val as_text = lowering.decode_declared_enum_payload_slot(raw, str_t)
+        expect(lowering.local_is_str(as_text)).to_equal(true)
+        val as_narrow = lowering.decode_declared_enum_payload_slot(raw, ty(HirTypeKind.Int(32, true)))
+        expect(lowering.find_local_hir_type(as_narrow.id).?).to_equal(true)
+        val as_any = lowering.decode_declared_enum_payload_slot(raw, ty(HirTypeKind.Any))
+        expect(lowering.find_local_hir_type(as_any.id).?).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+
+describe "payload diagnostics":
+    it "names the declared slot, falling back to its shape":
+        var lowering = _lowered()
+        expect(lowering.enum_payload_declared_name(ty(HirTypeKind.Named(_symbol(lowering, "HT"), [])))).to_equal("HT")
+        expect(lowering.enum_payload_declared_name(ty(HirTypeKind.Named(SymbolId(id: 987654), []))).contains("named")).to_equal(true)
+        expect(lowering.enum_payload_declared_name(ty(HirTypeKind.Bool))).to_equal("bool")
+
+    it "says to use None for a nil in an optional slot":
+        var lowering = _lowered()
+        val optional = ty(HirTypeKind.Optional(ty(HirTypeKind.Named(_symbol(lowering, "HT"), []))))
+        val message = lowering.enum_payload_mismatch_message("probe.E.K", 0, optional, ex(HirExprKind.NilLit))
+        expect(message.contains("nil outside unsafe into optional payload slot (declared 'HT?'); use None")).to_equal(true)
+
+    it "prints the evidence a refused slot saw when the trace switches are on":
+        var lowering = _lowered()
+        val ht = ty(HirTypeKind.Named(_symbol(lowering, "HT"), []))
+        var local_builder = lowering.builder
+        val local = local_builder.new_temp(mty(MirTypeKind.I64))
+        lowering.builder = local_builder
+        lowering.remember_local_hir_type(local.id, ht, 0, 0)
+        env_set("SIMPLE_ENUM_PAYLOAD_TRACE", "1")
+        env_set("SIMPLE_ENUM_PAYLOAD_PATH_TRACE", "1")
+        lowering.enum_payload_mismatch_trace(ty(HirTypeKind.Bool), _untyped(), local)
+        lowering.enum_payload_mismatch_trace(ty(HirTypeKind.Bool), _untyped(), LocalId(id: 987654))
+        val typed = HirExpr(kind: HirExprKind.IntLit(1, None), has_type_: true, type_: ty(HirTypeKind.Int(64, true)), span: Span.empty())
+        lowering.enum_payload_mismatch_trace(ty(HirTypeKind.Bool), typed, local)
+        val accepted = lowering.enum_payload_local_compatible(ht, _untyped(), local)
+        var bool_builder = lowering.builder
+        val bool_l = bool_builder.new_temp(mty(MirTypeKind.Bool))
+        lowering.builder = bool_builder
+        val by_mir = _admits(lowering, HirTypeKind.Bool, bool_l)
+        env_set("SIMPLE_ENUM_PAYLOAD_TRACE", "0")
+        env_set("SIMPLE_ENUM_PAYLOAD_PATH_TRACE", "0")
+        expect(accepted).to_equal(true)
+        expect(by_mir).to_equal(true)
+
+describe "enum payload construction from source":
+    it "accepts a dict literal and checks its keys and values against the slot":
+        val head = "enum E:\n    D(d: Dict<text, i64>)\nfn mk() -> E:\n"
+        expect(_errors(head + "    E.D({{\"a\": 1}})\n").len()).to_equal(0)
+        expect(_errors(head + "    E.D({{}})\n").len()).to_equal(0)
+        expect(_has(_errors(head + "    E.D({{1: 2}})\n"), "enum payload dictionary key type mismatch")).to_equal(true)
+        expect(_has(_errors(head + "    E.D({{\"a\": \"b\"}})\n"), "enum payload dictionary value type mismatch")).to_equal(true)
+
+    it "checks a later dict literal entry, not only the first":
+        val head = "enum E:\n    D(d: Dict<text, i64>)\nfn mk() -> E:\n"
+        expect(_has(_errors(head + "    E.D({{\"a\": 1, \"b\": \"c\"}})\n"), "enum payload dictionary value type mismatch")).to_equal(true)
+        expect(_has(_errors(head + "    E.D({{\"a\": 1, 2: 3}})\n"), "enum payload dictionary key type mismatch")).to_equal(true)
+
+    it "checks a typed variable dict value by its declared type":
+        val head = "enum E:\n    D(d: Dict<text, i64>)\nfn mk() -> E:\n"
+        expect(_has(_errors(head + "    val x: text = \"b\"\n    E.D({{\"a\": x}})\n"), "enum payload dictionary value type mismatch")).to_equal(true)
+
+    it "refuses a nested dict value element of another type":
+        val head = "enum E:\n    L(xs: Dict<text, [f64]>)\nfn mk() -> E:\n"
+        expect(_has(_errors(head + "    E.L({{\"a\": [\"x\"]}})\n"), "payload type mismatch at 0")).to_equal(true)
+
+    it "keeps nil out of a non-optional dict literal value":
+        val head = "enum E:\n    D(d: Dict<text, i64>)\nfn mk() -> E:\n"
+        expect(_has(_errors(head + "    E.D({{\"a\": nil}})\n"), "enum payload dictionary nil entry into non-optional slot")).to_equal(true)
+        expect(_has(_errors(head + "    unsafe:\n        E.D({{\"a\": nil}})\n"), "enum payload dictionary nil entry into non-optional slot")).to_equal(true)
+        expect(_has(_errors(head + "    E.D({{\"a\": 1, \"b\": {{\"c\": nil}}}})\n"), "payload type mismatch at 0")).to_equal(true)
+
+    it "keeps nil out of a non-optional dict literal key":
+        val head = "enum E:\n    D(d: Dict<text, i64>)\nfn mk() -> E:\n"
+        expect(_has(_errors(head + "    E.D({{nil: 1}})\n"), "enum payload dictionary nil entry into non-optional slot")).to_equal(true)
+
+    it "keeps nil out of a nested non-optional dict literal value":
+        val head = "enum E:\n    M(m: Dict<text, Dict<text, i64>>)\nfn mk() -> E:\n"
+        expect(_errors(head + "    E.M({{\"a\": {{\"b\": 1}}}})\n").len()).to_equal(0)
+        expect(_has(_errors(head + "    E.M({{\"a\": {{\"b\": nil}}}})\n"), "enum payload dictionary nil entry into non-optional slot")).to_equal(true)
+
+    it "takes None, and nil only inside unsafe, for an optional dict entry":
+        val head = "enum E:\n    O(o: Dict<text, i64?>)\nfn mk() -> E:\n"
+        expect(_errors(head + "    E.O({{\"a\": None}})\n").len()).to_equal(0)
+        expect(_errors(head + "    unsafe:\n        E.O({{\"a\": nil}})\n").len()).to_equal(0)
+        expect(_has(_errors(head + "    E.O({{\"a\": nil}})\n"), "enum payload dictionary value type mismatch")).to_equal(true)
+
+    it "keeps None out of a non-optional dict literal value":
+        val head = "enum E:\n    D(d: Dict<text, i64>)\nfn mk() -> E:\n"
+        expect(_has(_errors(head + "    E.D({{\"a\": None}})\n"), "payload type mismatch at 0")).to_equal(true)
+
+    it "refuses a dict literal in a scalar slot":
+        val head = "enum E:\n    N(n: i64)\nfn mk() -> E:\n"
+        expect(_has(_errors(head + "    E.N({{\"a\": 1}})\n"), "payload type mismatch at 0")).to_equal(true)
+
+    it "refuses an optional dict local in a non-optional dict slot and names the unwrap":
+        val head = "enum E:\n    D(d: Dict<text, i64>)\nfn mk() -> E:\n"
+        expect(_has(_errors(head + "    val d: Dict<text, i64>? = None\n    E.D(d)\n"), "unwrap it first")).to_equal(true)
+
+    it "accepts a float array dict value in a float array dict slot":
+        val head = "enum E:\n    L(xs: Dict<text, [f64]>)\nfn mk() -> E:\n"
+        expect(_errors(head + "    E.L({{\"a\": [1.5]}})\n").len()).to_equal(0)
+    it "accepts a tuple literal and refuses nil for a tuple or unit slot":
+        val head = "enum E:\n    V(p: (i64, text))\n    U(u: ())\nfn mk() -> E:\n"
+        expect(_errors(head + "    E.V((1, \"a\"))\n").len()).to_equal(0)
+        expect(_has(_errors(head + "    E.V(nil)\n"), "payload type mismatch at 0")).to_equal(true)
+        expect(_has(_errors(head + "    E.U(nil)\n"), "payload type mismatch at 0")).to_equal(true)
+
+    it "fills an optional record or text slot from a present value, never from a scalar":
+        val head = "struct HT:\n    kind: i64\nstruct Other:\n    kind: i64\nenum E:\n    K(t: HT?)\n    S(s: text?)\n    N(n: i64?)\nfn mk() -> E:\n"
+        expect(_errors(head + "    val h = HT(kind: 1)\n    E.K(h)\n").len()).to_equal(0)
+        expect(_errors(head + "    val s = \"a\"\n    E.S(s)\n").len()).to_equal(0)
+        expect(_has(_errors(head + "    val n = 1\n    E.N(n)\n"), "payload type mismatch at 0")).to_equal(true)
+        expect(_has(_errors(head + "    val o = Other(kind: 1)\n    E.K(o)\n"), "payload type mismatch at 0")).to_equal(true)
+
+    it "takes nil for an optional slot inside unsafe only":
+        val head = "struct HT:\n    kind: i64\nenum E:\n    K(t: HT?)\nfn mk() -> E:\n"
+        expect(_errors(head + "    unsafe:\n        E.K(nil)\n").len()).to_equal(0)
+        expect(_errors(head + "    E.K(None)\n").len()).to_equal(0)
+        expect(_has(_errors(head + "    E.K(nil)\n"), "nil outside unsafe into optional payload slot (declared 'HT?'); use None")).to_equal(true)
+
+    it "holds only nil in a nil-singleton slot":
+        val head = "enum E:\n    Z(z: nil)\nfn mk() -> E:\n"
+        expect(_errors(head + "    E.Z(nil)\n").len()).to_equal(0)
+        expect(_has(_errors(head + "    E.Z(1)\n"), "payload type mismatch at 0")).to_equal(true)
+
+    it "refuses a wrong payload count and an unknown variant":
+        val head = "enum E:\n    N(n: i64)\nfn mk() -> E:\n"
+        expect(_has(_errors(head + "    E.N(1, 2)\n"), "payload arity mismatch")).to_equal(true)
+        expect(_has(_errors(head + "    E.Nope(1)\n"), "enum variant lookup miss")).to_equal(true)
+
+    it "widens a narrower scalar into the slot and reads every slot kind back":
+        expect(_errors("enum E:\n    N(n: i64)\n    F(f: f64)\n    U(x: u64)\nfn a(x: i32) -> E:\n    E.N(x)\nfn b(x: f32) -> E:\n    E.F(x)\nfn c(x: u64) -> E:\n    E.U(x)\n").len()).to_equal(0)
+        expect(_errors("struct HT:\n    kind: i64\nclass CT:\n    kind: i64\nenum Inner:\n    A\n    B(v: i64)\nenum E:\n    D(d: Dict<text, i64>)\n    K(t: HT)\n    C(c: CT)\n    I(i: Inner)\n    N(n: i32)\n    S(s: text)\n    A(xs: [i64])\nfn rd(e: E) -> i64:\n    match e:\n        case E.D(d): d.len()\n        case E.K(t): t.kind\n        case E.C(c): c.kind\n        case E.I(i): 1\n        case E.N(n): 2\n        case E.S(s): s.len()\n        case E.A(xs): xs.len()\n").len()).to_equal(0)

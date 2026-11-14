@@ -47,6 +47,27 @@ fn enum_payload_types_alias_compatible(expected: HirType, actual: HirType, symbo
         case _:
             enum_payload_types_alias_equal(expected, actual, symbols)
 
+# HIR writes `Infer(0, 0)` as the key type of every unannotated dict literal
+# (expression_core.spl, DictLit); only a settled key type is an ascription.
+fn enum_payload_dict_key_is_ascribed(annotated_key: HirType) -> bool:
+    match annotated_key.kind:
+        case HirTypeKind.Infer(_, _): return false
+        case _: ()
+    true
+
+# A nil key or value in a dict literal payload needs a declared optional
+# (or nil-singleton) entry type. The entry check alone would take nil's
+# I64 carrier as an integer, so an inline literal must not be the way nil
+# reaches a non-optional scalar slot (never widen nil).
+fn enum_payload_dict_entry_nil_vetoed(expected: HirType, expression: HirExpr) -> bool:
+    match expression.kind:
+        case HirExprKind.NilLit: ()
+        case _: return false
+    match expected.kind:
+        case HirTypeKind.Optional(_) | HirTypeKind.Nil: return false
+        case _: ()
+    true
+
 # Veto only source NilLit values that occupy declared Unit leaves. This
 # closes stale whole-tuple metadata without granting new payload acceptance.
 fn enum_payload_nested_unit_nil_veto_v1(expected: HirType, expression: HirExpr) -> bool:
@@ -308,12 +329,17 @@ impl MirLowering:
                     case HirExprKind.DictLit(entries, annotated_key, annotated_value):
                         # The raw HIR key annotation is nullable despite its
                         # historic non-optional field declaration.
-                        if annotated_key != None and not enum_payload_types_alias_compatible(key_type, annotated_key, self.symbols):
+                        if annotated_key != None and enum_payload_dict_key_is_ascribed(annotated_key) and not enum_payload_types_alias_compatible(key_type, annotated_key, self.symbols):
                             self.error_fatal("enum payload dictionary key annotation mismatch", Some(expression.span))
                             return self.builder.emit_const_int(0)
                         if val annotated = annotated_value:
                             if not enum_payload_types_alias_compatible(value_type, annotated, self.symbols):
                                 self.error_fatal("enum payload dictionary value annotation mismatch", Some(expression.span))
+                                return self.builder.emit_const_int(0)
+                        for entry in entries:
+                            val (key_expr, value_expr) = entry
+                            if enum_payload_dict_entry_nil_vetoed(key_type, key_expr) or enum_payload_dict_entry_nil_vetoed(value_type, value_expr):
+                                self.error_fatal("enum payload dictionary nil entry into non-optional slot; use an optional entry type", Some(expression.span))
                                 return self.builder.emit_const_int(0)
                         val local = self.lower_dict_lit(entries, Some(key_type), Some(value_type))
                         if self.errors.len() == errors_before:
@@ -484,7 +510,31 @@ impl MirLowering:
                 val declared = self.enum_payload_declared_name(expected)
                 return "{stem}: nil into non-optional payload slot (declared '{declared}'); declare it '{declared}?' if absence is valid{context}"
             case _: ()
+        # An unguarded `T?` binding in a non-optional `T` slot: a nullable
+        # merge, or an annotated `val` whose initializer is one (a `T?` / `T`
+        # join is `T?` in either arm order). The refusal stands (never widen
+        # nil); name the unwrap so the site is fixable without
+        # SIMPLE_ENUM_PAYLOAD_TRACE.
+        if self.enum_payload_is_unguarded_optional(expected, expression):
+            val declared = self.enum_payload_declared_name(expected)
+            return "{stem}: optional '{declared}?' value into non-optional payload slot (declared '{declared}'); unwrap it first (`if val`){context}"
         stem + context
+
+    fn enum_payload_is_unguarded_optional(expected: HirType, expression: HirExpr) -> bool:
+        match expected.kind:
+            case HirTypeKind.Optional(_): return false
+            case _: ()
+        match expression.kind:
+            case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                val bound_local = self.symbol_bound_local(symbol.id)
+                if bound_local.id < 0: return false
+                if val actual = self.find_local_hir_type(bound_local.id):
+                    match actual.kind:
+                        case HirTypeKind.Optional(actual_inner):
+                            return enum_payload_types_alias_compatible(expected, actual_inner, self.symbols)
+                        case _: ()
+            case _: ()
+        false
 
     fn enum_payload_declared_name(declared_type: HirType) -> text:
         match declared_type.kind:

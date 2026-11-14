@@ -800,3 +800,35 @@ retracts the journaled copies (`provider_type_relocation_journal`) after
   for type-defining modules** (`{t.kind}` struct Display, hash order) -- compare
   serialized rows, not the fingerprint
   (`mir_canonical_fingerprint_type_row_hash_order_seed_2026-11-14.md`).
+
+## 2026-11-14 — an annotated `val x: T` does not launder a `T?` initializer
+
+`val x: T = if c: opt else: plain` keeps the initializer's `T?` (a `T?` / `T` join is `T?` in
+either arm order; `let_declared_type_override_v1` only lets the annotation win over Infer / Error /
+erased / Result). `Enum.Variant(x)` into a non-optional slot is then refused, now with
+`optional 'T?' value into non-optional payload slot ... unwrap it first`. Fix the source with
+`if val`, or bind the plain value once; do not make the annotation win. Struct fields and
+plain parameters still accept the same value silently. Red/green in about 30 s on the seed:
+`test/01_unit/compiler/mir/let_annotated_optional_join_spec.spl` (it also pins the three
+`HirStmtKind.Let` sites in `statements.spl`, lost once to a rebase). Record:
+`doc/08_tracking/bug/stage3_let_payload_unguarded_optional_arm_2026-11-14.md`.
+
+## 2026-11-14 — dict literal payloads, and what module coverage can show
+
+- HIR gives every dict literal the key type `Infer(0, 0)`; MIR must read that as "no
+  ascription" (`enum_payload_dict_key_is_ascribed`). Treating it as a key type refused every
+  inline `Enum.V({...})`. Seed-interpreted proof only; the `@workaround` sites stay until a
+  native Phase 2 lowers the inline form.
+- `enum_constructor_payload.spl` is unit-testable without a Stage 2: lower a small module,
+  then call the helpers on the `MirLowering` with a synthetic temp
+  (`test/01_unit/compiler/mir/enum_payload_local_evidence_spec.spl`). Add temps to
+  `lowering.builder` inline in the `it` body: a lowering passed to a helper function is not
+  updated in the caller. Private free functions come in through the module's wildcard import.
+- Measure coverage on a seed that contains PR #9041. An older seed does not record an
+  `if` / `match` in expression position and made this module look capped at 82.2%; on the
+  current seed it is 100.0% (237/237) lines. Check the seed's base commit before believing a
+  coverage ceiling.
+- The per-entry check in `lower_dict_lit` reads nil's I64 carrier as an integer, so a dict
+  literal payload vetoes a `nil` key or value unless the declared entry type is optional or
+  `Nil` (`enum_payload_dict_entry_nil_vetoed`). A top-level `E.N(nil)` into an `i64` slot is
+  still accepted; see `doc/08_tracking/bug/enum_payload_nil_into_scalar_slot_accepted_2026-11-14.md`.
