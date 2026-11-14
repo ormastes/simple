@@ -112,3 +112,30 @@ shadowing, containing-type privacy, all existing scoped/member rules, positive
 manifest mutation and negative-to-present cache invalidation. Exercise both
 registration and already-present symbol/type shortcuts. Existing native attempt
 caps remain exhausted; no tests in this packet are reported as executed.
+
+## Known private-target rejections
+
+Declaration origins are now attached to actual predeclaration IDs before alias
+expansion, including local TypeAlias declarations. Public transparent aliases
+are checked using neutral formal arguments, so a private target named by the
+declaration is rejected without confusing a caller's private generic argument
+with exported declaration evidence. The check walks nested lowered type shapes;
+it never marks the target public and an empty result is not positive permission.
+Declaration-owned bounds and defaults are checked in a saved/restored formal
+frame; defaults see only earlier formals. A transient validation context checks
+the selected private declaration before transparent expansion erases its ID.
+It does not yet replace full exported-signature access validation or prove
+eligibility for Unknown, scoped or default-folder targets.
+
+An explicitly written selective import also rejects its actually bound symbol
+when exact source intent is `pri` and the declaring physical file differs from
+the requester. Internal dependency registration does not invoke that boundary.
+Namespace, glob, late lookup and containing-type paths still require the full
+selected-binding consumer; this negative check does not claim those are done.
+Imported transparent aliases that share a public target's canonical symbol also
+require the selected alias binding's declaration authority; the canonical-symbol
+negative check alone cannot enforce that alias's privacy.
+Authored frontend/HIR regressions cover public alias to pri Target, nested
+private targets, private defaults/bounds/intermediate aliases, neutral formal
+shadowing, caller-private generic arguments, public targets and direct
+selective import of pri Target. All remain UNRUN.
