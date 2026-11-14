@@ -1,6 +1,6 @@
 # smux product files import ordinary std owners past the SOSIX host boundary
 
-Status: open. Platform-independent (source scan); observed on macOS arm64,
+Status: FIXED 2026-11-14 (see "Fix" at end). Platform-independent (source scan); observed on macOS arm64,
 release/1.0.0 at `3ebbaa03df9`.
 
 ## Failing spec
@@ -42,3 +42,19 @@ synchronous SOSIX owner, or the owner amends the boundary rule in the spec.
 Then the example passes unchanged.
 
 Related: `doc/08_tracking/bug/windows_smux_host_sosix_bypass_2026-10-18.md`.
+
+## Fix (2026-11-14)
+
+`src/lib/nogc_sync_mut/sosix/host.spl` (`std.sosix.host`) re-exports the
+synchronous owners unchanged — `sosix_file_read`/`sosix_file_write`,
+`sosix_getpid`, the `RetainedPrivateCredentialV1` family,
+`FileLockReleaseStateV2`, `HostHelperSettlementAckV1`, and (a seventh drift
+found while fixing, `api.spl:62`) `ContainerPrimaryAttachSessionV1` — and adds
+a synchronous `sosix_env_set` with the async facade's C-string admission (no
+NUL, key nonempty without `=`). `api.spl`, `server.spl`, `smux_remote.spl`
+import only `std.sosix.host`. Spec unchanged.
+
+Before: `smux_sosix_boundary_spec` 2/3. After: 3/3; regression lanes
+`smux_system_spec` 56/56, `smux_service_features_spec` 15/15,
+`smux_session_lifecycle_spec` 9/9 (macOS arm64, seed release100-d1ba435a0b3).
+BSD: source-only change, no platform branch — identical on FreeBSD.
