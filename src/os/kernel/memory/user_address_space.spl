@@ -9,7 +9,7 @@ use os.kernel.memory.vmm_address_space.{
     create_user_address_space as vmm_create_user_address_space,
     destroy_user_address_space as vmm_destroy_user_address_space,
     vmm_map_page_in, vmm_map_user_low_page,
-    vmm_clone_kernel_low_private
+    vmm_clone_kernel_low_private, vmm_enable_hosted_elementwise_copy
 }
 use os.kernel.memory.pmm.{pmm_alloc_page}
 
@@ -23,19 +23,54 @@ var g_user_as_next_id: u64 = 1
 var g_arm64_fs_exec_frame_next: u64 = 0x48100000
 val ARM64_FS_EXEC_FRAME_END: u64 = 0x50000000
 
+# Hosted (non-baremetal) pure-Simple model of the arm64 user address-space
+# externs. Named exactly like the kernel externs (same pattern as
+# `rt_arm_elf64_direct_entry` in loader/segment_mapper.spl) so hosted specs
+# on an arm64 host resolve `extern fn rt_arm64_user_as_create` here instead
+# of failing "function not found". The freestanding kernel build strips
+# these and links the real runtime symbols. Roots are synthetic,
+# page-aligned and never 0/1 (the VMM "unavailable" sentinels); page maps
+# are accepted only into a root this model handed out, page-aligned.
+val ARM64_HOST_USER_AS_ROOT_BASE: u64 = 0x7F0000000000
+var g_arm64_host_user_as_next_root: u64 = 0x7F0000000000
+var g_arm64_host_frame_next: u64 = 0u64
+var g_arm64_host_frame_end: u64 = 0u64
+val ARM64_HOST_FRAME_POOL_PAGES: i64 = 64
+
 @cfg(not(baremetal))
 @export("rt_arm64_user_as_create_host_stub")
-fn rt_arm64_user_as_create_host_stub() -> u64:
-    1u64
+fn rt_arm64_user_as_create() -> u64:
+    extern fn rt_alloc(size: i64) -> i64
+    vmm_enable_hosted_elementwise_copy()
+    if g_arm64_host_frame_next + 4096u64 * 8u64 > g_arm64_host_frame_end:
+        # Refill with real host pages: the raw 0x48100000 fs-exec arena is
+        # unmapped host memory. Earlier pool tails are left to the process.
+        val raw = rt_alloc((ARM64_HOST_FRAME_POOL_PAGES + 1) * 4096)
+        if raw > 0:
+            g_arm64_host_frame_next = ((raw as u64) + 4095u64) & 0xFFFFFFFFFFFFF000u64
+            g_arm64_host_frame_end = g_arm64_host_frame_next + (ARM64_HOST_FRAME_POOL_PAGES as u64) * 4096u64
+    val root = g_arm64_host_user_as_next_root
+    g_arm64_host_user_as_next_root = g_arm64_host_user_as_next_root + 4096
+    root
 
 @cfg(not(baremetal))
 @export("rt_arm64_user_as_map_page_host_stub")
-fn rt_arm64_user_as_map_page_host_stub(root: u64, virt: u64, phys: u64, flags_bits: u32) -> i32:
-    val _root = root
-    val _virt = virt
-    val _phys = phys
+fn rt_arm64_user_as_map_page(root: u64, virt: u64, phys: u64, flags_bits: u32) -> i32:
     val _flags_bits = flags_bits
-    0
+    if root < ARM64_HOST_USER_AS_ROOT_BASE or root >= g_arm64_host_user_as_next_root:
+        return 0
+    if (virt & 4095) != 0 or (phys & 4095) != 0:
+        return 0
+    1
+
+fn _arm64_host_user_page_frame() -> PageFrame?:
+    # Bump-allocates from the host page pool the hosted create model filled;
+    # no extern here, so freestanding builds need no extra runtime symbol.
+    if g_arm64_host_frame_next == 0u64 or g_arm64_host_frame_next + 4096u64 > g_arm64_host_frame_end:
+        return nil
+    val phys = g_arm64_host_frame_next
+    g_arm64_host_frame_next = g_arm64_host_frame_next + 4096u64
+    PageFrame(pfn: phys / 4096u64)
 
 fn _next_user_as_id() -> u64:
     val id = g_user_as_next_id
@@ -64,6 +99,12 @@ fn alloc_user_page_frame() -> PageFrame?:
     val frame = pmm_alloc_page()
     if frame != nil:
         return frame
+    if g_arm64_host_frame_end != 0u64:
+        # Only the hosted model above fills this pool; the freestanding
+        # kernel never does, so it keeps the fs-exec arena below. Hosted, the
+        # raw 0x48100000 arena is unmapped host memory, so back frames with
+        # real host pages instead.
+        return _arm64_host_user_page_frame()
     if g_arm64_fs_exec_frame_next < 0x48100000 or g_arm64_fs_exec_frame_next >= ARM64_FS_EXEC_FRAME_END:
         g_arm64_fs_exec_frame_next = 0x48100000
     if g_arm64_fs_exec_frame_next + 4096 <= ARM64_FS_EXEC_FRAME_END:

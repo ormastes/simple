@@ -72,3 +72,53 @@ Still open (next blocker, arm64 hosted only):
   `rt_arm64_user_as_create`, which has no hosted backing. Unblock: a hosted
   arm64 user-address-space provider (like the x86_64 `vmm` path), or run these
   specs on an x86_64 host. Verdicts unchanged at 2/5, 4/5, 2/3, 2/3.
+
+## Update 2026-11-15 (work/arm64-host-user-as-20261115) — still OPEN
+
+Verdicts on this arm64 Mac (seed release100-matcharm-20261115), before -> after:
+managed_workload_launch 2/5 -> **5/5**; container_runtime 4/5 -> 4/5;
+runtime_provider_v1 2/3 -> 2/3; macos_simpleos_guest_dispatch_v1 2/3 -> 2/3
+(the three container specs now get past launch and fail on later gaps below).
+New: `test/01_unit/os/kernel/memory/arm64_hosted_user_address_space_spec.spl` 3/3
+(its assertions run only when `get_arch() == Arm64`; zero assertions elsewhere).
+
+Findings (corrections to the earlier "Unblock"):
+- There was no x86_64 hosted provider to twin: hosted, every non-arm64 arm
+  goes through `vmm_address_space.spl:86` and returns `root=1 id=0` (VMM not
+  initialized), which `_address_space_can_map` rejects. The arm64 model is new.
+- Binding defect: `scheduler_executable_adoption.spl` imported
+  `create_user_address_space` from `user_address_space` but the call bound to
+  `vmm_address_space`'s same-named pub fn (proved with markers). Worked around
+  with an import alias; the same pattern is still live at
+  `executable_load_consumer.spl:301`.
+- `@cfg(baremetal)` / `@cfg(not(baremetal))` is ungated in the seed
+  interpreter (`cfg_strip.rs:28,321` gate arch names only), so both twins load.
+- The hosted `*_host_stub` functions never satisfied their externs; renamed to
+  the extern names (precedent: `segment_mapper.spl` `rt_arm_elf64_direct_entry`).
+- Hosted `[u8]` is not the packed freestanding header, so the
+  `not(x86_64)` `vmm_copy_bytes_to_phys` raw memcpy SIGSEGVs; element-wise copy
+  under the hosted model.
+- Not verified: an arm64 freestanding kernel compile with these changes
+  (not run on this host).
+
+Arch-independent product gaps found past the address space (commit 2):
+- `managed_workload_launch.spl`: nothing called `bind_managed_child_security`
+  (no caller in any ref), so every later binder failed `policy_bound` -> -12.
+  Now bound to the caller's TCB resource domain.
+- No process-limit admission existed for 64-bit managed launch; added
+  `sched_resource_process_admits` (authority_runtime.spl) checked before
+  staging -> -11.
+- `ContainerWorld.bind_runtime_pid` was called (`container_runtime.spl:102`)
+  but never defined; implemented.
+- Container specs never initialized the loader authority owner (boot does);
+  shared `ensure_loader_authority_registry()` in `test/helpers/host_arch_elf_fixture.spl`.
+
+Still open:
+- `task_exit_teardown.spl:7,25` imports/calls `device_grant_revoke_task`, which
+  no ref has ever defined. `_handle_device_grant` registers RES_NOTIFICATION /
+  RES_IRQ_ROUTE via `task_register_resource`, which `task_cleanup` may already
+  reclaim: delete-the-call vs add-a-ledger is an owner decision. Blocks
+  container_runtime and macos_simpleos_guest_dispatch_v1 exit tests.
+- runtime_provider_v1 "binds a real task..." returns `rejected` (undiagnosed).
+- Missing generalization spec: launch from a forked member of a limit-1
+  workload must return -11.
