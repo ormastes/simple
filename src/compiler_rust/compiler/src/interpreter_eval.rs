@@ -1909,6 +1909,16 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                                 enums.insert(prefixed_name, Arc::clone(&arc_e));
                                 enums.insert(e.name.clone(), arc_e);
 
+                                // `X.Kind` is the enum type, as for a file-level
+                                // module. Inserted before the variants, so a variant
+                                // spelled like its enum keeps its entry.
+                                module_dict.insert(
+                                    e.name.clone(),
+                                    Value::EnumType {
+                                        enum_name: e.name.clone(),
+                                    },
+                                );
+
                                 // Add enum variants to the module dict: a unit variant
                                 // is its enum value, a payload variant a constructor
                                 // (same rule as `Enum.Variant` in interpreter/expr/calls.rs).
@@ -1954,8 +1964,15 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                         }
                     }
 
-                    // Store module dict in environment
-                    env.insert(mod_decl.name.clone(), Value::Dict(Arc::new(module_dict)));
+                    // Store module dict in environment, and as a module global
+                    // (like a top-level `val`) so function bodies can name it.
+                    let module_value = Value::Dict(Arc::new(module_dict));
+                    env.insert(mod_decl.name.clone(), module_value.clone());
+                    record_flattened_global(
+                        pending_flattened_global_owner.as_ref(),
+                        mod_decl.name.clone(),
+                        module_value,
+                    );
                 }
                 // External module declarations (no body) are handled by the module resolver
             }

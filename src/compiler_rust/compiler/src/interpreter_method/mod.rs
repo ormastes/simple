@@ -546,6 +546,23 @@ pub(crate) fn evaluate_method_call(
             if let Value::Constructor { class_name } = &func_val {
                 return instantiate_class(class_name, args, env, functions, classes, enums, impl_methods);
             }
+            // `X.Pay(3)`: a payload variant of an enum declared in `mod X:`.
+            if let Value::EnumVariantConstructor {
+                enum_name,
+                variant_name,
+            } = func_val
+            {
+                return crate::interpreter::interpreter_call::construct_enum_variant(
+                    enum_name,
+                    variant_name,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                );
+            }
         }
         // Self-named module shadowing: `use a.b.Foo.{Foo}` binds the *module*
         // namespace dict to `Foo` when the module file and the class share a
