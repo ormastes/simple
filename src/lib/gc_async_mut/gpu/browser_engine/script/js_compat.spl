@@ -392,8 +392,8 @@ pub fn js_json_stringify(v: text) -> text:
 pub fn js_encode_uri_component(s: text) -> text:
     """Percent-encode a URI component.
 
-    Encodes all characters except A-Z a-z 0-9 - _ . ~
-    Uses a lookup table for common special characters.
+    Encodes ASCII characters except A-Z a-z 0-9 - _ . ! ~ * ' ( ), as
+    ECMAScript encodeURIComponent does. Non-ASCII is passed through.
     """
     var result = ""
     var i = 0
@@ -493,6 +493,9 @@ fn _is_uri_unreserved(ch: text) -> bool:
         return true
     if ch == "-" or ch == "_" or ch == "." or ch == "~":
         return true
+    # ECMAScript encodeURIComponent also leaves ! * ' ( ) unescaped.
+    if ch == "!" or ch == "*" or ch == "'" or ch == "(" or ch == ")":
+        return true
     false
 
 fn _percent_encode(ch: text) -> text:
@@ -536,7 +539,26 @@ fn _percent_encode(ch: text) -> text:
         return "%5B"
     if ch == "]":
         return "%5D"
-    # Fallback: return as-is (unhandled characters)
+    # `%` must be escaped or an encoded value decodes to something else
+    # ("%41" came back as "A"); the rest of the ASCII punctuation used to fall
+    # through unescaped as well.
+    if ch == "%":
+        return "%25"
+    if ch == "\"":
+        return "%22"
+    if ch == "<":
+        return "%3C"
+    if ch == ">":
+        return "%3E"
+    if ch == "\\":
+        return "%5C"
+    if ch == "^":
+        return "%5E"
+    if ch == "`":
+        return "%60"
+    if ch == "|":
+        return "%7C"
+    # Fallback: return as-is (non-ASCII and control characters)
     ch
 
 fn _hex_to_char(hex: text) -> text:
@@ -581,5 +603,32 @@ fn _hex_to_char(hex: text) -> text:
         return "["
     if lower == "5d":
         return "]"
+    # Every other printable ASCII code (0x20..0x7E). The lookups above
+    # covered only the characters the encoder used to emit, so "%41" stayed
+    # "%41" and an escaped "%25" never came back as "%".
+    val hi = _hex_digit_value(lower.slice(0, 1))
+    val lo = _hex_digit_value(lower.slice(1, 2))
+    if hi >= 0 and lo >= 0 and lower.len() == 2:
+        val code = hi * 16 + lo
+        if code == 123:
+            return "{{"
+        if code == 124:
+            return "|"
+        if code == 125:
+            return "}}"
+        if code == 126:
+            return "~"
+        if code >= 32 and code <= 122:
+            val printable = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz"
+            return printable.slice(code - 32, code - 31)
     # Fallback: return the hex as-is prefixed with %
     "%{hex}"
+
+fn _hex_digit_value(ch: text) -> i64:
+    val digits = "0123456789abcdef"
+    var i = 0
+    while i < 16:
+        if digits.slice(i, i + 1) == ch:
+            return i
+        i = i + 1
+    return -1

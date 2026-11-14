@@ -1,0 +1,151 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/net/cors.spl 1%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/script/js_compat.spl 1%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/net/h1_client.spl 1%
+# @tag: unit, browser_engine, net, cors, uri
+#
+# Three text-level rules with external definitions:
+# - Fetch "CORS-safelisted request-header": Accept without unsafe bytes,
+#   Accept-Language / Content-Language limited to [0-9A-Za-z *,-.;=], the three
+#   safelisted Content-Type essences, a single `bytes=a-b` Range with a <= b,
+#   and a value of at most 128 bytes; any other header is not safelisted.
+# - ECMAScript encodeURIComponent / decodeURIComponent: every byte except the
+#   unreserved set A-Z a-z 0-9 - _ . ! ~ * ' ( ) is %XX in upper-case hex of
+#   its UTF-8 encoding.
+# - HTTP/1 response bytes to text: ASCII passes through and UTF-8 sequences
+#   decode to their characters.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.net.cors.{
+    cors_header_is_safelisted, cors_range_value_is_safelisted,
+    cors_language_value_is_safelisted, cors_header_value_has_unsafe_byte
+}
+use std.gc_async_mut.gpu.browser_engine.script.js_compat.{
+    js_encode_uri_component, js_decode_uri_component
+}
+use std.gc_async_mut.gpu.browser_engine.net.h1_client.{h1_bytes_to_text}
+
+fn _long(n: i64) -> text:
+    var s = ""
+    var i = 0
+    while i < n:
+        s = s + "a"
+        i = i + 1
+    s
+
+describe "CORS safelist, URI components and response text":
+
+    context "safelisted request headers":
+
+        it "accepts an ordinary Accept value and rejects unsafe bytes":
+            expect(cors_header_is_safelisted("accept", "text/html, */*;q=0.8")).to_equal(true)
+            expect(cors_header_is_safelisted("accept", "text/html(comment)")).to_equal(false)
+            expect(cors_header_is_safelisted("accept", "a:b")).to_equal(false)
+            expect(cors_header_value_has_unsafe_byte("a\tb")).to_equal(false)
+            expect(cors_header_value_has_unsafe_byte("a<b")).to_equal(true)
+            expect(cors_header_value_has_unsafe_byte("a@b")).to_equal(true)
+
+        it "limits the language headers to the safelisted alphabet":
+            expect(cors_header_is_safelisted("accept-language", "en-US,en;q=0.9, *")).to_equal(true)
+            expect(cors_header_is_safelisted("content-language", "de-DE")).to_equal(true)
+            expect(cors_header_is_safelisted("accept-language", "en_US")).to_equal(false)
+            expect(cors_language_value_is_safelisted("fr/CA")).to_equal(false)
+            expect(cors_language_value_is_safelisted("")).to_equal(true)
+
+        it "accepts only the three safelisted content types":
+            expect(cors_header_is_safelisted("content-type", "text/plain")).to_equal(true)
+            expect(cors_header_is_safelisted("content-type", "Text/Plain; charset=utf-8")).to_equal(true)
+            expect(cors_header_is_safelisted("content-type", "multipart/form-data; boundary=x")).to_equal(true)
+            expect(cors_header_is_safelisted("content-type", "application/x-www-form-urlencoded")).to_equal(true)
+            expect(cors_header_is_safelisted("content-type", "application/json")).to_equal(false)
+            expect(cors_header_is_safelisted("content-type", "text/plain; a=(b)")).to_equal(false)
+
+        it "rejects any value longer than 128 bytes":
+            expect(cors_header_is_safelisted("accept", _long(128))).to_equal(true)
+            expect(cors_header_is_safelisted("accept", _long(129))).to_equal(false)
+
+        it "does not safelist other headers":
+            expect(cors_header_is_safelisted("authorization", "Bearer x")).to_equal(false)
+            expect(cors_header_is_safelisted("x-custom", "1")).to_equal(false)
+
+    context "safelisted Range values":
+
+        it "accepts one closed or open-ended byte range":
+            expect(cors_range_value_is_safelisted("bytes=0-499")).to_equal(true)
+            expect(cors_range_value_is_safelisted("bytes=500-")).to_equal(true)
+            expect(cors_range_value_is_safelisted("  bytes=7-7 ")).to_equal(true)
+            expect(cors_header_is_safelisted("range", "bytes=0-1")).to_equal(true)
+
+        it "rejects multiple ranges, suffix ranges and other units":
+            expect(cors_range_value_is_safelisted("bytes=0-1,5-6")).to_equal(false)
+            expect(cors_range_value_is_safelisted("bytes=-500")).to_equal(false)
+            expect(cors_range_value_is_safelisted("items=0-5")).to_equal(false)
+            expect(cors_range_value_is_safelisted("bytes=")).to_equal(false)
+
+        it "rejects non-digits, a second dash and a descending range":
+            expect(cors_range_value_is_safelisted("bytes=a-5")).to_equal(false)
+            expect(cors_range_value_is_safelisted("bytes=1-b")).to_equal(false)
+            expect(cors_range_value_is_safelisted("bytes=1-2-3")).to_equal(false)
+            expect(cors_range_value_is_safelisted("bytes=9-3")).to_equal(false)
+
+    context "encodeURIComponent":
+
+        it "leaves the unreserved set untouched":
+            expect(js_encode_uri_component("AZaz09-_.!~*'()")).to_equal("AZaz09-_.!~*'()")
+
+        it "escapes reserved ASCII with upper-case hex":
+            expect(js_encode_uri_component("a b&c=d/e?f#g")).to_equal("a%20b%26c%3Dd%2Fe%3Ff%23g")
+            expect(js_encode_uri_component("100%")).to_equal("100%25")
+            expect(js_encode_uri_component("+,:;@")).to_equal("%2B%2C%3A%3B%40")
+
+        it "escapes the percent sign so an encoded value cannot be mistaken for an escape":
+            expect(js_encode_uri_component("%41")).to_equal("%2541")
+            expect(js_decode_uri_component(js_encode_uri_component("%41"))).to_equal("%41")
+
+        it "escapes the remaining ASCII punctuation":
+            expect(js_encode_uri_component("<>|^`")).to_equal("%3C%3E%7C%5E%60")
+            expect(js_encode_uri_component("\"")).to_equal("%22")
+            expect(js_encode_uri_component("\\")).to_equal("%5C")
+            expect(js_encode_uri_component("[]")).to_equal("%5B%5D")
+
+        it "returns an empty string unchanged":
+            expect(js_encode_uri_component("")).to_equal("")
+
+    context "decodeURIComponent":
+
+        it "decodes escapes in either hex case":
+            expect(js_decode_uri_component("a%20b%26c%3dd")).to_equal("a b&c=d")
+            expect(js_decode_uri_component("%2F%2f")).to_equal("//")
+
+        it "decodes any printable ASCII escape, not only the reserved set":
+            expect(js_decode_uri_component("%41%7a%30")).to_equal("Az0")
+            expect(js_decode_uri_component("%25")).to_equal("%")
+            expect(js_decode_uri_component("%3C%3e%7C%5E%60%22%5C")).to_equal("<>|^`\"\\")
+            expect(js_decode_uri_component("%7B%7D%7E")).to_equal("{{}}~")
+
+        it "leaves a malformed or truncated escape as written":
+            expect(js_decode_uri_component("%zz")).to_equal("%zz")
+            expect(js_decode_uri_component("50%")).to_equal("50%")
+            expect(js_decode_uri_component("%4")).to_equal("%4")
+
+        it "does not treat plus as a space":
+            expect(js_decode_uri_component("a+b")).to_equal("a+b")
+
+        it "round-trips reserved ASCII":
+            val raw = "key=va lue&x=/?#[]@!$&'()*+,;="
+            expect(js_decode_uri_component(js_encode_uri_component(raw))).to_equal(raw)
+
+    context "response bytes to text":
+
+        it "passes ASCII through":
+            var bytes: [u8] = [72u8, 84u8, 84u8, 80u8, 47u8, 49u8, 46u8, 49u8, 32u8, 50u8, 48u8, 48u8]
+            expect(h1_bytes_to_text(bytes)).to_equal("HTTP/1.1 200")
+
+        it "keeps CR LF framing bytes":
+            var bytes: [u8] = [65u8, 13u8, 10u8, 66u8]
+            expect(h1_bytes_to_text(bytes)).to_equal("A\r\nB")
+
+        it "returns an empty string for no bytes":
+            var bytes: [u8] = []
+            expect(h1_bytes_to_text(bytes)).to_equal("")
