@@ -1,3 +1,4 @@
+use compiler.frontend.core._ParserDecls.named_aspect_decls.{parse_named_aspect_decl}
 use compiler.core.ast.{decl_set_param_defaults}
 # Declaration parsing: enum, top-level visibility, module body.
 use compiler.frontend.core.parser_decls.*
@@ -98,6 +99,17 @@ fn current_ident_is_layer_decl() -> bool:
     if pos < 0:
         return false
     is_ident_start_char(lex_source_char_at(pos))
+
+# Recognize only `aspect NAME:`; preserve ordinary calls/variables named aspect.
+fn current_ident_is_named_aspect_decl() -> bool:
+    var pos = lex_skip_inline_ws_after_token()
+    if pos < 0: return false
+    if not is_ident_start_char(lex_source_char_at(pos)): return false
+    while pos < lex_source_len() and is_ident_char(lex_source_char_at(pos)):
+        pos = pos + 1
+    while pos < lex_source_len() and (lex_source_char_at(pos) == " " or lex_source_char_at(pos) == "\t"):
+        pos = pos + 1
+    pos < lex_source_len() and lex_source_char_at(pos) == ":"
 
 # Soft-keyword lookahead for the `on pc{...} use handler form [priority N]`
 # AOP advice decl. "on" is NOT a reserved word at the lexer level -- it is an
@@ -1286,6 +1298,7 @@ pub fn parse_module_body():
     TOP_LEVEL_VISIBILITY_OFFSETS_V1 = []
     TOP_LEVEL_VISIBILITY_MODIFIERS_V1 = []
     UNSAFE_ANNOTATIONS = []
+    var named_aspects: [text] = []
     ENUM_ATTRIBUTES = []
     ENUM_OPEN_REGIONS = []
     parser_reset_extend_enums()
@@ -2295,11 +2308,20 @@ pub fn parse_module_body():
         elif par_kind_get() == 181:
             # Stray indent at module level -- skip it
             parser_advance()
+        elif par_kind_get() == 6 and par_text_get() == "aspect" and current_ident_is_named_aspect_decl():
+            val aspect_name = parse_named_aspect_decl()
+            if named_aspects.contains(aspect_name):
+                parser_error("duplicate named aspect: " + aspect_name)
+            else:
+                named_aspects.push(aspect_name)
+            parser_reset_pending_vhdl_decorators()
+            parser_skip_newlines_and_semicolons()
         elif par_kind_get() == 6 and par_text_get() == "on" and current_ident_is_on_advice_decl():
             # on pc{...} use handler form [priority N] ("on" is a soft
             # keyword, not reserved, so it never shadows identifiers/params
             # like `fn showcase_trace(on: bool, ...)`; see
             # current_ident_is_on_advice_decl()).
+            parser_warn("W-AOP-LEGACY-OWNER: wrap top-level on pc advice in a named aspect")
             val d = parse_aop_advice_decl()
             module_add_decl(d)
             parser_reset_pending_vhdl_decorators()
