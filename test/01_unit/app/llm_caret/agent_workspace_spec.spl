@@ -98,6 +98,41 @@ describe "LLM Caret agent worktrees":
         expect(r.status).to_equal("error")
         expect(r.reason).to_equal("worktree_add_failed")
 
+    it "names a tree the way git does when the not-yet-created root sits behind a symlink":
+        # @req REQ-APP-LLM-CARET-WORKSPACE-001
+        # Regression: doc/08_tracking/bug/caret_workspace_canonical_root_gnu_realpath_m_macos_2026-11-14.md
+        step("Reach the scratch root through a symlink; the worktree root below it does not exist yet")
+        val root = _scratch("symlink")
+        dir_remove_all(root)
+        val repo = _fixture_repo(root)
+        dir_create_all(root + "/real")
+        process_run("ln", ["-s", root + "/real", root + "/link"])
+        val ws = agent_workspace("caret-wt-link", repo, root + "/link/trees")
+
+        step("The agent's tree is listed by git under exactly the path the workspace reports")
+        expect(worktree_add(ws, "agent-a").status).to_equal("ok")
+        expect(worktree_list(ws)).to_contain(worktree_path(ws, "agent-a"))
+        expect(worktree_remove(ws, "agent-a").status).to_equal("ok")
+        dir_remove_all(root)
+
+    it "resolves the deepest existing ancestor and keeps the missing tail of a worktree root":
+        # @req REQ-APP-LLM-CARET-WORKSPACE-001
+        step("A root several missing levels below a symlink resolves to the real directory plus the tail")
+        val root = _scratch("canonical")
+        dir_remove_all(root)
+        dir_create_all(root + "/real")
+        process_run("ln", ["-s", root + "/real", root + "/link"])
+        val (real, _e, _c) = process_run("realpath", [root + "/real"])
+        expect(agent_workspace("c1", "/r", root + "/link/a/b/trees").worktree_root).to_equal(
+            real.trim() + "/a/b/trees")
+
+        step("An existing root resolves to itself; a relative missing root is anchored at the cwd")
+        expect(agent_workspace("c2", "/r", root + "/link").worktree_root).to_equal(real.trim())
+        val (here, _e2, _c2) = process_run("realpath", ["."])
+        expect(agent_workspace("c3", "/r", "caret-missing-root-x/trees").worktree_root).to_equal(
+            here.trim() + "/caret-missing-root-x/trees")
+        dir_remove_all(root)
+
 # @manual_section: agent-tmux-sessions
 describe "LLM Caret agent tmux sessions":
     it "broadcasts one command to every pane and each pane shows it":

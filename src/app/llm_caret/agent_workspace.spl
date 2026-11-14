@@ -81,14 +81,31 @@ fn _tmux(ws: AgentWorkspace, args: [text], reason: text) -> WorkspaceResult:
 # `git worktree list` prints symlink-resolved paths; the root is canonicalised
 # up front so `worktree_path` and `worktree_list` name the same tree the same
 # way (a repo reached through a symlinked cwd otherwise never matches itself).
-# `-m` resolves a root that does not exist yet; on failure the raw text stands.
+# The root usually does not exist yet, and only GNU `realpath` has `-m` (BSD /
+# macOS rejects it), so the deepest EXISTING ancestor is resolved with plain
+# `realpath` and the missing tail is appended; on failure the raw text stands.
 fn _canonical(path: text) -> text:
     if path == "":
         return ""
-    val (out, _e, code) = process_run("realpath", ["-m", path])
-    if code != 0 or out.trim() == "":
-        return path
-    out.trim()
+    var head = path
+    var tail = ""
+    while head != "":
+        val (out, _e, code) = process_run("realpath", [head])
+        if code == 0 and out.trim() != "":
+            return out.trim() + tail
+        val slash = head.last_index_of("/")
+        if head == ".":
+            return path
+        if slash < 0:
+            # relative path with no existing component: anchor at the cwd
+            tail = "/" + head + tail
+            head = "."
+        else if slash == 0:
+            return path
+        else:
+            tail = head.substring(slash) + tail
+            head = head.substring(0, slash)
+    path
 
 pub fn agent_workspace(id: text, repo: text, worktree_root: text) -> AgentWorkspace:
     AgentWorkspace(socket: "caret_ws_" + id, session: id, repo: repo,

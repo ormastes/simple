@@ -16,7 +16,13 @@ use os.apps.smux.api.{smux_reset_for_test, smux_create_session, smux_list_window
 use os.apps.smux.interactive_protocol.{smux_interactive_dispatch}
 use std.sosix.time.{sosix_sleep_ms, sosix_time_now_monotonic_ms}
 use std.sosix.process.{sosix_process_exists}
-use std.sosix.pty.{sosix_pty_cleanup_pending}
+use std.sosix.pty.{sosix_pty_cleanup_pending, sosix_pty_default_shell}
+use std.platform.{is_windows}
+
+# The viewport contract is host-neutral; only the shell that measures it differs.
+fn presentation_native_shell() -> text:
+    if is_windows(): return "cmd.exe /d /q"
+    return sosix_pty_default_shell()
 
 fn presentation_native_output(session: text, window: text, pane: text, marker: text) -> text:
     val deadline = sosix_time_now_monotonic_ms() + 5000
@@ -31,7 +37,8 @@ fn presentation_native_output(session: text, window: text, pane: text, marker: t
 
 # Expected dimensions are absent from input, so command echo is not an oracle.
 fn presentation_native_probe(session: text, window: text, pane: text, marker: text, dimensions: text) -> bool:
-    val command = "powershell.exe -NoProfile -Command \"Write-Output ('" + marker + "_' + [Console]::WindowWidth + 'x' + [Console]::WindowHeight)\""
+    val command = if not is_windows(): "set -- $(stty size); echo \"" + marker + "_$2\"x\"$1\""
+        else: "powershell.exe -NoProfile -Command \"Write-Output ('" + marker + "_' + [Console]::WindowWidth + 'x' + [Console]::WindowHeight)\""
     val sent = smux_send_command(session, window, pane, command)
     val captured = presentation_native_output(session, window, pane, marker + "_" + dimensions)
     return sent.is_ok() and captured.contains(marker + "_" + dimensions)
@@ -60,8 +67,8 @@ describe "native pane presentation and sized geometry":
             expect(split.is_ok()).to_equal(true)
             return
         val second = split.unwrap()
-        val first_spawn = smux_pane_spawn_pty(session.id, window.id, first.id, "cmd.exe /d /q")
-        val second_spawn = smux_pane_spawn_pty(session.id, window.id, second.id, "cmd.exe /d /q")
+        val first_spawn = smux_pane_spawn_pty(session.id, window.id, first.id, presentation_native_shell())
+        val second_spawn = smux_pane_spawn_pty(session.id, window.id, second.id, presentation_native_shell())
         val first_pid = if first_spawn.is_ok(): first_spawn.unwrap() else: -1
         val second_pid = if second_spawn.is_ok(): second_spawn.unwrap() else: -1
         val base_first = presentation_native_probe(session.id, window.id, first.id, "PRES_BASE_A", "59x24")
@@ -150,7 +157,7 @@ describe "native pane presentation and sized geometry":
             expect(split.is_ok()).to_equal(true)
             return
         val second = split.unwrap()
-        val spawned = smux_pane_spawn_pty(session.id, window.id, second.id, "cmd.exe /d /q")
+        val spawned = smux_pane_spawn_pty(session.id, window.id, second.id, presentation_native_shell())
         val pid = if spawned.is_ok(): spawned.unwrap() else: -1
         val measured = presentation_native_probe(session.id, window.id, second.id, "PRES_PERCENT", "80x5")
         val rejected = smux_split_pane_sized(session.id, window.id, second.id, "horizontal", MuxSplitSizeV1.Cells(5))
