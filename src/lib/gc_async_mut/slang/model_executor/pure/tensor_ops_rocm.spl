@@ -11,8 +11,8 @@
 #
 # Not on the device yet: softmax, rope, argmax, kv_write, row lookup.
 
-use std.gc_async_mut.gpu.rocm.hip_compute.{RocmDevice, rocm_open_at, rocm_bin_default, rocm_buffer_alloc, rocm_buffer_free, rocm_upload_f32, rocm_download_f32, rocm_kernel, rocm_launch, rocm_sync, rocm_f32_word}
-use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values}
+use std.gc_async_mut.gpu.rocm.hip_compute.{RocmDevice, rocm_open_at, rocm_bin_default, rocm_buffer_alloc, rocm_buffer_free, rocm_upload_f32, rocm_buffer_upload_bytes, rocm_buffer_download_bytes, rocm_kernel, rocm_launch, rocm_sync, rocm_f32_word}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values, tensor_decode_f32_le}
 
 pub struct RocmTensor:
     ptr: i64
@@ -119,8 +119,17 @@ pub fn rocm_tensor_upload(ops: RocmOps, t: PureTensor) -> Result<RocmTensor, tex
 
 pub fn rocm_tensor_download(ops: RocmOps, t: RocmTensor) -> Result<PureTensor, text>:
     rocm_sync(ops.dev)?
-    val values = rocm_download_f32(ops.dev, t.ptr, t.n)?
-    Ok(tensor_from_values(values, t.shape))
+    val raw = rocm_buffer_download_bytes(ops.dev, t.ptr, t.n * 4)?
+    Ok(tensor_decode_f32_le(raw, 0, t.n, t.shape))
+
+# Weight upload straight from little-endian F32 bytes (e.g. the file buffer):
+# `bytes[offset .. offset + numel*4]` goes to the device with one bulk copy and
+# no per-element staging.
+pub fn rocm_tensor_upload_f32_bytes(ops: RocmOps, bytes: [u8], offset: i64, shape: [i64]) -> Result<RocmTensor, text>:
+    val n = _numel(shape)
+    val ptr = rocm_buffer_alloc(ops.dev, n)?
+    rocm_buffer_upload_bytes(ops.dev, ptr, bytes, offset, n * 4)?
+    Ok(RocmTensor(ptr: ptr, n: n, shape: shape))
 
 pub fn rocm_tensor_free(ops: RocmOps, t: RocmTensor) -> Result<i64, text>:
     rocm_buffer_free(ops.dev, t.ptr)

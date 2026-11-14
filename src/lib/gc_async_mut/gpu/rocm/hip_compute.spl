@@ -3,36 +3,42 @@
 # hip_compute — ROCm (AMD HIP) compute backend of the GPU API.
 #
 # Layering: slang -> pure LLM runner -> GPU API -> CUDA / ROCm. This module is
-# the ROCm leg: device init, f32 device buffers, host<->device copy, runtime
-# kernel compile through hipRTC (cached per device by kernel name), kernel
-# launch, synchronize. The HIP and hipRTC libraries are loaded with the same
-# dynamic helper slang's backend.spl uses (spl_dlopen / spl_dlsym /
-# spl_wffi_call_i64); every HIP status other than 0 surfaces as Err(text).
+# the ROCm leg: device init, f32 device buffers, bulk host<->device byte copy,
+# runtime kernel compile through hipRTC (cached per device by kernel name),
+# kernel launch, synchronize. HIP and hipRTC are loaded with the dynamic helper
+# the slang backend uses (spl_dlopen / spl_dlsym / spl_wffi_call_i64); every
+# HIP status other than 0 surfaces as Err(text).
 #
+# Host memory is handled without any rt_* extern: blocks come from the C
+# runtime's malloc/free/memcpy (called through spl_wffi_call_i64 and
+# spl_wffi_call_i64_with_bytes, the latter passing a [u8] straight to memcpy or
+# hipMemcpyHtoD as the source pointer), and reads use
+# std.nogc_sync_mut.sffi.raw_bytes.bytes_from_raw.
 # Launch uses hipDrvLaunchKernelEx (4 integer arguments), so no wide-arity C
 # forwarder is needed. Kernel parameter convention: device pointers first
 # (8 bytes each), then 32-bit words (ints, or float bit patterns).
 
 use std.nogc_sync_mut.sffi.dynamic.{spl_dlopen, spl_dlsym, spl_wffi_call_i64}
-use std.common.binary_io.{f32_from_bits, f32_to_bits}
-use std.io_runtime.{file_exists}
+use std.nogc_sync_mut.sffi.raw_bytes.{bytes_from_raw}
+use std.common.binary_io.{f32_to_bits}
+use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes}
+use std.io_runtime.{file_exists, env_get}
 
-extern fn rt_alloc(size: i64) -> i64
-extern fn rt_free(ptr: i64)
-extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
-extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
-extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
-extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
-extern fn rt_cstring_to_text(ptr: i64) -> text
-extern fn spl_str_ptr(value: text) -> i64
+@unsafe(reason: "passes a bounded caller-owned byte payload as one pointer argument", capabilities: [ffi, raw_ptr])
+extern fn spl_wffi_call_i64_with_bytes(fptr: i64, prefix_args: [i64], bytes: [u8], offset: i64, length: i64, suffix_args: [i64]) -> i64
 
 val ROCM_BIN_DEFAULT = "C:\\Program Files\\AMD\\ROCm\\7.2\\bin"
 val HIP_DLL = "amdhip64_7.dll"
 val HIPRTC_DLL = "hiprtc0702.dll"
+# Launch scratch layout: argv at 0, kernel-param pointer array at 1024, config at 2048.
+val LAUNCH_PARAMS_OFF = 1024
+val LAUNCH_CFG_OFF = 2048
 
-# Directory holding the HIP DLLs: SLANG_ROCM_BIN override is read by callers
-# through rocm_open_at; this is the install default.
+# ROCm bin directory: SLANG_ROCM_BIN when set, else the 7.2 install default.
 pub fn rocm_bin_default() -> text:
+    val env_dir = env_get("SLANG_ROCM_BIN")
+    if env_dir != "":
+        return env_dir
     ROCM_BIN_DEFAULT
 
 pub fn rocm_available_at(bin_dir: text) -> bool:
@@ -55,7 +61,11 @@ pub class RocmDevice:
     f_rtc_code_size: i64
     f_rtc_code: i64
     f_rtc_destroy: i64
+    c_malloc: i64
+    c_free: i64
+    c_memcpy: i64
     scratch: i64
+    launch_scratch: i64
     kernels: Dict<text, i64>
 
 fn _need(lib: i64, sym: text) -> Result<i64, text>:
@@ -67,6 +77,57 @@ fn _need(lib: i64, sym: text) -> Result<i64, text>:
 fn _hip_err(what: text, rc: i64) -> text:
     "ROCm: {what} failed rc={rc}"
 
+# Little-endian i64 stored at host address `addr`.
+fn _read_i64(addr: i64) -> i64:
+    val b = bytes_from_raw(addr, 8)
+    var v: i64 = 0
+    var i: i64 = 7
+    while i >= 0:
+        v = v * 256 + (b[i] as i64)
+        i = i - 1
+    v
+
+# Copy `length` bytes of `bytes` (from `offset`) to host address `dst`.
+fn _host_write(dev: RocmDevice, dst: i64, bytes: [u8], offset: i64, length: i64) -> i64:
+    spl_wffi_call_i64_with_bytes(dev.c_memcpy, [dst], bytes, offset, length, [length])
+
+fn _i64_bytes(v: i64) -> [u8]:
+    var out: [u8] = []
+    var x = v
+    var i: i64 = 0
+    while i < 8:
+        out.push((x & 255) as u8)
+        x = x >> 8
+        i = i + 1
+    out
+
+fn _i32_bytes(v: i64) -> [u8]:
+    var out: [u8] = []
+    var x = v
+    var i: i64 = 0
+    while i < 4:
+        out.push((x & 255) as u8)
+        x = x >> 8
+        i = i + 1
+    out
+
+fn _cstring(dev: RocmDevice, s: text) -> i64:
+    var b: [u8] = text_to_utf8_bytes(s)
+    b.push(0)
+    val p = spl_wffi_call_i64(dev.c_malloc, [b.len()], 1)
+    _host_write(dev, p, b, 0, b.len())
+    p
+
+# Host text from a NUL-terminated byte window of `cap` bytes at `addr`.
+fn _text_at(addr: i64, cap: i64) -> text:
+    val raw = bytes_from_raw(addr, cap)
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < raw.len() and raw[i] != 0:
+        out.push(raw[i])
+        i = i + 1
+    bytes_to_text(out)
+
 # Load HIP + hipRTC from `bin_dir`, initialise HIP, and read the device name.
 pub fn rocm_open_at(bin_dir: text) -> Result<RocmDevice, text>:
     if not rocm_available_at(bin_dir):
@@ -74,10 +135,11 @@ pub fn rocm_open_at(bin_dir: text) -> Result<RocmDevice, text>:
     val ucrt = spl_dlopen("ucrtbase.dll")
     val hip = spl_dlopen(bin_dir + "\\" + HIP_DLL)
     val rtc = spl_dlopen(bin_dir + "\\" + HIPRTC_DLL)
-    if hip == 0 or rtc == 0:
-        return Err("ROCm: dlopen failed for HIP or hipRTC")
+    if ucrt == 0 or hip == 0 or rtc == 0:
+        return Err("ROCm: dlopen failed for ucrtbase, HIP or hipRTC")
     val f_init = _need(hip, "hipInit")?
     val f_name = _need(hip, "hipDeviceGetName")?
+    val c_malloc = _need(ucrt, "malloc")?
     val dev = RocmDevice(
         name: "",
         f_malloc: _need(hip, "hipMalloc")?,
@@ -95,20 +157,20 @@ pub fn rocm_open_at(bin_dir: text) -> Result<RocmDevice, text>:
         f_rtc_code_size: _need(rtc, "hiprtcGetCodeSize")?,
         f_rtc_code: _need(rtc, "hiprtcGetCode")?,
         f_rtc_destroy: _need(rtc, "hiprtcDestroyProgram")?,
-        scratch: rt_alloc(512),
+        c_malloc: c_malloc,
+        c_free: _need(ucrt, "free")?,
+        c_memcpy: _need(ucrt, "memcpy")?,
+        scratch: spl_wffi_call_i64(c_malloc, [512], 1),
+        launch_scratch: spl_wffi_call_i64(c_malloc, [4096], 1),
         kernels: {}
     )
     val rc_init = spl_wffi_call_i64(f_init, [0], 1)
     if rc_init != 0:
         return Err(_hip_err("hipInit", rc_init))
-    val name_buf = rt_alloc(256)
-    val rc_name = spl_wffi_call_i64(f_name, [name_buf, 256, 0], 3)
+    val rc_name = spl_wffi_call_i64(f_name, [dev.scratch, 256, 0], 3)
     if rc_name != 0:
-        rt_free(name_buf)
         return Err(_hip_err("hipDeviceGetName", rc_name))
-    val name = rt_cstring_to_text(name_buf)
-    rt_free(name_buf)
-    dev.name = name
+    dev.name = _text_at(dev.scratch, 256)
     Ok(dev)
 
 # Device buffer of `n_floats` f32 values.
@@ -116,7 +178,7 @@ pub fn rocm_buffer_alloc(dev: RocmDevice, n_floats: i64) -> Result<i64, text>:
     val rc = spl_wffi_call_i64(dev.f_malloc, [dev.scratch, n_floats * 4], 2)
     if rc != 0:
         return Err(_hip_err("hipMalloc", rc))
-    Ok(rt_ptr_read_i64(dev.scratch, 0))
+    Ok(_read_i64(dev.scratch))
 
 pub fn rocm_buffer_free(dev: RocmDevice, ptr: i64) -> Result<i64, text>:
     val rc = spl_wffi_call_i64(dev.f_free, [ptr], 1)
@@ -124,34 +186,44 @@ pub fn rocm_buffer_free(dev: RocmDevice, ptr: i64) -> Result<i64, text>:
         return Err(_hip_err("hipFree", rc))
     Ok(0)
 
-# Host f64 -> device f32. Staged through one malloc'd host block.
-pub fn rocm_upload_f32(dev: RocmDevice, dptr: i64, values: [f64]) -> Result<i64, text>:
-    val n = values.len()
-    val host = rt_alloc(n * 4 + 8)
-    var i: i64 = 0
-    while i < n:
-        rt_ptr_write_i32(host, i * 4, f32_to_bits(values[i] as f32) as i32)
-        i = i + 1
-    val rc = spl_wffi_call_i64(dev.f_htod, [dptr, host, n * 4], 3)
-    rt_free(host)
+# Bulk upload: `byte_len` bytes of `bytes` starting at `offset` go to device
+# address `buf` (little-endian f32 payload, no per-element staging). One
+# hipMemcpyHtoD per call.
+pub fn rocm_buffer_upload_bytes(dev: RocmDevice, buf: i64, bytes: [u8], offset: i64, byte_len: i64) -> Result<i64, text>:
+    if offset < 0 or byte_len < 0 or offset + byte_len > bytes.len():
+        return Err("ROCm: upload range {offset}+{byte_len} outside {bytes.len()} bytes")
+    val rc = spl_wffi_call_i64_with_bytes(dev.f_htod, [buf], bytes, offset, byte_len, [byte_len])
     if rc != 0:
         return Err(_hip_err("hipMemcpyHtoD", rc))
-    Ok(n)
+    Ok(byte_len)
 
-# Device f32 -> host f64.
-pub fn rocm_download_f32(dev: RocmDevice, dptr: i64, n: i64) -> Result<[f64], text>:
-    val host = rt_alloc(n * 4 + 8)
-    val rc = spl_wffi_call_i64(dev.f_dtoh, [host, dptr, n * 4], 3)
+# Bulk download of `byte_len` bytes at device address `buf` as raw bytes.
+pub fn rocm_buffer_download_bytes(dev: RocmDevice, buf: i64, byte_len: i64) -> Result<[u8], text>:
+    val host = spl_wffi_call_i64(dev.c_malloc, [byte_len + 8], 1)
+    val rc = spl_wffi_call_i64(dev.f_dtoh, [host, buf, byte_len], 3)
     if rc != 0:
-        rt_free(host)
+        spl_wffi_call_i64(dev.c_free, [host], 1)
         return Err(_hip_err("hipMemcpyDtoH", rc))
-    var out: [f64] = []
-    var i: i64 = 0
-    while i < n:
-        out.push(f32_from_bits(rt_ptr_read_i32(host, i * 4) as u32) as f64)
-        i = i + 1
-    rt_free(host)
+    val out = bytes_from_raw(host, byte_len)
+    spl_wffi_call_i64(dev.c_free, [host], 1)
     Ok(out)
+
+# Host f64 -> little-endian f32 bytes (small activations; weights use the
+# byte-range path).
+pub fn rocm_f32_bytes(values: [f64]) -> [u8]:
+    var out: [u8] = []
+    for v in values:
+        val bits = f32_to_bits(v as f32) as i64
+        out.push((bits & 255) as u8)
+        out.push(((bits >> 8) & 255) as u8)
+        out.push(((bits >> 16) & 255) as u8)
+        out.push(((bits >> 24) & 255) as u8)
+    out
+
+pub fn rocm_upload_f32(dev: RocmDevice, dptr: i64, values: [f64]) -> Result<i64, text>:
+    val b = rocm_f32_bytes(values)
+    rocm_buffer_upload_bytes(dev, dptr, b, 0, b.len())?
+    Ok(values.len())
 
 pub fn rocm_sync(dev: RocmDevice) -> Result<i64, text>:
     val rc = spl_wffi_call_i64(dev.f_sync, [], 0)
@@ -167,33 +239,38 @@ pub fn rocm_kernel(dev: RocmDevice, kernel: text, source: text) -> Result<i64, t
     if cached.is_some():
         return Ok(cached.unwrap())
     val s = dev.scratch
-    val rc_create = spl_wffi_call_i64(dev.f_rtc_create, [s, spl_str_ptr(source), spl_str_ptr(kernel + ".hip"), 0, 0, 0], 6)
+    val c_src = _cstring(dev, source)
+    val c_name = _cstring(dev, kernel + ".hip")
+    val rc_create = spl_wffi_call_i64(dev.f_rtc_create, [s, c_src, c_name, 0, 0, 0], 6)
+    spl_wffi_call_i64(dev.c_free, [c_src], 1)
+    spl_wffi_call_i64(dev.c_free, [c_name], 1)
     if rc_create != 0:
         return Err(_hip_err("hiprtcCreateProgram", rc_create))
-    val prog = rt_ptr_read_i64(s, 0)
+    val prog = _read_i64(s)
     val rc_compile = spl_wffi_call_i64(dev.f_rtc_compile, [prog, 0, 0], 3)
     if rc_compile != 0:
         spl_wffi_call_i64(dev.f_rtc_log_size, [prog, s], 2)
-        val log_n = rt_ptr_read_i64(s, 0)
-        val log_buf = rt_alloc(log_n + 8)
+        val log_n = _read_i64(s)
+        val log_buf = spl_wffi_call_i64(dev.c_malloc, [log_n + 8], 1)
         spl_wffi_call_i64(dev.f_rtc_log, [prog, log_buf], 2)
-        val log = rt_cstring_to_text(log_buf)
-        rt_free(log_buf)
+        val log = _text_at(log_buf, log_n)
+        spl_wffi_call_i64(dev.c_free, [log_buf], 1)
         spl_wffi_call_i64(dev.f_rtc_destroy, [s], 1)
         return Err("ROCm: hiprtc compile of {kernel} failed rc={rc_compile}: {log}")
     spl_wffi_call_i64(dev.f_rtc_code_size, [prog, s], 2)
-    val code_n = rt_ptr_read_i64(s, 0)
-    val code = rt_alloc(code_n + 8)
+    val code_n = _read_i64(s)
+    val code = spl_wffi_call_i64(dev.c_malloc, [code_n + 8], 1)
     spl_wffi_call_i64(dev.f_rtc_code, [prog, code], 2)
     val rc_load = spl_wffi_call_i64(dev.f_modload, [s, code], 2)
     if rc_load != 0:
-        rt_free(code)
         return Err(_hip_err("hipModuleLoadData", rc_load))
-    val module = rt_ptr_read_i64(s, 0)
-    val rc_fn = spl_wffi_call_i64(dev.f_getfn, [s, module, spl_str_ptr(kernel)], 3)
+    val module = _read_i64(s)
+    val c_kernel = _cstring(dev, kernel)
+    val rc_fn = spl_wffi_call_i64(dev.f_getfn, [s, module, c_kernel], 3)
+    spl_wffi_call_i64(dev.c_free, [c_kernel], 1)
     if rc_fn != 0:
         return Err(_hip_err("hipModuleGetFunction({kernel})", rc_fn))
-    val kfn = rt_ptr_read_i64(s, 0)
+    val kfn = _read_i64(s)
     dev.kernels[kernel] = kfn
     Ok(kfn)
 
@@ -203,39 +280,33 @@ pub fn rocm_f32_word(v: f64) -> i64:
 
 # Launch `kfn` on a 1-D grid. `ptr_args` are device pointers, `word_args` are
 # 32-bit words (ints or rocm_f32_word values), in kernel parameter order.
-# Asynchronous: call rocm_sync before reading results.
+# Asynchronous: call rocm_sync before reading results. The argument block lives
+# in the device's launch scratch, so launches are issued one at a time from one
+# thread per device handle.
 pub fn rocm_launch(dev: RocmDevice, kfn: i64, grid_x: i64, block_x: i64, ptr_args: [i64], word_args: [i64]) -> Result<i64, text>:
     val np = ptr_args.len()
     val nw = word_args.len()
-    val argv = rt_alloc(8 * (np + nw) + 8)
-    val params = rt_alloc(8 * (np + nw) + 8)
-    val cfg = rt_alloc(64)
+    if np * 8 + nw * 4 > LAUNCH_PARAMS_OFF or (np + nw) * 8 > LAUNCH_CFG_OFF - LAUNCH_PARAMS_OFF:
+        return Err("ROCm: too many kernel arguments")
+    val base = dev.launch_scratch
+    var argv: [u8] = []
+    var params: [u8] = []
     var i: i64 = 0
     while i < np:
-        rt_ptr_write_i64(argv, i * 8, ptr_args[i])
-        rt_ptr_write_i64(params, i * 8, argv + i * 8)
+        argv = argv + _i64_bytes(ptr_args[i])
+        params = params + _i64_bytes(base + i * 8)
         i = i + 1
     var j: i64 = 0
     while j < nw:
-        val off = np * 8 + j * 4
-        rt_ptr_write_i32(argv, off, word_args[j] as i32)
-        rt_ptr_write_i64(params, (np + j) * 8, argv + off)
+        argv = argv + _i32_bytes(word_args[j])
+        params = params + _i64_bytes(base + np * 8 + j * 4)
         j = j + 1
-    rt_ptr_write_i32(cfg, 0, grid_x as i32)
-    rt_ptr_write_i32(cfg, 4, 1)
-    rt_ptr_write_i32(cfg, 8, 1)
-    rt_ptr_write_i32(cfg, 12, block_x as i32)
-    rt_ptr_write_i32(cfg, 16, 1)
-    rt_ptr_write_i32(cfg, 20, 1)
-    rt_ptr_write_i32(cfg, 24, 0)
-    rt_ptr_write_i32(cfg, 28, 0)
-    rt_ptr_write_i64(cfg, 32, 0)
-    rt_ptr_write_i64(cfg, 40, 0)
-    rt_ptr_write_i64(cfg, 48, 0)
-    val rc = spl_wffi_call_i64(dev.f_launch, [cfg, kfn, params, 0], 4)
-    rt_free(argv)
-    rt_free(params)
-    rt_free(cfg)
+    var cfg: [u8] = _i32_bytes(grid_x) + _i32_bytes(1) + _i32_bytes(1) + _i32_bytes(block_x) + _i32_bytes(1) + _i32_bytes(1) + _i32_bytes(0) + _i32_bytes(0)
+    cfg = cfg + _i64_bytes(0) + _i64_bytes(0) + _i64_bytes(0)
+    _host_write(dev, base, argv, 0, argv.len())
+    _host_write(dev, base + LAUNCH_PARAMS_OFF, params, 0, params.len())
+    _host_write(dev, base + LAUNCH_CFG_OFF, cfg, 0, cfg.len())
+    val rc = spl_wffi_call_i64(dev.f_launch, [base + LAUNCH_CFG_OFF, kfn, base + LAUNCH_PARAMS_OFF, 0], 4)
     if rc != 0:
         return Err(_hip_err("hipDrvLaunchKernelEx", rc))
     Ok(0)

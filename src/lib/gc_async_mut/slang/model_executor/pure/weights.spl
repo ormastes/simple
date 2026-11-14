@@ -60,3 +60,29 @@ pub fn pure_weights_find(w: PureWeights, name: text) -> Option<PureTensor>:
 
 pub fn pure_weights_count(w: PureWeights) -> i64:
     w.names.len()
+
+# Byte range of one F32 tensor inside the safetensors buffer (absolute offset),
+# for bulk device upload without decoding to f64.
+pub struct PureF32Range:
+    name: text
+    shape: [i64]
+    offset: i64
+    count: i64
+
+pub fn pure_weights_f32_ranges(bytes: [u8]) -> Result<[PureF32Range], text>:
+    val parsed = parse_safetensors_header(bytes)
+    if parsed.is_err():
+        return Err("safetensors header invalid")
+    val header = parsed.unwrap()
+    val payload = 8 + header.header_byte_len
+    var out: [PureF32Range] = []
+    for e in header.tensors:
+        match e.dtype_tag:
+            Dtype.F32:
+                val count = _numel(e.shape)
+                if count * 4 != e.length:
+                    return Err("tensor {e.name}: F32 byte length mismatch")
+                out.push(PureF32Range(name: e.name, shape: e.shape, offset: payload + e.offset, count: count))
+            _:
+                pass
+    Ok(out)
