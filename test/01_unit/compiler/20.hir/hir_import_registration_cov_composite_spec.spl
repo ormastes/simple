@@ -1,0 +1,233 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+"""
+# HIR imports: registering an imported struct or class
+
+An imported composite is more than a name: its fields are projected in the
+declaring module's scope, its member visibility is judged once for the
+importer, and a function-local import binds a local spelling without becoming
+the declaration's identity. These examples pin the edges of that registration:
+
+- member visibility is recorded as DENIALS only, for both the canonical and
+  the local spelling, and only when enforcement is on and the importer is not
+  a test;
+- a field type the declaring module reaches through its own `use` resolves in
+  that module's scope; a fully qualified field spelling needs no chase;
+- an owner type-parameter bound that names nothing stops the registration
+  before fields, enum materialization or trait defaults are published;
+- a composite kind with no HIR symbol kind is refused with a diagnostic, and
+  a function-local import of it reports that it has no declaration owner.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{
+    module_surfaces_from_modules,
+    ModuleSurface,
+    ModuleSurfaceComposite,
+    ModuleSurfacesByName
+}
+
+val comp_a_src = "pub struct Point:\n    x: i64\n\npub enum Color:\n    Red\n    Green(i64)\n\npub struct Sealed:\n    pub shown: i64\n    hidden: i64\n\npub struct Open:\n    pub a: i64\n    pub b: i64\n\npub struct Bounded<T: Missing>:\n    v: i64\n\npub enum BoundedEnum<T: Missing>:\n    One\n\npub trait BoundedTrait<T: Missing>:\n    fn get() -> i64\n\npub fn make() -> i64:\n    1\n"
+val comp_c_src = "use lib.a.\{Point\}\n\npub struct Holder:\n    p: Point\n\npub struct QualifiedHolder:\n    q: lib.a.Point\n"
+
+fn composite_registry() -> ModuleSurfacesByName:
+    val names = ["lib.a", "lib.c"]
+    val srcs = [comp_a_src, comp_c_src]
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    var i = 0
+    while i < names.len():
+        val path = names[i].replace(".", "/") + ".spl"
+        modules[names[i]] = parse_full_frontend(srcs[i], path, names[i], log)
+        sources.push(SourceFile(path: path, content: srcs[i], module_name: names[i]))
+        i = i + 1
+    module_surfaces_from_modules(modules, sources).unwrap()
+
+fn odd_composite(name: text, kind: text) -> ModuleSurfaceComposite:
+    ModuleSurfaceComposite(
+        name: name, kind: kind, type_params: [], fields: [],
+        visibility: Visibility.Public, is_public: true, span: Span.empty())
+
+fn odd_kind_registry() -> ModuleSurfacesByName:
+    """A surface carrying composite kinds the importer has no symbol kind for."""
+    var surface = ModuleSurface.empty("odd.kinds")
+    val worker = odd_composite("Worker", "actor")
+    val blob = odd_composite("Blob", "union")
+    surface.composites["Worker"] = worker
+    surface.composites["Blob"] = blob
+    surface.composite_names = ["Worker", "Blob"]
+    surface.composite_values = [worker, blob]
+    ModuleSurfacesByName.from_parts([surface], {"odd.kinds": 0}, ["odd.kinds"], [0]).unwrap()
+
+fn importer_at(path: text, registry: ModuleSurfacesByName) -> HirLowering:
+    var lowering = hirlowering_for_module(path, registry)
+    lowering.begin_module(path)
+    lowering
+
+fn import_one(lowering: HirLowering, owner: text, name: text, local_name: text, materialize_enum: bool) -> HirLowering:
+    var target = lowering
+    val index = target.module_surfaces.index_by_name[owner]
+    target.register_imported_symbol(index, owner, name, local_name, Span.empty(), materialize_enum)
+    target
+
+fn import_in_function(lowering: HirLowering, owner: text, name: text, local_name: text, materialize_enum: bool) -> HirLowering:
+    """A function-local `use`: the scope stays open for the caller to inspect."""
+    var target = lowering
+    target.symbols.push_scope(ScopeKind.Function)
+    target.registering_lexical_import = true
+    target = import_one(target, owner, name, local_name, materialize_enum)
+    target.registering_lexical_import = false
+    target
+
+fn bound(lowering: HirLowering, local_name: text) -> bool:
+    lowering.symbols.lookup_or_invalid(local_name).is_valid()
+
+fn symbol_named(lowering: HirLowering, local_name: text) -> HirSymbol:
+    lowering.symbols.symbols[lowering.symbols.lookup_or_invalid(local_name).id]
+
+fn errors_mentioning(lowering: HirLowering, needle: text) -> i64:
+    var n = 0
+    for e in lowering.errors:
+        if e.message.contains(needle):
+            n = n + 1
+    n
+
+describe "imported composite member visibility":
+    it "records a denial for each private field and for the sealed constructor":
+        var lowering = importer_at("app/main.spl", composite_registry())
+        lowering.enforce_member_visibility = true
+        lowering = import_one(lowering, "lib.a", "Sealed", "Vault", true)
+        expect(lowering.member_field_denied.contains_key("lib.a.Sealed#hidden")).to_equal(true)
+        expect(lowering.member_field_denied.contains_key("Vault#hidden")).to_equal(true)
+        expect(lowering.member_field_denied.contains_key("lib.a.Sealed#shown")).to_equal(false)
+        expect(lowering.member_field_denied.contains_key("Vault#shown")).to_equal(false)
+        expect(lowering.member_ctor_denied.contains_key("lib.a.Sealed")).to_equal(true)
+        expect(lowering.member_ctor_denied.contains_key("Vault")).to_equal(true)
+
+    it "records nothing for a composite whose fields are all public":
+        var lowering = importer_at("app/main.spl", composite_registry())
+        lowering.enforce_member_visibility = true
+        lowering = import_one(lowering, "lib.a", "Open", "Open", true)
+        expect(lowering.member_field_denied.len()).to_equal(0)
+        expect(lowering.member_ctor_denied.len()).to_equal(0)
+
+    it "lets a test importer see private members":
+        var lowering = importer_at("test/unit/vault_spec.spl", composite_registry())
+        lowering.enforce_member_visibility = true
+        lowering = import_one(lowering, "lib.a", "Sealed", "Sealed", true)
+        expect(bound(lowering, "Sealed")).to_equal(true)
+        expect(lowering.member_field_denied.len()).to_equal(0)
+        expect(lowering.member_ctor_denied.len()).to_equal(0)
+
+    it "records nothing while enforcement is off":
+        var lowering = importer_at("app/main.spl", composite_registry())
+        lowering.enforce_member_visibility = false
+        lowering = import_one(lowering, "lib.a", "Sealed", "Sealed", true)
+        expect(bound(lowering, "Sealed")).to_equal(true)
+        expect(lowering.member_field_denied.len()).to_equal(0)
+        expect(lowering.member_ctor_denied.len()).to_equal(0)
+
+describe "imported composite field dependencies":
+    it "resolves a field type the declaring module itself imports":
+        val lowering = import_one(importer_at("app/main.spl", composite_registry()), "lib.c", "Holder", "Holder", true)
+        expect(bound(lowering, "Holder")).to_equal(true)
+        val declared = lowering.symbols.lookup_qualified_type_raw("lib.a", "Point")
+        expect(declared >= 0).to_equal(true)
+        # Field projection asks in the holder's module, so that spelling is bound too.
+        expect(lowering.symbols.lookup_qualified_type_raw("lib.c", "Point")).to_equal(declared)
+        expect(lowering.struct_field_types_by_name.contains_key("lib.c.Holder")).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "accepts a fully qualified field type without chasing it as a bare name":
+        val lowering = import_one(importer_at("app/main.spl", composite_registry()), "lib.c", "QualifiedHolder", "QualifiedHolder", true)
+        expect(bound(lowering, "QualifiedHolder")).to_equal(true)
+        expect(lowering.struct_field_types_by_name.contains_key("lib.c.QualifiedHolder")).to_equal(true)
+        # No bare `lib.a.Point` symbol is invented in the importer.
+        expect(bound(lowering, "lib.a.Point")).to_equal(false)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "ignores a direct dependency request for a qualified spelling":
+        var lowering = importer_at("app/main.spl", composite_registry())
+        val owner_index = lowering.module_surfaces.index_by_name["lib.c"]
+        lowering.materialize_imported_field_dependency(owner_index, "lib.c", "lib.a.Point", Span.empty(), true)
+        expect(lowering.symbols.next_symbol_id).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)
+
+describe "imported owner type-parameter bounds":
+    it "stops a struct registration whose bound names nothing":
+        val lowering = import_one(importer_at("app/main.spl", composite_registry()), "lib.a", "Bounded", "Bounded", true)
+        expect(errors_mentioning(lowering, "unresolved imported owner type parameter dependency: Missing")).to_equal(1)
+        expect(lowering.struct_field_types_by_name.contains_key("lib.a.Bounded")).to_equal(false)
+
+    it "stops an enum registration before it is materialized":
+        val lowering = import_one(importer_at("app/main.spl", composite_registry()), "lib.a", "BoundedEnum", "BoundedEnum", true)
+        expect(errors_mentioning(lowering, "unresolved imported owner type parameter dependency: Missing")).to_equal(1)
+        expect(lowering.imported_enums.contains_key("BoundedEnum")).to_equal(false)
+
+    it "stops a trait registration before its definition is published":
+        val lowering = import_one(importer_at("app/main.spl", composite_registry()), "lib.a", "BoundedTrait", "BoundedTrait", true)
+        expect(errors_mentioning(lowering, "unresolved imported owner type parameter dependency: Missing")).to_equal(1)
+        expect(lowering.imported_traits.contains_key("BoundedTrait")).to_equal(false)
+
+describe "composite kinds without a symbol kind":
+    it "refuses an imported actor":
+        val lowering = import_one(importer_at("app/main.spl", odd_kind_registry()), "odd.kinds", "Worker", "Worker", true)
+        expect(errors_mentioning(lowering, "imported actor `Worker` has no HIR SymbolKind surface mapping")).to_equal(1)
+        expect(bound(lowering, "Worker")).to_equal(false)
+
+    it "refuses an unknown composite kind by name":
+        val lowering = import_one(importer_at("app/main.spl", odd_kind_registry()), "odd.kinds", "Blob", "Blob", true)
+        expect(errors_mentioning(lowering, "unknown imported composite kind `union` for `Blob`")).to_equal(1)
+        expect(bound(lowering, "Blob")).to_equal(false)
+
+    it "reports a function-local import of it as having no declaration owner":
+        var lowering = import_in_function(importer_at("app/main.spl", odd_kind_registry()), "odd.kinds", "Worker", "W", true)
+        expect(errors_mentioning(lowering, "lexical imported type `W` has no declaration owner")).to_equal(1)
+        expect(bound(lowering, "W")).to_equal(false)
+        lowering.symbols.pop_scope()
+
+describe "function-local composite and enum imports":
+    it "binds the local spelling to the declaration and keeps it scoped":
+        var lowering = import_in_function(importer_at("app/main.spl", composite_registry()), "lib.a", "Point", "P", true)
+        expect(bound(lowering, "P")).to_equal(true)
+        val symbol = symbol_named(lowering, "P")
+        expect(symbol.name).to_equal("Point")
+        expect(lowering.symbols.lookup_qualified_type_raw("lib.a", "Point")).to_equal(symbol.id.id)
+        lowering.symbols.pop_scope()
+        expect(bound(lowering, "P")).to_equal(false)
+        # The declaration identity outlives the function scope.
+        expect(lowering.symbols.lookup_qualified_type_raw("lib.a", "Point")).to_equal(symbol.id.id)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "registers the variants of a materialized function-local enum":
+        var lowering = import_in_function(importer_at("app/main.spl", composite_registry()), "lib.a", "Color", "Hue", true)
+        expect(bound(lowering, "Hue")).to_equal(true)
+        expect(lowering.enum_variant_names.contains_key("Red")).to_equal(true)
+        expect(lowering.enum_variant_names.contains_key("Green")).to_equal(true)
+        # Materialization is keyed by the declaration owner, never the alias.
+        expect(lowering.imported_enums.contains_key("Hue")).to_equal(false)
+        expect(lowering.imported_enums.contains_key("lib.a::Color")).to_equal(true)
+        lowering.symbols.pop_scope()
+
+    it "leaves variants unregistered for a declaration-only function-local enum":
+        var lowering = import_in_function(importer_at("app/main.spl", composite_registry()), "lib.a", "Color", "Hue", false)
+        expect(bound(lowering, "Hue")).to_equal(true)
+        expect(lowering.enum_variant_names.contains_key("Red")).to_equal(false)
+        lowering.symbols.pop_scope()
+
+    it "binds a function-local callable directly under its local name":
+        var lowering = import_in_function(importer_at("app/main.spl", composite_registry()), "lib.a", "make", "build", true)
+        expect(bound(lowering, "build")).to_equal(true)
+        expect(symbol_named(lowering, "build").kind == SymbolKind.Function).to_equal(true)
+        lowering.symbols.pop_scope()
+        expect(bound(lowering, "build")).to_equal(false)
