@@ -244,14 +244,15 @@ fn transient_untrack_freed(value: RuntimeValue) {
         let len = scope.objects.len();
         let window_start = len.saturating_sub(TRANSIENT_UNTRACK_WINDOW);
         let same = |object: &RuntimeValue| object.is_heap() && object.as_heap_ptr() as usize == addr;
-        let mut hit = false;
         for pos in (window_start..len).rev() {
             if same(&scope.objects[pos]) {
                 scope.objects[pos] = RuntimeValue::NIL;
-                hit = true;
             }
         }
-        if !hit && window_start > 0 {
+        // Every entry for this address must go, not just the newest: an
+        // older duplicate left behind would be freed at scope end once
+        // `promoted` no longer filters it.
+        if window_start > 0 {
             scope.sync_index();
             if scope.index_ambiguous {
                 for object in scope.objects[..window_start].iter_mut() {

@@ -2398,6 +2398,10 @@ impl<'a> MirLowerer<'a> {
         // as another's.
         self.erased_local_class_types = compute_single_assignment_class_types(func, self.type_registry);
         self.block_release_ready.clear();
+        // Keyed by function-scoped local indices: a stale entry would make a
+        // loop pre-header read another function's slot.
+        self.len_local_sources.clear();
+        self.array_capacity_local_sources.clear();
         self.array_move_sites =
             super::array_move::compute_array_move_sites(
                 func,

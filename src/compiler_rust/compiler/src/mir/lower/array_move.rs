@@ -31,7 +31,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::hir::{HirExpr, HirExprKind, HirFunction, HirStmt, HirType, TypeId, TypeRegistry};
+use crate::hir::{HirContractClause, HirExpr, HirExprKind, HirFunction, HirStmt, HirType, TypeId, TypeRegistry};
 
 /// Copy sites that may hand the source buffer over instead of copying it.
 #[derive(Debug, Default, Clone)]
@@ -744,6 +744,23 @@ struct ReleaseScan<'x, 'a> {
 }
 
 impl ReleaseScan<'_, '_> {
+    /// The use site must see the local at its declared type: the `len` and
+    /// index fast paths key on the expression type, and an `ANY`-typed
+    /// mention may dispatch elsewhere.
+    fn typed_as_local(&self, receiver: &HirExpr, idx: usize) -> bool {
+        receiver.ty == self.a.local_ty(idx)
+    }
+
+    /// Loop invariants are not lowered today; a local they mention is
+    /// disqualified so a future lowering cannot read a released slot.
+    fn poison_clauses(&mut self, clauses: &[HirContractClause]) {
+        for clause in clauses {
+            let mut locals = HashSet::new();
+            collect_locals_expr(&clause.condition, &mut locals);
+            self.bad.extend(locals);
+        }
+    }
+
     /// Element type of an array of scalars, else `None`. A literal's inferred
     /// type carries `size: Some(n)`; MIR and codegen never read `size`, and
     /// every array value is the same `rt_array_new`-family heap handle.
@@ -787,7 +804,8 @@ impl ReleaseScan<'_, '_> {
                         if let HirExprKind::Local(idx) = &receiver.kind {
                             if !(is_release_scalar(target.ty)
                                 && is_release_scalar(value.ty)
-                                && is_release_index_ty(index.ty))
+                                && is_release_index_ty(index.ty)
+                                && self.typed_as_local(receiver, *idx))
                             {
                                 self.bad.insert(*idx);
                             }
@@ -810,7 +828,13 @@ impl ReleaseScan<'_, '_> {
                     self.stmts(else_block);
                 }
             }
-            HirStmt::While { condition, body, .. } => {
+            HirStmt::While {
+                condition,
+                body,
+                invariants,
+                ..
+            } => {
+                self.poison_clauses(invariants);
                 self.expr(condition);
                 self.stmts(body);
             }
@@ -819,8 +843,10 @@ impl ReleaseScan<'_, '_> {
                 pattern_local,
                 iterable,
                 body,
+                invariants,
                 ..
             } => {
+                self.poison_clauses(invariants);
                 if let Some(idx) = pattern_local {
                     self.bad.insert(*idx);
                 }
@@ -843,7 +869,8 @@ impl ReleaseScan<'_, '_> {
             // `a[i]` read yielding a scalar.
             HirExprKind::Index { receiver, index } => {
                 if let HirExprKind::Local(idx) = &receiver.kind {
-                    if !(is_release_scalar(e.ty) && is_release_index_ty(index.ty)) {
+                    if !(is_release_scalar(e.ty) && is_release_index_ty(index.ty) && self.typed_as_local(receiver, *idx))
+                    {
                         self.bad.insert(*idx);
                     }
                 } else {
@@ -859,7 +886,8 @@ impl ReleaseScan<'_, '_> {
                 receiver, method, args, ..
             } => {
                 if let HirExprKind::Local(idx) = &receiver.kind {
-                    if !(method == "len" && args.is_empty() && is_release_index_ty(e.ty)) {
+                    if !(method == "len" && args.is_empty() && is_release_index_ty(e.ty) && self.typed_as_local(receiver, *idx))
+                    {
                         self.bad.insert(*idx);
                     }
                 } else {

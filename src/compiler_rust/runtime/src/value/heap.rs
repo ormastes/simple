@@ -756,7 +756,7 @@ fn array_free_quarantine() -> Option<&'static Mutex<HashSet<usize>>> {
 extern "C" fn array_free_quarantine_report() {
     if let Some(Some(set)) = ARRAY_FREE_QUARANTINE.get() {
         let count = set.lock().map(|set| set.len()).unwrap_or(0);
-        eprintln!("[array-free-quarantine] quarantined={count} hits=0");
+        eprintln!("[array-free-quarantine] quarantined={count}");
     }
 }
 /// True when `rt_array_free` must quarantine instead of deallocating.

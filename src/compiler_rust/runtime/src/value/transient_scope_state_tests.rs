@@ -411,3 +411,23 @@ fn array_free_inside_session_drops_ownership() {
     assert!(rt_session_heap_end(session_id));
     assert!(!super::super::heap::is_registered_heap_ptr(kept.as_heap_ptr()));
 }
+
+/// A scope can list one address twice. The free must erase the old entry even
+/// when a newer one sits inside the scan window.
+#[test]
+fn array_free_untracks_every_duplicate_entry() {
+    assert!(rt_transient_array_scope_begin());
+    let dup = rt_array_new(1);
+    let dup_addr = dup.as_heap_ptr() as usize;
+    let mut younger = Vec::new();
+    for _ in 0..(TRANSIENT_UNTRACK_WINDOW * 2) {
+        younger.push(rt_array_new(1));
+    }
+    TRANSIENT_HEAP_SCOPE.with(|scope| scope.borrow_mut().as_mut().unwrap().objects.push(dup));
+    rt_array_free(dup);
+    assert!(!scope_tracks_addr(dup_addr), "an older duplicate entry survived the free");
+    assert!(rt_transient_array_scope_end());
+    for object in &younger {
+        assert!(!super::super::heap::is_registered_heap_ptr(object.as_heap_ptr()));
+    }
+}
