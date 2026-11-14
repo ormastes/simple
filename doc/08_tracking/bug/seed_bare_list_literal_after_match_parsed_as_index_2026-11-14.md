@@ -1,7 +1,7 @@
 # Seed: bare list-literal tail expression after a `match` val is parsed as an index
 
 Date: 2026-11-14
-Status: open (workaround applied by lane xrayfg; verification-pending once the seed is fixed)
+Status: verification-pending (fixed in seed parser postfix.rs 2026-11-15: `[`/`(` after a Dedent/Newline is never an index/call; workaround reverted; regression `src/compiler_rust/parser/tests/bare_collection_after_match_val.rs`; xray_llvm_attrs_spec 22/22 on a rebuilt seed)
 
 `val r = match x:` with a `case _: ""` last arm, followed by a function-tail list
 literal `["p=" + r, "q=" + r]`, fails in the seed (`seed-attr`, `seed-tip`) with
