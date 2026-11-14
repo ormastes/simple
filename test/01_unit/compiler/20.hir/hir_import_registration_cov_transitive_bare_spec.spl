@@ -35,10 +35,12 @@ val bare_b_src = "pub struct Gap:\n    b: i64\n\npub struct HolderB:\n    gap: G
 val bare_c_src = "pub struct Gap:\n    c: i64\n\npub struct HolderC:\n    gap: Gap\n"
 val bare_d_src = "pub struct Gap:\n    d: i64\n\npub struct HolderD:\n    gap: Gap\n"
 val bare_e_src = "use lib.a.\{Point as Pt\}\n\npub struct AliasHolder:\n    p: Pt\n"
+val bare_g_src = "pub struct Leaf:\n    g: i64\n\npub struct LeafHolderG:\n    leaf: Leaf\n"
+val bare_h_src = "pub struct Leaf:\n    h: i64\n\npub struct LeafHolderH:\n    leaf: Leaf\n"
 
 fn bare_registry() -> ModuleSurfacesByName:
-    val names = ["lib.a", "lib.b", "lib.c", "lib.d", "lib.e"]
-    val srcs = [bare_a_src, bare_b_src, bare_c_src, bare_d_src, bare_e_src]
+    val names = ["lib.a", "lib.b", "lib.c", "lib.d", "lib.e", "lib.g", "lib.h"]
+    val srcs = [bare_a_src, bare_b_src, bare_c_src, bare_d_src, bare_e_src, bare_g_src, bare_h_src]
     val log = Logger(level: 0)
     var modules: Dict<text, Module> = {}
     var sources: [SourceFile] = []
@@ -109,6 +111,21 @@ describe "transitive bare type bindings":
         expect(third == qualified(lowering, "lib.a", "Gap")).to_equal(false)
         expect(third == qualified(lowering, "lib.b", "Gap")).to_equal(false)
         expect(lowering.transitive_bare_names).to_equal(["Gap"])
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "stays ambiguous when a third and a fourth owner pull the same name":
+        var lowering = import_one(importer(), "lib.a", "HolderA", "HolderA")
+        lowering = import_one(lowering, "lib.b", "HolderB", "HolderB")
+        lowering = import_one(lowering, "lib.c", "HolderC", "HolderC")
+        # Once ambiguous, always ambiguous: a third owner must not claim it.
+        expect(bound(lowering, "Gap")).to_equal(false)
+        expect(lowering.transitive_bare_owners).to_equal([""])
+        lowering = import_one(lowering, "lib.d", "HolderD", "HolderD")
+        expect(bound(lowering, "Gap")).to_equal(false)
+        expect(lowering.transitive_bare_owners).to_equal([""])
+        expect(qualified(lowering, "lib.c", "Gap") >= 0).to_equal(true)
+        expect(qualified(lowering, "lib.d", "Gap") >= 0).to_equal(true)
+        expect(lowering.struct_field_types_by_name.contains_key("lib.c.HolderC")).to_equal(true)
         expect(lowering.errors.len()).to_equal(0)
 
     it "lets an explicit import claim a name left ambiguous":

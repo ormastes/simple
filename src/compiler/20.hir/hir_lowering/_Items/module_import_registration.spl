@@ -171,15 +171,24 @@ impl HirLowering:
         # (field `spacing: Spacing`, a class) kept `Spacing` bound to the class
         # over the explicit `use common.ui.design_tokens.{Spacing}` enum in
         # theme_registry.spl ("missing runtime identity for 'Spacing'").
+        #
+        # Ambiguity is STICKY. Making the name ambiguous unbinds it, so to the
+        # next transitive owner the bare name looked free again: a third
+        # owner claimed it, a fourth made it ambiguous once more, and which
+        # type bare `Gap` meant depended on how many holders were imported.
+        # An ambiguous bare name counts as taken; only an explicit import
+        # (supersede_transitive_bare_type) or the module's own declaration
+        # can bind it afterwards.
         val bare_bound_before = self.import_binding_or_invalid(dependency).is_valid()
-        val dependency_local = if bare_bound_before: "{imported_mod.module_name}::{dependency}" else: dependency
+        val bare_taken = bare_bound_before or self.transitive_bare_is_ambiguous(dependency)
+        val dependency_local = if bare_taken: "{imported_mod.module_name}::{dependency}" else: dependency
         val saved_field_dependency = self.registering_field_dependency
         self.registering_field_dependency = true
         self.register_imported_symbol(
             imported_mod.physical_index, imported_mod_name, dependency, dependency_local,
             import_span, materialize_enum)
         self.registering_field_dependency = saved_field_dependency
-        self.note_transitive_bare_type(dependency, imported_mod.module_name, bare_bound_before)
+        self.note_transitive_bare_type(dependency, imported_mod.module_name, bare_taken)
         if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) >= 0:
             return
         self.materialize_imported_callable_explicit_dependency(
@@ -201,6 +210,18 @@ impl HirLowering:
                 return row
             row = row + 1
         -1
+
+    fn transitive_bare_is_ambiguous(name: text) -> bool:
+        """True once two transitive owners have conflicted over bare `name`.
+
+        Module scope only, exactly like `note_transitive_bare_type`, which is
+        the only writer of the ambiguous ("") owner row."""
+        if self.registering_lexical_import or self.symbols.current_scope.id != 0:
+            return false
+        val row = self.transitive_bare_row(name)
+        if row < 0 or row >= self.transitive_bare_owners.len():
+            return false
+        self.transitive_bare_owners[row] == ""
 
     me note_transitive_bare_type(name: text, owner_module: text, bare_bound_before: bool):
         """Record (or invalidate) a bare name bound by a field dependency.
