@@ -1,0 +1,90 @@
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/slang_prefix_cache_hit_output_drift_2026-11-14.md
+# @cover src/lib/gc_async_mut/slang/engine/llm_engine.spl 50%
+# @cover src/runtime/slang_ggml_shim.c 40%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# design: doc/05_design/ml/slang_serial_exact_prefix_cache.md
+
+"""
+## Purpose and audience
+Purpose: the strict half of slang_kv_cache_live_spec.spl. A prefix-cache hit
+must decode the SAME greedy bytes as a full prefill of the same prompt. It
+does not today: the restored request recomputes only the last token(s) as a
+small batch, and ggml's CPU kernels are not bit-identical across batch
+shapes, so the hit path drifts (byte 42 of an exact repeat, byte 2 of a
+prefix extension; measured 2026-11-14,
+Qwen2.5-1.5B Q4_K_M, Windows mingw CPU). Expected to FAIL until the bug
+record above is resolved.
+Audience: engineers working on slang's prefix cache or batch-invariant
+prefill.
+
+## Compatibility and limitations
+Same gate as slang_kv_cache_live_spec.spl: SLANG_LIVE=1, SLANG_MODEL_ROOT,
+a built ggml shim, plus SLANG_KV_MODEL_ID naming the model (required here:
+the drift is model-dependent, a 15M model shows none).
+"""
+
+use std.spec.{describe, it, expect, step, skip, fail}
+use std.gc_async_mut.slang.entrypoints.llm.{slang_models, engine_backend_available}
+use std.gc_async_mut.slang.engine.llm_engine.{EngineGenerationRequest, engine_set_n_ctx_text, engine_set_prefix_cache_limits, engine_ensure_loaded, engine_generate_observed_request, engine_unload}
+use std.io_runtime.{env_get, is_dir}
+
+fn _model_root() -> text:
+    val root = env_get("SLANG_MODEL_ROOT") ?? ""
+    if root == "" or not is_dir(root):
+        return ""
+    root
+
+fn _live_enabled() -> bool:
+    (env_get("SLANG_LIVE") ?? "") == "1" and _model_root() != "" and
+        (env_get("SLANG_KV_MODEL_ID") ?? "") != "" and engine_backend_available()
+
+# Same prompt as slang_kv_cache_live_spec.spl, so the two specs measure the
+# same hit.
+fn _shared_prompt() -> text:
+    val owners = ["alpha", "bravo", "charlie", "delta", "echo"]
+    var doc = "The following ledger records which serving request owns each KV cache page"
+    var i = 1
+    while i <= 48:
+        doc = doc + ". Page " + i.to_text() + " belongs to request " + owners[i % 5] +
+            " and holds " + (i * 16).to_text() + " tokens of sealed attention state"
+        i = i + 1
+    doc + ". Answer briefly. Question: which request owns page seven"
+
+fn _generate(prompt: text) -> text:
+    match engine_generate_observed_request(EngineGenerationRequest(
+          prompt: prompt, max_tokens: "12")):
+        Err(reason):
+            fail("generation failed: " + reason)
+            ""
+        Ok(observed): observed.output
+
+describe "slang snapshot KV prefix cache hit output":
+
+    it "decodes the same greedy bytes on a hit as on a full prefill":
+        if not _live_enabled():
+            skip("decodes the same greedy bytes on a hit as on a full prefill", "needs SLANG_LIVE=1, SLANG_MODEL_ROOT, SLANG_KV_MODEL_ID, and a built ggml backend")
+        else:
+            step("Load the model once with n_ctx 2048")
+            expect(engine_set_n_ctx_text("2048")).to_equal(true)
+            val wanted = env_get("SLANG_KV_MODEL_ID") ?? ""
+            var loaded = false
+            for m in slang_models(_model_root()):
+                if not loaded and m.runnable and (wanted == "" or m.id == wanted):
+                    expect(engine_ensure_loaded(m).is_ok()).to_equal(true)
+                    loaded = true
+            expect(loaded).to_equal(true)
+
+            step("Full prefill with the cache disabled")
+            expect(engine_set_prefix_cache_limits(0, 0)).to_equal(true)
+            val full = _generate(_shared_prompt())
+
+            step("Seed the cache, then decode the same prompt from the restored prefix")
+            expect(engine_set_prefix_cache_limits(4, 2147483648)).to_equal(true)
+            _generate(_shared_prompt())
+            val hit = _generate(_shared_prompt())
+            engine_unload()
+
+            step("The hit decodes byte-identical output")
+            expect(full.len()).to_be_greater_than(0)
+            expect(hit).to_equal(full)
