@@ -1521,3 +1521,10 @@ never cache an answer computed while exhausted) —
 - Still open (residue record): the exact float bottom for a word moved
   down inside a run, integer flex factors, the eager `float_ctx_line_boxes`
   list, `align="left"` under RTL, cell-estimate minimum without a face.
+- Filed after the third review (residue items 25-27, and 6): the faceless
+  float-aware wrap still chops long words (as the normal faceless wrap
+  does); one twice-layout case remains when the room over a
+  formatting-context box's height is narrower than at its top row;
+  `<td align="left" style="direction:rtl">` probably still aligns `start`;
+  the faceless cell wrap gives 6 lines where Chrome has 3 for the AC-30
+  paragraph.

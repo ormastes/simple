@@ -38,7 +38,7 @@ Owner file for every layout item:
 6. **Without a resolved face the flex minimum is a CELL estimate.** The
    longest word is counted in `style_char_w` cells (the unit that lane wraps
    with), so it can differ from the resolved-face minimum by the usual cell
-   vs advance error.
+   vs advance error. Measured: `width:100px` + `flex:1` 14-word paragraph in 300 px at 16px/24px gives the right column (100,0,200) but 6 lines (144 px) where Chrome has 3 (72 px) -- the faceless cell wrap, not the minimum.
 7. **Min-content of a flex item** takes each text run and child on its own:
    adjacent inline boxes (`ab<b>cd</b>`) are not joined into one word, and a
    replaced child without a `width` counts as its padding and border.
@@ -77,6 +77,21 @@ Owner file for every layout item:
     float** (bounded at 4096 lines) before the run is wrapped, whatever the
     run's length; only the pairs the run used are STORED. A lazy per-line
     query needs the wrap to live beside the float context.
+
+25. **Without a resolved face the float-aware wrap still chops a long word.**
+    `compute_style_wrap_ranges_float_band`'s cell-width branch
+    (`web_wrap_line_end`) has no whole-word arm, the same as the normal
+    faceless wrap (`compute_wrap_ranges`); only the resolved-face branches
+    let a word overflow whole.
+26. **One twice-layout case remains for a formatting-context block beside
+    floats:** when the room over the box's HEIGHT is narrower than at its top
+    row, the trial (made at the top-row width) is discarded and the box is
+    laid out again at the narrower width. Each such level doubles the work
+    below it; the common case (same room over the whole height) reuses the
+    trial.
+27. **`<td align="left" style="direction:rtl">` is likely still aligned
+    `start` (right).** Same cause as item 17: the presentational attribute
+    does not set `Style.text_align_set`. Not measured against Chrome.
 
 ## Sub / sup
 
