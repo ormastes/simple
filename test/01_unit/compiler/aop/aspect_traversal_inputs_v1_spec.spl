@@ -2,6 +2,8 @@
 # the F1 plan independently from the earlier six descriptor/MIR probe cycles.
 use std.spec.{describe, it, expect}
 use compiler.common.config.{Logger}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.frontend.aspect_registry.{aspect_registry_reset}
 use compiler.hir.hir_lowering.types.{HirLowering}
@@ -32,6 +34,7 @@ describe "F1 real bounded ordinary input capture":
         val claims = aspect_forward_weave_claims_v1(identities, forward_join_points(modules))
         expect(claims.len()).to_equal(1)
         val captured = aop_traversal_inputs_capture_v1(modules, claims, 16, 8388608).unwrap()
+        expect(transient_array_scope_state_v1()).to_equal(0)
         val before = captured.module_roots["fixture"]
         val base = aop_traversal_base_key_v1(captured, "fixture", "forwarder").unwrap()
         val (woven, count) = weave_forward_advice_claim_in_module_v1("fixture", modules["fixture"], identities, claims[0])
@@ -63,6 +66,7 @@ describe "F1 real bounded ordinary input capture":
         val modules = traversal_input_modules("0")
         expect(aop_traversal_inputs_capture_v1(modules, [], 0, 8388608).is_err()).to_equal(true)
         expect(aop_traversal_inputs_capture_v1(modules, [], 16, 1).is_err()).to_equal(true)
+        expect(transient_array_scope_state_v1()).to_equal(0)
         val captured = aop_traversal_inputs_capture_v1(modules, [], 16, 8388608).unwrap()
         expect(aop_traversal_base_key_v1(captured, "missing", "forwarder").is_err()).to_equal(true)
 
@@ -77,3 +81,20 @@ describe "F1 real bounded ordinary input capture":
             source_digest: "", manifest: nil, metadata_errors: [], region_capabilities: [])
         val rejected = HirModule(..modules["fixture"], representation_declarations: [declaration])
         expect(hir_module_encode_snapshot_bounded_v1(rejected, 8388608).is_err()).to_equal(true)
+
+    it "refuses a borrowed live scope without closing its caller's scope":
+        val modules = traversal_input_modules("0")
+        val begun = transient_scope_begin()
+        var refused = false
+        var during: i64 = 0
+        var ended = false
+        if begun:
+            refused = aop_traversal_inputs_capture_v1(modules, [], 16, 8388608).is_err()
+            during = transient_array_scope_state_v1()
+            ended = transient_scope_end()
+        # Assertion machinery runs only after caller-owned scratch is closed.
+        expect(begun).to_equal(true)
+        expect(refused).to_equal(true)
+        expect(during).to_equal(1)
+        expect(ended).to_equal(true)
+        expect(transient_array_scope_state_v1()).to_equal(0)

@@ -226,3 +226,66 @@ source-level change removes the always-unavailable API choice from cold capture,
 but its real producer runtime behavior is still unqualified. Astra accepted the
 source contract; the independent canonical lane owns actual codec fixture
 preparation. The 13 pure-boundary results are unchanged and were not rerun.
+
+## Release synchronization and imported layout ownership
+
+The F1 checkpoint was rebased onto release `a132155869c` with all 16 commits
+patch-equivalent. Since PR #9191, `HirModule.imported_layouts` carries identity
+rows whose `fields` are deliberately empty. Neither capture nor warm planning
+may treat that as an empty physical layout. Any required layout facts come from
+the declaring module or its admitted surface owner. Current cold capture hashes
+actual HIR and function ABI; it does not derive offsets from importer rows.
+
+## Per-module scratch ownership correction
+
+The existing `hir_module_encode_retained_v1` documentation reports an unscoped
+encoder working-set cost of approximately 56 MB per module in a prior measured
+build. That is repository evidence motivating this correction, **not** a new F1
+measurement. A single batch-wide scratch scope would still accumulate all of
+those intermediates until the batch ended.
+
+Capture therefore owns one transient scope per module and one per advice ABI
+projection. Module/claim inputs remain read-only parent loans. After allocation
+pauses, only the compact result graph is promoted; ending the scope releases
+encoder bytes, key-framing and ABI scratch. Scope acquisition refuses an already
+active or paused caller scope. Every ordinary success/refusal closes the scope;
+promotion or cleanup failure follows the established fail-fast ownership rule
+instead of returning invalid child references. The top accumulator stores only
+these promoted compact outputs. Selected claims are capped at 1,024.
+
+Specs now assert successful/failing capture leaves no active scope and that an
+occupied caller-owned scope is refused without closing it. They are authored
+but unrun. No peak-RSS or performance PASS is claimed. Future warm blobs and
+restored module graphs need their own explicit promotion; global references to
+borrowed temporary allocations are not allowed.
+
+## Next warm implementation: process-local ordinary snapshots
+
+The approved direction does not wait for canonical persistence qualification.
+`TraversalModuleSnapshotV1` holds immutable ordinary base/output bytes and
+digests, module identity, source epoch/lineage and executing-image identity.
+`TraversalBatchStateV1` adds the complete ordered claim identity and aggregate
+per-directory prior views. `TraversalOutputCacheV1` bounds entry count and all
+retained UTF-8 payload bytes. These remain proposed source interfaces.
+
+A bounded ordinary decoder must check the ordinary header, complete consumption,
+resource budgets and exact re-encoding before any restored module is published.
+All modules decode and validate first; replacement is atomic at the driver-owner
+batch boundary. The canonical availability gate remains separate.
+
+Aggregate application identity frames every ordered claim, including selectors
+and zero-match claims, with real advice ABI/effects/body identities. A union of
+selectors alone cannot represent ordering. The existing parser/matcher forms
+the union query; the empty batch uses a genuine contradictory parsed query,
+not a forged empty shard. Removal is considered before the zero-claim return.
+
+The state machine distinguishes certified fresh lowering, same-epoch input
+matching a retained exact output, and previously woven input with missing or
+evicted proof. Only the first can fall back directly to the full legacy visit.
+The second restores the verified immutable baseline before changed/removal
+work; the third returns a checked re-lower error. Fresh-owner provenance takes
+precedence over incidental equality with old output bytes. Unchanged aggregate
+deltas may reuse a complete retained batch; any change conservatively restores
+and rewrites the whole batch through the existing ordered live-forwarder loop.
+No new per-function partial weaver is introduced. This warm path is not yet
+implemented or qualified.
