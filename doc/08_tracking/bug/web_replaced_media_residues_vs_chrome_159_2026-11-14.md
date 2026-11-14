@@ -187,11 +187,17 @@ Still open:
 
 - **1 px box floor.** Every box width is floored at 1 px, so an EMPTY
   `display:inline-block` is 1x1 here and 0x0 in Chrome; the 0-wide rows above
-  land on that floor (button 17 instead of 16). Unblock: let shrink-to-fit
+  land on that floor (button 17 instead of 16); AC-12 asserts
+  `<= Chrome + 1`, so it keeps passing when the floor goes. Unblock: let shrink-to-fit
   widths be 0 (about 25 `< 1` clamps in `layout_engine.spl`).
-- **`display:inline-flex` is laid out as a full-width flex row** (a text-only
-  inline-flex is 900 wide here, 33.8 in Chrome), so a ratio-only svg inside
-  one is 900x900 here and 0x24 in Chrome.
+- **`display:inline-flex` is not a supported display keyword**: the box stays
+  a full-width block (a text-only inline-flex is 900 wide here, 33.8 in
+  Chrome), where Chrome shrinks it and a ratio-only svg is 0 wide. Base
+  behaviour is retained there on purpose -- an unsized svg keeps the 300x150
+  default instead of filling 900 px (`Style.display_inline_flex_authored`,
+  set by the cascade in `core.spl`). 300x150 is not the Chrome value; AC-17
+  asserts only `width <= 300`. Unblock: implement inline-flex as a
+  shrink-to-fit flex container, then delete the flag.
 - **Percentage width in a shrink-to-fit container**: `<svg viewBox
   style="width:50%">` in an inline-block is 150x150 in Chrome (the percentage
   falls back to the 300 px default for the container's intrinsic width) and

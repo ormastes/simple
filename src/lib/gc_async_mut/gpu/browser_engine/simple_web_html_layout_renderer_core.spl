@@ -303,6 +303,47 @@ fn _display_value_in_decls(decls: text) -> text:
         return ""
     decl_tbl_get_last_cascading_display(decl_table_build(decls))
 
+# Last display value of one cascade origin, counting `inline-flex` (which the
+# cascade itself drops as unsupported) beside the values it honours.
+fn _display_or_inline_flex_in_decls(decls: text) -> text:
+    if not decls.contains("inline-flex"):
+        return _display_value_in_decls(decls)
+    if _decl_over_quota(decls):
+        return ""
+    val tbl = decl_table_build(decls)
+    var i = (tbl.len() as i32) - 2
+    while i >= 0:
+        if tbl[i] == "display":
+            val value = tbl[i + 1].trim().lower()
+            if value == "inline-flex":
+                return value
+            if (
+                is_supported_display_keyword(value) or value == "initial" or
+                value == "unset" or value == "inherit" or value == "revert"
+            ):
+                return value
+        i = i - 2
+    ""
+
+# True when the winning `display` declaration is `inline-flex`. The box is
+# still laid out with the display the cascade fell back to.
+fn _inline_flex_display_authored(
+    normal: text, inline_normal: text, important: text, inline_important: text
+) -> bool:
+    if not (
+        normal.contains("inline-flex") or inline_normal.contains("inline-flex") or
+        important.contains("inline-flex") or inline_important.contains("inline-flex")
+    ):
+        return false
+    var value = _display_or_inline_flex_in_decls(inline_important)
+    if value == "":
+        value = _display_or_inline_flex_in_decls(important)
+    if value == "":
+        value = _display_or_inline_flex_in_decls(inline_normal)
+    if value == "":
+        value = _display_or_inline_flex_in_decls(normal)
+    value == "inline-flex"
+
 fn _final_authored_display(
     ua_display: text, inherited_display: text, normal: text, inline_normal: text,
     important: text,
@@ -967,6 +1008,9 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 st = apply_decls(st, "display:" + final_display, em_base)
             else:
                 st.display = final_display
+        st.display_inline_flex_authored = _inline_flex_display_authored(
+            combined_decls, inline_normal, combined_important_decls, inline_important
+        )
         # HTML UA stylesheet `audio:not([controls]) { display: none
         # !important }` (Chrome's html.css): an <audio> without the controls
         # widget generates no box. Applied after the authored display because

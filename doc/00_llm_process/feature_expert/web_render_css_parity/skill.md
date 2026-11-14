@@ -1163,8 +1163,13 @@ turns green in the same change, or the check FAILs as stale.
   absolute replaced box is not shrink-to-fit: size it with
   `replaced_auto_box_w` against the available width.
 - **1 px box floor:** an empty inline-block is 1x1 here, 0x0 in Chrome; 0-wide
-  oracle rows are asserted at the floor. `display:inline-flex` is a full-width
-  flex row here.
+  oracle rows are asserted as `<= Chrome + 1`. `display:inline-flex` is
+  dropped by the cascade as unsupported (the box stays a full-width block);
+  `Style.display_inline_flex_authored` records it so an unsized svg there
+  keeps the 300x150 default instead of filling the row. A flag set in
+  `apply_authored_style_metadata` only sees INLINE styles: stylesheet rules
+  are applied without display, so set display-derived flags beside
+  `_final_authored_display` in `core.spl`.
 - Still open: residues 6-11 (9: a rule `em` is resolved before an inline
   `font-size`; 11: the 1 px floor, inline-flex, percentage width in a
   shrink-to-fit container) in

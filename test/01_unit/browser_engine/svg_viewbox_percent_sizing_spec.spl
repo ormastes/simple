@@ -60,6 +60,7 @@ use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_debug_layout_by_id
 }
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
 
 val VW: i32 = 900
 val VH: i32 = 760
@@ -164,9 +165,14 @@ describe "a replaced element resolves viewBox, percentage and em sizes like Chro
 # then fills whatever width the container resolved to.
 #
 # This engine floors every box width at 1 px (an EMPTY inline-block is 1x1
-# here and 0x0 in Chrome), so the 0-wide rows are asserted at that floor:
-# container 1 (button 17), svg 1x1. The floor is filed as residue 11 in
-# doc/08_tracking/bug/web_replaced_media_residues_vs_chrome_159_2026-11-14.md.
+# here and 0x0 in Chrome), so the 0-wide rows are asserted as `<= Chrome + 1`
+# and keep passing when the floor is removed. The floor is filed as residue
+# 11 in doc/08_tracking/bug/web_replaced_media_residues_vs_chrome_159_2026-11-14.md.
+#
+# `display:inline-flex` is not supported: the box stays a full-width block
+# (Chrome shrinks it, and the svg is 0 wide). BASE BEHAVIOUR RETAINED there --
+# an unsized svg keeps the 300x150 default instead of filling 900 px. That is
+# not the Chrome value; only the bound that guards the regression is asserted.
 val STF_BLOCK: text = "<div id=\"p\" style=\"width:400px\"><svg id=\"s\" " + VB + "></svg></div>"
 val STF_IB: text = "<div id=\"p\" style=\"display:inline-block\"><svg id=\"s\" " + VB + "></svg></div>"
 val STF_BUTTON: text = "<div><button id=\"p\"><svg id=\"s\" " + VB + "></svg></button></div>"
@@ -180,6 +186,8 @@ val STF_FLEX_H: text = "<div id=\"p\" style=\"display:flex\"><svg id=\"s\" " + V
 val STF_SVG_FLOAT: text = "<div id=\"p\" style=\"overflow:hidden\"><svg id=\"s\" " + VB + " style=\"float:left\"></svg></div>"
 val STF_SVG_ABS: text = "<div id=\"p\" style=\"position:relative;height:60px;width:500px\"><svg id=\"s\" " + VB + " style=\"position:absolute\"></svg></div>"
 val STF_SPAN: text = "<span id=\"p\">a<svg id=\"s\" " + VB + "></svg>b</span>"
+val STF_INLINE_FLEX: text = "<div><div id=\"p\" style=\"display:inline-flex\"><svg id=\"s\" " + VB + "></svg></div></div>"
+val STF_INLINE_FLEX_RULE: text = "<style>.x{display:inline-flex}</style><div><div id=\"p\" class=\"x\"><svg id=\"s\" " + VB + "></svg><span>hello</span></div></div>"
 val STF_IB_PLAIN: text = "<div id=\"p\" style=\"display:inline-block\"><svg id=\"s\"></svg></div>"
 
 fn page_probe(inner: text, id: text, name: text) -> text:
@@ -188,13 +196,34 @@ fn page_probe(inner: text, id: text, name: text) -> text:
 fn stf(inner: text) -> text:
     "container " + page_probe(inner, "p", "w") + " svg " + page_probe(inner, "s", "w") + "x" + page_probe(inner, "s", "h")
 
+fn px(inner: text, id: text, name: text) -> i32:
+    val out = page_probe(inner, id, name)
+    if out.len() == 0:
+        return 100000
+    parse_int(out)
+
 describe "a ratio-only svg in a shrink-to-fit container":
-    it "AC-12: contributes 0 intrinsic width, so the container collapses to the 1 px floor":
-        step("Chrome: inline-block 0 wide, button 16, float 0, abspos 0, svg 0x0; here the 1 px box floor applies")
-        expect(stf(STF_IB)).to_equal("container 1 svg 1x1")
-        expect(stf(STF_BUTTON)).to_equal("container 17 svg 1x1")
-        expect(stf(STF_FLOAT)).to_equal("container 1 svg 1x1")
-        expect(stf(STF_ABS)).to_equal("container 1 svg 1x1")
+    it "AC-12: contributes 0 intrinsic width to a shrink-to-fit container":
+        step("Chrome: inline-block 0 wide with a 0x0 svg; asserted as <= Chrome + 1 (1 px box floor)")
+        expect(px(STF_IB, "p", "w")).to_be_greater_than(-1)
+        expect(px(STF_IB, "p", "w")).to_be_less_than(2)
+        expect(px(STF_IB, "s", "w")).to_be_less_than(2)
+        expect(px(STF_IB, "s", "h")).to_be_less_than(2)
+        step("Chrome: button 16 wide with a 0x0 svg; asserted as <= 17")
+        expect(px(STF_BUTTON, "p", "w")).to_be_greater_than(15)
+        expect(px(STF_BUTTON, "p", "w")).to_be_less_than(18)
+        expect(px(STF_BUTTON, "s", "w")).to_be_less_than(2)
+        expect(px(STF_BUTTON, "s", "h")).to_be_less_than(2)
+        step("Chrome: float:left div 0 wide with a 0x0 svg; asserted as <= 1")
+        expect(px(STF_FLOAT, "p", "w")).to_be_greater_than(-1)
+        expect(px(STF_FLOAT, "p", "w")).to_be_less_than(2)
+        expect(px(STF_FLOAT, "s", "w")).to_be_less_than(2)
+        expect(px(STF_FLOAT, "s", "h")).to_be_less_than(2)
+        step("Chrome: position:absolute div 0 wide with a 0x0 svg; asserted as <= 1")
+        expect(px(STF_ABS, "p", "w")).to_be_greater_than(-1)
+        expect(px(STF_ABS, "p", "w")).to_be_less_than(2)
+        expect(px(STF_ABS, "s", "w")).to_be_less_than(2)
+        expect(px(STF_ABS, "s", "h")).to_be_less_than(2)
 
     it "AC-13: a specified height gives it an intrinsic width through the ratio":
         step("Chrome: height=48 makes the svg 48x48 and the container 48 (button 64)")
@@ -213,6 +242,13 @@ describe "a ratio-only svg in a shrink-to-fit container":
         expect(stf(STF_SVG_FLOAT)).to_equal("container 900 svg 900x900")
         expect(stf(STF_SVG_ABS)).to_equal("container 500 svg 500x500")
         expect(stf(STF_SPAN)).to_equal("container 900 svg 900x900")
+
+    it "AC-17: an unsized svg in display:inline-flex does not fill the row":
+        step("Base behaviour retained; Chrome 0: the svg must not be 900x900 (asserted: width <= 300)")
+        expect(px(STF_INLINE_FLEX, "s", "w")).to_be_greater_than(-1)
+        expect(px(STF_INLINE_FLEX, "s", "w")).to_be_less_than(301)
+        expect(px(STF_INLINE_FLEX_RULE, "s", "w")).to_be_greater_than(-1)
+        expect(px(STF_INLINE_FLEX_RULE, "s", "w")).to_be_less_than(301)
 
     it "AC-15: an svg without a viewBox keeps the 300x150 default":
         step("Chrome: inline-block around a plain svg is 300 wide")
