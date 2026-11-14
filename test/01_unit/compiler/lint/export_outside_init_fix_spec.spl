@@ -5,8 +5,11 @@
 use std.spec.{describe, it, expect, step, assert_true, expect_not}
 use std.tooling.easy_fix.{EasyFix, Replacement, FixConfidence}
 use compiler.tools.fix.source_edits.{validated_fix_sources}
-use compiler.tools.fix.rules.impl_.lint_module.{check_export_outside_init, check_init_boundary_violation}
+use compiler.tools.fix.rules.impl_.lint_module.{check_export_outside_init, check_init_boundary_violation, check_bypass_with_code_files}
+use compiler.tools.fix.main.{apply_fixes_to_disk}
 use compiler.tools.lint.main.{Linter}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_remove}
+use std.io_runtime.getpid
 
 fn eoi_apply(fixes: [EasyFix], path: text, source: text) -> text:
     val result = validated_fix_sources(fixes, {path: source})
@@ -95,3 +98,17 @@ describe "diagnostic-only findings keep their own line":
         expect(lines.contains(4)).to_equal(true)
         expect(lines.contains(5)).to_equal(true)
 
+    it "makes bypass_with_code_files diagnostic-only":
+        val fixes = check_bypass_with_code_files("@bypass\nexport use pkg.a.*\n", "pkg/__init__.spl")
+        expect(fixes.len()).to_equal(1)
+        expect(fixes[0].replacements.len()).to_equal(0)
+
+    it "does not count a no-edit fix as applied":
+        val path = "/tmp/simple_eoi_noedit_{getpid()}.spl"
+        val source = "val LIMIT = 3\nexport LIMIT\n"
+        assert_true(file_write(path, source))
+        val result = apply_fixes_to_disk(check_export_outside_init(source, path), {path: source}, true)
+        file_remove(path)
+        assert_true(result.is_ok())
+        expect(result.unwrap().applied).to_equal(0)
+        expect(result.unwrap().details.len()).to_equal(0)
