@@ -1,7 +1,8 @@
 # Character provider C0 constants depend on the lexer they support
 
-Status: production source repair authored and independently reviewed; changed
-source execution pending. This is separate from the Unicode lexer repair.
+Status: production repair independently reviewed; changed-source projection
+passed all ten groups. Updated compiler qualification remains pending. This is
+separate from the Unicode lexer repair.
 
 The retained actual-lexer projection at
 `/tmp/simple-unicode-escape-lexer-probe-20261115` compiled with producer SHA256
@@ -37,3 +38,27 @@ scanner paths. It uses separate immutable source/cache/evidence and retains
 the prior nine-PASS/one-FAIL attempt. This evidence cannot qualify a rebuilt
 compiler or replace the unchanged facts-key golden, which remains pending an
 updated producer.
+
+## Changed-source execution
+
+Source commit `c736d8b05f510154eb6d2b62bb3a7a715e355ef7` was extracted into
+separate fixture `/tmp/simple-unicode-provider-probe-20261115`, commit
+`c5be372d05e8e961520620d65b249c92e7cb22ed`. Independent review verified exact
+production declarations and that the ten-group harness was byte-identical to
+the earlier attempt. No oracle or provider substitute changed.
+
+Compile exit 0, run exit 0: **10/10 projection groups passed**, including the
+previously failing C0 group. Evidence commit
+`7808aeb6588f917062abd69d8466ed52adb23ab7` retains the actual command, source and
+binary hashes, logs, and resource receipts. Source SHA256:
+`3b4656b521da1a53ab3afb2948dfc993e4b2bc82d476c71c0527b6c4def0249b`.
+Binary SHA256:
+`daf3741cd68034300acca53875d8c98fa5716a679455fb4b278c3a8472ee04f8`.
+Producer SHA remains the pinned 855f48d3 above. Memory was capped at 2 GiB,
+swap 0, launch available memory 65,338,830,848 bytes, peak 842,813,440 bytes,
+elapsed 9.22 seconds, under the 90-second deadline. Independent Astra review
+accepted these scoped receipts without rerunning execution.
+
+The earlier nonpassing evidence is unchanged. This is qualification of the
+actual extracted lexer/provider functions, not a rebuilt compiler, whole
+SSpec suite, or the independent facts-key golden. Those remain pending.

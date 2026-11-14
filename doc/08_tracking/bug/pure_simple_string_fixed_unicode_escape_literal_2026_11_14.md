@@ -1,8 +1,8 @@
 # Fixed-width Unicode string escapes survive as literal text
 
-Status: source repair independently reviewed; actual lexer projection passed
-nine groups and failed one inherited provider group. Full execution remains
-nonpassing. No repaired-compiler or full fix PASS claimed.
+Status: source repair independently reviewed. The first projection retained
+nine PASS/one provider FAIL; a separate provider repair then passed the same
+ten groups. No repaired-compiler or full fix PASS claimed.
 
 The facts-key probe compiled by producer SHA256
 `855f48d3c9f9d915be2c8d732d4da3186caa0fb49f55ba3c780a47a1bb7efd42`
@@ -96,6 +96,19 @@ elapsed watchdog time 9.218 seconds, under a 90-second deadline. No failed or
 green criterion was rerun. SSpec and the committed full native fixture remain
 UNRUN; direct scanner evidence is not a full compiler test. An updated compiler
 and unchanged facts-key golden must execute before producer qualification.
+
+## Subsequent provider repair
+
+The separate production provider repair `c736d8b05f5` removes its 11/12 escape
+constants and uses its existing validated byte conversion. Separate immutable
+fixture `c5be372d05e8e961520620d65b249c92e7cb22ed` passed the identical ten-group
+numeric oracle under the same pinned producer; compile/run exit 0/0. Evidence
+commit `7808aeb6588f917062abd69d8466ed52adb23ab7` is retained at
+`/tmp/simple-unicode-provider-probe-20261115`. See
+[the provider report](char_from_code_c0_bootstrap_escape_cycle_2026_11_14.md)
+for exact hashes and resource measurements. Independent source and evidence
+review accepted this limited result. The earlier failed attempt above remains
+unchanged; no new compiler binary or facts-key golden has been qualified.
 
 ## Required qualification
 
