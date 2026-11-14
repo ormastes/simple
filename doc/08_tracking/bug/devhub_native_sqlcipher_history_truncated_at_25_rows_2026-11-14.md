@@ -82,3 +82,21 @@ interpreted:                      Results: 8 total, 8 passed, 0 failed
 Also native on the fixed build: `native_binary_sqlcipher_read_spec.spl` 2/2,
 `native_binary_sqlcipher_open_spec.spl` 4/4. The new regression spec has not
 been run through a native test lane; its native evidence is the minimal repro.
+
+## Tip re-verification 2026-11-15 (release/1.0.0 @ 031b59f7b3d, phase-1 seed)
+
+Native build: `SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NATIVE_INCREMENTAL=1 <seed> native-build src/app/devhub/main.spl -o build/nb/devhub.exe --cache-dir build/nb/cache`
+-> rc=0, `Linked: build/nb/devhub.exe (5771 KB) via clang`.
+
+Specs with `DEVHUB_NATIVE_BIN=<abs>/build/nb/devhub.exe`, run sequentially:
+
+- messenger_read_verbs_history_edges (native binary): `Results: 8 total, 8 passed, 0 failed`
+- messenger_read_verbs_damaged_store (native binary): `Results: 7 total, 7 passed, 0 failed`
+- native_binary_sqlcipher_read (native binary): `Results: 2 total, 2 passed, 0 failed`
+- native_binary_sqlcipher_open (native binary): `Results: 4 total, 4 passed, 0 failed`
+- dense_messenger_malformed_sequence (INTERPRETED, in-process; no native knob): `Results: 3 total, 3 passed, 0 failed`
+
+Sanity `devhub.exe messenger rooms --target dense --json` -> rc=2,
+`messenger config not found: C:\Users\user/.config/devhub/messenger.sdn` —
+host has no messenger config (environment, not a code defect); the reply is a
+well-formed JSON error. Not verified against a configured dense target.
