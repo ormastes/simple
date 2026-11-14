@@ -1,0 +1,33 @@
+# Public shared CUDA extent arithmetic. Both the plugin and legacy backend
+# consume existing target sizes/offsets; this module never places fields.
+use compiler.backend.backend.backend_types.{CompileError, BackendKind, compileerror_backend_error}
+
+pub fn cuda_align_to(offset: i64, align: i64) -> i64:
+    if align <= 1: offset else: ((offset + align - 1) / align) * align
+
+pub fn cuda_checked_extent_add_v1(offset: i64, size: i64) -> Result<i64, CompileError>:
+    if offset < 0 or size < 0 or offset > 9223372036854775807 - size:
+        return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: invalid or overflowing extent"))
+    Ok(offset + size)
+
+pub fn cuda_checked_extent_align_v1(size: i64, alignment: i64) -> Result<i64, CompileError>:
+    if alignment < 1:
+        return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: invalid alignment"))
+    val _ = cuda_checked_extent_add_v1(size, alignment - 1)?
+    Ok(cuda_align_to(size, alignment))
+
+pub fn cuda_checked_extent_product_v1(size: i64, count: i64) -> Result<i64, CompileError>:
+    if size < 0 or count < 0 or (size > 0 and count > 9223372036854775807 / size):
+        return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: invalid or overflowing array extent"))
+    Ok(size * count)
+
+pub fn cuda_checked_struct_extent_v1(offsets: [i64], sizes: [i64], alignment: i64) -> Result<i64, CompileError>:
+    if offsets.len() != sizes.len():
+        return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: incomplete field extents"))
+    var end = 0
+    var index = 0
+    while index < offsets.len():
+        val field_end = cuda_checked_extent_add_v1(offsets[index], sizes[index])?
+        if field_end > end: end = field_end
+        index = index + 1
+    cuda_checked_extent_align_v1(end, alignment)
