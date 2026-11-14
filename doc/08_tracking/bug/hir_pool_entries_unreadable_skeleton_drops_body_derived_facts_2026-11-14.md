@@ -78,23 +78,70 @@ phase is all hits too". Nothing documents a reason for the MIR worker to lower a
 no other consumer: with the keys apart, its whole output is dead weight.
 
 ## Fix
-`module_surface_skeleton_v1` now keeps the two function facts the parser derives from a body:
-- a blanked body that mentioned the word `self` (the parser's own rule: identifier boundaries, code,
-  comment or string) gets the stub `pass_do_nothing  # self`, so the promotion decides as on the source;
+`module_surface_skeleton_v1` keeps VERBATIM every body a surface fact is read from, so the parser reads
+the same text on both sides and none of its rules is re-implemented in the skeleton:
+- `fn new|create|default|from_*` whose body holds the letters `self` at all (the implicit-static
+  promotion then decides exactly as on the source);
 - a body holding a contract clause (`in:`, `requires:`, `invariant:`, `ensures:`, `decreases:`,
-  `out(r):`, `out_err(e):`, `proof uses:`) is kept verbatim. Contracts are body statements retained on
-  the function and folded into the surface projection. No module of this closure has one; the gap was
-  found by probe and is the same defect.
+  `out(r):`, `out_err(e):`, `proof uses:`). Contracts are body statements retained on the function and
+  folded into the surface projection;
+- a body holding an `extern fn` line, also behind an attribute (`@unsafe(...) extern fn ...`): the
+  parser registers it as a MODULE declaration (`parse_extern_fn_stmt_inline`);
+- every `async fn` body: the desugarer generates module-level declarations from the await points (a
+  state enum and a poll function, or one `__async_ready_body_<name>` helper).
 
 The key is not touched: no identity check is weakened, and a hit still requires equal surfaces. Lines
-still never move. The `.tldr` companion header (7 -> 8) and the worker surface sidecar header (v2 -> v3)
-are bumped so a skeleton stored by an older compiler is never read back.
+still never move.
 
-Spec `test/01_unit/compiler/80.driver/hir_worker_closure_digest_parity_spec.spl` (seed):
-red 3/9 before the fix, green 9/9 after. It pins skeleton/full surface equality for a self-using
-`create`, a comment-only mention, `in:` and `out(r):` clauses; that a body without `self` stays static
-and unmarked; that the worker's closure digest equals the consumer's on a frozen registry; and that the
-worker's digest still moves when the method really becomes static (before the fix it did not).
+**Stored skeletons are not re-versioned here.** Commit `412455b0f51` also bumped the `.tldr` companion
+header (7 -> 8) and the worker surface sidecar header (v2 -> v3) so a skeleton stored by an older
+compiler is not read back. Those two one-line edits were taken out again in review: they make
+`module_artifacts_v1.spl` and `driver_worker_surface_closure_v1.spl` changed modules, and every unit
+spec that touches them reaches 62.6% (131/209) and 84.7% (244/288) line coverage, under the 90% rule for
+a changed module (the macro-companion specs that own most of the missing lines are red on the current
+seed, at the parent commit too). What that leaves: stored skeletons are read only by
+`worker_surface_text_v1`, i.e. on the streaming-surface route (`worker_mode` 1), never on the retained
+route this record is about, which builds each skeleton fresh. On the streaming route an old-format
+skeleton of an unchanged source keeps being served, the worker surface stays unequal to the full parse,
+and the keys miss as before: slow, correct, and that route's keys are already apart (item 1 below).
+The bump belongs with that fix.
+
+### First version, and why it was replaced in review
+Commit `412455b0f51` kept the promotion fact with a stub, `pass_do_nothing  # self`, on every blanked
+body that mentioned the word `self`, deciding "mentions" with its own copy of the parser's
+word-boundary rule. Review found two defects, both failing closed (a miss, never a wrong hit):
+- **the copy and the parser disagree on non-ASCII bodies.** `source_mentions_self_word`
+  (`parser_decls_use.spl:521`) combines a `find` position, `[a:b]` slices and `len()`; on a body with
+  multibyte text its verdict is no longer the word-boundary rule it documents (observed on the seed;
+  the cause is assumed to be mixed byte and code-point offsets, not traced). Probe: `fn create()` with a body of `val note = "ééé..."` and `val selfx = 2` is an
+  instance method in the full parse and static from the skeleton (`f9acd57b...` vs `b65ea4e9...`, the
+  same pair as the original defect). No method in `src/compiler`, `src/lib` or `src/app` has that
+  shape today (0 of 143,830 function bodies), but one would silently cost the whole pool again;
+- **the stub line stopped being one fixed text.** `tldr_frozen_span_projection_v1`
+  (`tldr_frozen_projection_v1.spl:26`) matches `pass_do_nothing` exactly and returned nil for every
+  module that reached it with a marked stub (route behind `SIMPLE_TLDR_IMPORTS=1`; the caller then
+  parses the frozen bytes).
+
+Keeping the body removes both: nothing is re-derived, and the stub is one text again. The price is one
+coupling, the four constructor-like names, pinned by a parity case that walks candidate names
+(`with_fix`, `init`, ... turn red the day the parser starts promoting them).
+
+Two more body-derived facts were found by probe in the same review and are kept the same way: the
+body-level `extern fn` (skeleton digest `822c3af0...` vs full `22ad43c9...`; 21 files under `src/`, 5 of
+them in `80.driver`) and the async await points (full: `poll_outer` + enum `outerState`; skeleton:
+`__async_ready_body_outer`, no enum; 9 `async fn` under `src/`).
+
+Specs (seed):
+- `test/01_unit/compiler/80.driver/hir_worker_closure_digest_parity_spec.spl`: 3/9 at the parent of
+  `412455b0f51`, 9/9 at `412455b0f51`; with the review cases 8/14 at `412455b0f51`, 14/14 now. It pins
+  skeleton/full surface equality for a self-using `create`, a comment-only mention, multibyte text
+  before a `self`-prefixed identifier, `in:` and `out(r):` clauses, a body-level extern, an awaiting
+  `async fn`, and twelve candidate method names; the single stub form (with the frozen projection);
+  that the worker's closure digest equals the consumer's on a frozen registry; and that the worker's
+  digest still moves when the method really becomes static.
+- `test/01_unit/compiler/80.driver/module_surface_skeleton_scanner_spec.spl` (new, 19 cases, text only):
+  the line scanner itself: comments, strings, interpolation, continued and multi-line strings, header
+  forms, and each kept-body rule. `module_surface_skeleton_v1.spl` line coverage 98.6% (215/218).
 
 On the real module: the fixed skeleton of `platform_event.spl` changes 9 stub lines (496/496 lines kept)
 and its surface digest equals the recorded full-parse digest.
@@ -122,6 +169,28 @@ the documented exclusion of the interface key (`da7494c0ebf`: "an importer's cac
 line numbers for a dependency's declarations"). Removing it needs a skeleton that preserves byte
 offsets as well as lines (blank a body to equal-length whitespace), which is a format change of its own.
 
+Readers of `span.start`/`span.end` after a hit, checked in review (none selects code from the offset of
+an imported declaration):
+- `runtime_module_initializers_in_declaration_order` (`50.mir/_MirLowering/module_lowering.spl:557`)
+  orders a module's OWN constants by `span.start`; they come from the claimed module's full source;
+- `expr_dispatch.spl:4444` compares two spans of one expression of the module's own body;
+- `mcdc_runtime_decision_id_v1(path, cond.span.start)` (`mir_lowering_stmts.spl:3568`) names an MC/DC
+  decision by its offset. Own bodies carry source offsets. The one imported body an importer lowers is
+  a trait DEFAULT method (`hir_surface_trait_to_trait`): a decision inside an inherited default body
+  gets a skeleton offset, so in an MC/DC-instrumented build its id can differ from the id the trait's
+  own module records. That moves a coverage row, not program behaviour, and a line-shifting edit of
+  the trait's module does the same under the interface key today;
+- `enum_semantic_declarations_v1.spl:290` compares a variant's span with its symbol's and its
+  declaration's: all three come from the same parse, so they agree in either unit;
+- `representation_bind_hir_v1` (`35.semantics/representation_boundary/hir_binding.spl:25`) keys every
+  symbol of the module by `start:end:kind` WITHOUT the file. An imported symbol can collide with an own
+  declaration by coincidence under any offsets, full or skeleton; the result is a metadata error
+  (`no unique exact HIR symbol/span binding`), not code. Worth a file component in the key;
+- `verification_region_effects.spl:213`, `verification_contract_bridge.spl:155`, `mir_data.spl:211`,
+  `mir_json.spl:722`, `runtime_std_hir_sections_v1.spl`: identity strings and serialized spans.
+`70.backend`, `60.mir_opt`, `55.borrow`, `30.types` and `25.traits` have no reader (grep for
+`span.start`, `span.end`, `span_start`, `span_end`).
+
 ## Expected saving
 The MIR shard worker's 20.2 min HIR phase becomes 1664 cache decodes. A hit was measured at up to
 ~196 ms before the single-decode fix (2026-10-19), so at most ~5 min and likely much less: roughly
@@ -131,6 +200,9 @@ worker links from the ledger and lowers nothing, so it is unaffected. Not measur
 run `native-build`.
 
 ## Found next to it, not fixed here
+0. **Stored skeleton headers** (`simple-tldr-companion: 7`, `simple-worker-surface v2`) must be bumped
+   before the streaming route can share keys with full-parse consumers; see "Fix". Until then, clear
+   `<SIMPLE_FRONTEND_CACHE_DIR>/tldr` when changing compilers on that route.
 1. **Streaming route placeholders.** `driver_worker_surface_closure_v1.spl` gives a worker an empty-text
    placeholder surface for modules outside its seed closure and states that the closure digest is
    unchanged because identity fields come from the source. That held for byte rows only. An empty
@@ -147,4 +219,17 @@ run `native-build`.
    points / 25 bytes, `consumed=-1`), so the companion of every such source is rejected: 577 of the
    1664 sources here. Fails closed; the cost is that those companions are never usable.
 3. `test/01_unit/compiler/driver/module_surface_skeleton_v1_spec.spl` does not parse under the current
-   seed (`Unterminated f-string`, line 49), so it could not be run for this change.
+   seed (`Unterminated f-string`, line 49), so it could not be run for this change. Its scanner cases
+   are covered by `module_surface_skeleton_scanner_spec.spl`, which builds quotes and backslashes
+   without escapes.
+4. **`source_mentions_self_word` is wrong on multibyte bodies** (`parser_decls_use.spl:521`): the
+   `find` position, the `source[a:b]` slices and `source.len()` do not appear to be one unit, so the
+   implicit-static decision is taken from the wrong characters (probe above). This is a parser
+   defect of its own (a method can be promoted or kept against the documented rule); the skeleton no
+   longer depends on it. Left: a blanked non-ASCII body with NO `self` in it, followed by a comment
+   that holds `self` before the next declaration, is read at different offsets in the two parses.
+5. **No tripwire.** The MIR worker can compare its closure digest with line 1 of the pool's
+   `hir/queue-<pid>-0/inventory` and say so when they differ. Today the only signal is `cached=0`.
+6. `module_surface_canonical_digest_v1` cannot be computed under the seed for a module with an awaiting
+   `async fn` (`method len not found on type nil` on the generated declarations), so the async case
+   is pinned on declaration names.

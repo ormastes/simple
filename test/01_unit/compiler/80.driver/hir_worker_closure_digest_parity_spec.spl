@@ -10,13 +10,17 @@ every frozen surface into `hir_cache_closure_digest`, the closure half of the
 HIR cache key, so the skeleton surface must equal the full-parse surface or
 the HIR pool warms entries nobody can read.
 
-Two function facts are derived from the BODY text and were lost with it:
+Four surface facts are derived from a function BODY and were lost with it:
 the implicit-static promotion of `fn new|create|default|from_*` (static only
-when the body never mentions `self`, parser_decls_use.spl) and body-level
-contract clauses (`in:`, `out(r):`, ... retained on the function). Bootstrap
-run 31 (2026-11-14): one such method in a 1664-module closure moved the
-closure digest, so the MIR shard worker missed all 1664 warm entries and
-lowered the whole closure a second time.
+when the body text never mentions `self`, parser_decls_use.spl), body-level
+contract clauses (`in:`, `out(r):`, ... retained on the function), body-level
+`extern fn` (registered as a MODULE declaration) and the await points of an
+`async fn` (the desugarer generates a state enum and a poll function from
+them). The skeleton keeps every such body verbatim, so the parser reads the
+same text on both sides whatever its rule is. Bootstrap run 31 (2026-11-14):
+one such method in a 1664-module closure moved the closure digest, so the MIR
+shard worker missed all 1664 warm entries and lowered the whole closure a
+second time.
 Audience: compiler engineers maintaining the HIR cache and the shard route.
 """
 
@@ -30,6 +34,7 @@ use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.frontend.parser_types.{ParserModule}
 use compiler.driver.driver_hir_cache.{hir_cache_closure_digest, hir_cache_closure_fallback_count_v1}
 use compiler.driver.cache.module_surface_skeleton_v1.{module_surface_skeleton_v1}
+use compiler.driver.cache.tldr_frozen_projection_v1.{tldr_frozen_span_projection_v1}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.hir.hir_lowering.module_surface_canonical_digest_v1.{module_surface_canonical_digest_v1}
 use test.helpers.module_surface_owner_fixture.{module_surfaces_from_test_modules}
@@ -42,6 +47,19 @@ fn wcd_event(body: text) -> text:
 val WCD_USER: text = "use wcd.ev.\{Ev\}\n\npub fn run() -> i64:\n    val out = Ev.new()\n    out\n"
 val WCD_CONTRACT_IN: text = "pub fn div(a: i64, b: i64) -> i64:\n    in: b != 0\n    val q = a / b\n    q\n"
 val WCD_CONTRACT_OUT: text = "pub fn inc(a: i64) -> i64:\n    out(ret): ret > a\n    val next = a + 1\n    next\n"
+
+# Same class with the method under test named `name`; its body uses `self`.
+fn wcd_named(name: text) -> text:
+    "pub class Ev:\n    backend: i64\n\n    fn {name}() -> i64:\n        self.backend + 1\n"
+
+val WCD_EXTERN_BODY: text = "pub fn now() -> i64:\n    extern fn rt_time_millis() -> i64\n    rt_time_millis()\n"
+val WCD_ASYNC_AWAIT: text = "pub async fn inner() -> i64:\n    7\n\npub async fn outer() -> i64:\n    val a = await inner()\n    a + 1\n"
+val WCD_PLAIN_SELF_COMMENT: text = "pub fn run() -> i64:\n    # self-check of the runner\n    7\n"
+
+# Module-level declaration names after desugaring: what an importer can see.
+fn wcd_decl_names(source: text) -> text:
+    val module = parse_full_frontend(source, "wcd/ev.spl", "wcd.ev", Logger(level: 0))
+    "fns=" + module.functions.keys().join(",") + " enums=" + module.enums.keys().join(",")
 
 fn wcd_digest(source: text) -> text:
     module_surface_canonical_digest_v1(parse_full_frontend(source, "wcd/ev.spl", "wcd.ev", Logger(level: 0)))
@@ -79,10 +97,28 @@ describe "surface skeleton keeps body-derived function facts":
         expect(wcd_skeleton_digest(source)).to_equal(wcd_digest(source))
         expect(module_surface_skeleton_v1(source).contains("self")).to_equal(false)
 
-    it "does not take an identifier containing self for a mention":
+    it "leaves the decision on an identifier containing self to the parser":
+        step("The body is kept verbatim, so skeleton and source cannot disagree")
         val source = wcd_event("val selfish = 2\n        selfish")
         expect(wcd_skeleton_digest(source)).to_equal(wcd_digest(source))
-        expect(module_surface_skeleton_v1(source).contains("self")).to_equal(false)
+        expect(module_surface_skeleton_v1(source).contains("val selfish = 2")).to_equal(true)
+
+    it "agrees with the parser when multibyte text precedes a self-prefixed identifier":
+        step("The parser's self check mixes byte and code-point offsets on such a body")
+        val source = wcd_event("val note = \"ééééééééééééééééééééééééé\"\n        val selfx = 2\n        selfx")
+        expect(wcd_skeleton_digest(source)).to_equal(wcd_digest(source))
+
+    it "keeps one stub form for every blanked body":
+        step("tldr_frozen_span_projection_v1 matches the stub line exactly")
+        val skeleton = module_surface_skeleton_v1(WCD_PLAIN_SELF_COMMENT)
+        expect(skeleton.split("\n")[1]).to_equal("    pass_do_nothing")
+        expect(tldr_frozen_span_projection_v1(WCD_PLAIN_SELF_COMMENT).is_some()).to_equal(true)
+
+    it "agrees with the parser for every constructor-like method name":
+        step("A name the parser starts promoting must be kept by the skeleton too")
+        for name in ["new", "create", "default", "from_text", "with_fix", "init", "of", "empty", "make", "build", "open", "value"]:
+            val source = wcd_named(name)
+            expect(wcd_skeleton_digest(source)).to_equal(wcd_digest(source))
 
     it "keeps a precondition clause written in the body":
         expect(wcd_skeleton_digest(WCD_CONTRACT_IN)).to_equal(wcd_digest(WCD_CONTRACT_IN))
@@ -90,10 +126,21 @@ describe "surface skeleton keeps body-derived function facts":
     it "keeps a postcondition clause with a binding":
         expect(wcd_skeleton_digest(WCD_CONTRACT_OUT)).to_equal(wcd_digest(WCD_CONTRACT_OUT))
 
-    it "still blanks the body and keeps every line on its source line":
-        val source = wcd_event("self.backend + 1")
+    it "keeps a body-level extern fn, which declares a module-level symbol":
+        expect(wcd_skeleton_digest(WCD_EXTERN_BODY)).to_equal(wcd_digest(WCD_EXTERN_BODY))
+        expect(module_surface_skeleton_v1(WCD_EXTERN_BODY)).to_equal(WCD_EXTERN_BODY)
+
+    it "keeps an async fn body, whose await points generate declarations":
+        step("Awaiting: state enum + poll function; not awaiting: one ready-body helper")
+        expect(wcd_decl_names(module_surface_skeleton_v1(WCD_ASYNC_AWAIT))).to_equal(wcd_decl_names(WCD_ASYNC_AWAIT))
+        expect(module_surface_skeleton_v1(WCD_ASYNC_AWAIT)).to_equal(WCD_ASYNC_AWAIT)
+
+    it "still blanks ordinary bodies and keeps every line on its source line":
+        step("Only the self-mentioning constructor-like body is kept")
+        val source = wcd_event("self.backend + 1") + "\n    fn value() -> i64:\n        self.backend + 2\n"
         val skeleton = module_surface_skeleton_v1(source)
-        expect(skeleton.contains("self.backend + 1")).to_equal(false)
+        expect(skeleton.contains("self.backend + 1")).to_equal(true)
+        expect(skeleton.contains("self.backend + 2")).to_equal(false)
         expect(skeleton.contains("val seven = 7")).to_equal(false)
         expect(skeleton.split("\n").len()).to_equal(source.split("\n").len())
 

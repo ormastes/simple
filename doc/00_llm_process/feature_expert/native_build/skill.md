@@ -244,11 +244,22 @@ needs the bad module plus at least one good module in the same child. Bug:
 - Signature: `<cache>/hir/` holds two `.parser-v4.hir` files per module, and
   the consumer's `[hir-cache-store] rate attempts=` climbs during `phase=hir`.
   The pool's closure digest is line 1 of `hir/queue-<pid>-0/inventory`.
-- The parser derives function facts from the BODY: implicit-static promotion of
-  `fn new|create|default|from_*` (body text never mentions `self`) and
-  body-level contract clauses. Any new body-derived fact must be preserved by
-  the skeleton too; pin it in
-  `test/01_unit/compiler/80.driver/hir_worker_closure_digest_parity_spec.spl`.
+- Four surface facts come from a function BODY: implicit-static promotion of
+  `fn new|create|default|from_*` (body text never mentions `self`), contract
+  clauses, a body-level `extern fn` (a MODULE declaration) and the await points
+  of an `async fn` (generated state enum / poll function). The skeleton keeps
+  such a body VERBATIM; it never re-implements a parser rule and never changes
+  the stub text (`tldr_frozen_span_projection_v1` matches `pass_do_nothing`
+  exactly). Any new body-derived fact gets the same treatment; pin it in
+  `test/01_unit/compiler/80.driver/hir_worker_closure_digest_parity_spec.spl`
+  (surface equality) and `module_surface_skeleton_scanner_spec.spl` (text).
+- Stored skeletons (`.tldr` `surface` section, `.surface` sidecar) are read only
+  on the streaming-surface route (`worker_surface_text_v1`). Their headers were
+  NOT bumped with the 2026-11-14 skeleton change (coverage rule on the two
+  owning modules), so that route still serves old-format skeletons.
+- A new implicitly-static method name in `method_name_is_implicitly_static`
+  must be added to `_skel_implicit_static_name_v1`; the parity spec's name
+  walk goes red otherwise.
 - To find the module: each `.tldr` companion stores the skeleton (`surface`)
   and the full-parse digest (`surface-digest`); parse the skeleton and compare
   `module_surface_canonical_digest_v1`.
