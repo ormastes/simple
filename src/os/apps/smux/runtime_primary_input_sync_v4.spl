@@ -1,0 +1,82 @@
+# Native gates belong to canonical panes, never to copies in the lease issuer.
+use os.apps.smux.api.smux_owner_snapshot
+use os.apps.smux.runtime_binding_state_v3.SmuxRuntimeBindingOwnerV3
+use os.apps.smux.smux_runtime_control_owner_v1.{SmuxRuntimeControlOwnerV1,
+    smux_runtime_control_find_v1, smux_runtime_control_check_v1}
+use os.apps.smux.runtime_control_service_v1.smux_runtime_control_sweep_v1
+use os.apps.smux.runtime_control_target_v1.smux_runtime_control_target_v1
+use os.apps.smux.runtime_primary_input_state_v4.smux_primary_input_uncertain_v4
+use std.nogc_async_mut.container.terminal_session_v1.*
+use std.common.contracts.mux.session_runtime_control_v1.{SessionRuntimeControlKindV1,
+    SessionRuntimeControlLeaseV1, session_runtime_control_target_digest_v1}
+use std.common.contracts.container.primary_input_v1.container_primary_input_deadline_v1
+use std.common.process.input_control_v1.{ProcessInputControlStateV1, ProcessInputWriteDispositionV1}
+use std.sosix.time.sosix_time_now_monotonic_ms
+
+pub fn smux_primary_input_installed_v4(state: ProcessInputControlStateV1,
+        lease: SessionRuntimeControlLeaseV1) -> bool:
+    val digest = session_runtime_control_target_digest_v1(lease.target)
+    val deadline = container_primary_input_deadline_v1(lease)
+    if digest.is_err() or deadline.is_err(): return false
+    state.controlled and state.active and state.revision == lease.revision and
+        state.target_digest == digest.unwrap() and state.nonce_digest == lease.nonce_digest and
+        state.expires_monotonic_ns == deadline.unwrap()
+
+pub fn smux_primary_input_stop_allowed_v4(owner: SmuxRuntimeControlOwnerV1) -> bool:
+    if owner.input_sync_error != "": return false
+    for attempt in owner.input_attempts:
+        if attempt.disposition == ProcessInputWriteDispositionV1.Unknown: return false
+    true
+
+pub fn smux_primary_input_sync_v4(binding: SmuxRuntimeBindingOwnerV3,
+        owner: SmuxRuntimeControlOwnerV1) -> SmuxRuntimeControlOwnerV1:
+    var current = smux_runtime_control_sweep_v1(binding, owner)
+    current.input_sync_error = ""
+    val snapshot = smux_owner_snapshot()
+    for index in 0..snapshot.pane_count:
+        val session = match snapshot.get_pane(index).owned_terminal_session:
+            case Some(ContainerOwnedTerminalSessionV1.PrimaryAttach(value)): value
+            case _: continue
+        # Actual canonical cleanup closes the native gate; metadata retirement
+        # alone never justifies skipping a still-owned native session.
+        if container_primary_attach_native_cleaned_v1(session): continue
+        val adoption = container_primary_attach_adoption_v1(session)
+        if adoption == nil:
+            current.input_sync_error = "primary-input-adoption-unavailable"
+            continue
+        val uid = adoption.unwrap().binding_uid
+        val entry = smux_runtime_control_find_v1(current, uid, SessionRuntimeControlKindV1.Input)
+        var eligible: SessionRuntimeControlLeaseV1? = nil
+        if entry != nil and entry.unwrap().active:
+            val resolved = smux_runtime_control_target_v1(binding, uid, entry.unwrap().lease.target.client_id,
+                entry.unwrap().attachment_token)
+            if resolved.is_ok() and resolved.unwrap().primary != nil:
+                val checked = smux_runtime_control_check_v1(current, uid, SessionRuntimeControlKindV1.Input,
+                    entry.unwrap().nonce, entry.unwrap().lease.revision, resolved.unwrap().target, sosix_time_now_monotonic_ms())
+                current = checked.owner
+                if checked.error == "": eligible = checked.lease
+        val state = container_primary_input_state_v1(session)
+        if state.is_err():
+            current.input_sync_error = state.unwrap_err()
+            continue
+        if eligible != nil and smux_primary_input_installed_v4(state.unwrap(), eligible.unwrap()): continue
+        # Do not install over an unresolved old native holder. A failed receipt
+        # remains pending and is queried/revoked again on the next owner turn.
+        val revoked = container_primary_input_revoke_v1(session)
+        if revoked.is_err():
+            current.input_sync_error = revoked.unwrap_err()
+            continue
+        if eligible == nil: continue
+        if smux_primary_input_uncertain_v4(current.input_attempts, uid):
+            current.input_sync_error = "primary-input-prior-outcome-unknown"
+            continue
+        val installed = container_primary_input_install_v1(session, eligible.unwrap(), eligible.unwrap().target,
+            current.policy.principal_id, entry.unwrap().nonce)
+        if installed.is_err():
+            current.input_sync_error = installed.unwrap_err()
+            continue
+        val observed = container_primary_input_state_v1(session)
+        if observed.is_err(): current.input_sync_error = observed.unwrap_err()
+        elif not smux_primary_input_installed_v4(observed.unwrap(), eligible.unwrap()):
+            current.input_sync_error = "primary-input-install-unconfirmed"
+    current

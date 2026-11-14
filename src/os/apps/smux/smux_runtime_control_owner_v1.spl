@@ -9,6 +9,7 @@ use os.apps.smux.client_leases.client_lease_token_valid
 use std.common.build_manager.contracts.builder_digest_valid_v1
 use std.common.crypto.sha256.sha256_text
 use std.common.crypto.constant_time.constant_time_compare
+use os.apps.smux.runtime_primary_input_state_v4.{SmuxPrimaryInputAttemptV4, smux_primary_input_uncertain_v4}
 
 pub struct SmuxRuntimeControlEntryV1:
     lease: SessionRuntimeControlLeaseV1
@@ -24,6 +25,8 @@ pub struct SmuxRuntimeControlOwnerV1:
     last_clock: i64
     quarantined: bool
     entries: [SmuxRuntimeControlEntryV1]
+    input_attempts: [SmuxPrimaryInputAttemptV4] = []
+    input_sync_error: text = ""
 
 pub struct SmuxRuntimeControlTurnV1:
     owner: SmuxRuntimeControlOwnerV1
@@ -136,6 +139,8 @@ pub fn smux_runtime_control_issue_v1(original: SmuxRuntimeControlOwnerV1,
             if not entry.active: return control_denied_v1(owner, current_revision, "control-lease-retired")
             return SmuxRuntimeControlTurnV1(owner: owner, lease: Some(entry.lease), nonce: entry.nonce,
                 revision: current_revision, status: "issued", error: "", replay: true)
+    if kind == SessionRuntimeControlKindV1.Input and smux_primary_input_uncertain_v4(owner.input_attempts, target.binding_uid):
+        return control_denied_v1(owner, current_revision, "primary-input-prior-outcome-unknown")
     if expected_revision != current_revision: return control_denied_v1(owner, current_revision, "control-revision-conflict")
     if current_revision == 9223372036854775807: return control_denied_v1(owner, current_revision, "control-revision-exhausted")
     if index < 0 and owner.entries.len() >= 16: return control_denied_v1(owner, 0, "control-owner-capacity")

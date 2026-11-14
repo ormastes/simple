@@ -24,10 +24,14 @@ use std.nogc_sync_mut.io.file_lock_owned_v2.FileLockReleaseStateV2
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.sosix.entropy.sosix_random_hex
 use std.common.build_manager.contracts.builder_identifier_valid_v1
-use os.apps.smux.smux_runtime_control_owner_v1.{SmuxRuntimeControlOwnerV1, smux_runtime_control_owner_new_v1}
+use os.apps.smux.smux_runtime_control_owner_v1.{SmuxRuntimeControlOwnerV1, smux_runtime_control_owner_new_v1,
+    smux_runtime_control_invalidate_binding_v1}
 use os.apps.smux.runtime_control_policy_v1.smux_runtime_control_policy_load_v1
 use os.apps.smux.runtime_control_request_v1.smux_runtime_control_request_from_token_v1
-use os.apps.smux.runtime_control_service_v1.{smux_runtime_control_service_v1, smux_runtime_control_sweep_v1}
+use os.apps.smux.runtime_control_service_v1.smux_runtime_control_service_v1
+use os.apps.smux.runtime_primary_control_request_v4.smux_primary_control_request_from_token_v4
+use os.apps.smux.runtime_primary_control_service_v4.{smux_primary_control_service_v4, smux_primary_control_refresh_v4}
+use os.apps.smux.runtime_primary_input_sync_v4.{smux_primary_input_sync_v4, smux_primary_input_stop_allowed_v4}
 use os.apps.smux.runtime_binding_request_v3.smux_runtime_bind_request_from_token_v3
 use os.apps.smux.runtime_primary_request_v4.smux_runtime_primary_request_from_token_v4
 use os.apps.smux.runtime_primary_reply_v4.smux_primary_capabilities_v4
@@ -101,6 +105,8 @@ fn runtime_close_credential_v3() -> bool:
     false
 
 fn runtime_stop_reply_v3() -> text:
+    if (_runtime_control_owner != nil and not smux_primary_input_stop_allowed_v4(_runtime_control_owner.unwrap())):
+        return "smux: stop refused: input revocation or receipt reconciliation pending"
     if (_runtime_binding_owner != nil and
             not smux_runtime_binding_stop_allowed_v3(_runtime_binding_owner.unwrap())):
         return "smux: stop refused: runtime helper cleanup or host release pending"
@@ -187,10 +193,26 @@ pub fn smux_server_dispatch(request: text, token: text) -> text:
             parts[0] == "cleanup-primary-binding-v4"):
         if _runtime_binding_owner == nil: return smux_primary_capabilities_v4(false)
         if parts.len() != 2 or not builder_identifier_valid_v1(parts[1]): return "smux: invalid primary binding UID"
+        if parts[0] == "cleanup-primary-binding-v4" and _runtime_control_owner != nil:
+            val observed = smux_primary_control_refresh_v4(_runtime_binding_owner.unwrap(), _runtime_control_owner.unwrap(), parts[1])
+            val retired = smux_runtime_control_invalidate_binding_v1(observed, parts[1],
+                "primary-helper-cleanup", time_now_monotonic_ms())
+            _runtime_control_owner = Some(smux_primary_input_sync_v4(_runtime_binding_owner.unwrap(), retired))
         val turn = if parts[0] == "prepare-primary-helper-v4":
             smux_primary_prepare_v4(_runtime_binding_owner.unwrap(), parts[1])
         else: smux_primary_inspect_v4(_runtime_binding_owner.unwrap(), parts[1], parts[0] == "cleanup-primary-binding-v4")
         _runtime_binding_owner = turn.owner
+        if _runtime_control_owner != nil:
+            _runtime_control_owner = Some(smux_primary_input_sync_v4(turn.owner, _runtime_control_owner.unwrap()))
+        return turn.reply
+    if parts[0] == "runtime-primary-control-v4":
+        if (_runtime_binding_owner == nil or _runtime_control_owner == nil or not _runtime_configured):
+            return "smux: runtime control policy unavailable"
+        if parts.len() != 2: return "smux: invalid primary control request"
+        val parsed = smux_primary_control_request_from_token_v4(parts[1])
+        if parsed.is_err(): return "smux: invalid primary control request"
+        val turn = smux_primary_control_service_v4(_runtime_binding_owner.unwrap(), _runtime_control_owner.unwrap(), parsed.unwrap())
+        _runtime_control_owner = Some(turn.owner)
         return turn.reply
     if parts[0] == "runtime-control-v1":
         if (_runtime_binding_owner == nil or _runtime_control_owner == nil or not _runtime_configured):
@@ -200,8 +222,11 @@ pub fn smux_server_dispatch(request: text, token: text) -> text:
         if parsed.is_err(): return "smux: invalid runtime control request"
         # Only this branch, after the retained service credential comparison,
         # projects the installed trusted-local-owner principal into issuance.
-        val turn = smux_runtime_control_service_v1(_runtime_binding_owner.unwrap(), _runtime_control_owner.unwrap(), parsed.unwrap())
-        _runtime_control_owner = turn.owner
+        val refreshed = smux_primary_control_refresh_v4(_runtime_binding_owner.unwrap(), _runtime_control_owner.unwrap(), parsed.unwrap().binding_uid)
+        val turn = smux_runtime_control_service_v1(_runtime_binding_owner.unwrap(), refreshed, parsed.unwrap())
+        _runtime_control_owner = Some(smux_primary_input_sync_v4(_runtime_binding_owner.unwrap(), turn.owner))
+        if _runtime_control_owner.unwrap().input_sync_error != "":
+            return "smux: runtime input synchronization pending; inspect primary control"
         return turn.reply
     if parts[0] == "create-runtime-target-v3":
         if _runtime_binding_owner == nil: return smux_runtime_binding_refusal_v3()
@@ -241,7 +266,10 @@ pub fn smux_server_dispatch(request: text, token: text) -> text:
         return smux_runtime_target_encode_v3(target.unwrap())
     if command == "stop-server":
         return smux_server_stop_reply_v1(smux_owner_snapshot())
-    return smux_remote_dispatch(command)
+    val reply = smux_remote_dispatch(command)
+    if _runtime_binding_owner != nil and _runtime_control_owner != nil:
+        _runtime_control_owner = Some(smux_primary_input_sync_v4(_runtime_binding_owner.unwrap(), _runtime_control_owner.unwrap()))
+    return reply
 
 fn prepare_reply(client: PendingClient, reply: text, stop: bool) -> PendingClient:
     var output = text_to_bytes(reply)
@@ -420,7 +448,7 @@ fn _serve_on(bound_listener: TcpListener, address: text, token: text, initialize
                 lease_error_reported = false
             client_reap_deadline = reap_now + SMUX_CLIENT_LEASE_SWEEP_MS
             if _runtime_binding_owner != nil and _runtime_control_owner != nil and not _runtime_cleanup_only:
-                _runtime_control_owner = Some(smux_runtime_control_sweep_v1(_runtime_binding_owner.unwrap(), _runtime_control_owner.unwrap()))
+                _runtime_control_owner = Some(smux_primary_input_sync_v4(_runtime_binding_owner.unwrap(), _runtime_control_owner.unwrap()))
         val _polled = smux_poll_output()
         val accepted = listener.accept_timeout(10)
         if accepted.is_ok():

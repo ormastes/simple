@@ -77,9 +77,10 @@ qualification and positive native cleanup/settlement coverage remain pending.
 
 smux now consumes this owner through an explicit V4 plan/bind/adoption and
 cleanup/settlement lifecycle; see `doc/05_design/smux_primary_session_v4.md`.
-That source integration is unqualified at runtime and exposes no interactive
-input or geometry capability. Caret can migrate only after that composition
-works end to end with independently authorized control ports.
+That source integration is unqualified at runtime. A subsequent V4 input route
+consumes independent control leases and the common native gate (see
+`container_primary_input_v4.md`); geometry and full interactive capability remain
+pending. Caret can migrate only after that composition works end to end.
 The current Caret `--container` path is preserved and is not migrated here.
 smux V3 replies require `outputMode = output-follow` and an exact output-only
 capability shape. The separate V4 extension preserves those V3 semantics.
