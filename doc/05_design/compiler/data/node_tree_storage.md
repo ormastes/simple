@@ -435,8 +435,17 @@ Switch: env `SIMPLE_NODE_ATTR=extra=<token>,s_val=<token>` (tokens `direct`,
 `column`, `sparse_hash`), read ONCE per `expr_reset` by `expr_attr_apply_config` in
 `10.frontend/core/_AstExpr/nodes.spl`; per access only an `[i64]` mode slot is read, no
 string compare. Unset/`direct` = today's owner arrays, no store constructed. An unknown
-token returns Err and leaves everything off. The switch does NOT yet flow through the SDN
-rule / `data_attr_storage_resolve_v1` (env-only).
+token returns Err and leaves everything off.
+
+SDN rule (2026-11-15, lane nodeattr2): placement is also selectable by the existing
+`data_policy.rules` layout rows (no new format) addressed `compiler.ast.Expr.extra` /
+`compiler.ast.Expr.s_val` (site), `compiler.ast.Expr` (type), `compiler.ast` (module) or
+project, resolved by `data_attr_storage_resolve_v1` with default `direct`
+(`expr_attr_apply_sdn(source, path, override_spec)`). The rule file path comes from env
+`SIMPLE_NODE_ATTR_SDN`, read at `expr_reset`; `SIMPLE_NODE_ATTR` is applied AFTER the
+rules and overrides them. Neither set, or empty rules plus empty override, is the off
+identity (no store). A bad layout token or a bad/unreadable rule file returns Err and
+leaves the switch off. Default stays OFF.
 
 Applied (real `ExprStore` owner arrays `expr_extra`, `expr_s_val`; `inferred_type` has no
 owner in the real AST pool, so the 0.4%-dense `extra` is the sparse-hash candidate and
@@ -444,17 +453,29 @@ owner in the real AST pool, so the 0.4%-dense `extra` is the sparse-hash candida
 Writes go through `expr_*_put`, reads through `expr_*_get`; the flat snapshot codec
 uses `*_dense()` / `*_load()`.
 
-Evidence (seed-tip interpreter, Windows, `ast_attr_apply_spec` 7/7): off-identity
+Evidence (seed-tip interpreter, Windows, `ast_attr_apply_spec` 11/11 (7 env + 4 SDN-rule: site rules for both attrs with identical parse, no-rules/override precedence, bogus layout rejected, rule file via env at reset)): off-identity
 (parse fingerprint equals the pre-change constant), value+presence parity for extra on
 hash and column, s_val (text) on column and hash, array<->hash<->column switching by
 config alone with parity both ways, combined extra+s_val identical fingerprint.
 Regressions: `ast_pool_snapshot_spec` 5/5, `ast_node_pool_pilot_spec` 6/6,
 `attribute_schema_v1_spec` 9/9.
 
-Perf (parse-only of `mir_lowering_stmts.spl`, 12,266 exprs, 2 rounds alternating,
-parse_ms): extra direct 139424/134025, hash 149614/131478, column 135562/135697;
-s_val direct 136022/136287, column 143757/134590, hash 134580/131719. Noise-level, no
-measurable difference. `memory_usage()` (current RSS, not max RSS, units unrecorded):
-~6455 off vs ~6491-6496 on (+36..41). Only 2 rounds, not 3.
+Perf (parse-only of `mir_lowering_stmts.spl`, 12,266 exprs; same seed binary and tree,
+only the switch toggled; 3 alternating rounds, one process per run; wall = in-process
+parse_ms, peak RSS = PowerShell `Process.PeakWorkingSet64` polled externally every
+100 ms; host loaded, so rounds drift 84 s -> 118 s):
+
+| run | off parse_ms / peak MB | extra=sparse_hash | s_val=column |
+|---|---|---|---|
+| round 1 | 83910 / 231.3 | 79336 / 231.0 | 84647 / 231.7 |
+| round 2 | 92077 / 230.8 | 91034 / 230.8 | 91149 / 230.9 |
+| round 3 | 118385 / 231.0 | 96244 / 231.2 | 92294 / 230.8 |
+| mean | 98124 | 88871 | 89363 |
+
+Round-to-round drift (load) dwarfs any switch effect; within each round the on-runs are
+not slower than off. Peak working set is identical to 0.5 MB (about 231 MB for every
+config). `memory_usage()` in-process: 6455 off, 6496 extra=sparse_hash, 6491
+s_val=column (+36..41, units unrecorded). Conclusion: no measurable time or peak-RSS
+cost; no win either on the interpreter lane.
 Caveats: static fan-in of `expr_get_extra(` is 23 sites/10 files; dynamic read counters
-need a product hook and were not added. Default stays off.
+need a product hook (no cheap existing one) and were not added. Default stays off.
