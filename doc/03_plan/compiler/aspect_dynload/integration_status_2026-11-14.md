@@ -1,6 +1,6 @@
 # Aspect integration status — 2026-11-14
 
-Release checkpoint: `a132155869c26a7020e5eaac2d444c3bcd2dd5d0`.
+Release checkpoint: `c541817df822dd0d371371034ad79a6a44fd3e1c`.
 Status: implementation in progress; neither full feature qualification nor Phase 3 is established.
 
 This update supplements the existing aspect plans and the selected
@@ -82,16 +82,58 @@ Its outcome is unclassified, not successful.
 Owned provisional attempt 1 reached all 1,665 HIR modules and failed on the two
 aggregate-pattern arity errors subsequently fixed by #9188. Attempt 2 uses
 frozen source `a6ba3cf0566096df12336d9edeab73439f6db36b` and the admitted P2
-compiler whose SHA-256 begins `855f48d3c9f9d915`. It has reached MIR under a
-16 GiB cgroup limit. At this observation it is still running; there is no
+compiler whose SHA-256 begins `855f48d3c9f9d915`. It reached MIR under a
+16 GiB cgroup limit and was OOM-killed (terminal exit 143); there is no
 Phase 3 executable/Hello result or admission claim. Logs are retained under
 `/home/yoon/dev/simple-phase3-next-20261114/build/phase3-provisional/attempts/002`.
 Later upstream changes do not mutate this frozen build. The first attempt's
 shared HIR cache use is retained in provenance; attempt 2 selects a private
 HIR cache and relies on normal identity validation rather than restamping.
 
-The earlier feature table records initial checkpoints; this dated supplement
-records later progress without upgrading its limited test evidence.
+The earlier feature table records initial checkpoints; the following update
+supersedes their live-process and implementation-status statements without
+upgrading their limited test evidence.
+
+### Subsequent integration evidence
+
+| Area | Retained evidence | Remaining admission |
+|---|---|---|
+| Target profiles | PR #9219 merged as `cda4d2d059a08ddc77d430d2f1ea54fc2662c9bc`; target profile is independent of optimization and enters managed receipts/cache identity. | Full managed bootstrap and final artifact/profile qualification. |
+| Source manifest | PR #9230 merged as `4fb2cc2d3e028e48425412c661d77b5f9213b041`; byte/codepoint slicing repair has native RED/GREEN evidence for Unicode membership. PR #9232 closed its tracker claim. | This does not qualify the entire rebuilt compiler. |
+| Linux LLVM observer | Draft PR #9240 at `89b6906053fc02dc571ec25afdc6e29b490e570f` connects semantic maps, resident session source, typed runtime hooks and post-initializer readiness. Public prepare/start reject unqualified profiles before runtime effects. | Real Simple-produced instrumentation through the public facade, qualified handler ABI, bounded process storage and actual quiescence authority. Readiness alone is not quiescence. |
+| Handler correction | `92d27334df4` forces two audited hot leaves inline. Retained Clang 18 AArch64 objects show the original calls and the corrected no-call/no-external-branch/no-vector handler. | New CI must qualify its own target; object inspection is not runtime capture evidence. |
+| Thread integration | Fixture branch `work/xray-thread-context-fixture-20261114`, checkpoint `7a2bbd23bc9`, links actual runtime thread/native/memory owners; no value/closure stubs. | Execution remains unrun. Its explicit compiler-rt stand-ins cannot qualify sled patching even when this fixture passes. |
+| Accessors | Checkpoint `1ab519e7b27728a476e752b51d3fa65153213bd9` has field consumers, hidden helper linkage and transient-root checks (18 static invariants). | Do not land it alone: selector inventory misclassifies an ordinary function named `get`/`set`; atom-aware correction and actual PlanSet production are being integrated. Imported provider layouts and worker-local type relocation need real qualification. |
+| Traversal | `cab5dcaf7b099fdef367a186167970165e17d764` contains actual warm restore/reuse/removal source and a scoped core-C lifetime audit. | Actual caller execution/performance, complete session resets, process-image memo ownership and full provider admission. Cross-session reuse is not established. |
+| Directory linking | Draft PR #9171 at `d173f40b2ea9216eeebc9eb6e001c89c72049922` joins selected current-build object receipts to fresh initializer/startup/output evidence in four hosted link callers. Receipt helpers passed 13 native checks. | Actual object/aggregate pipeline execution and full PackageInit category roots. Missing, warm or external evidence yields no aggregate authority. |
+| Visibility | Semantic-origin draft #9236 at `93c030b670590b764b6b2bbb3be4b68eb37a1361` preserves typed origin facts; policy-only ancestor manifest observation and requester routing remain in progress. | Compiler/LSP/MCP access parity and live-buffer/performance tests. Narrow source roots are not visibility boundaries. |
+
+A distinct peer bootstrap service, `simple-bootstrap-stage3-1794658041-1796856`,
+failed with exit 1 at 22:40:17 local time. Its journal reports 28.2 GiB peak RAM
+and 5.1 GiB peak swap. The first attributed failure is a Cranelift ABI refusal:
+`CudaBackend.compile_const` calls `PtxBuilder.emit_const_float` with an unknown
+callee signature and an `f64` argument. Its 1,664 aggregate MIR failures and
+zero objects are fallout, not 1,664 independently diagnosed bugs. This peer
+used a different producer; it is not owned attempt 2 and yielded no Phase 3
+artifact. Missing systemd unit defaults must not be read as a successful exit.
+
+The declared-parameter repair preserves parameter metadata independently of
+an absent inferred return type, including imported nominal identities. Source
+`c255b7a1938` and generated-code/test checkpoint `b0ad096fc9d` are unqualified:
+the actual generator reproduced the release baseline and generated 99
+declarations, but authored compiler/MIR/roundtrip tests remain unrun. An old
+receiver-tail workaround cannot handle this call's named enum parameter.
+Changing target source alone cannot repair the already-running P2 producer.
+
+The next provisional bootstrap controller has source review and focused
+control tests, but no third attempt has launched. A new frozen source/producer,
+live build inventory, memory admission and disk admission remain mandatory.
+
+Remaining directory work has explicit owners: the PackageInit lane owns
+A1/B3 roots/publication; cutoff/scheduler owns C1/D1/D-T3; traversal owns F1;
+the admission lane owns H1–H5. Coordinate E1/G1 interfaces with those owners.
+Complete PackageInit authority is a prerequisite for propagation cutoff;
+descriptor code identity alone is not an admitted plugin allowlist.
 
 1. A compilation's HIR module list is not proof of complete directory
    membership. The existing SCV diagnostic relation is not semantic authority.
