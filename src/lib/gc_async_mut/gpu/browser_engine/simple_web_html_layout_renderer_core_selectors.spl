@@ -172,6 +172,17 @@ fn base_selector_matches(base: text, tag: text, cls: text, class_words: [text], 
 
 # Check :not(), :is(), :where() pseudo-class against this element's base properties.
 # Returns true if the selector pseudo condition is satisfied.
+# Does a :not()/:is()/:where() option carry a pseudo-class that needs the
+# node's sibling context (position or emptiness)? Such an option used to be
+# evaluated context-free, where positional pseudo-classes are skipped, so
+# `:not(:nth-child(2))` matched nothing and `:is(:first-child)` everything.
+fn _option_needs_ctx(opt: text) -> bool:
+    (
+        opt.contains(":nth-") or opt.contains(":first-child") or
+        opt.contains(":last-child") or opt.contains(":only-child") or
+        opt.contains(":empty")
+    )
+
 fn _pseudo_list_matches(
     pseudo: text, arg: text, tag: text, cls: text,
     class_words: [text], id: text, attrs: text,
@@ -221,8 +232,11 @@ fn _pseudo_list_matches(
         var j = 0
         while j < opt_count:  # cpu-lane-loop-ok: walks the <=16 parsed :not() options, returning false at the first option that matches
             val opt = options[j]
+            # An option with a positional pseudo-class cannot be decided
+            # without the node's sibling context; _list_ctx_matches() decides
+            # it in the context phase. Here it is left undecided (no match).
             if (
-                opt.len() > 0 and simple_match(
+                opt.len() > 0 and not _option_needs_ctx(opt) and simple_match(
                     opt, tag, cls, class_words, id, attrs,
                     recursion_depth
                 )
@@ -235,6 +249,8 @@ fn _pseudo_list_matches(
         var j = 0
         while j < opt_count:  # cpu-lane-loop-ok: walks the <=16 parsed :is()/:where() options, returning true at the first option that matches
             val opt = options[j]
+            if opt.len() > 0 and _option_needs_ctx(opt):
+                return true
             if (
                 opt.len() > 0 and simple_match(
                     opt, tag, cls, class_words, id, attrs,
@@ -422,39 +438,18 @@ fn _sibling_count(ctx: SelectorContext, idx: i32) -> i32:
         return 1
     ctx.element_sibling_count[idx]
 
-# 1-based position of node[idx] among the element siblings that share its tag.
-fn _type_position(nodes: [HNode], ctx: SelectorContext, idx: i32) -> i32:
-    if idx < 0 or idx >= nodes.len():
+# 1-based position of node[idx] among the element siblings that share its tag
+# (precomputed per parent in build_selector_context).
+fn _type_position(ctx: SelectorContext, idx: i32) -> i32:
+    if idx < 0 or idx >= ctx.type_position.len():
         return 1
-    val parent = nodes[idx].parent as i32
-    if parent < 0 or parent >= ctx.child_index.first_child.len():
-        return 1
-    val tag = nodes[idx].tag
-    var pos = 0
-    var c = ctx.child_index.first_child[parent]
-    while c >= 0:  # cpu-lane-loop-ok: walks the sibling chain of ONE parent for :nth-of-type; bound is that parent's child count
-        if nodes[c].tag == tag:
-            pos = pos + 1
-        if c == idx:
-            return pos
-        c = ctx.child_index.next_sibling[c]
-    1
+    ctx.type_position[idx]
 
 # Number of element siblings (including node[idx]) that share its tag.
-fn _type_count(nodes: [HNode], ctx: SelectorContext, idx: i32) -> i32:
-    if idx < 0 or idx >= nodes.len():
+fn _type_count(ctx: SelectorContext, idx: i32) -> i32:
+    if idx < 0 or idx >= ctx.type_count.len():
         return 1
-    val parent = nodes[idx].parent as i32
-    if parent < 0 or parent >= ctx.child_index.first_child.len():
-        return 1
-    val tag = nodes[idx].tag
-    var count = 0
-    var c = ctx.child_index.first_child[parent]
-    while c >= 0:  # cpu-lane-loop-ok: walks the sibling chain of ONE parent for :nth-last-of-type; bound is that parent's child count
-        if nodes[c].tag == tag:
-            count = count + 1
-        c = ctx.child_index.next_sibling[c]
-    count
+    ctx.type_count[idx]
 
 # The 1-based index an An+B argument is tested against for each structural
 # pseudo-class: from the start or the end, among all element siblings or only
@@ -463,9 +458,9 @@ fn _nth_index_for(code: i32, nodes: [HNode], ctx: SelectorContext, idx: i32) -> 
     if code == PSEUDO_NTH_LAST_CHILD:
         return _sibling_count(ctx, idx) - _child_position(ctx, idx) + 1
     if code == PSEUDO_NTH_OF_TYPE:
-        return _type_position(nodes, ctx, idx)
+        return _type_position(ctx, idx)
     if code == PSEUDO_NTH_LAST_OF_TYPE:
-        return _type_count(nodes, ctx, idx) - _type_position(nodes, ctx, idx) + 1
+        return _type_count(ctx, idx) - _type_position(ctx, idx) + 1
     _child_position(ctx, idx)
 
 # Check whether any node that is a child of parent_idx matches simple selector sel_arg.
@@ -522,6 +517,31 @@ fn _node_is_empty(ctx: SelectorContext, idx: i32) -> bool:
     if idx < 0 or idx >= ctx.has_content_child.len():
         return true
     not ctx.has_content_child[idx]
+
+# Context phase of :not()/:is()/:where(): decides the options that need the
+# node's sibling context. Options without a positional pseudo-class were
+# already decided context-free; when no option needs context this is a no-op.
+fn _list_ctx_matches(negate: bool, opts: [text], nodes: [HNode], ctx: SelectorContext, idx: i32) -> bool:
+    val nd = nodes[idx]
+    var any_ctx = false
+    var matched = false
+    var j = 0
+    val opt_count = opts.len()
+    while j < opt_count:  # cpu-lane-loop-ok: walks the <=16 options of ONE :not()/:is()/:where() argument for one node
+        val opt = opts[j]
+        if opt.len() > 0:
+            if _option_needs_ctx(opt):
+                any_ctx = true
+                if simple_match_ctx(opt, nd.tag, nd.class_attr, nd.class_words, nd.id_attr, nd.attrs_raw, nodes, ctx, idx):
+                    matched = true
+            elif not negate and simple_match(opt, nd.tag, nd.class_attr, nd.class_words, nd.id_attr, nd.attrs_raw, 1):
+                matched = true
+        j = j + 1
+    if not any_ctx:
+        return true
+    if negate:
+        return not matched
+    matched
 
 # Full-context pseudo-class check. Called after simple_match() passes the base check.
 # Returns true if all pseudo-class conditions on sel are satisfied given node context.
@@ -591,6 +611,9 @@ fn _pseudo_ctx_matches(sel: text, nodes: [HNode], ctx: SelectorContext, idx: i32
             pseudo == "nth-of-type" or pseudo == "nth-last-of-type"
         ):
             if not css_nth_matches(arg, _nth_index_for(_pseudo_code_for(pseudo), nodes, ctx, idx) as i64):
+                return false
+        elif pseudo == "not" or pseudo == "is" or pseudo == "where":
+            if not _list_ctx_matches(pseudo == "not", _split_pseudo_options(arg), nodes, ctx, idx):
                 return false
         elif pseudo == "has":
             var opts: [text] = [""; 16]
@@ -1156,7 +1179,7 @@ fn simple_match_parsed(
             var j = 0
             val opt_count = opts.len()
             while j < opt_count:  # cpu-lane-loop-ok: walks the <=16 pre-split :not() options, returning false at the first that matches
-                if simple_match(opts[j], tag, cls, class_words, id, attrs, 1):
+                if not _option_needs_ctx(opts[j]) and simple_match(opts[j], tag, cls, class_words, id, attrs, 1):
                     return false
                 j = j + 1
         elif code == PSEUDO_ANY:
@@ -1165,7 +1188,7 @@ fn simple_match_parsed(
             var j = 0
             val opt_count = opts.len()
             while j < opt_count and not any_matched:  # cpu-lane-loop-ok: walks the <=16 pre-split :is()/:where() options, stopping at the first that matches
-                any_matched = simple_match(opts[j], tag, cls, class_words, id, attrs, 1)
+                any_matched = _option_needs_ctx(opts[j]) or simple_match(opts[j], tag, cls, class_words, id, attrs, 1)
                 j = j + 1
             if not any_matched:
                 return false
@@ -1208,6 +1231,9 @@ fn _pseudo_ctx_matches_parsed(
                 p.pseudo_nth_kind[pi], p.pseudo_nth_a[pi], p.pseudo_nth_b[pi],
                 _nth_index_for(code, nodes, ctx, idx)
             ):
+                return false
+        elif code == PSEUDO_NOT or code == PSEUDO_ANY:
+            if not _list_ctx_matches(code == PSEUDO_NOT, p.pseudo_opts[pi], nodes, ctx, idx):
                 return false
         elif code == PSEUDO_HAS:
             val opts = p.pseudo_opts[pi]
@@ -1269,7 +1295,7 @@ fn _selector_group_matches_node_parsed_inner(
                 if ancestor < 0:
                     return false
                 val anc = nodes[ancestor]
-                if simple_match_parsed(part, anc.tag, anc.class_attr, anc.class_words, anc.id_attr, anc.attrs_raw):
+                if simple_match_ctx_parsed(part, anc.tag, anc.class_attr, anc.class_words, anc.id_attr, anc.attrs_raw, nodes, ctx, ancestor as i32):
                     ancestor = anc.parent
                     require_direct = false
                 else:
@@ -1278,7 +1304,7 @@ fn _selector_group_matches_node_parsed_inner(
                 var found = false
                 while ancestor >= 0 and not found:  # cpu-lane-loop-ok: descendant-combinator ancestor walk up the parent chain of one node; bound is that node's tree depth
                     val anc = nodes[ancestor]
-                    if simple_match_parsed(part, anc.tag, anc.class_attr, anc.class_words, anc.id_attr, anc.attrs_raw):
+                    if simple_match_ctx_parsed(part, anc.tag, anc.class_attr, anc.class_words, anc.id_attr, anc.attrs_raw, nodes, ctx, ancestor as i32):
                         found = true
                     else:
                         ancestor = anc.parent
@@ -1949,7 +1975,7 @@ fn _selector_group_matches_node_parts_inner(nodes: [HNode], ctx: SelectorContext
                 if ancestor < 0:
                     return false
                 val anc = nodes[ancestor]
-                if simple_match(part, anc.tag, anc.class_attr, anc.class_words, anc.id_attr, anc.attrs_raw):
+                if simple_match_ctx(part, anc.tag, anc.class_attr, anc.class_words, anc.id_attr, anc.attrs_raw, nodes, ctx, ancestor as i32):
                     ancestor = anc.parent
                     require_direct = false
                 else:
@@ -1958,7 +1984,7 @@ fn _selector_group_matches_node_parts_inner(nodes: [HNode], ctx: SelectorContext
                 var found = false
                 while ancestor >= 0 and not found:  # cpu-lane-loop-ok: descendant-combinator ancestor walk up the parent chain of one node; bound is that node's tree depth
                     val anc = nodes[ancestor]
-                    if simple_match(part, anc.tag, anc.class_attr, anc.class_words, anc.id_attr, anc.attrs_raw):
+                    if simple_match_ctx(part, anc.tag, anc.class_attr, anc.class_words, anc.id_attr, anc.attrs_raw, nodes, ctx, ancestor as i32):
                         found = true
                     else:
                         ancestor = anc.parent
