@@ -5,8 +5,8 @@ use app.bootstrap_builder.native_group_index_variant.{native_group_index_variant
 use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1,
     config_variant_digest_v1}
 
-fn index_variant_config_v1(variant: ConfigVariantKeyV1) -> NativeGroupIndexConfigV1:
-    NativeGroupIndexConfigV1("phase4", variant.backend, variant.target_triple,
+fn index_variant_config_v1(variant: ConfigVariantKeyV1, phase: text = "phase4") -> NativeGroupIndexConfigV1:
+    NativeGroupIndexConfigV1(phase, variant.backend, variant.target_triple,
         "D:/phase2/simple.exe", "a".repeat(64), "D:/frozen",
         "D:/frozen/build/scv/snapshots/rev", "rev", "commit", "tree",
         "D:/frozen/build/scv/receipts/rev.receipt", "b".repeat(64),
@@ -26,8 +26,11 @@ describe "native full-index variant to compiler options":
                 expect(profile.options.release).to_equal(true)
                 expect(profile.options.opt_level ?? -1).to_equal(2)
                 expect(profile.variant.normalized_options).to_equal([
+                    "managed_build_phase=phase4", "target_trace_admission_identity=absent",
                     "debug_info=0", "low_memory=1", "mode=aot",
-                    "opt_level=2", "output_format=native"])
+                    "opt_level=2", "output_format=native", "target_profile_schema=1",
+                    "target_profile=release", "target_debug_request=default",
+                    "target_trace_resolution=disabled", "target_trace_reason="])
                 expect(profile.digest).to_equal(config_variant_digest_v1(profile.variant))
                 match native_group_index_variant_admit_v1(
                         index_variant_config_v1(profile.variant)):
@@ -42,21 +45,25 @@ describe "native full-index variant to compiler options":
                 expect(profile.options.release).to_equal(false)
                 expect(profile.options.opt_level ?? -1).to_equal(0)
                 expect(profile.variant.normalized_options).to_equal([
+                    "managed_build_phase=phase3", "target_trace_admission_identity=absent",
                     "debug_info=1", "low_memory=1", "mode=aot",
-                    "opt_level=0", "output_format=native"])
+                    "opt_level=0", "output_format=native", "target_profile_schema=1",
+                    "target_profile=development", "target_debug_request=default",
+                    "target_trace_resolution=unavailable",
+                    "target_trace_reason=trace-backend-not-admitted-v1"])
                 var altered = profile.variant
                 altered.features = ["avx2"]
-                match native_group_index_variant_admit_v1(index_variant_config_v1(altered)):
+                match native_group_index_variant_admit_v1(index_variant_config_v1(altered, "phase3")):
                     Ok(_): fail("unmapped CPU feature admitted")
                     Err(reason): expect(reason).to_contain("does not match")
                 altered = profile.variant
                 altered.environment_inputs = ["TZ=UTC"]
-                match native_group_index_variant_admit_v1(index_variant_config_v1(altered)):
+                match native_group_index_variant_admit_v1(index_variant_config_v1(altered, "phase3")):
                     Ok(_): fail("unmapped environment input admitted")
                     Err(reason): expect(reason).to_contain("does not match")
                 altered = profile.variant
                 altered.normalized_options = ["opt=2"]
-                match native_group_index_variant_admit_v1(index_variant_config_v1(altered)):
+                match native_group_index_variant_admit_v1(index_variant_config_v1(altered, "phase3")):
                     Ok(_): fail("unknown normalized option admitted")
                     Err(reason): expect(reason).to_contain("does not match")
             Err(reason): fail(reason)
@@ -78,3 +85,35 @@ describe "native full-index variant to compiler options":
                 "x86_64-pc-windows-msvc", "release", "abi-v1"):
             Ok(_): fail("unsupported language ABI admitted")
             Err(reason): expect(reason).to_contain("language ABI")
+
+    it "rejects stale phase3 release and phase4 development profiles":
+        match native_group_index_variant_profile_v1("phase3", "llvm",
+                "aarch64-unknown-linux-gnu", "release", "simple-v1"):
+            Ok(_): fail("old both-release phase3 profile admitted")
+            Err(reason): expect(reason).to_contain("phase does not match")
+        match native_group_index_variant_profile_v1("phase4", "llvm",
+                "aarch64-unknown-linux-gnu", "debug", "simple-v1"):
+            Ok(_): fail("development phase4 profile admitted")
+            Err(reason): expect(reason).to_contain("phase does not match")
+
+    it "rejects old phase4 receipts despite a valid old variant digest":
+        val old = ConfigVariantKeyV1("aarch64-unknown-linux-gnu", "llvm", [],
+            "release", "simple-v1", ["debug_info=0", "low_memory=1",
+            "mode=aot", "opt_level=2", "output_format=native"], [])
+        match native_group_index_variant_admit_v1(index_variant_config_v1(old)):
+            Ok(_): fail("pre-profile-schema receipt admitted")
+            Err(reason): expect(reason).to_contain("does not match")
+
+    it "records requested development debug as unavailable while LLVM admission is closed":
+        match native_group_index_variant_profile_v1("phase3", "llvm",
+                "aarch64-unknown-linux-gnu", "debug", "simple-v1"):
+            Ok(profile):
+                expect(profile.options.managed_build_phase).to_equal("phase3")
+                expect(profile.options.xray_enabled).to_equal(false)
+                expect(profile.variant.normalized_options).to_contain("target_debug_request=default")
+                expect(profile.variant.normalized_options).to_contain("target_trace_resolution=unavailable")
+                expect(profile.variant.normalized_options).to_contain("target_trace_reason=llvm-observer-link-handler-not-admitted-v1")
+                match native_group_index_variant_admit_v1(index_variant_config_v1(profile.variant, "phase3")):
+                    Ok(admitted): expect(admitted.digest).to_equal(profile.digest)
+                    Err(reason): fail(reason)
+            Err(reason): fail(reason)
