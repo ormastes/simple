@@ -1,0 +1,61 @@
+"""
+## Purpose and audience
+Purpose: Pin that a bare `#text` run sits in its line box by HALF-LEADING,
+exactly like an inline element's text. An inline non-replaced element
+(`<strong>`, `<code>`) is already centred on its content area
+(`align_inline_line_baselines`), but a bare text run kept its box at the line
+top, so in `Paragraph with <strong>strong</strong>, ...` the plain words were
+painted 3 px ABOVE the strong/em/code words (catalog `overview`), and every
+block made of plain text (h1, blockquote, li) sat 3-4 px above Chromium's.
+Audience: browser-engine inline-layout maintainers.
+
+Chrome oracle (Chromium 131 headless --headless=new, Range.getBoundingClientRect
+of each text node, page `*{box-sizing:border-box}body{margin:0;font:16px/1.5
+sans-serif}`, Liberation Sans / DejaVu Sans Mono):
+
+| text node                     | line box top | text rect top | offset |
+|-------------------------------|--------------|---------------|--------|
+| `<p>` plain `Paragraph with ` | 55.91        | 58.91         | +3     |
+| `<strong>` text               | 55.91        | 58.91         | +3     |
+| `<code>` text                 | 55.91        | 57.91         | +2     |
+| `<section><h1>` text (24/36)  | 0.00         | 4.00          | +4     |
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-INLINE-HALF-LEADING-001 — every text run in a line shares the line's half-leading placement.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 760
+val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}</style></head><body>"
+val PARA: text = "<p id=\"p\">Paragraph with <strong id=\"s\">strong</strong>, <code id=\"c\">inline code</code> x</p>"
+
+fn probe(inner: text, id: text, name: text) -> text:
+    simple_web_layout_debug_layout_by_id(
+        HEAD + inner + "</body></html>", VW, VH, id, name)
+
+describe "a bare text run is placed by half-leading like an inline element":
+    it "AC-1: control — the paragraph line box starts at y=16":
+        step("Chrome: p margin-top 16 (1em), line box top 16")
+        expect(probe(PARA, "p", "y")).to_equal("16")
+
+    it "AC-2: the plain text run sits 3 px below the line top":
+        step("Chrome: plain text rect top = line top + 3")
+        expect(probe(PARA, "p", "text_y")).to_equal("19")
+
+    it "AC-3: control — the strong text keeps its +3 placement":
+        step("Chrome: strong text rect top = line top + 3")
+        expect(probe(PARA, "s", "text_y")).to_equal("19")
+
+    it "AC-4: control — the monospace code text keeps its +2 placement":
+        step("Chrome: code text rect top = line top + 2")
+        expect(probe(PARA, "c", "text_y")).to_equal("18")
+
+    it "AC-5: a heading's only text run is half-leaded in its 36 px line":
+        step("Chrome: <section><h1> at y=20, text rect top +4")
+        expect(probe("<section><h1 id=\"h\">Common HTML</h1></section>", "h", "text_y")).to_equal("24")

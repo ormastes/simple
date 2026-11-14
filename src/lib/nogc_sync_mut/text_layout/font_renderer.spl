@@ -2936,11 +2936,34 @@ class FontRenderer:
         self.stage_text_with_advances_configured(content, advance_widths, color, config)
         self.staged_batch()
 
+    # Per-codepoint integer glyph advances: the pen `_stage_text_active`'s
+    # no-layout fallback places quads with.
+    me _glyph_pen_advances(content: text, font_size: i32) -> [i32]:
+        val cps = text_codepoints(content)
+        var out: [i32] = [0; cps.len()]
+        var ci = 0
+        while ci < cps.len():
+            out[ci] = self.get_glyph(cps[ci] as i32, font_size).advance
+            ci = ci + 1
+        out
+
     me stage_text_with_advances_configured(content: text, advance_widths: [i32], color: u32, config: FontRenderConfig) -> i64:
         if not font_render_config_selection_supported(config) or not self._ensure_render_config_face(config):
             return self._stage_invalid_config(config)
         self._activate_render_config(config)
-        val natural_advances = self.measure_text_advances(content, config.size)
+        # `natural_advances` must describe the pen the quads were ACTUALLY
+        # staged at, or the re-layout shift carries the difference into the
+        # quads. When the rasterizer has no layout of its own,
+        # `_stage_text_active` walks the per-glyph INTEGER advances, while
+        # `measure_text_advances` snaps a FRACTIONAL cumulative pen; feeding
+        # the latter leaked the rounding gap into every glyph and accumulated
+        # (+4 px by the last glyph of a 31-glyph 24 px run, which the CPU
+        # lane's run-width clip then cut in half).
+        # test/01_unit/lib/nogc_sync_mut/text_layout/advance_staging_pen_drift_spec.spl
+        val natural_advances = if self.layout_text(content, config.size, 0).len() == 0:
+            self._glyph_pen_advances(content, config.size)
+        else:
+            self.measure_text_advances(content, config.size)
         self._stage_text_active(content, color, config.size)
         # The advance re-layout rewrites the staged quads IN PLACE (array
         # element assignment on a local, then one field store) instead of the
