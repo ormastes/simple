@@ -71,6 +71,34 @@ describe "TargetHIR region slots (P5)":
         expect(t.cancel(key, "b", g2, "late").is_err()).to_be(true)
         expect(t.await_slot(key, g2).unwrap()).to_equal("fresh")
 
+    it "THIR-10: stale waiters cannot consume a replacement generation's published result":
+        var t = RegionSlotTable.new()
+        val key = region_slot_key("s", "t", "published-retry")
+        val old_gen = claim_gen(t.claim(key, "first"))
+        expect(t.cancel(key, "first", old_gen, "retry").unwrap()).to_be(true)
+        val new_gen = claim_gen(t.claim(key, "replacement"))
+        expect(new_gen).to_equal(old_gen + 1)
+        expect(t.publish(key, "replacement", new_gen, "replacement-result").unwrap()).to_equal("replacement-result")
+        expect(t.await_slot(key, old_gen).unwrap_err()).to_equal("region_slot_stale_generation: " + key)
+        expect(t.await_slot(key, new_gen).unwrap()).to_equal("replacement-result")
+
+    it "THIR-10: stale waiters cannot consume a replacement generation's failure":
+        var t = RegionSlotTable.new()
+        val key = region_slot_key("s", "t", "failed-retry")
+        val old_gen = claim_gen(t.claim(key, "first"))
+        expect(t.cancel(key, "first", old_gen, "first-failure").unwrap()).to_be(true)
+        val new_gen = claim_gen(t.claim(key, "replacement"))
+        expect(t.await_slot(key, new_gen).unwrap_err()).to_equal("pending")
+        expect(t.cancel(key, "replacement", new_gen, "replacement-failure").unwrap()).to_be(true)
+        expect(t.await_slot(key, old_gen).unwrap_err()).to_equal("region_slot_stale_generation: " + key)
+        expect(t.await_slot(key, new_gen).unwrap_err()).to_equal("region_slot_failed: replacement-failure")
+
+    it "reports empty slots before checking a requested generation":
+        val t = RegionSlotTable.new()
+        val key = region_slot_key("s", "t", "missing")
+        expect(t.await_slot(key, 0).unwrap_err()).to_equal("region_slot_empty: " + key)
+        expect(t.await_slot(key, 99).unwrap_err()).to_equal("region_slot_empty: " + key)
+
     it "IHIR-03: readers of one snapshot share one pinned decode":
         var t = RegionSlotTable.new()
         val snap = hir_snapshot_freeze(fixture("app.main"), 0).unwrap()
