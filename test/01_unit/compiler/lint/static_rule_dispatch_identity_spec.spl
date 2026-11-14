@@ -1,0 +1,84 @@
+# Purpose and audience: guard for lint maintainers that every static lint row runs its own rule body.
+# @req REQ-SSPEC-COMPILER
+# bug: doc/08_tracking/bug/lint_static_rules_private_check_rule_collision_2026-11-12.md
+"""
+# Static lint rows dispatch to their own check function
+
+Fifteen rule modules each declared a private `fn check_rule`. Under
+co-compilation the seed resolved every `static_lint_rule(..., check_rule)`
+reference to ONE module's body (the one the caller imported), so fourteen rows
+silently ran `nil_outside_unsafe`'s check. Each rule now names its check fn
+`<rule>_check_rule`. This spec pins the behaviour and the naming invariant.
+"""
+
+# @tag: unit, compiler, lint
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use compiler.tools.lint.static_rules.{LintParamsV1, LintUnit, static_lint_rule_table, run_static_lint_rule_table}
+# Imported directly on purpose: the caller's import path is what made the
+# seed pick this module's private `check_rule` for every sibling row.
+use compiler.tools.lint.rules.nil_outside_unsafe_rule.{nil_outside_unsafe_lint_rule}
+use compiler.tools.lint.rules.robust_option_surface_rule.{robust_option_surface_lint_rule}
+
+fn row_codes(rule_id: text, path: text, src: text) -> [text]:
+    var out: [text] = []
+    for rule in static_lint_rule_table():
+        if rule.id() == rule_id:
+            val run = run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit(path, src), [rule])
+            for f in run.findings:
+                out.push(f.code)
+    out
+
+fn rows_emitting(code: text, path: text, src: text) -> [text]:
+    var ids: [text] = []
+    for rule in static_lint_rule_table():
+        val run = run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit(path, src), [rule])
+        if [f.code for f in run.findings].contains(code):
+            ids.push(rule.id())
+    ids
+
+fn top_level_fn_name(line: text) -> text:
+    if not line.starts_with("fn "): return ""
+    val rest = line.substring(3)
+    var name = ""
+    for ch in rest.chars():
+        if ch == "(" or ch == "<" or ch == " " or ch == ":": return name
+        name = name + ch
+    name
+
+describe "static lint row dispatch identity":
+    it "runs NIL-UNSAFE-001 only from the nil_outside_unsafe row":
+        val src = "fn f() -> i64?:\n    nil\n"
+        expect([f.code for f in run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit("fixture.spl", src), [nil_outside_unsafe_lint_rule()]).findings]).to_equal(["NIL-UNSAFE-001"])
+        expect(rows_emitting("NIL-UNSAFE-001", "fixture.spl", src)).to_equal(["nil_outside_unsafe"])
+
+    it "runs ROB-OPT-001 only from the robust_option_surface row":
+        val src = "pub fn connect(host: i64, timeout: Option<i64>) -> i64:\n    0\n"
+        expect([f.code for f in run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit("src/lib/example.spl", src), [robust_option_surface_lint_rule()]).findings]).to_equal(["ROB-OPT-001"])
+        expect(rows_emitting("ROB-OPT-001", "src/lib/example.spl", src)).to_equal(["robust_option_surface"])
+
+    it "reports each code exactly once through the full table":
+        val src = "pub fn connect(host: i64, timeout: Option<i64>) -> i64:\n    return nil\n"
+        val run = run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit("src/lib/example.spl", src), static_lint_rule_table())
+        val codes = [f.code for f in run.findings]
+        expect(run.errors.len()).to_equal(0)
+        expect([c for c in codes if c == "NIL-UNSAFE-001"].len()).to_equal(1)
+        expect([c for c in codes if c == "ROB-OPT-001"].len()).to_equal(1)
+        expect(row_codes("nil_outside_unsafe", "src/lib/example.spl", src)).to_equal(["NIL-UNSAFE-001"])
+
+    it "keeps every private top-level fn name unique across static rule modules":
+        var owner: Dict<text, text> = {}
+        var clashes: [text] = []
+        for rule in static_lint_rule_table():
+            val path = "src/compiler/90.tools/lint/rules/{rule.id()}_rule.spl"
+            val content = file_read(path)
+            expect(content.len() > 0).to_equal(true)
+            for line in content.split("\n"):
+                val name = top_level_fn_name(line)
+                if name == "": continue
+                if owner.contains_key(name):
+                    clashes.push("{name}: {owner[name]} vs {rule.id()}")
+                else:
+                    owner[name] = rule.id()
+        expect(clashes).to_equal([])
