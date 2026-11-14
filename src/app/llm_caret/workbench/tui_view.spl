@@ -15,6 +15,8 @@
 #   - Inactive previews are read-only: they carry no input affordance and
 #     are rendered from the same SessionView, never a separate mutable copy.
 
+use std.common.encoding.utf8.{text_codepoints, char_from_codepoint}
+use std.common.layout.text_metrics.{codepoint_cells}
 use app.llm_caret.workbench.tui_layout.{Rect, WorkbenchLayout, CompactView}
 use app.llm_caret.workbench.session_contract.{
     SessionId, SessionView, ComposerDraft, InputMode, ProcessLifecycle,
@@ -48,11 +50,31 @@ fn _set_cell(grid: Grid, x: i64, y: i64, ch: text):
         return
     grid.cells[y * grid.width + x] = ch
 
+# Places `s` by terminal CELLS (REQ-CARET-UI-003): a wide character takes two
+# cells (the second holds "" so a joined row keeps the right display width), a
+# combining mark joins the previous cell, and a wide character that would
+# straddle the region edge becomes a space instead of being half-written.
 fn _put_str(grid: Grid, x: i64, y: i64, max_w: i64, s: text):
+    val cps = text_codepoints(s)
+    var col = 0
+    var last = -1
     var i = 0
-    val n = s.byte_len()
-    while i < n and i < max_w:
-        _set_cell(grid, x + i, y, s.substring(i, i + 1))
+    while i < cps.len():
+        val w = codepoint_cells(cps[i])
+        if w == 0:
+            if last >= 0 and y >= 0 and y < grid.height and x + last >= 0 and x + last < grid.width:
+                val at = y * grid.width + x + last
+                grid.cells[at] = grid.cells[at] + char_from_codepoint(cps[i])
+        else:
+            if col + w > max_w:
+                if col < max_w:
+                    _set_cell(grid, x + col, y, " ")
+                break
+            _set_cell(grid, x + col, y, char_from_codepoint(cps[i]))
+            if w == 2:
+                _set_cell(grid, x + col + 1, y, "")
+            last = col
+            col = col + w
         i = i + 1
 
 fn _draw_box(grid: Grid, r: Rect):
