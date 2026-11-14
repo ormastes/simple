@@ -40,7 +40,7 @@ use compiler.core.types.{named_type_register, named_type_update, named_type_find
 use compiler.core.types.{newunit_register, unit_decl_register_origin}
 use compiler.core.types.{primitive_integer_bit_width_from_name, primitive_backing_bits_from_name}
 use compiler.core.types.{custom_primitive_integer_bit_width_by_name, custom_primitive_backing_bits_by_name}
-use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get}
+use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, parser_has_errors}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_warn, parser_warn_print_if_needed}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
@@ -703,6 +703,45 @@ fn parse_enum_decl() -> i64:
 
 # ===== Top-Level Module Parsing =====
 
+# Source observations only. Byte offsets identify the modifier's first byte,
+# or the unmarked declaration-start token. A consumer must bind a row to
+# an actual top-level declaration before assigning scope or access authority.
+# Keeping this separate preserves legacy visibility and member/default APIs.
+var TOP_LEVEL_VISIBILITY_OFFSETS_V1: [i64] = []
+var TOP_LEVEL_VISIBILITY_MODIFIERS_V1: [text] = []
+
+pub fn parser_top_level_visibility_intent_count_v1() -> i64:
+    if parser_has_errors(): return 0
+    TOP_LEVEL_VISIBILITY_OFFSETS_V1.len()
+
+pub fn parser_top_level_visibility_intent_offset_v1(index: i64) -> i64:
+    if parser_has_errors(): return -1
+    if index < 0 or index >= TOP_LEVEL_VISIBILITY_OFFSETS_V1.len(): return -1
+    TOP_LEVEL_VISIBILITY_OFFSETS_V1[index]
+
+pub fn parser_top_level_visibility_intent_modifier_v1(index: i64) -> text:
+    if parser_has_errors(): return "unknown"
+    if index < 0 or index >= TOP_LEVEL_VISIBILITY_MODIFIERS_V1.len(): return "unknown"
+    TOP_LEVEL_VISIBILITY_MODIFIERS_V1[index]
+
+fn top_level_visibility_intent_rows_valid_v1() -> bool:
+    if TOP_LEVEL_VISIBILITY_OFFSETS_V1.len() != TOP_LEVEL_VISIBILITY_MODIFIERS_V1.len(): return false
+    var previous = -1
+    for offset in TOP_LEVEL_VISIBILITY_OFFSETS_V1:
+        if offset <= previous: return false
+        previous = offset
+    for modifier in TOP_LEVEL_VISIBILITY_MODIFIERS_V1:
+        if not ["omitted", "pri", "public", "peer", "up", "internal", "package"].contains(modifier): return false
+    true
+
+fn record_top_level_visibility_intent_v1(source_start: i64, explicit_pri: bool, explicit_pub: bool, parsed: text):
+    val token = par_text_get()
+    if not explicit_pri and not explicit_pub and not ["fn", "me", "struct", "class", "enum", "trait", "actor", "extern", "async", "static", "const", "val", "var", "let", "cli", "lazy", "type", "newtype", "newunit", "unit", "resource", "layer", "mod", "macro", "bitfield"].contains(token):
+        return
+    val modifier = if explicit_pri: "pri" else: if explicit_pub: parsed else: "omitted"
+    TOP_LEVEL_VISIBILITY_OFFSETS_V1.push(source_start)
+    TOP_LEVEL_VISIBILITY_MODIFIERS_V1.push(modifier)
+
 fn parse_top_level_visibility() -> text:
     if par_kind_get() == 29:
         parser_advance()
@@ -1131,7 +1170,9 @@ extern fn rt_transient_heap_promote<T>(value: T) -> bool
 # The bridge copies these into rich declarations, but the public last-parse
 # accessors must also remain valid until the next parser reset.
 pub fn parser_declaration_metadata_promote_transient_owner() -> bool:
-    rt_transient_heap_promote(UNSAFE_ANNOTATIONS) and
+    rt_transient_heap_promote(TOP_LEVEL_VISIBILITY_OFFSETS_V1) and
+        rt_transient_heap_promote(TOP_LEVEL_VISIBILITY_MODIFIERS_V1) and
+        rt_transient_heap_promote(UNSAFE_ANNOTATIONS) and
         rt_transient_heap_promote(ENUM_ATTRIBUTES) and
         rt_transient_heap_promote(ENUM_OPEN_REGIONS) and
         representation_parser_promote_transient_owner_v1() and
@@ -1242,6 +1283,8 @@ fn parser_reset_pending_vhdl_decorators():
 
 pub fn parse_module_body():
     parser_reset_pending_vhdl_decorators()
+    TOP_LEVEL_VISIBILITY_OFFSETS_V1 = []
+    TOP_LEVEL_VISIBILITY_MODIFIERS_V1 = []
     UNSAFE_ANNOTATIONS = []
     ENUM_ATTRIBUTES = []
     ENUM_OPEN_REGIONS = []
@@ -1292,7 +1335,11 @@ pub fn parse_module_body():
         pm_prev_col = pm_col
         if parser_module_trace_enabled():
             eprint("[parser-module] decl:start i={i} kind={par_kind_get()} text={par_text_get()} line={par_line_get()} col={par_col_get()}")
+        val visibility_source_start = lex_source_byte_offset(lex_token_start_get())
+        val explicit_pri = par_kind_get() == 6 and par_text_get() == "pri"
+        val explicit_pub = par_kind_get() == 29
         val parsed_visibility = parse_top_level_visibility()
+        record_top_level_visibility_intent_v1(visibility_source_start, explicit_pri, explicit_pub, parsed_visibility)
         val representation_target = par_kind_get()
         if not [20, 34, 23, 24, 25, 31, 53, 30, 171].contains(representation_target):
             representation_reject_pending_v1()
@@ -2499,6 +2546,8 @@ pub fn flat_pending_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_text(PENDING_UNSAFE_CAPS))
     parts = parts.push(flat_pool_enc_scalar_text(PENDING_UNSAFE_REASON))
     parts = parts.push(flat_pool_enc_i64(PENDING_VHDL_GENERIC_ARGS))
+    parts = parts.push(flat_pool_enc_text(TOP_LEVEL_VISIBILITY_MODIFIERS_V1))
+    parts = parts.push(flat_pool_enc_i64(TOP_LEVEL_VISIBILITY_OFFSETS_V1))
     parts = parts.push(flat_pool_enc_text(UNSAFE_ANNOTATIONS))
     parts.join("")
 
@@ -2518,8 +2567,14 @@ pub fn flat_pending_pools_restore(r: FlatPoolReader) -> bool:
     PENDING_UNSAFE_CAPS = flat_pool_dec_text(r)
     PENDING_UNSAFE_REASON = flat_pool_dec_scalar_text(r)
     PENDING_VHDL_GENERIC_ARGS = flat_pool_dec_i64(r)
+    TOP_LEVEL_VISIBILITY_MODIFIERS_V1 = flat_pool_dec_text(r)
+    TOP_LEVEL_VISIBILITY_OFFSETS_V1 = flat_pool_dec_i64(r)
     UNSAFE_ANNOTATIONS = flat_pool_dec_text(r)
-    r.ok
+    if not r.ok or not top_level_visibility_intent_rows_valid_v1():
+        TOP_LEVEL_VISIBILITY_OFFSETS_V1 = []
+        TOP_LEVEL_VISIBILITY_MODIFIERS_V1 = []
+        return false
+    true
 
 export flat_pending_pools_dump, flat_pending_pools_restore
 
@@ -2542,6 +2597,8 @@ pub struct PendingDeclAttrState:
     PENDING_DECL_ATTRS: [text]
     ENUM_ATTRIBUTES: [text]
     ENUM_OPEN_REGIONS: [text]
+    TOP_LEVEL_VISIBILITY_OFFSETS_V1: [i64]
+    TOP_LEVEL_VISIBILITY_MODIFIERS_V1: [text]
 
 pub fn pending_decl_attr_state_take() -> PendingDeclAttrState:
     val s = PendingDeclAttrState(
@@ -2558,7 +2615,9 @@ pub fn pending_decl_attr_state_take() -> PendingDeclAttrState:
         UNSAFE_ANNOTATIONS: UNSAFE_ANNOTATIONS,
         PENDING_DECL_ATTRS: PENDING_DECL_ATTRS,
         ENUM_ATTRIBUTES: ENUM_ATTRIBUTES,
-        ENUM_OPEN_REGIONS: ENUM_OPEN_REGIONS
+        ENUM_OPEN_REGIONS: ENUM_OPEN_REGIONS,
+        TOP_LEVEL_VISIBILITY_OFFSETS_V1: TOP_LEVEL_VISIBILITY_OFFSETS_V1,
+        TOP_LEVEL_VISIBILITY_MODIFIERS_V1: TOP_LEVEL_VISIBILITY_MODIFIERS_V1
     )
     PENDING_SFFI = 0
     PENDING_SFFI_KEYS = []
@@ -2574,6 +2633,8 @@ pub fn pending_decl_attr_state_take() -> PendingDeclAttrState:
     PENDING_DECL_ATTRS = []
     ENUM_ATTRIBUTES = []
     ENUM_OPEN_REGIONS = []
+    TOP_LEVEL_VISIBILITY_OFFSETS_V1 = []
+    TOP_LEVEL_VISIBILITY_MODIFIERS_V1 = []
     s
 
 pub fn pending_decl_attr_state_install(s: PendingDeclAttrState):
@@ -2591,5 +2652,7 @@ pub fn pending_decl_attr_state_install(s: PendingDeclAttrState):
     PENDING_DECL_ATTRS = s.PENDING_DECL_ATTRS
     ENUM_ATTRIBUTES = s.ENUM_ATTRIBUTES
     ENUM_OPEN_REGIONS = s.ENUM_OPEN_REGIONS
+    TOP_LEVEL_VISIBILITY_OFFSETS_V1 = s.TOP_LEVEL_VISIBILITY_OFFSETS_V1
+    TOP_LEVEL_VISIBILITY_MODIFIERS_V1 = s.TOP_LEVEL_VISIBILITY_MODIFIERS_V1
 
 export PendingDeclAttrState, pending_decl_attr_state_take, pending_decl_attr_state_install
