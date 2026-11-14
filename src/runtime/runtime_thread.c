@@ -10,6 +10,7 @@
  */
 
 #include "runtime_thread.h"
+#include "xray/xray_startup_owned_threads_v1.h"
 #include "runtime_memtrack.h"
 #include "runtime_value.h"
 
@@ -392,13 +393,13 @@ spl_thread_handle spl_thread_create(void* (*entry_point)(void*), void* arg) {
     launch->entry_point = entry_point;
     launch->argument = arg;
     launch->attachment.attached = 0;
-    if (pthread_create(thread, NULL, rt_xray_thread_entry_v1, launch) != 0) {
+    if (SIMPLE_XRAY_STARTUP_PTHREAD_CREATE_V1(thread, NULL, rt_xray_thread_entry_v1, launch) != 0) {
         SPL_FREE(launch);
         SPL_FREE(thread);
         return 0;
     }
 #else
-    if (pthread_create(thread, NULL, entry_point, arg) != 0) {
+    if (SIMPLE_XRAY_STARTUP_PTHREAD_CREATE_V1(thread, NULL, entry_point, arg) != 0) {
         SPL_FREE(thread);
         return 0;
     }
@@ -755,7 +756,7 @@ static int64_t spl_thread_start(RtThreadData* td) {
     td->refs        = 2;
 #ifdef SPL_THREAD_PTHREAD
     SPL_NOTE_USER_THREADS();
-    if (pthread_create(&td->thread, NULL, rt_isolated_wrapper, td) != 0) {
+    if (SIMPLE_XRAY_STARTUP_PTHREAD_CREATE_V1(&td->thread, NULL, rt_isolated_wrapper, td) != 0) {
         spl_thread_data_free(td);
         return 0;
     }
@@ -1211,7 +1212,7 @@ static int rt_pool_spawn_worker(int worker_id) {
 #ifdef SPL_THREAD_PTHREAD
     pthread_t thread;
     SPL_NOTE_USER_THREADS();
-    if (pthread_create(&thread, NULL, rt_pool_worker_main, arg) == 0) {
+    if (SIMPLE_XRAY_STARTUP_PTHREAD_CREATE_V1(&thread, NULL, rt_pool_worker_main, arg) == 0) {
         pthread_detach(thread);
         return 1;
     }
@@ -2632,7 +2633,7 @@ spl_thread_handle spl_thread_pool_spawn_worker(int64_t pool_id) {
 
     SPL_NOTE_USER_THREADS();
 
-    int result = pthread_create(thread, NULL, worker_thread_wrapper,
+    int result = SIMPLE_XRAY_STARTUP_PTHREAD_CREATE_V1(thread, NULL, worker_thread_wrapper,
                                 (void*)(intptr_t)pool_id);
     if (result != 0) {
         SPL_FREE(thread);

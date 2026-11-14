@@ -80,6 +80,8 @@ static simple_xray_resident_admission_v1 g_resident_admission = SIMPLE_XRAY_RESI
 static uint64_t g_xray_handler_mode;
 static uint64_t g_xray_control;
 static uint64_t g_xray_runtime_ready;
+/* HELD=1, EVER_OWNED_SPAWN_ATTEMPT=2, WINDOW_SPENT=4. */
+static uint64_t g_xray_startup_owned_threads;
 static uint64_t g_xray_last_generation;
 static uint64_t g_xray_admission_lost;
 static __thread __attribute__((tls_model("initial-exec"))) int g_xray_control_owned;
@@ -108,6 +110,44 @@ void simple_xray_resident_control_leave_v1(void) {
     if (!g_xray_control_owned) return;
     g_xray_control_owned = 0;
     __atomic_store_n(&g_xray_control, 0, __ATOMIC_RELEASE);
+}
+/* This ledger proves only absence of owned spawn attempts. The actual linked
+ * profile must separately exclude foreign/constructor execution before any
+ * startup observation authority can be issued. No profile is enabled here. */
+int64_t simple_xray_startup_owned_spawn_admit_v1(void) {
+    uint64_t state = __atomic_load_n(&g_xray_startup_owned_threads, __ATOMIC_ACQUIRE);
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        if (state & 1u) return 0;
+        uint64_t desired = state | 2u;
+        if (__atomic_compare_exchange_n(&g_xray_startup_owned_threads, &state,
+                desired, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return 1;
+    }
+    return 0;
+}
+int64_t simple_xray_startup_no_owned_threads_begin_v1(void) {
+    if (!g_xray_control_owned || g_xray_in_handler ||
+        !__atomic_load_n(&g_xray_runtime_ready, __ATOMIC_ACQUIRE)) return 0;
+    uint64_t expected = 0;
+    return __atomic_compare_exchange_n(&g_xray_startup_owned_threads, &expected,
+        1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) ? 1 : 0;
+}
+int64_t simple_xray_startup_no_owned_threads_end_v1(void) {
+    if (!g_xray_control_owned || g_xray_in_handler ||
+        !__atomic_load_n(&g_xray_runtime_ready, __ATOMIC_ACQUIRE)) return 0;
+    uint64_t state = __atomic_load_n(&g_xray_startup_owned_threads, __ATOMIC_ACQUIRE);
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        if (!(state & 1u)) return 0;
+        uint64_t desired = (state | 4u) & ~UINT64_C(1);
+        if (__atomic_compare_exchange_n(&g_xray_startup_owned_threads, &state,
+                desired, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return 1;
+    }
+    return 0;
+}
+/* Actual entry owner seals idle or held state before main, even if no startup
+ * consumer ran. Mark SPENT first so no competing begin can reopen the window. */
+void simple_xray_startup_window_seal_v1(void) {
+    __atomic_fetch_or(&g_xray_startup_owned_threads, 4, __ATOMIC_ACQ_REL);
+    __atomic_fetch_and(&g_xray_startup_owned_threads, ~UINT64_C(1), __ATOMIC_ACQ_REL);
 }
 static int64_t simple_xray_thread_attach_internal_v1(int cold_root) {
     if (g_xray_in_handler) return -1;

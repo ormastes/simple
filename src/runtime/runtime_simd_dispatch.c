@@ -4,6 +4,7 @@
  * The crypto dispatch table (g_simd_crypto) is defined here with scalar stubs.
  */
 #include "runtime_simd_dispatch.h"
+#include "xray/xray_startup_owned_threads_v1.h"
 #include "runtime.h"
 #include "runtime_value.h"
 #include "runtime_nonnull.h"
@@ -1571,7 +1572,7 @@ SplArray* rt_engine2d_simd_fill_rows_u32(int64_t width, int64_t height,
             engine2d_fill_chunk(&chunks[i]);
         }
 #else
-        if (pthread_create(&threads[i - 1], NULL, engine2d_fill_worker,
+        if (SIMPLE_XRAY_STARTUP_PTHREAD_CREATE_V1(&threads[i - 1], NULL, engine2d_fill_worker,
                            &chunks[i]) == 0) {
             created[i - 1] = 1;
         } else {

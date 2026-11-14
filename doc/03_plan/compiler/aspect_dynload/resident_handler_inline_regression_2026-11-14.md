@@ -14,3 +14,5 @@ Local retained evidence: `/tmp/xray-shim-call-diagnostic-20261114`.
 - `handler.dis`: `dfffcc08466c0a89e8eaa4d48fd4bcaf1f84aa84912b80a66e1e3d947e714394`
 - `adapter-fixed.o`: `b2f04e128dfcec1030d7552b572ed082ea38fa423acfdac222f533541fadaea5`
 - `handler-fixed.dis`: `e0a90e96fa61b288acb1a899d4289c6883ff630df8f504646de7bdb3372d436f`
+
+The changed head `92d27334df47250e8b821537a1952cb35904bbfd` subsequently passed [structural run 43603400019](https://github.com/ormastes/simple/actions/runs/43603400019): `local-xray-llvm-adapter-e2e pass`, all 78 rows passed. This is the complete existing gate's CI outcome, separate from the local object-only proof. It does not establish public Simple-provider or new startup-ledger qualification. Retained aggregate log: `/tmp/xray-ci-43603983255/shim-correction-structural.log`.
