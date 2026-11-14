@@ -119,8 +119,9 @@ max-content of mixed inline content, control UA font reset, `h6` margins
   two-colour vertical form keeps its old path. The `html` page drops from
   15.98 % to 5.25 %. Spec:
   `test/01_unit/browser_engine/linear_gradient_angle_cpu_raster_chrome159_spec.spl`.
-  Cost: the page render goes from 212 s to about 330 s, filed as
-  `web_angled_gradient_header_render_slowdown_2026-11-15.md`.
+  Cost: the page render first went from 212 s to about 330 s; per-row
+  blits in the engine2d ramp brought it back to 226 s with identical
+  pixels (`web_angled_gradient_header_render_slowdown_2026-11-15.md`).
 - **Open, filed from the 9208a82f4e8 review:**
   - `definite_content_height_limit` treats a parent's `min-height` as a
     definite height. `<div style="min-height:200px"><div

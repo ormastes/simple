@@ -1121,14 +1121,20 @@ fn emu_draw_linear_gradient_stops(mut core: RenderBackend, x: i32, y: i32, w: i3
     if t01 > t_max: t_max = t01
     if t11 > t_max: t_max = t11
     val t_span = _emu_max(t_max - t_min, 1)
+    # One `draw_image` per row: a diagonal ramp changes colour every pixel or
+    # two, and one `draw_rect_filled` per colour run made the catalog `html`
+    # page render 212 s -> 334 s (its 120deg header alone).
+    var any_alpha = false
+    for sc in colors:
+        if color_a(sc) < 255:
+            any_alpha = true
     var py: i32 = 0
     # cpu-lane-loop-ok: N-stop linear gradient scanline walk: one iteration per row of the rect
     while py < h:
+        # A fresh row each time: a batching backend may keep the array.
+        var row: [u32] = [0u32; w]
         var px: i32 = 0
-        var run_start: i32 = 0
-        var run_len: i32 = 0
-        var run_color: u32 = 0u32
-        # cpu-lane-loop-ok: N-stop linear gradient per-pixel column walk; the gradient is still EVALUATED per pixel, but emission is run-merged (consecutive identical packed colors become ONE draw_rect_filled) so the Vulkan backend does not issue one compute dispatch per pixel
+        # cpu-lane-loop-ok: N-stop linear gradient per-pixel column walk; the row is emitted as ONE image blit
         while px < w:
             val nx = 2 * px - hw
             val ny = 2 * py - hh
@@ -1138,18 +1144,12 @@ fn emu_draw_linear_gradient_stops(mut core: RenderBackend, x: i32, y: i32, w: i3
                 pos_permille = 0
             if pos_permille > 1000:
                 pos_permille = 1000
-            val c = _emu_gradient_color_at(colors, positions_permille, pos_permille)
-            if run_len > 0 and c == run_color:
-                run_len = run_len + 1
-            else:
-                if run_len > 0:
-                    core.draw_rect_filled(x + run_start, y + py, run_len, 1, run_color)
-                run_start = px
-                run_color = c
-                run_len = 1
+            row[px] = _emu_gradient_color_at(colors, positions_permille, pos_permille)
             px = px + 1
-        if run_len > 0:
-            core.draw_rect_filled(x + run_start, y + py, run_len, 1, run_color)
+        if any_alpha:
+            core.draw_image_blend(x, y + py, w, 1, row)
+        else:
+            core.draw_image(x, y + py, w, 1, row)
         py = py + 1
 
 fn emu_draw_radial_gradient_stops(mut core: RenderBackend, cx: i32, cy: i32, r: i32, colors: [u32], positions_permille: [i32]):
