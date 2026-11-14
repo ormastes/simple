@@ -1,0 +1,154 @@
+# Staged target-binding boundary. UNEXECUTED; not frozen-HIR qualification.
+use std.spec.{describe, it, expect, fail}
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.common.mir_target_context.{MirTargetContext, mir_target_context_from}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_unfrozen_module_input_v1.{UnfrozenMirModuleInputV1, mir_unfrozen_module_input_v1}
+use compiler.mir.verification_call_lowering_v1.{lower_module_with_resolved_calls_v1,
+    lower_module_with_resolved_calls_for_target_v1}
+use compiler.mir.verification_call_identity.{validate_resolved_direct_call_manifest_v1}
+
+fn bound_input_hir(source: text) -> HirModule:
+    val ast = parse_full_frontend(source, "bound_input.spl", "bound_input.spl", Logger(level: 0))
+    var lowering = HirLowering.with_filename("bound_input.spl")
+    val hir = lowering.lower_module(ast)
+    expect(lowering.errors.len()).to_equal(0)
+    hir
+
+fn bound_input_target() -> MirTargetContext:
+    mir_target_context_from("x86_64-unknown-linux-gnu", "unknown", "unknown", "llvm", 1)
+
+describe "unfrozen target-bound MIR module entry":
+    it "rejects a mismatched profile before declaration guards or scratch writes":
+        step("submit release input to a debug lowerer with sentinel scratch")
+        val hir = bound_input_hir("fn sample() -> i64:\n    1\n")
+        var target = bound_input_target()
+        target.build_profile = "release"
+        val input = mir_unfrozen_module_input_v1(hir, target).unwrap()
+        var lowering = MirLowering.new_for_target(hir.symbols, bound_input_target())
+        lowering.current_module_id = "untouched"
+        val identity = lowering.module_target_identity_v1
+        match lowering.lower_unfrozen_module_v1(input):
+            case Ok(_): fail("mismatched target admitted")
+            case Err(message): expect(message).to_start_with("mir_module_target_mismatch:")
+        expect(lowering.current_module_id).to_equal("untouched")
+        expect(lowering.module_target_identity_v1).to_equal(identity)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.fn_return_types.keys().len()).to_equal(0)
+        expect(lowering.verification_call_captures.len()).to_equal(0)
+
+    it "revalidates unresolved manually constructed carriers at the lowering boundary":
+        step("bypass the packaging helper with each unresolved target dimension")
+        val hir = bound_input_hir("fn sample() -> i64:\n    1\n")
+        for dimension in ["arch", "os", "abi", "backend"]:
+            var target = bound_input_target()
+            if dimension == "arch": target.arch = " HOST "
+            if dimension == "os": target.os = ""
+            if dimension == "abi": target.abi = " native "
+            if dimension == "backend": target.backend = " AUTO "
+            expect(mir_unfrozen_module_input_v1(hir, target).is_err()).to_equal(true)
+            val input = UnfrozenMirModuleInputV1(module: hir, target: target)
+            var lowering = MirLowering.new_for_target(hir.symbols, target)
+            lowering.current_module_id = "untouched"
+            match lowering.lower_unfrozen_module_v1(input):
+                case Ok(_): fail("unresolved target admitted")
+                case Err(message): expect(message).to_start_with("mir_module_target_unresolved:")
+            expect(lowering.current_module_id).to_equal("untouched")
+            expect(lowering.errors.len()).to_equal(0)
+            expect(lowering.fn_return_types.keys().len()).to_equal(0)
+
+    it "accepts the native backend retained by common context normalization":
+        step("lower a bound module with the explicitly selected native backend")
+        val hir = bound_input_hir("fn sample() -> i64:\n    1\n")
+        val target = mir_target_context_from("x86_64-unknown-linux-gnu", "unknown", "unknown", "native", 1)
+        expect(target.backend).to_equal("native")
+        val input = mir_unfrozen_module_input_v1(hir, target).unwrap()
+        var lowering = MirLowering.new_for_target(hir.symbols, target)
+        match lowering.lower_unfrozen_module_v1(input):
+            case Ok(module):
+                var names: [text] = []
+                for function in module.functions.values(): names.push(function.name)
+                expect(names.contains("bound_input.sample")).to_equal(true)
+                expect(lowering.errors.len()).to_equal(0)
+            case Err(message): fail(message)
+
+    it "retains the none ABI admitted for explicit SimpleOS contexts":
+        step("package the common normalizer's SimpleOS context without inventing ABI restrictions")
+        val hir = bound_input_hir("fn sample() -> i64:\n    1\n")
+        val target = mir_target_context_from("x86_64-unknown-simpleos", "unknown", "unknown", "llvm", 1)
+        expect(target.abi).to_equal("none")
+        match mir_unfrozen_module_input_v1(hir, target):
+            case Ok(input): expect(input.target.abi).to_equal("none")
+            case Err(message): fail(message)
+
+    it "selects debug and release declarations from the bound context":
+        step("attach semantic cfg guards and lower each profile through the strict entry")
+        for profile in ["debug", "release"]:
+            var hir = bound_input_hir("fn debug_only() -> i64:\n    1\n\nfn release_only() -> i64:\n    2\n")
+            for key in hir.functions.keys():
+                var function = hir.functions[key]
+                if function.name == "debug_only": function.cfg = ["debug"]
+                if function.name == "release_only": function.cfg = ["release"]
+                hir.functions[key] = function
+            var target = bound_input_target()
+            target.build_profile = profile
+            var lowering = MirLowering.new_for_target(hir.symbols, target)
+            val input = mir_unfrozen_module_input_v1(hir, target).unwrap()
+            match lowering.lower_unfrozen_module_v1(input):
+                case Ok(module):
+                    var names: [text] = []
+                    for function in module.functions.values(): names.push(function.name)
+                    expect(names.contains("bound_input.debug_only")).to_equal(profile == "debug")
+                    expect(names.contains("bound_input.release_only")).to_equal(profile == "release")
+                    expect(lowering.errors.len()).to_equal(0)
+                case Err(message): fail(message)
+
+    it "allows same-target reuse but rejects retargeting a populated lowerer":
+        step("lower twice then change both the requested and mutable lowerer target")
+        val hir = bound_input_hir("fn sample() -> i64:\n    1\n")
+        val target = bound_input_target()
+        var lowering = MirLowering.new_for_target(hir.symbols, target)
+        val input = mir_unfrozen_module_input_v1(hir, target).unwrap()
+        expect(lowering.lower_unfrozen_module_v1(input).is_ok()).to_equal(true)
+        expect(lowering.lower_unfrozen_module_v1(input).is_ok()).to_equal(true)
+        val before_module = lowering.current_module_id
+        val before_returns = lowering.fn_return_types.keys().len()
+        val before_errors = lowering.errors.len()
+        var changed = bound_input_target()
+        changed.cpu_tier = "x86-64-v3"
+        lowering.target_context = changed
+        val changed_input = mir_unfrozen_module_input_v1(hir, changed).unwrap()
+        match lowering.lower_unfrozen_module_v1(changed_input):
+            case Ok(_): fail("retargeted session admitted")
+            case Err(message): expect(message).to_start_with("mir_module_target_rebound:")
+        expect(lowering.current_module_id).to_equal(before_module)
+        expect(lowering.fn_return_types.keys().len()).to_equal(before_returns)
+        expect(lowering.errors.len()).to_equal(before_errors)
+
+    it "preserves explicit receipts and the intentionally unbound legacy producer":
+        step("produce closed direct-call manifests through explicit and compatibility routes")
+        val hir = bound_input_hir("fn leaf(value: i64) -> i64:\n    value\n\nfn caller() -> i64:\n    leaf(5)\n")
+        val target = bound_input_target()
+        match lower_module_with_resolved_calls_for_target_v1(hir, target):
+            case Ok(first):
+                expect(validate_resolved_direct_call_manifest_v1(first.module, first.calls).closed()).to_equal(true)
+                expect(first.calls.bindings.len()).to_equal(1)
+                match lower_module_with_resolved_calls_for_target_v1(hir, target):
+                    case Ok(second): expect(second.calls.resolver_receipt_hash).to_equal(first.calls.resolver_receipt_hash)
+                    case Err(message): fail(message)
+            case Err(message): fail(message)
+        match lower_module_with_resolved_calls_v1(hir):
+            case Ok(legacy):
+                expect(validate_resolved_direct_call_manifest_v1(legacy.module, legacy.calls).closed()).to_equal(true)
+                expect(legacy.calls.bindings.len()).to_equal(1)
+            case Err(message): fail(message)
+        val unknown = mir_target_context_from("", "unknown", "unknown", "llvm", -1)
+        match lower_module_with_resolved_calls_for_target_v1(hir, unknown):
+            case Ok(_): fail("explicit producer accepted unresolved context")
+            case Err(message): expect(message).to_start_with("mir_module_target_unresolved:")
