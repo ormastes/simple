@@ -226,3 +226,12 @@ SLANG_LIVE=1 SLANG_GPU=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi
 - Specs: `test/01_unit/lib/gc_async_mut/slang/model_executor/pure/tensor_ops_rocm_spec.spl`, `test/03_system/lib/slang/feature/slang_pure_rocm_ops_spec.spl` (skip with reason when `C:\Program Files\AMD\ROCm\7.2\bin` DLLs are absent).
 - Weights go to the device as raw F32 bytes (`rocm_tensor_upload_f32_bytes`, ranges from `pure_weights_f32_ranges`): the 32000x288 head uploads in ~23 ms (was ~330 s with per-element f64->f32 staging). Downloads are bulk bytes but decoded per element in the seed interpreter (~2 s for 32000 values), so keep reductions such as argmax on device. `hip_compute.spl` declares no `rt_*` externs (libc malloc/memcpy via `spl_wffi_*`, reads via `sffi.raw_bytes`). `SLANG_ROCM_BIN` overrides the ROCm bin dir.
 - **Windows memory probe.** `mem_available_bytes()` uses `Win32_PerfFormattedData_PerfOS_Memory.AvailableBytes` (free+standby), not `FreePhysicalMemory`, which collapses after reading big model files and falsely refuses loads (`doc/08_tracking/bug/slang_windows_mem_available_uses_free_not_available_2026-11-15.md`). Runtime overhead in admission is a flat 6 GiB (`llm_engine.spl:219`).
+## Multimodal input (image / audio / video; in progress, 2026-11-15)
+
+- **Protocol (done):** `protocol.chat_messages_parse` keeps typed `ChatPart`s
+  (`text`/`image`/`audio`/`video`); `image_url`/`input_audio`/`video_url` data
+  URLs are strict-base64 checked, `http(s)` URLs are 400 `unsupported_media_url`.
+  Media parts are never dropped: `serving_chat.media_refusal` answers 400
+  `unsupported_modality` unless the resident model can take them. Each media part
+  becomes `SLANG_MEDIA_MARKER` (`<__media__>`) in the chat frame.
+- **Video:** refused with a clear error (no decoder, no ffmpeg subprocess).

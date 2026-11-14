@@ -20,11 +20,11 @@
 #   - no backend built -> 503, naming the library that is absent
 #   - will not fit     -> 503, naming the arithmetic that refused it
 
-use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, parse_chat_request, openai_error_response, openai_chat_completion_response, chat_messages_from_body}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, ChatMessage, parse_chat_request, openai_error_response, openai_chat_completion_response, chat_messages_from_body, chat_messages_parse}
 use std.gc_async_mut.slang.entrypoints.openai.serving_models.{SlangModelEntry, discover_models, find_model}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel, scan_model_root}
 use std.gc_async_mut.slang.engine.llm_engine.{engine_backend_available, engine_complete_chat, engine_lib_path}
-use std.gc_async_mut.slang.model_executor.backend.{chat_frame}
+use std.gc_async_mut.slang.model_executor.backend.{chat_frame, SLANG_MEDIA_MARKER}
 
 # The most advanced phase of slang's OWN engine that is actually present.
 # Unchanged at A1, deliberately: the ggml backend routes AROUND the native
@@ -72,24 +72,63 @@ fn engine_refusal_response(model: text, reason: text) -> ApiResponse:
 # and the running history (an agent tool loop does both) must have the model
 # see all of it. Requests with no readable content are refused rather than
 # served an empty prompt, which a model would answer with plausible noise.
-fn chat_frames_from_body(body: text) -> text:
+# Each media part becomes one SLANG_MEDIA_MARKER at its place in the message,
+# so a model that can take the medium sees it exactly where the client put it.
+# A message holding only media is readable: the marker is its content.
+fn chat_frames_from_messages(messages: [ChatMessage]) -> text:
     var framed = ""
     var readable = false
-    for message in chat_messages_from_body(body):
-        if message.content.trim() != "":
+    for message in messages:
+        var content = ""
+        for part in message.parts:
+            if part.kind == "text":
+                content = content + part.text
+            else:
+                content = content + SLANG_MEDIA_MARKER
+        if content.trim() != "":
             readable = true
-        framed = framed + chat_frame(message.role, message.content)
+        framed = framed + chat_frame(message.role, content)
     if readable:
         framed
     else:
         ""
+
+fn chat_frames_from_body(body: text) -> text:
+    chat_frames_from_messages(chat_messages_from_body(body))
+
+fn _unsupported_modality(message: text) -> ApiResponse:
+    openai_error_response(400, message, "invalid_request_error", "unsupported_modality", "")
+
+# Refuses media the served model cannot take, BEFORE any generation: answering
+# such a request as text-only would be a fabricated answer about an image or a
+# recording the model never saw. Ok means every part can be served.
+fn media_refusal(model_id: text, messages: [ChatMessage]) -> Result<(), ApiResponse>:
+    var video = 0
+    var media = 0
+    for message in messages:
+        for part in message.parts:
+            if part.kind == "video":
+                video = video + 1
+            elif part.kind != "text":
+                media = media + 1
+    if video > 0:
+        return Err(_unsupported_modality("video input is not supported by this slang build: slang has no video container decoder of its own and does not run external tools such as ffmpeg/ffprobe; send sampled frames as image_url parts instead"))
+    if media > 0:
+        return Err(_unsupported_modality("model '" + model_id + "' accepts text only; the request carries " + media.to_text() + " image/audio part(s) and slang will not answer it as if they were absent"))
+    Ok(())
 
 fn serve_chat_completions(model_root: text, body: text) -> ApiResponse:
     match parse_chat_request(body):
         Err(reason):
             openai_error_response(400, reason, "invalid_request_error", "invalid_request", "")
         Ok(request):
-            val framed = chat_frames_from_body(body)
+            var messages: [ChatMessage] = []
+            match chat_messages_parse(body):
+                Err(error):
+                    return openai_error_response(400, error.message, "invalid_request_error", error.code, "")
+                Ok(parsed):
+                    messages = parsed
+            val framed = chat_frames_from_messages(messages)
             if framed == "":
                 return openai_error_response(400, "no readable message content in the request", "invalid_request_error", "invalid_request", "")
             # A native slang pack is answered by the pack-aware refusal, which
@@ -103,6 +142,10 @@ fn serve_chat_completions(model_root: text, body: text) -> ApiResponse:
                     found = m
             if found == nil:
                 return model_not_found_response(request.model)
+            match media_refusal(request.model, messages):
+                Err(refusal):
+                    return refusal
+                Ok(_): ()
             match engine_complete_chat(model_root, request.model, framed, request.max_tokens):
                 Err(reason):
                     engine_refusal_response(request.model, reason)
@@ -111,4 +154,4 @@ fn serve_chat_completions(model_root: text, body: text) -> ApiResponse:
 
 export slang_implemented_phase, slang_missing_inference_phases
 export model_not_runnable_response, model_not_found_response, engine_refusal_response
-export serve_chat_completions, chat_frames_from_body
+export serve_chat_completions, chat_frames_from_body, chat_frames_from_messages, media_refusal
