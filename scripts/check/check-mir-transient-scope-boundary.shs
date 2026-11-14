@@ -223,8 +223,8 @@ scan_tree() {
         _semantic=${_pair%%:*}
         _raw=${_pair#*:}
         _semantic_body=$(awk -v name="${_semantic}" '
-            $0 ~ "^fn " name "[<(]" { inbody = 1; next }
-            inbody && /^fn / { exit }
+            $0 ~ "^(pub )?fn " name "[<(]" { inbody = 1; next }
+            inbody && /^(pub )?fn / { exit }
             inbody && /^[^ #]/ { exit }
             inbody && /^[[:space:]]*(#|$)/ { next }
             inbody { sub(/^[[:space:]]*/, ""); print }
@@ -237,8 +237,8 @@ scan_tree() {
 
     _checked=$((_checked + 1))
     _release_body=$(awk '
-        /^fn promote_and_release_transient_owner_roots[<(]/ { inbody = 1; next }
-        inbody && /^fn / { exit }
+        /^(pub )?fn promote_and_release_transient_owner_roots[<(]/ { inbody = 1; next }
+        inbody && /^(pub )?fn / { exit }
         inbody && /^[^ #]/ { exit }
         inbody && /^[[:space:]]*(#|$)/ { next }
         inbody { sub(/^[[:space:]]*/, ""); print }
@@ -623,6 +623,19 @@ EOF
     sed '/^    bootstrap_mir_store_discard_pending()/d; /^    val ended = transient_array_scope_end_v1()/a\
     bootstrap_mir_store_discard_pending()' "${_tmp}/modern/${LOWER_REL}" > "${_tmp}/late_pending_discard/${LOWER_REL}"
 
+    # Public visibility does not change the sanctioned runtime forwarding body.
+    # A following public helper must delimit extraction, and visibility must
+    # never hide a missing release inside the helper under inspection.
+    cp -R "${_tmp}/modern" "${_tmp}/public_sffi"
+    sed 's/^fn /pub fn /' "${_tmp}/modern/${SFFI_REL}" > "${_tmp}/public_sffi/${SFFI_REL}"
+    cat >> "${_tmp}/public_sffi/${SFFI_REL}" <<'EOF'
+
+pub fn unrelated_public_helper() -> bool:
+    false
+EOF
+    cp -R "${_tmp}/public_sffi" "${_tmp}/public_sffi_nofree"
+    sed '/rt_array_free(roots)/d' "${_tmp}/public_sffi/${SFFI_REL}" > "${_tmp}/public_sffi_nofree/${SFFI_REL}"
+
     # Fixture F: empty tree. Must check 0 invariants so the caller ERRORs.
     _mk "${_tmp}/empty"
     rm -f "${_tmp}/empty/${DRIVER_REL}" "${_tmp}/empty/${LOWER_REL}"
@@ -658,6 +671,8 @@ EOF
     for _shape in rawowner missingtext missingnested newfield earlysuccess nofree latepush broken_sffi; do
         _expect "${_shape}" fail
     done
+    _expect public_sffi pass
+    _expect public_sffi_nofree fail
     _expect modern pass
     _expect duplicate_root pass
     _expect duplicate_root_nofree fail
@@ -692,7 +707,7 @@ done
 # Selftest is unconditional and fatal, exactly like the sibling guards.
 selftest
 if [ "${SELFTEST_ONLY}" = "1" ]; then
-    echo "PASS — 33 selftest fixture(s) checked, scanner rejects unscoped lowering, invalid cleanup/SFFI forwarding, and incomplete owner inventories"
+    echo "PASS — 35 selftest fixture(s) checked, scanner rejects unscoped lowering, invalid cleanup/SFFI forwarding, and incomplete owner inventories"
     exit 0
 fi
 
