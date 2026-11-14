@@ -12,12 +12,18 @@
 #                  keybindings: [{command, key, when}],
 #                  themes: [{id, label, ui_theme, path}],
 #                  debug_adapters: [{id, label, program}]}
+# Schema "simple.ide.extension/2" additionally allows (v2 only) under contributes:
+#                  view_containers: [{id, title, location, order}],
+#                  views: [{id, kind, container, provider}],
+#                  panels: [{id, kind, default_dock}],
+#                  status_items: [{id, priority}]
 #
 # All decode problems are collected into diagnostics (no first-error abort).
 # Legacy quote-style manifests (flat "name"/"version"/"main" JSON-ish files)
 # still load through a compatibility scraper.
 #
 # Provides: ExtensionManifestLoad, extension_manifest_schema_id,
+#           extension_manifest_schema_id_v2,
 #           extension_manifest_decode, extension_manifest_load,
 #           extension_manifest_load_with_diagnostics.
 
@@ -31,6 +37,11 @@ use std.io_runtime.{file_read}
 
 fn extension_manifest_schema_id() -> text:
     "simple.ide.extension/1"
+
+# Additive v2: adds view_containers, views, panels, status_items under
+# `contributes`; v1 manifests decode unchanged.
+fn extension_manifest_schema_id_v2() -> text:
+    "simple.ide.extension/2"
 
 # Result of decoding one manifest: the typed model plus every diagnostic
 # collected on the way. `ok` is true when the manifest is usable (has a name).
@@ -111,8 +122,8 @@ fn _extension_manifest_decode_v1(root: SdnValue, spans: Dict<text, SdnSpan>, par
 
     # extension section
     val schema = _req_text(root, "extension.schema", issues)
-    if schema != "" and schema != extension_manifest_schema_id():
-        issues.add("extension.schema", "unsupported schema '" + schema + "' (expected '" + extension_manifest_schema_id() + "')")
+    if schema != "" and schema != extension_manifest_schema_id() and schema != extension_manifest_schema_id_v2():
+        issues.add("extension.schema", "unsupported schema '" + schema + "' (expected '" + extension_manifest_schema_id() + "' or '" + extension_manifest_schema_id_v2() + "')")
     m.schema_version = schema
 
     val id = _req_text(root, "extension.id", issues)
@@ -173,6 +184,12 @@ fn _extension_manifest_decode_v1(root: SdnValue, spans: Dict<text, SdnSpan>, par
     m.contributes_keybindings = _decode_keybindings(root, issues)
     m.contributes_themes = _decode_themes(root, issues)
     m.contributes_debug_adapters = _decode_debug_adapters(root, issues)
+    _check_contribution_sections(root, schema, issues)
+    if schema == extension_manifest_schema_id_v2():
+        m.contributes_view_containers = _decode_view_containers(root, issues)
+        m.contributes_views = _decode_views(root, m.contributes_view_containers, issues)
+        m.contributes_panels = _decode_panels(root, issues)
+        m.contributes_status_items = _decode_status_items(root, issues)
 
     val located = _locate_with_parents(issues, spans)
     var merged: [SdnDecodeIssue] = []
@@ -299,6 +316,131 @@ fn _decode_debug_adapters(root: SdnValue, issues: SdnDecodeIssues) -> [Extension
                 _merge_item_issues(issues, sub, "contributes.debug_adapters", idx)
                 if id != "":
                     out.push(ExtensionDebugAdapterManifest(id: id, label: label, program: program))
+                idx = idx + 1
+        case None:
+            pass_do_nothing
+    out
+
+# ---- v2 contributions -------------------------------------------------------
+
+fn _text_in(items: [text], s: text) -> bool:
+    for it in items:
+        if it == s:
+            return true
+    false
+
+# Every key under `contributes` must be a known section; v2-only sections are
+# an error unless the manifest declares the v2 schema.
+fn _check_contribution_sections(root: SdnValue, schema: text, issues: SdnDecodeIssues):
+    val v1_sections = ["commands", "languages", "custom_editors", "keybindings", "themes", "debug_adapters"]
+    val v2_sections = ["view_containers", "views", "panels", "status_items"]
+    match sdn_get_dict(root, "contributes", issues):
+        case Some(d):
+            for key in d.keys():
+                if _text_in(v1_sections, key):
+                    pass_do_nothing
+                elif _text_in(v2_sections, key):
+                    if schema != extension_manifest_schema_id_v2():
+                        issues.add("contributes." + key, "section '" + key + "' requires schema '" + extension_manifest_schema_id_v2() + "' (manifest declares '" + schema + "')")
+                else:
+                    issues.add("contributes." + key, "unknown contribution section '" + key + "'")
+        case None:
+            pass_do_nothing
+
+fn _decode_view_containers(root: SdnValue, issues: SdnDecodeIssues) -> [ExtensionViewContainer]:
+    var out: [ExtensionViewContainer] = []
+    var seen: [text] = []
+    match sdn_get_array(root, "contributes.view_containers", issues):
+        case Some(items):
+            var idx = 0
+            for item in items:
+                val sub = SdnDecodeIssues.new()
+                val id = _req_text(item, "id", sub)
+                val title = _opt_text(item, "title", sub)
+                val location = _req_text(item, "location", sub)
+                val order = _opt_int(item, "order", sub, 0)
+                _merge_item_issues(issues, sub, "contributes.view_containers", idx)
+                if id != "":
+                    if _text_in(seen, id):
+                        issues.add("contributes.view_containers." + idx.to_text() + ".id", "duplicate view container id '" + id + "'")
+                    else:
+                        seen.push(id)
+                        out.push(ExtensionViewContainer(id: id, title: if title == "" then id else: title, location: location, order: order))
+                idx = idx + 1
+        case None:
+            pass_do_nothing
+    out
+
+fn _decode_views(root: SdnValue, containers: [ExtensionViewContainer], issues: SdnDecodeIssues) -> [ExtensionView]:
+    var out: [ExtensionView] = []
+    var seen: [text] = []
+    match sdn_get_array(root, "contributes.views", issues):
+        case Some(items):
+            var idx = 0
+            for item in items:
+                val sub = SdnDecodeIssues.new()
+                val id = _req_text(item, "id", sub)
+                val kind = _req_text(item, "kind", sub)
+                val container = _req_text(item, "container", sub)
+                val provider = _req_text(item, "provider", sub)
+                _merge_item_issues(issues, sub, "contributes.views", idx)
+                if id != "":
+                    var declared = false
+                    for c in containers:
+                        if c.id == container:
+                            declared = true
+                    if _text_in(seen, id):
+                        issues.add("contributes.views." + idx.to_text() + ".id", "duplicate view id '" + id + "'")
+                    elif container != "" and not declared:
+                        issues.add("contributes.views." + idx.to_text() + ".container", "view '" + id + "' names undeclared view container '" + container + "'")
+                    else:
+                        seen.push(id)
+                        out.push(ExtensionView(id: id, kind: kind, container: container, provider: provider))
+                idx = idx + 1
+        case None:
+            pass_do_nothing
+    out
+
+fn _decode_panels(root: SdnValue, issues: SdnDecodeIssues) -> [ExtensionPanel]:
+    var out: [ExtensionPanel] = []
+    var seen: [text] = []
+    match sdn_get_array(root, "contributes.panels", issues):
+        case Some(items):
+            var idx = 0
+            for item in items:
+                val sub = SdnDecodeIssues.new()
+                val id = _req_text(item, "id", sub)
+                val kind = _req_text(item, "kind", sub)
+                val default_dock = _opt_text(item, "default_dock", sub)
+                _merge_item_issues(issues, sub, "contributes.panels", idx)
+                if id != "":
+                    if _text_in(seen, id):
+                        issues.add("contributes.panels." + idx.to_text() + ".id", "duplicate panel id '" + id + "'")
+                    else:
+                        seen.push(id)
+                        out.push(ExtensionPanel(id: id, kind: kind, default_dock: default_dock))
+                idx = idx + 1
+        case None:
+            pass_do_nothing
+    out
+
+fn _decode_status_items(root: SdnValue, issues: SdnDecodeIssues) -> [ExtensionStatusItem]:
+    var out: [ExtensionStatusItem] = []
+    var seen: [text] = []
+    match sdn_get_array(root, "contributes.status_items", issues):
+        case Some(items):
+            var idx = 0
+            for item in items:
+                val sub = SdnDecodeIssues.new()
+                val id = _req_text(item, "id", sub)
+                val priority = _opt_int(item, "priority", sub, 0)
+                _merge_item_issues(issues, sub, "contributes.status_items", idx)
+                if id != "":
+                    if _text_in(seen, id):
+                        issues.add("contributes.status_items." + idx.to_text() + ".id", "duplicate status item id '" + id + "'")
+                    else:
+                        seen.push(id)
+                        out.push(ExtensionStatusItem(id: id, priority: priority))
                 idx = idx + 1
         case None:
             pass_do_nothing
