@@ -144,13 +144,31 @@ Seeds (release builds of this branch; `sha256` prefix): base gap-1
   1.52 s; max RSS flat (~34 MB).
 - Baseline `check-private-import-baseline.shs --prune`: 144 stale entries
   pruned (names now `pub`), 0 added.
+- Review 3 (on the merged tree, seed `c700b93e11a0`): matrix 38/40 before
+  (rows `aliascall` and `mapqualtest` red), 40/40 after; unit tests 9/9;
+  fixture matrix: the same 8 known mismatches before and after (the two
+  open bugs above plus the `t_it_lambda`/`t_decorator` fixture rows, which
+  fail for a non-visibility reason, `nv=0`), 4 new rows green; 115-spec
+  strict sweep: 0 "is not visible" refusals.
+
+Review 3 fixes (this change):
+- an env-bound function binding (notably `use m.{secret as s}`, which never
+  enters `FUNCTION_OVERLOADS`) called by name is now gated by the
+  definition's own name;
+- lambda bodies evaluated inline by builtins (`map`/`filter`/`reduce`/
+  `for_each`, Option/Result combinators, field-stored lambdas, pipeline,
+  generator) install the writer stamp (`ClosureOriginGuard::enter_closure`),
+  so a test lambda run by a src helper's `.map` is judged as the test, and a
+  product lambda run inside a test closure no longer inherits the exemption.
 
 Review follow-ups not fixed here (no regression; recorded):
 - an `as`-aliased import read as a VALUE (`use m.{secret as s}`;
   `run_cb(s)`) is not gated (the value gate keys on the name read);
-- lambdas run by collection helpers (`.map`/`.filter`, builtins, thread spawn)
-  do not install the writer stamp, so they keep the invoker as caller (the
-  pre-existing behaviour).
+- UFCS / pipeline / value fallbacks gate whatever the flat function table
+  returns for a bare name; two directories defining a same-named private
+  helper can be mis-attributed;
+- dict-indexed calls (`m["secret"]()`), owner-less definitions, other threads
+  (thread-local registry) and an unknown entry file stay fail-open.
 
 ## Pair list
 
