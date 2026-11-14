@@ -1,3 +1,4 @@
+use compiler.common.cache.visibility_manifest_inventory_v1.{visibility_manifest_inventory_maps_v1}
 # Snapshot and canonical inventory authority shared by public compiler routes.
 # This seam does not import the driver or the package-module index.
 use app.io.env_ops.{env_get, env_set, env_unset}
@@ -256,7 +257,15 @@ fn compiler_source_authority_acquire_v1(
         inventory_trace_cost_emit_v1(trace_token, cost)
         return compiler_source_authority_invalid_v1(refresh.reason)
     val snapshot_started = scv_cost_now_v1(cost)
-    val snapshot = scv_compile_snapshot_acquire_cost_v2(root, cache_root, selectors, cost)
+    # A file selector's implicit directory metadata is part of the frozen
+    # input, while the original source_roots retain their routing identity.
+    # Read the already sealed generation; never probe live existence here.
+    val manifest_selectors = compiler_source_authority_file_manifests_v1(
+        cache_root, selectors, refresh.inventory_digest, refresh.inventory_generation)
+    if manifest_selectors.is_err():
+        inventory_trace_cost_emit_v1(trace_token, cost)
+        return compiler_source_authority_invalid_v1(manifest_selectors.unwrap_err())
+    val snapshot = scv_compile_snapshot_acquire_cost_v2(root, cache_root, manifest_selectors.unwrap(), cost)
     if cost != nil: cost!.snapshot_ns = scv_cost_elapsed_v1(cost, snapshot_started)
     if not snapshot.valid:
         inventory_trace_cost_emit_v1(trace_token, cost)
@@ -366,3 +375,48 @@ fn compiler_source_authority_publish_v1(authority: CompilerSourceAuthorityV1) ->
     if not published:
         compiler_source_authority_clear_v1()
     published
+
+# Authenticated maps for manifest ancestor reads. The complete source inventory
+# proves absence; the selected snapshot map proves each positive is frozen.
+pub fn compiler_source_authority_visibility_maps_v1(root: text,
+        authority: CompilerSourceAuthorityV1) -> Result<(Dict<text, text>, Dict<text, text>), text>:
+    val validated = compiler_source_authority_inventory_manifest_v1(root, authority)
+    if validated.is_err(): return Err(validated.unwrap_err())
+    val (inventory, manifest) = validated.unwrap()
+    visibility_manifest_inventory_maps_v1(authority.snapshot.snapshot_root, inventory, manifest)
+
+export compiler_source_authority_visibility_maps_v1
+
+# Only canonical directory-complete event families can supply negative sibling
+# observations today. Extra-family selectors need a durable coverage receipt.
+pub fn compiler_source_authority_file_manifest_selectors_v1(selectors: [text],
+        inventory: CompileSourceInventoryV1) -> [text]:
+    var present: Dict<text, bool> = {}
+    for entry in inventory.entries: present[entry.source_identity] = true
+    var selected: [text] = []
+    for selector in selectors: selected.push(selector)
+    for selector in selectors:
+        if not selector.ends_with(".spl") or compiler_inventory_family_v1(selector) == "": continue
+        val parts = selector.split("/")
+        if parts.len() < 2: continue
+        var parent: [text] = []
+        for index in 0..parts.len() - 1: parent.push(parts[index])
+        val candidate = parent.join("/") + "/__init__.spl"
+        if present.contains_key(candidate) and not selected.contains(candidate):
+            selected.push(candidate)
+    selected
+
+fn compiler_source_authority_file_manifests_v1(cache_root: text, selectors: [text],
+        digest: text, generation: i64) -> Result<[text], text>:
+    var needs_manifest = false
+    for selector in selectors:
+        if selector.ends_with(".spl") and compiler_inventory_family_v1(selector) != "":
+            needs_manifest = true
+    if not needs_manifest: return Ok(selectors)
+    val opened = compile_source_inventory_read_at_pointer_v1(cache_root, digest)
+    if not opened.valid or opened.inventory == nil or opened.digest != digest or
+            opened.inventory!.generation != generation:
+        return Err("visibility-manifest-selector-generation-invalid")
+    Ok(compiler_source_authority_file_manifest_selectors_v1(selectors, opened.inventory!))
+
+export compiler_source_authority_file_manifest_selectors_v1

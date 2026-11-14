@@ -1,3 +1,4 @@
+use compiler.common.cache.visibility_manifest_inventory_v1.{visibility_manifest_inventory_maps_v1}
 use compiler.driver.driver_build.native_entry_closure_receipt.*
 use std.scv.compile_snapshot.{ScvCompileSnapshotV1, scv_compile_snapshot_open_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_snapshot_cache_root_v1,
@@ -174,3 +175,29 @@ pub fn native_entry_closure_handoff_take_v1() -> NativeEntryClosureRequestV1?:
     val request = _g_native_entry_closure_handoff[0]
     _g_native_entry_closure_handoff = []
     Some(request)
+
+# Called after request admission. Reopen the pinned generation, never CURRENT,
+# and verify the snapshot before producing a complete absence universe.
+pub fn native_entry_closure_visibility_maps_v1(request: NativeEntryClosureRequestV1
+) -> Result<(Dict<text, text>, Dict<text, text>), text>:
+    val snapshot = request.snapshot
+    if not snapshot.valid or request.binding.inventory_digest != snapshot.inventory_digest or
+            request.binding.revision != snapshot.revision_id or request.binding.commit != snapshot.commit_id or
+            request.binding.tree != snapshot.tree_id:
+        return Err("visibility-manifest-request-binding-invalid")
+    val cache_root = compile_source_inventory_snapshot_cache_root_v1(
+        request.source_root, snapshot.snapshot_root, snapshot.revision_id)
+    if cache_root == "": return Err("visibility-manifest-inventory-owner-invalid")
+    val opened = compile_source_inventory_read_at_pointer_v1(cache_root, request.source_digest)
+    if not opened.valid or opened.inventory == nil or opened.digest != request.source_digest or
+            opened.inventory!.generation != request.generation:
+        return Err("visibility-manifest-inventory-generation-invalid")
+    val manifest = file_read_regular_no_follow_bounded(
+        snapshot.snapshot_root + "/SCV_COMPILE_INVENTORY", 256 * 1024 * 1024)
+    if manifest.is_err(): return Err("visibility-manifest-inventory-unreadable")
+    val bytes = manifest.unwrap()
+    if sha256_text(bytes) != snapshot.inventory_digest or bytes.split("\n").len() != snapshot.inventory_count:
+        return Err("visibility-manifest-snapshot-inventory-changed")
+    visibility_manifest_inventory_maps_v1(snapshot.snapshot_root, opened.inventory!, bytes)
+
+export native_entry_closure_visibility_maps_v1

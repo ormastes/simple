@@ -1,0 +1,92 @@
+use compiler.common.source_inventory_families_v1.{compiler_inventory_family_v1}
+# Source observations. A complete readset is issued only by an authenticated
+# inventory owner; neither an empty list nor live filesystem absence is proof.
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+
+pub struct VisibilityManifestReadV1:
+    source_path: text
+    directory_path: text
+    manifest_path: text
+    exists: bool
+    content_sha256: text
+    snapshot_id: text
+
+# Reference owner keeps evidence alive across streaming source record rebuilds.
+pub class VisibilityManifestEvidenceV1:
+    root: text = ""
+    snapshot_id: text = ""
+    complete: bool = false
+    reason: text = "authority-unavailable"
+    reads: [VisibilityManifestReadV1] = []
+
+pub fn visibility_manifest_path_valid_v1(path: text) -> bool:
+    if path == "" or path.contains("\\") or path.contains("\n") or path.contains("\r"):
+        return false
+    if path.ends_with("/"): return false
+    var relative_start = if path.starts_with("//"): 2 else: 1
+    if not path.starts_with("/"):
+        if path.byte_len() < 4 or path.substring(1, 3) != ":/" or
+                not "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".contains(path.substring(0, 1)):
+            return false
+        relative_start = 3
+    for part in path.substring(relative_start).split("/"):
+        if part == "" or part == "." or part == "..": return false
+    true
+
+pub fn visibility_manifest_parent_v1(path: text) -> text:
+    val pieces = path.split("/")
+    if pieces.len() < 3: return ""
+    var parent: [text] = []
+    for index in 0..pieces.len() - 1: parent.push(pieces[index])
+    parent.join("/")
+
+# Pure projection under a caller-owned complete inventory. Both maps use exact
+# canonical absolute spelling. `inventory` is the complete source universe;
+# `selected` only proves positive membership in this frozen compilation.
+# Overlapping declared roots choose the outer root so adding a nested source
+# selector cannot silently discard an already observed ancestor.
+pub fn visibility_manifest_reads_v1(source: text, snapshot_root: text,
+        roots: [text], snapshot_id: text, inventory: Dict<text, text>,
+        selected: Dict<text, text>) -> Result<VisibilityManifestEvidenceV1, text>:
+    if not visibility_manifest_path_valid_v1(source) or
+            not visibility_manifest_path_valid_v1(snapshot_root) or snapshot_id == "" or
+            not source.starts_with(snapshot_root + "/") or not selected.contains_key(source):
+        return Err("visibility-manifest-source-binding-invalid")
+    if not inventory.contains_key(source) or inventory[source] != selected[source] or
+            not builder_digest_valid_v1(selected[source]):
+        return Err("visibility-manifest-source-inventory-mismatch")
+    var declared_root = ""
+    for candidate in roots:
+        if not visibility_manifest_path_valid_v1(candidate) or
+                not candidate.starts_with(snapshot_root + "/"):
+            return Err("visibility-manifest-root-invalid")
+        val root = if candidate.ends_with(".spl"): visibility_manifest_parent_v1(candidate) else: candidate
+        if source.starts_with(root + "/") and (declared_root == "" or root.len() < declared_root.len()):
+            declared_root = root
+    if declared_root == "": return Err("visibility-manifest-source-root-missing")
+    # Canonical event families are directory-complete by their inventory
+    # owner contract. Extra file/directory selectors currently carry no sealed
+    # coverage receipt: their missing rows are unknown, never negative proof.
+    if declared_root == snapshot_root or compiler_inventory_family_v1(
+            declared_root.substring(snapshot_root.byte_len() + 1)) == "":
+        return Ok(VisibilityManifestEvidenceV1(root: declared_root,
+            snapshot_id: snapshot_id, complete: false, reason: "extra-family-coverage-unproven", reads: []))
+    var reads: [VisibilityManifestReadV1] = []
+    var directory = visibility_manifest_parent_v1(source)
+    while directory != "":
+        val manifest = directory + "/__init__.spl"
+        val present = inventory.contains_key(manifest)
+        var digest = ""
+        if present:
+            digest = inventory[manifest]
+            if not builder_digest_valid_v1(digest) or not selected.contains_key(manifest) or selected[manifest] != digest:
+                return Err("visibility-manifest-present-source-not-selected:" + manifest)
+        reads.push(VisibilityManifestReadV1(source, directory, manifest, present, digest, snapshot_id))
+        if directory == declared_root:
+            return Ok(VisibilityManifestEvidenceV1(root: declared_root,
+                snapshot_id: snapshot_id, complete: true, reason: "ok", reads: reads))
+        directory = visibility_manifest_parent_v1(directory)
+    Err("visibility-manifest-root-not-reached")
+
+export VisibilityManifestReadV1, VisibilityManifestEvidenceV1
+export visibility_manifest_reads_v1, visibility_manifest_parent_v1, visibility_manifest_path_valid_v1
