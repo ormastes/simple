@@ -10,6 +10,9 @@ use std.tooling.easy_fix.types.{FixConfidence, Replacement, EasyFix}
 use std.tooling.easy_fix.*
 use compiler.semantics.lint.primitive_types.{bare_primitive_types}
 use compiler.tools.fix.rules.impl_.lint_allow.{lines_allow_rule, line_is_allowed}
+use std.common.diagnostics.diagnostic_v1.{DiagnosticFix, FixApplicability, FixPrecondition}
+use std.common.diagnostics.diagnostic_v1.{FixConfidence as DiagFixConfidence}
+use std.common.diagnostics.span.{Span}
 
 struct PrimitiveApiAuditEntry:
     file: text
@@ -99,8 +102,8 @@ fn primitive_api_audit_report(source: text, file: text) -> text:
     out
 
 # One primitive_api finding: exact span of the offending type token.
-# There is no fix — the help text names the migration; a replacement that
-# rewrote the line with itself used to be offered as an EasyFix (no-op).
+# `fixes` holds ranked semantic-type rewrites of that token (possibly none);
+# the no-op same-line EasyFix this rule used to offer is gone for good.
 pub struct PrimitiveApiFinding:
     code: text
     file: text
@@ -113,6 +116,7 @@ pub struct PrimitiveApiFinding:
     end: i64
     message: text
     help: text
+    fixes: [DiagnosticFix]
 
 # Single owner of primitive_api detection. The lint driver consumes this
 # directly; the EasyFix producers no longer carry the rule (nothing to apply).
@@ -177,7 +181,7 @@ pub fn primitive_api_findings(file: text, lines: [text]) -> [PrimitiveApiFinding
                 val param_name = _extract_param_name(param)
                 val colon = param.find(":")
                 val ty_col = seg_start + colon + 1 + _leading_ws_len(param.slice(colon + 1))
-                val f = _finding(file, "{item_name}.param.{param_name}", param_type,
+                val f = _finding(file, "{item_name}.param.{param_name}", param_name, param_type,
                     line_num, indent + ty_col, line_start,
                     "public API parameter '{param_name}' of '{item_name}' uses bare primitive type '{param_type}'")
                 out = _push_unique(out, seen, f)
@@ -187,7 +191,7 @@ pub fn primitive_api_findings(file: text, lines: [text]) -> [PrimitiveApiFinding
         if _is_bare_primitive_type(return_type):
             val arrow = trimmed.find("->")
             val ty_col = arrow + 2 + _leading_ws_len(trimmed.slice(arrow + 2))
-            val f = _finding(file, "{item_name}.return", return_type,
+            val f = _finding(file, "{item_name}.return", item_name, return_type,
                 line_num, indent + ty_col, line_start,
                 "public API return type of '{item_name}' uses bare primitive type '{return_type}'")
             out = _push_unique(out, seen, f)
@@ -196,8 +200,11 @@ pub fn primitive_api_findings(file: text, lines: [text]) -> [PrimitiveApiFinding
     out
 
 # col0 = 0-based byte column of the type token within its line.
-fn _finding(file: text, type_path: text, ty: text, line: i64, col0: i64, line_start: i64, message: text) -> PrimitiveApiFinding:
+# `name` is the parameter name (or the fn name for a return type); it selects
+# the semantic-type candidates.
+fn _finding(file: text, type_path: text, name: text, ty: text, line: i64, col0: i64, line_start: i64, message: text) -> PrimitiveApiFinding:
     val symbol = type_path.slice(0, type_path.find("."))
+    val span = Span.new(line_start + col0, line_start + col0 + ty.len(), line, col0 + 1)
     PrimitiveApiFinding(
         code: "primitive_api",
         file: file,
@@ -209,8 +216,101 @@ fn _finding(file: text, type_path: text, ty: text, line: i64, col0: i64, line_st
         start: line_start + col0,
         end: line_start + col0 + ty.len(),
         message: message,
-        help: "replace '{ty}' with a semantic unit/domain type (e.g. `unit {_suggest_wrapper_name(symbol, ty)}: {ty}`), or add `@allow(primitive_api)` with a reason at an ABI/math boundary"
+        help: "replace '{ty}' with a semantic unit/domain type (e.g. `unit {_suggest_wrapper_name(symbol, ty)}: {ty}`), or add `@allow(primitive_api)` with a reason at an ABI/math boundary",
+        fixes: _ranked_type_fixes(file, type_path, name, ty, span)
     )
+
+# --- Ranked semantic-type fixes (plan 2026-11-12 §5, fix rule 3) -----------
+# Each row: [comma-separated names, type, wrapped repr, module]. Only existing
+# semantic types are listed. Names match exactly (no fuzzy guessing); a name
+# outside the table yields no fix, only the help text. Row order is the
+# tie-break, so a name listed in several rows is ranked deterministically.
+fn _semantic_type_table() -> [[text]]:
+    [["port,port_number", "PortNumber", "i32", "std.common.types"],
+     ["offset,pos,position,byte_offset", "Offset", "i64", "std.common.types"],
+     ["size,byte_size,size_bytes,nbytes", "ByteSize", "i64", "std.common.types"],
+     ["len,length,size", "Length", "i64", "std.common.types"],
+     ["capacity,cap", "Capacity", "i64", "std.common.types"],
+     ["count", "Count", "i64", "std.common.types"],
+     ["ms,millis,timeout_ms,delay_ms,duration_ms,elapsed_ms,budget_ms", "Millis", "i64", "std.common.types"],
+     ["ms,millis,timeout_ms,delay_ms,duration_ms,elapsed_ms,budget_ms", "DurationMs", "i32", "std.common.types"],
+     ["ns,nanos,elapsed_ns,duration_ns", "Nanos", "i64", "std.common.types"],
+     ["timestamp,ts", "Timestamp", "i64", "std.common.types"],
+     ["line,line_no,lineno,line_number", "LineNumber", "i64", "std.common.types"],
+     ["col,column,column_number", "ColumnNumber", "i64", "std.common.types"],
+     ["pid,process_id", "ProcessId", "i64", "std.common.types"],
+     ["exit_code", "ExitCode", "i64", "std.common.types"],
+     ["error_code,errno", "ErrorCode", "i64", "std.common.types"],
+     ["addr,address,mem_addr", "MemAddr", "i64", "std.common.types"],
+     ["inode,ino", "Inode", "u64", "std.nogc_sync_mut.fs_driver.types"],
+     ["file_handle,fh", "FileHandle", "u64", "std.nogc_sync_mut.fs_driver.types"],
+     ["rate,hit_rate", "HitRate", "f64", "std.common.types"]]
+
+fn _primitive_family(ty: text) -> text:
+    if ty == "f32" or ty == "f64":
+        return "float"
+    if ty.starts_with("i") or ty.starts_with("u"):
+        return "int"
+    ""
+
+fn _name_in_csv(name: text, csv: text) -> bool:
+    for n in csv.split(","):
+        if n == name:
+            return true
+    false
+
+# Candidates for `name: ty`: same numeric family only; rows whose wrapped
+# repr equals `ty` rank first, then the rest, each group in table order.
+fn _semantic_type_candidates(name: text, ty: text) -> [[text]]:
+    val family = _primitive_family(ty)
+    var exact: [[text]] = []
+    var other: [[text]] = []
+    if family == "":
+        return exact
+    for row in _semantic_type_table():
+        if not _name_in_csv(name, row[0]) or _primitive_family(row[2]) != family:
+            continue
+        if row[2] == ty:
+            exact.push(row)
+        else:
+            other.push(row)
+    for row in other:
+        exact.push(row)
+    exact
+
+# Every candidate changes the public signature and so every caller, and the
+# rewrite here is the type token only (no caller/import edits). Plan §5 fix
+# rule 3 asks for "ranked candidates, full cross-file edits, check call
+# sites/overloads", so these are Uncertain + review_required: never applied
+# automatically and never promoted to the legacy single `fix` alias.
+fn _ranked_type_fixes(file: text, type_path: text, name: text, ty: text, span: Span) -> [DiagnosticFix]:
+    var fixes: [DiagnosticFix] = []
+    var rank = 0
+    for row in _semantic_type_candidates(name, ty):
+        rank = rank + 1
+        val target = row[1]
+        val repr_note = if row[2] == ty: "wraps {ty}" else: "wraps {row[2]}, not {ty}: check value range"
+        var fix = DiagnosticFix.new(
+            "L:primitive_api:{type_path}:{rank}:{target}",
+            "replace '{ty}' with '{target}' ({repr_note}); import {target} from {row[3]} and update every caller to pass {target}(value: ...)",
+            DiagFixConfidence.Uncertain)
+        fix.title = "Use {target} for '{name}'"
+        fix.rank = rank
+        fix.applicability = FixApplicability.ReviewRequired
+        fix = fix.with_replacement(file, span, target)
+        fix.preconditions.push(FixPrecondition(file: file, span: span, expected_text: ty))
+        fixes.push(fix)
+    fixes
+
+# Lint hint: the help text plus the ranked candidates (LintDiag carries one
+# hint and one EasyFix, so the ranked list is rendered here, not applied).
+pub fn primitive_api_fix_hint(f: PrimitiveApiFinding) -> text:
+    if f.fixes.len() == 0:
+        return f.help
+    var parts: [text] = []
+    for fix in f.fixes:
+        parts.push("{fix.rank}. {fix.replacements[0].new_text}")
+    "{f.help}; ranked fixes (review required, update callers): " + parts.join(", ")
 
 fn _finding_key(f: PrimitiveApiFinding) -> text:
     "{f.code}|{f.symbol}|{f.type_path}|{f.start}|{f.end}"

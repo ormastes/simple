@@ -30,7 +30,7 @@ use app.llm_caret.workbench.key_chunker.{split_complete_keys, flush_carry, termi
 use app.llm_caret.workbench.pane_binding.{PaneBinding, PaneBindingResult, resolve_pane_binding}
 use app.llm_caret.workbench.session_contract.{SessionId, new_session_id}
 use app.llm_caret.workbench.session_source.{select_live_session, live_selected,
-    publish_pane_binding, live_pane_bindings, live_pane_generation}
+    publish_pane_binding, live_pane_bindings, live_pane_generation, observe_agent_generation}
 use app.llm_caret.pane_backend.{pane_send_raw}
 use std.common.text_bytes.{bytes_to_text}
 use std.nogc_sync_mut.cli.cli_util.{get_cli_args}
@@ -257,11 +257,22 @@ fn _cs_terminal_target(d: CsDashboard) -> (PaneBindingResult, SessionId):
     if pane == "":
         select_live_session(new_session_id("none"))
     else:
-        val sid = new_session_id(d.agents[d.selected].agent_id)
+        # The live generation comes from the restart ledger fed by this
+        # agent's pid: a restarted child is generation N+1, not a fresh 1.
+        val agent = d.agents[d.selected]
+        val gen = observe_agent_generation(agent.agent_id, agent.pid)
+        val sid = SessionId(value: agent.agent_id, generation: gen)
         select_live_session(sid)
-        publish_pane_binding(PaneBinding(session: sid, pane_id: pane, pane_generation: 1))
-    val live = live_selected()
+        publish_pane_binding(PaneBinding(session: sid, pane_id: pane, pane_generation: gen))
+    val live = _cs_live_id(d)
     (resolve_pane_binding(live_pane_bindings(), live, live_pane_generation()), live)
+
+# The selected agent's live (id, generation); "none" when nothing is selected.
+fn _cs_live_id(d: CsDashboard) -> SessionId:
+    if _cs_selected_pane(d) == "":
+        return live_selected()
+    val agent = d.agents[d.selected]
+    SessionId(value: agent.agent_id, generation: observe_agent_generation(agent.agent_id, agent.pid))
 
 # Production send: the smux primitive takes text, so the key bytes go through
 # as UTF-8 text (escape sequences and control bytes are plain ASCII).
@@ -273,6 +284,12 @@ fn _cs_send_raw(session: text, pane: text, bytes: [u8]) -> bool:
 # replayed against the new focus rather than dropped.
 fn _cs_terminal_keys(d0: CsDashboard, state0: LeaderState, focus0: KeyFocus,
         keys: [[u8]], session: text) -> (CsDashboard, LeaderState, KeyFocus, text):
+    cs_terminal_keys_via(d0, state0, focus0, keys,
+        \pane, b: _cs_send_raw(session, pane, b))
+
+# Same, with the pane send injected (production: `_cs_send_raw`).
+fn cs_terminal_keys_via(d0: CsDashboard, state0: LeaderState, focus0: KeyFocus,
+        keys: [[u8]], send: fn(text, [u8]) -> bool) -> (CsDashboard, LeaderState, KeyFocus, text):
     var d = d0
     var state = state0
     var focus = focus0
@@ -281,7 +298,7 @@ fn _cs_terminal_keys(d0: CsDashboard, state0: LeaderState, focus0: KeyFocus,
         val (binding, live) = _cs_terminal_target(d)
         val pane = _cs_selected_pane(d)
         val step = terminal_key_step(workbench_leader(), state, keys[i], binding,
-            live.value, live.generation, \b: _cs_send_raw(session, pane, b))
+            live.value, live.generation, \b: send(pane, b))
         state = step.state
         i = i + 1
         if step.status != "":
@@ -521,4 +538,4 @@ fn main() -> i64:
         return 0
     1
 
-export cs_live_input_supported, cs_run, cs_run_live, cs_live_paint, cs_session_from_args, cs_effective_size, cs_plain_io, CS_DEFAULT_SESSION
+export cs_terminal_keys_via, cs_live_input_supported, cs_run, cs_run_live, cs_live_paint, cs_session_from_args, cs_effective_size, cs_plain_io, CS_DEFAULT_SESSION

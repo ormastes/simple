@@ -1648,8 +1648,31 @@ never cache an answer computed while exhausted) —
   `display == "inline"` and not replaced. `white-space: nowrap` still
   collapses (only `pre` keeps spaces), so a nowrap cell keeps the
   inter-inline space in max-content.
-- **Trap — `max-width: <percent>` used to be N px.** The clamp slot is
-  px-only; a percentage is now `none` (residue item 18).
+- **Trap — `max-width: <percent>` used to be N px.** Percentage min-/max-
+  sizes are now the negative sentinel (like `width`) and resolve in
+  `style_with_resolved_percent_min_max`; every clamp reader tests `> 0`, so an
+  unresolved sentinel is `none`, which is what max-content needs. Resolve at
+  EACH call site against that site's containing block (normal flow, inline
+  atomic, float, abspos padding box, flex container); `layout_with_style`
+  only maps a leftover sentinel to `none`. Resolving there against the box's
+  own width was wrong everywhere it mattered: an inline input came out 16 px,
+  a float 193 instead of 200, an abspos 193 instead of 210, and
+  `td{max-width:10%}` (ignored by Chrome) shrank the cell to 13 px. A flex
+  item also needs the clamp INSIDE distribution (`flex:1;max-width:25%` of
+  400 is 100 / 300), not only on the final width.
+- **Trap — a gradient row has two painters.** The CPU raster paints a typed
+  `linear-gradient` in `fb_style_background_opacity_clip` (fb lane) AND the
+  Draw IR engine2d ramp (`emu_draw_linear_gradient_stops`); a fix in one
+  lane only is invisible or half-visible, so run each new spec row red first
+  to learn which lane it hits. Corner keywords are box-dependent: the parser
+  stores 1000 + the square angle and both lanes resolve it with
+  `gradient_corner_dir_q16`. Interpolation is premultiplied; stop positions
+  never decrease. Emit a ramp a ROW at a time (`draw_image`): one
+  `draw_rect_filled` per colour run cost the catalog `html` page 120 s.
+  Test with hex stops: `parse_color("red")` is #dc3232. The corner codes
+  (>= 1000) share the angle slot, so every real angle must be reduced to
+  0..359 first (`3turn` painted as "to top left" until it was). Ramp
+  positions multiply by 1000: keep them in i64 past ~1073 px.
 - **Trap — a UA reset needs `inherit` to exist.** Resetting the control
   font exposed that NO font property resolved the `inherit` keyword
   (`font-family: inherit` stored the literal text; `font: inherit` cleared

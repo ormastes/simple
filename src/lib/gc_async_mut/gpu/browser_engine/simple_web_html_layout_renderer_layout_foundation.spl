@@ -481,7 +481,7 @@ fn block_bottom_margin_collapses_through(nodes: [HNode], styles: [Style], i: i32
         return false
     if st.pad_b != 0 or st.border_b != 0:
         return false
-    if st.height_px != 0 or st.min_height_px != 0 or st.max_height_px != 0:
+    if st.height_px != 0 or st.min_height_px > 0 or st.max_height_px > 0:
         return false
     if st.min_height_vh or st.flex_fill:
         return false
@@ -522,7 +522,7 @@ fn block_top_margin_collapses_through(nodes: [HNode], styles: [Style], i: i32, s
         return false
     if st.pad_t != 0 or st.border_t != 0:
         return false
-    if st.height_px != 0 or st.min_height_px != 0 or st.max_height_px != 0:
+    if st.height_px != 0 or st.min_height_px > 0 or st.max_height_px > 0:
         return false
     if st.min_height_vh or st.flex_fill:
         return false
@@ -2300,6 +2300,27 @@ fn definite_content_height_limit(node: HNode, st: Style) -> i32:
         return st.min_height_px
     0
 
+# `st` with its percentage `min-` / `max-` sizes (negative sentinels, see
+# `_decl_percent_sentinel_or_length_px`) resolved to px against the
+# containing block: `containing_w` for the widths, `containing_h` for the
+# heights. A height percentage against an auto height (`containing_h <= 0`)
+# is `none` (CSS 2.2 10.7). Every reader of the clamp slots tests `> 0`, so
+# an unresolved sentinel already reads as `none` -- which is what an
+# intrinsic (max-content) contribution needs.
+fn style_with_resolved_percent_min_max(st: Style, containing_w: i32, containing_h: i32) -> Style:
+    if st.min_width_px >= 0 and st.max_width_px >= 0 and st.min_height_px >= 0 and st.max_height_px >= 0:
+        return st
+    val out = style_with_width(st, st.width_px)
+    if st.min_width_px < 0:
+        out.min_width_px = if containing_w > 0: containing_w * (0 - st.min_width_px) / 100 else: 0
+    if st.max_width_px < 0:
+        out.max_width_px = if containing_w > 0: containing_w * (0 - st.max_width_px) / 100 else: 0
+    if st.min_height_px < 0:
+        out.min_height_px = if containing_h > 0: containing_h * (0 - st.min_height_px) / 100 else: 0
+    if st.max_height_px < 0:
+        out.max_height_px = if containing_h > 0: containing_h * (0 - st.max_height_px) / 100 else: 0
+    out
+
 fn constrained_outer_width(node: HNode, st: Style, candidate_width: i32) -> i32:
     var out = candidate_width
     if st.min_width_px > 0:
@@ -2537,7 +2558,8 @@ fn constrained_outer_height(node: HNode, st: Style, candidate_height: i32) -> i3
         out = 1
     out
 
-fn absolute_outer_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, node_i: i32, parent: Style, node: HNode, st: Style, containing_w: i32) -> i32:
+fn absolute_outer_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, node_i: i32, parent: Style, node: HNode, authored_st: Style, containing_w: i32) -> i32:
+    val st = style_with_resolved_percent_min_max(authored_st, containing_w + parent.pad_l + parent.pad_r, 0)
     if st.width_px == 0 and st.left_px > 0 and st.right_px >= 0:
         val padding_box_w = containing_w + parent.pad_l + parent.pad_r
         var stretched = padding_box_w - st.left_px - st.right_px
@@ -2660,9 +2682,10 @@ fn absolute_child_y(nodes: [HNode], styles: [Style], child_i: i32, parent_y: i32
     parent_y + parent.border_t + child.top_px
 
 fn absolute_child_style(parent: Style, child: Style, containing_w: i32, containing_h: i32) -> Style:
-    var resolved_child = child
+    # Percentages of an abspos box are of the containing block's padding box.
+    val padding_box_w = containing_w + parent.pad_l + parent.pad_r
+    var resolved_child = style_with_resolved_percent_min_max(child, padding_box_w, containing_h)
     if child.width_px < 0:
-        val padding_box_w = containing_w + parent.pad_l + parent.pad_r
         val child_width_px = padding_box_w * (0 - child.width_px) / 100
         resolved_child = style_with_width(resolved_child, child_width_px)
     val child_height_px = resolve_percent_height_px(child.height_px, containing_h)
