@@ -734,6 +734,13 @@ pub fn is_registered_heap_ptr(ptr: *mut HeapHeader) -> bool {
 // would otherwise read as the accessor's default value. That miss aborts.
 // Design: doc/05_design/compiler/jit_memory/seed_jit_array_reclamation.md
 // ("Verification common to all options").
+//
+// Lockless-rule exception (doc/04_architecture/language/concurrency/
+// concurrency_architecture.md): the set is guarded by a `Mutex`. It exists
+// only when the env var is set, which is a debugging mode that is off by
+// default; with it unset the `OnceLock` holds `None` and no lock is ever
+// taken. The set is touched on `rt_array_free` and on a registry miss, never
+// on a successful lookup. Owner: seed JIT memory lane.
 
 static ARRAY_FREE_QUARANTINE: std::sync::OnceLock<Option<Mutex<HashSet<usize>>>> = std::sync::OnceLock::new();
 

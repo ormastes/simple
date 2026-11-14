@@ -2712,6 +2712,13 @@ impl<'a> MirLowerer<'a> {
     /// (`block_release_locals`) and whose `Let` stored a fresh buffer raw into
     /// the slot (`block_release_ready`). The proof guarantees the `Let` ran on
     /// this entry of the list and that nothing reads the slot afterwards.
+    ///
+    /// This is a release of a PROVEN-UNIQUE buffer, which is why a plain
+    /// `rt_array_free` is correct: no other name can hold it.
+    // TODO: [compiler][P2] if arrays become shared copy-on-write buffers,
+    // this call must become a counted release (decrement, free at zero);
+    // an unconditional free would then free a buffer another holder reads.
+    // doc/03_plan/compiler/memory_model/unified_memory_model_plan.md
     pub(super) fn emit_block_array_releases(&mut self, stmts: &[HirStmt]) -> MirLowerResult<()> {
         if !self.block_array_release || self.block_release_ready.is_empty() {
             return Ok(());

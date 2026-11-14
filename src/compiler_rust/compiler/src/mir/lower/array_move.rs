@@ -705,6 +705,10 @@ impl<'a> Analysis<'a> {
 // move source), so it is deliberately not reused here.
 
 /// Element types whose arrays hold no heap values: a shallow free is exact.
+/// `F32`/`F64` are excluded: a float entering an array is heap-boxed
+/// (`RuntimeValue::from_float`), so a shallow free would leak every box.
+/// Measured: a 2,000,000-iteration `[1.5, 2.5, 3.5]` loop peaks at 212 MB
+/// with the release against 39 MB for the empty loop.
 fn is_release_scalar(ty: TypeId) -> bool {
     matches!(
         ty,
@@ -717,8 +721,6 @@ fn is_release_scalar(ty: TypeId) -> bool {
             | TypeId::U16
             | TypeId::U32
             | TypeId::U64
-            | TypeId::F32
-            | TypeId::F64
     )
 }
 

@@ -117,14 +117,23 @@ fn p_field(h: Holder) -> i64:
         i = i + 1
     acc
 
-fn p_bool_and_float() -> i64:
+fn p_bool() -> i64:
     var i = 0
     var acc = 0
     while i < 1000:
         val b = [true, false]
-        val f = [1.5, 2.5]
         if b[0]:
             acc = acc + 1
+        i = i + 1
+    acc
+
+# Float elements are heap-boxed, so a shallow free would leak the boxes:
+# float arrays are outside the S1 allowlist and are not released.
+fn n_float() -> i64:
+    var i = 0
+    var acc = 0
+    while i < 1000:
+        val f = [1.5, 2.5]
         if f[1] > 2.0:
             acc = acc + 1
         i = i + 1
@@ -414,6 +423,36 @@ fn n_slice() -> i64:
         i = i + 1
     acc
 
+# ---- transient scope: frees inside an open scope ------------------------------
+
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+
+# Opens a scope, releases 1,000 loop locals inside it, pauses, allocates 64
+# rows the scope does not own, ends the scope, then reads the rows. A freed
+# array left in the scope's list would let scope end free a row that reused
+# its address. Returns -1 when the scope calls fail.
+fn scope_churn_then_survivors() -> i64:
+    if not rt_transient_array_scope_begin():
+        return -1
+    val churned = p_literal()
+    if not rt_transient_array_scope_pause():
+        return -1
+    var keep: [[i64]] = []
+    var i = 0
+    while i < 64:
+        keep.push([i, i + 1])
+        i = i + 1
+    if not rt_transient_array_scope_end():
+        return -1
+    var acc = 0
+    var j = 0
+    while j < 64:
+        acc = acc + keep[j][1]
+        j = j + 1
+    acc + churned + keep.len()
+
 describe "seed JIT releases proven-unique scalar array locals at block end":
     it "fresh literal: val a = [i, i + 1, i + 2]":
         step("Verify: 1,000 iterations leave the live-array count flat")
@@ -481,13 +520,13 @@ describe "seed JIT releases proven-unique scalar array locals at block end":
         expect(rt_heap_free_count() - frees >= 1000).to_equal(true)
         expect(h.xs[1]).to_equal(6)
 
-    it "bool and float element arrays":
-        step("Verify: both per-iteration arrays are released")
+    it "bool element arrays":
+        step("Verify: the per-iteration bool array is released")
         val before = live_arrays()
         val frees = rt_heap_free_count()
-        expect(p_bool_and_float()).to_equal(2000)
+        expect(p_bool()).to_equal(1000)
         expect(live_arrays() - before <= 2).to_equal(true)
-        expect(rt_heap_free_count() - frees >= 2000).to_equal(true)
+        expect(rt_heap_free_count() - frees >= 1000).to_equal(true)
 
     it "nested if body and function-level local":
         step("Verify: lists other than a loop body release too")
@@ -498,6 +537,12 @@ describe "seed JIT releases proven-unique scalar array locals at block end":
         expect(rt_heap_free_count() - frees >= 1001).to_equal(true)
 
 describe "seed JIT does not release an array that may have a second holder":
+    it "excluded element type: float arrays (boxed elements)":
+        step("Verify: 1,000 iterations still hold at least 1,000 arrays and the value is unchanged")
+        val before = live_arrays()
+        expect(n_float()).to_equal(1000)
+        expect(live_arrays() - before >= 1000).to_equal(true)
+
     it "escape form: A5 call ret":
         step("Verify: 1,000 iterations still hold at least 1,000 arrays and the value is unchanged")
         val before = live_arrays()
@@ -654,3 +699,9 @@ describe "seed JIT does not release an array that may have a second holder":
         expect(n_slice()).to_equal(499500)
         expect(live_arrays() - before >= 1000).to_equal(true)
 
+describe "seed JIT release inside an open transient scope":
+    it "frees in the scope, allocates under pause, reads survivors after scope end":
+        step("Verify: the 1,000 releases happen and the 64 paused rows survive scope end")
+        val frees = rt_heap_free_count()
+        expect(scope_churn_then_survivors()).to_equal(502644)
+        expect(rt_heap_free_count() - frees >= 1000).to_equal(true)

@@ -120,9 +120,16 @@ fn releases_copied_field() {
 }
 
 #[test]
-fn releases_bool_and_float_elements() {
+fn releases_bool_elements() {
     releases("", "        val a = [true, false]\n        if a[0]:\n            acc = acc + 1\n");
-    releases("", "        val a = [1.5, 2.5]\n        if a[0] > 1.0:\n            acc = acc + 1\n");
+}
+
+/// Float elements are heap-boxed; a shallow free would leak the boxes, so
+/// float arrays are not on the allowlist (unified plan, S1 condition 4).
+#[test]
+fn keeps_float_element_arrays() {
+    keeps("", "        val a = [1.5, 2.5]\n        if a[0] > 1.0:\n            acc = acc + 1\n");
+    keeps("", "        val a: [f32] = [1.5, 2.5]\n        if a[0] > 1.0:\n            acc = acc + 1\n");
 }
 
 #[test]
@@ -285,4 +292,68 @@ fn keeps_slice_source_and_parameter() {
 #[test]
 fn keeps_local_declared_without_initializer_or_read_before_its_let() {
     keeps("", "        var a: [i64]\n        a = [i]\n        acc = acc + a[0]\n");
+}
+
+// ---- pins for the review fixes ------------------------------------------------
+
+fn calls_in(mir: &MirModule, function: &str, callee: &str) -> usize {
+    let f = mir.functions.iter().find(|f| f.name == function).expect("function");
+    f.blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .filter(|i| matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name(callee)))
+        .count()
+}
+
+/// Loop invariants are not walked by lowering today. A local they mention is
+/// disqualified, so a future invariant lowering cannot read a released slot.
+#[test]
+fn keeps_local_mentioned_in_a_loop_invariant() {
+    let with_invariant = "fn f(n: i64) -> i64:\n    var acc = 0\n    if n > 0:\n        val a = [n, 1]\n        var i = 0\n        while i < n:\n            invariant: a[0] >= 0\n            acc = acc + i\n            i = i + 1\n    acc\n";
+    assert_eq!(frees_in(&lower(with_invariant, true), "f"), 0);
+    // Control: the same shape without the invariant mention is released.
+    let without = "fn f(n: i64) -> i64:\n    var acc = 0\n    if n > 0:\n        val a = [n, 1]\n        var i = 0\n        while i < n:\n            acc = acc + i + a[0]\n            i = i + 1\n    acc\n";
+    assert_eq!(frees_in(&lower(without, true), "f"), 1);
+}
+
+/// The `len` and index fast paths key on the expression type. A use site that
+/// sees the local at another type (the `ANY` filler) is not on the allowlist.
+#[test]
+fn keeps_local_whose_use_site_type_differs_from_its_declared_type() {
+    let source = format!("{PRELUDE}fn f(n: i64) -> i64:\n    val a = [n, 1, 2]\n    val k = a.len()\n    k\n");
+    let parse = |source: &str| {
+        let mut parser = Parser::new(source);
+        hir::lower(&parser.parse().expect("parse failed")).expect("hir lower failed")
+    };
+    // Control: untouched HIR releases `a`.
+    let mir = lower_to_mir_jit(&parse(&source)).expect("lower");
+    assert_eq!(frees_in(&mir, "f"), 1);
+
+    let mut module = parse(&source);
+    let f = module.functions.iter_mut().find(|f| f.name == "f").expect("f");
+    let mut retyped = false;
+    for stmt in &mut f.body {
+        if let hir::HirStmt::Let { value: Some(value), .. } = stmt {
+            if let hir::HirExprKind::MethodCall { receiver, .. } = &mut value.kind {
+                receiver.ty = hir::TypeId::ANY;
+                retyped = true;
+            }
+        }
+    }
+    assert!(retyped, "fixture must contain `val k = a.len()`");
+    let mir = lower_to_mir_jit(&module).expect("lower");
+    assert_eq!(frees_in(&mir, "f"), 0);
+}
+
+/// `len_local_sources` is keyed by function-scoped local indices. Function
+/// `a` records "local 1 is the length of local 0"; `b` reuses both indices
+/// for plain integers and must not hoist an array data pointer from slot 0.
+/// The bound proof needs an unsigned index, so both loops use `u64`.
+#[test]
+fn length_source_map_does_not_leak_into_the_next_function() {
+    let source = "fn a(p: [i64]) -> i64:\n    val n: u64 = p.len().to_u64()\n    var i: u64 = 0\n    var acc = 0\n    while i < n:\n        acc = acc + p[i]\n        i = i + 1\n    acc\n\nfn b(q: u64, m: u64) -> u64:\n    var i: u64 = 0\n    var acc: u64 = 0\n    while i < m:\n        acc = acc + q\n        i = i + 1\n    acc\n";
+    let mir = lower(source, true);
+    // Control: the proof fires in `a`, so the map entry exists.
+    assert!(calls_in(&mir, "a", "rt_array_data_ptr") >= 1);
+    assert_eq!(calls_in(&mir, "b", "rt_array_data_ptr"), 0);
 }
