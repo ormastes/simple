@@ -111,7 +111,11 @@ The direct semantic-owner match API remains available without pretending it is a
 persisted directory admission route.
 
 This integrates the reviewed plugin-model dependency from PR #9172. The compiler
-provider names the builtin adapter code, not a source advice function. Directory
+provider digest declares the managed compiler lineage containing the builtin adapter,
+not a source advice function. It is not generic proof of the executing image: the
+validated managed launch chain must bind that digest to the launched executable;
+ordinary/LSP entry paths require their own typed image identity. Fresh process-local
+matching does not authorize serialized output reuse. Directory
 configuration is scope data, never retained as instance configuration.
 
 The file-TLDR root hashes actual companion bytes. Source freshness and current
@@ -138,7 +142,34 @@ with validated tagged-digest conversion. Compiled initializer digests exist in
 `cold_hir_package_outputs_from_driver_v1`, but directory initializer ordering still
 needs its explicit owner. Aspect catalog/advice-interface roots are currently
 broader than a directory and require scoped aggregation. Trait and extension
-category projections still need implementation; the whole frozen interface hash
-is not silently relabeled as either category. Missing sections require coverage
+category projections now reuse the exact semantic owner folds, with separate
+category domains; the whole frozen interface hash is not relabeled as a category. Missing sections require coverage
 proof before claiming an empty category. This work and B3 inline facts, traversal
 cutoff/publication and a complete acceptance run remain required.
+
+
+## Partial category capture at full-source parsing
+
+`module_surface_trait_root_v2` covers trait declarations and default method bodies;
+`module_surface_extension_root_v2` covers impl signatures and enum extensions,
+preserving the existing whole-surface order and encoding. Ordinary impl method
+bodies remain outside this interface projection. The legacy whole-surface encoding
+was independently reconstructed unchanged during Astra review. Eight parser-based
+regression scenarios are authored but not executed.
+
+`project_directory_categories_v2` now calls these owners inside the actual streaming
+surface parse scope. It requires successful full-source parsing (not skeleton or
+placeholder text), an existing full-inventory cfg receipt validated against the
+actual source SHA and target, and a valid composition-root environment policy
+digest. The compact receipt binds source identity, target, preprocessing and cfg
+decisions, environment policy, and both category roots. Only that receipt is
+promoted; no parser AST survives through this route. The context dictionary is
+updated after successful surface insertion and reset at source-lineage loading.
+Missing coverage omits a receipt and does not grant empty-category authority.
+
+These are compile-local partial receipts. A final directory producer must establish
+exact member coverage and common variant, separately bind the executing provider,
+and combine the remaining real category/initializer receipts before PackageInit
+publication. No new cache cutoff or full-package admission is enabled here. The
+three structural transport scenarios and production full-parse hook are currently
+unrun; this checkpoint does not upgrade prior codec/row probe evidence.

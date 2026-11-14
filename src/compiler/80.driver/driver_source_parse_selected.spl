@@ -1,3 +1,7 @@
+use compiler.common.cache_contract.directory_category_projection_v2.{DirectoryCategoryProjectionV2,
+    directory_category_projection_valid_v2}
+use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_trait_root_v2,
+    module_surface_extension_root_v2}
 # CompilerDriver phase-2 source parsing.
 
 use compiler.driver.cache.tldr_layout_v1.{tldr_dir_v1}
@@ -112,6 +116,32 @@ use compiler.driver.driver_source_parse_support.{
 }
 
 impl CompilerDriver:
+    # Called only after successful full parsing while the AST scope is alive.
+    # Missing target decisions or policy identity conservatively omit the row.
+    me project_directory_categories_v2(owner: ModuleSurfaceParserOwner,
+        source_path: text, canonical_path: text, source_content: text,
+        surface_text: text, worker_mode: i64) -> DirectoryCategoryProjectionV2?:
+        if worker_mode == 2 or surface_text != source_content or
+                self.ctx.runtime_std_full_inventory_selection == nil or
+                not self.ctx.runtime_std_cfg_source_identity_by_path.has(source_path):
+            return nil
+        val identity = self.ctx.runtime_std_cfg_source_identity_by_path[source_path]
+        if not self.ctx.runtime_std_cfg_decisions.has(identity): return nil
+        val decision = self.ctx.runtime_std_cfg_decisions[identity]
+        val source_digest = sha256_text(source_content)
+        if not frontend_cfg_receipt_valid_v1(decision, identity, source_digest,
+                self.ctx.native_target): return nil
+        val projection = DirectoryCategoryProjectionV2(
+            canonical_path: canonical_path, source_identity: identity,
+            source_digest: source_digest, target_triple: self.ctx.native_target,
+            preprocessed_digest: decision.preprocessed_digest,
+            cfg_decision_digest: decision.decision_digest,
+            environment_policy_digest: self.ctx.environment_variant_policy_digest,
+            trait_root: module_surface_trait_root_v2(owner.traits),
+            extension_root: module_surface_extension_root_v2(owner.impls, owner.extend_enums))
+        if not directory_category_projection_valid_v2(projection): return nil
+        Some(projection)
+
     me promote_target_cfg_receipt_v1(source_path: text) -> bool:
         if self.ctx.runtime_std_full_inventory_selection == nil:
             return true
@@ -362,6 +392,8 @@ impl CompilerDriver:
         # Surface extraction then crosses the module boundary by class
         # reference instead of copying every executable body by value.
         val module_owner = ModuleSurfaceParserOwner.new(module)
+        val category_projection = self.project_directory_categories_v2(module_owner,
+            source_path, canonical_path, source_content, surface_text, worker_mode)
         val declaration_only = driver_native_parser_can_persist_objectless(module_owner)
         val surface_result = module_surface_from_owner(
             module_owner, source, source_index)
@@ -393,6 +425,9 @@ impl CompilerDriver:
                 parser_initialization_generation_v1() != parser_generation):
             val _ended = driver_end_transient_parse_scope()
             return Err("frontend registry promotion failed for {source_path}")
+        if category_projection != nil and not rt_transient_heap_promote(category_projection):
+            val _ended = driver_end_transient_parse_scope()
+            return Err("directory category projection promotion failed for {source_path}")
         if not module_surface_promote(surface):
             val _ended = driver_end_transient_parse_scope()
             return Err("module surface promotion failed for {source_path}")
@@ -406,6 +441,9 @@ impl CompilerDriver:
             surface, source_module_name, canonical_path)
         if add_result.is_err():
             return Err(add_result.unwrap_err())
+        if category_projection != nil:
+            val projected = category_projection.unwrap()
+            self.ctx.directory_category_projections_v2[projected.canonical_path] = projected
         # The transient scope is already closed: only allocate the digest/key
         # and persistent proof row now, never retain ParserModule or its bodies.
         if declaration_only and worker_mode != 2 and frozen_parse_text == nil:
