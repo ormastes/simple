@@ -1,0 +1,43 @@
+# Caret workbench — explicit (session, generation) -> (pane, generation) binding.
+#
+# A terminal pane is shown as the selected agent's ONLY when a binding names
+# that exact session generation and the pane's live generation matches. Anything
+# else is Unbound; a pane is never guessed.
+
+use app.llm_caret.workbench.session_contract.{SessionId, same_session}
+
+struct PaneBinding:
+    session: SessionId
+    pane_id: text
+    pane_generation: i64
+
+enum PaneBindingResult:
+    Bound(binding: PaneBinding)
+    Unbound(reason: text)
+
+# `observed_pane_generation` is the generation of the pane as it exists now.
+fn resolve_pane_binding(bindings: [PaneBinding], session: SessionId,
+        observed_pane_generation: i64) -> PaneBindingResult:
+    for b in bindings:
+        if same_session(b.session, session):
+            if b.pane_generation == observed_pane_generation:
+                return PaneBindingResult.Bound(binding: b)
+            return PaneBindingResult.Unbound(reason: "pane generation mismatch")
+    PaneBindingResult.Unbound(reason: "no binding for session generation")
+
+# REQ-CARET-UI-002: input may only reach a pane bound to the exact session id
+# and generation the draft was captured against.
+fn input_target_allowed(result: PaneBindingResult, expected_session: text,
+        expected_generation: i64) -> bool:
+    match result:
+        case PaneBindingResult.Bound(b):
+            b.session.value == expected_session and b.session.generation == expected_generation
+        case PaneBindingResult.Unbound(reason): false
+
+fn pane_binding_label(result: PaneBindingResult) -> text:
+    match result:
+        case PaneBindingResult.Bound(b): "terminal " + b.pane_id
+        case PaneBindingResult.Unbound(reason): "unbound terminal"
+
+export PaneBinding, PaneBindingResult, resolve_pane_binding,
+    input_target_allowed, pane_binding_label
