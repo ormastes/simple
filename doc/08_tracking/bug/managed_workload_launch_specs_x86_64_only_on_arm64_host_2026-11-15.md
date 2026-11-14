@@ -1,6 +1,6 @@
 # Managed workload launch specs hardcode an x86_64 image; adoption rejects it on arm64 hosts
 
-- **Status:** open (2026-11-15)
+- **Status:** closed (2026-11-15, work/container-launch-gaps-20261115)
 - **Where:** `src/os/kernel/scheduler/scheduler_executable_adoption.spl:207`
   (`_authenticated_consumer_arch_matches_v1(consumer, get_arch())`), with specs
   `test/01_unit/os/kernel/loader/managed_workload_launch_spec.spl` (3/5),
@@ -122,3 +122,37 @@ Still open:
 - runtime_provider_v1 "binds a real task..." returns `rejected` (undiagnosed).
 - Missing generalization spec: launch from a forked member of a limit-1
   workload must return -11.
+
+## Update 2026-11-15 (work/container-launch-gaps-20261115) — CLOSED
+
+Verdicts on this arm64 Mac (seed release100-matcharm-20261115), before -> after:
+container_runtime 4/5 -> **5/5**; runtime_provider_v1 2/3 -> **3/3**;
+macos_simpleos_guest_dispatch_v1 2/3 -> **3/3**; managed_workload_launch 5/5 -> **6/6**.
+
+- `device_grant_revoke_task` call deleted from `task_exit_teardown.spl`: a
+  device grant's only state is the RES_NOTIFICATION / RES_IRQ_ROUTE entries
+  `_handle_device_grant` registers through `task_register_resource`, and
+  `task_cleanup` (already called in the same teardown) destroys/unregisters
+  both. BAR/IRQ/DMA tokens are pure functions of (bdf, task) with no ledger.
+- `Scheduler.live_job_member_ids` / `Scheduler.terminate_job` were called by
+  `container_runtime.spl:164` and `agent_runtime.spl:100` but never defined
+  (the next blocker once the teardown call was gone). Added
+  `sched_live_job_member_ids` / `sched_terminate_job` in `authority_runtime.spl`,
+  sharing `_authority_close_job` with `sched_terminate_direct_child_job`.
+- runtime_provider_v1 `rejected` root cause: its ELF fixture had
+  `p_offset 0x80` with `p_vaddr 0x400000` (align 0x1000), violating
+  offset/vaddr congruence, so launch returned -8. Fixture now uses 0x400080,
+  like container_runtime's. Spec bug, not product.
+- `executable_load_consumer.spl` imports the user-address-space pair under
+  `user_as_create` / `user_as_destroy` aliases (same fix as adoption).
+- New spec "charges a forked member against its limit-1 workload before
+  launching" (`managed_workload_launch_spec.spl`) -> -11. Needed
+  `vmm_cow_clone_pages` to be `pub` (imported by scheduler_exec,
+  scheduler_task_mgmt, vmm_vma; was private, so fork failed hosted).
+
+Not fixed (seed parser gap, needs a seed rebuild):
+`scheduler_security_contract_spec.spl:155` `security.policy_bound = true` fails
+`expected identifier, found Dot`. `src/compiler_rust/parser/src/parser_impl/core.rs:901`
+treats every statement-leading identifier `security` as a security policy/gate
+declaration without checking for a following `.`/`=`. The spec is valid Simple.
+Unblock: make that arm contextual (like `admit`/`move`) and rebuild the seed.

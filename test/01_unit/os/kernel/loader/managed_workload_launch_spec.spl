@@ -223,3 +223,30 @@ describe "managed workload launch":
                     kernel_call_context_from_task(child), compiled.unwrap(), bytes,
                     get_arch(), [], [], TaskPriority.Normal, one.scheduler)
                 expect(two.pid).to_equal(-11)
+
+    it "charges a forked member against its limit-1 workload before launching":
+        # Generalization of the process-limit admission fix: a fork inherits
+        # the workload's resource domain, so the fork itself consumes the
+        # single slot and a launch from the forked member must be refused.
+        _ensure_authority_registry()
+        val bytes = _minimal_host_elf()
+        val compiled = compile_workload_manifest(_policy_with_limit(bytes, 1u64))
+        var scheduler = _live_parent_scheduler()
+        val root_id = scheduler.get_current()
+        val root = scheduler.get_task(root_id)
+        if root != nil and compiled.is_ok():
+            val first = launch_compiled_workload_into_scheduler(
+                kernel_call_context_from_task(root), compiled.unwrap(), bytes,
+                get_arch(), [], [], TaskPriority.High, scheduler)
+            expect(first.pid).to_be_greater_than(0)
+            var member_scheduler = first.scheduler
+            val forked_id = member_scheduler.clone_task(TaskId(id: first.pid as u64))
+            expect(forked_id.id).to_be_greater_than(0u64)
+            val forked = member_scheduler.get_task(forked_id)
+            expect(forked != nil).to_equal(true)
+            if forked != nil:
+                expect(forked.security.job_id).to_equal(first.pid as u64)
+                val refused = launch_compiled_workload_into_scheduler(
+                    kernel_call_context_from_task(forked), compiled.unwrap(), bytes,
+                    get_arch(), [], [], TaskPriority.Normal, member_scheduler)
+                expect(refused.pid).to_equal(-11)

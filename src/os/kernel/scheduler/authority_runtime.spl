@@ -629,7 +629,41 @@ pub fn sched_terminate_direct_child_job(
     if not target_task.security.policy_bound or target_task.security.job_id == 0u64:
         return (tasks, [])
 
-    val job_id = target_task.security.job_id
+    _authority_close_job(tasks, target_task.security.job_id, exit_code, Some(caller), target)
+
+pub fn sched_live_job_member_ids(tasks: [TaskControlBlock?], job_id: u64) -> [TaskId]:
+    """Ids of every not-yet-zombied task bound to `job_id` (0 = no job)."""
+    var members: [TaskId] = []
+    if job_id == 0u64:
+        return members
+    var index = 0
+    while index < tasks.len():
+        val entry = tasks[index]
+        if entry != nil:
+            val task = entry
+            if task.security.job_id == job_id and task.state != TaskState.Zombie:
+                members.push(task.id)
+        index = index + 1
+    members
+
+pub fn sched_terminate_job(
+    tasks: [TaskControlBlock?],
+    job_id: u64,
+    exit_code: i32
+) -> ([TaskControlBlock?], [TaskId]):
+    """Close one job's lifetime boundary: revoke every member's CSpace lineage,
+    then publish live members as zombies. Parents are left unchanged."""
+    if job_id == 0u64:
+        return (tasks, [])
+    _authority_close_job(tasks, job_id, exit_code, None, TaskId(id: 0u64))
+
+fn _authority_close_job(
+    tasks: [TaskControlBlock?],
+    job_id: u64,
+    exit_code: i32,
+    adopter: TaskId?,
+    leader: TaskId
+) -> ([TaskControlBlock?], [TaskId]):
     var members: [TaskId] = []
     var token_roots: [u64] = []
     var index = 0
@@ -673,8 +707,8 @@ pub fn sched_terminate_direct_child_job(
                 task.capabilities = CapabilitySet(
                     caps: [], is_pledged: task.capabilities.is_pledged)
                 task.security = _authority_security_without_exit_authority(task.security)
-                if member_id.id != target.id:
-                    task.parent = Some(caller)
+                if adopter != nil and member_id.id != leader.id:
+                    task.parent = adopter
                 if task.state != TaskState.Zombie:
                     task.state = TaskState.Zombie
                     task.exit_code = exit_code
