@@ -235,3 +235,7 @@ SLANG_LIVE=1 SLANG_GPU=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi
   `unsupported_modality` unless the resident model can take them. Each media part
   becomes `SLANG_MEDIA_MARKER` (`<__media__>`) in the chat frame.
 - **Video:** refused with a clear error (no decoder, no ffmpeg subprocess).
+- **Model dir:** `native_formats.gguf_is_projector` reads GGUF `general.architecture`
+  (first KV, fixed offsets) == `clip`; `mmproj` filename prefix is only the
+  fallback when the first key is another one. `gguf_entry_shard` never returns a
+  projector; `NativeModel.mmproj_path` carries it; two projectors = refused.
