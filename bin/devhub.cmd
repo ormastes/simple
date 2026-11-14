@@ -83,11 +83,37 @@ if not defined RUNTIME (
     exit /b 127
 )
 
-echo [devhub] mode=ordinary runtime=!RUNTIME! receipt=!RECEIPT! version=!VERSION! 1>&2
+rem The dispatch identity (REQ-DHLM-004) is a launch diagnostic: printed on
+rem --verbose, otherwise captured and replayed only when the launch fails, so a
+rem successful default launch keeps stderr clean (mirrors bin/devhub).
+set "SHOW_DIAG=0"
+for %%A in (%*) do (
+    if /I "%%~A"=="--verbose" set "SHOW_DIAG=1"
+    if /I "%%~A"=="--quiet" set "SHOW_DIAG=0"
+)
+set "DISPATCH_IDENTITY=[devhub] mode=ordinary runtime=!RUNTIME! receipt=!RECEIPT! version=!VERSION!"
+set "DIAG_FILE=%TEMP%\devhub-diagnostics-%RANDOM%-%RANDOM%.tmp"
+if "!SHOW_DIAG!"=="1" echo !DISPATCH_IDENTITY! 1>&2
+if not "!SHOW_DIAG!"=="1" >"!DIAG_FILE!" echo !DISPATCH_IDENTITY!
 rem Disable delayed expansion at the process boundary: %* is the original
 rem argv, with no %1..%9 reconstruction, SHIFT, or CALL re-entry.
 set "RUNTIME_EXT=!RUNTIME:~-4!"
 setlocal DisableDelayedExpansion
+if "%SHOW_DIAG%"=="1" goto :launch_verbose
+(
+    if /I "%RUNTIME_EXT%"==".cmd" (
+        call "%RUNTIME%" run "%REPO_ROOT%\src\app\devhub\main.spl" %*
+    ) else if /I "%RUNTIME_EXT%"==".bat" (
+        call "%RUNTIME%" run "%REPO_ROOT%\src\app\devhub\main.spl" %*
+    ) else (
+        "%RUNTIME%" run "%REPO_ROOT%\src\app\devhub\main.spl" %*
+    )
+) 2>>"%DIAG_FILE%"
+set "STATUS=%ERRORLEVEL%"
+if not "%STATUS%"=="0" type "%DIAG_FILE%" 1>&2
+del /q "%DIAG_FILE%" >nul 2>&1
+exit /b %STATUS%
+:launch_verbose
 if /I "%RUNTIME_EXT%"==".cmd" (
     call "%RUNTIME%" run "%REPO_ROOT%\src\app\devhub\main.spl" %*
 ) else if /I "%RUNTIME_EXT%"==".bat" (
