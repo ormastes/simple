@@ -1092,3 +1092,22 @@ turns green in the same change, or the check FAILs as stale.
   the matrix; spacing is forced to 0 under `border-collapse:collapse` in the
   layout, because the default is no longer 0. Record:
   `doc/08_tracking/bug/web_table_ua_border_spacing_and_cell_padding_2026-11-14.md`.
+
+## State at landing (2026-11-14, Chrome 159.0.8154.6, Linux aarch64)
+
+- Catalog pixel gate, 900x760 `cpu_simd`: overview 2.88, html 15.98,
+  css-layout 6.11, css-paint 9.28, forms-media 6.38, animation 12.23,
+  evidence 1.72, tab-bar 0.68 (baseline row 0.63, inside the +0.25 tolerance).
+- Combination matrix: 608 of 849 cells match (71.6%); 463 element ids baselined.
+- **The matrix verdict depends on WHICH Chrome 159 binary runs it.** Full
+  Chrome (`chromium-1255/.../chrome`, `--headless=new`) gives 241 mismatching
+  cells; the headless shell gives 259 (21 `<code>` cells: generic `monospace`
+  is 192.66 px in full Chrome, 192.03 in the shell). The baseline is measured
+  with full Chrome; set `CHROME_BIN` to it.
+- **Two paint lanes, one layout.** The software-pixel lane paints text below
+  16 px with the 5x7 bitmap rasteriser; Draw IR lanes paint the resolved face.
+  `web_set_bitmap_paint_lane` keeps the bitmap advance clamp on for the
+  software entry points only. Dropping the clamp everywhere joins `ll` at 13 px.
+- 4K (3840x2160, Vulkan on llvmpipe): `overview` was 9.15% before the
+  clamped-width auto-margin fix; not re-measured after it. No 4K baseline yet.
+- Open review items: `doc/08_tracking/bug/web_render_chrome_lane_review_residue_2026-11-14.md`.
