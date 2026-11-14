@@ -8,6 +8,10 @@ use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.statements.*
 use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode_snapshot_bounded_v1}
+use compiler.common.assurance.representation_manifest_v1.{RepresentationDeclarationV1}
+use compiler.semantics.symbol_id.stable_id.{SymbolComponents}
+use compiler.common.diagnostics.span.{Span}
 use compiler.semantics.aspect_validation.{aspect_module_identity_index, validate_aspect_contracts}
 use compiler.semantics.join_point_model.{forward_join_points}
 use compiler.semantics.aspect_weave.{aspect_forward_weave_claims_v1, weave_forward_advice_claim_in_module_v1}
@@ -20,7 +24,7 @@ fn traversal_input_modules(value: text) -> Dict<text, HirModule>:
     var lowering = HirLowering.with_filename("fixture/input.spl")
     {"fixture": lowering.lower_module(parsed)}
 
-describe "F1 real canonical input capture":
+describe "F1 real bounded ordinary input capture":
     it "keeps original digest facts after the existing weaver mutates HIR":
         val modules = traversal_input_modules("0")
         expect(validate_aspect_contracts(modules).len()).to_equal(0)
@@ -61,3 +65,15 @@ describe "F1 real canonical input capture":
         expect(aop_traversal_inputs_capture_v1(modules, [], 16, 1).is_err()).to_equal(true)
         val captured = aop_traversal_inputs_capture_v1(modules, [], 16, 8388608).unwrap()
         expect(aop_traversal_base_key_v1(captured, "missing", "forwarder").is_err()).to_equal(true)
+
+    it "preserves the ordinary codec refusal for representation declarations":
+        val modules = traversal_input_modules("0")
+        val span = Span.default()
+        val declaration = RepresentationDeclarationV1(
+            components: SymbolComponents(package: "fixture", module_path: "fixture", item_kind: "fn",
+                owner_id: "", name: "observe", signature: "fn observe()"),
+            declaration_id: "fixture-observe", local_symbol_id: 0,
+            declaration_span: span, attribute_span: span, owned_intervals: [],
+            source_digest: "", manifest: nil, metadata_errors: [], region_capabilities: [])
+        val rejected = HirModule(..modules["fixture"], representation_declarations: [declaration])
+        expect(hir_module_encode_snapshot_bounded_v1(rejected, 8388608).is_err()).to_equal(true)
