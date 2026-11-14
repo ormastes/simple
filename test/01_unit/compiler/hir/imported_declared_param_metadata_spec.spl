@@ -13,12 +13,13 @@ use compiler.hir.hir_definitions.{HirModule}
 use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode}
 use compiler.mir.mir.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
 
 fn declared_params_fixture() -> HirModule:
     val logger = Logger(level: 0)
     val kinds = "pub enum PrimitiveType:\n    F32\n    F64\n"
-    val provider = "use params.kinds.\{PrimitiveType\}\npub class Builder:\n    handle: i64\n\nimpl Builder:\n    me emit_const_float(dest: text, ty: PrimitiveType, value: f64):\n        pass\n\npub fn empty():\n    pass\npub fn unknown(value):\n    pass\n"
-    val consumer = "use params.owner.\{Builder, empty, unknown\}\nstruct PrimitiveType:\n    decoy: i64\nfn main() -> i64:\n    0\n"
+    val provider = "use params.kinds.\{PrimitiveType\}\npub class Builder:\n    handle: i64\n\nimpl Builder:\n    me emit_const_float(dest: text, ty: PrimitiveType, value: f64):\n        pass\n\npub fn emit_free(ty: PrimitiveType, value: f64):\n    pass\npub fn empty():\n    pass\npub fn unknown(value):\n    pass\n"
+    val consumer = "use params.owner.\{Builder, emit_free, empty, unknown\}\nstruct PrimitiveType:\n    decoy: i64\nfn main() -> i64:\n    0\n"
     var modules: Dict<text, ParserModule> = {}
     modules["params.kinds"] = parse_full_frontend(kinds, "params.kinds", "params.kinds", logger)
     modules["params.owner"] = parse_full_frontend(provider, "params.owner", "params.owner", logger)
@@ -33,7 +34,7 @@ fn declared_params_fixture() -> HirModule:
 fn check_declared_params(hir: HirModule):
     val id = hir.symbols.lookup_or_invalid("params.owner.Builder::emit_const_float")
     expect(id.is_valid()).to_equal(true)
-    val symbol: HirSymbol = hir.symbols.get_symbol_raw(id.id)
+    val symbol: HirSymbol = hir.symbols.get_symbol(id).unwrap()
     expect(symbol.type_ == nil).to_equal(true)
     expect(symbol.declared_param_types_v1.?).to_equal(true)
     val params = symbol.declared_param_types_v1.unwrap()
@@ -48,6 +49,7 @@ fn check_declared_params(hir: HirModule):
         case _: false
     expect(hir_float).to_equal(true)
     var lowering = MirLowering.new(hir.symbols)
+    expect(lowering.resolved_call_hir_param_types(id).len()).to_equal(4)
     val operand = lowering.symbol_to_operand(id)
     match operand.kind:
         case Const(_, type_):
@@ -75,8 +77,8 @@ describe "imported callable declared parameter metadata":
 
     it "distinguishes known zero arity from missing parameter annotations":
         val hir = declared_params_fixture()
-        val empty = hir.symbols.get_symbol_raw(hir.symbols.lookup_or_invalid("empty").id)
-        val unknown = hir.symbols.get_symbol_raw(hir.symbols.lookup_or_invalid("unknown").id)
+        val empty = hir.symbols.get_symbol(hir.symbols.lookup_or_invalid("empty")).unwrap()
+        val unknown = hir.symbols.get_symbol(hir.symbols.lookup_or_invalid("unknown")).unwrap()
         expect(empty.declared_param_types_v1.?).to_equal(true)
         expect(empty.declared_param_types_v1.unwrap().len()).to_equal(0)
         expect(unknown.declared_param_types_v1 == nil).to_equal(true)
@@ -86,7 +88,25 @@ describe "imported callable declared parameter metadata":
         val id = hir.symbols.lookup_or_invalid("params.owner.Builder::emit_const_float")
         var symbols = hir.symbols
         symbols.rename_symbol(id, "renamed_emit_const_float")
-        val renamed: HirSymbol = symbols.get_symbol_raw(id.id)
+        val renamed: HirSymbol = symbols.get_symbol(id).unwrap()
         expect(renamed.declared_param_types_v1.?).to_equal(true)
         expect(renamed.declared_param_types_v1.unwrap().len()).to_equal(4)
         expect(renamed.type_ == nil).to_equal(true)
+
+    it "feeds the separate direct free-call parameter resolver":
+        val hir = declared_params_fixture()
+        val id = hir.symbols.lookup_or_invalid("emit_free")
+        expect(id.is_valid()).to_equal(true)
+        val symbol: HirSymbol = hir.symbols.get_symbol(id).unwrap()
+        expect(symbol.type_ == nil).to_equal(true)
+        var lowering = MirLowering.new(hir.symbols)
+        val params = lowering.resolved_call_hir_param_types(id)
+        expect(params.len()).to_equal(2)
+        match params[0].kind:
+            case Named(owner, _):
+                expect(owner.id).to_equal(hir.symbols.lookup_qualified_type_raw("params.kinds", "PrimitiveType"))
+            case _: expect(false).to_equal(true)
+        val float_parameter = match params[1].kind:
+            case F64: true
+            case _: false
+        expect(float_parameter).to_equal(true)
