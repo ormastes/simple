@@ -1,6 +1,6 @@
 # Aspect integration status — 2026-11-14
 
-Release checkpoint: `ecb2d5059efcb2f601334e4adc59fc0b24a6c861`.
+Release checkpoint: `a132155869c26a7020e5eaac2d444c3bcd2dd5d0`.
 Status: implementation in progress; neither full feature qualification nor Phase 3 is established.
 
 This update supplements the existing aspect plans and the selected
@@ -22,9 +22,9 @@ Each fix received Astra review and passed the blocking push gates. These
 scoped bug fixes did not wait for Phase 3; their evidence does not qualify
 the unfinished feature branches.
 
-## Feature checkpoints and remaining production connections
+## Initial feature checkpoints at ecb2d5059ef (historical)
 
-| Lane | Implemented/evaluated checkpoint | Required next connection |
+| Lane | Implemented/evaluated checkpoint | Remaining work at that checkpoint |
 |---|---|---|
 | Linux LLVM XRay linking | Private runtime materialization executor, compiler-rt/adapter objects, and executable link routes. Executed materialization and final link produced a harness with 40 passing XRay checks. | Probe used explicit existing tuple bindings and a shell file probe. Qualify ordinary imported IO, real Simple-generated instrumentation, handler ABI, and complete compiler/controller path before opening public capability admission. |
 | Directory TLDR | Schema-2 roots/provider/guard fields and codec; 11 native codec checks passed with the supported `core-c` provider. [PR #9171](https://github.com/ormastes/simple/pull/9171) remains a draft. | Capture authoritative immediate-directory membership, source/TLDR identity, provider, guards and attributes from one compile epoch; invoke the real AOP cache consumer. Then construct all legacy PackageInit category roots and the complete directory projection. |
@@ -33,6 +33,65 @@ the unfinished feature branches.
 | Build runner/Phase 3 | An independent admitted-P2 full-CLI build is being observed without restarting it. | Its command is Stage 2 verification. A live process or partial HIR progress is not a Phase 3 artifact, lineage receipt, or acceptance result. Directory-resident scheduling and performance gates remain open. |
 
 ## Integration constraints
+
+### Later implementation and qualification checkpoint
+
+The release checkpoint now includes AOP error admission and advice-form/MIR
+placement fixes (PRs #9177 and #9178), enum metadata preservation through eight
+MIR transformations (#9185), and the `Value.get_type` aggregate-pattern arity
+repair (#9188; tracker follow-up #9189). Each is a scoped repair with retained
+evidence, not full aspect qualification. PR #9181 corrected CI wiring and the
+canonical bug-database checksum; its structural and platform checks passed.
+
+Feature branches have been rebased onto the release checkpoint. Named ownership
+now has parser/HIR/cache propagation and regeneration through the actual codec
+generator; its native transport projection passed 12 assertions. Whole-parser
+and cache integration remain unqualified. Generated accessors are not enabled:
+receiver retention across advice still needs an actual runtime/backend lifetime
+contract. Returning the receiver in a helper tuple is not sufficient proof.
+
+The directory lane wires source-authority capture to the actual traversal
+adapter on the cold path. The full HIR producer/SCV route remains unrun;
+bounded ordinary F1 activation is not runtime-proven. Initializer-plan transport is implemented in the
+feature branch; final native-link binding and complete category aggregation
+remain open. Warm restoration, generated traversal and signed-provider admission
+are not established. The canonical codec gate remains closed: the real-import
+qualification attempt hit its 4 GiB RSS bound before producing an executable.
+Ordinary bounded snapshots must not be described as canonical qualification.
+
+The Linux current-image identity factory passed a real imported-module native
+probe built by the admitted P2 compiler. Its observed executable SHA matched
+external hashing. Producer lineage and the executing image remain separate
+identities; this does not qualify non-Linux hosts or all loaded provider code.
+
+Visibility intent and resident LSP overlay work remain drafts (#9183 and #9190).
+Their source reviews and capped build attempts do not establish runtime access
+parity, canonical visibility semantics, or measured query performance.
+
+PR #9191 makes `HirModule.imported_layouts` identity-only. New rows intentionally
+contain no fields. Accessor and traversal planning must resolve field layout
+from the declaring module or its frozen surface, never from this importer-side
+table or redundant payload retained in older caches.
+
+### Bootstrap evidence at this checkpoint
+
+The independent old full-CLI build's tracked processes are no longer present;
+its retained records contain no terminal verdict and no full-CLI artifact.
+Its outcome is unclassified, not successful.
+
+Owned provisional attempt 1 reached all 1,665 HIR modules and failed on the two
+aggregate-pattern arity errors subsequently fixed by #9188. Attempt 2 uses
+frozen source `a6ba3cf0566096df12336d9edeab73439f6db36b` and the admitted P2
+compiler whose SHA-256 begins `855f48d3c9f9d915`. It has reached MIR under a
+16 GiB cgroup limit. At this observation it is still running; there is no
+Phase 3 executable/Hello result or admission claim. Logs are retained under
+`/home/yoon/dev/simple-phase3-next-20261114/build/phase3-provisional/attempts/002`.
+Later upstream changes do not mutate this frozen build. The first attempt's
+shared HIR cache use is retained in provenance; attempt 2 selects a private
+HIR cache and relies on normal identity validation rather than restamping.
+
+The earlier feature table records initial checkpoints; this dated supplement
+records later progress without upgrading its limited test evidence.
 
 1. A compilation's HIR module list is not proof of complete directory
    membership. The existing SCV diagnostic relation is not semantic authority.
