@@ -412,3 +412,19 @@ the `transient_owner.spl` inventory.
 4. On green: default the knob on for the shard-worker lane in
    `phase-c-backend-commands.shs` (same place the shard pin lives), leaving the
    env override for A/B.
+
+### Review findings before turning SIMPLE_MIR_RETRACT_PROVIDER_TYPES on (2026-11-14, Opus)
+
+Default-off is a no-op: the journal is only written while a scoped lowering
+that will retract is running (`journal_provider_type_relocations`), so the
+unscoped and ambient-bootstrap paths no longer grow it. Open before the flip:
+1. `relocate_provider_callable` copies (`provider_metadata.spl` ~520-532) are
+   not retracted, but their `type_` names the relocated (retracted) type. A
+   later lowering against the same table that hits the
+   `lookup_qualified_function_raw` early return reads a type whose symbol is
+   gone (silent `Error`/wrong type). Journal and retract the callable copies
+   too, or skip retraction when a surviving row's `type_` names a journaled id.
+2. `retract_symbol_rows_v1` (`hir_symbol_table_methods.spl` ~296-307) deletes
+   `module_callables` keys instead of restoring an overwritten earlier value.
+3. The spec never re-lowers on a retracted table (`shifted()` untested), so the
+   identical-MIR result does not cover item 1.
