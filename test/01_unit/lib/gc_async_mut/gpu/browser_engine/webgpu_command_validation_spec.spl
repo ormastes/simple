@@ -1,0 +1,115 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/webgpu_commands.spl 20%
+# @tag: unit, browser_engine, webgpu
+#
+# WebGPU command validation that needs no device: each validator returns ""
+# for a valid call and a specific message for the first violated rule of the
+# WebGPU spec (copyBufferToBuffer needs distinct valid buffers, non-negative
+# offsets and a positive size; indirect offsets are 4-byte aligned; a viewport
+# depth range lies in [0,1] with minDepth <= maxDepth; index formats are
+# uint16 / uint32 ...). The exact message is asserted so a reordered or
+# dropped check is visible, not just "some error".
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.webgpu_commands.{
+    webgpu_validate_render_pass_load_op, webgpu_validate_render_pass_store_op,
+    webgpu_validate_render_pass_attachment_dimensions,
+    webgpu_validate_buffer_copy, webgpu_validate_texture_copy,
+    webgpu_validate_indirect_draw_buffer, webgpu_validate_render_buffer_binding,
+    webgpu_validate_index_buffer_binding, webgpu_index_format_bits,
+    webgpu_validate_scissor_rect, webgpu_validate_viewport,
+    webgpu_validate_stencil_reference
+}
+
+describe "WebGPU command validation":
+
+    context "render pass attachment ops":
+
+        it "accepts clear and load":
+            expect(webgpu_validate_render_pass_load_op("clear", "depthLoadOp")).to_equal("")
+            expect(webgpu_validate_render_pass_load_op("load", "depthLoadOp")).to_equal("")
+
+        it "names the offending load field":
+            expect(webgpu_validate_render_pass_load_op("store", "stencilLoadOp")).to_equal("GPURenderPassDepthStencilAttachment stencilLoadOp must be 'clear' or 'load'")
+
+        it "accepts store and discard and rejects anything else":
+            expect(webgpu_validate_render_pass_store_op("store", "depthStoreOp")).to_equal("")
+            expect(webgpu_validate_render_pass_store_op("discard", "depthStoreOp")).to_equal("")
+            expect(webgpu_validate_render_pass_store_op("clear", "depthStoreOp")).to_equal("GPURenderPassDepthStencilAttachment depthStoreOp must be 'store' or 'discard'")
+
+        it "requires attachments to share dimensions once one is known":
+            expect(webgpu_validate_render_pass_attachment_dimensions(64, 32, 1, -1, -1, -1)).to_equal("")
+            expect(webgpu_validate_render_pass_attachment_dimensions(64, 32, 1, 64, 32, 1)).to_equal("")
+            expect(webgpu_validate_render_pass_attachment_dimensions(64, 32, 1, 64, 16, 1)).to_equal("GPURenderPassDescriptor attachments must have matching dimensions")
+            expect(webgpu_validate_render_pass_attachment_dimensions(64, 32, 2, 64, 32, 1)).to_equal("GPURenderPassDescriptor attachments must have matching dimensions")
+
+    context "copies":
+
+        it "accepts a valid buffer copy":
+            expect(webgpu_validate_buffer_copy(1, 0, 2, 16, 64)).to_equal("")
+
+        it "reports buffer copy violations in rule order":
+            expect(webgpu_validate_buffer_copy(0, 0, 2, 0, 64)).to_equal("GPUCommandEncoder copyBufferToBuffer buffers must be valid")
+            expect(webgpu_validate_buffer_copy(3, 0, 3, 0, 64)).to_equal("GPUCommandEncoder copyBufferToBuffer requires distinct buffers")
+            expect(webgpu_validate_buffer_copy(1, -4, 2, 0, 64)).to_equal("GPUCommandEncoder copyBufferToBuffer offsets must be non-negative")
+            expect(webgpu_validate_buffer_copy(1, 0, 2, 0, 0)).to_equal("GPUCommandEncoder copyBufferToBuffer size must be positive")
+
+        it "validates texture copies":
+            expect(webgpu_validate_texture_copy(1, 2, 8, 8, 1)).to_equal("")
+            expect(webgpu_validate_texture_copy(1, 0, 8, 8, 1)).to_equal("GPUCommandEncoder copyTextureToTexture textures must be valid")
+            expect(webgpu_validate_texture_copy(2, 2, 8, 8, 1)).to_equal("GPUCommandEncoder copyTextureToTexture requires distinct textures")
+            expect(webgpu_validate_texture_copy(1, 2, 8, 0, 1)).to_equal("GPUCommandEncoder copyTextureToTexture size must be positive")
+
+    context "buffer bindings":
+
+        it "accepts 16- and 20-byte indirect commands at aligned offsets":
+            expect(webgpu_validate_indirect_draw_buffer(1, 0, 16)).to_equal("")
+            expect(webgpu_validate_indirect_draw_buffer(1, 8, 20)).to_equal("")
+
+        it "rejects invalid indirect draws":
+            expect(webgpu_validate_indirect_draw_buffer(0, 0, 16)).to_equal("GPURenderPassEncoder indirect draw buffer must be valid")
+            expect(webgpu_validate_indirect_draw_buffer(1, -4, 16)).to_equal("GPURenderPassEncoder indirect draw offset must be non-negative")
+            expect(webgpu_validate_indirect_draw_buffer(1, 6, 16)).to_equal("GPURenderPassEncoder indirect draw offset must be 4-byte aligned")
+            expect(webgpu_validate_indirect_draw_buffer(1, 0, 12)).to_equal("GPURenderPassEncoder indirect draw command size is unsupported")
+
+        it "treats size -1 as the rest of the buffer":
+            expect(webgpu_validate_render_buffer_binding(0, 1, 0, -1, "vertex")).to_equal("")
+            expect(webgpu_validate_render_buffer_binding(0, 1, 0, 64, "vertex")).to_equal("")
+
+        it "labels vertex binding violations":
+            expect(webgpu_validate_render_buffer_binding(-1, 1, 0, 64, "vertex")).to_equal("GPURenderPassEncoder vertex buffer slot must be non-negative")
+            expect(webgpu_validate_render_buffer_binding(0, 0, 0, 64, "vertex")).to_equal("GPURenderPassEncoder vertex buffer must be valid")
+            expect(webgpu_validate_render_buffer_binding(0, 1, -1, 64, "vertex")).to_equal("GPURenderPassEncoder vertex buffer offset must be non-negative")
+            expect(webgpu_validate_render_buffer_binding(0, 1, 0, 0, "vertex")).to_equal("GPURenderPassEncoder vertex buffer size must be positive")
+
+        it "knows the two index formats":
+            expect(webgpu_index_format_bits("uint16")).to_equal(16)
+            expect(webgpu_index_format_bits("uint32")).to_equal(32)
+            expect(webgpu_index_format_bits("uint8")).to_equal(0)
+
+        it "validates an index buffer binding":
+            expect(webgpu_validate_index_buffer_binding(1, "uint16", 0, -1)).to_equal("")
+            expect(webgpu_validate_index_buffer_binding(1, "uint8", 0, -1)).to_equal("GPURenderPassEncoder index buffer format must be uint16 or uint32")
+            expect(webgpu_validate_index_buffer_binding(0, "uint16", 0, -1)).to_equal("GPURenderPassEncoder index buffer must be valid")
+
+    context "dynamic state":
+
+        it "validates a scissor rect":
+            expect(webgpu_validate_scissor_rect(0, 0, 10, 10)).to_equal("")
+            expect(webgpu_validate_scissor_rect(-1, 0, 10, 10)).to_equal("GPURenderPassEncoder scissor rect origin must be non-negative")
+            expect(webgpu_validate_scissor_rect(0, 0, 0, 10)).to_equal("GPURenderPassEncoder scissor rect size must be positive")
+
+        it "validates a viewport":
+            expect(webgpu_validate_viewport(0, 0, 640, 480, 0.0, 1.0)).to_equal("")
+            expect(webgpu_validate_viewport(0, 0, 640, 480, 0.5, 0.5)).to_equal("")
+            expect(webgpu_validate_viewport(0, -1, 640, 480, 0.0, 1.0)).to_equal("GPURenderPassEncoder viewport origin must be non-negative")
+            expect(webgpu_validate_viewport(0, 0, 640, 0, 0.0, 1.0)).to_equal("GPURenderPassEncoder viewport size must be positive")
+            expect(webgpu_validate_viewport(0, 0, 640, 480, -0.5, 1.0)).to_equal("GPURenderPassEncoder viewport depth range must be between 0 and 1")
+            expect(webgpu_validate_viewport(0, 0, 640, 480, 0.0, 1.5)).to_equal("GPURenderPassEncoder viewport depth range must be between 0 and 1")
+            expect(webgpu_validate_viewport(0, 0, 640, 480, 0.75, 0.25)).to_equal("GPURenderPassEncoder viewport minDepth must not exceed maxDepth")
+
+        it "validates a stencil reference":
+            expect(webgpu_validate_stencil_reference(0)).to_equal("")
+            expect(webgpu_validate_stencil_reference(255)).to_equal("")
+            expect(webgpu_validate_stencil_reference(-1)).to_equal("GPURenderPassEncoder stencil reference must be non-negative")
