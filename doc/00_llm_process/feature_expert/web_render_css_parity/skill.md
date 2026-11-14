@@ -1108,8 +1108,12 @@ turns green in the same change, or the check FAILs as stale.
   16 px with the 5x7 bitmap rasteriser; Draw IR lanes paint the resolved face.
   `web_set_bitmap_paint_lane` keeps the bitmap advance clamp on for the
   software entry points only. Dropping the clamp everywhere joins `ll` at 13 px.
-- 4K (3840x2160, Vulkan on llvmpipe): `overview` was 9.15% before the
-  clamped-width auto-margin fix; not re-measured after it. No 4K baseline yet.
+- 4K (3840x2160, Vulkan on llvmpipe) is ratcheted in
+  `chrome_catalog_pixel_diff_baseline.Linux-aarch64.3840x2160.vulkan.txt`:
+  overview 0.24 (9.15 before the clamped-width auto-margin fix), html 2.77,
+  css-layout 2.09, css-paint 2.50, forms-media 1.96, animation 2.63,
+  evidence 0.15, tab-bar 0.05. About 2 min per page on llvmpipe. Not yet
+  measured on a hardware Vulkan driver.
 - Open review items: `doc/08_tracking/bug/web_render_chrome_lane_review_residue_2026-11-14.md`.
 
 ## 2026-11-14 — replaced media (canvas / svg / audio / video) vs Chrome 159
