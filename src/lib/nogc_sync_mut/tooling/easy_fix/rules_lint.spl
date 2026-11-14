@@ -209,7 +209,7 @@ fn check_spipe_manual_assertions(source: String, file: String) -> [EasyFix]:
 # ============================================================================
 # Rule 6: non_exhaustive_match
 # Detects match blocks without a catch-all `case _:` arm.
-# Confidence: Safe
+# Confidence: Likely (the inserted arm is a placeholder to replace)
 # ============================================================================
 
 # Arms are `case P:` or bare `P:`; either form may be the catch-all (`case _:` / `_:`).
@@ -222,6 +222,7 @@ fn check_non_exhaustive_match(source: String, file: String) -> [EasyFix]:
     var case_styles: [bool] = []
     var end_lines: [i64] = []
     var end_offsets: [i64] = []
+    var end_columns: [i64] = []
 
     for raw_ctx in line_contexts(source):
         val ctx: LineContext = raw_ctx
@@ -231,13 +232,14 @@ fn check_non_exhaustive_match(source: String, file: String) -> [EasyFix]:
         while indents.len() > 0 and indents[indents.len() - 1] >= ctx.indent:
             val top = indents.len() - 1
             if not catch_alls[top]:
-                _emit_non_exhaustive_fix(fixes: fixes, file: file, after_line: end_lines[top], after_offset: end_offsets[top], case_indent: arm_indents[top], bare: not case_styles[top])
+                _emit_non_exhaustive_fix(fixes: fixes, file: file, after_line: end_lines[top], after_offset: end_offsets[top], after_column: end_columns[top], case_indent: arm_indents[top], bare: not case_styles[top])
             indents.pop()
             arm_indents.pop()
             catch_alls.pop()
             case_styles.pop()
             end_lines.pop()
             end_offsets.pop()
+            end_columns.pop()
         if indents.len() > 0:
             val top = indents.len() - 1
             if arm_indents[top] < 0:
@@ -245,11 +247,11 @@ fn check_non_exhaustive_match(source: String, file: String) -> [EasyFix]:
             if ctx.indent == arm_indents[top]:
                 if ctx.trimmed.starts_with("case "):
                     case_styles[top] = true
-                if ctx.trimmed.starts_with("case _:") or ctx.trimmed.starts_with("case _ ") or ctx.trimmed.starts_with("case _(") or ctx.trimmed.starts_with("_:"):
+                if ctx.trimmed.starts_with("case _:") or ctx.trimmed.starts_with("case _ ") or ctx.trimmed.starts_with("case _(") or ctx.trimmed.starts_with("_:") or ctx.trimmed.starts_with("_("):
                     catch_alls[top] = true
-            if ctx.trimmed.starts_with("case ") or not case_styles[top]:
-                end_lines[top] = ctx.line_num
-                end_offsets[top] = ctx.byte_offset + ctx.line.len()
+            end_lines[top] = ctx.line_num
+            end_offsets[top] = ctx.byte_offset + ctx.line.len()
+            end_columns[top] = ctx.line.len() + 1
         if ctx.trimmed.starts_with("match ") and ctx.trimmed.ends_with(":"):
             indents.push(ctx.indent)
             arm_indents.push(-1)
@@ -257,18 +259,20 @@ fn check_non_exhaustive_match(source: String, file: String) -> [EasyFix]:
             case_styles.push(false)
             end_lines.push(ctx.line_num)
             end_offsets.push(ctx.byte_offset + ctx.line.len())
+            end_columns.push(ctx.line.len() + 1)
 
     # Matches still open at end of file
     while indents.len() > 0:
         val top = indents.len() - 1
         if not catch_alls[top]:
-            _emit_non_exhaustive_fix(fixes: fixes, file: file, after_line: end_lines[top], after_offset: end_offsets[top], case_indent: arm_indents[top], bare: not case_styles[top])
+            _emit_non_exhaustive_fix(fixes: fixes, file: file, after_line: end_lines[top], after_offset: end_offsets[top], after_column: end_columns[top], case_indent: arm_indents[top], bare: not case_styles[top])
         indents.pop()
         arm_indents.pop()
         catch_alls.pop()
         case_styles.pop()
         end_lines.pop()
         end_offsets.pop()
+        end_columns.pop()
 
     fixes
 
@@ -282,22 +286,22 @@ fn _lint_find_text_from(line: text, needle: text, search_from: i64) -> i64:
         i = i + 1
     -1
 
-fn _emit_non_exhaustive_fix(fixes: [EasyFix], file: String, after_line: Int, after_offset: Int, case_indent: Int, bare: bool = false):
+fn _emit_non_exhaustive_fix(fixes: [EasyFix], file: String, after_line: Int, after_offset: Int, after_column: Int, case_indent: Int, bare: bool):
     val spaces = " ".repeat(case_indent)
     val inner_spaces = " ".repeat(case_indent + 4)
-    val arm_head = if bare: "_:" else: "case _:"
-    val new_arm = "\n{spaces}{arm_head}\n{inner_spaces}todo(\"handle remaining cases\")"
+    val arm_head = if bare: "_" else: "case _"
+    val new_arm = "\n{spaces}{arm_head}(\"remaining cases are not handled yet\"):\n{inner_spaces}todo(\"handle remaining cases\", \"replace this catch-all with explicit arms\")"
     var fix = EasyFix.create(
         id: "L:non_exhaustive_match:{after_line}",
         description: "add missing catch-all arm with todo()",
-        confidence: FixConfidence.Safe
+        confidence: FixConfidence.Likely
     )
     fix.add_replacement(Replacement.create(
         file: file,
         start: after_offset,
         end: after_offset,
         line: after_line,
-        column: 1,
+        column: after_column,
         new_text: new_arm
     ))
     fixes.push(fix)
