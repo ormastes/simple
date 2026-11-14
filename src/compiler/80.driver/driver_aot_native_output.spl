@@ -79,6 +79,7 @@ use compiler.backend.linker.linker_wrapper.{
 use compiler.backend.llvm_native_link.{NativeLinkOptions}
 use compiler.driver.driver_build.native_link_receipt_v1.{native_link_with_receipt_v1, native_shared_link_with_receipt_v1}
 use compiler.driver.driver_xray_link.{xray_link_with_runtime_v1}
+use compiler.driver.driver_xray_llvm_link.{xray_llvm_link_needed_v1, xray_llvm_link_objects_v1, xray_llvm_link_libraries_v1}
 use compiler.driver.smf_writer.{Target}
 use compiler.driver.smf_group_object_adapter.{smf_group_object_from_bytes_v1}
 use compiler.driver.smf.runtime_std_package_membership_v1.{
@@ -1925,8 +1926,20 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
                         "native collection direct link-input admission failed: {reason}")
                 direct_objects = retained.unwrap()
             if effective_backend == "llvm" or effective_backend == "llvm-lib":
+                var llvm_objects = direct_objects
+                var llvm_libraries = ctx.options.native_libraries
+                match xray_llvm_link_needed_v1(ctx.options.xray_enabled, effective_backend, ctx.native_target, false):
+                    case Err(reason):
+                        return driver_native_collection_link_cleanup_error_v1(direct_link_input_dir, CompileResult.CodegenError(reason))
+                    case Ok(needed):
+                        if needed:
+                            match xray_llvm_link_objects_v1(direct_objects, true, effective_backend, ctx.native_target, false):
+                                case Err(reason):
+                                    return driver_native_collection_link_cleanup_error_v1(direct_link_input_dir, CompileResult.CodegenError(reason))
+                                case Ok(linked): llvm_objects = linked
+                            llvm_libraries = xray_llvm_link_libraries_v1(llvm_libraries)
                 val llvm_opts = NativeLinkOptions(
-                    libraries: ctx.options.native_libraries,
+                    libraries: llvm_libraries,
                     library_paths: ctx.options.native_library_paths,
                     linker_flags: ctx.options.native_linker_flags,
                     debug: ctx.options.debug_info,
@@ -1943,7 +1956,7 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
                     return driver_native_collection_link_cleanup_error_v1(
                         direct_link_input_dir,
                         CompileResult.CodegenError("native collection direct link input changed before LLVM link"))
-                match native_link_with_receipt_v1(direct_objects, output, llvm_opts):
+                match native_link_with_receipt_v1(llvm_objects, output, llvm_opts):
                     case Ok(_):
                         return driver_native_success_with_launch_metadata(ctx, output,
                             direct_bindings, direct_objects, direct_link_input_dir)
@@ -3327,6 +3340,12 @@ impl CompilerDriver:
             return driver_native_success_with_launch_metadata(ctx, output, collection_bindings, object_files, collection_link_input_dir)
 
         if emit_shared_requested:
+            # The LLVM stage-1 adapter rejects packed DSO IDs; never claim that
+            # linking its main-image runtime makes a shared image observable.
+            match xray_llvm_link_needed_v1(ctx.options.xray_enabled, effective_backend, native_target, true):
+                case Err(reason):
+                    return driver_native_collection_link_cleanup_error_v1(collection_link_input_dir, CompileResult.CodegenError(reason))
+                case Ok(_): nil
             var shared_config = NativeLinkConfig.default()
             shared_config.pie = false
             shared_config.verbose = ctx.options.verbose
@@ -3362,8 +3381,20 @@ impl CompilerDriver:
             # LLVM path: compile C runtime and link with entry point
             if trace:
                 print "[NATIVE] creating NativeLinkOptions..."
+            var llvm_objects = object_files
+            var llvm_libraries = ctx.options.native_libraries
+            match xray_llvm_link_needed_v1(ctx.options.xray_enabled, effective_backend, native_target, false):
+                case Err(reason):
+                    return driver_native_collection_link_cleanup_error_v1(collection_link_input_dir, CompileResult.CodegenError(reason))
+                case Ok(needed):
+                    if needed:
+                        match xray_llvm_link_objects_v1(object_files, true, effective_backend, native_target, false):
+                            case Err(reason):
+                                return driver_native_collection_link_cleanup_error_v1(collection_link_input_dir, CompileResult.CodegenError(reason))
+                            case Ok(linked): llvm_objects = linked
+                        llvm_libraries = xray_llvm_link_libraries_v1(llvm_libraries)
             val llvm_opts = NativeLinkOptions(
-                libraries: ctx.options.native_libraries,
+                libraries: llvm_libraries,
                 library_paths: ctx.options.native_library_paths,
                 linker_flags: ctx.options.native_linker_flags,
                 debug: ctx.options.debug_info,
@@ -3385,7 +3416,7 @@ impl CompilerDriver:
                 return driver_native_collection_link_cleanup_error_v1(
                     collection_link_input_dir,
                     CompileResult.CodegenError("native collection link input changed before LLVM link"))
-            match native_link_with_receipt_v1(object_files, output, llvm_opts):
+            match native_link_with_receipt_v1(llvm_objects, output, llvm_opts):
                 case Ok(_):
                     log_build_progress("link", "objects", object_files.len(),
                         object_files.len(), output, 6, 6, 0,
