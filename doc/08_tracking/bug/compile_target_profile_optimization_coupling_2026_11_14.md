@@ -65,3 +65,5 @@ and failing native exits are retained; the separate bug
 `named_default_tail_argument_misbind_2026_11_14` owns that repair.
 The positional production call was already the real call shape. This profile
 repair does not claim to repair the compiler's named-argument lowering.
+
+The PR source-binding gate detected the new target-profile hash component missing from the formal live-key schema. The correction adds component50, regenerates its Lean visibility theorem through the actual native schema parser/emitter, and re-pins only the reviewed hash declaration. The compiler-free source-binding check passes41 bindings. Lean compilation and full generator execution remain UNRUN on this host; this does not expand the scoped verification claim.

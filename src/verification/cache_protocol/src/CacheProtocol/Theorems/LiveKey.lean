@@ -72,8 +72,8 @@ theorem library_mode_default_vs_explicit_visible (legacy explicit : LiveKey)
   exact hexplicit (heq.symm.trans hlegacy)
 
 /-- The optional XRay component (`--xray`) uses the empty model value for the
-    off encoding, which appends no component and so keeps every historical
-    key. An instrumented build always carries a nonempty value, so a sled
+    off encoding, which appends no XRay component in the current schema.
+    An instrumented build always carries a nonempty value, so a sled
     artifact can never satisfy an off lookup (or the reverse).
     Source framing/digest assumptions remain those of Generated.LiveKey. -/
 theorem xray_off_vs_on_visible (plain instrumented : LiveKey)
@@ -82,5 +82,15 @@ theorem xray_off_vs_on_visible (plain instrumented : LiveKey)
   apply opts_xray_live_change_visible
   intro heq
   exact hon (heq.symm.trans hoff)
+
+/-- The mandatory target-profile descriptor invalidates pre-policy keys.
+    Distinct normalized descriptors are separately visible through the generated
+    opts_target_profile_identity_live_change_visible theorem. -/
+theorem target_profile_legacy_vs_current_visible (legacy current : LiveKey)
+    (hlegacy : legacy .opts_target_profile_identity = [])
+    (hcurrent : current .opts_target_profile_identity ≠ []) : enc legacy ≠ enc current := by
+  apply opts_target_profile_identity_live_change_visible
+  intro heq
+  exact hcurrent (heq.symm.trans hlegacy)
 
 end CacheProtocol.Live
