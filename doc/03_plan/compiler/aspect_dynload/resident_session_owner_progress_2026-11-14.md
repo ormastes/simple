@@ -32,7 +32,9 @@ logical release only invalidates the current handle. Simple metadata carrier
 layout and RSS are still unqualified; the reservation is not a measured RSS
 claim.
 
-Stop closes native admission before unpatching. Drain first checks native
+Stop closes native admission without unpatching: armed sleds and their exact
+IDs remain resident, and preparation/restart cannot reuse that adapter.
+This requires no post-start physical patch authority. Drain first checks native
 callback pins, then closes each channel and requires every queued record to
 have been polled. A timeout preserves the generation and Draining state.
 Flush checks pending records without discarding them. Poll has a 4096-record
