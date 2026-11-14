@@ -378,6 +378,7 @@ pub(crate) fn call_method_on_value(
                         body,
                         env: captured,
                     }) => {
+                        let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
                         let mut result = Vec::new();
                         for item in arr.iter() {
                             let mut local_env = Env::clone(captured);
@@ -419,6 +420,7 @@ pub(crate) fn call_method_on_value(
                         body,
                         env: captured,
                     }) => {
+                        let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
                         let mut result = Vec::new();
                         for item in arr.iter() {
                             let mut local_env = Env::clone(captured);
@@ -464,6 +466,7 @@ pub(crate) fn call_method_on_value(
                         body,
                         env: captured,
                     }) => {
+                        let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
                         let mut result = Vec::new();
                         for item in arr.iter() {
                             let mut local_env = Env::clone(captured);
@@ -560,6 +563,7 @@ pub(crate) fn call_method_on_value(
                         body,
                         env: captured,
                     }) => {
+                        let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
                         for item in arr.iter() {
                             let mut local_env = Env::clone(captured);
                             if let Some(param) = params.first() {
@@ -601,6 +605,7 @@ pub(crate) fn call_method_on_value(
                         body,
                         env: captured,
                     }) => {
+                        let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
                         for item in arr.iter() {
                             let mut local_env = Env::clone(captured);
                             if let Some(param) = params.first() {

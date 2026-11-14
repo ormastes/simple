@@ -1094,6 +1094,12 @@ pub(crate) fn evaluate_call(
         let env_fn_binding_shadows_flat = matches!(env.get(name), Some(Value::Function { .. }));
         if env_fn_binding_shadows_flat {
             if let Some(val) = env.get(name).cloned() {
+                // An env-bound import (notably `use m.{secret as s}`, which
+                // never enters FUNCTION_OVERLOADS) is gated by the def's own
+                // name; nested fns have no owner and pass.
+                if let Value::Function { def, .. } = &val {
+                    gate_private_call(&def.name, def)?;
+                }
                 if let Some(result) =
                     call_value_as_callable(val, args, env, functions, classes, enums, impl_methods)?
                 {

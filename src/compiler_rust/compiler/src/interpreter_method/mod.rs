@@ -45,6 +45,7 @@ fn call_callable_field(
                 arg_vals.push(evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
             }
             // Create local env from captured env and bind params
+            let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured_env);
             let mut local_env = Env::clone(captured_env);
             for (i, param) in params.iter().enumerate() {
                 if let Some(val) = arg_vals.get(i) {
@@ -1796,6 +1797,7 @@ pub(crate) fn evaluate_method_call(
                         env: captured,
                     } = func
                     {
+                        let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
                         let mut local_env = Env::clone(&captured);
                         // No args to bind for or_else
                         return evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods);
@@ -1824,6 +1826,7 @@ pub(crate) fn evaluate_method_call(
                         env: captured,
                     } = func
                     {
+                        let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
                         let mut local_env = Env::clone(&captured);
                         return evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods);
                     }
@@ -2253,6 +2256,7 @@ pub(crate) fn evaluate_method_call_with_self_update(
                     for arg in args {
                         arg_vals.push(evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
                     }
+                    let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured_env);
                     let mut local_env = Env::clone(captured_env);
                     for (i, param) in params.iter().enumerate() {
                         if let Some(val) = arg_vals.get(i) {

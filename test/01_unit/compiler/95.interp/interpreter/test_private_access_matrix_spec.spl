@@ -56,6 +56,11 @@ fn fixture_root(tag: text) -> text:
     val _lf = write_file(root + "/src/app/other/lamfn.spl", "use app.sub.lamlib.{{make_lam}}\npub fn call_lam() -> i64:\n    val g = make_lam()\n    g()\n")
     val _vf = write_file(root + "/src/app/other/vf.spl", "use app.sub.lib_mod.*\nuse app.runner.run.{{run_cb}}\npub fn vf_cb() -> i64:\n    run_cb(secret_helper)\npub fn vf_val() -> i64:\n    val f = secret_helper\n    f()\npub fn uf() -> i64:\n    val x = 41\n    x.secret_inc()\npub fn pipe() -> i64:\n    41 |> secret_inc\n")
     val _vq = write_file(root + "/src/app/other/vq.spl", "use app.sub.lib_mod\npub fn vq() -> i64:\n    val f = lib_mod.secret_helper\n    f()\n")
+    # An aliased facade import called by name, and a lambda with a qualified
+    # private call run by a builtin (`.map`) inside a src helper.
+    val _al = write_file(root + "/src/app/other/alias_caller.spl", "use app.sub.sub_facade.{{secret_helper as s}}\npub fn call_al() -> i64:\n    s()\n")
+    val _rm = write_file(root + "/src/app/runner/run2.spl", "pub fn run_map(f: fn(i64) -> i64) -> i64:\n    [41].map(f)[0]\n")
+    val _pm = write_file(root + "/src/app/other/pm.spl", "use app.sub.lib_mod\npub fn pm() -> i64:\n    [41].map(\\x: lib_mod.secret_inc(x))[0]\n")
     root
 
 # The fixture root itself must not look like a test path, or every product
@@ -246,3 +251,13 @@ describe "a closure or decorator runs as the module that wrote it":
 
     it "an entry-defined decorator calling another dir's private fn stays refused":
         expect(refused_on_every_lane("entrydeco", "src/app/other/entry_deco2.spl", "use app.sub.lib_mod\nfn deco(f: fn() -> i64) -> fn() -> i64:\n    val k = lib_mod.secret_helper()\n    return f\nfn outer() -> i64:\n    @deco\n    fn inner() -> i64:\n        return 7\n    inner()\nprint outer()\n")).to_equal(true)
+
+describe "aliased imports and builtin-run lambdas follow the same rule":
+    it "product code calling an aliased facade import is refused":
+        expect(refused_on_every_lane("aliascall", "src/app/main_al.spl", "use app.other.alias_caller.{{call_al}}\nprint call_al()\n")).to_equal(true)
+
+    it "a product lambda with a qualified private call run by .map is refused":
+        expect(refused_fn_on_every_lane("mapqualsrc", "src/app/main_pm.spl", "use app.other.pm.{{pm}}\nprint pm()\n", "secret_inc")).to_equal(true)
+
+    it "a test lambda with a qualified private call run by .map in a src helper is allowed":
+        expect(allowed_on_every_lane("mapqualtest", "test/unit/mq_spec.spl", "use app.sub.lib_mod\nuse app.runner.run2.{{run_map}}\nprint run_map(\\x: lib_mod.secret_inc(x))\n")).to_equal(true)

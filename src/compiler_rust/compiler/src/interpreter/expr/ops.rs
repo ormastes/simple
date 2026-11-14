@@ -587,6 +587,7 @@ pub(super) fn eval_op_expr(
                                     body,
                                     env: lambda_env,
                                 } => {
+                                    let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&lambda_env);
                                     let mut local_env = Env::clone(&lambda_env);
                                     for (i, param_name) in params.iter().enumerate() {
                                         if let Some(arg) = all_args.get(i) {
@@ -645,6 +646,7 @@ pub(super) fn eval_op_expr(
                                     body,
                                     env: lambda_env,
                                 } => {
+                                    let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&lambda_env);
                                     let mut local_env = Env::clone(&lambda_env);
                                     if let Some(param_name) = params.first() {
                                         local_env.insert(param_name.clone(), left_val);
