@@ -73,16 +73,24 @@ The controls below are the other half: they pin that this change reaches ONLY
 sized text controls, and moves neither the heights the sibling spec fixed, nor
 `<select>`'s max-content width, nor text advance anywhere outside a control.
 
-RE-ORACLED 2026-11-14 against Chrome 159 on Linux. The widths this spec first
-pinned (163 / 93 / 58 for `<input>`, 195 / 115 / 355 for `<textarea>`) are
-Chrome 152 on a host whose control faces are Helvetica and Menlo, and the
-`N*7 + 5` / `N*8 + 17` fits are those faces' metrics, not browser constants.
-On Linux Chrome's `Arial` is Liberation Sans and its `monospace` is DejaVu Sans
-Mono, where the same Chrome rule gives `8N + 17` and `8N + 15`
-(`form_control_chrome159_geometry_spec` derives both from the font tables).
-The rows below now carry the Chrome 159 / Linux numbers, because that is the
-oracle available on this host; the Helvetica/Menlo arm is unchanged in the
-engine and is what a macOS run of this spec would need its old numbers for.
+TWO ORACLE TABLES (2026-11-14). The widths above are FACE metrics, not browser
+constants, so this spec carries one table per platform face set and selects by
+the faces actually installed (same test as font_provider_linux_generic_spec):
+
+| row                      | Helvetica / Menlo (Chrome 152, macOS) | Liberation Sans / DejaVu Sans Mono (Chrome 159, Linux) |
+|--------------------------|---------------------------------------|---------------------------------------------------------|
+| `<input>` size 20        | 163                                   | 195                                                     |
+| `<input size=10>`        |  93                                   | 115                                                     |
+| `<input size=5>`         |  58                                   |  75                                                     |
+| `<textarea>` cols 20     | 195                                   | 193                                                     |
+| `<textarea cols=10>`     | 115                                   | 113                                                     |
+| `<textarea cols=40>`     | 355 (Chrome 356, stated residue)      | 353                                                     |
+
+Linux is `8N + 17` / `8N + 15` (see form_control_chrome159_geometry_spec). A
+host with neither face set is BLOCKED, not guessed at. Heights, the checkbox
+box, the explicit-width row and the select row do not depend on the face and
+assert unconditionally (`Alpha` is 34.09 px in Arial, Helvetica and Liberation
+Sans alike, so the select is 73 on both tables).
 """
 
 """
@@ -90,6 +98,7 @@ Traceability: REQ-BROWSER-ENGINE-FORMS-003 — a text control's intrinsic conten
 """
 # @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl 1%
 use std.spec.*
+use std.nogc_sync_mut.sffi.io.{file_exists}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_debug_layout_by_id
 }
@@ -97,6 +106,24 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
 val VW: i32 = 900
 val VH: i32 = 20000
 val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}label{display:block;margin:8px 0}input,select,textarea,button{padding:8px;border:1px solid #94a3b8}</style></head><body><form>"
+
+val LIB_SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val DJV_MONO: text = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+val NO_FACE_SET: text = "BLOCKED: host has neither Helvetica/Menlo (/System/Library/Fonts/Helvetica.ttc) nor Liberation Sans / DejaVu Sans Mono under /usr/share/fonts"
+
+fn macos_faces() -> bool:
+    file_exists("/System/Library/Fonts/Helvetica.ttc")
+
+fn linux_faces() -> bool:
+    not macos_faces() and file_exists(LIB_SANS) and file_exists(DJV_MONO)
+
+fn by_face(macos: text, linux: text) -> text:
+    """The expected value for the face set this host resolves, "" for neither."""
+    if macos_faces():
+        return macos
+    if linux_faces():
+        return linux
+    ""
 
 fn probe(inner: text, prop: text) -> text:
     simple_web_layout_debug_layout_by_id(
@@ -109,29 +136,53 @@ fn h_of(inner: text) -> text:
     probe(inner, "h")
 
 describe "sized text controls take Chrome's per-column advance plus an intercept":
-    it "AC-1: <input> with the HTML default size=20 is Chrome's 195, not 138":
+    it "AC-1: <input> with the HTML default size=20 is Chrome's 163 (Helvetica) / 195 (Liberation Sans), not 138":
         step("20 * 7 + 5 = 145 content, plus the author's 18 px padding+border")
-        expect(w_of("<label>Name <input id=\"x\" value=\"Simple\"></label>")).to_equal("195")
+        val want = by_face("163", "195")
+        if want == "":
+            pending(NO_FACE_SET)
+            return
+        expect(w_of("<label>Name <input id=\"x\" value=\"Simple\"></label>")).to_equal(want)
 
-    it "AC-2: an explicit size=10 gives Chrome's 115":
+    it "AC-2: an explicit size=10 gives Chrome's 93 / 115":
         step("10 * 7 + 5 = 75 — the column term scales, it is not a constant")
-        expect(w_of("<label>Ten <input id=\"x\" size=\"10\"></label>")).to_equal("115")
+        val want = by_face("93", "115")
+        if want == "":
+            pending(NO_FACE_SET)
+            return
+        expect(w_of("<label>Ten <input id=\"x\" size=\"10\"></label>")).to_equal(want)
 
-    it "AC-3: an explicit size=5 gives Chrome's 75":
+    it "AC-3: an explicit size=5 gives Chrome's 58 / 75":
         step("5 * 7 + 5 = 40; a third point is what separates slope from intercept")
-        expect(w_of("<label>Five <input id=\"x\" size=\"5\"></label>")).to_equal("75")
+        val want = by_face("58", "75")
+        if want == "":
+            pending(NO_FACE_SET)
+            return
+        expect(w_of("<label>Five <input id=\"x\" size=\"5\"></label>")).to_equal(want)
 
-    it "AC-4: <textarea> with the HTML default cols=20 is Chrome's 193, not 138":
+    it "AC-4: <textarea> with the HTML default cols=20 is Chrome's 195 (Menlo) / 193 (DejaVu Sans Mono), not 138":
         step("20 * 8 + 17 = 177 — a different advance AND a different intercept")
-        expect(w_of("<label>Notes <textarea id=\"x\">Editable text</textarea></label>")).to_equal("193")
+        val want = by_face("195", "193")
+        if want == "":
+            pending(NO_FACE_SET)
+            return
+        expect(w_of("<label>Notes <textarea id=\"x\">Editable text</textarea></label>")).to_equal(want)
 
-    it "AC-5: an explicit cols=10 gives Chrome's 113":
+    it "AC-5: an explicit cols=10 gives Chrome's 115 / 113":
         step("10 * 8 + 17 = 97, so the textarea intercept survives at another width")
-        expect(w_of("<label>Narrow <textarea id=\"x\" cols=\"10\">t</textarea></label>")).to_equal("113")
+        val want = by_face("115", "113")
+        if want == "":
+            pending(NO_FACE_SET)
+            return
+        expect(w_of("<label>Narrow <textarea id=\"x\" cols=\"10\">t</textarea></label>")).to_equal(want)
 
-    it "AC-6: cols=40 is Chrome's 353 — exact on this face, no residue":
+    it "AC-6: cols=40 lands 355 against Chrome's 356 (Menlo, stated residue) / exactly 353 (DejaVu)":
         step("integer arithmetic drops monospace '0' = 8.0253 down to 8; recorded, not hidden")
-        expect(w_of("<label>Wide <textarea id=\"x\" cols=\"40\">t</textarea></label>")).to_equal("353")
+        val want = by_face("355", "353")
+        if want == "":
+            pending(NO_FACE_SET)
+            return
+        expect(w_of("<label>Wide <textarea id=\"x\" cols=\"40\">t</textarea></label>")).to_equal(want)
 
     it "AC-7 (control): the heights the sibling spec fixed do not move":
         step("this change touches the width branch only; 33 and 48 must be untouched")

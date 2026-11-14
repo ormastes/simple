@@ -68,6 +68,7 @@ weakened test.
 use std.spec.step
 
 use std.spec.*
+use std.nogc_sync_mut.sffi.io.{file_exists}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_draw_ir,
     simple_web_layout_render_html_draw_ir_with_images,
@@ -77,6 +78,12 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_cpu.{
 use std.common.gpu.simpleos_host_gpu_draw_ir.{
     SimpleOsHostGpuImageResource, simpleos_host_gpu_image_resource}
 use common.ui.draw_ir.{DrawIrCommand, DrawIrComposition}
+
+fn _macos_control_faces() -> bool:
+    file_exists("/System/Library/Fonts/Helvetica.ttc")
+
+fn _linux_control_faces() -> bool:
+    not _macos_control_faces() and file_exists("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf")
 
 fn _draw_ir_command_by_id(
     commands: [DrawIrCommand], component_id: text
@@ -235,15 +242,27 @@ describe "Web CSS table, replaced-element, and forms layout":
         val inp = _draw_ir_command_by_id(commands, "inp")
 
         step("Assert the button grew its border-box by its own border and padding around the label content")
-        # Chrome 159 (Linux, Liberation Sans): the UA button is 35.27 px wide,
-        # `border: 2px` + `padding: 1px 6px` around a 19.27 px `OK` label, so
-        # its content box starts at x=8. Integer boxes ceil the label to 20.
-        # The 33 / 6 / 21 this row carried were a border-less button around a
-        # 21 px label and matched no browser (red since before 2026-11-14:
-        # `expected 31 to equal 33`).
+        # FACE-INDEPENDENT (Chrome's UA sheet on every platform): `border: 2px`
+        # and `padding: 1px 6px`, so the content box starts at x=8 and the
+        # border box is the label plus 16. The `content_rect.x == 6` this row
+        # used to carry was a border-less button and matched no browser.
         expect(btn.x).to_equal(0)
-        expect(btn.width).to_equal(36)
         expect(btn.content_rect.x).to_equal(8)
+        expect(btn.width).to_equal(btn.content_rect.width + 16)
+        # FACE-DEPENDENT: the `OK` label. Chrome 159 on Linux (Liberation
+        # Sans) measures it 19.27 px, button 35.27; integer boxes ceil to 20 /
+        # 36. The 21 / 33 this row carried came from this engine's
+        # bitmap-clamped 13 px advances, not from a browser, and were already
+        # red on Linux (29 at 212090742df, 31 at 8f83a7b9c4a). No Chrome
+        # measurement of the Helvetica label exists here, so that host is
+        # BLOCKED on its oracle rather than given an invented number.
+        if _macos_control_faces():
+            pending("BLOCKED: no Chrome measurement of the UA <button>OK</button> label width on the Helvetica face set")
+            return
+        if not _linux_control_faces():
+            pending("BLOCKED: host has neither Helvetica nor Liberation Sans under /usr/share/fonts")
+            return
+        expect(btn.width).to_equal(36)
         expect(btn.content_rect.width).to_equal(20)
 
         step("Assert the input sits to the right of the button and reserves its own padded box")
