@@ -384,6 +384,8 @@ impl ExtensionHost:
     # last 3 consecutive dispatches is short-circuited with a fixed error
     # instead of running its handler again (crash-loop containment).
     me dispatch_command(command_id: text, payload: text) -> Result<text, text>:
+        if not me.command_enabled(command_id):
+            return Err("command disabled by when clause: " + command_id)
         me.activate_command(command_id)
         if not me.commands.has(command_id):
             return Err("no handler registered for command '" + command_id + "'")
@@ -725,7 +727,7 @@ impl ExtensionHost:
                 return entry
         ExtensionCommandEntry(
             extension_name: "",
-            command: ExtensionCommand(id: "", title: "", category: "")
+            command: ExtensionCommand(id: "", title: "", category: "", when: "")
         )
 
     fn command_registered(command_id: text) -> bool:
@@ -931,6 +933,27 @@ impl ExtensionHost:
     # contributed keybindings are evaluated against.
     me set_context_keys(keys: [text]):
         me.context_keys = keys
+
+    # A view is visible when its manifest `when` clause holds against the
+    # current context keys ("" = always). Unregistered ids are not visible.
+    fn view_visible(view_id: text) -> bool:
+        for entry in me.view_registry:
+            if entry.view.id == view_id:
+                return context_when_eval(entry.view.when, me.context_keys)
+        false
+
+    fn visible_view_ids() -> [text]:
+        var ids: [text] = []
+        for entry in me.view_registry:
+            if context_when_eval(entry.view.when, me.context_keys):
+                ids.push(entry.view.id)
+        ids
+
+    # A contributed command is enabled when its `when` clause holds. A command
+    # with no manifest entry (handler-only) has no clause and is enabled.
+    fn command_enabled(command_id: text) -> bool:
+        val entry = me.find_command(command_id)
+        context_when_eval(entry.command.when, me.context_keys)
 
     me _unregister_context(name: text):
         var new_contexts: [ExtensionContextEntry] = []
