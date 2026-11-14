@@ -1,0 +1,44 @@
+# Real intake + shared policy contract. Changed compiler execution remains a separate gate.
+use std.spec.{describe, it, expect}
+use app.io._CliCompile.compile_targets.{cli_native_build_parse_options_v1, cli_native_build_option_error}
+use app.cli.native_build_output_plan.{native_build_output_format_v1}
+use compiler.driver.driver_xray_policy.{xray_policy_resolve}
+
+describe "Native-build XRay option forwarding":
+    it "keeps ordinary native builds statically off":
+        val parsed = cli_native_build_parse_options_v1(["native-build", "main.spl"])
+        expect(parsed.ok).to_equal(true)
+        expect(parsed.xray_enabled).to_equal(false)
+
+    it "preserves explicit development instrumentation through typed intake":
+        val args = ["native-build", "--xray", "--profile", "dev", "--mode", "one-binary", "--backend", "llvm", "main.spl"]
+        expect(cli_native_build_option_error(args)).to_equal("")
+        val parsed = cli_native_build_parse_options_v1(args)
+        expect(parsed.ok).to_equal(true)
+        expect(parsed.xray_enabled).to_equal(true)
+        expect(parsed.release).to_equal(false)
+        expect(parsed.profile).to_equal("dev")
+        val format = native_build_output_format_v1(parsed.build_mode, false, false, false).to_text()
+        expect(xray_policy_resolve(parsed.xray_enabled, "aot", "llvm", parsed.release, format).is_ok()).to_equal(true)
+
+    it "does not let explicit instrumentation override release policy":
+        for args in [["native-build", "--xray", "--release", "main.spl"], ["native-build", "--profile=prod", "--xray", "main.spl"]]:
+            val parsed = cli_native_build_parse_options_v1(args)
+            expect(parsed.ok).to_equal(true)
+            expect(parsed.xray_enabled).to_equal(true)
+            expect(xray_policy_resolve(parsed.xray_enabled, "aot", "llvm", parsed.release, "native").is_err()).to_equal(true)
+
+    it "retains existing output and backend rejections":
+        val parsed = cli_native_build_parse_options_v1(["native-build", "--profile=dev", "--xray", "main.spl"])
+        val format = native_build_output_format_v1(parsed.build_mode, false, false, false).to_text()
+        expect(xray_policy_resolve(parsed.xray_enabled, "aot", "llvm", parsed.release, format).is_err()).to_equal(true)
+        expect(xray_policy_resolve(parsed.xray_enabled, "aot", "cranelift", parsed.release, "native").is_err()).to_equal(true)
+        expect(cli_native_build_option_error(["native-build", "--xray=false", "main.spl"]) != "").to_equal(true)
+
+    it "requires explicit native executable intent for startup consumption":
+        expect(cli_native_build_parse_options_v1(["native-build", "--profile=dev", "--xray-startup-consumer", "--mode=one-binary", "main.spl"]).ok).to_equal(false)
+        for output in ["--emit-shared", "--emit-object", "--emit-entry-object", "--emit-archive", "--emit-smf"]:
+            expect(cli_native_build_parse_options_v1(["native-build", "--profile=dev", "--xray", "--xray-startup-consumer", "--mode=one-binary", output, "main.spl"]).ok).to_equal(false)
+        val parsed = cli_native_build_parse_options_v1(["native-build", "--profile=dev", "--xray", "--xray-startup-consumer", "--mode=one-binary", "main.spl"])
+        expect(parsed.ok).to_equal(true)
+        expect(parsed.xray_startup_consumer_v1).to_equal(true)
