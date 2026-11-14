@@ -1,11 +1,12 @@
+use compiler.hir.hir_lowering.module_surface_selected_exports_v1.{module_surface_selected_exports_build_v1, module_surface_selected_exports_project_v1}
 # Frozen registry indexes and import/export route projections.
 use compiler.common.library_mode_policy_v1.{library_mode_generic_import_v1, library_mode_import_key_v1}
 
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName, module_surface_allocate_generation, module_surface_export_origin_index_position}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName, module_surface_allocate_generation, module_surface_export_origin_index_position, module_surface_declaration_authority_lookup_typed_v1, module_surface_authority_category_v1}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_logical_name_from_path, module_surface_fold_std_alias, module_surface_package_name_from_name}
 use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_semantic_hex_limb, module_surface_semantic_state, module_surface_semantic_mix, module_surface_semantic_finish}
 use compiler.common.cache.native_resolution_trace.{NativeResolutionProbeV1, NativeResolutionTraceV1}
-use compiler.common.module_path_naming.{module_relative_name_from_path}
+use compiler.common.module_path_naming.{module_relative_name_from_path, module_source_relative_path}
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io_runtime.{env_get_opt}
@@ -53,10 +54,15 @@ pub(package) fn module_surface_resolution_rows_sorted_v1(rows: [text]) -> [text]
 # exist after freeze. Restored 2026-11-13 (dropped by the 4edef8fab8e tree
 # snapshot): without it, an export rename, a facade reroute, or an eager/lazy
 # import edit left the frozen identity unchanged.
-fn _module_surface_final_semantic_digest(surface: ModuleSurface) -> text:
+fn _module_surface_final_semantic_digest(surface: ModuleSurface, selected_digest: text) -> text:
+    if selected_digest.byte_len() != 64: return ""
     if not surface.semantic_cacheable: return ""
+    val manifest_digest = module_surface_manifest_digest_v1(surface.canonical_path, surface.visibility_manifest_evidence_v1)
+    if manifest_digest == "": return ""
     var digest = module_surface_semantic_state()
-    digest = module_surface_semantic_mix(digest, "schema", "module-surface-frozen-v1")
+    digest = module_surface_semantic_mix(digest, "schema", "module-surface-frozen-typed-exports-v2")
+    digest = module_surface_semantic_mix(digest, "selected-export-digest", selected_digest)
+    digest = module_surface_semantic_mix(digest, "manifest-permission-input", manifest_digest)
     for limb in [surface.semantic_hash0, surface.semantic_hash1, surface.semantic_hash2, surface.semantic_hash3]:
         digest = module_surface_semantic_mix(digest, "declaration-limb", "{limb}")
     if surface.import_item_offsets.len() != surface.import_target_names.len() + 1: return ""
@@ -98,6 +104,26 @@ fn _module_surface_final_semantic_digest(surface: ModuleSurface) -> text:
         digest = module_surface_semantic_mix(digest, "origin-source", surface.export_origin_index.source_names[row])
         digest = module_surface_semantic_mix(digest, "origin-kind", surface.export_origin_index.resolution_kinds[row])
         i = i + 1
+    # A resolved facade retains the terminal declaration's policy. Export
+    # topology and declaration intent are separate semantic inputs; this does
+    # not promote the declaration or infer requester permission.
+    digest = module_surface_semantic_mix(digest, "authority-schema", "source-intent-v1")
+    val authority_index = surface.declaration_authority_index
+    val authority_bindings = module_surface_resolution_rows_sorted_v1(authority_index.index_by_binding.keys())
+    for binding in authority_bindings:
+        val row = authority_index.index_by_binding[binding]
+        if row < 0 or row >= authority_index.names.len() or row >= authority_index.projection_keys.len(): return ""
+        val local_name = authority_index.names[row]
+        val category = module_surface_authority_category_v1(authority_index.projection_keys[row])
+        if binding != category + "|" + local_name: return ""
+        val authority = module_surface_declaration_authority_lookup_typed_v1(authority_index, local_name, category)
+        if not authority.found: return ""
+        digest = module_surface_semantic_mix(digest, "authority-binding", binding)
+        digest = module_surface_semantic_mix(digest, "authority-owner", authority.declaring_module)
+        digest = module_surface_semantic_mix(digest, "authority-source", authority.source_name)
+        digest = module_surface_semantic_mix(digest, "authority-target", authority.projection_key)
+        digest = module_surface_semantic_mix(digest, "authority-modifier", authority.source_modifier)
+        digest = module_surface_semantic_mix(digest, "authority-path", module_source_relative_path(authority.source_path))
     module_surface_semantic_finish(digest)
 
 fn module_surface_stable_resolution_generation_v1(registry: ModuleSurfacesByName) -> text:
@@ -463,7 +489,9 @@ pub(package) fn module_surface_route_arrays_aligned(surface: ModuleSurface) -> b
     if surface.export_route_sources.len() != surface.export_route_locals.len() or
        surface.export_route_sources.len() != surface.export_route_target_indices.len() or
        surface.export_route_sources.len() != surface.export_route_target_names.len() or
-       surface.export_route_sources.len() != surface.export_route_is_glob.len():
+       surface.export_route_sources.len() != surface.export_route_is_glob.len() or
+       surface.export_route_sources.len() != surface.export_route_rows_v1.len() or
+       surface.export_route_sources.len() != surface.export_route_items_v1.len():
         return false
     if surface.export_origin_index.names.len() != surface.export_origin_index.owner_modules.len() or
        surface.export_origin_index.names.len() != surface.export_origin_index.source_names.len() or
@@ -573,6 +601,7 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
     val generation = generation_result.unwrap()
     registry.generation = generation
     val stable_resolution_generation = module_surface_stable_resolution_generation_v1(registry)
+    registry.configured_route_generation_v1 = stable_resolution_generation
     var surface_index = 0
     while surface_index < registry.surfaces.len():
         var surface = registry.surfaces[surface_index]
@@ -817,6 +846,16 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
         surface.export_route_target_indices = export_route_target_indices
         surface.export_route_target_names = export_route_target_names
         surface.export_route_is_glob = export_route_is_glob
+        surface.export_route_rows_v1 = []
+        surface.export_route_items_v1 = []
+        var selected_export_row = 0
+        while selected_export_row < surface.exports.len():
+            var selected_export_item = 0
+            while selected_export_item < surface.exports[selected_export_row].items.len():
+                surface.export_route_rows_v1 = surface.export_route_rows_v1.push(selected_export_row)
+                surface.export_route_items_v1 = surface.export_route_items_v1.push(selected_export_item)
+                selected_export_item = selected_export_item + 1
+            selected_export_row = selected_export_row + 1
         registry.surfaces[surface_index] = surface
         surface_index = surface_index + 1
 
@@ -825,6 +864,11 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
         if not module_surface_route_arrays_aligned(registry.surfaces[surface_index]):
             return Err("frozen module surface route arrays are misaligned: {surface_index}")
         surface_index = surface_index + 1
+    # Actual configured targets are now complete. Selection must not run in
+    # the parser builder, where guessed names can choose a different provider.
+    module_surface_selected_exports_build_v1(registry)?
+    module_surface_selected_exports_project_v1(registry)?
+    registry.selected_exports_v1.frozen = true
     surface_index = 0
     while surface_index < registry.surfaces.len():
         var surface = registry.surfaces[surface_index]
@@ -837,7 +881,7 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
         # Final identity is published only after every declaration, route,
         # origin, and freeze flag is complete. No consumer can observe the
         # construction-only declaration limbs as a frozen surface digest.
-        val final_semantic_hex = _module_surface_final_semantic_digest(surface)
+        val final_semantic_hex = _module_surface_final_semantic_digest(surface, registry.selected_exports_v1.surface_digests[surface_index])
         surface.semantic_cacheable = final_semantic_hex.byte_len() == 64
         if surface.semantic_cacheable:
             surface.semantic_hash0 = module_surface_semantic_hex_limb(final_semantic_hex, 0)
@@ -875,3 +919,4 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
     registry.generation = generation
     registry.frozen = true
     Ok(registry)
+use compiler.hir.hir_lowering.module_surface_manifest_evidence_v1.{module_surface_manifest_digest_v1}

@@ -26,6 +26,7 @@ use std.io_runtime.{hash_text}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
+use compiler.hir.hir_lowering.module_surface_types.{module_surface_declaration_authority_lookup_typed_v1}
 use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
@@ -744,7 +745,9 @@ impl HirLowering:
                                     # the target surface's actual declaration
                                     # arrays in THIS process.
                                     eprint("[no-exported-item] module={imp.module} item={item_name} resolved={resolved_module_name} surf_module={imported_surface.module_name} surf_idx={imported_surface.physical_index} reg_surfaces={self.module_surfaces.surfaces.len()} F={imported_surface.callable_names.len()} C={imported_surface.composite_names.len()} E={imported_surface.enum_names.len()} T={imported_surface.trait_names.len()} A={imported_surface.type_alias_names.len()} K={imported_surface.constant_names.len()} declares_linear={module_surface_declares_item(imported_surface, item_name)}")
-                        self.register_imported_symbol(imported_surface.physical_index, resolved_module_name, item_name, local_name, imp.span, true)
+                        val selected_category = self.register_imported_symbol_selected_v1(imported_surface.physical_index, resolved_module_name, item_name, local_name, imp.span, true)
+                        self.reject_explicit_private_selected_import_v1(imported_surface, item_name, selected_category, imp.span)
+                        self.reject_explicit_private_import_v1(local_name, imp.span)
                         item_idx = item_idx + 1
             else:
                 # Do not change unresolved module-only/glob behavior. Named
@@ -753,6 +756,28 @@ impl HirLowering:
                 if imp.items.len() > 0:
                     self.error("missing module surface for {imp.module}", imp.span)
             import_idx = import_idx + 1
+
+    # This is a known-rejection check at an explicitly written selective
+    # import. Dependency materialization never calls this boundary. Positive
+    # access still requires the selected route/manifest policy consumer.
+    me reject_explicit_private_selected_import_v1(surface: ModuleSurface, name: text, category: text, span: Span):
+        val authority = module_surface_declaration_authority_lookup_typed_v1(surface.declaration_authority_index, name, category)
+        if not authority.found or authority.source_modifier != "pri": return
+        if authority.source_path == "" or self.module_filename == "":
+            self.error("explicit pri import has unavailable selected declaration authority: " + name, span)
+        elif module_surface_canonical_path(self.module_filename) != authority.source_path:
+            self.error("cannot import explicitly private declaration `" + name + "` from another file", span)
+
+    me reject_explicit_private_import_v1(local_name: text, span: Span):
+        val id = self.import_binding_or_invalid(local_name)
+        if not id.is_valid(): return
+        if val symbol = self.symbols.get_symbol_raw(id.id):
+            if symbol.declaration_modifier_v1 != "pri": return
+            if symbol.declaration_source_path_v1 == "" or self.module_filename == "":
+                self.error("explicit pri import has unavailable source authority: " + local_name, span)
+                return
+            if module_surface_canonical_path(self.module_filename) != symbol.declaration_source_path_v1:
+                self.error("cannot import explicitly private declaration `" + local_name + "` from another file", span)
 
     me private_fn_import_denied(imported: ModuleSurface, module_label: text, name: text, importer_path: text, span: Span) -> bool:
         """interp_private_names_selfhost_check_2026-11-09: mirror of the seed

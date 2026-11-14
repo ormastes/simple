@@ -1,3 +1,9 @@
+use compiler.core.frontend.{parser_provider_v1_default, parser_provider_v1_name}
+use compiler.frontend.frontend_advisory_preprocess_port_v1.{FrontendAdvisoryPreprocessPolicyV1}
+use compiler.common.cache.visibility_manifest_policy_v1.{VisibilityManifestPolicyV1}
+use compiler.common.cache.visibility_manifest_read_v1.{VisibilityManifestReadV1}
+use compiler.common.dependency.manifest_visibility_v1.{ParserManifestVisibilityV1}
+use compiler.common.driver_source_file.{source_file_with_manifest_evidence_v1}
 # CompilerDriver phase-2 source parsing.
 
 use compiler.driver.cache.tldr_layout_v1.{tldr_dir_v1}
@@ -273,6 +279,85 @@ impl CompilerDriver:
             case Err(_): Err(
                 "required environment variant frontend provider unavailable for {source_path}")
 
+    # Parse an implicit manifest under the same selected frontend policy as
+    # ordinary sources, retaining only metadata. This method never creates a
+    # ModuleSurface or follows the manifest's imports/executable declarations.
+    me parse_visibility_manifest_policy_v1(content: text, observation: VisibilityManifestReadV1,
+            coverage_root: text, module_name: text) -> Result<VisibilityManifestPolicyV1, text>:
+        val path = observation.manifest_path
+        # Initialise the actual producer fingerprint outside scratch so its
+        # process memo never borrows storage from this policy parse.
+        val frontend_identity = native_build_frontend_identity()
+        ast_prepare_persistent_owner_v1()
+        val generation = parser_initialization_generation_v1()
+        if not driver_parse_transient_scope_begin_v1():
+            return Err("manifest parser scope unavailable: " + path)
+        # Policy provider provenance is from a fresh actual parse. Existing
+        # private/shared flat-cache restoration is deliberately disabled here.
+        val parsed = self.parse_full_frontend_in_borrowed_scope_selected_uncached_v1(content, path, module_name)
+        var projected: Result<VisibilityManifestPolicyV1, text> = Err("manifest projection unavailable")
+        match parsed:
+            case Err(reason): projected = Err(reason)
+            case Ok(module):
+                if par_had_error_get():
+                    projected = Err(driver_parse_error_message(path))
+                else:
+                    val facts: ParserManifestVisibilityV1 = module.manifest_visibility_v1
+                    val policy = VisibilityManifestPolicyV1.from_facts(path,
+                        observation.directory_path, coverage_root, observation.content_sha256,
+                        observation.snapshot_id, facts)
+                    val friend_modules: [text] = module.friends
+                    val internal_exports: [text] = module.internal_exports
+                    policy.friend_modules = friend_modules.copy()
+                    policy.internal_exports = internal_exports.copy()
+                    policy.frontend_identity = frontend_identity
+                    policy.parser_provider_id = parser_provider_v1_name(parser_provider_v1_default())
+                    policy.advisory_policy = match self.ctx.frontend_advisory_policy:
+                        case FrontendAdvisoryPreprocessPolicyV1.Reference: "reference"
+                        case FrontendAdvisoryPreprocessPolicyV1.PreferSimd: "prefer-simd"
+                        case FrontendAdvisoryPreprocessPolicyV1.RequireSimd: "require-simd"
+                    policy.advisory_identity = self.ctx.environment_variant_frontend_cache_identity
+                    policy.frontend_route = "advisory-selected"
+                    policy.target_triple = self.ctx.native_target
+                    policy.preprocessed_source_sha256 = module.source_declaration_digest_v1
+                    if self.ctx.runtime_std_full_inventory_selection != nil:
+                        # The target-receipted owner explicitly selects the
+                        # reference advisory, independently of ctx preference.
+                        policy.frontend_route = "target-cfg-reference"
+                        policy.advisory_policy = "reference"
+                        policy.advisory_identity = ""
+                    if self.ctx.runtime_std_full_inventory_selection != nil and
+                            self.ctx.runtime_std_cfg_source_identity_by_path.has(path):
+                        val identity = self.ctx.runtime_std_cfg_source_identity_by_path[path]
+                        if self.ctx.runtime_std_cfg_decisions.has(identity):
+                            val receipt = self.ctx.runtime_std_cfg_decisions[identity]
+                            policy.cfg_receipt_present = true
+                            policy.cfg_source_identity = receipt.source_identity
+                            policy.cfg_preprocessed_sha256 = receipt.preprocessed_digest
+                            policy.cfg_decision_digest = receipt.decision_digest
+                    projected = Ok(policy)
+        if not driver_parse_transient_scope_pause_v1():
+            val _ended = driver_end_transient_parse_scope()
+            return Err("manifest parser scope pause failed: " + path)
+        val owners_ok = driver_promote_retained_frontend_owners_v1(
+            parser_initialization_generation_v1() != generation)
+        val receipt_ok = if parsed.is_ok(): self.promote_target_cfg_receipt_v1(path) else: true
+        # Rebox on the paused heap and promote only the compact policy/error.
+        # The full ParserModule and executable bodies die with this scope.
+        var reboxed: Result<VisibilityManifestPolicyV1, text> = Err("manifest result was not reboxed")
+        var payload_ok = false
+        match projected:
+            case Ok(policy):
+                payload_ok = rt_transient_heap_promote(policy)
+                reboxed = Ok(policy)
+            case Err(reason):
+                payload_ok = rt_transient_heap_promote(reason)
+                reboxed = Err(reason)
+        val ended = driver_end_transient_parse_scope()
+        if not (owners_ok and receipt_ok and payload_ok and ended):
+            return Err("manifest projection ownership failed: " + path)
+        reboxed
+
     me add_streaming_module_surface(
         builder: ModuleSurfaceBuilder,
         source_path: text,
@@ -296,14 +381,20 @@ impl CompilerDriver:
         val parser_generation = parser_initialization_generation_v1()
         if not driver_parse_transient_scope_begin_v1():
             return Err("transient parser scope unavailable for {source_path}")
-        val source = SourceFile(
+        var source = SourceFile(
             path: source_path,
             authored_path: source_authored_path,
             content: source_content,
             module_name: source_module_name)
+        if source_index < self.ctx.source_manifest_evidence_owner_v1.len():
+            source = source_file_with_manifest_evidence_v1(source,
+                self.ctx.source_manifest_evidence_owner_v1[source_index])
         # Step-3 lazy restore: an opted-in HIR shard worker builds the surface
         # from the module skeleton (driver_hir_worker_surface_v1.spl).
-        val surface_text = if frozen_parse_text != nil:
+        val is_manifest_source = source.visibility_manifest_complete_v1 and source_path.ends_with("/__init__.spl")
+        val surface_text = if is_manifest_source:
+            source_content
+        elif frozen_parse_text != nil:
             frozen_parse_text.unwrap()
         elif worker_mode == 2:
             ""

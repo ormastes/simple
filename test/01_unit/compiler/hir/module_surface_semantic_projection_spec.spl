@@ -35,12 +35,13 @@ use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
 use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_semantic_hex_limb}
+use compiler.hir.hir_lowering.module_surface_types.{module_surface_declaration_authority_lookup_typed_v1}
 
-fn semantic_surface(source: text) -> ModuleSurfacesByName:
-    val parsed = parse_and_build_module(source, "semantic_surface.spl")
+fn semantic_surface(source: text, path: text = "semantic_surface.spl") -> ModuleSurfacesByName:
+    val parsed = parse_and_build_module(source, path)
     val result = module_surfaces_from_modules(
         {"semantic.surface": parsed},
-        [SourceFile(path: "semantic_surface.spl", content: source,
+        [SourceFile(path: path, content: source,
                     module_name: "semantic.surface")])
     expect(result.is_ok()).to_equal(true)
     result.unwrap()
@@ -195,3 +196,40 @@ describe "frozen ModuleSurface semantic identity":
         expect(module_surface_semantic_hex_limb(hex, 2)).to_equal(0)  # oracle: limb 2 is all zero digits
         expect(module_surface_semantic_hex_limb(hex, 3)).to_equal(-1)  # oracle: limb 3 is all F digits, i.e. i64 -1
         expect(module_surface_semantic_hex_limb(hex, 4)).to_equal(0)  # oracle: limb 4 is past the string, the parse yields the zero limb
+
+    it "distinguishes omitted folder intent from explicit file privacy":
+        step("Compare declarations with equal legacy Visibility but different source intent")
+        val omitted = "fn local() -> i64:\n    1\n"
+        val explicit_private = "pri fn local() -> i64:\n    1\n"
+        expect(semantic_equal(omitted, explicit_private)).to_equal(false)
+        expect(semantic_equal(omitted, "# byte offsets move\nfn local() -> i64:\n    9\n")).to_equal(true)
+
+    it "rejects declaration facts attached to a different source owner":
+        step("Pair an actual parsed module with a conflicting SourceFile path")
+        val source = "pri fn hidden() -> i64:\n    1\n"
+        val parsed = parse_and_build_module(source, "original.spl")
+        val result = module_surfaces_from_modules({"other": parsed},
+            [SourceFile(path: "other.spl", content: source, module_name: "other")])
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("source declaration facts do not belong")
+
+    it "retains same-spelled function and type authority in separate namespaces":
+        step("Project two real declarations with distinct intent and one spelling")
+        val surfaces = semantic_surface("pub fn Shared() -> i64:\n    1\npri struct Shared:\n    value: i64\n")
+        val index = surfaces.surfaces[0].declaration_authority_index
+        val function_ = module_surface_declaration_authority_lookup_typed_v1(index, "Shared", "function")
+        val type_ = module_surface_declaration_authority_lookup_typed_v1(index, "Shared", "struct")
+        expect(function_.found).to_equal(true)
+        expect(type_.found).to_equal(true)
+        expect(function_.source_modifier).to_equal("public")
+        expect(type_.source_modifier).to_equal("pri")
+        expect(function_.projection_key).to_equal("function:Shared")
+        expect(type_.projection_key).to_equal("struct:Shared")
+
+    it "keeps source intent cache identity stable across admitted snapshot root relocation":
+        step("Compare identical source topology under two SCV roots")
+        val a = semantic_surface("pri fn hidden() -> i64:\n    1\n", "/work/build/scv/a/src/x/owner.spl").surfaces[0]
+        val b = semantic_surface("pri fn hidden() -> i64:\n    9\n", "/work/build/scv/b/src/x/owner.spl").surfaces[0]
+        expect(a.semantic_cacheable).to_equal(true)
+        expect(b.semantic_cacheable).to_equal(true)
+        expect([a.semantic_hash0, a.semantic_hash1, a.semantic_hash2, a.semantic_hash3]).to_equal([b.semantic_hash0, b.semantic_hash1, b.semantic_hash2, b.semantic_hash3])

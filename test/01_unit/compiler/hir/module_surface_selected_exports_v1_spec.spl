@@ -1,0 +1,129 @@
+# Real parser -> module surfaces -> configured freeze -> selected binding API.
+# Authored regression scenarios; execution remains unqualified until recorded.
+use std.spec.{describe, it, expect}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfaceBuilder, ModuleSurfaceParserOwner}
+use compiler.hir.hir_lowering.module_surface_types.*
+use compiler.hir.hir_lowering.module_surface_selected_exports_v1.*
+
+fn selected_registry_fixture_v1(names: [text], bodies: [text]) -> ModuleSurfacesByName:
+    expect(names.len()).to_equal(bodies.len())
+    var builder = ModuleSurfaceBuilder.new()
+    var row = 0
+    while row < names.len():
+        val path = "src/selected_routes/" + names[row] + ".spl"
+        val parsed = parse_and_build_module(bodies[row], path)
+        val owner = ModuleSurfaceParserOwner.new(parsed)
+        val source = SourceFile(path: path, content: bodies[row], module_name: names[row])
+        expect(builder.add_parsed(owner, source, row).is_ok()).to_equal(true)
+        row = row + 1
+    val result = builder.finish()
+    expect(result.is_ok()).to_equal(true)
+    result.unwrap()
+
+fn selected_function_v1(registry: ModuleSurfacesByName, source: i64, name: text) -> ModuleSurfaceExportSelectionV1:
+    module_surface_selected_export_lookup_v1(registry, source, ModuleSurfaceExportCategoryV1.Function, name)
+
+describe "typed selected export provenance":
+    it "distinguishes a public declaration from an explicit exported binding":
+        val registry = selected_registry_fixture_v1(["provider"], ["pub fn item() -> i64:\n    1\n"])
+        val declaration = module_surface_selected_declaration_lookup_v1(registry, 0, ModuleSurfaceExportCategoryV1.Function, "item")
+        expect(declaration.state).to_equal(ModuleSurfaceExportSelectionStateV1.Selected)
+        expect(selected_function_v1(registry, 0, "item").state).to_equal(ModuleSurfaceExportSelectionStateV1.Missing)
+        val marker = module_surface_selected_export_hop_v1(registry, declaration, 0).unwrap()
+        expect(marker.kind).to_equal(ModuleSurfaceExportHopKindV1.Direct)
+        expect(marker.target_binding_row).to_equal(declaration.binding_row)
+        expect(marker.export_row).to_equal(-1)
+        expect(marker.import_row).to_equal(-1)
+
+    it "binds a named alias through its configured import instead of bare export target minus one":
+        val registry = selected_registry_fixture_v1(["provider", "facade"], ["pub fn item() -> i64:\n    1\n", "use provider.\{item as alias\}\nexport alias\n"])
+        expect(registry.surfaces[1].export_route_target_indices[0]).to_equal(-1)
+        val selected = selected_function_v1(registry, 1, "alias")
+        expect(selected.state).to_equal(ModuleSurfaceExportSelectionStateV1.Selected)
+        val hop = module_surface_selected_export_hop_v1(registry, selected, 0).unwrap()
+        expect(hop.kind).to_equal(ModuleSurfaceExportHopKindV1.NamedImport)
+        expect(hop.target_surface).to_equal(0)
+        expect(hop.target_name).to_equal("item")
+        expect(hop.import_row).to_equal(0)
+        expect(hop.import_item).to_equal(0)
+        registry.surfaces[1].import_target_indices[0] = 1
+        expect(module_surface_selected_export_hop_v1(registry, selected, 0).is_err()).to_equal(true)
+
+    it "retains both same-terminal routes and their intermediate export bindings":
+        val registry = selected_registry_fixture_v1(["provider", "left", "right", "facade"], ["pub fn item() -> i64:\n    1\n", "export use provider.\{item\}\n", "export use provider.\{item\}\n", "use left.\{item\}\nuse right.\{item\}\nexport item\n"])
+        val selected = selected_function_v1(registry, 3, "item")
+        expect(selected.state).to_equal(ModuleSurfaceExportSelectionStateV1.Selected)
+        expect(selected.hop_count).to_equal(2)
+        val left = module_surface_selected_export_hop_v1(registry, selected, 0).unwrap()
+        val right = module_surface_selected_export_hop_v1(registry, selected, 1).unwrap()
+        expect(left.target_surface).to_equal(1)
+        expect(right.target_surface).to_equal(2)
+        expect(left.target_role).to_equal(ModuleSurfaceExportBindingRoleV1.Export)
+        expect(left.terminal_surface).to_equal(0)
+        expect(right.terminal_surface).to_equal(0)
+
+    it "reports distinct typed terminals in the same winning tier as ambiguous":
+        val registry = selected_registry_fixture_v1(["left", "right", "facade"], ["pub fn item() -> i64:\n    1\n", "pub fn item() -> i64:\n    2\n", "use left.\{item\}\nuse right.\{item\}\nexport item\n"])
+        expect(selected_function_v1(registry, 2, "item").state).to_equal(ModuleSurfaceExportSelectionStateV1.Ambiguous)
+        expect(registry.surfaces[2].semantic_cacheable).to_equal(false)
+        expect(module_surface_export_origin_index_lookup(registry.surfaces[2].export_origin_index, "item").found).to_equal(false)
+
+    it "does not let a resolved glob replace an unavailable named tier":
+        val registry = selected_registry_fixture_v1(["provider", "facade"], ["pub fn item() -> i64:\n    1\n", "use absent.\{item\}\nuse provider\nexport item\n"])
+        expect(selected_function_v1(registry, 1, "item").state).to_equal(ModuleSurfaceExportSelectionStateV1.Unavailable)
+        expect(registry.surfaces[1].semantic_cacheable).to_equal(false)
+
+    it "keeps declaration categories separate before coalescing legacy names":
+        val registry = selected_registry_fixture_v1(["provider"], ["pub struct item:\n    value: i64\npub fn item() -> i64:\n    1\nexport item\n"])
+        val function = selected_function_v1(registry, 0, "item")
+        val type_binding = module_surface_selected_export_lookup_v1(registry, 0, ModuleSurfaceExportCategoryV1.Struct, "item")
+        expect(function.state).to_equal(ModuleSurfaceExportSelectionStateV1.Selected)
+        expect(type_binding.state).to_equal(ModuleSurfaceExportSelectionStateV1.Selected)
+        expect(function.terminal_projection).to_equal("function:item")
+        expect(type_binding.terminal_projection).to_equal("struct:item")
+        expect(module_surface_export_origin_index_lookup(registry.surfaces[0].export_origin_index, "item").found).to_equal(false)
+
+    it "never promotes explicit private or guesses a cycle terminal":
+        val private_registry = selected_registry_fixture_v1(["provider"], ["pri fn secret() -> i64:\n    1\nexport secret\n"])
+        expect(selected_function_v1(private_registry, 0, "secret").state).to_equal(ModuleSurfaceExportSelectionStateV1.Unavailable)
+        val cyclic = selected_registry_fixture_v1(["left", "right"], ["export use right.\{item\}\n", "export use left.\{item\}\n"])
+        expect(selected_function_v1(cyclic, 0, "item").state).to_equal(ModuleSurfaceExportSelectionStateV1.Unavailable)
+        expect(cyclic.surfaces[0].semantic_cacheable).to_equal(false)
+
+    it "rejects stale generations and corrupt windows rather than returning a grant":
+        val registry = selected_registry_fixture_v1(["provider"], ["pub fn item() -> i64:\n    1\nexport item\n"])
+        val selected = selected_function_v1(registry, 0, "item")
+        expect(selected.state).to_equal(ModuleSurfaceExportSelectionStateV1.Selected)
+        expect(module_surface_selected_export_hop_v1(registry, selected, selected.hop_count).is_err()).to_equal(true)
+        registry.selected_exports_v1.hop_counts[selected.binding_row] = 9223372036854775807
+        expect(selected_function_v1(registry, 0, "item").state).to_equal(ModuleSurfaceExportSelectionStateV1.Unavailable)
+        registry.generation = registry.generation + 1
+        expect(module_surface_selected_export_hop_v1(registry, selected, 0).is_err()).to_equal(true)
+
+    it "does not infer bitfield absence from an incomplete source projection":
+        val registry = selected_registry_fixture_v1(["provider", "facade"], ["pub fn item() -> i64:\n    1\n", "export use provider.\{item\}\n"])
+        val bitfield = module_surface_selected_export_lookup_v1(registry, 1, ModuleSurfaceExportCategoryV1.Bitfield, "item")
+        expect(bitfield.state).to_equal(ModuleSurfaceExportSelectionStateV1.Unavailable)
+        expect(selected_function_v1(registry, 1, "item").state).to_equal(ModuleSurfaceExportSelectionStateV1.Selected)
+        expect(registry.surfaces[1].semantic_cacheable).to_equal(false)
+
+    it "does not turn selected-only same-folder membership into complete sibling lookup authority":
+        val registry = selected_registry_fixture_v1(["provider", "facade"], ["pub fn item() -> i64:\n    1\n", "export item\n"])
+        expect(selected_function_v1(registry, 1, "item").state).to_equal(ModuleSurfaceExportSelectionStateV1.Unavailable)
+        expect(registry.surfaces[1].semantic_cacheable).to_equal(false)
+
+    it "retains raw transitive identity when an unrelated category is unavailable":
+        val names = ["provider", "middle", "facade"]
+        val bodies = ["pub fn item() -> i64:\n    1\n", "export use provider.\{item\}\n", "export use middle.\{item\}\n"]
+        val first = selected_registry_fixture_v1(names, bodies)
+        val repeated = selected_registry_fixture_v1(names, bodies)
+        val rerouted = selected_registry_fixture_v1(names, [bodies[0], "use provider.\{item\}\nuse provider.\{item\}\nexport item\n", bodies[2]])
+        expect(selected_function_v1(first, 2, "item").terminal_surface).to_equal(selected_function_v1(rerouted, 2, "item").terminal_surface)
+        expect(first.surfaces[1].semantic_cacheable).to_equal(false)
+        expect(rerouted.surfaces[1].semantic_cacheable).to_equal(false)
+        expect(first.selected_exports_v1.snapshot_digest.byte_len()).to_equal(64)
+        expect(first.selected_exports_v1.snapshot_digest).to_equal(repeated.selected_exports_v1.snapshot_digest)
+        expect(first.selected_exports_v1.snapshot_digest == rerouted.selected_exports_v1.snapshot_digest).to_equal(false)
+        expect(first.generation == repeated.generation).to_equal(false)

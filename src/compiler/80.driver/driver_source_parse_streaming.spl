@@ -1,3 +1,4 @@
+use compiler.common.driver_source_file.{source_file_with_manifest_evidence_v1}
 # CompilerDriver phase-2 source parsing.
 
 use compiler.driver.cache.tldr_layout_v1.{tldr_dir_v1}
@@ -311,7 +312,7 @@ impl CompilerDriver:
                     self.ctx.add_error(
                         "Module surface extraction error: {alias_result.unwrap_err()} source='{source_paths[source_index]}' module='{source_module_names[source_index]}' index={source_index}")
                     return false
-            elif unit_tldr_on and not worker_needed[source_index] and
+            elif unit_tldr_on and not source_paths[source_index].ends_with("/__init__.spl") and not worker_needed[source_index] and
                     unit_tldr_surface_for_v1(unit_tldr_plan, source_module_names[source_index]) != nil:
                 # PM3: an import not parsed here gets its summary-built surface.
                 var tldr_surface: ModuleSurface = unit_tldr_surface_for_v1(unit_tldr_plan, source_module_names[source_index]).unwrap()
@@ -393,19 +394,18 @@ impl CompilerDriver:
         var retained_sources: [SourceFile] = []
         var retained_index = 0
         while retained_index < frozen_source_count:
-            retained_sources = retained_sources.push(SourceFile(
+            var retained_source = SourceFile(
                 path: source_paths[retained_index],
                 authored_path: source_authored_paths[retained_index],
                 content: source_contents[retained_index],
-                module_name: source_module_names[retained_index]))
+                module_name: source_module_names[retained_index])
+            if retained_index < self.ctx.source_manifest_evidence_owner_v1.len():
+                retained_source = source_file_with_manifest_evidence_v1(retained_source,
+                    self.ctx.source_manifest_evidence_owner_v1[retained_index])
+            retained_sources.push(retained_source)
             retained_index = retained_index + 1
         self.ctx.sources = retained_sources
 
-        val origin_result = builder.resolve_export_origins()
-        if origin_result.is_err():
-            self.ctx.add_error(
-                "Module surface extraction error: {origin_result.unwrap_err()}")
-            return false
         # Build the completed owner inside one dedicated transient scope, then
         # deep-promote the whole registry graph before committing it. Promoting
         # individual surfaces is insufficient: the registry's Dict and aligned

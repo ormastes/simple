@@ -1,0 +1,46 @@
+# Negative declaration-target check only: an empty result is not a requester
+# grant. Export/module-route validation still owns external access.
+use compiler.hir.hir_types.{SymbolTable, HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_symbol_table_methods.*
+
+fn explicit_private_symbol_v1(symbols: SymbolTable, id: SymbolId) -> text:
+    if val symbol = symbols.get_symbol_raw(id.id):
+        if symbol.declaration_modifier_v1 == "pri":
+            return "explicitly private declaration `" + symbol.name + "`"
+    ""
+
+fn explicit_private_children_v1(symbols: SymbolTable, children: [HirType], depth: i64) -> text:
+    for child in children:
+        val reason = hir_exported_type_private_target_v1(symbols, child, depth + 1)
+        if reason != "": return reason
+    ""
+
+pub fn hir_exported_type_private_target_v1(symbols: SymbolTable, type_: HirType, depth: i64) -> text:
+    if depth > 64: return "exported type target traversal exceeds its depth bound"
+    match type_.kind:
+        case HirTypeKind.Named(id, arguments):
+            val reason = explicit_private_symbol_v1(symbols, id)
+            if reason != "": return reason
+            explicit_private_children_v1(symbols, arguments, depth)
+        case HirTypeKind.DynTrait(id): explicit_private_symbol_v1(symbols, id)
+        case HirTypeKind.Tuple(elements): explicit_private_children_v1(symbols, elements, depth)
+        case HirTypeKind.Union(elements): explicit_private_children_v1(symbols, elements, depth)
+        case HirTypeKind.TypeParam(_, bounds): explicit_private_children_v1(symbols, bounds, depth)
+        case HirTypeKind.Array(inner, _): hir_exported_type_private_target_v1(symbols, inner, depth + 1)
+        case HirTypeKind.Slice(inner): hir_exported_type_private_target_v1(symbols, inner, depth + 1)
+        case HirTypeKind.Ref(inner, _): hir_exported_type_private_target_v1(symbols, inner, depth + 1)
+        case HirTypeKind.Ptr(inner, _): hir_exported_type_private_target_v1(symbols, inner, depth + 1)
+        case HirTypeKind.Optional(inner): hir_exported_type_private_target_v1(symbols, inner, depth + 1)
+        case HirTypeKind.Isolated(inner): hir_exported_type_private_target_v1(symbols, inner, depth + 1)
+        case HirTypeKind.Unique(inner): hir_exported_type_private_target_v1(symbols, inner, depth + 1)
+        case HirTypeKind.Shared(inner): hir_exported_type_private_target_v1(symbols, inner, depth + 1)
+        case HirTypeKind.Weak(inner): hir_exported_type_private_target_v1(symbols, inner, depth + 1)
+        case HirTypeKind.Tensor(inner, _, _): hir_exported_type_private_target_v1(symbols, inner, depth + 1)
+        case HirTypeKind.Projection(inner, _): hir_exported_type_private_target_v1(symbols, inner, depth + 1)
+        case HirTypeKind.Dict(key, value): explicit_private_children_v1(symbols, [key, value], depth)
+        case HirTypeKind.Result(ok, err): explicit_private_children_v1(symbols, [ok, err], depth)
+        case HirTypeKind.Function(parameters, result, _):
+            val reason = explicit_private_children_v1(symbols, parameters, depth)
+            if reason != "": return reason
+            hir_exported_type_private_target_v1(symbols, result, depth + 1)
+        case _: ""

@@ -9202,6 +9202,7 @@ impl MirLowering:
         var arg_source_locals: Dict<i64, i64> = {}
         val is_thread_boundary = is_direct and self.call_has_thread_transfer_boundary(direct_name, direct_symbol)
         var call_param_types: [HirType] = []
+        var independent_call_params_known = false
         # A Var/NamedVar callee keeps its resolved symbol even when it names a
         # local function value and therefore is not a direct call. Recover the
         # declared parameter types from that symbol too, so `f(3)` can promote
@@ -9209,17 +9210,24 @@ impl MirLowering:
         # it. The callee expression type remains a fallback for symbol-less
         # function values.
         if mir_expr_symbol_id_value(direct_symbol) >= 0:
-            call_param_types = self.resolved_call_hir_param_types(direct_symbol)
+            if val declared_params = self.independent_call_hir_param_types_v1(direct_symbol):
+                call_param_types = declared_params
+                independent_call_params_known = true
+            else:
+                call_param_types = self.resolved_call_hir_param_types(direct_symbol)
+        if independent_call_params_known and call_param_types.len() == 0 and args.len() > 0:
+            self.error_fatal("call argument count differs from known zero-parameter declaration", Some(callee.span))
+            return self.builder.emit_const_int(0)
         # Name-keyed prescan registry fallback: a wildcard-imported callee can
         # carry an INVALID symbol id here, so the symbol path yields nothing
         # and every arg erased to i64 — on rv32 the caller then marshaled a
         # mixed (i32, i64) signature as all-i64 register pairs while the
         # callee read the declared layout (band/policy/dram/target failures,
         # 2026-07-24).
-        if call_param_types.len() == 0 and direct_name != "":
+        if not independent_call_params_known and call_param_types.len() == 0 and direct_name != "":
             if val reg_param_tys = bootstrap_fn_param_hir_types_lookup(direct_name):
                 call_param_types = reg_param_tys
-        if call_param_types.len() == 0 and callee.has_type_:
+        if not independent_call_params_known and call_param_types.len() == 0 and callee.has_type_:
             # Nil-guard (stage4 lane): `has_type_` can be spuriously true
             # while `type_` is nil on this lane -- reading `.kind` off it
             # crashed with "field access on nil receiver". Same nil-tolerant
@@ -9602,7 +9610,7 @@ impl MirLowering:
                     case _:
                         ()
             var direct_signature = MirSignature(params: [], return_type: return_type, is_variadic: false)
-            if call_param_types.len() > 0:
+            if independent_call_params_known or call_param_types.len() > 0:
                 # The callee's DECLARED parameter types (symbol or cross-module
                 # prescan registry above), for backends that must declare the
                 # import themselves (Cranelift). Never the caller's operands.

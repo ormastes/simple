@@ -39,7 +39,66 @@ fn _structural_union_preferred_id(name: text) -> i64:
             h = 0 - h
     900000000 + (h % 100000000)
 
+pub fn hir_symbol_declaration_category_v1(symbol: HirSymbol) -> text:
+    val category = match symbol.kind:
+        case SymbolKind.Function: "function"
+        case SymbolKind.Class: "class"
+        case SymbolKind.Struct: "struct"
+        case SymbolKind.Enum: "enum"
+        case SymbolKind.Trait: "trait"
+        case SymbolKind.TypeAlias: "type_alias"
+        case SymbolKind.Const: "constant"
+        case _: ""
+    category
+
+# Request-local selection, never a reusable authorization receipt. Canonical
+# symbols can be shared by aliases; the actual lexical binding owns the route.
+# Kept outside the serialized HIR model: no policy bit or cache schema change.
+pub class HirLexicalBindingV1:
+    scope_id: i64
+    spelling: text
+    symbol_id: i64
+    version: i64 = 0
+
 impl SymbolTable:
+    fn binding_version_v1(scope_id: i64, name: text) -> i64:
+        if scope_id < 0 or scope_id >= self.next_scope_id: return -1
+        val scope: Scope = self.scopes[scope_id]
+        if not rt_dict_contains(scope.binding_versions_v1, name): return 0
+        val version: i64 = scope.binding_versions_v1[name]
+        version
+
+    me advance_binding_version_v1(scope_id: i64, name: text):
+        val previous = self.binding_version_v1(scope_id, name)
+        if previous < 0 or previous == 9223372036854775807:
+            panic("lexical binding version is invalid or exhausted")
+        self.scopes[scope_id].binding_versions_v1[name] = previous + 1
+
+    me bind_declaration_origin_v1(id: SymbolId, owner: text, source_name: text, modifier: text, source_path: text, projection_key: text) -> Result<bool, text>:
+        if modifier == "": return Ok(false)
+        if not ["omitted", "pri", "public", "peer", "up", "internal", "package"].contains(modifier):
+            return Err("invalid source declaration modifier")
+        if source_path == "" or owner == "" or not self.symbols.has(id.id):
+            return Err("source declaration origin has no live owner")
+        val canonical_owner = _hir_symbol_owner_module(owner)
+        var symbol: HirSymbol = self.symbols[id.id]
+        # A transparent type alias can share the target's canonical SymbolId.
+        # Its binding policy must not replace the target declaration's origin.
+        if projection_key != hir_symbol_declaration_category_v1(symbol) + ":" + source_name or (symbol.name != source_name and symbol.name != owner + "." + source_name and symbol.name != canonical_owner + "." + source_name):
+            return Ok(false)
+        if _hir_symbol_owner_module(symbol.defining_module ?? "") != canonical_owner:
+            return Err("source declaration origin mismatches the symbol owner")
+        if symbol.declaration_modifier_v1 != "":
+            if symbol.declaration_modifier_v1 != modifier or symbol.declaration_source_path_v1 != source_path or symbol.declaration_projection_key_v1 != projection_key or symbol.declaration_owner_v1 != canonical_owner:
+                return Err("cannot overwrite a bound source declaration origin")
+            return Ok(true)
+        symbol.declaration_modifier_v1 = modifier
+        symbol.declaration_source_path_v1 = source_path
+        symbol.declaration_projection_key_v1 = projection_key
+        symbol.declaration_owner_v1 = canonical_owner
+        self.symbols[id.id] = symbol
+        Ok(true)
+
     me structural_union_symbol(name: text, _preferred: i64) -> SymbolId:
         """Return one module-local collision-free ID for a canonical union or
         variant identity. Preferred IDs remain byte-compatible when free.
@@ -138,8 +197,12 @@ impl SymbolTable:
             case SymbolKind.Class | SymbolKind.Struct | SymbolKind.Enum | SymbolKind.Trait: raw_id
             case _: -1
 
-    fn lookup(name: text) -> SymbolId?:
-        """Look up a symbol by name, searching up scope chain."""
+    fn lookup_binding_scope_raw_v1(name: text) -> i64:
+        """Return the actual lexical binding scope, or -1 on miss.
+
+        This scalar walk is shared with legacy lookups and allocates no receipt.
+        It deliberately does not return the canonical symbol's declaring scope.
+        """
         var scope_id = self.current_scope
 
         loop:
@@ -187,8 +250,7 @@ impl SymbolTable:
             # the self-hosted native path. The runtime-owner predicate plus a
             # bracket read keeps the value type-directed and untagged.
             if rt_dict_contains(scope.symbols, name):
-                val found: i64 = scope.symbols[name]
-                return SymbolId(id: found)
+                return scope_id.id
 
             match scope.parent:
                 case Some(parent):
@@ -196,7 +258,32 @@ impl SymbolTable:
                 case None:
                     break
 
-        nil
+        -1
+
+    fn lookup(name: text) -> SymbolId?:
+        """Look up a symbol by name, searching up scope chain."""
+        val scope_id = self.lookup_binding_scope_raw_v1(name)
+        if scope_id < 0: return nil
+        val scope: Scope = self.scopes[scope_id]
+        val found: i64 = scope.symbols[name]
+        SymbolId(id: found)
+
+    fn lookup_binding_v1(name: text) -> HirLexicalBindingV1:
+        """Select a live lexical binding for an immediate requester decision.
+
+        Callers must not retain this result as permission across mutation/reset.
+        A stale nearest binding is a miss; it never falls through to an outer
+        binding that the source expression did not select.
+        """
+        val scope_id = self.lookup_binding_scope_raw_v1(name)
+        if scope_id < 0:
+            return HirLexicalBindingV1(scope_id: -1, spelling: name, symbol_id: -1)
+        val scope: Scope = self.scopes[scope_id]
+        val found: i64 = scope.symbols[name]
+        if found < 0 or found >= self.next_symbol_id:
+            return HirLexicalBindingV1(scope_id: scope_id, spelling: name, symbol_id: -1)
+        HirLexicalBindingV1(scope_id: scope_id, spelling: name, symbol_id: found,
+            version: self.binding_version_v1(scope_id, name))
 
     fn lookup_local_or_invalid(name: text) -> SymbolId:
         """Look up only the current lexical scope, preserving outer shadowing."""
@@ -212,33 +299,14 @@ impl SymbolTable:
 
     fn lookup_or_invalid(name: text) -> SymbolId:
         """Look up a symbol by name, returning an invalid id when missing."""
-        var scope_id = self.current_scope
-
-        loop:
-            # See lookup()'s matching comment: do NOT re-add an
-            # `rt_dict_contains(self.scopes, scope_id.id)` guard here -- it
-            # under-reports membership on this struct-valued dict and breaks
-            # the Stage 3 self-host via unbounded HIR recursion. Use the same
-            # Dict-free `next_scope_id` range check instead (exact substitute
-            # for membership -- see lookup()'s full comment).
-            if scope_id.id < 0 or scope_id.id >= self.next_scope_id:
-                break
-            val scope = self.scopes[scope_id.id]
-            if rt_dict_contains(scope.symbols, name):
-                val found: i64 = scope.symbols[name]
-                # A name binding outside the live allocation interval is stale
-                # module state. Never let it alias a newly-issued SymbolId.
-                if found < 0 or found >= self.next_symbol_id:
-                    return SymbolId(id: -1)
-                return SymbolId(id: found)
-
-            match scope.parent:
-                case Some(parent):
-                    scope_id = parent
-                case None:
-                    break
-
-        SymbolId(id: -1)
+        val scope_id = self.lookup_binding_scope_raw_v1(name)
+        if scope_id < 0: return SymbolId(id: -1)
+        val scope: Scope = self.scopes[scope_id]
+        val found: i64 = scope.symbols[name]
+        # Preserve the live interval check without a struct-valued Dict probe.
+        if found < 0 or found >= self.next_symbol_id:
+            return SymbolId(id: -1)
+        SymbolId(id: found)
 
     fn get_symbol(id: SymbolId?) -> HirSymbol?:
         """Get symbol by ID.
@@ -449,6 +517,13 @@ impl SymbolTable:
                 sym.generic_param_count = type_param_count
                 self.symbols[raw] = sym
 
+    me mark_declared_callable_params_v1(id: SymbolId, params: [HirType]?):
+        if id.is_valid():
+            if val present = self.symbols[id.id]:
+                var symbol: HirSymbol = present
+                symbol.declared_param_types_v1 = params
+                self.symbols[id.id] = symbol
+
     me rename_symbol(id: SymbolId, new_name: text):
         """Overwrite a symbol's stored `.name` in place, WITHOUT touching its
         scope lookup key. Used to give a --entry-closure cross-module
@@ -474,7 +549,12 @@ impl SymbolTable:
                     is_mutable: sym.is_mutable,
                     defining_module: sym.defining_module,
                     builtin_method_tag: hir_builtin_method_tag(new_name),
-                    generic_param_count: sym.generic_param_count
+                    generic_param_count: sym.generic_param_count,
+                    declaration_modifier_v1: sym.declaration_modifier_v1,
+                    declaration_source_path_v1: sym.declaration_source_path_v1,
+                    declaration_projection_key_v1: sym.declaration_projection_key_v1,
+                    declaration_owner_v1: sym.declaration_owner_v1,
+                    declared_param_types_v1: sym.declared_param_types_v1
                 )
                 self.symbols[raw] = renamed
                 if not self.exact_symbols.has(new_name):

@@ -1,0 +1,152 @@
+"""
+REQ-VIS-MANIFEST ordered readset projection and source-owner retention.
+Authored UNRUN. These are pure contract cases, not SCV authentication evidence.
+Production callers authenticate complete inventory before calling this seam.
+"""
+use std.spec.*
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryV1, CompileSourceInventoryEntryV1}
+use compiler.common.cache.visibility_manifest_inventory_v1.{visibility_manifest_inventory_maps_v1}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache.visibility_manifest_read_v1.{VisibilityManifestEvidenceV1, visibility_manifest_reads_v1}
+use compiler.common.driver_source_file.{SourceFile, source_file_with_manifest_evidence_v1}
+
+val VIS_SNAPSHOT = "/snapshot"
+val VIS_SOURCE = "/snapshot/src/pkg/child/body.spl"
+val VIS_PARENT = "/snapshot/src/pkg/__init__.spl"
+val VIS_ROOT = "/snapshot/src"
+val VIS_SNAPSHOT_ID = "immutable-revision:immutable-inventory"
+val VIS_BODY = "pub fn sample():\n    1\n"
+val VIS_MANIFEST = "pub mod child\n"
+
+fn visibility_test_inventory_v1() -> Dict<text, text>:
+    {VIS_SOURCE: sha256_text(VIS_BODY), VIS_PARENT: sha256_text(VIS_MANIFEST)}
+
+describe "REQ-VIS-MANIFEST frozen ancestor observations":
+    it "orders immediate through root and distinguishes positive from proven negative":
+        step("Project a complete inventory with one real manifest body")
+        val inventory = visibility_test_inventory_v1()
+        val result = visibility_manifest_reads_v1(VIS_SOURCE, VIS_SNAPSHOT,
+            [VIS_ROOT], VIS_SNAPSHOT_ID, inventory, inventory)
+        expect(result.is_ok()).to_equal(true)
+        val evidence = result.unwrap()
+        expect(evidence.complete).to_equal(true)
+        expect(evidence.root).to_equal(VIS_ROOT)
+        expect(evidence.reads.len()).to_equal(3)
+        expect(evidence.reads[0].directory_path).to_equal("/snapshot/src/pkg/child")
+        expect(evidence.reads[0].exists).to_equal(false)
+        expect(evidence.reads[0].content_sha256).to_equal("")
+        expect(evidence.reads[1].manifest_path).to_equal(VIS_PARENT)
+        expect(evidence.reads[1].exists).to_equal(true)
+        expect(evidence.reads[1].content_sha256).to_equal(sha256_text(VIS_MANIFEST))
+        expect(evidence.reads[2].directory_path).to_equal(VIS_ROOT)
+        expect(evidence.reads[2].exists).to_equal(false)
+        for row in evidence.reads:
+            expect(row.source_path).to_equal(VIS_SOURCE)
+            expect(row.snapshot_id).to_equal(VIS_SNAPSHOT_ID)
+
+    it "refuses a present manifest omitted from the selected byte-checked source set":
+        step("Keep complete inventory while removing the selected manifest")
+        val selected: Dict<text, text> = {VIS_SOURCE: sha256_text(VIS_BODY)}
+        val result = visibility_manifest_reads_v1(VIS_SOURCE, VIS_SNAPSHOT,
+            [VIS_ROOT], VIS_SNAPSHOT_ID, visibility_test_inventory_v1(), selected)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("present-source-not-selected")
+
+    it "refuses content substitution and source or root provenance gaps":
+        step("Substitute a different manifest body under the same path")
+        var selected = visibility_test_inventory_v1()
+        selected[VIS_PARENT] = sha256_text("mod child\n")
+        expect(visibility_manifest_reads_v1(VIS_SOURCE, VIS_SNAPSHOT, [VIS_ROOT],
+            VIS_SNAPSHOT_ID, visibility_test_inventory_v1(), selected).is_err()).to_equal(true)
+        val inventory = visibility_test_inventory_v1()
+        expect(visibility_manifest_reads_v1(VIS_SOURCE, VIS_SNAPSHOT, [],
+            VIS_SNAPSHOT_ID, inventory, inventory).is_err()).to_equal(true)
+        expect(visibility_manifest_reads_v1(VIS_SOURCE, VIS_SNAPSHOT, [VIS_ROOT],
+            "", inventory, inventory).is_err()).to_equal(true)
+        expect(visibility_manifest_reads_v1(VIS_SOURCE, VIS_SNAPSHOT, ["/snapshot/src/../src"],
+            VIS_SNAPSHOT_ID, inventory, inventory).is_err()).to_equal(true)
+        expect(visibility_manifest_reads_v1(VIS_SOURCE, "/another-snapshot", [VIS_ROOT],
+            VIS_SNAPSHOT_ID, inventory, inventory).is_err()).to_equal(true)
+
+    it "keeps outer ancestor observations under overlapping declared roots":
+        val inventory = visibility_test_inventory_v1()
+        val evidence = visibility_manifest_reads_v1(VIS_SOURCE, VIS_SNAPSHOT,
+            ["/snapshot/src/pkg", VIS_ROOT], VIS_SNAPSHOT_ID, inventory, inventory).unwrap()
+        expect(evidence.root).to_equal(VIS_ROOT)
+        expect(evidence.reads.len()).to_equal(3)
+
+    it "preserves verified absence without an arch block and leaves missing authority unknown":
+        step("Project an inventory in which every ancestor manifest is absent")
+        val inventory: Dict<text, text> = {VIS_SOURCE: sha256_text(VIS_BODY)}
+        val absent = visibility_manifest_reads_v1(VIS_SOURCE, VIS_SNAPSHOT,
+            [VIS_ROOT], VIS_SNAPSHOT_ID, inventory, inventory).unwrap()
+        expect(absent.complete).to_equal(true)
+        expect(absent.reads.len()).to_equal(3)
+        for row in absent.reads: expect(row.exists).to_equal(false)
+        val unknown = VisibilityManifestEvidenceV1()
+        expect(unknown.complete).to_equal(false)
+        expect(unknown.reads.len()).to_equal(0)
+        step("Retain the exact ordered observations on a real SourceFile record")
+        val source = SourceFile(path: VIS_SOURCE, content: VIS_BODY, module_name: "pkg.child.body")
+        val retained = source_file_with_manifest_evidence_v1(source, absent)
+        expect(retained.path).to_equal(VIS_SOURCE)
+        expect(retained.visibility_manifest_complete_v1).to_equal(true)
+        expect(retained.visibility_manifest_snapshot_id_v1).to_equal(VIS_SNAPSHOT_ID)
+        expect(retained.visibility_manifest_reads_v1[0].source_path).to_equal(retained.path)
+        expect(source.visibility_manifest_complete_v1).to_equal(false)
+
+    it "uses canonical drive paths without inventing platform source identities":
+        val source = "C:/snapshot/src/body.spl"
+        val inventory: Dict<text, text> = {"C:/snapshot/src/body.spl": sha256_text(VIS_BODY)}
+        val result = visibility_manifest_reads_v1(source, "C:/snapshot", ["C:/snapshot/src"],
+            VIS_SNAPSHOT_ID, inventory, inventory)
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap().reads[0].manifest_path).to_equal("C:/snapshot/src/__init__.spl")
+
+    it "never turns an inventory-present manifest excluded from snapshot into absence":
+        step("Join real inventory record types with a snapshot selecting only the source")
+        val body_digest = sha256_text(VIS_BODY)
+        val manifest_digest = sha256_text(VIS_MANIFEST)
+        val entries = [
+            CompileSourceInventoryEntryV1("src/pkg/child/body.spl", body_digest, body_digest,
+                body_digest, body_digest, body_digest, VIS_BODY.byte_len()),
+            CompileSourceInventoryEntryV1("src/pkg/__init__.spl", manifest_digest, manifest_digest,
+                manifest_digest, manifest_digest, manifest_digest, VIS_MANIFEST.byte_len())]
+        val inventory = CompileSourceInventoryV1(1, 7, entries)
+        val manifest = "src/pkg/child/body.spl|sha256_{body_digest}|{VIS_BODY.byte_len()}"
+        val joined = visibility_manifest_inventory_maps_v1(VIS_SNAPSHOT, inventory, manifest)
+        expect(joined.is_ok()).to_equal(true)
+        expect(joined.unwrap().0.contains_key(VIS_PARENT)).to_equal(true)
+        expect(joined.unwrap().1.contains_key(VIS_PARENT)).to_equal(false)
+        val result = visibility_manifest_reads_v1(VIS_SOURCE, VIS_SNAPSHOT, [VIS_ROOT],
+            VIS_SNAPSHOT_ID, joined.unwrap().0, joined.unwrap().1)
+        expect(result.is_err()).to_equal(true)
+        step("Reject duplicate or substituted snapshot manifest rows")
+        expect(visibility_manifest_inventory_maps_v1(VIS_SNAPSHOT, inventory,
+            manifest + "\n" + manifest).is_err()).to_equal(true)
+        expect(visibility_manifest_inventory_maps_v1(VIS_SNAPSHOT, inventory,
+            manifest.replace(body_digest, manifest_digest)).is_err()).to_equal(true)
+
+    it "keeps extra-family missing rows unknown without a sealed coverage receipt":
+        val source = "/snapshot/custom/body.spl"
+        val inventory: Dict<text, text> = {"/snapshot/custom/body.spl": sha256_text(VIS_BODY)}
+        val result = visibility_manifest_reads_v1(source, VIS_SNAPSHOT, ["/snapshot/custom/body.spl"],
+            VIS_SNAPSHOT_ID, inventory, inventory)
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap().complete).to_equal(false)
+        expect(result.unwrap().reason).to_equal("extra-family-coverage-unproven")
+        expect(result.unwrap().reads.len()).to_equal(0)
+
+    it "observes the same leaf's closed ancestor above a narrow routing root":
+        val inventory = visibility_test_inventory_v1()
+        val narrow = visibility_manifest_reads_v1(VIS_SOURCE, VIS_SNAPSHOT,
+            ["/snapshot/src/pkg/child/body.spl"], VIS_SNAPSHOT_ID, inventory, inventory).unwrap()
+        expect(narrow.complete).to_equal(true)
+        expect(narrow.root).to_equal(VIS_ROOT)
+        expect(narrow.reads.len()).to_equal(3)
+        expect(narrow.reads[1].exists).to_equal(true)
+        expect(narrow.reads[1].manifest_path).to_equal(VIS_PARENT)
+        val broad = visibility_manifest_reads_v1(VIS_SOURCE, VIS_SNAPSHOT,
+            [VIS_ROOT], VIS_SNAPSHOT_ID, inventory, inventory).unwrap()
+        expect(narrow.reads[1].content_sha256).to_equal(broad.reads[1].content_sha256)
+        expect(narrow.reads[2].manifest_path).to_equal(broad.reads[2].manifest_path)
