@@ -7,6 +7,7 @@ use compiler.hir.hir_types.{SymbolTable, SymbolKind, ScopeKind, SymbolId}
 use compiler.hir.hir_symbol_table_methods.*
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.diagnostics.span.{Span}
+use compiler.mir.verification_source_environment_v1.{verification_source_environment_v1}
 
 describe "lexical visibility binding selection":
     it "distinguishes a facade binding from its canonical declaration scope":
@@ -57,3 +58,40 @@ describe "lexical visibility binding selection":
         expect(missing.scope_id).to_equal(-1)
         expect(missing.symbol_id).to_equal(-1)
         expect(symbols.lookup("Value")).to_be_nil()
+
+    it "versions a same-ID rebind and retains the unbound spelling tombstone":
+        step("Publish an alias and prove no-op and unrelated writes retain its version")
+        val symbols = SymbolTable.new()
+        val target = symbols.define("Target", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, Some("one"))
+        symbols.bind_local_type_if_free("Alias", target)
+        val first = symbols.lookup_binding_v1("Alias")
+        expect(first.version).to_equal(1)
+        symbols.bind_local_type_if_free("Alias", target)
+        symbols.define("Other", SymbolKind.Const, nil, Span.empty(), Visibility.Private, false, nil)
+        expect(symbols.lookup_binding_v1("Alias").version).to_equal(first.version)
+        step("Rebind the exact same canonical ID without preserving the old route identity")
+        symbols.rebind_local_type("Alias", target)
+        expect(symbols.lookup_binding_v1("Alias").symbol_id).to_equal(target.id)
+        expect(symbols.lookup_binding_v1("Alias").version).to_equal(2)
+        symbols.unbind_local_type("Alias")
+        expect(symbols.lookup_binding_v1("Alias").symbol_id).to_equal(-1)
+        expect(symbols.binding_version_v1(0, "Alias")).to_equal(3)
+        symbols.unbind_local_type("Alias")
+        expect(symbols.binding_version_v1(0, "Alias")).to_equal(3)
+        symbols.bind_local_type_if_free("Alias", target)
+        expect(symbols.lookup_binding_v1("Alias").version).to_equal(4)
+
+    it "keeps independent verified environments from mutating original binding versions":
+        step("Clone the real symbol owner then rebind only the clone")
+        val symbols = SymbolTable.new()
+        val target = symbols.define("Value", SymbolKind.Const, nil, Span.empty(), Visibility.Public, false, Some("one"))
+        val copied = verification_source_environment_v1(symbols)
+        expect(copied.is_ok()).to_equal(true)
+        val isolated = copied.unwrap()
+        isolated.rebind_local_type("Value", target)
+        expect(isolated.lookup_binding_v1("Value").version).to_equal(2)
+        expect(symbols.lookup_binding_v1("Value").version).to_equal(1)
+        step("A fresh module clears version ownership along with lexical names")
+        symbols.reset_module()
+        expect(symbols.binding_version_v1(0, "Value")).to_equal(0)
+        expect(isolated.lookup_binding_v1("Value").version).to_equal(2)

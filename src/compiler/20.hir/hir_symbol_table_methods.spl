@@ -58,8 +58,22 @@ pub class HirLexicalBindingV1:
     scope_id: i64
     spelling: text
     symbol_id: i64
+    version: i64 = 0
 
 impl SymbolTable:
+    fn binding_version_v1(scope_id: i64, name: text) -> i64:
+        if scope_id < 0 or scope_id >= self.next_scope_id: return -1
+        val scope: Scope = self.scopes[scope_id]
+        if not rt_dict_contains(scope.binding_versions_v1, name): return 0
+        val version: i64 = scope.binding_versions_v1[name]
+        version
+
+    me advance_binding_version_v1(scope_id: i64, name: text):
+        val previous = self.binding_version_v1(scope_id, name)
+        if previous < 0 or previous == 9223372036854775807:
+            panic("lexical binding version is invalid or exhausted")
+        self.scopes[scope_id].binding_versions_v1[name] = previous + 1
+
     me bind_declaration_origin_v1(id: SymbolId, owner: text, source_name: text, modifier: text, source_path: text, projection_key: text) -> Result<bool, text>:
         if modifier == "": return Ok(false)
         if not ["omitted", "pri", "public", "peer", "up", "internal", "package"].contains(modifier):
@@ -268,7 +282,8 @@ impl SymbolTable:
         val found: i64 = scope.symbols[name]
         if found < 0 or found >= self.next_symbol_id:
             return HirLexicalBindingV1(scope_id: scope_id, spelling: name, symbol_id: -1)
-        HirLexicalBindingV1(scope_id: scope_id, spelling: name, symbol_id: found)
+        HirLexicalBindingV1(scope_id: scope_id, spelling: name, symbol_id: found,
+            version: self.binding_version_v1(scope_id, name))
 
     fn lookup_local_or_invalid(name: text) -> SymbolId:
         """Look up only the current lexical scope, preserving outer shadowing."""
