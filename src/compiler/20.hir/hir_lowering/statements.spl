@@ -12,7 +12,7 @@ use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types_expr.{StmtKind, Expr}  # explicit: a glob is not an import-origin for surface projection
 use compiler.common.diagnostics.span.{Span}
-use compiler.hir.hir_lowering.types.{HirLowering, hir_type_kind_disc, hir_type_env_get}
+use compiler.hir.hir_lowering.types.{HirLowering, hir_type_kind_disc, hir_type_env_get, is_read_only_handle_name}
 use compiler.hir.hir_lowering.expressions.*
 use compiler.hir.hir_lowering._Expressions.expression_support.{hir_expr_kind_disc, _hir_expr_symbol_or_invalid}
 use compiler.hir.exhaustiveness.char_condition.{cc_message, cc_env_name, cc_mode_resolve, cc_is_char_type}
@@ -504,14 +504,31 @@ impl HirLowering:
                     through_member = true
                 case HirExprKind.NamedVar(rsym, rname):
                     if through_member and self.immutable_view_symbols.contains_key(rsym.id):
-                        self.error("E_IMMUTABLE_WRITE: cannot write through read-only view `{rname}: Immutable<T>`; write via a mutable alias of the object instead", span)
+                        val handle = self.immutable_view_symbols[rsym.id]
+                        self.error("E_IMMUTABLE_WRITE: cannot write through read-only view `{rname}: {handle}<T>`; write via a mutable alias of the object instead", span)
                     return
                 case HirExprKind.Var(rsym2):
                     if through_member and self.immutable_view_symbols.contains_key(rsym2.id):
-                        self.error("E_IMMUTABLE_WRITE: cannot write through a read-only `Immutable<T>` view; write via a mutable alias of the object instead", span)
+                        self.error("E_IMMUTABLE_WRITE: cannot write through a read-only `{self.immutable_view_symbols[rsym2.id]}<T>` handle; write via a mutable alias of the object instead", span)
                     return
                 case _:
                     return
+
+    # E_FROZEN_ALIAS (IMM-04): a `var` initialised directly from a pinned
+    # `RevisionImmutable<T>` / `FrozenImmutable<T>` handle would be a mutable
+    # alias of content that must not change. A live `Immutable<T>` may be
+    # aliased (other writers are allowed by contract); a `val` alias stays read-only.
+    me flag_frozen_alias(init: HirExpr, span: Span):
+        if self.immutable_view_symbols.len() == 0:
+            return
+        match init.kind:
+            case HirExprKind.NamedVar(asym, aname):
+                if self.immutable_view_symbols.contains_key(asym.id):
+                    val handle = self.immutable_view_symbols[asym.id]
+                    if handle != "Immutable":
+                        self.error("E_FROZEN_ALIAS: cannot bind a mutable alias to `{aname}: {handle}<T>`; copy it into a fresh value instead", span)
+            case _:
+                return
 
     me lower_hir_assignment_kind(target: Expr, op: AssignOp?, value: Expr, span: Span) -> HirStmtKind:
         val discard = match target.kind:
@@ -1083,8 +1100,8 @@ impl HirLowering:
                     case _: v_sym_type = inferred
             val v_symbol = self.symbols.define(v_name, SymbolKind.Variable, v_sym_type, s.span, Visibility.Private, false, nil)
             self.local_annotation_provenance[v_symbol.id] = v_has_annotation
-            if v_has_annotation and parser_type_kind_named_name(v_ast_type.kind) == "Immutable":
-                self.immutable_view_symbols[v_symbol.id] = true
+            if v_has_annotation and is_read_only_handle_name(parser_type_kind_named_name(v_ast_type.kind)):
+                self.immutable_view_symbols[v_symbol.id] = parser_type_kind_named_name(v_ast_type.kind)
             self.mark_optional_call_init(v_symbol.id, v_init, v_has_annotation, s.bind_optional_payload, v_sym_type)
             self.try_register_local_struct_type(v_symbol, v_init)
             self.try_register_local_tuple_type(v_symbol, v_init)
@@ -1142,8 +1159,10 @@ impl HirLowering:
                     case _: vr_sym_type = inferred
             val vr_symbol = self.symbols.define(vr_name, SymbolKind.Variable, vr_sym_type, s.span, Visibility.Private, true, nil)
             self.local_annotation_provenance[vr_symbol.id] = vr_has_annotation
-            if vr_has_annotation and parser_type_kind_named_name(vr_ast_type.kind) == "Immutable":
-                self.immutable_view_symbols[vr_symbol.id] = true
+            if vr_has_annotation and is_read_only_handle_name(parser_type_kind_named_name(vr_ast_type.kind)):
+                self.immutable_view_symbols[vr_symbol.id] = parser_type_kind_named_name(vr_ast_type.kind)
+            if not is_read_only_handle_name(parser_type_kind_named_name(vr_ast_type.kind)):
+                self.flag_frozen_alias(vr_hir_init, s.span)
             if val vr_init_present = vr_init:
                 self.mark_optional_call_init(vr_symbol.id, vr_init_present, vr_has_annotation, s.bind_optional_payload, vr_sym_type)
                 self.try_register_local_struct_type(vr_symbol, vr_init_present)
