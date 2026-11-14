@@ -13,5 +13,8 @@ Status: authored, UNRUN with the changed compiler. Codec generation alone passed
 4. Rename the callable while preserving independent declaration metadata and
    leaving its return-type inference state unchanged.
 
+5. Exercise the separate direct free-call resolver with nominal and f64 declared
+   parameters while its return type remains absent.
+
 Public tracing, bootstrap admission, inferred return types and instantiated generic
 callable ABI qualification are not established by these scenarios.
