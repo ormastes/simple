@@ -92,9 +92,10 @@ SPipe lane. Never replace explicit fail placeholders with false-green passes.
   has no `etc/`, the layer never loads, and the in-app API still answers
   `available=1 start=1` — the run ends `num_captures=0` with no cause named.
   The helper now reports `missing-renderdoc-layer-manifest:<path>`.
-- **Start the capture after the device exists and keep the device alive.** A
-  start issued before the first `vkCreateDevice` returns 1 and captures
-  nothing; so does a start whose warm-up engine was already dropped.
+- **Start the capture after the device exists.** A start issued before the
+  first `vkCreateDevice` returns 1 and captures nothing (re-verified with the
+  layer loaded: original program `num_captures=0`). Dropping the warm-up
+  engine afterwards is harmless — the shared session keeps the device.
   `renderdoc_web_page_capture.spl` now follows `renderdoc_vulkan_capture.spl`.
 - **NVIDIA GB10 (driver 580.173) rejects `vkCreateDevice` with the RenderDoc
   layer in the chain** (5 of 5 attempts, `VK_ERROR_INITIALIZATION_FAILED`);

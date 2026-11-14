@@ -1,3 +1,4 @@
+(numbers pending: re-measured against Chrome 159 — see the baseline file)
 # Web Render CSS Parity Feature Expert
 
 ## Role
@@ -998,9 +999,13 @@ Gate: `scripts/check/check-chrome-catalog-pixel-diff.shs`; ratchet rows in
 | evidence | 2.31 | 1.63 |
 | tab-bar | 0.61 | 0.61 |
 
+Oracle trap: playwright 1.49 pins Chromium 131, which still shrinks
+`section h1`; Chrome 159 does not. A sectioning-h1 rule added from the 131
+oracle was reverted the same day. Use the NEWEST Chromium the host has.
+
 Roots fixed, each pinned by a spec: Linux generic faces (Liberation Sans /
 DejaVu Sans Mono + real bold/italic faces — Linux used Noto Sans SC's wght=100
-master and reused the regular face for bold), sectioning `h1` UA levels, list
+master and reused the regular face for bold), list
 markers and link underlines never painted in Draw IR, staged glyph pen drifting
 from the measured advances (last glyph clipped), bare `#text` runs missing
 their half-leading.
@@ -1019,9 +1024,11 @@ Traps measured this round:
 - **A comparison is not a verdict.** The gate printed `PASS … worst=33.89`;
   PASS meant "a diff ran". Without a baseline file the verdict now says
   `compared, not judged`.
-- **A stale seed lies.** The 2026-11-05 seed's JIT returned `"760".to_i32() ==
-  95`; a seed built from current source is right. Record the binary's build
-  date with any number, and rebuild before chasing an inexplicable value.
+- **One seed binary lies.** `src/compiler_rust/target/bootstrap/simple` (built
+  2026-11-05, bootstrap profile) returns `"760".to_i32() == 95` under its JIT; a
+  release seed built from current source is right. The two differ in age,
+  profile and features, so the cause is not isolated — record the binary with
+  any number and re-run on another before chasing an inexplicable value.
 - **Never edit the worktree while a render reads it.** `src/lib` is read as
   source on every run; pages rendered across a cherry-pick are mixed-source.
 - CPU vs Vulkan on `overview`: 69 differing px, all at clipped run ends — a
