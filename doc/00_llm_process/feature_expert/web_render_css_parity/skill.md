@@ -1669,7 +1669,7 @@ never cache an answer computed while exhausted) —
   `gradient_corner_dir_q16`. Interpolation is premultiplied; stop positions
   never decrease. Emit a ramp a ROW at a time (`draw_image`): one
   `draw_rect_filled` per colour run cost the catalog `html` page 120 s.
-  Test with hex stops: `parse_color("red")` is #dc3232. The corner codes
+  (`parse_color("red")` was #dc3232 until 2026-11-15.) The corner codes
   (>= 1000) share the angle slot, so every real angle must be reduced to
   0..359 first (`3turn` painted as "to top left" until it was). Ramp
   positions multiply by 1000: keep them in i64 past ~1073 px.
@@ -1695,3 +1695,9 @@ never cache an answer computed while exhausted) —
   </span>cd`), or the start of the next (`inline_subtree_edge_is_space`).
   Text controls are clamped by min/max-width (`constrained_outer_width`)
   and atomic inline boxes carry their horizontal margins.
+- **Trap — one colour parser, CSS Color 4 values.** `parse_color` (opaque)
+  and `parse_color_alpha` (keeps alpha) share `css_color_function_argb` for
+  `rgb()` / `hsl()` in both syntaxes; keywords go to `dom_color`'s CSS
+  table. A shortcut keyword above the table (`red` = #dc3232 survived
+  for months) silently repaints every page; pin new forms in
+  `css_color_parse_chrome159_spec.spl` against `getComputedStyle`.

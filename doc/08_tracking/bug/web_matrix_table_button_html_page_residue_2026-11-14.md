@@ -165,8 +165,6 @@ max-content of mixed inline content, control UA font reset, `h6` margins
     backends has no Chrome-numbered row of its own.
   - `flex:1 1 100px;max-width:25%` (a growing item with a definite basis)
     is not frozen at its max-width; only zero-basis items are.
-  - `parse_color` maps the keyword `red` to #dc3232 (CSS: #ff0000), so every
-    `red` in a page paints the wrong colour, gradients included.
 - **Fixed from the 5066a3eeae1 / 5ffa5564085 review:** an angle token is
   reduced to 0..359 (`gradient_angle_token_deg`), so `3turn` / `1080deg`
   no longer collide with the `to <corner>` codes (gradient spec AC-7, red
@@ -174,3 +172,14 @@ max-content of mixed inline content, control UA font reset, `h6` margins
   i64: `(t - t_min) * 1000` is about `2 * w * 1000 * 1000` at 90deg and
   passed i32 for a box wider than ~1073 px (a 3840 px 4K header). Found by
   arithmetic, not by a 4K render.
+- **Colour parsing fixed (2026-11-15, paint-page lane).** `parse_color`
+  hard-coded `red` as #dc3232 ahead of the named-colour table (a themed
+  value from `81d9241e755`, mirrored in `examples/06_io/ui/mini_html_render.spl`,
+  which is a separate example and keeps its own palette); it is the CSS
+  #ff0000 now. `rgb()` / `rgba()` / `hsl()` / `hsla()` go through one CSS
+  Color 4 parser (`css_color_function_argb`: comma and space syntax,
+  `/ alpha`, percentage channels rounded half up, hue units), which fixes
+  `rgb(100%,0%,0%)` (was rgb(100,0,0)), `rgb(100% 50% 0%)` (green 127),
+  the alpha of `rgb(r,g,b,a)` and `hsl(120deg ...)` (was no colour). A
+  `box-shadow` colour accepted only `black` / `white` / `red` as keywords
+  and now takes any CSS colour. Spec: `css_color_parse_chrome159_spec.spl`.
