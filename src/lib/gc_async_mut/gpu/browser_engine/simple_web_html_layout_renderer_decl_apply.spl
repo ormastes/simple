@@ -301,7 +301,7 @@ fn _apply_decls_without_grid_inner(
             if line_height_value_is_normal(line_part):
                 line_height_v = line_height_after_normal_keyword(line_height_v, browser_host_has_measured_linux_face_set())
             else:
-                val parsed_line_height = parse_line_height_value(line_part)
+                val parsed_line_height = _decl_line_height(line_part, font_size_v)
                 if parsed_line_height != 0:
                     line_height_v = parsed_line_height
         elif parsed_font_size > 0:
@@ -679,7 +679,7 @@ fn _apply_decls_without_grid_inner(
             # kept the 2x. Measured host only; see the helper.
             line_height_v = line_height_after_normal_keyword(line_height_v, browser_host_has_measured_linux_face_set())
         else:
-            val parsed_line_height = parse_line_height_value(line_height)
+            val parsed_line_height = _decl_line_height(line_height, font_size_v)
             if parsed_line_height != 0:
                 line_height_v = parsed_line_height
     writing_mode_v = _decl_tbl_resolve_writing_mode(
@@ -2513,13 +2513,21 @@ fn _decl_font_relative_length_px(raw: text, font_px: i32) -> i32:
         return (font_px * parse_decimal_x10(v)) / 10
     parse_int(raw)
 
-# `left`, `top` and `order` are signed. `parse_int` skips every non-digit
-# before the first digit, the minus sign included, so `top:-5px` was laid out
-# as `top:5px` and `order:-1` sorted as `order:1`. A value with no digit at all
-# (`auto`) reads as 0, exactly as `parse_int` read it.
-# `right` and `bottom` are NOT routed through this: the layout reads
-# `right_px >= 0` as "right is set", so a negative `right`/`bottom` needs a
-# separate is-set flag before its sign can be kept.
+# A `line-height` declaration as the Style encoding (positive px length, or
+# minus ten times a unitless factor; 0 when unusable). A percentage or `em`
+# value computes to a LENGTH against the declaring element's own font-size
+# and is inherited as that length (CSS 2.2 10.8.1); only a unitless number
+# stays a factor that each descendant re-resolves against its own font.
+fn _decl_line_height(raw: text, font_size: i32) -> i32:
+    val value = raw.trim().lower()
+    if value.ends_with("%"):
+        val px = font_size * (parse_decimal_x10(value) / 10) / 100
+        return if px > 0: px else: 0
+    if value.ends_with("em") and not value.ends_with("rem"):
+        val px = font_size * parse_decimal_x10(value) / 10
+        return if px > 0: px else: 0
+    parse_line_height_value(raw)
+
 # A unitless flex factor (`flex: 1.5`, `flex-grow: 2`), or -1 when `raw` is
 # not one. Factors are stored as integers: a fraction is rounded to the
 # nearest integer (half up), and a positive factor below 1 becomes 1 so that
@@ -2539,6 +2547,13 @@ fn _decl_flex_factor(raw: text) -> i32:
     val rounded = if tenth >= 5: whole + 1 else: whole
     if rounded == 0 and frac > 0: 1 else: rounded
 
+# `left`, `top` and `order` are signed. `parse_int` skips every non-digit
+# before the first digit, the minus sign included, so `top:-5px` was laid out
+# as `top:5px` and `order:-1` sorted as `order:1`. A value with no digit at all
+# (`auto`) reads as 0, exactly as `parse_int` read it.
+# `right` and `bottom` are NOT routed through this: the layout reads
+# `right_px >= 0` as "right is set", so a negative `right`/`bottom` needs a
+# separate is-set flag before its sign can be kept.
 fn _decl_signed_int_or_zero(raw: text) -> i32:
     val v = parse_signed_nth_int(raw, 0)
     if v == -1000000:
