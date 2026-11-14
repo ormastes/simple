@@ -18,7 +18,7 @@
 # Verdict (last stdout line): PASS — <n> function(s) checked, 0 mixed
 #                            FAIL — <n> function(s) checked, <k> mixed: ...
 #                            ERROR — nothing was checked
-# Exit 0 / 1 / 2. --selftest runs 13 fixtures first and is fatal.
+# Exit 0 / 1 / 2. --selftest runs 15 fixtures first and is fatal.
 #
 # Rule 4 (len()-bounded byte scan, bug
 # doc/08_tracking/bug/len_bounded_byte_scanners_non_ascii_2026_11_14.md):
@@ -183,7 +183,12 @@ cmp_set() {
 }
 
 run_scan() {
-  if [ -n "$scope_files" ]; then
+  if [ -n "$scope_files" ] && [ -n "$scope_tip" ]; then
+    sc=$(mktemp -d)
+    while read -r f; do mkdir -p "$sc/$(dirname "$f")"; git show "$scope_tip:$f" > "$sc/$f" 2>/dev/null || rm -f "$sc/$f"; done < "$scope_files"
+    (cd "$sc" && while read -r f; do [ -f "$f" ] && scan_file "$f"; done) < "$scope_files"
+    rm -rf "$sc"; echo "FNCOUNT 0"
+  elif [ -n "$scope_files" ]; then
     while read -r f; do [ -f "$f" ] && scan_file "$f"; done < "$scope_files"
     echo "FNCOUNT 0"
   else
@@ -201,7 +206,6 @@ run_scan() {
   r4=$(grep -c . "$tmp_r4" || true)
   if [ -n "$scope_files" ]; then
     nf=$(grep -c . "$scope_files" || true)
-    [ "$nf" -eq 0 ] && { echo "ERROR — nothing was checked (no .spl file in range)"; return 2; }
   else
     [ "$total_fn" -eq 0 ] && { echo "ERROR — nothing was checked"; return 2; }
   fi
@@ -221,7 +225,7 @@ run_scan() {
   return 0
 }
 
-tmp_out=$(mktemp); tmp_r4=$(mktemp); tmp_base=$(mktemp); tmp_mix=$(mktemp); scope_files=""
+tmp_out=$(mktemp); tmp_r4=$(mktemp); tmp_base=$(mktemp); tmp_mix=$(mktemp); scope_files=""; scope_tip=""
 trap 'rm -f "$tmp_out" "$tmp_r4" "$tmp_base" "$tmp_mix" ${scope_files:+"$scope_files"}; rm -rf "${fx:-}"' EXIT
 baseline="${TEXT_LEN_BASELINE:-scripts/check/text_len_bounded_byte_scan_baseline.txt}"
 mix_baseline="${TEXT_LEN_MIX_BASELINE:-scripts/check/text_len_unit_mix_baseline.txt}"
@@ -273,7 +277,26 @@ selftest() {
   v=$(baseline="$fx/base_g"; scope_files="$fx/scope_a"; run_scan); rc=$?; [ $rc -eq 0 ] || { echo "selftest: diff mode must ignore rows of untouched files, got rc=$rc: $v"; exit 2; }
   printf '%s\n' "$fx/g/scan.spl" > "$fx/scope_g"
   v=$(scope_files="$fx/scope_g"; run_scan); rc=$?; [ $rc -eq 1 ] || { echo "selftest: diff mode must FAIL a new hit in a touched file, got rc=$rc: $v"; exit 2; }
-  echo "selftest: 13 fixtures OK"
+  # Committed-content mode: the scan reads the range TIP, not the working tree.
+  gr="$fx/repo"; mkdir -p "$gr/src/lib" && git init -q "$gr" && printf "src/lib/t.spl
+" > "$fx/scope_t"
+  printf "fn quote_end(s: text, p: i64) -> i64:
+    val n = s.len()
+    s.substring(p, n)
+" > "$gr/src/lib/bad.spl"
+  printf "fn ok(s: text) -> i64:
+    s.byte_len()
+" > "$gr/src/lib/t.spl"
+  (cd "$gr" && git add -A && git -c user.name=t -c user.email=t@t commit -qm c)
+  printf "src/lib/t.spl
+" > "$fx/scope_t"
+  cp "$gr/src/lib/bad.spl" "$gr/src/lib/t.spl"
+  v=$(cd "$gr" && scope_tip=HEAD; scope_files="$fx/scope_t"; run_scan); rc=$?; [ $rc -eq 0 ] || { echo "selftest: clean tip + dirty working copy must PASS, got rc=$rc: $v"; exit 2; }
+  (cd "$gr" && git checkout -q -- src/lib/t.spl && cp src/lib/bad.spl src/lib/t.spl && git add -A && git -c user.name=t -c user.email=t@t commit -qm d && printf "fn ok(s: text) -> i64:
+    s.byte_len()
+" > src/lib/t.spl)
+  v=$(cd "$gr" && scope_tip=HEAD; scope_files="$fx/scope_t"; run_scan); rc=$?; [ $rc -eq 1 ] || { echo "selftest: broken tip + clean working copy must FAIL, got rc=$rc: $v"; exit 2; }
+  echo "selftest: 15 fixtures OK"
 }
 
 do_selftest=0
@@ -300,10 +323,10 @@ if [ -n "$range" ]; then
   # Diff-scoped mode (push tier): scan only the .spl files the range touches
   # under the roots; a deleted file is kept in scope so its rows go stale.
   case "$range" in *..*) ;; *) echo "ERROR — nothing was checked (--changed needs BASE..HEAD)"; exit 2 ;; esac
-  scope_files=$(mktemp)
+  scope_files=$(mktemp); scope_tip="${range##*..}"
   # shellcheck disable=SC2086
-  git diff --name-only "$range" -- $roots 2>/dev/null | grep '\.spl$' | sort -u > "$scope_files" \
-    || { [ -s "$scope_files" ] || { echo "PASS — 0 touched .spl file(s) in $range under $roots; nothing to ratchet"; exit 0; }; }
+  git diff --name-only "$range" -- $roots 2>/dev/null | grep "[.]spl$" | sort -u > "$scope_files" || true
+  [ -s "$scope_files" ] || { echo "PASS — 0 touched .spl file(s) in $range under $roots; nothing to ratchet"; exit 0; }
 fi
 # shellcheck disable=SC2086
 run_scan $roots
