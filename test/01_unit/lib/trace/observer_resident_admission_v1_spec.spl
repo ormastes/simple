@@ -1,0 +1,28 @@
+use std.spec.*
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_resident_admission_v1.*
+use std.common.trace.observer_config_v1.{trace_config_defaults_v1}
+use std.nogc_sync_mut.trace.observer_resident_owner_v1.{TraceResidentObserverV1}
+
+describe "resident public admission remains closed":
+    it "advertises no admitted profile and rejects a claimed candidate profile":
+        var observer = TraceResidentObserverV1()
+        val capabilities = observer.capabilities()
+        expect(capabilities.backend).to_equal(TraceBackendV1.None)
+        expect(capabilities.abi_profiles.len()).to_equal(0)
+        var config = trace_config_defaults_v1()
+        config.instrumentation = TraceInstrumentationV1.Dynamic
+        config.abi_profile = "llvm-resident-candidate-v1"
+        val selection = TraceSelectionV1(manifest_incarnation: 1,
+            sites: [TraceSiteV1(module_instance: 1, site_id: 1)])
+        expect(observer.prepare(config, selection)).to_equal(Err(TraceFailureV1.UnsupportedProfile))
+
+    it "rejects guessed prepared handles before touching the runtime":
+        var observer = TraceResidentObserverV1()
+        for incarnation in [0u64, 1u64, 18446744073709551615u64]:
+            val prepared = TracePreparedV1(slot: 1, incarnation: incarnation)
+            expect(observer.start(prepared)).to_equal(Err(TraceFailureV1.UnsupportedProfile))
+
+    it "does not equate runtime readiness with quiescence authority":
+        expect(trace_resident_require_qualified_v1()).to_equal(Err(TraceFailureV1.UnsupportedProfile))
+        expect(trace_resident_require_quiescent_handoff_v1()).to_equal(Err(TraceFailureV1.UnsupportedConsistency))
