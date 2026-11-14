@@ -1,0 +1,196 @@
+# Generic trait object in an optional field: the attribute_schema_v1.spl shape
+# (`trait AttrOwnerV1<T>` with `T?` slots, `owner: AttrOwnerV1<T>?`, `None`
+# into the field, dispatch under `if val` and `match ... case Some(o)`), plus
+# concrete `impl Owner<X> for Cell` for X = i64, text, f64 so the dispatch runs.
+# Spec guard: test/01_unit/compiler/mir/generic_trait_object_optional_slot_spec.spl
+# Build with `native-build main.spl --backend=cranelift --entry-closure` from a
+# directory outside test/. Reference = seed interpreter (`simple run main.spl`).
+# Expected stdout, exactly:
+#   i64 read some 41
+#   i64 miss none
+#   i64 write true
+#   i64 reread some 9000000000
+#   i64 clear true
+#   i64 cleared none
+#   text read none
+#   text write true
+#   text reread some hello
+#   f64 read some 1.5
+#   f64 write true
+#   f64 reread some -2.25
+#   f64 miss none
+#   i64 set true
+#   i64 has true false
+#   i64 get ok 12
+#   i64 clear2 true
+#   i64 has_after_clear false
+#   i64 get err absent 1
+#   text set true
+#   text get ok world
+#   f64 set true
+#   f64 get ok 3.75
+#   f64 has true false
+#   detached owner false
+#   detached read none
+#   detached write false
+#   detached set false has false
+#   detached get err absent 1
+
+trait Owner<T>:
+    fn owner_read(node: i64) -> T?
+    me owner_write(node: i64, value: T?)
+
+class IntCell:
+    key: i64
+    cell: i64?
+
+impl Owner<i64> for IntCell:
+    fn owner_read(node: i64) -> i64?:
+        if node == self.key: self.cell else: None
+    me owner_write(node: i64, value: i64?):
+        if node == self.key:
+            self.cell = value
+
+class TextCell:
+    key: i64
+    cell: text?
+
+impl Owner<text> for TextCell:
+    fn owner_read(node: i64) -> text?:
+        if node == self.key: self.cell else: None
+    me owner_write(node: i64, value: text?):
+        if node == self.key:
+            self.cell = value
+
+class FloatCell:
+    key: i64
+    cell: f64?
+
+impl Owner<f64> for FloatCell:
+    fn owner_read(node: i64) -> f64?:
+        if node == self.key: self.cell else: None
+    me owner_write(node: i64, value: f64?):
+        if node == self.key:
+            self.cell = value
+
+class Store<T>:
+    name: text
+    owner: Owner<T>?
+
+impl Store<T>:
+    fn has_owner() -> bool:
+        if val _o = self.owner:
+            return true
+        false
+
+    fn read(node: i64) -> T?:
+        if val o = self.owner:
+            return o.owner_read(node)
+        None
+
+    me write(node: i64, value: T?) -> bool:
+        if val o = self.owner:
+            o.owner_write(node, value)
+            return true
+        false
+
+    fn has(node: i64) -> bool:
+        if val o = self.owner:
+            if val _v = o.owner_read(node):
+                return true
+        false
+
+    fn get(node: i64) -> Result<T, text>:
+        match self.owner:
+            case Some(o):
+                match o.owner_read(node):
+                    case Some(v): return Ok(v)
+                    case None: pass
+            case None: pass
+        Err("absent {node}")
+
+    me set(node: i64, value: T) -> bool:
+        match self.owner:
+            case Some(o):
+                o.owner_write(node, Some(value))
+                return true
+            case None: return false
+
+    me clear(node: i64) -> bool:
+        match self.owner:
+            case Some(o):
+                o.owner_write(node, None)
+                return true
+            case None: return false
+
+fn store_with<T>(name: text, owner: Owner<T>) -> Store<T>:
+    Store(name: name, owner: Some(owner))
+
+fn store_detached<T>(name: text) -> Store<T>:
+    Store(name: name, owner: None)
+
+fn show_i64(tag: text, v: i64?):
+    match v:
+        case Some(x): print "{tag} some {x}"
+        case None: print "{tag} none"
+
+fn show_text(tag: text, v: text?):
+    match v:
+        case Some(x): print "{tag} some {x}"
+        case None: print "{tag} none"
+
+fn show_f64(tag: text, v: f64?):
+    match v:
+        case Some(x): print "{tag} some {x}"
+        case None: print "{tag} none"
+
+fn main():
+    var si: Store<i64> = store_with("i", IntCell(key: 1, cell: Some(41)))
+    show_i64("i64 read", si.read(1))
+    show_i64("i64 miss", si.read(2))
+    print "i64 write {si.write(1, Some(9000000000))}"
+    show_i64("i64 reread", si.read(1))
+    print "i64 clear {si.write(1, None)}"
+    show_i64("i64 cleared", si.read(1))
+
+    var st: Store<text> = store_with("t", TextCell(key: 3, cell: None))
+    show_text("text read", st.read(3))
+    print "text write {st.write(3, Some(\"hello\"))}"
+    show_text("text reread", st.read(3))
+
+    var sf: Store<f64> = store_with("f", FloatCell(key: 5, cell: Some(1.5)))
+    show_f64("f64 read", sf.read(5))
+    print "f64 write {sf.write(5, Some(-2.25))}"
+    show_f64("f64 reread", sf.read(5))
+    show_f64("f64 miss", sf.read(6))
+
+    print "i64 set {si.set(1, 12)}"
+    print "i64 has {si.has(1)} {si.has(2)}"
+    match si.get(1):
+        case Ok(v): print "i64 get ok {v}"
+        case Err(e): print "i64 get err {e}"
+    print "i64 clear2 {si.clear(1)}"
+    print "i64 has_after_clear {si.has(1)}"
+    match si.get(1):
+        case Ok(v): print "i64 get ok {v}"
+        case Err(e): print "i64 get err {e}"
+    print "text set {st.set(3, \"world\")}"
+    match st.get(3):
+        case Ok(v): print "text get ok {v}"
+        case Err(e): print "text get err {e}"
+    print "f64 set {sf.set(5, 3.75)}"
+    match sf.get(5):
+        case Ok(v): print "f64 get ok {v}"
+        case Err(e): print "f64 get err {e}"
+    print "f64 has {sf.has(5)} {sf.has(6)}"
+
+    var sd: Store<i64> = store_detached("d")
+    print "detached owner {sd.has_owner()}"
+    show_i64("detached read", sd.read(1))
+    print "detached write {sd.write(1, Some(7))}"
+    print "detached set {sd.set(1, 7)} has {sd.has(1)}"
+    match sd.get(1):
+        case Ok(v): print "detached get ok {v}"
+        case Err(e): print "detached get err {e}"
+
+main()

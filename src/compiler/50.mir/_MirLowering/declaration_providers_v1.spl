@@ -697,7 +697,7 @@ impl MirLowering:
                 # Diagnose at conversion, not for an unused generic declaration.
                 if owner == "": continue
                 var slots: [NativeTraitMethodSlot] = []
-                var safe = declaration.type_params.len() == 0 and declaration.assoc_types.len() == 0 and declaration.supertraits.len() == 0
+                var safe = declaration.assoc_types.len() == 0 and declaration.supertraits.len() == 0
                 val method_names = native_trait_sorted_declaration_method_names_v1(declaration)
                 if method_names.len() != declaration.methods.len() + declaration.defaults.len(): safe = false
                 for method_name in method_names:
@@ -724,7 +724,14 @@ impl MirLowering:
                             parameter_mutability: parameter_mutability,
                             result: self.relocate_provider_type(method.return_type, module.symbols),
                             mutable_receiver: method.is_mutable))
-                val layout = NativeTraitLayout(owner: owner, methods: slots, object_safe: safe)
+                # Same generic-trait admission as register_native_trait_declarations.
+                if declaration.type_params.len() > 0:
+                    var type_param_names: [text] = []
+                    for type_param in declaration.type_params:
+                        type_param_names.push(type_param.name)
+                    if not self.native_trait_generic_slots_word_only(type_param_names, slots, declaration.defaults.len()):
+                        safe = false
+                val layout = NativeTraitLayout(owner: owner, methods: slots, object_safe: safe, generic: declaration.type_params.len() > 0)
                 val existing = self.native_trait_layout_index(owner)
                 if existing >= 0:
                     if not self.native_trait_layout_matches(self.native_trait_layouts[existing], layout):
@@ -802,7 +809,7 @@ impl MirLowering:
                     trait_owner: owner, concrete_owner: concrete_owner, methods: methods,
                     concrete_type: self.relocate_provider_type(implementation.type_, module.symbols),
                     concrete_name: concrete.name, reference_semantics: concrete.kind == SymbolKind.Class,
-                    signatures: signatures))
+                    signatures: signatures, trait_type_key: self.native_trait_signature_type_key(trait_type)))
 
     me register_provider_enum_from_declarations_v1(enum_def: MirHirEnumDeclarationV1, provider: SymbolTable):
         """Register an archived provider enum's variants into the MIR enum

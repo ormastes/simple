@@ -1,0 +1,124 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+"""
+Generic trait objects whose type parameter appears only as `T?`.
+
+`src/compiler/00.common/data/attribute_schema_v1.spl` (`trait AttrOwnerV1<T>`,
+field `owner: AttrOwnerV1<T>?`) failed native MIR lowering three ways:
+
+1. `owner: None` into the optional trait-object field searched for a trait
+   implementation with an EMPTY concrete owner: `None` lowers through the
+   Option enum (rt_enum_new), not NilLit, so coerce_native_trait_object fell
+   through to the concrete-implementation search.
+2. Every `o.owner_read(..)` / `o.owner_write(..)` dispatch was refused
+   ("lacks object-safe method"): any trait type parameter made the layout
+   non-object-safe. A `T?` slot is the i64 Option handle whatever T is (one
+   pointer-class word in every backend), so a trait whose parameters appear
+   ONLY as whole Option payloads is object-safe; bare `T`, `[T]`, `T??` and
+   default methods stay refused.
+3. The flat (native) frontend dropped `impl Owner<i64> for X:` trait
+   arguments, so HIR rejected every implementation of a generic trait
+   ("type `Owner` expects 1 type arguments, got 0").
+
+Rows lower through the native frontend (parse_and_build_module); the bootstrap
+rows lower HIR with SIMPLE_BOOTSTRAP=1 + SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1 as
+native-build does. Native oracle:
+test/fixtures/native_generic_trait_object_optional_field/main.spl.
+"""
+
+use std.spec.*
+use std.io_runtime.{env_set}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+
+val TRAIT = "trait Owner<T>:\n    fn owner_read(node: i64) -> T?\n    me owner_write(node: i64, value: T?)\n\n"
+
+val STORE = "class Store<T>:\n    name: text\n    owner: Owner<T>?\n\n" +
+    "impl Store<T>:\n" +
+    "    fn has(node: i64) -> bool:\n        if val o = self.owner:\n            if val _v = o.owner_read(node):\n                return true\n        false\n\n" +
+    "    fn read(node: i64) -> T?:\n        if val o = self.owner:\n            return o.owner_read(node)\n        None\n\n" +
+    "    me set(node: i64, value: T) -> bool:\n        match self.owner:\n            case Some(o):\n                o.owner_write(node, Some(value))\n                return true\n            case None: return false\n\n" +
+    "    me clear(node: i64) -> bool:\n        match self.owner:\n            case Some(o):\n                o.owner_write(node, None)\n                return true\n            case None: return false\n\n" +
+    "fn store_with<T>(name: text, owner: Owner<T>) -> Store<T>:\n    Store(name: name, owner: Some(owner))\n\n" +
+    "fn store_detached<T>(name: text) -> Store<T>:\n    Store(name: name, owner: None)\n\n"
+
+val CELLS = "class IntCell:\n    key: i64\n    cell: i64?\n\n" +
+    "impl Owner<i64> for IntCell:\n    fn owner_read(node: i64) -> i64?:\n        if node == self.key: self.cell else: None\n    me owner_write(node: i64, value: i64?):\n        self.cell = value\n\n" +
+    "class FloatCell:\n    key: i64\n    cell: f64?\n\n" +
+    "impl Owner<f64> for FloatCell:\n    fn owner_read(node: i64) -> f64?:\n        if node == self.key: self.cell else: None\n    me owner_write(node: i64, value: f64?):\n        self.cell = value\n\n" +
+    "fn probe() -> i64:\n    var si: Store<i64> = store_with(\"i\", IntCell(key: 1, cell: Some(4)))\n    var sf: Store<f64> = store_with(\"f\", FloatCell(key: 1, cell: None))\n    si.set(1, 9)\n    sf.set(1, 1.5)\n    0\n"
+
+fn lower_errors(src: text, bootstrap_hir: bool) -> [text]:
+    val parsed = parse_and_build_module(src, "generic_trait_probe.spl")
+    var hir_lowering = HirLowering.with_filename("generic_trait_probe.spl")
+    if bootstrap_hir:
+        env_set("SIMPLE_BOOTSTRAP", "1")
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+    val hir = hir_lowering.lower_module(parsed)
+    if bootstrap_hir:
+        env_set("SIMPLE_BOOTSTRAP", "")
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "")
+    var out: [text] = []
+    for e in hir_lowering.errors:
+        out.push("hir: " + e.message)
+    var lowering = MirLowering.new(hir.symbols)
+    lowering.trait_impl_closure_complete = true
+    val mir = lowering.lower_module(hir)
+    for e in lowering.errors:
+        out.push("mir: " + e.message)
+    out
+
+fn joined(errors: [text]) -> text:
+    var s = ""
+    for e in errors:
+        s = s + e + "\n"
+    s
+
+fn impl_trait_arg_count(src: text) -> i64:
+    val parsed = parse_and_build_module(src, "generic_trait_header.spl")
+    var hir_lowering = HirLowering.with_filename("generic_trait_header.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    for i in hir.impls:
+        if i.has_trait_:
+            match i.trait_.kind:
+                case HirTypeKind.Named(_, args): return args.len()
+                case _: return -1
+    -2
+
+describe "generic trait object in an optional slot":
+    it "keeps the trait arguments of `impl Owner<i64> for X:` (native frontend)":
+        expect(impl_trait_arg_count(TRAIT + "class IntCell:\n    key: i64\n\nimpl Owner<i64> for IntCell:\n    fn owner_read(node: i64) -> i64?:\n        None\n    me owner_write(node: i64, value: i64?):\n        self.key = node\n")).to_equal(1)
+
+    it "lowers None into the optional slot, dispatch and conversion with no errors":
+        expect(joined(lower_errors(TRAIT + STORE + CELLS, false))).to_equal("")
+
+    it "lowers the same module with bootstrap HIR (native-build mode)":
+        expect(joined(lower_errors(TRAIT + STORE + CELLS, true))).to_equal("")
+
+    it "lowers the detached-only shape of attribute_schema_v1 (no implementation)":
+        expect(joined(lower_errors(TRAIT + STORE, true))).to_equal("")
+
+    it "still refuses dispatch through a trait whose slot uses a bare T":
+        val src = "trait Getter<T>:\n    fn get() -> T\n\nfn probe(g: Getter<i64>) -> i64:\n    g.get()\n"
+        expect(joined(lower_errors(src, false))).to_contain("native trait dispatch lacks object-safe method")
+
+    it "still refuses dispatch through a trait whose slot nests T in an array":
+        val src = "trait Many<T>:\n    fn all() -> [T]?\n\nfn probe(g: Many<i64>) -> bool:\n    g.all().?\n"
+        expect(joined(lower_errors(src, false))).to_contain("native trait dispatch lacks object-safe method")
+
+    it "rejects an implementation that binds T inconsistently across slots":
+        val src = TRAIT + "class Bad:\n    key: i64\n\nimpl Owner<i64> for Bad:\n    fn owner_read(node: i64) -> i64?:\n        None\n    me owner_write(node: i64, value: text?):\n        self.key = node\n\nfn probe(b: Bad) -> Owner<i64>:\n    b\n"
+        expect(joined(lower_errors(src, false))).to_contain("incompatible native trait object signature")
+
+    it "rejects converting an implementation to a different instantiation":
+        val src = TRAIT + "class IntCell:\n    key: i64\n\nimpl Owner<i64> for IntCell:\n    fn owner_read(node: i64) -> i64?:\n        None\n    me owner_write(node: i64, value: i64?):\n        self.key = node\n\nfn probe(c: IntCell) -> Owner<text>:\n    c\n"
+        expect(joined(lower_errors(src, false))).to_contain("native trait object type arguments differ")
+
+    it "refuses a checked `as` downcast to a generic trait":
+        val src = TRAIT + "trait Tag:\n    fn tag() -> i64\n\nfn probe(t: Tag) -> bool:\n    if val o = t as Owner<i64>:\n        return true\n    false\n"
+        expect(joined(lower_errors(src, false))).to_contain("native trait cast target is generic")
