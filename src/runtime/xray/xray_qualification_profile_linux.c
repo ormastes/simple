@@ -36,9 +36,10 @@ static int snapshot_matches(int64_t snapshot) {
 static int shape_valid(const unsigned char *p) {
     uint64_t contexts = read_word(p + 48), payload = read_word(p + 56);
     uint64_t cap = read_word(p + 64);
+    uint64_t profile = read_word(p + 32), evidence = read_word(p + 40);
+    if (!((profile == 1 && evidence == 255) || (profile == 2 && evidence == 254))) return 0;
     if (read_word(p) != SIMPLE_XRAY_PROFILE_MAGIC_V1 || read_word(p + 8) != 1 ||
         read_word(p + 16) != 480 || read_word(p + 24) != 1 ||
-        read_word(p + 32) != 1 || read_word(p + 40) != 255 ||
         !contexts || contexts > 64 || !payload || payload > 393216 || payload % 96 ||
         cap > 67108864 || read_word(p + 72) != 1 ||
         read_word(p + 80) != 33554432 || read_word(p + 88) != 8) return 0;
@@ -48,7 +49,9 @@ static int shape_valid(const unsigned char *p) {
     for (unsigned digest = 0; digest < 11; ++digest) {
         unsigned any = 0;
         for (unsigned byte = 0; byte < 32; ++byte) any |= p[128 + digest * 32 + byte];
-        if (!any) return 0;
+        if (profile == 2 && digest == 7) {
+            if (any) return 0;
+        } else if (!any) return 0;
     }
     return 1;
 }

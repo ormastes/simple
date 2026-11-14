@@ -18,6 +18,8 @@
 #define SIMPLE_XRAY_PROFILE_REQUIRED_EVIDENCE_V1 255
 #define SIMPLE_XRAY_PROFILE_TARGET_LINUX_X64_V1 1
 #define SIMPLE_XRAY_PROFILE_RAW_STARTUP_V1 1
+#define SIMPLE_XRAY_PROFILE_ISOLATED_TEST_V1 2
+#define SIMPLE_XRAY_PROFILE_TEST_EVIDENCE_V1 254
 #define SIMPLE_XRAY_PROFILE_MAX_CONTEXTS_V1 64
 #define SIMPLE_XRAY_PROFILE_MAX_PAYLOAD_V1 393216
 #define SIMPLE_XRAY_PROFILE_METADATA_RESERVE_V1 33554432
@@ -30,7 +32,10 @@
  * approved receipt, producer, runtime component manifest, Clang, compiler-rt,
  * LLD, linked closure, generated Simple ABI, runtime ABI/thread evidence,
  * foreign/init closure, full allocation/resource evidence.
- * Scalar digest getters expose eight little-endian u32 words per digest. */
+ * Production profile1 requires mask255/all11 digests. Isolated test profile2
+ * requires mask254, slot7 exactly zero, and all other digests; a distinct
+ * approved test catalogue/signer binds the exact fixture closure. It never
+ * converts to production admission. Scalar getters expose eight LE u32 words. */
 int64_t simple_xray_resident_profile_bind_v1(int64_t snapshot_handle);
 int64_t simple_xray_resident_profile_word_v1(int64_t handle, int64_t field);
 int64_t simple_xray_resident_profile_digest_word_v1(int64_t handle,

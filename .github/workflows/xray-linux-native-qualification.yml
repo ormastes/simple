@@ -72,7 +72,7 @@ jobs:
         run: |
           set -eu
           mkdir -p build/xray-image-locator/adapter
-          sha256sum src/runtime/xray/xray_llvm_adapter_linux.c src/runtime/xray/xray_resident_admission_v1.h src/runtime/xray/xray_resident_descriptor_v1.h src/runtime/xray/xray_thread_context_v1.h src/runtime/xray/xray_channel_producer_v1.h src/runtime/xray/xray_startup_owned_threads_v1.h test/fixtures/xray/xray_adapter_e2e_main.c test/fixtures/xray/xray_adapter_resident_case.h test/fixtures/xray/xray_adapter_targets.ll scripts/check/check-xray-llvm-adapter-e2e.shs > build/xray-image-locator/adapter-sources.sha256
+          sha256sum src/runtime/xray/xray_llvm_adapter_linux.c src/runtime/xray/xray_resident_admission_v1.h src/runtime/xray/xray_resident_descriptor_v1.h src/runtime/xray/xray_thread_context_v1.h src/runtime/xray/xray_channel_producer_v1.h src/runtime/xray/xray_startup_owned_threads_v1.h test/fixtures/xray/xray_adapter_e2e_main.c test/fixtures/xray/xray_adapter_resident_case.h test/fixtures/xray/xray_adapter_targets.ll scripts/check/check-xray-llvm-adapter-e2e.shs src/runtime/xray/xray_qualification_profile_linux.c src/runtime/xray/xray_qualification_profile_v1.h src/runtime/xray/xray_llvm_image_linux.h > build/xray-image-locator/adapter-sources.sha256
           status=0
           sudo systemd-run --unit="xray-adapter-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             --wait --pipe --collect \
@@ -90,6 +90,12 @@ jobs:
               cat "/sys/fs/cgroup$group/memory.swap.max" > "$out/adapter-memory.swap.max"
               test "$(cat "$out/adapter-memory.max")" = 2147483648
               test "$(cat "$out/adapter-memory.swap.max")" = 0
+              printf "%s\n" "/usr/bin/clang-18 --target=x86_64-unknown-linux-gnu -std=c11 -O2 -fPIC -Wall -Wextra -Werror -mgeneral-regs-only -c src/runtime/xray/xray_qualification_profile_linux.c -o $out/profile.o" > "$out/profile-compile.command"
+              profile_status=0
+              timeout 30 /usr/bin/clang-18 --target=x86_64-unknown-linux-gnu -std=c11 -O2 -fPIC -Wall -Wextra -Werror -mgeneral-regs-only -c src/runtime/xray/xray_qualification_profile_linux.c -o "$out/profile.o" || profile_status=$?
+              printf "%s\n" "$profile_status" > "$out/profile-compile.status"
+              test "$profile_status" = 0
+              sha256sum "$out/profile.o" > "$out/profile-object.sha256"
               exec env CLANG=/usr/bin/clang-18 LLVM_OBJDUMP=/usr/bin/llvm-objdump-18 LLVM_READELF=/usr/bin/llvm-readelf-18 LLVM_NM=/usr/bin/llvm-nm-18 XRAY_E2E_LD=/usr/bin/ld.lld-18 XRAY_E2E_TIMEOUT=30 TMPDIR="$(pwd)/$out/adapter" sh scripts/check/check-xray-llvm-adapter-e2e.shs --keep
             ' > build/xray-image-locator/adapter-execution.log 2>&1 || status=$?
           cat build/xray-image-locator/adapter-execution.log
