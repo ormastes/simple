@@ -5,9 +5,12 @@
 #   @__simple_xray_descriptor_v1 = { i64 count, [count x ptr] }   one i8 slot per site
 #   @__simple_xray_names_v1      = { i64 count, [count x ptr] }   C string per site
 #   @__simple_xray_hook_v1       = ptr                            void(i64 site, i32 kind)
+#   @__simple_xray_ring_v1       = { i64 cap, i64 widx, i64 dropped, [cap x { i64 site, i32 kind, i32 pad, i64 seq }] }
 # Each sled function loads its slot at entry (kind 0) and before every ret
-# (kind 1) and calls the hook when the slot is nonzero. This leaf resolves the
-# exported symbols on the loaded DLL, stores the handler into the hook, and
+# (kind 1) and calls the DLL-local edge when the slot is nonzero; the edge
+# calls the hook when set, else appends to the ring (ring mode, PROVISIONAL).
+# This leaf resolves the exported symbols on the loaded DLL, installs either a
+# handler (hook mode) or nothing (ring mode, drained by drain()), and
 # sets/clears slots. Adapter ids are 1-based; descriptor/hook sites 0-based.
 #
 # Concurrency: slot and hook stores are single aligned stores; the caller is the
@@ -22,6 +25,7 @@ use std.nogc_sync_mut.trace.observer_native_channel_v1.{trace_native_channel_clo
 pub const XRAY_WIN_DESCRIPTOR_SYMBOL_V1: text = "__simple_xray_descriptor_v1"
 pub const XRAY_WIN_NAMES_SYMBOL_V1: text = "__simple_xray_names_v1"
 pub const XRAY_WIN_HOOK_SYMBOL_V1: text = "__simple_xray_hook_v1"
+pub const XRAY_WIN_RING_SYMBOL_V1: text = "__simple_xray_ring_v1"
 const XRAY_WIN_MAX_SITES_V1: i64 = 4096
 
 # The effect boundary: symbol lookup on the loaded DLL, and the C-callable
@@ -73,13 +77,43 @@ pub class XrayWinFlagLeafV1:
     port: XrayWinModulePortV1
     descriptor: i64
     hook: i64
+    ring: i64
+    ring_read: i64
     sink: XrayWinEdgeSinkV1
 
 impl XrayWinFlagLeafV1:
     static fn bind(port: XrayWinModulePortV1) -> XrayWinFlagLeafV1:
         XrayWinFlagLeafV1(port: port, descriptor: port.symbol(XRAY_WIN_DESCRIPTOR_SYMBOL_V1),
-            hook: port.symbol(XRAY_WIN_HOOK_SYMBOL_V1),
+            hook: port.symbol(XRAY_WIN_HOOK_SYMBOL_V1), ring: port.symbol(XRAY_WIN_RING_SYMBOL_V1),
+            ring_read: 0,
             sink: XrayWinEdgeSinkV1(arena: 0, generation: 0u64, context: 0u64, module_instance: 0u64))
+
+    # Edges the DLL dropped because the ring was full (0 without a ring).
+    fn ring_dropped() -> i64:
+        if self.ring == 0: return 0
+        unsafe(capabilities: [ffi]): rt_ptr_read_i64(self.ring, 16)
+
+    # Ring mode: turn every newly published ring record into one raw-edge
+    # channel record. A record is published once its seq equals index + 1; the
+    # first unpublished one stops the drain (retried next call). Returns the
+    # number of records drained. The ring does not wrap: once full, the DLL
+    # drops and counts.
+    me drain() -> i64:
+        if self.ring == 0 or self.sink.arena == 0: return 0
+        var n = 0
+        unsafe(capabilities: [ffi]):
+            val cap = rt_ptr_read_i64(self.ring, 0)
+            var end = rt_ptr_read_i64(self.ring, 8)
+            if end > cap: end = cap
+            while self.ring_read < end:
+                val rec = 24 + self.ring_read * 24
+                if rt_ptr_read_i64(self.ring, rec + 16) != self.ring_read + 1: break
+                val site = rt_ptr_read_i64(self.ring, rec)
+                val kind = (rt_ptr_read_i64(self.ring, rec + 8) & 4294967295) as i32
+                xray_win_edge_record_v1(self.sink, site, kind)
+                self.ring_read = self.ring_read + 1
+                n = n + 1
+        n
 
     fn slot_address(id: i64) -> i64:
         if id < 1 or id > self.max_function_id(): return 0
@@ -124,9 +158,11 @@ impl XrayLlvmLeafV1 for XrayWinFlagLeafV1:
     me install(arena: i64, generation: u64, context: u64, module_instance: u64) -> i64:
         if arena <= 0 or arena % 8 != 0 or generation == 0u64 or self.hook == 0: return 0
         val handler = self.port.handler_address()
-        if handler == 0: return 0
+        # Ring mode needs no handler: the hook stays null and drain() reads the ring.
+        if handler == 0 and self.ring == 0: return 0
         self.sink = XrayWinEdgeSinkV1(arena: arena, generation: generation, context: context, module_instance: module_instance)
-        unsafe(capabilities: [ffi]): rt_ptr_write_i64(self.hook, 0, handler)
+        if handler != 0:
+            unsafe(capabilities: [ffi]): rt_ptr_write_i64(self.hook, 0, handler)
         1
 
     me patch_function(id: i64) -> i64:
