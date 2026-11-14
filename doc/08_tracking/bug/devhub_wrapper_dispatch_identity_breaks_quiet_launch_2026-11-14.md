@@ -51,8 +51,11 @@ exit-127 admission-failure report is unchanged.
   After the fix they write 0 bytes, and `--verbose --version` still shows the
   identity line plus the compiler warnings.
 
-## Follow-up
+## Follow-up (closed)
 
-`bin/devhub.cmd` still echoes the identity line unconditionally. It has no
-quiet/verbose capture structure to route it through, so the Windows launcher
-still differs from POSIX here.
+`bin/devhub.cmd` used to echo the identity line unconditionally. It now mirrors
+`bin/devhub`: the line is echoed to stderr under `--verbose`, otherwise written to
+a temp diagnostic file that is replayed to stderr only when the launch exits
+non-zero. The gap is closed. Windows cannot run here, so
+`test/00_unit/scripts/devhub_windows_launch_modes_test.shs` pins the `.cmd` text
+(red before: `FAIL devhub.cmd echoes the identity line unconditionally`).
