@@ -190,3 +190,16 @@ SLANG_LIVE=1 SLANG_GPU=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi
 - Engine default is all layers on the GPU; `engine_set_gpu_layers_text("0")` (before load) keeps the CPU lane.
 - Evidence: shim `slang_ggml_gpu_offload_supported` / `slang_ggml_model_offloaded`, surfaced as `engine_gpu_offload_status()`; the llama log shows `using device Vulkan0` and `offloaded 29/29 layers to GPU`.
 - On GPU the prefix cache restores only partly (988 -> 512 re-prefilled tokens on exact repeat; first-micro-batch workaround), and wall time is noisy.
+## Live consumer system specs (2026-11-15)
+
+- `test/03_system/lib/slang/feature/slang_caret_local_usage_spec.spl` drives caret's
+  `dispatch_send("slang_local", ...)` (base_url = model root, cli_path = shim) against the
+  real 1.5B model; asserts provider `slang_local/ggml`, non-empty text, and a second request.
+- `slang_http_server_live_spec.spl` spawns `src/app/slang_server/main.spl` via
+  `process_spawn_redirected`, speaks HTTP over `TcpStream`: /v1/models, two chat
+  completions, 404 `model_not_found`, then `process_kill_tree`. ~25 s server startup.
+- Gate: `SLANG_LIVE=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi/slang_ggml.dll
+  SIMPLE_BINARY=<simple>`; model dir name from `CARET_SLANG_MODEL`
+  (default `Qwen2.5-1.5B-Instruct-Q4_K_M`). Ungated they skip.
+- Known gap: server `usage` counts are always 0
+  (`doc/08_tracking/bug/slang_openai_usage_counts_always_zero_2026-11-15.md`).
