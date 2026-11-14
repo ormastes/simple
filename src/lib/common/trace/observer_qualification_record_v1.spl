@@ -8,6 +8,7 @@ pub const TRACE_QUALIFICATION_BYTES_V1: i64 = 480
 pub const TRACE_QUALIFICATION_DIGEST_COUNT_V1: i64 = 11
 pub const TRACE_QUALIFICATION_MAGIC_V1: u64 = 0x0031565150525853u64
 pub const TRACE_QUALIFICATION_REQUIRED_EVIDENCE_V1: u64 = 255
+pub const TRACE_QUALIFICATION_TEST_EVIDENCE_V1: u64 = 254
 
 # Digest indices: approved receipt, Simple producer, runtime component manifest
 # (objects + flags + ownership recipe), Clang, compiler-rt XRay, LLD, linked
@@ -25,13 +26,20 @@ pub struct TraceQualificationRecordV1:
     word_bytes: u64
     digests: [[u8]]
 
-# Target1=Linux x86_64; profile1=one startup activation, raw edges and retained
-# armed hooks after recording stop. These codes do not admit other targets.
+# Target1=Linux x86_64. Profile1 is production; profile2 is a separately signed
+# exact-fixture qualification experiment, NOT production. Both permit one
+# startup activation, raw edges and retained armed hooks after recording stop.
 pub fn trace_qualification_record_validate_shape_v1(record: TraceQualificationRecordV1
         ) -> Result<bool, TraceFailureV1>:
     if record.target != 1 or record.word_bytes != 8:
         return Err(TraceFailureV1.UnsupportedTarget)
-    if record.profile != 1 or record.evidence_mask != TRACE_QUALIFICATION_REQUIRED_EVIDENCE_V1:
+    if record.profile == 1:
+        if record.evidence_mask != TRACE_QUALIFICATION_REQUIRED_EVIDENCE_V1:
+            return Err(TraceFailureV1.UnsupportedProfile)
+    elif record.profile == 2:
+        if record.evidence_mask != TRACE_QUALIFICATION_TEST_EVIDENCE_V1:
+            return Err(TraceFailureV1.UnsupportedProfile)
+    else:
         return Err(TraceFailureV1.UnsupportedProfile)
     if (record.max_contexts == 0 or record.max_contexts > 64 or
             record.buffer_bytes < 96 or record.buffer_bytes > 393216 or
@@ -47,12 +55,18 @@ pub fn trace_qualification_record_validate_shape_v1(record: TraceQualificationRe
         return Err(TraceFailureV1.ResourceExhausted)
     if record.digests.len() != TRACE_QUALIFICATION_DIGEST_COUNT_V1:
         return Err(TraceFailureV1.InvalidArgument)
-    for digest in record.digests:
+    for slot in 0..record.digests.len():
+        val digest = record.digests[slot]
         if digest.len() != 32: return Err(TraceFailureV1.InvalidArgument)
         var nonzero = false
         for byte in digest:
             if byte != 0: nonzero = true
-        if not nonzero: return Err(TraceFailureV1.UnsupportedProfile)
+        if record.profile == 2 and slot == 7:
+            # End-to-end acceptance is the experiment's result, never its
+            # fabricated prerequisite. Other ten digests must carry real
+            # independently verified safety/compositional inputs upstream.
+            if nonzero: return Err(TraceFailureV1.UnsupportedProfile)
+        elif not nonzero: return Err(TraceFailureV1.UnsupportedProfile)
     Ok(true)
 
 fn trace_qualification_read_word_v1(bytes: [u8], offset: i64) -> u64:
