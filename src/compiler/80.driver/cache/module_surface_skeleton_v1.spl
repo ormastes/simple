@@ -8,6 +8,26 @@
 # constant values, macro invocations (they regenerate their members on parse),
 # and generic / `@inline` / `const fn` bodies (importers need them).
 #
+# Four surface facts are read from a function BODY. A body that can carry one
+# is kept VERBATIM, so the parser reads the same text on both sides and no
+# rule of the parser is re-implemented here:
+#   - implicit-static promotion (parser_decls_use.spl,
+#     method_name_is_implicitly_static): `fn new|create|default|from_*`
+#     without a receiver is static only when its body text never mentions
+#     `self`. Such a body is kept when it holds the letters `self` at all;
+#   - contract clauses (`in:`, `requires:`, `invariant:`, `ensures:`,
+#     `decreases:`, `out(r):`, `out_err(e):`, `proof uses:`) are statements
+#     retained on the function;
+#   - a body-level `extern fn` is registered as a MODULE declaration
+#     (parser_stmts.spl, parse_extern_fn_stmt_inline);
+#   - the await points of an `async fn` decide which module-level declarations
+#     the desugarer generates (desugar_async.spl: state enum + poll function,
+#     or one ready-body helper).
+# Without them the skeleton surface differed from the full-parse surface and
+# moved hir_cache_closure_digest for the whole closure (bootstrap run 31).
+# Every blanked body has the one stub line `pass_do_nothing`:
+# tldr_frozen_span_projection_v1 matches it exactly.
+#
 # Because lines never move, every declaration keeps its source line, so
 # diagnostics from a surface built on the skeleton point at the real file.
 # Equality rule: parse(skeleton) and parse(source) must have the same
@@ -53,6 +73,7 @@ fn _skel_header_v1(lines: [text], index: i64) -> (i64, bool):
     val is_const_fn = decl.starts_with("const fn ")
     if not decl.starts_with("fn ") and not decl.starts_with("me ") and not is_const_fn:
         return (-1, true)
+    val is_async = stripped.substring(0, stripped.byte_len() - decl.byte_len()).contains("async ")
     val lt = decl.index_of("<")
     val paren = decl.index_of("(")
     val generic = lt > 0 and (paren < 0 or lt < paren)
@@ -70,7 +91,7 @@ fn _skel_header_v1(lines: [text], index: i64) -> (i64, bool):
         val tail = lines[end].trim()
         if depth <= 0:
             if tail.ends_with(":"):
-                return (end, generic or inline or is_const_fn)
+                return (end, generic or inline or is_const_fn or is_async)
             return (-1, true)
         end = end + 1
     (-1, true)
@@ -260,6 +281,39 @@ fn _skel_string_continuations_v1(lines: [text]) -> [bool]:
             continued_quote = ""
     out
 
+# Header of a function whose static-ness the parser may read from the body
+# text: the names of method_name_is_implicitly_static. Modifiers are ignored,
+# so an explicit `static fn new` matches too; that only keeps one more body.
+fn _skel_implicit_static_name_v1(header: text) -> bool:
+    val decl = _skel_strip_modifiers_v1(header.trim())
+    if not decl.starts_with("fn "):
+        return false
+    val name = decl.substring(3).split("(")[0].trim()
+    name == "new" or name == "create" or name == "default" or name.starts_with("from_")
+
+# A body line that declares a module-level extern: `extern fn ...`, also behind
+# an attribute on the same line (`@unsafe(...) extern fn ...`).
+fn _skel_body_extern_v1(trimmed: text) -> bool:
+    trimmed.starts_with("extern ") or trimmed.contains(" extern fn ")
+
+# A body line shaped like a contract clause (try_parse_contract_stmt). Any
+# match keeps the whole body, so a false positive only costs skeleton bytes.
+fn _skel_contract_clause_v1(trimmed: text) -> bool:
+    for word in ["in", "requires", "invariant", "ensures", "decreases"]:
+        if trimmed.starts_with(word) and trimmed.substring(word.byte_len()).trim().starts_with(":"):
+            return true
+    for word in ["out_err", "out"]:
+        if trimmed.starts_with(word):
+            val rest = trimmed.substring(word.byte_len()).trim()
+            val close = rest.index_of(")")
+            if rest.starts_with("(") and close > 0 and rest.substring(close + 1).trim().starts_with(":"):
+                return true
+    if trimmed.starts_with("proof ") or trimmed.starts_with("proof\t"):
+        val rest = trimmed.substring(6).trim()
+        if rest.starts_with("uses") and rest.substring(4).trim().starts_with(":"):
+            return true
+    false
+
 pub fn module_surface_skeleton_v1(source: text) -> text:
     val lines = source.replace("\r\n", "\n").split("\n")
     val in_string = _skel_string_continuations_v1(lines)
@@ -291,9 +345,21 @@ pub fn module_surface_skeleton_v1(source: text) -> text:
             out.push(lines[h])
             h = h + 1
         var k = header_end + 1
+        # Body-derived surface facts (see the header): one pass over the body
+        # before it is blanked. Any hit keeps the whole body.
+        var keep = keep_body
+        val self_decides = not keep and _skel_implicit_static_name_v1(line)
+        var scan = header_end + 1
+        while not keep and scan < lines.len() and (lines[scan].trim() == "" or _skel_indent_v1(lines[scan]) > indent or in_string[scan]):
+            val body_line = lines[scan].trim()
+            if _skel_contract_clause_v1(body_line) or _skel_body_extern_v1(body_line):
+                keep = true
+            elif self_decides and body_line.contains("self"):
+                keep = true
+            scan = scan + 1
         var stubbed = false
         while k < lines.len() and (lines[k].trim() == "" or _skel_indent_v1(lines[k]) > indent or in_string[k]):
-            if keep_body:
+            if keep:
                 out.push(lines[k])
             elif lines[k].trim() == "" or stubbed:
                 out.push("")
