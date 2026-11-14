@@ -1,0 +1,176 @@
+use compiler.common.cache_contract.directory_tldr_source_rows_v2.{DirectoryTldrSourceRowV2,
+    directory_tldr_source_rows_match_v2}
+# Compiler-owned capture, once per lowering epoch. Unsupported/missing authority
+# returns no snapshots and the production consumer visits the full module set.
+use compiler.driver.driver_types.{CompileContext}
+use compiler.common.cache_contract.directory_tldr_snapshot_v2.{DirectoryTldrSourceSnapshotV2}
+use compiler.common.cache_contract.package_init_directory_v2.{FileTldrDigestV2, directory_file_tldr_root_v2}
+use compiler.common.cache_contract.physical_tld_v1.{three_payload_contract_digest_valid_v1}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.driver.cache.source_reader_v1.{file_source_reader_v1}
+use compiler.driver.cache.module_artifacts_v1.{module_tldr_companion_source_digest_raw_v1}
+use compiler.driver.cache.aop_match_cache_driver_v1.{aop_directory_facts_from_hir_v1}
+use compiler.frontend.aspect_registry.{aspect_registry_claim_keys}
+use compiler.frontend.join_point_attr_registry.{join_point_attr_epoch_matches_v2}
+use compiler.frontend.core.cfg_platform.{cfg_detect_os, cfg_detect_arch, cfg_triple_os, cfg_triple_arch}
+use compiler.hir.hir_types.{HirModule}
+use compiler.semantics.join_point_model.{forward_join_points_for_module_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory.{compile_source_inventory_read_at_pointer_v1,
+    compile_source_inventory_snapshot_cache_root_v1, CompileSourceInventoryBindingV1,
+    compile_source_inventory_binding_reason_v1}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1,
+    compile_source_inventory_digest_v1}
+use std.scv.compile_snapshot.{scv_compile_snapshot_open_v1}
+use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable, sosix_cwd}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+
+fn _snapshot_dir_v2(path: text) -> text:
+    val split = path.rfind("/")
+    if split == nil: return ""
+    path.slice(0, split!)
+
+# No mutable environment value alone authorizes a hit. Producer/inventory/revision
+# and tree were bound by the native-group source loader; SCV is reopened at that
+# exact pointer and each held source row is checked against the admitted inventory.
+pub fn driver_aop_directory_snapshots_capture_v2(ctx: CompileContext) -> [DirectoryTldrSourceSnapshotV2]:
+    if ctx.aop_snapshot_captured_v2: return ctx.aop_directory_snapshots_v2
+    ctx.aop_snapshot_captured_v2 = true
+    ctx.aop_directory_snapshots_v2 = []
+    if aspect_registry_claim_keys().len() == 0: return []
+    val provider = ctx.config["aop_snapshot_producer_v2"] ?? ""
+    val digest = ctx.config["aop_snapshot_inventory_v2"] ?? ""
+    if ctx.aop_source_epoch_v2 <= 0 or not three_payload_contract_digest_valid_v1(provider) or
+            not three_payload_contract_digest_valid_v1(digest): return []
+    val root = sosix_env_get_nullable("SIMPLE_SCV_SNAPSHOT_ROOT") ?? ""
+    val revision = ctx.config["aop_snapshot_revision_v2"] ?? ""
+    val tree = ctx.config["aop_snapshot_tree_v2"] ?? ""
+    if root == "" or root.ends_with("/") or revision == "" or tree == "" or
+            revision != (sosix_env_get_nullable("SIMPLE_SCV_REVISION_ID") ?? "") or
+            tree != (sosix_env_get_nullable("SIMPLE_SCV_TREE_ID") ?? "") or
+            digest != (sosix_env_get_nullable("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST") ?? ""): return []
+    if ctx.native_target != "" and (cfg_triple_os(ctx.native_target) != cfg_detect_os() or
+            cfg_triple_arch(ctx.native_target) != cfg_detect_arch()): return []
+    val manifest_digest = sosix_env_get_nullable("SIMPLE_SCV_INVENTORY_DIGEST") ?? ""
+    val snapshot = scv_compile_snapshot_open_v1(sosix_cwd(), root, revision,
+        sosix_env_get_nullable("SIMPLE_SCV_COMMIT_ID") ?? "", tree, manifest_digest)
+    if not snapshot.valid: return []
+    val cache_root = compile_source_inventory_snapshot_cache_root_v1(sosix_cwd(), root, revision)
+    if cache_root == "": return []
+    val read = compile_source_inventory_read_at_pointer_v1(cache_root, digest)
+    if not read.valid or read.digest != digest or read.inventory == nil: return []
+    val binding = CompileSourceInventoryBindingV1(snapshot_manifest_digest: manifest_digest,
+        source_inventory_digest: digest)
+    if compile_source_inventory_binding_reason_v1(binding, read.digest) != "ok": return []
+    val inventory = read.inventory.unwrap()
+    if inventory.generation < 0 or "{inventory.generation}" !=
+            (sosix_env_get_nullable("SIMPLE_SCV_INVENTORY_GENERATION") ?? "") or
+            compile_source_inventory_digest_v1(inventory) != digest: return []
+    if ctx.source_paths_owner.len() != ctx.source_identities_owner.len() or
+            ctx.source_paths_owner.len() != ctx.source_byte_lengths_owner.len() or
+            ctx.source_paths_owner.len() != ctx.source_module_names_owner.len(): return []
+    var source_indices: Dict<text, i64> = {}
+    var i = 0
+    while i < ctx.source_paths_owner.len():
+        val path = ctx.source_paths_owner[i]
+        if path != path.replace("\\", "/") or source_indices.contains_key(path): return []
+        source_indices[path] = i
+        i = i + 1
+    var entries: Dict<text, CompileSourceInventoryEntryV1> = {}
+    var directory_files: Dict<text, [text]> = {}
+    for entry in inventory.entries:
+        val path = root + "/" + entry.source_identity
+        if entries.contains_key(path): return []
+        entries[path] = entry
+        val dir = _snapshot_dir_v2(path)
+        var files = directory_files[dir] ?? []
+        files.push(path)
+        directory_files[dir] = files
+    var held_files: Dict<text, [text]> = {}
+    var module_for_file: Dict<text, text> = {}
+    for key in ctx.hir_modules.keys():
+        val module: HirModule = ctx.hir_modules[key]
+        val path = module.path
+        if path == "" or module_for_file.contains_key(path): return []
+        module_for_file[path] = key
+        val dir = _snapshot_dir_v2(path)
+        var files = held_files[dir] ?? []
+        files.push(path)
+        held_files[dir] = files
+    val reader = file_source_reader_v1(sosix_env_get_nullable("SIMPLE_TLDR_ROOT") ?? "build/tldr")
+    var eligible_modules: Dict<text, HirModule> = {}
+    var frozen_sources: Dict<text, text> = {}
+    var roots: Dict<text, text> = {}
+    var retained_source_bytes: i64 = 0
+    for dir in held_files.keys():
+        if not directory_files.contains_key(dir): continue
+        val files = canonical_identity_sort_texts(held_files[dir])
+        if files != canonical_identity_sort_texts(directory_files[dir]): continue
+        var expected_rows: [DirectoryTldrSourceRowV2] = []
+        var held_rows: [DirectoryTldrSourceRowV2] = []
+        for path in files:
+            val entry = entries[path]
+            expected_rows.push(DirectoryTldrSourceRowV2(path: path,
+                content_digest: entry.content_digest, byte_count: entry.byte_count))
+            if source_indices.contains_key(path):
+                val index = source_indices[path]
+                held_rows.push(DirectoryTldrSourceRowV2(path: ctx.source_paths_owner[index],
+                    content_digest: ctx.source_identities_owner[index], byte_count: ctx.source_byte_lengths_owner[index]))
+        if not directory_tldr_source_rows_match_v2(expected_rows, held_rows): continue
+        var directory_source_bytes: i64 = 0
+        for row in expected_rows:
+            if row.byte_count > 33554432 - directory_source_bytes:
+                directory_source_bytes = 33554433
+                break
+            directory_source_bytes = directory_source_bytes + row.byte_count
+        if directory_source_bytes > 33554432 - retained_source_bytes: continue
+        var complete = true
+        var members: [FileTldrDigestV2] = []
+        var contents: Dict<text, text> = {}
+        for path in files:
+            if not source_indices.contains_key(path):
+                complete = false
+                break
+            val index = source_indices[path]
+            val entry = entries[path]
+            val module_key = module_for_file[path]
+            if ctx.source_module_names_owner[index] != module_key:
+                complete = false
+                break
+            val source = match file_read_regular_no_follow_bounded(path, 268435456):
+                case Ok(value): value
+                case Err(_):
+                    complete = false
+                    break
+            if source.byte_len() != entry.byte_count or sha256_text(source) != entry.content_digest:
+                complete = false
+                break
+            val module: HirModule = ctx.hir_modules[module_key]
+            for point in forward_join_points_for_module_v1(module, 1):
+                if not join_point_attr_epoch_matches_v2(path, point.source_symbol, ctx.aop_source_epoch_v2):
+                    complete = false
+            if not complete: break
+            val companion = reader.read_tldr(path)
+            if companion == "" or module_tldr_companion_source_digest_raw_v1(companion) !=
+                    "sha256:" + entry.content_digest:
+                complete = false
+                break
+            members.push(FileTldrDigestV2(member_id: entry.source_identity, tldr_digest: sha256_text(companion)))
+            contents[path] = source
+        if not complete: continue
+        val file_root = directory_file_tldr_root_v2(members)
+        if file_root == nil: continue
+        roots[dir] = file_root.unwrap()
+        retained_source_bytes = retained_source_bytes + directory_source_bytes
+        for path in files:
+            val key = module_for_file[path]
+            eligible_modules[key] = ctx.hir_modules[key]
+            frozen_sources[path] = contents[path]
+    var out: [DirectoryTldrSourceSnapshotV2] = []
+    for facts in aop_directory_facts_from_hir_v1(eligible_modules, frozen_sources):
+        if not facts.complete or not roots.contains_key(facts.scope_id): continue
+        out.push(DirectoryTldrSourceSnapshotV2(scope_id: facts.scope_id,
+            inventory_digest: digest, provider_digest: provider,
+            file_tldr_root_digest: roots[facts.scope_id], facts: facts))
+    ctx.aop_directory_snapshots_v2 = out
+    out
