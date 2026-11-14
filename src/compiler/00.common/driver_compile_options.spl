@@ -27,6 +27,40 @@ struct NormalizedTargetProfileV1:
     # Available means admitted instrumentation, never active recording.
     trace_resolution: TargetTraceResolutionV1
 
+# Explicit native compiler request. Configured paths identify signed local
+# policy inputs; loaded code digest/ABI/config identity is resolved by the
+# admission owner and is never inferred from these paths.
+pub struct TraversalPluginProviderRequestV1:
+    provider_id: text
+    allowlist_path: text
+    signature_path: text
+    trust_root_path: text
+
+fn _traversal_provider_id_valid_v1(value: text) -> bool:
+    if value == "" or value.byte_len() > 128: return false
+    for ch in value.chars():
+        if not ((ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
+                (ch >= "0" and ch <= "9") or ch == "." or ch == "_" or ch == "-"):
+            return false
+    true
+
+fn _traversal_provider_path_valid_v1(path: text) -> bool:
+    path != "" and path.byte_len() <= 4096 and not path.contains("\0") and
+        not path.contains("\n") and not path.contains("\r") and not path.contains("://")
+
+pub fn traversal_plugin_provider_request_v1(provider_id: text,
+        allowlist_path: text, signature_path: text,
+        trust_root_path: text) -> Result<TraversalPluginProviderRequestV1, text>:
+    if not _traversal_provider_id_valid_v1(provider_id):
+        return Err("traversal-provider-id-invalid")
+    if not _traversal_provider_path_valid_v1(allowlist_path) or
+            not _traversal_provider_path_valid_v1(signature_path) or
+            not _traversal_provider_path_valid_v1(trust_root_path):
+        return Err("traversal-provider-policy-path-invalid")
+    Ok(TraversalPluginProviderRequestV1(provider_id: provider_id,
+        allowlist_path: allowlist_path, signature_path: signature_path,
+        trust_root_path: trust_root_path))
+
 pub fn target_profile_normalize_v1(profile: TargetBuildProfileV1,
         request: TargetDebugRequestV1, automatic_development_debug: bool,
         capability: TargetTraceCapabilityV1) -> Result<NormalizedTargetProfileV1, text>:
@@ -99,6 +133,12 @@ struct CompileOptions:
     native_library_paths: [text] = []
     native_linker_flags: [text] = []
     backend_plugin_path: text = ""
+    # Nil preserves the builtin traversal provider. When set, the trusted
+    # loader verifies these local policy inputs before context admission.
+    traversal_plugin_request_v1: TraversalPluginProviderRequestV1? = nil
+    # Populated only after signed provider admission. It is derived from the
+    # admitted selection, never from the request paths or CLI text.
+    traversal_plugin_resolved_identity_v1: text = ""
     interpreter_mode: text
     program_args: [text] = []
     gc_off: bool
@@ -184,6 +224,8 @@ pub fn driver_core_compile_options_default() -> CompileOptions:
         backend: "auto",
         native_target: "",
         backend_plugin_path: "",
+        traversal_plugin_request_v1: nil,
+        traversal_plugin_resolved_identity_v1: "",
         interpreter_mode: "optimized",
         gc_off: false,
         smf_output_mode: "code_only",
@@ -226,6 +268,8 @@ pub fn compileoptions_normalize_mir_optimization(opts: CompileOptions) -> Compil
     val mcdc_global_bytes = opts.mcdc_global_bytes
     val aspect_params = opts.aspect_params
     val backend_plugin_path = opts.backend_plugin_path
+    val traversal_plugin_request_v1 = opts.traversal_plugin_request_v1
+    val traversal_plugin_resolved_identity_v1 = opts.traversal_plugin_resolved_identity_v1
     val native_target = opts.native_target
     val native_source_roots = opts.native_source_roots
     val native_source_snapshot_root = opts.native_source_snapshot_root
@@ -245,6 +289,8 @@ pub fn compileoptions_normalize_mir_optimization(opts: CompileOptions) -> Compil
     normalized.mcdc_global_bytes = mcdc_global_bytes
     normalized.aspect_params = aspect_params
     normalized.backend_plugin_path = backend_plugin_path
+    normalized.traversal_plugin_request_v1 = traversal_plugin_request_v1
+    normalized.traversal_plugin_resolved_identity_v1 = traversal_plugin_resolved_identity_v1
     normalized.native_target = native_target
     normalized.native_source_roots = native_source_roots
     normalized.native_source_snapshot_root = native_source_snapshot_root
@@ -272,6 +318,7 @@ pub fn compileoptions_target_profile_v1(raw_options: CompileOptions,
 
 export TargetBuildProfileV1, TargetDebugRequestV1, TargetTraceCapabilityV1
 export TargetTraceResolutionV1, NormalizedTargetProfileV1
+export TraversalPluginProviderRequestV1, traversal_plugin_provider_request_v1
 
 pub fn target_profile_identity_text_v1(profile: NormalizedTargetProfileV1) -> text:
     var identity = ""
