@@ -77,3 +77,27 @@ so the MIR declaration and provider consumers see no new owner. The lint
 reads `imported_layouts` and asserts that `structs` does NOT own the symbol.
 Result: `inferred_type_fallback_use_spec` went from 22/25 to 25/25 on the phase-1 seed.
 Native verification is still pending.
+
+## Narrowed 2026-11-14: the side table carries identity, not a field copy
+
+The fix above stored a full `HirStruct` (one `HirField` per declared field)
+for every imported struct in every importer. On the run-32 full CLI closure
+(3145 modules) those copies were 30 % of all encoded HIR fields (165 rows,
+1200 fields per module; 31-entry sample of the HIR cache) and nothing after
+lowering reads them: the lint asks `imported_layouts.contains_key(sym)`, and
+no consumer in 50.mir / 60 / 70 / 80 names the field.
+
+`hir_imported_struct_row_v1` (`20.hir/hir_lowering/imported_layout_row_v1.spl`)
+now builds an identity-only row (importer SymbolId, declaring name, visibility,
+span, generic flag, `fields: []`). The key set is unchanged, so the lint result
+is unchanged: `inferred_type_fallback_use_spec` stays 25/25 on the seed, with
+its two layout-payload examples reworded to assert the nominal row (the
+unedited file is 23/25 against this change, failing exactly those two).
+New spec: `test/01_unit/compiler/20.hir/hir_imported_layout_row_spec.spl`
+(8/8; red run 4/7 before the change, one control example added afterwards).
+
+"Missing layout for downstream consumers" is therefore NOT delivered by this
+table. A consumer that needs an imported struct's fields reads the declaring
+module (`HirModule.structs` of the owner, as MIR does through `providers`).
+Design and numbers: `doc/05_design/compiler/perf/hir_import_replica_residency_v1.md`.
+Native verification (RSS, lint on a cache hit) is still pending.

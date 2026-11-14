@@ -1,0 +1,229 @@
+# @req REQ-SSPEC-UNIT
+"""
+# HirModule.imported_layouts rows are identity-only
+
+Every importer of a struct used to keep a full field copy of it in
+`HirModule.imported_layouts` (one HirField per declared field: name, projected
+type, a NilLit default expression, flags and span). Nothing after HIR lowering
+reads those fields: the only production reader is the W-HIR-INFER-001 lint,
+which asks for key membership. On the 3145-module full CLI closure the copies
+were 30% of all encoded HIR fields (165 rows / 1200 fields per module), all of
+it resident in every process that holds the HIR.
+
+A row now carries the importer's SymbolId and the declaring identity only; the
+layout stays with its owner (the declaring module's `structs`).
+
+Design: doc/05_design/compiler/perf/hir_import_replica_residency_v1.md
+"""
+
+# @tag: unit, compiler, hir, imports, memory
+
+use std.spec.*
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfaceComposite}
+use compiler.hir.hir_lowering.imported_layout_row_v1.{hir_imported_struct_row_v1}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_struct}
+use compiler.semantics.lint.hir_frontend_diagnostics.{run_hir_frontend_diagnostics, hir_frontend_findings_with_code}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir._MirLowering.asm_and_targets.*
+use compiler.mir.mir_lowering_stmts.*
+use test.helpers.lowering_harness.{mir_module_text, first_text_difference}
+
+val ROW_API_SOURCE = "use lib.model.\{Node, Box, Holder, make\}\n\npub fn node_get(i: i64) -> Node:\n    make()\n\npub fn box_get(i: i64) -> Box<i64>:\n    Box<i64>(item: i)\n\npub fn holder_get(i: i64) -> Holder:\n    Holder(v: i)\n"
+
+fn row_model_source(field_count: i64) -> text:
+    var fields = ""
+    var args = ""
+    var i = 0
+    while i < field_count:
+        fields = fields + "    f{i}: i64\n"
+        if i > 0:
+            args = args + ", "
+        args = args + "f{i}: {i}"
+        i = i + 1
+    "pub struct Node:\n" + fields + "\npub struct Box<T>:\n    item: T\n\npub class Holder:\n    v: i64\n\npub fn make() -> Node:\n    Node(" + args + ")\n"
+
+fn row_consumer_source(field_count: i64) -> text:
+    val last = field_count - 1
+    "use lib.api.\{node_get, box_get, holder_get\}\n\nfn f() -> i64:\n    val src = node_get(0)\n    val boxed = box_get(1)\n    val held = holder_get(2)\n    src.f0 + src.f{last}\n"
+
+class RowFixture:
+    model: HirModule
+    api: HirModule
+    consumer: HirModule
+    consumer_errors: i64
+
+fn row_fixture(field_count: i64) -> RowFixture:
+    val log = Logger(level: 0)
+    val model_source = row_model_source(field_count)
+    val consumer_source = row_consumer_source(field_count)
+    val model_ast = parse_full_frontend(model_source, "lib/model.spl", "lib.model", log)
+    val api_ast = parse_full_frontend(ROW_API_SOURCE, "lib/api.spl", "lib.api", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.model"] = model_ast
+    modules["lib.api"] = api_ast
+    modules["app.main"] = consumer_ast
+    val files = [
+        SourceFile(path: "lib/model.spl", content: model_source, module_name: "lib.model"),
+        SourceFile(path: "lib/api.spl", content: ROW_API_SOURCE, module_name: "lib.api"),
+        SourceFile(path: "app/main.spl", content: consumer_source, module_name: "app.main")
+    ]
+    match module_surfaces_from_modules(modules, files):
+        case Err(reason): fail("module surface construction failed: {reason}")
+        case Ok(surfaces):
+            var model_lowering = hirlowering_for_module("lib/model.spl", surfaces)
+            var api_lowering = hirlowering_for_module("lib/api.spl", surfaces)
+            var consumer_lowering = hirlowering_for_module("app/main.spl", surfaces)
+            val model = model_lowering.lower_module(model_ast)
+            val api = api_lowering.lower_module(api_ast)
+            val consumer = consumer_lowering.lower_module(consumer_ast)
+            expect(model_lowering.errors.len()).to_equal(0)
+            expect(api_lowering.errors.len()).to_equal(0)
+            return RowFixture(model: model, api: api, consumer: consumer,
+                consumer_errors: consumer_lowering.errors.len())
+
+# The importer's SymbolId of the struct `callee` returns; -1 when the callee
+# symbol or its nominal return is missing.
+fn row_return_owner(hir: HirModule, callee: text) -> SymbolId:
+    for symbol in hir.symbols.symbols.values():
+        if symbol.name != callee or not symbol.type_.?: continue
+        match symbol.type_.unwrap().kind:
+            case Function(_, result, _):
+                match result.kind:
+                    case Named(owner, _): return owner
+                    case _: ()
+            case _: ()
+    SymbolId(id: -1)
+
+fn row_of(hir: HirModule, callee: text) -> HirStruct:
+    val owner = row_return_owner(hir, callee)
+    if not hir.imported_layouts.contains_key(owner):
+        fail("no imported_layouts row for the return type of {callee}")
+    hir.imported_layouts[owner]
+
+fn row_codec_field_count(row: HirStruct) -> i64:
+    var w = HirCodecWriter.create()
+    hc_enc_hir_struct(w, row)
+    expect(w.ok).to_equal(true)
+    w.finish().split("\n").len()
+
+# The declaring module's own struct, i.e. the field-carrying shape a row had
+# before it became identity-only.
+fn row_owner_struct(model: HirModule, name: text) -> HirStruct:
+    for key in model.structs.keys():
+        val declared: HirStruct = model.structs[key]
+        if declared.name == name: return declared
+    fail("declaring module has no struct {name}")
+    model.structs[model.structs.keys()[0]]
+
+fn row_consumer_mir_text(fixture: RowFixture, consumer: HirModule) -> text:
+    var lowering = MirLowering.new(consumer.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["consumer"] = consumer
+    prescan_mods["api"] = fixture.api
+    prescan_mods["model"] = fixture.model
+    lowering.prescan_module_struct_names(prescan_mods, "consumer")
+    lowering.prescan_module_struct_names(prescan_mods, "api")
+    lowering.prescan_module_struct_names(prescan_mods, "model")
+    val mir = lowering.lower_module(consumer, [consumer, fixture.api, fixture.model])
+    expect(lowering.errors.len()).to_equal(0)
+    mir_module_text(mir)
+
+describe "hir_imported_struct_row_v1":
+    it "builds the row from the importer symbol and the declaring identity alone":
+        val span = Span(start: 3, end: 9, line: 2, col: 1, file: "lib/model.spl", length: 6)
+        val composite = ModuleSurfaceComposite(name: "Node", kind: "struct", type_params: [],
+            fields: [], visibility: Visibility.Public, is_public: true, span: span)
+        val row = hir_imported_struct_row_v1(SymbolId(id: 41), composite)
+        expect(row.symbol.id).to_equal(41)
+        expect(row.name).to_equal("Node")
+        expect(row.fields.len()).to_equal(0)
+        expect(row.type_params.len()).to_equal(0)
+        expect(row.is_public).to_equal(true)
+        expect(row.is_generic_template).to_equal(false)
+        expect(row.span.line).to_equal(2)
+        expect(row.has_layout_attr).to_equal(false)
+        expect(row.has_specialization_of).to_equal(false)
+
+describe "HirModule.imported_layouts rows are identity-only":
+    it "adds a row for an imported struct and none for an imported class":
+        val fixture = row_fixture(2)
+        val holder = row_return_owner(fixture.consumer, "holder_get")
+        expect(holder.id >= 0).to_equal(true)
+        expect(fixture.consumer.imported_layouts.contains_key(holder)).to_equal(false)
+        var names: [text] = []
+        for key in fixture.consumer.imported_layouts.keys():
+            names.push(fixture.consumer.imported_layouts[key].name)
+        expect(names.contains("Holder")).to_equal(false)
+        expect(names.contains("Node")).to_equal(true)
+
+    it "keys the row by the exact imported return symbol and keeps it out of structs":
+        val fixture = row_fixture(3)
+        val owner = row_return_owner(fixture.consumer, "node_get")
+        expect(owner.id >= 0).to_equal(true)
+        expect(fixture.consumer.imported_layouts.contains_key(owner)).to_equal(true)
+        expect(fixture.consumer.structs.contains_key(owner)).to_equal(false)
+        val row = row_of(fixture.consumer, "node_get")
+        expect(row.symbol.id).to_equal(owner.id)
+        expect(row.name).to_equal("Node")
+
+    it "carries no field payload for a 1-field and a 40-field declaring struct":
+        expect(row_of(row_fixture(1).consumer, "node_get").fields.len()).to_equal(0)
+        expect(row_of(row_fixture(40).consumer, "node_get").fields.len()).to_equal(0)
+
+    it "encodes a 40-field row to as many codec fields as a 1-field row":
+        val narrow = row_codec_field_count(row_of(row_fixture(1).consumer, "node_get"))
+        val wide = row_codec_field_count(row_of(row_fixture(40).consumer, "node_get"))
+        print "[imported-layout-row] codec fields per row: 1-field struct={narrow} 40-field struct={wide}"
+        expect(wide).to_equal(narrow)
+
+    it "marks the row of a generic declaring struct as a template":
+        val fixture = row_fixture(2)
+        val row = row_of(fixture.consumer, "box_get")
+        expect(row.name).to_equal("Box")
+        expect(row.is_generic_template).to_equal(true)
+        expect(row.fields.len()).to_equal(0)
+
+describe "Readers of an identity-only row":
+    it "resolves fields of the imported value and keeps W-HIR-INFER-001 silent":
+        val fixture = row_fixture(40)
+        expect(fixture.consumer_errors).to_equal(0)
+        val findings = hir_frontend_findings_with_code(
+            run_hir_frontend_diagnostics(fixture.consumer), "W-HIR-INFER-001")
+        expect(findings.len()).to_equal(0)
+
+    it "lowers the consumer to the same MIR with field-carrying rows, identity rows and no rows":
+        val identity = row_fixture(4)
+        val identity_text = row_consumer_mir_text(identity, identity.consumer)
+        val carrying = row_fixture(4)
+        var carrying_consumer = carrying.consumer
+        var carrying_rows: Dict<SymbolId, HirStruct> = {}
+        carrying_rows[row_return_owner(carrying.consumer, "node_get")] = row_owner_struct(carrying.model, "Node")
+        carrying_rows[row_return_owner(carrying.consumer, "box_get")] = row_owner_struct(carrying.model, "Box")
+        expect(carrying_rows[row_return_owner(carrying.consumer, "node_get")].fields.len()).to_equal(4)
+        carrying_consumer.imported_layouts = carrying_rows
+        val carrying_text = row_consumer_mir_text(carrying, carrying_consumer)
+        val bare = row_fixture(4)
+        var bare_consumer = bare.consumer
+        bare_consumer.imported_layouts = {}
+        val bare_text = row_consumer_mir_text(bare, bare_consumer)
+        expect(identity_text != "").to_equal(true)
+        expect(identity_text.contains("node_get")).to_equal(true)
+        expect(first_text_difference("app.main carrying", identity_text, carrying_text)).to_equal("")
+        expect(first_text_difference("app.main bare", identity_text, bare_text)).to_equal("")

@@ -316,3 +316,18 @@ module and the library exports only `simple_empty_module_<name>` with rc=0.
 Spec: `test/03_system/native/pure_simple_compile_library_functions_spec.spl`
 (compiles, dlopens and calls). Record:
 `doc/08_tracking/bug/xray_llvm_simple_compiled_module_emits_zero_functions_2026-11-13.md`.
+
+## HIR residency is import replicas, not bodies (2026-11-14)
+
+Run 32 full CLI (3145 modules, one process, cold): 1.46 MB per module before
+HIR, +5.9 MB per module in HIR, 23.2 GiB at MIR start. By encoded field count
+(31-entry sample of the HIR cache) a module's HIR is 33 % imported symbol
+rows, 30 % `imported_layouts` field copies, 15.5 % its own functions, 8 %
+symbol indexes, 7 % locals. Body stripping (`SIMPLE_MIR_SHARD_INTERFACE_HIR`)
+therefore saves little. `imported_layouts` rows are identity-only since
+`imported_layout_row_v1.spl` (the lint reads key membership); do not put field
+payload back without a reader. A cache-hit decode un-shares spans and types,
+so warm residency follows encoded size. Traps: `rt_heap_live_bytes` counts
+object headers only; the seed refuses `hc_enc_*` on decoded modules, so
+attribute by walking the cache with `hc_dec_*` and `FlatPoolReader.pos`.
+Design: `doc/05_design/compiler/perf/hir_import_replica_residency_v1.md`.
