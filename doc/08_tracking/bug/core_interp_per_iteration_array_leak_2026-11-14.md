@@ -132,3 +132,27 @@ nested struct, struct in array, freed-row reuse) pass on both sides and on
 `SIMPLE_EXECUTION_MODE=interpret`. All 27 existing specs in
 `test/01_unit/compiler_core/interpreter/` report identical executed/passed/failed counts
 before and after, including the four that are red on base.
+
+## Follow-up 2026-11-14: first reclamation slice (S1) on the seed JIT
+
+The root cause above is now partly addressed. On the in-process JIT lane the seed emits
+`rt_array_free` at the end of a statement list for array locals with int/float/bool
+elements that have a proven single holder (design slice S1,
+`doc/05_design/compiler/jit_memory/seed_jit_array_reclamation.md`). Every other array
+is still never freed, so this record stays open.
+
+### Evidence (same host, serial, cgroup-capped)
+
+Base seed sha256 `f30ba4d66d443a3c…`, changed seed `820b3886088da71c…`.
+
+| run | base | changed |
+|---|---|---|
+| `jit_block_array_release_spec.spl` (9 release forms, 26 escape forms) | 26 passed, 9 failed | 35/35, also 35/35 under `SIMPLE_ARRAY_FREE_QUARANTINE=1` |
+| loop probe, 1,000 iterations of `val a = [i, i + 1, i + 2]` | 1,000 live arrays | 0 live arrays |
+| 157 JIT fixtures and specs, base / changed / changed + quarantine | — | same exit code and verdict on every file except the new spec; 0 quarantine hits; 10 files performed frees (10,152 in total) |
+| `stmt_for_comprehension…_spec.spl`, peak RSS | 2.97–3.03 GB | 2.97–3.02 GB |
+| same spec, wall time, 4 alternating runs each under host load 20 | 18.5–29.6 s | 21.2–29.2 s |
+
+The core-interpreter workload itself does not shrink: its per-iteration arrays escape
+through calls and struct fields, which S1 deliberately leaves alone. Stages S2 and later
+in the design cover those.
