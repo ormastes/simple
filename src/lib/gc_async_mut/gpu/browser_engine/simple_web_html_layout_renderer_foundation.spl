@@ -1542,6 +1542,10 @@ fn parse_color(raw: text) -> u32:
             val g = hex_val(s.substring(3, 4)) * 16 + hex_val(s.substring(4, 5))
             val b = hex_val(s.substring(5, 6)) * 16 + hex_val(s.substring(6, 7))
             val a = hex_val(s.substring(7, 8)) * 16 + hex_val(s.substring(8, 9))
+            if a == 0:
+                # Fully transparent (`#0000`, `#ff000000`): 0, the value every
+                # painter skips. Packed as-is its alpha byte of 0 read as opaque.
+                return 0u32
             return (a.to_u32() << 24) | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
         if h_len >= 6:
             val r = hex_val(s.substring(1, 2)) * 16 + hex_val(s.substring(2, 3))
@@ -1553,6 +1557,8 @@ fn parse_color(raw: text) -> u32:
             val g = hex_val(s.substring(2, 3)) * 17
             val b = hex_val(s.substring(3, 4)) * 17
             val a = hex_val(s.substring(4, 5)) * 17
+            if a == 0:
+                return 0u32
             return (a.to_u32() << 24) | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
         if h_len == 3:
             val r = hex_val(s.substring(1, 2)) * 17
@@ -1593,6 +1599,11 @@ fn parse_color_any(raw: text) -> u32:
     val direct = parse_color(raw)
     if direct != 0u32:
         return direct
+    # The colour token of a shorthand (`4px solid blue`): a named colour was
+    # never found here, so `border:1px solid black` painted no border.
+    val tok = _shorthand_color_token(raw)
+    if tok != 0u32:
+        return tok
     val lower = raw.lower()
     # The first colour function inside a shorthand (`4px solid hsl(...)`):
     # rgb()/rgba() and hsl()/hsla() alike.
@@ -1608,6 +1619,31 @@ fn parse_color_any(raw: text) -> u32:
     val hash = text_index_of(raw, "#")
     if hash >= 0:
         return parse_color(raw.substring(hash, raw.byte_len()))
+    0u32
+
+# First top-level token of a shorthand that parses as a colour; a length
+# (`4px`, `0`) is skipped, since the delegate would read its digits as one.
+fn _shorthand_color_token(raw: text) -> u32:
+    val s = raw.trim()
+    val n = s.byte_len()
+    var depth = 0
+    var start = 0
+    var i = 0
+    while i <= n:
+        val ch = if i < n: s.substring(i, i + 1) else: " "
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+        elif depth == 0 and (ch == " " or ch == "\t" or ch == "\n"):
+            if i > start:
+                val tok = s.substring(start, i)
+                if not "0123456789.-+".contains(tok.substring(0, 1)):
+                    val c = parse_color(tok)
+                    if c != 0u32:
+                        return c
+            start = i + 1
+        i = i + 1
     0u32
 
 # "0.09", ".5", "1" -> 0..255 alpha
