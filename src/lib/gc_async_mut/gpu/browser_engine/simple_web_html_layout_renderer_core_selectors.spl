@@ -142,33 +142,48 @@ fn base_selector_matches(base: text, tag: text, cls: text, class_words: [text], 
     # universal selector (e.g. the `*, *::before, *::after` margin/padding reset)
     if base == "*":
         return true
-    if base.substring(0, 0 + 1) == ".":
-        val want = base.substring(1, base.byte_len())
-        return class_has_all(class_words, want)
-    if base.substring(0, 0 + 1) == "#":
-        # #id or compound #id.class(.class...)
-        val id_dot = find_from(base, ".", 1)
-        if id_dot >= 0:
-            val want_id = base.substring(1, id_dot)
-            val want_cls = base.substring(id_dot + 1, base.byte_len())
-            return id == want_id and class_has_all(class_words, want_cls)
-        return id == base.substring(1, base.byte_len())
-    val hash = text_index_of(base, "#")
-    if hash > 0:
-        # tag#id or tag#id.class
-        val t = base.substring(0, hash)
-        val dot2 = find_from(base, ".", hash + 1)
-        if dot2 >= 0:
-            val want_id = base.substring(hash + 1, dot2)
-            val want_cls = base.substring(dot2 + 1, base.byte_len())
-            return t == tag and id == want_id and class_has_all(class_words, want_cls)
-        return t == tag and id == base.substring(hash + 1, base.byte_len())
-    val dot = text_index_of(base, ".")
-    if dot >= 0:
-        val t = base.substring(0, dot)
-        val want = base.substring(dot + 1, base.byte_len())
-        return t == tag and class_has_all(class_words, want)
-    base == tag
+    val toks = _compound_base_tokens(base)
+    if toks[1] == "x":
+        return false
+    if toks[0] != "" and toks[0] != tag:
+        return false
+    if toks[1] == "1" and toks[2] != id:
+        return false
+    var k = 3
+    while k < toks.len():  # cpu-lane-loop-ok: one compound's wanted classes; bound is that selector's class count
+        if not class_words_has(class_words, toks[k]):
+            return false
+        k = k + 1
+    true
+
+# A compound selector base (`div.a#t.b`, `.a#t`, `#t.a`) as
+# [tag, id_state, id, class...]. Parts come in any order (Selectors 4 3.1);
+# `*` or no leading name is an empty tag. id_state is "" (no id), "1", or
+# "x" for two different ids, which can never match.
+fn _compound_base_tokens(base: text) -> [text]:
+    val n = base.byte_len()
+    var out: [text] = ["", "", ""]
+    var i = 0
+    while i < n and base.substring(i, i + 1) != "." and base.substring(i, i + 1) != "#":  # cpu-lane-loop-ok: scans ONE selector's leading tag name at parse time
+        i = i + 1
+    val tag = base.substring(0, i)
+    out[0] = if tag == "*": "" else: tag
+    while i < n:  # cpu-lane-loop-ok: walks ONE compound's `#id`/`.class` parts at parse time; bound is that selector's length
+        val kind = base.substring(i, i + 1)
+        var j = i + 1
+        while j < n and base.substring(j, j + 1) != "." and base.substring(j, j + 1) != "#":  # cpu-lane-loop-ok: scans one part name
+            j = j + 1
+        val name = base.substring(i + 1, j)
+        if kind == "#":
+            if out[1] == "1" and out[2] != name:
+                out[1] = "x"
+            elif out[1] == "":
+                out[1] = "1"
+                out[2] = name
+        elif name != "":
+            out.push(name)
+        i = j
+    out
 
 # Check :not(), :is(), :where() pseudo-class against this element's base properties.
 # Returns true if the selector pseudo condition is satisfied.
@@ -1096,21 +1111,6 @@ fn _dead_parsed_sel() -> ParsedSel:
         pseudo_nth_a: [], pseudo_nth_b: []
     )
 
-# Split a `.a.b.c` compound class list exactly the way class_has_all() does:
-# on `.`, skipping empty segments (so "", ".", "a..b" behave identically).
-fn _split_class_wants(wants: text) -> [text]:
-    val wants_len = wants.byte_len()
-    var out: [text] = []
-    var start = 0
-    var i = 0
-    while i <= wants_len:  # cpu-lane-loop-ok: splits ONE compound class selector on `.` at parse time (once per selector part, never per node); bound is that compound's text length
-        if i == wants_len or wants.substring(i, i + 1) == ".":
-            if i > start:
-                out.push(wants.substring(start, i))
-            start = i + 1
-        i = i + 1
-    out
-
 # Pre-parse ONE `[...]` expression the way attr_selector_matches() reads it.
 fn _parse_attr_test(expr: text) -> ParsedAttr:
     var raw = expr.trim()
@@ -1350,45 +1350,24 @@ fn parse_selector_part(part: text) -> ParsedSel:
                 group_start = 0 - 1
             else:
                 group_start = group_start + 1 + rel_end + 1 + next_rel
-    # Base compound: mirrors base_selector_matches()'s branch structure.
+    # Base compound: the same _compound_base_tokens split base_selector_matches uses.
     var check_tag = false
     var want_tag = ""
     var check_id = false
     var want_id = ""
     var want_classes: [text] = []
-    if node_base.len() == 0 or node_base == "*":
-        # Universal / empty base: base_selector_matches returns true outright.
-        var base_is_universal = true
-    elif node_base.substring(0, 0 + 1) == ".":
-        want_classes = _split_class_wants(node_base.substring(1, node_base.byte_len()))
-    elif node_base.substring(0, 0 + 1) == "#":
-        val id_dot = find_from(node_base, ".", 1)
-        check_id = true
-        if id_dot >= 0:
-            want_id = node_base.substring(1, id_dot)
-            want_classes = _split_class_wants(node_base.substring(id_dot + 1, node_base.byte_len()))
-        else:
-            want_id = node_base.substring(1, node_base.byte_len())
-    else:
-        val hash = text_index_of(node_base, "#")
-        if hash > 0:
-            check_tag = true
-            want_tag = node_base.substring(0, hash)
-            check_id = true
-            val dot2 = find_from(node_base, ".", hash + 1)
-            if dot2 >= 0:
-                want_id = node_base.substring(hash + 1, dot2)
-                want_classes = _split_class_wants(node_base.substring(dot2 + 1, node_base.byte_len()))
-            else:
-                want_id = node_base.substring(hash + 1, node_base.byte_len())
-        else:
-            val dot = text_index_of(node_base, ".")
-            check_tag = true
-            if dot >= 0:
-                want_tag = node_base.substring(0, dot)
-                want_classes = _split_class_wants(node_base.substring(dot + 1, node_base.byte_len()))
-            else:
-                want_tag = node_base
+    if node_base.len() > 0 and node_base != "*":
+        val toks = _compound_base_tokens(node_base)
+        if toks[1] == "x":
+            return _dead_parsed_sel()
+        check_tag = toks[0] != ""
+        want_tag = toks[0]
+        check_id = toks[1] == "1"
+        want_id = toks[2]
+        var k = 3
+        while k < toks.len():  # cpu-lane-loop-ok: one compound's wanted classes at parse time
+            want_classes.push(toks[k])
+            k = k + 1
     # Pseudo-class chain: one parse, replacing the two independent walks in
     # simple_match() and _pseudo_ctx_matches().
     var pseudo_codes: [i32] = []
@@ -2026,16 +2005,14 @@ fn selector_bucket_kind(part: text) -> text:
 fn selector_bucket_kind_from_base(base: text) -> text:
     if base.len() == 0 or base == "*":
         return "fallback"
-    if base.substring(0, 0 + 1) == "#":
+    # Any compound with an id buckets as "id", else on its first class.
+    val toks = _compound_base_tokens(base)
+    if toks[1] != "":
         return "id"
-    if base.substring(0, 0 + 1) == ".":
+    if toks.len() > 3:
         return "class"
-    # tag#id compound: bucket as "id" so rules fire when node has that id
-    val hash = text_index_of(base, "#")
-    if hash > 0:
-        return "id"
-    if text_index_of(base, ".") >= 0:
-        return "class"
+    if toks[0] == "":
+        return "fallback"
     "tag"
 
 fn selector_bucket_value(part: text) -> text:
@@ -2045,25 +2022,12 @@ fn selector_bucket_value(part: text) -> text:
 fn selector_bucket_value_from_base(base: text) -> text:
     if base.len() == 0:
         return ""
-    val first = base.substring(0, 0 + 1)
-    if first == "#" or first == ".":
-        val dot = find_from(base, ".", 1)
-        if dot >= 0:
-            return base.substring(1, dot)
-        return base.substring(1, base.byte_len())
-    # tag#id compound: return the id part as the bucket key
-    val hash = text_index_of(base, "#")
-    if hash > 0:
-        val dot2 = find_from(base, ".", hash + 1)
-        if dot2 >= 0:
-            return base.substring(hash + 1, dot2)
-        return base.substring(hash + 1, base.byte_len())
-    val dot = text_index_of(base, ".")
-    if dot >= 0:
-        val next_dot = find_from(base, ".", dot + 1)
-        if next_dot >= 0:
-            return base.substring(dot + 1, next_dot)
-        return base.substring(dot + 1, base.byte_len())
+    # Same split as selector_bucket_kind_from_base: id, else first class, else tag.
+    val toks = _compound_base_tokens(base)
+    if toks[1] != "":
+        return toks[2]
+    if toks.len() > 3:
+        return toks[3]
     base
 
 fn text_key_index_count(keys: [text], key: text, key_count: i32) -> i32:
@@ -2549,42 +2513,12 @@ fn _part_specificity(
     if attr_bracket >= 0:
         base = base.substring(0, attr_bracket).trim()
     var base_specificity = attribute_specificity
-    if base.len() == 0 or base == "*":
-        base_specificity = attribute_specificity
-    elif base.substring(0, 0 + 1) == "#":
-        val dot = find_from(base, ".", 1)
-        if dot >= 0:
-            base_specificity = 110 + attribute_specificity
-        else:
-            base_specificity = 100 + attribute_specificity
-    elif base.substring(0, 0 + 1) == ".":
-        var class_count = 1
-        var i = 1
-        val base_len = base.byte_len()
-        while i < base_len:  # cpu-lane-loop-ok: counts the `.` class separators in one `.a.b` compound base; bound is that base's length
-            if base.substring(i, i + 1) == ".":
-                class_count = class_count + 1
-            i = i + 1
-        base_specificity = class_count * 10 + attribute_specificity
-    elif text_index_of(base, "#") > 0:
-        val hash = text_index_of(base, "#")
-        val dot = find_from(base, ".", hash + 1)
-        if dot >= 0:
-            base_specificity = 111 + attribute_specificity
-        else:
-            base_specificity = 101 + attribute_specificity
-    elif text_index_of(base, ".") >= 0:
-        val dot = text_index_of(base, ".")
-        var class_count2 = 1
-        var j = dot + 1
-        val base_len2 = base.byte_len()
-        while j < base_len2:  # cpu-lane-loop-ok: counts the `.` class separators after the first dot in one `tag.a.b` compound base; bound is that base's length
-            if base.substring(j, j + 1) == ".":
-                class_count2 = class_count2 + 1
-            j = j + 1
-        base_specificity = 1 + class_count2 * 10 + attribute_specificity
-    else:
-        base_specificity = 1 + attribute_specificity
+    if base.len() > 0 and base != "*":
+        # (id, class, type) = 100, 10, 1 per part, in any order.
+        val toks = _compound_base_tokens(base)
+        val id_spec = if toks[1] != "": 100 else: 0
+        val tag_spec = if toks[0] != "": 1 else: 0
+        base_specificity = id_spec + ((toks.len() - 3) as i32) * 10 + tag_spec + attribute_specificity
     base_specificity + pseudo_specificity
 
 fn _group_specificity(
