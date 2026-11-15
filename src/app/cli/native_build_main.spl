@@ -59,8 +59,9 @@ use app.cli.shard_worker_reap_v1.{shard_worker_confirm_kill_v1, parse_shard_reap
     shard_pool_poll_quantum_v1, shard_child_wait_bounded_v1}
 use app.cli.native_build_exit_status.{native_build_windows_status_label, native_build_posix_signal, native_build_signal_name, native_build_exit_cause_field_v1}
 use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1, file_worker_pool_addressable_budget_kb_v1,
-    file_worker_pool_hir_budget_kb_v1, file_worker_pool_mir_budget_kb_v1, file_worker_pool_host_pointer_bits_v1}
-use app.cli.shard_mem_clamp.{shard_default_threads}
+    file_worker_pool_hir_budget_kb_v1, file_worker_pool_mir_budget_kb_v1, file_worker_pool_host_pointer_bits_v1,
+    file_worker_pool_serial_memory_admits_v1}
+use app.cli.shard_mem_clamp.{shard_default_threads, shard_parse_worker_budget_kb_for_v1, shard_host_worker_budget_kb}
 use std.nogc_sync_mut.host_limits.{host_limit_value}
 use app.cli.shard_mem_clamp.{build_memory_reserve_kib, build_memory_start_refusal_v1}
 use app.cli.shard_mem_clamp.{shard_threads_mem_cap, shard_worker_budget_kb,
@@ -786,7 +787,9 @@ fn native_build_parse_shard_count(args: [text]) -> i64:
         return 0
     if native_build_streaming_surfaces():
         return 0      # streaming parse has no front-end parse cache to warm
-    val requested = native_build_shard_threads(args, shard_worker_budget_kb("SIMPLE_PARSE_SHARD_WORKER_KB", SHARD_PARSE_WORKER_KB_V1))
+    val requested = native_build_shard_threads(args, shard_parse_worker_budget_kb_for_v1(
+        env_get("SIMPLE_PARSE_SHARD_WORKER_KB") ?? "", env_get("SIMPLE_HIR_SHARD_WORKER_KB") ?? "",
+        shard_host_worker_budget_kb(host_limit_value("worker_mem_mib")), SHARD_PARSE_WORKER_KB_V1))
     if requested <= 0:
         return 0
     # A parse shard is a process, not a lightweight task: the seed interpreter
@@ -1710,6 +1713,7 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
                 hir_run.refused_before_spawn, hir_run.failed_modules, hir_go_to_end)
             if hir_outcome == "fail":
                 eprint "[capsule-shard] HIR worker retirement unconfirmed (exit={hir_run.code}); in-process fallback blocked"
+                _shard_aggregate_fail_reason_v1 = "capsule HIR worker retirement unconfirmed exit={hir_run.code} blocked={hir_run.blocked_reason}"
                 native_build_env_restore_v1("SIMPLE_MEM_SNAPSHOT_FILE", old_mem_snapshot)
                 native_build_env_restore_v1("SIMPLE_COMPILER_PHASE_PROFILE_FILE", old_phase_file)
                 native_build_env_restore_v1("SIMPLE_BUILD_PROGRESS_EVENTS", old_progress_events)
@@ -1743,6 +1747,7 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
                     result = mir_queue
                 elif outcome == "fail":
                     eprint "[capsule-shard] MIR aggregate failure exit={mir_run.code} failed_modules={mir_run.failed_modules} blocked={mir_run.blocked_reason}; link blocked"
+                    _shard_aggregate_fail_reason_v1 = "capsule MIR shards exit={mir_run.code} failed_modules={mir_run.failed_modules} blocked={mir_run.blocked_reason}; see the [mir-shard] owner= lines above"
                     result = "fail"
                 else:
                     eprint "[capsule-shard] MIR shards recorded no module verdict (lane ineligible or no HIR inventory); falling back to in-process MIR"
@@ -1780,11 +1785,19 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
         hir_disabled_by == "" and hir_count < 2 and shard_pool_clamp_workers(file_worker_pool_addressable_budget_kb_v1(shard_worker_estimate_kib_v1(native_build_hir_worker_budget_kb_v1(), native_build_recorded_worker_peaks_v1(args), shard_mem_available_kb_from_field(env_get("SIMPLE_HIR_SHARD_WORKER_KB") ?? "")), file_worker_pool_host_pointer_bits_v1())) in [0, 1], file_worker_pool_host_pointer_bits_v1())
     val serial_low_memory = native_file_worker_serial_low_memory_admitted_v1(
         parallel, hir_disabled_by, env_get("SIMPLE_MIR_SHARD_INTERFACE_HIR") ?? "")
-    if serial_low_memory:
+    val pool_hir_kb = native_build_hir_worker_budget_kb_v1()
+    val pool_mir_kb = native_build_pool_mir_worker_budget_kb_v1()
+    val serial_memory = refusal != "" and not serial_low_memory and file_worker_pool_serial_memory_admits_v1(
+        hir_count, mir_parallel, native_build_requested_shard_threads(admit_args), hir_disabled_by,
+        shard_mem_available_kb(), if pool_hir_kb > pool_mir_kb: pool_hir_kb else: pool_mir_kb)
+    if serial_memory:
+        print "[file-worker] WARNING: pool admits {parallel} worker(s) under the tree headroom (hir_workers={hir_count} mir_workers={mir_parallel}); raw free memory covers one worker + coordinator, degrading to 1 serial worker (RSS guard authoritative)"
+    if serial_low_memory or serial_memory:
         parallel = 1
-    if refusal != "" and not serial_low_memory:
+    if refusal != "" and not serial_low_memory and not serial_memory:
         # @workaround bug=eprint-noparen-stage2-20261031 reason=pinned-stage2-predates-#5567
         eprint(refusal)
+        _shard_aggregate_fail_reason_v1 = refusal
         return "fail"
     val hir_queue = shard_ledger_queue_dir(args, "queue", "hir-shard")
     val mir_queue = shard_ledger_queue_dir(args, "mir-queue", "mir-shard")
@@ -1844,9 +1857,18 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
         return mir_queue
     if outcome == "fail":
         eprint "[file-worker] aggregate failure exit={run.code} failed_modules={run.failed_modules} blocked={run.blocked_reason}; link blocked"
+        _shard_aggregate_fail_reason_v1 = "file-worker pool exit={run.code} failed_modules={run.failed_modules} claims={run.total_claims} blocked={run.blocked_reason}; see the [file-worker] owner= lines above"
         return "fail"
     eprint "[file-worker] no MIR module verdict; per-file pool selected, no in-process fallback"
+    _shard_aggregate_fail_reason_v1 = "file-worker pool recorded no MIR module verdict exit={run.code} claims={run.total_claims}"
     "fail"
+
+# Reason behind the last "fail" from the per-file pool / capsule shard pre-pass
+# ("" when none), read by bootstrap_main for its aggregate-failure line.
+var _shard_aggregate_fail_reason_v1: text = ""
+
+pub fn native_build_shard_aggregate_fail_reason_v1() -> text:
+    _shard_aggregate_fail_reason_v1
 
 # Worker side of `--file-worker=i/n` (bootstrap_main.spl dispatch). Claims
 # one module (SIMPLE_FILE_WORKER_BATCH, default 1) per round through a HIR
