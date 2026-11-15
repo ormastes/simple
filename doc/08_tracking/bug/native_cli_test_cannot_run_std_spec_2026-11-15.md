@@ -84,3 +84,18 @@ interpolation `:format` specs. Each is its own slice.
 reports `elapsed_ms=26`. The time goes elsewhere in startup or admission.
 `provider_context_for` also rebuilds the owner module's name map and fn index
 on every cross-module call. A per-module context cache is the follow-up.
+
+## 2026-11-16: `unresolved method call: len` (receiver kind function)
+
+Not a stale cache (the only emitter is #9601's fallback in
+`interpreter_control.spl`). Cause: the HIR interpreter never bound module-level
+`val`/`var` (`HirModule.constants`), so a NamedVar read of an imported global
+(`_aggregate_ledger_paths` at `src/lib/nogc_sync_mut/spec.spl:97`) fell back to
+a Function value. Fixed by evaluating provider + entry constants as globals
+before `main`; Array `push` now returns the grown array so `xs = xs.push(v)`
+keeps xs. Native repro: `test/fixtures/native_interp_module_var/main.spl`
+(RED `unresolved method call: push (receiver kind function)`, GREEN
+`ledger_len=1`; seed interpreter was never affected).
+Next blocker: `expression kind not implemented (disc 1572658204) at
+src/lib/nogc_sync_mut/spec.spl:1244:21` (`env_get(...) ?? ""`). Status stays
+verification-pending.
