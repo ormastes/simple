@@ -257,3 +257,32 @@ SLANG_LIVE=1 SLANG_GPU=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi
 - **Runner trap:** `skip(...)` inside an example is counted as PASSED
   (`skipped=0`); the live spec records `SKIPPED:` lines to `build/probe/mm_answers.txt`.
 - **Live spec timeout knob:** `SLANG_RUN_TIMEOUT_MS` (default 600000) bounds each child in `caret_slang_local_hello_system_spec.spl`; the 3-model gate (`check-slang-ggml-inference.shs`, 9 dirs) took 34m50s on a loaded Windows host, so set e.g. 3300000 with `SIMPLE_TIMEOUT_SECONDS=3600`.
+
+## Model variety live spec (2026-11-15, Windows, llvm-mingw shim)
+
+`test/03_system/lib/slang/feature/slang_model_variety_live_spec.spl` loads each model under
+`SLANG_MODEL_ROOT` through `engine_ensure_loaded` + `engine_complete_chat_observed` (chat template,
+greedy) and asserts a Paris / `def ` answer; absent models print SKIPPED_BY_ABSENCE and skip.
+`SLANG_GPU=1` selects the Vulkan pass (shim built with `LLAMA_BUILD_DIR=.../build-mingw-vulkan`)
+and asserts the shim reports offload. 7/7 pass on CPU and GPU. Qwen3-ASR-0.6B is NOT refused: it
+answers as a chat model (`language English<asr_text>The capital of France is Paris.`). Prompt
+tokens are not exposed by the engine observation (column n/a). Load time is 64-120 s per model
+for every size (`doc/08_tracking/bug/slang_model_load_fixed_overhead_70_100s_windows_2026-11-15.md`).
+Tokens/s below is meaningless for 1-2 token answers.
+
+| device | model | load ms | gen tok | gen ms | tok/s | answer |
+|---|---|---|---|---|---|---|
+| cpu | Qwen2.5-1.5B Q4_K_M | 88015 | 1 | 1505 | 0.6 | Paris |
+| cpu | Qwen2.5-Coder-7B (capital) | 67198 | 1 | 16561 | 0.0 | Paris |
+| cpu | Qwen2.5-Coder-7B (python) | 97686 | 96 | 40345 | 2.3 | ```python def add_numbers |
+| cpu | gemma-3-270m Q8_0 | 85433 | 2 | 1218 | 1.6 | Paris |
+| cpu | Llama-3.2-1B Q4_K_M | 73767 | 2 | 1312 | 1.5 | Paris. |
+| cpu | SmolVLM2-256M Q8_0 | 120456 | 24 | 325 | 73.8 | The capital of France is Paris... |
+| cpu | Qwen3-ASR-0.6B Q8_0 | 76604 | 10 | 2986 | 3.3 | language English<asr_text>...Paris. |
+| gpu | Qwen2.5-1.5B Q4_K_M | 87879 | 1 | 1306 | 0.7 | Paris |
+| gpu | Qwen2.5-Coder-7B (capital) | 74007 | 1 | 759 | 1.3 | Paris |
+| gpu | Qwen2.5-Coder-7B (python) | 64216 | 96 | 2874 | 33.4 | ```python def add_numbers |
+| gpu | gemma-3-270m Q8_0 | 76606 | 2 | 3271 | 0.6 | Paris |
+| gpu | Llama-3.2-1B Q4_K_M | 86591 | 2 | 494 | 4.0 | Paris. |
+| gpu | SmolVLM2-256M Q8_0 | 83498 | 24 | 199 | 120.6 | The capital of France is Paris... |
+| gpu | Qwen3-ASR-0.6B Q8_0 | 95035 | 10 | 424 | 23.5 | language English<asr_text>...Paris. |

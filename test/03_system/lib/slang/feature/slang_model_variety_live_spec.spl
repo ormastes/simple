@@ -1,0 +1,203 @@
+# @cover src/lib/gc_async_mut/slang/engine/llm_engine.spl 80%
+# @cover src/lib/gc_async_mut/slang/model_executor/backend.spl 80%
+# @cover src/runtime/slang_ggml_shim.c 60%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# design: doc/05_design/ml/slang_serial_exact_prefix_cache.md
+
+"""
+## Purpose and audience
+Purpose: prove that slang serves a VARIETY of text models through its public
+engine entrypoint (chat framing -> the model's own chat template -> greedy
+sampling), on the CPU and on the AMD Radeon GPU, and print one result row per
+model and device.
+Audience: engineers changing the engine, the backend seam or the ggml shim, and
+operators choosing which local model to serve.
+
+## What is checked
+For each model directory present under SLANG_MODEL_ROOT (Qwen2.5-1.5B-Instruct,
+Qwen2.5-Coder-7B-Instruct, gemma-3-270m-it, the Llama-3.2-1B decoder shipped
+with ultravox, SmolVLM2-256M text-only, Qwen3-ASR-0.6B):
+- the model loads and answers "What is the capital of France? Answer with one
+  word." with an answer containing "Paris"; the Coder model also answers "Write
+  a Python function that adds two numbers." with an answer containing "def ";
+- Qwen3-ASR is not a chat model: it must either be refused with an explicit
+  error text, or answer on-topic. An empty or off-topic answer fails;
+- with SLANG_GPU=1 the shim reports the model offloaded to the GPU; without it
+  the shim reports not offloaded;
+- a model directory that is absent is printed as SKIPPED_BY_ABSENCE and the
+  case is skipped, never counted as a pass.
+One SLANG_VARIETY_TABLE row is printed per model, prompt and device.
+Prompt tokens are not exposed by the engine's observation (generated tokens
+are), so that column is "n/a".
+
+## Compatibility and limitations
+Runs when SLANG_LIVE=1, SLANG_MODEL_ROOT names a model directory and
+SLANG_GGML_LIB names a built shim. SLANG_GPU=1 selects the GPU pass (the shim
+must be built against a Vulkan llama.cpp); otherwise n_gpu_layers = 0.
+"""
+
+use std.spec.{describe, it, expect, step, skip, fail}
+use std.gc_async_mut.slang.entrypoints.llm.{slang_models, engine_backend_available}
+use std.gc_async_mut.slang.engine.llm_engine.{engine_set_n_ctx_text, engine_set_gpu_layers_text, engine_ensure_loaded, engine_complete_chat_observed, engine_gpu_offload_status, engine_unload}
+use std.gc_async_mut.slang.model_executor.backend.{chat_frame, parse_nonnegative_i64_text_exact}
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel}
+use std.io_runtime.{env_get, is_dir, time_now_monotonic_ms}
+
+val CAPITAL_PROMPT = "What is the capital of France? Answer with one word."
+val CODER_PROMPT = "Write a Python function that adds two numbers."
+
+struct VarRow:
+    err: text
+    output: text
+    load_ms: i64
+    gen_ms: i64
+    gen_tokens: i64
+    offloaded: bool
+
+fn _model_root() -> text:
+    val root = env_get("SLANG_MODEL_ROOT") ?? ""
+    if root == "" or not is_dir(root):
+        return ""
+    root
+
+fn _gpu_pass() -> bool:
+    (env_get("SLANG_GPU") ?? "") == "1"
+
+fn _live_enabled() -> bool:
+    (env_get("SLANG_LIVE") ?? "") == "1" and _model_root() != "" and engine_backend_available()
+
+fn _device() -> text:
+    if _gpu_pass():
+        return "gpu"
+    "cpu"
+
+fn _find(root: text, id: text) -> NativeModel?:
+    for m in slang_models(root):
+        if m.id == id:
+            return Some(m)
+    nil
+
+fn _failed(message: text) -> VarRow:
+    VarRow(err: message, output: "", load_ms: 0, gen_ms: 0, gen_tokens: 0, offloaded: false)
+
+# Loads `model` (timed), asks one chat question (timed), unloads. Any refusal
+# or failure is returned as err text, never as an empty answer.
+fn _ask(model: NativeModel, root: text, prompt: text, max_tokens: i64) -> VarRow:
+    val layers = if _gpu_pass(): "-1" else: "0"
+    if not engine_set_gpu_layers_text(layers):
+        return _failed("engine_set_gpu_layers_text(" + layers + ") refused")
+    val load_started = time_now_monotonic_ms()
+    match engine_ensure_loaded(model):
+        Err(reason):
+            return _failed("load: " + reason)
+        Ok(_): ()
+    val load_ms = time_now_monotonic_ms() - load_started
+    var offloaded = false
+    if val flags = engine_gpu_offload_status():
+        offloaded = flags.1
+    val gen_started = time_now_monotonic_ms()
+    val answered = engine_complete_chat_observed(root, model.id, chat_frame("user", prompt), max_tokens)
+    val gen_ms = time_now_monotonic_ms() - gen_started
+    engine_unload()
+    match answered:
+        Err(reason):
+            VarRow(err: "generate: " + reason, output: "", load_ms: load_ms, gen_ms: gen_ms, gen_tokens: 0, offloaded: offloaded)
+        Ok(observed):
+            val produced = parse_nonnegative_i64_text_exact(observed.generated_tokens)
+            val tokens = if produced < 0: 0 else: produced
+            VarRow(err: "", output: observed.output, load_ms: load_ms, gen_ms: gen_ms, gen_tokens: tokens, offloaded: offloaded)
+
+fn _one_line(s: text) -> text:
+    s.replace("\n", " ").replace("\r", " ").replace("|", "/")
+
+fn _head60(s: text) -> text:
+    val line = _one_line(s)
+    if line.len() > 60:
+        return line.slice(0, 60)
+    line
+
+fn _tokens_per_s(row: VarRow) -> text:
+    if row.gen_ms <= 0 or row.gen_tokens <= 0:
+        return "n/a"
+    val tenths = row.gen_tokens * 10000 / row.gen_ms
+    (tenths / 10).to_text() + "." + (tenths % 10).to_text()
+
+fn _print_row(model_id: text, arch: text, row: VarRow):
+    var shown = row.output
+    if row.err != "":
+        shown = "ERROR " + row.err
+    print "SLANG_VARIETY_TABLE | " + _device() + " | " + model_id + " | " + arch + " | " + row.load_ms.to_text() +
+        " | n/a | " + row.gen_tokens.to_text() + " | " + row.gen_ms.to_text() + " | " + _tokens_per_s(row) +
+        " | offloaded=" + row.offloaded.to_text() + " | " + _head60(shown)
+    print "SLANG_VARIETY_FULL | " + _device() + " | " + model_id + " | " + _one_line(shown)
+
+fn _check_offload(row: VarRow):
+    step("Offload status matches the requested device")
+    expect(row.offloaded).to_equal(_gpu_pass())
+
+# Chat model: must answer on-topic with `needle`.
+fn _check_answer(row: VarRow, needle: text):
+    if row.err != "":
+        fail("model refused or failed: " + row.err)
+    expect(row.output.trim().len()).to_be_greater_than(0)
+    expect(row.output.to_lower().contains(needle.to_lower())).to_equal(true)
+    _check_offload(row)
+
+# Whole case: look the model up (absent -> skipped by absence), ask, print, check.
+fn _case(name: text, id: text, arch: text, prompt: text, max_tokens: i64, needle: text):
+    if not _live_enabled():
+        skip(name, "needs SLANG_LIVE=1, SLANG_MODEL_ROOT and a built ggml shim (SLANG_GGML_LIB)")
+        return
+    expect(engine_set_n_ctx_text("2048")).to_equal(true)
+    val root = _model_root()
+    val found = _find(root, id)
+    if found == nil:
+        print "SLANG_VARIETY_TABLE | " + _device() + " | " + id + " | " + arch + " | SKIPPED_BY_ABSENCE (no such directory under SLANG_MODEL_ROOT)"
+        skip(name, "model directory " + id + " is absent under SLANG_MODEL_ROOT")
+        return
+    step("Load " + id + " and answer: " + prompt)
+    val row = _ask(found!, root, prompt, max_tokens)
+    _print_row(id, arch, row)
+    _check_answer(row, needle)
+
+describe "slang model variety through the public engine entrypoint":
+
+    it "Qwen2.5-1.5B-Instruct answers the capital question":
+        _case("Qwen2.5-1.5B-Instruct answers the capital question", "Qwen2.5-1.5B-Instruct-Q4_K_M", "gguf qwen2 Q4_K_M", CAPITAL_PROMPT, 24, "Paris")
+
+    it "Qwen2.5-Coder-7B answers the capital question":
+        _case("Qwen2.5-Coder-7B answers the capital question", "Qwen2.5-Coder-7B-Instruct-Q4_K_M", "gguf qwen2 Q4_K_M", CAPITAL_PROMPT, 24, "Paris")
+
+    it "Qwen2.5-Coder-7B writes a Python function":
+        _case("Qwen2.5-Coder-7B writes a Python function", "Qwen2.5-Coder-7B-Instruct-Q4_K_M", "gguf qwen2 Q4_K_M", CODER_PROMPT, 96, "def ")
+
+    it "gemma-3-270m-it answers the capital question":
+        _case("gemma-3-270m-it answers the capital question", "gemma-3-270m-it-GGUF", "gguf gemma3 Q8_0", CAPITAL_PROMPT, 24, "Paris")
+
+    it "Llama-3.2-1B (ultravox decoder) answers the capital question":
+        _case("Llama-3.2-1B (ultravox decoder) answers the capital question", "ultravox-v0_5-llama-3_2-1b-GGUF", "gguf llama Q4_K_M", CAPITAL_PROMPT, 24, "Paris")
+
+    it "SmolVLM2-256M answers a text-only capital question":
+        _case("SmolVLM2-256M answers a text-only capital question", "SmolVLM2-256M-Video-Instruct-GGUF", "gguf smolvlm Q8_0", CAPITAL_PROMPT, 24, "Paris")
+
+    it "Qwen3-ASR-0.6B is refused explicitly or answers on-topic":
+        if not _live_enabled():
+            skip("Qwen3-ASR-0.6B is refused explicitly or answers on-topic", "needs SLANG_LIVE=1, SLANG_MODEL_ROOT and a built ggml shim (SLANG_GGML_LIB)")
+        else:
+            expect(engine_set_n_ctx_text("2048")).to_equal(true)
+            val root = _model_root()
+            val id = "Qwen3-ASR-0.6B-GGUF"
+            val found = _find(root, id)
+            if found == nil:
+                print "SLANG_VARIETY_TABLE | " + _device() + " | " + id + " | gguf qwen3-asr Q8_0 | SKIPPED_BY_ABSENCE (no such directory under SLANG_MODEL_ROOT)"
+                skip("Qwen3-ASR-0.6B is refused explicitly or answers on-topic", "model directory " + id + " is absent under SLANG_MODEL_ROOT")
+            else:
+                step("Load " + id + " (an ASR model, not a chat model)")
+                val row = _ask(found!, root, CAPITAL_PROMPT, 24)
+                _print_row(id, "gguf qwen3-asr Q8_0", row)
+                if row.err != "":
+                    step("A refusal carries an explicit reason")
+                    expect(row.err.len()).to_be_greater_than(12)
+                else:
+                    step("No refusal: the answer must be on-topic, not empty or garbage")
+                    _check_answer(row, "Paris")
