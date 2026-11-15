@@ -26,19 +26,43 @@ font owners (Liberation Sans 16/13, Liberation Sans Bold 24, DejaVu Sans Mono).
 
 `font_render_config_identity_sizeless` (font_types.spl) masks `|size=N|`; the
 atlas wipe decision and the atlas owner identity both use it. Any other config
-change (face, hinting, antialiasing, atlas policy, ...) still wipes.
+change (face, hinting, antialiasing, atlas policy, ...) still wipes. The owner
+identity keeps its length-prefixed form over the sizeless text
+(`|config=<len>:<sizeless>`).
+
+## Capacity (no size wipe means one atlas holds every size)
+
+Overflow is already handled: each prepare loop (`while attempt < 2` in
+`font_renderer.spl`) calls `_reset_font_atlas` on a failed insert and re-inserts
+the whole run into the empty atlas. The reset re-seeds `atlas_owner_sequence`
+from the global counter, so the Vulkan mirror sees a gap and takes a full
+upload. Pinned by:
+
+- `font_atlas_size_switch_retention_spec` overflow row: 16 px run, cursor parked
+  at the bottom edge, 13 px run -> atlas holds 2 cells from (0,0), sequence not
+  contiguous, owner unchanged; the 16 px cells come back with a contiguous +1;
+  every cell's coverage equals a fresh renderer's.
+- `vulkan_font_atlas_overflow_parity_spec` (llvmpipe): 0 mismatches vs the
+  software lane across the rebuild, in separate flushes and inside one flush.
+  Mutation check: with the reset NOT re-seeding the sequence, the one-flush row
+  fails with 69 mismatched pixels (the earlier recorded run reads the rebuilt
+  cell).
+- Parking the cursor stands in for real fill: driving 1M atlas pixels with
+  300-512 px glyphs hit the 900 s spec budget in the interpreter.
 
 ## Evidence
 
 - Spec `test/01_unit/lib/nogc_sync_mut/text_layout/font_atlas_size_switch_retention_spec.spl`:
   red at base (returning to 16 px re-inserted 2 cells, owner sequence jumped
   `6 != 4`; with only the producer half, the owner identities differed by
-  `size=13` vs `size=16`), 3/3 green.
+  `size=13` vs `size=16`), 4/4 green with the overflow row.
 - forms-media 900x760 vulkan, same seed (59635056 B, mtime 1794616340), 3 runs
   each, load 13-15: `pack_full` 12 -> 3 (one per owner), incremental 9 -> 17,
   pixel sum `2697697746427296` identical, maxrss 2.56-2.59 GB -> 2.10-2.12 GB.
-  Wall 15.0/15.9/17.7 s -> 22.4/16.7/19.4 s: inside the host-load noise, no
-  wall claim.
+  Interleaved A,B x3 under the seed lock, load 4.2-4.9: A 13.03/12.65/12.61 s,
+  B 10.96/11.24/11.39 s (median 12.65 -> 11.24 s); `font_composite`
+  2.9-3.3 s -> 1.6-2.1 s, `font_atlas_pack_u32_to_u8` 1.2-1.5 s -> 0.16-0.33 s.
+  The earlier non-interleaved 22.4/16.7/19.4 s was host-load noise (load 13-15).
 - Unchanged pre-existing reds on the same base: `shared_font_surfaces_spec`
   4/6 (`method identity not found on FontRenderConfig`,
   `cache_identity_snapshot not found on FontRasterizer`), `font_renderer_spec`

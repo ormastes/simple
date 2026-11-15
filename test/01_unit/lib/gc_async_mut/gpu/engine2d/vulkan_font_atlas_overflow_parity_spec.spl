@@ -1,0 +1,114 @@
+"""
+## Purpose and audience
+Purpose: Pin that the Vulkan font-atlas mirror stays consistent when the shared
+glyph atlas fills up and is rebuilt. A text-size change no longer wipes the atlas
+(cells are keyed by size), so one 1024x1024 atlas accumulates every size until
+an insert fails; the producer then wipes it and re-inserts the run
+(`FontRenderer` prepare loop, `while attempt < 2`). The Vulkan backend must take
+that as a full upload, not as an increment over the old cells, or it would
+sample glyphs that are no longer there.
+Audience: Engine2D font / Vulkan backend maintainers.
+"""
+
+"""
+Traceability: REQ-TEXT-LAYOUT-ATLAS-SIZE-RETENTION-001 — an atlas rebuilt on overflow paints the same pixels on Vulkan as on the software lane.
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.io_runtime.{file_exists}
+
+val W: i32 = 96
+val H: i32 = 64
+val LVP_ICD: text = "/usr/share/vulkan/icd.d/lvp_icd.json"
+val WHITE: u32 = 0xFFFFFFFFu32
+
+fn no_vulkan_device(row: text) -> bool:
+    if file_exists(LVP_ICD):
+        return false
+    print("[skip] {row}: no llvmpipe ICD at {LVP_ICD}; this Vulkan row was not exercised")
+    true
+
+fn diff_count(a: [u32], b: [u32]) -> i32:
+    var n = 0
+    var i = 0
+    while i < W * H:
+        if a[i] != b[i]:
+            n = n + 1
+        i = i + 1
+    n
+
+fn ink(p: [u32]) -> i32:
+    var n = 0
+    for c in p:
+        if c != WHITE:
+            n = n + 1
+    n
+
+# Park the atlas insert cursor at the bottom edge: the next new glyph cannot
+# fit, so the producer takes its overflow wipe-and-rebuild. Filling the 1M
+# atlas pixels with real glyphs costs >900 s in the interpreter.
+fn fill_atlas(e: Engine2D):
+    var f = e.fonts()
+    f.atlas_cursor_x = 0
+    f.atlas_cursor_y = 1020
+    f.atlas_row_height = 0
+    e.install_font_renderer(f)
+
+fn run(e: Engine2D, x: i32, content: text, size: i32):
+    e.draw_text_with_advances(x, 4, content, e.fonts().measure_text_advances(content, size), 0xFF000000u32, size)
+
+describe "Vulkan font atlas across an overflow rebuild":
+    it "matches the software lane before, at and after an overflow rebuild":
+        if no_vulkan_device("atlas-overflow-parity"):
+            return
+        var se = Engine2D.create_with_backend_fast(W, H, "software")
+        var ve = Engine2D.create_with_backend_fast(W, H, "vulkan")
+        expect(ve.backend_name()).to_equal("vulkan")
+        var k = 0
+        while k < 3:
+            se.clear(WHITE)
+            ve.clear(WHITE)
+            if k == 1:
+                fill_atlas(se)
+                fill_atlas(ve)
+            val content = if k == 1: "cd" else: "Ab"
+            val size = if k == 1: 13 else: 16
+            run(se, 2, content, size)
+            run(ve, 2, content, size)
+            se.submit_batch()
+            ve.submit_batch()
+            step("frame {k}: the font composite ran on Vulkan and every pixel equals software")
+            expect(ve.font_execution_target()).to_equal("vulkan")
+            val soft = se.read_pixels()
+            expect(ink(soft) > 0).to_equal(true)
+            expect(diff_count(ve.read_pixels(), soft)).to_equal(0)
+            k = k + 1
+        step("the overflow really rebuilt the Vulkan engine's atlas")
+        expect(ve.fonts().atlas_codepoints.len()).to_equal(4)
+
+    it "matches the software lane when the rebuild happens inside one flush":
+        if no_vulkan_device("atlas-overflow-one-flush"):
+            return
+        # All three runs are recorded before one submit. After the rebuild the
+        # 13 px cells sit where the 16 px cells were, so the first run's
+        # recorded dispatch must not read the rebuilt atlas.
+        var se = Engine2D.create_with_backend_fast(W, H, "software")
+        var ve = Engine2D.create_with_backend_fast(W, H, "vulkan")
+        expect(ve.backend_name()).to_equal("vulkan")
+        se.clear(WHITE)
+        ve.clear(WHITE)
+        run(se, 2, "Ab", 16)
+        run(ve, 2, "Ab", 16)
+        fill_atlas(se)
+        fill_atlas(ve)
+        run(se, 34, "cd", 13)
+        run(ve, 34, "cd", 13)
+        run(se, 62, "Ab", 16)
+        run(ve, 62, "Ab", 16)
+        se.submit_batch()
+        ve.submit_batch()
+        expect(ve.font_execution_target()).to_equal("vulkan")
+        val soft = se.read_pixels()
+        expect(ink(soft) > 0).to_equal(true)
+        expect(ve.fonts().atlas_codepoints.len()).to_equal(4)
+        expect(diff_count(ve.read_pixels(), soft)).to_equal(0)

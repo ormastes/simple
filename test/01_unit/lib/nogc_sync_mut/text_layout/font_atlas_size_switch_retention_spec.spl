@@ -18,7 +18,7 @@ Traceability: REQ-TEXT-LAYOUT-ATLAS-SIZE-RETENTION-001 — a size switch keeps t
 use std.spec.*
 use std.nogc_sync_mut.sffi.io.{file_exists}
 use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer}
-use std.nogc_sync_mut.text_layout.font_types.{font_render_config_identity_sizeless, font_render_batch_atlas_owner_identity}
+use std.nogc_sync_mut.text_layout.font_types.{FontRenderBatch, FontRenderQuad, font_render_config_identity_sizeless, font_render_batch_atlas_owner_identity}
 
 val SANS = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
 val BLACK: u32 = 0xff000000u32
@@ -64,6 +64,11 @@ describe "FontRenderer atlas across a text-size switch":
         expect(first.render_config_identity == second.render_config_identity).to_equal(false)
         expect(font_render_batch_atlas_owner_identity(second)).to_equal(font_render_batch_atlas_owner_identity(first))
         expect(font_render_batch_atlas_owner_identity(third)).to_equal(font_render_batch_atlas_owner_identity(first))
+        step("the config field stays length-prefixed over the size-masked identity")
+        val sizeless = font_render_config_identity_sizeless(first.render_config_identity)
+        expect(sizeless.contains("|size=*")).to_equal(true)
+        val owner_text = font_render_batch_atlas_owner_identity(first)
+        expect(owner_text.contains("|config=" + sizeless.len().to_string() + ":" + sizeless + "|transform=")).to_equal(true)
 
     it "still paints the same coverage for the reused cells":
         if no_face("size-switch-coverage"):
@@ -105,3 +110,75 @@ describe "font_render_config_identity_sizeless":
         expect(font_render_config_identity_sizeless("a|weight=4:bold|size=24")).to_equal("a|weight=4:bold|size=*")
         expect(font_render_config_identity_sizeless("a|weight=4:bold")).to_equal("a|weight=4:bold")
         expect(font_render_config_identity_sizeless("")).to_equal("")
+
+fn cell_coverage(b: FontRenderBatch, q: FontRenderQuad) -> [u32]:
+    var out: [u32] = []
+    var row = 0
+    while row < q.height:
+        var col = 0
+        while col < q.width:
+            out.push(b.atlas_pixels[(q.atlas_y + row) * b.atlas_width + q.atlas_x + col])
+            col = col + 1
+        row = row + 1
+    out
+
+describe "FontRenderer atlas past capacity across sizes":
+    # With no size-change wipe one 1024x1024 atlas accumulates every size, so
+    # it must still recover when it fills. The recovery is the prepare loop's
+    # overflow retry (`while attempt < 2`): a failed insert calls
+    # `_reset_font_atlas` and re-inserts the whole run into the empty atlas.
+    # Filling 1M atlas pixels with real glyphs costs >900 s in the interpreter,
+    # so the row parks the insert cursor at the bottom edge instead: overflow
+    # is decided by that cursor alone (`_insert_font_atlas_glyph`).
+    it "wipes and rebuilds on overflow and still paints each size like a fresh renderer":
+        if no_face("atlas-overflow-rebuild"):
+            return
+        var r = FontRenderer.new()
+        expect(r.try_load_runtime_ttf(SANS)).to_equal(true)
+        val first = r.prepare_text_with_advances("Ab", r.measure_text_advances("Ab", 16), BLACK, 16)
+        expect(first.quads.len()).to_equal(2)
+        expect(r.atlas_codepoints.len()).to_equal(2)
+        val seq_before = r.staged_atlas_owner_sequence
+
+        step("a full atlas: the next insert at another size cannot fit")
+        r.atlas_cursor_x = 0
+        r.atlas_cursor_y = 1020
+        r.atlas_row_height = 0
+        val over = r.prepare_text_with_advances("cd", r.measure_text_advances("cd", 13), BLACK, 13)
+        expect(over.valid).to_equal(true)
+        expect(over.quads.len()).to_equal(2)
+        expect(over.dirty_rects.len()).to_equal(2)
+        step("the atlas was rebuilt with only this run, from the top-left")
+        expect(r.atlas_codepoints.len()).to_equal(2)
+        expect(over.quads[0].atlas_x).to_equal(0)
+        expect(over.quads[0].atlas_y).to_equal(0)
+        step("the owner sequence jumps, so a GPU mirror takes a full upload, never an increment")
+        expect(r.staged_atlas_owner_sequence == seq_before + 1).to_equal(false)
+        expect(font_render_batch_atlas_owner_identity(over)).to_equal(font_render_batch_atlas_owner_identity(first))
+
+        step("the wiped 16 px cells are re-inserted on demand, contiguously")
+        val seq_over = r.staged_atlas_owner_sequence
+        val back = r.prepare_text_with_advances("Ab", r.measure_text_advances("Ab", 16), BLACK, 16)
+        expect(back.dirty_rects.len()).to_equal(2)
+        expect(r.atlas_codepoints.len()).to_equal(4)
+        expect(r.staged_atlas_owner_sequence).to_equal(seq_over + 1)
+
+        step("each size paints exactly what a fresh renderer paints")
+        var fresh = FontRenderer.new()
+        expect(fresh.try_load_runtime_ttf(SANS)).to_equal(true)
+        val f13 = fresh.prepare_text_with_advances("cd", fresh.measure_text_advances("cd", 13), BLACK, 13)
+        val f16 = fresh.prepare_text_with_advances("Ab", fresh.measure_text_advances("Ab", 16), BLACK, 16)
+        var g = 0
+        while g < 2:
+            expect(over.quads[g].dst_x).to_equal(f13.quads[g].dst_x)
+            expect(over.quads[g].dst_y).to_equal(f13.quads[g].dst_y)
+            expect(cell_coverage(over, over.quads[g])).to_equal(cell_coverage(f13, f13.quads[g]))
+            expect(back.quads[g].dst_x).to_equal(f16.quads[g].dst_x)
+            expect(cell_coverage(back, back.quads[g])).to_equal(cell_coverage(f16, f16.quads[g]))
+            expect(cell_coverage(back, back.quads[g])).to_equal(cell_coverage(first, first.quads[g]))
+            g = g + 1
+        var ink = 0
+        for p in cell_coverage(over, over.quads[0]):
+            if ((p >> 24) & 0xffu32) > 0u32:
+                ink = ink + 1
+        expect(ink > 0).to_equal(true)
