@@ -14,6 +14,7 @@
 2b. **The riscv64 lint and test builds are rejected:** `BACKEND_SESSION_AUTHORITY: load rejected: BACKEND_PLUGIN_TARGET: riscv64gc-unknown-simpleos`. The cranelift backend plugin does not admit the triple, although `is_simpleos_riscv64_target` lists it.
 3. **The simple-core archive fails (x86_64):** `error=archive_part_failed:core_any_ops`, i.e. "per-file route selected but the file-worker pool produced no sealed ledger".
 4. **On `main`, `runtime_native.c` calls `link()`.** SimpleOS libc does not declare it, and there are no hard links on SimpleOS; the sysroot cross-compile breaks. A local workaround was used: an ENOSYS stub.
+   - **Status: verification-pending (2026-11-15).** The kernel has no link syscall (`src/os/kernel/ipc/syscall.spl` has unlink 39 and rename 44 only) and FAT32 cannot hold hard links, so `src/os/libc/simpleos_fs.c` `link()` now returns -1 with `errno = ENOSYS` and issues no syscall; declared in `include/unistd.h`. Test: `test/01_unit/os/libc/simpleos_link_enosys_test.c` (host clang, red before / green after). The runtime cross-compile census (`sosxc_rt_census.sh`) reports 0 errors.
 5. **No 32-bit SimpleOS userland exists.** The triples exist only as constants (`simpleos_target_v1.spl`: i686, armv7, riscv32imac) and LLVM-port strings. Other facts:
    - There is no i686 or armv7 `is_simpleos_*` predicate and no link function for either.
    - riscv32 has a freestanding route only.
