@@ -38,6 +38,12 @@ fn xray_attr_translator(target_os: text) -> MirToLlvm:
         "", false, "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
         false, "hosted")
 
+fn xray_env_translator(target_os: text, target_env: text) -> MirToLlvm:
+    MirToLlvm.create_explicit_target_with_hardening(
+        "probe.attrs", CodegenTarget.X86_64, "x86_64", "pc", target_os,
+        target_env, true, "e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
+        false, "hosted")
+
 fn xray_attr_ir(module: MirModule) -> text:
     xray_attr_translator("linux").translate_module(module)
 
@@ -68,6 +74,18 @@ describe "XRay LLVM function attributes":
         step("A.5: LLVM XRay sleds are admitted for Linux triples only")
         val ir = xray_attr_translator("darwin").translate_module(xray_attr_module([xray_attr_fn(1, "xr_tail", 2)]))
         expect(ir).to_contain("XRAY-E-UNSUPPORTED-TARGET")
+
+    # @req REQ-XRAY-V1-API-01
+    it "rejects windows-msvc (no auto-export) and admits windows-gnu":
+        step("clang-cl / --msvc: the __simple_xray_* data symbols would not be exported")
+        val module = xray_attr_module([xray_attr_fn(1, "xr_tail", 2)])
+        val msvc = xray_env_translator("windows", "msvc").translate_module(module)
+        expect(msvc).to_contain("XRAY-E-UNSUPPORTED-TARGET")
+        expect(msvc).to_contain("no auto-export")
+        step("llvm-mingw windows-gnu keeps the flag-guard route")
+        val gnu = xray_env_translator("windows", "gnu").translate_module(module)
+        expect(gnu.contains("XRAY-E-")).to_equal(false)
+        expect(gnu).to_contain("@__simple_xray_slot_xr_tail")
 
     it "admits the host-default Linux translator used by the driver":
         step("MirToLlvm.create derives target_os from the triple parser, not a literal")
