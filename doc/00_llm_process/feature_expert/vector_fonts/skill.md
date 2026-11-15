@@ -161,9 +161,20 @@ read at the wrong shift" shape, different call sites.
   hoc driver) and the interpreter test lane (spec above, 4/4 green,
   sabotage-verified — forcing the lookup loop to `if false:` flips 3 of 4
   cases red).
+- **Key trap (fixed 2026-11-15):** the key is `"{raster_identity};cp;fs"`, and
+  a renderer with no rasterizer used to send identity "" for EVERY fallback
+  tier, so the vector-tier `'A'` (7 px) was served to a bitmap-tier renderer
+  (8x16). With no rasterizer the identity is now `fallback=ttf:<h>|vector|bitmap|none`.
+  Row: `font_renderer_spec` "keeps vector and bitmap fallback tiers apart".
 
 ## Gotchas
 
+- Registered-only (handle-free) shaping needs `shaper_with_registered_ot_font`
+  with the pinned digest. Plain `shaper_with_ot_font` never yields a valid run:
+  canonical layout is gated on a live handle or that registered binding
+  (f119f8b7120 dropped the binding; restored 2026-11-15).
+- Fallback-layout quads carry UTF-8 BYTE offsets (since 2026-11-15; they
+  used to count codepoints). `font_batch_apply_advances` accepts both.
 - A fix that works hosted (interpreter/JIT) says nothing about the
   freestanding native lane — all 8 recipes above are freestanding-only.
   Re-probe via serial / gated `_probe_debug()` output after any change to
