@@ -16,6 +16,11 @@ use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 use compiler.common.cache_contract.hash_algorithm_registry_v1.{
     DigestV1, HASH_ALGO_SHA256_V1, digest_v1_parse, digest_v1_text
 }
+use compiler.common.cache_contract.aspect_plugin_model_v1.{PluginInstanceDescriptorV1,
+    PluginConfigValueV1}
+use compiler.common.cache_contract.traversal_plugin_selection_v1.{TraversalPluginSelectionV1,
+    TraversalPluginDescriptorV1, traversal_descriptor_identity_v1}
+use compiler.common.cache.canonical_identity.{canon_field}
 use std.nogc_sync_mut.io_runtime.{platform_name, host_arch}
 use compiler.frontend.core.cfg_platform.{cfg_normalize_arch}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
@@ -25,6 +30,8 @@ use std.nogc_sync_mut.sffi.dynlib_exact_admission_v1.{
 }
 use compiler.loader.traversal_plugin_elf_gate_v1.{traversal_plugin_elf_gate_v1}
 use compiler.common.driver_core_types.{TraversalPluginProviderRequestV1}
+use compiler.loader.traversal_plugin_host_trust_v1.{
+    traversal_plugin_host_trust_root_resolve_v1}
 
 pub val TRAVERSAL_PLUGIN_ALLOWLIST_MAX_SOURCE_BYTES_V1: i64 = 65536
 pub val TRAVERSAL_PLUGIN_ALLOWLIST_MAX_ENTRIES_V1: i64 = 128
@@ -32,6 +39,7 @@ pub val TRAVERSAL_PLUGIN_ARTIFACT_MAX_BYTES_V1: i64 = 67108864
 pub val TRAVERSAL_PLUGIN_ENTRY_SYMBOL_V1: text = "simple_traversal_plugin_v1"
 pub val TRAVERSAL_PLUGIN_ABI_ID_V1: text = "simple-traversal-plugin/v1"
 pub val TRAVERSAL_PLUGIN_MAX_WIRE_BYTES_V1: i64 = 1048576
+pub val TRAVERSAL_PLUGIN_DESCRIPTOR_MAX_CHARS_V1: i64 = 131072
 
 var _traversal_plugin_host_arch_cache_v1: text = ""
 
@@ -101,6 +109,55 @@ fn _traversal_allowlist_path_valid_v1(path: text) -> bool:
     for component in path.split("/"):
         if component == ".." or component == ".": return false
     true
+
+fn _traversal_identity_read_string_v1(chars: [text], start: i64) -> Result<(text, i64), text>:
+    if start < 0 or start >= chars.len() or chars[start] != "S":
+        return Err("traversal-provider-identity-string-tag")
+    var cursor = start + 1
+    var count: i64 = 0
+    var digits = 0
+    while cursor < chars.len() and chars[cursor] != ":":
+        val ch = chars[cursor]
+        if ch < "0" or ch > "9": return Err("traversal-provider-identity-length")
+        val digit = ch.byte_at(0) - "0".byte_at(0)
+        if count > (65536 - digit) / 10: return Err("traversal-provider-identity-field-budget")
+        count = count * 10 + digit
+        digits = digits + 1
+        cursor = cursor + 1
+    if digits == 0 or cursor >= chars.len() or chars[cursor] != ":":
+        return Err("traversal-provider-identity-length")
+    cursor = cursor + 1
+    if count > chars.len() - cursor: return Err("traversal-provider-identity-truncated")
+    var parts: [text] = []
+    for index in cursor..(cursor + count): parts.push(chars[index])
+    Ok((parts.join(""), cursor + count))
+
+fn _traversal_descriptor_decode_identity_v1(identity: text) -> Result<TraversalPluginDescriptorV1, text>:
+    if identity == "" or identity.len() > TRAVERSAL_PLUGIN_DESCRIPTOR_MAX_CHARS_V1:
+        return Err("traversal-provider-identity-budget")
+    val prefix = canon_field("simple/admitted-traversal-provider/v1", "")
+    if not identity.starts_with(prefix): return Err("traversal-provider-identity-domain")
+    val chars = identity.chars()
+    var cursor = prefix.len()
+    if cursor + 3 > chars.len() or chars[cursor] != "Q" or
+            chars[cursor + 1] != "7" or chars[cursor + 2] != ":":
+        return Err("traversal-provider-identity-sequence")
+    cursor = cursor + 3
+    var fields: [text] = []
+    for _ in 0..7:
+        val parsed = _traversal_identity_read_string_v1(chars, cursor)?
+        fields.push(parsed.0)
+        cursor = parsed.1
+    if cursor != chars.len(): return Err("traversal-provider-identity-trailing-data")
+    val values: [PluginConfigValueV1] = []
+    val descriptor = TraversalPluginDescriptorV1(provider_id: fields[0],
+        provider_code_digest: fields[1], entry_identity: fields[2],
+        abi_schema: fields[3], policy_identity: fields[4],
+        instance: PluginInstanceDescriptorV1(key: fields[5],
+            canonical_identity: fields[6], values: values))
+    val canonical = traversal_descriptor_identity_v1(descriptor)?
+    if canonical != identity: return Err("traversal-provider-identity-noncanonical")
+    Ok(descriptor)
 
 pub fn traversal_plugin_host_abi_fingerprint_v1() -> text:
     if platform_name() != "linux": return ""
@@ -197,7 +254,7 @@ pub fn traversal_plugin_allowlist_select_v1(policy: VerifiedTraversalPluginAllow
     Err("traversal-provider-not-admitted")
 
 @unsafe(reason: "loads only a signed, SHA-pinned, dependency-free traversal provider", capabilities: [ffi, raw_ptr])
-pub fn traversal_plugin_provider_load_v1(source: text, signature: [u8],
+fn traversal_plugin_provider_load_v1(source: text, signature: [u8],
         external_trust_root: [u8], provider_id: text) -> Result<AdmittedTraversalPluginProviderV1, text>:
     """Verify signed local policy and exact bytes before any loader effect.
 
@@ -248,15 +305,14 @@ pub fn traversal_plugin_provider_load_v1(source: text, signature: [u8],
         abi_fingerprint: entry.abi_fingerprint, artifact_path: entry.artifact_path,
         library_handle: admitted_handle, entry_symbol_address: symbol))
 
-pub fn traversal_plugin_provider_load_request_v1(
-        request: TraversalPluginProviderRequestV1,
-        external_trust_root: [u8]) -> Result<AdmittedTraversalPluginProviderV1, text>:
+fn traversal_plugin_provider_load_request_v1(
+        request: TraversalPluginProviderRequestV1) -> Result<AdmittedTraversalPluginProviderV1, text>:
     """Read local signed policy files and then admit the exact pinned provider.
 
     The allowlist is canonical UTF-8 SDN and `.sig` is exactly 64 raw
-    Ed25519 bytes. The public key is injected by a trusted composition root,
-    independently of the user request and the policy being verified. Every
-    file read rejects symlinks and is bounded. No network loader is involved.
+    Ed25519 bytes. The verification key is read from the fixed host user
+    configuration resolver, independently of CLI/project/plugin inputs.
+    Every file read rejects symlinks and is bounded. No network loader is used.
     """
     val policy_bytes = match file_read_regular_no_follow_bounded(
             request.allowlist_path, TRAVERSAL_PLUGIN_ALLOWLIST_MAX_SOURCE_BYTES_V1):
@@ -269,10 +325,9 @@ pub fn traversal_plugin_provider_load_request_v1(
         case Ok(value): value
         case Err(_): return Err("traversal-allowlist-signature-unreadable")
     if signature.len() != 64: return Err("traversal-allowlist-signature-required")
-    if external_trust_root.len() != 32:
-        return Err("traversal-provider-trust-root-unavailable")
+    val host_trust_root = traversal_plugin_host_trust_root_resolve_v1()?
     traversal_plugin_provider_load_v1(policy_text, signature,
-        external_trust_root, request.provider_id)
+        host_trust_root.public_key, request.provider_id)
 
 export TRAVERSAL_PLUGIN_ALLOWLIST_MAX_SOURCE_BYTES_V1,
     TRAVERSAL_PLUGIN_ALLOWLIST_MAX_ENTRIES_V1,
