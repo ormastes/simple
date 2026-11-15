@@ -239,3 +239,15 @@ SLANG_LIVE=1 SLANG_GPU=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi
   (first KV, fixed offsets) == `clip`; `mmproj` filename prefix is only the
   fallback when the first key is another one. `gguf_entry_shard` never returns a
   projector; `NativeModel.mmproj_path` carries it; two projectors = refused.
+- **mtmd path:** shim `mtmd group` block (end of `slang_ggml_shim.c`, bit 128,
+  `-DSLANG_WITH_MTMD`, built with `SLANG_SHIM_MTMD=1 LLAMA_BUILD_DIR=<build with
+  libmtmd>`): add_encoded (magic-sniffed jpeg/png/gif/bmp/wav/mp3/flac only, so
+  video never reaches ffmpeg) -> chat render (markers) -> mm_tokenize ->
+  mm_eval_prompt (clears KV; never touches the prefix cache). Engine loads the
+  projector after the context; `engine_media_caps()` is what actually works.
+  Media decode is C-side (stb_image/miniaudio); pure-Simple decoders are not wired.
+- **Memory gate trap:** `_runtime_overhead_bytes` is a flat 6 GiB, so a 0.3 GB
+  VLM needs 10 GiB free and is refused on a busy shared host with
+  `model_not_runnable` (503) — see the live spec's `mm_answers.txt` record.
+- **Runner trap:** `skip(...)` inside an example is counted as PASSED
+  (`skipped=0`); the live spec records `SKIPPED:` lines to `build/probe/mm_answers.txt`.

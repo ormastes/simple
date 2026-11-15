@@ -20,10 +20,12 @@
 #   - no backend built -> 503, naming the library that is absent
 #   - will not fit     -> 503, naming the arithmetic that refused it
 
-use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, ChatMessage, parse_chat_request, openai_error_response, openai_chat_completion_response, chat_messages_from_body, chat_messages_parse}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, ChatMessage, chat_message_media_count, parse_chat_request, openai_error_response, openai_chat_completion_response, chat_messages_from_body, chat_messages_parse}
 use std.gc_async_mut.slang.entrypoints.openai.serving_models.{SlangModelEntry, discover_models, find_model}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel, scan_model_root}
-use std.gc_async_mut.slang.engine.llm_engine.{engine_backend_available, engine_complete_chat, engine_lib_path}
+use std.gc_async_mut.slang.engine.llm_engine.{engine_backend_available, engine_complete_chat, engine_complete_chat_media, engine_media_caps_for, engine_lib_path}
+use std.gc_async_mut.slang.model_executor.backend.{MediaBlob}
+use std.common.base_encoding.base64.{base64_decode_bytes}
 use std.gc_async_mut.slang.model_executor.backend.{chat_frame, SLANG_MEDIA_MARKER}
 
 # The most advanced phase of slang's OWN engine that is actually present.
@@ -102,7 +104,7 @@ fn _unsupported_modality(message: text) -> ApiResponse:
 # Refuses media the served model cannot take, BEFORE any generation: answering
 # such a request as text-only would be a fabricated answer about an image or a
 # recording the model never saw. Ok means every part can be served.
-fn media_refusal(model_id: text, messages: [ChatMessage]) -> Result<(), ApiResponse>:
+fn media_refusal(model_id: text, messages: [ChatMessage], projector: text) -> Result<(), ApiResponse>:
     var video = 0
     var media = 0
     for message in messages:
@@ -113,9 +115,55 @@ fn media_refusal(model_id: text, messages: [ChatMessage]) -> Result<(), ApiRespo
                 media = media + 1
     if video > 0:
         return Err(_unsupported_modality("video input is not supported by this slang build: slang has no video container decoder of its own and does not run external tools such as ffmpeg/ffprobe; send sampled frames as image_url parts instead"))
-    if media > 0:
-        return Err(_unsupported_modality("model '" + model_id + "' accepts text only; the request carries " + media.to_text() + " image/audio part(s) and slang will not answer it as if they were absent"))
+    if media > 0 and projector == "":
+        return Err(_unsupported_modality("model '" + model_id + "' accepts text only (no multimodal projector next to the model); the request carries " + media.to_text() + " image/audio part(s) and slang will not answer it as if they were absent"))
     Ok(())
+
+fn media_part_count(messages: [ChatMessage]) -> i64:
+    var n = 0
+    for message in messages:
+        n = n + chat_message_media_count(message)
+    n
+
+# The media of the request in client order, one encoded file per marker.
+fn media_blobs(messages: [ChatMessage]) -> [MediaBlob]:
+    var blobs: [MediaBlob] = []
+    for message in messages:
+        for part in message.parts:
+            if part.kind != "text":
+                blobs.push(MediaBlob(bytes: base64_decode_bytes(part.data)))
+    blobs
+
+# Media bit each kind needs from the projector: 1 images, 2 audio.
+fn _caps_missing(caps: i64, messages: [ChatMessage]) -> text:
+    for message in messages:
+        for part in message.parts:
+            if part.kind == "image" and (caps & 1) == 0:
+                return "image"
+            if part.kind == "audio" and (caps & 2) == 0:
+                return "audio"
+    ""
+
+# A request with image/audio parts for a model that has a projector directory
+# entry. The model is loaded first because only the loaded projector knows
+# whether this backend build and this model really take the medium.
+fn serve_media_chat(model_root: text, model_id: text, framed: text, messages: [ChatMessage], max_tokens: i64) -> ApiResponse:
+    match engine_media_caps_for(model_root, model_id):
+        Err(reason):
+            return engine_refusal_response(model_id, reason)
+        Ok(caps):
+            if caps <= 0:
+                return _unsupported_modality("model '" + model_id + "' has a multimodal projector but this slang backend cannot use it (shim built without mtmd, or the projector failed to load); slang will not answer the request as if the media were absent")
+            val missing = _caps_missing(caps, messages)
+            if missing != "":
+                return _unsupported_modality("model '" + model_id + "' does not accept " + missing + " input")
+    match engine_complete_chat_media(model_id, framed, media_blobs(messages), max_tokens):
+        Err(reason):
+            if reason.find("media was rejected") >= 0:
+                return openai_error_response(400, reason, "invalid_request_error", "invalid_media", "")
+            engine_refusal_response(model_id, reason)
+        Ok(content):
+            openai_chat_completion_response(model_id, content, 0, 0)
 
 fn serve_chat_completions(model_root: text, body: text) -> ApiResponse:
     match parse_chat_request(body):
@@ -142,10 +190,12 @@ fn serve_chat_completions(model_root: text, body: text) -> ApiResponse:
                     found = m
             if found == nil:
                 return model_not_found_response(request.model)
-            match media_refusal(request.model, messages):
+            match media_refusal(request.model, messages, found!.mmproj_path):
                 Err(refusal):
                     return refusal
                 Ok(_): ()
+            if media_part_count(messages) > 0:
+                return serve_media_chat(model_root, request.model, framed, messages, request.max_tokens)
             match engine_complete_chat(model_root, request.model, framed, request.max_tokens):
                 Err(reason):
                     engine_refusal_response(request.model, reason)
