@@ -1,0 +1,124 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory.*
+use std.nogc_sync_mut.io_runtime.{dir_remove, file_write, file_read}
+
+extern fn rt_getpid() -> i64
+
+# A warm native build re-admitted the same 17.8 MB generation 21 times (9 in
+# the coordinator, 4 per worker). Admitted-digest consumers now verify each
+# digest once per process; these rows pin the COUNT of full blob reads.
+
+fn memo_spec_inventory(generation: i64, body: text) -> CompileSourceInventoryV1:
+    val entry = CompileSourceInventoryEntryV1(
+        "src/memo_fixture.spl", sha256_text(body),
+        sha256_text("semantic"), sha256_text("exports"),
+        sha256_text("initializer"), sha256_text("provider"), body.len())
+    CompileSourceInventoryV1(1, generation, [entry])
+
+fn memo_spec_root(name: text) -> text:
+    "build/test-artifacts/scv-admitted-memo-{name}-{rt_getpid()}/build/scv"
+
+describe "SCV admitted-digest reads verify once per process per digest":
+    it "REQ-SCV-ADMITTED-MEMO-001 refresh then three reads costs one full read":
+        val root = memo_spec_root("same")
+        dir_remove(root, true)
+        val digest = compile_source_inventory_publish_v1(root, memo_spec_inventory(3, "fn a(): 1"))
+        val before = compile_source_inventory_full_read_count_v1()
+        val first = compile_source_inventory_read_admitted_digest_v1(root, digest)
+        val second = compile_source_inventory_read_admitted_digest_v1(root, digest)
+        val third = compile_source_inventory_read_admitted_digest_v1(root, digest)
+        val reads = compile_source_inventory_full_read_count_v1() - before
+        dir_remove(root, true)
+        expect(reads).to_equal(1)
+        expect(first.valid).to_equal(true)
+        expect(third.valid).to_equal(true)
+        expect(second.digest).to_equal(digest)
+        expect(third.inventory!.generation).to_equal(3)
+        expect(third.inventory!.entries[0].content_digest).to_equal(sha256_text("fn a(): 1"))
+
+    it "REQ-SCV-ADMITTED-MEMO-002 a new digest after a changed refresh is a fresh full read":
+        val root = memo_spec_root("change")
+        dir_remove(root, true)
+        val old_digest = compile_source_inventory_publish_v1(root, memo_spec_inventory(4, "fn a(): 1"))
+        # Publication's own readback is not an admitted-digest read; count
+        # only the spans around the admitted reads.
+        val c0 = compile_source_inventory_full_read_count_v1()
+        val old_read = compile_source_inventory_read_admitted_digest_v1(root, old_digest)
+        val c1 = compile_source_inventory_full_read_count_v1()
+        val new_digest = compile_source_inventory_publish_v1(root, memo_spec_inventory(5, "fn a(): 2"))
+        val c2 = compile_source_inventory_full_read_count_v1()
+        val new_read = compile_source_inventory_read_admitted_digest_v1(root, new_digest)
+        val new_again = compile_source_inventory_read_admitted_digest_v1(root, new_digest)
+        val c3 = compile_source_inventory_full_read_count_v1()
+        val after_change = (c1 - c0) + (c3 - c2)
+        # One entry only: returning to the older digest reads it again.
+        val old_again = compile_source_inventory_read_admitted_digest_v1(root, old_digest)
+        val after_return = after_change + compile_source_inventory_full_read_count_v1() - c3
+        dir_remove(root, true)
+        expect(new_digest == old_digest).to_equal(false)
+        expect(old_read.inventory!.generation).to_equal(4)
+        expect(new_read.inventory!.generation).to_equal(5)
+        expect(new_again.inventory!.entries[0].content_digest).to_equal(sha256_text("fn a(): 2"))
+        expect(after_change).to_equal(2)
+        expect(old_again.inventory!.generation).to_equal(4)
+        expect(after_return).to_equal(3)
+
+    it "REQ-SCV-ADMITTED-MEMO-003 the same digest under another cache root is a fresh full read":
+        val root_a = memo_spec_root("root-a")
+        val root_b = memo_spec_root("root-b")
+        dir_remove(root_a, true)
+        dir_remove(root_b, true)
+        val digest = compile_source_inventory_publish_v1(root_a, memo_spec_inventory(6, "fn a(): 1"))
+        val digest_b = compile_source_inventory_publish_v1(root_b, memo_spec_inventory(6, "fn a(): 1"))
+        val before = compile_source_inventory_full_read_count_v1()
+        val read_a = compile_source_inventory_read_admitted_digest_v1(root_a, digest)
+        val read_b = compile_source_inventory_read_admitted_digest_v1(root_b, digest)
+        val reads = compile_source_inventory_full_read_count_v1() - before
+        dir_remove(root_a, true)
+        dir_remove(root_b, true)
+        expect(digest_b).to_equal(digest)
+        expect(read_a.valid).to_equal(true)
+        expect(read_b.valid).to_equal(true)
+        expect(reads).to_equal(2)
+
+    it "REQ-SCV-ADMITTED-MEMO-004 a missing digest fails closed and is never remembered":
+        val root = memo_spec_root("missing")
+        dir_remove(root, true)
+        val digest = compile_source_inventory_publish_v1(root, memo_spec_inventory(7, "fn a(): 1"))
+        val absent = sha256_text("never published")
+        val before = compile_source_inventory_full_read_count_v1()
+        val first = compile_source_inventory_read_admitted_digest_v1(root, absent)
+        val second = compile_source_inventory_read_admitted_digest_v1(root, absent)
+        val reads = compile_source_inventory_full_read_count_v1() - before
+        val malformed = compile_source_inventory_read_admitted_digest_v1(root, "not-a-digest")
+        dir_remove(root, true)
+        expect(digest.len()).to_equal(64)
+        expect(first.valid).to_equal(false)
+        expect(first.reason).to_equal("inventory-generation-invalid")
+        expect(second.valid).to_equal(false)
+        expect(reads).to_equal(2)
+        expect(malformed.valid).to_equal(false)
+        expect(malformed.reason).to_equal("inventory-pointer-invalid")
+
+    it "REQ-SCV-ADMITTED-MEMO-005 truncated and tampered blobs fail on the first read in a process":
+        val root = memo_spec_root("tamper")
+        dir_remove(root, true)
+        val digest = compile_source_inventory_publish_v1(root, memo_spec_inventory(8, "fn a(): 1"))
+        val blob = "{root}/source-inventory/generations/{digest}.inventory"
+        val saved = file_read(blob)
+        expect(file_write(blob, saved.substring(0, saved.len() / 2))).to_equal(true)
+        val truncated = compile_source_inventory_read_admitted_digest_v1(root, digest)
+        val replacement = compile_source_inventory_encode_v1(memo_spec_inventory(9, "fn a(): 1"))
+        expect(file_write(blob, replacement)).to_equal(true)
+        val tampered = compile_source_inventory_read_admitted_digest_v1(root, digest)
+        step("A rejection is not remembered: the restored blob admits")
+        expect(file_write(blob, saved)).to_equal(true)
+        val restored = compile_source_inventory_read_admitted_digest_v1(root, digest)
+        dir_remove(root, true)
+        expect(truncated.valid).to_equal(false)
+        expect(truncated.reason).to_equal("inventory-generation-invalid")
+        expect(tampered.valid).to_equal(false)
+        expect(tampered.reason).to_equal("inventory-generation-invalid")
+        expect(restored.valid).to_equal(true)
+        expect(restored.inventory!.generation).to_equal(8)
