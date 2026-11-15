@@ -18468,11 +18468,32 @@ static SplArray* rt_process_run_array(const char* cmd, uint64_t cmd_len, SplArra
         command = joined;
     }
 
-    char* redirected = spl_str_concat(command, " 2>/tmp/simple_core_process_run_stderr");
+    /* stderr goes to a per-call mkstemp file that is read back after pclose.
+     * It used to go to the fixed shared path /tmp/simple_core_process_run_stderr
+     * and was never read, so every native process_run/shell returned an EMPTY
+     * stderr where the seed returns the child's text (and concurrent processes
+     * raced on the one file). If mkstemp fails, stderr is discarded rather than
+     * falling back to a shared path. */
+    char err_path[] = "/tmp/simple_process_run_stderr_XXXXXX";
+    int err_fd = mkstemp(err_path);
+    char* redirected = NULL;
+    if (err_fd >= 0) {
+        close(err_fd);
+        char* quoted_err = rt_core_shell_quote(err_path);
+        char* redirect = spl_str_concat(" 2>", quoted_err ? quoted_err : err_path);
+        if (quoted_err) free(quoted_err);
+        if (redirect) {
+            redirected = spl_str_concat(command, redirect);
+            free(redirect);
+        }
+    } else {
+        redirected = spl_str_concat(command, " 2>/dev/null");
+    }
     FILE* pipe = popen(redirected ? redirected : command, "r");
     free(command);
     if (redirected) free(redirected);
     if (!pipe) {
+        if (err_fd >= 0) unlink(err_path);
         rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
         rt_array_push(result, rt_string_new((const uint8_t*)"process spawn failed", 20));
         rt_array_push(result, rt_value_int(-1));
@@ -18499,9 +18520,33 @@ static SplArray* rt_process_run_array(const char* cmd, uint64_t cmd_len, SplArra
     int status = pclose(pipe);
     int exit_code = status == -1 ? -1 : (status >> 8);
 
+    char* stderr_buf = NULL;
+    size_t stderr_len = 0;
+    if (err_fd >= 0) {
+        FILE* err_file = fopen(err_path, "rb");
+        if (err_file) {
+            size_t err_cap = 4096;
+            stderr_buf = (char*)rt_observed_malloc_v1(err_cap);
+            while (stderr_buf) {
+                size_t got = fread(stderr_buf + stderr_len, 1, err_cap - stderr_len, err_file);
+                if (got == 0) break;
+                stderr_len += got;
+                if (stderr_len == err_cap) {
+                    char* grown = (char*)rt_observed_realloc_v1(stderr_buf, err_cap * 2);
+                    if (!grown) break;
+                    stderr_buf = grown;
+                    err_cap *= 2;
+                }
+            }
+            fclose(err_file);
+        }
+        unlink(err_path);
+    }
+
     const char* stdout_text = stdout_buf ? stdout_buf : "";
     rt_array_push(result, rt_string_new((const uint8_t*)stdout_text, (uint64_t)strlen(stdout_text)));
-    rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
+    rt_array_push(result, rt_string_new((const uint8_t*)(stderr_buf ? stderr_buf : ""), (uint64_t)(stderr_buf ? stderr_len : 0)));
+    if (stderr_buf) free(stderr_buf);
     rt_array_push(result, rt_value_int(exit_code));
     if (stdout_buf) free(stdout_buf);
     return result;
