@@ -1,0 +1,70 @@
+"""
+## Purpose and audience
+Purpose: Prove the SFFI generator emits a validating, fallible facade
+(`Result<Unit, ConstraintError>`) for an extern that returns a unit carrying a
+range, and a direct projection for an unconstrained unit.
+Audience: compiler and tooling engineers maintaining SFFI boundary generation.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Generator input model only (ConstrainedUnitReturn); the language grammar has no
+unit range syntax yet. Integer ranges only; anything else yields SPL-SFFI-RANGE-001.
+"""
+# @req: RB-SFFI-02
+
+use std.spec.*
+use std.spec.step
+use compiler.tools.sffi_gen.constrained_unit_gen.{ConstrainedUnitReturn, generate_unit_return_facade}
+
+# @manual_section: constrained_unit_return
+describe "SFFI constrained unit return":
+    """A range-carrying unit is checked at the boundary before it is trusted."""
+
+    it "emits a validating wrapper with range check and Err path":
+        # @req: RB-SFFI-02
+        step("Generate a facade for a unit with min 1 and max 65535")
+        val spec = ConstrainedUnitReturn(extern_name: "rt_net_port", params: "fd: i32", arg_names: "fd", unit_name: "Port", abi_type: "i32", range_min: "1", range_max: "65535")
+        val r = generate_unit_return_facade(spec)
+        expect(r.diagnostic).to_equal("")
+        expect(r.source).to_contain("extern fn __raw_rt_net_port(fd: i32) -> i32")
+        expect(r.source).to_contain("fn rt_net_port(fd: i32) -> Result<Port, ConstraintError>:")
+        expect(r.source).to_contain("val raw = __raw_rt_net_port(fd)")
+        expect(r.source).to_contain("if raw < 1 or raw > 65535:")
+        expect(r.source).to_contain("return Err(ConstraintError.out_of_range(\"Port\", raw, \"1\", \"65535\"))")
+        expect(r.source).to_contain("Ok(Port(raw))")
+
+    it "checks only the lower bound when the range is half open":
+        # @req: RB-SFFI-02
+        step("Generate a facade with a minimum but no maximum")
+        val spec = ConstrainedUnitReturn(extern_name: "rt_count", params: "", arg_names: "", unit_name: "Count", abi_type: "i64", range_min: "0", range_max: "")
+        val r = generate_unit_return_facade(spec)
+        expect(r.source).to_contain("if raw < 0:")
+        expect(r.source.contains("raw >")).to_equal(false)
+        expect(r.source).to_contain("Ok(Count(raw))")
+
+    it "keeps an unconstrained unit as a direct projection":
+        # @req: RB-SFFI-02
+        step("Generate a facade for a unit with no range")
+        val spec = ConstrainedUnitReturn(extern_name: "rt_clock_ms", params: "", arg_names: "", unit_name: "Millis", abi_type: "i64", range_min: "", range_max: "")
+        val r = generate_unit_return_facade(spec)
+        expect(r.diagnostic).to_equal("")
+        expect(r.source).to_contain("extern fn rt_clock_ms() -> Millis")
+        expect(r.source.contains("Result<")).to_equal(false)
+        expect(r.source.contains("ConstraintError")).to_equal(false)
+
+    it "reports SPL-SFFI-RANGE-001 for a range on a non-integer representation":
+        # @req: RB-SFFI-02
+        step("Generate a facade with a range over an f64 unit")
+        val spec = ConstrainedUnitReturn(extern_name: "rt_temp", params: "", arg_names: "", unit_name: "Celsius", abi_type: "f64", range_min: "0", range_max: "100")
+        val r = generate_unit_return_facade(spec)
+        expect(r.source).to_equal("")
+        expect(r.diagnostic).to_contain("SPL-SFFI-RANGE-001")
+        expect(r.diagnostic).to_contain("Celsius")
+
+    it "reports SPL-SFFI-RANGE-001 for a bound that is not an integer literal":
+        # @req: RB-SFFI-02
+        step("Generate a facade whose maximum is an expression")
+        val spec = ConstrainedUnitReturn(extern_name: "rt_n", params: "", arg_names: "", unit_name: "Level", abi_type: "i32", range_min: "0", range_max: "MAX_LEVEL")
+        val r = generate_unit_return_facade(spec)
+        expect(r.source).to_equal("")
+        expect(r.diagnostic).to_contain("SPL-SFFI-RANGE-001")
