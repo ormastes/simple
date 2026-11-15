@@ -53,7 +53,12 @@ Two layers were at fault:
   a fatal MIR error when two modules in one compilation define the same leaf.
 - In `MirToLlvm.llvm_function_symbol_name`, `no_mangle` is checked before the
   runtime-owned rename again.
-- Cranelift is unchanged. Its no-mangle path still privatizes `rt_*`
+- Follow-up PR: `cl_function_emit_name` now also checks `no_mangle` before the
+  runtime-owned rename. Only `cl_is_lowering_owned_runtime` accessors stay
+  private. Spec: `cranelift_no_mangle_leaf_symbol_spec.spl`. The smoke script
+  now fails with `error=duplicate_leaf_symbol:` when two archive parts define
+  the same global symbol, checked before `ar`.
+- (Superseded by the follow-up above.) In the first PR, Cranelift was unchanged. Its no-mangle path still privatizes `rt_*`
   definitions, because its array-literal lowering declares the bare runtime
   symbol outside `func_handles`. Open follow-up: a Cranelift `--no-mangle`
   runtime archive will lack bare `rt_*` definitions.
