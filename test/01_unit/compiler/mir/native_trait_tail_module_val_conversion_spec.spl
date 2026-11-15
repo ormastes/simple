@@ -78,6 +78,11 @@ fn any_mir_has(l: Lowered, needle: text) -> bool:
         if m.contains(needle): return true
     false
 
+fn return_block_label(m: text) -> text:
+    val before = m.split("\"Return\":{")[0]
+    val labels = before.split("\"label\":\"")
+    labels[labels.len() - 1].split("\"")[0]
+
 describe "trait-object conversion at implicit tails (bootstrap HIR)":
     it "converts a non-generic `-> Tag` implicit tail":
         val l = lower_bootstrap(DECLS + "fn make_tag(k: i64) -> Tag:\n    Alpha(k: k)\n")
@@ -144,6 +149,16 @@ describe "trait-object conversion at implicit tails (bootstrap HIR)":
         # Blocks only: `return` adds one unused Unit temp to the locals.
         expect(mir_of(l, "some_tag").split("\"blocks\":")[1]).to_equal(mir_of(ex, "some_tag").split("\"blocks\":")[1])
 
+    # A conditional `-> Tag?` tail is converted once, after the join; the
+    # Return must use that converted result, not the raw join.
+    it "returns the converted join of a conditional `-> Tag?` tail":
+        val ci = lower_bootstrap(DECLS + "fn ct(b: bool) -> Tag?:\n    if b: Some(Alpha(k: 1)) else: None\n")
+        expect(ci.errors).to_equal("")
+        expect(return_block_label(mir_of(ci, "ct"))).to_equal("native_trait_opt_merge")
+        val mi = lower_bootstrap(DECLS + "fn mt(n: i64) -> Tag?:\n    match n:\n        case 0: Some(Alpha(k: 1))\n        case _: None\n")
+        expect(mi.errors).to_equal("")
+        expect(return_block_label(mir_of(mi, "mt"))).to_equal("native_trait_opt_merge")
+
     it "refuses a disallowed instantiation reached through an implicit tail":
         val src = "type Flag = bool\n\n" + DECLS + "class RCell:\n    cell: Flag?\n\nimpl Reader<Flag> for RCell:\n    fn read(node: i64) -> Flag?:\n        self.cell\n\nfn make() -> Reader<Flag>:\n    RCell(cell: Some(false))\n"
         # The alias-typed `-> Flag?` result is not recoverable in bootstrap HIR,
@@ -168,6 +183,19 @@ describe "trait-object conversion at module-level typed vals (bootstrap HIR)":
         val l = lower_bootstrap(DECLS + "val module_tag: Tag = Alpha(k: 5)\n\nfn read_tag() -> i64:\n    module_tag.tag()\n")
         expect(l.errors).to_equal("")
         expect(mir_of(l, "read_tag")).to_contain("CallIndirect")
+
+describe "consumers of a generic trait-dispatched Optional":
+    # `Reader<T>.read -> T?` dispatched on a Reader<i64>: the `match` binder is
+    # the instance's i64, as under `if val` and a plain `i64?` match. Binding
+    # the declaration's erased `T` rendered the raw 41 as a tagged runtime
+    # word (`<value:0x29>` natively).
+    it "binds the instance payload type in a `match` arm":
+        val src = "fn use_m(r: Reader<i64>) -> i64:\n    match r.read(1):\n        case Some(v): print \"m {{v}}\"\n        case None: print \"none\"\n    0\n"
+        val l = lower_bootstrap(DECLS + src)
+        expect(l.errors).to_equal("")
+        val m = mir_of(l, "use_m")
+        expect(m).to_contain("rt_raw_i")
+        expect(m.contains("rt_value_to_string")).to_equal(false)
 
 describe "native oracle fixtures (exact source, bootstrap HIR)":
     it "lowers the tail/module-val fixture with no errors":
