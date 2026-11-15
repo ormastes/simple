@@ -709,6 +709,27 @@ pub(crate) fn construct_standalone_unit(name: &str, suffix: &str, val: Value) ->
     }
 }
 
+thread_local! {
+    /// Names of the synthesized one-field `value` record classes made by `unit Name: T`
+    /// and numeric `newtype`. Ordinary classes that merely have a single `value`
+    /// field (e.g. `ByteSize`, which has methods) are NOT in this set, so they never
+    /// auto-unwrap to a scalar or take part in unit arithmetic rules.
+    static RECORD_UNIT_CLASSES: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// Record that `name` is a `unit`/numeric-`newtype` record class.
+pub(crate) fn register_record_unit_class(name: &str) {
+    RECORD_UNIT_CLASSES.with(|s| {
+        s.borrow_mut().insert(name.to_string());
+    });
+}
+
+/// True when `name` was registered by `register_record_unit_class`.
+pub(crate) fn is_record_unit_class(name: &str) -> bool {
+    RECORD_UNIT_CLASSES.with(|s| s.borrow().contains(name))
+}
+
 /// Canonical `unit Name: T [as suffix]` is also a constructible one-field
 /// record `Name { value: T }` (same lowering as numeric `newtype`). Multi-base
 /// (`str | u32`) wrappers are literal-suffix only and yield `None`.
