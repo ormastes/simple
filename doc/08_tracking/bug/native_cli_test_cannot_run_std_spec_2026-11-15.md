@@ -73,3 +73,5 @@ calls today.
 ## Perf (recorded, not fixed here)
 `cli_tip.exe run` of a two-file program takes 48 s wall, while the HIR phase
 reports `elapsed_ms=26`. The time goes elsewhere in startup or admission.
+`provider_context_for` also rebuilds the owner module's name map and fn index
+on every cross-module call. A per-module context cache is the follow-up.
