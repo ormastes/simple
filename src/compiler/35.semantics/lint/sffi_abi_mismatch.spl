@@ -34,6 +34,30 @@ fn _sam_unit_decl(line: text) -> [text]:
     val parts = tail.split(" ")
     [name, parts[0]]
 
+fn _sam_import_names(line: text) -> [text]:
+    # Names bound by `use a.b.{A, B as C}` / `use a.b.A [as C]`; the alias wins.
+    var rest = line
+    for prefix in ["pub use ", "export use ", "use "]:
+        if rest.starts_with(prefix):
+            rest = rest.substring(prefix.byte_len(), rest.byte_len()).trim()
+            var items: [text] = []
+            val open = rest.find("{")
+            if open >= 0:
+                val close = rest.find("}")
+                if close > open:
+                    items = rest.substring(open + 1, close).split(",")
+            else:
+                val dot = rest.rfind(".")
+                items = [rest.substring(dot + 1, rest.byte_len())]
+            var names: [text] = []
+            for item in items:
+                val parts = item.trim().split(" as ")
+                val n = parts[parts.len() - 1].trim()
+                if n != "":
+                    names.push(n)
+            return names
+    []
+
 fn _sam_width(prim: text) -> text:
     prim.substring(1, prim.byte_len())
 
@@ -60,7 +84,10 @@ pub fn check_sffi_abi_mismatch(source: text, file_path: text, triple: text) -> [
     val lines = code_line_snapshot(source).lines
     var unit_names: [text] = []
     var unit_prims: [text] = []
+    var imported: [text] = []
     for line in lines:
+        for n in _sam_import_names(line.trimmed):
+            imported.push(n)
         val d = _sam_unit_decl(line.trimmed)
         if d.len() == 2:
             unit_names.push(d[0])
@@ -95,7 +122,7 @@ pub fn check_sffi_abi_mismatch(source: text, file_path: text, triple: text) -> [
                     if msg != "":
                         findings.push(SffiAbiFinding(code: "SPL-SFFI-ABI-001", message: msg, line_num: i + 1))
                 k = k + 1
-            if not declared:
+            if not declared and not imported.contains(unit_name):
                 findings.push(SffiAbiFinding(code: "SPL-SFFI-ABI-001", message: "@c_abi names undeclared unit `{unit_name}` (no `unit {unit_name}: ...` declaration in this file)", line_num: i + 1))
         i = i + 1
     findings
