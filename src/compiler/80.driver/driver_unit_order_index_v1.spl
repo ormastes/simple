@@ -26,14 +26,25 @@ pub fn unit_order_index_path_v1(queue: text) -> text:
 pub fn unit_order_index_digest_v1(paths: [text]) -> text:
     sha256_text(paths.join("\n"))
 
-fn _uoi_header_v1(paths: [text]) -> text:
-    "{UNIT_ORDER_INDEX_MAGIC_V1} n={paths.len()} digest={unit_order_index_digest_v1(paths)}"
+# Content stamp: the edges depend on each source's imports and on the
+# resolution roots/mode, not just the path list, so an import edit with an
+# unchanged inventory must invalidate the index. Per-source hashes are joined
+# so no separator inside a source can alias two inventories.
+pub fn unit_order_index_stamp_v1(contents: [text], roots: [text], library_mode: text) -> text:
+    var parts: [text] = []
+    for c in contents: parts.push(sha256_text(c))
+    parts.push(sha256_text(roots.join("\n")))
+    parts.push(sha256_text(library_mode))
+    sha256_text(parts.join(","))
+
+fn _uoi_header_v1(paths: [text], stamp: text) -> text:
+    "{UNIT_ORDER_INDEX_MAGIC_V1} n={paths.len()} digest={unit_order_index_digest_v1(paths)} stamp={stamp}"
 
 fn _uoi_clean_v1(s: text) -> text:
     s.replace("\n", " ").replace("\r", " ").replace("\t", " ")
 
-pub fn unit_order_index_encode_v1(paths: [text], graph: WorkerAdmittedGraphV1) -> text:
-    var lines: [text] = [_uoi_header_v1(paths)]
+pub fn unit_order_index_encode_v1(paths: [text], stamp: text, graph: WorkerAdmittedGraphV1) -> text:
+    var lines: [text] = [_uoi_header_v1(paths, stamp)]
     var i = 0
     while i < paths.len():
         var deps: [text] = []
@@ -44,11 +55,11 @@ pub fn unit_order_index_encode_v1(paths: [text], graph: WorkerAdmittedGraphV1) -
         i = i + 1
     lines.join("\n")
 
-pub fn unit_order_index_decode_v1(paths: [text], content: text) -> Result<WorkerAdmittedGraphV1, text>:
+pub fn unit_order_index_decode_v1(paths: [text], stamp: text, content: text) -> Result<WorkerAdmittedGraphV1, text>:
     val lines = content.split("\n")
     if lines.len() != paths.len() + 1:
         return Err("unit order index row count mismatch")
-    if lines[0] != _uoi_header_v1(paths):
+    if lines[0] != _uoi_header_v1(paths, stamp):
         return Err("unit order index inventory mismatch")
     var edges: [[i64]] = []
     var errors: [text] = []
@@ -70,20 +81,20 @@ pub fn unit_order_index_decode_v1(paths: [text], content: text) -> Result<Worker
         i = i + 1
     Ok(WorkerAdmittedGraphV1(edges: edges, errors: errors))
 
-pub fn unit_order_index_load_v1(queue: text, paths: [text]) -> Result<WorkerAdmittedGraphV1, text>:
+pub fn unit_order_index_load_v1(queue: text, paths: [text], stamp: text) -> Result<WorkerAdmittedGraphV1, text>:
     val path = unit_order_index_path_v1(queue)
     if queue == "" or not file_exists(path):
         return Err("unit order index absent")
-    unit_order_index_decode_v1(paths, file_read(path))
+    unit_order_index_decode_v1(paths, stamp, file_read(path))
 
 # Temp + atomic rename: a concurrent reader sees the old file or the whole new
 # one. A lost race publishes identical bytes, so either winner is correct.
-pub fn unit_order_index_publish_v1(queue: text, paths: [text], graph: WorkerAdmittedGraphV1) -> bool:
+pub fn unit_order_index_publish_v1(queue: text, paths: [text], stamp: text, graph: WorkerAdmittedGraphV1) -> bool:
     if queue == "":
         return false
     val target = unit_order_index_path_v1(queue)
     val tmp = "{target}.{getpid()}.tmp"
-    if not file_write(tmp, unit_order_index_encode_v1(paths, graph)):
+    if not file_write(tmp, unit_order_index_encode_v1(paths, stamp, graph)):
         return false
     if file_rename(tmp, target):
         return true
@@ -94,16 +105,18 @@ pub fn unit_order_index_publish_v1(queue: text, paths: [text], graph: WorkerAdmi
 # the full admitted-graph walk (and, when on, publish it for later units).
 pub fn unit_admitted_graph_v1(enabled: bool, queue: text, paths: [text], contents: [text], names: [text],
         roots: [text], library_mode: text) -> Result<WorkerAdmittedGraphV1, text>:
-    if enabled:
-        val hit = unit_order_index_load_v1(queue, paths)
-        if hit.is_ok():
-            return hit
+    if not enabled:
+        return worker_admitted_edges_v1(paths, contents, names, roots, library_mode)
+    val stamp = unit_order_index_stamp_v1(contents, roots, library_mode)
+    val hit = unit_order_index_load_v1(queue, paths, stamp)
+    if hit.is_ok():
+        return hit
     val computed = worker_admitted_edges_v1(paths, contents, names, roots, library_mode)
-    if enabled and computed.is_ok():
-        val _published = unit_order_index_publish_v1(queue, paths, computed.unwrap())
+    if computed.is_ok():
+        val _published = unit_order_index_publish_v1(queue, paths, stamp, computed.unwrap())
     computed
 
 export unit_admitted_graph_v1
 export UNIT_ORDER_INDEX_ENV_V1, unit_order_index_enabled_v1, unit_order_index_path_v1
-export unit_order_index_digest_v1, unit_order_index_encode_v1, unit_order_index_decode_v1
+export unit_order_index_digest_v1, unit_order_index_stamp_v1,unit_order_index_encode_v1, unit_order_index_decode_v1
 export unit_order_index_load_v1, unit_order_index_publish_v1
