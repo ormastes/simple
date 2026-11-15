@@ -1,0 +1,103 @@
+# Cranelift stack-slot alignment contract, executed through the real Cranelift
+# provider JIT.
+#
+# Bug: the Rust provider rt_cranelift_stack_slot (cranelift_sffi.rs) forwards
+# its third argument to cranelift-codegen 0.116.1
+# `StackSlotData::new(kind, size, align_shift: u8)`, a log2 EXPONENT
+# (machinst/abi.rs: `align = max(word_bytes, 1 << align_shift)`). The Simple
+# backend passed `8` meaning "8 bytes", so every slot was 2^8 = 256-byte
+# aligned: one slot per 0x100 bytes, a 2.9 MB frame for lower_expr_impl, and a
+# Stage 3 stack overflow on hello world.
+#
+# The JIT probes return the byte distance between two consecutive 8-byte slots
+# requested at 8-byte alignment (must be 8, was 256) and the low bits of a slot
+# requested at 16-byte alignment (must stay 16-aligned).
+# Requires an admitted runtime (cranelift provider JIT).
+use std.spec.*
+use std.spec.step
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir.*
+use compiler.backend.cranelift_codegen_adapter.{build_signature, cranelift_local_slot_sizes}
+use std.nogc_sync_mut.sffi.codegen.*
+
+fn no_arg_i64_sig() -> MirSignature:
+    MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)
+
+# Builds, JITs and runs a no-arg `fn() -> i64` probe; `mode` picks the body.
+fn run_slot_probe(name: text, mode: i64) -> i64:
+    val module = cranelift_new_module(name, -1)
+    expect(module != 0).to_equal(true)
+    val ctx = cranelift_begin_function(module, name, build_signature(no_arg_i64_sig(), false))
+    expect(ctx != 0).to_equal(true)
+    val entry = cranelift_create_block(ctx)
+    cranelift_append_func_params(ctx, entry)
+    cranelift_switch_to_block(ctx, entry)
+    var result = 0
+    if mode == 0:
+        # Two consecutive 8-byte slots at 8-byte alignment: distance in bytes.
+        val a = cranelift_stack_addr(ctx, cranelift_stack_slot(ctx, 8, 8), 0)
+        val b = cranelift_stack_addr(ctx, cranelift_stack_slot(ctx, 8, 8), 0)
+        result = cranelift_isub(ctx, b, a)
+    else:
+        # An 8-byte slot, then a 16-byte slot requested at 16-byte alignment:
+        # low 4 address bits of the second slot.
+        cranelift_stack_addr(ctx, cranelift_stack_slot(ctx, 8, 8), 0)
+        val v = cranelift_stack_addr(ctx, cranelift_stack_slot(ctx, 16, 16), 0)
+        result = cranelift_band(ctx, v, cranelift_iconst(ctx, CL_TYPE_I64, 15))
+    cranelift_return(ctx, result)
+    cranelift_seal_all_blocks(ctx)
+    val finished = cranelift_end_function(ctx)
+    expect(finished != 0).to_equal(true)
+    expect(cranelift_define_function(module, 0, finished)).to_equal(true)
+    expect(cranelift_finalize_module(module) != 0).to_equal(true)
+    val address = cranelift_get_function_ptr(module, name)
+    expect(address != 0).to_equal(true)
+    val actual = cranelift_call_function_ptr(address, 0, 0)
+    cranelift_free_module(module)
+    actual
+
+fn enum_aggregate_func() -> MirFunction:
+    # local 1 = Enum aggregate with 3 word operands (tag + 2 payload words);
+    # the adapter's catch-all Aggregate arm stores them at offsets 0/8/16 of
+    # local 1's slot, so that slot must be at least 24 bytes.
+    MirFunction(
+        symbol: SymbolId(id: 9031), name: "slot_enum_agg",
+        signature: no_arg_i64_sig(),
+        locals: [MirLocal(id: LocalId(id: 1), name: nil, type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false)],
+        blocks: [
+            MirBlock(
+                id: BlockId(id: 0), label: nil,
+                instructions: [
+                    MirInst(
+                        kind: MirInstKind.Aggregate(
+                            LocalId(id: 1),
+                            AggregateKind.Enum(SymbolId(id: 7), 1),
+                            [mir_operand_const_int(1), mir_operand_const_int(2), mir_operand_const_int(3)]
+                        ),
+                        span: nil
+                    )
+                ],
+                terminator: MirTerminator.Ret(Some(mir_operand_const_int(0)))
+            )
+        ],
+        entry_block: BlockId(id: 0), span: Span.default(),
+        generic_params: [], is_generic_template: false, specialization_of: nil,
+        type_bindings: {}, layout_phase: nil, is_kernel: false, is_export_c: false,
+        export_name: "", has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false
+    )
+
+describe "Cranelift stack slot alignment":
+    it "packs consecutive 8-byte-aligned slots 8 bytes apart (not 256)":
+        expect(run_slot_probe("slot_pack_8", 0)).to_equal(8)
+
+    it "keeps a 16-byte-aligned slot 16-byte aligned":
+        expect(run_slot_probe("slot_align_16", 1)).to_equal(0)
+
+describe "cranelift_local_slot_sizes multi-word aggregates":
+    it "sizes an Enum aggregate destination for every stored word":
+        val sizes = cranelift_local_slot_sizes(enum_aggregate_func())
+        expect(sizes.has(1)).to_equal(true)
+        expect(sizes[1]).to_equal(24)
