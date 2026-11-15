@@ -1239,6 +1239,10 @@ fn flex_ordered_children(styles: [Style], child_index: HtmlChildIndex, parent_i:
     var sorted = true
     var last_order = 0
     while c >= 0:
+        # A display:none child (whitespace-only text included) is no flex item.
+        if styles[c].display == "none":
+            c = child_index.next_sibling[c]
+            continue
         val current_order = styles[c].order
         if out_len > 0 and current_order < last_order:
             sorted = false
@@ -1246,6 +1250,8 @@ fn flex_ordered_children(styles: [Style], child_index: HtmlChildIndex, parent_i:
         out[out_len] = c
         out_len = out_len + 1
         c = child_index.next_sibling[c]
+    if out_len < child_count:
+        out = i32_list_prefix(out, out_len)
     if sorted:
         return out
     _sort_style_order_indices(out, out_len, styles)
@@ -2334,7 +2340,8 @@ fn constrained_outer_width(node: HNode, st: Style, candidate_width: i32) -> i32:
         if out > max_outer:
             out = max_outer
     if out < 1:
-        out = 1
+        # `width:0` (no padding/border) is a definite 0-wide box.
+        out = if st.width_zero and out == 0: 0 else: 1
     out
 
 fn explicit_auto_table_column_offsets(
@@ -2562,7 +2569,7 @@ fn constrained_outer_height(node: HNode, st: Style, candidate_height: i32) -> i3
 
 fn absolute_outer_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, node_i: i32, parent: Style, node: HNode, authored_st: Style, containing_w: i32) -> i32:
     val st = style_with_resolved_percent_min_max(authored_st, containing_w + parent.pad_l + parent.pad_r, 0)
-    if st.width_px == 0 and st.left_px > 0 and st.right_px >= 0:
+    if st.width_px == 0 and not st.width_zero and st.left_px > 0 and st.right_px >= 0:
         val padding_box_w = containing_w + parent.pad_l + parent.pad_r
         var stretched = padding_box_w - st.left_px - st.right_px
         if stretched < 1:
@@ -2573,7 +2580,7 @@ fn absolute_outer_width(nodes: [HNode], styles: [Style], child_index: HtmlChildI
         val percent_content_w = padding_box_w * (0 - st.width_px) / 100
         return constrained_outer_width(node, st, css_outer_width(node, st, percent_content_w))
     val explicit_node_w = css_outer_width(node, st, st.width_px)
-    if st.width_px > 0:
+    if st.width_px > 0 or st.width_zero:
         return constrained_outer_width(node, st, explicit_node_w)
     # CSS 2.1 10.3.7: `width: auto` on an absolutely positioned, non-replaced
     # box is SHRINK-TO-FIT, not "fill the containing block". The stretch case is
@@ -2653,7 +2660,9 @@ fn absolute_child_x(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex
     # parent-relative static-position approximation below.
     if not child.left_auto and not absolute_has_positioned_ancestor(nodes, styles, child_i):
         return child.left_px
-    if child.right_px >= 0:
+    # Both insets with a definite width over-constrain the box; in ltr
+    # `right` is ignored (CSS 2.2 10.3.7).
+    if child.right_px >= 0 and child.left_auto:
         val padding_box_w = containing_w + parent.pad_l + parent.pad_r
         return parent_x + parent.border_l + padding_box_w - absolute_outer_width(nodes, styles, child_index, child_i, parent, child_node, child, containing_w) - child.right_px
     parent_x + parent.border_l + child.left_px

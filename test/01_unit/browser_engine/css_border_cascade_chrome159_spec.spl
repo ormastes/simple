@@ -1,0 +1,69 @@
+"""
+## Purpose and audience
+Purpose: Pin the cascade of the border property family: a border shorthand
+authored after a longhand wins on every side it sets, and a declaration
+with an invalid token is dropped whole, so the earlier value stays.
+Audience: browser-engine style cascade maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless shell, `getComputedStyle` /
+`getBoundingClientRect()`), every box absolutely placed, 20x20 with
+`border:4px solid green` from the stylesheet:
+- `#c1` `border-color:blue;border-color:red foo` -- all four sides blue.
+- `#c2` `border-color:red blue foo` -- all four sides stay green.
+- `#c3` `border-top-color:red;border-color:blue` -- top blue.
+- `#c4` `border-left-color:red;border:4px solid blue` -- left blue.
+- `#c5` `border-color:blue;border-top-color:red` -- top red (longhand last).
+- `#s1` `border-top-style:none;border-style:solid` is 28 tall; `#s2` the
+  reverse order is 24 tall.
+- `#w1` `border-top-width:10px;border-width:1px` is 22 tall; `#w2` the
+  reverse order is 31 tall.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-CSS-BORDER-CASCADE-001 — border shorthands and longhands cascade in source order, and an invalid border-color declaration is dropped whole, as Chrome 159.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_geometry.{simple_web_layout_debug_layout_by_id}
+
+val COLOR_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}div{{position:absolute;left:0;width:20px;height:20px;border:4px solid green}}</style></head><body><div id=c1 style=\"top:0;border-color:blue;border-color:red foo\"></div><div id=c2 style=\"top:40px;border-color:red blue foo\"></div><div id=c3 style=\"top:80px;border-top-color:red;border-color:blue\"></div><div id=c4 style=\"top:120px;border-left-color:red;border:4px solid blue\"></div><div id=c5 style=\"top:160px;border-color:blue;border-top-color:red\"></div></body></html>"
+
+val GEOM_PAGE: text = "<!doctype html><html><head><style>body{{margin:0}}div{{position:absolute;left:0;width:20px;height:20px;border:4px solid green}}</style></head><body><div id=s1 style=\"top:0;border-top-style:none;border-style:solid\"></div><div id=s2 style=\"top:40px;border-style:solid;border-top-style:none\"></div><div id=w1 style=\"top:80px;border-top-width:10px;border-width:1px\"></div><div id=w2 style=\"top:120px;border-width:1px;border-top-width:10px\"></div></body></html>"
+
+# Colours of the top, right, bottom and left border middles of the 28x28
+# box whose top edge is at `y`.
+fn sides(px: [u32], y: i32) -> text:
+    val t = px[14 + (y + 1) * 100] & 0xFFFFFFu32
+    val r = px[26 + (y + 14) * 100] & 0xFFFFFFu32
+    val b = px[14 + (y + 26) * 100] & 0xFFFFFFu32
+    val l = px[1 + (y + 14) * 100] & 0xFFFFFFu32
+    "{t} {r} {b} {l}"
+
+fn height(id: text) -> text:
+    simple_web_layout_debug_layout_by_id(GEOM_PAGE, 900, 400, id, "h")
+
+val BLUE: text = "255"
+val GREEN: text = "32768"
+val RED: text = "16711680"
+
+describe "border property family cascade":
+    it "AC-1: a border-color with an invalid token is dropped whole":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(COLOR_PAGE, 100, 200, "cpu_simd")
+        step("Chrome 159: #c1 all blue (the earlier border-color), #c2 all green")
+        expect(sides(px, 0)).to_equal("{BLUE} {BLUE} {BLUE} {BLUE}")
+        expect(sides(px, 40)).to_equal("{GREEN} {GREEN} {GREEN} {GREEN}")
+
+    it "AC-2: a border shorthand after a longhand wins; a longhand after it wins":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(COLOR_PAGE, 100, 200, "cpu_simd")
+        step("Chrome 159: #c3 top blue, #c4 left blue, #c5 top red")
+        expect(sides(px, 80)).to_equal("{BLUE} {BLUE} {BLUE} {BLUE}")
+        expect(sides(px, 120)).to_equal("{BLUE} {BLUE} {BLUE} {BLUE}")
+        expect(sides(px, 160)).to_equal("{RED} {BLUE} {BLUE} {BLUE}")
+
+    it "AC-3: border-style and border-width cascade in source order too":
+        step("Chrome 159: s1 28, s2 24, w1 22, w2 31 tall")
+        expect(height("s1")).to_equal("28")
+        expect(height("s2")).to_equal("24")
+        expect(height("w1")).to_equal("22")
+        expect(height("w2")).to_equal("31")
