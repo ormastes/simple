@@ -488,9 +488,14 @@ fn _stub_is_trivial(body: text) -> bool:
 # ============================================================================
 
 pub fn easy_fix_check_short_grammar_refactor(source: text, file: text) -> [EasyFix]:
+    easy_fix_check_short_grammar_refactor_with_contexts(file: file, contexts: line_contexts(source))
+
+# Single owner of the short-grammar rule. The compiler fix registry calls this
+# with the per-line contexts it already built, so no rule re-splits the source.
+pub fn easy_fix_check_short_grammar_refactor_with_contexts(file: text, contexts: [LineContext]) -> [EasyFix]:
     var fixes: [EasyFix] = []
     var in_multiline_string = false
-    for raw_ctx in line_contexts(source):
+    for raw_ctx in contexts:
         val ctx: LineContext = raw_ctx
         val starts_inside = in_multiline_string
         val quote_count = _short_count_triple_quotes(line: ctx.line)
@@ -516,12 +521,19 @@ fn _short_count_triple_quotes(line: text) -> i64:
 
 fn _check_short_grammar_line(ctx: LineContext, file: text) -> [EasyFix]:
     var fixes: [EasyFix] = []
+    val lambda_starts = _short_lambda_starts(line: ctx.line)
+    val functional_update_start = if lambda_starts.len() > 0:
+        _short_first_functional_update_start(line: ctx.line)
+    else:
+        -1
+    var candidate_index = 0
     var search_from = 0
-    while search_from < ctx.line.len():
-        val lambda_start = _find_next_collection_lambda_start(line: ctx.line, search_from: search_from)
-        if lambda_start < 0:
-            return fixes
-        if _short_line_has_functional_update_before(line: ctx.line, pos: lambda_start):
+    while candidate_index < lambda_starts.len():
+        val lambda_start = lambda_starts[candidate_index]
+        candidate_index = candidate_index + 1
+        if lambda_start < search_from:
+            continue
+        if functional_update_start >= 0 and functional_update_start < lambda_start:
             search_from = lambda_start + 1
             continue
         if _short_line_has_pipe_parenthesized_lambda_before(line: ctx.line, pos: lambda_start):
@@ -614,37 +626,33 @@ fn _check_short_grammar_line(ctx: LineContext, file: text) -> [EasyFix]:
                                         search_from = lambda_start + 1
     fixes
 
-fn _find_next_collection_lambda_start(line: text, search_from: i64) -> i64:
-    val candidate = _short_find_text_from(line: line, needle: "\\", search_from: search_from)
-    if candidate < 0:
-        return -1
-    if _short_line_has_comment_before(line: line, pos: candidate) or _short_position_is_inside_string(line: line, pos: candidate):
-        return _find_next_collection_lambda_start(line: line, search_from: candidate + 1)
-    if candidate + 1 >= line.len():
-        return -1
-    val next = line.slice(candidate + 1, candidate + 2)
-    if _short_is_identifier_start(next) or next == "(":
-        return candidate
-    _find_next_collection_lambda_start(line: line, search_from: candidate + 1)
-
-fn _short_line_has_comment_before(line: text, pos: i64) -> bool:
+fn _short_lambda_starts(line: text) -> [i64]:
+    var result: [i64] = []
     var i = 0
-    while i < pos:
-        if line.slice(i, i + 1) == "#":
-            return true
+    var in_string = false
+    while i < line.len():
+        val ch = line.slice(i, i + 1)
+        if ch == "#":
+            return result
+        if ch == "\"":
+            in_string = not in_string
+        elif not in_string and ch == "\\" and i + 1 < line.len():
+            val next = line.slice(i + 1, i + 2)
+            if _short_is_identifier_start(next) or next == "(":
+                result.push(i)
         i = i + 1
-    false
+    result
 
-fn _short_line_has_functional_update_before(line: text, pos: i64) -> bool:
+fn _short_first_functional_update_start(line: text) -> i64:
     var search_from = 0
-    while search_from < pos:
+    while search_from < line.len():
         val arrow = _short_find_text_from(line: line, needle: "->", search_from: search_from)
-        if arrow < 0 or arrow >= pos:
-            return false
+        if arrow < 0:
+            return -1
         if not _short_arrow_is_function_type_return(line: line, arrow_pos: arrow):
-            return true
+            return arrow
         search_from = arrow + 2
-    false
+    -1
 
 fn _short_line_has_pipe_parenthesized_lambda_before(line: text, pos: i64) -> bool:
     var before = pos - 1
@@ -693,16 +701,6 @@ fn _short_arrow_is_function_type_return(line: text, arrow_pos: i64) -> bool:
                 return line.slice(name_start, name_end) == "fn"
         i = i - 1
     false
-
-fn _short_position_is_inside_string(line: text, pos: i64) -> bool:
-    var i = 0
-    var in_string = false
-    while i < pos:
-        val ch = line.slice(i, i + 1)
-        if ch == "\"":
-            in_string = not in_string
-        i = i + 1
-    in_string
 
 fn _parse_method_ref_candidate(line: text, lambda_start: i64) -> Option<ShortGrammarMethodRefCandidate>:
     val colon_abs = _short_find_text_from(line: line, needle: ":", search_from: lambda_start)
