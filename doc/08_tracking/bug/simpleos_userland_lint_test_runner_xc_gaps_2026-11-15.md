@@ -13,6 +13,13 @@
    The same first error hits x86_64 test, aarch64 lint and aarch64 test, so it is target-independent (it happens in the parse phase).
 2b. **The riscv64 lint and test builds are rejected:** `BACKEND_SESSION_AUTHORITY: load rejected: BACKEND_PLUGIN_TARGET: riscv64gc-unknown-simpleos`. The cranelift backend plugin does not admit the triple, although `is_simpleos_riscv64_target` lists it.
 3. **The simple-core archive fails (x86_64):** `error=archive_part_failed:core_any_ops`, i.e. "per-file route selected but the file-worker pool produced no sealed ledger".
+   - **Status: verification-pending (2026-11-15).** Two causes were found:
+     - The real compile error was a HIR failure at `core_any_ops.spl:12:5`: `unresolved name: f64`. The source called `f64.from_bits`, a primitive static call that the pure-Simple compiler does not resolve. Fix: a pure IEEE-754 decoder that keeps -0.0 and computes pow2 by squaring.
+     - The ledger message itself came from `--clean` on the per-file pool. The shard prepass returns no ledger, and the strict route refuses that, which masked the HIR error. A second problem: in-process, `--clean` fails with "failed to remove clean cache scope" when the dir is absent (`driver_aot_native_output.spl`, `_sffi_dir_remove_all` on a missing dir). This one is an open compiler bug.
+     - Parts are now built with `--threads 1` and without `--clean`.
+     - Open compiler gaps: `f64.from_bits` should resolve, and `--clean` should accept an absent scope dir.
+     - Test: `test/01_unit/runtime/simple_core_archive_part_buildable_spec.spl`.
+     - Result: core_any_ops plus 17 other parts now build (18 of 20). The **next blocker** is `core_string`: HIR rejects `__simple_rt_string_char_code_at` and `__simple_rt_string_byte_at` as "reserved for compiler-generated text calls". This is still open.
 4. **On `main`, `runtime_native.c` calls `link()`.** SimpleOS libc does not declare it, and there are no hard links on SimpleOS; the sysroot cross-compile breaks. A local workaround was used: an ENOSYS stub.
 5. **No 32-bit SimpleOS userland exists.** The triples exist only as constants (`simpleos_target_v1.spl`: i686, armv7, riscv32imac) and LLVM-port strings. Other facts:
    - There is no i686 or armv7 `is_simpleos_*` predicate and no link function for either.
