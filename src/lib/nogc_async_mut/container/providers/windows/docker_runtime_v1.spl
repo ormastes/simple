@@ -1,7 +1,11 @@
+use std.nogc_async_mut.container.providers.windows.docker_cleanup_observation_v6.{windows_docker_cleanup_inspect_command_v6, windows_docker_cleanup_observation_v6}
+use std.nogc_async_mut.container.providers.windows.docker_progress_query_v6.windows_docker_progress_query_v6
+use std.nogc_async_mut.container.providers.windows.docker_server_environment_inspect_v5.{windows_docker_server_environment_inspect_command_v5, windows_docker_server_environment_observation_v5}
+use std.nogc_async_mut.container.providers.windows.docker_network_v6.{windows_docker_network_inspect_command_v6, windows_docker_network_observation_v6}
 use std.nogc_sync_mut.io.windows_command_domain_v4.{windows_command_origin_matches_v4, windows_command_registry_thread_v4}
 use std.nogc_async_mut.container.providers.windows.docker_progress_v2.WindowsDockerProgressV2
 use std.nogc_sync_mut.io.windows_command_owner_v2.{WindowsCommandRequestV2, windows_command_begin_v2, windows_command_step_v2, windows_command_thread_check_v2}
-use std.nogc_async_mut.container.providers.windows.docker_observation_codec_v2.{windows_docker_inspect_format_v2, windows_docker_inspect_decode_v2}
+use std.nogc_async_mut.container.providers.windows.docker_observation_codec_v2.{windows_docker_inspect_format_v2, windows_docker_inspect_decode_v2, windows_docker_observed_identity_v2}
 # Docker is a delegated Windows engine, never a rootless or VM claim.
 # SOURCE-ONLY NOT_RUN: no Windows runtime qualification is implied by fixtures.
 # Caller must persist the immutable request + operation and RuntimeIntentV1
@@ -17,7 +21,7 @@ use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{
     windows_docker_request_reason_v1, windows_docker_policy_reason_v1,
     windows_docker_request_digest_v1, windows_docker_command_v1,
     windows_docker_create_command_v1, windows_docker_args_equal_v1, windows_docker_id_v1}
-use std.common.contracts.container.runtime_v1.{RuntimeProviderV1, RuntimeProviderContractV1,
+use std.common.contracts.container.runtime_v1.{RuntimeProviderV1,
     RuntimeIdentityV1, RuntimeCommandV1, RuntimeStateV1, RuntimeOperationV1,
     RuntimeProbeV1, RuntimeIntentV1, runtime_state_empty, runtime_command_empty,
     runtime_probe_unavailable, RUNTIME_PRIVILEGE_UNKNOWN, RUNTIME_STATUS_OK,
@@ -35,10 +39,9 @@ struct WindowsDockerRecordV1:
     state: RuntimeStateV1
     create_attempted: bool
     candidate_id: text
+    native_birth_retained: bool = false
 
-pub fn windows_docker_provider_contract_v1() -> RuntimeProviderContractV1:
-    RuntimeProviderContractV1(provider_id: WINDOWS_DOCKER_ENGINE_V1, version: 1,
-        supports_recovery: true, supports_logs: true)
+pub use std.nogc_async_mut.container.providers.windows.docker_contract_v1.windows_docker_provider_contract_v1
 
 # Canonical command continuations. Aliased/copied carriers cannot rewind a
 # command stage or renew an already claimed inspection completion.
@@ -229,22 +232,33 @@ impl WindowsDockerRuntimeProviderV1:
         if not found: return Err("docker-image-repodigest-mismatch")
         Ok(true)
 
-    fn _identity(request: WindowsDockerRequestV1, native_id: text) -> RuntimeIdentityV1:
-        RuntimeIdentityV1(pod_uid: request.pod_uid, attempt: request.attempt,
-            provider_generation: self.policy.provider_generation, operation_id: request.operation_id,
-            engine: WINDOWS_DOCKER_NATIVE_ENGINE_V1, native_id: native_id, node_boot_id: self.policy.node_boot_id)
-
     me fn _observe(request: WindowsDockerRequestV1, native_id: text) -> Result<RuntimeStateV1, text>:
         if not windows_docker_id_v1(native_id): return Err("docker-exact-native-id-required")
+        if request.network != "none":
+            val query = windows_docker_network_inspect_command_v6(self.policy)?
+            val network = self._execute(query)?
+            val checked = windows_docker_network_observation_v6(self.policy, network.0)?
         val format = windows_docker_inspect_format_v2(request, self.managed_scope)
         val command = windows_docker_command_v1(self.policy, "inspect",
             ["container", "inspect", "--format", format, native_id])
         val run = self._execute(command)?
-        windows_docker_inspect_decode_v2(self.policy, request, self.managed_scope, native_id, run.0)
+        val state = windows_docker_inspect_decode_v2(self.policy, request, self.managed_scope, native_id, run.0)?
+        if request.environment.len() > 0:
+            val query = windows_docker_server_environment_inspect_command_v5(self.policy, native_id)?
+            val actual = self._execute(query)?
+            val checked = windows_docker_server_environment_observation_v5(request, native_id, actual.0)?
+        Ok(state)
 
-    me fn _guard(request: WindowsDockerRequestV1) -> Result<RuntimeStateV1, text>:
+    me fn _guard(request: WindowsDockerRequestV1, action: text = "") -> Result<RuntimeStateV1, text>:
         val index = self._binding(request)?
         val engine = self._engine()?
+        if ((action == "stop" or action == "destroy") and (request.network != "none" or request.environment.len() > 0) and
+                self.records[index].native_birth_retained):
+            val record = self.records[index]
+            val native_id = if record.state.identity.native_id != "": record.state.identity.native_id else: record.candidate_id
+            val command = windows_docker_cleanup_inspect_command_v6(self.policy, self.managed_scope, native_id)?
+            val run = self._execute(command)?
+            return windows_docker_cleanup_observation_v6(self.policy, request, self.managed_scope, native_id, run.0)
         self._observe(request, self.records[index].state.identity.native_id)
 
     me fn _success(request: WindowsDockerRequestV1, operation: text,
@@ -332,7 +346,7 @@ impl WindowsDockerRuntimeProviderV1:
     # failed inspect never substitutes for this successful empty native query.
     pub me fn absence(request: WindowsDockerRequestV1, expected: RuntimeIdentityV1) -> Result<(RuntimeOperationV1, i64), text>:
         val index = self._binding(request)?
-        val identity = self._identity(request, expected.native_id)
+        val identity = windows_docker_observed_identity_v2(self.policy, request, expected.native_id)
         if not windows_docker_id_v1(expected.native_id) or expected.pod_uid != identity.pod_uid or
                 expected.attempt != identity.attempt or expected.operation_id != identity.operation_id or
                 expected.provider_generation != identity.provider_generation or expected.engine != identity.engine or
@@ -420,7 +434,7 @@ impl WindowsDockerRuntimeProviderV1:
 
     me fn _lifecycle(request: WindowsDockerRequestV1, operation: text, force: bool,
             control_context: ContainerControlDeadlineV1? = nil) -> RuntimeOperationV1:
-        val before = match self._guard(request):
+        val before = match self._guard(request, operation):
             case Ok(value): value
             case Err(error): return self._failure(request, operation, error)
         if operation == "start" and before.phase == "running":
@@ -589,17 +603,11 @@ impl WindowsDockerRuntimeProviderV1:
 
     fn _progress_command_v2(progress: WindowsDockerProgressV2) -> WindowsDockerProgressV2:
         var next = progress
-        if next.stage == "engine" or next.stage == "engine-after":
-            next.command = windows_docker_command_v1(self.policy, "engine-info", ["info", "--format", WINDOWS_DOCKER_INFO_FORMAT_V1])
-        elif next.stage == "image":
-            next.command = windows_docker_command_v1(self.policy, "image-inspect", ["image", "inspect", "--format", WINDOWS_DOCKER_IMAGE_FORMAT_V1, next.request.image])
-        elif next.stage == "inspect" or next.stage == "inspect-after":
-            if not windows_docker_id_v1(next.native_id): return self._progress_fail_v2(next, "docker-exact-native-id-required")
-            next.command = windows_docker_command_v1(self.policy, "inspect", ["container", "inspect", "--format",
-                windows_docker_inspect_format_v2(next.request, self.managed_scope), next.native_id])
-        elif next.stage == "start":
-            next.command = windows_docker_command_v1(self.policy, "start", ["start", next.native_id])
-            next.effect_command = Some(next.command)
+        val command = windows_docker_progress_query_v6(self.policy, next.request, self.managed_scope,
+            next.stage, next.native_id, next.command)
+        if command.is_err(): return self._progress_fail_v2(next, command.unwrap_err())
+        next.command = command.unwrap()
+        if next.stage == "start": next.effect_command = Some(next.command)
         next
 
     # One reducer is used by both the existing finite owner and cooperative IO.
@@ -614,8 +622,20 @@ impl WindowsDockerRuntimeProviderV1:
         if next.stage == "engine" or next.stage == "engine-after":
             if output != "windows|" + self.policy.engine_id + "|" + self.policy.expected_kernel_version:
                 return self._progress_fail_v2(next, "docker-live-engine-identity-mismatch")
-            next.stage = if next.stage == "engine-after": "inspect-after"
-                elif next.action == "create" or next.action == "prepare": "image" else: "inspect"
+            if request.network != "none":
+                next.stage = if next.stage == "engine-after": "network-after" else: "network"
+            elif next.stage == "engine-after": next.stage = if request.environment.len() > 0: "environment-after" else: "inspect-after"
+            else: next.stage = if next.action == "create" or next.action == "prepare": "image" elif request.environment.len() > 0: "environment" else: "inspect"
+        elif next.stage == "network" or next.stage == "network-after":
+            val network = windows_docker_network_observation_v6(self.policy, run.unwrap().0)
+            if network.is_err(): return self._progress_fail_v2(next, network.unwrap_err())
+            if next.stage == "network-after":
+                next.stage = if request.environment.len() > 0: "environment-after" else: "inspect-after"
+            else: next.stage = if next.action == "create" or next.action == "prepare": "image" elif request.environment.len() > 0: "environment" else: "inspect"
+        elif next.stage == "environment" or next.stage == "environment-after":
+            val environment = windows_docker_server_environment_observation_v5(request, next.native_id, run.unwrap().0)
+            if environment.is_err(): return self._progress_fail_v2(next, environment.unwrap_err())
+            next.stage = if next.stage == "environment-after": "inspect-after" else: "inspect"
         elif next.stage == "image":
             val lines = output.split("\n")
             val expected = "windows|" + self.policy.expected_image_id + "|" + self.policy.image_os_version
@@ -629,7 +649,7 @@ impl WindowsDockerRuntimeProviderV1:
             if next.action == "prepare":
                 val digest = windows_docker_request_digest_v1(self.policy, request)
                 if digest.is_err(): return self._progress_fail_v2(next, digest.unwrap_err())
-                val state = RuntimeStateV1("prepared", self._identity(request, ""), -1, "docker-attempt-prepared-caller-persistence-required")
+                val state = RuntimeStateV1("prepared", windows_docker_observed_identity_v2(self.policy, request, ""), -1, "docker-attempt-prepared-caller-persistence-required")
                 self.records.push(WindowsDockerRecordV1(digest.unwrap(), state, false, ""))
                 next.result = Some(self._operation(request, "prepare_pod", RUNTIME_STATUS_OK, state.reason, runtime_command_empty()))
                 return next
@@ -655,6 +675,7 @@ impl WindowsDockerRuntimeProviderV1:
             if index.is_err(): return self._progress_fail_v2(next, index.unwrap_err())
             var candidate = self.records[index.unwrap()]
             candidate.candidate_id = output
+            candidate.native_birth_retained = true
             self.records[index.unwrap()] = candidate
             next.native_id = output
             next.stdout = run.unwrap().0
@@ -732,6 +753,7 @@ impl WindowsDockerRuntimeProviderV1:
             if bound.is_ok():
                 var candidate = self.records[bound.unwrap()]
                 candidate.candidate_id = result.stdout.trim()
+                candidate.native_birth_retained = true
                 self.records[bound.unwrap()] = candidate
         if current.error != "": return self._progress_accept_v2(current, Err(current.error))
         if result.limit_type != "": return self._progress_fail_v2(current, "docker-command-limit:" + result.limit_type)

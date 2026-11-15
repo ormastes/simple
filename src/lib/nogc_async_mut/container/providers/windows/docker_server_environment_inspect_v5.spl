@@ -1,0 +1,65 @@
+# Effective reserved environment only. Other image env values never leave the
+# trusted template; JSON is explicit Docker interoperability, not configuration.
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_get, json_value_keys}
+use std.common.contracts.container.runtime_v1.RuntimeCommandV1
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{WindowsDockerPolicyV1,
+    WindowsDockerRequestV1, windows_docker_id_v1, windows_docker_command_v1}
+use std.nogc_async_mut.container.providers.windows.docker_server_environment_v5.windows_docker_server_environment_options_v5
+
+pub const WINDOWS_DOCKER_SERVER_ENV_FORMAT_V5 = "{\"id\":{{{{json .Id}}}},\"environment\":[{{{{range .Config.Env}}}}{{{{$k := lower (index (split . \"=\") 0)}}}}{{{{if or (eq $k \"simple_servers_sdn\") (eq $k \"simple_server_client_scope\") (eq $k \"simple_servers_config\")}}}}{{{{json .}}}},{{{{end}}}}{{{{end}}}}null]}"
+
+pub fn windows_docker_server_environment_inspect_command_v5(policy: WindowsDockerPolicyV1,
+        native_id: text) -> Result<RuntimeCommandV1, text>:
+    if not windows_docker_id_v1(native_id): return Err("docker-server-environment-native-id-required")
+    Ok(windows_docker_command_v1(policy, "server-environment-inspect",
+        ["container", "inspect", "--format", WINDOWS_DOCKER_SERVER_ENV_FORMAT_V5, native_id]))
+
+pub fn windows_docker_server_environment_observation_v5(request: WindowsDockerRequestV1,
+        native_id: text, raw: text) -> Result<bool, text>:
+    val configured = windows_docker_server_environment_options_v5(request.environment)?
+    if request.environment.len() != 3 or not windows_docker_id_v1(native_id):
+        return Err("docker-server-environment-observation-request-invalid")
+    if raw.byte_len() == 0 or raw.byte_len() > 32768: return Err("docker-server-environment-observation-bound")
+    var quoted = false
+    var escaped = false
+    var depth = 0
+    for byte in raw.bytes():
+        if quoted:
+            if escaped: escaped = false
+            elif byte == 92: escaped = true
+            elif byte == 34: quoted = false
+        else:
+            if byte == 34: quoted = true
+            elif byte == 123 or byte == 91:
+                depth = depth + 1
+                if depth > 2: return Err("docker-server-environment-observation-depth")
+            elif byte == 125 or byte == 93: depth = depth - 1
+    val value = json_parse_value_strict(raw)?
+    if json_value_keys(value).len() != 2: return Err("docker-server-environment-observation-fields")
+    if json_value_get(value, "id") != Some(JsonValue.Str(native_id)):
+        return Err("docker-server-environment-observation-identity")
+    val entries = match json_value_get(value, "environment"):
+        case Some(JsonValue.Array(found)): found
+        case _: return Err("docker-server-environment-observation-type")
+    # Null terminator permits a constant filtered template without retaining or
+    # emitting any unrelated (possibly secret) image environment value.
+    if entries.len() != 4 or entries[3] != JsonValue.Null:
+        return Err("docker-server-environment-observed-count")
+    var seen: [text] = []
+    for index in 0..3:
+        val entry = match entries[index]:
+            case JsonValue.Str(found): found
+            case _: return Err("docker-server-environment-observed-type")
+        val at = entry.index_of("=")
+        if at <= 0: return Err("docker-server-environment-observed-shape")
+        val key = entry.substring(0, at)
+        val payload = entry.substring(at + 1, entry.byte_len())
+        if seen.contains(key.to_lower()): return Err("docker-server-environment-observed-duplicate")
+        seen.push(key.to_lower())
+        var matched = false
+        for expected in request.environment:
+            if key == expected.name:
+                if payload != expected.value: return Err("docker-server-environment-observed-value-mismatch")
+                matched = true
+        if not matched: return Err("docker-server-environment-observed-name-invalid")
+    Ok(true)
