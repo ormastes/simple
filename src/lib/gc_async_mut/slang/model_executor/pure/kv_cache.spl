@@ -34,6 +34,15 @@ fn _common_prefix(a: [i64], b: [i64]) -> i64:
         n = n + 1
     n
 
+# Positions of `prompt_ids` whose K/V rows can be reused from `cached_ids`:
+# the common prefix, but never the last prompt token (its hidden state yields
+# the first generated token). Shared with the ROCm session.
+pub fn kv_reuse_len(cached_ids: [i64], prompt_ids: [i64]) -> i64:
+    val reuse = _common_prefix(cached_ids, prompt_ids)
+    if reuse >= prompt_ids.len():
+        return prompt_ids.len() - 1
+    reuse
+
 # Evaluate ids[reuse..] on top of the cached rows [0, reuse).
 fn _extend(m: LlamaModel, s: KvSession, ids: [i64], reuse: i64) -> KvSession:
     var kv = s.kv
@@ -50,9 +59,7 @@ fn _extend(m: LlamaModel, s: KvSession, ids: [i64], reuse: i64) -> KvSession:
 
 # Greedy generation with the cache. Stops at EOS or when n_new tokens exist.
 pub fn kv_generate_greedy(m: LlamaModel, session: KvSession, prompt_ids: [i64], n_new: i64) -> KvGenResult:
-    var reuse = _common_prefix(session.cached_ids, prompt_ids)
-    if reuse >= prompt_ids.len():
-        reuse = prompt_ids.len() - 1
+    val reuse = kv_reuse_len(session.cached_ids, prompt_ids)
     var s = _extend(m, session, prompt_ids, reuse)
     var ids = prompt_ids
     var generated: [i64] = []
