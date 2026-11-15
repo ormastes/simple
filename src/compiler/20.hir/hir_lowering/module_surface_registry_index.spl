@@ -1,4 +1,6 @@
+use compiler.common.cache.module_child_selection_receipt_v1.{ModuleChildSelectionReceiptV1}
 use compiler.hir.hir_lowering.module_surface_selected_exports_v1.{module_surface_selected_exports_build_v1, module_surface_selected_exports_project_v1}
+use compiler.hir.hir_lowering.module_child_selection_v1.{module_child_select_configured_v1}
 # Frozen registry indexes and import/export route projections.
 use compiler.common.library_mode_policy_v1.{library_mode_generic_import_v1, library_mode_import_key_v1}
 
@@ -71,6 +73,14 @@ fn _module_surface_final_semantic_digest(surface: ModuleSurface, selected_digest
         val import_decl: ParserImport = surface.imports[i]
         digest = module_surface_semantic_mix(digest, "import-target", surface.import_target_names[i])
         digest = module_surface_semantic_mix(digest, "import-source", import_decl.module)
+        if i >= surface.import_child_selections_v1.len(): return ""
+        val child_selection = surface.import_child_selections_v1[i]
+        digest = module_surface_semantic_mix(digest, "child-selected", "{child_selection.selected}")
+        for field in [child_selection.configured_namespace, child_selection.selected_name,
+                child_selection.child_name, "{child_selection.child_ordinal}", child_selection.child_modifier,
+                child_selection.policy_digest, child_selection.target_digest, child_selection.target_kind,
+                child_selection.configured_route_generation]:
+            digest = module_surface_semantic_mix(digest, "child-route", field)
         digest = module_surface_semantic_mix(digest, "import-lazy", "{import_decl.is_lazy}")
         var item = surface.import_item_offsets[i]
         val item_end = surface.import_item_offsets[i + 1]
@@ -468,7 +478,8 @@ pub(package) fn module_surface_preferred_registry_name(
 pub(package) fn module_surface_route_arrays_aligned(surface: ModuleSurface) -> bool:
     if surface.import_target_indices.len() != surface.imports.len() or
        surface.import_target_names.len() != surface.imports.len() or
-       surface.import_resolution_traces.len() != surface.imports.len():
+       surface.import_resolution_traces.len() != surface.imports.len() or
+       surface.import_child_selections_v1.len() != surface.imports.len():
         return false
     if surface.import_item_offsets.len() != surface.imports.len() + 1 or
        surface.import_item_names.len() != surface.import_item_aliases.len() or
@@ -645,6 +656,7 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
         var import_target_indices: [i64] = []
         var import_target_names: [text] = []
         var import_resolution_traces: [NativeResolutionTraceV1] = []
+        var import_child_selections: [ModuleChildSelectionReceiptV1] = []
         var import_item_offsets: [i64] = [0]
         var import_item_names: [text] = []
         var import_item_aliases: [text] = []
@@ -661,8 +673,26 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
             if (item_start < 0 or item_start > item_end or
                 item_end > surface.import_item_names.len()):
                 return Err("pre-freeze import item range is invalid: surface={surface_index} import={import_index}")
-            var resolution_trace = module_surface_import_resolution_trace_with_generation_v1(
-                registry, surface, import_decl.module, stable_resolution_generation)
+            # Select the exact configured namespace-child branch before legacy
+            # flat/relative resolution. Only that branch may mint a receipt.
+            val configured_import = library_mode_import_key_v1(import_decl.module,
+                registry.library_mode, surface.module_name)
+            var child_selection = module_child_select_configured_v1(registry, configured_import)
+            # Self-file imports have an existing package redirection rule;
+            # that legacy branch cannot borrow a namespace-child receipt.
+            if child_selection.selected and child_selection.target_path == surface.canonical_path:
+                child_selection = ModuleChildSelectionReceiptV1()
+            var resolution_trace = if child_selection.selected:
+                NativeResolutionTraceV1(consumer_module_id: surface.preferred_registry_name,
+                    import_id: import_decl.module,
+                    probes: [NativeResolutionProbeV1(path: child_selection.configured_namespace, found: true),
+                        NativeResolutionProbeV1(path: child_selection.selected_name, found: true)],
+                    selected: child_selection.selected_name, selected_count: 1,
+                    dir_generation: "module-surfaces-" + stable_resolution_generation,
+                    resolver_version: NATIVE_HIR_IMPORT_RESOLVER_VERSION_V1)
+            else:
+                module_surface_import_resolution_trace_with_generation_v1(
+                    registry, surface, import_decl.module, stable_resolution_generation)
             var target_name = resolution_trace.selected
             var fallback_item_name = ""
             # The parser encodes `use a.b.item as local` as an import of
@@ -721,6 +751,7 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
             var target_index = -1
             if target_name != "":
                 target_index = module_surface_registry_index(registry, target_name)
+            import_child_selections.push(child_selection)
             import_target_indices = import_target_indices.push(target_index)
             import_target_names = import_target_names.push(target_name)
             import_resolution_traces = import_resolution_traces.push(
@@ -837,6 +868,7 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
         surface.import_target_indices = import_target_indices
         surface.import_target_names = import_target_names
         surface.import_resolution_traces = import_resolution_traces
+        surface.import_child_selections_v1 = import_child_selections
         surface.import_item_offsets = import_item_offsets
         surface.import_item_names = import_item_names
         surface.import_item_aliases = import_item_aliases

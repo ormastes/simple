@@ -1,3 +1,6 @@
+use compiler.common.cache.module_child_selection_receipt_v1.{ModuleChildSelectionReceiptV1}
+use compiler.hir.hir_lowering.module_child_binding_v1.*
+use compiler.hir.hir_lowering.module_child_selection_v1.{module_child_selection_validate_v1}
 # HIR item lowering - module, import, and bootstrap-flat lowering.
 use compiler.hir.hir_lowering._Items.module_lowering.*
 use compiler.common.library_mode_policy_v1.{library_mode_generic_import_v1,
@@ -258,19 +261,19 @@ impl HirLowering:
         var keys = imported_mod.composite_names
         var idx = 0
         while idx < keys.len():
-            self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
+            self.register_source_import_v1(imported_mod.physical_index, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
             idx = idx + 1
 
         keys = imported_mod.enum_names
         idx = 0
         while idx < keys.len():
-            self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
+            self.register_source_import_v1(imported_mod.physical_index, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
             idx = idx + 1
 
         keys = imported_mod.trait_names
         idx = 0
         while idx < keys.len():
-            self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
+            self.register_source_import_v1(imported_mod.physical_index, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
             idx = idx + 1
 
         keys = imported_mod.callable_names
@@ -286,13 +289,13 @@ impl HirLowering:
             val callable_is_private = idx < imported_mod.callable_values.len() and
                 not imported_mod.callable_values[idx].is_public
             if not (callable_is_private and self.glob_private_would_displace(keys[idx], imported_mod.module_name)):
-                self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
+                self.register_source_import_v1(imported_mod.physical_index, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
             idx = idx + 1
 
         keys = imported_mod.type_alias_names
         idx = 0
         while idx < keys.len():
-            self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
+            self.register_source_import_v1(imported_mod.physical_index, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
             idx = idx + 1
 
         keys = imported_mod.constant_names
@@ -302,7 +305,7 @@ impl HirLowering:
             val constant_is_private = idx < imported_mod.constant_values.len() and
                 not imported_mod.constant_values[idx].is_public
             if not (constant_is_private and self.glob_private_would_displace(keys[idx], imported_mod.module_name)):
-                self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
+                self.register_source_import_v1(imported_mod.physical_index, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
             idx = idx + 1
 
         # A split module can explicitly re-export names it imports. Register
@@ -321,7 +324,7 @@ impl HirLowering:
                         import_span, depth + 1, include_private_named_imports,
                         materialize_enums)
             elif export_local != export_source or not hir_module_declares_item(imported_mod, export_source):
-                self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, export_source, export_local, import_span, materialize_enums)
+                self.register_source_import_v1(imported_mod.physical_index, imported_mod_name, export_source, export_local, import_span, materialize_enums)
             route_index = route_index + 1
 
         # Facade globs: `use std.simd.*` can resolve to a tier FACADE (e.g.
@@ -427,7 +430,7 @@ impl HirLowering:
                         elif self.surface_index_for_name(glob_name) >= 0:
                             glob_row_is_module_alias = true
                     if not glob_row_is_module_alias:
-                        self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, glob_name, glob_local, import_span, materialize_enums)
+                        self.register_source_import_v1(imported_mod.physical_index, imported_mod_name, glob_name, glob_local, import_span, materialize_enums)
                     glob_it = glob_it + 1
                 glob_imp_idx = glob_imp_idx + 1
 
@@ -513,6 +516,7 @@ impl HirLowering:
             importer_surface_index = -1
         var import_idx = 0
         while import_idx < imports.len():
+            self.active_module_child_selection_v1 = ModuleChildSelectionReceiptV1()
             val imp: ParserImport = imports[import_idx]
             # Progress receipt (stage3_driver_hir_lowering_spins_after_parse_fix):
             # the last line printed names the import a stalled run is inside.
@@ -591,6 +595,13 @@ impl HirLowering:
                     import_idx = import_idx + 1
                     continue
                 val imported_surface = self.module_surfaces.surfaces[imported_index]
+                if importer_surface_index >= 0:
+                    val importing_surface = self.module_surfaces.surfaces[importer_surface_index]
+                    if import_idx < importing_surface.import_child_selections_v1.len():
+                        val selected_child = importing_surface.import_child_selections_v1[import_idx]
+                        if (selected_child.target_surface == imported_index and selected_child.selected_name == imported_key and
+                                module_child_selection_validate_v1(self.module_surfaces, selected_child) == ""):
+                            self.active_module_child_selection_v1 = selected_child
                 if self.library_mode != "" and library_mode_generic_import_v1(imp.module):
                     resolved_module_name = imported_surface.module_name
                 # Per-import item rows: the frozen importer surface's flattened
@@ -634,6 +645,7 @@ impl HirLowering:
                     val module_alias = item_aliases[item_start]
                     if module_alias != "" and not self.import_binding_or_invalid(module_alias).is_valid():
                         self.symbols.define(module_alias, SymbolKind.Module, nil,
+                        self.record_module_child_binding_v1(module_alias, "", self.active_module_child_selection_v1)
                             imp.span, Visibility.Private, false,
                             Some(imported_surface.module_name))
                     # A namespace alias also needs qualified projections of
@@ -641,27 +653,27 @@ impl HirLowering:
                     # would leak bare names and let unrelated imports win.
                     if module_alias != "":
                         for name in imported_surface.callable_names:
-                            self.register_imported_symbol(imported_index,
+                            self.register_source_import_v1(imported_index,
                                 resolved_module_name, name,
                                 module_alias + "." + name, imp.span, true)
                         for name in imported_surface.constant_names:
-                            self.register_imported_symbol(imported_index,
+                            self.register_source_import_v1(imported_index,
                                 resolved_module_name, name,
                                 module_alias + "." + name, imp.span, true)
                         for name in imported_surface.composite_names:
-                            self.register_imported_symbol(imported_index,
+                            self.register_source_import_v1(imported_index,
                                 resolved_module_name, name,
                                 module_alias + "." + name, imp.span, true)
                         for name in imported_surface.enum_names:
-                            self.register_imported_symbol(imported_index,
+                            self.register_source_import_v1(imported_index,
                                 resolved_module_name, name,
                                 module_alias + "." + name, imp.span, true)
                         for name in imported_surface.trait_names:
-                            self.register_imported_symbol(imported_index,
+                            self.register_source_import_v1(imported_index,
                                 resolved_module_name, name,
                                 module_alias + "." + name, imp.span, true)
                         for name in imported_surface.type_alias_names:
-                            self.register_imported_symbol(imported_index,
+                            self.register_source_import_v1(imported_index,
                                 resolved_module_name, name,
                                 module_alias + "." + name, imp.span, true)
                 elif item_start == item_end:
@@ -680,6 +692,7 @@ impl HirLowering:
                         # `module.member` receiver to decay into GlobalLoad.
                         if module_alias != "" and not self.import_binding_or_invalid(module_alias).is_valid():
                             self.symbols.define(module_alias, SymbolKind.Module, nil, imp.span, Visibility.Private, false, Some(imported_surface.module_name))
+                            self.record_module_child_binding_v1(module_alias, "", self.active_module_child_selection_v1)
                 else:
                     # A dotted single `use m.name as alias` reaches this branch as
                     # one aliased item whose source spells the whole path; the
@@ -745,7 +758,7 @@ impl HirLowering:
                                     # the target surface's actual declaration
                                     # arrays in THIS process.
                                     eprint("[no-exported-item] module={imp.module} item={item_name} resolved={resolved_module_name} surf_module={imported_surface.module_name} surf_idx={imported_surface.physical_index} reg_surfaces={self.module_surfaces.surfaces.len()} F={imported_surface.callable_names.len()} C={imported_surface.composite_names.len()} E={imported_surface.enum_names.len()} T={imported_surface.trait_names.len()} A={imported_surface.type_alias_names.len()} K={imported_surface.constant_names.len()} declares_linear={module_surface_declares_item(imported_surface, item_name)}")
-                        val selected_category = self.register_imported_symbol_selected_v1(imported_surface.physical_index, resolved_module_name, item_name, local_name, imp.span, true)
+                        val selected_category = self.register_source_import_selected_v1(imported_surface.physical_index, resolved_module_name, item_name, local_name, imp.span, true)
                         self.reject_explicit_private_selected_import_v1(imported_surface, item_name, selected_category, imp.span)
                         self.reject_explicit_private_import_v1(local_name, imp.span)
                         item_idx = item_idx + 1
@@ -756,6 +769,7 @@ impl HirLowering:
                 if imp.items.len() > 0:
                     self.error("missing module surface for {imp.module}", imp.span)
             import_idx = import_idx + 1
+        self.active_module_child_selection_v1 = ModuleChildSelectionReceiptV1()
 
     # This is a known-rejection check at an explicitly written selective
     # import. Dependency materialization never calls this boundary. Positive

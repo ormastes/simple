@@ -1,0 +1,142 @@
+# TDD authored before implementation. Runtime qualification pending: admitted
+# producer available to this session has native-build only, no SSpec runner.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.driver_source_file.{SourceFile, source_file_with_manifest_evidence_v1}
+use compiler.common.cache.visibility_manifest_read_v1.{visibility_manifest_reads_v1}
+use compiler.common.cache.visibility_manifest_policy_v1.{VisibilityManifestPolicyV1}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}
+use compiler.hir.hir_lowering.module_child_selection_v1.{module_child_selection_validate_v1}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.context_helpers.*
+use compiler.hir.hir_lowering.module_child_binding_v1.*
+use compiler.hir.hir_lowering._Items.module_import_resolution.*
+use compiler.hir.hir_symbol_table_methods.*
+
+fn child_receipt_registry_v1(caller_body: text = "use configured.open.{Target}\nuse configured.hidden.{Target as Hidden}\n") -> ModuleSurfacesByName:
+    val root = "/snapshot/test/pkg/__init__.spl"
+    val target = "/snapshot/test/pkg/body.spl"
+    val caller = "/snapshot/test/caller.spl"
+    val root_body = "# policy owner\n"
+    val target_body = "pub struct Target:\n    value: i64\n"
+    val inventory = {root: sha256_text(root_body), target: sha256_text(target_body), caller: sha256_text(caller_body)}
+    val evidence = visibility_manifest_reads_v1(root, "/snapshot", ["/snapshot/test/pkg"],
+        "snapshot-one", inventory, inventory).unwrap()
+    evidence.policies.push(VisibilityManifestPolicyV1(source_path: root,
+        directory_path: "/snapshot/test/pkg", coverage_root: "/snapshot/test",
+        content_sha256: inventory[root], snapshot_id: "snapshot-one", valid: true,
+        frontend_identity: "selected-frontend", parser_provider_id: "parser.simple.legacy-reference",
+        frontend_route: "advisory-selected", advisory_policy: "reference",
+        preprocessed_source_sha256: inventory[root], child_names: ["open", "hidden"],
+        child_visibilities: ["public", "private"], child_modifiers: ["pub", "pri"],
+        child_target_paths: [target, target], child_target_sha256: [inventory[target], inventory[target]],
+        child_target_kinds: ["source-file", "source-file"],
+        child_resolution_outcomes: ["snapshot-selected", "snapshot-selected"]))
+    val owner_source = source_file_with_manifest_evidence_v1(
+        SourceFile(path: root, content: root_body, module_name: "physical.pkg"), evidence)
+    val root_parsed = parse_and_build_module(root_body, root)
+    val target_parsed = parse_and_build_module(target_body, target)
+    val target_evidence = visibility_manifest_reads_v1(target, "/snapshot", ["/snapshot/test/pkg"],
+        "snapshot-one", inventory, inventory).unwrap()
+    target_evidence.policies = evidence.policies.copy()
+    val target_source = source_file_with_manifest_evidence_v1(
+        SourceFile(path: target, content: target_body, module_name: "physical.body"), target_evidence)
+    module_surfaces_from_modules({"physical.pkg": root_parsed,
+        "configured": root_parsed, "configured.open": target_parsed, "configured.hidden": target_parsed,
+        "physical.body": parse_and_build_module(target_body, target),
+        "caller": parse_and_build_module(caller_body, caller)},
+        [owner_source, SourceFile(path: root, content: root_body, module_name: "configured"),
+         target_source,
+         SourceFile(path: target, content: target_body, module_name: "configured.open"),
+         SourceFile(path: target, content: target_body, module_name: "configured.hidden"),
+         SourceFile(path: caller, content: caller_body, module_name: "caller")]).unwrap()
+
+fn child_receipt_lowering_v1(registry: ModuleSurfacesByName, caller_body: text = "use configured.open.{Target}\nuse configured.hidden.{Target as Hidden}\n") -> HirLowering:
+    val lowering = HirLowering.with_filename("/snapshot/test/caller.spl")
+    lowering.module_surfaces = registry
+    lowering.resolve_import_symbols(parse_and_build_module(
+        caller_body, "/snapshot/test/caller.spl"))
+    lowering
+
+describe "selected configured module-child provenance":
+    it "retains distinct public and private rows even when their target is identical":
+        val registry = child_receipt_registry_v1()
+        val surface = registry.surfaces[registry.index_by_name["caller"]]
+        val open = surface.import_child_selections_v1[0]
+        val hidden = surface.import_child_selections_v1[1]
+        expect(open.selected).to_equal(true)
+        expect(hidden.selected).to_equal(true)
+        expect(open.target_path).to_equal(hidden.target_path)
+        expect(open.child_ordinal).to_equal(0)
+        expect(hidden.child_ordinal).to_equal(1)
+        expect(open.child_modifier).to_equal("pub")
+        expect(hidden.child_modifier).to_equal("pri")
+        expect(module_child_selection_validate_v1(registry, open)).to_equal("")
+        expect(module_child_selection_validate_v1(registry, hidden)).to_equal("")
+        expect(surface.import_resolution_traces[0].probes[0].path).to_equal("configured")
+        expect(surface.import_resolution_traces[0].selected).to_equal(open.selected_name)
+
+    it "retains the configured namespace instead of the parser module label":
+        val registry = child_receipt_registry_v1()
+        val selected = registry.surfaces[registry.index_by_name["caller"]].import_child_selections_v1[0]
+        expect(selected.configured_namespace).to_equal("configured")
+        expect(selected.selected_name).to_equal("configured.open")
+        expect(selected.manifest_path).to_equal("/snapshot/test/pkg/__init__.spl")
+        expect(selected.configured_namespace == registry.surfaces[selected.manifest_surface].module_name).to_equal(false)
+
+    it "rejects changed child ordinal, policy, snapshot and registry generation":
+        val registry = child_receipt_registry_v1()
+        val selected = registry.surfaces[registry.index_by_name["caller"]].import_child_selections_v1[0]
+        var wrong = selected
+        wrong.child_ordinal = 1
+        expect(module_child_selection_validate_v1(registry, wrong)).to_contain("child")
+        wrong = selected
+        wrong.policy_digest = sha256_text("other policy")
+        expect(module_child_selection_validate_v1(registry, wrong)).to_contain("policy")
+        wrong = selected
+        wrong.snapshot_id = "snapshot-two"
+        expect(module_child_selection_validate_v1(registry, wrong)).to_contain("snapshot")
+        wrong = selected
+        wrong.registry_generation = selected.registry_generation + 1
+        expect(module_child_selection_validate_v1(registry, wrong)).to_contain("generation")
+        wrong = selected
+        wrong.configured_route_generation = "other configured registry"
+        expect(module_child_selection_validate_v1(registry, wrong)).to_contain("generation")
+        registry.surfaces[selected.target_surface].source_sha256_v1 = sha256_text("changed target")
+        expect(module_child_selection_validate_v1(registry, selected)).to_contain("target")
+
+    it "records actual import bindings and rejects same-ID rebinding and module reset":
+        val registry = child_receipt_registry_v1()
+        val lowering = child_receipt_lowering_v1(registry)
+        expect(lowering.selected_module_child_binding_v1("Target").child_ordinal).to_equal(0)
+        expect(lowering.selected_module_child_binding_v1("Hidden").child_ordinal).to_equal(1)
+        val id = lowering.symbols.lookup_or_invalid("Target")
+        lowering.symbols.rebind_local_type("Target", id)
+        expect(lowering.selected_module_child_binding_v1("Target").selected).to_equal(false)
+        lowering.begin_module("/snapshot/test/next.spl")
+        expect(lowering.module_child_binding_keys_v1.len()).to_equal(0)
+        expect(lowering.selected_module_child_binding_v1("Hidden").selected).to_equal(false)
+
+    it "does not replace a private selected binding with a public same-ID no-op import":
+        val body = "use configured.hidden.{Target}\nuse configured.open.{Target}\n"
+        val registry = child_receipt_registry_v1(body)
+        val lowering = child_receipt_lowering_v1(registry, body)
+        expect(lowering.selected_module_child_binding_v1("Target").child_ordinal).to_equal(1)
+        expect(lowering.selected_module_child_binding_v1("Target").child_modifier).to_equal("pri")
+
+    it "rejects a receipt when the selected frontend policy changes in the same snapshot":
+        val registry = child_receipt_registry_v1()
+        val selected = registry.surfaces[registry.index_by_name["caller"]].import_child_selections_v1[0]
+        registry.surfaces[selected.manifest_surface].visibility_manifest_evidence_v1.policies[0].frontend_identity = "different frontend"
+        expect(module_child_selection_validate_v1(registry, selected)).to_contain("policy")
+
+    it "leaves a flat legacy import unavailable when no selected parent manifest exists":
+        val source = "use legacy.{Target}\n"
+        val registry = module_surfaces_from_modules({"caller": parse_and_build_module(source, "caller.spl"),
+            "legacy": parse_and_build_module("pub struct Target:\n    value: i64\n", "legacy.spl")},
+            [SourceFile(path: "caller.spl", content: source, module_name: "caller"),
+             SourceFile(path: "legacy.spl", content: "pub struct Target:\n    value: i64\n", module_name: "legacy")]).unwrap()
+        expect(registry.surfaces[registry.index_by_name["caller"]].import_child_selections_v1[0].selected).to_equal(false)

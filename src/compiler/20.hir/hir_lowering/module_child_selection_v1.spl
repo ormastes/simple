@@ -1,0 +1,97 @@
+# Explicit configured namespace-child selection. Legacy flat aliases remain
+# unavailable; no path-to-public-child search is permitted here.
+use compiler.common.cache.module_child_selection_receipt_v1.{ModuleChildSelectionReceiptV1}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}
+use compiler.hir.hir_lowering.module_surface_registry_index.{module_surface_registry_index}
+use compiler.hir.hir_lowering.module_surface_manifest_evidence_v1.{module_surface_manifest_ready_reason_v1, module_surface_manifest_digest_v1}
+
+pub(package) fn module_child_select_configured_v1(registry: ModuleSurfacesByName,
+        configured_name: text) -> ModuleChildSelectionReceiptV1:
+    # This branch selects an exact namespace binding and then its named child.
+    # It does not replay a path-derived or relative legacy lookup after the fact.
+    val dot = configured_name.last_index_of(".")
+    if dot <= 0 or configured_name.starts_with("."):
+        return ModuleChildSelectionReceiptV1()
+    val namespace = configured_name.substring(0, dot)
+    val child = configured_name.substring(dot + 1)
+    val parent_index = module_surface_registry_index(registry, namespace)
+    val target_index = module_surface_registry_index(registry, configured_name)
+    if parent_index < 0 or target_index < 0 or registry.generation <= 0:
+        return ModuleChildSelectionReceiptV1()
+    val parent = registry.surfaces[parent_index]
+    val target = registry.surfaces[target_index]
+    val evidence = parent.visibility_manifest_evidence_v1
+    if module_surface_manifest_ready_reason_v1(parent.canonical_path, evidence) != "":
+        return ModuleChildSelectionReceiptV1()
+    # Only the policy owned by the selected parent binding can choose this row.
+    # A sibling/ancestor policy with the same target cannot stand in for it.
+    for policy in evidence.policies:
+        if policy.source_path != parent.canonical_path: continue
+        if policy.content_sha256 != parent.source_sha256_v1: return ModuleChildSelectionReceiptV1()
+        for ordinal in 0..policy.child_names.len():
+            if policy.child_names[ordinal] != child: continue
+            if policy.child_resolution_outcomes[ordinal] != "snapshot-selected":
+                return ModuleChildSelectionReceiptV1()
+            # Check the selected row's target, never choose a row by target.
+            if (policy.child_target_paths[ordinal] != target.canonical_path or
+                    target.source_sha256_v1 != policy.child_target_sha256[ordinal] or
+                    target.visibility_manifest_evidence_v1.snapshot_id != evidence.snapshot_id):
+                return ModuleChildSelectionReceiptV1()
+            val digest = module_surface_manifest_digest_v1(parent.canonical_path, evidence)
+            if digest == "": return ModuleChildSelectionReceiptV1()
+            return ModuleChildSelectionReceiptV1(selected: true, reason: "selected",
+                configured_namespace: namespace, selected_name: configured_name,
+                manifest_surface: parent_index, manifest_path: policy.source_path,
+                child_ordinal: ordinal, child_name: child, child_modifier: policy.child_modifiers[ordinal],
+                policy_digest: digest, snapshot_id: evidence.snapshot_id,
+                target_surface: target_index, target_path: target.canonical_path,
+                target_digest: policy.child_target_sha256[ordinal], target_kind: policy.child_target_kinds[ordinal],
+                configured_route_generation: registry.configured_route_generation_v1,
+                registry_generation: registry.generation)
+    ModuleChildSelectionReceiptV1()
+
+pub fn module_child_selection_validate_v1(registry: ModuleSurfacesByName,
+        receipt: ModuleChildSelectionReceiptV1) -> text:
+    """Validate a selected receipt against its frozen owner; empty means current
+    provenance only. The caller must still authorize all ancestor/export hops."""
+    if not receipt.selected: return "module-child-route-unavailable"
+    if (not registry.frozen or receipt.registry_generation != registry.generation or
+            receipt.configured_route_generation == "" or
+            receipt.configured_route_generation != registry.configured_route_generation_v1):
+        return "module-child-generation-mismatch"
+    if (receipt.manifest_surface < 0 or receipt.manifest_surface >= registry.surfaces.len() or
+            receipt.target_surface < 0 or receipt.target_surface >= registry.surfaces.len()):
+        return "module-child-owner-missing"
+    if (module_surface_registry_index(registry, receipt.configured_namespace) != receipt.manifest_surface or
+            module_surface_registry_index(registry, receipt.selected_name) != receipt.target_surface or
+            receipt.selected_name != receipt.configured_namespace + "." + receipt.child_name):
+        return "module-child-namespace-mismatch"
+    val parent = registry.surfaces[receipt.manifest_surface]
+    val evidence = parent.visibility_manifest_evidence_v1
+    if (receipt.snapshot_id != evidence.snapshot_id or
+            receipt.snapshot_id != registry.surfaces[receipt.target_surface].visibility_manifest_evidence_v1.snapshot_id):
+        return "module-child-snapshot-mismatch"
+    if receipt.manifest_path != parent.canonical_path: return "module-child-manifest-mismatch"
+    if module_surface_manifest_ready_reason_v1(parent.canonical_path, evidence) != "":
+        return "module-child-policy-unavailable"
+    val digest = module_surface_manifest_digest_v1(parent.canonical_path, evidence)
+    if digest == "" or digest != receipt.policy_digest: return "module-child-policy-mismatch"
+    for policy in evidence.policies:
+        if policy.source_path != receipt.manifest_path: continue
+        if policy.content_sha256 != parent.source_sha256_v1: return "module-child-policy-source-mismatch"
+        val ordinal = receipt.child_ordinal
+        if ordinal < 0 or ordinal >= policy.child_names.len(): return "module-child-ordinal-invalid"
+        if (policy.child_names[ordinal] != receipt.child_name or
+                policy.child_modifiers[ordinal] != receipt.child_modifier or
+                policy.child_resolution_outcomes[ordinal] != "snapshot-selected"):
+            return "module-child-selection-mismatch"
+        if (policy.child_target_paths[ordinal] != receipt.target_path or
+                registry.surfaces[receipt.target_surface].canonical_path != receipt.target_path or
+                policy.child_target_sha256[ordinal] != receipt.target_digest or
+                registry.surfaces[receipt.target_surface].source_sha256_v1 != receipt.target_digest or
+                policy.child_target_kinds[ordinal] != receipt.target_kind):
+            return "module-child-target-mismatch"
+        return ""
+    "module-child-policy-missing"
+
+export module_child_selection_validate_v1
