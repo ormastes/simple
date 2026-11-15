@@ -176,6 +176,11 @@ link hosted. Precedent for doing it in both: `rt_text_cmp_any`.
   `tree-rss-policy.shs` and the inherited-override check in
   `product-frontend-policy.shs` to move together (open follow-up).
 - Record: `doc/08_tracking/bug/stage2_compiler_tests_frontend_shard_rss_2026-10-25.md`.
+- (2026-11-15) Host key `worker_mem_mib` is a MIR SHARD figure: it prices only
+  the MIR shard mode. Per-file pool HIR/MIR prices take the per-file default
+  (scaled to host); `SIMPLE_{HIR,MIR}_SHARD_WORKER_KB` still win everywhere
+  (`file_worker_pool_phase_price_kb_v1`). Record:
+  `doc/08_tracking/bug/phase3_per_file_pool_refused_26gib_worker_price_windows_2026-11-15.md`.
 
 ## Stage 4 live projection is in-process on Linux (2026-10-20)
 
