@@ -131,7 +131,7 @@ class LeanBuilder:
         self.emit("inductive {name} where")
         self.indent()
         for (var_name, params) in variants:
-            if params.is_empty():
+            if params.len() == 0:
                 self.emit("| {var_name}")
             else:
                 val param_str = params.join(" → ")
@@ -190,7 +190,7 @@ class LeanBuilder:
         # Add imports
         for import_mod in self.imports:
             output = "{output}import {import_mod}\n"
-        if not self.imports.is_empty():
+        if self.imports.len() != 0:
             output = "{output}\n"
 
         # Add lines
@@ -235,11 +235,11 @@ impl FunctionContract:
         )
 
     fn has_contracts() -> bool:
-        (not self.preconditions.is_empty() or not self.postconditions.is_empty() or
-            not self.error_postconditions.is_empty())
+        (self.preconditions.len() != 0 or self.postconditions.len() != 0 or
+            self.error_postconditions.len() != 0)
 
     fn has_any_contract_clause() -> bool:
-        (self.has_contracts() or not self.invariants.is_empty() or
+        (self.has_contracts() or self.invariants.len() != 0 or
             self.decreases_measure != "")
 
     fn to_lean_spec(builder: LeanBuilder, params: [(text, text)], ret_type: text):
@@ -248,7 +248,7 @@ impl FunctionContract:
             return
 
         var prefix = ""
-        if not self.preconditions.is_empty():
+        if self.preconditions.len() != 0:
             val pre = self.preconditions.join(" ∧ ")
             prefix = "({pre}) → "
             var satisfiable = pre
@@ -268,9 +268,9 @@ impl FunctionContract:
         var actual_call = self.function_name
         if param_str != "": actual_call = "{self.function_name} {param_str}"
         var normal = "True"
-        if not self.postconditions.is_empty(): normal = self.postconditions.join(" ∧ ")
+        if self.postconditions.len() != 0: normal = self.postconditions.join(" ∧ ")
         var spec = ""
-        if self.error_postconditions.is_empty():
+        if self.error_postconditions.len() == 0:
             spec = "{prefix}(let result : {ret_type} := {actual_call}; {normal})"
         else:
             val error = self.error_postconditions.join(" ∧ ")
@@ -293,7 +293,7 @@ impl FunctionContract:
     ):
         if not self.has_contracts(): return
         var implication = ""
-        if not self.preconditions.is_empty():
+        if self.preconditions.len() != 0:
             val pre = self.preconditions.join(" ∧ ")
             implication = "({pre}) → "
             var satisfiable = pre
@@ -313,9 +313,9 @@ impl FunctionContract:
         var actual_call = self.function_name + " __fv2_pre_state"
         if param_names != "": actual_call = actual_call + " " + param_names
         var normal = "True"
-        if not self.postconditions.is_empty(): normal = self.postconditions.join(" ∧ ")
+        if self.postconditions.len() != 0: normal = self.postconditions.join(" ∧ ")
         var outcome_spec = ""
-        if self.error_postconditions.is_empty():
+        if self.error_postconditions.len() == 0:
             outcome_spec = "(let execution : ({ret_type} × ({state_type})) := {actual_call}; " +
                 "let result : {ret_type} := execution.1; {normal})"
         else:
@@ -337,7 +337,7 @@ impl FunctionContract:
         params: [(text, text)],
         state_type: text
     ):
-        if self.state_invariant_predicates.is_empty(): return
+        if self.state_invariant_predicates.len() == 0: return
         val binders = params.map("({_.0} : {_.1})").join(" ")
         val param_names = params.map(_.0).join(" ")
         val quantified = if binders == "": "" else: "∀ {binders}, "
@@ -363,7 +363,7 @@ impl FunctionContract:
         builder.emit_blank()
 
     fn to_lean_pure_state_spec(builder: LeanBuilder, params: [(text, text)]):
-        if self.invariants.is_empty(): return
+        if self.invariants.len() == 0: return
         val binders = params.map("({_.0} : {_.1})").join(" ")
         val param_names = params.map(_.0).join(" ")
         var actual_call = self.function_name
@@ -431,7 +431,7 @@ impl FunctionContract:
             builder.emit("simp [equal]")
             builder.dedent()
             region_index = region_index + 1
-        val frame_facts = if outside_names.is_empty(): ""
+        val frame_facts = if outside_names.len() == 0: ""
             else: ", " + outside_names.join(", ")
         builder.emit("simp [{self.function_name}{frame_facts}]")
         builder.dedent()
@@ -533,7 +533,7 @@ fn hir_contract_expr_to_lean(
 fn hir_contract_state_predicate(expr: HirExpr) -> Result<StateInvariantPredicateV1, CompileError>:
     match expr.kind:
         case HirExprKind.Call(callee, args, _):
-            if not args.is_empty(): return Err(compileerror_backend_error(
+            if args.len() != 0: return Err(compileerror_backend_error(
                 BackendKind.Lean,
                 "lean-backend: effectful invariant state predicate must be one zero-argument ghost function call"))
             match callee.kind:
@@ -647,7 +647,7 @@ fn lean_module_state_predicate_names(
         val owner = module.functions[symbol]
         val owner_manifest = verification_region_effect_manifest_v1(owner)
         if not owner_manifest.closed(): continue
-        if owner_manifest.effects.is_empty(): continue
+        if owner_manifest.effects.len() == 0: continue
         val bindings = verification_state_predicate_bindings_from_module_v1(
             module, owner)
         if bindings.diagnostic != "": return Err(compileerror_backend_error(
@@ -918,11 +918,11 @@ class LeanBackend:
         val state_semantics = verification_pure_state_semantics_v1(mir_fn)
         val region_manifest = verification_region_effect_manifest_v1(mir_fn)
         val has_region_effects = (region_manifest.closed() and
-            not region_manifest.effects.is_empty())
+            region_manifest.effects.len() != 0)
         var stateful_state_type = ""
         if self.level.includes_contracts():
             contract = function_contract_from_hir(name, mir_fn.verification_contract, param_aliases)?
-            if has_region_effects and not contract.invariants.is_empty():
+            if has_region_effects and contract.invariants.len() != 0:
                 if contract.state_invariant_predicates.len() != contract.invariants.len():
                     return Err(compileerror_backend_error(BackendKind.Lean,
                         "lean-backend: effectful invariant requires a zero-argument ghost predicate call to bind explicit state"))
@@ -937,7 +937,7 @@ class LeanBackend:
             if has_region_effects and contract.decreases_measure != "":
                 return Err(compileerror_backend_error(BackendKind.Lean,
                     "lean-backend: effectful recursion requires state-threaded termination lowering"))
-            if not contract.invariants.is_empty():
+            if contract.invariants.len() != 0:
                 if not state_semantics.closed():
                     return Err(compileerror_backend_error(BackendKind.Lean,
                         "lean-backend: invariant requires exact pure state semantics: {state_semantics.diagnostic}"))
@@ -995,7 +995,7 @@ class LeanBackend:
                     builder, params, stateful_state_type)
             else:
                 contract.to_lean_spec(builder, params, ret_type)
-                if not contract.invariants.is_empty():
+                if contract.invariants.len() != 0:
                     contract.to_lean_pure_state_spec(builder, params)
                 if state_semantics.closed():
                     contract.to_lean_pure_frame_spec(builder, params)
@@ -1039,7 +1039,7 @@ impl LeanExportResult:
             Err("lean-backend: failed to write Lean module `{self.module_name}` to {path}")
 
     fn has_unproven_obligations() -> bool:
-        not self.proof_obligations.is_empty()
+        self.proof_obligations.len() != 0
 
 # ============================================================================
 # Proof Tactic Selection
