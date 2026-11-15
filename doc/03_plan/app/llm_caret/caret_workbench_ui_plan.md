@@ -54,7 +54,7 @@ All evidence is the seed interpreter on Windows. **No row is native-verified; ev
 
 | CU | Status | Evidence / gap | Resume |
 |---|---|---|---|
-| CU-001 | partial | `roster_order_spec` 8/8; `fleet_transport_spec` 5/5: loopback second host rows join the roster (snapshot poll via process); no 50-agent/5-host scale run, no attention grouping, no real ssh run | scale spec on a Linux host over ssh |
+| CU-001 | partial | `roster_order_spec` 8/8; `fleet_transport_spec` 5/5: loopback second host rows join the roster (snapshot poll via process); `fleet_gaps_spec` 6/6 (interpreter, loopback): 50 agents/5 hosts with attention-first grouping, input forwarded to a remote session (loopback only), credential-safe host row in the TUI roster; no real ssh run, ssh hosts cannot receive input, TUI roster clips 50 rows to region height | scale spec on a Linux host over ssh |
 | CU-002 | met (interpreter) | `caret_workbench_generation_spec`: 1,000 seeded ops, 3 sessions, >20 restarts, 0 wrong sends (#9330) | native run |
 | CU-003 | met (interpreter) | `caret_workbench_e2e_spec` 2/2 ("unbound terminal"), `caret_workbench_prod_spec` 2/2 | native run with `LLM_CARET_NATIVE_BIN` |
 | CU-004 | met (interpreter) | `caret_workbench_detach_spec` 1/1 (real children survive detach/switch) | native run |
@@ -63,7 +63,7 @@ All evidence is the seed interpreter on Windows. **No row is native-verified; ev
 | CU-007 | met (interpreter) | `deactivation_hygiene_spec` 10/10 | native run |
 | CU-008 | met (interpreter) | `caret_observer_silent_child_live_spec` (slow) 1/1, 626 s: real silent child with 22 heartbeats never classified as hang, ends "quiet" (#9352); heartbeats folded directly | native run; `provider_adapters` maps Claude PostToolUse/PostToolUseFailure to JobHeartbeat (`provider_heartbeat_spec` 3/3, RED 2 of 3 first); Codex has no heartbeat signal; a stale mapped heartbeat past stall_ms can read as suspected-stall on an idle session (unverified) |
 | CU-009 | met (interpreter) | `observer_live_spec` approval -> "needs you" in TUI+GUI, replay no dup | native run |
-| CU-010 | partial | lifecycle folded at render; `fleet_transport_spec`: failed host poll shows last rows Disconnected/Lost (loopback, interpreter); other 4 states not re-verified over a fleet | native + real ssh run |
+| CU-010 | partial | lifecycle folded at render; `fleet_transport_spec`: failed host poll shows last rows Disconnected/Lost (loopback, interpreter); `fleet_gaps_spec`: bounded reconnect backoff returns a host to connected, and NotStarted/Starting/Running/Stopping/Exited/Failed round-trip over the fleet wire (interpreter, loopback; not classifier-verified per state, not native) | native + real ssh run |
 | CU-011 | met (interpreter) | `trace_view_snapshot_spec` 9/9: list/show/refs equal the canonical service for the same snapshot (#9329) | native run; UI selection of show/refs |
 | CU-012 | met (interpreter) | `ide_view_provider` badge rollup specs | native run |
 | CU-013 | met (interpreter) | `impact_corpus_spec` 3/3: exact incoming/outgoing reverse-impact edges over a feature→req→design→spec→code→bug corpus (#9342) | native run |
