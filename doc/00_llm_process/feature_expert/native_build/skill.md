@@ -357,3 +357,7 @@ Each unit child used to run `worker_admitted_edges_v1` over the whole inventory,
 - phase 1 reads every source;
 - line 271's advice scan runs over all contents;
 - `worker_unit_pick_v1` stats a `.pick`/`.claim` file for each entry that is already taken.
+
+## Tuple-returning runtime externs (2026-11-15)
+
+A stdlib `extern fn` call is FOREIGN origin; MIR reads a tuple result with raw `GetField` loads, but the process-run/cpuid owners return a registered SplArray. Both AOT backends route those calls to the raw-block `*_tuple` facades through ONE table, `runtime_tuple_result_facade(name, word_count)` in `src/compiler/50.mir/text_extern_abi.spl` (runtime and foreign origin; source origin keeps its callee). A new tuple-returning extern must be added there or to the named unrouted list in `test/01_unit/compiler/backend/runtime_tuple_result_facade_census_spec.spl`. Oracle fixture: `test/fixtures/native_process_run_tuple_abi/main.spl`. Record: `doc/08_tracking/bug/native_tuple_returning_externs_without_facade_2026-11-15.md`.
