@@ -1,0 +1,73 @@
+# Simple CLI - bug-closure-check command (plan section 5.3 `bug closure-check`)
+# Read-only: prints the closure receipt and E-BUG-* codes for one bug without
+# changing the bug database. Exit 0 = allowed, 1 = blocked, 2 = usage error.
+
+use std.cli.cli_util (get_cli_args)
+use app.bug_resolve.closure_cli.{BugDbPathV1, BugClosureRequestV1, bug_closure_bug_state_v1,
+    bug_closure_cli_evaluate, bug_closure_argument_problem_v1, bug_closure_render_v1}
+use app.bug.closure_gate.{BugIdV1, SnapshotDigestV1, TestCaseIdV1, ClosureRationaleV1,
+    BugClosureDispositionV1, BugClosureVerdictV1, bug_closure_disposition_parse_v1}
+
+val BUG_DB_PATH = "doc/08_tracking/bug/bug_db.sdn"
+
+fn print_help():
+    print "Usage: simple bug-closure-check --id=<id> [--disposition=<d>] [--reproducer=<spec>] [--prevention=<spec>] [--rationale=<text>] [--source-head=<rev>]"
+    print ""
+    print "Evaluate the bug closure gate without writing. Exit 0 allowed, 1 blocked, 2 usage error."
+
+fn parse_flag(args: [text], prefix: text) -> text:
+    for arg in args:
+        if arg.starts_with(prefix):
+            return arg[prefix.len():]
+    ""
+
+fn _optional_case(raw: text) -> TestCaseIdV1?:
+    if raw == "": None else: Some(TestCaseIdV1(value: raw))
+
+fn main() -> i64:
+    val args = get_cli_args()
+    for arg in args:
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+    val id = parse_flag(args, "--id=")
+    if id == "":
+        print "Error: --id is required"
+        print_help()
+        return 2
+    val disposition_raw = parse_flag(args, "--disposition=")
+    var disposition = BugClosureDispositionV1.Fixed
+    if disposition_raw != "":
+        match bug_closure_disposition_parse_v1(disposition_raw):
+            case Some(value): disposition = value
+            case None:
+                print "Error: --disposition must be one of fixed, closed, triage, duplicate, invalid, wontfix, deferred"
+                return 2
+    val db_path = BugDbPathV1(value: BUG_DB_PATH)
+    val bug_state = match bug_closure_bug_state_v1(db_path, BugIdV1(value: id)):
+        case Ok(value): value
+        case Err(reason):
+            print "Error: {reason}"
+            return 2
+    val source_head_raw = parse_flag(args, "--source-head=")
+    val source_head: SnapshotDigestV1? = if source_head_raw == "": None else: Some(SnapshotDigestV1(value: source_head_raw))
+    val request = BugClosureRequestV1(bug: BugIdV1(value: id), disposition: disposition,
+        reproducer: _optional_case(parse_flag(args, "--reproducer=")),
+        prevention: _optional_case(parse_flag(args, "--prevention=")),
+        rationale: ClosureRationaleV1(value: parse_flag(args, "--rationale=")),
+        source_head: source_head, bug_state: bug_state)
+    val argument_problem = bug_closure_argument_problem_v1(request)
+    if argument_problem != "":
+        print "closure bug={id} verdict=blocked"
+        print "  {argument_problem}"
+        return 1
+    val evaluation = match bug_closure_cli_evaluate(request, db_path):
+        case Ok(value): value
+        case Err(reason):
+            print "Error: {reason}"
+            return 2
+    for line in bug_closure_render_v1(evaluation):
+        print line
+    if evaluation.receipt.verdict == BugClosureVerdictV1.Allowed:
+        return 0
+    1
