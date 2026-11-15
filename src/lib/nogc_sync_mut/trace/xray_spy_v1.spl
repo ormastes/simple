@@ -1,0 +1,134 @@
+# XRay shared wrapper V1: ONE pure-Simple interface over the per-OS backends,
+# and ONE spy (log) + profile built on it, so both behave identically on Linux
+# and Windows.
+#
+# The interface is composition of what the backends already expose:
+#   XrayLlvmLeafV1   (xray_llvm_adapter_v1)  install / enable site
+#                    (patch_function) / disable site (unpatch_function) / close
+#   XrayEdgeSourceV1 (here)                  drain edges / site names
+# Backends:
+#   Linux   - any XrayLlvmLeafV1 (compiler-rt host leaf, native sled leaf):
+#             its handler writes the channel directly, so drain is a no-op;
+#             names come from the caller's map.
+#   Windows - XrayWinFlagLeafV1 (flag-guard slots + in-DLL ring): drain moves
+#             ring records into the channel; names come from the DLL table.
+#
+# Spy and profile read the SAME drained event list: log_lines() renders it,
+# profile() folds it with trace_profile_fold_v1. No per-OS branch exists below
+# the backend constructors.
+#
+# Concurrency: XraySpyV1 is the adapter's serialized control-plane owner
+# (quiescent mode, as XrayLlvmAdapterV1); no lock. The hot path stays the
+# lockless channel CAS of observer_native_channel_v1.
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_event_codec_v1.{trace_event_decode_v1}
+use std.common.trace.observer_profile_v1.{TraceProfileV1, trace_profile_fold_v1}
+use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_ptr_read_u8}
+use std.nogc_sync_mut.trace.observer_native_channel_v1.*
+use std.nogc_sync_mut.trace.xray_llvm_adapter_v1.*
+use std.nogc_sync_mut.trace.xray_win_flag_leaf_v1.{XrayWinFlagLeafV1, xray_win_site_name_v1}
+
+pub trait XrayEdgeSourceV1:
+    # Move backend-buffered edges into the published channel; count moved.
+    me drain() -> i64
+    # 1-based site id -> function name, "" when unknown.
+    fn site_name(id: i64) -> text
+
+pub class XrayLinuxEdgeSourceV1:
+    names: [text]
+
+impl XrayEdgeSourceV1 for XrayLinuxEdgeSourceV1:
+    me drain() -> i64:
+        0
+    fn site_name(id: i64) -> text:
+        if id < 1 or id > self.names.len(): return ""
+        self.names[id - 1]
+
+pub class XrayWinEdgeSourceV1:
+    leaf: XrayWinFlagLeafV1
+
+impl XrayEdgeSourceV1 for XrayWinEdgeSourceV1:
+    me drain() -> i64:
+        self.leaf.drain()
+    fn site_name(id: i64) -> text:
+        xray_win_site_name_v1(self.leaf.port, id)
+
+# The shared wrapper. leaf and edges of one backend share the same instance.
+pub class XrayBackendV1:
+    leaf: XrayLlvmLeafV1
+    edges: XrayEdgeSourceV1
+
+impl XrayBackendV1:
+    static fn linux(leaf: XrayLlvmLeafV1, names: [text]) -> XrayBackendV1:
+        XrayBackendV1(leaf: leaf, edges: XrayLinuxEdgeSourceV1(names: names))
+
+    static fn windows(leaf: XrayWinFlagLeafV1) -> XrayBackendV1:
+        XrayBackendV1(leaf: leaf, edges: XrayWinEdgeSourceV1(leaf: leaf))
+
+pub class XraySpyV1:
+    backend: XrayBackendV1
+    adapter: XrayLlvmAdapterV1
+    capacity: i64
+    arena: i64
+    session: TraceSessionV1
+    events: [TraceEventV1]
+
+impl XraySpyV1:
+    static fn create(backend: XrayBackendV1, module_instance: u64, capacity: i64) -> XraySpyV1:
+        XraySpyV1(backend: backend, adapter: XrayLlvmAdapterV1.create(module_instance),
+            capacity: capacity, arena: 0,
+            session: TraceSessionV1(slot: 0, incarnation: 0u64, generation: 0u64), events: [])
+
+    # prepare -> fresh channel for this generation -> start. Events reset.
+    me enable(config: TraceConfigV1, selection: TraceSelectionV1) -> Result<TraceSessionV1, TraceFailureV1>:
+        val prepared = self.adapter.prepare(self.backend.leaf, config, selection)?
+        val bytes = trace_native_channel_bytes_v1(self.capacity)
+        val raw = rt_alloc(bytes + 8)
+        val arena = raw + ((8 - (raw % 8)) % 8)
+        val status = unsafe(capabilities: [ffi]):
+            trace_native_channel_initialize_v1(arena, bytes, self.capacity, prepared.incarnation, 1)
+        if status != TRACE_NATIVE_CHANNEL_OK_V1: return Err(TraceFailureV1.ResourceExhausted)
+        self.session = self.adapter.start(self.backend.leaf, prepared, arena)?
+        self.arena = arena
+        self.events = []
+        Ok(self.session)
+
+    # Drain the backend, then poll + decode every channel record. Count added.
+    me collect() -> i64:
+        if self.arena == 0: return 0
+        self.backend.edges.drain()
+        val raw = rt_alloc(96 + 8)
+        val output = raw + ((8 - (raw % 8)) % 8)
+        var n = 0
+        unsafe(capabilities: [ffi]):
+            while trace_native_channel_poll_into_v1(self.arena, output, 96) == TRACE_NATIVE_CHANNEL_OK_V1:
+                var bytes: [u8] = []
+                for offset in 0..96:
+                    bytes.push((rt_ptr_read_u8(output, offset) & 255) as u8)
+                match trace_event_decode_v1(bytes):
+                    case Ok(event):
+                        self.events.push(event)
+                        n = n + 1
+                    case Err(_): ()
+        n
+
+    # Collect what is pending, then quiescent stop through the adapter.
+    me disable() -> Result<TraceSessionStateV1, TraceFailureV1>:
+        self.collect()
+        self.adapter.request_stop(self.backend.leaf, self.session)
+
+    # Spy: one "enter|exit <name>" line per drained edge.
+    fn log_lines() -> [text]:
+        var out: [text] = []
+        for event in self.events:
+            val name = self.backend.edges.site_name(event.function_id as i64)
+            if event.kind == TraceEventKindV1.Entry: out.push("enter {name}")
+            elif event.kind == TraceEventKindV1.Exit or event.kind == TraceEventKindV1.TailExit:
+                out.push("exit {name}")
+        out
+
+    # Profile: the same events folded into per-function calls/time/depth.
+    fn profile() -> TraceProfileV1:
+        trace_profile_fold_v1(self.events)
+
+export XrayEdgeSourceV1, XrayLinuxEdgeSourceV1, XrayWinEdgeSourceV1, XrayBackendV1, XraySpyV1
