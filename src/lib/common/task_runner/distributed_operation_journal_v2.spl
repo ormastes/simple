@@ -17,7 +17,7 @@ use std.common.contracts.distributed_control_codec_v2.distributed_encode_operati
 use std.nogc_sync_mut.database.wal.{WalEntry, WalEntryType}
 use std.nogc_sync_mut.database.wal_segmented.{database_wal_current_v1,
     database_wal_revision_open_v1, database_wal_segment_read_strict_v1, database_wal_commit_v1,
-    database_wal_object_v1, database_wal_publish_v1, database_wal_checkpoint_commit_v1}
+    database_wal_object_v1, database_wal_publish_v1, database_wal_checkpoint_commit_v1, DatabaseWalRevisionV1}
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_atomic_write, file_read_regular_no_follow_bounded, file_exists, file_create_exclusive, secure_temp_dir, file_publish_noreplace}
 use std.nogc_sync_mut.io_runtime.{file_delete, dir_remove}
 use std.nogc_sync_mut.io.dir_entry_ops.{directory_create_private}
@@ -212,7 +212,7 @@ fn operation_replay_snapshot_v2(root: text, authority_digest: text,
     var origins: Dict<text, DistributedOperationHistoryV2> = {}
     var checkpoint_sequence: i64 = 0
     while cursor != "":
-        val revision = operation_stored_result_v2(database_wal_revision_open_v1(
+        val revision: DatabaseWalRevisionV1 = operation_stored_result_v2(database_wal_revision_open_v1(
             root + "/database-wal", cursor, store), turn, cursor)?
         if revision.database_identity != authority_digest: return Err("OPERATION_WAL_AUTHORITY_CHANGED")
         if expected_last >= 0 and revision.last_sequence != expected_last: return Err("OPERATION_WAL_SEQUENCE_GAP")
@@ -222,9 +222,9 @@ fn operation_replay_snapshot_v2(root: text, authority_digest: text,
         if revision.checkpoint_digest != "":
             if retention_profile.is_none(): return Err("OPERATION_CHECKPOINT_PROFILE_REQUIRED")
             val profile = retention_profile.unwrap()
-            val manifest = operation_stored_result_v2(database_wal_object_v1(root + "/database-wal",
+            val manifest: text = operation_stored_result_v2(database_wal_object_v1(root + "/database-wal",
                 revision.checkpoint_digest, store), turn, revision.checkpoint_digest)?
-            val checkpoint = operation_stored_result_v2(distributed_operation_checkpoint_decode_v2(manifest,
+            val checkpoint: OperationCheckpointSnapshotV2 = operation_stored_result_v2(distributed_operation_checkpoint_decode_v2(manifest,
                 \digest: operation_stored_result_v2(database_wal_object_v1(root + "/database-wal",
                     digest, store), turn, digest)), turn, revision.checkpoint_digest)?
             if (checkpoint.authority_digest != authority_digest or checkpoint.base_commit != revision.parent or
@@ -244,7 +244,7 @@ fn operation_replay_snapshot_v2(root: text, authority_digest: text,
             checkpoint_sequence = revision.last_sequence
             expected_last = 0
             break
-        val entries = operation_stored_result_v2(database_wal_segment_read_strict_v1(
+        val entries: [WalEntry] = operation_stored_result_v2(database_wal_segment_read_strict_v1(
             root + "/database-wal", revision, store), turn, revision.segment_digest)?
         endpoints[revision.digest] = revision.last_sequence
         var index = entries.len()
@@ -294,7 +294,7 @@ fn operation_assessment_held_v3(owner: DistributedOperationJournalV2,
     val checked = operation_owner_check_v2(owner, turn)?
     val before = operation_current_for_owner_v2(owner, turn)?
     if before != owner.revision: return Err("OPERATION_JOURNAL_REVISION_STALE")
-    val plan = operation_stored_result_v2(planned, turn, owner.revision)?
+    val plan: OperationAssessmentPlanV3 = operation_stored_result_v2(planned, turn, owner.revision)?
     var records: [DistributedOperationAssessmentRecordV3] = []
     for reference in plan.references:
         val payload = operation_stored_result_v2(operation_assessment_read_v3(owner.root,
@@ -314,7 +314,7 @@ fn operation_history_batch_held_v2(owner: DistributedOperationJournalV2,
     val held = operation_owner_check_v2(owner, turn)?
     val before = operation_current_for_owner_v2(owner, turn)?
     if before != owner.revision: return Err("OPERATION_JOURNAL_REVISION_STALE")
-    val snapshot = operation_stored_result_v2(operation_replay_snapshot_v2(owner.root, owner.authority_digest,
+    val snapshot: OperationReplaySnapshotV2 = operation_stored_result_v2(operation_replay_snapshot_v2(owner.root, owner.authority_digest,
         owner.maximum_events, owner.windows_store, owner.retention_profile, turn, owner.revision), turn, owner.revision)?
     val still_held = operation_owner_check_v2(owner, turn)?
     val after = operation_current_for_owner_v2(owner, turn)?
