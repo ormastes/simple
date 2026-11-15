@@ -174,17 +174,18 @@ fn check_fit_with_available(model_bytes: i64, overhead_bytes: i64, headroom_byte
 # backend opens the file, so the exact KV size
 # (2 * n_layers * n_ctx * n_kv_heads * head_dim * 2 bytes, f16) cannot be
 # computed here. Instead: KV bytes = n_ctx * kv_bytes_per_token, with
-# kv_bytes_per_token = model_bytes / 8192 clamped to [64 KiB, 512 KiB]. Checked
-# against real shapes: Qwen2.5-1.5B Q4 (~1 GB file) is 28 KiB/token vs 128 KiB
-# here; Llama-2-7B MHA Q4 (~3.8 GB) is 512 KiB/token vs 475 KiB; Llama-3-70B
-# (GQA) is 320 KiB/token vs the 512 KiB cap. Plus a fixed 512 MiB for compute
-# buffers. A 1.5B Q4 model at n_ctx 4096 therefore needs ~1 GiB, not 6 GiB.
+# kv_bytes_per_token = model_bytes / 32768 clamped to [16 KiB, 512 KiB]. Checked
+# against real shapes: Qwen2.5-1.5B Q4 (~1 GB file) is 28 KiB/token vs 32 KiB
+# here; Qwen2.5-7B Q4 (~4.4 GB) is 56 KiB vs 134 KiB; Llama-3-8B (GQA) 128 KiB vs 150 KiB; Llama-3-70B
+# (GQA) 320 KiB vs the 512 KiB cap. Not covered: MHA models (Llama-2-7B is 512 KiB
+# vs 116 KiB), which are rare now and still bounded by the headroom. Plus 512 MiB for compute
+# buffers. A 1.5B Q4 model at n_ctx 4096 therefore needs ~0.6 GiB, not 6 GiB.
 fn estimate_runtime_overhead_bytes(model_bytes: i64, n_ctx: i64) -> i64:
     val kib = 1024
     val compute_slack = 512 * 1024 * 1024
-    var per_token = model_bytes / 8192
-    if per_token < 64 * kib:
-        per_token = 64 * kib
+    var per_token = model_bytes / 32768
+    if per_token < 16 * kib:
+        per_token = 16 * kib
     if per_token > 512 * kib:
         per_token = 512 * kib
     var ctx = n_ctx

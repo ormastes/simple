@@ -27,7 +27,7 @@ when it drives cuBLAS/FlashAttention rather than writing GEMMs.
 Caret side: providers `slang` (HTTP) and `slang_local` (in-process) in
 `src/app/llm_caret/provider.spl`; model root config in `config.spl`
 (`SLANG_MODEL_ROOT`).
-`slang_local` sends the conversation as chat frames (`slang_generate_chat`, the model's own chat template, stops at its end-of-turn token); the old raw transcript made the model role-play "Assistant:" turns to the token cap. Admission overhead is `estimate_runtime_overhead_bytes(model_bytes, ENGINE_N_CTX)` (`memory_budget.spl`; KV = n_ctx * clamp(model_bytes/8192, 64..512 KiB) + 512 MiB), ~1 GiB for a 1.5B Q4 model at 4096 ctx.
+`slang_local` sends the conversation as chat frames (`slang_generate_chat`, the model's own chat template, stops at its end-of-turn token); the old raw transcript made the model role-play "Assistant:" turns to the token cap. Admission overhead is `estimate_runtime_overhead_bytes(model_bytes, ENGINE_N_CTX)` (`memory_budget.spl`; KV = n_ctx * clamp(model_bytes/32768, 16..512 KiB) + 512 MiB), ~0.6 GiB for a 1.5B Q4 model at 4096 ctx.
 
 ## Things that will bite you
 
