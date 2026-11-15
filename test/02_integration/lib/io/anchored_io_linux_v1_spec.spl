@@ -1,0 +1,69 @@
+# SOURCE_AUTHORED_NOT_RUN. Requires real Linux x86_64/aarch64 libc statx.
+# No owner, workspace, mutation or launch qualification is inferred here.
+use std.spec.{describe, it, expect}
+@when(os="linux"):
+use std.nogc_sync_mut.io.anchored_io_linux_v1.*
+use std.nogc_sync_mut.io.host_identity_store_abi_v1.{free, openat, close}
+use std.nogc_sync_mut.io.volatile_ops.volatile_read_u8
+
+describe "Extracted stateless anchored Linux IO mechanisms":
+    it "REQ-ANCHORED-IO-001 preserves native architecture flag constants":
+        @when(arch="x86_64"):
+        expect(anchored_linux_directory_flags_v1()).to_equal(720896)
+        expect(anchored_linux_file_flags_v1()).to_equal(657408)
+        @elif(arch="aarch64"):
+        expect(anchored_linux_directory_flags_v1()).to_equal(573440)
+        expect(anchored_linux_file_flags_v1()).to_equal(559104)
+        @else:
+        expect(anchored_linux_directory_flags_v1()).to_equal(0)
+        expect(anchored_linux_file_flags_v1()).to_equal(0)
+        @end
+
+    it "REQ-ANCHORED-IO-002 rejects embedded NUL and oversized pathname bytes":
+        expect(anchored_linux_name_v1("a\u0000b")).to_equal(0)
+        expect(anchored_linux_name_v1("a".repeat(4096))).to_equal(0)
+
+    it "REQ-ANCHORED-IO-003 retains empty native names for descriptor observation":
+        val memory = anchored_linux_name_v1("")
+        var terminator: i64 = -1
+        if memory != 0:
+            terminator = volatile_read_u8(memory)
+            free(memory)
+        expect(memory > 0).to_equal(true)
+        expect(terminator).to_equal(0)
+
+    it "REQ-ANCHORED-IO-004 preserves multibyte bytes and the terminating zero":
+        val memory = anchored_linux_name_v1("é")
+        var observed: [i64] = []
+        if memory != 0:
+            for index in 0..3: observed.push(volatile_read_u8(memory + index))
+            free(memory)
+        expect(memory > 0).to_equal(true)
+        expect(observed).to_equal([195, 169, 0])
+
+    it "REQ-ANCHORED-IO-005 observes a real retained root through AT_EMPTY_PATH":
+        val name = anchored_linux_name_v1("/")
+        var fd: i64 = -1
+        if name != 0:
+            fd = openat(-100, name, anchored_linux_directory_flags_v1(), 0u32) as i64
+            free(name)
+        # All native resources are consumed before any assertion can abort.
+        val held = anchored_linux_metadata_v1(fd, "", true)
+        val named = anchored_linux_metadata_v1(-100, "/", false)
+        val closed = if fd >= 0: close(fd as i32) else: -1
+        expect(fd >= 0).to_equal(true)
+        expect(closed).to_equal(0)
+        expect(held.is_ok()).to_equal(true)
+        expect(named.is_ok()).to_equal(true)
+        val actual = held.unwrap()
+        val current = named.unwrap()
+        expect(actual.identity.len()).to_equal(16)
+        expect(actual.revision.len()).to_equal(48)
+        expect(actual.identity).to_equal(current.identity)
+        expect(actual.mode & 61440u32).to_equal(16384u32)
+
+    it "REQ-ANCHORED-IO-006 reports a real invalid descriptor failure":
+        val result = anchored_linux_metadata_v1(-1, "", true)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal("anchored-io-metadata")
+@end
