@@ -272,7 +272,10 @@ On-device verification (absolute oracles, NOT `eval OK` which ≠ painted):
 ## Pixel-compare resolution rule (owner, 2026-11-15)
 
 - **Never lower resolution to meet a perf budget or to make a compare pass.**
-  Downscaling, a smaller viewport, a lower DPI, blur or widened tolerance that
+  Low resolution itself is the problem, on BOTH sides: the Simple render AND
+  the reference capture (Chrome, Skia). A low-res reference is as invalid as a
+  low-res Simple render. Downscaling, a smaller viewport, a lower DPI, blur or
+  widened tolerance that
   hides a real difference is a defect, not a fix. Fix the renderer or the perf.
 - **Text compares:** a rasterized vector (outline) font must be rendered at
   **300 DPI or more** (CSS device scale >= 3.125, i.e. 16px text >= 50 device px)
