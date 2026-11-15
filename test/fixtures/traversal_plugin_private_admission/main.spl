@@ -2,6 +2,8 @@
 # this fixture's public key; never overwrite the developer's real trust root.
 # argv: actual dependency-free provider.so, fresh absolute scratch directory.
 use app.io.cli_ops.{get_args}
+use app.io._CliCompile.traversal_plugin_composition_v1.{cli_traversal_plugin_create_driver_v1,
+    cli_traversal_plugin_cache_dir_v1}
 use std.nogc_sync_mut.concurrent.thread.{ThreadHandle, thread_spawn_with_args}
 use std.common.sdn.value.{SdnValue}
 use std.common.sdn.encode.{sdn_encode_canonical}
@@ -13,7 +15,7 @@ use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded_bytes, fi
 use std.nogc_sync_mut.sffi.dynlib_exact_admission_v1.{dynlib_admit_exact_v1}
 use std.nogc_sync_mut.sffi.dynamic.{provider_lifetime_register_bound_v1,
     provider_lifetime_begin_bound_v1, provider_lifetime_end_v1}
-use compiler.common.driver_compile_options.{TraversalPluginProviderRequestV1, traversal_plugin_provider_request_v1}
+use compiler.common.driver_compile_options.{TraversalPluginProviderRequestV1, traversal_plugin_provider_request_v1, driver_core_compile_options_default}
 use compiler.common.cache_contract.aspect_plugin_model_v1.*
 use compiler.common.cache_contract.traversal_plugin_selection_v1.*
 use compiler.loader.traversal_plugin_host_trust_v1.{traversal_plugin_host_trust_root_resolve_v1}
@@ -93,13 +95,32 @@ fn main() -> i32:
     val forged = TraversalPluginSelectionV1(provider_token: generic as i64, canonical_identity: identity)
     assert(traversal_plugin_selection_validate_v1(forged).is_err())
     assert(traversal_plugin_selection_validate_request_v1(forged, request).is_err())
+    var options = driver_core_compile_options_default()
+    options.traversal_plugin_request_v1 = Some(request)
+    assert(cli_traversal_plugin_create_driver_v1(options, nil, Some(forged)).is_err())
+    assert(cli_traversal_plugin_cache_dir_v1(scratch + "/cache", Some(request), Some(forged)).is_err())
+    assert(cli_traversal_plugin_create_driver_v1(options, nil, nil).is_err())
     # The only positive path reads fixed host trust, verifies signature and maps exact bytes.
     val selected = traversal_plugin_selection_load_v1(request).unwrap()
     assert(selected.canonical_identity == identity)
+    val driver = cli_traversal_plugin_create_driver_v1(options, nil, Some(selected)).unwrap()
+    assert(driver.ctx.options.traversal_plugin_resolved_identity_v1 == identity)
+    assert(driver.ctx.options.traversal_plugin_request_v1.unwrap().provider_id == request.provider_id)
+    assert(driver.ctx.aop_traversal_plugin_selection_v1.unwrap().provider_token == selected.provider_token)
+    assert(driver.ctx.config["traversal_plugin_identity_v1"] == identity)
+    assert(cli_traversal_plugin_cache_dir_v1(scratch + "/cache", Some(request), Some(selected)).unwrap() ==
+        scratch + "/cache/traversal-" + sha256_text(identity))
     assert(traversal_plugin_selection_validate_request_v1(selected, request).unwrap().provider_id == request.provider_id)
     assert(traversal_plugin_selection_validate_v1(selected).unwrap().provider_code_digest == "sha256:" + code_hex)
     val changed = traversal_plugin_provider_request_v1(request.provider_id, scratch + "/other.sdn", signature_path).unwrap()
     assert(traversal_plugin_selection_validate_request_v1(selected, changed).is_err())
+    var changed_options = driver_core_compile_options_default()
+    changed_options.traversal_plugin_request_v1 = Some(changed)
+    assert(cli_traversal_plugin_create_driver_v1(changed_options, nil, Some(selected)).is_err())
+    assert(cli_traversal_plugin_cache_dir_v1(scratch + "/cache", Some(changed), Some(selected)).is_err())
+    val ordinary = driver_core_compile_options_default()
+    assert(cli_traversal_plugin_create_driver_v1(ordinary, nil, Some(selected)).is_err())
+    assert(cli_traversal_plugin_cache_dir_v1(scratch + "/cache", nil, nil).unwrap() == scratch + "/cache")
     val corrupt = TraversalPluginSelectionV1(..selected, canonical_identity: identity + "x")
     assert(traversal_plugin_selection_validate_v1(corrupt).is_err())
     assert(traversal_plugin_selection_validate_v1(TraversalPluginSelectionV1(
