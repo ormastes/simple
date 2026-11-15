@@ -1,0 +1,419 @@
+# Shared SSH identity and immutable server pins through the retained store.
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use app.orchestrator.host_identity_public_v1.{HostPublicKeyV1, host_identity_public_parse_v1}
+use app.orchestrator.host_identity_public_v1.{host_identity_pin_check_v1, host_identity_known_hosts_validate_v1}
+use app.orchestrator.host_identity_key_v1.{host_identity_key_generate_v1, host_identity_private_public_v1}
+use std.common.config_core.server_context_types_v1.{ServerRecordV1, server_name_valid_v1, server_record_validate_v1}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.nogc_sync_mut.io.host_identity_store_v1.*
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
+use std.common.crypto.sha256.sha256_text
+use std.common.crypto.secure_memory.secure_zero_u8_slots
+use std.common.text_bytes.bytes_to_text
+use std.nogc_sync_mut.io.stdin_command_v1.stdin_command_path_valid_v1
+
+pub struct HostIdentityProjectionReceiptV1:
+    fields: Dict<text, SdnValue>
+    available: bool
+    exit_code: i64
+
+# Retained native storage names are not automatically external SSH paths.
+# Preserve the observed operation facts; never strip a GLOBAL?? authority.
+pub fn host_identity_projection_receipt_v1(fields: Dict<text, SdnValue>,
+        observed: Result<text, text>, path_field: text) -> HostIdentityProjectionReceiptV1:
+    var output: Dict<text, SdnValue> = {}
+    for key in fields.keys():
+        if key != path_field: output[key] = fields[key]
+    match observed:
+        case Ok(path):
+            if not stdin_command_path_valid_v1(path):
+                output["transportProjectionUnavailable"] = SdnValue.Bool(true)
+                output["transportProjectionReason"] = SdnValue.String("unsupported-native-path")
+                return HostIdentityProjectionReceiptV1(fields: output, available: false, exit_code: 1)
+            output[path_field] = SdnValue.String(path)
+            output["transportProjectionUnavailable"] = SdnValue.Bool(false)
+            HostIdentityProjectionReceiptV1(fields: output, available: true, exit_code: 0)
+        case Err(reason):
+            output["transportProjectionUnavailable"] = SdnValue.Bool(true)
+            if reason == "identity-store-transport-projection-unavailable":
+                output["transportProjectionReason"] = SdnValue.String(reason)
+                return HostIdentityProjectionReceiptV1(fields: output, available: false, exit_code: 0)
+            output["transportProjectionReason"] = SdnValue.String("retained-path-unavailable")
+            output["projectionValidationUnconfirmed"] = SdnValue.Bool(true)
+            HostIdentityProjectionReceiptV1(fields: output, available: false, exit_code: 1)
+
+pub fn host_identity_reply_v1(fields: Dict<text, SdnValue>, exit_code: i64) -> OrchestratorValidationReplyV1:
+    var output = fields
+    output["version"] = SdnValue.Int(1)
+    output["kind"] = SdnValue.String("orchestration-host-identity")
+    output["authorized"] = SdnValue.Bool(false)
+    output["enrolled"] = SdnValue.Bool(false)
+    OrchestratorValidationReplyV1(exit_code: exit_code, output: sdn_encode_canonical(SdnValue.Dict(output)))
+
+pub fn host_identity_failure_v1(code: text, exit_code: i64) -> OrchestratorValidationReplyV1:
+    host_identity_reply_v1({"status": SdnValue.String("rejected"), "code": SdnValue.String(code)}, exit_code)
+
+fn host_identity_options_v1(args: [text]) -> Result<Dict<text, text>, text>:
+    if args.len() < 1 or args.len() > 11 or args.len() % 2 != 1:
+        return Err("host-identity-usage")
+    var result: Dict<text, text> = {}
+    var index = 1
+    while index < args.len():
+        val option = args[index]
+        if (option != "--public-key-file" and option != "--auth-ref" and option != "--trust-ref" and
+                option != "--server" and option != "--expected-fingerprint" and option != "--name" and
+                option != "--store-root"):
+            return Err("host-identity-unknown-option")
+        if result.contains_key(option) or args[index + 1] == "" or args[index + 1].byte_len() > 4096:
+            return Err("host-identity-invalid-option")
+        result[option] = args[index + 1]
+        index = index + 2
+    Ok(result)
+
+fn host_identity_exact_options_v1(options: Dict<text, text>, names: [text]) -> bool:
+    if options.len() != names.len(): return false
+    for name in names:
+        if not options.contains_key(name): return false
+    true
+
+fn host_identity_reference_check_v1(auth_ref: text, trust_ref: text) -> Result<(), text>:
+    server_record_validate_v1(ServerRecordV1(name: "identity", transport: "ssh", host: "localhost", port: 22,
+        container_host: "", auth_ref: auth_ref, tls_ref: trust_ref, remote_executable: "/bin/true"))?
+    Ok(())
+
+# Pure command admission exposes omitted versus explicit naming without opening
+# a store or sampling time/entropy; the command consumes this same result.
+pub fn host_identity_generate_arguments_v1(args: [text]) -> Result<Dict<text, text>, text>:
+    val options = host_identity_options_v1(args)?
+    if args[0] != "key-generate": return Err("host-identity-generate-usage")
+    if (not host_identity_exact_options_v1(options, ["--store-root", "--auth-ref"]) and
+            not host_identity_exact_options_v1(options, ["--store-root", "--auth-ref", "--name"])):
+        return Err("host-identity-generate-usage")
+    if options.contains_key("--name"):
+        if options["--name"].byte_len() < 1 or options["--name"].byte_len() > 256:
+            return Err("host-identity-name-invalid")
+    match host_identity_reference_check_v1(options["--auth-ref"], "trust://generation-validation"):
+        case Err(_): return Err("host-identity-auth-reference")
+        case Ok(_): ()
+    Ok(options)
+
+fn host_identity_public_path_valid_v1(path: text) -> bool:
+    if path.byte_len() < 2 or path.byte_len() > 4096 or not path.ends_with(".pub"): return false
+    val normalized = path.replace("\\", "/")
+    var absolute = normalized.starts_with("/")
+    @when(os="windows"):
+    if normalized.byte_len() > 3 and normalized.byte_at(1) == 58 and normalized.byte_at(2) == 47:
+        val drive = normalized.byte_at(0)
+        if (drive >= 65 and drive <= 90) or (drive >= 97 and drive <= 122): absolute = true
+    @end
+    if not absolute: return false
+    for scalar in normalized.chars():
+        if scalar < " " or scalar > "~": return false
+    val components = normalized.split("/")
+    for index in 1..components.len():
+        if components[index] == "" or components[index] == "." or components[index] == "..": return false
+    true
+
+pub fn host_identity_registration_v1(server: text, auth_ref: text,
+        public_key: HostPublicKeyV1) -> OrchestratorValidationReplyV1:
+    if not server_name_valid_v1(server): return host_identity_failure_v1("host-identity-server-name", 2)
+    match host_identity_reference_check_v1(auth_ref, "trust://registration-validation"):
+        case Err(_): return host_identity_failure_v1("host-identity-auth-reference", 2)
+        case Ok(_): ()
+    # Revalidate caller-supplied public structs so no private payload can enter
+    # the export through a fabricated HostPublicKeyV1 value.
+    val parsed = match host_identity_public_parse_v1(public_key.public_key):
+        case Err(reason): return host_identity_failure_v1(reason, 2)
+        case Ok(value): value
+    host_identity_reply_v1({"status": SdnValue.String("registration-request-exported"),
+        "server": SdnValue.String(server), "authRef": SdnValue.String(auth_ref),
+        "publicKey": SdnValue.String(parsed.public_key), "fingerprint": SdnValue.String(parsed.fingerprint),
+        "proofOfPossession": SdnValue.String("not-performed"), "sent": SdnValue.Bool(false),
+        "serverGrantRequired": SdnValue.Bool(true)}, 0)
+
+# Every store path, including errors, closes once. Any unresolved retained
+# owner travels only in the process-local reply; no peer can fabricate it.
+pub fn host_identity_finish_v1(fields: Dict<text, SdnValue>, exit_code: i64,
+        owner: HostIdentityStoreV1) -> OrchestratorValidationReplyV1:
+    val closed = host_identity_store_close_v1(owner)
+    var output = fields
+    if not closed.completed or closed.owner != nil:
+        val pending = closed.owner != nil
+        output["status"] = SdnValue.String(if pending: "cleanup-required" else: "cleanup-unconfirmed")
+        output["cleanupPending"] = SdnValue.Bool(pending)
+        output["code"] = SdnValue.String(if pending: "host-identity-store-cleanup-required" else: "host-identity-store-cleanup-unconfirmed")
+        var reply = host_identity_reply_v1(output, 1)
+        reply.host_identity_cleanup = closed.owner
+        return reply
+    output["cleanupPending"] = SdnValue.Bool(false)
+    host_identity_reply_v1(output, exit_code)
+
+pub fn host_identity_store_error_v1(code: text, owner: HostIdentityStoreV1) -> OrchestratorValidationReplyV1:
+    host_identity_finish_v1({"status": SdnValue.String("rejected"), "code": SdnValue.String(code)}, 1, owner)
+
+pub fn host_identity_open_failure_v1(opened: HostIdentityStoreOpenTurnV1) -> OrchestratorValidationReplyV1:
+    if opened.owner != nil:
+        return host_identity_store_error_v1("host-identity-store-open", opened.owner.unwrap())
+    host_identity_failure_v1("host-identity-store-open", 1)
+
+fn host_identity_public_fields_v1(public_key: HostPublicKeyV1, status: text) -> Dict<text, SdnValue>:
+    {"status": SdnValue.String(status), "publicKey": SdnValue.String(public_key.public_key),
+        "fingerprint": SdnValue.String(public_key.fingerprint),
+        "proofOfPossession": SdnValue.String("not-performed"), "pinned": SdnValue.Bool(false)}
+
+fn host_identity_decode_private_v1(mut bytes: [u8]) -> Result<HostPublicKeyV1, text>:
+    val parsed = host_identity_private_public_v1(bytes)
+    val wipe = secure_zero_u8_slots(bytes)
+    if not wipe.verified(): return Err("host-identity-key-buffer-wipe")
+    parsed
+
+fn host_identity_generate_command_v1(options: Dict<text, text>) -> OrchestratorValidationReplyV1:
+    val opened = host_identity_store_open_v1(options["--store-root"])
+    if not opened.ready or opened.owner == nil or opened.cleanup_pending or opened.error != "":
+        return host_identity_open_failure_v1(opened)
+    var owner = opened.owner.unwrap()
+    val leaf = sha256_text(options["--auth-ref"]) + ".key"
+    val initial = host_identity_store_read_v1(owner, leaf, 4096)
+    owner = initial.owner
+    if initial.error != "" or initial.cleanup_pending:
+        return host_identity_store_error_v1("host-identity-store-read", owner)
+    if not initial.absent:
+        if initial.bytes == nil: return host_identity_store_error_v1("host-identity-store-read", owner)
+        var bytes = initial.bytes.unwrap()
+        val public_key = match host_identity_decode_private_v1(bytes):
+            case Err(reason): return host_identity_store_error_v1(reason, owner)
+            case Ok(value): value
+        var fields = host_identity_public_fields_v1(public_key, "identity-existing")
+        fields["authRef"] = SdnValue.String(options["--auth-ref"])
+        fields["identityRef"] = SdnValue.String(options["--auth-ref"])
+        fields["identityExists"] = SdnValue.Bool(true)
+        fields["publicationObserved"] = SdnValue.Bool(false)
+        val projection = host_identity_projection_receipt_v1(fields, host_identity_store_path_v1(owner, leaf), "identityPath")
+        return host_identity_finish_v1(projection.fields, projection.exit_code, owner)
+    if initial.bytes != nil: return host_identity_store_error_v1("host-identity-store-absence", owner)
+    # Private root admission and established absence precede time/OS entropy.
+    val name: Option<text> = if options.contains_key("--name"): Some(options["--name"]) else: nil
+    var generated = match host_identity_key_generate_v1(name, time_sample_unix_micros_or_failure()):
+        case Err(reason): return host_identity_store_error_v1(reason, owner)
+        case Ok(value): value
+    val checked = host_identity_private_public_v1(generated.private_file)
+    if checked.is_err() or checked.unwrap().public_key != generated.public_key.public_key:
+        val wiped = secure_zero_u8_slots(generated.private_file)
+        return host_identity_store_error_v1("host-identity-private-consistency", owner)
+    val published = host_identity_store_publish_v1(owner, leaf, generated.private_file)
+    owner = published.owner
+    val wiped = secure_zero_u8_slots(generated.private_file)
+    if not wiped.verified() or published.cleanup_pending or published.error != "":
+        val observed = published.publication == HostIdentityStorePublicationV1.Published
+        var fields: Dict<text, SdnValue> = {"status": SdnValue.String(if observed: "identity-created-unconfirmed" else: "identity-publication-uncertain"),
+            "identityRef": SdnValue.String(options["--auth-ref"]), "publicationObserved": SdnValue.Bool(observed),
+            "fileSynced": SdnValue.Bool(published.file_synced), "namespaceSynced": SdnValue.Bool(published.namespace_synced),
+            "code": SdnValue.String(if not wiped.verified(): "host-identity-key-buffer-wipe" else: "host-identity-store-publication-uncertain")}
+        if observed:
+            fields["publicKey"] = SdnValue.String(generated.public_key.public_key)
+            fields["fingerprint"] = SdnValue.String(generated.public_key.fingerprint)
+            fields["identityExists"] = SdnValue.Bool(true)
+        return host_identity_finish_v1(fields, 1, owner)
+    if published.publication == HostIdentityStorePublicationV1.Existing:
+        # Another creator won. Return its actual public identity, never ours.
+        val actual = host_identity_store_read_v1(owner, leaf, 4096)
+        owner = actual.owner
+        if actual.error != "" or actual.cleanup_pending or actual.absent or actual.bytes == nil:
+            return host_identity_store_error_v1("host-identity-store-existing-read", owner)
+        var bytes = actual.bytes.unwrap()
+        val public_key = match host_identity_decode_private_v1(bytes):
+            case Err(reason): return host_identity_store_error_v1(reason, owner)
+            case Ok(value): value
+        generated.public_key = public_key
+    elif published.publication != HostIdentityStorePublicationV1.Published or not published.file_synced:
+        return host_identity_store_error_v1("host-identity-store-publication-uncertain", owner)
+    val status = if published.publication == HostIdentityStorePublicationV1.Existing: "identity-existing" else: "identity-created"
+    var fields = host_identity_public_fields_v1(generated.public_key, status)
+    fields["authRef"] = SdnValue.String(options["--auth-ref"])
+    fields["identityRef"] = SdnValue.String(options["--auth-ref"])
+    fields["identityExists"] = SdnValue.Bool(true)
+    fields["publicationObserved"] = SdnValue.Bool(published.publication == HostIdentityStorePublicationV1.Published)
+    fields["fileSynced"] = SdnValue.Bool(published.file_synced)
+    fields["namespaceSynced"] = SdnValue.Bool(published.namespace_synced)
+    if published.publication == HostIdentityStorePublicationV1.Published:
+        fields["label"] = SdnValue.String(generated.label)
+    val projection = host_identity_projection_receipt_v1(fields, host_identity_store_path_v1(owner, leaf), "identityPath")
+    return host_identity_finish_v1(projection.fields, projection.exit_code, owner)
+
+fn host_identity_stored_public_command_v1(options: Dict<text, text>, registration: bool) -> OrchestratorValidationReplyV1:
+    val opened = host_identity_store_open_v1(options["--store-root"])
+    if not opened.ready or opened.owner == nil or opened.cleanup_pending or opened.error != "":
+        return host_identity_open_failure_v1(opened)
+    val read = host_identity_store_read_v1(opened.owner.unwrap(), sha256_text(options["--auth-ref"]) + ".key", 4096)
+    val owner = read.owner
+    if read.error != "" or read.cleanup_pending or read.absent or read.bytes == nil:
+        return host_identity_store_error_v1("host-identity-store-key-unavailable", owner)
+    var bytes = read.bytes.unwrap()
+    val public_key = match host_identity_decode_private_v1(bytes):
+        case Err(reason): return host_identity_store_error_v1(reason, owner)
+        case Ok(value): value
+    if registration:
+        var fields = host_identity_public_fields_v1(public_key, "registration-request-exported")
+        fields["server"] = SdnValue.String(options["--server"])
+        fields["authRef"] = SdnValue.String(options["--auth-ref"])
+        fields["serverGrantRequired"] = SdnValue.Bool(true)
+        fields["sent"] = SdnValue.Bool(false)
+        return host_identity_finish_v1(fields, 0, owner)
+    host_identity_finish_v1(host_identity_public_fields_v1(public_key, "public-key-inspected"), 0, owner)
+
+fn host_identity_pin_command_v1(options: Dict<text, text>, candidate: HostPublicKeyV1) -> OrchestratorValidationReplyV1:
+    val opened = host_identity_store_open_v1(options["--store-root"])
+    if not opened.ready or opened.owner == nil or opened.cleanup_pending or opened.error != "":
+        return host_identity_open_failure_v1(opened)
+    var owner = opened.owner.unwrap()
+    val leaf = sha256_text(options["--trust-ref"]) + ".hosts"
+    val alias = options["--server"]
+    val proposed = alias + " " + candidate.public_key + "\n"
+    val read = host_identity_store_read_v1(owner, leaf, 4096)
+    owner = read.owner
+    if read.error != "" or read.cleanup_pending:
+        return host_identity_store_error_v1("host-identity-store-pin-read", owner)
+    var file_synced = false
+    var namespace_synced = false
+    var publication_observed = false
+    var actual: [u8] = []
+    if read.absent:
+        if read.bytes != nil: return host_identity_store_error_v1("host-identity-store-absence", owner)
+        val published = host_identity_store_publish_v1(owner, leaf, proposed.bytes())
+        owner = published.owner
+        if published.cleanup_pending or published.error != "":
+            val observed = published.publication == HostIdentityStorePublicationV1.Published
+            var fields: Dict<text, SdnValue> = {"status": SdnValue.String("server-pin-publication-unconfirmed"),
+                "pinRef": SdnValue.String(options["--trust-ref"]), "publicationObserved": SdnValue.Bool(observed),
+                "fileSynced": SdnValue.Bool(published.file_synced), "namespaceSynced": SdnValue.Bool(published.namespace_synced),
+                "code": SdnValue.String("host-identity-store-publication-uncertain")}
+            if observed: fields["fingerprint"] = SdnValue.String(candidate.fingerprint)
+            return host_identity_finish_v1(fields, 1, owner)
+        if published.publication == HostIdentityStorePublicationV1.Published and published.file_synced:
+            actual = proposed.bytes()
+            file_synced = published.file_synced
+            namespace_synced = published.namespace_synced
+            publication_observed = true
+        elif published.publication == HostIdentityStorePublicationV1.Existing:
+            val existing = host_identity_store_read_v1(owner, leaf, 4096)
+            owner = existing.owner
+            if existing.error != "" or existing.cleanup_pending or existing.absent or existing.bytes == nil:
+                return host_identity_store_error_v1("host-identity-store-existing-read", owner)
+            actual = existing.bytes.unwrap()
+        else:
+            return host_identity_store_error_v1("host-identity-store-publication-uncertain", owner)
+    else:
+        if read.bytes == nil: return host_identity_store_error_v1("host-identity-store-pin-read", owner)
+        actual = read.bytes.unwrap()
+    val existing = bytes_to_text(actual)
+    val existing_key = match host_identity_known_hosts_validate_v1(existing, alias):
+        case Err(reason): return host_identity_store_error_v1(reason, owner)
+        case Ok(value): value
+    match host_identity_pin_check_v1(existing_key.public_key, candidate.public_key, options["--expected-fingerprint"]):
+        case Err(reason): return host_identity_store_error_v1(reason, owner)
+        case Ok(_): ()
+    val fields: Dict<text, SdnValue> = {"status": SdnValue.String("server-key-pinned"),
+        "server": SdnValue.String(alias), "hostKeyAlias": SdnValue.String(alias),
+        "trustRef": SdnValue.String(options["--trust-ref"]), "pinRef": SdnValue.String(options["--trust-ref"]),
+        "fingerprint": SdnValue.String(candidate.fingerprint), "pinned": SdnValue.Bool(true),
+        "publicationObserved": SdnValue.Bool(publication_observed),
+        "fileSynced": SdnValue.Bool(file_synced), "namespaceSynced": SdnValue.Bool(namespace_synced)}
+    val projection = host_identity_projection_receipt_v1(fields, host_identity_store_path_v1(owner, leaf), "knownHostsPath")
+    host_identity_finish_v1(projection.fields, projection.exit_code, owner)
+
+pub fn host_identity_public_file_v1(path: text) -> Result<HostPublicKeyV1, text>:
+    if not host_identity_public_path_valid_v1(path): return Err("host-identity-public-path")
+    val source = match file_read_regular_no_follow_bounded(path, 4096):
+        case Err(_): return Err("host-identity-public-file-unavailable")
+        case Ok(value): value
+    host_identity_public_parse_v1(source)
+
+# Remote public bytes use the same expected-fingerprint and immutable-store
+# path as an offline pin. The request never chooses a private filesystem path.
+pub fn host_identity_pin_received_v1(root: text, trust_ref: text, server: text,
+        public_source: text, expected_fingerprint: text) -> OrchestratorValidationReplyV1:
+    if not server_name_valid_v1(server): return host_identity_failure_v1("host-identity-server-name", 2)
+    match host_identity_reference_check_v1("secret://pin-validation", trust_ref):
+        case Err(_): return host_identity_failure_v1("host-identity-trust-reference", 2)
+        case Ok(_): ()
+    val candidate = match host_identity_public_parse_v1(public_source):
+        case Err(reason): return host_identity_failure_v1(reason, 1)
+        case Ok(value): value
+    if candidate.fingerprint != expected_fingerprint:
+        return host_identity_failure_v1("host-identity-server-fingerprint-mismatch", 1)
+    val options: Dict<text, text> = {"--store-root": root, "--trust-ref": trust_ref,
+        "--server": server, "--expected-fingerprint": expected_fingerprint}
+    host_identity_pin_command_v1(options, candidate)
+
+# args begins with key-generate, key-public, key-inspect, key-pin or
+# key-registration; the parent CLI owns namespace routing.
+pub fn host_identity_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
+    if args.len() > 0 and args[0] == "key-generate":
+        val generation = match host_identity_generate_arguments_v1(args):
+            case Err(reason): return host_identity_failure_v1(reason, 2)
+            case Ok(value): value
+        return host_identity_generate_command_v1(generation)
+    val options = match host_identity_options_v1(args):
+        case Err(reason): return host_identity_failure_v1(reason, 2)
+        case Ok(value): value
+    val operation = args[0]
+    if operation == "key-public" or operation == "key-inspect":
+        if not host_identity_exact_options_v1(options, ["--public-key-file"]):
+            if not host_identity_exact_options_v1(options, ["--store-root", "--auth-ref"]):
+                return host_identity_failure_v1("host-identity-public-usage", 2)
+            match host_identity_reference_check_v1(options["--auth-ref"], "trust://public-validation"):
+                case Err(_): return host_identity_failure_v1("host-identity-auth-reference", 2)
+                case Ok(_): ()
+            return host_identity_stored_public_command_v1(options, false)
+    elif operation == "key-registration":
+        if (not host_identity_exact_options_v1(options, ["--public-key-file", "--auth-ref", "--server"]) and
+                not host_identity_exact_options_v1(options, ["--store-root", "--auth-ref", "--server"])):
+            return host_identity_failure_v1("host-identity-registration-usage", 2)
+        if not server_name_valid_v1(options["--server"]):
+            return host_identity_failure_v1("host-identity-server-name", 2)
+        match host_identity_reference_check_v1(options["--auth-ref"], "trust://registration-validation"):
+            case Err(_): return host_identity_failure_v1("host-identity-auth-reference", 2)
+            case Ok(_): ()
+        if options.contains_key("--store-root"):
+            return host_identity_stored_public_command_v1(options, true)
+    elif operation == "key-pin":
+        if not host_identity_exact_options_v1(options,
+                ["--store-root", "--public-key-file", "--trust-ref", "--server", "--expected-fingerprint"]):
+            return host_identity_failure_v1("host-identity-pin-usage", 2)
+        if not server_name_valid_v1(options["--server"]):
+            return host_identity_failure_v1("host-identity-server-name", 2)
+        match host_identity_reference_check_v1("secret://pin-validation", options["--trust-ref"]):
+            case Err(_): return host_identity_failure_v1("host-identity-trust-reference", 2)
+            case Ok(_): ()
+    else:
+        return host_identity_failure_v1("host-identity-operation-unknown", 2)
+    val path = options["--public-key-file"]
+    # Require an explicit public-file extension; never derive public bytes by
+    # reading a private key or emit arbitrary source bytes on parse failure.
+    if not host_identity_public_path_valid_v1(path):
+        return host_identity_failure_v1("host-identity-public-path", 2)
+    val source = match file_read_regular_no_follow_bounded(path, 4096):
+        case Err(_): return host_identity_failure_v1("host-identity-public-file-unavailable", 1)
+        case Ok(value): value
+    val public_key = match host_identity_public_parse_v1(source):
+        case Err(reason): return host_identity_failure_v1(reason, 1)
+        case Ok(value): value
+    if operation == "key-registration":
+        return host_identity_registration_v1(options["--server"], options["--auth-ref"], public_key)
+    if operation == "key-pin":
+        if public_key.fingerprint != options["--expected-fingerprint"]:
+            return host_identity_failure_v1("host-identity-server-fingerprint-mismatch", 1)
+        return host_identity_pin_command_v1(options, public_key)
+    host_identity_reply_v1({"status": SdnValue.String("public-key-inspected"),
+        "publicKey": SdnValue.String(public_key.public_key),
+        "fingerprint": SdnValue.String(public_key.fingerprint),
+        "proofOfPossession": SdnValue.String("not-performed"), "pinned": SdnValue.Bool(false)}, 0)
+
+export host_identity_command_v1, host_identity_registration_v1
+export host_identity_reply_v1, host_identity_failure_v1, host_identity_finish_v1
+export host_identity_store_error_v1, host_identity_open_failure_v1
+export host_identity_public_file_v1, host_identity_pin_received_v1
+export HostIdentityProjectionReceiptV1, host_identity_projection_receipt_v1
+export host_identity_generate_arguments_v1

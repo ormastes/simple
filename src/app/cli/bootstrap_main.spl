@@ -43,7 +43,8 @@ use compiler.driver.driver_build.native_file_worker_incremental_v1.{FILE_WORKER_
 use compiler.driver.driver_build.native_file_worker_incremental_io_v1.{file_worker_inc_commit_v1}
 use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_V1,
     NATIVE_PER_FILE_PIPELINE_DEFAULT_V1, NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1,
-    native_bootstrap_stage3_per_file_selected_v1, native_bootstrap_stage3_pool_result_accepts_v1}
+    native_bootstrap_stage3_per_file_selected_v1, native_bootstrap_stage3_pool_result_accepts_v1,
+    native_file_worker_serial_low_memory_admitted_v1}
 use app.cli.native_build_worker_entry.{run_native_build_worker_entry}
 use app.io._CliCompile.compile_targets.{cli_native_build_option_error}
 use app.io._CliCompile.compile_options.{cli_print_shared_optimization_inventory}
@@ -213,14 +214,16 @@ fn bootstrap_build_role_child_requested(args: [text]) -> bool:
             return true
     false
 
-# The per-file pool needs >= 2 admitted workers and refuses (fail closed) a
-# single-worker request. A --threads 1 build keeps its in-process route: one
-# process compiling one file at a time is already the cc1 shape, and the
-# refused-pool hard error (observed 2026-11-05 in the stage2 receiver proof)
-# is worse than never selecting the pool. Unset threads default to the host
-# CPU count inside the pool admission, which is > 1.
+# The ordinary per-file pool needs >= 2 admitted workers and refuses (fail
+# closed) a single-worker request. Interface-only HIR explicitly permits one
+# live worker so low-memory builds do not fall back to the whole-HIR route.
+# Unset threads default to the host CPU count inside the pool admission.
 fn bootstrap_pool_worker_count_usable(args: [text]) -> bool:
-    bootstrap_native_build_thread_count(args) != 1
+    val threads = bootstrap_native_build_thread_count(args)
+    if threads == 1:
+        return native_file_worker_serial_low_memory_admitted_v1(
+            1, "", env_get("SIMPLE_MIR_SHARD_INTERFACE_HIR") ?? "")
+    threads != 1
 
 # per_file: the per-file route was selected (Stage3 / plain coordinator). Then
 # only a sealed ledger is accepted -- no verdict fails closed instead of

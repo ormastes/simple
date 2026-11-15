@@ -34,7 +34,7 @@ use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 use std.nogc_sync_mut.sffi.time.{time_monotonic_ns}
 use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_alloc_buffer, vulkan_sffi_free_buffer,
-    vulkan_sffi_copy_to_buffer, vulkan_sffi_copy_to_buffer_u32,
+    vulkan_sffi_copy_to_buffer, vulkan_sffi_copy_to_buffer_u32, vulkan_sffi_copy_to_buffer_u32_admitted,
     vulkan_sffi_read_buffer_bytes,
     vulkan_sffi_create_descriptor_set, vulkan_sffi_bind_buffer,
     vulkan_sffi_destroy_descriptor_set, vulkan_sffi_begin_compute,
@@ -1554,7 +1554,12 @@ impl VulkanBackend:
             # any guard can decline. Same opt-in shape as the rect and image
             # flags. The byte path below stays the fallback, byte-identical on
             # the wire, and also runs when the typed lane DECLINES.
-            val typed_upload = vulkan_font_upload_u32_requested()
+            # Admission is decided HERE, before the words are parked: the copy
+            # runs at the next submit, after this run's dispatch is recorded,
+            # so a decline there could no longer fall back to the byte path and
+            # the run drew no text (every run, under the compiled array ABI).
+            val typed_requested = vulkan_font_upload_u32_requested()
+            val typed_upload = typed_requested and vulkan_sffi_copy_to_buffer_u32_admitted()
             var atlas_uploaded = false
             var mirror_ready = false
             var packed_on_host = false
@@ -1596,8 +1601,10 @@ impl VulkanBackend:
                 # and reason are reachable via `vulkan_font_upload_last_mode()`
                 # / `vulkan_font_upload_last_reason()`.
             if not atlas_uploaded:
-                if not typed_upload:
+                if not typed_requested:
                     vulkan_font_upload_note("bytes", "typed-not-requested")
+                elif not typed_upload:
+                    vulkan_font_upload_note("bytes", "typed-declined")
                 packed_on_host = true
                 val _t_pack = vulkan_timing_now_us()
                 # `atlas_owner`, `mirror_coherent` and `continuity` are computed

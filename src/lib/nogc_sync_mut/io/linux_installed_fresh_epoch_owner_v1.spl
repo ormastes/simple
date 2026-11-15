@@ -1,0 +1,225 @@
+# Genuine finite preparation and successor custody. Neither phase is admission.
+# The upper consumer must retain its SAME machine writer and durable admission.
+pub use std.common.contracts.container.linux_fresh_epoch_v1.LinuxFreshEpochObservationV1
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, group_process_stream_template_encode_v3}
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_profile_v1.*
+use std.nogc_sync_mut.io.linux_fresh_epoch_native_v1.*
+use std.nogc_sync_mut.io.linux_fresh_epoch_manager_v1.linux_fresh_epoch_manager_current_v1
+use std.nogc_sync_mut.io.linux_installed_supervisor_profile_v1.*
+use std.nogc_sync_mut.io.linux_installed_supervisor_bus_v1.*
+use std.nogc_sync_mut.io.file_lock_owned_v2.*
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+
+pub class LinuxInstalledFreshEpochOwnerV1:
+    slot: i64
+    generation: i64
+    pub fn current_v1() -> Result<LinuxFreshEpochObservationV1, text>: fresh_epoch_current_v1(self.slot, self.generation, false)
+    pub fn consume_preparation_v1() -> LinuxFreshEpochConsumeTurnV1: fresh_epoch_consume_v1(self.slot, self.generation)
+    pub fn close_v1() -> LinuxFreshEpochCloseTurnV1:
+        val turn = fresh_epoch_close_v1(self.slot, self.generation, false)
+        LinuxFreshEpochCloseTurnV1(if turn.0: nil else: Some(self), turn.0, turn.1)
+
+pub class LinuxFreshEpochSuccessorCustodyV1:
+    slot: i64
+    generation: i64
+    pub fn current_v1() -> Result<LinuxFreshEpochObservationV1, text>: fresh_epoch_current_v1(self.slot, self.generation, true)
+    pub fn bind_profiled_launch_v1(template: GroupProcessStreamLaunchV2) -> Result<GroupProcessStreamLaunchV2, text>:
+        fresh_epoch_bind_v1(self.slot, self.generation, template)
+    pub fn validate_profiled_launch_v1(template: GroupProcessStreamLaunchV2) -> Result<(), text>:
+        val actual = fresh_epoch_bind_v1(self.slot, self.generation, template)?
+        if group_process_stream_template_encode_v3(actual)? != group_process_stream_template_encode_v3(template)?:
+            return Err("fresh-epoch-launch-does-not-match-held-profile")
+        Ok(())
+    pub fn close_v1() -> LinuxFreshEpochSuccessorCloseTurnV1:
+        val turn = fresh_epoch_close_v1(self.slot, self.generation, true)
+        LinuxFreshEpochSuccessorCloseTurnV1(if turn.0: nil else: Some(self), turn.0, turn.1)
+
+pub enum LinuxFreshEpochOpenV1:
+    Rejected(reason: text)
+    CleanupRequired(owner: LinuxInstalledFreshEpochOwnerV1, reason: text)
+    Ready(owner: LinuxInstalledFreshEpochOwnerV1)
+pub struct LinuxFreshEpochCloseTurnV1:
+    owner: Option<LinuxInstalledFreshEpochOwnerV1>
+    closed: bool
+    error: text
+pub struct LinuxFreshEpochSuccessorCloseTurnV1:
+    owner: Option<LinuxFreshEpochSuccessorCustodyV1>
+    closed: bool
+    error: text
+pub struct LinuxFreshEpochConsumeTurnV1:
+    preparation: Option<LinuxInstalledFreshEpochOwnerV1>
+    successor: Option<LinuxFreshEpochSuccessorCustodyV1>
+    error: text
+
+struct FreshEpochStateV1:
+    generation: i64
+    var profile: Option<LinuxInstalledFreshEpochProfileV1> = nil
+    var supervisor: Option<LinuxInstalledSupervisorProfileV1> = nil
+    var bus: Option<LinuxSupervisorBusV1> = nil
+    var native: Option<LinuxFreshEpochNativeOwnerV1> = nil
+    var lock: Option<FileLockOwnerV2> = nil
+    var manager: text = ""
+    var phase: text = "opening"
+    var successor: bool = false
+    var error: text = ""
+var fresh_epoch_slots_v1: [FreshEpochStateV1] = []
+
+fn fresh_epoch_state_v1(slot: i64, generation: i64) -> Result<FreshEpochStateV1, text>:
+    linux_machine_process_origin_check_v1()?
+    if slot < 0 or slot >= fresh_epoch_slots_v1.len() or fresh_epoch_slots_v1[slot].generation != generation:
+        return Err("fresh-epoch-owner-stale")
+    Ok(fresh_epoch_slots_v1[slot])
+
+fn fresh_epoch_check_v1(slot: i64, generation: i64, successor: bool) -> Result<LinuxFreshEpochObservationV1, text>:
+    val state = fresh_epoch_state_v1(slot, generation)?
+    if state.phase != "ready" or state.successor != successor: return Err("fresh-epoch-custody-phase")
+    if (state.profile.is_none() or state.supervisor.is_none() or state.bus.is_none() or state.native.is_none() or
+            state.lock.is_none() or not file_lock_owner_live_v2(state.lock.unwrap())):
+        return Err("fresh-epoch-custody-incomplete")
+    val profile = state.profile.unwrap().current_v1()?
+    val p = profile.profile
+    val manager = linux_fresh_epoch_manager_current_v1(state.bus.unwrap(), state.supervisor.unwrap(), profile)?
+    if manager != state.manager: return Err("fresh-epoch-manager-replaced")
+    val native = if successor: state.native.unwrap().successor_v1()? else: state.native.unwrap().preparation_v1()?
+    if linux_fresh_epoch_manager_current_v1(state.bus.unwrap(), state.supervisor.unwrap(), profile)? != manager:
+        return Err("fresh-epoch-manager-changed-during-observation")
+    if not file_lock_owner_live_v2(state.lock.unwrap()): return Err("fresh-epoch-launch-exclusion-lost")
+    Ok(LinuxFreshEpochObservationV1(owner_generation: generation, epoch_id: p.text_v1("epochId")?,
+        profile_digest: profile.profile_digest, machine_policy_digest: p.text_v1("machinePolicyDigest")?,
+        process_identity_digest: profile.process.identity_digest, manager_unique_name: manager,
+        service_uid: p.number_v1("serviceUid")?, service_gid: p.number_v1("serviceGid")?,
+        partition_identity_digest: native.partition_identity_digest, store_identity_digest: native.store_identity_digest,
+        provider_policy_digest: p.text_v1("providerPolicyDigest")?, observed_cpu_millis: native.observed_cpu_millis,
+        observed_memory_bytes: native.observed_memory_bytes, reserved_cpu_millis: p.number_v1("reservedCpuMillis")?,
+        reserved_memory_bytes: p.number_v1("reservedMemoryBytes")?, outside_cpu_millis: p.number_v1("outsideCpuMillis")?,
+        outside_memory_bytes: p.number_v1("outsideMemoryBytes")?, usable_cpu_millis: native.observed_cpu_millis - p.number_v1("reservedCpuMillis")?,
+        usable_memory_bytes: native.observed_memory_bytes - p.number_v1("reservedMemoryBytes")?))
+
+fn fresh_epoch_current_v1(slot: i64, generation: i64, successor: bool) -> Result<LinuxFreshEpochObservationV1, text>:
+    val checked = fresh_epoch_check_v1(slot, generation, successor)
+    if checked.is_err():
+        val state = fresh_epoch_state_v1(slot, generation)
+        if state.is_ok() and state.unwrap().phase == "ready" and state.unwrap().successor == successor:
+            fresh_epoch_slots_v1[slot].phase = "cleanup"
+    checked
+
+fn fresh_epoch_bind_v1(slot: i64, generation: i64, template: GroupProcessStreamLaunchV2) -> Result<GroupProcessStreamLaunchV2, text>:
+    val before = fresh_epoch_current_v1(slot, generation, true)?
+    val state = fresh_epoch_state_v1(slot, generation)?
+    val projected = state.native.unwrap().bind_profiled_launch_v1(template)?
+    val after = fresh_epoch_current_v1(slot, generation, true)?
+    Ok(projected)
+
+fn fresh_epoch_consume_v1(slot: i64, generation: i64) -> LinuxFreshEpochConsumeTurnV1:
+    val owner = LinuxInstalledFreshEpochOwnerV1(slot: slot, generation: generation)
+    val current = fresh_epoch_current_v1(slot, generation, false)
+    if current.is_err(): return LinuxFreshEpochConsumeTurnV1(Some(owner), nil, current.unwrap_err())
+    # All preparation aliases are invalidated BEFORE publishing the successor.
+    # No ledger, writer, descriptor or launch permission is created/transferred.
+    fresh_epoch_slots_v1[slot].successor = true
+    LinuxFreshEpochConsumeTurnV1(nil, Some(LinuxFreshEpochSuccessorCustodyV1(slot: slot, generation: generation)), "")
+
+fn fresh_epoch_open_body_v1(slot: i64) -> Result<(), text>:
+    val generation = slot + 1
+    match linux_installed_fresh_epoch_profile_open_v1():
+        case LinuxFreshEpochProfileOpenV1.Rejected(reason): return Err(reason)
+        case LinuxFreshEpochProfileOpenV1.CleanupRequired(owner, reason):
+            fresh_epoch_slots_v1[slot].profile = Some(owner)
+            return Err(reason)
+        case LinuxFreshEpochProfileOpenV1.Ready(owner): fresh_epoch_slots_v1[slot].profile = Some(owner)
+    match linux_installed_supervisor_profile_open_v1():
+        case LinuxInstalledSupervisorProfileOpenV1.Rejected(reason): return Err(reason)
+        case LinuxInstalledSupervisorProfileOpenV1.CleanupRequired(owner, reason):
+            fresh_epoch_slots_v1[slot].supervisor = Some(owner)
+            return Err(reason)
+        case LinuxInstalledSupervisorProfileOpenV1.Ready(owner): fresh_epoch_slots_v1[slot].supervisor = Some(owner)
+    val supervisor = fresh_epoch_slots_v1[slot].supervisor.unwrap()
+    match linux_supervisor_bus_open_v1(supervisor):
+        case LinuxSupervisorBusOpenV1.Rejected(reason): return Err(reason)
+        case LinuxSupervisorBusOpenV1.CleanupRequired(owner, reason):
+            fresh_epoch_slots_v1[slot].bus = Some(owner)
+            return Err(reason)
+        case LinuxSupervisorBusOpenV1.Ready(owner): fresh_epoch_slots_v1[slot].bus = Some(owner)
+    val profile = fresh_epoch_slots_v1[slot].profile.unwrap()
+    val snapshot = profile.current_v1()?
+    val bus = fresh_epoch_slots_v1[slot].bus.unwrap()
+    val manager = linux_fresh_epoch_manager_current_v1(bus, supervisor, snapshot)?
+    fresh_epoch_slots_v1[slot].manager = manager
+    # Existing bus custody permits RefUnit only inside activation closure.
+    # No LoadUnit, provider activation or wider mutating bus port is used.
+    bus.ref_unit_v1(snapshot.profile.text_v1("providerSocketUnit")?)?
+    match linux_fresh_epoch_native_open_v1(profile):
+        case LinuxFreshEpochNativeOpenV1.Rejected(reason): return Err(reason)
+        case LinuxFreshEpochNativeOpenV1.CleanupRequired(owner, reason):
+            fresh_epoch_slots_v1[slot].native = Some(owner)
+            return Err(reason)
+        case LinuxFreshEpochNativeOpenV1.Ready(owner): fresh_epoch_slots_v1[slot].native = Some(owner)
+    val native = fresh_epoch_slots_v1[slot].native.unwrap().successor_v1()?
+    val key = sha256_text("FRESH-EPOCH-EXCLUSION-V1\n" + native.partition_identity_digest + "\n" + native.store_identity_digest + "\n")
+    match file_lock_open_owned_v2("/var/lib/simple/container/fresh-epoch-" + key + ".lock", 0):
+        case FileLockOpenV2.Rejected(reason): return Err(reason)
+        case FileLockOpenV2.CleanupRequired(owner, reason):
+            fresh_epoch_slots_v1[slot].lock = Some(owner)
+            return Err(reason)
+        case FileLockOpenV2.Ready(owner): fresh_epoch_slots_v1[slot].lock = Some(owner)
+    fresh_epoch_slots_v1[slot].phase = "ready"
+    val checked = fresh_epoch_current_v1(slot, generation, false)?
+    Ok(())
+
+pub fn linux_installed_fresh_epoch_open_v1() -> LinuxFreshEpochOpenV1:
+    val origin = linux_machine_process_origin_check_v1()
+    if origin.is_err(): return LinuxFreshEpochOpenV1.Rejected(origin.unwrap_err())
+    if fresh_epoch_slots_v1.len() >= 4096: return LinuxFreshEpochOpenV1.Rejected("fresh-epoch-owner-bound")
+    val slot = fresh_epoch_slots_v1.len()
+    fresh_epoch_slots_v1.push(FreshEpochStateV1(generation: slot + 1))
+    val owner = LinuxInstalledFreshEpochOwnerV1(slot: slot, generation: slot + 1)
+    val opened = fresh_epoch_open_body_v1(slot)
+    if opened.is_err():
+        fresh_epoch_slots_v1[slot].phase = "cleanup"
+        return LinuxFreshEpochOpenV1.CleanupRequired(owner, opened.unwrap_err())
+    LinuxFreshEpochOpenV1.Ready(owner)
+
+fn fresh_epoch_note_v1(slot: i64, error: text):
+    if fresh_epoch_slots_v1[slot].error == "" and error != "": fresh_epoch_slots_v1[slot].error = error
+
+fn fresh_epoch_close_v1(slot: i64, generation: i64, successor: bool) -> (bool, text):
+    val loaded = fresh_epoch_state_v1(slot, generation)
+    if loaded.is_err(): return (false, loaded.unwrap_err())
+    val state = loaded.unwrap()
+    if not successor and state.successor: return (true, "fresh-epoch-preparation-consumed")
+    if successor != state.successor: return (false, "fresh-epoch-custody-phase")
+    if state.phase == "closed": return (true, state.error)
+    fresh_epoch_slots_v1[slot].phase = "closing"
+    if val native = state.native:
+        val turn = native.close_v1()
+        fresh_epoch_note_v1(slot, turn.error)
+        if not turn.closed: return (false, fresh_epoch_slots_v1[slot].error)
+        fresh_epoch_slots_v1[slot].native = nil
+    if val bus = state.bus:
+        val closed = bus.close_v1()
+        fresh_epoch_note_v1(slot, bus.close_diagnostic_v1())
+        if closed != "released" and closed != "consumed-error":
+            fresh_epoch_note_v1(slot, "fresh-epoch-bus-close:" + closed)
+            return (false, fresh_epoch_slots_v1[slot].error)
+        fresh_epoch_slots_v1[slot].bus = nil
+    if val lock = state.lock:
+        val turn = file_lock_release_owned_v2(lock)
+        fresh_epoch_note_v1(slot, turn.error)
+        if turn.state != FileLockReleaseStateV2.Released and turn.state != FileLockReleaseStateV2.ConsumedError:
+            return (false, fresh_epoch_slots_v1[slot].error)
+        fresh_epoch_slots_v1[slot].lock = nil
+    if val supervisor = state.supervisor:
+        val closed = supervisor.close_v1()
+        fresh_epoch_note_v1(slot, supervisor.close_diagnostic_v1())
+        if closed != "released" and closed != "consumed-error":
+            fresh_epoch_note_v1(slot, "fresh-epoch-supervisor-profile-close:" + closed)
+            return (false, fresh_epoch_slots_v1[slot].error)
+        fresh_epoch_slots_v1[slot].supervisor = nil
+    if val profile = state.profile:
+        val turn = profile.close_v1()
+        fresh_epoch_note_v1(slot, turn.error)
+        if not turn.closed: return (false, fresh_epoch_slots_v1[slot].error)
+        fresh_epoch_slots_v1[slot].profile = nil
+    fresh_epoch_slots_v1[slot].phase = "closed"
+    (true, fresh_epoch_slots_v1[slot].error)

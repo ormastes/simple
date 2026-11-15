@@ -10,7 +10,7 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at}
 use compiler.backend.backend.backend_types.{BackendCompileOptions, CodegenTarget}
-use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
+use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig, llvm_hosted_windows_msvc_explicit}
 use compiler.backend.llvm_type_mapper.{LlvmTypeMapper, llvm_type_mapper_create_for_target}
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
     llvm_ir_builder_build}
@@ -152,6 +152,9 @@ class MirToLlvm:
     # (`xray_site` = MIR function name -> site id) loaded at entry and before each
     # return. `xray_guard_seq` numbers the guard labels/temps of one module.
     xray_flag_guard: bool = false
+    # Triple env ("msvc", "gnu", ...) of explicit-target translators; "" when
+    # unknown. Only the XRay admission reads it (MSVC has no auto-export).
+    target_env: text = ""
     xray_site: Dict<text, i64> = {}
     xray_guard_seq: i64 = 0
     # DS3: line-table debug info toggle. Off by default; set via
@@ -360,9 +363,11 @@ class MirToLlvm:
         val builder = LlvmIRBuilder.create_explicit_from_scalars(
             module_name, target_arch, target_vendor, target_os,
             target_env, target_has_env, target_datalayout)
-        MirToLlvm.create_with_builder(
+        var translator = MirToLlvm.create_with_builder(
             target, builder, target_arch, target_os, bare_metal, false,
             hardening_preset)
+        translator.target_env = if target_has_env: target_env else: ""
+        translator
 
     static fn create_with_policy(
         module_name: text,
@@ -374,10 +379,15 @@ class MirToLlvm:
         val builder = LlvmIRBuilder.create(module_name, config.triple)
         val target_arch = config.triple.arch
         val target_os = config.triple.os
-        MirToLlvm.create_with_builder(
+        var translator = MirToLlvm.create_with_builder(
             target, builder, target_arch, target_os,
             bare_metal, allow_ambient_codegen_policy,
             if bare_metal then "baremetal" else: "hosted")
+        # Host default env falls back to msvc unselected; only a SELECTED msvc
+        # (target suffix / SIMPLE_LINKER_FLAVOR) counts for XRay admission.
+        val env = config.triple.env ?? ""
+        translator.target_env = if env == "msvc" and not llvm_hosted_windows_msvc_explicit(): "" else: env
+        translator
 
     static fn create_with_builder(
         target: CodegenTarget,

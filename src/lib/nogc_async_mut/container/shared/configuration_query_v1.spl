@@ -1,0 +1,108 @@
+# Fixed engine-declared configuration queries. Not kernel namespace evidence.
+use std.nogc_async_mut.container.shared.configuration_json_v1.*
+use std.common.json.value.{JsonValue, json_value_keys}
+use std.common.contracts.container.runtime_v1.{RuntimeCommandV1, RuntimeIdentityV1}
+use std.common.contracts.container.execution_v2.ContainerHostScopeV2
+use std.common.contracts.container.execution_configuration_v1.*
+use std.common.crypto.sha256.sha256_text
+
+pub fn configuration_container_command_v1(expected: RuntimeIdentityV1, windows: bool) -> Result<RuntimeCommandV1, text>:
+    configuration_image_key_v1(expected.native_id)?
+    val prefix = if windows: "simple." else: "io.simpleorch."
+    val pod = if windows: "pod" else: "pod_uid"
+    val boot = if windows: "boot" else: "node_boot_id"
+    val generation = if windows: "generation" else: "provider_generation"
+    val operation = if windows: "operation" else: "operation_id"
+    val format = "{\"id\":{{{{json .Id}}}},\"pod\":{{{{json (index .Config.Labels \"" + prefix + pod + "\")}}}},\"attempt\":{{{{json (index .Config.Labels \"" + prefix + "attempt\")}}}},\"boot\":{{{{json (index .Config.Labels \"" + prefix + boot + "\")}}}},\"generation\":{{{{json (index .Config.Labels \"" + prefix + generation + "\")}}}},\"operation\":{{{{json (index .Config.Labels \"" + prefix + operation + "\")}}}},\"image\":{{{{json .Image}}}},\"path\":{{{{json .Path}}}},\"args\":{{{{json .Args}}}},\"workdir\":{{{{json .Config.WorkingDir}}}},\"user\":{{{{json .Config.User}}}},\"readonly\":{{{{json .HostConfig.ReadonlyRootfs}}}},\"environment\":{{{{json .Config.Env}}}},\"mounts\":[{{{{range $i, $m := .Mounts}}}}{{{{if $i}}}},{{{{end}}}}{\"kind\":{{{{json $m.Type}}}},\"source\":{{{{json $m.Source}}}},\"destination\":{{{{json $m.Destination}}}},\"rw\":{{{{json $m.RW}}}}}{{{{end}}}}]}"
+    Ok(RuntimeCommandV1(operation: "configuration-container", program: expected.engine,
+        args: ["container", "inspect", "--format", format, expected.native_id]))
+
+pub fn configuration_image_command_v1(engine: text, image_id: text) -> Result<RuntimeCommandV1, text>:
+    configuration_image_key_v1(image_id)?
+    val format = "{\"id\":{{{{json .Id}}}},\"repoDigests\":{{{{json .RepoDigests}}}},\"environment\":{{{{json .Config.Env}}}}}"
+    Ok(RuntimeCommandV1(operation: "configuration-image", program: engine,
+        args: ["image", "inspect", "--format", format, image_id]))
+
+pub struct ConfigurationContainerDataV1:
+    image_id: text
+    primary_argv: [text]
+    working_directory: text
+    configured_user: text
+    readonly_rootfs: bool
+    mounts: [ContainerExecutionMountObservationV1]
+    environment_digest: text
+    environment_names: [text]
+
+pub fn configuration_container_parse_v1(raw: text, expected: RuntimeIdentityV1,
+        scope: ContainerHostScopeV2, windows: bool) -> Result<ConfigurationContainerDataV1, text>:
+    val value = configuration_json_v1(raw)?
+    configuration_fields_v1(value, ["id", "pod", "attempt", "boot", "generation", "operation", "image", "path", "args", "workdir", "user", "readonly", "environment", "mounts"])?
+    val boot = if windows: scope.boot_id else: expected.node_boot_id
+    if (configuration_text_v1(value, "id")? != expected.native_id or
+            configuration_text_v1(value, "pod")? != expected.pod_uid or
+            configuration_text_v1(value, "attempt")? != expected.attempt.to_text() or
+            configuration_text_v1(value, "boot")? != boot or
+            configuration_text_v1(value, "generation")? != expected.provider_generation.to_text() or
+            configuration_text_v1(value, "operation")? != expected.operation_id):
+        return Err("configuration-native-runtime-mismatch")
+    val image_id = configuration_text_v1(value, "image")?
+    configuration_image_key_v1(image_id)?
+    val path = configuration_text_v1(value, "path")?
+    if path == "": return Err("configuration-native-primary-missing")
+    var argv: [text] = [path]
+    for arg in configuration_strings_v1(value, "args", 511)?: argv.push(arg)
+    val entries = match configuration_member_v1(value, "mounts")?:
+        case JsonValue.Array(found): found
+        case JsonValue.Null: []
+        case _: return Err("configuration-native-mount-array")
+    if entries.len() > 64: return Err("configuration-native-mount-bound")
+    var mounts: [ContainerExecutionMountObservationV1] = []
+    for entry in entries:
+        configuration_fields_v1(entry, ["kind", "source", "destination", "rw"])?
+        mounts.push(ContainerExecutionMountObservationV1(kind: configuration_text_v1(entry, "kind")?,
+            source: configuration_text_v1(entry, "source")?, destination: configuration_text_v1(entry, "destination")?,
+            read_only: not configuration_bool_v1(entry, "rw")?))
+    val environment = configuration_environment_v1(configuration_strings_v1(value, "environment", 512)?)?
+    Ok(ConfigurationContainerDataV1(image_id: image_id, primary_argv: argv,
+        working_directory: configuration_text_v1(value, "workdir")?, configured_user: configuration_text_v1(value, "user")?,
+        readonly_rootfs: configuration_bool_v1(value, "readonly")?, mounts: mounts,
+        environment_digest: environment.0, environment_names: environment.1))
+
+pub fn configuration_observation_v1(before: ConfigurationContainerDataV1, image_raw: text,
+        after: ConfigurationContainerDataV1, scope: ContainerHostScopeV2, expected: RuntimeIdentityV1,
+        request_digest: text, requested_image: text) -> Result<text, text>:
+    val image = configuration_json_v1(image_raw)?
+    configuration_fields_v1(image, ["id", "repoDigests", "environment"])?
+    val config_id = configuration_text_v1(image, "id")?
+    if configuration_image_key_v1(before.image_id)? != configuration_image_key_v1(config_id)?:
+        return Err("configuration-image-correspondence-mismatch")
+    val repos = configuration_strings_v1(image, "repoDigests", 256)?
+    val requested_kind = if requested_image.starts_with("sha256:"):
+        if configuration_image_key_v1(requested_image)? != configuration_image_key_v1(config_id)?:
+            return Err("configuration-requested-image-mismatch")
+        "image-config-id"
+    else:
+        if not requested_image.contains("@sha256:") or not repos.contains(requested_image):
+            return Err("configuration-requested-manifest-correspondence-unavailable")
+        "repository-digest"
+    val defaults = configuration_environment_v1(configuration_strings_v1(image, "environment", 512)?)?
+    var first = ContainerExecutionConfigurationObservationV1(scope: scope, runtime: expected, request_digest: request_digest,
+        requested_image_ref: requested_image, requested_image_kind: requested_kind, runtime_image_id: before.image_id,
+        image_config_id: config_id, image_repo_digests: repos, primary_argv: before.primary_argv,
+        working_directory: before.working_directory, configured_user: before.configured_user, readonly_rootfs: before.readonly_rootfs,
+        mounts: before.mounts, environment_digest: before.environment_digest, environment_names: before.environment_names,
+        image_default_environment_digest: defaults.0, image_default_environment_names: defaults.1,
+        configuration_digest: "0000000000000000000000000000000000000000000000000000000000000000")
+    var second = first
+    second.runtime_image_id = after.image_id
+    second.primary_argv = after.primary_argv
+    second.working_directory = after.working_directory
+    second.configured_user = after.configured_user
+    second.readonly_rootfs = after.readonly_rootfs
+    second.mounts = after.mounts
+    second.environment_digest = after.environment_digest
+    second.environment_names = after.environment_names
+    val canonical = container_execution_configuration_encode_v1(first)?
+    if canonical != container_execution_configuration_encode_v1(second)?: return Err("configuration-changed-during-observation")
+    first.configuration_digest = sha256_text(canonical)
+    container_execution_configuration_encode_v1(first)

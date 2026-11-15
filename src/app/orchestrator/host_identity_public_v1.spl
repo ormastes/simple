@@ -1,0 +1,74 @@
+# Public SSH identity values only. No private key bytes belong in this module.
+use std.common.base_encoding.base64.{base64_decode_bytes, base64_encode_bytes}
+use std.common.crypto.sha256.sha256_bytes
+
+pub struct HostPublicKeyV1:
+    algorithm: text
+    public_key: text
+    fingerprint: text
+
+# Accept one bounded OpenSSH Ed25519 public-key line; discard its comment.
+# This validates wire encoding, not possession, authorization or point validity.
+pub fn host_identity_public_parse_v1(source: text) -> Result<HostPublicKeyV1, text>:
+    if source.byte_len() < 1 or source.byte_len() > 4096:
+        return Err("host-identity-public-size")
+    var line = source
+    if line.ends_with("\n"): line = line.substring(0, line.len() - 1)
+    if line.ends_with("\r"): line = line.substring(0, line.len() - 1)
+    for scalar in line.chars():
+        if scalar < " " or scalar > "~": return Err("host-identity-public-characters")
+    val fields = line.split(" ")
+    if fields.len() < 2 or fields[0] != "ssh-ed25519":
+        return Err("host-identity-public-algorithm")
+    val encoded = fields[1]
+    if encoded.byte_len() != 68: return Err("host-identity-public-encoding")
+    val bytes = base64_decode_bytes(encoded)
+    if bytes.len() != 51: return Err("host-identity-public-wire-length")
+    # Round-trip rejects lenient Base64 decoder acceptance and noncanonical bits.
+    if base64_encode_bytes(bytes) != encoded: return Err("host-identity-public-encoding")
+    val prefix: [u8] = [0, 0, 0, 11, 115, 115, 104, 45, 101, 100, 50, 53, 53, 49, 57, 0, 0, 0, 32]
+    for index in 0..prefix.len():
+        if bytes[index] != prefix[index]: return Err("host-identity-public-wire-type")
+    var input: [i64] = []
+    for byte in bytes: input.push(byte as i64)
+    val digest = sha256_bytes(input)
+    if digest.len() != 32: return Err("host-identity-public-fingerprint")
+    var fingerprint_bytes: [u8] = []
+    for byte in digest: fingerprint_bytes.push(byte as u8)
+    val padded = base64_encode_bytes(fingerprint_bytes)
+    if padded.len() != 44 or not padded.ends_with("="):
+        return Err("host-identity-public-fingerprint")
+    Ok(HostPublicKeyV1(algorithm: "ssh-ed25519", public_key: "ssh-ed25519 " + encoded,
+        fingerprint: "SHA256:" + padded.substring(0, 43)))
+
+# Existing pins are immutable here. An absent pin requires a separately secured
+# publication; this decision alone grants no persistent trust or authorization.
+pub fn host_identity_pin_check_v1(existing: text, candidate: text,
+        expected_fingerprint: text) -> Result<HostPublicKeyV1, text>:
+    val proposed = host_identity_public_parse_v1(candidate)?
+    if expected_fingerprint != proposed.fingerprint:
+        return Err("host-identity-server-fingerprint-mismatch")
+    if existing != "":
+        val pinned = host_identity_public_parse_v1(existing)?
+        if pinned.public_key != proposed.public_key:
+            return Err("host-identity-server-key-changed")
+    Ok(proposed)
+
+# Exactly the one-line known_hosts file produced by the retained pin owner;
+# aliases are explicit profile bindings, never DNS/keyscan-derived names.
+pub fn host_identity_known_hosts_validate_v1(source: text, alias: text) -> Result<HostPublicKeyV1, text>:
+    if alias.byte_len() < 1 or alias.byte_len() > 128 or alias.starts_with("-"):
+        return Err("host-identity-server-pin-alias")
+    for scalar in alias.chars():
+        if ((scalar >= "a" and scalar <= "z") or (scalar >= "A" and scalar <= "Z") or
+                (scalar >= "0" and scalar <= "9") or scalar == "-" or scalar == "_" or scalar == "."):
+            continue
+        return Err("host-identity-server-pin-alias")
+    if not source.starts_with(alias + " ") or not source.ends_with("\n"):
+        return Err("host-identity-server-pin-alias-changed")
+    val key = host_identity_public_parse_v1(source.substring(alias.len() + 1, source.len()))?
+    if source != alias + " " + key.public_key + "\n": return Err("host-identity-server-pin-format")
+    Ok(key)
+
+export HostPublicKeyV1, host_identity_public_parse_v1, host_identity_pin_check_v1
+export host_identity_known_hosts_validate_v1

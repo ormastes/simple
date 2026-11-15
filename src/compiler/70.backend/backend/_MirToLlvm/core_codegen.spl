@@ -573,6 +573,11 @@ impl MirTextCodegen for MirToLlvm:
             self.xray_flag_guard = self.target_os.starts_with("windows")
             if not self.xray_flag_guard and not self.target_os.starts_with("linux"):
                 self.codegen_error("XRAY-E-UNSUPPORTED-TARGET: LLVM XRay sleds are admitted for Linux and Windows triples only (target os '{self.target_os}')")
+            # MSVC (clang-cl / --msvc): link.exe has no auto-export, so the
+            # descriptor/names/hook/ring data symbols are not exported from the
+            # DLL and the flag-guard leaf cannot bind. Fail fast (reversible).
+            if self.xray_flag_guard and self.target_env == "msvc":
+                self.codegen_error("XRAY-E-UNSUPPORTED-TARGET: LLVM XRay is not supported on windows-msvc: MSVC link has no auto-export, so the __simple_xray_* data symbols would not be exported (use the llvm-mingw windows-gnu target)")
             if self.bootstrap_string_globals_active:
                 self.codegen_error("XRAY-E-UNSUPPORTED-TARGET: LLVM XRay is not supported on the bootstrap translation path")
             for fn_mode in mir_module_functions_sorted(module):
@@ -1214,6 +1219,9 @@ impl MirTextCodegen for MirToLlvm:
         self.builder.emit("  br label %xe_done")
         self.builder.emit("xe_ring:")
         self.builder.emit("  %xe_widx = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 1")
+        if module.xray_ring_wrap:
+            self.emit_xray_ring_wrap_store(ring_ty, cap)
+            return
         self.builder.emit("  %xe_i = atomicrmw add ptr %xe_widx, i64 1 monotonic")
         self.builder.emit("  %xe_full = icmp uge i64 %xe_i, {cap}")
         self.builder.emit("  br i1 %xe_full, label %xe_drop, label %xe_store")
@@ -1237,6 +1245,32 @@ impl MirTextCodegen for MirToLlvm:
         self.builder.emit("  ret void")
         self.builder.emit("}}")
         self.builder.emit("declare i64 @llvm.readcyclecounter()")
+
+    me emit_xray_ring_wrap_store(ring_ty: text, cap: i64):
+        """Wrap ring (MirModule.xray_ring_wrap): keep the most recent `cap`
+        edges. Slot = claim mod cap; seq := 0, fence, payload, seq := claim+1
+        (release), so a reader rejects a slot whose seq is not claim+1 before
+        and after reading it (overwritten or torn). Never drops."""
+        self.builder.emit("  %xe_c = atomicrmw add ptr %xe_widx, i64 1 monotonic")
+        self.builder.emit("  %xe_i = urem i64 %xe_c, {cap}")
+        self.builder.emit("  %xe_rseq = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 3")
+        self.builder.emit("  store atomic i64 0, ptr %xe_rseq monotonic, align 8")
+        self.builder.emit("  fence release")
+        self.builder.emit("  %xe_rsite = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 0")
+        self.builder.emit("  store i64 %site, ptr %xe_rsite, align 8")
+        self.builder.emit("  %xe_rkind = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 1")
+        self.builder.emit("  store i32 %kind, ptr %xe_rkind, align 4")
+        self.builder.emit("  %xe_ts = call i64 @llvm.readcyclecounter()")
+        self.builder.emit("  %xe_rts = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 4")
+        self.builder.emit("  store i64 %xe_ts, ptr %xe_rts, align 8")
+        self.builder.emit("  %xe_seq = add i64 %xe_c, 1")
+        self.builder.emit("  store atomic i64 %xe_seq, ptr %xe_rseq release, align 8")
+        self.builder.emit("  br label %xe_done")
+        self.builder.emit("xe_done:")
+        self.builder.emit("  ret void")
+        self.builder.emit("}}")
+        self.builder.emit("declare i64 @llvm.readcyclecounter()")
+        self.builder.emit("@__simple_xray_ring_wrap_v2 = constant i64 1")
 
     me emit_xray_flag_guard(name: text, kind: i64, continue_label: text):
         """Load the slot; when set call the edge hook. Falls through to

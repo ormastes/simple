@@ -1,3 +1,4 @@
+use std.common.contracts.container.pre_start_constraint_v1.ContainerPreStartConstraintV1
 # Windows deployment-backed local Host owner. Capacity remains the existing
 # journal/ledger; the service incarnation is never represented as a Linux boot.
 use std.nogc_sync_mut.orchestration.host_windows_deployment_v2.*
@@ -8,7 +9,7 @@ use std.nogc_sync_mut.orchestration.host_service_reconciliation_v2.*
 use std.nogc_sync_mut.orchestration.host_service_private_receipt_v2.{HostServicePrivateCleanupV2, host_service_private_cleanup_v2}
 use std.nogc_sync_mut.orchestration.host_local_root_v1.host_local_context_v1
 use std.nogc_sync_mut.orchestration.host_authorized_reservation_v1.host_authorized_prepare_reply_v1
-use std.nogc_sync_mut.orchestration.host_authorized_execution_v2.host_authorized_execute_v2
+use std.nogc_sync_mut.orchestration.host_authorized_execution_v2.host_authorized_execute_constrained_v2
 use std.nogc_sync_mut.orchestration.host_execution_observation_v2.HostExecutionObservationV2
 use std.nogc_sync_mut.orchestration.host_parent_budget_v1.{host_parent_budget_record_decode_v1, host_parent_budget_store_owned_v2}
 use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_scope_v2, simple_container_observation_v2}
@@ -117,6 +118,10 @@ pub class HostWindowsLocalRootV3:
     # not invoke this. One canonical root retains both returned owners before
     # any response encoding or post-effect validation can fail.
     pub me execute_v3(payload: text) -> HostWindowsExecutionReplyV3:
+        self.execute_constrained_v3(payload, nil)
+
+    pub me execute_constrained_v3(payload: text,
+            constraint: Option<ContainerPreStartConstraintV1>) -> HostWindowsExecutionReplyV3:
         val metadata = self.current_v3()
         if metadata.is_err(): return HostWindowsExecutionReplyV3(nil, true, metadata.unwrap_err())
         if not self.ready_v3(): return HostWindowsExecutionReplyV3(nil, true, "host-windows-startup-quarantine")
@@ -124,9 +129,9 @@ pub class HostWindowsLocalRootV3:
         val journal = self.capacity.journal
         val refresh = fn() -> HostReservationAuthorizationContextV1:
             windows_execution_context_v3(deployment, journal)
-        val turn = host_authorized_execute_v2(self.capacity, self.container, payload, metadata.unwrap().policy,
+        val turn = host_authorized_execute_constrained_v2(self.capacity, self.container, payload, metadata.unwrap().policy,
             self.binding_v3().provider_identity_digest, self.scope_v3().service_scope_id,
-            windows_execution_context_v3(deployment, journal), refresh)
+            windows_execution_context_v3(deployment, journal), refresh, constraint)
         self.capacity = turn.owner
         self.container = turn.container
         self.reconciliation.owner = turn.owner

@@ -1,0 +1,765 @@
+# Genuine retained Linux cgroup/store/account preparation. AUTHORED_NOT_RUN.
+# No engine invocation, cgroup write, ownership change or admission grant.
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_profile_v1.*
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+use std.common.contracts.container.linux_fresh_epoch_v1.*
+use std.common.crypto.sha256.{sha256_text, sha256_stream_v1_new}
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.common.string_core.char_from_code
+use std.nogc_sync_mut.io.linux_fresh_epoch_launch_v1.{LinuxFreshEpochBrokerDataV1, linux_fresh_epoch_project_launch_v1,
+    linux_fresh_epoch_broker_environment_v1}
+use std.common.build_manager.group_process_stream_protocol_v2.GroupProcessStreamLaunchV2
+use std.nogc_sync_mut.io.linux_fresh_epoch_population_v1.*
+
+pub struct LinuxFreshEpochNativeObservationV1:
+    partition_identity_digest: text
+    store_identity_digest: text
+    observed_cpu_millis: i64
+    observed_memory_bytes: i64
+    physical_cpu_millis: i64
+    physical_memory_bytes: i64
+
+pub class LinuxFreshEpochNativeOwnerV1:
+    slot: i64
+    generation: i64
+    pub fn preparation_v1() -> Result<LinuxFreshEpochNativeObservationV1, text>: epoch_native_current_v1(self.slot, self.generation, true)
+    pub fn successor_v1() -> Result<LinuxFreshEpochNativeObservationV1, text>: epoch_native_current_v1(self.slot, self.generation, false)
+    pub fn bind_profiled_launch_v1(template: GroupProcessStreamLaunchV2) -> Result<GroupProcessStreamLaunchV2, text>:
+        epoch_native_bind_launch_v1(self.slot, self.generation, template)
+    pub fn close_v1() -> LinuxFreshEpochNativeCloseTurnV1: epoch_native_close_v1(self.slot, self.generation)
+
+pub enum LinuxFreshEpochNativeOpenV1:
+    Rejected(reason: text)
+    CleanupRequired(owner: LinuxFreshEpochNativeOwnerV1, reason: text)
+    Ready(owner: LinuxFreshEpochNativeOwnerV1)
+
+pub struct LinuxFreshEpochNativeCloseTurnV1:
+    owner: Option<LinuxFreshEpochNativeOwnerV1>
+    closed: bool
+    error: text
+
+pub fn linux_fresh_epoch_native_open_v1(profile: LinuxInstalledFreshEpochProfileV1) -> LinuxFreshEpochNativeOpenV1:
+    @when(os="linux"):
+    epoch_native_open_v1(profile)
+    @else:
+    LinuxFreshEpochNativeOpenV1.Rejected("fresh-epoch-native-linux-required")
+    @end
+
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_machine_policy_abi_v1.*
+use std.nogc_sync_mut.io.linux_installed_supervisor_abi_v1.{fdopendir, readdir, closedir, __errno_location, pidfd_open, poll}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32, volatile_read_u64,
+    volatile_write_u8, volatile_write_u32, volatile_write_u64}
+@unsafe(reason: "reads actual supplementary groups; no credential mutation", capabilities: [ffi, raw_ptr])
+extern fn getgroups(size: i32, groups: i64) -> i32
+@unsafe(reason: "reads retained executable capability xattr without changing privileges", capabilities: [ffi, raw_ptr])
+extern fn fgetxattr(fd: i32, name: i64, value: i64, size: u64) -> i64
+
+struct EpochNativeFdV1:
+    fd: i64
+    parent: i64
+    name: text
+    rule: text
+    identity: text
+    size: i64
+    device: i64
+    inode: i64
+
+struct EpochNativeStateV1:
+    generation: i64
+    profile: LinuxInstalledFreshEpochProfileV1
+    snapshot: LinuxFreshEpochProfileSnapshotV1
+    arena: i64
+    var handles: [EpochNativeFdV1] = []
+    var partition: i64 = -1
+    var graph: i64 = -1
+    var run: i64 = -1
+    var proc: i64 = -1
+    var machine_state: i64 = -1
+    var machine_wal: i64 = -1
+    var machine_objects: i64 = -1
+    var supervisor: i64 = -1
+    var cursor_fd: i64 = -1
+    var cursor: i64 = 0
+    var scan_pid: i64 = -1
+    var scan_status: i64 = -1
+    var scan_group: i64 = -1
+    var scan_pidfd: i64 = -1
+    var population: Option<LinuxFreshEpochPopulationV1> = nil
+    var phase: text = "opening"
+    var error: text = ""
+
+var epoch_native_slots_v1: [EpochNativeStateV1] = []
+var epoch_native_active_v1: i64 = 0
+
+fn epoch_native_directory_flags_v1() -> i32:
+    @when(arch="x86_64"):
+    720896
+    @elif(arch="aarch64"):
+    573440
+    @else:
+    0
+    @end
+
+fn epoch_native_file_flags_v1() -> i32:
+    @when(arch="x86_64"):
+    657408
+    @elif(arch="aarch64"):
+    559104
+    @else:
+    0
+    @end
+
+fn epoch_native_state_v1(slot: i64, generation: i64) -> Result<EpochNativeStateV1, text>:
+    linux_machine_process_origin_check_v1()?
+    if slot < 0 or slot >= epoch_native_slots_v1.len() or epoch_native_slots_v1[slot].generation != generation:
+        return Err("fresh-epoch-native-stale")
+    if epoch_native_slots_v1[slot].phase == "closed": return Err("fresh-epoch-native-closed")
+    Ok(epoch_native_slots_v1[slot])
+
+@unsafe(reason: "bounded owned NUL name buffer", capabilities: [ffi, raw_ptr])
+fn epoch_native_name_v1(slot: i64, value: text) -> i64:
+    if value.byte_len() > 4095 or value.contains("\0"): return 0
+    val pointer = epoch_native_slots_v1[slot].arena + 512
+    for at in 0..value.byte_len(): volatile_write_u8(pointer + at, value.byte_at(at) as i64)
+    volatile_write_u8(pointer + value.byte_len(), 0)
+    pointer
+
+@unsafe(reason: "actual descriptor statx security/type/mount identity", capabilities: [ffi, raw_ptr])
+fn epoch_native_meta_v1(slot: i64, fd: i64, name: text = "", immutable: bool = false, nofollow: bool = false) -> Result<(text, i64, i64, i64), text>:
+    val buffer = epoch_native_slots_v1[slot].arena
+    for at in 0..256: volatile_write_u8(buffer + at, 0)
+    val pointer = epoch_native_name_v1(slot, name)
+    if pointer == 0: return Err("fresh-epoch-native-name-bound")
+    if (statx(fd as i32, pointer, if name == "": 4096 else: (if nofollow: 256 else: 0), 6143u32, buffer) != 0 or
+            (volatile_read_u32(buffer) & 6143) != 6143 or volatile_read_u64(buffer + 144) <= 0):
+        return Err("fresh-epoch-native-statx-security-unavailable")
+    val uid = volatile_read_u32(buffer + 20)
+    val mode = volatile_read_u16(buffer + 28)
+    var identity = str(volatile_read_u32(buffer + 136)) + ":" + str(volatile_read_u32(buffer + 140)) + ":" +
+        str(volatile_read_u64(buffer + 32)) + ":" + str(volatile_read_u64(buffer + 144)) + ":" + str(uid) + ":" + str(mode)
+    if immutable and (mode & 61440) == 32768:
+        identity = identity + ":" + str(volatile_read_u64(buffer + 40)) + ":" + str(volatile_read_u64(buffer + 96)) +
+            ":" + str(volatile_read_u32(buffer + 104)) + ":" + str(volatile_read_u64(buffer + 112)) + ":" + str(volatile_read_u32(buffer + 120))
+    Ok((identity, uid, mode, volatile_read_u64(buffer + 40)))
+
+@unsafe(reason: "actual retained cgroup/proc filesystem type", capabilities: [ffi, raw_ptr])
+fn epoch_native_fs_v1(slot: i64, fd: i64, expected: i64) -> Result<(), text>:
+    val buffer = epoch_native_slots_v1[slot].arena + 256
+    if fstatfs(fd as i32, buffer) != 0 or volatile_read_u64(buffer) != expected:
+        return Err("fresh-epoch-native-filesystem-kind")
+    Ok(())
+
+@unsafe(reason: "restricts first vfs topology to actual local ext4/XFS stores and optional tmpfs runtime", capabilities: [ffi, raw_ptr])
+fn epoch_native_local_stores_v1(slot: i64) -> Result<(), text>:
+    val state = epoch_native_slots_v1[slot]
+    for index in [state.graph, state.run]:
+        val buffer = state.arena + 256
+        if fstatfs(state.handles[index].fd as i32, buffer) != 0: return Err("fresh-epoch-native-store-filesystem-observation")
+        val kind = volatile_read_u64(buffer)
+        if kind != 61267 and kind != 1481003842 and not (index == state.run and kind == 16914836):
+            return Err("fresh-epoch-native-store-filesystem-unsupported")
+    Ok(())
+
+fn epoch_native_proc_child_v1(slot: i64, fd: i64) -> Result<(), text>:
+    epoch_native_fs_v1(slot, fd, 40864)?
+    val meta = epoch_native_meta_v1(slot, fd)?
+    val child = meta.0.split(":")
+    val state = epoch_native_slots_v1[slot]
+    val parent = state.handles[state.proc].identity.split(":")
+    if child[0] != parent[0] or child[1] != parent[1] or child[3] != parent[3]:
+        return Err("fresh-epoch-native-proc-child-mount-mismatch")
+    Ok(())
+
+fn epoch_native_security_v1(slot: i64, meta: (text, i64, i64, i64), rule: text) -> Result<(), text>:
+    val uid = epoch_native_slots_v1[slot].snapshot.profile.number_v1("serviceUid")?
+    if rule == "root-dir" and (meta.1 != 0 or (meta.2 & 61440) != 16384 or (meta.2 & 18) != 0):
+        return Err("fresh-epoch-native-root-ancestry-writable")
+    if rule == "private-dir" and (meta.1 != uid or meta.2 != 16832):
+        return Err("fresh-epoch-native-private-store-owner-mode")
+    if rule == "root-file" or rule == "executable" or rule == "ceiling-file":
+        if meta.1 != 0 or (meta.2 & 61440) != 32768 or (meta.2 & 18) != 0 or (meta.2 & 3072) != 0:
+            return Err("fresh-epoch-native-root-control-writable")
+    if rule == "executable" and (meta.2 & 73) == 0: return Err("fresh-epoch-native-executable-mode")
+    if rule == "cgroup-dir" and ((meta.2 & 61440) != 16384 or meta.1 != 0 or (meta.2 & 18) != 0):
+        return Err("fresh-epoch-native-parent-ownership")
+    if rule == "delegated-dir" and ((meta.2 & 61440) != 16384 or (meta.1 != 0 and meta.1 != uid) or (meta.2 & 18) != 0):
+        return Err("fresh-epoch-native-delegated-ownership")
+    if rule == "root-mask" and (meta.1 != 0 or (meta.2 & 61440) != 40960):
+        return Err("fresh-epoch-native-activation-mask-ownership")
+    Ok(())
+
+@unsafe(reason: "publishes each actual descriptor before later fallible validation", capabilities: [ffi, raw_ptr])
+fn epoch_native_open_fd_v1(slot: i64, parent: i64, name: text, directory: bool, rule: text) -> Result<i64, text>:
+    val pointer = epoch_native_name_v1(slot, name)
+    if pointer == 0: return Err("fresh-epoch-native-name-bound")
+    var flags = if directory: epoch_native_directory_flags_v1() else: epoch_native_file_flags_v1()
+    if rule == "root-mask":
+        @when(arch="x86_64"):
+        flags = 2752512 # O_PATH|O_NOFOLLOW|O_CLOEXEC
+        @elif(arch="aarch64"):
+        flags = 2654208
+        @end
+    val fd = openat(parent as i32, pointer, flags, 0u32) as i64
+    if fd < 0: return Err("fresh-epoch-native-required-entry-missing")
+    var state = epoch_native_slots_v1[slot]
+    val index = state.handles.len()
+    state.handles.push(EpochNativeFdV1(fd: fd, parent: parent, name: name, rule: rule, identity: "", size: 0, device: 0, inode: 0))
+    epoch_native_slots_v1[slot] = state
+    val meta = epoch_native_meta_v1(slot, fd, "", rule == "root-file" or rule == "executable")?
+    epoch_native_security_v1(slot, meta, rule)?
+    epoch_native_slots_v1[slot].handles[index].identity = meta.0
+    epoch_native_slots_v1[slot].handles[index].size = meta.3
+    val buffer = state.arena
+    val major = volatile_read_u32(buffer + 136)
+    val minor = volatile_read_u32(buffer + 140)
+    epoch_native_slots_v1[slot].handles[index].device = ((major & 4095) << 8) | (minor & 255) |
+        ((major & 4294963200) << 32) | ((minor & 4294967040) << 12)
+    epoch_native_slots_v1[slot].handles[index].inode = volatile_read_u64(buffer + 32)
+    Ok(index)
+
+fn epoch_native_path_v1(slot: i64, path: text, final_rule: text, final_directory: bool = true) -> Result<i64, text>:
+    var current = epoch_native_open_fd_v1(slot, -100, "/", true, "root-dir")?
+    val pieces = path.substring(1, path.byte_len()).split("/")
+    if pieces.len() > 32: return Err("fresh-epoch-native-ancestry-bound")
+    for at in 0..pieces.len():
+        val parent = epoch_native_slots_v1[slot].handles[current].fd
+        val last = at + 1 == pieces.len()
+        current = epoch_native_open_fd_v1(slot, parent, pieces[at], if last: final_directory else: true,
+            if last: final_rule else: "root-dir")?
+    Ok(current)
+
+@unsafe(reason: "bounded binary retained pread with no path reopen", capabilities: [ffi, raw_ptr])
+fn epoch_native_bytes_v1(slot: i64, fd: i64, offset: i64, maximum: i64) -> Result<[u8], text>:
+    if maximum <= 0 or maximum > 1048576: return Err("fresh-epoch-native-read-bound")
+    val pointer = epoch_native_slots_v1[slot].arena + 8192
+    val count = pread(fd as i32, pointer, maximum as u64, offset)
+    if count < 0 or count > maximum: return Err("fresh-epoch-native-read")
+    var bytes: [u8] = []
+    for at in 0..count: bytes.push(volatile_read_u8(pointer + at) as u8)
+    Ok(bytes)
+
+fn epoch_native_text_v1(slot: i64, fd: i64, maximum: i64 = 65536) -> Result<text, text>:
+    val bytes = epoch_native_bytes_v1(slot, fd, 0, maximum + 1)?
+    if bytes.len() > maximum or not utf8_bytes_valid(bytes): return Err("fresh-epoch-native-text-bound")
+    Ok(bytes_to_text(bytes))
+
+fn epoch_native_child_text_v1(slot: i64, directory: i64, name: text) -> Result<text, text>:
+    # Child control descriptors are retained once, then reused and revalidated.
+    val state = epoch_native_slots_v1[slot]
+    for item in state.handles:
+        if item.parent == directory and item.name == name: return epoch_native_text_v1(slot, item.fd)
+    val index = epoch_native_open_fd_v1(slot, directory, name, false, "ceiling-file")?
+    epoch_native_text_v1(slot, epoch_native_slots_v1[slot].handles[index].fd)
+
+fn epoch_native_number_v1(value: text, maximum: i64 = 1125899906842624) -> Result<i64, text>:
+    val source = value.trim()
+    if source.byte_len() == 0 or source.byte_len() > 19: return Err("fresh-epoch-native-integer")
+    val parsed = source.to_int() ?? -1
+    if parsed < 0 or parsed > maximum or str(parsed) != source: return Err("fresh-epoch-native-integer")
+    Ok(parsed)
+
+fn epoch_native_limits_v1(slot: i64) -> Result<(i64, i64), text>:
+    val state = epoch_native_slots_v1[slot]
+    val p = state.snapshot.profile
+    val expected_cpu = p.number_v1("partitionCpuMillis")?
+    val expected_memory = p.number_v1("partitionMemoryBytes")?
+    var effective_cpu = 64000
+    var effective_memory = 1125899906842624
+    for index in 0..state.handles.len():
+        val item = state.handles[index]
+        if item.rule != "cgroup-dir": continue
+        epoch_native_fs_v1(slot, item.fd, 1667723888)?
+        val procs = epoch_native_child_text_v1(slot, item.fd, "cgroup.procs")?
+        val controller_text = epoch_native_child_text_v1(slot, item.fd, "cgroup.subtree_control")?
+        val controllers = " " + controller_text.trim() + " "
+        if not controllers.contains(" cpu ") or not controllers.contains(" memory "):
+            return Err("fresh-epoch-native-controller-delegation")
+        # The filesystem root has no cpu.max/memory.max of its own.
+        if item.name == "/sys/fs/cgroup": continue
+        val kind = epoch_native_child_text_v1(slot, item.fd, "cgroup.type")?
+        if kind != "domain\n": return Err("fresh-epoch-native-threaded-cgroup-unsupported")
+        val cpu_text = epoch_native_child_text_v1(slot, item.fd, "cpu.max")?
+        val cpu_line = cpu_text.trim()
+        val cpu_fields = cpu_line.split(" ")
+        if cpu_fields.len() != 2: return Err("fresh-epoch-native-cpu-max-shape")
+        val period = epoch_native_number_v1(cpu_fields[1], 1000000)?
+        if period < 1000: return Err("fresh-epoch-native-cpu-period")
+        if cpu_fields[0] != "max":
+            val quota = epoch_native_number_v1(cpu_fields[0], 1000000000000)?
+            if quota < 1: return Err("fresh-epoch-native-cpu-quota")
+            val cap = quota * 1000 / period
+            if cap < effective_cpu: effective_cpu = cap
+            if index == state.partition and quota * 1000 != expected_cpu * period:
+                return Err("fresh-epoch-native-partition-cpu-readback")
+        elif index == state.partition: return Err("fresh-epoch-native-unlimited-partition")
+        val memory_text = epoch_native_child_text_v1(slot, item.fd, "memory.max")?
+        val memory = memory_text.trim()
+        if memory != "max":
+            val cap = epoch_native_number_v1(memory)?
+            if cap < effective_memory: effective_memory = cap
+            if index == state.partition and cap != expected_memory: return Err("fresh-epoch-native-partition-memory-readback")
+        elif index == state.partition: return Err("fresh-epoch-native-unlimited-partition")
+    val parent = state.handles[state.partition].fd
+    if epoch_native_child_text_v1(slot, parent, "memory.swap.max")? != "0\n":
+        return Err("fresh-epoch-native-swap-policy")
+    if effective_cpu != expected_cpu or effective_memory != expected_memory:
+        return Err("fresh-epoch-native-tighter-ancestor-limit")
+    Ok((effective_cpu, effective_memory))
+
+@unsafe(reason: "opens and owns a separate directory iterator without consuming retained parent", capabilities: [ffi, raw_ptr])
+fn epoch_native_cursor_begin_v1(slot: i64, parent: i64) -> Result<(), text>:
+    if epoch_native_slots_v1[slot].cursor != 0 or epoch_native_slots_v1[slot].cursor_fd >= 0:
+        return Err("fresh-epoch-native-cursor-busy")
+    val dot = epoch_native_name_v1(slot, ".")
+    val fd = openat(parent as i32, dot, epoch_native_directory_flags_v1(), 0u32) as i64
+    epoch_native_slots_v1[slot].cursor_fd = fd
+    if fd < 0: return Err("fresh-epoch-native-cursor-open")
+    val directory = fdopendir(fd as i32)
+    if directory == 0: return Err("fresh-epoch-native-cursor-adopt")
+    epoch_native_slots_v1[slot].cursor = directory
+    epoch_native_slots_v1[slot].cursor_fd = -1
+    Ok(())
+
+@unsafe(reason: "bounded genuine Linux dirent64 name with errno-aware end", capabilities: [ffi, raw_ptr])
+fn epoch_native_cursor_next_v1(slot: i64) -> Result<Option<text>, text>:
+    val error = __errno_location()
+    volatile_write_u32(error, 0)
+    val entry = readdir(epoch_native_slots_v1[slot].cursor)
+    if entry == 0:
+        if volatile_read_u32(error) != 0: return Err("fresh-epoch-native-directory-read")
+        return Ok(nil)
+    val length = volatile_read_u16(entry + 16)
+    if length < 20 or length > 280: return Err("fresh-epoch-native-dirent-bound")
+    var name = ""
+    for at in 19..length:
+        val byte = volatile_read_u8(entry + at)
+        if byte == 0: return Ok(Some(name))
+        if byte < 32 or byte > 126: return Err("fresh-epoch-native-dirent-encoding")
+        name = name + char_from_code(byte as u32)
+    Err("fresh-epoch-native-dirent-unterminated")
+
+@unsafe(reason: "consumes iterator before one Linux close; never retries numeric fd", capabilities: [ffi])
+fn epoch_native_cursor_close_v1(slot: i64) -> Result<(), text>:
+    val cursor = epoch_native_slots_v1[slot].cursor
+    epoch_native_slots_v1[slot].cursor = 0
+    if cursor != 0 and closedir(cursor) != 0: return Err("fresh-epoch-native-cursor-close-consumed-error")
+    Ok(())
+
+fn epoch_native_empty_v1(slot: i64, fd: i64) -> Result<(), text>:
+    epoch_native_cursor_begin_v1(slot, fd)?
+    var count = 0
+    while true:
+        val next = epoch_native_cursor_next_v1(slot)?
+        if next.is_none(): break
+        val name = next.unwrap()
+        if name != "." and name != "..":
+            epoch_native_cursor_close_v1(slot)?
+            return Err("fresh-epoch-native-store-nonempty")
+        count = count + 1
+        if count > 4: return Err("fresh-epoch-native-store-enumeration-bound")
+    epoch_native_cursor_close_v1(slot)
+
+@unsafe(reason: "temporary process descriptors are published/consumed exactly once", capabilities: [ffi, raw_ptr])
+fn epoch_native_scan_close_v1(slot: i64) -> Result<(), text>:
+    var failed = false
+    var state = epoch_native_slots_v1[slot]
+    for fd in [state.scan_group, state.scan_status, state.scan_pid, state.scan_pidfd]:
+        # Each stored descriptor is distinct; clear its canonical slot first.
+        if fd == state.scan_group: epoch_native_slots_v1[slot].scan_group = -1
+        if fd == state.scan_status: epoch_native_slots_v1[slot].scan_status = -1
+        if fd == state.scan_pid: epoch_native_slots_v1[slot].scan_pid = -1
+        if fd == state.scan_pidfd: epoch_native_slots_v1[slot].scan_pidfd = -1
+        if fd >= 0 and close(fd as i32) != 0: failed = true
+    if failed: return Err("fresh-epoch-native-scan-close-consumed-error")
+    Ok(())
+
+fn epoch_native_status_uid_v1(source: text, uid: i64, start: i64, count: i64) -> Result<bool, text>:
+    for line in source.split("\n"):
+        if not line.starts_with("Uid:"): continue
+        var cells: [text] = []
+        for cell in line.substring(4, line.byte_len()).replace("\t", " ").split(" "):
+            if cell != "": cells.push(cell)
+        if cells.len() != 4: return Err("fresh-epoch-native-uid-status-shape")
+        var related = false
+        for cell in cells:
+            val value = epoch_native_number_v1(cell, 4294967295)?
+            if value == uid or (value >= start and value - start < count): related = true
+        return Ok(related)
+    Err("fresh-epoch-native-uid-status-missing")
+
+@unsafe(reason: "full bounded real UID census under pinned procfs and pidfd liveness", capabilities: [ffi, raw_ptr])
+fn epoch_native_uid_census_v1(slot: i64) -> Result<(), text>:
+    val state = epoch_native_slots_v1[slot]
+    val proc_fd = state.handles[state.proc].fd
+    val uid = state.snapshot.profile.number_v1("serviceUid")?
+    val self_pid = state.snapshot.process.process_id
+    epoch_native_cursor_begin_v1(slot, proc_fd)?
+    var count = 0
+    var seen_self = false
+    while true:
+        val next = epoch_native_cursor_next_v1(slot)?
+        if next.is_none(): break
+        val name = next.unwrap()
+        var numeric = name.byte_len() > 0
+        for byte in name.bytes():
+            if byte < 48 or byte > 57: numeric = false
+        if not numeric: continue
+        count = count + 1
+        if count > 65536: return Err("fresh-epoch-native-uid-census-bound")
+        val pid = epoch_native_number_v1(name, 2147483647)?
+        val pinned = pidfd_open(pid as i32, 0u32) as i64
+        epoch_native_slots_v1[slot].scan_pidfd = pinned
+        if pinned < 0:
+            if volatile_read_u32(__errno_location()) == 3: continue
+            return Err("fresh-epoch-native-uid-census-pidfd")
+        val pointer = epoch_native_name_v1(slot, name)
+        val process_fd = openat(proc_fd as i32, pointer, epoch_native_directory_flags_v1(), 0u32) as i64
+        epoch_native_slots_v1[slot].scan_pid = process_fd
+        if process_fd < 0:
+            if volatile_read_u32(__errno_location()) == 2:
+                epoch_native_scan_close_v1(slot)?
+                continue
+            return Err("fresh-epoch-native-uid-census-process")
+        epoch_native_proc_child_v1(slot, process_fd)?
+        val status_name = epoch_native_name_v1(slot, "status")
+        val status_fd = openat(process_fd as i32, status_name, epoch_native_file_flags_v1(), 0u32) as i64
+        epoch_native_slots_v1[slot].scan_status = status_fd
+        if status_fd < 0: return Err("fresh-epoch-native-uid-census-status")
+        epoch_native_proc_child_v1(slot, status_fd)?
+        val status = epoch_native_text_v1(slot, status_fd, 16384)?
+        val p = state.snapshot.profile
+        if epoch_native_status_uid_v1(status, uid, p.number_v1("subuidStart")?, p.number_v1("subuidCount")?)?:
+            if pid != self_pid: return Err("fresh-epoch-native-preexisting-service-or-subuid-process")
+            seen_self = true
+        val descriptor = state.arena + 4096
+        volatile_write_u32(descriptor, pinned)
+        volatile_write_u32(descriptor + 4, 1)
+        if poll(descriptor, 1u64, 0) != 0: return Err("fresh-epoch-native-uid-census-process-changed")
+        epoch_native_scan_close_v1(slot)?
+    epoch_native_cursor_close_v1(slot)?
+    if not seen_self: return Err("fresh-epoch-native-uid-census-incomplete")
+    Ok(())
+
+fn epoch_native_accounts_v1(slot: i64) -> Result<(), text>:
+    val state = epoch_native_slots_v1[slot]
+    val p = state.snapshot.profile
+    val name = p.text_v1("serviceName")?
+    val uid = p.number_v1("serviceUid")?
+    val gid = p.number_v1("serviceGid")?
+    var passwd_count = 0
+    for item in state.handles:
+        if item.name != "passwd": continue
+        val account_text = epoch_native_text_v1(slot, item.fd, 1048575)?
+        for line in account_text.split("\n"):
+            val cells = line.split(":")
+            if cells.len() != 7: continue
+            if cells[0] == name or cells[2] == str(uid):
+                passwd_count = passwd_count + 1
+                if (cells[0] != name or cells[2] != str(uid) or cells[3] != str(gid) or cells[5] != "/nonexistent" or
+                        (cells[6] != "/usr/sbin/nologin" and cells[6] != "/sbin/nologin")):
+                    return Err("fresh-epoch-native-service-account")
+    if passwd_count != 1: return Err("fresh-epoch-native-service-account-ambiguous")
+    for pair in [("subuid", "subuidStart", "subuidCount"), ("subgid", "subgidStart", "subgidCount")]:
+        var matches = 0
+        for item in state.handles:
+            if item.name != pair.0: continue
+            val subid_text = epoch_native_text_v1(slot, item.fd, 1048575)?
+            for line in subid_text.split("\n"):
+                if line == "" or line.starts_with("#"): continue
+                val cells = line.split(":")
+                if cells.len() != 3: return Err("fresh-epoch-native-subid-config-shape")
+                val start = epoch_native_number_v1(cells[1], 4294967294)?
+                val count = epoch_native_number_v1(cells[2], 4294967294)?
+                val expected_start = p.number_v1(pair.1)?
+                val expected_count = p.number_v1(pair.2)?
+                if cells[0] == name or cells[0] == str(uid):
+                    matches = matches + 1
+                    if start != expected_start or count != expected_count: return Err("fresh-epoch-native-subid-config-mismatch")
+                elif start < expected_start + expected_count and expected_start < start + count:
+                    return Err("fresh-epoch-native-subid-overlap")
+        if matches != 1: return Err("fresh-epoch-native-subid-config-ambiguous")
+    Ok(())
+
+@unsafe(reason: "checks actual supplementary groups and bounded physical hardware totals", capabilities: [ffi, raw_ptr])
+fn epoch_native_hardware_v1(slot: i64) -> Result<(i64, i64), text>:
+    val state = epoch_native_slots_v1[slot]
+    val group_count = getgroups(0, 0)
+    if group_count < 0 or group_count > 32: return Err("fresh-epoch-native-groups")
+    if group_count > 0:
+        if getgroups(group_count, state.arena + 4096) != group_count: return Err("fresh-epoch-native-groups-changed")
+        for at in 0..group_count:
+            if volatile_read_u32(state.arena + 4096 + at * 4) != state.snapshot.profile.number_v1("serviceGid")?:
+                return Err("fresh-epoch-native-additional-group")
+    val cpu = sysconf(84)
+    val pages = sysconf(85)
+    val page_size = sysconf(30)
+    if cpu < 1 or cpu > 9223372036854775807 / 1000 or pages < 1 or page_size < 1 or pages > 9223372036854775807 / page_size:
+        return Err("fresh-epoch-native-physical-capacity")
+    Ok((cpu * 1000, pages * page_size))
+
+fn epoch_native_mounts_v1(slot: i64) -> Result<(), text>:
+    val state = epoch_native_slots_v1[slot]
+    val expected = state.snapshot.profile.text_v1("supervisorCgroup")?
+    var own_group = ""
+    var proc_found = false
+    var cgroup_found = false
+    for item in state.handles:
+        if item.rule == "self-cgroup": own_group = epoch_native_text_v1(slot, item.fd)?
+        if item.rule != "mountinfo": continue
+        val mount_text = epoch_native_text_v1(slot, item.fd, 1048575)?
+        for line in mount_text.split("\n"):
+            val halves = line.split(" - ")
+            if halves.len() != 2: continue
+            val left = halves[0].split(" ")
+            val right = halves[1].split(" ")
+            if left.len() < 6 or right.len() < 3: return Err("fresh-epoch-native-mountinfo-shape")
+            if left[4] == "/proc":
+                if left[3] != "/" or right[0] != "proc" or right[2].contains("hidepid="):
+                    return Err("fresh-epoch-native-hidden-proc-unsupported")
+                proc_found = true
+            if left[4] == "/sys/fs/cgroup":
+                if left[3] != "/" or right[0] != "cgroup2": return Err("fresh-epoch-native-cgroup-mount-root")
+                cgroup_found = true
+    if own_group != "0::" + expected + "\n" or not proc_found or not cgroup_found:
+        return Err("fresh-epoch-native-current-membership-or-visible-hierarchy")
+    Ok(())
+
+fn epoch_native_recheck_v1(slot: i64, generation: i64) -> Result<EpochNativeStateV1, text>:
+    val state = epoch_native_state_v1(slot, generation)?
+    if state.phase != "ready" and state.phase != "opening": return Err("fresh-epoch-native-cleanup-only")
+    val profile = state.profile.current_v1()?
+    if profile.profile_digest != state.snapshot.profile_digest or profile.process.identity_digest != state.snapshot.process.identity_digest:
+        return Err("fresh-epoch-native-installed-context-changed")
+    for item in state.handles:
+        val immutable = item.rule == "root-file" or item.rule == "executable"
+        val meta = epoch_native_meta_v1(slot, item.fd, "", immutable)?
+        if meta.0 != item.identity: return Err("fresh-epoch-native-retained-object-changed")
+        epoch_native_security_v1(slot, meta, item.rule)?
+        if item.rule == "executable": epoch_native_executable_caps_v1(slot, item.fd)?
+        if item.parent >= 0 or item.parent == -100:
+            val named = epoch_native_meta_v1(slot, item.parent, item.name, immutable, item.rule == "root-mask")?
+            if named.0 != item.identity:
+                return Err("fresh-epoch-native-named-ancestry-replaced")
+        if item.rule == "root-mask":
+            val name = epoch_native_name_v1(slot, item.name)
+            val output = state.arena + 8192
+            if readlinkat(item.parent as i32, name, output, 64u64) != 9: return Err("fresh-epoch-native-activation-mask-target")
+            val expected = "/dev/null"
+            for at in 0..9:
+                if volatile_read_u8(output + at) != expected.byte_at(at) as i64:
+                    return Err("fresh-epoch-native-activation-mask-target")
+    Ok(state)
+
+fn epoch_native_current_body_v1(slot: i64, generation: i64, preparation: bool) -> Result<LinuxFreshEpochNativeObservationV1, text>:
+    val state = epoch_native_recheck_v1(slot, generation)?
+    epoch_native_accounts_v1(slot)?
+    epoch_native_mounts_v1(slot)?
+    val limits = epoch_native_limits_v1(slot)?
+    val hardware = epoch_native_hardware_v1(slot)?
+    val p = state.snapshot.profile
+    epoch_native_no_user_bus_v1(slot)?
+    epoch_native_local_stores_v1(slot)?
+    if p.number_v1("outsideCpuMillis")? > hardware.0 - limits.0 or p.number_v1("outsideMemoryBytes")? > hardware.1 - limits.1:
+        return Err("fresh-epoch-native-physical-allocation-exceeded")
+    if preparation:
+        epoch_native_uid_census_v1(slot)?
+        if epoch_native_slots_v1[slot].population.is_none():
+            match linux_fresh_epoch_population_open_v1(state.handles[state.partition].fd, state.handles[state.supervisor].identity):
+                case LinuxFreshEpochPopulationOpenV1.Rejected(reason): return Err(reason)
+                case LinuxFreshEpochPopulationOpenV1.CleanupRequired(owner, reason):
+                    epoch_native_slots_v1[slot].population = Some(owner)
+                    return Err(reason)
+                case LinuxFreshEpochPopulationOpenV1.Ready(owner): epoch_native_slots_v1[slot].population = Some(owner)
+        val population = epoch_native_slots_v1[slot].population.unwrap().current_v1()?
+        if population != state.handles[state.partition].identity: return Err("fresh-epoch-native-partition-population-root-differs")
+        epoch_native_empty_v1(slot, state.handles[state.graph].fd)?
+        epoch_native_empty_v1(slot, state.handles[state.run].fd)?
+    val final_state = epoch_native_recheck_v1(slot, generation)?
+    val machine_roots = sha256_text("MACHINE-FRESH-EPOCH-WAL-ROOTS-V1\n" + state.handles[state.machine_state].identity + "\n" +
+        state.handles[state.machine_wal].identity + "\n" + state.handles[state.machine_objects].identity + "\n")
+    Ok(LinuxFreshEpochNativeObservationV1(partition_identity_digest: sha256_text("FRESH-EPOCH-CGROUP-V1\n" +
+        state.handles[state.partition].identity + "\n"), store_identity_digest: sha256_text("FRESH-EPOCH-STORES-V1\n" +
+        state.handles[state.graph].identity + "\n" + state.handles[state.run].identity + "\n" + machine_roots + "\n"),
+        observed_cpu_millis: limits.0, observed_memory_bytes: limits.1,
+        physical_cpu_millis: hardware.0, physical_memory_bytes: hardware.1))
+
+fn epoch_native_current_v1(slot: i64, generation: i64, preparation: bool) -> Result<LinuxFreshEpochNativeObservationV1, text>:
+    val result = epoch_native_current_body_v1(slot, generation, preparation)
+    if (result.is_err() and linux_machine_process_origin_check_v1().is_ok() and slot >= 0 and slot < epoch_native_slots_v1.len() and
+            epoch_native_slots_v1[slot].generation == generation):
+        if epoch_native_slots_v1[slot].phase != "closed": epoch_native_slots_v1[slot].phase = "cleanup"
+    result
+
+@unsafe(reason: "requires actual absence of executable privilege xattrs, not only current Host caps0", capabilities: [ffi, raw_ptr])
+fn epoch_native_executable_caps_v1(slot: i64, fd: i64) -> Result<(), text>:
+    val name = epoch_native_name_v1(slot, "security.capability")
+    val error = __errno_location()
+    volatile_write_u32(error, 0)
+    if fgetxattr(fd as i32, name, 0, 0u64) >= 0: return Err("fresh-epoch-native-executable-file-capability-present")
+    val failure = volatile_read_u32(error)
+    if failure != 61 and failure != 95: return Err("fresh-epoch-native-executable-file-capability-unknown")
+    Ok(())
+
+@unsafe(reason: "tests the actual fixed UID bus address without connecting or accepting a caller path", capabilities: [ffi, raw_ptr])
+fn epoch_native_no_user_bus_v1(slot: i64) -> Result<(), text>:
+    val uid = epoch_native_slots_v1[slot].snapshot.profile.number_v1("serviceUid")?
+    val pointer = epoch_native_name_v1(slot, "/run/user/" + str(uid) + "/bus")
+    val error = __errno_location()
+    volatile_write_u32(error, 0)
+    val status = statx(-100, pointer, 256, 6143u32, epoch_native_slots_v1[slot].arena)
+    val failure = volatile_read_u32(error)
+    if status == 0: return Err("fresh-epoch-native-user-bus-route-exists")
+    if failure != 2 and failure != 13: return Err("fresh-epoch-native-user-bus-route-unknown")
+    volatile_write_u32(error, 0)
+    val home = epoch_native_name_v1(slot, "/nonexistent")
+    if statx(-100, home, 256, 6143u32, epoch_native_slots_v1[slot].arena) == 0:
+        return Err("fresh-epoch-native-user-home-route-exists")
+    if volatile_read_u32(error) != 2: return Err("fresh-epoch-native-user-home-route-unknown")
+    Ok(())
+
+fn epoch_native_bind_launch_v1(slot: i64, generation: i64, template: GroupProcessStreamLaunchV2) -> Result<GroupProcessStreamLaunchV2, text>:
+    val observed = epoch_native_current_v1(slot, generation, false)?
+    val state = epoch_native_state_v1(slot, generation)?
+    val p = state.snapshot.profile
+    linux_fresh_epoch_broker_environment_v1(p, state.snapshot.process.process_id)?
+    val supervisor = state.handles[state.supervisor]
+    epoch_native_fs_v1(slot, supervisor.fd, 1667723888)?
+    val cpu_text = epoch_native_child_text_v1(slot, supervisor.fd, "cpu.max")?
+    val fields = cpu_text.trim().split(" ")
+    if fields.len() != 2: return Err("fresh-epoch-native-broker-cpu-shape")
+    val quota = epoch_native_number_v1(fields[0], 1000000000000)?
+    val period = epoch_native_number_v1(fields[1], 1000000)?
+    val memory_text = epoch_native_child_text_v1(slot, supervisor.fd, "memory.max")?
+    val memory = epoch_native_number_v1(memory_text)?
+    if (quota < 1 or period < 1000 or quota * 1000 != p.number_v1("reservedCpuMillis")? * period or
+            memory != p.number_v1("reservedMemoryBytes")?):
+        return Err("fresh-epoch-native-broker-reserved-limit-readback")
+    val projected = linux_fresh_epoch_project_launch_v1(p, LinuxFreshEpochBrokerDataV1(device: supervisor.device,
+        inode: supervisor.inode, generation: generation, cpu_quota_us: quota, cpu_period_us: period, memory_bytes: memory), template)?
+    val checked = epoch_native_recheck_v1(slot, generation)?
+    Ok(projected)
+
+@unsafe(reason: "captures actual fixed-profile selected descriptors without execution or initialization", capabilities: [ffi, raw_ptr])
+fn epoch_native_open_v1(profile: LinuxInstalledFreshEpochProfileV1) -> LinuxFreshEpochNativeOpenV1:
+    val origin = linux_machine_process_origin_check_v1()
+    if origin.is_err(): return LinuxFreshEpochNativeOpenV1.Rejected(origin.unwrap_err())
+    val initial = profile.current_v1()
+    if initial.is_err(): return LinuxFreshEpochNativeOpenV1.Rejected(initial.unwrap_err())
+    if epoch_native_directory_flags_v1() == 0 or epoch_native_active_v1 >= 32 or epoch_native_slots_v1.len() >= 4096:
+        return LinuxFreshEpochNativeOpenV1.Rejected("fresh-epoch-native-platform-or-owner-bound")
+    val arena = malloc(1060864u64)
+    if arena == 0: return LinuxFreshEpochNativeOpenV1.Rejected("fresh-epoch-native-memory")
+    val slot = epoch_native_slots_v1.len()
+    epoch_native_slots_v1.push(EpochNativeStateV1(generation: slot + 1, profile: profile, snapshot: initial.unwrap(), arena: arena))
+    epoch_native_active_v1 = epoch_native_active_v1 + 1
+    val owner = LinuxFreshEpochNativeOwnerV1(slot: slot, generation: slot + 1)
+    val acquired = epoch_native_capture_v1(slot)
+    if acquired.is_err():
+        epoch_native_slots_v1[slot].phase = "cleanup"
+        return LinuxFreshEpochNativeOpenV1.CleanupRequired(owner, acquired.unwrap_err())
+    epoch_native_slots_v1[slot].phase = "ready"
+    LinuxFreshEpochNativeOpenV1.Ready(owner)
+
+fn epoch_native_capture_v1(slot: i64) -> Result<(), text>:
+    val state = epoch_native_slots_v1[slot]
+    val p = state.snapshot.profile
+    for path in ["/etc/passwd", "/etc/subuid", "/etc/subgid"]:
+        val account = epoch_native_path_v1(slot, path, "root-file", false)?
+    val host_fragment = epoch_native_path_v1(slot, "/etc/systemd/system/" + p.text_v1("hostUnit")?, "root-file", false)?
+    for unit in [p.text_v1("providerUnit")?, p.text_v1("providerSocketUnit")?, "user@" + str(p.number_v1("serviceUid")?) + ".service"]:
+        val inhibited = epoch_native_path_v1(slot, "/etc/systemd/system/" + unit, "root-mask", false)?
+    val graph = epoch_native_path_v1(slot, p.text_v1("graphRoot")?, "private-dir")?
+    epoch_native_slots_v1[slot].graph = graph
+    val run = epoch_native_path_v1(slot, p.text_v1("runRoot")?, "private-dir")?
+    epoch_native_slots_v1[slot].run = run
+    for pair in [("providerExecutable", "providerExecutableSha256"), ("brokerExecutable", "brokerExecutableSha256")]:
+        val executable = epoch_native_path_v1(slot, p.text_v1(pair.0)?, "executable", false)?
+        val binary = epoch_native_slots_v1[slot].handles[executable]
+        if binary.size < 1 or binary.size > 268435456: return Err("fresh-epoch-native-binary-bound")
+        var hash = sha256_stream_v1_new()
+        var offset = 0
+        while offset < binary.size:
+            val left = binary.size - offset
+            val chunk = epoch_native_bytes_v1(slot, binary.fd, offset, if left > 1048576: 1048576 else: left)?
+            if chunk.len() == 0 or not hash.update(chunk): return Err("fresh-epoch-native-binary-hash")
+            offset = offset + chunk.len()
+        val digest = hash.finish_hex()
+        if digest.is_none() or digest.unwrap() != p.text_v1(pair.1)?: return Err("fresh-epoch-native-binary-identity")
+    val machine = epoch_native_path_v1(slot, "/var/lib/simple/container", "private-dir")?
+    epoch_native_slots_v1[slot].machine_state = machine
+    val wal = epoch_native_open_fd_v1(slot, epoch_native_slots_v1[slot].handles[machine].fd, "database-wal", true, "private-dir")?
+    epoch_native_slots_v1[slot].machine_wal = wal
+    val objects = epoch_native_open_fd_v1(slot, epoch_native_slots_v1[slot].handles[wal].fd, "objects", true, "private-dir")?
+    epoch_native_slots_v1[slot].machine_objects = objects
+    val cgroot = epoch_native_path_v1(slot, "/sys/fs/cgroup", "cgroup-dir")?
+    # Special root marker distinguishes the hierarchy root from nonroot limits.
+    epoch_native_slots_v1[slot].handles[cgroot].name = "/sys/fs/cgroup"
+    epoch_native_slots_v1[slot].handles[cgroot].parent = -100
+    var index = cgroot
+    val partition_path = p.text_v1("partitionCgroup")?
+    val partition_relative = partition_path.substring(1, partition_path.byte_len())
+    for component in partition_relative.split("/"):
+        index = epoch_native_open_fd_v1(slot, epoch_native_slots_v1[slot].handles[index].fd, component, true, "cgroup-dir")?
+    epoch_native_slots_v1[slot].partition = index
+    val delegated_path = p.text_v1("delegatedCgroup")?
+    val relative_delegated = delegated_path.substring(partition_path.byte_len() + 1, delegated_path.byte_len())
+    for component in relative_delegated.split("/"):
+        index = epoch_native_open_fd_v1(slot, epoch_native_slots_v1[slot].handles[index].fd, component, true, "delegated-dir")?
+    val supervisor = epoch_native_open_fd_v1(slot, epoch_native_slots_v1[slot].handles[index].fd, "supervisor", true, "delegated-dir")?
+    epoch_native_slots_v1[slot].supervisor = supervisor
+    val proc = epoch_native_path_v1(slot, "/proc", "proc-dir")?
+    epoch_native_slots_v1[slot].proc = proc
+    epoch_native_fs_v1(slot, epoch_native_slots_v1[slot].handles[proc].fd, 40864)?
+    val procfd = epoch_native_slots_v1[slot].handles[proc].fd
+    val selfdir = epoch_native_open_fd_v1(slot, procfd, str(state.snapshot.process.process_id), true, "proc-dir")?
+    val self_fd = epoch_native_slots_v1[slot].handles[selfdir].fd
+    val mounts = epoch_native_open_fd_v1(slot, self_fd, "mountinfo", false, "mountinfo")?
+    val membership = epoch_native_open_fd_v1(slot, self_fd, "cgroup", false, "self-cgroup")?
+    epoch_native_proc_child_v1(slot, self_fd)?
+    epoch_native_proc_child_v1(slot, epoch_native_slots_v1[slot].handles[mounts].fd)?
+    epoch_native_proc_child_v1(slot, epoch_native_slots_v1[slot].handles[membership].fd)?
+    val checked = epoch_native_recheck_v1(slot, slot + 1)?
+    Ok(())
+
+@unsafe(reason: "clears consumed descriptor ownership before close, preserves diagnostics and borrowed profile", capabilities: [ffi, raw_ptr])
+fn epoch_native_close_v1(slot: i64, generation: i64) -> LinuxFreshEpochNativeCloseTurnV1:
+    val owner = LinuxFreshEpochNativeOwnerV1(slot: slot, generation: generation)
+    val origin = linux_machine_process_origin_check_v1()
+    if origin.is_err(): return LinuxFreshEpochNativeCloseTurnV1(Some(owner), false, origin.unwrap_err())
+    if slot < 0 or slot >= epoch_native_slots_v1.len() or epoch_native_slots_v1[slot].generation != generation:
+        return LinuxFreshEpochNativeCloseTurnV1(Some(owner), false, "fresh-epoch-native-stale")
+    var state = epoch_native_slots_v1[slot]
+    if state.phase == "closed": return LinuxFreshEpochNativeCloseTurnV1(nil, true, state.error)
+    epoch_native_slots_v1[slot].phase = "closing"
+    if val population = state.population:
+        val turn = population.close_v1()
+        if turn.1 != "" and state.error == "": epoch_native_slots_v1[slot].error = turn.1
+        if not turn.0: return LinuxFreshEpochNativeCloseTurnV1(Some(owner), false, epoch_native_slots_v1[slot].error)
+        epoch_native_slots_v1[slot].population = nil
+    val cursor = epoch_native_cursor_close_v1(slot)
+    if cursor.is_err() and epoch_native_slots_v1[slot].error == "": epoch_native_slots_v1[slot].error = cursor.unwrap_err()
+    val scanned = epoch_native_scan_close_v1(slot)
+    if scanned.is_err() and epoch_native_slots_v1[slot].error == "": epoch_native_slots_v1[slot].error = scanned.unwrap_err()
+    val cursor_fd = epoch_native_slots_v1[slot].cursor_fd
+    epoch_native_slots_v1[slot].cursor_fd = -1
+    if cursor_fd >= 0 and close(cursor_fd as i32) != 0 and epoch_native_slots_v1[slot].error == "":
+        epoch_native_slots_v1[slot].error = "fresh-epoch-native-cursor-fd-close-consumed-error"
+    var at = state.handles.len() - 1
+    while at >= 0:
+        val fd = epoch_native_slots_v1[slot].handles[at].fd
+        epoch_native_slots_v1[slot].handles[at].fd = -1
+        if fd >= 0 and close(fd as i32) != 0 and epoch_native_slots_v1[slot].error == "":
+            epoch_native_slots_v1[slot].error = "fresh-epoch-native-fd-close-consumed-error"
+        at = at - 1
+    free(state.arena)
+    epoch_native_slots_v1[slot].phase = "closed"
+    epoch_native_active_v1 = epoch_native_active_v1 - 1
+    LinuxFreshEpochNativeCloseTurnV1(nil, true, epoch_native_slots_v1[slot].error)
+@else:
+fn epoch_native_bind_launch_v1(slot: i64, generation: i64, template: GroupProcessStreamLaunchV2) -> Result<GroupProcessStreamLaunchV2, text>:
+    Err("fresh-epoch-native-linux-required")
+fn epoch_native_current_v1(slot: i64, generation: i64, preparation: bool) -> Result<LinuxFreshEpochNativeObservationV1, text>: Err("fresh-epoch-native-linux-required")
+fn epoch_native_close_v1(slot: i64, generation: i64) -> LinuxFreshEpochNativeCloseTurnV1:
+    LinuxFreshEpochNativeCloseTurnV1(Some(LinuxFreshEpochNativeOwnerV1(slot: slot, generation: generation)), false, "fresh-epoch-native-linux-required")
+@end

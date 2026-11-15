@@ -23,6 +23,7 @@ use std.spec.step
 use std.spec.{describe, context, it, expect}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.color.{color_r}
+use std.io_runtime.{file_exists}
 
 
 fn _has_intermediate_red(pixels: [u32], width: i32, x: i32, y: i32, w: i32, h: i32) -> bool:
@@ -132,3 +133,63 @@ describe "Engine2DExtended.draw_text_bg (CPU backend)":
             # Empty string must touch no pixels — whole scene still GREEN.
             expect(pixels[0]).to_equal(GREEN)
             engine.shutdown()
+
+# Vector face at high dpi (owner rule: >= 300 dpi, device scale >= 3.125):
+# a 16 CSS px run at scale 3.125 is 50 device px. Same font, same size on
+# every backend. This restores the antialiased-coverage check the scale-1
+# bitmap rows above cannot make (#9443 traded it away).
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val LVP_ICD: text = "/usr/share/vulkan/icd.d/lvp_icd.json"
+val HW: i32 = 96
+val HH: i32 = 64
+val HI_DPI_SIZE: i32 = 50
+
+fn _hidpi_frame(backend: text) -> [u32]:
+    var e = if backend == "vulkan": Engine2D.create_with_backend_fast(HW, HH, backend) else: Engine2D.create_with_backend(HW, HH, backend)
+    expect(e.load_font(SANS)).to_be(true)
+    expect(e.selected_font_identity() != "").to_be(true)
+    if backend == "vulkan":
+        expect(e.backend_name()).to_equal("vulkan")
+    e.clear(0xFF00FF00u32)
+    e.draw_text_bg(2, 2, "Ab", 0xFFFFFFFFu32, 0xFF000000u32, HI_DPI_SIZE)
+    e.submit_batch()
+    val px = e.read_pixels()
+    e.shutdown()
+    px
+
+fn _hidpi_intermediate(px: [u32]) -> i32:
+    var n = 0
+    for c in px:
+        val r = color_r(c)
+        if r > 0 and r < 255:
+            n = n + 1
+    n
+
+fn _hidpi_diff(a: [u32], b: [u32]) -> i32:
+    var n = 0
+    var i = 0
+    while i < HW * HH:
+        if a[i] != b[i]:
+            n = n + 1
+        i = i + 1
+    n
+
+describe "Engine2D.draw_text_bg vector face at high dpi":
+    it "blends antialiased edges identically on cpu, software and vulkan":
+        if not file_exists(SANS):
+            print("[skip] draw-text-bg-hidpi: no Liberation Sans at {SANS}; this row was not exercised")
+            return
+        val cpu = _hidpi_frame("cpu")
+        val soft = _hidpi_frame("software")
+        val inter = _hidpi_intermediate(cpu)
+        step("50 px glyph edges carry real coverage between fg and bg (333 px, read back 2026-11-15)")
+        expect(inter).to_equal(333)
+        step("cpu and software paint the same bytes")
+        expect(_hidpi_diff(cpu, soft)).to_equal(0)
+        if not file_exists(LVP_ICD):
+            print("[skip] draw-text-bg-hidpi vulkan: no llvmpipe ICD at {LVP_ICD}; the Vulkan half was not exercised")
+            return
+        val vk = _hidpi_frame("vulkan")
+        step("vulkan paints the same bytes as cpu")
+        expect(_hidpi_diff(cpu, vk)).to_equal(0)
+        expect(_hidpi_intermediate(vk)).to_equal(333)

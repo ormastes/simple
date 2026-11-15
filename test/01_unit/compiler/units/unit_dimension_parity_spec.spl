@@ -1,0 +1,89 @@
+# @req RB-UNIT-01 RB-UNIT-02
+# @cover src/compiler/30.types/units/unit_ops.spl 60%
+"""
+## Purpose and audience
+Executable contract for plan rows RB-UNIT-01/02 (robust boundaries plan, 2.4).
+The shared unit verdict table (unit_ops) is consulted by both the compiler's
+inference gate and the interpreter's binary dispatch; this spec pins the
+dimension behaviour both must share: distance / duration is a velocity with the
+right scale, integer operands never truncate a ratio to zero, `km + kg` is
+rejected, and two nominal units with the same storage type never mix unless
+unit_ops declares it.
+## Operator workflow
+bin/simple test test/01_unit/compiler/units/unit_dimension_parity_spec.spl
+## Compatibility and limitations
+Scale algebra lives in std.common.units.model.world_units (exact ratios).
+unit_ops itself has no dimension quotient: the Distance/Duration -> velocity
+verdict is a known gap (RED until unit_ops learns declared quotients), see
+doc/08_tracking/bug/unit_ops_no_dimension_quotient_velocity_2026-11-15.md.
+## Verification guidance and troubleshooting
+An Allow on a km+kg or same-storage-different-unit row means implicit
+arithmetic leaked back into unit_ops.
+"""
+
+use std.spec
+use compiler.core.types.{reset_all_pools, unit_decl_register, TYPE_I64}
+use compiler.types.units.unit_ops.{UnitOpVerdict, unit_op_verdict, UnitValueResult, unit_value_binop}
+use std.common.units.model.world_units.{
+    exact_ratio, exact_ratio_div, exact_ratio_equal,
+    unit_expression_scaled, unit_expression_div,
+    unit_expression_factor_exponent
+}
+
+fn declare_world():
+    reset_all_pools()
+    unit_decl_register("Distance", "nominal", "km", TYPE_I64, "")
+    unit_decl_register("Duration", "nominal", "hr", TYPE_I64, "")
+    unit_decl_register("Mass", "nominal", "kg", TYPE_I64, "")
+    unit_decl_register("Widgets", "nominal", "wd", TYPE_I64, "")
+
+fn verdict_text(v: UnitOpVerdict) -> text:
+    match v:
+        case NotUnit: "notunit"
+        case Allow(r): "allow:" + r
+        case Deny(m):
+            if m.starts_with("SPL-UNIT-002"): "deny"
+            else: "deny-without-code"
+
+describe "unit dimension parity (RB-UNIT-01/02)":
+    it "km/hr scale is 5/18 m/s with metre^1 second^-1 dimension":
+        step("build km / hr from exact scales")
+        val km = unit_expression_scaled(exact_ratio(1000, 1), "metre")
+        val hr = unit_expression_scaled(exact_ratio(3600, 1), "second")
+        val v = unit_expression_div(km, hr)
+        step("scale is exactly 5/18")
+        expect(exact_ratio_equal(v.scale, exact_ratio(5, 18))).to_equal(true)
+        expect(unit_expression_factor_exponent(v, "metre")).to_equal(1)
+        expect(unit_expression_factor_exponent(v, "second")).to_equal(-1)
+
+    it "integer operands do not truncate 1/2 to 0":
+        step("exact ratio keeps 1/2")
+        val half = exact_ratio_div(exact_ratio(1, 1), exact_ratio(2, 1))
+        expect(half.numerator).to_equal(1)
+        expect(half.denominator).to_equal(2)
+        step("a unit/unit ratio is denied, never silently integer-divided")
+        declare_world()
+        val r = unit_value_binop("div", "", "Widgets", 1, "Widgets", 2)
+        val is_error = match r:
+            case Error(_): true
+            case _: false
+        expect(is_error).to_equal(true)
+
+    it "km + kg is rejected":
+        declare_world()
+        step("distinct nominal units never mix")
+        expect(verdict_text(unit_op_verdict("add", "Distance", "Mass"))).to_equal("deny")
+        expect(verdict_text(unit_op_verdict("sub", "Mass", "Distance"))).to_equal("deny")
+
+    it "same-storage nominal units cannot be added unless declared":
+        declare_world()
+        step("Distance and Widgets are both i64-backed")
+        expect(verdict_text(unit_op_verdict("add", "Distance", "Widgets"))).to_equal("deny")
+        step("same unit with itself is the declared case")
+        expect(verdict_text(unit_op_verdict("add", "Distance", "Distance"))).to_equal("allow:Distance")
+
+    it "distance / duration yields a velocity dimension through unit_ops":
+        declare_world()
+        step("unit_ops must approve Distance / Duration with a velocity result")
+        val t = verdict_text(unit_op_verdict("div", "Distance", "Duration"))
+        expect(t.starts_with("allow:")).to_equal(true)

@@ -1,4 +1,7 @@
 pub use std.nogc_async_mut.container.observation_v2.simple_container_observe_v2
+pub use std.common.contracts.container.execution_configuration_v1.{ContainerExecutionConfigurationObservationV1, ContainerExecutionMountObservationV1}
+use std.common.contracts.container.execution_configuration_v1.container_execution_configuration_decode_v1
+use std.nogc_sync_mut.io.process_capture_evidence_v1.{ProcessCaptureOwnerV1, ProcessCaptureEvidenceV1, ProcessCaptureTurnV1, process_capture_step_v1}
 use std.nogc_async_mut.container.observation_v2.container_observation_validate_v2
 # The single Simple Container API routes actual platform owners, never a fake
 # trait probe. Returned turns retain the updated tagged owner after every call.
@@ -20,6 +23,124 @@ pub enum SimpleContainerOwnerV2:
 pub struct ContainerOperationTurnV2:
     owner: SimpleContainerOwnerV2
     operation: RuntimeOperationV1
+
+pub struct ContainerExecutionConfigurationTurnV1:
+    owner: SimpleContainerOwnerV2
+    observation: ContainerExecutionConfigurationObservationV1?
+    error: text
+
+pub class ContainerExecutionLogsCaptureOwnerV1:
+    original_request: ContainerExecutionRequestV2
+    scope: ContainerHostScopeV2
+    runtime: RuntimeIdentityV1
+    native: ProcessCaptureOwnerV1
+    first_error: text
+
+pub struct ContainerExecutionLogsCaptureObservationV1:
+    scope: ContainerHostScopeV2
+    runtime: RuntimeIdentityV1
+    request_digest: text
+    evidence: ProcessCaptureEvidenceV1
+
+pub struct ContainerExecutionLogsCaptureTurnV1:
+    owner: SimpleContainerOwnerV2
+    capture: ContainerExecutionLogsCaptureOwnerV1?
+    observation: ContainerExecutionLogsCaptureObservationV1?
+    error: text
+
+fn container_logs_identity_equal_v1(left: RuntimeIdentityV1, right: RuntimeIdentityV1) -> bool:
+    left.native_id == right.native_id and left.pod_uid == right.pod_uid and left.attempt == right.attempt and
+        left.operation_id == right.operation_id and left.engine == right.engine and left.node_boot_id == right.node_boot_id and
+        left.provider_generation == right.provider_generation
+
+fn container_logs_capture_finish_v1(owner: SimpleContainerOwnerV2, original: ContainerExecutionRequestV2,
+        scope: ContainerHostScopeV2, runtime: RuntimeIdentityV1, native: ProcessCaptureTurnV1,
+        previous_error: text, cancelled: bool) -> ContainerExecutionLogsCaptureTurnV1:
+    var error = previous_error
+    if error == "": error = native.error
+    if native.owner.?:
+        return ContainerExecutionLogsCaptureTurnV1(owner: owner,
+            capture: Some(ContainerExecutionLogsCaptureOwnerV1(original_request: original, scope: scope, runtime: runtime,
+                native: native.owner.unwrap(), first_error: error)), observation: nil, error: error)
+    if not native.evidence.?:
+        return ContainerExecutionLogsCaptureTurnV1(owner: owner, capture: nil, observation: nil,
+            error: if error != "": error else: "container-logs-capture-evidence-unavailable")
+    val evidence = native.evidence.unwrap()
+    val observation = ContainerExecutionLogsCaptureObservationV1(scope: scope, runtime: runtime,
+        request_digest: original.plan.request_digest, evidence: evidence)
+    if not evidence.retirement_confirmed_v1():
+        return ContainerExecutionLogsCaptureTurnV1(owner: owner, capture: nil, observation: Some(observation),
+            error: "container-logs-capture-retirement-unconfirmed")
+    if cancelled:
+        return ContainerExecutionLogsCaptureTurnV1(owner: owner, capture: nil, observation: Some(observation),
+            error: if error != "": error else: "container-logs-capture-cancelled")
+    # Native log-process EOF/retirement does not prove workload exit. Recheck
+    # this exact runtime binding; consumers separately use workload wait.
+    val checked = simple_container_read_v2(owner, "inspect", original)
+    if checked.operation.status != "ok" or not container_logs_identity_equal_v1(runtime, checked.operation.state.identity):
+        if error == "": error = "container-logs-runtime-recheck-failed"
+    val result = evidence.process_result_v1()
+    if result.is_none() or result.unwrap().exit_code != 0 or result.unwrap().limit_exceeded:
+        if error == "": error = "container-logs-command-failed-limited-or-text-unavailable"
+    ContainerExecutionLogsCaptureTurnV1(owner: checked.owner, capture: nil, observation: Some(observation), error: error)
+
+pub fn simple_container_logs_capture_v1(owner: SimpleContainerOwnerV2,
+        original_request: ContainerExecutionRequestV2) -> ContainerExecutionLogsCaptureTurnV1:
+    val projected = simple_container_project_v2(owner, original_request)
+    if projected.is_err():
+        return ContainerExecutionLogsCaptureTurnV1(owner: owner, capture: nil, observation: nil, error: projected.unwrap_err())
+    val scope = simple_container_scope_v2(owner)
+    match owner:
+        case SimpleContainerOwnerV2.Linux(_, adapter):
+            var active = adapter
+            val started = active.logs_capture_begin_v1(original_request)
+            container_logs_capture_finish_v1(SimpleContainerOwnerV2.Linux(scope, active), original_request,
+                scope, started.runtime, started.capture, "", false)
+        case SimpleContainerOwnerV2.Windows(_, adapter):
+            var active = adapter
+            val started = active.logs_capture_begin_v1(original_request)
+            container_logs_capture_finish_v1(SimpleContainerOwnerV2.Windows(scope, active), original_request,
+                scope, started.runtime, started.capture, "", false)
+
+pub fn simple_container_logs_capture_step_v1(owner: SimpleContainerOwnerV2,
+        capture: ContainerExecutionLogsCaptureOwnerV1, cancel: bool = false) -> ContainerExecutionLogsCaptureTurnV1:
+    val expected = container_host_scope_bytes_v2(capture.scope)
+    val current = container_host_scope_bytes_v2(simple_container_scope_v2(owner))
+    if not cancel and (expected.is_err() or current.is_err() or expected.unwrap() != current.unwrap()):
+        return ContainerExecutionLogsCaptureTurnV1(owner: owner, capture: Some(capture), observation: nil,
+            error: "container-logs-capture-owner-scope-mismatch")
+    # Cleanup consumes only the genuine already-retained native lease. It does
+    # not require a live provider/current launch policy or start a new child.
+    val turn = process_capture_step_v1(capture.native, cancel)
+    container_logs_capture_finish_v1(owner, capture.original_request, capture.scope, capture.runtime,
+        turn, capture.first_error, cancel)
+
+# Only the retained owner executes these fixed backend reads. A public DATA
+# record supplied by a caller is never accepted as an observation producer.
+pub fn simple_container_configuration_observe_v1(owner: SimpleContainerOwnerV2,
+        original_request: ContainerExecutionRequestV2) -> ContainerExecutionConfigurationTurnV1:
+    val turn = simple_container_read_v2(owner, "configuration", original_request)
+    if turn.operation.status != "ok" or turn.operation.exit_code != 0:
+        return ContainerExecutionConfigurationTurnV1(owner: turn.owner, observation: nil, error: turn.operation.reason)
+    val observed = match container_execution_configuration_decode_v1(turn.operation.stdout):
+        case Ok(value): value
+        case Err(reason): return ContainerExecutionConfigurationTurnV1(owner: turn.owner, observation: nil, error: reason)
+    val identity = turn.operation.state.identity
+    val plan = original_request.plan
+    val actual = observed.runtime
+    if (observed.request_digest != plan.request_digest or actual.pod_uid != plan.workload_uid or
+            actual.attempt != plan.attempt or actual.operation_id != plan.operation_id or
+            actual.provider_generation != plan.provider_generation or actual.native_id == "" or
+            actual.native_id != identity.native_id or actual.pod_uid != identity.pod_uid or
+            actual.attempt != identity.attempt or actual.operation_id != identity.operation_id or
+            actual.provider_generation != identity.provider_generation or actual.node_boot_id != identity.node_boot_id or
+            actual.engine != identity.engine):
+        return ContainerExecutionConfigurationTurnV1(owner: turn.owner, observation: nil, error: "container-configuration-request-runtime-mismatch")
+    val expected_scope = container_host_scope_bytes_v2(simple_container_scope_v2(turn.owner))
+    val found_scope = container_host_scope_bytes_v2(observed.scope)
+    if expected_scope.is_err() or found_scope.is_err() or expected_scope.unwrap() != found_scope.unwrap():
+        return ContainerExecutionConfigurationTurnV1(owner: turn.owner, observation: nil, error: "container-configuration-scope-mismatch")
+    ContainerExecutionConfigurationTurnV1(owner: turn.owner, observation: Some(observed), error: "")
 
 pub struct ContainerAbsenceTurnV2:
     owner: SimpleContainerOwnerV2
@@ -167,7 +288,7 @@ fn container_api_rejected_v2(owner: SimpleContainerOwnerV2, action: text, reason
 
 pub fn simple_container_read_v2(owner: SimpleContainerOwnerV2, action: text,
         request: ContainerExecutionRequestV2) -> ContainerOperationTurnV2:
-    if action != "inspect" and action != "logs" and action != "wait":
+    if action != "inspect" and action != "logs" and action != "wait" and action != "configuration":
         return container_api_rejected_v2(owner, action, "container-api-read-action-unsupported")
     val projected = simple_container_project_v2(owner, request)
     if projected.is_err(): return container_api_rejected_v2(owner, action, projected.unwrap_err())
@@ -183,7 +304,7 @@ pub fn simple_container_read_v2(owner: SimpleContainerOwnerV2, action: text,
 
 pub fn simple_container_apply_v2(owner: SimpleContainerOwnerV2, action: text,
         request: ContainerExecutionRequestV2, deadline: ContainerEffectDeadlineV1) -> ContainerOperationTurnV2:
-    if action == "inspect" or action == "logs" or action == "wait":
+    if action == "inspect" or action == "logs" or action == "wait" or action == "configuration":
         return simple_container_read_v2(owner, action, request)
     if not ["prepare", "create", "start", "stop", "destroy"].contains(action):
         return container_api_rejected_v2(owner, action, "container-api-action-unsupported")

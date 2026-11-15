@@ -26,13 +26,15 @@ use std.common.trace.observer_profile_v1.{TraceProfileV1, trace_profile_fold_v1}
 use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_ptr_read_u8}
 use std.nogc_sync_mut.trace.observer_native_channel_v1.*
 use std.nogc_sync_mut.trace.xray_llvm_adapter_v1.*
-use std.nogc_sync_mut.trace.xray_win_flag_leaf_v1.{XrayWinFlagLeafV1, xray_win_site_name_v1}
+use std.nogc_sync_mut.trace.xray_win_flag_leaf_v1.{XrayWinFlagLeafV1, xray_win_site_name_v1, xray_win_calibrate_tick_hz_v1}
 
 pub trait XrayEdgeSourceV1:
     # Move backend-buffered edges into the published channel; count moved.
     me drain() -> i64
     # 1-based site id -> function name, "" when unknown.
     fn site_name(id: i64) -> text
+    # Ticks per second of drained ts before conversion; 0 = already ns.
+    fn tick_hz() -> i64
 
 pub class XrayLinuxEdgeSourceV1:
     names: [text]
@@ -43,6 +45,8 @@ impl XrayEdgeSourceV1 for XrayLinuxEdgeSourceV1:
     fn site_name(id: i64) -> text:
         if id < 1 or id > self.names.len(): return ""
         self.names[id - 1]
+    fn tick_hz() -> i64:
+        0
 
 pub class XrayWinEdgeSourceV1:
     leaf: XrayWinFlagLeafV1
@@ -52,6 +56,8 @@ impl XrayEdgeSourceV1 for XrayWinEdgeSourceV1:
         self.leaf.drain()
     fn site_name(id: i64) -> text:
         xray_win_site_name_v1(self.leaf.port, id)
+    fn tick_hz() -> i64:
+        self.leaf.tick_hz
 
 # The shared wrapper. leaf and edges of one backend share the same instance.
 pub class XrayBackendV1:
@@ -63,6 +69,8 @@ impl XrayBackendV1:
         XrayBackendV1(leaf: leaf, edges: XrayLinuxEdgeSourceV1(names: names))
 
     static fn windows(leaf: XrayWinFlagLeafV1) -> XrayBackendV1:
+        # Calibrate rdtsc once (10 ms) so drained ring ts arrive in ns.
+        leaf.set_tick_hz(xray_win_calibrate_tick_hz_v1(10000000))
         XrayBackendV1(leaf: leaf, edges: XrayWinEdgeSourceV1(leaf: leaf))
 
 pub class XraySpyV1:
@@ -83,7 +91,10 @@ fn _xray_align8_v1(raw: i64) -> i64:
 
 impl XraySpyV1:
     static fn create(backend: XrayBackendV1, module_instance: u64, capacity: i64) -> XraySpyV1:
-        XraySpyV1(backend: backend, adapter: XrayLlvmAdapterV1.create(module_instance),
+        # The adapter takes the leaf's sled kind (Llvm: compiler-rt / Windows
+        # flag guard; Simple: native Simple sleds), so one spy serves every leaf.
+        XraySpyV1(backend: backend,
+            adapter: XrayLlvmAdapterV1.create_for_backend(module_instance, backend.leaf.sled_kind()),
             capacity: capacity, arena_raw: 0, arena: 0, poll_raw: rt_alloc(96 + 8),
             session: TraceSessionV1(slot: 0, incarnation: 0u64, generation: 0u64), events: [])
 

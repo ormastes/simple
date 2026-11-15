@@ -6,6 +6,13 @@ use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text}
 use std.nogc_sync_mut.io.windows_private_file_v1.{WindowsPrivateRootV1, WindowsPrivateFileV1,
     WindowsPrivateErrorV1, WindowsJournalStoreV1, WindowsJournalStoreOpenV1, windows_private_root_open_v1}
 use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new_gate, mutex_lock_gate, mutex_unlock_gate}
+use std.nogc_sync_mut.io.host_identity_ssh_projection_types_v1.{HostIdentitySshPathsV1, host_identity_ssh_projection_roles_valid_v1}
+use std.nogc_sync_mut.io.windows_private_read_v2.{WindowsPrivateReadRootV2, WindowsPrivateReadFileV2,
+    WindowsPrivateReadErrorV2, windows_private_read_root_open_v2, windows_private_roots_same_directory_v2}
+use std.nogc_sync_mut.io.windows_service_logon_namespace_v1.{WindowsServiceLogonNamespaceOwnerV1,
+    windows_service_logon_namespace_open_v1, windows_service_logon_namespace_step_v1,
+    windows_service_logon_namespace_current_v1, windows_service_logon_namespace_candidate_path_v1,
+    windows_service_logon_namespace_close_v1}
 
 pub class HostIdentityPlatformV1:
     slot: i64
@@ -57,11 +64,66 @@ pub class HostIdentityPlatformV1:
         val unlocked = mutex_unlock_gate(identity_windows_gate_v1, 0)
         result
 
+    pub fn profile_locator_v1(leaf: text) -> Result<text, text>:
+        if mutex_lock_gate(identity_windows_gate_v1) == None: return Err("identity-store-gate")
+        var result: Result<text, text> = Err("identity-store-profile-role")
+        if host_identity_leaf_valid_v1(leaf) and leaf.ends_with(".profile"):
+            val observed = identity_windows_read_v1(self.slot, self.generation, leaf, 65536)
+            if observed.error != "": result = Err(observed.error)
+            elif observed.bytes == None: result = Err("identity-store-profile-absent")
+            else: result = Ok(identity_windows_slots_v1[self.slot].root_path + "\\journal\\" + leaf)
+        val unlocked = mutex_unlock_gate(identity_windows_gate_v1, 0)
+        result
+
 pub struct HostIdentityPlatformOpenV1:
     owner: Option<HostIdentityPlatformV1>
     ready: bool
     cleanup_pending: bool
     error: text
+
+pub class HostIdentityPlatformProjectionV1:
+    store_slot: i64
+    store_generation: i64
+    child_slot: i64
+    child_generation: i64
+
+pub struct HostIdentityPlatformProjectionTurnV1:
+    owner: Option<HostIdentityPlatformProjectionV1>
+    ready: bool
+    cleanup_pending: bool
+    error: text
+
+pub fn host_identity_platform_projection_begin_v1(store: HostIdentityPlatformV1, key: text, hosts: text) -> HostIdentityPlatformProjectionTurnV1:
+    if mutex_lock_gate(identity_windows_gate_v1) == None: return HostIdentityPlatformProjectionTurnV1(None, false, false, "identity-store-gate")
+    val turn = identity_windows_projection_begin_v1(store, key, hosts)
+    val unlocked = mutex_unlock_gate(identity_windows_gate_v1, 0)
+    turn
+
+pub fn host_identity_platform_projection_step_v1(owner: HostIdentityPlatformProjectionV1, store: HostIdentityPlatformV1, cancel: bool) -> HostIdentityPlatformProjectionTurnV1:
+    if mutex_lock_gate(identity_windows_gate_v1) == None: return HostIdentityPlatformProjectionTurnV1(Some(owner), false, true, "identity-store-gate")
+    val turn = identity_windows_projection_step_v1(owner, store, cancel)
+    val unlocked = mutex_unlock_gate(identity_windows_gate_v1, 0)
+    turn
+
+pub fn host_identity_platform_projection_paths_v1(owner: HostIdentityPlatformProjectionV1, store: HostIdentityPlatformV1) -> Result<HostIdentitySshPathsV1, text>:
+    if mutex_lock_gate(identity_windows_gate_v1) == None: return Err("identity-store-gate")
+    val checked = identity_windows_projection_current_v1(owner, store)
+    var result: Result<HostIdentitySshPathsV1, text> = Err("identity-ssh-projection-not-ready")
+    if checked.is_err():
+        val retained = identity_windows_projection_failure_v1(owner, checked.unwrap_err())
+        result = Err(checked.unwrap_err())
+    else:
+        val child = checked.unwrap()
+        val prefix = child.candidate.replace("\\", "/") + "/journal/"
+        result = Ok(HostIdentitySshPathsV1(prefix + child.leaves[0], prefix + child.leaves[1]))
+    val unlocked = mutex_unlock_gate(identity_windows_gate_v1, 0)
+    result
+
+pub fn host_identity_platform_projection_close_v1(owner: HostIdentityPlatformProjectionV1) -> HostIdentityPlatformCloseV1:
+    if mutex_lock_gate(identity_windows_gate_v1) == None: return HostIdentityPlatformCloseV1(false, false, "identity-store-gate")
+    val turn = identity_windows_projection_close_v1(owner)
+    val unlocked = mutex_unlock_gate(identity_windows_gate_v1, 0)
+    turn
 
 struct IdentityWindowsStateV1:
     generation: i64
@@ -73,6 +135,19 @@ struct IdentityWindowsStateV1:
     ready: bool = false
     closing: bool = false
     closed: bool = false
+    projections: [IdentityWindowsProjectionV1] = []
+    projection_generation: i64 = 0
+
+struct IdentityWindowsProjectionV1:
+    generation: i64
+    leaves: [text]
+    # 0 namespace open, 1 step, 2 candidate, 3 root, 4 equality, 5 journal,
+    # 6 key, 7 hosts, 8 ready, 9 closing, 10 fully released.
+    phase: i64 = 0
+    namespace: Option<WindowsServiceLogonNamespaceOwnerV1> = None
+    candidate: text = ""
+    roots: [WindowsPrivateReadRootV2] = []
+    files: [WindowsPrivateReadFileV2] = []
 
 var identity_windows_gate_v1: Mutex = mutex_new_gate(0)
 var identity_windows_slots_v1: [IdentityWindowsStateV1] = []
@@ -204,6 +279,9 @@ fn identity_windows_close_v1(slot: i64, generation: i64) -> HostIdentityPlatform
     state.ready = false
     state.closing = true
     identity_windows_slots_v1[slot] = state
+    val drained = identity_windows_projection_drain_v1(slot)
+    if drained.is_err(): return HostIdentityPlatformCloseV1(false, false, drained.unwrap_err())
+    if not drained.unwrap(): return HostIdentityPlatformCloseV1(false, false, "identity-store-projection-cleanup-pending")
     if val journal_owner = state.journal:
         var journal = journal_owner
         if journal.close_state() != "released": return HostIdentityPlatformCloseV1(false, false, "identity-store-journal-close-retained")
@@ -227,3 +305,188 @@ fn identity_windows_close_v1(slot: i64, generation: i64) -> HostIdentityPlatform
     state.closed = true
     identity_windows_slots_v1[slot] = state
     HostIdentityPlatformCloseV1(true, true, "")
+
+fn identity_windows_projection_load_v1(owner: HostIdentityPlatformProjectionV1) -> Result<IdentityWindowsProjectionV1, text>:
+    val state = identity_windows_slot_v1(owner.store_slot, owner.store_generation)?
+    if owner.child_slot < 0 or owner.child_slot >= state.projections.len(): return Err("identity-ssh-projection-stale")
+    val child = state.projections[owner.child_slot]
+    if child.generation != owner.child_generation: return Err("identity-ssh-projection-stale")
+    Ok(child)
+
+fn identity_windows_projection_save_v1(owner: HostIdentityPlatformProjectionV1, child: IdentityWindowsProjectionV1):
+    var state = identity_windows_slots_v1[owner.store_slot]
+    state.projections[owner.child_slot] = child
+    identity_windows_slots_v1[owner.store_slot] = state
+
+fn identity_windows_projection_failure_v1(owner: HostIdentityPlatformProjectionV1, error: text) -> HostIdentityPlatformProjectionTurnV1:
+    val loaded = identity_windows_projection_load_v1(owner)
+    if loaded.is_err(): return HostIdentityPlatformProjectionTurnV1(None, false, false, loaded.unwrap_err())
+    var child = loaded.unwrap()
+    if child.phase == 10: return HostIdentityPlatformProjectionTurnV1(None, false, false, error)
+    child.phase = 9
+    identity_windows_projection_save_v1(owner, child)
+    HostIdentityPlatformProjectionTurnV1(Some(owner), false, true, error)
+
+fn identity_windows_projection_read_error_v1(owner: HostIdentityPlatformProjectionV1, error: WindowsPrivateReadErrorV2) -> HostIdentityPlatformProjectionTurnV1:
+    var child = identity_windows_slots_v1[owner.store_slot].projections[owner.child_slot]
+    if val root = error.cleanup_root: child.roots.push(root)
+    if val file = error.cleanup_file: child.files.push(file)
+    identity_windows_projection_save_v1(owner, child)
+    identity_windows_projection_failure_v1(owner, error.message)
+
+fn identity_windows_projection_begin_v1(store: HostIdentityPlatformV1, key: text, hosts: text) -> HostIdentityPlatformProjectionTurnV1:
+    if not host_identity_ssh_projection_roles_valid_v1(key, hosts): return HostIdentityPlatformProjectionTurnV1(None, false, false, "identity-ssh-projection-leaf-role")
+    val current = identity_windows_current_v1(store.slot, store.generation)
+    if current.is_err(): return HostIdentityPlatformProjectionTurnV1(None, false, false, current.unwrap_err())
+    var state = current.unwrap()
+    # First qualified service projection is explicit native GLOBAL only. The
+    # generic store's ordinary-drive admission remains supported unchanged.
+    if not state.root_path.starts_with("\\GLOBAL??\\"): return HostIdentityPlatformProjectionTurnV1(None, false, false, "identity-ssh-projection-native-global-root-required")
+    if state.projection_generation >= 9223372036854775807: return HostIdentityPlatformProjectionTurnV1(None, false, false, "identity-ssh-projection-generation-bound")
+    var index = -1
+    for at in 0..state.projections.len():
+        if index < 0 and state.projections[at].phase == 10: index = at
+    if index < 0:
+        if state.projections.len() >= 8: return HostIdentityPlatformProjectionTurnV1(None, false, false, "identity-ssh-projection-owner-bound")
+        index = state.projections.len()
+    state.projection_generation = state.projection_generation + 1
+    val child = IdentityWindowsProjectionV1(generation: state.projection_generation, leaves: [key, hosts])
+    if index == state.projections.len(): state.projections.push(child)
+    else: state.projections[index] = child
+    identity_windows_slots_v1[store.slot] = state
+    val owner = HostIdentityPlatformProjectionV1(store_slot: store.slot, store_generation: store.generation, child_slot: index, child_generation: child.generation)
+    HostIdentityPlatformProjectionTurnV1(Some(owner), false, false, "")
+
+fn identity_windows_projection_current_v1(owner: HostIdentityPlatformProjectionV1, store: HostIdentityPlatformV1) -> Result<IdentityWindowsProjectionV1, text>:
+    if owner.store_slot != store.slot or owner.store_generation != store.generation: return Err("identity-ssh-projection-foreign-store")
+    val child = identity_windows_projection_load_v1(owner)?
+    if child.phase != 8 or child.namespace == None or child.roots.len() != 2 or child.files.len() != 2:
+        return Err("identity-ssh-projection-not-ready")
+    val state = identity_windows_current_v1(store.slot, store.generation)?
+    val namespace = child.namespace.unwrap()
+    windows_service_logon_namespace_current_v1(namespace)?
+    val candidate = windows_service_logon_namespace_candidate_path_v1(namespace, state.root_path)?
+    if candidate != child.candidate: return Err("identity-ssh-projection-namespace-path-changed")
+    val writer = state.root.unwrap()
+    if not windows_private_roots_same_directory_v2(writer, child.roots[0])?: return Err("identity-ssh-projection-root-differs")
+    for root in child.roots:
+        if not root.security_current(): return Err("identity-ssh-projection-read-root-not-current")
+    for file in child.files:
+        if not file.security_current(): return Err("identity-ssh-projection-file-not-current")
+    Ok(child)
+
+fn identity_windows_projection_step_v1(owner: HostIdentityPlatformProjectionV1, store: HostIdentityPlatformV1, cancel: bool) -> HostIdentityPlatformProjectionTurnV1:
+    if owner.store_slot != store.slot or owner.store_generation != store.generation: return identity_windows_projection_failure_v1(owner, "identity-ssh-projection-foreign-store")
+    val loaded = identity_windows_projection_load_v1(owner)
+    if loaded.is_err(): return HostIdentityPlatformProjectionTurnV1(None, false, false, loaded.unwrap_err())
+    var child = loaded.unwrap()
+    val state = identity_windows_slots_v1[owner.store_slot]
+    if cancel or state.closing or child.phase >= 9:
+        val closed = identity_windows_projection_close_v1(owner)
+        return HostIdentityPlatformProjectionTurnV1(if closed.consumed: None else: Some(owner), false, not closed.consumed, closed.error)
+    val current = identity_windows_current_v1(store.slot, store.generation)
+    if current.is_err(): return identity_windows_projection_failure_v1(owner, current.unwrap_err())
+    if child.namespace != None and child.phase > 1:
+        val namespace = child.namespace.unwrap()
+        val namespace_current = windows_service_logon_namespace_current_v1(namespace)
+        # An acquiring namespace is stepped only in phase1; it is not yet a
+        # current proof. Once ready, any loss permanently starts cleanup.
+        if namespace_current.is_err(): return identity_windows_projection_failure_v1(owner, namespace_current.unwrap_err())
+    match child.phase:
+        case 0:
+            val opened = windows_service_logon_namespace_open_v1()
+            child.namespace = opened.owner
+            identity_windows_projection_save_v1(owner, child)
+            if opened.owner == None or opened.error != "": return identity_windows_projection_failure_v1(owner, if opened.error != "": opened.error else: "identity-ssh-projection-namespace-owner-required")
+            child.phase = if opened.ready: 2 else: 1
+        case 1:
+            val namespace = child.namespace.unwrap()
+            val advanced = windows_service_logon_namespace_step_v1(namespace)
+            if advanced.owner != None: child.namespace = advanced.owner
+            identity_windows_projection_save_v1(owner, child)
+            if advanced.owner == None or advanced.error != "": return identity_windows_projection_failure_v1(owner, if advanced.error != "": advanced.error else: "identity-ssh-projection-namespace-owner-lost")
+            if advanced.ready: child.phase = 2
+        case 2:
+            val namespace = child.namespace.unwrap()
+            val candidate = windows_service_logon_namespace_candidate_path_v1(namespace, state.root_path)
+            if candidate.is_err(): return identity_windows_projection_failure_v1(owner, candidate.unwrap_err())
+            child.candidate = candidate.unwrap()
+            # Candidate must be an ordinary drive spelling proved by the
+            # namespace owner, not a stripped native prefix or UNC fallback.
+            if (child.candidate.byte_len() < 4 or child.candidate.byte_at(1) != 58 or child.candidate.byte_at(2) != 92 or
+                    not ((child.candidate.byte_at(0) >= 65 and child.candidate.byte_at(0) <= 90) or
+                        (child.candidate.byte_at(0) >= 97 and child.candidate.byte_at(0) <= 122))):
+                return identity_windows_projection_failure_v1(owner, "identity-ssh-projection-candidate-shape")
+            child.phase = 3
+        case 3:
+            match windows_private_read_root_open_v2(child.candidate):
+                case Ok(root): child.roots.push(root)
+                case Err(error): return identity_windows_projection_read_error_v1(owner, error)
+            child.phase = 4
+        case 4:
+            val same = windows_private_roots_same_directory_v2(state.root.unwrap(), child.roots[0])
+            if same.is_err(): return identity_windows_projection_failure_v1(owner, same.unwrap_err())
+            if not same.unwrap(): return identity_windows_projection_failure_v1(owner, "identity-ssh-projection-root-differs")
+            child.phase = 5
+        case 5:
+            match child.roots[0].child_directory("journal"):
+                case Ok(root): child.roots.push(root)
+                case Err(error): return identity_windows_projection_read_error_v1(owner, error)
+            child.phase = 6
+        case 6:
+            match child.roots[1].open_file(child.leaves[0], 65536u64):
+                case Ok(file): child.files.push(file)
+                case Err(error): return identity_windows_projection_read_error_v1(owner, error)
+            child.phase = 7
+        case 7:
+            match child.roots[1].open_file(child.leaves[1], 65536u64):
+                case Ok(file): child.files.push(file)
+                case Err(error): return identity_windows_projection_read_error_v1(owner, error)
+            child.phase = 8
+        case 8: ()
+        case _: return identity_windows_projection_failure_v1(owner, "identity-ssh-projection-phase")
+    identity_windows_projection_save_v1(owner, child)
+    if child.phase == 8:
+        val checked = identity_windows_projection_current_v1(owner, store)
+        if checked.is_err(): return identity_windows_projection_failure_v1(owner, checked.unwrap_err())
+    HostIdentityPlatformProjectionTurnV1(Some(owner), child.phase == 8, false, "")
+
+fn identity_windows_projection_close_v1(owner: HostIdentityPlatformProjectionV1) -> HostIdentityPlatformCloseV1:
+    val loaded = identity_windows_projection_load_v1(owner)
+    if loaded.is_err(): return HostIdentityPlatformCloseV1(true, false, loaded.unwrap_err())
+    var child = loaded.unwrap()
+    if child.phase == 10: return HostIdentityPlatformCloseV1(true, true, "")
+    child.phase = 9
+    identity_windows_projection_save_v1(owner, child)
+    if child.files.len() > 0:
+        var file = child.files[child.files.len() - 1]
+        if not file.close(): return HostIdentityPlatformCloseV1(false, false, "identity-ssh-projection-file-close-retained")
+        child.files = child.files[0:child.files.len() - 1]
+    elif child.roots.len() > 0:
+        var root = child.roots[child.roots.len() - 1]
+        if not root.close(): return HostIdentityPlatformCloseV1(false, false, "identity-ssh-projection-root-close-retained")
+        child.roots = child.roots[0:child.roots.len() - 1]
+    elif child.namespace != None:
+        val namespace = child.namespace.unwrap()
+        val closed = windows_service_logon_namespace_close_v1(namespace)
+        if not closed.completed:
+            if closed.owner != None: child.namespace = closed.owner
+            identity_windows_projection_save_v1(owner, child)
+            return HostIdentityPlatformCloseV1(false, false, if closed.error != "": closed.error elif closed.owner == None: "identity-ssh-projection-namespace-close-owner-lost" else: "identity-ssh-projection-cleanup-pending")
+        if closed.owner != None: return HostIdentityPlatformCloseV1(false, false, "identity-ssh-projection-namespace-close-owner-remains")
+        child.namespace = None
+    if child.files.len() == 0 and child.roots.len() == 0 and child.namespace == None: child.phase = 10
+    identity_windows_projection_save_v1(owner, child)
+    HostIdentityPlatformCloseV1(child.phase == 10, child.phase == 10,
+        if child.phase == 10: "" else: "identity-ssh-projection-cleanup-pending")
+
+fn identity_windows_projection_drain_v1(slot: i64) -> Result<bool, text>:
+    val state = identity_windows_slots_v1[slot]
+    for at in 0..state.projections.len():
+        val child = state.projections[at]
+        if child.phase != 10:
+            val owner = HostIdentityPlatformProjectionV1(store_slot: slot, store_generation: state.generation, child_slot: at, child_generation: child.generation)
+            val closed = identity_windows_projection_close_v1(owner)
+            if closed.error != "" and closed.error != "identity-ssh-projection-cleanup-pending": return Err(closed.error)
+            return Ok(false)
+    Ok(true)

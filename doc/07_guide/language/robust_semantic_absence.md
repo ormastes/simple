@@ -20,9 +20,12 @@ value probably exists.
 - The only planned raw-optional exceptions are **explicitly reviewed HAL/interpreter declaration capabilities**. Neither a path name nor `--engine=interpreter` grants a capability. A public adapter should translate the boundary value into a semantic domain result as early as possible.
 - Do not promote genuinely private fields into public findings merely because their containing class is exported.
 
-Lint status: `ROB-OPT-001`/`ROB-OPT-002` are emitted by the
+Lint status: `ROB-OPT-001`/`-002`/`-003` (public inputs, fields, return types and
+top-level `pub type` aliases; locals are not yet checked) are emitted by the
 `robust_option_surface` lint rule at **warning** severity (never deny);
-`NIL-UNSAFE-001` is the existing `nil_outside_unsafe` rule. Both are
+`NIL-UNSAFE-001` is the existing `nil_outside_unsafe` rule (allow by default,
+warn in the Robust and Critical profiles; presence tests `== nil` / `case nil:`
+are not flagged yet). Both are
 compatibility warnings until the rule-by-rule error gate of the design's
 phase E.
 

@@ -1,0 +1,84 @@
+"""
+## Purpose and audience
+Purpose: Prove that SPL-BOUND-003 reports a unit erased to its primitive and
+then reasserted as a DIFFERENT unit, and stays silent on same-unit round trips,
+genuine conversions, and unrelated text.
+Audience: compiler and tooling engineers maintaining robust-boundary lints.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Single-file, function-local origin tracking only. Units are recognised when
+declared in the file or imported from a `unit.` module. Erasure accessors are
+`.value`, `.raw()`, `.to_f64()` and `.to_i64()`.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use compiler.semantics.lint.bound_unit_reassert.{check_bound_unit_reasserts}
+
+# @manual_section: bound_unit_reassert
+describe "SPL-BOUND-003: unit erased then reasserted as another unit":
+    """Erasing unit A to a primitive and casting it into unit B launders the
+    dimension."""
+
+    it "reports a direct .value erasure cast into a different unit":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a function that casts a Meters value into Seconds")
+        val src = "unit Meters: f64 as m\nunit Seconds: f64 as s\nfn bad(d: Meters) -> Seconds:\n    Seconds(d.value)\n"
+        val fs = check_bound_unit_reasserts(src, "app/phys.spl")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].code).to_equal("SPL-BOUND-003")
+        expect(fs[0].line_num).to_equal(4)
+        expect(fs[0].message).to_contain("Meters")
+        expect(fs[0].message).to_contain("Seconds")
+
+    it "follows the erased value through a local and arithmetic":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint an erased value that is modified before the reassert")
+        val src = "unit Meters: f64 as m\nunit Seconds: f64 as s\nfn bad(d: Meters) -> Seconds:\n    val raw = d.to_f64()\n    val doubled = raw * 2.0\n    Seconds(doubled)\n"
+        val fs = check_bound_unit_reasserts(src, "app/phys.spl")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].line_num).to_equal(6)
+
+    it "tracks a unit built locally from a constructor":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a locally constructed unit erased and recast")
+        val src = "unit Meters: f64 as m\nunit Seconds: f64 as s\nfn bad() -> Seconds:\n    val d = Meters(5.0)\n    val r = d.raw()\n    Seconds(r)\n"
+        expect(check_bound_unit_reasserts(src, "app/phys.spl").len()).to_equal(1)
+
+    it "recognises units imported from a unit module":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a cast between two imported units")
+        val src = "use unit.length.{{Meter}\nuse unit.time.{{Second}\nfn bad(d: Meter) -> Second:\n    Second(d.value)\n"
+        expect(check_bound_unit_reasserts(src, "app/phys.spl").len()).to_equal(1)
+
+    it "allows re-casting the erased value to the same unit":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint an erase and reassert of the same unit")
+        val src = "unit Meters: f64 as m\nunit Seconds: f64 as s\nfn ok(d: Meters) -> Meters:\n    val raw = d.value\n    Meters(raw * 2.0)\n"
+        expect(check_bound_unit_reasserts(src, "app/phys.spl").len()).to_equal(0)
+
+    it "allows constructing a unit from a plain primitive":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a unit built from an ordinary number parameter")
+        val src = "unit Meters: f64 as m\nunit Seconds: f64 as s\nfn ok(n: f64) -> Seconds:\n    Seconds(n + 1.0)\n"
+        expect(check_bound_unit_reasserts(src, "app/phys.spl").len()).to_equal(0)
+
+    it "does not leak erased origin from one function into the next":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint two functions that reuse a local name")
+        val src = "unit Meters: f64 as m\nunit Seconds: f64 as s\nfn a(d: Meters) -> f64:\n    val raw = d.value\n    raw\nfn b(raw: f64) -> Seconds:\n    Seconds(raw)\n"
+        expect(check_bound_unit_reasserts(src, "app/phys.spl").len()).to_equal(0)
+
+    it "forgets the erased origin once the local is rebound to a plain value":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a local rebound from a plain parameter before the cast")
+        val src = "unit Meters: f64 as m\nunit Seconds: f64 as s\nfn ok(d: Meters, n: f64) -> Seconds:\n    var raw = d.value\n    raw = n\n    Seconds(raw)\n"
+        expect(check_bound_unit_reasserts(src, "app/phys.spl").len()).to_equal(0)
+
+    it "stays silent when fewer than two units are known":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a file with a single unit and ordinary text")
+        val src = "unit Meters: f64 as m\nfn show(d: Meters) -> text:\n    format_num(d.value)\n"
+        expect(check_bound_unit_reasserts(src, "app/phys.spl").len()).to_equal(0)

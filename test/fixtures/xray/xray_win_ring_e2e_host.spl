@@ -49,8 +49,10 @@ fn main():
         print "RING-E2E FAIL exports traced={traced} scaled={scaled}"
         return
     var leaf = XrayWinFlagLeafV1.bind(port)
+    # Ring v2 ts are rdtsc ticks; calibrate once so drained ts are ns.
+    leaf.set_tick_hz(xray_win_calibrate_tick_hz_v1(10000000))
     val count = leaf.max_function_id()
-    print "RING-E2E sites={count} ring={leaf.ring != 0}"
+    print "RING-E2E sites={count} ring={leaf.ring != 0} tick_hz={leaf.tick_hz}"
     val bytes = trace_native_channel_bytes_v1(64)
     val arena = rt_alloc(bytes)
     unsafe(capabilities: [ffi]):
@@ -71,19 +73,35 @@ fn main():
     print "RING-E2E drained={n} dropped={leaf.ring_dropped()}"
     val out = rt_alloc(96)
     var seq = ""
+    var prev_ts = 0
+    var ts_ok = true
+    var ts_list = ""
     unsafe(capabilities: [ffi]):
         while trace_native_channel_poll_into_v1(arena, out, 96) == 1:
             val code = (rt_ptr_read_i64(out, 0) >> 32) & 65535
             val id = rt_ptr_read_i64(out, 24) & 4294967295
             val tag = if code == 1: "E" else: "X"
+            val ts = rt_ptr_read_i64(out, 48)
+            if ts <= 0 or ts < prev_ts: ts_ok = false
+            prev_ts = ts
+            ts_list = ts_list + "{ts},"
             seq = seq + "{tag}:{xray_win_site_name_v1(port, id).replace(PFX, "")},"
     val want = "E:traced,E:add1,X:add1,X:traced,"
     print "RING-E2E edges={seq}"
-    print(if seq == want and n == 4: "RING-E2E PASS" else: "RING-E2E FAIL edges want {want}")
+    print "RING-E2E ts_ns={ts_list} nonzero_monotonic={ts_ok}"
+    print(if seq == want and n == 4 and ts_ok: "RING-E2E PASS" else: "RING-E2E FAIL edges want {want} with nonzero monotonic ts")
     val on_ms = time_reps(traced)
     leaf.unpatch_function(traced_id)
     leaf.unpatch_function(add1_id)
     print "RING-E2E timing calls={CALLS} slots_off_us={off_ms} slots_on_us={on_ms} dropped={leaf.ring_dropped()}"
+    # Per edge: traced(i) -> add1 is 4 edges per call (ring full -> drop path).
+    leaf.patch_function(traced_id)
+    leaf.patch_function(add1_id)
+    val on_us = time_one(traced)
+    leaf.unpatch_function(traced_id)
+    leaf.unpatch_function(add1_id)
+    val off_us = time_one(traced)
+    print "RING-E2E per_edge_ns={(on_us - off_us) * 1000 / (CALLS * 4)} on_us={on_us} off_us={off_us}"
     val off_path = rt_env_get("XR_OFF_DLL") ?? ""
     if off_path != "":
         val off_handle = rt_host_dynlib_open(off_path, 2)

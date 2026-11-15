@@ -1,0 +1,51 @@
+# Cleanup retains the actual original writer and native custody, never a
+# diagnostic projection. Resource consumption does not refund any WAL charge.
+use std.nogc_sync_mut.container.machine_authority_v1.*
+
+pub struct MachineFreshEpochRetainedCloseTurnV1:
+    retained: Option<MachineFreshEpochAdmissionTurnV1>
+    closed: bool
+    error: text
+
+pub fn machine_fresh_epoch_admission_turn_close_v1(turn: MachineFreshEpochAdmissionTurnV1) -> MachineFreshEpochRetainedCloseTurnV1:
+    var current = turn
+    if val owner = current.owner:
+        val closed = owner.close_v1()
+        current.owner = closed.owner
+        if not closed.closed and current.owner.is_none(): current.owner = Some(owner)
+        if current.error == "" and closed.error != "": current.error = closed.error
+        if not closed.closed or current.owner.is_some():
+            return MachineFreshEpochRetainedCloseTurnV1(Some(current), false, current.error)
+    if val authority = current.authority:
+        val state = authority.close_v1()
+        val diagnostic = authority.close_diagnostic_v1()
+        if current.error == "" and diagnostic != "": current.error = diagnostic
+        if not ["released", "consumed-error"].contains(state):
+            return MachineFreshEpochRetainedCloseTurnV1(Some(current), false,
+                if current.error != "": current.error else: "machine-fresh-epoch-writer-close:" + state)
+        current.authority = nil
+        if current.error == "" and state == "consumed-error": current.error = "machine-fresh-epoch-writer-consumed-error"
+    if val cleanup = current.cleanup:
+        val state = machine_container_authority_cleanup_v1(cleanup)
+        val diagnostic = machine_container_authority_cleanup_diagnostic_v1(cleanup)
+        if current.error == "" and diagnostic != "": current.error = diagnostic
+        if not ["released", "consumed-error"].contains(state):
+            return MachineFreshEpochRetainedCloseTurnV1(Some(current), false,
+                if current.error != "": current.error else: "machine-fresh-epoch-opening-close:" + state)
+        current.cleanup = nil
+        if current.error == "" and state == "consumed-error": current.error = "machine-fresh-epoch-opening-consumed-error"
+    if val epoch = current.preparation:
+        val closed = epoch.close_v1()
+        current.preparation = closed.owner
+        if not closed.closed and current.preparation.is_none(): current.preparation = Some(epoch)
+        if current.error == "" and closed.error != "": current.error = closed.error
+        if not closed.closed or current.preparation.is_some():
+            return MachineFreshEpochRetainedCloseTurnV1(Some(current), false, current.error)
+    if val custody = current.successor:
+        val closed = custody.close_v1()
+        current.successor = closed.owner
+        if not closed.closed and current.successor.is_none(): current.successor = Some(custody)
+        if current.error == "" and closed.error != "": current.error = closed.error
+        if not closed.closed or current.successor.is_some():
+            return MachineFreshEpochRetainedCloseTurnV1(Some(current), false, current.error)
+    MachineFreshEpochRetainedCloseTurnV1(nil, true, current.error)
