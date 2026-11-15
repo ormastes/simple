@@ -152,21 +152,30 @@ max-content of mixed inline content, control UA font reset, `h6` margins
   being typed. Spec rows AC-4..6 of the gradient spec.
 - **Gradients, open:**
   - px stop positions (`red 20px`) are not parsed; the stop takes the
-    evenly spaced default.
-  - The engine2d ramp (`emu_draw_linear_gradient_stops`) spans the line
-    between the pixel centres of the extreme corners, not the CSS gradient
-    line length `|w sin a| + |h cos a|` the fb raster uses, so the two lanes
-    disagree by up to a pixel's worth of ramp at the ends.
-  - The two lanes round a mixed stop's alpha differently (fb raster:
-    rounded Q16 weights; engine2d ramp: truncated permille), so a
-    translucent ramp can differ by 1 between them.
-  - The new gradient spec rows render through `cpu_simd` only; the engine2d
-    ramp `emu_draw_linear_gradient_stops` as used by the Vulkan / Draw IR
-    backends has no Chrome-numbered row of its own.
+    evenly spaced default. Chrome numbers for both lanes:
+    `web_gradient_px_stop_position_unresolved_2026-11-15.md`.
+  - **Fixed 2026-11-15 (engine2d lane parity):** the engine2d ramp
+    (`emu_draw_linear_gradient_stops`) now uses the fb raster's mapping
+    exactly -- Q16 angle, line `|w sin a| + |h cos a|` through the box
+    edges, 1025-entry LUT, rounded premultiplied alpha. Opaque angled /
+    multi-stop gradients are bit-identical between the Draw IR lane and `cpu_simd` (was 16
+    levels on a 12x6 `to bottom right` box, 13 on a 10x10 45deg box).
+    Translucent stops still differ by up to 2: the fb raster quantises
+    each pixel's alpha to 0..100 % (`background_gradient_pixel_opacity`);
+    the Draw IR lane is the closer of the two to Chrome there. Pinned by
+    `linear_gradient_angle_draw_ir_chrome159_spec.spl` (AC-1..11, AC-10
+    and AC-11 red -> green). The fb raster keeps its own copy of the Q16
+    helpers (`gradient_angle_sin_cos_q16`, `linear_gradient_color_at`);
+    folding it onto the engine2d twins is a browser_engine edit left
+    for when that tree is not being edited by another lane.
+  - **Open (fb raster):** the default top-to-bottom two-stop ramp
+    (`mix_color_vertical_centered`) puts the exact stop colours on the first
+    and last rows; Chrome 159 samples row centres (10x10 `#000 -> #fff` row
+    0: Chrome #0d0d0d, Draw IR #0d0d0d, fb raster #000000; 12x6 red -> blue
+    up to 21 off). Pinned on the Draw IR side by AC-12 of
+    `linear_gradient_angle_draw_ir_chrome159_spec.spl`.
   - `flex:1 1 100px;max-width:25%` (a growing item with a definite basis)
     is not frozen at its max-width; only zero-basis items are.
-  - `parse_color` maps the keyword `red` to #dc3232 (CSS: #ff0000), so every
-    `red` in a page paints the wrong colour, gradients included.
 - **Fixed from the 5066a3eeae1 / 5ffa5564085 review:** an angle token is
   reduced to 0..359 (`gradient_angle_token_deg`), so `3turn` / `1080deg`
   no longer collide with the `to <corner>` codes (gradient spec AC-7, red
@@ -174,3 +183,218 @@ max-content of mixed inline content, control UA font reset, `h6` margins
   i64: `(t - t_min) * 1000` is about `2 * w * 1000 * 1000` at 90deg and
   passed i32 for a box wider than ~1073 px (a 3840 px 4K header). Found by
   arithmetic, not by a 4K render.
+- **Colour parsing fixed (2026-11-15, paint-page lane).** `parse_color`
+  hard-coded `red` as #dc3232 ahead of the named-colour table (a themed
+  value from `81d9241e755`, mirrored in `examples/06_io/ui/mini_html_render.spl`,
+  which is a separate example and keeps its own palette); it is the CSS
+  #ff0000 now. `rgb()` / `rgba()` / `hsl()` / `hsla()` go through
+  dom_color's parser (`parse_color_value_checked`: comma and space syntax,
+  `/ alpha`, channels validated and rounded half up, hue units), which fixes
+  `rgb(100%,0%,0%)` (was rgb(100,0,0)), `rgb(100% 50% 0%)` (green 127),
+  the alpha of `rgb(r,g,b,a)` and `hsl(120deg ...)` (was no colour). A
+  `box-shadow` colour accepted only `black` / `white` / `red` as keywords
+  and now takes any CSS colour. Spec: `css_color_parse_chrome159_spec.spl`.
+- **Colour review follow-up (2026-11-15).** The first cut of the colour fix
+  added a second parser that read a non-number as 0 (`hsl(foo, bar, baz)`
+  painted opaque black) and made every function form opaque in `parse_color`
+  (`hsla(...)`, `/ alpha` lost their alpha). Now: the duplicate is deleted
+  and dom_color's parser rejects any non-number channel, hue or percentage
+  (`css_rgb_channel_checked`, `css_hue_degrees_checked`,
+  `css_percent_number_checked`); `parse_color` keeps alpha for every form
+  except legacy comma `rgb()`/`rgba()`, which stays opaque as before; a
+  colour longhand whose value is a malformed `rgb()`/`hsl()` is dropped from
+  the declaration table so the earlier value wins (Chrome); a translucent
+  border blends instead of being stored raw. Spec rows AC-7..AC-9 of
+  `css_color_parse_chrome159_spec.spl`.
+- **Colour review round 2 (2026-11-15).** A shorthand holding a malformed
+  colour function (`background: rgb(1,2)`, `border: 3px solid hsl(foo,1%,2%)`,
+  `border-top`, `outline`) is now dropped whole, like the longhands (it used
+  to win as last and reset the earlier colour). Legacy comma `rgba()` keeps
+  its alpha in `parse_color` like `hsla()`; `color` with an alpha-0 colour
+  paints no text; `parse_color_any` finds `hsl()` inside a shorthand
+  (`border-left: 4px solid hsl(...)` painted no border); a translucent side
+  next to an unpainted side fills its corner. Spec rows AC-10..AC-13; 3px
+  collapsed borders pinned by the table spec's AC-8 (already Chrome-exact).
+- **Fixed (2026-11-15, transparent-anim lane): transparent is a value.**
+  Appliers still receive 0 from the colour parsers for both "transparent"
+  and "invalid" (`_parse_color_delegated` is unchanged); the distinction is
+  made at the applier by `_decl_transparent_color(raw)` (decl_apply), which
+  the border/outline family, the dispatch path's `color`/`outline` arms and
+  text-/box-shadow consult. `border-color` takes 1-4 values; alpha-0 hex is
+  transparent; a named colour inside a shorthand (`border:4px solid blue`)
+  is found -- it painted no border since before `00dd0a5da9d`. Differently
+  coloured adjacent sides meet on a mitre (diagonal pixel = one 50/50 mix,
+  Chrome #7f0080 for red/blue) in BOTH the framebuffer lane and the Draw IR
+  engine2d lane; `width:0` is an authored zero (`Style.width_zero`; the first
+  cut missed the 1px clamp in `constrained_outer_width`, floats, abspos and
+  the flex sizing branches -- fixed in review round 2 below). Spec:
+  `css_transparent_color_chrome159_spec.spl` AC-1..8.
+- **Fixed: partial text alpha** in the 5x7 framebuffer lane
+  (`_fb_text_px`) and the engine2d software backend's bitmap `draw_text`
+  (AC-7). **Open:** the engine2d TTF font-batch composite and every other
+  backend's `draw_text` (vulkan, metal, cuda, ...) are unverified for alpha:
+  this host had no active vector font owner, so every lane fell back to the
+  bitmap face.
+- **Fixed: an unclosed function at the end of a style attribute** is closed
+  (`_inline_style_closed`, core compute_styles) -- AC-5.
+- **Open: transparent in the remaining appliers.** `text-decoration-color`
+  (0 means currentColor there), `caret-color`, `accent-color`,
+  `scrollbar-color`, the `background` over-colour layer and gradient stops
+  still read a transparent colour as "unset".
+- **Open: space advance.** A collapsible space between inline elements is
+  6 px on the cpu_simd lane where Chrome's 16px sans-serif space is 4.45
+  (`inline_whitespace_between_elements_chrome159_spec.spl` admits 24..26).
+- **Review round 2 (2026-11-15), fixed:**
+  - Border cascade: a border shorthand stores its physical side longhands
+    at its own source position (`_border_shorthand_longhands`, foundation
+    `_decl_table_build_inner`), so `border-top-color:red;border-color:blue`
+    is blue on top, `border-left-color:red;border:4px solid blue` blue on
+    the left, and the same for widths and styles; `border-color:red foo` is
+    dropped whole (`css_border_cascade_chrome159_spec.spl`).
+  - Whitespace-only text is judged by computed display after the cascade
+    (core `compute_styles_with_material`): it is hidden inside
+    flex/grid/table containers and beside a block-level sibling; flex
+    row/column and grid loops skip display:none children. The first cut
+    decided by tag and moved the catalog's forms-media (block `label`s) and
+    tab-bar (flex `gap` between buttons) pages
+    (`inline_whitespace_between_elements_chrome159_spec.spl` AC-2..4;
+    AC-3, the `<table>` row, already passed and is a guard).
+  - `width:0` at the 1px clamp, floats, abspos (and `left`+`right`+width:
+    `right` is ignored), flex sizing, legend and the float retry;
+    `width:0;inline-size:50%` clears the flag (`css_zero_size_chrome159_spec.spl`).
+  - column-reverse: one restack for every `justify-content` (`flex-end` and
+    `start` pack at the top, center/space-* keep the reversed order) moved
+    by `offset_layout_subtree` from the flow position, so
+    `position:relative;top` survives (`flex_column_reverse_chrome159_spec.spl`
+    AC-3, AC-4).
+  - Over-constrained abspos (both insets, definite size): `right` and
+    `bottom` are ignored (CSS 2.2 10.3.7 / 10.6.4). Chrome 159 puts the
+    `simple_web_renderer_spec` logical-inset card at 7,9; the spec had
+    pinned the right/bottom-wins 22,12 and was corrected to Chrome.
+- **Review round 2, open (filed):**
+  - `height:0` is read as auto: Chrome 159 `<div style="height:0">abc</div>`
+    (with or without `overflow:hidden`) is 0 tall and the next block starts
+    at the same y; Simple makes it 24 tall. 48 "is height set" tests
+    (`height_px > 0` / `== 0`) in layout_engine/layout_foundation would need
+    a `height_zero` flag like `width_zero`.
+  - `white-space: pre-wrap` / `pre-line` / `break-spaces` keep only the
+    newline between elements (round 3); spaces are still collapsed or
+    wrapped as `normal`, and newlines inside a text run are not modelled
+    for them (`white_space_pre` also means nowrap, so it cannot carry them).
+  - Authored `display: table` / `table-row` / `table-cell` is not a
+    supported display keyword (`is_supported_display_keyword`); such divs
+    lay out as blocks/inline, and only `<table>` tag markup is a table.
+  - Logical border properties map to physical sides as horizontal-tb ltr
+    only (`_border_logical_sides`, foundation): `direction:rtl` should swap
+    inline-start/end and a vertical writing mode should rotate block/inline.
+    The fixed-order logical appliers in decl_apply now run only for a value
+    the table cannot expand (`var()`).
+  - Draw IR mitre (`_engine2d_draw_ir_render_borders_mitred`) ignores a
+    radius: differently coloured sides with `border-radius > 0` are drawn
+    square-mitred.
+  - column-reverse restack ignores `margin-top:auto` / auto main margins
+    and percentage margins (it restacks as flex-start), and column flex
+    does not honour `order`.
+  - Animation page: the `<audio controls>` / `<video controls>` area is
+    the largest remaining mismatching region after the whitespace fix
+    (geometry now within a few px; the widget painting differs). Not
+    investigated in this lane.
+- **Review round 3, fixed (2026-11-15):**
+  - The declaration table is cut to its used length
+    (`_decl_table_build_inner`): any `border`/`outline` substring (even
+    `box-sizing:border-box`) sized it at 26 slots per declaration, and
+    `decl_tbl_get` / `decl_tbl_last_index` / `decl_tbl_presence` scanned the
+    spare empty slots.
+  - A border or outline shorthand resets what it omits (width `medium` =
+    3px, style `none`, color `currentcolor`, which the side/outline colour
+    appliers now resolve to the element colour); `thin`/`medium`/`thick` are
+    1/3/5px; a five-token `border-color` is dropped. Logical longhands and
+    shorthands are stored as physical longhands at their source position.
+    `border-block:4px none #112233` is now 0 wide (Chrome), re-pinned in
+    `decl_apply_coverage_closure_spec`. `outline:2px red` (no style) paints
+    nothing. Spec: `css_border_cascade_chrome159_spec.spl` AC-4, AC-5.
+  - Over-constrained abspos keeps `right` (drops `left`) when the parent is
+    `direction:rtl` (`css_abspos_overconstrained_chrome159_spec.spl`).
+  - A newline in whitespace between elements is a forced break where the
+    computed white-space keeps newlines (`<pre>`, `pre`, `pre-wrap`,
+    `pre-line`, `break-spaces`): `HNode.ws_newline` +
+    `Style.white_space_newline`; between two blocks it is an empty line
+    (`inline_whitespace_between_elements_chrome159_spec.spl` AC-5).
+- **Review round 3, open (filed):**
+  - An out-of-flow sibling hides a real space: `<span>a</span> <div
+    style=position:absolute></div><span>b</span>` renders "ab" -- the
+    whitespace pass (core.spl, after the `::marker` pass) treats the abspos
+    div as block-level by its computed display.
+  - `display:contents` inside a flex container: whitespace children of the
+    contents box are kept (the pass only looks at the direct parent's
+    display).
+  - The inline-run abspos placement in layout_engine (replaced box inside a
+    span, `if cst.left_auto and cst.right_px >= 0`) is still left-wins in an
+    rtl containing block.
+  - (round 4) `white-space: pre-line` collapses spaces correctly only
+    because it is not `white_space_pre`; the three-way white-space model
+    (collapse / keep newlines / keep all) is still two booleans.
+- **Review round 4, fixed (2026-11-15):**
+  - Abspos `width:auto` with both insets stretches when `left` is SET
+    (`left:0`, `inset:0`), not only positive; replaced boxes keep their
+    width (`<canvas>` 300x150). The rtl "left is dropped" branch needs a
+    definite width and reads the CONTAINING block's direction (nearest
+    positioned ancestor), not the DOM parent's
+    (`css_abspos_overconstrained_chrome159_spec.spl` AC-3).
+  - `outline`: an omitted width is medium (3px) on every path
+    (`outline:solid`, with or without an outline longhand, and
+    `outline-style:solid` alone), an omitted colour is currentColor, and
+    `auto` paints Chrome's ring as its 1px outer column
+    (`outline_shorthand_paint_width_px`, used by the full and dispatch
+    appliers; `css_border_cascade_chrome159_spec.spl` AC-6).
+  - Kept newlines keep their count (`\n\n` = two breaks, also between
+    blocks) and `<pre>`/`textarea`/`listing`/`plaintext` keep the count of
+    spaces between elements (`HNode.ws_raw`, `html_kept_newlines`;
+    `inline_whitespace_between_elements_chrome159_spec.spl` AC-6).
+- **Review round 4, open (filed):**
+  - Vertical abspos stretch: `top:0;bottom:0;height:auto` / `inset:0` is
+    one line tall (Chrome: the containing block's 50px); `<input>` with
+    `inset:0` keeps its own width (Chrome 200x50).
+  - `outline:auto`'s inner ring column (Chrome paints x 9 AND x 10 for a box
+    at x 10) is not painted.
+  - Spaces between elements under CSS `white-space: pre` / `pre-wrap` /
+    `break-spaces` (not the `<pre>` tag) collapse to one: the count is
+    decided at parse time, and normal-mode layout does not collapse a
+    multi-space whitespace node (two spaces measured 15px against 6).
+  - An abspos box with no positioned ancestor returns its `left` before the
+    rtl test (absolute_child_x early return).
+- **Open: exponents in colour channels.** `rgb(1e2, 0, 0)` reads its channel
+  as 1 (the exponent is consumed and dropped); Chrome reads 100. The value is
+  pinned by `dom_color_alpha_normalization_spec.spl`
+  (`rgba(1e2,2,3,.5)` = `0x01020380`), so fixing it means re-pinning that
+  row to Chrome's number.
+- **Collapsed table geometry fixed (2026-11-15, paint-page lane).** A
+  `border-collapse: collapse` cell box sat inside its whole border, so every
+  shared edge painted as two lines one pixel apart and the outer edges and
+  the content sat one pixel right of / below Chrome's; the grid filled the
+  whole table width instead of 0.5px in from each side, and the column
+  distributor handed the integer leftover to the first column (Chrome's
+  170.38px edge painted at 171). Cell boxes now reach over the outer half
+  of their own borders ((b+1)/2 before, b/2 after) so neighbours overlap on
+  one line, the grid is `iw - (b+1)/2 - b/2` wide, and auto and fixed
+  column edges round half up. Spec:
+  `table_collapsed_border_paint_chrome159_spec.spl` (5 ACs, red at
+  b8af2f7b53e). In-development `table_fractional_column_width_spec.spl`
+  gained its `width:200px` 99/95 row (the 3x2 67px row still fails).
+- **Open: a collapsed table with a `colspan` cell (or a min/max-width cell)
+  takes no table geometry at all.** `explicit_auto_table_column_offsets`
+  returns `[]` for those without authored spacing, and a collapsed table
+  has no spacing, so the rows lay out as plain blocks: Chrome paints
+  `<tr><td colspan=2>`+`<tr><td><td>` in a 400px table with lines at
+  y = 0, 41, 82 and x = 0, 170, 399; Simple at y = 0, 41, 42, 83, 84, 125
+  and no middle column line (unchanged by this lane).
+- **Collapsed table follow-up (2026-11-15).** A 2px collapsed border left
+  the last row's bottom half-border outside the table (the next block one
+  pixel early); the table now adds it. Round-half-up column edges apply to
+  separate-border tables too and are pinned there (AC-6).
+- **Open: collapsed borders of different widths or styles.** Only the
+  uniform-border case is modelled: the outer half-borders are read from the
+  first cell of the first row, and the CSS 2.2 §17.6.2.1 conflict resolution
+  (wider wins, then style, then cell over row over table) is applied only by
+  `simple_web_resolve_collapsed_table_borders` for one-row, two-cell
+  tables. Rowspan/colspan collapsed tables are the item above.

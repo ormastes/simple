@@ -3,7 +3,9 @@
 
 use std.cli.cli_util (get_cli_args)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
-use nogc_sync_mut.database.bug.{load_bug_database}
+use nogc_sync_mut.database.bug.{load_bug_database, BugTokenReading, BugTokenCount, BugTokenUsage,
+    BugTokenProvider, BugTokenSource, BugKnowledgeLink, bug_token_total, bug_token_reading_text,
+    bug_token_category_to_string}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.log.{error}
 use app.bug_resolve.close_gate.{bug_close_gate}
@@ -46,15 +48,28 @@ fn parse_flag(args: [text], prefix: text) -> text:
             return arg[prefix.len():]
     ""
 
-fn _token_value(raw: text) -> i64:
+# None means the field is malformed (negative or not a decimal integer).
+fn _token_reading(raw: text) -> BugTokenReading?:
     if raw == "unavailable" or raw == "-1":
-        return -1
-    match raw.parse_i64():
-        case Some(value): if value >= 0: value else: -2
-        case None: -2
+        return Some(BugTokenReading.Unavailable)
+    # Not `match raw.parse_i64()`: on the seed, a tail-position match arm that
+    # builds BugTokenCount from its binding yields one shared count for every call.
+    val parsed = raw.parse_i64()
+    if not parsed.?:
+        return None
+    val count = parsed ?? 0
+    if count < 0:
+        return None
+    Some(BugTokenReading.Count(BugTokenCount(value: count)))
 
-fn _token_field_valid(raw: text) -> bool:
-    _token_value(raw) != -2
+fn _exceeds_twice_average(total: BugTokenReading, average: BugTokenReading) -> bool:
+    match total:
+        case BugTokenReading.Unavailable: false
+        case BugTokenReading.Count(total_count):
+            match average:
+                case BugTokenReading.Unavailable: false
+                case BugTokenReading.Count(average_count):
+                    average_count.value <= 4611686018427387903 and total_count.value > average_count.value * 2
 
 fn _knowledge_path_allowed(path: text) -> bool:
     path != "" and not path.starts_with("/") and not path.contains("..") and
@@ -118,32 +133,20 @@ fn main() -> i64:
         print_help()
         return 1
 
-    if not _token_field_valid(input_tokens) or not _token_field_valid(output_tokens) or not _token_field_valid(cache_read_tokens) or not _token_field_valid(cache_create_tokens):
-        print "Error: token fields must be nonnegative decimal integers or literal 'unavailable'"
-        return 1
-
-    val input_value = _token_value(input_tokens)
-    val output_value = _token_value(output_tokens)
-    val cache_read_value = _token_value(cache_read_tokens)
-    val cache_create_value = _token_value(cache_create_tokens)
-    val numeric_usage = input_value >= 0 and output_value >= 0 and cache_read_value >= 0 and cache_create_value >= 0
-    var total_tokens: i64 = -1
-    if numeric_usage:
-        if input_value > 9223372036854775807 - output_value:
+    var readings: [BugTokenReading] = []
+    for raw in [input_tokens, output_tokens, cache_read_tokens, cache_create_tokens]:
+        match _token_reading(raw):
+            case Some(reading): readings.push(reading)
+            case None:
+                print "Error: token fields must be nonnegative decimal integers or literal 'unavailable'"
+                return 1
+    val total = match bug_token_total(readings):
+        case Ok(value): value
+        case Err(_reason):
             print "Error: token total overflow"
             return 1
-        val first_total = input_value + output_value
-        if first_total > 9223372036854775807 - cache_read_value:
-            print "Error: token total overflow"
-            return 1
-        val second_total = first_total + cache_read_value
-        if second_total > 9223372036854775807 - cache_create_value:
-            print "Error: token total overflow"
-            return 1
-        total_tokens = second_total + cache_create_value
 
     val timestamp = date_str
-    val token_provider = token_provider_raw
 
     val db_opt = load_bug_database(BUG_DB_PATH)
     var db = match db_opt:
@@ -152,19 +155,26 @@ fn main() -> i64:
             print "Error: could not load bug database at {BUG_DB_PATH}"
             return 1
 
-    val token_category = db.token_category_for_bug(id)
-    val average_value = db.comparable_token_average(token_category, id)
-    if average_value == -2:
-        print "Error: comparable token cohort is invalid or overflows"
-        return 1
-    val above_twice_average = total_tokens >= 0 and average_value >= 0 and average_value <= 4611686018427387903 and total_tokens > average_value * 2
-    if above_twice_average:
+    val token_category = match db.token_category_for_bug(id):
+        case Some(value): value
+        case None:
+            print "Error: bug '{id}' not found in database"
+            return 1
+    val average = match db.comparable_token_average(token_category, id):
+        case Ok(value): value
+        case Err(reason):
+            print "Error: comparable token cohort is invalid or overflows ({reason})"
+            return 1
+    if _exceeds_twice_average(total, average):
         if knowledge == "none" or not _knowledge_path_allowed(knowledge) or not file_exists(knowledge):
             print "Error: token usage exceeds 2x derived average; --knowledge must name an existing repository knowledge artifact"
             return 1
-    val any_unavailable = input_value < 0 or output_value < 0 or cache_read_value < 0 or cache_create_value < 0
-    val all_unavailable = input_value < 0 and output_value < 0 and cache_read_value < 0 and cache_create_value < 0
-    if any_unavailable and not all_unavailable:
+    var unavailable_count = 0
+    for reading in readings:
+        match reading:
+            case BugTokenReading.Unavailable: unavailable_count = unavailable_count + 1
+            case BugTokenReading.Count(_): pass
+    if unavailable_count > 0 and unavailable_count < readings.len():
         if knowledge == "none" or not _knowledge_path_allowed(knowledge) or not file_exists(knowledge):
             print "Error: partial token usage cannot be compared; --knowledge must name an existing repository knowledge artifact"
             return 1
@@ -178,13 +188,24 @@ fn main() -> i64:
         return 1
     db.add_investigation_log(id, "close_evidence reproducer={reproducer} prevention={prevention}")
 
-    val total_text = if total_tokens >= 0: "{total_tokens}" else: "unavailable"
-    val average_text = if average_value >= 0: "{average_value}" else: "unavailable"
-    val token_receipt = "token_usage category={token_category} provider={token_provider} input={input_tokens} output={output_tokens} cache_read={cache_read_tokens} cache_create={cache_create_tokens} total={total_text} source={token_source} comparable_average={average_text} knowledge={knowledge}"
+    val category_text = bug_token_category_to_string(token_category)
+    val token_receipt = "token_usage category={category_text} provider={token_provider_raw} input={input_tokens} output={output_tokens} cache_read={cache_read_tokens} cache_create={cache_create_tokens} total={bug_token_reading_text(total)} source={token_source} comparable_average={bug_token_reading_text(average)} knowledge={knowledge}"
     if not db.add_investigation_log(id, token_receipt):
         print "Error: bug '{id}' not found in database"
         return 1
-    if not db.add_token_usage(id, token_category, token_provider, input_value, output_value, cache_read_value, cache_create_value, total_tokens, token_source, knowledge, timestamp):
+    val knowledge_link: BugKnowledgeLink? = if knowledge == "none": None else: Some(BugKnowledgeLink(path: knowledge))
+    val usage = BugTokenUsage(
+        category: token_category,
+        provider: BugTokenProvider(value: token_provider_raw),
+        input: readings[0],
+        output: readings[1],
+        cache_read: readings[2],
+        cache_create: readings[3],
+        source: BugTokenSource(value: token_source),
+        knowledge: knowledge_link,
+        recorded_at: timestamp
+    )
+    if not db.add_token_usage(id, usage):
         print "Error: failed to store structured bug token usage"
         return 1
 

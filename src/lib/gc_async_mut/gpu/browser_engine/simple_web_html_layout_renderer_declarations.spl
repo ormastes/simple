@@ -645,10 +645,10 @@ fn _apply_decls_dispatch(
             val cv = parse_color(col)
             if cv != 0u32:
                 st.fg = cv
-            elif col.trim().lower() == "transparent":
-                # parse_color returns 0 both for "transparent" and for an
-                # unparsable value; only the keyword sets the fully
-                # transparent color (alpha 0), which paint then skips.
+            elif _decl_transparent_color(col):
+                # parse_color returns 0 both for a transparent colour and for
+                # an unparsable value; only a transparent one (`transparent`,
+                # `rgba(0,0,0,0)`, `#0000`) sets fg 0, which paint skips.
                 st.fg = 0u32
     if css_prop_mask_has(mask, CSS_PROP_WIDTH):
         css_probe_note()
@@ -669,6 +669,7 @@ fn _apply_decls_dispatch(
                 st.width_px = if wv > 0: 0 - wv else: 0
             else:
                 st.width_px = _decl_font_relative_length_px(width, st.font_size)
+            st.width_zero = st.width_px == 0 and "0123456789.".contains(width.substring(0, 1))
     if css_prop_mask_has(mask, CSS_PROP_HEIGHT):
         css_probe_note()
         val height = decl_tbl_get(decl_tbl, "height")
@@ -819,14 +820,12 @@ fn _apply_decls_dispatch(
         css_probe_note()
         val outline = decl_tbl_get(decl_tbl, "outline")
         if outline.len() > 0:
-            val ow = parse_supported_outline_shorthand_width_px(outline)
-            if ow >= 0:
-                st.outline_w = ow
+            st.outline_w = outline_shorthand_paint_width_px(outline)
             val oc = parse_color_any(outline)
-            if oc != 0u32:
+            if oc != 0u32 or _decl_transparent_color(outline):
                 st.outline_color = oc
-            if border_style_disables_paint(outline):
-                st.outline_w = 0
+            else:
+                st.outline_color = st.fg
     if css_prop_mask_has(mask, CSS_PROP_OVERFLOW):
         css_probe_note()
         val overflow_decl = decl_tbl_get(decl_tbl, "overflow")
@@ -1262,6 +1261,10 @@ fn apply_authored_style_metadata(
         previous.left_auto, table, "left", 3, "inset-inline", "inset-inline-start")
     st.top_auto = _authored_inset_auto(
         previous.top_auto, table, "top", 0, "inset-block", "inset-block-start")
+    st.white_space_newline = previous.white_space_newline
+    val white_space = decl_tbl_get(table, "white-space").trim().lower()
+    if white_space.len() > 0:
+        st.white_space_newline = white_space == "pre" or white_space == "pre-wrap" or white_space == "pre-line" or white_space == "break-spaces"
     # Same normal form as web_fractional_capture_authored_decls, which the
     # fractional resolver compares these against.
     st.transform_raw = _decl_tbl_raw_or(table, "transform", previous.transform_raw)
@@ -1684,6 +1687,7 @@ fn tag_defaults(st: Style, tag: text) -> Style:
     out.height_auto = st.height_auto
     out.left_auto = st.left_auto
     out.top_auto = st.top_auto
+    out.white_space_newline = st.white_space_newline or tag == "pre" or tag == "textarea" or tag == "listing" or tag == "plaintext"
     out.align_items_authored = st.align_items_authored
     out.scrollbar_width_none = st.scrollbar_width_none
     out.display_inline_flex_authored = st.display_inline_flex_authored

@@ -23,7 +23,7 @@ not these):
 4. Site-id to function-name map for the profile: descriptor carries slots only.
 ## Decisions (2026-11-15, lane xrayleaf) — each PROVISIONAL (owner to ratify)
 
-Status: verification-pending for items 1, 3, 4; item 2 has a chosen ABI but a BLOCKED host half.
+Status: verification-pending for items 1, 3, 4; item 2 hook ABI chosen, host half replaced by ring mode (below, PROVISIONAL).
 
 1. **Leaf binding — PROVISIONAL (owner to ratify).** `rt_host_dynlib_symbol(handle, name)` resolves
    `__simple_xray_descriptor_v1` / `__simple_xray_hook_v1` on the loaded DLL; slots are read with
@@ -61,3 +61,39 @@ Specs: `xray_llvm_attrs_spec` 24/24, `xray_win_flag_leaf_v1_spec` 7/7, `observer
 with `TARGET-PROFILE-E-UNAVAILABLE` from the unchanged receipt gate above; not re-run on the base). Off identity: an
 `xray_mode=0` Windows module still emits no `xray` text (attrs spec). The two system specs stay
 BLOCKED on Windows (ELF-lane gate, plus item 2).
+
+## Ring mode (2026-11-15, lane xrayring) — PROVISIONAL (owner to ratify)
+
+Item 2's BLOCKED host half is removed for the pure-Simple host by recording inside the DLL:
+`@__simple_xray_ring_v1 = { i64 capacity (65536), i64 write index, i64 dropped,
+[capacity x { i64 site, i32 kind, i32 pad, i64 seq }] }`. With a null hook,
+`__simple_xray_edge_v1` claims an index by `atomicrmw add` (monotonic), drops and counts
+(`atomicrmw add` on dropped) when the index is past capacity, writes site/kind and
+release-stores `seq = index + 1` last. The hook path is unchanged. The ring never wraps
+(fixed-size; no reset while edges may run — lockless, no locks). Leaf: `install` succeeds
+with no handler when the ring symbol resolves (hook stays null); `drain()` reads records
+with `rt_ptr_read_i64`, stops at the first record whose seq is not yet published, and
+writes one raw-edge channel record per edge (`xray_win_edge_record_v1`); `ring_dropped()`.
+Rejected: a wrapping ring (needs a consumer-index handshake with the DLL for no current
+need) and a host-minted C callback (needs a native host build).
+
+Also fixed: the xray globals are no longer `dllexport` — one explicit export turned MinGW
+lld auto-export off and the `--xray` DLL lost every function export
+(`xray_win_flag_guard_dllexport_disables_mingw_auto_export_2026-11-15.md`). The MSVC
+lane (no auto-export) stays open.
+
+Real run, Windows 11 host, seed-attr, llvm-mingw 20260922 UCRT
+(`test/fixtures/xray/xray_win_llvm_compile_driver.spl` builds,
+`test/fixtures/xray/xray_win_ring_e2e_host.spl` loads via `rt_host_dynlib_open`, patches
+`traced`+`add1`, calls through `rt_call_ptr_1`, drains): `RING-E2E PASS`, edges
+`E:traced,E:add1,X:add1,X:traced`, `traced(1)=44`, 0 dropped.
+Compile wall (one run each, loaded host): xray off 163 s; xray on 114 / 146 / 133 s —
+the spread is host noise, no measurable on/off difference. DLL size off 7,680 B, on
+1,580,544 B (the nonzero capacity header puts the 1.5 MB ring in `.data`, not `.bss`).
+Call time, 5000 calls of `traced`, three reps: xray-off build 2431/3256/2438 us, xray-on
+slots off 3310/2303/2546 us, slots on 3675/3521/3636 us (~0.2 us/call more). Calls go
+through the seed interpreter's `rt_call_ptr_1`, whose overhead dominates; these are not
+native-caller numbers.
+
+Specs: `xray_llvm_attrs_spec` 27/27, `xray_win_flag_leaf_v1_spec` 9/9. The two system
+specs stay BLOCKED on Windows (their ELF-lane gate is unchanged; not re-run).

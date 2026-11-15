@@ -1,6 +1,6 @@
 # native-build: default per-worker budget (26 GiB) refuses the per-file pool with 49 GB free
 
-- **Status:** open (P3, bootstrap)
+- **Status:** verification-pending (P3, bootstrap)
 - **Found:** 2026-11-09, Windows, `C:/dev/p3new/stage2new/stage2_new4.exe native-build src/app/mcp/main.spl` in a clean `origin/main` worktree.
 
 ## Observed
@@ -26,3 +26,13 @@ and names the override knobs.
 
 ## Repro
 Run the command above on a host with < ~91 GB free and no `SIMPLE_*_SHARD_WORKER_KB` set.
+
+## Fix (2026-11-15, verification-pending)
+Root cause: `file_worker_pool_mir_budget_kb_v1(modules, scale=true)` (per-file pool) priced each
+worker at the closure-scaled MIR SHARD price (`file_worker_pool_mir_price_kb_v1`, 26 GiB ceiling for
+a ~3000-module closure). A per-file worker never holds the whole-program HIR; its measured peak is
+5.04-5.65 GiB. The pool now prices MIR at `FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1`
+(= `SHARD_HIR_WORKER_KB_V1`, 9 GB) via `file_worker_pool_mir_default_price_kb_v1(modules, per_file)`;
+the MIR shard path keeps the closure price. 72 GB free -> 60% = 43.2 GB / 9 GB = 4 workers (was 1).
+Specs: `test/01_unit/app/cli/file_worker_pool_per_file_price_spec.spl` (4/4 GREEN, RED before).
+Needs native verification on a < 91 GB host without the `SIMPLE_*_SHARD_WORKER_KB` workaround.

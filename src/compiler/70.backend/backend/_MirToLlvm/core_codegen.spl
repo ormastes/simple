@@ -26,6 +26,8 @@ use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_funct
     bootstrap_mir_static_name_at, bootstrap_mir_static_type_tag_at,
     bootstrap_mir_static_init_kind_at, bootstrap_mir_static_init_payload_at,
     bootstrap_mir_static_alignment_at, bootstrap_mir_static_visibility_at, bootstrap_mir_static_external_at}
+# Records in the Windows XRay ring-mode ring (__simple_xray_ring_v1); 24 B each.
+const XRAY_RING_CAPACITY_V1: i64 = 65536
 # These implementation helpers belong to the SSA transform owner. The public
 # facade also exports them; its separate native-resolution regression remains
 # covered by mir_opt_facade_ssa_owner_spec.spl.
@@ -1175,9 +1177,12 @@ impl MirTextCodegen for MirToLlvm:
                 slot_names = slot_names.push("@__simple_xray_slot_{symbol}")
         self.builder.emit("")
         self.builder.emit("; XRay flag-guard sleds (Windows)")
+        # No dllexport: one explicit export turns MinGW lld auto-export off and
+        # the DLL loses every function export (bug
+        # xray_win_flag_guard_dllexport_disables_mingw_auto_export_2026-11-15).
         for slot_name in slot_names:
             self.builder.emit("{slot_name} = internal global i8 0")
-        self.builder.emit("@__simple_xray_descriptor_v1 = dllexport constant {{ i64, [{slots.len()} x ptr] }} {{ i64 {slots.len()}, [{slots.len()} x ptr] [{slots.join(", ")}] }}")
+        self.builder.emit("@__simple_xray_descriptor_v1 = constant {{ i64, [{slots.len()} x ptr] }} {{ i64 {slots.len()}, [{slots.len()} x ptr] [{slots.join(", ")}] }}")
         # Site id -> Simple function name, parallel to the descriptor.
         var name_refs: [text] = []
         var site_index = 0
@@ -1188,15 +1193,41 @@ impl MirTextCodegen for MirToLlvm:
                 self.builder.emit("@__simple_xray_name_{site_index} = private unnamed_addr constant [{name_len} x i8] c\"{name_text}\\00\"")
                 name_refs = name_refs.push("ptr @__simple_xray_name_{site_index}")
                 site_index = site_index + 1
-        self.builder.emit("@__simple_xray_names_v1 = dllexport constant {{ i64, [{name_refs.len()} x ptr] }} {{ i64 {name_refs.len()}, [{name_refs.len()} x ptr] [{name_refs.join(", ")}] }}")
-        self.builder.emit("@__simple_xray_hook_v1 = dllexport global ptr null")
+        self.builder.emit("@__simple_xray_names_v1 = constant {{ i64, [{name_refs.len()} x ptr] }} {{ i64 {name_refs.len()}, [{name_refs.len()} x ptr] [{name_refs.join(", ")}] }}")
+        self.builder.emit("@__simple_xray_hook_v1 = global ptr null")
+        # Ring mode (PROVISIONAL): with a null hook the edge appends one
+        # {site, kind, pad, seq} record to this exported fixed-size ring. The
+        # write index is claimed by atomicrmw add (lockless); a claim past
+        # capacity is dropped and counted; seq = index+1 is release-stored last
+        # so a reader sees only complete records.
+        val cap = XRAY_RING_CAPACITY_V1
+        val ring_ty = "{{ i64, i64, i64, [{cap} x {{ i64, i32, i32, i64 }}] }}"
+        self.builder.emit("@__simple_xray_ring_v1 = global {ring_ty} {{ i64 {cap}, i64 0, i64 0, [{cap} x {{ i64, i32, i32, i64 }}] zeroinitializer }}")
         self.builder.emit("define internal void @__simple_xray_edge_v1(i64 %site, i32 %kind) nounwind {{")
         self.builder.emit("xe_entry:")
         self.builder.emit("  %h = load volatile ptr, ptr @__simple_xray_hook_v1")
         self.builder.emit("  %set = icmp ne ptr %h, null")
-        self.builder.emit("  br i1 %set, label %xe_call, label %xe_done")
+        self.builder.emit("  br i1 %set, label %xe_call, label %xe_ring")
         self.builder.emit("xe_call:")
         self.builder.emit("  call void %h(i64 %site, i32 %kind)")
+        self.builder.emit("  br label %xe_done")
+        self.builder.emit("xe_ring:")
+        self.builder.emit("  %xe_widx = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v1, i32 0, i32 1")
+        self.builder.emit("  %xe_i = atomicrmw add ptr %xe_widx, i64 1 monotonic")
+        self.builder.emit("  %xe_full = icmp uge i64 %xe_i, {cap}")
+        self.builder.emit("  br i1 %xe_full, label %xe_drop, label %xe_store")
+        self.builder.emit("xe_drop:")
+        self.builder.emit("  %xe_dropped = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v1, i32 0, i32 2")
+        self.builder.emit("  %xe_d = atomicrmw add ptr %xe_dropped, i64 1 monotonic")
+        self.builder.emit("  br label %xe_done")
+        self.builder.emit("xe_store:")
+        self.builder.emit("  %xe_rsite = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v1, i32 0, i32 3, i64 %xe_i, i32 0")
+        self.builder.emit("  store i64 %site, ptr %xe_rsite, align 8")
+        self.builder.emit("  %xe_rkind = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v1, i32 0, i32 3, i64 %xe_i, i32 1")
+        self.builder.emit("  store i32 %kind, ptr %xe_rkind, align 4")
+        self.builder.emit("  %xe_seq = add i64 %xe_i, 1")
+        self.builder.emit("  %xe_rseq = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v1, i32 0, i32 3, i64 %xe_i, i32 3")
+        self.builder.emit("  store atomic i64 %xe_seq, ptr %xe_rseq release, align 8")
         self.builder.emit("  br label %xe_done")
         self.builder.emit("xe_done:")
         self.builder.emit("  ret void")
@@ -2951,6 +2982,16 @@ impl MirTextCodegen for MirToLlvm:
                 arg_ty = self.valid_llvm_type(param_ty)
             elif arg_val == "0":
                 arg_val = self.ret_value_for_type(arg_ty, "0")
+            else:
+                # No declared param (varargs `declare ... @f(...)` for a callee
+                # in another module): arg_ty came from the sticky ptr_locals /
+                # MIR-declared type, which can disagree with the SSA value's
+                # real type (a `[i64]` local defined by `call i64 @g(...)`).
+                # value_as_type reads value_types and emits the inttoptr /
+                # ptrtoint, so the operand is type-consistent with arg_ty.
+                # llc: "'%l26' defined with type 'i64' but expected 'ptr'"
+                # (external_text.spl `unicode_scalar_from_utf8(external_wide_bytes(utf8))`).
+                arg_val = self.value_as_type(arg_val, arg_ty, arg_ty)
             arg_parts = arg_parts.push("{arg_ty} {arg_val}")
             arg_tys = arg_tys.push(arg_ty)
             if bootstrap_debug:
