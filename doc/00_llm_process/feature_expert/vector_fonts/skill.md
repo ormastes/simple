@@ -195,6 +195,13 @@ Measured with `SIMPLE_INTERP_SAMPLE=1` on
   returns 0 on the interpreter, and `i64 + u32` without a cast gives a wrong
   sum there.
 
+- Selected-asset validation on the interpreter lane hashes with
+  `rt_tls13_sha256` through `_font_interp_digest_hex`
+  (`std.common.encoding.font_registry`). The pure-Simple `sha256_bytes` route ran
+  at ~22 KB/s: 77 s for the 1.7 MB NotoSansMono, now 11 ms. It is kept only as
+  the fallback when the accelerator returns no 32-byte digest.
+  `doc/08_tracking/bug/font_registry_interp_digest_22kbps_2026-11-15.md`.
+
 ## Update Rule
 
 After any rasterizer, font-config, or Engine2D-text-path change —
