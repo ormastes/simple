@@ -157,3 +157,4 @@ P0 baseline + inventory + manifest drift; P1 shared diagnostics (scaffold landed
 - Rust type layout / `repr(transparent)`: https://doc.rust-lang.org/reference/type-layout.html
 - Clang taint analysis configuration: https://clang.llvm.org/docs/analyzer/user-docs/TaintAnalysisConfiguration.html
 - Bazel build concepts: https://bazel.build/concepts/build-ref
+| 2026-11-15 | RB-UNIT-01/02 (unit parity spec) | `test/01_unit/compiler/units/unit_dimension_parity_spec.spl`: km/hr scale 5/18, exact 1/2, `km+kg` deny, same-storage nominal deny all GREEN; Distance/Duration -> velocity through unit_ops RED (no dimension quotient in unit_ops, bug record `unit_ops_no_dimension_quotient_velocity_2026-11-15.md`) | spec 4/5 pass, 1 expected RED |
