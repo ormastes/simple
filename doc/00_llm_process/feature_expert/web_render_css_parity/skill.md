@@ -1757,9 +1757,21 @@ never cache an answer computed while exhausted) —
   RSS 4.5 GB: the interpreted page pipeline dominates, not the device. Run
   with `--baseline <nonexistent>` so it is compared, not judged against the
   llvmpipe file. The RenderDoc layer still cannot load on this driver.
-- **Perf note (not fixed):** on llvmpipe at 900x760 `font_atlas_pack_u32_to_u8`
-  is 54 s of forms-media's 76 s render (byte-lane atlas repack; the typed
-  `SIMPLE_VK_FONT_UPLOAD=u32` lane is opt-in).
+- **Perf note (superseded 2026-11-15):** the "54 s of 76 s" `font_atlas_pack_u32_to_u8`
+  figure is stale. On tree `7b88ee7874a` with the same seed, forms-media renders
+  in 13-17 s and the pack was 0.8-1.5 s (21 packs, ~60 ms each); the drop came
+  from upstream source, not from the binary. 12 of those packs were full
+  repacks caused by the atlas being wiped on every text-size change, fixed in
+  `doc/08_tracking/bug/font_atlas_wiped_on_size_change_full_vulkan_repacks_2026-11-15.md`
+  (12 -> 3 full packs). The opt-in `SIMPLE_VK_FONT_UPLOAD=u32` lane renders a
+  DIFFERENT pixel sum (`2697956136642868` vs `2697697746427296`) and must not
+  become the default until that is explained. Checked 2026-11-15: it is already
+  so on base `b8b14272484`; disabling the #9435 `clipped-out` return leaves the
+  u32 sum byte-identical, so that is NOT the cause; draining the deferred u32
+  upload at once moves it only to `2697952473848308`, and this branch (atlas kept
+  across sizes) gives `2697955134348331`: the lane depends on atlas layout and
+  upload order. The gap is the sum-equivalent of ~15.4k black-to-white pixels
+  (no framebuffer diff yet); cause open.
 - Gradient paint cost, same seed: 300 x 900x100 120deg boxes 1.02 s -> 0.39 s
   wall (startup 0.24 s), RSS +4 MB; 6000 12x6 boxes 0.25 s -> 0.25 s, +5 MB
   (boxes under 1025 px skip the table; a table per box cost +87 MB).
@@ -1935,3 +1947,27 @@ never cache an answer computed while exhausted) —
 - Batch 1 (`71ff31154d5`) catalog 900 px: every page equal to its row
   (worst css-paint 6.80); `html` 216.2 s vs 226.6 s at base, `css-layout`
   266.0 s vs 274.3 s, same seed.
+
+### Batch 3a (2026-11-15): host-dependent renderer rows, numeric Playwright pick
+
+- **Playwright build is picked by number, not by glob order.** Both the
+  matrix gate (`full_chrome_in`) and the catalog gate
+  (`newest_playwright_chrome`) parse the `chromium-<n>` build and keep the
+  largest, so `chromium-999` can no longer shadow `chromium-1255`. Each gate's
+  selftest has a 999/1255/1200 fixture expecting 1255.
+- **A backend-name row is host-dependent, not a regression.** The resolver
+  probes the real device and honestly falls back to `software`
+  (`9970185d1de` surfaced the reason). Expect the canonical name only where an
+  independent `Engine2D.probe_backend` initializes; check aliases with
+  `backend_canonical_name`. On this aarch64 host: cuda/vulkan/cpu_simd
+  initialize; hip, opencl and metal ("Metal requires macOS") do not.
+- **Chrome pixel probe without ImageMagick:** screenshot with full Chrome,
+  then load the PNG into a canvas in a second headless page
+  (`--allow-file-access-from-files --disable-web-security`) and print
+  `getImageData` through `--dump-dom`.
+- **Chrome samples a vertical 2-stop ramp at row centres.** Measured
+  2026-11-15, Chrome 159: a 4 px `#000 -> #fff` ramp gives 1F/60/9F/DF, and a
+  16 px one gives 08 at the top row and F7 at the bottom. The CPU raster's
+  endpoint-exact `mix_channel_gradient_centered` (t = pos/(span-1)) is wrong
+  against this; Draw IR already samples centres (AC-12 in
+  `linear_gradient_angle_draw_ir_chrome159_spec`).

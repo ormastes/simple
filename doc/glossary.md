@@ -1215,4 +1215,5 @@ Windows = `XrayWinFlagLeafV1`, which uses flag-guard slots and an in-DLL ring
 drained into the channel. **Spy** is log mode: `XraySpyV1.log_lines()` prints
 one `enter|exit <name>` line per edge. **Profile** is `XraySpyV1.profile()`,
 which folds the same drained events with `trace_profile_fold_v1`. Both share
-one implementation and run unchanged on either OS.
+one implementation and run unchanged on either OS; the spy's adapter takes the
+backend leaf's sled kind (`Llvm` or native `Simple`).

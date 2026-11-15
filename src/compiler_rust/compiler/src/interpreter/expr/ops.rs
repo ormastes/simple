@@ -690,36 +690,55 @@ pub(super) fn eval_op_expr(
             let mut left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
             let mut right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
 
-            // Newtype-wrap detection: if both operands are Objects of the SAME class
-            // with a single `value` field (the canonical newtype shape), arithmetic
-            // ops unwrap to the inner value, perform the op on raw scalars, then
-            // re-wrap the int/float result back into the newtype. Comparison ops
-            // (==, !=, <, >, <=, >=) return Bool and never re-wrap.
-            let newtype_wrap_class: Option<String> = match (&left_val, &right_val) {
-                (Value::Object { class: lc, fields: lf }, Value::Object { class: rc, fields: rf })
-                    if lc == rc
-                        && lf.len() == 1
-                        && lf.contains_key("value")
-                        && rf.len() == 1
-                        && rf.contains_key("value")
-                        && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) =>
-                {
-                    Some(lc.clone())
-                }
-                _ => None,
-            };
-
-            // For newtype arithmetic, unwrap to inner scalars so use_float detection
-            // and Int/Float dispatch see the real underlying types.
-            if newtype_wrap_class.is_some() {
-                if let Value::Object { fields, .. } = &left_val {
-                    if let Some(inner) = fields.get("value").cloned() {
-                        left_val = inner;
+            // Newtype/`unit` shape: a method-less class instance (or struct object) whose
+            // only field is `value`. Rules (the seed is lenient: no cross-unit deny check):
+            //   U (+|-|%) U -> U        U * U, U / U -> the bare scalar
+            //   U * n, n * U, U / n -> U      comparisons unwrap through `as_int`.
+            let newtype_wrap_class: Option<String>;
+            let newtype_as_instance: bool;
+            {
+                let shape = |v: &Value| -> Option<(String, Value, bool)> {
+                    match v {
+                        Value::Object { class, fields } if fields.len() == 1 => {
+                            fields.get("value").map(|x| (class.clone(), x.clone(), false))
+                        }
+                        Value::ClassInstance(inst)
+                            if classes.get(inst.class()).is_some_and(|c| c.methods.is_empty()) =>
+                        {
+                            inst.with_fields(|f| {
+                                if f.len() == 1 {
+                                    f.get("value").map(|x| (inst.class().to_string(), x.clone(), true))
+                                } else {
+                                    None
+                                }
+                            })
+                        }
+                        _ => None,
                     }
-                }
-                if let Value::Object { fields, .. } = &right_val {
-                    if let Some(inner) = fields.get("value").cloned() {
-                        right_val = inner;
+                };
+                let is_scalar = |v: &Value| matches!(v, Value::Int(_) | Value::UInt { .. } | Value::Float(_));
+                let arith = matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod);
+                let scale = matches!(op, BinOp::Mul | BinOp::Div);
+                match (shape(&left_val), shape(&right_val)) {
+                    (Some((lc, lv, li)), Some((rc, rv, _))) if lc == rc && arith => {
+                        left_val = lv;
+                        right_val = rv;
+                        newtype_as_instance = li;
+                        newtype_wrap_class = if scale { None } else { Some(lc) };
+                    }
+                    (Some((lc, lv, li)), None) if scale && is_scalar(&right_val) => {
+                        left_val = lv;
+                        newtype_as_instance = li;
+                        newtype_wrap_class = Some(lc);
+                    }
+                    (None, Some((rc, rv, ri))) if matches!(op, BinOp::Mul) && is_scalar(&left_val) => {
+                        right_val = rv;
+                        newtype_as_instance = ri;
+                        newtype_wrap_class = Some(rc);
+                    }
+                    _ => {
+                        newtype_as_instance = false;
+                        newtype_wrap_class = None;
                     }
                 }
             }
@@ -1628,13 +1647,19 @@ pub(super) fn eval_op_expr(
             let mut final_value = result?;
             // Re-wrap newtype: turn raw Int/Float result back into Object { class, value }.
             if let Some(wrap_class) = newtype_wrap_class {
-                if matches!(final_value, Value::Int(_) | Value::Float(_)) {
+                if matches!(final_value, Value::Int(_) | Value::UInt { .. } | Value::Float(_)) {
                     let mut field_map: std::collections::HashMap<String, Value> =
                         std::collections::HashMap::with_capacity(1);
                     field_map.insert("value".to_string(), final_value);
-                    final_value = Value::Object {
-                        class: wrap_class,
-                        fields: std::sync::Arc::new(field_map),
+                    final_value = if newtype_as_instance {
+                        Value::ClassInstance(std::sync::Arc::new(crate::value::ClassInstance::new(
+                            wrap_class, field_map,
+                        )))
+                    } else {
+                        Value::Object {
+                            class: wrap_class,
+                            fields: std::sync::Arc::new(field_map),
+                        }
                     };
                 }
             }
