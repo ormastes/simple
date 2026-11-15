@@ -37,10 +37,21 @@ The pure runner has no chat template: the prompt is the message text.
 """
 
 use std.spec.{describe, it, expect, step, skip, fail}
-use std.io_runtime.{env_get, env_set, is_dir}
+use std.io_runtime.{env_get, env_set, is_dir, file_append_text, dir_create_all}
 use std.gc_async_mut.slang.entrypoints.openai.api_server.{slang_api_dispatch}
 use std.gc_async_mut.slang.entrypoints.openai.protocol.{json_string_field, json_int_field}
 use std.gc_async_mut.slang.engine.llm_engine.{engine_last_runner, engine_pure_stats, engine_backend_available, engine_set_n_ctx_text, engine_unload}
+
+# The runner does not keep stdout of passing examples and counts skip() as a
+# pass, so evidence (and every skip reason) is also appended to a file.
+fn _record(line: text):
+    print line
+    dir_create_all("build/probe")
+    file_append_text("build/probe/dispatch_evidence.txt", line + "\n")
+
+fn _skip(name: text, why: text):
+    _record("SKIPPED: " + name + " -- " + why)
+    skip(name, why)
 
 val PURE_MODEL = "llama2c-stories15M"
 val GGML_MODEL = "Qwen2.5-1.5B-Instruct-Q4_K_M"
@@ -68,7 +79,7 @@ fn _ggml_gate() -> text:
 fn _chat(model: text, prompt: text, max_tokens: i64) -> (i64, text):
     val body = "{\"model\":\"" + model + "\",\"max_tokens\":" + max_tokens.to_text() + ",\"messages\":[{\"role\":\"user\",\"content\":\"" + prompt + "\"}]}"
     val r = slang_api_dispatch("POST", "/v1/chat/completions", body, _root())
-    print "SLANG_DISPATCH model=" + model + " runner=" + engine_last_runner() + " status=" + r.status.to_text() + " body=" + r.body
+    _record("SLANG_DISPATCH model=" + model + " runner=" + engine_last_runner() + " status=" + r.status.to_text() + " body=" + r.body)
     (r.status as i64, r.body)
 
 describe "slang dispatches a model to the pure runner or the llama.cpp wrapper":
@@ -76,7 +87,7 @@ describe "slang dispatches a model to the pure runner or the llama.cpp wrapper":
     it "serves stories15M through the pure runner with real usage":
         val gate = _gate()
         if gate != "":
-            skip("serves stories15M through the pure runner with real usage", gate)
+            _skip("serves stories15M through the pure runner with real usage", gate)
         else:
             step("POST a completion for the safetensors model through slang_api_dispatch")
             val r = _chat(PURE_MODEL, "Once upon a time", 10)
@@ -90,7 +101,7 @@ describe "slang dispatches a model to the pure runner or the llama.cpp wrapper":
     it "re-uses the resident KvSession for a second request sharing the prefix":
         val gate = _gate()
         if gate != "":
-            skip("re-uses the resident KvSession for a second request sharing the prefix", gate)
+            _skip("re-uses the resident KvSession for a second request sharing the prefix", gate)
         else:
             step("Second request extends the first prompt by a few generated words")
             val r = _chat(PURE_MODEL, "Once upon a time, there was a little", 2)
@@ -103,7 +114,7 @@ describe "slang dispatches a model to the pure runner or the llama.cpp wrapper":
             val completion = json_int_field(r.1, "completion_tokens", -1)
             # a fresh session would evaluate every prompt position plus all but the last generated token
             val fresh_cost = prompt_tokens + completion - 1
-            print "SLANG_DISPATCH reused=" + s.last_reused_positions.to_text() + " evaluated=" + s.last_evaluated_positions.to_text() + " fresh_cost=" + fresh_cost.to_text()
+            _record("SLANG_DISPATCH reused=" + s.last_reused_positions.to_text() + " evaluated=" + s.last_evaluated_positions.to_text() + " fresh_cost=" + fresh_cost.to_text())
             expect(s.last_reused_positions > 5).to_equal(true)
             expect(s.last_evaluated_positions < fresh_cost).to_equal(true)
             expect(s.requests).to_equal(2)
@@ -111,7 +122,7 @@ describe "slang dispatches a model to the pure runner or the llama.cpp wrapper":
     it "still serves the Qwen GGUF through the llama.cpp wrapper":
         val gate = _ggml_gate()
         if gate != "":
-            skip("still serves the Qwen GGUF through the llama.cpp wrapper", gate)
+            _skip("still serves the Qwen GGUF through the llama.cpp wrapper", gate)
         else:
             expect(engine_set_n_ctx_text("2048")).to_equal(true)
             val r = _chat(GGML_MODEL, "Say exactly: hello", 8)
@@ -123,9 +134,9 @@ describe "slang dispatches a model to the pure runner or the llama.cpp wrapper":
     it "refuses an impossible forced runner explicitly instead of falling back":
         val gate = _gate()
         if gate != "":
-            skip("refuses an impossible forced runner explicitly instead of falling back", gate)
+            _skip("refuses an impossible forced runner explicitly instead of falling back", gate)
         elif not is_dir(_root() + "/" + GGML_MODEL):
-            skip("refuses an impossible forced runner explicitly instead of falling back", "'" + GGML_MODEL + "' not under SLANG_MODEL_ROOT")
+            _skip("refuses an impossible forced runner explicitly instead of falling back", "'" + GGML_MODEL + "' not under SLANG_MODEL_ROOT")
         else:
             step("SLANG_RUNNER=pure on the GGUF model is a 503 naming the forced choice")
             val _a = env_set("SLANG_RUNNER", "pure")

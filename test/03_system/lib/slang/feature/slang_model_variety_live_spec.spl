@@ -41,7 +41,18 @@ use std.gc_async_mut.slang.entrypoints.llm.{slang_models, engine_backend_availab
 use std.gc_async_mut.slang.engine.llm_engine.{engine_set_n_ctx_text, engine_set_gpu_layers_text, engine_ensure_loaded, engine_complete_chat_observed, engine_gpu_offload_status, engine_unload}
 use std.gc_async_mut.slang.model_executor.backend.{chat_frame, parse_nonnegative_i64_text_exact}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel}
-use std.io_runtime.{env_get, is_dir, time_now_monotonic_ms}
+use std.io_runtime.{env_get, is_dir, time_now_monotonic_ms, file_append_text, dir_create_all}
+
+# The runner does not keep stdout of passing examples and counts skip() as a
+# pass, so evidence (and every skip reason) is also appended to a file.
+fn _record(line: text):
+    print line
+    dir_create_all("build/probe")
+    file_append_text("build/probe/variety_evidence.txt", line + "\n")
+
+fn _skip(name: text, why: text):
+    _record("SKIPPED: " + name + " -- " + why)
+    skip(name, why)
 
 val CAPITAL_PROMPT = "What is the capital of France? Answer with one word."
 val CODER_PROMPT = "Write a Python function that adds two numbers."
@@ -126,10 +137,10 @@ fn _print_row(model_id: text, arch: text, row: VarRow):
     var shown = row.output
     if row.err != "":
         shown = "ERROR " + row.err
-    print "SLANG_VARIETY_TABLE | " + _device() + " | " + model_id + " | " + arch + " | " + row.load_ms.to_text() +
+    _record("SLANG_VARIETY_TABLE | " + _device() + " | " + model_id + " | " + arch + " | " + row.load_ms.to_text() +
         " | n/a | " + row.gen_tokens.to_text() + " | " + row.gen_ms.to_text() + " | " + _tokens_per_s(row) +
-        " | offloaded=" + row.offloaded.to_text() + " | " + _head60(shown)
-    print "SLANG_VARIETY_FULL | " + _device() + " | " + model_id + " | " + _one_line(shown)
+        " | offloaded=" + row.offloaded.to_text() + " | " + _head60(shown))
+    _record("SLANG_VARIETY_FULL | " + _device() + " | " + model_id + " | " + _one_line(shown))
 
 fn _check_offload(row: VarRow):
     step("Offload status matches the requested device")
@@ -146,14 +157,14 @@ fn _check_answer(row: VarRow, needle: text):
 # Whole case: look the model up (absent -> skipped by absence), ask, print, check.
 fn _case(name: text, id: text, arch: text, prompt: text, max_tokens: i64, needle: text):
     if not _live_enabled():
-        skip(name, "needs SLANG_LIVE=1, SLANG_MODEL_ROOT and a built ggml shim (SLANG_GGML_LIB)")
+        _skip(name, "needs SLANG_LIVE=1, SLANG_MODEL_ROOT and a built ggml shim (SLANG_GGML_LIB)")
         return
     expect(engine_set_n_ctx_text("2048")).to_equal(true)
     val root = _model_root()
     val found = _find(root, id)
     if found == nil:
-        print "SLANG_VARIETY_TABLE | " + _device() + " | " + id + " | " + arch + " | SKIPPED_BY_ABSENCE (no such directory under SLANG_MODEL_ROOT)"
-        skip(name, "model directory " + id + " is absent under SLANG_MODEL_ROOT")
+        _record("SLANG_VARIETY_TABLE | " + _device() + " | " + id + " | " + arch + " | SKIPPED_BY_ABSENCE (no such directory under SLANG_MODEL_ROOT)")
+        _skip(name, "model directory " + id + " is absent under SLANG_MODEL_ROOT")
         return
     step("Load " + id + " and answer: " + prompt)
     val row = _ask(found!, root, prompt, max_tokens)
@@ -182,15 +193,15 @@ describe "slang model variety through the public engine entrypoint":
 
     it "Qwen3-ASR-0.6B is refused explicitly or answers on-topic":
         if not _live_enabled():
-            skip("Qwen3-ASR-0.6B is refused explicitly or answers on-topic", "needs SLANG_LIVE=1, SLANG_MODEL_ROOT and a built ggml shim (SLANG_GGML_LIB)")
+            _skip("Qwen3-ASR-0.6B is refused explicitly or answers on-topic", "needs SLANG_LIVE=1, SLANG_MODEL_ROOT and a built ggml shim (SLANG_GGML_LIB)")
         else:
             expect(engine_set_n_ctx_text("2048")).to_equal(true)
             val root = _model_root()
             val id = "Qwen3-ASR-0.6B-GGUF"
             val found = _find(root, id)
             if found == nil:
-                print "SLANG_VARIETY_TABLE | " + _device() + " | " + id + " | gguf qwen3-asr Q8_0 | SKIPPED_BY_ABSENCE (no such directory under SLANG_MODEL_ROOT)"
-                skip("Qwen3-ASR-0.6B is refused explicitly or answers on-topic", "model directory " + id + " is absent under SLANG_MODEL_ROOT")
+                _record("SLANG_VARIETY_TABLE | " + _device() + " | " + id + " | gguf qwen3-asr Q8_0 | SKIPPED_BY_ABSENCE (no such directory under SLANG_MODEL_ROOT)")
+                _skip("Qwen3-ASR-0.6B is refused explicitly or answers on-topic", "model directory " + id + " is absent under SLANG_MODEL_ROOT")
             else:
                 step("Load " + id + " (an ASR model, not a chat model)")
                 val row = _ask(found!, root, CAPITAL_PROMPT, 24)
