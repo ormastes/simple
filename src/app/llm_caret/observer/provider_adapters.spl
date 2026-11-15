@@ -49,6 +49,36 @@ fn claude_loaded_skill(hook_name: text, payload: text) -> text:
         return ""
     extract_json_string(payload, "skill")
 
+# Codex has no Skill tool: a skill is loaded when the agent reads its
+# `skills/<name>/SKILL.md` through a shell tool, which the PreToolUse payload
+# carries as tool_input.command. Returns "" when the command reads no SKILL.md.
+fn codex_loaded_skill(hook_name: text, payload: text) -> text:
+    if hook_name != "PreToolUse":
+        return ""
+    val command = extract_json_string(payload, "command")
+    val tail = "/SKILL.md"
+    val end = command.index_of(tail) ?? -1
+    if end < 0:
+        return ""
+    val head = command.substring(0, end)
+    val slash = head.last_index_of("/")
+    if slash < 0:
+        return ""
+    head.substring(slash + 1, head.len())
+
+# Codex `$name` skill invocations in a UserPromptSubmit prompt are the skills
+# the user requested; compared against codex_loaded_skill for the diff.
+fn codex_requested_skills(hook_name: text, payload: text) -> [text]:
+    var out: [text] = []
+    if hook_name != "UserPromptSubmit":
+        return out
+    for word in extract_json_string(payload, "prompt").split(" "):
+        if word.starts_with("$") and word.len() > 1:
+            val name = word.substring(1, word.len())
+            if not out.contains(name):
+                out = out + [name]
+    out
+
 fn provider_events(provider: text, session: text, generation: i64, op: text, seq: i64, at_ms: i64, event_name: text) -> [ObserverEvent]:
     if provider == "claude":
         return claude_hook_events(session, generation, op, seq, at_ms, event_name)
@@ -56,4 +86,4 @@ fn provider_events(provider: text, session: text, generation: i64, op: text, seq
         return codex_notification_events(session, generation, op, seq, at_ms, event_name)
     []
 
-export claude_hook_events, claude_loaded_skill, codex_notification_events, provider_events
+export claude_hook_events, claude_loaded_skill, codex_loaded_skill, codex_requested_skills, codex_notification_events, provider_events
