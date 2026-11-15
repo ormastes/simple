@@ -2038,3 +2038,7 @@ never cache an answer computed while exhausted) —
 - **`absolute_containing_h` is the PADDING-box height** (`content_height_limit + pad_t + pad_b` at every call site), while `containing_w` is the CONTENT width and callers add the padding back. Mixing the two up gives the wrong stretch only when the parent has padding, so the spec includes a padded parent.
 - Absolute boxes now take their margins in `absolute_child_x/y` and in the width stretch. Before this an abs box with `margin:1px` sat at the inset with no offset, which no catalog page exercised.
 - **Trap — per-call-site variable names:** the five `absolute_child_style` call sites name the child `c`, `fc`, `fc_wrap` and `flex_c`. A blanket `nodes[c]` replace only fails with `variable c not found` when a flex absolute child is actually laid out. `layout_renderer_box_geometry_chrome159_spec` ("flex row/col abs child") caught it, and nothing at load time did.
+
+## 2026-11-16 — absolute static position
+
+- The static y of an auto-inset absolute box is `cy + prev_margin_b + margin-top`, not `cy`. The previous sibling's bottom margin is still pending in `prev_margin_b` (it has not been added to `cy` yet), and Chrome places the box after it.
