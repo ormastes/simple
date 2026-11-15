@@ -39,11 +39,13 @@ use common.text_layout.font_renderer.{
     _font_atlas_dependency_generation_after, _resolved_font_metric_key, _resolved_font_metrics_cacheable,
     ensure_browser_provided_fonts,
     resolved_font_metric_cache_hits, resolved_font_metric_cache_misses, _resolved_font_metric_cache_reset_for_test}
-use common.text_layout.font_provider.{browser_bundled_font_path_for_family, browser_host_has_measured_linux_face_set}
-use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_identity}
+use common.text_layout.font_provider.{browser_bundled_font_path_for_family, browser_host_has_measured_linux_face_set, browser_platform_sans_faces, browser_platform_mono_faces}
+use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_identity, selected_font_asset_physical_path}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION, font_atlas_composite_program_version_valid, font_atlas_subrect_pixels}
 use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.encoding.sfnt.{sfnt_measure_glyph_into, SFNT_GLYPH_SELECTOR_INDEX}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+use std.nogc_sync_mut.text_layout.font_renderer.{resolved_font_front_memo_hits, resolved_font_front_memo_misses}
 
 fn expect_resolved_font_metrics(metrics: ResolvedFontMetrics):
     expect(metrics.valid).to_be(true)
@@ -569,20 +571,43 @@ describe "shared font renderer fallbacks":
         # @req REQ-SSPEC-LIB
         # @capture(bit_table): sans and mono candidate lane ordering
         step("keeps provided browser sans and mono candidates ahead of host fallbacks")
+        # Corrected 2026-11-15. The examples/09_embedded/simple_os/fonts/* pins
+        # went stale in 571e316f856 (2026-07-11, bundled faces moved to the
+        # registry assets) and the platform-face lead came with the Chrome 159
+        # per-name resolver. Contract: present platform faces lead (Chrome on
+        # Linux resolves sans-serif to Liberation Sans and monospace to DejaVu
+        # Sans Mono), then the first bundled registry asset.
         val sans = browser_sans_font_candidates()
         val mono = browser_mono_font_candidates()
-        expect(sans[0]).to_equal("examples/09_embedded/simple_os/fonts/sans/NotoSans-Regular.ttf")
-        expect(sans[1]).to_equal("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf")
-        expect(mono[0]).to_equal("examples/09_embedded/simple_os/fonts/mono/FiraCodeNerdFontMono-Regular.ttf")
-        expect(mono[1]).to_equal("/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf")
+        val psans = browser_platform_sans_faces()
+        val pmono = browser_platform_mono_faces()
+        if browser_host_has_measured_linux_face_set():
+            expect(psans).to_equal(["/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"])
+            expect(pmono).to_equal(["/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"])
+        var k = 0
+        while k < psans.len():
+            expect(sans[k]).to_equal(psans[k])
+            k = k + 1
+        expect(sans[psans.len()]).to_equal(selected_font_asset_physical_path("assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf"))
+        k = 0
+        while k < pmono.len():
+            expect(mono[k]).to_equal(pmono[k])
+            k = k + 1
+        expect(mono[pmono.len()]).to_equal(selected_font_asset_physical_path("assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"))
 
     it "maps browser CSS font-family names to provided font lanes":
         # @req REQ-SSPEC-LIB
         # @capture(bit_table): CSS family to candidate lane mapping
         step("maps browser CSS font-family names to provided font lanes")
-        expect(browser_font_candidates_for_family("monospace")[0]).to_equal("assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf")
-        expect(browser_font_candidates_for_family("'Fira Code', monospace")[0]).to_equal("assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf")
-        expect(browser_font_candidates_for_family("Arial, sans-serif")[0]).to_equal("assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf")
+        # Corrected 2026-11-15: a generic family heads with its category stack,
+        # whose head is the platform face when present (see the row above), and
+        # an unserved name ('Fira Code') falls through to the next token.
+        expect(browser_font_candidates_for_family("monospace")[0]).to_equal(browser_mono_font_candidates()[0])
+        expect(browser_font_candidates_for_family("'Fira Code', monospace")[0]).to_equal(browser_mono_font_candidates()[0])
+        if browser_host_has_measured_linux_face_set():
+            # Chrome on Linux serves Arial with its metric twin Liberation Sans.
+            expect(browser_font_candidates_for_family("monospace")[0]).to_equal("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf")
+            expect(browser_font_candidates_for_family("Arial, sans-serif")[0]).to_equal("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf")
         expect(browser_font_candidates_for_family("system")[0]).to_equal(browser_chrome_compatible_normal_font_path())
         expect(browser_font_candidates_for_family("Times New Roman, serif")[0]).to_equal(browser_chrome_compatible_normal_font_path())
 
@@ -655,17 +680,26 @@ describe "shared font renderer fallbacks":
             expect(batch.valid).to_equal(true)
             if bitmap != nil:
                 val glyph = bitmap.?
-                val ascent = renderer.horizontal_line_metric(32, 0)
-                expect(glyph.bearing_x != 0 or glyph.bearing_y != 0).to_equal(true)
-                expect(batch.quads[0].dst_x).to_equal(metrics.glyph_run.xs[0] + glyph.bearing_x.to_i32())
-                expect(batch.quads[0].dst_y).to_equal(ascent + metrics.glyph_run.ys[0] - glyph.bearing_y.to_i32() - glyph.height.to_i32())
+                # Corrected 2026-11-15: a handle-free selected face has no native line
+                # metric (`horizontal_line_metric` answers 0), so the ascent is the
+                # outline hhea ascender, as `_stage_selected_glyph_run_active` uses
+                # since bbb98e957a8 (Noto Sans Arabic at 32: 44).
+                var ascent_meta: [i64] = [0; 20]
+                sfnt_measure_glyph_into(renderer.selected_outline_blob, SFNT_GLYPH_SELECTOR_INDEX,
+                    metrics.glyph_run.glyph_ids[0].to_i64(), 32, ascent_meta)
+                expect(ascent_meta[7]).to_equal(310031)
+                val ascent = ascent_meta[17].to_i32()
+                expect(ascent).to_be_greater_than(32)
+                expect(glyph.gbm_bearing_x != 0 or glyph.gbm_bearing_y != 0).to_equal(true)
+                expect(batch.quads[0].dst_x).to_equal(metrics.glyph_run.xs[0] + glyph.gbm_bearing_x.to_i32())
+                expect(batch.quads[0].dst_y).to_equal(ascent + metrics.glyph_run.ys[0] - glyph.gbm_bearing_y.to_i32() - glyph.gbm_height.to_i32())
                 val quad = batch.quads[0]
                 val pixels = font_atlas_subrect_pixels(batch.atlas_pixels, batch.atlas_width,
                     batch.atlas_height, quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color)
-                expect(pixels.len()).to_equal(glyph.pixels.len())
+                expect(pixels.len()).to_equal(glyph.gbm_pixels.len())
                 var pixel_index: i64 = 0
                 while pixel_index < pixels.len():
-                    expect((pixels[pixel_index] >> 24) & 0xFFu32).to_equal(glyph.pixels[pixel_index].to_u32())
+                    expect((pixels[pixel_index] >> 24) & 0xFFu32).to_equal(glyph.gbm_pixels[pixel_index].to_u32())
                     pixel_index = pixel_index + 1
         renderer.clear_ttf()
 
@@ -716,15 +750,22 @@ describe "shared font renderer fallbacks":
         # Now re-look-up EVERY key a second time, checking each individually
         # -- a bug that only breaks e.g. index 5 onward would be invisible if
         # only the aggregate hit counter were checked.
+        expect(resolved_font_front_memo_misses()).to_equal(contents.len())
+        # Corrected 2026-11-15: repeats are answered by the front memo in
+        # `_resolve_font_metrics_with_language_config` (present since at least
+        # bb3f6ab8ab2), before the deep metric cache is consulted, so the hit
+        # is counted there and the deep cache sees neither a hit nor a miss.
         idx = 0
         while idx < contents.len():
-            val hits_before = resolved_font_metric_cache_hits()
+            val hits_before = resolved_font_front_memo_hits()
             val second = resolve_font_metrics_with_language("sans-serif", contents[idx], 16, "und")
             expect(second.width).to_equal(widths[idx])
-            expect(resolved_font_metric_cache_hits()).to_equal(hits_before + 1)
+            expect(resolved_font_front_memo_hits()).to_equal(hits_before + 1)
             idx = idx + 1
         expect(resolved_font_metric_cache_misses()).to_equal(misses_after_all_first)
-        expect(resolved_font_metric_cache_hits()).to_equal(contents.len())
+        expect(resolved_font_front_memo_misses()).to_equal(contents.len())
+        expect(resolved_font_front_memo_hits()).to_equal(contents.len())
+        expect(resolved_font_metric_cache_hits()).to_equal(0)
 
     it "shaped-run cache: repeated identical (family, content, size) shaping is byte-identical and records a hit":
         # @req REQ-SSPEC-LIB
@@ -738,7 +779,8 @@ describe "shared font renderer fallbacks":
         expect(second.line_height).to_equal(first.line_height)
         expect(second.glyph_run.valid).to_equal(first.glyph_run.valid)
         expect(second.glyph_run.glyph_ids.len()).to_equal(first.glyph_run.glyph_ids.len())
-        expect(resolved_font_metric_cache_hits()).to_be_greater_than(0)
+        # Corrected 2026-11-15: the repeat is a front-memo hit (see STRESS).
+        expect(resolved_font_front_memo_hits()).to_equal(1)
         expect(resolved_font_metric_cache_misses()).to_equal(misses_after_first)
 
     it "shaped-run cache: different content is NOT served from the cached entry (no stale reuse)":
@@ -782,10 +824,13 @@ describe "shared font renderer fallbacks":
         # @capture(statistics): provided path list and download intent verdicts
         step("exposes an opt-in browser default font materialization surface")
         val provided = browser_provided_font_paths()
-        expect(provided).to_contain("examples/09_embedded/simple_os/fonts/sans/NotoSans-Regular.ttf")
-        expect(provided).to_contain("examples/09_embedded/simple_os/fonts/serif/NotoSerif-Regular.ttf")
-        expect(provided).to_contain("examples/09_embedded/simple_os/fonts/mono/FiraCodeNerdFontMono-Regular.ttf")
-        expect(browser_font_download_script_path()).to_equal("examples/09_embedded/simple_os/fonts/download_fonts.shs")
+        # Corrected 2026-11-15: since 571e316f856 (2026-07-11) the provided
+        # faces are the digest-pinned registry assets and there is no download
+        # script (the bundle ships in-tree), so the script path is "".
+        expect(provided).to_contain(selected_font_asset_physical_path("assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf"))
+        expect(provided).to_contain(selected_font_asset_physical_path("assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf"))
+        expect(provided).to_contain(selected_font_asset_physical_path("assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"))
+        expect(browser_font_download_script_path()).to_equal("")
 
         val result = ensure_browser_provided_fonts(false, 1)
         expect(result.attempted_download).to_equal(false)
@@ -847,8 +892,11 @@ describe "shared font renderer fallbacks":
         step("puts resolved local font-face sources ahead of generic fallback candidates")
         val family = browser_font_face_family_value("Demo Serif, serif", "assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf")
         val candidates = browser_font_candidates_for_family(family)
-        expect(browser_font_face_source_from_family_value(family)).to_equal("examples/09_embedded/simple_os/fonts/serif/NotoSerif-Regular.ttf")
-        expect(candidates[0]).to_equal("examples/09_embedded/simple_os/fonts/serif/NotoSerif-Regular.ttf")
+        # Corrected 2026-11-15: a local @font-face source is used as written
+        # (`browser_font_face_local_source_path`); the old assets -> examples
+        # remap went with 571e316f856 (2026-07-11).
+        expect(browser_font_face_source_from_family_value(family)).to_equal("assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf")
+        expect(candidates[0]).to_equal("assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf")
         expect(candidates[1]).to_equal(browser_chrome_compatible_normal_font_path())
 
     it "keeps remote font-face sources out of renderer file candidates until fetched":
