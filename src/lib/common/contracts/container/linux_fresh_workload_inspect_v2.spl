@@ -1,0 +1,176 @@
+# Fixed Podman5.2.5 interoperability DATA; not native kernel or admission proof.
+# Primary source define/container_inspect.go240b09d21d3998a18c58b32295b063608dbf76a3
+# and libpod/container_inspect.go ef4bac14e4d44c8ab884cb04e8303766a06b0717.
+use std.common.contracts.container.linux_fresh_workload_v2.*
+use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_get, json_value_keys, json_value_as_text}
+
+pub fn linux_fresh_workload_inspect_format_v2() -> text:
+    "{\"id\":{{{{json .Id}}}},\"pod_uid\":{{{{json (index .Config.Labels \"io.simpleorch.pod_uid\")}}}},\"attempt\":{{{{json (index .Config.Labels \"io.simpleorch.attempt\")}}}},\"node_boot_id\":{{{{json (index .Config.Labels \"io.simpleorch.node_boot_id\")}}}},\"provider_generation\":{{{{json (index .Config.Labels \"io.simpleorch.provider_generation\")}}}},\"operation_id\":{{{{json (index .Config.Labels \"io.simpleorch.operation_id\")}}}},\"pid\":{{{{json .State.Pid}}}},\"cgroup\":{{{{json .State.CgroupPath}}}},\"status\":{{{{json .State.Status}}}},\"runtime\":{{{{json .OCIRuntime}}}},\"manager\":{{{{json .HostConfig.CgroupManager}}}},\"cgroup_mode\":{{{{json .HostConfig.CgroupMode}}}},\"pid_mode\":{{{{json .HostConfig.PidMode}}}},\"cgroups\":{{{{json .HostConfig.Cgroups}}}},\"privileged\":{{{{json .HostConfig.Privileged}}}},\"effective_caps\":{{{{len .EffectiveCaps}}}},\"bounding_caps\":{{{{len .BoundingCaps}}}},\"no_new_privileges\":{{{{range .HostConfig.SecurityOpt}}}}{{{{if eq . \"no-new-privileges\"}}}}true{{{{end}}}}{{{{end}}}},\"readonly_rootfs\":{{{{json .HostConfig.ReadonlyRootfs}}}},\"image_digest\":{{{{json .ImageDigest}}}},\"image_name\":{{{{json .ImageName}}}},\"path\":{{{{json .Path}}}},\"args\":{{{{json .Args}}}},\"workdir\":{{{{json .Config.WorkingDir}}}},\"environment\":{{{{json .Config.Env}}}},\"devices\":{{{{json .HostConfig.Devices}}}},\"binds\":{{{{json .HostConfig.Binds}}}},\"mounts\":{{{{json .Mounts}}}},\"volumes_from\":{{{{json .HostConfig.VolumesFrom}}}},\"tmpfs\":{{{{json .HostConfig.Tmpfs}}}},\"network_mode\":{{{{json .HostConfig.NetworkMode}}}},\"cpu_period\":{{{{json .HostConfig.CpuPeriod}}}},\"cpu_quota\":{{{{json .HostConfig.CpuQuota}}}},\"memory_bytes\":{{{{json .HostConfig.Memory}}}},\"memory_swap\":{{{{json .HostConfig.MemorySwap}}}},\"pids_limit\":{{{{json .HostConfig.PidsLimit}}}},\"cgroup_parent\":{{{{json .HostConfig.CgroupParent}}}},\"create_command\":{{{{json .Config.CreateCommand}}}},\"config_annotations\":{{{{json .Config.Annotations}}}},\"host_annotations\":{{{{json .HostConfig.Annotations}}}},\"security_options\":{{{{json .HostConfig.SecurityOpt}}}},\"configured_user\":{{{{json .Config.User}}}}}"
+
+pub fn linux_fresh_workload_inspect_field_names_v2() -> [text]:
+    ["id", "pod_uid", "attempt", "node_boot_id", "provider_generation", "operation_id", "pid", "cgroup", "status", "runtime", "manager", "cgroup_mode", "pid_mode", "cgroups", "privileged", "effective_caps", "bounding_caps", "no_new_privileges", "readonly_rootfs", "image_digest", "image_name", "path", "args", "workdir", "environment", "devices", "binds", "mounts", "volumes_from", "tmpfs", "network_mode", "cpu_period", "cpu_quota", "memory_bytes", "memory_swap", "pids_limit", "cgroup_parent", "create_command", "config_annotations", "host_annotations", "security_options", "configured_user"]
+
+pub fn linux_fresh_workload_inspect_fields_v2(raw: text) -> Result<JsonValue, text>:
+    if raw.byte_len() < 1 or raw.byte_len() > 1048576: return Err("fresh-workload-inspect-size")
+    var quoted = false
+    var escaped = false
+    var depth = 0
+    for byte in raw.bytes():
+        if quoted:
+            if escaped: escaped = false
+            elif byte == 92: escaped = true
+            elif byte == 34: quoted = false
+        else:
+            if byte == 34: quoted = true
+            elif byte == 123 or byte == 91:
+                depth = depth + 1
+                if depth > 4: return Err("fresh-workload-inspect-depth")
+            elif byte == 125 or byte == 93: depth = depth - 1
+    val value = match json_parse_value_strict(raw):
+        case Ok(found): found
+        case Err(_): return Err("fresh-workload-inspect-json")
+    val keys = json_value_keys(value)
+    val expected = linux_fresh_workload_inspect_field_names_v2()
+    if keys.len() != expected.len(): return Err("fresh-workload-inspect-fields")
+    for key in expected:
+        if not keys.contains(key): return Err("fresh-workload-inspect-fields")
+    Ok(value)
+
+pub fn linux_fresh_workload_inspect_member_v2(value: JsonValue, key: text) -> Result<JsonValue, text>:
+    match json_value_get(value, key):
+        case Some(found): Ok(found)
+        case None: Err("fresh-workload-inspect-field-missing")
+
+pub fn linux_fresh_workload_inspect_text_v2(value: JsonValue, key: text) -> Result<text, text>:
+    match json_value_as_text(linux_fresh_workload_inspect_member_v2(value, key)?):
+        case Some(found):
+            if found.byte_len() > 65536 or found.contains("\0"): return Err("fresh-workload-inspect-text-bound")
+            Ok(found)
+        case None: Err("fresh-workload-inspect-text-type")
+
+pub fn linux_fresh_workload_inspect_integer_v2(value: JsonValue, key: text) -> Result<i64, text>:
+    match linux_fresh_workload_inspect_member_v2(value, key)?:
+        case JsonValue.Int(found): Ok(found)
+        case _: Err("fresh-workload-inspect-integer-type")
+
+pub fn linux_fresh_workload_inspect_strings_v2(value: JsonValue, key: text, maximum: i64) -> Result<[text], text>:
+    val values = match linux_fresh_workload_inspect_member_v2(value, key)?:
+        case JsonValue.Array(found): found
+        case JsonValue.Null: return Ok([]) # explicit Go nil slice, never missing/unknown
+        case _: return Err("fresh-workload-inspect-array-type")
+    if values.len() > maximum: return Err("fresh-workload-inspect-array-bound")
+    var result: [text] = []
+    for item in values:
+        val text = json_value_as_text(item)
+        if text.is_none() or text.unwrap().byte_len() > 65536 or text.unwrap().contains("\0"):
+            return Err("fresh-workload-inspect-array-text")
+        result.push(text.unwrap())
+    Ok(result)
+
+fn workload_empty_array_v2(value: JsonValue, key: text) -> Result<(), text>:
+    match linux_fresh_workload_inspect_member_v2(value, key)?:
+        case JsonValue.Array(values):
+            if values.len() != 0: return Err("fresh-workload-unrequested-mount-configuration")
+        case JsonValue.Null: pass # explicit typed nil from known Podman producer
+        case _: return Err("fresh-workload-inspect-array-type")
+    Ok(())
+
+fn workload_annotations_v2(value: JsonValue, key: text) -> Result<(), text>:
+    val member = linux_fresh_workload_inspect_member_v2(value, key)?
+    match member:
+        case JsonValue.Null: return Ok(())
+        case JsonValue.Object(_, _): pass
+        case _: return Err("fresh-workload-inspect-annotation-type")
+    val keys = json_value_keys(member)
+    if keys.len() > 128: return Err("fresh-workload-inspect-annotation-bound")
+    for name in keys:
+        val text = linux_fresh_workload_inspect_text_v2(member, name)?
+        val lower = name.lower()
+        if (name.byte_len() > 256 or text.byte_len() > 4096 or lower.contains("cdi") or lower.contains("hook") or
+                lower.contains("preservefd") or lower.contains("preserve-fd") or lower.starts_with("run.oci.")):
+            return Err("fresh-workload-unrequested-runtime-annotation")
+    Ok(())
+
+fn workload_standard_devices_v2(value: JsonValue) -> Result<(), text>:
+    val values = match linux_fresh_workload_inspect_member_v2(value, "devices")?:
+        case JsonValue.Array(found): found
+        case JsonValue.Null: return Ok(())
+        case _: return Err("fresh-workload-inspect-device-type")
+    if values.len() > 7: return Err("fresh-workload-physical-device-passthrough")
+    var seen: [text] = []
+    for device in values:
+        val keys = json_value_keys(device)
+        if keys.len() != 3 or not keys.contains("PathOnHost") or not keys.contains("PathInContainer") or not keys.contains("CgroupPermissions"):
+            return Err("fresh-workload-inspect-device-fields")
+        val host = linux_fresh_workload_inspect_text_v2(device, "PathOnHost")?
+        val guest = linux_fresh_workload_inspect_text_v2(device, "PathInContainer")?
+        if (host != guest or not ["/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom", "/dev/tty", "/dev/ptmx"].contains(host) or
+                seen.contains(host)):
+            return Err("fresh-workload-physical-device-passthrough")
+        # v5.2.5 explicitly does NOT populate this field. Never pretend it is
+        # an effective kernel device allowlist or infer BPF enforcement.
+        if linux_fresh_workload_inspect_text_v2(device, "CgroupPermissions")? != "": return Err("fresh-workload-device-permission-format")
+        seen.push(host)
+    Ok(())
+
+pub fn linux_fresh_workload_inspect_identity_v2(command: LinuxFreshWorkloadCommandV2, raw: text) -> Result<JsonValue, text>:
+    linux_fresh_workload_command_validate_v2(command)?
+    val value = linux_fresh_workload_inspect_fields_v2(raw)?
+    val plan = command.request.plan
+    for pair in [("id", command.native_id), ("pod_uid", plan.workload_uid), ("attempt", str(plan.attempt)),
+            ("node_boot_id", container_scope_fence_id_v2(command.scope)?), ("provider_generation", str(command.scope.provider_generation)),
+            ("operation_id", plan.operation_id)]:
+        if linux_fresh_workload_inspect_text_v2(value, pair.0)? != pair.1: return Err("fresh-workload-inspect-request-identity")
+    Ok(value)
+
+pub fn linux_fresh_workload_created_config_validate_v2(command: LinuxFreshWorkloadCommandV2, raw: text) -> Result<(), text>:
+    if command.action != LinuxFreshWorkloadActionV2.Inspect: return Err("fresh-workload-created-inspect-action-required")
+    val value = linux_fresh_workload_inspect_identity_v2(command, raw)?
+    if linux_fresh_workload_inspect_text_v2(value, "status")? != "created" or linux_fresh_workload_inspect_integer_v2(value, "pid")? != 0:
+        return Err("fresh-workload-container-already-executing-or-unknown")
+    for pair in [("manager", "cgroupfs"), ("cgroup_mode", "private"), ("pid_mode", "private"), ("cgroups", "default"), ("network_mode", "none")]:
+        if linux_fresh_workload_inspect_text_v2(value, pair.0)? != pair.1: return Err("fresh-workload-created-namespace-configuration")
+    val runtime = linux_fresh_workload_inspect_text_v2(value, "runtime")?
+    if not ["crun", "runc", "/usr/bin/crun", "/usr/bin/runc"].contains(runtime): return Err("fresh-workload-qualified-runtime-required")
+    if (linux_fresh_workload_inspect_member_v2(value, "privileged")? != JsonValue.Bool(false) or
+            linux_fresh_workload_inspect_member_v2(value, "readonly_rootfs")? != JsonValue.Bool(true) or
+            linux_fresh_workload_inspect_member_v2(value, "no_new_privileges")? != JsonValue.Bool(true) or
+            linux_fresh_workload_inspect_integer_v2(value, "effective_caps")? != 0 or
+            linux_fresh_workload_inspect_integer_v2(value, "bounding_caps")? != 0):
+        return Err("fresh-workload-created-security-configuration")
+    for pair in [("cpu_period", 100000), ("cpu_quota", command.cpu_millis * 100), ("memory_bytes", command.memory_bytes),
+            ("memory_swap", command.memory_bytes), ("pids_limit", command.pid_limit)]:
+        if linux_fresh_workload_inspect_integer_v2(value, pair.0)? != pair.1: return Err("fresh-workload-created-resource-configuration")
+    val image = command.image.split("@sha256:")
+    if (linux_fresh_workload_inspect_text_v2(value, "image_digest")? != "sha256:" + image[1] or
+            linux_fresh_workload_inspect_text_v2(value, "image_name")? != command.image or
+            linux_fresh_workload_inspect_text_v2(value, "path")? != command.entrypoint[0]):
+        return Err("fresh-workload-created-image-or-command")
+    var expected: [text] = []
+    for at in 1..command.entrypoint.len(): expected.push(command.entrypoint[at])
+    expected = expected + command.args
+    if linux_fresh_workload_inspect_strings_v2(value, "args", 64)? != expected: return Err("fresh-workload-created-argv")
+    val directory = linux_fresh_workload_inspect_text_v2(value, "workdir")?
+    if directory != "/": return Err("fresh-workload-image-working-directory-unsupported")
+    val user = linux_fresh_workload_inspect_text_v2(value, "configured_user")?
+    val env = linux_fresh_workload_inspect_strings_v2(value, "environment", 256)?
+    val created = linux_fresh_workload_inspect_strings_v2(value, "create_command", 65)?
+    if created.len() < 1: return Err("fresh-workload-created-command-unavailable")
+    val parent = linux_fresh_workload_inspect_text_v2(value, "cgroup_parent")?
+    if parent == "" or not parent.starts_with("/"): return Err("fresh-workload-created-parent-unavailable")
+    for key in ["mounts", "binds", "volumes_from"]: workload_empty_array_v2(value, key)?
+    val tmpfs = linux_fresh_workload_inspect_member_v2(value, "tmpfs")?
+    match tmpfs:
+        case JsonValue.Null: pass
+        case JsonValue.Object(keys, _):
+            if keys.len() != 0: return Err("fresh-workload-unrequested-tmpfs")
+        case _: return Err("fresh-workload-inspect-tmpfs-type")
+    workload_standard_devices_v2(value)?
+    workload_annotations_v2(value, "config_annotations")?
+    workload_annotations_v2(value, "host_annotations")?
+    val security = linux_fresh_workload_inspect_strings_v2(value, "security_options", 8)?
+    if not security.contains("no-new-privileges"): return Err("fresh-workload-created-nnp-missing")
+    for option in security:
+        if option.contains("unconfined") or option == "label=disable": return Err("fresh-workload-created-security-weakened")
+    Ok(())

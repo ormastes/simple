@@ -1,0 +1,478 @@
+# Actual containment association and resource/security observations only.
+# Qualified trusted-runtime created configuration is a separate pre-Start gate;
+# this post-start observer does not claim independent global device-BPF proof.
+use std.common.contracts.container.linux_fresh_workload_v2.*
+use std.common.contracts.container.execution_v2.{container_execution_request_encode_v2, container_host_scope_bytes_v2}
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_profile_v1.*
+use std.nogc_sync_mut.io.linux_container_containment_v1.*
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+
+pub class LinuxFreshWorkloadSubjectV2:
+    slot: i64
+    generation: i64
+    pub fn current_v2(owner: LinuxContainerContainmentOwnerV1, command: LinuxFreshWorkloadCommandV2) -> Result<LinuxContainerContainmentSnapshotV1, text>:
+        subject_current_v2(self.slot, self.generation, owner, command)
+    pub fn matches_v2(command: LinuxFreshWorkloadCommandV2) -> Result<bool, text>: subject_matches_v2(self.slot, self.generation, command)
+    pub fn closure_v2(command: LinuxFreshWorkloadCommandV2) -> Result<LinuxFreshWorkloadClosureV2, text>: subject_closure_v2(self.slot, self.generation, command)
+    pub fn close_v2() -> (bool, text): subject_close_v2(self.slot, self.generation)
+pub enum LinuxFreshWorkloadSubjectOpenV2:
+    Rejected(reason: text)
+    CleanupRequired(owner: LinuxFreshWorkloadSubjectV2, reason: text)
+    Ready(owner: LinuxFreshWorkloadSubjectV2)
+
+pub fn linux_fresh_workload_subject_open_v2(profile: LinuxInstalledFreshEpochProfileV1, delegated_fd: i64,
+        proc_fd: i64, owner: LinuxContainerContainmentOwnerV1, command: LinuxFreshWorkloadCommandV2) -> LinuxFreshWorkloadSubjectOpenV2:
+    @when(os="linux"):
+    subject_open_v2(profile, delegated_fd, proc_fd, owner, command)
+    @else:
+    LinuxFreshWorkloadSubjectOpenV2.Rejected("fresh-workload-linux-required")
+    @end
+
+fn subject_request_key_v2(command: LinuxFreshWorkloadCommandV2) -> Result<text, text>:
+    linux_fresh_workload_command_validate_v2(command)?
+    if command.action != LinuxFreshWorkloadActionV2.Inspect and command.action != LinuxFreshWorkloadActionV2.Absence:
+        return Err("fresh-workload-subject-inspect-or-absence-required")
+    Ok(sha256_text("FRESH-WORKLOAD-SUBJECT-V2\n" + container_execution_request_encode_v2(command.request)? +
+        container_host_scope_bytes_v2(command.scope)? + command.native_id + "\n" + str(command.helper_cpu_millis) + "\n" +
+        str(command.helper_memory_bytes) + "\n"))
+
+fn subject_snapshot_key_v2(value: LinuxContainerContainmentSnapshotV1) -> text:
+    sha256_text("FRESH-WORKLOAD-NATIVE-V2\n" + value.binding_digest + "\n" + str(value.capture_pid) + "\n" +
+        str(value.process_start_ticks) + "\n" + value.cgroup_path + "\n" + str(value.cgroup_mount_id) + "\n" +
+        str(value.cgroup_mount_device) + "\n" + str(value.cgroup_mount_inode) + "\n" + str(value.cgroup_device) + "\n" +
+        str(value.cgroup_inode) + "\n" + str(value.target_pidns_device) + "\n" + str(value.target_pidns_inode) + "\n" +
+        str(value.target_cgroupns_device) + "\n" + str(value.target_cgroupns_inode) + "\n" +
+        str(value.observer_pidns_device) + "\n" + str(value.observer_pidns_inode) + "\n" +
+        str(value.observer_cgroupns_device) + "\n" + str(value.observer_cgroupns_inode) + "\n" +
+        str(value.observer_mountns_device) + "\n" + str(value.observer_mountns_inode) + "\n")
+
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_machine_policy_abi_v1.*
+use std.nogc_sync_mut.io.linux_installed_supervisor_abi_v1.{pidfd_open, poll}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u32, volatile_read_u16}
+use std.nogc_sync_mut.io.linux_fresh_workload_abi_v2.*
+struct SubjectFdV2:
+    fd: i64
+    parent: i64
+    name: text
+    identity: text
+    kind: text
+    target: bool
+struct SubjectStateV2:
+    generation: i64
+    arena: i64
+    profile: LinuxInstalledFreshEpochProfileV1
+    profile_digest: text
+    process_digest: text
+    service_uid: i64
+    request_key: text
+    initial: LinuxContainerContainmentSnapshotV1
+    var handles: [SubjectFdV2] = []
+    var cgroups: [i64] = []
+    var container: i64 = -1
+    var group: i64 = -1
+    var process: i64 = -1
+    var status: i64 = -1
+    var stat: i64 = -1
+    var membership: i64 = -1
+    var mountinfo: i64 = -1
+    var host_mountinfo: i64 = -1
+    var target_mount: i64 = -1
+    var target_user: i64 = -1
+    var target_net: i64 = -1
+    var host_user: i64 = -1
+    var host_net: i64 = -1
+    var pidfd: i64 = -1
+    var confirmed: bool = false
+    var phase: text = "opening"
+    var error: text = ""
+var subject_slots_v2: [SubjectStateV2] = []
+
+fn subject_state_v2(slot: i64, generation: i64) -> Result<SubjectStateV2, text>:
+    linux_machine_process_origin_check_v1()?
+    if slot < 0 or slot >= subject_slots_v2.len() or subject_slots_v2[slot].generation != generation:
+        return Err("fresh-workload-subject-stale")
+    Ok(subject_slots_v2[slot])
+
+@unsafe(reason: "retains every duplicate, child and namespace FD before fallible checks", capabilities: [ffi, raw_ptr])
+fn subject_fd_v2(slot: i64, parent: i64, name: text, kind: text, target: bool = false) -> Result<i64, text>:
+    val state = subject_slots_v2[slot]
+    if state.handles.len() >= 256: return Err("fresh-workload-subject-fd-bound")
+    val directory = kind == "cgroup" or kind == "proc-dir"
+    val pointer = linux_workload_name_v2(state.arena, name)
+    if pointer == 0: return Err("fresh-workload-subject-name")
+    val fd = openat(parent as i32, pointer, if kind == "namespace": 524288 else: linux_workload_flags_v2(directory), 0u32) as i64
+    if fd < 0: return Err("fresh-workload-subject-open")
+    val at = state.handles.len()
+    subject_slots_v2[slot].handles.push(SubjectFdV2(fd: fd, parent: if name == ".": -1 else: parent,
+        name: name, identity: "", kind: kind, target: target))
+    val meta = linux_workload_metadata_v2(state.arena, fd)?
+    val expected = if kind == "namespace": 1853056627 else: (if kind == "cgroup" or kind == "control": 1667723888 else: 40864)
+    linux_workload_filesystem_v2(state.arena, fd, expected)?
+    if kind != "namespace" and (meta.mode & 61440) != (if directory: 16384 else: 32768): return Err("fresh-workload-subject-file-type")
+    if kind == "cgroup" or kind == "control":
+        if at > 0 and (meta.device != state.initial.cgroup_device or meta.mount_id != state.initial.cgroup_mount_id):
+            return Err("fresh-workload-subject-cgroup-mount")
+        val uid = state.service_uid
+        if (meta.uid != 0 and meta.uid != uid) or (meta.mode & 18) != 0: return Err("fresh-workload-subject-cgroup-ownership")
+    elif kind != "namespace" and at > 1:
+        val proc = subject_slots_v2[slot].handles[1].identity.split(":")
+        val fields = meta.identity.split(":")
+        if proc[0] != fields[0] or proc[1] != fields[1] or proc[3] != fields[3]: return Err("fresh-workload-subject-proc-child-mount")
+    subject_slots_v2[slot].handles[at].identity = meta.identity
+    Ok(at)
+
+fn subject_control_v2(slot: i64, group: i64, name: text) -> Result<text, text>:
+    val state = subject_slots_v2[slot]
+    var found = -1
+    for at in 0..state.handles.len():
+        if state.handles[at].parent == group and state.handles[at].name == name: found = at
+    if found < 0: found = subject_fd_v2(slot, group, name, "control")?
+    linux_workload_text_v2(state.arena, subject_slots_v2[slot].handles[found].fd)
+
+fn subject_limits_v2(slot: i64, command: LinuxFreshWorkloadCommandV2) -> Result<(), text>:
+    val state = subject_slots_v2[slot]
+    var cpu = 64000
+    var memory = 1125899906842624
+    for index in state.cgroups:
+        val fd = state.handles[index].fd
+        if subject_control_v2(slot, fd, "cgroup.type")? != "domain\n": return Err("fresh-workload-subject-threaded-unsupported")
+        val text = subject_control_v2(slot, fd, "cpu.max")?
+        val fields = text.trim().split(" ")
+        if fields.len() != 2: return Err("fresh-workload-subject-cpu-shape")
+        val period = linux_workload_integer_v2(fields[1], 1000000)?
+        if period < 1000: return Err("fresh-workload-subject-cpu-period")
+        if fields[0] != "max":
+            val quota = linux_workload_integer_v2(fields[0], 1000000000000)?
+            if quota < 1: return Err("fresh-workload-subject-cpu-quota")
+            if quota * 1000 / period < cpu: cpu = quota * 1000 / period
+            if index == state.container and quota * 1000 != command.cpu_millis * period:
+                return Err("fresh-workload-subject-cpu-readback")
+        elif index == state.container: return Err("fresh-workload-subject-unlimited-cpu")
+        val mem = subject_control_v2(slot, fd, "memory.max")?
+        if mem.trim() != "max":
+            val limit = linux_workload_integer_v2(mem)?
+            if limit < memory: memory = limit
+            if index == state.container and limit != command.memory_bytes: return Err("fresh-workload-subject-memory-readback")
+        elif index == state.container: return Err("fresh-workload-subject-unlimited-memory")
+    val container = state.handles[state.container].fd
+    val events = subject_control_v2(slot, container, "cgroup.events")?
+    if subject_control_v2(slot, container, "memory.swap.max")? != "0\n": return Err("fresh-workload-subject-swap-readback")
+    val pids = subject_control_v2(slot, container, "pids.max")?
+    if linux_workload_integer_v2(pids, 4096)? != command.pid_limit: return Err("fresh-workload-subject-pids-readback")
+    if cpu > command.cpu_millis or memory > command.memory_bytes: return Err("fresh-workload-subject-effective-limit")
+    Ok(())
+
+fn subject_status_v2(slot: i64) -> Result<(), text>:
+    val state = subject_slots_v2[slot]
+    val profile = state.profile.current_v1()?
+    val p = profile.profile
+    val status = linux_workload_text_v2(state.arena, state.handles[state.status].fd, 16384)?
+    var seen: [text] = []
+    for line in status.split("\n"):
+        val fields = line.split(":")
+        if fields.len() != 2: continue
+        val key = fields[0]
+        val value = fields[1].trim()
+        if ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"].contains(key):
+            if value.byte_len() != 16: return Err("fresh-workload-subject-capability-shape")
+            for byte in value.bytes():
+                if byte != 48: return Err("fresh-workload-subject-capabilities-not-zero")
+            seen.push(key)
+        elif key == "NoNewPrivs" or key == "Seccomp" or key == "TracerPid":
+            val expected = if key == "NoNewPrivs": "1" else: (if key == "Seccomp": "2" else: "0")
+            if value != expected: return Err("fresh-workload-subject-kernel-security")
+            seen.push(key)
+        elif key == "Uid" or key == "Gid":
+            var ids: [text] = []
+            for cell in value.replace("\t", " ").split(" "):
+                if cell != "": ids.push(cell)
+            if ids.len() != 4: return Err("fresh-workload-subject-credential-shape")
+            val own = p.number_v1(if key == "Uid": "serviceUid" else: "serviceGid")?
+            val start = p.number_v1(if key == "Uid": "subuidStart" else: "subgidStart")?
+            val count = p.number_v1(if key == "Uid": "subuidCount" else: "subgidCount")?
+            for id in ids:
+                val actual = linux_workload_integer_v2(id, 4294967295)?
+                if actual == 0 or (actual != own and not (actual >= start and actual - start < count)):
+                    return Err("fresh-workload-subject-credential-range")
+            seen.push(key)
+    if seen.len() != 10: return Err("fresh-workload-subject-security-fields-missing")
+    Ok(())
+
+fn subject_start_v2(source: text, pid: i64) -> Result<i64, text>:
+    if not source.starts_with(str(pid) + " ("): return Err("fresh-workload-subject-stat-pid")
+    var end = -1
+    for at in 0..source.byte_len():
+        if source.byte_at(at) == 41: end = at
+    if end < 0 or end + 2 >= source.byte_len(): return Err("fresh-workload-subject-stat")
+    val fields = source.substring(end + 2, source.byte_len()).trim().split(" ")
+    if fields.len() < 20: return Err("fresh-workload-subject-stat")
+    linux_workload_integer_v2(fields[19], 9223372036854775807)
+
+@unsafe(reason: "polls actual retained pidfd, not a recycled PID", capabilities: [ffi, raw_ptr])
+fn subject_exited_v2(slot: i64) -> Result<bool, text>:
+    val state = subject_slots_v2[slot]
+    val pointer = state.arena + 4096
+    volatile_write_u32(pointer, state.pidfd)
+    volatile_write_u32(pointer + 4, 1)
+    val result = poll(pointer, 1u64, 0)
+    if result < 0: return Err("fresh-workload-subject-pidfd-poll")
+    if result == 0: return Ok(false)
+    val events = volatile_read_u16(pointer + 6)
+    if (events & 32) != 0 or (events & 8) != 0: return Err("fresh-workload-subject-pidfd-invalid")
+    if (events & 1) == 0: return Err("fresh-workload-subject-pidfd-unknown")
+    Ok(true)
+
+fn subject_mounts_v2(slot: i64) -> Result<(), text>:
+    val state = subject_slots_v2[slot]
+    val host = linux_workload_text_v2(state.arena, state.handles[state.host_mountinfo].fd)?
+    var delegated = false
+    for line in host.split("\n"):
+        val halves = line.split(" - ")
+        if halves.len() != 2: continue
+        val left = halves[0].split(" ")
+        val right = halves[1].split(" ")
+        if left.len() < 6 or right.len() < 3: return Err("fresh-workload-host-mount-shape")
+        if left[4] == "/sys/fs/cgroup":
+            if (left[3] != "/" or right[0] != "cgroup2" or linux_workload_integer_v2(left[0])? != state.initial.cgroup_mount_id or
+                    not right[2].split(",").contains("nsdelegate")):
+                return Err("fresh-workload-cgroup-namespace-delegation-unavailable")
+            delegated = true
+    if not delegated: return Err("fresh-workload-cgroup-mount-unavailable")
+    val target = linux_workload_text_v2(state.arena, state.handles[state.mountinfo].fd)?
+    var readonly = false
+    for line in target.split("\n"):
+        val halves = line.split(" - ")
+        if halves.len() != 2: continue
+        val left = halves[0].split(" ")
+        if left.len() < 6: return Err("fresh-workload-target-mount-shape")
+        if left[4] == "/": readonly = left[5].split(",").contains("ro")
+    if not readonly: return Err("fresh-workload-target-root-not-readonly")
+    Ok(())
+
+fn subject_recheck_v2(slot: i64, populated: bool) -> Result<(), text>:
+    val state = subject_slots_v2[slot]
+    val profile = state.profile.current_v1()?
+    if profile.profile_digest != state.profile_digest or profile.process.identity_digest != state.process_digest:
+        return Err("fresh-workload-subject-observer-context-changed")
+    for item in state.handles:
+        # Departed target's proc magic links are not reopened on genuine Empty.
+        if not populated and item.target: continue
+        val meta = linux_workload_metadata_v2(state.arena, item.fd)?
+        if meta.identity != item.identity: return Err("fresh-workload-subject-retained-identity-changed")
+        if item.parent >= 0:
+            val named = linux_workload_metadata_v2(state.arena, item.parent, item.name, false, item.kind == "namespace")?
+            if named.identity != item.identity: return Err("fresh-workload-subject-named-identity-changed")
+    Ok(())
+
+fn subject_body_v2(slot: i64, generation: i64, owner: LinuxContainerContainmentOwnerV1,
+        command: LinuxFreshWorkloadCommandV2) -> Result<LinuxContainerContainmentSnapshotV1, text>:
+    val state = subject_state_v2(slot, generation)?
+    if state.phase != "ready": return Err("fresh-workload-subject-not-current")
+    if subject_request_key_v2(command)? != state.request_key: return Err("fresh-workload-subject-request-changed")
+    val before = linux_container_containment_observe_v1(owner)
+    if before.snapshot.is_none(): return Err("fresh-workload-subject-observation-unavailable:" + before.error)
+    val snapshot = before.snapshot.unwrap()
+    if subject_snapshot_key_v2(snapshot) != subject_snapshot_key_v2(state.initial): return Err("fresh-workload-subject-native-binding-changed")
+    val populated = snapshot.state == LinuxContainerContainmentPopulationV1.Populated
+    subject_recheck_v2(slot, populated)?
+    subject_limits_v2(slot, command)?
+    val exited = subject_exited_v2(slot)?
+    if populated:
+        if exited: return Err("fresh-workload-primary-exited-with-population")
+        val stat = linux_workload_text_v2(state.arena, state.handles[state.stat].fd, 4096)?
+        if subject_start_v2(stat, snapshot.capture_pid)? != snapshot.process_start_ticks: return Err("fresh-workload-subject-incarnation-changed")
+        val group = linux_workload_text_v2(state.arena, state.handles[state.membership].fd, 4096)?
+        if group != "0::" + snapshot.cgroup_path + "\n": return Err("fresh-workload-subject-membership-changed")
+        subject_status_v2(slot)?
+        subject_mounts_v2(slot)?
+    elif not exited: return Err("fresh-workload-empty-with-live-primary")
+    val after = linux_container_containment_observe_v1(owner)
+    if after.snapshot.is_none(): return Err("fresh-workload-subject-final-observation-unavailable:" + after.error)
+    if (subject_snapshot_key_v2(after.snapshot.unwrap()) != subject_snapshot_key_v2(state.initial) or after.snapshot.unwrap().state != snapshot.state):
+        return Err("fresh-workload-subject-state-changed")
+    subject_recheck_v2(slot, populated)?
+    if populated: subject_slots_v2[slot].confirmed = true
+    Ok(after.snapshot.unwrap())
+
+fn subject_current_v2(slot: i64, generation: i64, owner: LinuxContainerContainmentOwnerV1,
+        command: LinuxFreshWorkloadCommandV2) -> Result<LinuxContainerContainmentSnapshotV1, text>:
+    val result = subject_body_v2(slot, generation, owner, command)
+    if result.is_err():
+        val loaded = subject_state_v2(slot, generation)
+        if loaded.is_ok() and loaded.unwrap().phase != "closed": subject_slots_v2[slot].phase = "cleanup"
+    result
+
+@unsafe(reason: "actual native owner observed first, pidfd and every new descriptor retained before validation", capabilities: [ffi, raw_ptr])
+fn subject_open_v2(profile: LinuxInstalledFreshEpochProfileV1, delegated_fd: i64, proc_fd: i64,
+        owner: LinuxContainerContainmentOwnerV1, command: LinuxFreshWorkloadCommandV2) -> LinuxFreshWorkloadSubjectOpenV2:
+    val origin = linux_machine_process_origin_check_v1()
+    if origin.is_err(): return LinuxFreshWorkloadSubjectOpenV2.Rejected(origin.unwrap_err())
+    val current = profile.current_v1()
+    if current.is_err(): return LinuxFreshWorkloadSubjectOpenV2.Rejected(current.unwrap_err())
+    val key = subject_request_key_v2(command)
+    if key.is_err(): return LinuxFreshWorkloadSubjectOpenV2.Rejected(key.unwrap_err())
+    val observed = linux_container_containment_observe_v1(owner)
+    if observed.snapshot.is_none(): return LinuxFreshWorkloadSubjectOpenV2.Rejected("fresh-workload-native-owner-required:" + observed.error)
+    val snapshot = observed.snapshot.unwrap()
+    if snapshot.state != LinuxContainerContainmentPopulationV1.Populated: return LinuxFreshWorkloadSubjectOpenV2.Rejected("fresh-workload-first-running-subject-required")
+    if subject_slots_v2.len() >= 4096: return LinuxFreshWorkloadSubjectOpenV2.Rejected("fresh-workload-subject-owner-bound")
+    val arena = malloc(131072u64)
+    if arena == 0: return LinuxFreshWorkloadSubjectOpenV2.Rejected("fresh-workload-subject-memory")
+    val slot = subject_slots_v2.len()
+    subject_slots_v2.push(SubjectStateV2(generation: slot + 1, arena: arena, profile: profile,
+        profile_digest: current.unwrap().profile_digest, process_digest: current.unwrap().process.identity_digest, service_uid: current.unwrap().profile.number_v1("serviceUid").unwrap(),
+        request_key: key.unwrap(), initial: snapshot))
+    val result = LinuxFreshWorkloadSubjectV2(slot: slot, generation: slot + 1)
+    val captured = subject_capture_v2(slot, delegated_fd, proc_fd, command)
+    if captured.is_err(): return LinuxFreshWorkloadSubjectOpenV2.CleanupRequired(result, captured.unwrap_err())
+    subject_slots_v2[slot].phase = "ready"
+    val checked = subject_current_v2(slot, slot + 1, owner, command)
+    if checked.is_err(): return LinuxFreshWorkloadSubjectOpenV2.CleanupRequired(result, checked.unwrap_err())
+    LinuxFreshWorkloadSubjectOpenV2.Ready(result)
+
+@unsafe(reason: "opens actual descendant chain beneath retained delegated FD, verifies native device/inode and namespaces", capabilities: [ffi, raw_ptr])
+fn subject_capture_v2(slot: i64, delegated_fd: i64, proc_fd: i64, command: LinuxFreshWorkloadCommandV2) -> Result<(), text>:
+    val state = subject_slots_v2[slot]
+    val installed = state.profile.current_v1()?
+    val p = installed.profile
+    val delegated = subject_fd_v2(slot, delegated_fd, ".", "cgroup")?
+    val proc = subject_fd_v2(slot, proc_fd, ".", "proc-dir")?
+    val path = state.initial.cgroup_path
+    val parent_path = p.text_v1("delegatedCgroup")?
+    if not path.starts_with(parent_path + "/"): return Err("fresh-workload-subject-outside-delegation")
+    val parts = path.substring(parent_path.byte_len() + 1, path.byte_len()).split("/")
+    if parts.len() < 1 or parts.len() > 32: return Err("fresh-workload-subject-ancestry-bound")
+    var at = delegated
+    for part in parts:
+        if part == "" or part == "." or part == ".." or part.byte_len() > 255: return Err("fresh-workload-subject-component")
+        val parent = subject_slots_v2[slot].handles[at].fd
+        at = subject_fd_v2(slot, parent, part, "cgroup")?
+        subject_slots_v2[slot].cgroups.push(at)
+        if ["libpod-" + command.native_id, "libpod-" + command.native_id + ".scope"].contains(part):
+            if subject_slots_v2[slot].container >= 0: return Err("fresh-workload-subject-duplicate-container-component")
+            subject_slots_v2[slot].container = at
+    if subject_slots_v2[slot].container < 0: return Err("fresh-workload-subject-native-id-component-missing")
+    val original = linux_workload_metadata_v2(state.arena, subject_slots_v2[slot].handles[subject_slots_v2[slot].container].fd)?
+    if original.links <= 0: return Err("fresh-workload-original-container-not-linked-at-capture")
+    subject_slots_v2[slot].group = at
+    val group = linux_workload_metadata_v2(state.arena, subject_slots_v2[slot].handles[at].fd)?
+    if (group.device != state.initial.cgroup_device or group.inode != state.initial.cgroup_inode or group.mount_id != state.initial.cgroup_mount_id):
+        return Err("fresh-workload-subject-native-cgroup-identity")
+    subject_slots_v2[slot].pidfd = pidfd_open(state.initial.capture_pid as i32, 0u32) as i64
+    if subject_slots_v2[slot].pidfd < 0: return Err("fresh-workload-subject-pidfd")
+    val process = subject_fd_v2(slot, subject_slots_v2[slot].handles[proc].fd, str(state.initial.capture_pid), "proc-dir", true)?
+    subject_slots_v2[slot].process = process
+    val fd = subject_slots_v2[slot].handles[process].fd
+    subject_slots_v2[slot].stat = subject_fd_v2(slot, fd, "stat", "proc-file", true)?
+    subject_slots_v2[slot].status = subject_fd_v2(slot, fd, "status", "proc-file", true)?
+    subject_slots_v2[slot].membership = subject_fd_v2(slot, fd, "cgroup", "proc-file", true)?
+    subject_slots_v2[slot].mountinfo = subject_fd_v2(slot, fd, "mountinfo", "proc-file", true)?
+    val ns = subject_fd_v2(slot, fd, "ns", "proc-dir", true)?
+    val host = subject_fd_v2(slot, subject_slots_v2[slot].handles[proc].fd, str(installed.process.process_id), "proc-dir")?
+    subject_slots_v2[slot].host_mountinfo = subject_fd_v2(slot, subject_slots_v2[slot].handles[host].fd, "mountinfo", "proc-file")?
+    val host_ns = subject_fd_v2(slot, subject_slots_v2[slot].handles[host].fd, "ns", "proc-dir")?
+    for pair in [("mnt", 131072), ("user", 268435456), ("net", 1073741824)]:
+        val index = subject_fd_v2(slot, subject_slots_v2[slot].handles[ns].fd, pair.0, "namespace", true)?
+        val target = linux_workload_metadata_v2(state.arena, subject_slots_v2[slot].handles[index].fd)?
+        if ioctl(subject_slots_v2[slot].handles[index].fd as i32, 46851u64) as i64 != pair.1: return Err("fresh-workload-subject-target-namespace-kind")
+        if pair.0 == "mnt":
+            subject_slots_v2[slot].target_mount = index
+            if target.device == state.initial.observer_mountns_device and target.inode == state.initial.observer_mountns_inode:
+                return Err("fresh-workload-subject-host-mount-namespace")
+        else:
+            val observer = subject_fd_v2(slot, subject_slots_v2[slot].handles[host_ns].fd, pair.0, "namespace")?
+            val actual = linux_workload_metadata_v2(state.arena, subject_slots_v2[slot].handles[observer].fd)?
+            if ioctl(subject_slots_v2[slot].handles[observer].fd as i32, 46851u64) as i64 != pair.1: return Err("fresh-workload-subject-observer-namespace-kind")
+            if target.device == actual.device and target.inode == actual.inode: return Err("fresh-workload-subject-host-namespace")
+    Ok(())
+
+fn subject_matches_v2(slot: i64, generation: i64, command: LinuxFreshWorkloadCommandV2) -> Result<bool, text>:
+    val state = subject_state_v2(slot, generation)?
+    Ok(state.request_key == subject_request_key_v2(command)?)
+
+fn subject_closure_ancestry_v2(slot: i64) -> Result<bool, text>:
+    val state = subject_slots_v2[slot]
+    val profile = state.profile.current_v1()?
+    if profile.profile_digest != state.profile_digest or profile.process.identity_digest != state.process_digest:
+        return Err("fresh-workload-closure-observer-context-changed")
+    # Inspect the original container ROOT, never only its payload leaf. Positive
+    # zero-link evidence is required for removal; unsupported kernfs stays unknown.
+    var removed = false
+    for index in [0] + state.cgroups:
+        if index > state.container: continue
+        val item = state.handles[index]
+        linux_workload_filesystem_v2(state.arena, item.fd, 1667723888)?
+        val actual = linux_workload_metadata_v2(state.arena, item.fd)?
+        if actual.identity != item.identity: return Err("fresh-workload-closure-original-identity-changed")
+        if index == state.container:
+            removed = actual.links == 0
+            if removed:
+                linux_workload_named_absent_v2(state.arena, item.parent, item.name)?
+        elif actual.links <= 0: return Err("fresh-workload-closure-ancestor-removed")
+        if not (index == state.container and removed) and item.parent >= 0:
+            val named = linux_workload_metadata_v2(state.arena, item.parent, item.name)?
+            if named.identity != item.identity: return Err("fresh-workload-closure-named-ancestor-changed")
+    Ok(removed)
+
+fn subject_closure_v2(slot: i64, generation: i64, command: LinuxFreshWorkloadCommandV2) -> Result<LinuxFreshWorkloadClosureV2, text>:
+    val state = subject_state_v2(slot, generation)?
+    if (not state.confirmed or (state.phase != "ready" and state.phase != "cleanup") or
+            command.action != LinuxFreshWorkloadActionV2.Absence or subject_request_key_v2(command)? != state.request_key):
+        return Err("fresh-workload-closure-confirmed-subject-required")
+    val removed = subject_closure_ancestry_v2(slot)?
+    if not subject_exited_v2(slot)?: return Err("fresh-workload-closure-primary-not-exited")
+    # ESRCH is no remaining task on the ORIGINAL pidfd. This is not an owned
+    # wait/collect receipt and does not retire any CLI helper or runtime reaper.
+    linux_workload_pidfd_no_task_v2(state.pidfd)?
+    if not removed:
+        val container = state.handles[state.container].fd
+        val events = subject_control_v2(slot, container, "cgroup.events")?
+        var seen: [text] = []
+        for line in events.trim().split("\n"):
+            val fields = line.split(" ")
+            if fields.len() != 2 or seen.contains(fields[0]): return Err("fresh-workload-closure-events-shape")
+            if fields[0] == "populated":
+                if fields[1] != "0": return Err("fresh-workload-original-container-still-populated")
+            elif fields[0] == "frozen":
+                if fields[1] != "0" and fields[1] != "1": return Err("fresh-workload-closure-events-shape")
+            else: return Err("fresh-workload-closure-events-unknown")
+            seen.push(fields[0])
+        if not seen.contains("populated"): return Err("fresh-workload-closure-population-missing")
+    if subject_closure_ancestry_v2(slot)? != removed: return Err("fresh-workload-closure-domain-changed")
+    if not subject_exited_v2(slot)?: return Err("fresh-workload-closure-pidfd-changed")
+    linux_workload_pidfd_no_task_v2(state.pidfd)?
+    val meta = linux_workload_metadata_v2(state.arena, state.handles[state.container].fd)?
+    if (meta.links == 0) != removed: return Err("fresh-workload-closure-final-link-state-changed")
+    Ok(LinuxFreshWorkloadClosureV2(state: if removed: LinuxFreshWorkloadClosureStateV2.RemovedOriginalContainer else: LinuxFreshWorkloadClosureStateV2.EmptyOriginalContainer,
+        native_id: command.native_id, request_binding_digest: state.request_key, native_binding_digest: state.initial.binding_digest,
+        cgroup_device: meta.device, cgroup_inode: meta.inode, cgroup_mount_id: meta.mount_id,
+        process_id: state.initial.capture_pid, process_start_ticks: state.initial.process_start_ticks,
+        partition_identity_digest: "", owner_generation: generation))
+
+@unsafe(reason: "consumes owned observation descriptors once; borrowed containment/profile/ancestor owners remain intact", capabilities: [ffi])
+fn subject_close_v2(slot: i64, generation: i64) -> (bool, text):
+    val loaded = subject_state_v2(slot, generation)
+    if loaded.is_err(): return (false, loaded.unwrap_err())
+    val state = loaded.unwrap()
+    if state.phase == "closed": return (true, state.error)
+    subject_slots_v2[slot].phase = "closing"
+    val pidfd = state.pidfd
+    subject_slots_v2[slot].pidfd = -1
+    if pidfd >= 0 and close(pidfd as i32) != 0 and subject_slots_v2[slot].error == "": subject_slots_v2[slot].error = "fresh-workload-subject-pidfd-close-consumed-error"
+    var at = state.handles.len() - 1
+    while at >= 0:
+        val fd = subject_slots_v2[slot].handles[at].fd
+        subject_slots_v2[slot].handles[at].fd = -1
+        if fd >= 0 and close(fd as i32) != 0 and subject_slots_v2[slot].error == "": subject_slots_v2[slot].error = "fresh-workload-subject-close-consumed-error"
+        at = at - 1
+    free(state.arena)
+    subject_slots_v2[slot].phase = "closed"
+    (true, subject_slots_v2[slot].error)
+@else:
+fn subject_matches_v2(slot: i64, generation: i64, command: LinuxFreshWorkloadCommandV2) -> Result<bool, text>: Err("fresh-workload-linux-required")
+fn subject_closure_v2(slot: i64, generation: i64, command: LinuxFreshWorkloadCommandV2) -> Result<LinuxFreshWorkloadClosureV2, text>: Err("fresh-workload-linux-required")
+fn subject_current_v2(slot: i64, generation: i64, owner: LinuxContainerContainmentOwnerV1, command: LinuxFreshWorkloadCommandV2) -> Result<LinuxContainerContainmentSnapshotV1, text>: Err("fresh-workload-linux-required")
+fn subject_close_v2(slot: i64, generation: i64) -> (bool, text): (false, "fresh-workload-linux-required")
+@end

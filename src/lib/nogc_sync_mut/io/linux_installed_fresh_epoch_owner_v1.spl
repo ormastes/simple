@@ -3,6 +3,12 @@
 pub use std.common.contracts.container.linux_fresh_epoch_v1.LinuxFreshEpochObservationV1
 use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, group_process_stream_template_encode_v3}
 use std.common.crypto.sha256.sha256_text
+pub use std.common.contracts.container.linux_fresh_workload_v2.{LinuxFreshWorkloadCommandV2, LinuxFreshWorkloadActionV2, LinuxFreshHostContextV2, LinuxFreshWorkloadClosureV2, LinuxFreshWorkloadClosureStateV2}
+use std.common.contracts.container.linux_fresh_workload_v2.linux_fresh_workload_command_validate_v2
+use std.common.contracts.container.linux_fresh_workload_inspect_v2.*
+use std.nogc_sync_mut.io.linux_fresh_workload_launch_v2.{linux_fresh_workload_project_launch_v2, linux_fresh_workload_argv_v2}
+use std.nogc_sync_mut.io.linux_container_containment_v1.{LinuxContainerContainmentOwnerV1, LinuxContainerContainmentSnapshotV1}
+use std.common.build_manager.group_process_stream_profile_v3.group_process_cpu_quota_v3
 use std.nogc_sync_mut.io.linux_installed_fresh_epoch_profile_v1.*
 use std.nogc_sync_mut.io.linux_fresh_epoch_native_v1.*
 use std.nogc_sync_mut.io.linux_fresh_epoch_manager_v1.linux_fresh_epoch_manager_current_v1
@@ -31,6 +37,20 @@ pub class LinuxFreshEpochSuccessorCustodyV1:
         if group_process_stream_template_encode_v3(actual)? != group_process_stream_template_encode_v3(template)?:
             return Err("fresh-epoch-launch-does-not-match-held-profile")
         Ok(())
+    pub fn current_host_context_v2() -> Result<LinuxFreshHostContextV2, text>: fresh_workload_context_v2(self.slot, self.generation)
+    pub fn bind_workload_launch_v2(command: LinuxFreshWorkloadCommandV2, template: GroupProcessStreamLaunchV2) -> Result<GroupProcessStreamLaunchV2, text>:
+        fresh_workload_bind_v2(self.slot, self.generation, command, template)
+    pub fn validate_workload_launch_v2(command: LinuxFreshWorkloadCommandV2, template: GroupProcessStreamLaunchV2) -> Result<(), text>:
+        val actual = fresh_workload_bind_v2(self.slot, self.generation, command, template)?
+        if group_process_stream_template_encode_v3(actual)? != group_process_stream_template_encode_v3(template)?:
+            return Err("fresh-workload-launch-does-not-match-held-command")
+        Ok(())
+    pub fn validate_workload_created_config_v2(command: LinuxFreshWorkloadCommandV2, output: text) -> Result<(), text>:
+        fresh_workload_created_v2(self.slot, self.generation, command, output)
+    pub fn validate_workload_containment_v2(owner: LinuxContainerContainmentOwnerV1, command: LinuxFreshWorkloadCommandV2) -> Result<LinuxContainerContainmentSnapshotV1, text>:
+        fresh_workload_associate_v2(self.slot, self.generation, owner, command)
+    pub fn observe_workload_absence_v2(command: LinuxFreshWorkloadCommandV2) -> Result<LinuxFreshWorkloadClosureV2, text>:
+        fresh_workload_absence_v2(self.slot, self.generation, command)
     pub fn close_v1() -> LinuxFreshEpochSuccessorCloseTurnV1:
         val turn = fresh_epoch_close_v1(self.slot, self.generation, true)
         LinuxFreshEpochSuccessorCloseTurnV1(if turn.0: nil else: Some(self), turn.0, turn.1)
@@ -110,6 +130,82 @@ fn fresh_epoch_bind_v1(slot: i64, generation: i64, template: GroupProcessStreamL
     val projected = state.native.unwrap().bind_profiled_launch_v1(template)?
     val after = fresh_epoch_current_v1(slot, generation, true)?
     Ok(projected)
+
+fn fresh_workload_context_v2(slot: i64, generation: i64) -> Result<LinuxFreshHostContextV2, text>:
+    val before = fresh_epoch_current_v1(slot, generation, true)?
+    val state = fresh_epoch_state_v1(slot, generation)?
+    val observer = state.native.unwrap().borrow_workload_observer_v2()?
+    val context = observer.context_v2()?
+    val after = fresh_epoch_current_v1(slot, generation, true)?
+    Ok(LinuxFreshHostContextV2(native_machine_id: context.native_machine_id, native_boot_id: context.native_boot_id,
+        architecture: context.architecture, owner_generation: after.owner_generation))
+
+fn fresh_workload_scope_v2(slot: i64, generation: i64, command: LinuxFreshWorkloadCommandV2) -> Result<FreshEpochStateV1, text>:
+    linux_fresh_workload_command_validate_v2(command)?
+    val before = fresh_epoch_current_v1(slot, generation, true)?
+    val state = fresh_epoch_state_v1(slot, generation)?
+    state.profile.unwrap().validate_workload_scope_v2(command.scope)?
+    val context = fresh_workload_context_v2(slot, generation)?
+    if (command.scope.provider_generation != before.owner_generation or command.scope.native_machine_id != context.native_machine_id or
+            command.scope.boot_id != context.native_boot_id or command.scope.continuity_id != context.native_boot_id):
+        return Err("fresh-workload-current-scope-mismatch")
+    if (command.helper_cpu_millis > before.usable_cpu_millis or command.cpu_millis > before.usable_cpu_millis - command.helper_cpu_millis or
+            command.helper_memory_bytes > before.usable_memory_bytes or command.memory_bytes > before.usable_memory_bytes - command.helper_memory_bytes):
+        return Err("fresh-workload-request-helper-budget-exceeded")
+    Ok(state)
+
+fn fresh_workload_bind_v2(slot: i64, generation: i64, command: LinuxFreshWorkloadCommandV2,
+        template: GroupProcessStreamLaunchV2) -> Result<GroupProcessStreamLaunchV2, text>:
+    val state = fresh_workload_scope_v2(slot, generation, command)?
+    if template.profile_v3.is_none(): return Err("fresh-workload-helper-profile-required")
+    var safe = template
+    var profile = safe.profile_v3.unwrap()
+    profile.helper_cpu = group_process_cpu_quota_v3(command.helper_cpu_millis)?
+    safe.profile_v3 = Some(profile)
+    safe.memory_limit_bytes = command.helper_memory_bytes
+    var request = safe.request
+    request.args = ["version"] # DATA-only base projection; this is never spawned.
+    request.timeout_ms = command.timeout_ms
+    safe.request = request
+    val base = state.native.unwrap().bind_profiled_launch_v1(safe)?
+    val installed = state.profile.unwrap().current_v1()?
+    val projected = linux_fresh_workload_project_launch_v2(installed.profile, base, command)?
+    val after = fresh_epoch_current_v1(slot, generation, true)?
+    Ok(projected)
+
+fn fresh_workload_created_v2(slot: i64, generation: i64, command: LinuxFreshWorkloadCommandV2, output: text) -> Result<(), text>:
+    val state = fresh_workload_scope_v2(slot, generation, command)?
+    linux_fresh_workload_created_config_validate_v2(command, output)?
+    val value = linux_fresh_workload_inspect_fields_v2(output)?
+    val installed = state.profile.unwrap().current_v1()?
+    if linux_fresh_workload_inspect_text_v2(value, "cgroup_parent")? != installed.profile.text_v1("delegatedCgroup")?:
+        return Err("fresh-workload-created-parent-not-held-delegation")
+    var create = command
+    create.action = LinuxFreshWorkloadActionV2.Create
+    create.native_id = ""
+    create.observed_image_id = ""
+    val expected = [installed.profile.text_v1("providerExecutable")?] + linux_fresh_workload_argv_v2(installed.profile, create)?
+    if linux_fresh_workload_inspect_strings_v2(value, "create_command", 65)? != expected:
+        return Err("fresh-workload-created-command-not-exact-owned-projection")
+    val after = fresh_epoch_current_v1(slot, generation, true)?
+    Ok(())
+
+fn fresh_workload_associate_v2(slot: i64, generation: i64, owner: LinuxContainerContainmentOwnerV1,
+        command: LinuxFreshWorkloadCommandV2) -> Result<LinuxContainerContainmentSnapshotV1, text>:
+    val state = fresh_workload_scope_v2(slot, generation, command)?
+    val observer = state.native.unwrap().borrow_workload_observer_v2()?
+    val snapshot = observer.associate_v2(owner, command)?
+    val after = fresh_epoch_current_v1(slot, generation, true)?
+    Ok(snapshot)
+
+fn fresh_workload_absence_v2(slot: i64, generation: i64, command: LinuxFreshWorkloadCommandV2) -> Result<LinuxFreshWorkloadClosureV2, text>:
+    val state = fresh_workload_scope_v2(slot, generation, command)?
+    val observer = state.native.unwrap().borrow_workload_observer_v2()?
+    var result = observer.closure_v2(command)?
+    val after = fresh_epoch_current_v1(slot, generation, true)?
+    result.partition_identity_digest = after.partition_identity_digest
+    result.owner_generation = after.owner_generation
+    Ok(result)
 
 fn fresh_epoch_consume_v1(slot: i64, generation: i64) -> LinuxFreshEpochConsumeTurnV1:
     val owner = LinuxInstalledFreshEpochOwnerV1(slot: slot, generation: generation)

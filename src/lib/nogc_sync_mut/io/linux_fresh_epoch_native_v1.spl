@@ -10,7 +10,7 @@ use std.nogc_sync_mut.io.linux_fresh_epoch_launch_v1.{LinuxFreshEpochBrokerDataV
     linux_fresh_epoch_broker_environment_v1}
 use std.common.build_manager.group_process_stream_protocol_v2.GroupProcessStreamLaunchV2
 use std.nogc_sync_mut.io.linux_fresh_epoch_population_v1.*
-
+use std.nogc_sync_mut.io.linux_fresh_workload_native_v2.*
 pub struct LinuxFreshEpochNativeObservationV1:
     partition_identity_digest: text
     store_identity_digest: text
@@ -26,18 +26,19 @@ pub class LinuxFreshEpochNativeOwnerV1:
     pub fn successor_v1() -> Result<LinuxFreshEpochNativeObservationV1, text>: epoch_native_current_v1(self.slot, self.generation, false)
     pub fn bind_profiled_launch_v1(template: GroupProcessStreamLaunchV2) -> Result<GroupProcessStreamLaunchV2, text>:
         epoch_native_bind_launch_v1(self.slot, self.generation, template)
+    # Borrowed actual READ component only: no raw FD/path/writer or effect grant.
+    pub fn borrow_workload_observer_v2() -> Result<LinuxFreshWorkloadNativeV2, text>:
+        epoch_native_workload_v2(self.slot, self.generation)
     pub fn close_v1() -> LinuxFreshEpochNativeCloseTurnV1: epoch_native_close_v1(self.slot, self.generation)
 
 pub enum LinuxFreshEpochNativeOpenV1:
     Rejected(reason: text)
     CleanupRequired(owner: LinuxFreshEpochNativeOwnerV1, reason: text)
     Ready(owner: LinuxFreshEpochNativeOwnerV1)
-
 pub struct LinuxFreshEpochNativeCloseTurnV1:
     owner: Option<LinuxFreshEpochNativeOwnerV1>
     closed: bool
     error: text
-
 pub fn linux_fresh_epoch_native_open_v1(profile: LinuxInstalledFreshEpochProfileV1) -> LinuxFreshEpochNativeOpenV1:
     @when(os="linux"):
     epoch_native_open_v1(profile)
@@ -83,9 +84,9 @@ struct EpochNativeStateV1:
     var cursor: i64 = 0
     var scan_pid: i64 = -1
     var scan_status: i64 = -1
-    var scan_group: i64 = -1
     var scan_pidfd: i64 = -1
     var population: Option<LinuxFreshEpochPopulationV1> = nil
+    var workload: Option<LinuxFreshWorkloadNativeV2> = nil
     var phase: text = "opening"
     var error: text = ""
 
@@ -364,9 +365,8 @@ fn epoch_native_empty_v1(slot: i64, fd: i64) -> Result<(), text>:
 fn epoch_native_scan_close_v1(slot: i64) -> Result<(), text>:
     var failed = false
     var state = epoch_native_slots_v1[slot]
-    for fd in [state.scan_group, state.scan_status, state.scan_pid, state.scan_pidfd]:
+    for fd in [state.scan_status, state.scan_pid, state.scan_pidfd]:
         # Each stored descriptor is distinct; clear its canonical slot first.
-        if fd == state.scan_group: epoch_native_slots_v1[slot].scan_group = -1
         if fd == state.scan_status: epoch_native_slots_v1[slot].scan_status = -1
         if fd == state.scan_pid: epoch_native_slots_v1[slot].scan_pid = -1
         if fd == state.scan_pidfd: epoch_native_slots_v1[slot].scan_pidfd = -1
@@ -722,6 +722,26 @@ fn epoch_native_capture_v1(slot: i64) -> Result<(), text>:
     val checked = epoch_native_recheck_v1(slot, slot + 1)?
     Ok(())
 
+fn epoch_native_workload_v2(slot: i64, generation: i64) -> Result<LinuxFreshWorkloadNativeV2, text>:
+    val observed = epoch_native_current_v1(slot, generation, false)?
+    val state = epoch_native_slots_v1[slot]
+    val delegated = state.handles[state.supervisor].parent
+    val delegated_meta = epoch_native_meta_v1(slot, delegated)?
+    val delegated_id = delegated_meta.0
+    if state.workload.is_none():
+        match linux_fresh_workload_native_open_v2(state.profile, state.handles[state.partition].fd, delegated,
+                state.handles[state.supervisor].fd, state.handles[state.proc].fd):
+            case LinuxFreshWorkloadNativeOpenV2.Rejected(reason): return Err(reason)
+            case LinuxFreshWorkloadNativeOpenV2.CleanupRequired(owner, reason):
+                epoch_native_slots_v1[slot].workload = Some(owner)
+                return Err(reason)
+            case LinuxFreshWorkloadNativeOpenV2.Ready(owner): epoch_native_slots_v1[slot].workload = Some(owner)
+    val component = epoch_native_slots_v1[slot].workload.unwrap()
+    if component.roots_v2()? != [state.handles[state.partition].identity, delegated_id, state.handles[state.supervisor].identity, state.handles[state.proc].identity]:
+        return Err("fresh-workload-original-retained-ancestor-identity-mismatch")
+    val checked = epoch_native_recheck_v1(slot, generation)?
+    Ok(component)
+
 @unsafe(reason: "clears consumed descriptor ownership before close, preserves diagnostics and borrowed profile", capabilities: [ffi, raw_ptr])
 fn epoch_native_close_v1(slot: i64, generation: i64) -> LinuxFreshEpochNativeCloseTurnV1:
     val owner = LinuxFreshEpochNativeOwnerV1(slot: slot, generation: generation)
@@ -732,9 +752,14 @@ fn epoch_native_close_v1(slot: i64, generation: i64) -> LinuxFreshEpochNativeClo
     var state = epoch_native_slots_v1[slot]
     if state.phase == "closed": return LinuxFreshEpochNativeCloseTurnV1(nil, true, state.error)
     epoch_native_slots_v1[slot].phase = "closing"
+    if val workload = state.workload:
+        val turn = workload.close_v2()
+        if turn.1 != "" and epoch_native_slots_v1[slot].error == "": epoch_native_slots_v1[slot].error = turn.1
+        if not turn.0: return LinuxFreshEpochNativeCloseTurnV1(Some(owner), false, epoch_native_slots_v1[slot].error)
+        epoch_native_slots_v1[slot].workload = nil
     if val population = state.population:
         val turn = population.close_v1()
-        if turn.1 != "" and state.error == "": epoch_native_slots_v1[slot].error = turn.1
+        if turn.1 != "" and epoch_native_slots_v1[slot].error == "": epoch_native_slots_v1[slot].error = turn.1
         if not turn.0: return LinuxFreshEpochNativeCloseTurnV1(Some(owner), false, epoch_native_slots_v1[slot].error)
         epoch_native_slots_v1[slot].population = nil
     val cursor = epoch_native_cursor_close_v1(slot)
@@ -757,6 +782,7 @@ fn epoch_native_close_v1(slot: i64, generation: i64) -> LinuxFreshEpochNativeClo
     epoch_native_active_v1 = epoch_native_active_v1 - 1
     LinuxFreshEpochNativeCloseTurnV1(nil, true, epoch_native_slots_v1[slot].error)
 @else:
+fn epoch_native_workload_v2(slot: i64, generation: i64) -> Result<LinuxFreshWorkloadNativeV2, text>: Err("fresh-workload-linux-required")
 fn epoch_native_bind_launch_v1(slot: i64, generation: i64, template: GroupProcessStreamLaunchV2) -> Result<GroupProcessStreamLaunchV2, text>:
     Err("fresh-epoch-native-linux-required")
 fn epoch_native_current_v1(slot: i64, generation: i64, preparation: bool) -> Result<LinuxFreshEpochNativeObservationV1, text>: Err("fresh-epoch-native-linux-required")

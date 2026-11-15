@@ -1,0 +1,215 @@
+# Read-only workload custody component. It owns only duplicate/child FDs and
+# borrows installed profile/containment owners. No spawn, admission or writer.
+use std.common.contracts.container.linux_fresh_workload_v2.*
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_profile_v1.*
+use std.nogc_sync_mut.io.linux_container_containment_v1.*
+use std.nogc_sync_mut.io.linux_fresh_workload_subject_v2.*
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+
+pub class LinuxFreshWorkloadNativeV2:
+    slot: i64
+    generation: i64
+    pub fn roots_v2() -> Result<[text], text>: workload_roots_v2(self.slot, self.generation)
+    pub fn context_v2() -> Result<LinuxFreshHostContextV2, text>: workload_context_v2(self.slot, self.generation)
+    pub fn associate_v2(owner: LinuxContainerContainmentOwnerV1, command: LinuxFreshWorkloadCommandV2) -> Result<LinuxContainerContainmentSnapshotV1, text>:
+        workload_associate_v2(self.slot, self.generation, owner, command)
+    pub fn closure_v2(command: LinuxFreshWorkloadCommandV2) -> Result<LinuxFreshWorkloadClosureV2, text>:
+        workload_closure_v2(self.slot, self.generation, command)
+    pub fn close_v2() -> (bool, text): workload_close_v2(self.slot, self.generation)
+pub enum LinuxFreshWorkloadNativeOpenV2:
+    Rejected(reason: text)
+    CleanupRequired(owner: LinuxFreshWorkloadNativeV2, reason: text)
+    Ready(owner: LinuxFreshWorkloadNativeV2)
+
+pub fn linux_fresh_workload_native_open_v2(profile: LinuxInstalledFreshEpochProfileV1,
+        partition_fd: i64, delegated_fd: i64, supervisor_fd: i64, proc_fd: i64) -> LinuxFreshWorkloadNativeOpenV2:
+    @when(os="linux"):
+    workload_open_v2(profile, [partition_fd, delegated_fd, supervisor_fd, proc_fd])
+    @else:
+    LinuxFreshWorkloadNativeOpenV2.Rejected("fresh-workload-linux-required")
+    @end
+
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_machine_policy_abi_v1.*
+use std.nogc_sync_mut.io.linux_fresh_workload_abi_v2.*
+struct WorkloadFdV2:
+    fd: i64
+    parent: i64
+    name: text
+    identity: text
+    immutable: bool
+struct WorkloadNativeStateV2:
+    generation: i64
+    arena: i64
+    profile: LinuxInstalledFreshEpochProfileV1
+    profile_digest: text
+    process_digest: text
+    var handles: [WorkloadFdV2] = []
+    var subjects: [LinuxFreshWorkloadSubjectV2] = []
+    var bindings: [text] = []
+    var machine_id: text = ""
+    var architecture: text = ""
+    var phase: text = "opening"
+    var error: text = ""
+var workload_native_slots_v2: [WorkloadNativeStateV2] = []
+
+fn workload_state_v2(slot: i64, generation: i64) -> Result<WorkloadNativeStateV2, text>:
+    linux_machine_process_origin_check_v1()?
+    if slot < 0 or slot >= workload_native_slots_v2.len() or workload_native_slots_v2[slot].generation != generation:
+        return Err("fresh-workload-native-stale")
+    Ok(workload_native_slots_v2[slot])
+
+@unsafe(reason: "duplicates borrowed FD or opens fixed root-owned machine-ID; retains before statx", capabilities: [ffi, raw_ptr])
+fn workload_open_fd_v2(slot: i64, parent: i64, name: text, directory: bool) -> Result<i64, text>:
+    val state = workload_native_slots_v2[slot]
+    val pointer = linux_workload_name_v2(state.arena, name)
+    if pointer == 0: return Err("fresh-workload-native-name")
+    val fd = openat(parent as i32, pointer, linux_workload_flags_v2(directory), 0u32) as i64
+    if fd < 0: return Err("fresh-workload-native-open")
+    val at = state.handles.len()
+    workload_native_slots_v2[slot].handles.push(WorkloadFdV2(fd: fd, parent: if directory: -1 else: parent,
+        name: name, identity: "", immutable: not directory))
+    val meta = linux_workload_metadata_v2(state.arena, fd, "", not directory)?
+    if directory:
+        if (meta.mode & 61440) != 16384: return Err("fresh-workload-native-directory")
+        linux_workload_filesystem_v2(state.arena, fd, if at == 3: 40864 else: 1667723888)?
+    elif meta.uid != 0 or (meta.mode != 33188 and meta.mode != 33060): return Err("fresh-workload-root-machine-id-required")
+    workload_native_slots_v2[slot].handles[at].identity = meta.identity
+    Ok(at)
+
+fn workload_roots_v2(slot: i64, generation: i64) -> Result<[text], text>:
+    val state = workload_state_v2(slot, generation)?
+    if state.phase != "ready" or state.handles.len() != 5: return Err("fresh-workload-native-not-current")
+    val profile = state.profile.current_v1()?
+    if profile.profile_digest != state.profile_digest or profile.process.identity_digest != state.process_digest:
+        return Err("fresh-workload-native-installed-context-changed")
+    var roots: [text] = []
+    for at in 0..state.handles.len():
+        val item = state.handles[at]
+        val meta = linux_workload_metadata_v2(state.arena, item.fd, "", item.immutable)?
+        if meta.identity != item.identity: return Err("fresh-workload-native-retained-object-changed")
+        if item.parent != -1:
+            val named = linux_workload_metadata_v2(state.arena, item.parent, item.name, item.immutable)?
+            if named.identity != item.identity: return Err("fresh-workload-native-machine-id-replaced")
+        if at < 4:
+            linux_workload_filesystem_v2(state.arena, item.fd, if at == 3: 40864 else: 1667723888)?
+            roots.push(meta.identity)
+    Ok(roots)
+
+fn workload_context_v2(slot: i64, generation: i64) -> Result<LinuxFreshHostContextV2, text>:
+    val roots = workload_roots_v2(slot, generation)?
+    val state = workload_native_slots_v2[slot]
+    val machine = linux_workload_text_v2(state.arena, state.handles[4].fd, 64)?
+    if machine.trim() != state.machine_id: return Err("fresh-workload-native-machine-id-changed")
+    state.profile.validate_native_machine_v2(state.machine_id)?
+    val architecture = linux_workload_architecture_v2(state.arena)?
+    if architecture != state.architecture: return Err("fresh-workload-native-architecture-changed")
+    val boot = state.profile.actual_boot_id_v2()?
+    val after = workload_roots_v2(slot, generation)?
+    Ok(LinuxFreshHostContextV2(native_machine_id: state.machine_id, native_boot_id: boot,
+        architecture: architecture, owner_generation: generation))
+
+fn workload_associate_v2(slot: i64, generation: i64, owner: LinuxContainerContainmentOwnerV1,
+        command: LinuxFreshWorkloadCommandV2) -> Result<LinuxContainerContainmentSnapshotV1, text>:
+    val context = workload_context_v2(slot, generation)?
+    linux_fresh_workload_command_validate_v2(command)?
+    val state = workload_native_slots_v2[slot]
+    state.profile.validate_workload_scope_v2(command.scope)?
+    val before = linux_container_containment_observe_v1(owner)
+    if before.snapshot.is_none(): return Err("fresh-workload-native-containment-unavailable:" + before.error)
+    val snapshot = before.snapshot.unwrap()
+    var index = -1
+    for at in 0..state.bindings.len():
+        if state.bindings[at] == snapshot.binding_digest: index = at
+    if index < 0:
+        if state.subjects.len() >= 16: return Err("fresh-workload-native-subject-bound")
+        match linux_fresh_workload_subject_open_v2(state.profile, state.handles[1].fd, state.handles[3].fd, owner, command):
+            case LinuxFreshWorkloadSubjectOpenV2.Rejected(reason): return Err(reason)
+            case LinuxFreshWorkloadSubjectOpenV2.CleanupRequired(subject, reason):
+                workload_native_slots_v2[slot].subjects.push(subject)
+                workload_native_slots_v2[slot].bindings.push(snapshot.binding_digest)
+                return Err(reason)
+            case LinuxFreshWorkloadSubjectOpenV2.Ready(subject):
+                index = state.subjects.len()
+                workload_native_slots_v2[slot].subjects.push(subject)
+                workload_native_slots_v2[slot].bindings.push(snapshot.binding_digest)
+    val observed = workload_native_slots_v2[slot].subjects[index].current_v2(owner, command)?
+    val checked = workload_context_v2(slot, generation)?
+    Ok(observed)
+
+fn workload_closure_v2(slot: i64, generation: i64, command: LinuxFreshWorkloadCommandV2) -> Result<LinuxFreshWorkloadClosureV2, text>:
+    val context = workload_context_v2(slot, generation)?
+    val state = workload_native_slots_v2[slot]
+    state.profile.validate_workload_scope_v2(command.scope)?
+    var index = -1
+    for at in 0..state.subjects.len():
+        if state.subjects[at].matches_v2(command)?:
+            if index >= 0: return Err("fresh-workload-closure-subject-ambiguous")
+            index = at
+    if index < 0: return Err("fresh-workload-closure-no-confirmed-subject")
+    val result = state.subjects[index].closure_v2(command)?
+    val after = workload_context_v2(slot, generation)?
+    Ok(result)
+
+@unsafe(reason: "actual zero-caller-identity profile plus duplicated internally borrowed roots", capabilities: [ffi, raw_ptr])
+fn workload_open_v2(profile: LinuxInstalledFreshEpochProfileV1, borrowed: [i64]) -> LinuxFreshWorkloadNativeOpenV2:
+    val origin = linux_machine_process_origin_check_v1()
+    if origin.is_err(): return LinuxFreshWorkloadNativeOpenV2.Rejected(origin.unwrap_err())
+    val current = profile.current_v1()
+    if current.is_err(): return LinuxFreshWorkloadNativeOpenV2.Rejected(current.unwrap_err())
+    if linux_workload_flags_v2(true) == 0 or workload_native_slots_v2.len() >= 4096: return LinuxFreshWorkloadNativeOpenV2.Rejected("fresh-workload-native-bound-or-platform")
+    val arena = malloc(131072u64)
+    if arena == 0: return LinuxFreshWorkloadNativeOpenV2.Rejected("fresh-workload-native-memory")
+    val slot = workload_native_slots_v2.len()
+    workload_native_slots_v2.push(WorkloadNativeStateV2(generation: slot + 1, arena: arena, profile: profile,
+        profile_digest: current.unwrap().profile_digest, process_digest: current.unwrap().process.identity_digest))
+    val owner = LinuxFreshWorkloadNativeV2(slot: slot, generation: slot + 1)
+    val captured = workload_capture_v2(slot, borrowed)
+    if captured.is_err(): return LinuxFreshWorkloadNativeOpenV2.CleanupRequired(owner, captured.unwrap_err())
+    workload_native_slots_v2[slot].phase = "ready"
+    val checked = workload_context_v2(slot, slot + 1)
+    if checked.is_err(): return LinuxFreshWorkloadNativeOpenV2.CleanupRequired(owner, checked.unwrap_err())
+    LinuxFreshWorkloadNativeOpenV2.Ready(owner)
+
+fn workload_capture_v2(slot: i64, borrowed: [i64]) -> Result<(), text>:
+    for fd in borrowed:
+        val duplicate = workload_open_fd_v2(slot, fd, ".", true)?
+    val machine = workload_open_fd_v2(slot, -100, "/etc/machine-id", false)?
+    val state = workload_native_slots_v2[slot]
+    val bytes = linux_workload_text_v2(state.arena, state.handles[machine].fd, 64)?
+    val value = bytes.trim()
+    if value.byte_len() != 32: return Err("fresh-workload-native-machine-id-shape")
+    for byte in value.bytes():
+        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)): return Err("fresh-workload-native-machine-id-shape")
+    workload_native_slots_v2[slot].machine_id = value
+    workload_native_slots_v2[slot].architecture = linux_workload_architecture_v2(state.arena)?
+    Ok(())
+
+@unsafe(reason: "retires owned duplicates/subjects only; borrowed originals and profiles remain with parent", capabilities: [ffi])
+fn workload_close_v2(slot: i64, generation: i64) -> (bool, text):
+    val loaded = workload_state_v2(slot, generation)
+    if loaded.is_err(): return (false, loaded.unwrap_err())
+    val state = loaded.unwrap()
+    if state.phase == "closed": return (true, state.error)
+    workload_native_slots_v2[slot].phase = "closing"
+    for subject in state.subjects:
+        val turn = subject.close_v2()
+        if turn.1 != "" and workload_native_slots_v2[slot].error == "": workload_native_slots_v2[slot].error = turn.1
+        if not turn.0: return (false, workload_native_slots_v2[slot].error)
+    var at = state.handles.len() - 1
+    while at >= 0:
+        val fd = workload_native_slots_v2[slot].handles[at].fd
+        workload_native_slots_v2[slot].handles[at].fd = -1
+        if fd >= 0 and close(fd as i32) != 0 and workload_native_slots_v2[slot].error == "":
+            workload_native_slots_v2[slot].error = "fresh-workload-native-close-consumed-error"
+        at = at - 1
+    free(state.arena)
+    workload_native_slots_v2[slot].phase = "closed"
+    (true, workload_native_slots_v2[slot].error)
+@else:
+fn workload_closure_v2(slot: i64, generation: i64, command: LinuxFreshWorkloadCommandV2) -> Result<LinuxFreshWorkloadClosureV2, text>: Err("fresh-workload-linux-required")
+fn workload_roots_v2(slot: i64, generation: i64) -> Result<[text], text>: Err("fresh-workload-linux-required")
+fn workload_context_v2(slot: i64, generation: i64) -> Result<LinuxFreshHostContextV2, text>: Err("fresh-workload-linux-required")
+fn workload_associate_v2(slot: i64, generation: i64, owner: LinuxContainerContainmentOwnerV1, command: LinuxFreshWorkloadCommandV2) -> Result<LinuxContainerContainmentSnapshotV1, text>: Err("fresh-workload-linux-required")
+fn workload_close_v2(slot: i64, generation: i64) -> (bool, text): (false, "fresh-workload-linux-required")
+@end

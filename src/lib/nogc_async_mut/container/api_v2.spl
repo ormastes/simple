@@ -1,3 +1,8 @@
+use std.nogc_sync_mut.container.machine_authority_v1.*
+use std.nogc_sync_mut.container.machine_fresh_epoch_cleanup_v1.machine_fresh_epoch_admission_turn_close_v1
+use std.nogc_sync_mut.io.machine_local_process_principal_v1.MachineLocalProcessPrincipalV1
+use std.common.build_manager.group_process_stream_protocol_v2.GroupProcessStreamLaunchV2
+use std.nogc_async_mut.container.providers.linux.fresh_epoch_workload_v2.*
 pub use std.nogc_async_mut.container.observation_v2.simple_container_observe_v2
 pub use std.common.contracts.container.execution_configuration_v1.{ContainerExecutionConfigurationObservationV1, ContainerExecutionMountObservationV1}
 pub use std.common.contracts.container.execution_input_configuration_v1.ContainerExecutionInputConfigurationObservationV1
@@ -21,6 +26,70 @@ use std.nogc_async_mut.container.providers.windows.simple_container_adapter_v2.W
 pub enum SimpleContainerOwnerV2:
     Linux(ContainerHostScopeV2, LinuxSimpleContainerAdapterV2)
     Windows(ContainerHostScopeV2, WindowsSimpleContainerAdapterV2)
+
+pub struct SimpleContainerFreshOpenV2:
+    owner: Option<SimpleContainerOwnerV2> = nil
+    admission_cleanup: Option<MachineFreshEpochAdmissionTurnV1> = nil
+    fresh_cleanup: Option<LinuxFreshWorkloadOwnerV2> = nil
+    error: text = ""
+
+pub struct SimpleContainerCloseV2:
+    owner: Option<SimpleContainerOwnerV2>
+    closed: bool
+    error: text
+
+pub struct SimpleContainerFreshCleanupV2:
+    retained: Option<SimpleContainerFreshOpenV2>
+    closed: bool
+    error: text
+
+# Principal is an actual scoped loan: the caller keeps its cleanup owner alive.
+# A request DTO or policy string cannot choose this genuine installed factory.
+pub fn simple_container_open_fresh_v2(principal: MachineLocalProcessPrincipalV1,
+        template: GroupProcessStreamLaunchV2) -> SimpleContainerFreshOpenV2:
+    val admitted = machine_container_authority_open_fresh_epoch_v1()
+    if admitted.error != "" or admitted.owner.is_none():
+        return SimpleContainerFreshOpenV2(admission_cleanup: Some(admitted), error: admitted.error)
+    val transferred = admitted.owner.unwrap().transfer_workload_v2()
+    if transferred.owner.is_none():
+        var cleanup = admitted
+        cleanup.owner = transferred.retained
+        return SimpleContainerFreshOpenV2(admission_cleanup: Some(cleanup), error: transferred.error)
+    val fresh = linux_fresh_workload_owner_v2(transferred.owner.unwrap(), principal, template)
+    if transferred.error != "": return SimpleContainerFreshOpenV2(fresh_cleanup: Some(fresh), error: transferred.error)
+    # Retain the actual native owner BEFORE any metadata validation can fail.
+    val adapter = LinuxSimpleContainerAdapterV2.open_fresh_v2(fresh)
+    if adapter.is_err(): return SimpleContainerFreshOpenV2(fresh_cleanup: Some(fresh), error: adapter.unwrap_err())
+    val scope = fresh.scope_v2()
+    if scope.is_err(): return SimpleContainerFreshOpenV2(fresh_cleanup: Some(fresh), error: scope.unwrap_err())
+    SimpleContainerFreshOpenV2(owner: Some(SimpleContainerOwnerV2.Linux(scope.unwrap(), adapter.unwrap())))
+
+pub fn simple_container_close_v2(owner: SimpleContainerOwnerV2) -> SimpleContainerCloseV2:
+    match owner:
+        case SimpleContainerOwnerV2.Linux(scope, adapter):
+            val closed = adapter.close_fresh_v2()
+            val pending = if closed.owner.is_some(): Some(SimpleContainerOwnerV2.Linux(scope, closed.owner.unwrap())) else: nil
+            SimpleContainerCloseV2(pending, closed.closed, closed.error)
+        case SimpleContainerOwnerV2.Windows(_, _): SimpleContainerCloseV2(Some(owner), false, "container-api-lifecycle-retained")
+
+pub fn simple_container_fresh_cleanup_v2(original: SimpleContainerFreshOpenV2) -> SimpleContainerFreshCleanupV2:
+    var retained = original
+    if val owner = retained.owner:
+        val closed = simple_container_close_v2(owner)
+        retained.owner = closed.owner
+        if retained.error == "" and closed.error != "": retained.error = closed.error
+        if not closed.closed or closed.owner.is_some(): return SimpleContainerFreshCleanupV2(Some(retained), false, retained.error)
+    if val fresh = retained.fresh_cleanup:
+        val closed = fresh.close_v2()
+        retained.fresh_cleanup = closed.owner
+        if retained.error == "" and closed.error != "": retained.error = closed.error
+        if not closed.closed or closed.owner.is_some(): return SimpleContainerFreshCleanupV2(Some(retained), false, retained.error)
+    if val admission = retained.admission_cleanup:
+        val closed = machine_fresh_epoch_admission_turn_close_v1(admission)
+        retained.admission_cleanup = closed.retained
+        if retained.error == "" and closed.error != "": retained.error = closed.error
+        if not closed.closed or closed.retained.is_some(): return SimpleContainerFreshCleanupV2(Some(retained), false, retained.error)
+    SimpleContainerFreshCleanupV2(nil, true, retained.error)
 
 pub struct ContainerOperationTurnV2:
     owner: SimpleContainerOwnerV2

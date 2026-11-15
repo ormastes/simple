@@ -1,3 +1,4 @@
+use std.nogc_async_mut.container.providers.linux.fresh_epoch_workload_v2.*
 use std.nogc_async_mut.container.shared.logs_capture_v1.*
 # Linux leaf adapter for the common container API. Its callers serialize access
 # to the retained provider; this module is not another scheduler or grant verifier.
@@ -48,30 +49,15 @@ use std.nogc_async_mut.container.providers.linux.containment_observer_v1.{LinuxO
     linux_oci_containment_observe_v1}
 use std.nogc_async_mut.container.providers.linux.containment_v1.LinuxOciContainmentOutcomeV1
 
-pub const LINUX_SIMPLE_CONTAINER_BACKEND_V2 = "linux-podman"
+use std.nogc_async_mut.container.providers.linux.host_observation_v2.{LINUX_SIMPLE_CONTAINER_BACKEND_V2,
+    _linux_container_observation_v2, linux_container_host_observe_v2}
+export LINUX_SIMPLE_CONTAINER_BACKEND_V2
 
 pub struct LinuxOciContainmentHostObservationV1:
     host: ContainerHostObservationV2
     profile_digest: text
     runtime_digest: text
     containment_identity_digest: text
-
-fn _linux_container_native_id_v2(path: text) -> Result<text, text>:
-    val raw = file_read_regular_no_follow_bounded(path, 128)?
-    val identity = raw.trim()
-    if raw.len() > 128 or not builder_identifier_valid_v1(identity):
-        return Err("container-native-identity-invalid")
-    Ok(identity)
-
-fn _linux_container_observation_v2(engine: LinuxOciEngineObservationV1) -> Result<ContainerHostObservationV2, text>:
-    if platform_name_raw().lower() != "linux": return Err("container-adapter-native-os-unsupported")
-    val architecture = linux_native_uname_architecture_v1()?
-    val machine = _linux_container_native_id_v2("/etc/machine-id")?
-    val boot = _linux_container_native_id_v2("/proc/sys/kernel/random/boot_id")?
-    Ok(ContainerHostObservationV2(backend: LINUX_SIMPLE_CONTAINER_BACKEND_V2,
-        native_machine_id: machine, native_boot_id: boot, provider_identity_digest: engine.identity_digest,
-        execution_os: "linux", architecture: architecture,
-        continuity_assurance: "native-boot-incarnation-v1", boot_observation: boot))
 
 fn _linux_container_scope_error_v2(scope: ContainerHostScopeV2) -> text:
     match container_host_scope_bytes_v2(scope):
@@ -102,8 +88,29 @@ pub class LinuxSimpleContainerAdapterV2:
     provider: LinuxOciRuntimeProviderV1
     _observed_host: ContainerHostObservationV2
     _duration_cap_ms: i64
+    _fresh: Option<LinuxFreshWorkloadOwnerV2> = nil
 
 impl LinuxSimpleContainerAdapterV2:
+    # Borrows a genuine fresh owner. The factory caller retains it on Err;
+    # these metadata checks acquire no new native resource or second journal.
+    pub static fn open_fresh_v2(owner: LinuxFreshWorkloadOwnerV2) -> Result<LinuxSimpleContainerAdapterV2, text>:
+        val scope = owner.scope_v2()?
+        val observed = owner.observation_v2()?
+        val fence = container_scope_fence_id_v2(scope)?
+        val provider = LinuxOciRuntimeProviderV1.new("linux", "podman", "", fence, scope.provider_generation, false, 30000)
+        Ok(LinuxSimpleContainerAdapterV2(scope: scope, provider: provider, _observed_host: observed,
+            _duration_cap_ms: 30000, _fresh: Some(owner)))
+
+    pub fn close_fresh_v2() -> LinuxFreshAdapterCloseV2:
+        if self._fresh.is_none(): return LinuxFreshAdapterCloseV2(Some(self), false, "container-adapter-lifecycle-retained")
+        val original = self._fresh.unwrap()
+        val closed = original.close_v2()
+        var retained = self
+        if closed.owner.is_some(): retained._fresh = closed.owner
+        if not closed.closed or closed.owner.is_some(): return LinuxFreshAdapterCloseV2(Some(retained), false, closed.error)
+        retained._fresh = nil
+        LinuxFreshAdapterCloseV2(nil, true, closed.error)
+
     # Protected local configuration, not a wire endpoint. The actual retained
     # provider baseline is correlated again against Engine info by the owner.
     pub fn primary_geometry_context_v1(plan: ContainerPrimaryAttachPlanV1,
@@ -176,9 +183,7 @@ impl LinuxSimpleContainerAdapterV2:
             self._observed_host.provider_identity_digest, actual.identity_digest)
 
     pub static fn observe(policy_bytes: text) -> Result<ContainerHostObservationV2, text>:
-        val policy = linux_oci_engine_policy_decode_v1(policy_bytes)?
-        val engine = linux_oci_engine_observe_v1(policy, 5000)?
-        _linux_container_observation_v2(engine)
+        linux_container_host_observe_v2(policy_bytes)
 
     pub static fn open(policy_bytes: text, state_root: text, scope: ContainerHostScopeV2,
             expected_provider_identity_digest: text, timeout_ms: i64) -> Result<LinuxSimpleContainerAdapterV2, text>:
@@ -235,6 +240,7 @@ impl LinuxSimpleContainerAdapterV2:
         self._observed_host
 
     fn _checked_request_v2(request: ContainerExecutionRequestV2) -> Result<(LinuxOciRequestV1, ContainerRequestProjectionV2), text>:
+        if self._fresh.is_some(): return Err("linux-fresh-workload-legacy-operation-unavailable")
         val plan = request.plan
         if plan.backend != LINUX_SIMPLE_CONTAINER_BACKEND_V2: return Err("container-adapter-backend-mismatch")
         if plan.physical_host_id != self.scope.physical_host_id or plan.service_scope_id != self.scope.service_scope_id or
@@ -257,10 +263,14 @@ impl LinuxSimpleContainerAdapterV2:
         Ok((decoded, projection))
 
     pub fn project(request: ContainerExecutionRequestV2) -> Result<ContainerRequestProjectionV2, text>:
+        if val fresh = self._fresh: return fresh.project_v2(request)
         val checked = self._checked_request_v2(request)?
         Ok(checked.1)
 
     pub fn validate(request: ContainerExecutionRequestV2) -> Result<bool, text>:
+        if val fresh = self._fresh:
+            val projected = fresh.project_v2(request)?
+            return Ok(true)
         val checked = self._checked_request_v2(request)?
         val valid = self.provider.validate(checked.0)
         if not valid.accepted: return Err(valid.reason)
@@ -341,6 +351,7 @@ impl LinuxSimpleContainerAdapterV2:
         self.provider.logs_capture_begin_v1(decoded)
 
     pub me read(action: text, request: ContainerExecutionRequestV2) -> RuntimeOperationV1:
+        if val fresh = self._fresh: return fresh.read_v2(action, request)
         if action != "inspect" and action != "logs" and action != "wait" and action != "configuration" and action != "input-configuration":
             return _linux_container_adapter_refused_v2(action, "container-adapter-read-action-unsupported")
         val checked = match self._checked_request_v2(request):
@@ -360,6 +371,7 @@ impl LinuxSimpleContainerAdapterV2:
 
     pub me apply(action: text, request: ContainerExecutionRequestV2,
             deadline: ContainerEffectDeadlineV1) -> RuntimeOperationV1:
+        if val fresh = self._fresh: return fresh.apply_v2(action, request, Some(deadline))
         if action == "inspect" or action == "logs" or action == "wait" or action == "configuration" or action == "input-configuration": return self.read(action, request)
         if action != "prepare" and action != "create" and action != "start" and action != "stop" and action != "destroy":
             return _linux_container_adapter_refused_v2(action, "container-adapter-action-unsupported")
@@ -384,6 +396,7 @@ impl LinuxSimpleContainerAdapterV2:
 
     pub me control(action: text, request: ContainerExecutionRequestV2,
             deadline: ContainerControlDeadlineV1) -> RuntimeOperationV1:
+        if val fresh = self._fresh: return fresh.apply_v2(action, request)
         if action != "stop" and action != "destroy":
             return _linux_container_adapter_refused_v2(action, "container-adapter-control-action-unsupported")
         val checked = match self._checked_request_v2(request):
@@ -400,6 +413,7 @@ impl LinuxSimpleContainerAdapterV2:
         self.provider.destroy(checked.0, false, Some(deadline))
 
     pub fn intent(request: ContainerExecutionRequestV2) -> Result<RuntimeIntentV1, text>:
+        if val fresh = self._fresh: return fresh.intent_v2(request)
         val checked = self._checked_request_v2(request)?
         self.provider.retained_intent_v1(checked.0, true)
 
@@ -576,6 +590,7 @@ impl LinuxSimpleContainerAdapterV2:
         self.provider.observe_execution_user_mapping_v3(checked.0, expected, self._observed_host.provider_identity_digest)
 
     pub me recover(request: ContainerExecutionRequestV2, expected: RuntimeIntentV1) -> RuntimeOperationV1:
+        if val fresh = self._fresh: return fresh.recover_v2(request, expected)
         val checked = match self._checked_request_v2(request):
             case Ok(value): value
             case Err(reason): return _linux_container_adapter_refused_v2("recover", reason)
@@ -600,3 +615,9 @@ impl LinuxSimpleContainerAdapterV2:
             case Err(reason): return _linux_container_adapter_refused_v2("recover", reason)
             case Ok(_): pass
         self.provider.recover(decoded)
+
+# An actual fresh close may remain pending; callers retain this exact adapter.
+pub struct LinuxFreshAdapterCloseV2:
+    owner: Option<LinuxSimpleContainerAdapterV2>
+    closed: bool
+    error: text
