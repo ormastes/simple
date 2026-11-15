@@ -1,0 +1,94 @@
+# Shared per-requirement status derivation for the `simple trace` query family
+# (matrix, links, explain, diff, report). Pure; reads one graph.
+# A structural link alone is Linked. Verified needs passing test evidence.
+# @req REQ-TRC-021
+use std.common.traceability.model.*
+use std.common.traceability.sidecar_v1.{TraceSidecarReferenceV1}
+use std.common.traceability.profile_v1.{TraceProfile}
+use std.common.traceability.query_missing_v1.{TraceLinkStatus, TraceRequirementIdV1, TraceSnapshotIdV1,
+    TraceRequirementCountV1, TraceGraphCompletenessV1}
+
+pub struct TraceNodeIdV1:
+    value: text
+
+# Passing test evidence for one requirement. The caller supplies it from a
+# trusted run source; an empty list means no run evidence is available.
+pub struct TracePassingEvidenceV1:
+    requirement_id: TraceRequirementIdV1
+
+pub struct TraceRequirementStatusV1:
+    requirement_id: TraceRequirementIdV1
+    title: text    # display text copied from the node
+    implementation: TraceLinkStatus
+    verification: TraceLinkStatus
+
+# Command outcome: Complete -> exit 0, Incomplete -> exit 2 (never 0, never 1).
+pub enum TraceCommandVerdictV1:
+    Complete
+    Incomplete
+
+pub fn trace_graph_completeness_v1(graph: TraceGraph) -> TraceGraphCompletenessV1:
+    if graph.complete: TraceGraphCompletenessV1.Complete else: TraceGraphCompletenessV1.Incomplete
+
+# Only the worktree profile is certified here; other profiles report incomplete.
+pub fn trace_command_verdict_v1(completeness: TraceGraphCompletenessV1, profile: TraceProfile) -> TraceCommandVerdictV1:
+    if completeness == TraceGraphCompletenessV1.Incomplete or profile != TraceProfile.Worktree:
+        return TraceCommandVerdictV1.Incomplete
+    TraceCommandVerdictV1.Complete
+
+# Overall status of one requirement across both halves.
+pub fn trace_requirement_overall_v1(status: TraceRequirementStatusV1) -> TraceLinkStatus:
+    if status.implementation == TraceLinkStatus.Missing or status.verification == TraceLinkStatus.Missing:
+        return TraceLinkStatus.Missing
+    if status.implementation == TraceLinkStatus.Unknown or status.verification == TraceLinkStatus.Unknown:
+        return TraceLinkStatus.Unknown
+    if status.verification == TraceLinkStatus.Verified:
+        return TraceLinkStatus.Verified
+    TraceLinkStatus.Linked
+
+pub fn trace_requirement_statuses_v1(graph: TraceGraph, sidecar: [TraceSidecarReferenceV1],
+    evidence: [TracePassingEvidenceV1]) -> [TraceRequirementStatusV1]:
+    """Per-requirement statuses sorted by id.
+
+    Orientation matches `trace missing`: the requirement is the `from` end of
+    implemented_by / verified_by. An absent link is Missing in a complete graph
+    and Unknown in an incomplete one. A verifying link is Linked, and becomes
+    Verified only when passing evidence names that requirement.
+    """
+    var implemented: Dict<text, bool> = {}
+    var verified: Dict<text, bool> = {}
+    var criterion_verified: Dict<text, bool> = {}
+    for edge in graph.edges:
+        if edge.relation == TraceRelation.ImplementedBy:
+            implemented[edge.from_id] = true
+        elif edge.relation == TraceRelation.VerifiedBy:
+            verified[edge.from_id] = true
+        elif edge.relation == TraceRelation.AcceptedBy:
+            criterion_verified[edge.from_id] = true
+    for edge in graph.edges:
+        if edge.relation == TraceRelation.DecomposesTo and criterion_verified.contains_key(edge.to_id):
+            verified[edge.from_id] = true
+    for row in sidecar:
+        if row.relation == "verified_by":
+            verified[row.from_id] = true
+    var passing: Dict<text, bool> = {}
+    for item in evidence:
+        passing[item.requirement_id.value] = true
+    val absent = if graph.complete: TraceLinkStatus.Missing else: TraceLinkStatus.Unknown
+    var by_id: Dict<text, TraceRequirementStatusV1> = {}
+    var ids: [text] = []
+    for node in graph.nodes:
+        if node.kind != TraceNodeKind.Requirement:
+            continue
+        val implementation = if implemented.contains_key(node.id): TraceLinkStatus.Linked else: absent
+        var verification = absent
+        if verified.contains_key(node.id):
+            verification = if passing.contains_key(node.id): TraceLinkStatus.Verified else: TraceLinkStatus.Linked
+        by_id[node.id] = TraceRequirementStatusV1(requirement_id: TraceRequirementIdV1(value: node.id),
+            title: node.title, implementation: implementation, verification: verification)
+        ids.push(node.id)
+    var out: [TraceRequirementStatusV1] = []
+    for id in trace_sorted_ids(ids):
+        out.push(by_id[id])
+    out
+
