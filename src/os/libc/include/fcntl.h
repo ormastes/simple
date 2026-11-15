@@ -21,6 +21,9 @@ extern "C" {
 #define O_APPEND    0x0400
 #define O_NONBLOCK  0x0800
 #define O_CLOEXEC   0x80000
+/* SimpleOS has no symlinks, so O_NOFOLLOW is vacuously honoured; libc open()
+ * strips it before the syscall so the kernel never sees an unknown bit. */
+#define O_NOFOLLOW  0x20000
 
 /* fcntl() commands */
 #define F_DUPFD   0
