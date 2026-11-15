@@ -215,6 +215,29 @@ describe "native oracle fixtures (exact source, bootstrap HIR)":
         expect(errors).to_contain("Reader for tail_probe::RCell: method read: return type expected=T? actual=int:64:true")
         expect(errors).to_contain("Reader for tail_probe::ICell: method read: return type argument T=optional[int:32:true] is not supported")
 
+describe "script main replays a top-level binding with its annotation":
+    # A script's top-level `var t: Tag = ..` is replayed as a main local.
+    # Replayed as untyped, the local was the raw Alpha struct: no conversion
+    # on the reassignment and `t.tag()` devirtualized to Alpha.tag, so the
+    # native binary printed Alpha.tag over Beta's data (`assigned 12`).
+    it "converts and dispatches a reassigned top-level trait var":
+        val l = lower_bootstrap(DECLS + "var assigned: Tag = Alpha(k: 0)\nassigned = Beta(k: 12)\nprint assigned.tag()\n")
+        expect(l.errors).to_equal("")
+        val m = mir_of(l, "main")
+        expect(casts(m)).to_equal(2)
+        expect(m.contains("tail_probe.Alpha.tag")).to_equal(false)
+        expect(m).to_contain("CallIndirect")
+
+describe "if val on a generic trait-dispatched Optional":
+    # The trait impl returns a raw i64 payload. With the receiver instance
+    # substituted the binder is i64, so the erased-T re-tag must not fire
+    # (it printed 41 as 328 natively).
+    it "does not re-tag the raw payload of a substituted dispatch":
+        val src = "fn make_reader(v: i64) -> Reader<i64>:\n    return ICell(cell: Some(v))\n\nfn use_i() -> i64:\n    val r = make_reader(41)\n    if val w = r.read(1):\n        print \"i {{w}}\"\n    0\n"
+        val l = lower_bootstrap(DECLS + src)
+        expect(l.errors).to_equal("")
+        expect(mir_of(l, "use_i").contains("rt_value_int_wide")).to_equal(false)
+
 describe "controls that already converted":
     it "explicit return":
         val l = lower_bootstrap(DECLS + "fn explicit_tag(k: i64) -> Tag:\n    return Beta(k: k)\n")
