@@ -92,6 +92,16 @@
 #   nested 0 2: none
 #   plain -7: some -7
 #   plain 0: some 0
+#   dget_agree z: ifval 0 coal 0
+#   dget_agree t: ifval 3 coal 3
+#   dget_agree q: eqnil eqnone coal -5
+#   var_loop_eq: p0 a1
+#   var_loop_ne: p0 a1 p2
+#   var_loop_ifval: some0 none
+#   var_nested_loop: p00 a01 a10 a11
+#   var_arm_join 0: p0 p1
+#   var_arm_join 1: a0 a1
+#   var_closure: lam-p a
 #   --- seed-divergent
 #   ok3 t: none
 #   ok3 f: none
@@ -330,6 +340,98 @@ fn row_plain_scalar(v: i64) -> text:
         return "some {x}"
     "none"
 
+# Loop-carried `var`: a test lowered BEFORE the reassignment runs again on
+# the next iteration, so a presence bit copied at `var g = d.get(..)` would
+# be stale there (review of 59a93f2a5aa). d holds 0, never the nil word.
+fn var_loop_eq() -> text:
+    val d: {text: i64} = {"t": 0}
+    var g = d.get("t")
+    var s = ""
+    var i = 0
+    while i < 2:
+        if g == nil:
+            s = s + "a{i} "
+        else:
+            s = s + "p{i} "
+        g = nil
+        i = i + 1
+    s
+
+fn var_loop_ne() -> text:
+    val d: {text: i64} = {"t": 0}
+    var g = d.get("t")
+    var s = ""
+    for i in [0, 1, 2]:
+        if g != nil:
+            s = s + "p{i} "
+        else:
+            s = s + "a{i} "
+        if i == 0: g = d.get("missing")
+        if i == 1: g = d.get("t")
+    s
+
+fn var_loop_ifval() -> text:
+    val d: {text: i64} = {"t": 0}
+    var g = d.get("t")
+    var s = ""
+    var i = 0
+    while i < 2:
+        if val x = g:
+            s = s + "some{x} "
+        else:
+            s = s + "none "
+        g = d.get("missing")
+        i = i + 1
+    s
+
+fn var_nested_loop() -> text:
+    val d: {text: i64} = {"t": 0}
+    var g = d.get("t")
+    var s = ""
+    for j in [0, 1]:
+        for i in [0, 1]:
+            if g != nil:
+                s = s + "p{j}{i} "
+            else:
+                s = s + "a{j}{i} "
+            g = nil
+    s
+
+fn var_arm_join(k: i64) -> text:
+    val d: {text: i64} = {"t": 0}
+    var g = d.get("t")
+    var s = ""
+    for i in [0, 1]:
+        match k:
+            case 1:
+                if i == 0:
+                    g = nil
+            case _: ()
+        if g == nil:
+            s = s + "a{i} "
+        else:
+            s = s + "p{i} "
+    s
+
+fn var_closure() -> text:
+    val d: {text: i64} = {"t": 0}
+    var g = d.get("t")
+    val f = \: if g != nil: "lam-p" else: "lam-a"
+    g = nil
+    val now = if g != nil: "p" else: "a"
+    "{f()} {now}"
+
+# `== nil`, `== None`, `if val` and `??` must agree on one `d.get(k)` word,
+# including a stored 3 (the nil word).
+fn dget_agree(k: text) -> text:
+    val d: {text: i64} = {"z": 0, "t": 3}
+    val g = d.get(k)
+    var s = ""
+    if g == nil: s = s + "eqnil "
+    if g == None: s = s + "eqnone "
+    if val x = g: s = s + "ifval {x} "
+    "{s}coal {g ?? -5}"
+
 fn main():
     var k = 0
     while k < 4:
@@ -380,6 +482,16 @@ fn main():
     print "nested 0 2: {row_nested(0, 2)}"
     print "plain -7: {row_plain_scalar(-7)}"
     print "plain 0: {row_plain_scalar(0)}"
+    print "dget_agree z: {dget_agree(\"z\")}"
+    print "dget_agree t: {dget_agree(\"t\")}"
+    print "dget_agree q: {dget_agree(\"q\")}"
+    print "var_loop_eq: {var_loop_eq()}"
+    print "var_loop_ne: {var_loop_ne()}"
+    print "var_loop_ifval: {var_loop_ifval()}"
+    print "var_nested_loop: {var_nested_loop()}"
+    print "var_arm_join 0: {var_arm_join(0)}"
+    print "var_arm_join 1: {var_arm_join(1)}"
+    print "var_closure: {var_closure()}"
     print "--- seed-divergent"
     print "ok3 t: {row_ok3(true)}"
     print "ok3 f: {row_ok3(false)}"

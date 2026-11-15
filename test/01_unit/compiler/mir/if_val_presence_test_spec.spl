@@ -196,3 +196,94 @@ describe "every if-val consumer shape tests presence, not the payload word":
         val fns = lower_module_json(NEARBY_SOURCE)
         for name in ["f_field", "f_elif", "f_ok", "f_index", "f_dict", "f_while", "f_generic"]:
             expect(presence_problem(fns, name)).to_equal("")
+
+fn dict_presence_bit(mir: text) -> text:
+    """Dest of the `raw != nil` bit recorded for a `d.get(k)` word, or ""."""
+    var rest = mir
+    var at = rest.index_of("\"dest\":")
+    while at >= 0:
+        val local = digits_from(rest, at + 7)
+        val def = def_of(mir, local)
+        if def.starts_with("\"dest\":" + local + ",\"op\":\"Ne\"") and left_operand_def(mir, def).contains("rt_dict_get"):
+            return local
+        rest = rest.substring(at + 7, rest.len())
+        at = rest.index_of("\"dest\":")
+    ""
+
+fn copy_uses(mir: text, local: text) -> i64:
+    var count = 0
+    var rest = mir
+    val needle = "\"Copy\":" + local
+    var at = rest.index_of(needle)
+    while at >= 0:
+        val after = rest.substring(at + needle.len(), at + needle.len() + 1)
+        if not "0123456789".contains(after):
+            count = count + 1
+        rest = rest.substring(at + needle.len(), rest.len())
+        at = rest.index_of(needle)
+    count
+
+val VAR_LOOP_SOURCE: text = "fn f_var_eq() -> i64:" + NL +
+    "    val d: {{text: i64}} = {{\"t\": 0}}" + NL +
+    "    var g = d.get(\"t\")" + NL +
+    "    var n = 0" + NL +
+    "    var i = 0" + NL +
+    "    while i < 2:" + NL +
+    "        if g == nil:" + NL +
+    "            n = n + 1" + NL +
+    "        g = nil" + NL +
+    "        i = i + 1" + NL +
+    "    n" + NL + NL +
+    "fn f_var_ne(k: i64) -> i64:" + NL +
+    "    val d: {{text: i64}} = {{\"t\": 0}}" + NL +
+    "    var g = d.get(\"t\")" + NL +
+    "    var n = 0" + NL +
+    "    for i in [0, 1]:" + NL +
+    "        if g != nil:" + NL +
+    "            n = n + 1" + NL +
+    "        match k:" + NL +
+    "            case 1: g = nil" + NL +
+    "            case _: ()" + NL +
+    "    n" + NL + NL +
+    "fn f_val_eq(k: text) -> i64:" + NL +
+    "    val d: {{text: i64}} = {{\"t\": 3}}" + NL +
+    "    val g = d.get(k)" + NL +
+    "    if g == nil:" + NL +
+    "        return 1" + NL +
+    "    0" + NL
+
+describe "a reassigned var never answers presence from its initializer's bit":
+    it "a loop-carried var re-tests its current word; a val keeps the producer bit":
+        val fns = lower_module_json(VAR_LOOP_SOURCE)
+        for name in ["f_var_eq", "f_var_ne"]:
+            val mir = fns[name] ?? ""
+            val bit = dict_presence_bit(mir)
+            expect(bit != "").to_equal(true)
+            val uses = copy_uses(mir, bit)
+            expect("{name} uses {uses}").to_equal("{name} uses 0")
+        val val_mir = fns["f_val_eq"] ?? ""
+        val val_bit = dict_presence_bit(val_mir)
+        expect(val_bit != "").to_equal(true)
+        val val_uses = copy_uses(val_mir, val_bit)
+        expect("f_val_eq uses {val_uses}").to_equal("f_val_eq uses 1")
+
+val AGREE_SOURCE: text = "fn f_coal(k: text) -> i64:" + NL +
+    "    val d: {{text: i64}} = {{\"t\": 3}}" + NL +
+    "    val g = d.get(k)" + NL +
+    "    g ?? -5" + NL + NL +
+    "fn f_none(k: text) -> i64:" + NL +
+    "    val d: {{text: i64}} = {{\"t\": 3}}" + NL +
+    "    val g = d.get(k)" + NL +
+    "    if g == None:" + NL +
+    "        return 1" + NL +
+    "    0" + NL
+
+describe "`??` and `== None` answer presence from the same bit as `== nil`":
+    it "a d.get word holding the nil word 3 is present for `??` and `== None`":
+        val fns = lower_module_json(AGREE_SOURCE)
+        for name in ["f_coal", "f_none"]:
+            val mir = fns[name] ?? ""
+            val bit = dict_presence_bit(mir)
+            expect(bit != "").to_equal(true)
+            val uses = copy_uses(mir, bit)
+            expect("{name} uses {uses}").to_equal("{name} uses 1")

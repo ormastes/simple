@@ -6,22 +6,36 @@
 # Seed stdout (`simple run main.spl`), one row per print:
 #   err t: none
 #   err f: some bad
+#   ok_text t: some hi
+#   ok_text f: none
+#   var_backedge_three: p0 a1 p2
+#   var_ok_loop: p0 a1
+#   var_ifval_five: some5 none
+#   lambda_three: lam-present
+#   ifexpr_three: some 3
 #   call 0: none
 #   call 1: some 0
 #   call 2: some 3
 #   ctor 0: none
 #   ctor 1: some 0
 #   ctor 2: some 3
-# Native, Stage 2 of b19a14b4c9f (presence fix in), measured 2026-11-15:
-#   cranelift: every row equals the seed EXCEPT
-#     err f: some 222296153947184     (the text payload printed as an integer;
-#     the `.err` text binder is not registered as text, so the interpolation
-#     renders the word with rt_raw_i64_to_string)
-#   llvm: the build FAILS in llc, first error
-#     `%l2 = call i64 @rt_array_len(ptr %l1)`: '%l1' defined with type 'i64'
-#     (the erased `make_items()` result fed to `[k]`). Same llc class as
-#     `Holder(slot: opt_int(k))` on the pre-fix Stage 2. llc stops at the
-#     first error, so the err and ctor rows are unmeasured on llvm.
+# Native, Stage 2 of 59a93f2a5aa (before the `var` gate), 2026-11-15:
+#   cranelift differs from the seed in exactly these rows:
+#     err f: some 194129053457456       (`.err` text binder rendered as an
+#     ok_text t: some 194129053457936    integer: not registered as text)
+#     var_backedge_three: p0 p1 p2      (stale presence bit; a stored 3)
+#     var_ok_loop: p0 p1
+#     var_ifval_five: some5 some3
+#     lambda_three: lam-absent          (bit does not cross a capture)
+#     ifexpr_three: none                (bit does not cross an if-expr merge)
+#   llvm: the build FAILS in llc ('%l1' defined with type 'i64' but expected
+#     'ptr' for `make_items()[k]`), so no llvm row is measured.
+# Reviewer base (pre-presence-fix Stage 2, review-ifval/base), same shapes:
+#   loop_backedge a0 a1 a2, ok_var_loop p0 p1, ifval_var_loop some0 none,
+#   in_lambda lam-absent, via_ifexpr none, `.ok` text binder a pointer.
+# After the `var` gate a `var` takes the pre-fix word path again, so the
+# var_* rows are expected to match that base, not the seed (not measured
+# natively: no Stage 2 of the gate exists yet).
 # Build: SIMPLE_BOOTSTRAP=1 native-build main.spl --entry-closure (cranelift, llvm).
 
 struct Bag:
@@ -50,9 +64,79 @@ fn row_ctor(k: i64) -> text:
         return "some {x}"
     "none"
 
+fn row_ok_text(b: bool) -> text:
+    val r: Result<text, i64> = if b: Ok("hi") else: Err(1)
+    if val v = r.ok:
+        return "some {v}"
+    "none"
+
+# A `var` carries no presence bit (it may be reassigned on a later loop
+# iteration), so these stay on the pre-existing word path: a stored 3 reads
+# as nil, `.ok` keeps its stale word, a `var` copy of `d.get` re-decodes.
+fn var_backedge_three() -> text:
+    val d: {text: i64} = {"t": 3}
+    var g = d.get("t")
+    var s = ""
+    var i = 0
+    while i < 3:
+        if g != nil:
+            s = s + "p{i} "
+        else:
+            s = s + "a{i} "
+        if i == 0: g = d.get("missing")
+        if i == 1: g = d.get("t")
+        i = i + 1
+    s
+
+fn var_ok_loop() -> text:
+    var g = res(true).ok
+    var s = ""
+    for i in [0, 1]:
+        if g != nil:
+            s = s + "p{i} "
+        else:
+            s = s + "a{i} "
+        g = res(false).ok
+    s
+
+fn var_ifval_five() -> text:
+    val d: {text: i64} = {"t": 5}
+    var g = d.get("t")
+    var s = ""
+    var i = 0
+    while i < 2:
+        if val x = g:
+            s = s + "some{x} "
+        else:
+            s = s + "none "
+        g = d.get("missing")
+        i = i + 1
+    s
+
+# The bit does not cross a closure capture or an if-expression merge.
+fn lambda_three() -> text:
+    val d: {text: i64} = {"t": 3}
+    val g = d.get("t")
+    val f = \: if g != nil: "lam-present" else: "lam-absent"
+    f()
+
+fn ifexpr_three(k: i64) -> text:
+    val d: {text: i64} = {"t": 3}
+    val o = if k >= 0: d.get("t") else: None
+    if val x = o:
+        return "some {x}"
+    "none"
+
 fn main():
     print "err t: {row_err(true)}"
     print "err f: {row_err(false)}"
+    print "ok_text t: {row_ok_text(true)}"
+    print "ok_text f: {row_ok_text(false)}"
+    print "var_backedge_three: {var_backedge_three()}"
+    print "var_ok_loop: {var_ok_loop()}"
+    print "var_ifval_five: {var_ifval_five()}"
+    print "lambda_three: {lambda_three()}"
+    print "ifexpr_three: {ifexpr_three(1)}"
     var k = 0
     while k < 3:
         print "call {k}: {row_call(k)}"
