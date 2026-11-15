@@ -7,6 +7,16 @@ Collect failures across independent entries and test shards using bounded lanes.
 cache preservation, and bug evidence. This is agent workflow guidance; it does
 not change runner behavior.
 
+**Cranelift/LLVM AOT: module input fails the module, not the worker
+(2026-11-15).** A MIR construct these two AOT translators cannot lower is that
+module's compile error: Cranelift records through `cl_module_codegen_error`,
+LLVM through `MirToLlvm.codegen_error` (Unknown call origin:
+`llvm_callable_uses_local_symbols`). A panic kills the Stage 3 worker and
+seals its whole ~186-module claim CRASH. Not covered: the native isel, C,
+wasm, lua, opencl and llvm_lib backends still panic on an Unknown origin
+through the shared MIR helper. Pins: `cranelift_aot_module_codegen_error_spec`,
+`llvm_aot_module_codegen_error_spec`.
+
 ## What this is
 Compilation of Simple source code to native binaries: the `bin/simple native-build` pipeline, encompassing closure discovery, native codegen, C FFI linkage, symbol resolution, and runtime library integration for host platforms.
 

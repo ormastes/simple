@@ -1,0 +1,34 @@
+# Pure request-history comparison, not issuer authority or native evidence.
+use std.common.contracts.container.primary_geometry_v1.{ContainerPrimaryGeometryRequestV1,
+    container_primary_geometry_request_same_v1}
+use std.common.contracts.mux.session_runtime_control_v1.{session_runtime_control_target_bytes_v1,
+    session_runtime_control_target_binding_match_v1}
+
+# true means return the retained receipt without invoking begin again.
+pub fn smux_connection_geometry_replay_v5(previous: ContainerPrimaryGeometryRequestV1?,
+        request: ContainerPrimaryGeometryRequestV1, unresolved: bool) -> Result<bool, text>:
+    if (request.attempt_sequence < 1 or request.attempt_sequence > 1152921504606846975 or
+            request.lease.revision < 1 or request.lease.revision > 1152921504606846975):
+        return Err("runtime-geometry-attempt-bound")
+    if val prior = previous:
+        session_runtime_control_target_binding_match_v1(prior.target, request.target)?
+        if request.lease.revision == prior.lease.revision:
+            if (request.lease.kind != prior.lease.kind or request.lease.principal_id != prior.lease.principal_id or
+                    request.lease.nonce_digest != prior.lease.nonce_digest or
+                    request.lease.issued_monotonic_ms != prior.lease.issued_monotonic_ms or
+                    request.lease.expires_monotonic_ms != prior.lease.expires_monotonic_ms or
+                    session_runtime_control_target_bytes_v1(request.lease.target)? != session_runtime_control_target_bytes_v1(prior.lease.target)?):
+                return Err("runtime-geometry-lease-changed-at-revision")
+            if request.attempt_sequence == prior.attempt_sequence:
+                if not container_primary_geometry_request_same_v1(prior, request)?:
+                    return Err("runtime-geometry-attempt-changed")
+                return Ok(true)
+            if request.attempt_sequence != prior.attempt_sequence + 1:
+                return Err("runtime-geometry-attempt-not-next")
+        else:
+            if request.lease.revision < prior.lease.revision: return Err("runtime-geometry-lease-revision-stale")
+            if request.attempt_sequence != 1: return Err("runtime-geometry-new-lease-first-attempt")
+    elif request.attempt_sequence != 1:
+        return Err("runtime-geometry-first-attempt")
+    if unresolved: return Err("runtime-geometry-prior-unresolved")
+    Ok(false)

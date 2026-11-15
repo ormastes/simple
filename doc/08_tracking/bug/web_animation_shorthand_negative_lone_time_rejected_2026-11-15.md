@@ -37,3 +37,5 @@ should be checked against `transition: opacity -1s`.
 `test/01_unit/lib/gc_async_mut/gpu/browser_engine/layout_renderer_style_value_parsers_spec.spl`
 asserts the Chrome-agreeing rows only (including `spin 1s -1s`, a negative
 delay after a duration); the `spin -1s` row is kept out until the fix lands.
+
+Re-verified still OPEN 2026-11-15 at `ba2663afde6` (after the upstream border/abspos/whitespace fixes): every row above reproduces unchanged.

@@ -1,0 +1,43 @@
+# Administrator startup selection, never a service request decoder. Historical
+# binding bytes are untrusted until the actual protected deployment verifies
+# its enrollment, anchor, native root generation and pinned configuration.
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.*
+use std.nogc_sync_mut.orchestration.host_windows_deployment_v2.HostWindowsDeploymentAnchorV2
+use std.nogc_sync_mut.orchestration.host_service_enrollment_v2.host_service_enrollment_payload_decode_v2
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+
+pub fn host_service_installed_shape_v3(backend: text, anchor: text, policy_pin: text, binding_file: text) -> text:
+    if anchor == "": return "host-service-installed-anchor-required"
+    if backend == "linux-podman":
+        if policy_pin != "-" or binding_file != "-": return "host-service-linux-anchor-fields"
+    elif backend == "windows-docker-process":
+        if policy_pin == "" or policy_pin == "-" or binding_file == "" or binding_file == "-":
+            return "host-service-windows-anchor-fields"
+    else: return "host-service-backend"
+    ""
+
+pub fn host_service_domain_open_installed_v3(backend: text, anchor: text,
+        policy_pin: text, binding_file: text) -> HostServiceDomainOpenV3:
+    val invalid = host_service_installed_shape_v3(backend, anchor, policy_pin, binding_file)
+    if invalid != "": return HostServiceDomainOpenV3.Rejected(invalid)
+    if backend == "linux-podman": return host_service_domain_open_linux_v3(anchor)
+    val bytes = file_read_regular_no_follow_bounded(binding_file, 16384)
+    if bytes.is_err(): return HostServiceDomainOpenV3.Rejected(bytes.unwrap_err())
+    val binding = host_service_enrollment_payload_decode_v2(bytes.unwrap())
+    if binding.is_err(): return HostServiceDomainOpenV3.Rejected(binding.unwrap_err())
+    host_service_domain_open_windows_v3(HostWindowsDeploymentAnchorV2(anchor, policy_pin), binding.unwrap())
+
+# Direct provider connections currently have one native adapter. Existing Linux
+# finite service/V4 routes remain available; reject here before opening a writer.
+pub fn host_service_primary_installed_shape_v3(backend: text, anchor: text,
+        policy_pin: text, binding_file: text) -> text:
+    val invalid = host_service_installed_shape_v3(backend, anchor, policy_pin, binding_file)
+    if invalid != "": return invalid
+    if backend != "windows-docker-process": return "host-primary-provider-connection-unsupported"
+    ""
+
+pub fn host_service_domain_open_primary_v3(backend: text, anchor: text,
+        policy_pin: text, binding_file: text) -> HostServiceDomainOpenV3:
+    val invalid = host_service_primary_installed_shape_v3(backend, anchor, policy_pin, binding_file)
+    if invalid != "": return HostServiceDomainOpenV3.Rejected(invalid)
+    host_service_domain_open_installed_v3(backend, anchor, policy_pin, binding_file)
