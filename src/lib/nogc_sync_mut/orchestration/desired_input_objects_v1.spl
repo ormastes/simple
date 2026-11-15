@@ -4,7 +4,9 @@ use std.common.contracts.orchestration.desired_input_v1.*
 use std.common.contracts.orchestration.assignment_v1.controller_assignment_authority_v1
 use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
 use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
-use std.common.task_runner.distributed_operation_journal_v2.DistributedOperationJournalV2
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_relative_v3, distributed_operation_journal_read_required_v3,
+    distributed_operation_journal_publish_v3, distributed_operation_journal_lookup_v2}
 use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.{daemon_operation_exact_v2, daemon_operation_begin_v2, daemon_operation_record_outcome_v2}
 use std.common.crypto.sha256.sha256_text
 use std.common.build_manager.contracts.builder_identifier_valid_v1
@@ -91,3 +93,61 @@ pub fn controller_desired_complete_v1(journal: DistributedOperationJournalV2,
     var current = journal
     if prior.state == "admitted": current = daemon_operation_begin_v2(current, operation)?
     daemon_operation_record_outcome_v2(current, operation, "completed", operation.payload_digest)
+
+pub fn desired_object_put_owned_v3(journal: DistributedOperationJournalV2,
+        digest: text, bytes: text, maximum: i64) -> Result<bool, text>:
+    val current = controller_storage_owner_check_v3(journal)?
+    if maximum <= 0 or bytes.byte_len() > maximum or sha256_text(bytes) != digest: return Err("desired-object-invalid")
+    val relative = "desired-input-objects/" + digest + ".sdn"
+    if not distributed_operation_journal_relative_v3(relative): return Err("desired-object-record-path-bounds")
+    if journal.windows_store.is_none(): return desired_object_put_v1(journal.root, digest, bytes, maximum)
+    val published = distributed_operation_journal_publish_v3(journal, relative, bytes)?
+    if distributed_operation_journal_read_required_v3(journal, relative, maximum)? != bytes:
+        return Err("desired-object-content-mismatch")
+    Ok(true)
+
+pub fn controller_desired_objects_retain_owned_v3(journal: DistributedOperationJournalV2,
+        input: ControllerDesiredInputV1, source: text) -> Result<bool, text>:
+    val current = controller_storage_owner_check_v3(journal)?
+    if journal.windows_store.is_none(): return controller_desired_objects_retain_v1(journal.root, input, source)
+    val matches = controller_desired_input_matches_v1(input, source)?
+    val manifest = controller_desired_input_encode_v1(input)?
+    val saved_source = desired_object_put_owned_v3(journal, input.source_digest, source, 1048576)?
+    desired_object_put_owned_v3(journal, sha256_text(manifest), manifest, 8192)
+
+pub fn controller_desired_source_read_owned_v3(journal: DistributedOperationJournalV2,
+        input: ControllerDesiredInputV1) -> Result<text, text>:
+    val current = controller_storage_owner_check_v3(journal)?
+    if journal.windows_store.is_none(): return controller_desired_source_read_v1(journal.root, input)
+    val checked = controller_desired_input_encode_v1(input)?
+    val source = distributed_operation_journal_read_required_v3(journal,
+        "desired-input-objects/" + input.source_digest + ".sdn", 1048576)?
+    val matches = controller_desired_input_matches_v1(input, source)?
+    Ok(source)
+
+pub fn controller_desired_objects_read_owned_v3(journal: DistributedOperationJournalV2,
+        operation: OperationEnvelopeV2, controller_id: text) -> Result<ControllerDesiredObjectsV1, text>:
+    val current = controller_storage_owner_check_v3(journal)?
+    if journal.windows_store.is_none(): return controller_desired_objects_read_v1(journal.root, operation, controller_id)
+    if ((operation.operation != "controller_desired_input_v1" and operation.operation != "controller_desired_cancel_v1") or
+            operation.host_id != controller_id): return Err("desired-input-controller-mismatch")
+    val encoded = distributed_encode_operation_v2(operation)?
+    val bytes = distributed_operation_journal_read_required_v3(journal,
+        "desired-input-objects/" + operation.payload_digest + ".sdn", 8192)?
+    if sha256_text(bytes) != operation.payload_digest: return Err("desired-input-manifest-mismatch")
+    val input = controller_desired_input_decode_v1(bytes)?
+    if input.controller_id != controller_id: return Err("desired-input-controller-mismatch")
+    var expected = controller_desired_operation_v1(input)?
+    if operation.operation == "controller_desired_cancel_v1": expected = controller_desired_cancel_operation_v1(input)?
+    if distributed_encode_operation_v2(expected)? != encoded: return Err("desired-input-envelope-mismatch")
+    val source = controller_desired_source_read_owned_v3(journal, input)?
+    Ok(ControllerDesiredObjectsV1(input: input, source: source))
+
+# Shared leaf guard before any Linux compatibility delegation. The indexed
+# query validates the actual retained lease/WAL; a found row grants nothing.
+pub fn controller_storage_owner_check_v3(journal: DistributedOperationJournalV2) -> Result<bool, text>:
+    match distributed_operation_journal_lookup_v2(journal, "controller-storage-owner-check"):
+        case Ok(_): Ok(true)
+        case Err(reason):
+            if reason != "OPERATION_NOT_FOUND": return Err(reason)
+            Ok(true)
