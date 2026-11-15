@@ -5152,6 +5152,22 @@ impl MirLowering:
                         match struct_nil_type.kind:
                             case MirTypeKind.Struct(_): nil_check_operand = struct_nil_local
                             case _: ()
+                # The built-in `None` VALUE (NamedVar arm, option_none_locals)
+                # against a record operand is the same presence test. Without
+                # this it reached the struct `==` dispatch below as a peer
+                # record: lower_struct_structural_eq compared `m.name` with
+                # field@8 of the None enum handle through rt_text_eq_any
+                # (stage-2 native class B, `if provider == None`). Option-typed
+                # and type-parameter operands keep their existing arms.
+                if nil_check_operand.id < 0 and op_is_eq_or_neq and not left_is_nil_lit and not right_is_nil_lit:
+                    val left_is_none_value = self.option_none_locals.contains(left_local.id)
+                    val right_is_none_value = self.option_none_locals.contains(right_local.id)
+                    if left_is_none_value != right_is_none_value:
+                        val record_expr = if right_is_none_value: left else: right
+                        val record_local = if right_is_none_value: left_local else: right_local
+                        if not self.local_is_type_param_value(record_local):
+                            if self.nil_compare_operand_is_struct(record_local) or self.binary_struct_owner(record_expr, record_local, "") != "":
+                                nil_check_operand = record_local
                 if nil_check_operand.id >= 0:
                     val nil_check_func_name = match op:
                         case Eq: "rt_is_none"
