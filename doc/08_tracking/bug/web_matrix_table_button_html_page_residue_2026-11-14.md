@@ -398,3 +398,18 @@ max-content of mixed inline content, control UA font reset, `h6` margins
   (wider wins, then style, then cell over row over table) is applied only by
   `simple_web_resolve_collapsed_table_borders` for one-row, two-cell
   tables. Rowspan/colspan collapsed tables are the item above.
+- **Flex-wrap line stretch fixed (2026-11-15, residue lane).** Items on a
+  wrapped flex line now take the line's cross size (auto-height stretch) or
+  align `end`/`center` inside it, and a line starts below the real items of
+  the previous one (`flex_wrap_line_stretch_chrome159_spec.spl`, red 0/3 ->
+  3/3). Matrix 102 -> 95 cells; 21 `cc-fx-fw-wrap-*` ids left the baseline.
+  Still open: `wrap-reverse` alignment inside a line, baseline alignment on
+  wrapped lines.
+- **Open (measured 2026-11-15, base 5bc8747b394, full Chrome 159):** abspos
+  `top`/`bottom` are measured from the DOM parent, not the nearest
+  positioned ancestor (`tc-{span,li,img,button}-abs-rb`: Chrome y 111, Simple
+  -29; `tc-li-abs-lt`: Chrome 5, Simple 21), and an abspos box's own vertical
+  margins are dropped (`tc-p-abs-lt` Chrome 21 = top 5 + margin 16, Simple 5).
+  `justify-content: space-evenly` floors its start offset (third item 211 vs
+  Chrome 212.5). `width: max-content | min-content` is not parsed
+  (`cc-ws-*-maxc/-minc`, Chrome 163 / 18 / 98, Simple 400).

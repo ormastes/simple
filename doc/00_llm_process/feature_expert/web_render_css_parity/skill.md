@@ -1883,3 +1883,35 @@ never cache an answer computed while exhausted) —
 - Draw IR advances are applied only when they sum to the command width;
   otherwise the run silently paints with the font's own advances. A test of
   "advances applied" must set the width to the sum (see the `7,7` row).
+
+## 2026-11-15 — wrapped flex lines size their items; the headless shell is not the oracle
+
+- **Trap — the gates must run FULL Chrome.** With no `CHROME_BIN`, the
+  harvester (`check-chrome-layout-geometry-diff.shs --print-chrome`) prefers
+  the Playwright headless shell, which resolves `monospace` to DejaVu Sans
+  Mono through fontconfig: every `<code>` line box is 1px shorter and the
+  matrix reports 28 NEW ids (127 cells) at an untouched base. Full Chrome
+  (`CHROME_BIN=$HOME/.cache/ms-playwright/chromium-1255/chrome-linux-arm64/chrome
+  CHROME_NO_SANDBOX=1`) gives the recorded 102. Never baseline those ids;
+  cross-check any hand measurement of text from the headless shell.
+- **Fonts on both sides (audit).** Simple's Linux face set is Liberation
+  Sans / Serif / Mono (`browser_host_has_measured_linux_face_set`). Chrome is
+  not handed that file: it resolves the generics through fontconfig to its
+  Arial / Times New Roman / Courier New defaults, which this host aliases to
+  the same Liberation files -- same face by host configuration only. The
+  catalog uses 16px / 24px text and no `@font-face`; no fixture enlarges
+  text to hide a mismatch. High-DPI comparison (owner rule: >= 300 dpi or a
+  shared 1px bitmap font) is blocked on a device scale the renderer does not
+  have: `doc/08_tracking/bug/web_render_no_device_scale_hidpi_gate_2026-11-15.md`.
+- **Wrapped lines align their items.** The wrap branch placed each line at
+  its align-content-stretched offset but laid every item out at content
+  height. After the line loop, each in-flow item is aligned inside its line
+  (CSS Flexbox 9.4 step 11): an auto-height `stretch` item (not replaced,
+  no max-height, no auto cross margin) grows to the line's cross size, an
+  `end`/`flex-end`/`center` item moves down by the free space
+  (`offset_layout_subtree`). The line cross size is the larger of the
+  stretched estimate and the tallest real item, and the next line starts
+  below the REAL items (`line_heights` estimates an auto-height item as one
+  line box, so `aa<br>bb` used to overlap the next line). `wrap-reverse`
+  keeps the old placement. Matrix 102 -> 95 cells (21 `cc-fx-fw-wrap-*`
+  ids). Spec: `flex_wrap_line_stretch_chrome159_spec.spl`.
