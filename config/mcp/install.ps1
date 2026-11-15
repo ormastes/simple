@@ -12,6 +12,32 @@ $dst = Join-Path $projectRoot ".mcp.json"
 Copy-Item -LiteralPath $src -Destination $dst -Force
 Write-Host "Installed Windows .mcp.json"
 
+# Antigravity CLI (agy): its MCP config (~/.gemini/config/mcp_config.json) is
+# user-global with no project cwd, so register absolute backslash .cmd paths
+# (the cmd.exe-safe spelling, see win/.mcp.json).
+$agy = Get-Command agy -ErrorAction SilentlyContinue
+if ($null -eq $agy) {
+    Write-Host "Antigravity CLI (agy) not found, skipping agy MCP setup"
+} else {
+    $agyServers = @(
+        @{ Name = "simple-mcp"; Wrapper = "simple_mcp_server.cmd" },
+        @{ Name = "simple-lsp-mcp"; Wrapper = "simple_lsp_mcp_server.cmd" },
+        @{ Name = "t32-mcp"; Wrapper = "t32_mcp_server.cmd" },
+        @{ Name = "t32-lsp-mcp"; Wrapper = "t32_lsp_mcp_server.cmd" }
+    )
+    foreach ($server in $agyServers) {
+        $cmd = Join-Path $projectRoot ("bin\" + $server.Wrapper)
+        if (-not (Test-Path -LiteralPath $cmd)) {
+            Write-Host ("Warning: {0} not found, skipping agy {1}" -f $cmd, $server.Name)
+            continue
+        }
+        & agy mcp add -e "SIMPLE_LOG=error" -e "RUST_LOG=error" `
+            -e "SIMPLE_EXECUTION_MODE=interpreter" $server.Name $cmd
+    }
+    & agy mcp add spipe node (Join-Path $projectRoot ".spipe\spipe\mcp\server.js")
+    Write-Host "Installed Antigravity (agy) MCP servers"
+}
+
 if ($SkipCodex) {
     Write-Host "Skipped Codex MCP setup"
     exit 0
