@@ -1,6 +1,6 @@
 # Selected-child requester regressions
 
-Status: fourteen authored executable cases; UNRUN. RED/GREEN execution is blocked by
+Status: sixteen authored executable cases; UNRUN. RED/GREEN execution is blocked by
 the absence of an admitted general pure-Simple SSpec runner. The frozen policy
 fixtures are injected test inputs, not evidence of driver/frontend authentication.
 
@@ -28,3 +28,8 @@ retain the required success expectation and are KNOWN UNSUPPORTED on this source
 valid imported public aliases, valid generic defaults, and sibling facade export
 without a selected public implementation-child receipt. A future run is expected
 to expose these gaps; this suite is not currently claimed green or complete.
+
+The follow-up same-file alias producer addresses the preserved public-alias
+positive oracle. Two added cases reject an explicit-private selected alias
+target and a corrupted proof, and check module-reset cleanup. All remain UNRUN.
+The valid-default and sibling-facade positive cases are still known unsupported.

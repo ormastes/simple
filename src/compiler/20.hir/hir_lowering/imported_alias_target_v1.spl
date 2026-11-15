@@ -1,0 +1,61 @@
+# Proof of the existing same-surface, non-generic alias registration branch.
+# A parser target name alone cannot produce this receipt: the actual registered
+# binding and qualified target SymbolId must agree at the selection owner.
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName, module_surface_declaration_authority_lookup_typed_v1}
+use compiler.hir.hir_lowering._Items.module_import_resolution.*
+
+pub struct ImportedAliasTargetSelectionV1:
+    source_surface: i64
+    alias_name: text
+    alias_projection: text
+    source_sha256: text
+    target_name: text
+    target_category: text
+    target_projection: text
+    generation: i64
+    configured_generation: text
+    snapshot_id: text
+
+impl HirLowering:
+    me record_imported_alias_target_v1(source_index: i64, alias_name: text,
+            target_name: text, target_category: text, local_name: text, target_symbol: i64):
+        if target_symbol < 0 or self.import_binding_or_invalid(local_name).id != target_symbol: return
+        if source_index < 0 or source_index >= self.module_surfaces.surfaces.len(): return
+        # A same-file non-alias nominal was actually selected by registration.
+        # Generic template dependencies remain a separate proof obligation.
+        if not ["class", "struct", "enum", "trait", "bitfield"].contains(target_category): return
+        val source = self.module_surfaces.surfaces[source_index]
+        val alias = module_surface_declaration_authority_lookup_typed_v1(source.declaration_authority_index, alias_name, "type_alias")
+        val target = module_surface_declaration_authority_lookup_typed_v1(source.declaration_authority_index, target_name, target_category)
+        if not alias.found or not target.found or alias.source_path != source.canonical_path or target.source_path != source.canonical_path: return
+        self.imported_alias_targets_v1.push(ImportedAliasTargetSelectionV1(
+            source_surface: source_index, alias_name: alias_name, alias_projection: alias.projection_key,
+            source_sha256: source.source_sha256_v1, target_name: target_name, target_category: target_category,
+            target_projection: target.projection_key, generation: self.module_surfaces.generation,
+            configured_generation: self.module_surfaces.configured_route_generation_v1,
+            snapshot_id: source.visibility_manifest_evidence_v1.snapshot_id))
+
+pub fn imported_alias_target_row_v1(registry: ModuleSurfacesByName,
+        proofs: [ImportedAliasTargetSelectionV1], source_index: i64, alias_name: text) -> i64:
+    if source_index < 0 or source_index >= registry.surfaces.len(): return -1
+    val source = registry.surfaces[source_index]
+    var row = proofs.len() - 1
+    while row >= 0:
+        val proof: ImportedAliasTargetSelectionV1 = proofs[row]
+        if proof.source_surface == source_index and proof.alias_name == alias_name:
+            if proof.target_name == alias_name or not ["class", "struct", "enum", "trait", "bitfield"].contains(proof.target_category): return -1
+            if (not registry.frozen or proof.generation != registry.generation or
+                    proof.configured_generation != registry.configured_route_generation_v1 or
+                    proof.source_sha256 == "" or proof.source_sha256 != source.source_sha256_v1 or
+                    proof.snapshot_id == "" or proof.snapshot_id != source.visibility_manifest_evidence_v1.snapshot_id): return -1
+            val alias = module_surface_declaration_authority_lookup_typed_v1(source.declaration_authority_index, alias_name, "type_alias")
+            val target = module_surface_declaration_authority_lookup_typed_v1(source.declaration_authority_index, proof.target_name, proof.target_category)
+            if (not alias.found or not target.found or alias.projection_key != proof.alias_projection or
+                    target.projection_key != proof.target_projection or alias.source_path != source.canonical_path or
+                    target.source_path != source.canonical_path): return -1
+            return row
+        row = row - 1
+    -1
+
+export ImportedAliasTargetSelectionV1, imported_alias_target_row_v1

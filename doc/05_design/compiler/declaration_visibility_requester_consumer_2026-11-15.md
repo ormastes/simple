@@ -58,7 +58,7 @@ general runner. Do not publish or call this full visibility qualification.
 
 ## Safety repair and incomplete positive requirements
 
-Imported aliases and generic default/bound dependencies do not yet retain their
+Complex imported aliases and generic default/bound dependencies do not yet retain their
 actual declaration-owner binding selections. The outer consumer now reports
 `alias-route-closure-unavailable` or `generic-route-closure-unavailable` before
 owner-switch elaboration can skip checks. This is missing capability, not a
@@ -74,3 +74,20 @@ authenticated direct-folder/sibling import selection receipt from the configured
 resolver. Parser spelling, matching physical target or matching folder alone
 cannot mint that authority. Their traversal must join actual typed predecessor
 edges and the same snapshot/configuration/generation before permitting access.
+
+## Actual same-file alias selection producer
+
+The existing bare nongeneric alias registration branch already registers a
+non-alias target declared by the same surface and obtains its actual qualified
+SymbolId. It now captures the returned target category only when that SymbolId
+is exactly the binding installed for the source import. The module-local proof
+retains alias/target declaration projections, source SHA, snapshot and both
+registry generations. The requester joins those exact facts before accepting
+the alias, rejects explicit-private targets, and recursively checks whether the
+nominal target still requires unproved generic defaults or bounds. No parser
+name-only scan manufactures the selected dependency. Module reset drops proofs.
+
+The preexisting positive public `Alias = Target` requirement is now intended
+supported by this source path (runtime remains UNRUN). General alias templates,
+valid generic defaults/bounds and authenticated sibling import provenance remain
+unfinished. The two corresponding positive success oracles remain unsupported.

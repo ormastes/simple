@@ -35,3 +35,10 @@ binding. Added two negative regressions and preserved three legal positive
 requirements with success oracles. Those positive cases are known unsupported,
 so this checkpoint is neither a green suite nor feature completion. The next
 required proof producers are specified in the consumer design document.
+
+Follow-up implementation adds actual same-source bare-alias proof at the existing
+registration branch, after selected target category and qualified SymbolId agree.
+The earlier valid-public-alias success oracle is retained and now intended
+supported. Two new regressions cover explicit-private target rejection and stale
+projection/reset handling. Sixteen consumer cases remain UNRUN; the valid
+generic-default and sibling-facade success requirements remain unsupported.
