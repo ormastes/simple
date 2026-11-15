@@ -512,13 +512,17 @@ pub fn expr_attr_apply_config(spec: text) -> Result<bool, text>:
     if op_mode != 0 and not expr_attr_i64_round_trips(expr_attr_placement_of(op_mode)):
         expr_attr_self_check_failed(op_mode)
         op_mode = 0
-    expr_attr_op_mode[0] = op_mode
-    expr_attr_int_route[0] = if op_mode != 0 or expr_attr_count_on[0] != 0: 1 else: 0
+    # Store first, then mode + route: a failed store must never leave mode != 0
+    # with an empty store list (next [0] access would be out of bounds).
+    expr_attr_op_mode[0] = 0
+    expr_attr_int_route[0] = expr_attr_count_on[0]
     expr_attr_op_stores.clear()
     if op_mode != 0:
         match attr_store_detached_v1("op", expr_attr_placement_of(op_mode)):
             case Ok(store): expr_attr_op_stores.push(store)
             case Err(e): return Err(e)
+        expr_attr_op_mode[0] = op_mode
+        expr_attr_int_route[0] = 1
     if extra_mode != 0 and not expr_attr_i64_round_trips(expr_attr_placement_of(extra_mode)):
         expr_attr_self_check_failed(extra_mode)
         extra_mode = 0
@@ -763,7 +767,11 @@ fn expr_i_val_load(values: [i64]):
     expr_attr_op_stores.clear()
     match attr_store_detached_v1("op", expr_attr_placement_of(expr_attr_op_mode[0])):
         case Ok(store): expr_attr_op_stores.push(store)
-        case Err(_): pass
+        case Err(_):
+            # values is dense (op included), so falling back to direct is lossless.
+            expr_attr_op_mode[0] = 0
+            expr_attr_int_route[0] = expr_attr_count_on[0]
+            return
     var i = 0
     while i < values.len():
         if expr_is_op_tag(i):
