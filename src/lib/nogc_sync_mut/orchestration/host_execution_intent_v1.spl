@@ -14,6 +14,8 @@ use std.common.string_core.str_len
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_exists, file_fsync, directory_fsync}
 use std.nogc_sync_mut.io_runtime.dir_create
 use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, distributed_operation_journal_read_required_v3}
+use std.nogc_sync_mut.orchestration.host_execution_archive_v3.{host_execution_archive_relative_v3, host_execution_archive_publish_v3}
 
 pub fn host_execution_intent_encode_v1(value: RuntimeIntentV1) -> Result<text, text>:
     if (not builder_identifier_valid_v1(value.operation_id) or not builder_identifier_valid_v1(value.node_boot_id) or
@@ -83,3 +85,16 @@ pub fn host_execution_intent_store_v1(root: text, value: RuntimeIntentV1) -> Res
         return Err("host-execution-intent-readback-mismatch")
     if not file_fsync(path) or not directory_fsync(directory) or not directory_fsync(root): return Err("host-execution-intent-sync-failed")
     Ok(path)
+
+pub fn host_execution_intent_load_owned_v3(journal: DistributedOperationJournalV2,
+        operation_id: text) -> Result<RuntimeIntentV1, text>:
+    val relative = host_execution_archive_relative_v3("host-execution-intents", operation_id)?
+    val value = host_execution_intent_decode_v1(distributed_operation_journal_read_required_v3(journal, relative, 16384)?)?
+    if value.operation_id != operation_id: return Err("host-execution-intent-operation-mismatch")
+    Ok(value)
+
+pub fn host_execution_intent_store_owned_v3(journal: DistributedOperationJournalV2,
+        value: RuntimeIntentV1) -> Result<text, text>:
+    if journal.windows_store.is_none(): return host_execution_intent_store_v1(journal.root, value)
+    host_execution_archive_publish_v3(journal, "host-execution-intents", value.operation_id,
+        host_execution_intent_encode_v1(value)?, 16384)

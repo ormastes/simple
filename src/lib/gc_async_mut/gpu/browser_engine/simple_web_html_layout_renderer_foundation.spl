@@ -721,6 +721,10 @@ class HNode:
     attrs_raw: text    # raw tag inner text for attribute selectors
     parent: i64        # index of parent in the arena (-1 for root)
     is_details_summary: bool # first direct summary owned by details
+    # Raw source of whitespace-only text after an element ("" otherwise).
+    # Where the computed white-space keeps newlines each "\n" in it is a
+    # forced break (`html_kept_newlines`); `text_data` keeps its spaces.
+    ws_raw: text = ""
 
 class HtmlChildIndex:
     first_child: [i32]
@@ -1313,6 +1317,38 @@ fn _parse_html_with_node_limit(html: text, requested_node_limit: i32) -> [HNode]
         html, requested_node_limit, SIMPLE_WEB_MAX_HTML_BYTES
     )
 
+# True when `parent` is or sits inside an element the UA stylesheet makes
+# preformatted (`pre`, `textarea`, `listing`, `plaintext`).
+fn _html_in_preformatted(nodes: [HNode], parent: i32) -> bool:
+    var p = parent
+    while p >= 0:
+        val tag = nodes[p].tag
+        if tag == "pre" or tag == "textarea" or tag == "listing" or tag == "plaintext":
+            return true
+        p = nodes[p].parent
+    false
+
+# The spaces of whitespace-only text after an element: one per space or tab
+# in the source, at least one (a newline alone is one space).
+fn _html_ws_spaces(raw: text) -> text:
+    var out = ""
+    for ch in raw.chars():
+        if ch == " " or ch == "\t":
+            out = out + " "
+    if out == "": " " else: out
+
+# Forced breaks a whitespace-only text node makes: its newline count where
+# the computed white-space keeps newlines (`Style.white_space_newline`),
+# else 0.
+fn html_kept_newlines(node: HNode, keeps_newlines: bool) -> i32:
+    if not keeps_newlines or node.ws_raw == "" or node.text_trimmed != "":
+        return 0
+    var n = 0
+    for ch in node.ws_raw.chars():
+        if ch == "\n":
+            n = n + 1
+    n
+
 fn _parse_html_with_limits(
     html: text, requested_node_limit: i32, requested_byte_limit: i64
 ) -> [HNode]:
@@ -1336,6 +1372,9 @@ fn _parse_html_with_limits(
     var flat_to_hnode: [i32] = [-1; projected.nodes.len()]
     var skip_subtree: [bool] = [false; projected.nodes.len()]
     var details_has_summary: [bool] = [false; node_limit]
+    # Tag of the latest child of each flat parent, so whitespace after an
+    # element is kept for the cascade to judge.
+    var prev_child_tag: [text] = [""; projected.nodes.len()]
     var nodes: [HNode] = []
     var i = 0
     while i < projected.nodes.len() and nodes.len() < node_limit:
@@ -1356,21 +1395,39 @@ fn _parse_html_with_limits(
             -1
         else:
             flat_to_hnode[flat.parent]
+        val prev_child_tag_before = if flat.parent >= 0: prev_child_tag[flat.parent] else: ""
+        if flat.parent >= 0:
+            prev_child_tag[flat.parent] = flat.tag
         if flat.tag == "#text":
             val trimmed = flat.text_data.trim()
-            if trimmed.len() > 0 or flat.text_data == " ":
+            # Whitespace after an element is kept as one collapsible space:
+            # between inline-level boxes it is one (`<canvas></canvas>\n<svg>`
+            # puts 4.45px between them in Chrome). Whether it renders at all
+            # depends on computed display, so compute_styles hides it beside
+            # block-level boxes and inside flex/grid/table containers. A
+            # newline in it is remembered (`ws_raw`): where the computed
+            # white-space keeps newlines the layout breaks the line there.
+            # Only a lone " " survived here before.
+            val after_element = trimmed.len() == 0 and prev_child_tag_before != "" and prev_child_tag_before != "#text"
+            # Inside a preformatted element the spaces keep their count
+            # (`<pre><b>a</b>  <b>b</b>` is a two-space gap); elsewhere the
+            # layout would not collapse them, so one space is stored.
+            val text_data = if not after_element: flat.text_data elif _html_in_preformatted(nodes, parent): _html_ws_spaces(flat.text_data) else: " "
+            if trimmed.len() > 0 or after_element or text_data == " ":
                 if (nodes.len() > 0 and nodes[nodes.len() - 1].tag == "#text" and
                     nodes[nodes.len() - 1].parent == parent):
                     val previous_index = nodes.len() - 1
                     var previous = nodes[previous_index]
-                    previous.text_data = previous.text_data + flat.text_data
+                    previous.text_data = previous.text_data + text_data
                     previous.text_trimmed = previous.text_data.trim()
                     nodes[previous_index] = previous
                     flat_to_hnode[i] = previous_index
                 else:
                     var text_node = mk_node("#text", parent)
-                    text_node.text_data = flat.text_data
+                    text_node.text_data = text_data
                     text_node.text_trimmed = trimmed
+                    if after_element:
+                        text_node.ws_raw = flat.text_data
                     flat_to_hnode[i] = nodes.len() as i32
                     nodes.push(text_node)
         else:
@@ -1542,6 +1599,10 @@ fn parse_color(raw: text) -> u32:
             val g = hex_val(s.substring(3, 4)) * 16 + hex_val(s.substring(4, 5))
             val b = hex_val(s.substring(5, 6)) * 16 + hex_val(s.substring(6, 7))
             val a = hex_val(s.substring(7, 8)) * 16 + hex_val(s.substring(8, 9))
+            if a == 0:
+                # Fully transparent (`#0000`, `#ff000000`): 0, the value every
+                # painter skips. Packed as-is its alpha byte of 0 read as opaque.
+                return 0u32
             return (a.to_u32() << 24) | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
         if h_len >= 6:
             val r = hex_val(s.substring(1, 2)) * 16 + hex_val(s.substring(2, 3))
@@ -1553,6 +1614,8 @@ fn parse_color(raw: text) -> u32:
             val g = hex_val(s.substring(2, 3)) * 17
             val b = hex_val(s.substring(3, 4)) * 17
             val a = hex_val(s.substring(4, 5)) * 17
+            if a == 0:
+                return 0u32
             return (a.to_u32() << 24) | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
         if h_len == 3:
             val r = hex_val(s.substring(1, 2)) * 17
@@ -1593,6 +1656,11 @@ fn parse_color_any(raw: text) -> u32:
     val direct = parse_color(raw)
     if direct != 0u32:
         return direct
+    # The colour token of a shorthand (`4px solid blue`): a named colour was
+    # never found here, so `border:1px solid black` painted no border.
+    val tok = _shorthand_color_token(raw)
+    if tok != 0u32:
+        return tok
     val lower = raw.lower()
     # The first colour function inside a shorthand (`4px solid hsl(...)`):
     # rgb()/rgba() and hsl()/hsla() alike.
@@ -1609,6 +1677,56 @@ fn parse_color_any(raw: text) -> u32:
     if hash >= 0:
         return parse_color(raw.substring(hash, raw.byte_len()))
     0u32
+
+# First top-level token of a shorthand that parses as a colour; a length
+# (`4px`, `0`) is skipped, since the delegate would read its digits as one.
+fn _shorthand_color_token(raw: text) -> u32:
+    for tok in _decl_top_level_tokens(raw):
+        if not "0123456789.-+".contains(tok.substring(0, 1)):
+            val c = parse_color(tok)
+            if c != 0u32:
+                return c
+    0u32
+
+pub fn _color_alpha_zero(raw: text) -> bool:
+    if val rgba = parse_color_value_checked(raw.trim().lower()):
+        return (rgba & 0xFFu32) == 0u32
+    false
+
+pub fn _decl_transparent_color(raw: text) -> bool:
+    """True when a colour value, or the colour token of a border/outline
+    shorthand, is fully transparent (`transparent`, `rgba(0,0,0,0)`,
+    `#0000`). The colour parsers answer 0 for it -- the same 0 as "no colour
+    in this value" -- so an applier asks this to tell "set to transparent"
+    from "unset" and override the earlier colour, as Chrome does."""
+    for tok in _decl_top_level_tokens(raw):
+        # A length (`20px`, `0`) is never a colour; the delegate would read
+        # its digits as one.
+        if not "0123456789.-+".contains(tok.substring(0, 1)) and _color_alpha_zero(tok):
+            return true
+    false
+
+# Whitespace-separated tokens of a value, a function (`rgb(0 0 0 / 0)`)
+# kept whole.
+pub fn _decl_top_level_tokens(raw: text) -> [text]:
+    var out: [text] = []
+    val s = raw.trim()
+    val n = s.byte_len()
+    var depth = 0
+    var start = 0
+    var i = 0
+    while i <= n:
+        val ch = if i < n: s.substring(i, i + 1) else: " "
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+        elif depth == 0 and (ch == " " or ch == "\t" or ch == "\n"):
+            if i > start:
+                out.push(s.substring(start, i))
+            start = i + 1
+        i = i + 1
+    out
 
 # "0.09", ".5", "1" -> 0..255 alpha
 fn parse_alpha_fraction_range(s: text, start: i32, end: i32) -> i32:
@@ -2980,7 +3098,14 @@ fn _decl_table_build_inner(decls: text) -> [text]:
         val empty: [text] = []
         return empty
     # Preallocated + indexed store: `.push` in a loop clones the array (O(N^2)).
-    var tbl: [text] = [""; n * 2]
+    # A border/outline shorthand also stores up to 12 longhands (below); the
+    # table is cut to the used length at the end, so the lookups that scan it
+    # whole never see the spare slots.
+    val per_decl = if text_index_of(decls, "border") >= 0 or text_index_of(decls, "outline") >= 0: 26 else: 2
+    # `outline` is dispatch-handled alone; its longhands (not dispatch props)
+    # are only needed when an outline longhand can be overridden.
+    val expand_outline = text_index_of(decls, "outline-") >= 0
+    var tbl: [text] = [""; n * per_decl]
     var pos = 0
     var idx = 0
     val decls_len = decls.byte_len()
@@ -2991,14 +3116,207 @@ fn _decl_table_build_inner(decls: text) -> [text]:
         if colon >= 0 and colon < end:
             val prop = decls.substring(pos, colon).trim().lower()
             val value = decls.substring(colon + 1, end).trim()
-            if not _decl_invalid_color_function(prop, value):
-                tbl[idx] = prop
-                tbl[idx + 1] = value
-                idx = idx + 2
+            var longhands: [text] = []
+            if prop != "outline" or expand_outline:
+                longhands = _border_shorthand_longhands(prop, value)
+            if not _decl_invalid_color_function(prop, value) and not (longhands.len() == 1 and longhands[0] == "!"):
+                # A logical property that expanded is stored as its physical
+                # longhands only, so its fixed-order applier cannot re-apply
+                # it over a later physical declaration.
+                if longhands.len() == 0 or not _border_logical_prop(prop):
+                    tbl[idx] = prop
+                    tbl[idx + 1] = value
+                    idx = idx + 2
+                # The shorthand's longhands at its own source position, so the
+                # last-wins lookup of a longhand sees a shorthand authored
+                # after it (`border-top-color:red;border-color:blue` -> blue).
+                for item in longhands:
+                    tbl[idx] = item
+                    idx = idx + 1
         if semi < 0:
             break
         pos = semi + 1
-    tbl
+    if idx == tbl.len():
+        return tbl
+    var used: [text] = [""; idx]
+    var k = 0
+    while k < idx:
+        used[k] = tbl[k]
+        k = k + 1
+    used
+
+fn _border_logical_prop(prop: text) -> bool:
+    prop.starts_with("border-block") or prop.starts_with("border-inline")
+
+# Physical sides of a logical border property name (horizontal-tb, ltr --
+# the mapping the logical appliers use), or [] when it is not one.
+fn _border_logical_sides(name: text) -> [text]:
+    if name == "border-block": return ["top", "bottom"]
+    if name == "border-block-start": return ["top"]
+    if name == "border-block-end": return ["bottom"]
+    if name == "border-inline": return ["left", "right"]
+    if name == "border-inline-start": return ["left"]
+    if name == "border-inline-end": return ["right"]
+    []
+
+fn _border_kind_ok(kind: text, tok: text) -> bool:
+    if kind == "color": return _border_color_token(tok)
+    if kind == "width": return _border_width_token(tok)
+    css_border_style_token(tok) != ""
+
+# `thin`/`medium`/`thick` as the px the width appliers parse (Chrome 159:
+# 1, 3, 5).
+fn _border_width_px(tok: text) -> text:
+    val t = tok.lower()
+    if t == "thin": return "1px"
+    if t == "medium": return "3px"
+    if t == "thick": return "5px"
+    tok
+
+# The physical side longhands a border (or outline) property sets, as flat
+# (property, value) pairs. ["!"] marks a declaration CSS drops whole: a
+# `border-color` with a token that is not a colour or more than four values,
+# so the earlier value stays. A shorthand also resets the parts it omits
+# (width medium, style none, color currentcolor). A value with `var()`, or
+# a width/style list the appliers must judge, is left to the appliers.
+fn _border_shorthand_longhands(prop: text, value: text) -> [text]:
+    var out: [text] = []
+    if text_index_of(value, "var(") >= 0:
+        return out
+    val toks = _decl_top_level_tokens(value)
+    if prop == "outline":
+        return _border_parts_longhands(toks, ["outline"])
+    if not prop.starts_with("border"):
+        return out
+    val sides = ["top", "right", "bottom", "left"]
+    if prop == "border-color" or prop == "border-width" or prop == "border-style":
+        val n = toks.len()
+        val kind = prop.substring(7, prop.byte_len())
+        if n < 1 or n > 4:
+            if kind == "color" and n > 4:
+                return ["!"]
+            return out
+        var k = 0
+        while k < n:
+            if not _border_kind_ok(kind, toks[k]):
+                if kind == "color":
+                    return ["!"]
+                return out
+            k = k + 1
+        val r_tok = if n >= 2: toks[1] else: toks[0]
+        val b_tok = if n >= 3: toks[2] else: toks[0]
+        val l_tok = if n >= 4: toks[3] else: r_tok
+        val per_side = [toks[0], r_tok, b_tok, l_tok]
+        var s = 0
+        while s < 4:
+            val v = if kind == "width": _border_width_px(per_side[s]) else: per_side[s]
+            out.push("border-" + sides[s] + "-" + kind)
+            out.push(v)
+            s = s + 1
+        return out
+    # Logical longhands: `border-inline-start-color` -> `border-left-color`;
+    # `border-block-width: 1px 2px` -> top 1px, bottom 2px.
+    for kind in ["width", "style", "color"]:
+        val suffix = "-" + kind
+        if prop.ends_with(suffix) and _border_logical_prop(prop):
+            val lsides = _border_logical_sides(prop.substring(0, prop.byte_len() - suffix.byte_len()))
+            if lsides.len() == 0 or toks.len() < 1 or toks.len() > lsides.len():
+                return out
+            for tok in toks:
+                if not _border_kind_ok(kind, tok):
+                    if kind == "color":
+                        return ["!"]
+                    return out
+            var si = 0
+            while si < lsides.len():
+                val tok = if si < toks.len(): toks[si] else: toks[0]
+                val v = if kind == "width": _border_width_px(tok) else: tok
+                out.push("border-" + lsides[si] + "-" + kind)
+                out.push(v)
+                si = si + 1
+            return out
+    var targets: [text] = []
+    if prop == "border":
+        targets = sides
+    elif prop == "border-top" or prop == "border-right" or prop == "border-bottom" or prop == "border-left":
+        targets = [prop.substring(7, prop.byte_len())]
+    else:
+        targets = _border_logical_sides(prop)
+    if targets.len() == 0:
+        return out
+    var names: [text] = []
+    for side in targets:
+        names.push("border-" + side)
+    _border_parts_longhands(toks, names)
+
+# Longhands `<name>-width/-style/-color` for every name in `names` from a
+# width/style/color shorthand value; a part it omits is reset to its
+# initial value. A token of no kind, a kind given twice or a CSS-wide
+# keyword leaves it unexpanded, so the appliers keep their old reading.
+fn _border_parts_longhands(toks: [text], names: [text]) -> [text]:
+    var out: [text] = []
+    for tok in toks:
+        val t = tok.lower()
+        if t == "inherit" or t == "initial" or t == "unset" or t == "revert":
+            return out
+    var width = ""
+    var style = ""
+    var color = ""
+    for tok in toks:
+        if _border_width_token(tok) and width == "":
+            width = _border_width_px(tok)
+        elif (css_border_style_token(tok) != "" or (tok.lower() == "auto" and names[0] == "outline")) and style == "":
+            style = tok
+        elif _border_color_token(tok) and color == "":
+            color = tok
+        else:
+            return out
+    if width == "":
+        width = "3px"
+    if style == "":
+        style = "none"
+    if color == "":
+        color = "currentcolor"
+    for name in names:
+        out.push(name + "-width")
+        out.push(width)
+        out.push(name + "-style")
+        out.push(style)
+        out.push(name + "-color")
+        out.push(color)
+    out
+
+# Painted width of an `outline` shorthand (Chrome 159): an omitted width is
+# medium (3px); an omitted, `none` or `hidden` style paints nothing; `auto`
+# paints the focus ring, modelled as its 1px outer column.
+fn outline_shorthand_paint_width_px(raw: text) -> i32:
+    var width = -1
+    var styled = false
+    var auto_style = false
+    for tok in _decl_top_level_tokens(raw.trim().lower()):
+        if tok == "auto":
+            auto_style = true
+        elif css_border_style_token(tok) != "":
+            if border_style_disables_paint(tok):
+                return 0
+            styled = true
+        elif width < 0 and _border_width_token(tok):
+            width = parse_int(_border_width_px(tok))
+    if width == 0 or (not styled and not auto_style):
+        return 0
+    if auto_style and not styled:
+        return 1
+    if width < 0: 3 else: width
+
+fn _border_width_token(tok: text) -> bool:
+    val t = tok.lower()
+    t == "thin" or t == "medium" or t == "thick" or "0123456789.".contains(tok.substring(0, 1))
+
+fn _border_color_token(tok: text) -> bool:
+    val t = tok.lower()
+    if t == "currentcolor" or t == "inherit" or t == "initial" or t == "unset" or t == "revert":
+        return true
+    not _border_width_token(tok) and (parse_color(tok) != 0u32 or _decl_transparent_color(tok))
 
 # A colour property whose value holds a malformed rgb()/rgba()/hsl()/hsla()
 # is an invalid declaration: CSS drops it whole, so the earlier (or
@@ -3147,26 +3465,6 @@ fn decl_tbl_last_index(tbl: [text], prop: text) -> i32:
             return i / 2
         i = i - 2
     -1
-
-# `transition` (and its longhands) can appear more than once with a blank or
-# otherwise unusable value from an earlier reset rule; unlike `decl_tbl_get`,
-# these skip blank entries so the cascade lands on the last entry that
-# actually carries a value.
-fn decl_tbl_last_valid_transition_index(tbl: [text], prop: text) -> i32:
-    var i = (tbl.len() as i32) - 2
-    while i >= 0:
-        if tbl[i] == prop and tbl[i + 1].trim().len() > 0:
-            return i / 2
-        i = i - 2
-    -1
-
-fn decl_tbl_get_last_valid_transition(tbl: [text], prop: text) -> text:
-    var i = (tbl.len() as i32) - 2
-    while i >= 0:
-        if tbl[i] == prop and tbl[i + 1].trim().len() > 0:
-            return tbl[i + 1]
-        i = i - 2
-    ""
 
 fn parse_nth_box_int(raw: text, index: i32) -> i32:
     val normalized = raw.trim().lower()

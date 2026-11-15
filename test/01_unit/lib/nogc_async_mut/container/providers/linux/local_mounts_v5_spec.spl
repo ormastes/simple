@@ -1,0 +1,118 @@
+# AUTHORED_NOT_RUN: pure metadata and scripted no-effect regression coverage.
+use std.spec.*
+use std.common.contracts.container.execution_v2.ContainerMountProjectionV2
+use std.nogc_async_mut.container.providers.linux.local_mounts_v5.*
+use std.nogc_async_mut.container.providers.linux.request_v1.*
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.*
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
+use test.fixtures.container.linux_engine_exec_fixture_v3.*
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
+
+fn mount_request_v5() -> LinuxOciRequestV1:
+    LinuxOciRequestV1(pod_uid: "mount-work", attempt: 1, operation_id: "create-mount",
+        image: "example/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        bundle_path: "", command: ["/agent"], args: ["two words", ""],
+        timeout_ms: 5000, cpu_limit_millis: 1000, memory_limit_bytes: 268435456,
+        pid_limit: 64, network_policy: "none", filesystem_policy: "read-only",
+        replace_entrypoint: true, working_directory: "/work",
+        mounts: [ContainerMountProjectionV2(host_root: "/host/work tree", guest_root: "/work", read_only: false)])
+
+describe "Linux V5 mount metadata is retained without granting effects":
+    it "roundtrips exact mount roots, permissions and typed arguments":
+        val request = mount_request_v5()
+        val source = linux_oci_retained_request_encode_v1(request).unwrap()
+        val decoded = linux_oci_retained_request_decode_v1(source).unwrap()
+        expect(decoded.mounts.len()).to_equal(1)
+        expect(decoded.mounts[0].host_root).to_equal("/host/work tree")
+        expect(decoded.mounts[0].guest_root).to_equal("/work")
+        expect(decoded.mounts[0].read_only).to_equal(false)
+        expect(decoded.args).to_equal(["two words", ""])
+        expect(linux_oci_retained_request_encode_v1(decoded).unwrap()).to_equal(source)
+        expect(linux_oci_request_digest_v1(decoded).unwrap()).to_equal(linux_oci_request_digest_v1(request).unwrap())
+        expect(source.contains("version: 5")).to_equal(true)
+
+    it "rejects downgrade, permission tampering, and discarded mount fields":
+        var request = mount_request_v5()
+        # A valid V4 containment field isolates the mount-version gate. Empty
+        # containment would correctly reject earlier during V4 validation.
+        request.containment_profile_digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val source = linux_oci_retained_request_encode_v1(request).unwrap()
+        expect(linux_oci_retained_request_decode_v1(source.replace("version: 5", "version: 4")).unwrap_err()).to_equal("retained-request-invalid:version:mounts")
+        expect(linux_oci_retained_request_decode_v1(source.replace("readOnly: false", "readOnly: true")).unwrap_err()).to_equal("retained-request-invalid:digest:requestDigest")
+        expect(linux_oci_retained_request_decode_v1(source.replace("readOnly: false", "readOnly: false, surprise: true")).unwrap_err().len()).to_be_greater_than(0)
+
+    it "binds source, destination, permissions and order into immutable identity":
+        var request = mount_request_v5()
+        val original = linux_oci_request_digest_v1(request).unwrap()
+        request.mounts[0].read_only = true
+        expect(linux_oci_request_digest_v1(request).unwrap() == original).to_equal(false)
+        request = mount_request_v5()
+        request.mounts[0].host_root = "/other/source"
+        expect(linux_oci_request_digest_v1(request).unwrap() == original).to_equal(false)
+        request = mount_request_v5()
+        request.mounts[0].guest_root = "/other/target"
+        expect(linux_oci_request_digest_v1(request).unwrap() == original).to_equal(false)
+        val first = request.mounts[0]
+        val second = ContainerMountProjectionV2(host_root: "/host/data", guest_root: "/data", read_only: true)
+        request.mounts = [first, second]
+        val ordered = linux_oci_request_digest_v1(request).unwrap()
+        request.mounts = [second, first]
+        expect(linux_oci_request_digest_v1(request).unwrap() == ordered).to_equal(false)
+
+    it "rejects path injection, parent traversal and target shadowing":
+        for path in ["relative", "/", "/a/../b", "/a/./b", "/a//b", "/a/", "/a,b", "/a\"b", "/a\u{0}b"]:
+            val mount = ContainerMountProjectionV2(host_root: path, guest_root: "/work", read_only: true)
+            expect(linux_local_mounts_validate_v5([mount], "", "", "").unwrap_err()).to_equal("linux-mount-path-invalid")
+        val first = mount_request_v5().mounts[0]
+        for target in ["/work", "/work/nested"]:
+            val second = ContainerMountProjectionV2(host_root: "/other", guest_root: target, read_only: true)
+            expect(linux_local_mounts_validate_v5([first, second], "", "", "").unwrap_err()).to_equal("linux-mount-target-overlap")
+        expect(linux_local_mounts_validate_v5([first], "/input", "/output", "").unwrap_err()).to_equal("linux-mount-legacy-workspace-conflict")
+        expect(linux_local_mounts_validate_v5([first], "", "", "/bundle").unwrap_err()).to_equal("linux-mount-legacy-workspace-conflict")
+        var too_many: [ContainerMountProjectionV2] = []
+        for index in 0..65:
+            too_many.push(ContainerMountProjectionV2(host_root: "/host", guest_root: "/target" + index.to_text(), read_only: true))
+        expect(linux_local_mounts_validate_v5(too_many, "", "", "").unwrap_err()).to_equal("linux-mount-count-exceeded")
+
+    it "refuses create, replay and command construction without a native mount owner":
+        var provider = LinuxOciRuntimeProviderV1.new("linux", "podman", "/tmp/mount-provider", "boot", 1, false)
+        val request = mount_request_v5()
+        expect(provider.validate(request).reason).to_equal("linux-mount-native-admission-not-installed")
+        expect(provider.prepare_pod(request).reason).to_equal("linux-mount-native-admission-not-installed")
+        expect(provider.create(request).reason).to_equal("linux-mount-native-admission-not-installed")
+        val replay = linux_oci_retained_request_decode_v1(linux_oci_retained_request_encode_v1(request).unwrap()).unwrap()
+        expect(provider.create(replay).reason).to_equal("linux-mount-native-admission-not-installed")
+        expect(provider.executor_calls).to_equal(0)
+        val command = build_create_command("podman", "/tmp/mount-provider", request, "create-mount", 1, "boot")
+        expect(command.0).to_equal("linux-mount-native-admission-not-installed")
+        expect(command.1.program).to_equal("")
+        expect(command.1.args.len()).to_equal(0)
+
+    it "keeps explicit empty mounts identical to the legacy default":
+        var request = mount_request_v5()
+        request.mounts = []
+        val source = linux_oci_retained_request_encode_v1(request).unwrap()
+        expect(source.contains("version: 1")).to_equal(true)
+        expect(source.contains("mounts:")).to_equal(false)
+        val original = linux_oci_request_digest_v1(request).unwrap()
+        val decoded = linux_oci_retained_request_decode_v1(source).unwrap()
+        expect(decoded.mounts.len()).to_equal(0)
+        expect(linux_oci_request_digest_v1(decoded).unwrap()).to_equal(original)
+        expect(linux_oci_retained_request_encode_v1(decoded).unwrap()).to_equal(source)
+        expect(build_create_command("podman", "/tmp/mount-provider", decoded, "create-mount", 1, "boot").0).to_equal("")
+
+    it "blocks the separate exec launch owner before any engine or journal work":
+        var adapter = linux_container_adapter_fixture_v2([], [])
+        # Structural fixture only: disabling the scripted marker does not open
+        # native authority. The mount guard must refuse before any owner call.
+        adapter.provider.scripted = false
+        var leaf = linux_container_leaf_fixture_v2()
+        val mounted = mount_request_v5()
+        leaf.mounts = mounted.mounts
+        val parent = linux_container_request_fixture_v2(leaf)
+        val begun = adapter.exec_begin_v3(parent, linux_engine_exec_installation_fixture_v3(),
+            linux_engine_exec_admission_fixture_v3(), linux_engine_exec_observation_fixture_v3(), "create")
+        expect(begun.error).to_equal("linux-mount-native-admission-not-installed")
+        expect(begun.owner).to_equal(nil)
+        expect(begun.birth).to_equal(nil)
+        expect(adapter.provider.executor_calls).to_equal(0)

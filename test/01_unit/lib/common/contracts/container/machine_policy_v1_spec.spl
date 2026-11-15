@@ -1,0 +1,279 @@
+# AUTHORED_NOT_RUN. Pure codec only; no installed/native owner or authority.
+# @req REQ-MACHINE-CONTAINER-POLICY-001
+# @req REQ-MACHINE-CONTAINER-POLICY-002
+# @req REQ-MACHINE-CONTAINER-POLICY-003
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.container.machine_policy_v1.*
+use std.common.crypto.sha256.sha256_text
+
+fn machine_policy_fixture_v1() -> MachineContainerPolicyV1:
+    MachineContainerPolicyV1(authority_id: "machine-authority", physical_host_id: "host-42",
+        native_machine_id: "native machine λ", mode: "standalone", managed_authority_id: "", managed_authority_policy_digest: "",
+        cpu_millis: 1000, memory_bytes: 1048576,
+        providers: [MachineContainerProviderPolicyV1(backend: "windows-docker-process",
+            identity_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            policy_bytes: "opaque: \"two words = and \\\\ slash\"\nnext: value\n")],
+        local_principals: ["S-1-5-21-42"])
+
+fn machine_policy_text_fixture_v1(size: i64) -> text:
+    var value = ""
+    var block = "x"
+    var remaining = size
+    while remaining > 0:
+        if remaining % 2 == 1: value = value + block
+        remaining = remaining / 2
+        if remaining > 0: block = block + block
+    value
+
+fn machine_policy_provider_fixture_v1(backend: text, digest: text, payload: text) -> MachineContainerProviderPolicyV1:
+    MachineContainerProviderPolicyV1(backend: backend, identity_digest: digest, policy_bytes: payload)
+
+describe "Machine container policy v1 pure canonical codec":
+    it "preserves canonical exact nested policy text and hashes those exact bytes":
+        step("Encode standalone metadata containing opaque multiline escaped provider text")
+        val policy = machine_policy_fixture_v1()
+        val source = machine_container_policy_bytes_v1(policy).unwrap()
+        expect(source).to_start_with("{authorityId: machine-authority, cpuMillis: 1000, kind: machine-container-policy")
+        expect(source).to_contain("version: 2")
+        expect(source).to_end_with("}\n")
+        expect(machine_container_policy_digest_v1(policy).unwrap()).to_equal(sha256_text(source))
+        step("Decode the strict canonical envelope and compare every preserved field")
+        val decoded = machine_container_policy_decode_v1(source).unwrap()
+        expect(decoded.authority_id).to_equal(policy.authority_id)
+        expect(decoded.physical_host_id).to_equal(policy.physical_host_id)
+        expect(decoded.native_machine_id).to_equal(policy.native_machine_id)
+        expect(decoded.mode).to_equal(policy.mode)
+        expect(decoded.managed_authority_id).to_equal(policy.managed_authority_id)
+        expect(decoded.managed_authority_policy_digest).to_equal("")
+        expect(decoded.cpu_millis).to_equal(policy.cpu_millis)
+        expect(decoded.memory_bytes).to_equal(policy.memory_bytes)
+        expect(decoded.local_principals).to_equal(policy.local_principals)
+        expect(decoded.providers.len()).to_equal(1)
+        expect(decoded.providers[0].backend).to_equal(policy.providers[0].backend)
+        expect(decoded.providers[0].identity_digest).to_equal(policy.providers[0].identity_digest)
+        expect(decoded.providers[0].policy_bytes).to_equal(policy.providers[0].policy_bytes)
+        expect(machine_container_policy_bytes_v1(decoded).unwrap()).to_equal(source)
+
+    it "changes integrity when opaque provider text or resource values change":
+        step("Bind exact provider text including its final newline")
+        val original = machine_policy_fixture_v1()
+        val digest = machine_container_policy_digest_v1(original).unwrap()
+        var changed = machine_policy_fixture_v1()
+        changed.providers = [machine_policy_provider_fixture_v1(original.providers[0].backend,
+            original.providers[0].identity_digest, original.providers[0].policy_bytes + "\n")]
+        expect(machine_container_policy_digest_v1(changed).unwrap() == digest).to_equal(false)
+        changed = machine_policy_fixture_v1()
+        changed.cpu_millis = 1001
+        expect(machine_container_policy_digest_v1(changed).unwrap() == digest).to_equal(false)
+
+    it "separates managed authority from standalone local principals":
+        step("Admit managed mode only with an explicit valid authority and no local principals")
+        var policy = machine_policy_fixture_v1()
+        policy.mode = "managed"
+        policy.managed_authority_id = "managed-authority"
+        policy.managed_authority_policy_digest = sha256_text("trusted installed enrollment policy\n")
+        policy.local_principals = []
+        val source = machine_container_policy_bytes_v1(policy).unwrap()
+        val decoded = machine_container_policy_decode_v1(source).unwrap()
+        expect(decoded.mode).to_equal("managed")
+        expect(decoded.managed_authority_id).to_equal("managed-authority")
+        expect(decoded.managed_authority_policy_digest).to_equal(policy.managed_authority_policy_digest)
+        expect(decoded.local_principals).to_equal([])
+        step("Refuse implicit managed local grants and inconsistent standalone metadata")
+        policy.local_principals = ["S-1-5-21-42"]
+        expect(machine_container_policy_validate_v1(policy).unwrap_err()).to_equal("machine-container-policy-managed-authority-separation")
+        policy.local_principals = []
+        for authority in ["", "bad\nissuer", "bad\0issuer", "bad\u0085issuer", machine_policy_text_fixture_v1(257)]:
+            policy.managed_authority_id = authority
+            expect(machine_container_policy_validate_v1(policy).unwrap_err()).to_equal("machine-container-policy-managed-authority-separation")
+        policy = machine_policy_fixture_v1()
+        policy.managed_authority_id = "managed-authority"
+        expect(machine_container_policy_validate_v1(policy).unwrap_err()).to_equal("machine-container-policy-standalone-authority-separation")
+        policy = machine_policy_fixture_v1()
+        policy.local_principals = []
+        expect(machine_container_policy_validate_v1(policy).unwrap_err()).to_equal("machine-container-policy-standalone-authority-separation")
+        policy = machine_policy_fixture_v1()
+        policy.mode = "hybrid"
+        expect(machine_container_policy_validate_v1(policy).unwrap_err()).to_equal("machine-container-policy-mode-invalid")
+
+    it "preserves exact controller issuer namespaces as metadata without proving authentication":
+        step("Roundtrip issuer namespace punctuation and the 256-byte issuer boundary")
+        var policy = machine_policy_fixture_v1()
+        policy.mode = "managed"
+        policy.local_principals = []
+        policy.managed_authority_policy_digest = sha256_text("trusted installed enrollment policy\n")
+        for issuer in ["controller:team.prod", machine_policy_text_fixture_v1(256)]:
+            policy.managed_authority_id = issuer
+            val source = machine_container_policy_bytes_v1(policy).unwrap()
+            val decoded = machine_container_policy_decode_v1(source).unwrap()
+            expect(decoded.managed_authority_id).to_equal(issuer)
+            expect(decoded.local_principals).to_equal([])
+
+    it "requires a managed policy trust pin and separates a same-issuer key-policy replacement":
+        step("Bind the exact expected authority policy bytes independently from its issuer name")
+        var policy = machine_policy_fixture_v1()
+        policy.mode = "managed"
+        policy.local_principals = []
+        policy.managed_authority_id = "controller:team.prod"
+        policy.managed_authority_policy_digest = sha256_text("installed trusted signing keys\n")
+        val source = machine_container_policy_bytes_v1(policy).unwrap()
+        val original_digest = machine_container_policy_digest_v1(policy).unwrap()
+        val decoded = machine_container_policy_decode_v1(source).unwrap()
+        expect(decoded.managed_authority_policy_digest).to_equal(policy.managed_authority_policy_digest)
+        step("Replacing key policy while retaining the issuer changes the machine policy binding")
+        policy.managed_authority_policy_digest = sha256_text("different signing keys with same issuer\n")
+        expect(machine_container_policy_digest_v1(policy).unwrap() == original_digest).to_equal(false)
+        for invalid in ["", "wrong-key", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]:
+            policy.managed_authority_policy_digest = invalid
+            expect(machine_container_policy_validate_v1(policy).unwrap_err()).to_equal("machine-container-policy-managed-authority-policy-digest")
+        step("Reject a missing V2 trust pin and all legacy unpinned wire V1 policies")
+        val pin = sha256_text("installed trusted signing keys\n")
+        val missing = source.replace("managedAuthorityPolicyDigest: {pin}, ", "")
+        expect(machine_container_policy_decode_v1(missing).unwrap_err()).to_equal("machine-container-policy-missing-field:managedAuthorityPolicyDigest")
+        expect(machine_container_policy_decode_v1(missing.replace("version: 2", "version: 1")).unwrap_err()).to_equal("machine-container-policy-version")
+        expect(machine_container_policy_decode_v1(source.replace("version: 2", "version: 1")).unwrap_err()).to_equal("machine-container-policy-version")
+        step("Standalone metadata cannot acquire managed trust by carrying a pin")
+        policy = machine_policy_fixture_v1()
+        policy.managed_authority_policy_digest = pin
+        expect(machine_container_policy_validate_v1(policy).unwrap_err()).to_equal("machine-container-policy-standalone-authority-separation")
+
+    it "uses the existing builder identifier grammar and bounds arbitrary native identities":
+        step("Admit shared identifier length128 and reject invalid or longer identifiers")
+        var policy = machine_policy_fixture_v1()
+        policy.authority_id = machine_policy_text_fixture_v1(128)
+        policy.physical_host_id = machine_policy_text_fixture_v1(128)
+        expect(machine_container_policy_validate_v1(policy).is_ok()).to_equal(true)
+        for identity in ["", "bad identity", "bad\0identity", "bad\nidentity", machine_policy_text_fixture_v1(129)]:
+            policy = machine_policy_fixture_v1()
+            policy.authority_id = identity
+            expect(machine_container_policy_validate_v1(policy).unwrap_err()).to_equal("machine-container-policy-identifier-invalid")
+            policy = machine_policy_fixture_v1()
+            policy.physical_host_id = identity
+            expect(machine_container_policy_validate_v1(policy).unwrap_err()).to_equal("machine-container-policy-identifier-invalid")
+        step("Admit 256-byte native identity text and refuse controls or byte overflow")
+        policy = machine_policy_fixture_v1()
+        policy.native_machine_id = machine_policy_text_fixture_v1(256)
+        expect(machine_container_policy_validate_v1(policy).is_ok()).to_equal(true)
+        for identity in ["", "native\0id", "native\nid", "native\u007Fid", "native\u0085id",
+                machine_policy_text_fixture_v1(257), machine_policy_text_fixture_v1(255) + "λ"]:
+            policy.native_machine_id = identity
+            expect(machine_container_policy_validate_v1(policy).unwrap_err()).to_equal("machine-container-policy-native-id-invalid")
+
+    it "enforces exact principal uniqueness and portable identity bounds":
+        step("Preserve distinct exact principal strings and a 256-byte principal")
+        var policy = machine_policy_fixture_v1()
+        policy.local_principals = ["principal-a", "principal-A", machine_policy_text_fixture_v1(256)]
+        expect(machine_container_policy_decode_v1(machine_container_policy_bytes_v1(policy).unwrap()).is_ok()).to_equal(true)
+        step("Reject duplicate empty control-bearing and oversized principal strings")
+        policy.local_principals = ["same", "same"]
+        expect(machine_container_policy_validate_v1(policy).unwrap_err()).to_equal("machine-container-policy-principal-duplicate")
+        for principal in ["", "bad\0principal", "bad\tprincipal", "bad\u0085principal", machine_policy_text_fixture_v1(257)]:
+            policy.local_principals = [principal]
+            expect(machine_container_policy_validate_v1(policy).unwrap_err()).to_equal("machine-container-policy-principal-invalid")
+
+    it "allows only named backends valid digests and nonempty NUL-free opaque text":
+        step("Admit either named backend without interpreting opaque provider text")
+        val original = machine_policy_fixture_v1()
+        for backend in ["linux-podman", "windows-docker-process"]:
+            var policy = machine_policy_fixture_v1()
+            policy.providers = [machine_policy_provider_fixture_v1(backend, original.providers[0].identity_digest, "opaque\n")]
+            expect(machine_container_policy_validate_v1(policy).is_ok()).to_equal(true)
+        var policy = machine_policy_fixture_v1()
+        policy.providers = [machine_policy_provider_fixture_v1("docker", original.providers[0].identity_digest, "opaque")]
+        expect(machine_container_policy_validate_v1(policy).unwrap_err()).to_equal("machine-container-policy-backend-invalid")
+        for digest in ["", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "bad-digest"]:
+            policy.providers = [machine_policy_provider_fixture_v1("linux-podman", digest, "opaque")]
+            expect(machine_container_policy_validate_v1(policy).unwrap_err()).to_equal("machine-container-policy-provider-digest-invalid")
+        for payload in ["", "opaque\0hidden", machine_policy_text_fixture_v1(1048577)]:
+            policy.providers = [machine_policy_provider_fixture_v1("linux-podman", original.providers[0].identity_digest, payload)]
+            expect(machine_container_policy_validate_v1(policy).unwrap_err()).to_equal("machine-container-policy-provider-bytes-invalid")
+
+    it "rejects duplicated backend and identity pairs while allowing distinct pairs":
+        step("Admit different identities under one backend and the same identity under different backends")
+        val original = machine_policy_fixture_v1()
+        val first = original.providers[0]
+        var policy = machine_policy_fixture_v1()
+        policy.providers = [first, machine_policy_provider_fixture_v1(first.backend,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "other"),
+            machine_policy_provider_fixture_v1("linux-podman", first.identity_digest, "other")]
+        expect(machine_container_policy_validate_v1(policy).is_ok()).to_equal(true)
+        step("Refuse the same pair even when opaque provider text differs")
+        policy.providers = [first, machine_policy_provider_fixture_v1(first.backend, first.identity_digest, "different")]
+        expect(machine_container_policy_validate_v1(policy).unwrap_err()).to_equal("machine-container-policy-provider-duplicate")
+
+    it "enforces inclusive CPU and memory units":
+        step("Admit both resource endpoints in the same canonical units")
+        var policy = machine_policy_fixture_v1()
+        policy.cpu_millis = 1
+        policy.memory_bytes = 1
+        expect(machine_container_policy_validate_v1(policy).is_ok()).to_equal(true)
+        policy.cpu_millis = 64000
+        policy.memory_bytes = 1125899906842624
+        expect(machine_container_policy_validate_v1(policy).is_ok()).to_equal(true)
+        for cpu in [0, 64001]:
+            policy = machine_policy_fixture_v1()
+            policy.cpu_millis = cpu
+            expect(machine_container_policy_validate_v1(policy).unwrap_err()).to_equal("machine-container-policy-resource-bounds")
+        for memory in [0, 1125899906842625]:
+            policy = machine_policy_fixture_v1()
+            policy.memory_bytes = memory
+            expect(machine_container_policy_validate_v1(policy).unwrap_err()).to_equal("machine-container-policy-resource-bounds")
+
+    it "bounds provider and local principal counts":
+        step("Admit sixteen unique provider pairs and 128 exact local principals")
+        var policy = machine_policy_fixture_v1()
+        policy.providers = []
+        policy.local_principals = []
+        val suffixes = "0123456789abcdef"
+        val prefix = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        for index in 0..16:
+            policy.providers.push(machine_policy_provider_fixture_v1("linux-podman", prefix + suffixes.substring(index, index + 1), "opaque"))
+        for index in 0..128: policy.local_principals.push("principal-{index}")
+        val source = machine_container_policy_bytes_v1(policy).unwrap()
+        val decoded = machine_container_policy_decode_v1(source).unwrap()
+        expect(decoded.providers.len()).to_equal(16)
+        expect(decoded.local_principals.len()).to_equal(128)
+        step("Reject no providers a seventeenth provider and a 129th principal")
+        policy.providers.push(policy.providers[0])
+        expect(machine_container_policy_validate_v1(policy).unwrap_err()).to_equal("machine-container-policy-field-count")
+        policy = machine_policy_fixture_v1()
+        policy.providers = []
+        expect(machine_container_policy_validate_v1(policy).unwrap_err()).to_equal("machine-container-policy-field-count")
+        policy = decoded
+        policy.local_principals.push("principal-extra")
+        expect(machine_container_policy_validate_v1(policy).unwrap_err()).to_equal("machine-container-policy-field-count")
+
+    it "admits exactly one MiB canonical bytes and refuses the next escaped output byte":
+        step("Fill a real canonical envelope to exactly its outer byte ceiling")
+        var policy = machine_policy_fixture_v1()
+        val first = policy.providers[0]
+        policy.providers = [machine_policy_provider_fixture_v1(first.backend, first.identity_digest, "x")]
+        val baseline = machine_container_policy_bytes_v1(policy).unwrap()
+        val payload = machine_policy_text_fixture_v1(1048576 - baseline.byte_len() + 1)
+        policy.providers = [machine_policy_provider_fixture_v1(first.backend, first.identity_digest, payload)]
+        val at_limit = machine_container_policy_bytes_v1(policy).unwrap()
+        expect(at_limit.byte_len()).to_equal(1048576)
+        expect(machine_container_policy_decode_v1(at_limit).is_ok()).to_equal(true)
+        step("Refuse larger canonical output and escaped text expansion before full serialization")
+        policy.providers = [machine_policy_provider_fixture_v1(first.backend, first.identity_digest, payload + "x")]
+        expect(machine_container_policy_validate_v1(policy).unwrap_err()).to_equal("machine-container-policy-source-size")
+        policy.providers = [machine_policy_provider_fixture_v1(first.backend, first.identity_digest, payload + "\n")]
+        expect(machine_container_policy_validate_v1(policy).unwrap_err()).to_equal("machine-container-policy-source-size")
+        expect(machine_container_policy_decode_v1("").unwrap_err()).to_equal("machine-container-policy-source-size")
+        expect(machine_container_policy_decode_v1(machine_policy_text_fixture_v1(1048577)).unwrap_err()).to_equal("machine-container-policy-source-size")
+
+    it "rejects unknown missing duplicate mistyped and noncanonical SDN":
+        step("Mutate actual canonical bytes to probe strict schema and type checking")
+        val source = machine_container_policy_bytes_v1(machine_policy_fixture_v1()).unwrap()
+        for invalid in [source.replace("{authorityId:", "{extra: 1, authorityId:"), source.replace("authorityId: machine-authority, ", ""),
+                source.replace("{authorityId:", "{version: 2, authorityId:"), source.replace("version: 2", "version: 1"),
+                source.replace("version: 2", "version: true"), source.replace("kind: machine-container-policy", "kind: another-kind"),
+                source.replace("cpuMillis: 1000", "cpuMillis: 1000.0"), source.replace("memoryBytes: 1048576", "memoryBytes: \"1048576\""),
+                source.replace("mode: standalone", "mode: managed"), source.replace("nativeMachineId:", "nativeMachineId: true, extraNative:"),
+                source.replace("providers: [{", "providers: [true, {"), source.replace("backend: windows-docker-process", "backend: false"),
+                source.replace("backend: windows-docker-process", "backend: windows-docker-process, extra: false"),
+                source.replace("backend: windows-docker-process", "backend: windows-docker-process, backend: linux-podman"),
+                source.replace("localPrincipals: [S-1-5-21-42]", "localPrincipals: [true]"),
+                source.replace("localPrincipals: [S-1-5-21-42]", "localPrincipals: [S-1-5-21-42, S-1-5-21-42]"),
+                source + "# comment\n", source + "another: value\n", " " + source, source.substring(0, source.byte_len() - 1), "[]\n", "{broken\n"]:
+            expect(machine_container_policy_decode_v1(invalid).is_err()).to_equal(true)

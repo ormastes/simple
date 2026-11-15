@@ -1,0 +1,139 @@
+"""
+## Purpose and audience
+Purpose: Pin the collapsible space that a newline between two inline
+elements leaves in the line. The HTML projection kept a whitespace-only text
+node only when it was exactly " ", so `<span></span>\\n<span>` put the
+two boxes edge to edge: the animation catalog page's canvas / svg / audio
+probes sat 4 and 9 px left of Chrome's.
+Audience: browser-engine HTML projection and inline layout maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless shell, `--window-size=420,200`,
+screenshot of WS_PAGE): the blue inline-block span covers x 0..19 and the red one x 24..43
+on rows 6..15 (`getBoundingClientRect().x` 24.45: one 16px sans-serif
+space). Simple's measured space advance on this lane is checked to land the
+red box within 24..26.
+
+Whitespace that is NOT between inline-level boxes renders nothing (Chrome
+159 `getBoundingClientRect()`, BLOCK_PAGE at 900 px, every row its own
+absolutely placed container): flex row `gap:10px` puts `#fr2` at x 18;
+flex column `#fc2` 34 below `#fc1`; grid columns `50px 50px 50px` gap 10 put
+`#gr2` at x 60; `<table>` cells `#tc2` at x 30 and the next row 24 below;
+`display:block` spans `#bb2` 24 below `#bb1`; `img{display:block}` 20x20
+`#im2` 20 below `#im1`.
+
+Where the computed white-space keeps newlines the newline is a forced break
+(same capture, PRE_PAGE / PRE_BLOCK_PAGE, 16px/24px sans-serif): in `<pre>`
+and under `white-space: pre`, `pre-wrap` and `pre-line`, `<b>b</b>` is at
+x 0, 24 below `<b>a</b>`; with normal white-space it stays on a's line at
+x 13.36. Between two blocks the newline is an empty line (b 48 below a in
+`<pre>` and `pre-line`); a trailing one after an inline adds no line (the
+`pre-wrap` container stays 24 tall).
+
+Counts are kept (COUNT_PAGE, same capture): `\\n\\n` between inline
+elements puts b 48 below a under `<pre>`, pre-wrap, pre-line and
+break-spaces (normal: same line, x 13.36); two spaces leave a two-space gap
+(b x 17.80) under `<pre>`, pre-wrap and break-spaces but one (13.36) under
+pre-line and normal (only `<pre>`'s count is modelled: CSS white-space
+spaces between elements are filed in the residue record); `\\n\\n` between two blocks in `<pre>` is two empty
+lines (d1 72 below c1); a newline after a block at the end of `<pre>` is
+one empty line (the pre is 48 tall).
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-INLINE-WHITESPACE-001 — whitespace between inline elements, newline included, collapses to one space as in Chrome 159.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_geometry.{simple_web_layout_debug_layout_by_id}
+
+val WS_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}span{{display:inline-block;width:20px;height:10px}}</style></head><body><div style=\"font:16px/20px sans-serif\"><span style=\"background:#0000ff\"></span>\n<span style=\"background:#ff0000\"></span></div></body></html>"
+
+val BLOCK_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;font:16px/24px sans-serif}}.r{{position:absolute;left:0;width:300px}}</style></head><body><div class=r style=\"top:0;display:flex;gap:10px\"><span id=fr1>x</span>\n<span id=fr2>y</span>\n</div><div class=r style=\"top:40px;display:flex;flex-direction:column;gap:10px\"><span id=fc1>x</span>\n<span id=fc2>y</span>\n</div><div class=r style=\"top:120px;display:grid;grid-template-columns:50px 50px 50px;gap:10px\"><span id=gr1>x</span>\n<span id=gr2>y</span>\n</div><table class=r style=\"top:160px;width:auto;border-spacing:0\">\n<tr>\n<td id=tc1 style=\"width:30px;padding:0\">x</td>\n<td id=tc2 style=\"width:30px;padding:0\">y</td>\n</tr>\n<tr><td id=tc3 style=\"padding:0\">z</td></tr>\n</table><div class=r style=\"top:240px\"><span id=bb1 style=\"display:block\">a</span>\n<span id=bb2 style=\"display:block\">b</span>\n</div><div class=r style=\"top:320px\"><img id=im1 style=\"display:block;width:20px;height:20px\">\n<img id=im2 style=\"display:block;width:20px;height:20px\">\n</div></body></html>"
+
+val PRE_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;font:16px/24px sans-serif}}pre{{margin:0;font:16px/24px sans-serif}}.r{{position:absolute;left:0;width:300px}}</style></head><body><pre class=r style=\"top:0\"><b id=pa>a</b>\n<b id=pb>b</b></pre><div class=r style=\"top:60px;white-space:pre\"><b id=wa>a</b>\n<b id=wb>b</b></div><div class=r style=\"top:120px;white-space:pre-wrap\"><b id=xa>a</b>\n<b id=xb>b</b></div><div class=r style=\"top:180px;white-space:pre-line\"><b id=la>a</b>\n<b id=lb>b</b></div><div class=r style=\"top:240px\"><b id=na>a</b>\n<b id=nb>b</b></div></body></html>"
+
+val PRE_BLOCK_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;font:16px/24px sans-serif}}pre{{margin:0;font:16px/24px sans-serif}}.r{{position:absolute;left:0;width:300px}}</style></head><body><pre class=r style=\"top:0\"><div id=a>a</div>\n<div id=b>b</div></pre><div class=r style=\"top:100px;white-space:pre-line\"><div id=c>a</div>\n<div id=d>b</div></div><div class=r id=f style=\"top:300px;white-space:pre-wrap\"><b>a</b>\n</div></body></html>"
+
+val COUNT_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;font:16px/24px sans-serif}}pre{{margin:0;font:16px/24px sans-serif}}.r{{position:absolute;left:0;width:300px}}</style></head><body><pre class=r style=\"top:0\"><b id=a1>a</b>\n\n<b id=b1>b</b></pre><div class=r style=\"top:100px;white-space:pre-wrap\"><b id=a2>a</b>\n\n<b id=b2>b</b></div><div class=r style=\"top:200px;white-space:pre-line\"><b id=a3>a</b>\n\n<b id=b3>b</b></div><div class=r style=\"top:300px;white-space:break-spaces\"><b id=a4>a</b>\n\n<b id=b4>b</b></div><div class=r style=\"top:400px\"><b id=a5>a</b>\n\n<b id=b5>b</b></div><pre class=r style=\"top:500px\"><b id=a6>a</b>  <b id=b6>b</b></pre><div class=r style=\"top:540px;white-space:pre-wrap\"><b id=a7>a</b>  <b id=b7>b</b></div><div class=r style=\"top:580px;white-space:pre-line\"><b id=a8>a</b>  <b id=b8>b</b></div><div class=r style=\"top:620px;white-space:break-spaces\"><b id=a9>a</b>  <b id=b9>b</b></div><div class=r style=\"top:660px\"><b id=a10>a</b>  <b id=b10>b</b></div><pre class=r style=\"top:700px\"><div id=c1>a</div>\n\n<div id=d1>b</div></pre><pre class=r id=e1 style=\"top:800px\"><div>a</div>\n</pre></body></html>"
+
+fn cnt(id: text, field: text) -> i32:
+    simple_web_layout_debug_layout_by_id(COUNT_PAGE, 900, 900, id, field).to_int()
+
+# Gap between the right edge of `a` and the left edge of `b`.
+fn gap(a: text, b: text) -> i32:
+    cnt(b, "x") - cnt(a, "x") - cnt(a, "w")
+
+fn preb_at(id: text, field: text) -> i32:
+    simple_web_layout_debug_layout_by_id(PRE_BLOCK_PAGE, 900, 400, id, field).to_int()
+
+fn pre_at(id: text, field: text) -> i32:
+    simple_web_layout_debug_layout_by_id(PRE_PAGE, 900, 400, id, field).to_int()
+
+fn at(id: text, field: text) -> i32:
+    simple_web_layout_debug_layout_by_id(BLOCK_PAGE, 900, 600, id, field).to_int()
+
+describe "Whitespace between inline elements":
+    it "AC-1: a newline between two inline-blocks leaves one space":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(WS_PAGE, 420, 200, "cpu_simd")
+        var row = -1
+        var y = 0
+        while y < 40 and row < 0:
+            if (px[10 + y * 420] & 0xFFFFFFu32) == 0x0000FFu32:
+                row = y
+            y = y + 1
+        step("Chrome 159: the blue box is painted")
+        expect(row >= 0).to_equal(true)
+        val r = if row >= 0: row else: 0
+        var red_x = -1
+        var x = 0
+        while x < 60 and red_x < 0:
+            if (px[x + r * 420] & 0xFFFFFFu32) == 0xFF0000u32:
+                red_x = x
+            x = x + 1
+        step("Chrome 159: white gap at x 20..23, red box from x 24")
+        expect(px[21 + r * 420] & 0xFFFFFFu32).to_equal(0xFFFFFFu32)
+        expect(red_x >= 24 and red_x <= 26).to_equal(true)
+
+    it "AC-2: whitespace directly inside flex and grid containers is not an item":
+        step("Chrome 159: flex row fr2 x 18; flex column fc2 34 below fc1; grid gr2 x 60")
+        expect(at("fr2", "x")).to_equal(18)
+        expect(at("fc2", "y") - at("fc1", "y")).to_equal(34)
+        expect(at("gr2", "x")).to_equal(60)
+
+    it "AC-3: whitespace between table cells and rows is not a cell":
+        step("Chrome 159: tc2 at x 30; the next row 24 below")
+        expect(at("tc2", "x")).to_equal(30)
+        expect(at("tc3", "y") - at("tc1", "y")).to_equal(24)
+
+    it "AC-4: whitespace after a block box (computed display, not the tag) is not a line":
+        step("Chrome 159: display:block spans 24 apart; display:block imgs 20 apart")
+        expect(at("bb2", "y") - at("bb1", "y")).to_equal(24)
+        expect(at("im2", "y") - at("im1", "y")).to_equal(20)
+
+    it "AC-5: a preserved newline between inline elements breaks the line":
+        step("Chrome 159: in <pre>, white-space:pre, pre-wrap and pre-line, b is at x 0, 24 below a")
+        for pair in [["pa", "pb"], ["wa", "wb"], ["xa", "xb"], ["la", "lb"]]:
+            expect(pre_at(pair[1], "x")).to_equal(0)
+            expect(pre_at(pair[1], "y") - pre_at(pair[0], "y")).to_equal(24)
+        step("Chrome 159 guard: normal white-space keeps b on a's line (x 13.4)")
+        expect(pre_at("nb", "y")).to_equal(pre_at("na", "y"))
+        expect(pre_at("nb", "x") > pre_at("na", "x") + pre_at("na", "w")).to_equal(true)
+        step("Chrome 159: a preserved newline between blocks is an empty line (b 48 below a in <pre> and pre-line); a trailing one adds none (f 24 tall)")
+        expect(preb_at("b", "y") - preb_at("a", "y")).to_equal(48)
+        expect(preb_at("d", "y") - preb_at("c", "y")).to_equal(48)
+        expect(preb_at("f", "h")).to_equal(24)
+
+    it "AC-6: preserved newlines and spaces keep their count":
+        step("Chrome 159: \\n\\n is two breaks -- b 48 below a under pre, pre-wrap, pre-line, break-spaces")
+        for pair in [["a1", "b1"], ["a2", "b2"], ["a3", "b3"], ["a4", "b4"]]:
+            expect(cnt(pair[1], "x")).to_equal(0)
+            expect(cnt(pair[1], "y") - cnt(pair[0], "y")).to_equal(48)
+        expect(cnt("b5", "y")).to_equal(cnt("a5", "y"))
+        step("Chrome 159: two spaces are two in <pre>, one under pre-line and normal")
+        val one = gap("a10", "b10")
+        expect(gap("a8", "b8")).to_equal(one)
+        expect(gap("a6", "b6") > one).to_equal(true)
+        step("Chrome 159: \\n\\n between blocks is two empty lines; a newline after the last block is one")
+        expect(cnt("d1", "y") - cnt("c1", "y")).to_equal(72)
+        expect(cnt("e1", "h")).to_equal(48)

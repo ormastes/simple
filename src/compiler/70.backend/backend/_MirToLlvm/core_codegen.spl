@@ -26,8 +26,8 @@ use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_funct
     bootstrap_mir_static_name_at, bootstrap_mir_static_type_tag_at,
     bootstrap_mir_static_init_kind_at, bootstrap_mir_static_init_payload_at,
     bootstrap_mir_static_alignment_at, bootstrap_mir_static_visibility_at, bootstrap_mir_static_external_at}
-# Records in the Windows XRay ring-mode ring (__simple_xray_ring_v1); 24 B each.
-const XRAY_RING_CAPACITY_V1: i64 = 65536
+# Records in the Windows XRay ring-mode ring (__simple_xray_ring_v2); 32 B each.
+const XRAY_RING_CAPACITY_V2: i64 = 65536
 # These implementation helpers belong to the SSA transform owner. The public
 # facade also exports them; its separate native-resolution regression remains
 # covered by mir_opt_facade_ssa_owner_spec.spl.
@@ -1196,13 +1196,14 @@ impl MirTextCodegen for MirToLlvm:
         self.builder.emit("@__simple_xray_names_v1 = constant {{ i64, [{name_refs.len()} x ptr] }} {{ i64 {name_refs.len()}, [{name_refs.len()} x ptr] [{name_refs.join(", ")}] }}")
         self.builder.emit("@__simple_xray_hook_v1 = global ptr null")
         # Ring mode (PROVISIONAL): with a null hook the edge appends one
-        # {site, kind, pad, seq} record to this exported fixed-size ring. The
+        # {site, kind, pad, seq, ts} record to this exported fixed-size ring (ABI
+        # v2; ts = llvm.readcyclecounter at the edge, v1 had no ts). The
         # write index is claimed by atomicrmw add (lockless); a claim past
         # capacity is dropped and counted; seq = index+1 is release-stored last
         # so a reader sees only complete records.
-        val cap = XRAY_RING_CAPACITY_V1
-        val ring_ty = "{{ i64, i64, i64, [{cap} x {{ i64, i32, i32, i64 }}] }}"
-        self.builder.emit("@__simple_xray_ring_v1 = global {ring_ty} {{ i64 {cap}, i64 0, i64 0, [{cap} x {{ i64, i32, i32, i64 }}] zeroinitializer }}")
+        val cap = XRAY_RING_CAPACITY_V2
+        val ring_ty = "{{ i64, i64, i64, [{cap} x {{ i64, i32, i32, i64, i64 }}] }}"
+        self.builder.emit("@__simple_xray_ring_v2 = global {ring_ty} {{ i64 {cap}, i64 0, i64 0, [{cap} x {{ i64, i32, i32, i64, i64 }}] zeroinitializer }}")
         self.builder.emit("define internal void @__simple_xray_edge_v1(i64 %site, i32 %kind) nounwind {{")
         self.builder.emit("xe_entry:")
         self.builder.emit("  %h = load volatile ptr, ptr @__simple_xray_hook_v1")
@@ -1212,26 +1213,59 @@ impl MirTextCodegen for MirToLlvm:
         self.builder.emit("  call void %h(i64 %site, i32 %kind)")
         self.builder.emit("  br label %xe_done")
         self.builder.emit("xe_ring:")
-        self.builder.emit("  %xe_widx = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v1, i32 0, i32 1")
+        self.builder.emit("  %xe_widx = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 1")
+        if module.xray_ring_wrap:
+            self.emit_xray_ring_wrap_store(ring_ty, cap)
+            return
         self.builder.emit("  %xe_i = atomicrmw add ptr %xe_widx, i64 1 monotonic")
         self.builder.emit("  %xe_full = icmp uge i64 %xe_i, {cap}")
         self.builder.emit("  br i1 %xe_full, label %xe_drop, label %xe_store")
         self.builder.emit("xe_drop:")
-        self.builder.emit("  %xe_dropped = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v1, i32 0, i32 2")
+        self.builder.emit("  %xe_dropped = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 2")
         self.builder.emit("  %xe_d = atomicrmw add ptr %xe_dropped, i64 1 monotonic")
         self.builder.emit("  br label %xe_done")
         self.builder.emit("xe_store:")
-        self.builder.emit("  %xe_rsite = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v1, i32 0, i32 3, i64 %xe_i, i32 0")
+        self.builder.emit("  %xe_rsite = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 0")
         self.builder.emit("  store i64 %site, ptr %xe_rsite, align 8")
-        self.builder.emit("  %xe_rkind = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v1, i32 0, i32 3, i64 %xe_i, i32 1")
+        self.builder.emit("  %xe_rkind = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 1")
         self.builder.emit("  store i32 %kind, ptr %xe_rkind, align 4")
+        self.builder.emit("  %xe_ts = call i64 @llvm.readcyclecounter()")
+        self.builder.emit("  %xe_rts = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 4")
+        self.builder.emit("  store i64 %xe_ts, ptr %xe_rts, align 8")
         self.builder.emit("  %xe_seq = add i64 %xe_i, 1")
-        self.builder.emit("  %xe_rseq = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v1, i32 0, i32 3, i64 %xe_i, i32 3")
+        self.builder.emit("  %xe_rseq = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 3")
         self.builder.emit("  store atomic i64 %xe_seq, ptr %xe_rseq release, align 8")
         self.builder.emit("  br label %xe_done")
         self.builder.emit("xe_done:")
         self.builder.emit("  ret void")
         self.builder.emit("}}")
+        self.builder.emit("declare i64 @llvm.readcyclecounter()")
+
+    me emit_xray_ring_wrap_store(ring_ty: text, cap: i64):
+        """Wrap ring (MirModule.xray_ring_wrap): keep the most recent `cap`
+        edges. Slot = claim mod cap; seq := 0, fence, payload, seq := claim+1
+        (release), so a reader rejects a slot whose seq is not claim+1 before
+        and after reading it (overwritten or torn). Never drops."""
+        self.builder.emit("  %xe_c = atomicrmw add ptr %xe_widx, i64 1 monotonic")
+        self.builder.emit("  %xe_i = urem i64 %xe_c, {cap}")
+        self.builder.emit("  %xe_rseq = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 3")
+        self.builder.emit("  store atomic i64 0, ptr %xe_rseq monotonic, align 8")
+        self.builder.emit("  fence release")
+        self.builder.emit("  %xe_rsite = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 0")
+        self.builder.emit("  store i64 %site, ptr %xe_rsite, align 8")
+        self.builder.emit("  %xe_rkind = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 1")
+        self.builder.emit("  store i32 %kind, ptr %xe_rkind, align 4")
+        self.builder.emit("  %xe_ts = call i64 @llvm.readcyclecounter()")
+        self.builder.emit("  %xe_rts = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 4")
+        self.builder.emit("  store i64 %xe_ts, ptr %xe_rts, align 8")
+        self.builder.emit("  %xe_seq = add i64 %xe_c, 1")
+        self.builder.emit("  store atomic i64 %xe_seq, ptr %xe_rseq release, align 8")
+        self.builder.emit("  br label %xe_done")
+        self.builder.emit("xe_done:")
+        self.builder.emit("  ret void")
+        self.builder.emit("}}")
+        self.builder.emit("declare i64 @llvm.readcyclecounter()")
+        self.builder.emit("@__simple_xray_ring_wrap_v2 = constant i64 1")
 
     me emit_xray_flag_guard(name: text, kind: i64, continue_label: text):
         """Load the slot; when set call the edge hook. Falls through to
@@ -1726,6 +1760,20 @@ impl MirTextCodegen for MirToLlvm:
         eprint("error: {message} [module={self.builder.module_name} function={self.current_function_name} at={llvm_format_span(self.current_inst_span)}]")
         self.codegen_errors = self.codegen_errors.push(diagnostic)
 
+    me llvm_callable_uses_local_symbols(origin: MirCallOrigin, callee: text) -> bool:
+        """Callable authority for an operand of the module being translated.
+
+        An Unknown origin is a defect of this module's MIR, so it is this
+        module's compile error (codegen_error), not the process-wide panic of
+        mir_call_origin_uses_local_symbols_named that cost Stage 3 every
+        module of a worker's claim. Answers false (the bare name) as the
+        placeholder; the module never reaches an object."""
+        if origin == MirCallOrigin.Unknown:
+            self.codegen_error("E-BACKEND-LLVM-CALL-ORIGIN: {callee}: callee lacks proven source/runtime/foreign origin")
+            return false
+        # EXPLICIT return: mixed-return/tail rule (see cl_translate_operand).
+        return mir_call_origin_uses_local_symbols_named(origin, callee)
+
     me mark_instruction_dest_defined_at(instructions: [MirInst], index: i64):
         val inst: MirInst = instructions[index]
         match inst.kind:
@@ -1778,7 +1826,7 @@ impl MirTextCodegen for MirToLlvm:
                                 # '@rt_value_as_int_wide', p2_add, 2026-11-12).
                                 return self.translate_operand_at(operands, index)
                             case _:
-                                val resolved = if mir_call_origin_uses_local_symbols_named(operand.call_origin, name): self.llvm_function_symbol_name(name) else: name
+                                val resolved = if self.llvm_callable_uses_local_symbols(operand.call_origin, name): self.llvm_function_symbol_name(name) else: name
                                 self.unknown_func_decls[resolved] = true
                                 return "@{resolved}"
                     case _: ()
@@ -2380,7 +2428,9 @@ impl MirTextCodegen for MirToLlvm:
         elif dest_ty == "i64":
             self.builder.emit("  {dest_name} = add i64 {boxed}, 0  ; boxed text literal")
         else:
-            panic("LLVM text literal has unsupported result type: {dest_ty}")
+            # A destination typed neither ptr nor i64 is a defect of this
+            # module's MIR: its compile error; the module never reaches llc.
+            self.codegen_error("E-BACKEND-LLVM-TEXT-LITERAL: text literal has unsupported result type {dest_ty}")
 
     me emit_boxed_text_literal_value(value: text, dest_ty: text) -> text:
         val dest_name = self.builder.fresh_local()
@@ -2879,15 +2929,20 @@ impl MirTextCodegen for MirToLlvm:
         val dest_name = if has_dest: self.get_local(dest_id) else: ""
         if bootstrap_debug:
             print "[mir-to-llvm] call:dest index={index} present={has_dest}"
-        # Unknown named-call authority must never fall through string emission.
+        # Unknown named-call authority must never fall through string emission:
+        # it is this module's compile error, and the call is not emitted.
+        var unproven_callee = false
         match func.kind:
             case Const(value, _):
                 match value:
                     case Str(name):
-                        # Guard only: panics on an unproved (Unknown) callable origin.
-                        mir_call_origin_uses_local_symbols_named(func.call_origin, name)
+                        if func.call_origin == MirCallOrigin.Unknown:
+                            self.llvm_callable_uses_local_symbols(func.call_origin, name)
+                            unproven_callee = true
                     case _: ()
             case _: ()
+        if unproven_callee:
+            return
         val callee_operands: [MirOperand] = [func]
         var func_name = self.translate_call_target_at(callee_operands, 0)
         if bootstrap_debug:
@@ -2982,6 +3037,16 @@ impl MirTextCodegen for MirToLlvm:
                 arg_ty = self.valid_llvm_type(param_ty)
             elif arg_val == "0":
                 arg_val = self.ret_value_for_type(arg_ty, "0")
+            else:
+                # No declared param (varargs `declare ... @f(...)` for a callee
+                # in another module): arg_ty came from the sticky ptr_locals /
+                # MIR-declared type, which can disagree with the SSA value's
+                # real type (a `[i64]` local defined by `call i64 @g(...)`).
+                # value_as_type reads value_types and emits the inttoptr /
+                # ptrtoint, so the operand is type-consistent with arg_ty.
+                # llc: "'%l26' defined with type 'i64' but expected 'ptr'"
+                # (external_text.spl `unicode_scalar_from_utf8(external_wide_bytes(utf8))`).
+                arg_val = self.value_as_type(arg_val, arg_ty, arg_ty)
             arg_parts = arg_parts.push("{arg_ty} {arg_val}")
             arg_tys = arg_tys.push(arg_ty)
             if bootstrap_debug:
@@ -3110,7 +3175,7 @@ impl MirTextCodegen for MirToLlvm:
                     case FuncPtr(signature):
                         match const_val:
                             case Str(name):
-                                val resolved = if mir_call_origin_uses_local_symbols_named(operand.call_origin, name): self.llvm_function_symbol_name(name) else: name
+                                val resolved = if self.llvm_callable_uses_local_symbols(operand.call_origin, name): self.llvm_function_symbol_name(name) else: name
                                 if self.lookup_function_return_type(resolved) == "" and signature.return_type.?:
                                     val return_types: [MirType] = [signature.return_type]
                                     self.remember_function_return_type(resolved, self.llvm_type_text_at(return_types, 0))
@@ -3191,7 +3256,7 @@ impl MirTextCodegen for MirToLlvm:
                     case FuncPtr(signature):
                         match const_val:
                             case Str(name):
-                                val resolved = if mir_call_origin_uses_local_symbols_named(operand.call_origin, name): self.llvm_function_symbol_name(name) else: name
+                                val resolved = if self.llvm_callable_uses_local_symbols(operand.call_origin, name): self.llvm_function_symbol_name(name) else: name
                                 if self.lookup_function_return_type(resolved) == "" and signature.return_type.?:
                                     self.remember_function_return_type(resolved, self.llvm_type_text(signature.return_type))
                                     self.remember_function_return_unsigned(resolved, self.is_unsigned_mir_kind(signature.return_type.kind))

@@ -1,0 +1,115 @@
+# AUTHORED_NOT_RUN. Actual shared journal IO; no Windows pipe or resize evidence.
+# @req REQ-WINDOWS-PRIMARY-GEOMETRY-ATTEMPT-001
+use std.spec.*
+use std.nogc_sync_mut.orchestration.host_primary_geometry_service_v2.host_primary_geometry_connection_match_v2
+use test.fixtures.orchestration.host_execution_windows_progress_v4.*
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.host_capacity_owner_close_v1
+use std.nogc_sync_mut.orchestration.host_primary_geometry_record_v1.*
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_publish_v3
+use std.common.crypto.sha256.sha256_text
+
+fn attempt() -> HostPrimaryGeometryReceiptV1:
+    HostPrimaryGeometryReceiptV1("binding-a", "1".repeat(64), "a".repeat(64), "b".repeat(64), "c".repeat(64),
+        "d".repeat(64), 1, 1, 80, 24, "pending", true, "")
+
+fn completion(disposition: text) -> HostPrimaryGeometryReceiptV1:
+    var value = attempt()
+    value.disposition = disposition
+    value.cleanup_pending = false
+    value
+
+describe "Durable primary geometry attempt records":
+    after_each:
+        host_windows_progress_sweep_v4()
+
+    it "publishes an attempt once and preserves missing outcome as unresolved":
+        step("Open the genuine shared journal fixture and publish one reserved attempt")
+        val fixture = host_windows_progress_fixture_v4()
+        val journal = fixture.owner.journal
+        assert(host_primary_geometry_record_publish_v1(journal, 1, false, attempt()).unwrap())
+        assert(not host_primary_geometry_record_publish_v1(journal, 1, false, attempt()).unwrap())
+        step("Observe the actual persisted attempt without inventing a terminal receipt")
+        val saved = host_primary_geometry_record_read_v1(journal, "binding-a", 1, false).unwrap().unwrap()
+        assert(host_primary_geometry_receipt_blocks_v1(saved))
+        assert(host_primary_geometry_record_read_v1(journal, "binding-a", 1, true).unwrap().is_none())
+        var rotated = attempt()
+        rotated.revision = 2
+        rotated.session_identity = "e".repeat(64)
+        rotated.request_digest = "f".repeat(64)
+        assert(host_primary_geometry_replay_v1(saved, rotated).is_err())
+        assert(host_capacity_owner_close_v1(fixture.owner).unwrap())
+
+    it "publishes exact acknowledgement idempotently and refuses conflicting outcome":
+        step("Reserve and acknowledge the same immutable request")
+        val fixture = host_windows_progress_fixture_v4()
+        val journal = fixture.owner.journal
+        assert(host_primary_geometry_record_publish_v1(journal, 1, false, attempt()).unwrap())
+        assert(host_primary_geometry_record_publish_v1(journal, 1, true, completion("acknowledged")).unwrap())
+        assert(host_primary_geometry_record_publish_v1(journal, 1, true, completion("acknowledged")).unwrap())
+        step("Refuse a changed outcome without overwriting retained acknowledgement")
+        assert(host_primary_geometry_record_publish_v1(journal, 1, true, completion("unknown")).is_err())
+        expect(host_primary_geometry_record_read_v1(journal, "binding-a", 1, true).unwrap().unwrap().disposition).to_equal("acknowledged")
+        assert(host_capacity_owner_close_v1(fixture.owner).unwrap())
+
+    it "refuses terminal proof for missing or changed attempts":
+        step("Reject orphan terminal evidence and altered dimensions")
+        val fixture = host_windows_progress_fixture_v4()
+        val journal = fixture.owner.journal
+        assert(host_primary_geometry_record_publish_v1(journal, 1, true, completion("acknowledged")).is_err())
+        assert(host_primary_geometry_record_publish_v1(journal, 1, false, attempt()).unwrap())
+        var changed = completion("acknowledged")
+        changed.columns = 81
+        assert(host_primary_geometry_record_publish_v1(journal, 1, true, changed).is_err())
+        assert(host_primary_geometry_record_read_v1(journal, "binding-a", 1, true).unwrap().is_none())
+        assert(host_capacity_owner_close_v1(fixture.owner).unwrap())
+
+    it "keeps Unknown blocking across both lease and session rotation":
+        step("Apply the production replay rule to an uncertain prior resize")
+        val previous = completion("unknown")
+        var rotated = attempt()
+        rotated.revision = 2
+        rotated.request_digest = "e".repeat(64)
+        assert(host_primary_geometry_replay_v1(previous, rotated).is_err())
+        rotated.session_identity = "f".repeat(64)
+        assert(host_primary_geometry_replay_v1(previous, rotated).is_err())
+        assert(host_primary_geometry_replay_v1(previous, attempt()).unwrap())
+
+    it "refuses changed payload at the same attempt and requires the next sequence":
+        step("Known acknowledgement permits only the next attempt or a fresh lease sequence one")
+        val previous = completion("acknowledged")
+        var changed = attempt()
+        changed.request_digest = "e".repeat(64)
+        assert(host_primary_geometry_replay_v1(previous, changed).is_err())
+        changed.sequence = 3
+        assert(host_primary_geometry_replay_v1(previous, changed).is_err())
+        changed.sequence = 2
+        assert(not host_primary_geometry_replay_v1(previous, changed).unwrap())
+        changed.revision = 2
+        assert(host_primary_geometry_replay_v1(previous, changed).is_err())
+        changed.sequence = 1
+        assert(not host_primary_geometry_replay_v1(previous, changed).unwrap())
+
+    it "fails closed on corrupted retained evidence and history exhaustion":
+        step("Publish malformed actual journal evidence and inspect through the bounded reader")
+        val fixture = host_windows_progress_fixture_v4()
+        val journal = fixture.owner.journal
+        val path = "primary-geometry-v2/" + sha256_text("binding-a") + "/1.attempt.sdn"
+        assert(distributed_operation_journal_publish_v3(journal, path, "partial").unwrap())
+        assert(host_primary_geometry_record_read_v1(journal, "binding-a", 1, false).is_err())
+        step("Reject slots outside the fixed history bound instead of reusing an old attempt")
+        assert(host_primary_geometry_record_publish_v1(journal, 0, false, attempt()).is_err())
+        assert(host_primary_geometry_record_publish_v1(journal, HOST_PRIMARY_GEOMETRY_HISTORY_MAX_V1 + 1, false, attempt()).is_err())
+        assert(host_capacity_owner_close_v1(fixture.owner).unwrap())
+
+    it "refuses substituted connection or terminal identity before current-live authorization":
+        step("Use the actual step predicate with original connection and native session fingerprints")
+        val first_plan = sha256_text("first connection plan fixture bytes")
+        val second_plan = sha256_text("second connection plan on the same writer")
+        val first_session = sha256_text("first retained native session identity")
+        val second_session = sha256_text("second retained native session identity")
+        assert(host_primary_geometry_connection_match_v2(first_plan, first_session, first_plan, first_plan, first_session))
+        step("Refuse another connection even if its separate current-live check could succeed")
+        assert(not host_primary_geometry_connection_match_v2(first_plan, first_session, second_plan, first_plan, first_session))
+        assert(not host_primary_geometry_connection_match_v2(first_plan, first_session, first_plan, second_plan, first_session))
+        assert(not host_primary_geometry_connection_match_v2(first_plan, first_session, first_plan, first_plan, second_session))
+        assert(not host_primary_geometry_connection_match_v2("", "", "", "", ""))

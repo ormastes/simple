@@ -1,5 +1,5 @@
 use std.spec.*
-use compiler.backend.runtime_compiler.{runtime_core_c_sources_v1, runtime_core_c_platform_sources_v1, runtime_object_basename_v1, runtime_object_paths_v1}
+use compiler.backend.runtime_compiler.{runtime_core_c_sources_v1, runtime_core_c_platform_sources_v1, runtime_core_c_target_os_v1, runtime_object_basename_v1, runtime_object_paths_v1}
 
 # The phase-3 manual stage3 link (2026-11-02) needed runtime C owners that the
 # baked core-C runtime list omitted: runtime_cranelift_bridge_stub (75
@@ -27,14 +27,38 @@ describe "Runtime C source list completeness":
         expect(list_has(sources, "runtime_native")).to_be(true)
 
     it "core-C Windows platform list owns async_driver and async_windows":
-        val windows = runtime_core_c_platform_sources_v1(true)
+        val windows = runtime_core_c_platform_sources_v1("windows")
         expect(windows).to_equal(["platform/async_driver", "platform/async_windows"])
-        val other = runtime_core_c_platform_sources_v1(false)
+        val other = runtime_core_c_platform_sources_v1("other")
         expect(other.len()).to_equal(0)
+
+    # The 2026-11-15 aarch64 Stage 3 core-C link failed on 10 rt_driver_*
+    # symbols referenced by lib.nogc_async_mut.io.platform_event: the Linux
+    # list was empty. async_driver.c dispatches to epoll, and probes io_uring
+    # first, so the uring owner (its !SPL_HAS_IO_URING stub without liburing)
+    # is required too.
+    it "core-C Linux platform list owns async_driver, epoll and io_uring":
+        val linux = runtime_core_c_platform_sources_v1("linux")
+        expect(linux).to_equal(["platform/async_driver", "platform/async_linux_epoll", "platform/async_linux_uring"])
+
+    it "target triples select the platform owner set":
+        expect(runtime_core_c_target_os_v1("aarch64-unknown-linux-gnu", false, "linux")).to_equal("linux")
+        expect(runtime_core_c_target_os_v1("x86_64-unknown-linux-gnu", false, "linux")).to_equal("linux")
+        expect(runtime_core_c_target_os_v1("x86_64-unknown-linux-gnu", true, "windows")).to_equal("linux")
+        expect(runtime_core_c_target_os_v1("host", false, "linux")).to_equal("linux")
+        expect(runtime_core_c_target_os_v1("x86_64-pc-windows-msvc", false, "linux")).to_equal("windows")
+        expect(runtime_core_c_target_os_v1("x86_64-pc-windows-gnu", false, "linux")).to_equal("windows")
+        expect(runtime_core_c_target_os_v1("host", true, "windows")).to_equal("windows")
+        expect(runtime_core_c_target_os_v1("x86_64-unknown-freebsd", false, "linux")).to_equal("other")
+        expect(runtime_core_c_target_os_v1("aarch64-apple-darwin", false, "macos")).to_equal("other")
+        expect(runtime_core_c_target_os_v1("host", false, "freebsd")).to_equal("other")
+        expect(runtime_core_c_target_os_v1("aarch64-linux-android", false, "linux")).to_equal("other")
 
     it "every listed core-C source exists as a C file":
         var all = runtime_core_c_sources_v1()
-        for extra in runtime_core_c_platform_sources_v1(true):
+        for extra in runtime_core_c_platform_sources_v1("windows"):
+            all = all.push(extra)
+        for extra in runtime_core_c_platform_sources_v1("linux"):
             all = all.push(extra)
         for name in all:
             val path = "src/runtime/{name}.c"

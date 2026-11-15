@@ -92,9 +92,9 @@ fn dispatch_status_int_v2(fields: Dict<text, SdnValue>, key: text) -> Result<i64
 
 pub fn controller_dispatch_host_status_v2(context: ControllerDispatchContextV1,
         packet: ControllerDispatchRequestV2, source: text) -> Result<bool, text>:
-    if str_len(source) == 0 or str_len(source) > 4096: return Err("dispatch-host-status-size")
-    val limits = SdnStrictLimitsV1(max_source_bytes: 4096, max_depth: 2,
-        max_nodes: 48, max_rows: 0, max_cells: 0, max_columns: 24)
+    if str_len(source) == 0 or str_len(source) > 8192: return Err("dispatch-host-status-size")
+    val limits = SdnStrictLimitsV1(max_source_bytes: 8192, max_depth: 4,
+        max_nodes: 128, max_rows: 0, max_cells: 0, max_columns: 24)
     val document = match sdn_parse_strict_v1(source, limits):
         case Ok(value): value
         case Err(issue): return Err("dispatch-host-status-syntax:" + issue.code)
@@ -107,7 +107,9 @@ pub fn controller_dispatch_host_status_v2(context: ControllerDispatchContextV1,
         "availableCpuMillis", "availableMemoryBytes", "retainedReservations",
         "providerIdentityDigest", "enrollmentBindingDigest"]
     for key in fields.keys():
-        if not allowed.contains(key): return Err("dispatch-host-status-unknown-field")
+        # Optional diagnostics never authorize capacity, dispatch or expiry.
+        # Old status records remain valid; unrelated fields still reject.
+        if not allowed.contains(key) and key != "retentionAssessment": return Err("dispatch-host-status-unknown-field")
     for key in allowed:
         if not fields.contains_key(key): return Err("dispatch-host-status-missing:" + key)
     if dispatch_status_int_v2(fields, "version")? != 2 or

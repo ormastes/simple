@@ -1,0 +1,114 @@
+use std.spec
+use app.orchestrator.controller_gateway_v1.*
+use app.orchestrator.local_controller.orchestrator_local_input_command_v1
+use app.orchestrator.execution.orchestrator_execution_input_command_v2
+use app.orchestrator.server_config_load_v1.{server_host_reference_validate_v1, server_host_reference_v1}
+
+fn gateway_request_v1(action: text = "inspect") -> ControllerGatewayRequestV1:
+    ControllerGatewayRequestV1(action: action, controller_id: "controller-a", request_uid: "request-a",
+        source: "", ns: "", name: "", source_digest: "")
+
+fn gateway_config_v1(actions: [text]) -> ControllerGatewayConfigV1:
+    ControllerGatewayConfigV1(state_root: "/private/controller-a", controller_id: "controller-a", allowed_actions: actions)
+
+describe "Typed selected-server controller boundary":
+    it "REQ-002 decodes quoted host schema and endpoint path exactly once":
+        val source = "host_config:\n  schema: \"simple-host-config-v1\"\n  server_config: \"/private/servers.sdn\"\nother:\n  server_config: /wrong/servers.sdn\n"
+        expect(server_host_reference_v1(source).unwrap()).to_equal("/private/servers.sdn")
+
+    it "REQ-002 rejects explicitly selected foreign host schema":
+        expect(server_host_reference_validate_v1("host_config:\n  schema: foreign\n  server_config: /private/servers.sdn\n").unwrap_err()).to_equal("server-host-config-schema")
+
+    it "REQ-002 rejects nontext and relative host server references":
+        expect(server_host_reference_validate_v1("host_config:\n  server_config: 7\n").unwrap_err()).to_equal("server-host-config-path")
+        expect(server_host_reference_validate_v1("host_config:\n  server_config: servers.sdn\n").unwrap_err()).to_equal("server-host-config-path")
+
+    it "REQ-004 rejects malformed remote success payload":
+        val source = controller_gateway_request_encode_v1(gateway_request_v1()).unwrap()
+        expect(controller_gateway_response_v1(source, "status: successful\n").is_err()).to_equal(true)
+
+    it "REQ-004 rejects wrong controller inside a correlated successful cancellation frame":
+        var request = gateway_request_v1("cancel")
+        request.source_digest = "a".repeat(64)
+        val source = controller_gateway_request_encode_v1(request).unwrap()
+        val output = "version: 1\nkind: orchestrator-local-controller\ncontrollerId: controller-b\nrequestUid: request-a\nexecutionAuthorized: false\nstatus: intent-cancelled\nsourceDigest: \"" + request.source_digest + "\"\nterminationObserved: false\n"
+        expect(controller_gateway_response_v1(source, output).unwrap_err()).to_equal("controller-cancellation-reply-mismatch")
+
+    it "REQ-004 rejects wrong request UID in remote cancellation response":
+        var request = gateway_request_v1("cancel")
+        request.source_digest = "a".repeat(64)
+        val source = controller_gateway_request_encode_v1(request).unwrap()
+        val output = "version: 1\nkind: orchestrator-local-controller\ncontrollerId: controller-a\nrequestUid: request-b\nexecutionAuthorized: false\nstatus: intent-cancelled\nsourceDigest: \"" + request.source_digest + "\"\nterminationObserved: false\n"
+        expect(controller_gateway_response_v1(source, output).unwrap_err()).to_equal("controller-cancellation-reply-mismatch")
+
+    it "REQ-004 preserves typed inspect request identity across encoding":
+        val source = controller_gateway_request_encode_v1(gateway_request_v1()).unwrap()
+        val decoded = controller_gateway_request_decode_v1(source).unwrap()
+        expect(decoded.controller_id).to_equal("controller-a")
+        expect(decoded.request_uid).to_equal("request-a")
+        expect(decoded.action).to_equal("inspect")
+
+    it "REQ-004 authorizes an installed action and exact frame subject":
+        val source = controller_gateway_request_encode_v1(gateway_request_v1()).unwrap()
+        val header = controller_gateway_header_v1(source).unwrap()
+        val accepted = controller_gateway_authorize_v1(gateway_config_v1(["inspect"]), header, source)
+        expect(accepted.unwrap().request_uid).to_equal("request-a")
+
+    it "REQ-004 denies a caller-selected controller before domain effects":
+        var request = gateway_request_v1()
+        request.controller_id = "controller-b"
+        val source = controller_gateway_request_encode_v1(request).unwrap()
+        val header = controller_gateway_header_v1(source).unwrap()
+        val rejected = controller_gateway_dispatch_v1(gateway_config_v1(["inspect"]), header, source)
+        expect(rejected.unwrap_err()).to_equal("controller-gateway-controller-mismatch")
+
+    it "REQ-004 refuses a valid request outside the local action grant":
+        val source = controller_gateway_request_encode_v1(gateway_request_v1()).unwrap()
+        val header = controller_gateway_header_v1(source).unwrap()
+        expect(controller_gateway_dispatch_v1(gateway_config_v1(["submit"]), header, source).unwrap_err()).to_equal("controller-gateway-action-denied")
+
+    it "REQ-004 rejects frame request-id substitution":
+        val source = controller_gateway_request_encode_v1(gateway_request_v1()).unwrap()
+        var header = controller_gateway_header_v1(source).unwrap()
+        header.request_id = "0".repeat(64)
+        expect(controller_gateway_authorize_v1(gateway_config_v1(["inspect"]), header, source).unwrap_err()).to_equal("controller-gateway-frame-correlation")
+
+    it "REQ-004 rejects hidden unused request fields":
+        var request = gateway_request_v1()
+        request.source = "unexpected executable or payload"
+        expect(controller_gateway_request_encode_v1(request).unwrap_err()).to_equal("controller-gateway-unused-fields")
+
+    it "REQ-004 requires immutable source digest for cancellation":
+        expect(controller_gateway_request_encode_v1(gateway_request_v1("cancel")).unwrap_err()).to_equal("controller-gateway-cancel-digest")
+        var request = gateway_request_v1("cancel")
+        request.source_digest = "a".repeat(64)
+        expect(controller_gateway_request_encode_v1(request).is_ok()).to_equal(true)
+
+    it "REQ-004 carries signed execution packet without claiming its admission":
+        var request = gateway_request_v1("dispatch")
+        request.source = "version: 2\nkind: deliberately-not-a-valid-signed-dispatch\n"
+        val source = controller_gateway_request_encode_v1(request).unwrap()
+        val header = controller_gateway_header_v1(source).unwrap()
+        val selected = controller_gateway_authorize_v1(gateway_config_v1(["dispatch"]), header, source).unwrap()
+        expect(selected.source).to_equal(request.source)
+        # Selection authorizes a dispatch attempt only; the real domain owner
+        # must still reject the invalid signed packet/private state below.
+        val reply = orchestrator_execution_input_command_v2(["dispatch", "/missing-server-test-root", "controller-a", "request-a", "framed-packet"], Some(request.source))
+        expect(reply.exit_code == 0).to_equal(false)
+
+    it "REQ-003 keeps local argument validation on source input route":
+        val reply = orchestrator_local_input_command_v1(["submit"], Some("kind: invalid"))
+        expect(reply.exit_code == 0).to_equal(false)
+        expect(reply.output).to_contain("invalid-local-command-arguments")
+
+    it "REQ-002 rejects duplicate gateway policy operations":
+        val source = "version: 1\nstateRoot: /private/controller\ncontrollerId: controller-a\nallowedActions: [inspect, inspect]\n"
+        expect(controller_gateway_config_decode_v1(source).unwrap_err()).to_equal("controller-gateway-actions")
+
+    it "REQ-002 rejects administrative operations in gateway policy":
+        val source = "version: 1\nstateRoot: /private/controller\ncontrollerId: controller-a\nallowedActions: [dispatch-init]\n"
+        expect(controller_gateway_config_decode_v1(source).unwrap_err()).to_equal("controller-gateway-actions")
+
+    it "REQ-002 rejects wire-selected filesystem roots":
+        val source = controller_gateway_request_encode_v1(gateway_request_v1()).unwrap() + "stateRoot: /attacker\n"
+        expect(controller_gateway_request_decode_v1(source).is_err()).to_equal(true)

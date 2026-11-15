@@ -1,0 +1,301 @@
+# Windows deployment-backed local Host owner. Capacity remains the existing
+# journal/ledger; the service incarnation is never represented as a Linux boot.
+use std.nogc_sync_mut.orchestration.host_windows_deployment_v2.*
+use std.nogc_sync_mut.orchestration.host_service_enrollment_v2.*
+use std.nogc_sync_mut.orchestration.host_private_metadata_v2.HostPrivateMetadataV2
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.host_service_reconciliation_v2.*
+use std.nogc_sync_mut.orchestration.host_service_private_receipt_v2.{HostServicePrivateCleanupV2, host_service_private_cleanup_v2}
+use std.nogc_sync_mut.orchestration.host_local_root_v1.host_local_context_v1
+use std.nogc_sync_mut.orchestration.host_authorized_reservation_v1.host_authorized_prepare_reply_v1
+use std.nogc_sync_mut.orchestration.host_authorized_execution_v2.host_authorized_execute_v2
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.HostExecutionObservationV2
+use std.nogc_sync_mut.orchestration.host_parent_budget_v1.{host_parent_budget_record_decode_v1, host_parent_budget_store_owned_v2}
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_scope_v2, simple_container_observation_v2}
+use std.nogc_async_mut.container.service_v2.simple_container_start_service_v2
+use std.nogc_async_mut.container.providers.windows.docker_policy_codec_v1.windows_docker_policy_decode_v1
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.orchestration.host_prepare_request_v1.host_prepare_request_decode_v1
+use std.common.task_runner.distributed_operation_journal_v2.*
+use std.nogc_sync_mut.io.windows_journal_store_v1.*
+use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
+use std.nogc_sync_mut.io.file_lock_owned_v2.FileLockReleaseStateV2
+use std.common.crypto.sha256.sha256_text
+
+pub struct HostWindowsExecutionReplyV3:
+    observation: Option<HostExecutionObservationV2>
+    recovery_required: bool
+    error: text
+
+# The executor owns the updated journal after begin. Its authorization callback
+# must validate the SAME native writer and deployment, not the old WAL revision.
+fn windows_execution_context_v3(deployment: HostWindowsDeploymentOwnerV2,
+        journal: DistributedOperationJournalV2) -> HostReservationAuthorizationContextV1:
+    val invalid = HostReservationAuthorizationContextV1(-1, -1, -1, -1, -1)
+    if journal.windows_store.is_none(): return invalid
+    val store = journal.windows_store.unwrap()
+    val metadata = deployment.current_for_store_v3(store)
+    if metadata.is_err(): return invalid
+    if not store.live(): return invalid
+    val lease = store.read("parent.lease", 512)
+    if lease.is_err() or lease.unwrap().is_none(): return invalid
+    if sha256_text(lease.unwrap().unwrap()) != journal.lease_digest: return invalid
+    host_local_context_v1(metadata.unwrap().policy)
+
+pub class HostWindowsLocalRootV3:
+    deployment: HostWindowsDeploymentOwnerV2
+    capacity: HostCapacityOwnerV1
+    container: SimpleContainerOwnerV2
+    reconciliation: HostServiceReconciliationTurnV2
+
+    pub fn capacity_v3() -> HostCapacityOwnerV1: self.capacity
+    pub fn container_v3() -> SimpleContainerOwnerV2: self.container
+    pub fn scope_v3() -> ContainerHostScopeV2: simple_container_scope_v2(self.container)
+    pub fn binding_v3() -> HostServiceEnrollmentBindingV2: self.deployment.binding_v2()
+    pub fn deployment_authority_v3() -> HostWindowsDeploymentOwnerV2: self.deployment
+
+    pub fn current_v3() -> Result<HostPrivateMetadataV2, text>:
+        val journal = self.capacity.journal
+        if journal.windows_store.is_none(): return Err("host-windows-journal-owner-missing")
+        val metadata = self.deployment.current_for_store_v3(journal.windows_store.unwrap())?
+        val probe = distributed_operation_journal_lookup_v2(journal, "")
+        if probe.is_ok() or probe.unwrap_err() != "OPERATION_NOT_FOUND": return Err("host-windows-journal-not-current")
+        if self.capacity.ledger.revision != journal.sequence + 1: return Err("host-windows-projection-stale")
+        val scope = self.scope_v3()
+        val binding = self.binding_v3()
+        val machine = self.deployment.machine_scope_v3()?
+        val allocatable = host_service_allocatable_v2(binding)?
+        val observed = simple_container_observation_v2(self.container)
+        if (scope.physical_host_id != binding.physical_host_id or scope.service_scope_id != binding.service_scope_id or
+                scope.native_machine_id != binding.native_machine_id or scope.continuity_mode != "service-incarnation-v1" or
+                scope.boot_id != "" or observed.provider_identity_digest != binding.provider_identity_digest or
+                scope.provider_generation != machine.provider_generation or
+                metadata.configuration.controller_ref != machine.issuer_id or
+                machine.physical_host_id != scope.physical_host_id or machine.native_machine_id != scope.native_machine_id or
+                machine.service_scope_id != scope.service_scope_id or
+                self.capacity.ledger.capacity.cpu_millis != allocatable.cpu_millis or
+                self.capacity.ledger.capacity.memory_bytes != allocatable.memory_bytes or
+                self.capacity.ledger.capacity.boot_id != container_scope_fence_id_v2(scope)?):
+            return Err("host-windows-local-scope-mismatch")
+        Ok(metadata)
+
+    pub fn context_v3() -> HostReservationAuthorizationContextV1:
+        match self.current_v3():
+            case Ok(metadata): host_local_context_v1(metadata.policy)
+            case Err(_): HostReservationAuthorizationContextV1(-1, -1, -1, -1, -1)
+
+    pub fn ready_v3() -> bool:
+        self.reconciliation.admission.is_some() and self.reconciliation.error == "" and
+            self.reconciliation.privacy_cleanup.is_none() and self.capacity.ledger.continuity_proven
+
+    pub me reconcile_v3() -> Result<bool, text>:
+        val checked = self.current_v3()?
+        if self.ready_v3(): return Ok(true)
+        val turn = host_service_reconcile_retry_v2(self.reconciliation)
+        self.capacity = turn.owner
+        self.container = turn.container
+        self.reconciliation = turn
+        if not self.ready_v3(): return Err(turn.error)
+        Ok(true)
+
+    pub me prepare_v3(payload: text) -> Result<text, text>:
+        val metadata = self.current_v3()?
+        if not self.ready_v3(): return Err("host-windows-startup-quarantine")
+        val request = host_prepare_request_decode_v1(payload)?
+        if request.intent.reservation.service_scope_id != self.scope_v3().service_scope_id:
+            return Err("host-service-scope-mismatch")
+        val retained = self
+        val refresh = fn() -> HostReservationAuthorizationContextV1: retained.context_v3()
+        val prepared = host_authorized_prepare_reply_v1(self.capacity, payload, metadata.policy.snapshot,
+            metadata.policy.snapshot.generation, self.context_v3(), refresh)?
+        self.capacity = prepared.owner
+        self.reconciliation.owner = prepared.owner
+        Ok(prepared.response)
+
+    # Explicit effect-owner port. The nonblocking service control callback does
+    # not invoke this. One canonical root retains both returned owners before
+    # any response encoding or post-effect validation can fail.
+    pub me execute_v3(payload: text) -> HostWindowsExecutionReplyV3:
+        val metadata = self.current_v3()
+        if metadata.is_err(): return HostWindowsExecutionReplyV3(nil, true, metadata.unwrap_err())
+        if not self.ready_v3(): return HostWindowsExecutionReplyV3(nil, true, "host-windows-startup-quarantine")
+        val deployment = self.deployment
+        val journal = self.capacity.journal
+        val refresh = fn() -> HostReservationAuthorizationContextV1:
+            windows_execution_context_v3(deployment, journal)
+        val turn = host_authorized_execute_v2(self.capacity, self.container, payload, metadata.unwrap().policy,
+            self.binding_v3().provider_identity_digest, self.scope_v3().service_scope_id,
+            windows_execution_context_v3(deployment, journal), refresh)
+        self.capacity = turn.owner
+        self.container = turn.container
+        self.reconciliation.owner = turn.owner
+        self.reconciliation.container = turn.container
+        val current = self.current_v3()
+        if current.is_err(): return HostWindowsExecutionReplyV3(turn.observation, true,
+            if turn.error == "": current.unwrap_err() else: turn.error)
+        HostWindowsExecutionReplyV3(turn.observation, turn.recovery_required, turn.error)
+
+    pub fn parent_budget_v3(payload: text) -> Result<text, text>:
+        val metadata = self.current_v3()?
+        if not self.ready_v3(): return Err("host-windows-startup-quarantine")
+        val record = host_parent_budget_record_decode_v1(payload)?
+        val retained = self
+        val refresh = fn() -> HostReservationAuthorizationContextV1: retained.context_v3()
+        host_parent_budget_store_owned_v2(self.capacity, self.scope_v3(), metadata.policy,
+            record, self.context_v3(), refresh)
+
+    # A provider turn and its SAME journal projection are returned to this owner.
+    # No new writer is opened; stale copied roots cannot pass current_v3.
+    pub me retain_v3(capacity: HostCapacityOwnerV1, container: SimpleContainerOwnerV2) -> Result<bool, text>:
+        val prior = self.capacity.journal
+        val next = capacity.journal
+        if (next.root != prior.root or next.authority_digest != prior.authority_digest or
+                next.lease_digest != prior.lease_digest or next.windows_store.is_none() or
+                prior.windows_store.is_none() or not prior.windows_store.unwrap().same_owner(next.windows_store.unwrap()) or
+                capacity.ledger.capacity != self.capacity.ledger.capacity or
+                simple_container_scope_v2(container) != self.scope_v3()):
+            return Err("host-windows-owner-turn-mismatch")
+        # Retain before any further validation: a post-effect failure must not
+        # return the pre-effect provider or lose a committed journal revision.
+        self.capacity = capacity
+        self.container = container
+        self.reconciliation.owner = capacity
+        self.reconciliation.container = container
+        val checked = self.current_v3()
+        if checked.is_err():
+            # The journal may already have committed while projection failed.
+            # Retain that exact writer, charge uncertainty, and block readiness.
+            self.reconciliation.error = checked.unwrap_err()
+            return Err(checked.unwrap_err())
+        Ok(true)
+
+pub struct HostWindowsLocalCleanupV3:
+    deployment: Option<HostWindowsDeploymentOwnerV2>
+    deployment_cleanup: Option<HostWindowsDeploymentCleanupV2> = nil
+    journal: Option<DistributedOperationJournalOpenCleanupV2> = nil
+    store: Option<WindowsJournalStoreV1> = nil
+    privacy: Option<HostServicePrivateCleanupV2> = nil
+    error: text = ""
+
+pub struct HostWindowsLocalCleanupTurnV3:
+    cleanup: Option<HostWindowsLocalCleanupV3>
+    closed: bool
+    error: text
+
+pub enum HostWindowsLocalOpenV3:
+    Ready(HostWindowsLocalRootV3)
+    Pending(HostWindowsLocalRootV3, text)
+    Rejected(text)
+    CleanupRequired(HostWindowsLocalCleanupV3, text)
+
+pub fn host_windows_local_cleanup_v3(cleanup: HostWindowsLocalCleanupV3) -> HostWindowsLocalCleanupTurnV3:
+    var current = cleanup
+    if val privacy = current.privacy:
+        current.privacy = host_service_private_cleanup_v2(privacy)
+        if current.privacy.is_some(): return HostWindowsLocalCleanupTurnV3(Some(current), false,
+            if current.error != "": current.error else: "host-windows-privacy-close-pending")
+    if val journal = current.journal:
+        val closed = distributed_operation_journal_open_cleanup_v2(journal)
+        current.journal = closed.cleanup
+        val state = match closed.state:
+            case FileLockReleaseStateV2.Released: "released"
+            case FileLockReleaseStateV2.Stale: "stale"
+            case FileLockReleaseStateV2.ConsumedError: "consumed-error"
+            case FileLockReleaseStateV2.Retained: "retained"
+            case FileLockReleaseStateV2.Unknown: "unknown"
+        if current.error == "" and closed.error != "": current.error = "host-windows-journal-close:" + closed.error
+        val disposition = host_windows_cleanup_disposition_v3(state, current.error, "host-windows-journal-close")
+        current.error = disposition.error
+        if not disposition.consumed or current.journal.is_some():
+            if current.journal.is_none(): current.journal = Some(journal)
+            return HostWindowsLocalCleanupTurnV3(Some(current), false,
+                if current.error != "": current.error else: "host-windows-journal-close-pending")
+        current.journal = nil
+    if val original = current.store:
+        var store = original
+        val state = store.close_state()
+        val disposition = host_windows_cleanup_disposition_v3(state, current.error, "host-windows-store-close")
+        current.error = disposition.error
+        if not disposition.consumed: return HostWindowsLocalCleanupTurnV3(Some(current), false,
+            if current.error != "": current.error else: "host-windows-store-close-pending")
+        current.store = nil
+    if val original = current.deployment:
+        val closed = host_windows_deployment_close_v2(original)
+        current.deployment = nil
+        current.deployment_cleanup = closed.cleanup
+        if val retained = closed.cleanup:
+            if current.error == "" and retained.error != "": current.error = retained.error
+        if closed.closed and current.error == "" and closed.error != "": current.error = closed.error
+        if not closed.closed: return HostWindowsLocalCleanupTurnV3(Some(current), false,
+            if current.error != "": current.error else: closed.error)
+    if val pending = current.deployment_cleanup:
+        val closed = host_windows_deployment_cleanup_v2(pending)
+        current.deployment_cleanup = closed.cleanup
+        if val retained = closed.cleanup:
+            if current.error == "" and retained.error != "": current.error = retained.error
+        if closed.closed and current.error == "" and closed.error != "": current.error = closed.error
+        if not closed.closed: return HostWindowsLocalCleanupTurnV3(Some(current), false,
+            if current.error != "": current.error else: closed.error)
+    HostWindowsLocalCleanupTurnV3(nil, true, current.error)
+
+pub fn host_windows_local_close_v3(owner: HostWindowsLocalRootV3) -> HostWindowsLocalCleanupTurnV3:
+    val journal = owner.capacity_v3().journal
+    # Store close releases this service writer only, never workload charges.
+    host_windows_local_cleanup_v3(HostWindowsLocalCleanupV3(deployment: Some(owner.deployment),
+        journal: Some(DistributedOperationJournalOpenCleanupV2(journal.root, journal.authority_digest,
+            journal.lease_digest, true, nil, journal.windows_store)), privacy: owner.reconciliation.privacy_cleanup))
+
+pub fn host_windows_local_open_v3(deployment: HostWindowsDeploymentOwnerV2) -> HostWindowsLocalOpenV3:
+    var cleanup = HostWindowsLocalCleanupV3(deployment: Some(deployment))
+    val metadata_result = deployment.current_v3()
+    if metadata_result.is_err(): return HostWindowsLocalOpenV3.CleanupRequired(cleanup, metadata_result.unwrap_err())
+    val metadata = metadata_result.unwrap()
+    val binding = deployment.binding_v2()
+    val machine = deployment.machine_scope_v3()
+    if machine.is_err(): return HostWindowsLocalOpenV3.CleanupRequired(cleanup, machine.unwrap_err())
+    val policy_result = windows_docker_policy_decode_v1(metadata.engine_policy_bytes)
+    if policy_result.is_err(): return HostWindowsLocalOpenV3.CleanupRequired(cleanup, policy_result.unwrap_err())
+    val policy = policy_result.unwrap()
+    if policy.provider_generation != machine.unwrap().provider_generation:
+        return HostWindowsLocalOpenV3.CleanupRequired(cleanup, "host-windows-machine-provider-generation")
+    val allocatable = host_service_allocatable_v2(binding)
+    if allocatable.is_err(): return HostWindowsLocalOpenV3.CleanupRequired(cleanup, allocatable.unwrap_err())
+    val root = deployment.diagnostic_root_v3()
+    # Provider state_root is diagnostic lexical scope only; actual journal IO
+    # below uses the retained store. Its Windows codec requires native slashes.
+    val started = simple_container_start_service_v2(binding.backend, metadata.engine_policy_bytes,
+        (root + "/provider").replace("/", "\\"),
+        ContainerServiceScopeBasisV2(binding.physical_host_id, binding.service_scope_id, binding.native_machine_id,
+            policy.provider_generation), binding.provider_identity_digest, policy.timeout_ms)
+    if started.is_err(): return HostWindowsLocalOpenV3.CleanupRequired(cleanup, started.unwrap_err())
+    val service = started.unwrap()
+    val fence = container_scope_fence_id_v2(service.scope)
+    if fence.is_err(): return HostWindowsLocalOpenV3.CleanupRequired(cleanup, fence.unwrap_err())
+    val digest = host_service_enrollment_payload_digest_v2(binding)
+    if digest.is_err(): return HostWindowsLocalOpenV3.CleanupRequired(cleanup, digest.unwrap_err())
+    val nonce = sosix_random_hex(32) ?? ""
+    if nonce.byte_len() != 64: return HostWindowsLocalOpenV3.CleanupRequired(cleanup, "host-windows-entropy-unavailable")
+    var retained: Option<WindowsJournalStoreV1> = nil
+    match deployment.journal_store_v3():
+        case WindowsJournalStoreOpenV1.Ready(store): retained = Some(store)
+        case WindowsJournalStoreOpenV1.Rejected(error): return HostWindowsLocalOpenV3.CleanupRequired(cleanup, error)
+        case WindowsJournalStoreOpenV1.CleanupRequired(store, error):
+            cleanup.store = Some(store)
+            return HostWindowsLocalOpenV3.CleanupRequired(cleanup, error)
+    # This stable journal ID is not the authenticated controller issuer. The
+    # deployment's retained machine claim binds that separate signed identity.
+    val capacity = HostCapacityV1(binding.physical_host_id, "host-" + digest.unwrap(), fence.unwrap(),
+        service.scope.provider_generation, allocatable.unwrap().cpu_millis, allocatable.unwrap().memory_bytes, [])
+    var owner: Option<HostCapacityOwnerV1> = nil
+    match host_capacity_owner_open_windows_v3(root + "/journal", retained.unwrap(), capacity, nonce,
+            metadata.configuration.maximum_journal_events):
+        case HostCapacityOpenV2.Ready(value): owner = Some(value)
+        case HostCapacityOpenV2.Rejected(error): return HostWindowsLocalOpenV3.CleanupRequired(cleanup, error)
+        case HostCapacityOpenV2.CleanupRequired(journal, error):
+            cleanup.journal = Some(journal)
+            return HostWindowsLocalOpenV3.CleanupRequired(cleanup, error)
+    val reconciled = host_service_reconcile_v2(owner.unwrap(), service.owner)
+    val local = HostWindowsLocalRootV3(deployment, reconciled.owner, reconciled.container, reconciled)
+    if not local.ready_v3(): return HostWindowsLocalOpenV3.Pending(local, reconciled.error)
+    HostWindowsLocalOpenV3.Ready(local)

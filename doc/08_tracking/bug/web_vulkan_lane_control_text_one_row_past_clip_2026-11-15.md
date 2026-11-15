@@ -1,6 +1,7 @@
 # Web renderer: the Vulkan lane paints some glyphs one row lower than the CPU lane
 
-Status: OPEN. Found 2026-11-15 on `work/engine2d-lane-parity-20261115`
+Status: FIXED 2026-11-15 on `work/engine2d-vulkan-text-20261115` (base
+`830879893c3`). Found the same day on `work/engine2d-lane-parity-20261115`
 (base `fa2dd425635`), while listing every cpu_simd vs Vulkan (llvmpipe)
 difference on the web catalog.
 
@@ -42,14 +43,72 @@ first at (60, 32). In the `<input>` value some glyph columns end at y 31 on
 both lanes (x 67) while others (x 70, 74, 78) reach y 32 on Vulkan only: the
 extra row is per glyph, not a uniform clip edge. Root cause not found.
 
-## Where to look
+## Root cause
 
-`simple_web_layout_render_html_readback`
-(`browser_engine/simple_web_html_engine2d_presenter.spl`) -> the text that
-reaches `VulkanBackend` with a clip, and `vulkan_bitmap_text_clip_quads`
-(`engine2d/backend_vulkan_font.spl:809`), whose own intersection is
-exclusive on the right/bottom and looks correct, so the extra row more likely
-comes from per-glyph height or `dst_y` derivation (`vulkan_bitmap_text_quads` /
-`text_metrics`) versus the fb glyph blit; `browser_engine` sets no explicit
-`set_clip`. Not fixed in this lane:
-`browser_engine/**` was being edited by another lane on 2026-11-15.
+Not a clip-edge off-by-one, glyph height or blit height: the Vulkan
+vector-face composite ignored the clip rect entirely.
+
+The Draw IR text branch (`engine2d/draw_ir_adv.spl`) sets
+`Engine2D.set_clip` to the command's clip (the `<input>` control box, bottom
+row y 31) and calls `draw_text_with_advances`. On the Vulkan lane that reaches
+`VulkanBackend.composite_font_batch` (`engine2d/backend_vulkan_font.spl`),
+which dispatched every staged glyph quad whole. Only the BITMAP text path
+applied `vulkan_bitmap_text_clip_quads`; the CPU lane clips in
+`draw_image`. Glyphs whose quads ended at y 32 gained one row; the 'p'
+descender (quad y 26-35) gained four, which is why the extra ink looked
+"per glyph". Narrower repro: the forms-media `<style>` plus
+`<label>Name <input id="name" name="name" value="Simple"></label>`, 300x120,
+24 differing pixels.
+
+RenderDoc capture on llvmpipe (both runs `num_captures=1`, same 34
+dispatches): only the font-atlas composite's params buffer differs. Glyph
+rows before y 23-32 (p: 26-35), after y 23-31. Table and method:
+`doc/00_llm_process/feature_expert/simple_renderdoc/skill.md`.
+
+## Fix
+
+- `composite_font_batch` intersects every quad with `self.clip_*` through
+  `vulkan_bitmap_text_clip_quads` before partitioning and dispatch, and
+  reports the caller's quad count so the batch is admitted without a CPU
+  redraw.
+- A batch whose quads are ALL outside the clip returns the new status
+  `clipped-out` (zero dispatches), admitted by both
+  `engine2d_vulkan_font_batch_admits` and its twin
+  `vulkan_font_batch_composited`. Before that change it fell back to the CPU
+  (`font_execution_target()` == `cpu`) and `draw_text_with_advances_vulkan_only`
+  returned false. Such a batch uploads nothing, so the host atlas mirror is
+  marked stale when the batch carried new cells.
+- Twin repair found on the way: `vulkan_font_batch_composited` never gained
+  `promoted` when `engine.spl` admitted it (`10b231914cf`), so
+  `backend_vulkan_bitmap_text_atlas_spec` was 5/6 at the base.
+
+Evidence: `test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_text_advances_clip_parity_spec.spl`
+(red at the base: 10 px below the clip; red without `clipped-out`: target
+`cpu`, vulkan-only `false`; 3/3 after). Repro 24 -> 0 px. Catalog 900x760 on the fixed tree: all 8 pages
+byte-identical between `--backend cpu_simd` and `--backend vulkan` (llvmpipe)
+`.ppm` files (`cmp`), was 62 px; the cpu_simd gate still PASSes (worst 7.09).
+forms-media Vulkan work is unchanged (39 font composites, pack_full=12,
+pack_incremental=9 before and after); wall-time deltas between runs were not
+attributed (shared host).
+
+Review follow-ups (same day):
+
+- With a clip set, `composite_font_batch` copies the quads and the batch only
+  when some quad crosses the clip (`vulkan_font_quads_within_clip`); Draw IR
+  sets a clip for every control text run, and nearly all of them lie inside
+  it. forms-media 900x760 on vulkan (llvmpipe), `simple run` of a one-page
+  render, same seed: before 81.10 s / 75.63 s (load ~4, maxrss 1.08-1.11 GB),
+  after 84.60 s / 87.02 s (load ~7, maxrss 1.06-1.09 GB), pixel checksum
+  identical (`sum=2697697746427296`). The page is dominated by other work and
+  the host load doubled between the runs, so no wall-time win is claimed; the
+  change removes one quad array plus one `FontRenderBatch` copy per
+  inside-clip run.
+- New rows: left/top partial clip (atlas read position shifted, byte-equal to
+  software), a run whose origin is off the top-left, host rows for the clip
+  helpers (atlas_x/atlas_y shift on left/top trim, negative origin, exclusive
+  right/bottom edges), and a Draw IR row proving valid advances are applied
+  (encoded `7,7` == `[7, 7]`, != `[3, 11]`; the advances must sum to the
+  command width or the run falls back to the font's own advances).
+- The Vulkan rows print `[skip] <row>: no llvmpipe ICD at
+  /usr/share/vulkan/icd.d/lvp_icd.json; this Vulkan row was not exercised`
+  when the ICD is missing. A green run on such a host is not Vulkan evidence.

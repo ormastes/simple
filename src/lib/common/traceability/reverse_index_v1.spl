@@ -1,0 +1,50 @@
+# Reverse index over the traceability graph: (relation, target) -> sources.
+# Pure. One pass over the edges builds sorted, de-duplicated source lists, so a
+# lookup never scans the edge list. Every answer equals a complete scan of the
+# same graph (REQ-TRC-017); dangling targets are indexed like any other target.
+# @req REQ-TRC-017
+use std.common.traceability.model.*
+
+# Id of a graph entity (node id, or a dangling edge endpoint).
+pub struct TraceEntityIdV1:
+    value: text
+
+# Sources keyed by "<relation>\n<target>"; each list is sorted and unique.
+pub struct TraceReverseIndexV1:
+    by_key: Dict<text, [TraceEntityIdV1]>
+
+fn _reverse_key(relation: TraceRelation, target: text) -> text:
+    relation_name(relation) + "\n" + target
+
+pub fn trace_reverse_index_build_v1(graph: TraceGraph) -> TraceReverseIndexV1:
+    var raw: Dict<text, [text]> = {}
+    var keys: [text] = []
+    for edge in graph.edges:
+        val key = _reverse_key(edge.relation, edge.to_id)
+        if raw.contains_key(key):
+            var current = raw[key]
+            current.push(edge.from_id)
+            raw[key] = current
+        else:
+            raw[key] = [edge.from_id]
+            keys.push(key)
+    var by_key: Dict<text, [TraceEntityIdV1]> = {}
+    for key in keys:
+        var unique: [TraceEntityIdV1] = []
+        var last = ""
+        var have_last = false
+        for id in trace_sorted_ids(raw[key]):
+            if not have_last or id != last:
+                unique.push(TraceEntityIdV1(value: id))
+                last = id
+                have_last = true
+        by_key[key] = unique
+    TraceReverseIndexV1(by_key: by_key)
+
+pub fn trace_reverse_lookup_v1(index: TraceReverseIndexV1, relation: TraceRelation, target: TraceEntityIdV1) -> [TraceEntityIdV1]:
+    val key = _reverse_key(relation, target.value)
+    if index.by_key.contains_key(key):
+        return index.by_key[key]
+    []
+
+export TraceEntityIdV1, TraceReverseIndexV1, trace_reverse_index_build_v1, trace_reverse_lookup_v1
