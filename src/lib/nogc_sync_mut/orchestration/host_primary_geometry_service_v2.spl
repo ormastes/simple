@@ -1,0 +1,287 @@
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.sosix.entropy.sosix_random_hex
+use std.nogc_sync_mut.io.windows_journal_store_v1.WindowsJournalStoreV1
+use std.common.task_runner.distributed_operation_journal_v2.DistributedOperationJournalV2
+# Current Host authority + durable attempt head + separate bounded Container
+# geometry exchange. The task retains neither a writer nor a terminal reader.
+use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
+use std.nogc_sync_mut.orchestration.host_primary_connection_service_v3.{HostPrimaryConnectionTaskV3,
+    host_primary_connection_control_live_v3}
+use std.nogc_sync_mut.orchestration.host_primary_connection_parent_v2.host_primary_connection_parent_v2
+use std.nogc_sync_mut.orchestration.host_primary_geometry_record_v1.*
+use std.nogc_async_mut.container.terminal_session_v2.ContainerOwnedTerminalSessionV2
+use std.nogc_async_mut.container.terminal_primary_v2.container_primary_terminal_view_v2
+use std.nogc_async_mut.container.terminal_primary_geometry_v2.*
+use std.common.contracts.container.primary_geometry_v1.{ContainerPrimaryGeometryRequestV1,
+    container_primary_geometry_request_check_v1, container_primary_geometry_request_same_v1}
+use std.common.contracts.mux.session_runtime_control_v1.session_runtime_control_target_digest_v1
+use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
+
+pub class HostPrimaryGeometryTaskV2:
+    head: HostPrimaryGeometryReceiptV1
+    receipt: HostPrimaryGeometryReceiptV1
+    request: ContainerPrimaryGeometryRequestV1
+    exchange: ContainerPrimaryGeometryOwnerV2?
+    phase: text
+    slot: i64
+    previous: HostPrimaryGeometryReceiptV1?
+    connection_plan_digest: text
+    journal_lease: text
+    journal_authority: text
+    journal_store: WindowsJournalStoreV1
+    error: text
+
+    pub fn receipt_v2() -> HostPrimaryGeometryReceiptV1: self.receipt
+    pub fn phase_v2() -> text: self.phase
+
+# Process-local verified prefix cursor. It cannot be decoded from wire data or
+# used across a different actual writer; restart must scan persisted evidence.
+pub class HostPrimaryGeometryHistoryV2:
+    receipt: HostPrimaryGeometryReceiptV1
+    slot: i64
+    journal_lease: text
+    journal_authority: text
+    journal_store: WindowsJournalStoreV1
+
+pub struct HostPrimaryGeometryTurnV2:
+    local: HostLocalRootV3
+    task: HostPrimaryGeometryTaskV2?
+    receipt: HostPrimaryGeometryReceiptV1?
+    error: text
+    history: HostPrimaryGeometryHistoryV2? = nil
+
+fn refused(local: HostLocalRootV3, reason: text) -> HostPrimaryGeometryTurnV2:
+    HostPrimaryGeometryTurnV2(local, nil, nil, reason)
+
+fn initial_receipt(session: ContainerOwnedTerminalSessionV2,
+        request: ContainerPrimaryGeometryRequestV1) -> Result<HostPrimaryGeometryReceiptV1, text>:
+    val now = time_sample_monotonic_nanos_or_failure()
+    if now < 0: return Err("host-primary-geometry-clock")
+    val valid = container_primary_geometry_request_check_v1(request, now / 1000000)?
+    val view = container_primary_terminal_view_v2(session)?
+    val wire = container_primary_geometry_wire_digest_v2(session, request.columns, request.rows)?
+    if wire != request.request_digest: return Err("host-primary-geometry-wire-digest")
+    val publication = sosix_random_hex(32)
+    if publication == nil: return Err("host-primary-geometry-publication-entropy")
+    val receipt = HostPrimaryGeometryReceiptV1(request.target.binding_uid, publication.unwrap(), view.fingerprint,
+        session_runtime_control_target_digest_v1(request.target)?, host_primary_geometry_request_digest_v1(request)?,
+        wire, request.lease.revision, request.attempt_sequence, request.columns, request.rows, "pending", true, "")
+    val canonical = host_primary_geometry_receipt_encode_v1(receipt)?
+    Ok(receipt)
+
+# This exact production predicate binds the supplied current connection to the
+# originally retained helper/parent plan and the actual terminal's immutable
+# identity. Metadata never creates a connection or bypasses control_live.
+pub fn host_primary_geometry_connection_match_v2(expected_plan: text, expected_session: text,
+        current_plan: text, session_plan: text, session_identity: text) -> bool:
+    (builder_digest_valid_v1(expected_plan) and builder_digest_valid_v1(expected_session) and
+        expected_plan == current_plan and expected_plan == session_plan and expected_session == session_identity)
+
+# Begin validates the actual owner and constructs a no-IO exchange. History is
+# scanned one pair per step, so persistent recovery cannot block the control poll.
+pub fn host_primary_geometry_begin_v2(local: HostLocalRootV3,
+        connection: HostPrimaryConnectionTaskV3, session: ContainerOwnedTerminalSessionV2,
+        request: ContainerPrimaryGeometryRequestV1, history: HostPrimaryGeometryHistoryV2? = nil) -> HostPrimaryGeometryTurnV2:
+    val live = host_primary_connection_control_live_v3(local, connection)
+    if live.is_err(): return refused(local, live.unwrap_err())
+    val proposed = initial_receipt(session, request)
+    if proposed.is_err(): return refused(local, proposed.unwrap_err())
+    val head = proposed.unwrap()
+    val view = container_primary_terminal_view_v2(session).unwrap()
+    if view.request_digest != connection.plan_v3().request_digest:
+        return refused(local, "host-primary-geometry-connection-session-mismatch")
+    match local:
+        case HostLocalRootV3.Windows(root):
+            val current = root.current_v3()
+            if current.is_err(): return refused(local, current.unwrap_err())
+            val parent = host_primary_connection_parent_v2(root, connection.plan_v3().identity.parent_operation_id)
+            if parent.is_err(): return refused(local, parent.unwrap_err())
+            val begun = container_primary_geometry_begin_v2(root.container_v3(), session, parent.unwrap().execution,
+                current.unwrap().engine_policy_bytes, request)
+            if begun.owner == nil: return HostPrimaryGeometryTurnV2(local, nil, nil, begun.error)
+            val journal = root.capacity_v3().journal
+            var task = HostPrimaryGeometryTaskV2(head, head, request, begun.owner, "scan", 1, nil,
+                connection.plan_v3().request_digest, journal.lease_digest, journal.authority_digest, journal.windows_store.unwrap(), "")
+            if val cursor = history:
+                if (cursor.receipt.binding_uid == head.binding_uid and cursor.journal_lease == journal.lease_digest and
+                        cursor.journal_authority == journal.authority_digest and cursor.journal_store.same_owner(journal.windows_store.unwrap()) and
+                        not host_primary_geometry_receipt_blocks_v1(cursor.receipt)):
+                    val saved = host_primary_geometry_record_read_v1(journal, head.binding_uid, cursor.slot, true)
+                    if (saved.is_ok() and saved.unwrap().is_some() and
+                            host_primary_geometry_receipt_encode_v1(saved.unwrap().unwrap()).unwrap() ==
+                            host_primary_geometry_receipt_encode_v1(cursor.receipt).unwrap()):
+                        task.previous = Some(cursor.receipt)
+                        task.slot = cursor.slot + 1
+            HostPrimaryGeometryTurnV2(local, Some(task), Some(task.receipt), "")
+        case _: refused(local, "host-primary-geometry-provider-unavailable")
+
+fn stopped(task: HostPrimaryGeometryTaskV2, reason: text) -> HostPrimaryGeometryTaskV2:
+    var retained = task
+    if retained.error == "": retained.error = reason
+    if retained.phase == "scan": retained.phase = "discard"
+    retained
+
+fn accept_turn(task: HostPrimaryGeometryTaskV2, turn: ContainerPrimaryGeometryTurnV2) -> HostPrimaryGeometryTaskV2:
+    var retained = task
+    retained.exchange = turn.owner
+    # Cached or unresolved history remains its own evidence; constructor cleanup
+    # cannot turn an older Unknown resize into rejected/non-delivery.
+    if not ["cached", "blocked"].contains(retained.phase):
+        retained.receipt.disposition = turn.disposition
+        retained.receipt.cleanup_pending = turn.cleanup_pending or turn.phase != "done"
+        retained.receipt.error = turn.error
+    if turn.error != "" and retained.error == "" and retained.phase != "cached": retained.error = turn.error
+    if turn.phase == "done" and not turn.cleanup_pending:
+        retained.exchange = nil
+        if retained.phase == "exchange": retained.phase = "publish"
+    retained
+
+# Examine at most one immutable attempt/receipt pair. Existing pending records
+# block new connections regardless of nonce, lease revision or session rotation.
+fn scan(task: HostPrimaryGeometryTaskV2,
+        journal: DistributedOperationJournalV2) -> Result<HostPrimaryGeometryTaskV2, text>:
+    var retained = task
+    if retained.slot > HOST_PRIMARY_GEOMETRY_HISTORY_MAX_V1: return Err("host-primary-geometry-history-exhausted")
+    val prior = host_primary_geometry_record_read_v1(journal, retained.head.binding_uid, retained.slot, false)?
+    if val attempt = prior:
+        val terminal = host_primary_geometry_record_read_v1(journal, retained.head.binding_uid, retained.slot, true)?
+        if terminal.is_none():
+            retained.receipt = attempt
+            retained.receipt.disposition = "unknown"
+            retained.receipt.error = "host-primary-geometry-unresolved-durable-attempt"
+            retained.phase = "blocked"
+            retained.error = retained.receipt.error
+            return Ok(retained)
+        val matched = host_primary_geometry_terminal_match_v1(attempt, terminal.unwrap())?
+        val previous = terminal.unwrap()
+        if previous.request_digest == retained.head.request_digest and previous.session_identity == retained.head.session_identity:
+            retained.receipt = previous
+            retained.phase = "cached"
+            return Ok(retained)
+        if host_primary_geometry_receipt_blocks_v1(previous):
+            retained.receipt = previous
+            retained.phase = "blocked"
+            retained.error = "host-primary-geometry-prior-unresolved"
+            return Ok(retained)
+        retained.previous = Some(previous)
+        retained.slot = retained.slot + 1
+        return Ok(retained)
+    # A receipt without its attempt is contradictory evidence, never absence.
+    val orphan = host_primary_geometry_record_read_v1(journal, retained.head.binding_uid, retained.slot, true)?
+    if orphan.is_some(): return Err("host-primary-geometry-orphan-receipt")
+    if val previous = retained.previous:
+        val replay = host_primary_geometry_replay_v1(previous, retained.head)?
+        if replay:
+            retained.receipt = previous
+            retained.slot = retained.slot - 1
+            retained.phase = "cached"
+            return Ok(retained)
+    elif retained.head.sequence != 1: return Err("host-primary-geometry-first-attempt-required")
+    # Mark uncertainty BEFORE publication; a failed return can still have left
+    # the immutable attempt. The next turn only reconciles/cleans, never writes.
+    retained.phase = "reservation-uncertain"
+    val published = host_primary_geometry_record_publish_v1(journal, retained.slot, false, retained.head)
+    if published.is_err():
+        retained.error = published.unwrap_err()
+        return Ok(retained)
+    if not published.unwrap():
+        retained.error = "host-primary-geometry-attempt-collision"
+        return Ok(retained)
+    retained.phase = "exchange"
+    Ok(retained)
+
+pub fn host_primary_geometry_step_v2(local: HostLocalRootV3,
+        connection: HostPrimaryConnectionTaskV3, session: ContainerOwnedTerminalSessionV2,
+        task: HostPrimaryGeometryTaskV2, current_request: ContainerPrimaryGeometryRequestV1,
+        cancel: bool = false) -> HostPrimaryGeometryTurnV2:
+    var retained = task
+    val same = container_primary_geometry_request_same_v1(retained.request, current_request)
+    val view = container_primary_terminal_view_v2(session)
+    val connection_matches = (view.is_ok() and host_primary_geometry_connection_match_v2(retained.connection_plan_digest,
+        retained.head.session_identity, connection.plan_v3().request_digest, view.unwrap().request_digest, view.unwrap().fingerprint))
+    # An unrelated executing connection must not stand in for this task's
+    # original helper/parent. Refusal retains and cleans only the original IO.
+    val live = if connection_matches: host_primary_connection_control_live_v3(local, connection)
+        else: Err("host-primary-geometry-original-connection-required")
+    var stop = cancel or same.is_err() or not same.unwrap() or live.is_err()
+    if stop: retained = stopped(retained, if live.is_err(): live.unwrap_err() else: "host-primary-geometry-cancelled-or-request-changed")
+    match local:
+        case HostLocalRootV3.Windows(root):
+            val journal = root.capacity_v3().journal
+            val current = root.current_v3()
+            val same_writer = (journal.lease_digest == retained.journal_lease and journal.authority_digest == retained.journal_authority and
+                journal.windows_store.is_some() and retained.journal_store.same_owner(journal.windows_store.unwrap()))
+            if current.is_err() or not same_writer:
+                stop = true
+                retained = stopped(retained, "host-primary-geometry-current-writer-required")
+            if retained.phase == "scan" and not stop:
+                val now = time_sample_monotonic_nanos_or_failure()
+                val valid = container_primary_geometry_request_check_v1(current_request, now / 1000000)
+                if now < 0 or valid.is_err(): retained = stopped(retained, "host-primary-geometry-lease-expired-during-scan")
+                else:
+                    val scanned = scan(retained, journal)
+                    if scanned.is_err(): retained = stopped(retained, scanned.unwrap_err())
+                    else: retained = scanned.unwrap()
+                    # Reservation turn never performs a native request as well.
+                    if ["scan", "exchange"].contains(retained.phase):
+                        return HostPrimaryGeometryTurnV2(local, Some(retained), Some(retained.receipt), retained.error)
+            if val exchange = retained.exchange:
+                val turn = if stop or retained.phase != "exchange":
+                    container_primary_geometry_cancel_v2(exchange, if retained.error != "": retained.error else: "host-primary-geometry-read-only-replay")
+                else:
+                    container_primary_geometry_step_v2(exchange, root.container_v3(), session, current_request)
+                retained = accept_turn(retained, turn)
+            finish(local, retained)
+        case _:
+            retained = stopped(retained, "host-primary-geometry-owner-domain")
+            if val exchange = retained.exchange:
+                retained = accept_turn(retained, container_primary_geometry_cancel_v2(exchange, retained.error))
+            HostPrimaryGeometryTurnV2(local, Some(retained), Some(retained.receipt), retained.error)
+
+fn finish(local: HostLocalRootV3, task: HostPrimaryGeometryTaskV2) -> HostPrimaryGeometryTurnV2:
+    var retained = task
+    if retained.exchange == nil and retained.phase == "discard":
+        return HostPrimaryGeometryTurnV2(local, nil, nil, retained.error)
+    if retained.exchange == nil and ["cached", "blocked"].contains(retained.phase):
+        return completed(local, retained, retained.phase == "cached")
+    match local:
+        case HostLocalRootV3.Windows(root):
+            val journal = root.capacity_v3().journal
+            val current = root.current_v3()
+            val same_writer = (journal.lease_digest == retained.journal_lease and journal.authority_digest == retained.journal_authority and
+                journal.windows_store.is_some() and retained.journal_store.same_owner(journal.windows_store.unwrap()))
+            if retained.exchange == nil and current.is_ok() and same_writer:
+                if retained.phase == "reservation-uncertain":
+                    val observed = host_primary_geometry_record_read_v1(journal, retained.head.binding_uid, retained.slot, false)
+                    if observed.is_ok() and observed.unwrap().is_none():
+                        return HostPrimaryGeometryTurnV2(local, nil, nil, retained.error)
+                    if (observed.is_ok() and observed.unwrap().is_some() and
+                            host_primary_geometry_receipt_encode_v1(observed.unwrap().unwrap()).unwrap() ==
+                            host_primary_geometry_receipt_encode_v1(retained.head).unwrap()):
+                        # This process has never stepped its native owner: its
+                        # own uncertain reservation may finish as rejected.
+                        retained.phase = "publish"
+                if retained.phase == "publish":
+                    val published = host_primary_geometry_record_publish_v1(journal, retained.slot, true, retained.receipt)
+                    if published.is_ok() and published.unwrap():
+                        return completed(local, retained, true)
+                    if retained.error == "":
+                        retained.error = if published.is_err(): published.unwrap_err() else: "host-primary-geometry-receipt-publication-pending"
+            HostPrimaryGeometryTurnV2(local, Some(retained), Some(retained.receipt), retained.error)
+        case _: HostPrimaryGeometryTurnV2(local, Some(retained), Some(retained.receipt), "host-primary-geometry-owner-domain")
+
+# Pane removal cannot require a fabricated/copy-restored terminal session. This
+# port only cancels the already-retained exchange and publishes exact evidence.
+pub fn host_primary_geometry_cancel_v2(local: HostLocalRootV3,
+        task: HostPrimaryGeometryTaskV2, reason: text) -> HostPrimaryGeometryTurnV2:
+    var retained = stopped(task, if reason == "": "host-primary-geometry-cancelled" else: reason)
+    if val exchange = retained.exchange:
+        retained = accept_turn(retained, container_primary_geometry_cancel_v2(exchange, retained.error))
+    finish(local, retained)
+
+fn completed(local: HostLocalRootV3, task: HostPrimaryGeometryTaskV2,
+        verified_prefix: bool) -> HostPrimaryGeometryTurnV2:
+    val history = if verified_prefix and not host_primary_geometry_receipt_blocks_v1(task.receipt):
+        Some(HostPrimaryGeometryHistoryV2(task.receipt, task.slot, task.journal_lease, task.journal_authority, task.journal_store))
+    else: nil
+    HostPrimaryGeometryTurnV2(local, nil, Some(task.receipt), task.error, history)

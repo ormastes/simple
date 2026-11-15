@@ -1,0 +1,346 @@
+# Generic service port for provider-owned primary connections. Applications
+# retain one HostLocalRootV3; platform selection and signed authority stay here.
+use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
+use std.nogc_sync_mut.orchestration.host_primary_connection_owner_v2.*
+use std.nogc_sync_mut.orchestration.host_primary_connection_parent_v2.host_primary_connection_parent_v2
+use std.nogc_sync_mut.orchestration.host_primary_connection_settlement_v2.{HostPrimaryConnectionSettlementAckV2,
+    host_primary_connection_settle_v2}
+use std.nogc_sync_mut.orchestration.host_helper_owner_v1.{HostHelperLeaseV1, HostHelperRequestV1,
+    host_helper_prepare_v1, host_helper_begin_v1}
+use std.nogc_sync_mut.orchestration.host_parent_budget_v1.host_parent_budget_load_owned_v2
+use std.nogc_sync_mut.orchestration.host_service_enrollment_v2.host_service_enrollment_payload_digest_v2
+use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
+use std.common.contracts.orchestration.host_reservation_codec_v1.HostPreparedReservationReceiptV1
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.container.primary_connection_v2.ContainerPrimaryConnectionPlanV2
+use std.common.contracts.container.primary_connection_consumption_v2.ContainerPrimaryConnectionConsumptionV2
+use std.common.contracts.container.stream_v2.{ContainerOutputIdentityV2, ContainerOutputResourcesV2}
+use std.nogc_async_mut.container.primary_connection_v2.simple_container_primary_connection_plan_v2
+use std.nogc_async_mut.container.primary_connection_open_v2.ContainerPrimaryConnectionPendingV2
+use std.nogc_async_mut.container.primary_connection_open_v2.{ContainerPrimaryConnectionAuthorityV2,
+    simple_container_primary_connection_begin_observed_v3}
+use std.nogc_async_mut.container.execution_progress_v4.{ContainerExecutionProgressV4,
+    simple_container_inspection_begin_v4, simple_container_execution_step_v4}
+use std.common.contracts.container.runtime_v1.RUNTIME_STATUS_OK
+use std.nogc_sync_mut.orchestration.host_windows_local_root_v3.HostWindowsLocalRootV3
+use std.nogc_async_mut.container.terminal_session_v2.ContainerOwnedTerminalSessionV2
+use std.nogc_async_mut.container.terminal_primary_v2.container_primary_connection_closed_bytes_v2
+use std.nogc_async_mut.container.providers.windows.docker_policy_codec_v1.windows_docker_policy_decode_v1
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.host_helper_request_load_owned_v2
+use std.nogc_sync_mut.io.windows_journal_store_v1.WindowsJournalConsumptionV1
+use std.nogc_sync_mut.io.windows_primary_connection_admission_v2.windows_primary_connection_abandon_v3
+use std.nogc_async_mut.container.primary_connection_attempt_v3.ContainerPrimaryConnectionAttemptTerminalV3
+use std.nogc_sync_mut.orchestration.host_primary_connection_attempt_settlement_v3.host_primary_connection_attempt_settle_v3
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_consume_primary_v3
+use std.common.contracts.container.primary_connection_consumption_v2.container_primary_connection_consumption_bytes_v2
+
+pub struct HostPrimaryConnectionPlanTurnV3:
+    local: HostLocalRootV3
+    plan: ContainerPrimaryConnectionPlanV2?
+    error: text
+
+pub struct HostPrimaryConnectionHelperTurnV3:
+    local: HostLocalRootV3
+    helper: HostHelperLeaseV1?
+    error: text
+    receipt: HostPreparedReservationReceiptV1? = nil
+    recovery_required: bool = false
+
+# This task contains only the connection obligation, not another Host writer.
+# Every step borrows the service's current canonical root and returns it once.
+pub class HostPrimaryConnectionTaskV3:
+    helper: HostHelperLeaseV1
+    plan: ContainerPrimaryConnectionPlanV2
+    record: ContainerPrimaryConnectionConsumptionV2?
+    pending: ContainerPrimaryConnectionPendingV2?
+    session: ContainerOwnedTerminalSessionV2?
+    consumption_attempted: bool
+    error: text
+    inspection: ContainerExecutionProgressV4? = nil
+    receipt: WindowsJournalConsumptionV1? = nil
+    terminal: ContainerPrimaryConnectionAttemptTerminalV3? = nil
+
+    pub fn plan_v3() -> ContainerPrimaryConnectionPlanV2: self.plan
+    pub fn error_v3() -> text: self.error
+    pub fn pending_v3() -> bool: self.pending != nil or self.inspection != nil
+    pub fn has_session_v3() -> bool: self.session != nil
+    pub fn consumption_attempted_v3() -> bool: self.consumption_attempted
+
+pub struct HostPrimaryConnectionServiceTurnV3:
+    local: HostLocalRootV3
+    task: HostPrimaryConnectionTaskV3?
+    error: text
+
+pub struct HostPrimaryConnectionTransferV3:
+    task: HostPrimaryConnectionTaskV3
+    session: ContainerOwnedTerminalSessionV2?
+    error: text
+
+pub struct HostPrimaryConnectionReleaseV3:
+    local: HostLocalRootV3
+    task: HostPrimaryConnectionTaskV3
+    session: ContainerOwnedTerminalSessionV2
+    ack: HostPrimaryConnectionSettlementAckV2?
+    error: text
+
+
+pub fn host_primary_connection_supported_v3(local: HostLocalRootV3) -> bool:
+    match local:
+        case HostLocalRootV3.Windows(value): value.ready_v3() and value.current_v3().is_ok()
+        case _: false
+
+# The attach grant expires after opening. Subsequent controls require their own
+# live issuer lease plus the actual still-executing parent/helper journal pair.
+pub fn host_primary_connection_control_live_v3(local: HostLocalRootV3,
+        task: HostPrimaryConnectionTaskV3) -> Result<(), text>:
+    if task.pending != nil or task.inspection != nil or task.session != nil or task.record == nil:
+        return Err("host-primary-connection-adopted-task-required")
+    match local:
+        case HostLocalRootV3.Windows(root):
+            val metadata = root.current_v3()?
+            if not root.ready_v3() or root.capacity_v3().journal.lease_digest != task.plan.journal_lease_digest:
+                return Err("host-primary-connection-current-owner-changed")
+            val helper = daemon_operation_exact_v2(root.capacity_v3().journal, task.helper.operation)?
+            val request = host_helper_request_load_owned_v2(root.capacity_v3().journal, task.helper.operation.id)?
+            val parent = daemon_operation_exact_v2(root.capacity_v3().journal, request.parent_binding.host_operation)?
+            if helper.state != "executing" or parent.state != "executing":
+                return Err("host-primary-connection-current-executing-required")
+            Ok(())
+        case _: Err("host-primary-connection-provider-unsupported")
+
+pub fn host_primary_connection_plan_v3(local: HostLocalRootV3, parent_operation_id: text,
+        helper_operation_id: text, budget_digest: text, binding_digest: text,
+        resources: ContainerOutputResourcesV2, terminal_mode: text) -> HostPrimaryConnectionPlanTurnV3:
+    match local:
+        case HostLocalRootV3.Windows(original):
+            var root = original
+            val metadata = root.current_v3()
+            if metadata.is_err(): return HostPrimaryConnectionPlanTurnV3(local, nil, metadata.unwrap_err())
+            val context = root.context_v3()
+            val retained = root
+            val refresh = fn() -> HostReservationAuthorizationContextV1: retained.context_v3()
+            val budget = host_parent_budget_load_owned_v2(root.capacity_v3(), root.scope_v3(), metadata.unwrap().policy,
+                budget_digest, parent_operation_id, context, refresh)
+            if budget.is_err(): return HostPrimaryConnectionPlanTurnV3(local, nil, budget.unwrap_err())
+            val parent = host_primary_connection_parent_v2(root, parent_operation_id)
+            if parent.is_err(): return HostPrimaryConnectionPlanTurnV3(local, nil, parent.unwrap_err())
+            val policy = windows_docker_policy_decode_v1(metadata.unwrap().engine_policy_bytes)
+            if policy.is_err(): return HostPrimaryConnectionPlanTurnV3(local, nil, policy.unwrap_err())
+            val installation = host_service_enrollment_payload_digest_v2(root.binding_v3())
+            if installation.is_err(): return HostPrimaryConnectionPlanTurnV3(local, nil, installation.unwrap_err())
+            val limits = budget.unwrap().proof.budget
+            val identity = ContainerOutputIdentityV2(helper_operation_id, parent_operation_id,
+                limits.parent_operation_digest, limits.parent_assignment_digest, budget_digest, binding_digest)
+            val planned = simple_container_primary_connection_plan_v2(root.container_v3(), parent.unwrap().execution,
+                parent.unwrap().runtime, identity, resources, installation.unwrap(), root.capacity_v3().journal.lease_digest,
+                terminal_mode, policy.unwrap().timeout_ms)
+            val saved = root.retain_v3(root.capacity_v3(), planned.owner)
+            val updated = HostLocalRootV3.Windows(root)
+            if saved.is_err(): return HostPrimaryConnectionPlanTurnV3(updated, nil, saved.unwrap_err())
+            HostPrimaryConnectionPlanTurnV3(updated, planned.plan, planned.error)
+        case _: HostPrimaryConnectionPlanTurnV3(local, nil, "host-primary-connection-provider-unsupported")
+
+pub fn host_primary_connection_helper_prepare_v3(local: HostLocalRootV3,
+        request: HostHelperRequestV1) -> HostPrimaryConnectionHelperTurnV3:
+    if request.plan.helper_kind != "primary-connection": return HostPrimaryConnectionHelperTurnV3(local, nil, "connection-helper-kind")
+    match local:
+        case HostLocalRootV3.Windows(original):
+            var root = original
+            val metadata = root.current_v3()
+            if metadata.is_err(): return HostPrimaryConnectionHelperTurnV3(local, nil, metadata.unwrap_err())
+            if not root.ready_v3(): return HostPrimaryConnectionHelperTurnV3(local, nil, "host-primary-startup-quarantine")
+            val retained = root
+            val refresh = fn() -> HostReservationAuthorizationContextV1: retained.context_v3()
+            val prepared = host_helper_prepare_v1(root.capacity_v3(), request, metadata.unwrap().policy,
+                root.scope_v3(), root.context_v3(), refresh)
+            val saved = root.retain_v3(prepared.owner, root.container_v3())
+            val updated = HostLocalRootV3.Windows(root)
+            if saved.is_err(): return HostPrimaryConnectionHelperTurnV3(updated, nil, saved.unwrap_err(), prepared.receipt, true)
+            HostPrimaryConnectionHelperTurnV3(updated, nil, prepared.error, prepared.receipt, prepared.recovery_required)
+        case _: HostPrimaryConnectionHelperTurnV3(local, nil, "host-primary-connection-provider-unsupported")
+
+pub fn host_primary_connection_helper_begin_v3(local: HostLocalRootV3, request: HostHelperRequestV1,
+        receipt: HostPreparedReservationReceiptV1,
+        signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2) -> HostPrimaryConnectionHelperTurnV3:
+    if request.plan.helper_kind != "primary-connection": return HostPrimaryConnectionHelperTurnV3(local, nil, "connection-helper-kind")
+    match local:
+        case HostLocalRootV3.Windows(original):
+            var root = original
+            val metadata = root.current_v3()
+            if metadata.is_err(): return HostPrimaryConnectionHelperTurnV3(local, nil, metadata.unwrap_err())
+            if not root.ready_v3(): return HostPrimaryConnectionHelperTurnV3(local, nil, "host-primary-startup-quarantine")
+            val retained = root
+            val refresh = fn() -> HostReservationAuthorizationContextV1: retained.context_v3()
+            val begun = host_helper_begin_v1(root.capacity_v3(), request, receipt, signed, approval,
+                metadata.unwrap().policy, root.scope_v3(), root.context_v3(), refresh)
+            val saved = root.retain_v3(begun.owner, root.container_v3())
+            val updated = HostLocalRootV3.Windows(root)
+            if saved.is_err(): return HostPrimaryConnectionHelperTurnV3(updated, begun.lease, saved.unwrap_err(), Some(receipt), true)
+            HostPrimaryConnectionHelperTurnV3(updated, begun.lease, begun.error, Some(receipt), begun.recovery_required)
+        case _: HostPrimaryConnectionHelperTurnV3(local, nil, "host-primary-connection-provider-unsupported")
+
+fn task_v3(turn: HostPrimaryConnectionTurnV2) -> HostPrimaryConnectionTaskV3:
+    HostPrimaryConnectionTaskV3(turn.helper, turn.plan, turn.record, turn.pending, turn.session,
+        turn.consumption_attempted, turn.error, nil, turn.receipt, turn.terminal)
+
+pub fn host_primary_connection_open_v3(local: HostLocalRootV3, plan: ContainerPrimaryConnectionPlanV2,
+        helper: HostHelperLeaseV1) -> HostPrimaryConnectionServiceTurnV3:
+    match local:
+        case HostLocalRootV3.Windows(original):
+            var root = original
+            var task = HostPrimaryConnectionTaskV3(helper, plan, nil, nil, nil, false, "")
+            val checked = host_primary_connection_validate_v2(root, plan, helper)
+            if checked.is_err():
+                task.error = checked.unwrap_err()
+                return HostPrimaryConnectionServiceTurnV3(local, Some(task), task.error)
+            val parent = host_primary_connection_parent_v2(root, plan.identity.parent_operation_id)
+            if parent.is_err():
+                task.error = parent.unwrap_err()
+                return HostPrimaryConnectionServiceTurnV3(local, Some(task), task.error)
+            val begun = simple_container_inspection_begin_v4(root.container_v3(), parent.unwrap().execution)
+            task.inspection = begun.progress
+            task.error = begun.error
+            val saved = root.retain_v3(root.capacity_v3(), begun.owner)
+            if saved.is_err(): task.error = saved.unwrap_err()
+            if task.inspection != nil or task.error != "":
+                return HostPrimaryConnectionServiceTurnV3(HostLocalRootV3.Windows(root), Some(task), task.error)
+            if begun.operation == nil or begun.operation.unwrap().status != RUNTIME_STATUS_OK:
+                task.error = "host-primary-inspection-failed"
+                return HostPrimaryConnectionServiceTurnV3(HostLocalRootV3.Windows(root), Some(task), task.error)
+            open_observed_v3(root, task)
+        case _: HostPrimaryConnectionServiceTurnV3(local, nil, "host-primary-connection-provider-unsupported")
+
+fn open_observed_v3(original: HostWindowsLocalRootV3, original_task: HostPrimaryConnectionTaskV3) -> HostPrimaryConnectionServiceTurnV3:
+    var root = original
+    var task = original_task
+    val checked = host_primary_connection_validate_v2(root, task.plan, task.helper)
+    if checked.is_err():
+        task.error = checked.unwrap_err()
+        return HostPrimaryConnectionServiceTurnV3(HostLocalRootV3.Windows(root), Some(task), task.error)
+    task.record = Some(checked.unwrap())
+    val parent = host_primary_connection_parent_v2(root, task.plan.identity.parent_operation_id)
+    if parent.is_err():
+        task.error = parent.unwrap_err()
+        return HostPrimaryConnectionServiceTurnV3(HostLocalRootV3.Windows(root), Some(task), task.error)
+    task.consumption_attempted = true
+    val consumed = host_primary_connection_consume_owned_v3(root, task.plan, task.helper)
+    if consumed.record != nil: task.record = consumed.record
+    task.receipt = consumed.receipt
+    task.consumption_attempted = consumed.publication_attempted
+    if consumed.error != "" or consumed.authority == nil:
+        task.error = consumed.error
+        return HostPrimaryConnectionServiceTurnV3(HostLocalRootV3.Windows(root), Some(task), task.error)
+    val opened = simple_container_primary_connection_begin_observed_v3(root.container_v3(), parent.unwrap().execution,
+        ContainerPrimaryConnectionAuthorityV2.WindowsVerified(consumed.authority.unwrap()))
+    task.pending = opened.turn.pending
+    task.session = opened.turn.session
+    task.terminal = opened.turn.terminal
+    task.error = opened.turn.error
+    val saved = root.retain_v3(root.capacity_v3(), opened.owner)
+    if saved.is_err(): task.error = saved.unwrap_err()
+    HostPrimaryConnectionServiceTurnV3(HostLocalRootV3.Windows(root), Some(task), task.error)
+
+pub fn host_primary_connection_progress_v3(local: HostLocalRootV3, task: HostPrimaryConnectionTaskV3,
+        cancel: bool) -> HostPrimaryConnectionServiceTurnV3:
+    match local:
+        case HostLocalRootV3.Windows(original):
+            var root = original
+            if task.inspection != nil:
+                var inspected = task
+                if cancel and inspected.error == "": inspected.error = "host-primary-inspection-cancelled"
+                val checked = host_primary_connection_validate_v2(root, task.plan, task.helper)
+                if checked.is_err() and inspected.error == "": inspected.error = checked.unwrap_err()
+                val progressed = simple_container_execution_step_v4(root.container_v3(), inspected.inspection.unwrap(), inspected.error != "")
+                inspected.inspection = progressed.progress
+                if progressed.error != "" and inspected.error == "": inspected.error = progressed.error
+                val saved = root.retain_v3(root.capacity_v3(), progressed.owner)
+                if saved.is_err() and inspected.error == "": inspected.error = saved.unwrap_err()
+                if inspected.inspection != nil or inspected.error != "":
+                    return HostPrimaryConnectionServiceTurnV3(HostLocalRootV3.Windows(root), Some(inspected), inspected.error)
+                if progressed.operation == nil or progressed.operation.unwrap().status != RUNTIME_STATUS_OK:
+                    inspected.error = "host-primary-inspection-failed"
+                    return HostPrimaryConnectionServiceTurnV3(HostLocalRootV3.Windows(root), Some(inspected), inspected.error)
+                return open_observed_v3(root, inspected)
+            val retained = HostPrimaryConnectionTurnV2(local: root, helper: task.helper, plan: task.plan,
+                record: task.record, pending: task.pending, session: task.session,
+                consumption_attempted: task.consumption_attempted, error: task.error, receipt: task.receipt, terminal: task.terminal)
+            val turn = if cancel: host_primary_connection_cancel_v2(retained) else: host_primary_connection_step_v2(retained)
+            HostPrimaryConnectionServiceTurnV3(HostLocalRootV3.Windows(turn.local), Some(task_v3(turn)), turn.error)
+        case _: HostPrimaryConnectionServiceTurnV3(local, Some(task), "host-primary-connection-owner-provider-changed")
+
+pub fn host_primary_connection_transfer_v3(task: HostPrimaryConnectionTaskV3) -> HostPrimaryConnectionTransferV3:
+    if task.pending != nil or task.inspection != nil or task.session == nil or task.error != "":
+        return HostPrimaryConnectionTransferV3(task, nil, "host-primary-connection-not-transferable")
+    var retained = task
+    val session = retained.session
+    retained.session = nil
+    HostPrimaryConnectionTransferV3(retained, session, "")
+
+# Failed opening may still retain a real hijacked session. Move it for typed
+# settlement only after exact native closure, preserving the original task error.
+pub fn host_primary_connection_cleanup_transfer_v3(task: HostPrimaryConnectionTaskV3) -> HostPrimaryConnectionTransferV3:
+    if task.pending != nil or task.inspection != nil or task.session == nil:
+        return HostPrimaryConnectionTransferV3(task, nil, "host-primary-connection-cleanup-pending")
+    val closed = container_primary_connection_closed_bytes_v2(task.session.unwrap())
+    if closed.is_err(): return HostPrimaryConnectionTransferV3(task, nil, closed.unwrap_err())
+    var retained = task
+    val session = retained.session
+    retained.session = nil
+    HostPrimaryConnectionTransferV3(retained, session, "")
+
+pub fn host_primary_connection_release_v3(local: HostLocalRootV3, task: HostPrimaryConnectionTaskV3,
+        session: ContainerOwnedTerminalSessionV2) -> HostPrimaryConnectionReleaseV3:
+    if task.pending != nil or task.inspection != nil or task.session != nil or task.record == nil:
+        return HostPrimaryConnectionReleaseV3(local, task, session, nil, "host-primary-connection-transfer-required")
+    match local:
+        case HostLocalRootV3.Windows(root):
+            val turn = host_primary_connection_settle_v2(root, task.record.unwrap(), session)
+            HostPrimaryConnectionReleaseV3(HostLocalRootV3.Windows(turn.local), task, turn.session, turn.ack, turn.error)
+        case _: HostPrimaryConnectionReleaseV3(local, task, session, nil, "host-primary-connection-owner-provider-changed")
+
+pub struct HostPrimaryConnectionAttemptReleaseV3:
+    local: HostLocalRootV3
+    task: HostPrimaryConnectionTaskV3
+    settled: bool
+    error: text
+
+# This carries the already returned executing helper into cleanup after a
+# post-begin error. It mints no attach permission or absence proof.
+pub fn host_primary_connection_cleanup_task_v3(plan: ContainerPrimaryConnectionPlanV2,
+        helper: HostHelperLeaseV1) -> HostPrimaryConnectionTaskV3:
+    HostPrimaryConnectionTaskV3(helper, plan, nil, nil, nil, false, "host-primary-connection-cleanup-only")
+
+pub fn host_primary_connection_attempt_release_v3(local: HostLocalRootV3,
+        original: HostPrimaryConnectionTaskV3) -> HostPrimaryConnectionAttemptReleaseV3:
+    var task = original
+    if task.pending != nil or task.inspection != nil or task.session != nil:
+        return HostPrimaryConnectionAttemptReleaseV3(local, task, false, "host-primary-connection-attempt-cleanup-pending")
+    match local:
+        case HostLocalRootV3.Windows(root):
+            if task.terminal == nil:
+                if not task.consumption_attempted:
+                    val checked = host_primary_connection_cleanup_record_v3(root, task.plan, task.helper)
+                    if checked.is_err(): return HostPrimaryConnectionAttemptReleaseV3(local, task, false, checked.unwrap_err())
+                    task.record = Some(checked.unwrap())
+                    val bytes = container_primary_connection_consumption_bytes_v2(checked.unwrap())
+                    if bytes.is_err(): return HostPrimaryConnectionAttemptReleaseV3(local, task, false, bytes.unwrap_err())
+                    # The flag precedes publication. An uncertain publish can
+                    # never remint a receipt by reading or retrying its path.
+                    task.consumption_attempted = true
+                    val published = distributed_operation_journal_consume_primary_v3(root.capacity_v3().journal,
+                        task.helper.operation, bytes.unwrap())
+                    if published.is_err(): return HostPrimaryConnectionAttemptReleaseV3(local, task, false, published.unwrap_err())
+                    task.receipt = Some(published.unwrap())
+                if task.record == nil or task.receipt == nil:
+                    return HostPrimaryConnectionAttemptReleaseV3(local, task, false, "host-primary-connection-consumption-uncertain")
+                val abandoned = windows_primary_connection_abandon_v3(root.deployment_authority_v3(),
+                    root.capacity_v3().journal, task.record.unwrap(), task.receipt.unwrap())
+                if abandoned.is_err(): return HostPrimaryConnectionAttemptReleaseV3(local, task, false, abandoned.unwrap_err())
+                task.terminal = Some(ContainerPrimaryConnectionAttemptTerminalV3.Abandoned(abandoned.unwrap()))
+            if task.record == nil:
+                return HostPrimaryConnectionAttemptReleaseV3(local, task, false, "host-primary-connection-consumption-missing")
+            val settled = host_primary_connection_attempt_settle_v3(root, task.record.unwrap(), task.terminal.unwrap())
+            task.terminal = Some(settled.terminal)
+            HostPrimaryConnectionAttemptReleaseV3(HostLocalRootV3.Windows(settled.local), task, settled.settled, settled.error)
+        case _: HostPrimaryConnectionAttemptReleaseV3(local, task, false, "host-primary-connection-provider-unsupported")

@@ -1,0 +1,74 @@
+# Real configured native service fixture, never a manufactured session/lease.
+# An administrator provisions the dedicated enrolled TTY binding and writes the
+# actual endpoint/authentication/attachment data below before this test runs.
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.nogc_sync_mut.io.windows_command_owner_v2.windows_command_thread_check_v2
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.{host_helper_stream_fields_v1, host_helper_stream_text_v1}
+use os.apps.smux.server.smux_server_request_within
+use os.apps.smux.runtime_connection_request_v5.{SmuxRuntimeConnectionRequestV5, smux_runtime_connection_request_token_v5}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct WindowsGeometryServiceFixtureV2:
+    endpoint: text
+    server_token: text
+    binding_uid: text
+    client_id: text
+    attachment_token: text
+    target_digest: text
+    geometry_revision: i64
+    input_revision: i64
+    input_probe: text
+
+pub fn windows_geometry_fixture_int_v2(fields: Dict<text, SdnValue>, key: text) -> i64:
+    match fields[key]:
+        case SdnValue.Int(value): value
+        case _: panic("native geometry fixture/reply integer type")
+
+pub fn windows_geometry_fixture_text_v2(fields: Dict<text, SdnValue>, key: text) -> text:
+    match fields[key]:
+        case SdnValue.String(value): value
+        case _: panic("native geometry fixture/reply text type")
+
+pub fn windows_geometry_fixture_dict_v2(value: SdnValue) -> Dict<text, SdnValue>:
+    match value:
+        case SdnValue.Dict(fields): fields
+        case _: panic("native geometry fixture/reply object required")
+
+pub fn windows_geometry_service_fixture_v2() -> WindowsGeometryServiceFixtureV2:
+    # This fails on non-Windows; no skipped/unsupported success is recorded.
+    assert(windows_command_thread_check_v2().is_ok())
+    val source = file_read_regular_no_follow_bounded("C:\\SimpleQualification\\primary-geometry-v2.sdn", 8192).unwrap()
+    val fields = host_helper_stream_fields_v1(source, "windows-primary-geometry-service-fixture", ["version", "kind",
+        "endpoint", "serverToken", "bindingUid", "clientId", "attachmentToken", "targetDigest",
+        "geometryRevision", "inputRevision", "inputProbe"]).unwrap()
+    val fixture = WindowsGeometryServiceFixtureV2(host_helper_stream_text_v1(fields, "endpoint").unwrap(),
+        host_helper_stream_text_v1(fields, "serverToken").unwrap(), host_helper_stream_text_v1(fields, "bindingUid").unwrap(),
+        host_helper_stream_text_v1(fields, "clientId").unwrap(), host_helper_stream_text_v1(fields, "attachmentToken").unwrap(),
+        host_helper_stream_text_v1(fields, "targetDigest").unwrap(), windows_geometry_fixture_int_v2(fields, "geometryRevision"),
+        windows_geometry_fixture_int_v2(fields, "inputRevision"), host_helper_stream_text_v1(fields, "inputProbe").unwrap())
+    assert(fixture.target_digest.byte_len() == 64)
+    assert(fixture.input_probe.byte_len() > 0 and fixture.input_probe.byte_len() <= 4096)
+    fixture
+
+pub fn windows_geometry_service_call_v2(fixture: WindowsGeometryServiceFixtureV2, action: text,
+        fields: Dict<text, SdnValue> = {}) -> Dict<text, SdnValue>:
+    val payload = if fields.len() == 0: "" else: sdn_encode_canonical(SdnValue.Dict(fields))
+    val request = SmuxRuntimeConnectionRequestV5(action, fixture.binding_uid, payload)
+    val token = smux_runtime_connection_request_token_v5(request).unwrap()
+    # No automatic resend on timeout: an uncertain mutation fails this fixture.
+    val wire = smux_server_request_within(fixture.endpoint, fixture.server_token, "runtime-connection-v5 " + token, 1000).unwrap()
+    val parsed = sdn_parse_strict_v1(wire, SdnStrictLimitsV1(max_source_bytes: 65536,
+        max_depth: 4, max_nodes: 128, max_rows: 0, max_cells: 0, max_columns: 32)).unwrap()
+    val reply = windows_geometry_fixture_dict_v2(parsed.value)
+    assert(reply["version"] == SdnValue.Int(5))
+    assert(reply["kind"] == SdnValue.String("smux-runtime-connection-reply"))
+    assert(reply["action"] == SdnValue.String(action))
+    assert(reply["bindingUid"] == SdnValue.String(fixture.binding_uid))
+    reply
+
+pub fn windows_geometry_service_result_v2(reply: Dict<text, SdnValue>) -> Dict<text, SdnValue>:
+    assert(windows_geometry_fixture_text_v2(reply, "error") == "")
+    windows_geometry_fixture_dict_v2(reply["result"])

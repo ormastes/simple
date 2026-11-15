@@ -1,15 +1,23 @@
 # Domain operation ledger over the existing segmented database WAL.
 # CURRENT publication guarantees process-crash recovery, not power-loss fsync.
 use std.common.contracts.distributed_operation_state_v2.*
+use std.common.contracts.distributed_operation_history_v2.*
+use std.common.contracts.distributed_operation_retention_v2.*
+use std.common.task_runner.distributed_operation_checkpoint_v2.*
+use std.common.task_runner.distributed_operation_owner_health_v2.*
 use std.common.contracts.distributed_control_codec_v2.distributed_decode_operation_v2
 use std.common.task_runner.index.{task_runner_storage_escape_v1, task_runner_storage_unescape_v1}
 use std.common.crypto.sha256.sha256_text
 use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.nogc_sync_mut.io.windows_journal_store_v1.{WindowsJournalStoreV1, WindowsJournalConsumptionV1}
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
 use std.nogc_sync_mut.database.wal.{WalEntry, WalEntryType}
 use std.nogc_sync_mut.database.wal_segmented.{database_wal_current_v1,
-    database_wal_revision_open_v1, database_wal_segment_read_strict_v1, database_wal_commit_v1}
-use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_atomic_write, file_read_regular_no_follow_bounded}
-use std.nogc_sync_mut.io_runtime.{file_delete}
+    database_wal_revision_open_v1, database_wal_segment_read_strict_v1, database_wal_commit_v1,
+    database_wal_object_v1, database_wal_publish_v1, database_wal_checkpoint_commit_v1}
+use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_atomic_write, file_read_regular_no_follow_bounded, file_exists, file_create_exclusive, secure_temp_dir, file_publish_noreplace}
+use std.nogc_sync_mut.io_runtime.{file_delete, dir_remove}
 use std.nogc_sync_mut.io.dir_entry_ops.{directory_create_private}
 use std.nogc_sync_mut.io.file_lock_owned_v2.{FileLockOwnerV2, FileLockOpenV2,
     FileLockReleaseStateV2, file_lock_open_owned_v2, file_lock_release_owned_v2,
@@ -25,28 +33,58 @@ struct DistributedOperationJournalV2:
     lease_digest: text
     operations: {text: DistributedOperationStateV2}
     owned_lock: Option<FileLockOwnerV2> = nil
-
-# Canonical in-process history data, not a decoder/authority token. Consumers
-# build once through history_batch for the actual fixed current owner.
-pub struct DistributedOperationHistoryV2:
-    envelope_digest: text
-    admitted_sequence: i64
-    last_from_state: text
-    last_to_state: text
-    last_outcome_digest: text
-    last_sequence: i64
-    last_commit_digest: text
-
-pub struct DistributedOperationJournalHistoryBatchV2:
-    authority_digest: text
-    head_commit_digest: text
-    head_sequence: i64
-    revision_endpoints: Dict<text, i64>
-    operations: Dict<text, DistributedOperationHistoryV2>
+    windows_store: Option<WindowsJournalStoreV1> = nil
+    checkpoint_sequence: i64 = 0
+    retention_profile: Option<DistributedOperationRetentionProfileV2> = nil
+    health_id: i64 = 0
 
 struct OperationReplaySnapshotV2:
     rows: {text: DistributedOperationStateV2}
     history: DistributedOperationJournalHistoryBatchV2
+    checkpoint_sequence: i64 = 0
+
+fn operation_health_binding_v2(authority: text, lease: text, maximum: i64,
+        profile: Option<DistributedOperationRetentionProfileV2>, io_root: text) -> text:
+    var policy = "none"
+    if val value = profile:
+        policy = "{value.version}:{value.maximum_lifetime_events}:{value.maximum_tail_events}"
+    val root_bytes = io_root.byte_len()
+    sha256_text("{root_bytes}:{io_root}\n{authority}\n{lease}\n{maximum}\n{policy}\n")
+
+fn operation_turn_begin_v2(owner: DistributedOperationJournalV2) -> Result<Option<OperationJournalHealthTurnV2>, text>:
+    if owner.owned_lock.is_none() and owner.windows_store.is_none():
+        if owner.health_id != 0 or owner.retention_profile.is_some(): return Err("OPERATION_JOURNAL_HEALTH_IDENTITY_INVALID")
+        # Compatibility path-lock owners cannot checkpoint or opt into profiles.
+        return Ok(nil)
+    val binding = operation_health_binding_v2(owner.authority_digest, owner.lease_digest,
+        owner.maximum_events, owner.retention_profile, if owner.windows_store.is_some(): "" else: owner.root)
+    Ok(Some(operation_health_begin_v2(owner.health_id, owner.owned_lock, owner.windows_store, binding)?))
+
+fn operation_turn_finish_v2<T>(turn: Option<OperationJournalHealthTurnV2>,
+        result: Result<T, text>) -> Result<T, text>:
+    if val held = turn:
+        val ended = operation_health_end_v2(held)
+        if ended.is_err(): return Err(ended.unwrap_err())
+    result
+
+fn operation_stored_result_v2<T>(result: Result<T, text>,
+        turn: Option<OperationJournalHealthTurnV2>, digest: text) -> Result<T, text>:
+    # Only authoritative stored-read/validation boundaries call this helper.
+    # Failure to validate is sticky even when the I/O error is unstructured.
+    # Caller validation and unreachable publication failures never call it.
+    if result.is_err():
+        if val held = turn:
+            val poisoned = operation_health_poison_v2(held, result.unwrap_err(), digest)
+            if poisoned.is_err(): return Err(poisoned.unwrap_err())
+    result
+
+fn operation_current_for_owner_v2(owner: DistributedOperationJournalV2,
+        turn: Option<OperationJournalHealthTurnV2>) -> Result<text, text>:
+    val current = operation_stored_result_v2(database_wal_current_v1(owner.root + "/database-wal",
+        owner.authority_digest, owner.windows_store), turn, owner.revision)?
+    if current == "" and owner.revision != "":
+        return operation_stored_result_v2(Err("OPERATION_WAL_CURRENT_MISSING"), turn, owner.revision)
+    Ok(current)
 
 fn operation_event_encode_v2(row: DistributedOperationStateV2) -> text:
     task_runner_storage_escape_v1(row.state + "\n" + row.outcome_digest + "\n" + row.envelope)
@@ -78,13 +116,22 @@ fn operation_event_apply_v2(rows: {text: DistributedOperationStateV2},
     updated[row.operation_id] = row
     Ok(updated)
 
-fn operation_owner_check_v2(owner: DistributedOperationJournalV2) -> Result<bool, text>:
+fn operation_owner_check_v2(owner: DistributedOperationJournalV2,
+        turn: Option<OperationJournalHealthTurnV2> = nil) -> Result<bool, text>:
+    if val store = owner.windows_store:
+        if not store.live(): return Err("OPERATION_JOURNAL_OWNER_INVALID")
+        val bytes = operation_stored_result_v2(store.read("parent.lease", 512), turn, owner.lease_digest)?
+        if bytes.is_none() or sha256_text(bytes.unwrap()) != owner.lease_digest:
+            return operation_stored_result_v2(Err("OPERATION_JOURNAL_LEASE_STALE"), turn, owner.lease_digest)
+        return Ok(true)
     if val held = owner.owned_lock:
         if not file_lock_owner_live_v2(held): return Err("OPERATION_JOURNAL_OWNER_INVALID")
     else:
         if owner.parent_lock < 0: return Err("OPERATION_JOURNAL_OWNER_INVALID")
-    val lease = file_read_regular_no_follow_bounded(owner.root + "/parent.lease", 512)?
-    if sha256_text(lease) != owner.lease_digest: return Err("OPERATION_JOURNAL_LEASE_STALE")
+    val lease = operation_stored_result_v2(file_read_regular_no_follow_bounded(
+        owner.root + "/parent.lease", 512), turn, owner.lease_digest)?
+    if sha256_text(lease) != owner.lease_digest:
+        return operation_stored_result_v2(Err("OPERATION_JOURNAL_LEASE_STALE"), turn, owner.lease_digest)
     Ok(true)
 
 # Roots whose journal THIS process currently owns through the path-lock open.
@@ -135,30 +182,68 @@ pub fn distributed_operation_journal_open_v2(root: text, authority_digest: text,
     opened
 
 fn distributed_operation_journal_replay_v2(root: text, authority_digest: text,
-        maximum_events: i64, held: i64, lease_digest: text) -> Result<DistributedOperationJournalV2, text>:
-    val snapshot = operation_replay_snapshot_v2(root, authority_digest, maximum_events)?
+        maximum_events: i64, held: i64, lease_digest: text,
+        retention_profile: Option<DistributedOperationRetentionProfileV2> = nil) -> Result<DistributedOperationJournalV2, text>:
+    val snapshot = operation_replay_snapshot_v2(root, authority_digest, maximum_events, nil, retention_profile)?
     Ok(DistributedOperationJournalV2(root, authority_digest, snapshot.history.head_commit_digest,
-        snapshot.history.head_sequence, maximum_events, held, lease_digest, snapshot.rows))
+        snapshot.history.head_sequence, maximum_events, held, lease_digest, snapshot.rows,
+        nil, nil, snapshot.checkpoint_sequence, retention_profile))
 
 # One canonical parser/fold for both ordinary replay and history qualification.
 # No second writer/lock or Host-specific operation semantics are introduced.
 fn operation_replay_snapshot_v2(root: text, authority_digest: text,
-        maximum_events: i64) -> Result<OperationReplaySnapshotV2, text>:
-    val latest = database_wal_current_v1(root + "/database-wal", authority_digest)?
+        maximum_events: i64, store: Option<WindowsJournalStoreV1> = nil,
+        retention_profile: Option<DistributedOperationRetentionProfileV2> = nil,
+        turn: Option<OperationJournalHealthTurnV2> = nil,
+        expected_digest: text = "") -> Result<OperationReplaySnapshotV2, text>:
+    val latest = operation_stored_result_v2(database_wal_current_v1(root + "/database-wal",
+        authority_digest, store), turn, expected_digest)?
+    if latest == "" and expected_digest != "":
+        return operation_stored_result_v2(Err("OPERATION_WAL_CURRENT_MISSING"), turn, expected_digest)
     var cursor = latest
     var sequence: i64 = 0
     var expected_last: i64 = -1
     var history: [WalEntry] = []
     var commits: [text] = []
     var endpoints: Dict<text, i64> = {}
+    var rows: {text: DistributedOperationStateV2} = {}
+    var origins: Dict<text, DistributedOperationHistoryV2> = {}
+    var checkpoint_sequence: i64 = 0
     while cursor != "":
-        val revision = database_wal_revision_open_v1(root + "/database-wal", cursor)?
+        val revision = operation_stored_result_v2(database_wal_revision_open_v1(
+            root + "/database-wal", cursor, store), turn, cursor)?
         if revision.database_identity != authority_digest: return Err("OPERATION_WAL_AUTHORITY_CHANGED")
         if expected_last >= 0 and revision.last_sequence != expected_last: return Err("OPERATION_WAL_SEQUENCE_GAP")
         if expected_last < 0:
             sequence = revision.last_sequence
             if sequence > maximum_events: return Err("OPERATION_WAL_REPLAY_BOUND_EXCEEDED")
-        val entries = database_wal_segment_read_strict_v1(root + "/database-wal", revision)?
+        if revision.checkpoint_digest != "":
+            if retention_profile.is_none(): return Err("OPERATION_CHECKPOINT_PROFILE_REQUIRED")
+            val profile = retention_profile.unwrap()
+            val manifest = operation_stored_result_v2(database_wal_object_v1(root + "/database-wal",
+                revision.checkpoint_digest, store), turn, revision.checkpoint_digest)?
+            val checkpoint = operation_stored_result_v2(distributed_operation_checkpoint_decode_v2(manifest,
+                \digest: operation_stored_result_v2(database_wal_object_v1(root + "/database-wal",
+                    digest, store), turn, digest)), turn, revision.checkpoint_digest)?
+            if (checkpoint.authority_digest != authority_digest or checkpoint.base_commit != revision.parent or
+                    checkpoint.base_sequence != revision.last_sequence):
+                return Err("OPERATION_CHECKPOINT_BINDING_INVALID")
+            if not distributed_operation_retention_profile_equal_v2(profile, checkpoint.retention_profile):
+                return Err("OPERATION_CHECKPOINT_PROFILE_MISMATCH")
+            val policy_checked = distributed_operation_retention_profile_validate_v2(profile, maximum_events)?
+            if history.len() > profile.maximum_tail_events: return Err("OPERATION_WAL_REPLAY_BOUND_EXCEEDED")
+            rows = checkpoint.rows
+            origins = checkpoint.history.operations
+            for digest in checkpoint.history.revision_endpoints.keys():
+                if endpoints.contains_key(digest): return Err("OPERATION_CHECKPOINT_HISTORY_OVERLAP")
+                endpoints[digest] = checkpoint.history.revision_endpoints[digest]
+            if endpoints.contains_key(revision.digest): return Err("OPERATION_CHECKPOINT_HISTORY_OVERLAP")
+            endpoints[revision.digest] = revision.last_sequence
+            checkpoint_sequence = revision.last_sequence
+            expected_last = 0
+            break
+        val entries = operation_stored_result_v2(database_wal_segment_read_strict_v1(
+            root + "/database-wal", revision, store), turn, revision.segment_digest)?
         endpoints[revision.digest] = revision.last_sequence
         var index = entries.len()
         while index > 0:
@@ -169,8 +254,6 @@ fn operation_replay_snapshot_v2(root: text, authority_digest: text,
         expected_last = revision.first_sequence - 1
         cursor = revision.parent
     if latest != "" and expected_last != 0: return Err("OPERATION_WAL_HISTORY_INCOMPLETE")
-    var rows: {text: DistributedOperationStateV2} = {}
-    var origins: Dict<text, DistributedOperationHistoryV2> = {}
     var index = history.len()
     while index > 0:
         index = index - 1
@@ -186,33 +269,51 @@ fn operation_replay_snapshot_v2(root: text, authority_digest: text,
             from_state, row.state, row.outcome_digest, entry.sequence, commits[index])
     Ok(OperationReplaySnapshotV2(rows: rows, history: DistributedOperationJournalHistoryBatchV2(
         authority_digest: authority_digest, head_commit_digest: latest, head_sequence: sequence,
-        revision_endpoints: endpoints, operations: origins)))
+        revision_endpoints: endpoints, operations: origins), checkpoint_sequence: checkpoint_sequence))
 
 pub fn distributed_operation_journal_history_batch_v2(owner: DistributedOperationJournalV2) -> Result<DistributedOperationJournalHistoryBatchV2, text>:
-    val held = operation_owner_check_v2(owner)?
-    val before = database_wal_current_v1(owner.root + "/database-wal", owner.authority_digest)?
+    val turn = operation_turn_begin_v2(owner)?
+    operation_turn_finish_v2(turn, operation_history_batch_held_v2(owner, turn))
+
+fn operation_history_batch_held_v2(owner: DistributedOperationJournalV2,
+        turn: Option<OperationJournalHealthTurnV2>) -> Result<DistributedOperationJournalHistoryBatchV2, text>:
+    val held = operation_owner_check_v2(owner, turn)?
+    val before = operation_current_for_owner_v2(owner, turn)?
     if before != owner.revision: return Err("OPERATION_JOURNAL_REVISION_STALE")
-    val snapshot = operation_replay_snapshot_v2(owner.root, owner.authority_digest, owner.maximum_events)?
-    val still_held = operation_owner_check_v2(owner)?
-    val after = database_wal_current_v1(owner.root + "/database-wal", owner.authority_digest)?
+    val snapshot = operation_stored_result_v2(operation_replay_snapshot_v2(owner.root, owner.authority_digest,
+        owner.maximum_events, owner.windows_store, owner.retention_profile, turn, owner.revision), turn, owner.revision)?
+    val still_held = operation_owner_check_v2(owner, turn)?
+    val after = operation_current_for_owner_v2(owner, turn)?
     if (after != owner.revision or snapshot.history.head_commit_digest != owner.revision or
-            snapshot.history.head_sequence != owner.sequence): return Err("OPERATION_JOURNAL_HISTORY_MOVED")
-    if snapshot.rows.len() != owner.operations.len(): return Err("OPERATION_JOURNAL_INDEX_MISMATCH")
+            snapshot.history.head_sequence != owner.sequence or snapshot.checkpoint_sequence != owner.checkpoint_sequence):
+        return Err("OPERATION_JOURNAL_HISTORY_MOVED")
+    if snapshot.rows.len() != owner.operations.len():
+        return operation_stored_result_v2(Err("OPERATION_JOURNAL_INDEX_MISMATCH"), turn, owner.revision)
     for id in snapshot.rows.keys():
-        if not owner.operations.contains_key(id): return Err("OPERATION_JOURNAL_INDEX_MISMATCH")
+        if not owner.operations.contains_key(id):
+            return operation_stored_result_v2(Err("OPERATION_JOURNAL_INDEX_MISMATCH"), turn, owner.revision)
         val actual = snapshot.rows[id]
         val indexed = owner.operations[id]
         if (actual.operation_id != id or indexed.operation_id != id or actual.operation_id != indexed.operation_id or
                 actual.envelope != indexed.envelope or actual.envelope_digest != indexed.envelope_digest or
                 actual.state != indexed.state or actual.outcome_digest != indexed.outcome_digest):
-            return Err("OPERATION_JOURNAL_INDEX_MISMATCH")
+            return operation_stored_result_v2(Err("OPERATION_JOURNAL_INDEX_MISMATCH"), turn, owner.revision)
     Ok(snapshot.history)
 
 fn distributed_operation_journal_commit_v2(owner: DistributedOperationJournalV2,
         row: DistributedOperationStateV2) -> Result<DistributedOperationJournalV2, text>:
-    val lease_checked = operation_owner_check_v2(owner)?
+    val turn = operation_turn_begin_v2(owner)?
+    operation_turn_finish_v2(turn, operation_commit_held_v2(owner, row, turn))
+
+fn operation_commit_held_v2(owner: DistributedOperationJournalV2, row: DistributedOperationStateV2,
+        turn: Option<OperationJournalHealthTurnV2>) -> Result<DistributedOperationJournalV2, text>:
+    val lease_checked = operation_owner_check_v2(owner, turn)?
     if owner.sequence >= owner.maximum_events: return Err("OPERATION_JOURNAL_FULL")
-    val current = database_wal_current_v1(owner.root + "/database-wal", owner.authority_digest)?
+    if val profile = owner.retention_profile:
+        val checked = distributed_operation_retention_profile_validate_v2(profile, owner.maximum_events)?
+        if owner.sequence - owner.checkpoint_sequence >= profile.maximum_tail_events:
+            return Err("OPERATION_JOURNAL_TAIL_FULL")
+    val current = operation_current_for_owner_v2(owner, turn)?
     if current != owner.revision: return Err("OPERATION_JOURNAL_REVISION_STALE")
     # Validate first; publish before mutating any index or performing effects.
     val data = operation_event_encode_v2(row)
@@ -222,17 +323,51 @@ fn distributed_operation_journal_commit_v2(owner: DistributedOperationJournalV2,
     val validated = operation_event_validate_v2(owner.operations, row)?
     val revision = database_wal_commit_v1(owner.root + "/database-wal", owner.authority_digest,
         owner.revision, [WalEntry(0, WalEntryType.Insert, "distributed_operations_v2",
-            row.operation_id, data, 0)])?
+            row.operation_id, data, 0)], owner.windows_store)?
     # If rebuilding the runtime index fails after publication, reopen; never retry effects.
     val projection = operation_event_apply_v2(owner.operations, row)?
     Ok(DistributedOperationJournalV2(owner.root, owner.authority_digest,
         revision.digest, revision.last_sequence, owner.maximum_events, owner.parent_lock,
-        owner.lease_digest, projection, owner.owned_lock))
+        owner.lease_digest, projection, owner.owned_lock, owner.windows_store,
+        owner.checkpoint_sequence, owner.retention_profile, owner.health_id))
+
+# Replay compaction only: retains every operation/history and never deletes.
+pub fn distributed_operation_journal_checkpoint_v2(owner: DistributedOperationJournalV2) -> Result<DistributedOperationJournalV2, text>:
+    val turn = operation_turn_begin_v2(owner)?
+    operation_turn_finish_v2(turn, operation_checkpoint_held_v2(owner, turn))
+
+fn operation_checkpoint_held_v2(owner: DistributedOperationJournalV2,
+        turn: Option<OperationJournalHealthTurnV2>) -> Result<DistributedOperationJournalV2, text>:
+    val held = operation_owner_check_v2(owner, turn)?
+    if owner.owned_lock.is_none() and owner.windows_store.is_none():
+        return Err("OPERATION_CHECKPOINT_OWNED_REQUIRED")
+    if owner.retention_profile.is_none(): return Err("OPERATION_CHECKPOINT_PROFILE_REQUIRED")
+    val profile = owner.retention_profile.unwrap()
+    val policy_checked = distributed_operation_retention_profile_validate_v2(profile, owner.maximum_events)?
+    val history = operation_history_batch_held_v2(owner, turn)?
+    if owner.sequence == 0: return Err("OPERATION_CHECKPOINT_EMPTY")
+    if owner.checkpoint_sequence == owner.sequence: return Ok(owner)
+    val encoded = distributed_operation_checkpoint_encode_v2(OperationCheckpointSnapshotV2(
+        owner.authority_digest, owner.revision, owner.sequence, profile, owner.operations, history))?
+    for object in encoded.objects:
+        val digest = database_wal_publish_v1(owner.root + "/database-wal", object.payload, owner.windows_store)?
+        if digest != object.digest: return Err("OPERATION_CHECKPOINT_PUBLICATION_CHANGED")
+    # Every immutable winner was re-read by the existing storage publisher.
+    # Owner and exact CURRENT are checked again before the sole mutable commit.
+    val still_held = operation_owner_check_v2(owner, turn)?
+    val before = operation_current_for_owner_v2(owner, turn)?
+    if before != owner.revision: return Err("OPERATION_JOURNAL_REVISION_STALE")
+    val revision = database_wal_checkpoint_commit_v1(owner.root + "/database-wal", owner.authority_digest,
+        owner.revision, encoded.manifest_digest, owner.windows_store)?
+    Ok(DistributedOperationJournalV2(owner.root, owner.authority_digest, revision.digest,
+        owner.sequence, owner.maximum_events, owner.parent_lock, owner.lease_digest,
+        owner.operations, owner.owned_lock, owner.windows_store, owner.sequence, owner.retention_profile, owner.health_id))
 
 pub fn distributed_operation_journal_close_v2(owner: DistributedOperationJournalV2) -> Result<bool, text>:
     # The Result adapter cannot carry cleanup after a partial owned close.
     # Reject before touching the lease; owned callers must retain typed turn.
-    if owner.owned_lock.is_some(): return Err("OPERATION_JOURNAL_OWNED_CLOSE_REQUIRED")
+    if owner.owned_lock.is_some() or owner.windows_store.is_some() or owner.health_id != 0 or owner.retention_profile.is_some():
+        return Err("OPERATION_JOURNAL_OWNED_CLOSE_REQUIRED")
     val checked = operation_owner_check_v2(owner)?
     if not file_delete(owner.root + "/parent.lease"): return Err("OPERATION_JOURNAL_LEASE_RELEASE_FAILED")
     if not file_unlock(owner.parent_lock): return Err("OPERATION_JOURNAL_UNLOCK_FAILED")
@@ -242,8 +377,13 @@ pub fn distributed_operation_journal_close_v2(owner: DistributedOperationJournal
 # One indexed read after fixed-size owner/revision checks; never replay in a hot query.
 fn distributed_operation_journal_lookup_v2(owner: DistributedOperationJournalV2,
         operation_id: text) -> Result<DistributedOperationStateV2, text>:
-    val checked = operation_owner_check_v2(owner)?
-    val current = database_wal_current_v1(owner.root + "/database-wal", owner.authority_digest)?
+    val turn = operation_turn_begin_v2(owner)?
+    operation_turn_finish_v2(turn, operation_lookup_held_v2(owner, operation_id, turn))
+
+fn operation_lookup_held_v2(owner: DistributedOperationJournalV2, operation_id: text,
+        turn: Option<OperationJournalHealthTurnV2>) -> Result<DistributedOperationStateV2, text>:
+    val checked = operation_owner_check_v2(owner, turn)?
+    val current = operation_current_for_owner_v2(owner, turn)?
     if current != owner.revision: return Err("OPERATION_JOURNAL_REVISION_STALE")
     if not owner.operations.contains_key(operation_id): return Err("OPERATION_NOT_FOUND")
     Ok(owner.operations[operation_id])
@@ -252,10 +392,15 @@ fn distributed_operation_journal_lookup_v2(owner: DistributedOperationJournalV2,
 # previous executor is uncertainty, never evidence that its effects did not run.
 pub fn distributed_operation_journal_recover_execution_v2(owner: DistributedOperationJournalV2,
         operation_id: text) -> Result<DistributedOperationJournalV2, text>:
-    val prior = distributed_operation_journal_lookup_v2(owner, operation_id)?
+    val turn = operation_turn_begin_v2(owner)?
+    operation_turn_finish_v2(turn, operation_recover_held_v2(owner, operation_id, turn))
+
+fn operation_recover_held_v2(owner: DistributedOperationJournalV2, operation_id: text,
+        turn: Option<OperationJournalHealthTurnV2>) -> Result<DistributedOperationJournalV2, text>:
+    val prior = operation_lookup_held_v2(owner, operation_id, turn)?
     if prior.state != "executing": return Ok(owner)
     val uncertain = distributed_operation_transition_v2(prior, "outcome-unknown", "")?
-    distributed_operation_journal_commit_v2(owner, uncertain)
+    operation_commit_held_v2(owner, uncertain, turn)
 
 # Additive owned entrypoint: callers must exhaustively retain CleanupRequired.
 # The legacy Result entrypoint remains a compatibility surface until all old
@@ -265,7 +410,12 @@ pub struct DistributedOperationJournalOpenCleanupV2:
     authority_digest: text
     lease_digest: text
     lease_published: bool
-    lock: FileLockOwnerV2
+    lock: Option<FileLockOwnerV2>
+    windows_store: Option<WindowsJournalStoreV1> = nil
+    health_id: i64 = 0
+    health_binding: text = ""
+    maximum_events: i64 = 0
+    retention_profile: Option<DistributedOperationRetentionProfileV2> = nil
 
 pub enum DistributedOperationJournalOpenV2:
     Ready(DistributedOperationJournalV2)
@@ -277,10 +427,73 @@ pub struct DistributedOperationJournalCleanupTurnV2:
     closed: bool
     error: text
     state: FileLockReleaseStateV2
+    health_pending_id: i64 = 0
 
 pub fn distributed_operation_journal_open_cleanup_v2(cleanup: DistributedOperationJournalOpenCleanupV2) -> DistributedOperationJournalCleanupTurnV2:
     var pending = cleanup
-    val phase = file_lock_owner_state_v2(pending.lock)
+    # The carrier's remembered digest is not authority for mutable I/O fields.
+    pending.health_binding = operation_health_binding_v2(pending.authority_digest,
+        pending.lease_digest, pending.maximum_events, pending.retention_profile,
+        if pending.windows_store.is_some(): "" else: pending.root)
+    var acquired: Result<OperationJournalHealthTurnV2, text> = Err("OPERATION_JOURNAL_HEALTH_UNKNOWN")
+    if pending.health_id == 0:
+        # POSIX reserves before native acquisition: a missing ID cannot mint a
+        # new root/path binding for an arbitrary existing file-lock capability.
+        if pending.windows_store.is_none() or pending.lock.is_some():
+            return DistributedOperationJournalCleanupTurnV2(Some(pending), false,
+                "OPERATION_JOURNAL_HEALTH_UNKNOWN", FileLockReleaseStateV2.Unknown)
+        # Windows alone may return an already-retained store after reservation
+        # failure. Its actual capability owns I/O; root remains diagnostic.
+        acquired = operation_health_reserve_v2(pending.windows_store, pending.health_binding)
+        if acquired.is_ok():
+            val turn = acquired.unwrap()
+            pending.health_id = turn.owner_id
+            val bound = operation_health_bind_v2(turn, pending.lock, pending.windows_store)
+            if bound.is_err():
+                return DistributedOperationJournalCleanupTurnV2(Some(pending), false,
+                    bound.unwrap_err(), FileLockReleaseStateV2.Unknown)
+    else:
+        acquired = operation_health_begin_v2(pending.health_id, pending.lock,
+            pending.windows_store, pending.health_binding, true)
+    if acquired.is_err():
+        # A retired POSIX copy has no native resource; never touch a new lease.
+        if acquired.unwrap_err() == "OPERATION_JOURNAL_HEALTH_UNKNOWN":
+            if val old = pending.lock:
+                if file_lock_owner_state_v2(old) == "stale":
+                    return DistributedOperationJournalCleanupTurnV2(nil, false,
+                        "OPERATION_JOURNAL_OWNER_STALE", FileLockReleaseStateV2.Stale)
+        return DistributedOperationJournalCleanupTurnV2(Some(pending), false,
+            acquired.unwrap_err(), FileLockReleaseStateV2.Unknown)
+    val turn = acquired.unwrap()
+    val released = operation_cleanup_held_v2(pending, turn)
+    val retire = released.cleanup.is_none() and (released.state == FileLockReleaseStateV2.Released or
+        released.state == FileLockReleaseStateV2.ConsumedError)
+    val ended = operation_health_end_v2(turn, retire)
+    if ended.is_err():
+        val error = if released.error == "": ended.unwrap_err() else: released.error + ":" + ended.unwrap_err()
+        # Native progress is conclusive independently of metadata retirement.
+        # Do not recreate a consumed native owner or reset lease_published.
+        return DistributedOperationJournalCleanupTurnV2(released.cleanup, released.closed,
+            error, released.state, turn.owner_id)
+    released
+
+fn operation_cleanup_held_v2(cleanup: DistributedOperationJournalOpenCleanupV2,
+        turn: OperationJournalHealthTurnV2) -> DistributedOperationJournalCleanupTurnV2:
+    var pending = cleanup
+    if val store = pending.windows_store:
+        var retained = store
+        val state = retained.close_state()
+        if state == "stale":
+            return DistributedOperationJournalCleanupTurnV2(nil, false,
+                "OPERATION_JOURNAL_OWNER_STALE", FileLockReleaseStateV2.Stale)
+        if state != "released":
+            return DistributedOperationJournalCleanupTurnV2(Some(pending), false,
+                "OPERATION_JOURNAL_WINDOWS_CLOSE_PENDING", FileLockReleaseStateV2.Retained)
+        return DistributedOperationJournalCleanupTurnV2(nil, true, "", FileLockReleaseStateV2.Released)
+    if pending.lock.is_none():
+        return DistributedOperationJournalCleanupTurnV2(Some(pending), false,
+            "OPERATION_JOURNAL_CLEANUP_OWNER_MISSING", FileLockReleaseStateV2.Unknown)
+    val phase = file_lock_owner_state_v2(pending.lock.unwrap())
     # A stale copied cleanup cannot read/delete a subsequent owner's lease.
     if phase == "stale":
         return DistributedOperationJournalCleanupTurnV2(nil, false,
@@ -289,25 +502,33 @@ pub fn distributed_operation_journal_open_cleanup_v2(cleanup: DistributedOperati
         if phase != "held":
             return DistributedOperationJournalCleanupTurnV2(Some(pending), false,
                 "OPERATION_JOURNAL_CLEANUP_PHASE_INVALID", FileLockReleaseStateV2.Unknown)
-        val lease = file_read_regular_no_follow_bounded(pending.root + "/parent.lease", 512)
+        val lease = operation_stored_result_v2(file_read_regular_no_follow_bounded(
+            pending.root + "/parent.lease", 512), Some(turn), pending.lease_digest)
         if lease.is_err():
             return DistributedOperationJournalCleanupTurnV2(Some(pending), false,
                 "OPERATION_JOURNAL_LEASE_READ_FAILED", FileLockReleaseStateV2.Retained)
         if sha256_text(lease.unwrap()) != pending.lease_digest:
+            val poisoned = operation_health_poison_v2(turn, "OPERATION_JOURNAL_LEASE_STALE", pending.lease_digest)
+            if poisoned.is_err():
+                return DistributedOperationJournalCleanupTurnV2(Some(pending), false,
+                    poisoned.unwrap_err(), FileLockReleaseStateV2.Unknown)
             return DistributedOperationJournalCleanupTurnV2(Some(pending), false,
                 "OPERATION_JOURNAL_LEASE_STALE", FileLockReleaseStateV2.Retained)
         if not file_delete(pending.root + "/parent.lease"):
             return DistributedOperationJournalCleanupTurnV2(Some(pending), false,
                 "OPERATION_JOURNAL_LEASE_RELEASE_FAILED", FileLockReleaseStateV2.Retained)
         pending.lease_published = false
-    val released = file_lock_release_owned_v2(pending.lock)
+    val released = file_lock_release_owned_v2(pending.lock.unwrap())
     if val held = released.owner:
-        pending.lock = held
+        pending.lock = Some(held)
         return DistributedOperationJournalCleanupTurnV2(Some(pending), false, released.error, released.state)
     DistributedOperationJournalCleanupTurnV2(nil, released.closed, released.error, released.state)
 
 fn operation_open_reject_owned_v2(cleanup: DistributedOperationJournalOpenCleanupV2,
-        error: text) -> DistributedOperationJournalOpenV2:
+        error: text, turn: Option<OperationJournalHealthTurnV2> = nil) -> DistributedOperationJournalOpenV2:
+    if val held = turn:
+        val ended = operation_health_end_v2(held)
+        if ended.is_err(): return DistributedOperationJournalOpenV2.CleanupRequired(cleanup, error + ":" + ended.unwrap_err())
     val released = distributed_operation_journal_open_cleanup_v2(cleanup)
     if val pending = released.cleanup:
         return DistributedOperationJournalOpenV2.CleanupRequired(pending, error + ":" + released.error)
@@ -316,41 +537,66 @@ fn operation_open_reject_owned_v2(cleanup: DistributedOperationJournalOpenCleanu
     DistributedOperationJournalOpenV2.Rejected(error)
 
 pub fn distributed_operation_journal_open_owned_v2(root: text, authority_digest: text,
-        nonce: text, maximum_events: i64) -> DistributedOperationJournalOpenV2:
+        nonce: text, maximum_events: i64,
+        retention_profile: Option<DistributedOperationRetentionProfileV2> = nil) -> DistributedOperationJournalOpenV2:
     if (root == "" or not builder_digest_valid_v1(authority_digest) or
             not builder_digest_valid_v1(nonce) or maximum_events <= 0 or maximum_events > 100000):
         return DistributedOperationJournalOpenV2.Rejected("OPERATION_JOURNAL_CONFIGURATION_INVALID")
-    # The journal holds signed authority state and its root is later opened
-    # as a trusted directory; create it private instead of 0777 & ~umask.
+    if val profile = retention_profile:
+        val checked = distributed_operation_retention_profile_validate_v2(profile, maximum_events)
+        if checked.is_err(): return DistributedOperationJournalOpenV2.Rejected(checked.unwrap_err())
+    val lease = "DISTRIBUTED-OPERATION-LEASE-V2\n{nonce}\n{authority_digest}\n"
+    val binding = operation_health_binding_v2(authority_digest, sha256_text(lease), maximum_events, retention_profile, root)
+    val reserved = operation_health_reserve_v2(nil, binding)
+    if reserved.is_err(): return DistributedOperationJournalOpenV2.Rejected(reserved.unwrap_err())
+    val turn = reserved.unwrap()
     directory_create_private(root)
     val acquired = file_lock_open_owned_v2(root + "/parent.lock", 1)
     var held: Option<FileLockOwnerV2> = nil
     match acquired:
         case FileLockOpenV2.Ready(lock): held = Some(lock)
-        case FileLockOpenV2.Rejected(error): return DistributedOperationJournalOpenV2.Rejected(error)
+        case FileLockOpenV2.Rejected(error):
+            val cancelled = operation_health_cancel_v2(turn)
+            if cancelled.is_err(): return DistributedOperationJournalOpenV2.CleanupRequired(
+                DistributedOperationJournalOpenCleanupV2(root, authority_digest, sha256_text(lease), false, nil,
+                    nil, turn.owner_id, binding, maximum_events, retention_profile), error + ":" + cancelled.unwrap_err())
+            return DistributedOperationJournalOpenV2.Rejected(error)
         case FileLockOpenV2.CleanupRequired(lock, error):
+            val bound = operation_health_bind_v2(turn, Some(lock), nil)
+            val ended = if bound.is_ok(): operation_health_end_v2(turn) else: bound
             return DistributedOperationJournalOpenV2.CleanupRequired(
-                DistributedOperationJournalOpenCleanupV2(root, authority_digest, "", false, lock), error)
+                DistributedOperationJournalOpenCleanupV2(root, authority_digest, sha256_text(lease), false, Some(lock),
+                    nil, turn.owner_id, binding, maximum_events, retention_profile), if ended.is_err(): error + ":" + ended.unwrap_err() else: error)
     val lock = held.unwrap()
-    val lease = "DISTRIBUTED-OPERATION-LEASE-V2\n{nonce}\n{authority_digest}\n"
     var cleanup = DistributedOperationJournalOpenCleanupV2(root, authority_digest,
-        sha256_text(lease), false, lock)
+        sha256_text(lease), false, Some(lock), nil, turn.owner_id, binding, maximum_events, retention_profile)
+    val bound = operation_health_bind_v2(turn, Some(lock), nil)
+    if bound.is_err(): return DistributedOperationJournalOpenV2.CleanupRequired(cleanup, bound.unwrap_err())
     if not file_atomic_write(root + "/parent.lease", lease):
-        return operation_open_reject_owned_v2(cleanup, "OPERATION_JOURNAL_LEASE_PUBLICATION_FAILED")
+        return operation_open_reject_owned_v2(cleanup, "OPERATION_JOURNAL_LEASE_PUBLICATION_FAILED", Some(turn))
     cleanup.lease_published = true
     val replay = distributed_operation_journal_replay_v2(root, authority_digest,
-        maximum_events, -1, cleanup.lease_digest)
-    if replay.is_err(): return operation_open_reject_owned_v2(cleanup, replay.unwrap_err())
+        maximum_events, -1, cleanup.lease_digest, retention_profile)
+    if replay.is_err(): return operation_open_reject_owned_v2(cleanup, replay.unwrap_err(), Some(turn))
     val row = replay.unwrap()
+    val ended = operation_health_end_v2(turn)
+    if ended.is_err(): return DistributedOperationJournalOpenV2.CleanupRequired(cleanup, ended.unwrap_err())
     DistributedOperationJournalOpenV2.Ready(DistributedOperationJournalV2(row.root,
         row.authority_digest, row.revision, row.sequence, row.maximum_events, -1,
-        row.lease_digest, row.operations, Some(lock)))
+        row.lease_digest, row.operations, Some(lock), nil, row.checkpoint_sequence, retention_profile, turn.owner_id))
 
 pub fn distributed_operation_journal_close_owned_v2(owner: DistributedOperationJournalV2) -> DistributedOperationJournalCleanupTurnV2:
+    if owner.windows_store.is_some():
+        return distributed_operation_journal_open_cleanup_v2(DistributedOperationJournalOpenCleanupV2(
+            owner.root, owner.authority_digest, owner.lease_digest, true, nil, owner.windows_store,
+            owner.health_id, operation_health_binding_v2(owner.authority_digest, owner.lease_digest,
+                owner.maximum_events, owner.retention_profile, ""), owner.maximum_events, owner.retention_profile))
     if val lock = owner.owned_lock:
         return distributed_operation_journal_open_cleanup_v2(
             DistributedOperationJournalOpenCleanupV2(owner.root, owner.authority_digest,
-                owner.lease_digest, true, lock))
+                owner.lease_digest, true, Some(lock), nil, owner.health_id,
+                operation_health_binding_v2(owner.authority_digest, owner.lease_digest,
+                    owner.maximum_events, owner.retention_profile, owner.root), owner.maximum_events, owner.retention_profile))
     DistributedOperationJournalCleanupTurnV2(nil, false,
         "OPERATION_JOURNAL_LEGACY_OWNER_REQUIRES_LEGACY_CLOSE", FileLockReleaseStateV2.Stale)
 
@@ -358,3 +604,138 @@ export DistributedOperationJournalV2, DistributedOperationJournalOpenV2
 export DistributedOperationJournalOpenCleanupV2, DistributedOperationJournalCleanupTurnV2
 export distributed_operation_journal_open_owned_v2, distributed_operation_journal_open_cleanup_v2
 export distributed_operation_journal_close_owned_v2
+export DistributedOperationHistoryV2, DistributedOperationJournalHistoryBatchV2
+export distributed_operation_journal_checkpoint_v2
+
+# The existing replay/transition engine receives a retained native storage owner.
+# root is diagnostic only on this path; no Windows IO derives authority from it.
+pub fn distributed_operation_journal_open_windows_v3(root: text, store: WindowsJournalStoreV1,
+        authority_digest: text, nonce: text, maximum_events: i64,
+        retention_profile: Option<DistributedOperationRetentionProfileV2> = nil) -> DistributedOperationJournalOpenV2:
+    var cleanup = DistributedOperationJournalOpenCleanupV2(root, authority_digest, "", false, nil, Some(store))
+    val lease = "DISTRIBUTED-OPERATION-LEASE-V2\n{nonce}\n{authority_digest}\n"
+    cleanup.lease_digest = sha256_text(lease)
+    cleanup.maximum_events = maximum_events
+    cleanup.retention_profile = retention_profile
+    val binding = operation_health_binding_v2(authority_digest, cleanup.lease_digest, maximum_events, retention_profile, "")
+    cleanup.health_binding = binding
+    val reserved = operation_health_reserve_v2(Some(store), binding)
+    if reserved.is_err():
+        if reserved.unwrap_err() == "OPERATION_JOURNAL_NATIVE_ALREADY_REGISTERED":
+            return DistributedOperationJournalOpenV2.Rejected(reserved.unwrap_err())
+        return DistributedOperationJournalOpenV2.CleanupRequired(cleanup, reserved.unwrap_err())
+    val turn = reserved.unwrap()
+    cleanup.health_id = turn.owner_id
+    val bound = operation_health_bind_v2(turn, nil, Some(store))
+    if bound.is_err(): return DistributedOperationJournalOpenV2.CleanupRequired(cleanup, bound.unwrap_err())
+    if (not builder_digest_valid_v1(authority_digest) or not builder_digest_valid_v1(nonce) or
+            maximum_events <= 0 or maximum_events > 100000 or not store.live()):
+        return operation_open_reject_owned_v2(cleanup, "OPERATION_JOURNAL_CONFIGURATION_INVALID", Some(turn))
+    if val profile = retention_profile:
+        val checked = distributed_operation_retention_profile_validate_v2(profile, maximum_events)
+        if checked.is_err(): return operation_open_reject_owned_v2(cleanup, checked.unwrap_err(), Some(turn))
+    # An unsuccessful replace may have published. The same store owns cleanup.
+    val published = store.replace("parent.lease", lease)
+    if published.is_err() or not published.unwrap():
+        return operation_open_reject_owned_v2(cleanup, "OPERATION_JOURNAL_LEASE_PUBLICATION_FAILED", Some(turn))
+    cleanup.lease_published = true
+    val replayed = operation_replay_snapshot_v2(root, authority_digest, maximum_events, Some(store), retention_profile)
+    if replayed.is_err(): return operation_open_reject_owned_v2(cleanup, replayed.unwrap_err(), Some(turn))
+    val snapshot = replayed.unwrap()
+    val ended = operation_health_end_v2(turn)
+    if ended.is_err(): return DistributedOperationJournalOpenV2.CleanupRequired(cleanup, ended.unwrap_err())
+    DistributedOperationJournalOpenV2.Ready(DistributedOperationJournalV2(root, authority_digest,
+        snapshot.history.head_commit_digest, snapshot.history.head_sequence, maximum_events,
+        -1, cleanup.lease_digest, snapshot.rows, nil, Some(store), snapshot.checkpoint_sequence, retention_profile, turn.owner_id))
+
+pub fn distributed_operation_journal_read_v3(owner: DistributedOperationJournalV2,
+        relative: text, maximum: i64) -> Result<Option<text>, text>:
+    val turn = operation_turn_begin_v2(owner)?
+    operation_turn_finish_v2(turn, operation_read_held_v3(owner, relative, maximum, turn))
+
+fn operation_read_held_v3(owner: DistributedOperationJournalV2,
+        relative: text, maximum: i64, turn: Option<OperationJournalHealthTurnV2>) -> Result<Option<text>, text>:
+    val checked = operation_owner_check_v2(owner, turn)?
+    if not distributed_operation_journal_relative_v3(relative): return Err("OPERATION_JOURNAL_RECORD_PATH")
+    val current = operation_current_for_owner_v2(owner, turn)?
+    if val store = owner.windows_store: return store.read(relative, maximum)
+    val path = owner.root + "/" + relative
+    if not file_exists(path): return Ok(nil)
+    Ok(Some(file_read_regular_no_follow_bounded(path, maximum)?))
+
+pub fn distributed_operation_journal_read_required_v3(owner: DistributedOperationJournalV2,
+        relative: text, maximum: i64) -> Result<text, text>:
+    val turn = operation_turn_begin_v2(owner)?
+    operation_turn_finish_v2(turn, operation_read_required_held_v3(owner, relative, maximum, turn))
+
+fn operation_read_required_held_v3(owner: DistributedOperationJournalV2,
+        relative: text, maximum: i64, turn: Option<OperationJournalHealthTurnV2>) -> Result<text, text>:
+    match operation_read_held_v3(owner, relative, maximum, turn)?:
+        case Some(bytes): Ok(bytes)
+        case nil: Err("OPERATION_JOURNAL_RECORD_MISSING:" + relative)
+
+pub fn distributed_operation_journal_publish_v3(owner: DistributedOperationJournalV2,
+        relative: text, payload: text) -> Result<bool, text>:
+    val turn = operation_turn_begin_v2(owner)?
+    operation_turn_finish_v2(turn, operation_publish_held_v3(owner, relative, payload, turn))
+
+fn operation_publish_held_v3(owner: DistributedOperationJournalV2,
+        relative: text, payload: text, turn: Option<OperationJournalHealthTurnV2>) -> Result<bool, text>:
+    val checked = operation_owner_check_v2(owner, turn)?
+    if not distributed_operation_journal_relative_v3(relative): return Err("OPERATION_JOURNAL_RECORD_PATH")
+    val current = operation_current_for_owner_v2(owner, turn)?
+    if val store = owner.windows_store: return store.publish(relative, payload)
+    val path = owner.root + "/" + relative
+    val parts = relative.split("/")
+    var directory = owner.root
+    for index in 0..parts.len() - 1:
+        directory = directory + "/" + parts[index]
+        directory_create_private(directory)
+    if file_exists(path): return Ok(false)
+    val stage = secure_temp_dir(directory, "journal-stage")?
+    val staged = stage + "/payload"
+    if not file_create_exclusive(staged, payload):
+        file_delete(staged)
+        dir_remove(stage, false)
+        return Err("OPERATION_JOURNAL_RECORD_PUBLICATION_FAILED")
+    val checked_bytes = file_read_regular_no_follow_bounded(staged, 8388608)
+    if checked_bytes.is_err() or checked_bytes.unwrap() != payload:
+        file_delete(staged)
+        dir_remove(stage, false)
+        return Err("OPERATION_JOURNAL_RECORD_STAGE_MISMATCH")
+    val published = file_publish_noreplace(staged, path)
+    file_delete(staged)
+    dir_remove(stage, false)
+    published
+
+pub fn distributed_operation_journal_relative_v3(relative: text) -> bool:
+    if relative.byte_len() < 1 or relative.byte_len() > 512: return false
+    val parts = relative.split("/")
+    if parts.len() > 4: return false
+    for part in parts:
+        if part == "" or part == "." or part == ".." or part.byte_len() > 128: return false
+        for index in 0..part.byte_len():
+            val code = part.byte_at(index) as i64
+            if not ((code >= 48 and code <= 57) or (code >= 65 and code <= 90) or
+                    (code >= 97 and code <= 122) or code == 45 or code == 46 or code == 95): return false
+    true
+
+# A native one-use publication receipt is minted only for a newly published
+# fixed consumption record under this exact executing journal operation.
+# The Host caller must already have verified signed helper admission; this
+# lower storage port does not manufacture a grant or authenticate payload data.
+pub fn distributed_operation_journal_consume_primary_v3(owner: DistributedOperationJournalV2,
+        operation: OperationEnvelopeV2, payload: text) -> Result<WindowsJournalConsumptionV1, text>:
+    val turn = operation_turn_begin_v2(owner)?
+    operation_turn_finish_v2(turn, operation_consume_primary_held_v3(owner, operation, payload, turn))
+
+fn operation_consume_primary_held_v3(owner: DistributedOperationJournalV2,
+        operation: OperationEnvelopeV2, payload: text,
+        turn: Option<OperationJournalHealthTurnV2>) -> Result<WindowsJournalConsumptionV1, text>:
+    val current = operation_lookup_held_v2(owner, operation.id, turn)?
+    if (operation.operation != "host_helper_reservation_v1" or current.state != "executing" or
+            current.envelope != distributed_encode_operation_v2(operation)?):
+        return Err("OPERATION_JOURNAL_PRIMARY_CONSUMPTION_STATE")
+    if owner.windows_store.is_none(): return Err("OPERATION_JOURNAL_PRIMARY_CONSUMPTION_BACKEND")
+    owner.windows_store.unwrap().publish_consumption(
+        "primary-connection-consumed/" + sha256_text(operation.id) + ".sdn", payload)

@@ -1,0 +1,92 @@
+# Geometry attempt state owns no Host writer and no terminal reader. The V5
+# coordinator supplies its current issuer decision and canonical session.
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.HostServiceDomainV3
+use std.nogc_sync_mut.orchestration.host_primary_connection_service_v3.HostPrimaryConnectionTaskV3
+use std.nogc_sync_mut.orchestration.host_primary_geometry_service_v2.{HostPrimaryGeometryTaskV2,
+    HostPrimaryGeometryTurnV2, HostPrimaryGeometryHistoryV2, host_primary_geometry_begin_v2, host_primary_geometry_step_v2,
+    host_primary_geometry_cancel_v2}
+use std.nogc_sync_mut.orchestration.host_primary_geometry_record_v1.{HostPrimaryGeometryReceiptV1,
+    host_primary_geometry_receipt_blocks_v1}
+use std.common.contracts.container.primary_geometry_v1.ContainerPrimaryGeometryRequestV1
+use os.apps.smux.runtime_connection_geometry_replay_v5.smux_connection_geometry_replay_v5
+use std.nogc_async_mut.container.terminal_session_v2.ContainerOwnedTerminalSessionV2
+
+pub class SmuxConnectionGeometryV5:
+    task: HostPrimaryGeometryTaskV2? = nil
+    request: ContainerPrimaryGeometryRequestV1? = nil
+    receipt: HostPrimaryGeometryReceiptV1? = nil
+    error: text = ""
+    cancelled: bool = false
+    history: HostPrimaryGeometryHistoryV2? = nil
+    candidate: bool = false
+    prior_request: ContainerPrimaryGeometryRequestV1? = nil
+    prior_receipt: HostPrimaryGeometryReceiptV1? = nil
+    prior_history: HostPrimaryGeometryHistoryV2? = nil
+
+    pub fn pending_v5() -> bool: self.task != nil
+    pub fn request_v5() -> ContainerPrimaryGeometryRequestV1?: self.request
+    pub fn receipt_v5() -> HostPrimaryGeometryReceiptV1?: self.receipt
+    pub fn error_v5() -> text: self.error
+    pub fn unresolved_v5() -> bool:
+        if self.task != nil: return true
+        if val receipt = self.receipt: return host_primary_geometry_receipt_blocks_v1(receipt)
+        false
+
+pub struct SmuxConnectionGeometryTurnV5:
+    domain: HostServiceDomainV3
+    state: SmuxConnectionGeometryV5
+    error: text
+
+pub fn smux_connection_geometry_new_v5() -> SmuxConnectionGeometryV5:
+    SmuxConnectionGeometryV5()
+
+fn retained_v5(original: SmuxConnectionGeometryV5, turn: HostPrimaryGeometryTurnV2) -> SmuxConnectionGeometryTurnV5:
+    var state = original
+    state.task = turn.task
+    if turn.task == nil and turn.receipt == nil and state.candidate:
+        # No immutable attempt was reserved. Restore the prior committed prefix;
+        # a fresh lease may retry that next sequence without inventing history.
+        state.request = state.prior_request
+        state.receipt = state.prior_receipt
+        state.history = state.prior_history
+    else:
+        if turn.history != nil: state.history = turn.history
+        if turn.receipt != nil: state.receipt = turn.receipt
+    if turn.task == nil:
+        state.candidate = false
+        state.prior_request = nil
+        state.prior_receipt = nil
+        state.prior_history = nil
+    state.error = turn.error
+    SmuxConnectionGeometryTurnV5(HostServiceDomainV3(turn.local), state, turn.error)
+
+pub fn smux_connection_geometry_begin_v5(domain: HostServiceDomainV3,
+        connection: HostPrimaryConnectionTaskV3, session: ContainerOwnedTerminalSessionV2,
+        original: SmuxConnectionGeometryV5, request: ContainerPrimaryGeometryRequestV1) -> SmuxConnectionGeometryTurnV5:
+    var state = original
+    val replay = smux_connection_geometry_replay_v5(state.request, request, state.unresolved_v5())
+    if replay.is_err(): return SmuxConnectionGeometryTurnV5(domain, state, replay.unwrap_err())
+    if replay.unwrap(): return SmuxConnectionGeometryTurnV5(domain, state, state.error)
+    val turn = host_primary_geometry_begin_v2(domain.local, connection, session, request, state.history)
+    if turn.task != nil or turn.receipt != nil:
+        state.prior_request = state.request
+        state.prior_receipt = state.receipt
+        state.prior_history = state.history
+        state.candidate = true
+        state.request = Some(request)
+        state.cancelled = false
+    retained_v5(state, turn)
+
+pub fn smux_connection_geometry_step_v5(domain: HostServiceDomainV3,
+        connection: HostPrimaryConnectionTaskV3, session: ContainerOwnedTerminalSessionV2,
+        state: SmuxConnectionGeometryV5, current: ContainerPrimaryGeometryRequestV1) -> SmuxConnectionGeometryTurnV5:
+    if state.task == nil: return SmuxConnectionGeometryTurnV5(domain, state, state.error)
+    retained_v5(state, host_primary_geometry_step_v2(domain.local, connection, session,
+        state.task.unwrap(), current, state.cancelled))
+
+pub fn smux_connection_geometry_cancel_v5(domain: HostServiceDomainV3,
+        original: SmuxConnectionGeometryV5, reason: text) -> SmuxConnectionGeometryTurnV5:
+    var state = original
+    state.cancelled = true
+    if state.task == nil: return SmuxConnectionGeometryTurnV5(domain, state, state.error)
+    retained_v5(state, host_primary_geometry_cancel_v2(domain.local, state.task.unwrap(), reason))
