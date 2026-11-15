@@ -1,6 +1,6 @@
 # Selected-font validation hashed at ~22 KB/s on the interpreter lane
 
-**Status:** FIXED (2026-11-15)
+**Status:** FIXED (2026-11-15) for the hosted interpreter lane only. The JIT lane (`simple run`) still takes the slow fallback, because `rt_tls13_sha256` returns an empty digest under the JIT (`doc/08_tracking/bug/jit_rt_tls13_sha256_returns_empty_2026-08-05.md`). The freestanding lane was not exercised.
 **Area:** `src/lib/common/encoding/font_registry.spl`, `_validate_selected_font_asset_with_digest`
 
 ## Symptom
