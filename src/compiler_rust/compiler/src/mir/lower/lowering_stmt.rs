@@ -29,6 +29,10 @@ fn if_merge_tail_value_ty(stmts: &[HirStmt], depth: usize) -> Option<TypeId> {
         return None;
     }
     match stmts.last()? {
+        // The "no arm matched" tail of a statement match diverges: it leaves
+        // no value, exactly like the missing `else` it replaced. Counting its
+        // NIL type would demote a float merge slot to I64 and zero the value.
+        HirStmt::Expr(expr) if expr.is_match_exhausted_panic() => None,
         HirStmt::Expr(expr) => Some(expr.ty),
         HirStmt::If {
             then_block, else_block, ..

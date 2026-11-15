@@ -1,0 +1,87 @@
+"""
+## Purpose and audience
+Purpose: Pin the AI-CLI bound socket endpoint (the text the listen grant
+decision reads) to the open-file description it describes, so a reused
+descriptor number never inherits another socket's bound endpoint.
+Audience: kernel engineers maintaining socket_compat and the fd table.
+## Operator workflow
+Run with the unit suite. A stale endpoint after a raw fd_close/fd_set/dup2
+means posix_listen asks the AI-CLI manifest about the wrong socket's address.
+## Compatibility and limitations
+Host-only. Recording is driven through the socket_compat record helper
+because a successful bind needs a live netstack IPC peer.
+# @manual: primary
+REQ-OS-KERNEL-001
+"""
+# @req: REQ-OS-KERNEL-001
+
+use std.spec.{describe, it, expect}
+use os.kernel.fd_table.{fd_table_init, fd_alloc, fd_set, fd_close, fd_dup, fd_dup2}
+use os.kernel.socket_compat.{
+    posix_close_socket, _record_bound_endpoint, _bound_endpoint_for_fd
+}
+
+fn _endpoint(fd: i32) -> text:
+    match _bound_endpoint_for_fd(fd):
+        Some(e): e
+        nil: "<none>"
+
+fn _bind_record(fd: i32, port: u16):
+    _record_bound_endpoint(fd, "127.0.0.1:{port as i64}")
+
+fn _socket_fd(handle: u64) -> i32:
+    val fd = fd_alloc()
+    fd_set(fd, 4, 2, handle)
+    fd
+
+describe "socket bound endpoint provenance":
+    it "records the bound endpoint on bind":
+        fd_table_init()
+        val fd = _socket_fd(77u64)
+        expect(_endpoint(fd)).to_equal("<none>")
+        _bind_record(fd, 8080u16)
+        expect(_endpoint(fd)).to_equal("127.0.0.1:8080")
+
+    it "does not leak an endpoint to a descriptor reused after raw fd_close":
+        fd_table_init()
+        val fd = _socket_fd(77u64)
+        _bind_record(fd, 8080u16)
+        fd_close(fd)
+        val reused = _socket_fd(78u64)
+        expect(reused).to_equal(fd)
+        expect(_endpoint(reused)).to_equal("<none>")
+
+    it "does not leak an endpoint when fd_set overwrites an occupied slot":
+        fd_table_init()
+        val fd = _socket_fd(77u64)
+        _bind_record(fd, 8080u16)
+        fd_set(fd, 4, 2, 79u64)
+        expect(_endpoint(fd)).to_equal("<none>")
+
+    it "gives a dup2 target the source socket's endpoint, not the old one":
+        fd_table_init()
+        val bound = _socket_fd(77u64)
+        val unbound = _socket_fd(78u64)
+        _bind_record(bound, 8080u16)
+        expect(fd_dup2(unbound, bound)).to_equal(bound)
+        expect(_endpoint(bound)).to_equal("<none>")
+        _bind_record(unbound, 9090u16)
+        expect(_endpoint(bound)).to_equal("127.0.0.1:9090")
+
+    it "shares the endpoint with a dup of the same socket":
+        fd_table_init()
+        val bound = _socket_fd(77u64)
+        _bind_record(bound, 8080u16)
+        val copy = fd_dup(bound)
+        expect(_endpoint(copy)).to_equal("127.0.0.1:8080")
+        fd_close(bound)
+        expect(_endpoint(copy)).to_equal("127.0.0.1:8080")
+
+    it "clears the endpoint on posix_close_socket":
+        fd_table_init()
+        val fd = _socket_fd(77u64)
+        _bind_record(fd, 8080u16)
+        posix_close_socket(fd)
+        val reused = _socket_fd(80u64)
+        expect(reused).to_equal(fd)
+        expect(_endpoint(reused)).to_equal("<none>")

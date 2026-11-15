@@ -751,3 +751,84 @@ that only reads `Const` operands sees a plain local there. The s3_fable44
 (cranelift + llvm). Spec `test/01_unit/compiler/50.mir/struct_i64_field_ctor_spec.spl`;
 native twin `test/fixtures/compiler/struct_i64_field_ctor_native.spl`; bug
 `native_struct_i64_field_ctor_reads_wrong_value_2026-11-05`.
+
+## 2026-11-14 — seed JIT reclamation design (options, not implemented)
+
+The seed JIT frees heap objects at one lowering site only (`lowering_stmt.rs`, the
+`array_move.rs` field-release proof); every other array, string, dict, tuple, closure,
+enum and `rt_alloc` struct block lives until exit, and struct blocks are invisible to the
+`rt_heap_*` counters. The JIT also aliases arrays where the interpreter copies (call
+return, struct-literal argument, capture, global write, push into an outer array, plain
+assign, tuple, and seven more measured forms), so a release is safe only for a proven-unique local. Measured per-operation
+leak table, the aliasing matrix, the options (proven-unique block-end release, refcount,
+regions, do nothing, tracing GC) and the recommended first slice are in
+`doc/05_design/compiler/jit_memory/seed_jit_array_reclamation.md`. Read it before
+emitting any `rt_*_free` from lowering; `emit_function_drops` is not a safe hook.
+
+## Provider type relocation retraction (2026-11-14, opt-in)
+
+`relocate_provider_type_symbol` copies provider class/struct/enum/trait symbols
+into the CONSUMER's persistent HIR table (`self.symbols = module.symbols`); the
+per-consumer p1 native-trait walk makes even a facade retain every type a
+provider trait signature names (~955 KiB/module on the bootstrap_main closure).
+`SIMPLE_MIR_RETRACT_PROVIDER_TYPES=1` / `retract_provider_type_relocations`
+retracts the journaled copies (`provider_type_relocation_journal`) after
+`s5_scope_end` on the success path of `lower_module_transient_scoped`, via
+`SymbolTable.retract_symbol_rows_v1`. Default OFF until a Stage 2 run flips it
+(record: `stage2_compiler_cli_build_mir_shard_share_unbounded_2026-11-06.md`,
+"Item 1" section). Traps met:
+
+- **Byte-identical MIR means identical ids**: `mir_json` serializes
+  `Struct/Enum(symbol)` as the raw id, so any design that changes WHICH
+  provider types get relocated (demand-driven p1, a shared relocation table)
+  renumbers MIR. Only post-promotion retraction keeps the MIR unchanged.
+- **Demand-driven p1 is unsafe anyway**: `native_trait_conversion.spl` builds a
+  concrete type's runtime trait-cast dispatcher from ALL impls of that owner,
+  including traits the lowering module never names.
+- **Never rewind `next_symbol_id`** on a retraction: a reissued id would alias
+  a stale holder to a different symbol; a retired id can only miss.
+- **`Dict.remove` differs by lane** (returns a new dict interpreted, mutates
+  natively): rebuild the map without the keys, filtering by VALUE for the
+  text->id indexes (`qualified_types`, `module_callables`).
+- **No new `SymbolTable` field**: `20.hir/generated/hir_codec.spl` constructs it
+  literally; a field means regenerating the codec. Add methods instead.
+- **Journal fields follow the Stage 4 rule**: copy, push, store back; add the
+  field to `transient_owner.spl`'s promote inventory
+  (`check-mir-transient-scope-boundary.shs`) and hand it across the lifted-
+  lambda nested lowerer in both directions (`switch_operators_calls.spl`).
+- **`mir_module_canonical_fingerprint_v1` is not run-to-run stable on the seed
+  for type-defining modules** (`{t.kind}` struct Display, hash order) -- compare
+  serialized rows, not the fingerprint
+  (`mir_canonical_fingerprint_type_row_hash_order_seed_2026-11-14.md`).
+
+## 2026-11-14 — an annotated `val x: T` does not launder a `T?` initializer
+
+`val x: T = if c: opt else: plain` keeps the initializer's `T?` (a `T?` / `T` join is `T?` in
+either arm order; `let_declared_type_override_v1` only lets the annotation win over Infer / Error /
+erased / Result). `Enum.Variant(x)` into a non-optional slot is then refused, now with
+`optional 'T?' value into non-optional payload slot ... unwrap it first`. Fix the source with
+`if val`, or bind the plain value once; do not make the annotation win. Struct fields and
+plain parameters still accept the same value silently. Red/green in about 30 s on the seed:
+`test/01_unit/compiler/mir/let_annotated_optional_join_spec.spl` (it also pins the three
+`HirStmtKind.Let` sites in `statements.spl`, lost once to a rebase). Record:
+`doc/08_tracking/bug/stage3_let_payload_unguarded_optional_arm_2026-11-14.md`.
+
+## 2026-11-14 — dict literal payloads, and what module coverage can show
+
+- HIR gives every dict literal the key type `Infer(0, 0)`; MIR must read that as "no
+  ascription" (`enum_payload_dict_key_is_ascribed`). Treating it as a key type refused every
+  inline `Enum.V({...})`. Seed-interpreted proof only; the `@workaround` sites stay until a
+  native Phase 2 lowers the inline form.
+- `enum_constructor_payload.spl` is unit-testable without a Stage 2: lower a small module,
+  then call the helpers on the `MirLowering` with a synthetic temp
+  (`test/01_unit/compiler/mir/enum_payload_local_evidence_spec.spl`). Add temps to
+  `lowering.builder` inline in the `it` body: a lowering passed to a helper function is not
+  updated in the caller. Private free functions come in through the module's wildcard import.
+- Measure coverage on a seed that contains PR #9041. An older seed does not record an
+  `if` / `match` in expression position and made this module look capped at 82.2%; on the
+  current seed it is 100.0% (237/237) lines. Check the seed's base commit before believing a
+  coverage ceiling.
+- The per-entry check in `lower_dict_lit` reads nil's I64 carrier as an integer, so a dict
+  literal payload vetoes a `nil` key or value unless the declared entry type is optional or
+  `Nil` (`enum_payload_dict_entry_nil_vetoed`). A top-level `E.N(nil)` into an `i64` slot is
+  still accepted; see `doc/08_tracking/bug/enum_payload_nil_into_scalar_slot_accepted_2026-11-14.md`.

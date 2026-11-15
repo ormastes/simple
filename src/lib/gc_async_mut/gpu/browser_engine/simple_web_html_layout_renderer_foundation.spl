@@ -732,6 +732,16 @@ class SelectorContext:
     element_position: [i32]
     element_sibling_count: [i32]
     has_content_child: [bool]
+    # 1-based position among same-tag element siblings, and how many there are.
+    # Built once per style pass so :nth-of-type / :nth-last-of-type are lookups.
+    type_position: [i32]
+    type_count: [i32]
+    # Arena index of the previous ELEMENT sibling (-1 when first), for the
+    # `+` and `~` combinators.
+    prev_element: [i32]
+    # Unique per build_selector_context() call; keys the pass-scoped selector
+    # caches so they can never serve another document.
+    pass_id: i64
 
 class ClassFlags:
     has_widget_class: bool
@@ -763,14 +773,22 @@ fn build_child_index(nodes: [HNode]) -> HtmlChildIndex:
         i = i + 1
     HtmlChildIndex(first_child: first_child, next_sibling: next_sibling, child_count: child_count)
 
+var _selector_pass_counter: i64 = 0
+
 fn build_selector_context(nodes: [HNode], child_index: HtmlChildIndex) -> SelectorContext:
+    _selector_pass_counter = _selector_pass_counter + 1
     val node_count = nodes.len()
     var element_position: [i32] = [1; node_count]
     var element_sibling_count: [i32] = [1; node_count]
     var has_content_child: [bool] = [false; node_count]
+    var type_position: [i32] = [1; node_count]
+    var type_count: [i32] = [1; node_count]
+    var prev_element: [i32] = [0 - 1; node_count]
     var parent = 0
     while parent < node_count:
         var element_count = 0
+        var type_seen: Dict<text, i32> = {}
+        var last_element = 0 - 1
         var child = child_index.first_child[parent]
         while child >= 0:
             val nd = nodes[child]
@@ -781,14 +799,20 @@ fn build_selector_context(nodes: [HNode], child_index: HtmlChildIndex) -> Select
                 has_content_child[parent] = true
                 element_count = element_count + 1
                 element_position[child] = element_count
+                prev_element[child] = last_element
+                last_element = child
+                val seen = (type_seen.get(nd.tag) ?? 0) + 1
+                type_seen[nd.tag] = seen
+                type_position[child] = seen
             child = child_index.next_sibling[child]
         child = child_index.first_child[parent]
         while child >= 0:
             if nodes[child].tag != "#text":
                 element_sibling_count[child] = element_count
+                type_count[child] = type_seen.get(nodes[child].tag) ?? 1
             child = child_index.next_sibling[child]
         parent = parent + 1
-    SelectorContext(child_index: child_index, element_position: element_position, element_sibling_count: element_sibling_count, has_content_child: has_content_child)
+    SelectorContext(child_index: child_index, element_position: element_position, element_sibling_count: element_sibling_count, has_content_child: has_content_child, type_position: type_position, type_count: type_count, prev_element: prev_element, pass_id: _selector_pass_counter)
 
 # ---------------------------------------------------------------------------
 # Position-aware string find (works around index_of(needle,pos) ignoring pos)
@@ -820,8 +844,8 @@ fn text_matches_at(haystack: text, needle: text, offset: i32) -> bool:
     # residual item 3), which is what collapsed `_html_scan_events` to zero
     # events in the guest while the host produced a full DOM. It also avoids
     # the per-character heap string `char_at` would allocate.
-    val needle_len = needle.len() as i32
-    if (offset < 0) or offset + needle_len > (haystack.len() as i32):
+    val needle_len = needle.byte_len() as i32
+    if (offset < 0) or offset + needle_len > (haystack.byte_len() as i32):
         return false
     if needle_len == 0:
         return true
@@ -848,7 +872,7 @@ fn skip_wrap_spaces(txt: text, off: i32) -> i32:
     # byte index — `char_code_at` here returned a character index that callers
     # then cut on, truncating any string containing multi-byte text.
     var out = off
-    val n = txt.len() as i32
+    val n = txt.byte_len() as i32
     if out >= n:
         return out
     val b = txt.bytes()
@@ -874,7 +898,7 @@ fn find_from(s: text, needle: text, pos: i32) -> i32:
     # so the edge cases answer exactly as before (an empty needle returns
     # `start` even past the end, which native index_of would clamp).
     val start = if pos < 0: 0 else: pos
-    val nlen = needle.len() as i32
+    val nlen = needle.byte_len() as i32
     if nlen == 0:
         return start
     val slen = s.byte_len() as i32
@@ -978,13 +1002,14 @@ fn attr_present(inner: text, name: text) -> bool:
         if token_start:
             var matched = true
             var j = 0
-            while j < name.len():
+            val name_blen = name.byte_len()
+            while j < name_blen:
                 if not html_attr_name_byte_equal(ib[i + j], nb[j]):
                     matched = false
                     break
                 j = j + 1
             if matched:
-                val end = i + name.len()
+                val end = i + name_blen
                 if end >= inner.byte_len():
                     return true
                 val next = ib[end]
@@ -1048,7 +1073,7 @@ pub fn html_has_presentational_attr(inner: text) -> bool:
 
 fn _html_attr_name_at(ib: [u8], inner_len: i64, at: i64, name: text) -> bool:
     val nb = name.bytes()
-    val name_len = name.len()
+    val name_len = name.byte_len()
     if at + name_len > inner_len:
         return false
     var j = 0
@@ -1071,7 +1096,7 @@ fn attr_value(inner: text, name: text) -> text:
     attr_value_by_key(inner, key)
 
 fn attr_value_by_key(inner: text, key: text) -> text:
-    val key_len = key.len()
+    val key_len = key.byte_len()
     val kpos = attr_key_index(inner, key, key_len)
     if kpos < 0:
         return ""
@@ -1201,37 +1226,37 @@ fn _decode_numeric_entities(s: text) -> text:
     var start = find_from(s, "&#", 0)
     if start < 0:
         return s
-    val n = s.len()
+    val n = s.byte_len()
     var out = ""
     var i = 0
     while start >= 0:
         out = out + s.substring(i, start)
         var j = start + 2
         var is_hex = false
-        if j < n and (s[j] == "x" or s[j] == "X"):
+        if j < n and (s.substring(j, j + 1) == "x" or s.substring(j, j + 1) == "X"):
             is_hex = true
             j = j + 1
         var cp = 0i64
         var digits = 0
         var valid = true
         while j < n and digits <= 7:
-            val c = s[j]
+            val c = s.substring(j, j + 1)
             if c == ";":
                 break
             var d = -1
             if c >= "0" and c <= "9":
-                d = c.char_code_at(0) - 48
+                d = c.byte_at(0) - 48
             elif is_hex and c >= "a" and c <= "f":
-                d = c.char_code_at(0) - 87
+                d = c.byte_at(0) - 87
             elif is_hex and c >= "A" and c <= "F":
-                d = c.char_code_at(0) - 55
+                d = c.byte_at(0) - 55
             if d < 0:
                 valid = false
                 break
             cp = cp * (if is_hex: 16 else: 10) + d
             digits = digits + 1
             j = j + 1
-        if valid and digits > 0 and j < n and s[j] == ";":
+        if valid and digits > 0 and j < n and s.substring(j, j + 1) == ";":
             out = out + _codepoint_to_text(cp)
             i = j + 1
         else:
@@ -1475,7 +1500,7 @@ fn parse_int_range(s: text, start: i32, end: i32) -> i32:
     var v = 0
     var matched_any_digit = false
     while i < end:
-        val c = s.char_at(i)
+        val c = s.substring(i, i + 1)
         val digit = dec_val(c)
         if digit < 10:
             v = v * 10 + digit
@@ -1493,7 +1518,6 @@ fn parse_color(raw: text) -> u32:
         return 0u32
     if s == "white": return web_argb(255, 255, 255)
     if s == "black": return web_argb(0, 0, 0)
-    if s == "red": return web_argb(220, 50, 50)
     # CSS Color 5 `light-dark(<light>, <dark>)`: this renderer paints the
     # light color scheme, so the first top-level argument wins. Without this
     # example.com's `background: light-dark(#eee,#222)` decoded as garbage.
@@ -1502,7 +1526,7 @@ fn parse_color(raw: text) -> u32:
         var depth = 0
         var i = 0
         while i < inner.byte_len():
-            val ch = inner.char_at(i)
+            val ch = inner.substring(i, i + 1)
             if ch == "(":
                 depth = depth + 1
             elif ch == ")":
@@ -1511,39 +1535,34 @@ fn parse_color(raw: text) -> u32:
                 return parse_color(inner.slice(0, i))
             i = i + 1
         return 0u32
-    if s.char_at(0) == "#":
+    if s.substring(0, 1) == "#":
         val h_len = s.byte_len() - 1
         if h_len == 8:
-            val r = hex_val(s.char_at(1)) * 16 + hex_val(s.char_at(2))
-            val g = hex_val(s.char_at(3)) * 16 + hex_val(s.char_at(4))
-            val b = hex_val(s.char_at(5)) * 16 + hex_val(s.char_at(6))
-            val a = hex_val(s.char_at(7)) * 16 + hex_val(s.char_at(8))
+            val r = hex_val(s.substring(1, 2)) * 16 + hex_val(s.substring(2, 3))
+            val g = hex_val(s.substring(3, 4)) * 16 + hex_val(s.substring(4, 5))
+            val b = hex_val(s.substring(5, 6)) * 16 + hex_val(s.substring(6, 7))
+            val a = hex_val(s.substring(7, 8)) * 16 + hex_val(s.substring(8, 9))
             return (a.to_u32() << 24) | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
         if h_len >= 6:
-            val r = hex_val(s.char_at(1)) * 16 + hex_val(s.char_at(2))
-            val g = hex_val(s.char_at(3)) * 16 + hex_val(s.char_at(4))
-            val b = hex_val(s.char_at(5)) * 16 + hex_val(s.char_at(6))
+            val r = hex_val(s.substring(1, 2)) * 16 + hex_val(s.substring(2, 3))
+            val g = hex_val(s.substring(3, 4)) * 16 + hex_val(s.substring(4, 5))
+            val b = hex_val(s.substring(5, 6)) * 16 + hex_val(s.substring(6, 7))
             return web_argb(r, g, b)
         if h_len == 4:
-            val r = hex_val(s.char_at(1)) * 17
-            val g = hex_val(s.char_at(2)) * 17
-            val b = hex_val(s.char_at(3)) * 17
-            val a = hex_val(s.char_at(4)) * 17
+            val r = hex_val(s.substring(1, 2)) * 17
+            val g = hex_val(s.substring(2, 3)) * 17
+            val b = hex_val(s.substring(3, 4)) * 17
+            val a = hex_val(s.substring(4, 5)) * 17
             return (a.to_u32() << 24) | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
         if h_len == 3:
-            val r = hex_val(s.char_at(1)) * 17
-            val g = hex_val(s.char_at(2)) * 17
-            val b = hex_val(s.char_at(3)) * 17
+            val r = hex_val(s.substring(1, 2)) * 17
+            val g = hex_val(s.substring(2, 3)) * 17
+            val b = hex_val(s.substring(3, 4)) * 17
             return web_argb(r, g, b)
         return 0u32
-    if s.byte_len() >= 3 and text_matches_at(s, "rgb", 0):
-        val lp = text_index_of(s, "(")
-        val rp = text_index_of(s, ")")
-        if lp >= 0 and rp > lp:
-            val c1 = find_from(s, ",", lp + 1)
-            val c2 = if c1 >= 0: find_from(s, ",", c1 + 1) else: -1
-            if c1 >= 0 and c2 >= 0 and c2 < rp:
-                return web_argb(parse_int_range(s, lp + 1, c1), parse_int_range(s, c1 + 1, c2), parse_int_range(s, c2 + 1, rp))
+    # rgb()/rgba()/hsl()/hsla() in every syntax keep their alpha through the
+    # delegate (legacy comma rgba() was forced opaque here until 2026-11-15);
+    # invalid input is 0 -- not a colour -- never black.
     _parse_color_delegated(s)
 
 fn _parse_color_delegated(lowered: text) -> u32:
@@ -1555,7 +1574,7 @@ fn _parse_color_delegated(lowered: text) -> u32:
     delegate would silently answer opaque black."""
     if lowered == "currentcolor":
         return 0u32
-    val first = if lowered.len() > 0: lowered.char_at(0) else: ""
+    val first = if lowered.len() > 0: lowered.substring(0, 1) else: ""
     if dec_val(first) < 10 or first == ".":
         # The delegate ends with a bare `parse_i64`, so `1` would come back as
         # a nonzero "color". No CSS color starts with a digit or a dot, and
@@ -1575,7 +1594,11 @@ fn parse_color_any(raw: text) -> u32:
     if direct != 0u32:
         return direct
     val lower = raw.lower()
-    val rgb = text_index_of(lower, "rgb")
+    # The first colour function inside a shorthand (`4px solid hsl(...)`):
+    # rgb()/rgba() and hsl()/hsla() alike.
+    val rgb_at = text_index_of(lower, "rgb")
+    val hsl_at = text_index_of(lower, "hsl")
+    val rgb = if rgb_at < 0 or (hsl_at >= 0 and hsl_at < rgb_at): hsl_at else: rgb_at
     if rgb >= 0:
         val rp = find_from(raw, ")", rgb)
         if rp >= 0:
@@ -1596,7 +1619,7 @@ fn parse_alpha_fraction_range(s: text, start: i32, end: i32) -> i32:
     var seen_digit = false
     var in_frac = false
     while i < end:
-        val c = s.char_at(i)
+        val c = s.substring(i, i + 1)
         val d = dec_val(c)
         if d < 10:
             seen_digit = true
@@ -1619,6 +1642,10 @@ fn parse_alpha_fraction_range(s: text, start: i32, end: i32) -> i32:
 # (rgba() keeps its alpha; every other form is opaque like parse_color_any).
 fn parse_color_alpha(raw: text) -> u32:
     val s = raw.trim().lower()
+    if text_matches_at(s, "rgb", 0) or text_matches_at(s, "hsl", 0):
+        # dom_color's CSS Color 4 parser: comma or space syntax, `/ alpha`,
+        # percentages, hue units; 0 when invalid or fully transparent.
+        return _parse_color_delegated(s)
     val rgba_at = text_index_of(s, "rgba")
     if rgba_at >= 0:
         val lp = find_from(s, "(", rgba_at)
@@ -1646,11 +1673,11 @@ fn is_gradient_angle_token(s: text) -> bool:
     if n == 0:
         return false
     var i = 0
-    if s.char_at(0) == "-" or s.char_at(0) == "+":
+    if s.substring(0, 1) == "-" or s.substring(0, 1) == "+":
         i = 1
     var saw_digit = false
     while i < n:
-        val c = s.char_at(i)
+        val c = s.substring(i, i + 1)
         val d = dec_val(c)
         if d < 10:
             saw_digit = true
@@ -1723,7 +1750,8 @@ fn parse_linear_gradient_color(raw: text, target: i32) -> u32:
             # IS the sheen (e.g. rgba(255,255,255,0.08)); parse_color_any made
             # every stop opaque (0xFFFFFFFF), erasing the translucency the CPU
             # material admission keys on.
-            return parse_color_alpha(part)
+            # A positioned stop (`#0f0 60%`) is still that colour.
+            return parse_color_alpha(gradient_stop_color_text(part))
         item_index = item_index + 1
     0u32
 
@@ -1811,7 +1839,7 @@ fn find_last_top_level_space(s: text) -> i32:
     var i = 0
     val n = s.byte_len()
     while i < n:
-        val c = s.char_at(i)
+        val c = s.substring(i, i + 1)
         if c == "(":
             depth = depth + 1
         elif c == ")":
@@ -1825,7 +1853,7 @@ fn find_last_top_level_space(s: text) -> i32:
 # percentage (no explicit stop position given).
 fn parse_percent_permille(s: text) -> i32:
     val n = s.byte_len()
-    if n == 0 or s.char_at(n - 1) != "%":
+    if n == 0 or s.substring(n - 1, n) != "%":
         return -1
     var i = 0
     var int_part = 0
@@ -1834,7 +1862,7 @@ fn parse_percent_permille(s: text) -> i32:
     var seen_digit = false
     var in_frac = false
     while i < n - 1:
-        val c = s.char_at(i)
+        val c = s.substring(i, i + 1)
         val d = dec_val(c)
         if d < 10:
             seen_digit = true
@@ -1872,14 +1900,14 @@ fn gradient_stop_position_or_neg1(part: text) -> i32:
 fn parse_signed_leading_int(s: text) -> i32:
     var i = 0
     var neg = false
-    if s.len() > 0 and s.char_at(0) == "-":
+    if s.len() > 0 and s.substring(0, 1) == "-":
         neg = true
         i = 1
-    elif s.len() > 0 and s.char_at(0) == "+":
+    elif s.len() > 0 and s.substring(0, 1) == "+":
         i = 1
     var v = 0
     while i < s.byte_len():
-        val d = dec_val(s.char_at(i))
+        val d = dec_val(s.substring(i, i + 1))
         if d < 10:
             v = v * 10 + d
             i = i + 1
@@ -1889,6 +1917,48 @@ fn parse_signed_leading_int(s: text) -> i32:
         -v
     else:
         v
+
+# A `<angle>` token (`deg`, `grad`, `rad`, `turn`, decimals allowed) in
+# whole degrees, rounded and reduced to 0..359.
+fn gradient_angle_token_deg(s: text) -> i32:
+    val n = s.byte_len()
+    var i = 0
+    var neg = false
+    if n > 0 and s.substring(0, 1) == "-":
+        neg = true
+        i = 1
+    elif n > 0 and s.substring(0, 1) == "+":
+        i = 1
+    var v = 0.0
+    var scale = 0.0
+    while i < n:
+        val c = s.substring(i, i + 1)
+        val d = dec_val(c)
+        if d < 10:
+            if scale > 0.0:
+                v = v + (d as f64) * scale
+                scale = scale / 10.0
+            else:
+                v = v * 10.0 + (d as f64)
+            i = i + 1
+        elif c == "." and scale == 0.0:
+            scale = 0.1
+            i = i + 1
+        else:
+            break
+    val unit = s.substring(i, n)
+    var deg = v
+    if unit == "grad":
+        deg = v * 0.9
+    elif unit == "rad":
+        deg = v * 180.0 / 3.141592653589793
+    elif unit == "turn":
+        deg = v * 360.0
+    val r = (deg + 0.5) as i32
+    # Reduced to 0..359: values >= 1000 are the `to <corner>` codes, so
+    # `3turn` or `1080deg` must never reach the painter unreduced.
+    val m = (if neg: 0 - r else: r) % 360
+    if m < 0: m + 360 else: m
 
 # Linear-gradient angle in CSS degrees (0 = to top, 90 = to right, 180 (the
 # CSS default) = to bottom, 270 = to left). Radial gradients have no angle.
@@ -1901,7 +1971,17 @@ fn parse_gradient_angle_deg(raw: text) -> i32:
         return 180
     val first = parts[0].trim()
     if is_gradient_angle_token(first):
-        return parse_signed_leading_int(first)
+        return gradient_angle_token_deg(first)
+    # `to <corner>`: the angle depends on the box, resolved at paint time
+    # (`gradient_corner_dir_q16`); 1000 + the square-box angle.
+    if first == "to top right" or first == "to right top":
+        return 1045
+    if first == "to bottom right" or first == "to right bottom":
+        return 1135
+    if first == "to bottom left" or first == "to left bottom":
+        return 1225
+    if first == "to top left" or first == "to left top":
+        return 1315
     if first == "to top":
         return 0
     if first == "to right":
@@ -1949,6 +2029,16 @@ fn parse_gradient_stops(raw: text) -> [GradientStopSpec]:
         raw_pos[0] = 0
     if raw_pos[n - 1] < 0:
         raw_pos[n - 1] = 1000
+    # CSS Images 3 §3.4.3: a positioned stop below the largest position
+    # before it is raised to that position (a hard edge).
+    var run_max = raw_pos[0]
+    var q = 1
+    while q < n:
+        if raw_pos[q] >= 0:
+            if raw_pos[q] < run_max:
+                raw_pos[q] = run_max
+            run_max = raw_pos[q]
+        q = q + 1
     var k = 1
     while k < n - 1:
         if raw_pos[k] < 0:
@@ -1977,7 +2067,7 @@ fn parse_int(s: text) -> i32:
     var matched_any_digit = false
     val s_len = s.byte_len()
     while i < s_len:
-        val c = s.char_at(i)
+        val c = s.substring(i, i + 1)
         val digit = dec_val(c)
         if digit < 10:
             v = v * 10 + digit
@@ -1993,11 +2083,11 @@ fn parse_nth_int(s: text, target: i32) -> i32:
     var seen = 0
     val s_len = s.byte_len()
     while i < s_len:
-        val c = s.char_at(i)
+        val c = s.substring(i, i + 1)
         if dec_val(c) < 10:
             var v = 0
             while i < s_len:
-                val d = s.char_at(i)
+                val d = s.substring(i, i + 1)
                 val digit = dec_val(d)
                 if digit >= 10:
                     break
@@ -2016,13 +2106,13 @@ fn parse_signed_nth_int(s: text, target: i32) -> i32:
     val s_len = s.byte_len()
     while i < s_len:
         var sign = 1
-        if s.char_at(i) == "-":
+        if s.substring(i, i + 1) == "-":
             sign = -1
             i = i + 1
-        if i < s_len and dec_val(s.char_at(i)) < 10:
+        if i < s_len and dec_val(s.substring(i, i + 1)) < 10:
             var v = 0
             while i < s_len:
-                val digit = dec_val(s.char_at(i))
+                val digit = dec_val(s.substring(i, i + 1))
                 if digit >= 10:
                     break
                 v = v * 10 + digit
@@ -2047,19 +2137,19 @@ fn parse_signed_nth_length(s: text, target: i32, basis: i32) -> i32:
     val s_len = s.byte_len()
     while i < s_len:
         var sign = 1
-        if s.char_at(i) == "-":
+        if s.substring(i, i + 1) == "-":
             sign = -1
             i = i + 1
-        if i < s_len and dec_val(s.char_at(i)) < 10:
+        if i < s_len and dec_val(s.substring(i, i + 1)) < 10:
             var v = 0
             while i < s_len:
-                val digit = dec_val(s.char_at(i))
+                val digit = dec_val(s.substring(i, i + 1))
                 if digit >= 10:
                     break
                 v = v * 10 + digit
                 i = i + 1
             if seen == target:
-                if i < s_len and s.char_at(i) == "%":
+                if i < s_len and s.substring(i, i + 1) == "%":
                     return (v * sign * basis) / 100
                 return v * sign
             seen = seen + 1
@@ -2181,7 +2271,7 @@ fn parse_opacity_pct(raw: text) -> i32:
         var i = dot + 1
         val t_len = t.byte_len()
         while i < t_len and scale < 100:
-            val d = t.char_at(i)
+            val d = t.substring(i, i + 1)
             if d < "0" or d > "9":
                 break
             frac = frac * 10 + hex_val(d)
@@ -2235,7 +2325,7 @@ fn parse_css_time_ms(raw: text) -> i32:
     var i = dot + 1
     val magnitude_len = magnitude.byte_len()
     while i < magnitude_len:
-        val c = magnitude.char_at(i)
+        val c = magnitude.substring(i, i + 1)
         if c < "0" or c > "9":
             break
         frac = frac * 10 + dec_val(c)
@@ -2266,7 +2356,7 @@ val CSS_TIMING_TOKEN_MAX_COUNT: i32 = 16
 # excessively nested functions, and oversized token streams fail closed.
 fn css_timing_shorthand_tokens(raw: text) -> [text]:
     var tokens: [text] = []
-    if raw.len() == 0 or raw.len() > CSS_TIMING_TOKEN_MAX_BYTES:
+    if raw.len() == 0 or raw.byte_len() > CSS_TIMING_TOKEN_MAX_BYTES:
         return tokens
     val bytes = raw.bytes()
     var depth = 0
@@ -2348,7 +2438,7 @@ fn animation_number_token_is_valid(raw: text) -> bool:
     var exponent_at = -1
     var scan = number_start
     while scan < token.byte_len():
-        val c = token.char_at(scan)
+        val c = token.substring(scan, scan + 1)
         if c == "e":
             if exponent_at >= 0:
                 return false
@@ -2360,14 +2450,14 @@ fn animation_number_token_is_valid(raw: text) -> bool:
         if exponent_i >= token.byte_len():
             return false
         if (
-            token.char_at(exponent_i) == "+" or
-            token.char_at(exponent_i) == "-"
+            token.substring(exponent_i, exponent_i + 1) == "+" or
+            token.substring(exponent_i, exponent_i + 1) == "-"
         ):
             exponent_i = exponent_i + 1
         if exponent_i >= token.byte_len():
             return false
         while exponent_i < token.byte_len():
-            val digit = dec_val(token.char_at(exponent_i))
+            val digit = dec_val(token.substring(exponent_i, exponent_i + 1))
             if digit >= 10:
                 return false
             exponent_i = exponent_i + 1
@@ -2377,7 +2467,7 @@ fn animation_number_token_is_valid(raw: text) -> bool:
     var digit_after_dot = false
     var i = number_start
     while i < number_end:
-        val c = token.char_at(i)
+        val c = token.substring(i, i + 1)
         if c == "." and not saw_dot:
             saw_dot = true
         else:
@@ -2398,9 +2488,9 @@ fn parse_animation_iteration_number_token(raw: text) -> f64?:
         var mantissa_i = 1
         while (
             mantissa_i < token.byte_len() and
-            token.char_at(mantissa_i) != "e"
+            token.substring(mantissa_i, mantissa_i + 1) != "e"
         ):
-            val digit = dec_val(token.char_at(mantissa_i))
+            val digit = dec_val(token.substring(mantissa_i, mantissa_i + 1))
             if digit > 0 and digit < 10:
                 return nil
             mantissa_i = mantissa_i + 1
@@ -2415,12 +2505,12 @@ fn parse_animation_iteration_number_token(raw: text) -> f64?:
 fn animation_token_looks_numeric(token: text) -> bool:
     if token.len() == 0:
         return false
-    val first = token.char_at(0)
+    val first = token.substring(0, 1)
     if first == "." or first == "+" or dec_val(first) < 10:
         return true
     (
         first == "-" and token.byte_len() > 1 and
-        (token.char_at(1) == "." or dec_val(token.char_at(1)) < 10)
+        (token.substring(1, 2) == "." or dec_val(token.substring(1, 2)) < 10)
     )
 
 fn parse_animation_name(raw: text) -> text:
@@ -2899,13 +2989,62 @@ fn _decl_table_build_inner(decls: text) -> [text]:
         val end = if semi >= 0: semi else: decls_len
         val colon = find_from(decls, ":", pos)
         if colon >= 0 and colon < end:
-            tbl[idx] = decls.substring(pos, colon).trim().lower()
-            tbl[idx + 1] = decls.substring(colon + 1, end).trim()
-            idx = idx + 2
+            val prop = decls.substring(pos, colon).trim().lower()
+            val value = decls.substring(colon + 1, end).trim()
+            if not _decl_invalid_color_function(prop, value):
+                tbl[idx] = prop
+                tbl[idx + 1] = value
+                idx = idx + 2
         if semi < 0:
             break
         pos = semi + 1
     tbl
+
+# A colour property whose value holds a malformed rgb()/rgba()/hsl()/hsla()
+# is an invalid declaration: CSS drops it whole, so the earlier (or
+# inherited) value stays. Leaving it in the table let the last-wins lookup
+# read it as "no colour" and lose the earlier one -- for a longhand
+# (`background-color: hsl(foo, bar, baz)`) and for a shorthand
+# (`background: rgb(1,2)`, `border: 3px solid hsl(foo,1%,2%)`), which also
+# resets its other longhands (css_color_parse_chrome159_spec.spl AC-9, AC-10).
+fn _decl_invalid_color_function(prop: text, value: text) -> bool:
+    if not (
+        prop == "color" or prop == "background-color" or
+        prop == "background" or prop == "border" or
+        prop == "border-color" or prop == "border-top" or
+        prop == "border-right" or prop == "border-bottom" or
+        prop == "border-left" or prop == "border-top-color" or
+        prop == "border-right-color" or prop == "border-bottom-color" or
+        prop == "border-left-color" or prop == "outline" or
+        prop == "outline-color" or prop == "text-decoration-color" or
+        prop == "caret-color"
+    ):
+        return false
+    val v = value.lower()
+    # Nothing a later stage substitutes is judged here.
+    if text_index_of(v, "var(") >= 0 or text_index_of(v, "calc(") >= 0 or text_index_of(v, "env(") >= 0 or text_index_of(v, "attr(") >= 0:
+        return false
+    var i = 0
+    val n = v.byte_len()
+    while i < n:
+        val lp = find_from(v, "(", i)
+        if lp < 0:
+            return false
+        var start = lp
+        while start > 0 and _decl_ident_char(v.substring(start - 1, start)):
+            start = start - 1
+        val name = v.substring(start, lp)
+        val rp = find_from(v, ")", lp)
+        if rp < 0:
+            return false
+        if name == "rgb" or name == "rgba" or name == "hsl" or name == "hsla":
+            if parse_color_value_checked(v.substring(start, rp + 1)) == nil:
+                return true
+        i = rp + 1
+    false
+
+fn _decl_ident_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or ch == "-"
 
 # ---------------------------------------------------------------------------
 # Presence set over a declaration table.
@@ -3074,7 +3213,36 @@ fn nth_box_token(raw: text, index: i32) -> text:
         return parts[index]
     ""
 
+# A `line-height` value as the Style encoding: > 0 is a length in px, < 0 is a
+# factor times ten negated (1.6 -> -16), 0 is "not a value this parser takes".
+# `normal` is NOT handled here (0 already means that in Style): the caller
+# tests `line_height_value_is_normal` first.
+#
+# A percentage is a factor of the element's font size: `150%` is 1.5x. Until
+# 2026-11-14 it fell into the unitless branch and became 150x (`-1500`).
+# Precision is one decimal, as for a unitless number: 125% is 1.2x.
+# `em` is taken as a factor too (`1.5em` -> -15).
+fn line_height_value_is_normal(raw: text) -> bool:
+    raw.trim().lower() == "normal"
+
+# The Style line-height after a `normal` keyword (`line-height: normal`, or a
+# `font` shorthand, which resets line-height to normal).
+#
+# On the measured host `normal` is 0, the Style encoding the face metric is
+# read for. Every other host keeps `current` — exactly what this renderer did
+# before `normal` was honoured, when the keyword was dropped. That matters for
+# a form control, whose UA line height is carried as an inherited-looking
+# factor: `<input style="line-height:normal">` must stay on it there, not fall
+# to the 9 * scale element fallback.
+fn line_height_after_normal_keyword(current: i32, measured_host: bool) -> i32:
+    if measured_host: 0 else: current
+
 fn parse_line_height_value(raw: text) -> i32:
+    if raw.contains("%"):
+        val tenths = parse_decimal_x10(raw) / 100
+        if tenths > 0:
+            return 0 - tenths
+        return 0
     if raw.contains("px"):
         val lh = parse_int(raw)
         if lh > 0:
@@ -3100,6 +3268,45 @@ fn parse_decimal_x10(raw: text) -> i32:
     if dot >= 0 and dot + 1 < raw.byte_len():
         m10 = whole * 10 + parse_int(raw.substring(dot + 1, dot + 2))
     m10
+
+fn svg_number_milli(raw: text) -> i64:
+    """SVG number in thousandths of a user unit; a unit suffix is ignored."""
+    val s = raw.trim()
+    val n = s.len() as i32
+    var i = 0
+    var negative = false
+    if i < n and s.char_at(i) == "-":
+        negative = true
+        i = i + 1
+    var value: i64 = 0
+    while i < n and dec_val(s.char_at(i)) < 10:
+        value = value * 10 + dec_val(s.char_at(i)).to_i64()
+        i = i + 1
+    value = value * 1000
+    if i < n and s.char_at(i) == ".":
+        i = i + 1
+        var place: i64 = 100
+        while i < n and dec_val(s.char_at(i)) < 10:
+            value = value + dec_val(s.char_at(i)).to_i64() * place
+            place = place / 10
+            i = i + 1
+    if negative: 0 - value else: value
+
+fn svg_view_box_milli(attrs_raw: text) -> [i64]:
+    """The four `viewBox` numbers (min-x, min-y, width, height) of an `<svg>`
+    in thousandths, or an empty list when the attribute is absent, malformed
+    or has a non-positive width/height (SVG 2 §8.6: such a viewBox is not
+    applied). The numbers may be separated by commas and any whitespace."""
+    var raw = attr_value(attrs_raw, "viewBox")
+    if raw == "":
+        raw = attr_value(attrs_raw, "viewbox")
+    var parts: [i64] = []
+    # cpu-lane-loop-ok: converts the four viewBox tokens of one <svg>; bound is the attribute's token count
+    for token in ws_tokens(raw.replace(",", " ")):
+        parts.push(svg_number_milli(token))
+    if parts.len() != 4 or parts[2] <= 0 or parts[3] <= 0:
+        return []
+    parts
 
 # Split on ASCII whitespace, dropping empty tokens.
 fn ws_tokens(s: text) -> [text]:

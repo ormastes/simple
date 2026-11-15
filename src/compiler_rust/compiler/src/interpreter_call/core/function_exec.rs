@@ -750,8 +750,11 @@ pub(crate) fn execute_function_body(
     // its own caller (drop any enclosing closure's origin); an owner-less one
     // (a nested `fn` value) is where it was written, as stamped on the env it
     // captured. A fresh/flat-path env carries no stamp, so it stays strict.
-    let closure_origin = func_owner_module.is_none().then(|| local_env.closure_in_test());
-    let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter(closure_origin);
+    let _closure_origin = if func_owner_module.is_none() {
+        crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(local_env)
+    } else {
+        crate::interpreter::interpreter_module::ClosureOriginGuard::enter(None)
+    };
     // COVERAGE: expression-level decision sites (if-expressions, standalone
     // `and`/`or`) anchor on the function that owns them; follows the same
     // owner rule as CURRENT_EXEC_MODULE (lambdas inherit). Off: no work.

@@ -1,0 +1,185 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_spirv.spl 0%
+# @tag: unit, engine2d, vulkan, spirv
+#
+# Every compute kernel Simple 2D hands to Vulkan is an embedded SPIR-V module.
+# A truncated or mis-edited blob only fails at vkCreateShaderModule on a GPU
+# host, so this spec checks each one on the CPU against the SPIR-V binary
+# layout (SPIR-V spec section 2.3): little-endian magic 0x07230203, a 1.x
+# version word, a non-zero id bound, a zero schema word, and an instruction
+# stream whose word counts chain exactly to the end of the module. It also
+# requires the pieces a compute kernel cannot work without: one OpMemoryModel,
+# a GLCompute OpEntryPoint and balanced OpFunction / OpFunctionEnd.
+# No GPU is touched; the Vulkan execution lane is covered elsewhere.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_spirv.{
+    spirv_noop_storage, spirv_clear, spirv_rect_filled, spirv_resident_scene_consume
+}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_spirv_raster_blobs.{
+    spirv_rect_outline, spirv_circle_filled, spirv_circle_outline, spirv_line,
+    spirv_rounded_rect, spirv_triangle_filled, spirv_gradient_rect, spirv_blit
+}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_glass_material_spirv.{spirv_glass_material}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_affine_coverage_spirv.{spirv_affine_coverage_rect}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_blur_rect_spirv.{spirv_blur_rect}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_rect_batch_spirv.{spirv_rect_batch}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_shadow_rect_spirv.{spirv_shadow_rect}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_spirv.{spirv_font_atlas_composite}
+
+fn _word(bytes: [u8], index: i64) -> i64:
+    val at = index * 4
+    (bytes[at] as i64) + (bytes[at + 1] as i64) * 256 + (bytes[at + 2] as i64) * 65536 + (bytes[at + 3] as i64) * 16777216
+
+# Walks the module and returns a one-line structural summary. A healthy
+# compute kernel yields exactly "ok magic=1 major=1 schema=0 memory_model=1
+# compute_entry=1 balanced=1 ends_with_function_end=1".
+fn _structure(bytes: [u8]) -> text:
+    if bytes.len() % 4 != 0:
+        return "length-not-word-aligned"
+    val words = bytes.len() / 4
+    if words < 6:
+        return "shorter-than-header"
+    val magic = if _word(bytes, 0) == 0x07230203: 1 else: 0
+    val version = _word(bytes, 1)
+    val major = (version / 65536) % 256
+    val bound = _word(bytes, 3)
+    if bound <= 0:
+        return "zero-id-bound"
+    val schema = _word(bytes, 4)
+    var memory_model = 0
+    var compute_entry = 0
+    var functions = 0
+    var function_ends = 0
+    var last_op = -1
+    var at = 5
+    while at < words:
+        val head = _word(bytes, at)
+        val count = head / 65536
+        val op = head % 65536
+        if count < 1:
+            return "zero-word-count-at-{at}"
+        if at + count > words:
+            return "instruction-overruns-module-at-{at}"
+        if op == 14:
+            memory_model = memory_model + 1
+        if op == 15 and _word(bytes, at + 1) == 5:
+            compute_entry = compute_entry + 1
+        if op == 54:
+            functions = functions + 1
+        if op == 56:
+            function_ends = function_ends + 1
+        last_op = op
+        at = at + count
+    val balanced = if functions > 0 and functions == function_ends: 1 else: 0
+    val tail = if last_op == 56: 1 else: 0
+    "ok magic={magic} major={major} schema={schema} memory_model={memory_model} compute_entry={compute_entry} balanced={balanced} ends_with_function_end={tail}"
+
+val HEALTHY: text = "ok magic=1 major=1 schema=0 memory_model=1 compute_entry=1 balanced=1 ends_with_function_end=1"
+
+describe "Simple 2D Vulkan SPIR-V kernel modules":
+
+    context "the structure walker itself":
+
+        it "rejects a blob that is not word aligned":
+            var blob: [u8] = [0x03, 0x02, 0x23]
+            expect(_structure(blob)).to_equal("length-not-word-aligned")
+
+        it "rejects a header-only blob":
+            var blob: [u8] = [0x03, 0x02, 0x23, 0x07, 0x00, 0x03, 0x01, 0x00]
+            expect(_structure(blob)).to_equal("shorter-than-header")
+
+        it "detects an instruction that runs past the end":
+            var blob: [u8] = [
+                0x03, 0x02, 0x23, 0x07, 0x00, 0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0E, 0x00, 0x03, 0x00
+            ]
+            expect(_structure(blob)).to_equal("instruction-overruns-module-at-5")
+
+        it "reports a wrong magic number":
+            var blob: [u8] = [
+                0x00, 0x02, 0x23, 0x07, 0x00, 0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x38, 0x00, 0x01, 0x00
+            ]
+            expect(_structure(blob).starts_with("ok magic=0 ")).to_equal(true)
+
+    context "core kernels":
+
+        it "noop storage kernel is a well-formed compute module":
+            expect(_structure(spirv_noop_storage())).to_equal(HEALTHY)
+
+        it "clear kernel is a well-formed compute module":
+            expect(_structure(spirv_clear())).to_equal(HEALTHY)
+
+        it "filled rect kernel is a well-formed compute module":
+            expect(_structure(spirv_rect_filled())).to_equal(HEALTHY)
+
+        it "resident scene consume kernel is a well-formed compute module":
+            expect(_structure(spirv_resident_scene_consume())).to_equal(HEALTHY)
+
+    context "raster kernels":
+
+        it "rect outline kernel is a well-formed compute module":
+            expect(_structure(spirv_rect_outline())).to_equal(HEALTHY)
+
+        it "filled circle kernel is a well-formed compute module":
+            expect(_structure(spirv_circle_filled())).to_equal(HEALTHY)
+
+        it "circle outline kernel is a well-formed compute module":
+            expect(_structure(spirv_circle_outline())).to_equal(HEALTHY)
+
+        it "line kernel is a well-formed compute module":
+            expect(_structure(spirv_line())).to_equal(HEALTHY)
+
+        it "rounded rect kernel is a well-formed compute module":
+            expect(_structure(spirv_rounded_rect())).to_equal(HEALTHY)
+
+        it "filled triangle kernel is a well-formed compute module":
+            expect(_structure(spirv_triangle_filled())).to_equal(HEALTHY)
+
+        it "gradient rect kernel is a well-formed compute module":
+            expect(_structure(spirv_gradient_rect())).to_equal(HEALTHY)
+
+        it "blit kernel is a well-formed compute module":
+            expect(_structure(spirv_blit())).to_equal(HEALTHY)
+
+    context "effect kernels":
+
+        it "glass material kernel is a well-formed compute module":
+            expect(_structure(spirv_glass_material())).to_equal(HEALTHY)
+
+        it "affine coverage rect kernel is a well-formed compute module":
+            expect(_structure(spirv_affine_coverage_rect())).to_equal(HEALTHY)
+
+        it "blur rect kernel is a well-formed compute module":
+            expect(_structure(spirv_blur_rect())).to_equal(HEALTHY)
+
+        it "rect batch kernel is a well-formed compute module":
+            expect(_structure(spirv_rect_batch())).to_equal(HEALTHY)
+
+        it "shadow rect kernel is a well-formed compute module":
+            expect(_structure(spirv_shadow_rect())).to_equal(HEALTHY)
+
+        it "font atlas composite kernel is a well-formed compute module":
+            expect(_structure(spirv_font_atlas_composite())).to_equal(HEALTHY)
+
+    context "kernels are distinct programs":
+
+        it "no two raster kernels share a module size":
+            val sizes = [
+                spirv_rect_outline().len(), spirv_circle_filled().len(),
+                spirv_circle_outline().len(), spirv_line().len(),
+                spirv_rounded_rect().len(), spirv_triangle_filled().len(),
+                spirv_gradient_rect().len(), spirv_blit().len()
+            ]
+            var duplicates = 0
+            var i = 0
+            while i < sizes.len():
+                var j = i + 1
+                while j < sizes.len():
+                    if sizes[i] == sizes[j]:
+                        duplicates = duplicates + 1
+                    j = j + 1
+                i = i + 1
+            expect(duplicates).to_equal(0)

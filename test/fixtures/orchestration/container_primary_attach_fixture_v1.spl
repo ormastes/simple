@@ -1,0 +1,42 @@
+# Pure plan fixture only: no native owner, signed admission, or Input rights.
+use std.common.contracts.container.primary_attach_v1.*
+use std.common.contracts.container.stream_v2.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.build_manager.group_process_stream_profile_v3.*
+use std.common.build_manager.group_process_stream_protocol_v2.*
+
+pub fn container_primary_attach_fixture_v1() -> ContainerPrimaryAttachPlanV1:
+    val workload = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: "workload", attempt: 2,
+        operation_id: "parent-operation", request_digest: "a".repeat(64), physical_host_id: "authorized-alias",
+        service_scope_id: "service", boot_id: "boot", provider_generation: 7, native_machine_id: "machine",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot")
+    val scope = ContainerHostScopeV2(physical_host_id: workload.physical_host_id, service_scope_id: workload.service_scope_id,
+        boot_id: workload.boot_id, provider_generation: workload.provider_generation, native_machine_id: workload.native_machine_id,
+        continuity_mode: workload.continuity_mode, continuity_id: workload.continuity_id)
+    val runtime = RuntimeIdentityV1(pod_uid: workload.workload_uid, attempt: workload.attempt,
+        operation_id: workload.operation_id, provider_generation: workload.provider_generation, engine: "podman",
+        native_id: "b".repeat(64), node_boot_id: container_scope_fence_id_v2(scope).unwrap())
+    val identity = ContainerOutputIdentityV2(operation_id: "output-operation", parent_operation_id: workload.operation_id,
+        parent_operation_digest: "c".repeat(64), parent_assignment_digest: "d".repeat(64),
+        parent_budget_digest: "e".repeat(64), binding_digest: "f".repeat(64))
+    val args = ["attach", "--no-stdin=false", "--sig-proxy=false", "--detach-keys=", runtime.native_id]
+    val request = GroupProcessStreamRequestV2(program: "/usr/bin/podman", producer_digest: "1".repeat(64), args: args,
+        environment: ["LANG=C", "TERM=dumb"], directory: "/trusted/work", inputs: [], timeout_ms: 30000,
+        broker_program: "/trusted/broker", broker_digest: "2".repeat(64),
+        child_argv_digest: group_process_child_argv_digest_v2("/usr/bin/podman", args), launch_deadline_unix_ms: 0)
+    val budget = GroupProcessBrokerBudgetV3(cgroup_path: "/delegated/broker", device: 1, inode: 2, generation: 3,
+        policy_digest: "3".repeat(64), cpu_quota_us: 10000, cpu_period_us: 100000,
+        reserved_cpu_millis: 100, memory_limit_bytes: 16777216, reserved_memory_bytes: 16777216)
+    val profile = GroupProcessStreamProfileV3(helper_cpu: group_process_cpu_quota_v3(50).unwrap(),
+        broker: budget, child_image_mode: "trusted-local-admin-image-fd-v1")
+    val launch = GroupProcessStreamLaunchV2(root: "/trusted/output", worker_id: identity.operation_id, generation: 7,
+        snapshot_digest: "4".repeat(64), cache_identity: "5".repeat(64), memory_limit_bytes: 33554432,
+        request: request, delegated_cgroup_path: "/delegated/helpers", memory_policy: "enforce", transport_generation: 0,
+        profile_v3: Some(profile))
+    var plan = ContainerPrimaryAttachPlanV1(terminal_mode: "stdin", workload: workload, runtime: runtime, identity: identity,
+        resources: ContainerOutputResourcesV2(cpu_millis: 50, memory_bytes: 33554432), provider_identity_digest: "6".repeat(64),
+        policy_digest: "7".repeat(64), launch_template: launch, request_digest: "")
+    plan.request_digest = container_primary_attach_plan_digest_v1(plan).unwrap()
+    plan
+

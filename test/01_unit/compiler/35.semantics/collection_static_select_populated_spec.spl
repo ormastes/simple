@@ -1,0 +1,46 @@
+# @cover src/compiler/35.semantics/perf/collection_static_select_v1.spl
+# @req REQ-PROF-01
+# @tag:in-development
+"""
+# Static container selection: populated containers (B1)
+
+BLOCKED on host: the seed interpreter has no backing for `spl_ordered_key_cmp` / `spl_collection_capture_*`,
+so any populated AdaptiveMap fails there (same limit as adaptive_policy_adapter_spec). Runs on a runtime that links them.
+"""
+use std.spec.*
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveSetAlgorithm, AdaptiveSetAttribute}
+use std.nogc_sync_mut.src.collections.adaptive_map.AdaptiveMap
+use std.nogc_sync_mut.src.collections.adaptive_set.AdaptiveSet
+use compiler.semantics.perf_facts.collection_contracts.{CollectionOriginV1, CollectionCreationKind}
+use compiler.semantics.perf.collection_static_select_v1.*
+
+fn site_origin() -> CollectionOriginV1:
+    CollectionOriginV1(legacy_site_id: "ast://compiler/resolve#symbols#1", module_key: "compiler.resolve",
+        owner_path: "resolve", binding_name: "symbols", creation_kind: CollectionCreationKind.Local,
+        token_fingerprint: "tok-v1-fnv64:1", type_fingerprint: "ctype-fnv64:2", origin_id: "corigin-v1:77")
+
+fn sdn_for(site: text, algorithm: text) -> text:
+    "data_policy:\n    rules:\n        symbols:\n            site: \"{site}\"\n            algorithm: \"{algorithm}\"\n            pin: true\n"
+
+fn attr_name(attribute: AdaptiveSetAttribute) -> text:
+    match attribute:
+        case AdaptiveSetAttribute.Auto: "auto"
+        case AdaptiveSetAttribute.Linear: "linear"
+        case AdaptiveSetAttribute.Hash: "hash"
+        case AdaptiveSetAttribute.Ordered: "ordered"
+
+describe "static container selection, populated containers":
+    it "keeps lookup results the same under every selected representation":
+        val sdn_off = ""
+        var base: AdaptiveMap<text, i64> = collection_static_select_map_v1(AdaptiveMap.new(), site_origin(), sdn_off, "p", "o", "next_instance").unwrap()
+        base.put("b", 2)
+        base.put("a", 1)
+        for algorithm in ["linear", "hash", "ordered"]:
+            val sdn = sdn_for("ast://compiler/resolve#symbols#1", algorithm)
+            var map: AdaptiveMap<text, i64> = collection_static_select_map_v1(AdaptiveMap.new(), site_origin(), sdn, "p", "o", "next_instance").unwrap()
+            map.put("b", 2)
+            map.put("a", 1)
+            expect(map.len()).to_equal(base.len())
+            expect(map.get("a") == base.get("a")).to_equal(true)
+            expect(map.get("b") == base.get("b")).to_equal(true)
+            expect(map.get("z").is_none()).to_equal(true)

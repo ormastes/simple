@@ -100,6 +100,7 @@ extern int64_t rt_tuple_get(int64_t tuple, int64_t idx);
  * rt_bootstrap_c_lane_atomic_math_time_selfcheck.c beside this file, which
  * links only runtime_native.o). Trivial libc-backed stand-ins, sufficient
  * for this real-filesystem exercise. */
+#ifndef SIMPLE_TEST_CORE_RUNTIME /* c-runtime test kind: the core-C owners link instead */
 char* spl_strdup(const char* s) {
     if (!s) return NULL;
     size_t len = strlen(s) + 1;
@@ -135,6 +136,7 @@ int64_t rt_transient_raw_words(int64_t value, const uintptr_t** words, uintptr_t
     return -1;
 }
 int32_t rt_transient_raw_promote(uintptr_t ptr) { (void)ptr; return 0; }
+#endif /* SIMPLE_TEST_CORE_RUNTIME */
 
 static int failures = 0;
 #define CHECK(cond, msg) do { \
@@ -155,6 +157,13 @@ static char* read_string_value(int64_t handle, uint64_t* len_out) {
 }
 
 int main(void) {
+#if defined(_WIN32)
+    /* The checks below pin POSIX host semantics: /tmp paths, chmod mode bits,
+     * `system("rm -rf ... && mkdir -p ...")`. Exit 77 = SKIP (not applicable
+     * on this host), never a pass. */
+    fputs("rt_bootstrap_c_lane_fs_env_selfcheck: POSIX-only checks (/tmp, mode bits, sh); skipped on Windows\n", stderr);
+    return 77;
+#endif
     /* ---- rt_env_home: reflects a real, just-set HOME ---- */
     setenv("HOME", "/tmp/rt_selfcheck_home", 1);
     char* home_str = read_string_value(rt_env_home(), NULL);

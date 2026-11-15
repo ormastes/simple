@@ -19,6 +19,10 @@ fn body_produces_value(body: &[HirStmt]) -> bool {
     fn stmt_produces_value(stmt: &HirStmt) -> bool {
         match stmt {
             HirStmt::Return(Some(_)) => true,
+            // The "no arm matched" tail of a statement match diverges; it
+            // must not turn a procedural body into a value-returning one
+            // (it stands where a missing `else` used to be).
+            HirStmt::Expr(expr) if expr.is_match_exhausted_panic() => false,
             HirStmt::Expr(expr) => expr.ty != TypeId::VOID,
             HirStmt::If {
                 then_block,
@@ -1212,7 +1216,21 @@ impl Lowerer {
         };
         let effective_body: &ast::Block = driver_synthesized.as_ref().unwrap_or(&f.body);
 
-        let mut body = match self.lower_block(effective_body, &mut ctx) {
+        // An implicit tail `match` in a function with a declared non-void
+        // return is value-position: exhausting its arms must fail closed, as
+        // the interpreter does and as `val r = match ..` already does here.
+        // doc/08_tracking/bug/seed_value_match_no_arm_yields_nil_2026-11-02.md
+        let saved_value_tail_match = self.value_tail_match.take();
+        if declared_return_type.map_or(false, |ty| ty != TypeId::VOID && ty != TypeId::NIL) {
+            if let Some(tail @ (ast::Node::Match(_) | ast::Node::Expression(ast::Expr::Match { .. }))) =
+                effective_body.statements.last()
+            {
+                self.value_tail_match = Some(tail as *const ast::Node as usize);
+            }
+        }
+        let lowered_body = self.lower_block(effective_body, &mut ctx);
+        self.value_tail_match = saved_value_tail_match;
+        let mut body = match lowered_body {
             Ok(body) => body,
             Err(error) => {
                 // A whole-module de-JIT names only the entry file; this names

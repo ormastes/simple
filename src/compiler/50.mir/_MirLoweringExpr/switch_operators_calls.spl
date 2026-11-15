@@ -114,7 +114,7 @@ fn int_list_contains(xs: [i64], v: i64) -> bool:
         i = i + 1
     false
 
-fn hir_type_is_plain_scalar(type_: HirType) -> bool:
+pub fn hir_type_is_plain_scalar(type_: HirType) -> bool:
     match type_.kind:
         case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char: true
         case _: false
@@ -2830,6 +2830,7 @@ impl MirLowering:
                             case HirTypeKind.Result(ok_type, err_type):
                                 if field_name == "ok": return Some(ok_type)
                                 return Some(err_type)
+                            case _: ()
                 # A declared nominal field of a typed binding / field chain
                 # (`match r.kind:` with `r: HirType?` narrowed by the source).
                 # Only a non-generic class/struct/enum field type is admitted;
@@ -2856,6 +2857,44 @@ impl MirLowering:
                         case _: ()
             case _: ()
         None
+
+    me enum_match_declared_owner_key(scrutinee: HirExpr, owner_keys: [text]) -> text:
+        """Owner key, among `owner_keys`, of the builtin Result/Option that a
+        method-call subject's callee declares as its return
+        (`stores[0].get(i)` with `fn get(..) -> Result<T, E>` on a generic
+        class). Attribution only: no type is recorded for the subject, its
+        payload or the call result, so value conventions are untouched
+        (bug native_generic_class_result_payload_times_8_2026-11-15). Empty
+        when the declaration is unknown or names another type."""
+        var wanted = ""
+        match scrutinee.kind:
+            case MethodCall(receiver, method, _, _):
+                var receiver_type = self.receiver_declared_type(receiver)
+                if receiver_type == None:
+                    match receiver.kind:
+                        case HirExprKind.Index(_, _): receiver_type = self.declared_container_read_type(receiver)
+                        case _: ()
+                if val found_receiver = receiver_type:
+                    match found_receiver.kind:
+                        case HirTypeKind.Named(owner_symbol, _):
+                            if val method_id = self.symbols.lookup_method_in_type(owner_symbol, method):
+                                if val declared = self.resolved_call_hir_return_type(method_id):
+                                    match declared.kind:
+                                        case HirTypeKind.Result(_, _): wanted = "Result"
+                                        case HirTypeKind.Optional(_): wanted = "Option"
+                                        case _: ()
+                        case _: ()
+            case _: ()
+        if wanted == "":
+            return ""
+        var found = ""
+        for raw_key in owner_keys:
+            val key: text = raw_key
+            if self.enum_bare_of(key) == wanted:
+                if found != "":
+                    return ""
+                found = key
+        found
 
     me enum_match_unwrapped_type(receiver: HirExpr) -> HirType?:
         """Payload type of a builtin Option/Result unwrap on `receiver`."""
@@ -4451,8 +4490,17 @@ impl MirLowering:
                         # truthful, so that case reaches the loud ambiguity
                         # error below instead.
                         val owner_keys = self.variant_owner_keys(variant)
-                        val owner_count = owner_keys.len()
+                        var owner_count = owner_keys.len()
                         var owner = if owner_count > 0: owner_keys[0] else: ""
+                        if owner_count > 1:
+                            # A method-call subject whose callee DECLARES a
+                            # Result/Option return owns the bare arm. Only the
+                            # owner is taken; the subject stays untyped, so the
+                            # payload bind is exactly the unambiguous path's.
+                            val declared_owner = self.enum_match_declared_owner_key(scrutinee, owner_keys)
+                            if declared_owner != "":
+                                owner = declared_owner
+                                owner_count = 1
                         if owner_count == 1:
                             d = self.enum_variant_discriminant(owner, variant)
                             if enum_name == "":
@@ -8457,6 +8505,10 @@ impl MirLowering:
                 lw.trait_impl_closure_complete = self.trait_impl_closure_complete
                 # Preserve cumulative evidence for the parent's archive gate.
                 lw.devirtualized_calls = self.devirtualized_calls
+                # The lift relocates into the shared table; its ids join the
+                # parent's scope-end retraction journal (copied back below).
+                lw.provider_type_relocation_journal = self.provider_type_relocation_journal
+                lw.journal_provider_type_relocations = self.journal_provider_type_relocations
                 lw.native_trait_layouts = self.native_trait_layouts
                 lw.native_trait_implementations = self.native_trait_implementations
                 lw.native_trait_thunks = self.native_trait_thunks
@@ -8772,6 +8824,10 @@ impl MirLowering:
                     # so the lambda's SymbolIds stay valid in this module
                     # whether or not the runtime shares these carriers.
                     self.symbols = lw.symbols
+                    # Only here are lw's journaled ids known to be ids of the
+                    # table this module will retract from; on the other branch
+                    # they stay retained (safe side).
+                    self.provider_type_relocation_journal = lw.provider_type_relocation_journal
                     self.struct_method_syms = lw.struct_method_syms
                     self.struct_method_return_names = lw.struct_method_return_names
                     self.struct_method_return_is_array = lw.struct_method_return_is_array
@@ -9608,6 +9664,18 @@ impl MirLowering:
                 direct_signature = MirSignature(params: [], return_type: return_type, is_variadic: false,
                     declared_params: declared_param_mir, declared_params_known: true,
                     int_literal_coerced_params: coerced_param_marks)
+            elif arg_operands.len() > 0 and resolved_name != "":
+                # No declared types reached this call: the callee has no `->`
+                # (nil surface type) and a nominal param keeps its plain param
+                # record rejected. Its ABI param record still states every
+                # register class, so the import is declared from it instead of
+                # staying unknown (which refuses any float argument). The
+                # arguments above were lowered without declared slots; a class
+                # mismatch is reported by the backend, never coerced.
+                val abi_declared = self.callable_abi_declared_params_v1(resolved_name)
+                if abi_declared.len() > 0:
+                    direct_signature = MirSignature(params: [], return_type: return_type, is_variadic: false,
+                        declared_params: abi_declared, declared_params_known: true)
             if val declared_signature = self.exact_extern_signatures.get(mir_expr_symbol_id_value(direct_symbol)):
                 if declared_signature.params.len() != arg_operands.len():
                     self.error_fatal("fixed extern call argument count differs from its declaration", None)

@@ -1,0 +1,32 @@
+"""
+## Caret shell routing
+
+Caret's one-shot commands and tmux pane wrappers get their shell from the
+SOSIX PTY facade (`sosix_pty_shell_exec_argv_v1` / `sosix_pty_shell_command_v1`),
+never a hardcoded `/bin/sh`. This spec scans the routed call sites.
+
+Guide: doc/07_guide/tooling/smux_caret_core_mux.md
+"""
+use std.spec
+use std.io_runtime.{read_file_text}
+
+val ROUTED = ["src/app/llm_caret/tools.spl", "src/app/llm_caret/agent_manager_view.spl",
+    "src/app/llm_caret/pane_backend.spl"]
+
+fn _code_has(path: text, needle: text) -> bool:
+    val src = read_file_text(path) ?? ""
+    for line in src.split("\n"):
+        if not line.trim().starts_with("#") and line.contains(needle):
+            return true
+    false
+
+describe "Caret shell routing":
+    it "has no direct /bin/sh in routed call sites":
+        for path in ROUTED + ["src/app/llm_caret/agent_workspace.spl"]:
+            expect(_code_has(path, "\"/bin/sh\"")).to_equal(false)
+            expect(_code_has(path, " /bin/sh -c")).to_equal(false)
+            expect(_code_has(path, "#!/bin/sh")).to_equal(false)
+
+    it "routes through the SOSIX PTY facade":
+        for path in ROUTED:
+            expect(_code_has(path, "sosix_pty_native_exec_argv")).to_equal(true)

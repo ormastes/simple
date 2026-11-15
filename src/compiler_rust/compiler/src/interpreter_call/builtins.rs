@@ -598,6 +598,7 @@ pub(super) fn eval_builtin(
                 body, env: captured, ..
             } = val
             {
+                let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
                 let mut captured_clone = Env::clone(&captured);
                 GENERATOR_YIELDS.with(|cell| *cell.borrow_mut() = Some(Vec::new()));
                 let _ = evaluate_expr(&body, &mut captured_clone, functions, classes, enums, impl_methods);

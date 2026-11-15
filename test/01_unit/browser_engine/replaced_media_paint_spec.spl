@@ -1,0 +1,216 @@
+"""
+## Purpose and audience
+Purpose: Pin what Chrome PAINTS for the replaced media elements when no media
+is loaded: an inline `<svg>`'s `<rect>` shapes clipped to the svg viewport,
+the dark controls panel of `<video controls>`, the light-grey rounded pill of
+`<audio controls>`, nothing for `<canvas>` or a controls-less `<video>`, and
+never the fallback children. Before this change the web catalog's `animation`
+probe row painted NONE of them (blank success).
+Audience: browser-engine paint maintainers.
+
+Chrome oracle (Chrome 159 headless shell, 900x760 screenshot, pixels probed
+from the PNG; page `<!doctype html>`,
+`*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}`, one `<div>`
+at the top of `<body>`, no whitespace between siblings).
+
+Row A = canvas 120x40 at (0,110), svg 120x40 at (120,110), audio 300x54 at
+(240,96), video 120x150 at (540,0):
+
+| probe (x,y) | Chrome  | what                                              |
+|-------------|---------|---------------------------------------------------|
+| 60,130      | #ffffff | canvas centre: transparent, the page shows through|
+| 180,130     | #7c3aed | svg `<rect fill="#7c3aed">`                       |
+| 300,110     | #f1f3f4 | audio controls pill                               |
+| 270,97      | #f1f3f4 | pill, just inside the top-left arc                |
+| 245,97      | #ffffff | outside the pill's 27 px corner arc               |
+| 600,6       | #333333 | video controls panel (solid down to y=44)         |
+| 600,75      | #272727 | ... darkening                                     |
+| 600,149     | #000000 | ... to black (from y=137)                         |
+| 660,75      | #ffffff | right of the video box                            |
+
+A `<video width=120>` WITHOUT `controls` is transparent in Chrome (white at
+its centre): the dark box is the controls panel, not a video surface. The
+panel's eased gradient is modelled as 16 flat bands on a linear ramp, so only
+its ends are asserted exactly and its middle within 8 levels. The audio and
+video control icons and timelines are not modelled.
+
+Row B = `<svg width=100 height=50>` at (0,0), `<svg width=60 height=30
+viewBox="0 0 120 60">` at (100,20), `<svg width=40 height=40>` with a yellow
+background and a 2 px black border at (160,10):
+
+| probe (x,y) | Chrome  | what                                              |
+|-------------|---------|---------------------------------------------------|
+| 50,15       | #ff0000 | rect x=10 y=5 width=200 height=20 rx=8            |
+| 99,15       | #ff0000 | ... up to the svg viewport's last column          |
+| 100,15      | #ffffff | ... and clipped beyond it                         |
+| 10,5        | #ffffff | the rx=8 corner is rounded away                   |
+| 18,5        | #ff0000 | first fully covered pixel of the top edge         |
+| 60,35       | #000000 | a rect with no fill is black                      |
+| 20,35       | #ffffff | fill="none" paints nothing                        |
+| 85,35       | #0000ff | style="fill:#0000ff"                              |
+| 115,25      | #00ff00 | viewBox 120x60 into 60x30: user 60x60 -> 30x30 px |
+| 130,35      | #ffffff | right of the scaled rect                          |
+| 180,25      | #008000 | rect placed from the svg CONTENT box (162,12)     |
+| 197,25      | #008000 | ... clipped at the content edge                   |
+| 200,25      | #ffffff | past the svg box (its border is at 198-199)       |
+| 180,15      | #ffff00 | the svg's own CSS background                      |
+
+The probe below resolves a page pixel from the Draw IR exactly as the
+rasteriser composes it: the last RECT command whose box, clip rect and
+border-radius cover the pixel centre.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-REPLACED-004 — inline svg rects, the video controls panel and the audio controls pill are painted; canvas, controls-less video and fallback content are not.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl 1%
+use std.spec.*
+use std.common.ui.draw_ir.{DrawIrCommand, DRAW_IR_COMMAND_TEXT, DRAW_IR_COMMAND_RECT}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir
+}
+
+val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}</style></head><body><div>"
+
+val ROW_A: text = "<canvas width=\"120\" height=\"40\">Canvas unsupported</canvas><svg width=\"120\" height=\"40\" role=\"img\"><rect width=\"120\" height=\"40\" fill=\"#7c3aed\"></rect></svg><audio controls><span>Audio unsupported</span></audio><video controls width=\"120\"><span>Video unsupported</span></video>"
+val ROW_B: text = "<svg width=\"100\" height=\"50\"><rect x=\"10\" y=\"5\" width=\"200\" height=\"20\" rx=\"8\" fill=\"#ff0000\"></rect><rect x=\"50\" y=\"30\" width=\"20\" height=\"10\"></rect><rect x=\"0\" y=\"30\" width=\"40\" height=\"40\" fill=\"none\"></rect><rect x=\"80\" y=\"30\" width=\"15\" height=\"15\" style=\"fill:#0000ff\"></rect></svg><svg width=\"60\" height=\"30\" viewBox=\"0 0 120 60\"><rect width=\"60\" height=\"60\" fill=\"#00ff00\"></rect></svg><svg width=\"40\" height=\"40\" style=\"background:#ffff00;border:2px solid #000\"><rect x=\"10\" y=\"10\" width=\"100\" height=\"10\" fill=\"rgb(0,128,0)\"></rect></svg>"
+
+fn commands_of(inner: text) -> [DrawIrCommand]:
+    val composition = simple_web_layout_render_html_draw_ir(HEAD + inner + "</div></body></html>", 900, 200)
+    var out: [DrawIrCommand] = []
+    for batch in composition.batches:
+        for command in batch.commands:
+            out.push(command)
+    out
+
+fn style_int(c: DrawIrCommand, key: text) -> i32:
+    for p in c.computed_style:
+        if p.key == key:
+            return p.value.to_i32()
+    0
+
+# True when pixel (px,py) lies inside the command's box rounded by `radius`
+# (pixel-centre test in doubled coordinates, so no fractions are needed).
+fn covers_rounded(c: DrawIrCommand, px: i32, py: i32, radius: i32) -> bool:
+    if px < c.x or py < c.y or px >= c.x + c.width or py >= c.y + c.height:
+        return false
+    var r = radius
+    if r * 2 > c.width:
+        r = c.width / 2
+    if r * 2 > c.height:
+        r = c.height / 2
+    if r <= 0:
+        return true
+    val cx2 = px * 2 + 1
+    val cy2 = py * 2 + 1
+    var ax2 = cx2
+    var ay2 = cy2
+    val left2 = (c.x + r) * 2
+    val right2 = (c.x + c.width - r) * 2
+    val top2 = (c.y + r) * 2
+    val bottom2 = (c.y + c.height - r) * 2
+    if cx2 < left2:
+        ax2 = left2
+    elif cx2 > right2:
+        ax2 = right2
+    if cy2 < top2:
+        ay2 = top2
+    elif cy2 > bottom2:
+        ay2 = bottom2
+    val dx = cx2 - ax2
+    val dy = cy2 - ay2
+    dx * dx + dy * dy <= (r * 2) * (r * 2)
+
+fn painted_at(cmds: [DrawIrCommand], px: i32, py: i32) -> text:
+    var color = 0u32
+    for c in cmds:
+        if c.kind != DRAW_IR_COMMAND_RECT:
+            continue
+        if c.clip_rect.present and (
+            px < c.clip_rect.x or py < c.clip_rect.y or
+            px >= c.clip_rect.x + c.clip_rect.width or
+            py >= c.clip_rect.y + c.clip_rect.height
+        ):
+            continue
+        if not covers_rounded(c, px, py, style_int(c, "border-radius")):
+            continue
+        if (c.color >> 24) == 255u32:
+            color = c.color
+    "{color & 0xFFFFFFu32}"
+
+# Grey level (blue channel) of the pixel `painted_at` resolves.
+fn painted_level(cmds: [DrawIrCommand], px: i32, py: i32) -> i32:
+    painted_at(cmds, px, py).to_i32() % 256
+
+fn rgb(r: i32, g: i32, b: i32) -> text:
+    "{r * 65536 + g * 256 + b}"
+
+fn fallback_text_commands(cmds: [DrawIrCommand]) -> i32:
+    var count = 0
+    for c in cmds:
+        if c.kind == DRAW_IR_COMMAND_TEXT and c.text_value.contains("unsupported"):
+            count = count + 1
+    count
+
+describe "replaced media elements are painted like Chrome":
+    it "AC-1: an inline svg paints its <rect> with the fill colour":
+        step("Chrome: #7c3aed at the svg centre (180,130)")
+        expect(painted_at(commands_of(ROW_A), 180, 130)).to_equal(rgb(124, 58, 237))
+
+    it "AC-2: video controls paint a #333333 panel that darkens to black at the bottom":
+        step("Chrome: #333333 at (600,6) and (540,0); #000000 at (600,149) and (659,149); white right of the box at (660,75)")
+        val cmds = commands_of(ROW_A)
+        expect(painted_at(cmds, 600, 6)).to_equal(rgb(51, 51, 51))
+        expect(painted_at(cmds, 540, 0)).to_equal(rgb(51, 51, 51))
+        expect(painted_at(cmds, 600, 149)).to_equal(rgb(0, 0, 0))
+        expect(painted_at(cmds, 659, 149)).to_equal(rgb(0, 0, 0))
+        expect(painted_at(cmds, 660, 75)).to_equal(rgb(255, 255, 255))
+        step("Chrome: #272727 (39) half-way down at (600,75); the banded ramp must land within 8 levels")
+        val mid = painted_level(cmds, 600, 75)
+        expect(mid >= 31 and mid <= 47).to_equal(true)
+
+    it "AC-3: audio controls paint Chrome's #f1f3f4 pill with fully rounded ends":
+        step("Chrome: #f1f3f4 at (300,110) and (270,97); the page's white at (245,97) outside the arc")
+        val cmds = commands_of(ROW_A)
+        expect(painted_at(cmds, 300, 110)).to_equal(rgb(241, 243, 244))
+        expect(painted_at(cmds, 270, 97)).to_equal(rgb(241, 243, 244))
+        expect(painted_at(cmds, 245, 97)).to_equal(rgb(255, 255, 255))
+
+    it "AC-4 (control): a canvas and a controls-less video are transparent":
+        step("Chrome: white at the canvas centre (60,130) and at the centre of <video width=120> (60,75)")
+        expect(painted_at(commands_of(ROW_A), 60, 130)).to_equal(rgb(255, 255, 255))
+        expect(painted_at(commands_of("<video width=\"120\"></video>"), 60, 75)).to_equal(rgb(255, 255, 255))
+
+    it "AC-5: fallback children of canvas/audio/video are never painted":
+        step("Chrome: no 'unsupported' text anywhere in the row")
+        expect(fallback_text_commands(commands_of(ROW_A))).to_equal(0)
+
+    it "AC-6: a rect is clipped to the svg viewport and rounded by rx":
+        step("Chrome: red at (50,15) and (99,15), white at (100,15); corner (10,5) white, (18,5) red")
+        val cmds = commands_of(ROW_B)
+        expect(painted_at(cmds, 50, 15)).to_equal(rgb(255, 0, 0))
+        expect(painted_at(cmds, 99, 15)).to_equal(rgb(255, 0, 0))
+        expect(painted_at(cmds, 100, 15)).to_equal(rgb(255, 255, 255))
+        expect(painted_at(cmds, 10, 5)).to_equal(rgb(255, 255, 255))
+        expect(painted_at(cmds, 18, 5)).to_equal(rgb(255, 0, 0))
+
+    it "AC-7: fill defaults to black, fill=none paints nothing, style fill wins":
+        step("Chrome: black at (60,35), white at (20,35), blue at (85,35)")
+        val cmds = commands_of(ROW_B)
+        expect(painted_at(cmds, 60, 35)).to_equal(rgb(0, 0, 0))
+        expect(painted_at(cmds, 20, 35)).to_equal(rgb(255, 255, 255))
+        expect(painted_at(cmds, 85, 35)).to_equal(rgb(0, 0, 255))
+
+    it "AC-8: a viewBox scales user units into the svg box":
+        step("Chrome: green at (115,25), white at (130,35) right of the 30 px wide scaled rect")
+        val cmds = commands_of(ROW_B)
+        expect(painted_at(cmds, 115, 25)).to_equal(rgb(0, 255, 0))
+        expect(painted_at(cmds, 130, 35)).to_equal(rgb(255, 255, 255))
+
+    it "AC-9: shapes are placed from and clipped to the svg CONTENT box":
+        step("Chrome: #008000 at (180,25) and (197,25); white past the svg box at (200,25); the background yellow at (180,15)")
+        val cmds = commands_of(ROW_B)
+        expect(painted_at(cmds, 180, 25)).to_equal(rgb(0, 128, 0))
+        expect(painted_at(cmds, 197, 25)).to_equal(rgb(0, 128, 0))
+        expect(painted_at(cmds, 200, 25)).to_equal(rgb(255, 255, 255))
+        expect(painted_at(cmds, 180, 15)).to_equal(rgb(255, 255, 0))

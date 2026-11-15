@@ -6,6 +6,10 @@ by #7354) under the 60 GiB `compiler_cli_build` row cap (#7302). Run 13
 finished MIR with no rss-cap kill; codegen headroom of the `compiler.*` /
 `lib.*` / `os.*` shards is still unmeasured (see the 2026-11-07 section). Root
 retention in the MIR shard worker remains open; see "Not fixed" below.
+2026-11-14: "Not fixed" item 1 (relocated provider type copies) has an opt-in,
+default-off scope-end retraction (`SIMPLE_MIR_RETRACT_PROVIDER_TYPES=1`),
+byte-identical MIR by construction, awaiting a Stage 2 flip run -- see the
+"Item 1" section at the end.
 
 ## Symptom
 
@@ -156,6 +160,8 @@ Run 11 recorded 5 cranelift AOT errors that failed the row independently of memo
    either a per-worker shared relocation table (one copy per provider type,
    not per consumer) or proof that no post-lowering reader in 60/70/80
    dereferences a relocated id.
+   **2026-11-14: mechanism landed, opt-in, default off -- see "Item 1:
+   scope-end retraction" below for the decision, the audit and the flip plan.**
 2. **RSS grows faster than runtime heap_live, by a varying factor.** In
    process, `bootstrap_main` closure: heap_live +1.4 MiB/module throughout;
    RSS +1.7 MiB/module over modules 25-100 (probe2-a) but +8.8 MiB/module
@@ -246,3 +252,179 @@ which adds wall time at any shard count. No memory measurement requires 12.
 The pin goes back to 8. `phase-c-backend-commands-test.shs` now bounds it
 on both sides: >= 8 for memory (run 10) and <= 8 for wall time (run 13).
 This adds no new knob; `SIMPLE_MIR_SHARD_COUNT` from the caller still wins.
+
+## Item 1: scope-end retraction of relocated provider type copies (2026-11-14)
+
+Re-checked on `origin/release/1.0.0` = `3e473113105` (~2300 commits after the
+record): **still live.** `relocate_provider_type_symbol`
+(`provider_metadata.spl:386-430`) still `define_with_binding`s into
+`self.symbols`, and `self.symbols = module.symbols` (`module_lowering.spl:2814`)
+is the consumer HIR module's own persistent table. The trait-impl and layout
+walks have gone demand-driven since 10-20 (`trait_demand`, `layout_demand`,
+`module_lowering.spl:3009-3024`), but the p1 native-trait walk has not:
+`register_native_trait_declarations/implementations` runs over EVERY provider
+for EVERY consumer (`module_lowering.spl:2846-2858`; tables reset per module at
+`:2830`) and relocates every type a provider trait signature or impl names.
+Reproduced in the small (seed, spec below): a facade consumer with no imports
+grows by exactly `Shape + Factor + Offset + Sq0..Sq5` = 9 symbols against 6
+impl modules -- the floor scales with the closure's trait/impl population.
+
+### Decision: (b) retract at scope end; (a) and (c) rejected
+
+- `mir_json.spl:104-108` serializes `MirType.Struct/Enum(symbol)` as the raw
+  id, so **byte-identical MIR <=> identical id allocation**. A per-worker
+  shared relocation table (a) and demand-driven p1 (c) both renumber every
+  later relocated id in every consumer that uses provider types.
+- (c) is also not semantics-preserving: `native_trait_conversion.spl:405-430`
+  builds a concrete type's runtime trait-cast dispatcher by enumerating ALL
+  `native_trait_implementations` of that concrete owner, so the module that
+  creates a trait object must know traits it never names (a dynamic cast in
+  another module hits that dispatcher). Registration cannot be keyed on what
+  the consumer names without a transitive closure that (c) did not have.
+- (b) is byte-identical by construction: retraction runs after the MirModule
+  is promoted and the transient scope has ended, so the MIR already carries
+  the ids and nothing is renumbered.
+
+### Mechanism (opt-in, default OFF)
+
+- `SymbolTable.retract_symbol_rows_v1(ids)` (`20.hir/hir_symbol_table_methods.spl`):
+  drops the `symbols` rows plus every `qualified_types` / `module_callables`
+  row whose VALUE is one of them (the three maps `define_with_binding(
+  bind_lexical: false, defining_module: Some)` writes). `next_symbol_id` is
+  never rewound: a retracted id is never reissued, so a stale holder resolves
+  to nil, never to another symbol. Maps are rebuilt without the keys -- the
+  one `Dict` removal form both lanes agree on
+  (`dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md`).
+  No `SymbolTable` field was added: `generated/hir_codec.spl:65,10555`
+  construct it literally, so a field means a codec regeneration.
+- `MirLowering.provider_type_relocation_journal: [i64]` records every id
+  `relocate_provider_type_symbol` defines (copy/push/store, Stage 4 field
+  mutation rule); reset per `lower_module_transient_scoped`; the lifted-lambda
+  nested lowerer inherits and hands it back (`switch_operators_calls.spl`
+  8460/8772); promoted through the transient-owner inventory
+  (`transient_owner.spl`) so it is readable after the scope ends.
+- Knob: `MirLowering.retract_provider_type_relocations` or
+  `SIMPLE_MIR_RETRACT_PROVIDER_TYPES=1` (read once per module). Applied on the
+  success path of `lower_module_transient_scoped` only, after `s5_scope_end`;
+  the unscoped fallback and every Err return keep the copies (a re-lower then
+  reuses them exactly as before). Same opt-in class as
+  `SIMPLE_MIR_SHARD_INTERFACE_HIR=1`.
+- Only the four type kinds are retracted. `relocate_provider_callable` shares
+  the writer but the interpreter lane reads function symbols from the module
+  table after lowering (`interpreter_calls.spl:205`), so callables stay.
+
+### Spec (seed, `/home/yoon/dev/seed-try-target/release/simple test`)
+
+`test/01_unit/compiler/50.mir/mir_provider_symbol_relocation_retention_spec.spl`:
+one `MirLowering`, fresh HIR per run, lowers `lib.impl0` (provider), a facade
+and a consumer that dispatches through `Shape` -- knob off, off again
+(control), on.
+
+| module | off growth | on growth | next_symbol_id growth (both) | MIR rows equal |
+|---|---|---|---|---|
+| app.facade | 9 (all type kinds) | 0 | 9 | yes (384 B) |
+| app.user | 6 (all type kinds) | 0 | 6 | yes (1691 B) |
+| lib.impl0 | 3 (own `Method` rows) | 3 | 3 | yes (12593 B) |
+
+Red before the change: 1/2 -- the facade example failed (growth 9), the
+loose `user_growth < 12` bound of the first spec shape passed. Green:
+3/3. MIR equality is over the serialized functions, statics, constants, type
+ids/names and enum records. **Side finding:** `mir_module_canonical_fingerprint_v1`
+is NOT run-to-run stable on the seed for a type-defining module --
+`mir_fp_type_row` interpolates `{t.kind}` and the seed prints struct fields in
+hash order (two knob-off runs of `lib.impl0` gave `c3812be7…` and
+`0d9b36b6…`; the function rows were byte-identical). Recorded in
+`mir_canonical_fingerprint_type_row_hash_order_seed_2026-11-14.md`.
+
+Adjacent specs (seed, same runner), before -> after the change:
+`mir_provider_trait_impl_once_per_closure` 3/3 -> 3/3,
+`mir_provider_session_key_no_reencode` 2/2 -> 2/2, `provider_layout_demand`
+4/4 -> 4/4 (one after-run hit the runner's `daemon-no-response` 900 s budget
+under host load and passed 4/4 on re-run), `driver/mir_provider_aliases`
+8/8 -> 8/8. `scripts/check/check-mir-transient-scope-boundary.shs` reports the
+same `FAIL -- 18 invariant(s): owner-field-inventory-drift;
+sffi-owner-release-forwarding-invalid` with the six source files reverted to
+`3e473113105` and with the change applied: pre-existing red on the release
+tip, not introduced here; the two new fields are in both the declaration and
+the `transient_owner.spl` inventory.
+
+### Post-lowering reader audit (static; why the knob stays off until a Stage 2 run)
+
+- 60/70 import no `SymbolTable` except a fresh one in
+  `result_abi_observation_capture.spl:90` and the interpret lane's function
+  lookup above. Backend type mappers treat `Struct(_)` as an opaque pointer
+  (`cranelift_type_mapper.spl:200,224`, `codegen.spl:619`).
+- The AOT pipeline already evicts the whole HIR after lowering
+  (`driver_aot_pipeline.spl:193-201`: "HIR is dead after MIR lowering for every
+  AOT backend except vhdl and SIMPLE_BOOTSTRAP_DIRECT_IR"), so no MIR pass or
+  codegen in that lane can read a consumer table. Those two exceptions, and the
+  interpret lane, are the readers the knob must not be flipped under.
+- 50.mir never writes relocated ids into provider-visible HIR: every
+  `X.functions = ...` assignment in 50.mir targets a `MirModule`
+  (`native_trait_thunks.spl:24`, `global_initializer_guard.spl:99`,
+  `function_lowering.spl:1422`, `module_lowering.spl:3339/3620/3829/4135`), so a
+  later consumer reading the retracted module as a provider only sees HIR-issued
+  ids (below the watermark). The spec's provider-first ordering covers this.
+- Cross-consumer lowering caches are reset per module (`native_trait_layouts`,
+  `native_trait_implementations` at `module_lowering.spl:2830`); session rows
+  are text-keyed.
+- 80.driver readers of `module.symbols` are HIR-stage
+  (`driver_warm_mir_logical_names_v1` at state 0, `collection_driver_binding_v1`
+  via the planner, `driver_hir_pipeline_support.spl:415`,
+  `run_representation_manifest_pass` from `driver_hir_pipeline_lowering.spl:2725`).
+- NOT covered statically: `SIMPLE_BOOTSTRAP_DIRECT_IR=1`
+  (`bootstrap_compile_to_native_local` re-reads `ctx.hir_modules`), the vhdl
+  backend, and any reader reached through `ctx.hir_modules[...]` dynamically.
+  A numeric dead-id guard in `get_symbol_raw` was considered and rejected:
+  `relocate_provider_type_symbol` legitimately probes ids that belong to OTHER
+  tables (`provider.symbols.has(id.id)`), and ids are small dense integers, so
+  a miss in the retracted range is not evidence of a dead-id reader.
+
+### Premises the flip run must prove (not provable on the seed)
+
+- The spec asserts ROW COUNT, not bytes. Reclamation presumes the persistent
+  heap frees the dropped `HirSymbol` copies, the retired text keys and the old
+  map storage on last reference (the record's `heap_live` probe is a refcount
+  metric, so this is expected). On a leak-only heap the three map rebuilds
+  per module would be a net INCREASE; the knob then stays off. The flip
+  run's heap_live/RSS curve against run 13 is the test.
+- The journal's survival past `scope_end` is seed-verified (the retraction
+  reads it after `s5_scope_end` and the spec is green); the boundary gate
+  checks inventory parity only, so promotion on the native lane is proven by
+  the Stage 2 run, not here.
+- The lifted-lambda nested lowerer hands its journal back only on the
+  `self.symbols = lw.symbols` adoption branch; otherwise its ids stay
+  retained (safe side: never retract ids issued in a table that may not be
+  the parent's).
+### Flip plan (owner decision after evidence)
+
+1. Stage 2 `compiler_cli_build` row, 8-shard pin, `SIMPLE_MIR_RETRACT_PROVIDER_TYPES=1`
+   on the MIR shard workers only (not the interpret lane, not vhdl, not
+   `SIMPLE_BOOTSTRAP_DIRECT_IR=1`). Compare per-module MIR against the knob-off
+   run of the same inputs (serialized functions/statics/constants/type ids, not
+   the canonical fingerprint until its type row is fixed) -- expect identical.
+2. Record the `[symtab]` pre/post delta (expect ~0 type rows retained per
+   module vs the 725-870 floor) and the worker RSS/heap_live curve against run
+   13; `[mir-scope]` trace under `SIMPLE_MIR_SCOPE_TRACE_MODULE` prints the
+   retracted count per module.
+3. Any `SymbolId(id: -1)` / `HirTypeKind.Error` that appears only with the knob
+   on is a dead-id reader: name it here and keep the knob off.
+4. On green: default the knob on for the shard-worker lane in
+   `phase-c-backend-commands.shs` (same place the shard pin lives), leaving the
+   env override for A/B.
+
+### Review findings before turning SIMPLE_MIR_RETRACT_PROVIDER_TYPES on (2026-11-14, Opus)
+
+Default-off is a no-op: the journal is only written while a scoped lowering
+that will retract is running (`journal_provider_type_relocations`), so the
+unscoped and ambient-bootstrap paths no longer grow it. Open before the flip:
+1. `relocate_provider_callable` copies (`provider_metadata.spl` ~520-532) are
+   not retracted, but their `type_` names the relocated (retracted) type. A
+   later lowering against the same table that hits the
+   `lookup_qualified_function_raw` early return reads a type whose symbol is
+   gone (silent `Error`/wrong type). Journal and retract the callable copies
+   too, or skip retraction when a surviving row's `type_` names a journaled id.
+2. `retract_symbol_rows_v1` (`hir_symbol_table_methods.spl` ~296-307) deletes
+   `module_callables` keys instead of restoring an overwritten earlier value.
+3. The spec never re-lowers on a retracted table (`shifted()` untested), so the
+   identical-MIR result does not cover item 1.

@@ -43,6 +43,8 @@ JS Function         -> Simple Function:
 
 #![allow(REQC001)]
 
+use std.common.char_from_code_pure.{char_from_code}
+
 extern fn rt_math_floor(x: f64) -> f64
 extern fn rt_math_ceil(x: f64) -> f64
 extern fn rt_random_random() -> f64
@@ -390,40 +392,65 @@ pub fn js_json_stringify(v: text) -> text:
 # =========================================================================
 
 pub fn js_encode_uri_component(s: text) -> text:
-    """Percent-encode a URI component.
+    """Percent-encode a URI component like ECMAScript encodeURIComponent.
 
-    Encodes all characters except A-Z a-z 0-9 - _ . ~
-    Uses a lookup table for common special characters.
+    Every byte of the UTF-8 encoding is written as %XX (upper-case hex) except
+    the unreserved set A-Z a-z 0-9 - _ . ! ~ * ' ( ). Control characters, the
+    rest of ASCII punctuation and non-ASCII characters are all escaped.
     """
     var result = ""
-    var i = 0
-    while i < s.len():
-        val ch = s.char_at(i)
-        if _is_uri_unreserved(ch):
-            result = result + ch
+    for b in s.bytes():
+        val code = b as i64
+        if _uri_unreserved_byte(code):
+            result = result + char_from_code(code)
         else:
-            result = result + _percent_encode(ch)
-        i = i + 1
+            result = result + "%" + _uri_hex_byte(code)
     result
 
-pub fn js_decode_uri_component(s: text) -> text:
-    """Decode a percent-encoded URI component.
+pub fn js_decode_uri_component(s: text) -> Result<text, text>:
+    """Decode a percent-encoded URI component like ECMAScript decodeURIComponent.
 
-    Converts %XX sequences back to characters.
+    Each %XX is one byte; bytes >= 0x80 must form a well-formed UTF-8 sequence
+    of escapes. JavaScript throws `URIError: URI malformed` for a truncated or
+    non-hex escape and for an invalid, overlong, surrogate or out-of-range
+    sequence; this returns Err with that message instead. Unescaped text,
+    including `+` and raw non-ASCII, is passed through.
     """
+    val n = s.byte_len()
     var result = ""
     var i = 0
-    while i < s.len():
-        val ch = s.char_at(i)
-        if ch == "%" and i + 2 < s.len():
-            val hex = s.slice(i + 1, i + 3)
-            val decoded = _hex_to_char(hex)
-            result = result + decoded
+    while i < n:
+        val b = s.byte_at(i) as i64
+        if b != 37:
+            val width = _uri_utf8_width(b)
+            val step = if width < 1 or i + width > n: 1 else: width
+            result = result + s.slice(i, i + step)
+            i = i + step
+            continue
+        val first = _uri_escape_value(s, i, n)
+        if first < 0:
+            return Err(_URI_MALFORMED)
+        i = i + 3
+        if first < 128:
+            result = result + char_from_code(first)
+            continue
+        val width = _uri_utf8_width(first)
+        if width < 2:
+            return Err(_URI_MALFORMED)
+        var code = if width == 2: first - 192 elif width == 3: first - 224 else: first - 240
+        var k = 1
+        while k < width:
+            val next = _uri_escape_value(s, i, n)
+            if next < 128 or next > 191:
+                return Err(_URI_MALFORMED)
+            code = code * 64 + (next - 128)
             i = i + 3
-        else:
-            result = result + ch
-            i = i + 1
-    result
+            k = k + 1
+        val smallest = if width == 2: 128 elif width == 3: 2048 else: 65536
+        if code < smallest or code > 1114111 or (code >= 55296 and code <= 57343):
+            return Err(_URI_MALFORMED)
+        result = result + char_from_code(code)
+    Ok(result)
 
 # =========================================================================
 # Date
@@ -483,103 +510,49 @@ fn _js_digit_value(ch: text) -> i64:
     if lower == "z": return 35
     0 - 1
 
-fn _is_uri_unreserved(ch: text) -> bool:
-    """Check if a character is unreserved in URI encoding."""
-    if ch >= "A" and ch <= "Z":
-        return true
-    if ch >= "a" and ch <= "z":
-        return true
-    if ch >= "0" and ch <= "9":
-        return true
-    if ch == "-" or ch == "_" or ch == "." or ch == "~":
-        return true
-    false
+val _URI_MALFORMED: text = "URIError: URI malformed"
 
-fn _percent_encode(ch: text) -> text:
-    """Percent-encode a single character."""
-    # Common characters lookup
-    if ch == " ":
-        return "%20"
-    if ch == "!":
-        return "%21"
-    if ch == "#":
-        return "%23"
-    if ch == "$":
-        return "%24"
-    if ch == "&":
-        return "%26"
-    if ch == "'":
-        return "%27"
-    if ch == "(":
-        return "%28"
-    if ch == ")":
-        return "%29"
-    if ch == "*":
-        return "%2A"
-    if ch == "+":
-        return "%2B"
-    if ch == ",":
-        return "%2C"
-    if ch == "/":
-        return "%2F"
-    if ch == ":":
-        return "%3A"
-    if ch == ";":
-        return "%3B"
-    if ch == "=":
-        return "%3D"
-    if ch == "?":
-        return "%3F"
-    if ch == "@":
-        return "%40"
-    if ch == "[":
-        return "%5B"
-    if ch == "]":
-        return "%5D"
-    # Fallback: return as-is (unhandled characters)
-    ch
+fn _uri_unreserved_byte(code: i64) -> bool:
+    """A-Z a-z 0-9 - _ . ! ~ * ' ( ) — the bytes encodeURIComponent keeps."""
+    if (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or (code >= 48 and code <= 57):
+        return true
+    (code == 45 or code == 95 or code == 46 or code == 33 or code == 126 or
+        code == 42 or code == 39 or code == 40 or code == 41)
 
-fn _hex_to_char(hex: text) -> text:
-    """Convert a 2-char hex string to the corresponding character."""
-    # Common hex lookups
-    val lower = hex.lower()
-    if lower == "20":
-        return " "
-    if lower == "21":
-        return "!"
-    if lower == "23":
-        return "#"
-    if lower == "24":
-        return "$"
-    if lower == "26":
-        return "&"
-    if lower == "27":
-        return "'"
-    if lower == "28":
-        return "("
-    if lower == "29":
-        return ")"
-    if lower == "2a":
-        return "*"
-    if lower == "2b":
-        return "+"
-    if lower == "2c":
-        return ","
-    if lower == "2f":
-        return "/"
-    if lower == "3a":
-        return ":"
-    if lower == "3b":
-        return ";"
-    if lower == "3d":
-        return "="
-    if lower == "3f":
-        return "?"
-    if lower == "40":
-        return "@"
-    if lower == "5b":
-        return "["
-    if lower == "5d":
-        return "]"
-    # Fallback: return the hex as-is prefixed with %
-    "%{hex}"
+fn _uri_hex_byte(code: i64) -> text:
+    val digits = "0123456789ABCDEF"
+    digits.slice(code / 16, code / 16 + 1) + digits.slice(code % 16, code % 16 + 1)
+
+fn _uri_hex_value(code: i64) -> i64:
+    if code >= 48 and code <= 57:
+        return code - 48
+    if code >= 65 and code <= 70:
+        return code - 55
+    if code >= 97 and code <= 102:
+        return code - 87
+    return -1
+
+# Value of the `%XX` escape that starts at byte `at`, or -1 when there is no
+# complete, well-formed escape there.
+fn _uri_escape_value(s: text, at: i64, n: i64) -> i64:
+    if at + 2 >= n or (s.byte_at(at) as i64) != 37:
+        return -1
+    val hi = _uri_hex_value(s.byte_at(at + 1) as i64)
+    val lo = _uri_hex_value(s.byte_at(at + 2) as i64)
+    if hi < 0 or lo < 0:
+        return -1
+    hi * 16 + lo
+
+# Length of the UTF-8 sequence a lead byte announces; 1 for ASCII, 0 for a
+# byte that cannot start a sequence (continuation byte, 0xC0/0xC1, >= 0xF5).
+fn _uri_utf8_width(lead: i64) -> i64:
+    if lead < 128:
+        return 1
+    if lead >= 194 and lead <= 223:
+        return 2
+    if lead >= 224 and lead <= 239:
+        return 3
+    if lead >= 240 and lead <= 244:
+        return 4
+    0
+

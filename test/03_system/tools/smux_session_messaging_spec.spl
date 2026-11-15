@@ -3,8 +3,8 @@
 Session targeting and bounded client notices through real smux owners.
 ## Evidence boundary
 State/protocol cases allocate actual service records, not fake transports.
-The final case requires a real Windows ConPTY child; it never skips on another
-host. Source authored only until an admitted Phase 3 native runner executes it.
+The final case requires a real child on the host's SOSIX PTY provider (ConPTY
+on Windows, a Unix PTY elsewhere); it never skips on any host.
 # @manual: primary
 # @capture: text
 """
@@ -20,6 +20,18 @@ use os.apps.smux.client_notifications.{smux_notifications_enqueue,
 use os.apps.smux.notification_client.{notification_reply_decode, notification_reply_ok, notification_overlay}
 use os.apps.smux.client_view.{client_input_hex}
 use std.nogc_sync_mut.sosix.process.{sosix_platform, sosix_sleep_ms}
+
+fn messaging_shell() -> text:
+    if sosix_platform() == "windows": return "cmd.exe /Q"
+    return "/bin/sh -i"
+
+fn messaging_assign() -> text:
+    if sosix_platform() == "windows": return "set SMUX_MESSAGE_OPERAND=3141"
+    return "SMUX_MESSAGE_OPERAND=3141"
+
+fn messaging_compute() -> text:
+    if sosix_platform() == "windows": return "set /a %SMUX_MESSAGE_OPERAND%+2718"
+    return "echo $(($SMUX_MESSAGE_OPERAND+2718))"
 
 # @inline
 fn messaging_session(name: text) -> [text]:
@@ -197,20 +209,19 @@ describe "smux sessions send pane input and attached-client notices":
                 "smux: notification 7 0", "smux: notification none trailing"]:
             expect(notification_reply_ok(reply)).to_equal(false)
 
-    it "sends a command to an inactive detached Windows shell without moving another session":
+    it "sends a command to an inactive detached live shell without moving another session":
         smux_reset_for_test()
-        expect(sosix_platform()).to_equal("windows")
         val sender = messaging_session("sender")
         val target = messaging_session("target")
-        step("Spawn a real ConPTY shell and detach its actual attachment")
-        val spawned = smux_pane_spawn_pty(target[0], target[1], target[2], "cmd.exe /Q")
+        step("Spawn a real PTY shell and detach its actual attachment")
+        val spawned = smux_pane_spawn_pty(target[0], target[1], target[2], messaging_shell())
         val attached = smux_attach(target[0], "receiver", 80, 24).attached
         val detached = smux_detach_from(target[0], "receiver")
         val other = smux_new_window(target[0], "other")
         val focused = smux_focus_window(target[0], other.id)
         step("Use explicit send-pane targeting and require a child-computed result")
-        val configured = smux_remote_dispatch("send-pane " + target[0] + " " + target[1] + " " + target[2] + " set SMUX_MESSAGE_OPERAND=3141")
-        val sent = smux_remote_dispatch("send-pane " + target[0] + " " + target[1] + " " + target[2] + " set /a %SMUX_MESSAGE_OPERAND%+2718")
+        val configured = smux_remote_dispatch("send-pane " + target[0] + " " + target[1] + " " + target[2] + " " + messaging_assign())
+        val sent = smux_remote_dispatch("send-pane " + target[0] + " " + target[1] + " " + target[2] + " " + messaging_compute())
         var observed = ""
         var tries = 0
         while tries < 200 and not observed.contains("5859"):

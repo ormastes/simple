@@ -1,0 +1,87 @@
+"""
+## Purpose and audience
+Purpose: Pin that a run staged with LAYOUT-resolved advances
+(`FontRenderer.prepare_text_with_advances`) puts every glyph origin
+(`quad.dst_x - bearing_x`) exactly on the prefix sum of those advances.
+
+`measure_text_advances` snaps a FRACTIONAL cumulative pen (round 12), but the
+staged quads come from the per-glyph INTEGER advance pen. The re-layout shift
+was computed against the fractional array, so the two pens' rounding error
+leaked into the quads and accumulated along the run: measured +4 px by the
+last glyph of the catalog `overview` h1. The CPU Engine2D lane clips a
+resolved-advance run to its laid-out width, so the drift showed as the last
+glyph cut in half ("one pag|e", "inline cod|"); Vulkan, which does not clip,
+drew the whole run 4 px wider than Chromium.
+Audience: text-layout / Engine2D font maintainers.
+
+Chrome oracle (Chromium 131 headless, Range.getBoundingClientRect, Linux
+Liberation Sans / DejaVu Sans Mono):
+
+| run                                         | face / size              | width  |
+|---------------------------------------------|--------------------------|--------|
+| `Common HTML and CSS in one page` (h1)      | Liberation Sans Bold 24  | 422.25 |
+| `inline code` (`<code>`)                    | DejaVu Sans Mono 13      | 105.97 |
+"""
+
+"""
+Traceability: REQ-TEXT-LAYOUT-ADVANCE-STAGING-001 — staged glyph origins follow the producer's advances exactly.
+"""
+# @tag: unit, text_layout, font, engine2d
+# @cover src/lib/nogc_sync_mut/text_layout/font_renderer.spl 1%
+use std.spec.*
+use std.nogc_sync_mut.sffi.io.{file_exists}
+use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer}
+
+val SANS_BOLD = "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
+val MONO = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+
+# Largest |glyph origin - advance prefix sum| over the staged run.
+fn max_origin_drift(path: text, s: text, size: i32) -> i32:
+    var r = FontRenderer.new()
+    assert_true(r.try_load_runtime_ttf(path))
+    val adv = r.measure_text_advances(s, size)
+    var pens: [i32] = []
+    var pen = 0
+    for a in adv:
+        pens.push(pen)
+        pen = pen + a
+    val batch = r.prepare_text_with_advances(s, adv, 0xff000000u32, size)
+    var worst = 0
+    for q in batch.quads:
+        val origin = q.dst_x - r.get_glyph(q.codepoint, size).bearing_x
+        var d = origin - pens[q.byte_offset]
+        if d < 0:
+            d = -d
+        if d > worst:
+            worst = d
+    worst
+
+fn run_width(path: text, s: text, size: i32) -> i32:
+    var r = FontRenderer.new()
+    assert_true(r.try_load_runtime_ttf(path))
+    var total = 0
+    for a in r.measure_text_advances(s, size):
+        total = total + a
+    total
+
+describe "a run staged with resolved advances":
+    it "AC-1: the h1 run measures Chrome's 422 px":
+        if not file_exists(SANS_BOLD):
+            skip("no Liberation Sans Bold on this host")
+            return
+        step("Chrome: 422.25 px")
+        expect(run_width(SANS_BOLD, "Common HTML and CSS in one page", 24)).to_equal(422)
+
+    it "AC-2: every h1 glyph origin sits on the advance prefix sum":
+        if not file_exists(SANS_BOLD):
+            skip("no Liberation Sans Bold on this host")
+            return
+        step("before the fix the last glyph drifted +4 px past its advance pen")
+        expect(max_origin_drift(SANS_BOLD, "Common HTML and CSS in one page", 24)).to_equal(0)
+
+    it "AC-3: every monospace glyph origin sits on the advance prefix sum":
+        if not file_exists(MONO):
+            skip("no DejaVu Sans Mono on this host")
+            return
+        step("before the fix 'inline code' drifted +2 px by its final 'e'")
+        expect(max_origin_drift(MONO, "inline code", 13)).to_equal(0)

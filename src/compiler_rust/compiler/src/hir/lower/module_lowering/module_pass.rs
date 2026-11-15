@@ -97,7 +97,7 @@ pub(crate) fn dynamic_module_initializer_name(module_path: &str) -> String {
     name
 }
 
-fn try_const_eval(expr: &Expr) -> Option<i64> {
+pub(crate) fn try_const_eval(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Integer(val) => Some(*val),
         // RuntimeValue nil is the tagged sentinel 0x3. Recording it here keeps
@@ -1952,6 +1952,19 @@ impl Lowerer {
                 || self.global_init_functions.contains_key(&name)
                 || self.global_init_structs.contains_key(&name);
             if has_static_init {
+                // `val G = imported_fn` is stored as a static fn slot and its
+                // initializer is never lowered: judge the reference here, as
+                // module-level code of the declaring module.
+                if let Expr::Identifier(target) = value {
+                    if self.global_init_functions.contains_key(&name) {
+                        let owner = self.flatten_global_symbol_owners.get(&name).cloned().flatten().or(declaring_owner);
+                        let previous = std::mem::replace(&mut self.current_function_owner, owner);
+                        let previous_name = self.current_function_name.take();
+                        self.gate_private_fn_ref(target);
+                        self.current_function_name = previous_name;
+                        self.current_function_owner = previous;
+                    }
+                }
                 continue;
             }
             let global_ty = *self.globals.get(&name).unwrap_or(&TypeId::ANY);
@@ -3217,6 +3230,7 @@ impl Lowerer {
                 && !items.iter().any(|item| matches!(item, Node::Trait(t) if &t.name == trait_name))
             {
                 self.trait_declaration_for_current_owner(trait_name)
+                    .or_else(|| self.unique_used_trait_declaration(trait_name, items))
             } else {
                 None
             };
@@ -3262,6 +3276,34 @@ impl Lowerer {
             });
         }
         Ok(())
+    }
+
+    /// Fallback for `class C with T:` when `T` was named by this module's own
+    /// `use` but no per-caller binding was recorded (native-project entry
+    /// modules: the binding is keyed by the caller's path and was observed
+    /// missing for an entry outside the source root). Accept the declaration
+    /// only when exactly one declaring module defines `T`, so an ambiguous
+    /// name never picks an arbitrary trait.
+    /// doc/08_tracking/bug/native_user_class_imported_trait_vtable_missing_2026-11-15.md
+    fn unique_used_trait_declaration(&self, trait_name: &str, items: &[Node]) -> Option<crate::hir::HirTraitDispatch> {
+        let imported_here = items.iter().any(|item| {
+            matches!(item, Node::UseStmt(u) if self.should_import_symbol(trait_name, &u.target))
+        });
+        if !imported_here {
+            return None;
+        }
+        let mut found: Vec<crate::hir::HirTraitDispatch> = Vec::new();
+        for (owner_path, traits) in &self.trait_declared_owners {
+            if let Some(decl) = traits.get(trait_name) {
+                // Only the declaring module's own entry, not re-bound copies.
+                if crate::interpreter::normalize_path_key(&decl.source_file) == *owner_path
+                    && !found.iter().any(|f| f.owner == decl.owner)
+                {
+                    found.push(decl.clone());
+                }
+            }
+        }
+        if found.len() == 1 { found.pop() } else { None }
     }
 }
 

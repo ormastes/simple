@@ -1,0 +1,122 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/dom_visual_effects.spl 95%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/style/supports.spl 41%
+# @tag: unit, browser_engine, css, box-shadow, supports
+#
+# Two CSS value grammars that had no unit spec: the `box-shadow` layer syntax
+# (CSS Backgrounds 3: [inset] <offset-x> <offset-y> [<blur> [<spread>]]
+# <color>, comma-separated layers, `inset` leading or trailing) with the
+# `blur()` filter radius, and `@supports` condition evaluation (CSS
+# Conditional 3: declarations, not / and / or, selector()). Colours are packed
+# 0xRRGGBBAA. The degenerate inputs "none" / "" are NOT asserted here: they
+# hit a missing WebBoxShadow.none() (dom_visual_effects.spl:43,61), reported
+# separately.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.dom_visual_effects.{
+    parse_box_shadows, parse_single_box_shadow, parse_blur_value,
+    split_shadow_tokens, find_substr
+}
+use std.gc_async_mut.gpu.browser_engine.style.supports.{eval_supports_query, known_properties}
+
+fn _shadow_text(s: text) -> text:
+    val sh = parse_single_box_shadow(s)
+    "{sh.offset_x}|{sh.offset_y}|{sh.blur_radius}|{sh.spread_radius}|{sh.color}|{sh.inset}"
+
+describe "CSS box-shadow layers and @supports conditions":
+
+    context "single box-shadow layer":
+
+        it "reads offsets, blur, spread and colour with a leading inset":
+            expect(_shadow_text("inset 1px 2px 3px 4px #ff0000")).to_equal("1|2|3|4|4278190335|true")
+
+        it "reads a trailing inset keyword":
+            expect(_shadow_text("0 1px 0 #00ff00 inset")).to_equal("0|1|0|0|16711935|true")
+
+        it "defaults spread to zero and keeps a functional colour whole":
+            expect(_shadow_text("0 2px 4px rgba(0, 0, 0, 0.5)")).to_equal("0|2|4|0|128|false")
+
+        it "defaults blur and spread to zero for two lengths":
+            expect(_shadow_text("3px 5px blue")).to_equal("3|5|0|0|65535|false")
+
+        it "accepts negative offsets":
+            expect(_shadow_text("-2px -3px 1px #000000")).to_equal("-2|-3|1|0|255|false")
+
+    context "layer lists":
+
+        it "splits layers on top-level commas only":
+            val layers = parse_box_shadows("0 1px 2px rgba(0, 0, 0, 0.5), 0 0 0 1px blue inset")
+            expect(layers.len()).to_equal(2)
+            expect(layers[0].blur_radius).to_equal(2)
+            expect(layers[0].inset).to_equal(false)
+            expect(layers[1].spread_radius).to_equal(1)
+            expect(layers[1].inset).to_equal(true)
+
+        it "keeps source order":
+            val layers = parse_box_shadows("1px 0 0 red, 2px 0 0 red, 3px 0 0 red")
+            expect(layers.len()).to_equal(3)
+            expect(layers[0].offset_x).to_equal(1)
+            expect(layers[2].offset_x).to_equal(3)
+
+        it "tokenises on blanks outside parentheses":
+            expect(split_shadow_tokens("0 2px rgba(0, 0, 0, 0.5) x")).to_equal(["0", "2px", "rgba(0, 0, 0, 0.5)", "x"])
+
+    context "blur() radius":
+
+        it "finds blur() anywhere in a filter list":
+            expect(parse_blur_value("blur(20px)")).to_equal(20)
+            expect(parse_blur_value("saturate(180%) blur(12px) brightness(1.1)")).to_equal(12)
+
+        it "is zero without a blur function or with an unterminated one":
+            expect(parse_blur_value("none")).to_equal(0)
+            expect(parse_blur_value("saturate(180%)")).to_equal(0)
+            expect(parse_blur_value("blur(20px")).to_equal(0)
+
+        it "locates a substring and reports the miss sentinel":
+            expect(find_substr("a blur(2px)", "blur(")).to_equal(2)
+            expect(find_substr("abc", "blur(")).to_equal(999999999)
+
+    context "@supports":
+
+        it "accepts a known property with a valid value":
+            expect(eval_supports_query("(display: grid)")).to_equal(true)
+            expect(eval_supports_query("(color: #fff)")).to_equal(true)
+
+        it "rejects an unknown property":
+            expect(eval_supports_query("(bogus-prop: 1)")).to_equal(false)
+
+        it "negates with not":
+            expect(eval_supports_query("not (bogus-prop: 1)")).to_equal(true)
+            expect(eval_supports_query("not (display: grid)")).to_equal(false)
+
+        it "requires every operand of and":
+            expect(eval_supports_query("(display: grid) and (color: red)")).to_equal(true)
+            expect(eval_supports_query("(display: grid) and (bogus-prop: 1)")).to_equal(false)
+            expect(eval_supports_query("(display: grid) and (not (color: red))")).to_equal(false)
+
+        it "requires any operand of or":
+            expect(eval_supports_query("(bogus: 1) or (color: #fff)")).to_equal(true)
+            expect(eval_supports_query("(bogus: 1) or (also-bogus: 2)")).to_equal(false)
+
+        it "evaluates selector() for a supported selector":
+            expect(eval_supports_query("selector(a > b)")).to_equal(true)
+
+        it "accepts the structural nth pseudo-classes in selector() like Chrome 159":
+            expect(eval_supports_query("selector(:nth-child(2))")).to_equal(true)
+            expect(eval_supports_query("selector(li:nth-of-type(2))")).to_equal(true)
+            expect(eval_supports_query("selector(:nth-last-child(odd))")).to_equal(true)
+            expect(eval_supports_query("selector(p:nth-last-of-type(2n+1))")).to_equal(true)
+
+        it "rejects an unknown nth name and an invalid An+B argument in selector()":
+            expect(eval_supports_query("selector(:nth-banana(2))")).to_equal(false)
+            expect(eval_supports_query("selector(:nth-of-type(1 2))")).to_equal(false)
+
+        it "is false for an empty condition":
+            expect(eval_supports_query("")).to_equal(false)
+
+        it "lists the properties it can answer for":
+            val props = known_properties()
+            expect(props.contains("display")).to_equal(true)
+            expect(props.contains("color")).to_equal(true)
+            expect(props.contains("bogus-prop")).to_equal(false)

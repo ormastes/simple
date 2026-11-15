@@ -70,7 +70,7 @@ pub(super) fn eval_control_expr(
                 let used: HashSet<String> = used.iter().map(|s| s.to_string()).collect();
                 env.project_preserving_bindings(&used)
             };
-            captured.set_closure_in_test(crate::interpreter::interpreter_module::closure_created_in_test());
+            crate::interpreter::interpreter_module::stamp_closure_origin(&mut captured);
             let captured_env = Arc::new(captured);
             Ok(Some(Value::Lambda {
                 params: names,
@@ -340,6 +340,19 @@ pub(super) fn eval_control_expr(
                         // Use the *_core variants so explicit `return` statements inside the arm
                         // propagate upward rather than being collapsed into a value.
                         if is_last {
+                            // COVERAGE: the arm-tail `if`/`match` below run
+                            // through exec_if_core / exec_match_core, not
+                            // exec_node, so the header of the last statement
+                            // of an arm of a value-position `match`
+                            // (`val r = match`, `return match`) ran unrecorded
+                            // -- the twin of the tail record in exec_block_fn.
+                            // Only for If/Match: any other tail falls through to
+                            // exec_node below, which records it itself (under the
+                            // invoker inside a closure body, which would put a
+                            // lambda line in a second file).
+                            if matches!(stmt, Node::If(_) | Node::Match(_)) {
+                                crate::interpreter::coverage_helpers::record_node_coverage_lexical(stmt);
+                            }
                             match stmt {
                                 Node::Expression(expr) => {
                                     result =
@@ -441,27 +454,15 @@ pub(super) fn eval_control_expr(
                     return Ok(Some(result));
                 }
             }
-            let ctx = ErrorContext::new()
-                .with_code(codes::INVALID_PATTERN)
-                .with_help("add a wildcard pattern (_) or another pattern to handle this case");
-            let arm_patterns = arms
-                .iter()
-                .map(|arm| format!("{}:{} {:?}", arm.span.line, arm.span.column, arm.pattern))
-                .collect::<Vec<_>>()
-                .join(", ");
-            Err(CompileError::semantic_with_context(
-                format!(
-                    "invalid pattern: match expression exhausted without matching any pattern for {} value {}; arms [{}]",
-                    subject_val.type_name(),
-                    subject_val.to_display_string(),
-                    arm_patterns
-                ),
-                ctx,
+            Err(crate::interpreter::interpreter_control::match_no_arm_error(
+                "expression",
+                &subject_val,
+                arms,
             ))
         }
         Expr::DoBlock(nodes) => {
             let mut captured = env.clone();
-            captured.set_closure_in_test(crate::interpreter::interpreter_module::closure_created_in_test());
+            crate::interpreter::interpreter_module::stamp_closure_origin(&mut captured);
             Ok(Some(Value::BlockClosure {
                 nodes: nodes.clone(),
                 env: Arc::new(captured),

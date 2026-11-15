@@ -14,8 +14,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* spl_panic lives in runtime.c, which this standalone link does not pull in. */
+/* spl_panic lives in runtime.c, which this standalone link does not pull in.
+ * Under the c-runtime test kind (SIMPLE_TEST_CORE_RUNTIME) the core-C owner
+ * runtime_legacy_core.c defines it instead. */
+#ifndef SIMPLE_TEST_CORE_RUNTIME
 void spl_panic(const char* msg) { fprintf(stderr, "PANIC: %s\n", msg ? msg : ""); exit(101); }
+#endif
 
 static unsigned checks;
 #define CHECK(x) do { ++checks; if (!(x)) { fprintf(stderr, "FAIL line=%d check=%u\n", __LINE__, checks); return 1; } } while (0)

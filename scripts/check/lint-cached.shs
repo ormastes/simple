@@ -21,6 +21,22 @@
 # Usage: sh scripts/check/lint-cached.shs [lint-options] <file.spl> [more...]
 #        SIMPLE_LINT_CACHE_DIR=... to relocate the cache
 #        SIMPLE_LINT_CACHE=0       to bypass the cache entirely
+#        SIMPLE_LINT_CLOSURE_DIAGNOSTICS=1  to also print the linter's own
+#                                  load-closure diagnostics (see below)
+#
+# Target-scoped output (default): lint FINDINGS are printed on stdout and only
+# ever name the requested targets. The ~380 stderr lines a seed-interpreted
+# lint used to print ('export use *' hints, W-STR-BRACE-001, [gc-warning] for
+# files such as src/lib/string_core.spl and src/compiler/90.tools/lint/main.spl)
+# are NOT about the targets: the seed's module loader emits them while it loads
+# the linter's OWN import closure, eagerly, before lint_entry.spl's main runs,
+# so no .spl code can filter them. This wrapper sets the existing seed knob
+# SIMPLE_NO_DEPRECATED_WARNINGS=1 for the lint process (only when it is unset),
+# which silences those non-error loader hints and nothing on stdout (verified:
+# identical stdout with and without it). SIMPLE_LINT_CLOSURE_DIAGNOSTICS=1
+# restores them. Still printed, because the seed has no knob for them:
+# [visibility-warning], the co-compiled-definition summaries, [engine-demotion]
+# and the seed banner. Gap record: scripts/check/check-lint-target-scoped-output.shs.
 #
 # Verdict line (always last on stdout):
 #   PASS — n file(s) checked (h cached, m linted)
@@ -38,6 +54,12 @@ use_cache="${SIMPLE_LINT_CACHE:-1}"
 if [ ! -x "$bin" ]; then
     echo "ERROR — nothing was checked (no linter at $bin)"
     exit 2
+fi
+
+# Scope the lint process to its targets unless closure diagnostics are asked for.
+lint_env=""
+if [ "${SIMPLE_LINT_CLOSURE_DIAGNOSTICS:-0}" != "1" ] && [ -z "${SIMPLE_NO_DEPRECATED_WARNINGS+set}" ]; then
+    lint_env="env SIMPLE_NO_DEPRECATED_WARNINGS=1"
 fi
 
 hasher=""
@@ -117,7 +139,7 @@ for f in $files; do
     fi
 
     # Cache miss (or cache disabled): run the REAL linter, unmodified.
-    if "$bin" lint $opts "$f"; then
+    if $lint_env "$bin" lint $opts "$f"; then
         linted=$((linted + 1))
         # Record clean only. Dirty/failing files are deliberately never cached.
         [ -n "$key" ] && : > "$key"

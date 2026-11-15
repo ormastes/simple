@@ -55,6 +55,12 @@ pub struct Lowerer {
     /// `option_pattern_shape_diag` can name a source location instead of only
     /// the run. `Pattern` itself carries no span; `MatchArm` and `IfStmt` do.
     pub(super) current_pattern_span: Option<(usize, usize)>,
+    /// Address of the AST node that is the implicit tail of the function body
+    /// being lowered, when that tail is a `match` and the function declares a
+    /// non-void return: its value is the return value, so a fall-through must
+    /// fail closed like a `val`-position match. Compared by address only.
+    /// doc/08_tracking/bug/seed_value_match_no_arm_yields_nil_2026-11-02.md
+    pub(super) value_tail_match: Option<usize>,
     /// Module resolver for loading types from imports (optional for backward compatibility)
     pub(super) module_resolver: Option<ModuleResolver>,
     /// Current file being compiled (for resolving relative imports)
@@ -82,6 +88,16 @@ pub struct Lowerer {
     /// statements declare are private to that module and must not become
     /// names of the module being lowered (see `materialize_import_aliases`).
     pub(super) dependency_import_depth: usize,
+    /// Bare enum name -> declaring file of the enum the module being lowered
+    /// imported explicitly. Any later load (incl. dependency-only) of a same-named
+    /// enum from another file must not replace it in the bare-name registry.
+    pub(super) direct_enum_owners: HashMap<String, PathBuf>,
+    /// Enum names some `use` of the module being lowered requests explicitly.
+    pub(super) direct_enum_wanted: HashSet<String>,
+    /// Active `load_imported_types` import keys, outermost first.
+    pub(super) import_key_stack: Vec<(PathBuf, String)>,
+    /// Per import key: every enum registered while that import was loading.
+    pub(super) enum_loads: HashMap<(PathBuf, String), Vec<(String, super::super::types::HirType, PathBuf)>>,
     /// Memory safety warning collector
     pub(super) memory_warnings: MemoryWarningCollector,
     /// Lifetime inference context for tracking reference lifetimes
@@ -311,16 +327,48 @@ pub struct Lowerer {
     /// a field with NO declared default keeps the `Nil` placeholder exactly as
     /// before.
     pub(super) struct_field_defaults: HashMap<String, HashMap<String, Expr>>,
-    /// Authored simple type name of each class/struct field, keyed by owner
-    /// then field. Lets `self.field.m()` recover a TRAIT field type, which
-    /// `resolve_type` erases to ANY.
-    pub(super) struct_field_type_names: HashMap<String, HashMap<String, String>>,
+    /// Authored field types and declaration provenance keyed by receiver TypeId.
+    /// A reused type id from conflicting owners is tombstoned, not guessed. Preserve
+    /// Optional and generic structure: only payload bindings may acquire the
+    /// inner trait identity; the Option carrier itself must never acquire it.
+    pub(super) struct_field_declared_types: HashMap<TypeId, Option<(String, HashMap<String, Type>)>>,
     /// Local bindings authored as untyped empty array literals (`var xs = []`).
     ///
     /// These start as `[Any]` placeholders in HIR so later builtin `append`
     /// calls can specialize the local to the appended element type instead of
     /// freezing the seed to the configured scalar default element type.
     pub(super) untyped_empty_array_locals: HashSet<usize>,
+}
+
+thread_local! {
+    /// Private-fn references found by the lowering in progress; `Some` while
+    /// the gate is armed (JIT run lane only, see `arm_private_ref_gate`).
+    static PRIVATE_REF_VIOLATIONS: std::cell::RefCell<Option<Vec<PrivateRefViolation>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn private_ref_gate_armed() -> bool {
+    PRIVATE_REF_VIOLATIONS.with(|cell| cell.borrow().is_some())
+}
+
+/// Arm the private-fn reference gate for the lowerings that follow on this
+/// thread, until `take_private_ref_violations`.
+pub(crate) fn arm_private_ref_gate() {
+    PRIVATE_REF_VIOLATIONS.with(|cell| *cell.borrow_mut() = Some(Vec::new()));
+}
+
+/// A reference to a private fn of another directory found while lowering.
+pub struct PrivateRefViolation {
+    /// Emitted name of the function whose body holds the reference; `None`
+    /// for module-level code (a global initializer), which always runs.
+    pub function: Option<String>,
+    /// The visibility error, as the interpreter's call rule words it.
+    pub message: String,
+}
+
+/// Disarm the gate and return what it recorded: one entry per distinct
+/// (holding function, private fn) reference in the lowered unit.
+pub fn take_private_ref_violations() -> Vec<PrivateRefViolation> {
+    PRIVATE_REF_VIOLATIONS.with(|cell| cell.borrow_mut().take()).unwrap_or_default()
 }
 
 impl Lowerer {
@@ -344,6 +392,7 @@ impl Lowerer {
             current_function_name: None,
             current_function_line: None,
             current_pattern_span: None,
+            value_tail_match: None,
             module_resolver: None,
             current_file: None,
             loaded_modules: HashSet::new(),
@@ -351,6 +400,10 @@ impl Lowerer {
             import_cycles: Vec::new(),
             loaded_import_targets: HashSet::new(),
             dependency_import_depth: 0,
+            direct_enum_owners: HashMap::new(),
+            direct_enum_wanted: HashSet::new(),
+            import_key_stack: Vec::new(),
+            enum_loads: HashMap::new(),
             memory_warnings: MemoryWarningCollector::strict(), // STRICT mode for Rust-level safety
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),
@@ -405,7 +458,7 @@ impl Lowerer {
             duplicate_global_struct_defs: None,
             struct_decl_files: HashMap::new(),
             struct_field_defaults: HashMap::new(),
-            struct_field_type_names: HashMap::new(),
+            struct_field_declared_types: HashMap::new(),
             ambiguous_field_names: None,
             global_enum_defs: None,
             untyped_empty_array_locals: HashSet::new(),
@@ -431,6 +484,7 @@ impl Lowerer {
             current_function_name: None,
             current_function_line: None,
             current_pattern_span: None,
+            value_tail_match: None,
             module_resolver: Some(module_resolver),
             current_file: Some(current_file),
             loaded_modules: HashSet::new(),
@@ -438,6 +492,10 @@ impl Lowerer {
             import_cycles: Vec::new(),
             loaded_import_targets: HashSet::new(),
             dependency_import_depth: 0,
+            direct_enum_owners: HashMap::new(),
+            direct_enum_wanted: HashSet::new(),
+            import_key_stack: Vec::new(),
+            enum_loads: HashMap::new(),
             memory_warnings: MemoryWarningCollector::strict(), // STRICT by default
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),
@@ -492,7 +550,7 @@ impl Lowerer {
             duplicate_global_struct_defs: None,
             struct_decl_files: HashMap::new(),
             struct_field_defaults: HashMap::new(),
-            struct_field_type_names: HashMap::new(),
+            struct_field_declared_types: HashMap::new(),
             ambiguous_field_names: None,
             global_enum_defs: None,
             untyped_empty_array_locals: HashSet::new(),
@@ -541,6 +599,7 @@ impl Lowerer {
             current_function_name: None,
             current_function_line: None,
             current_pattern_span: None,
+            value_tail_match: None,
             module_resolver: None,
             current_file: None,
             loaded_modules: HashSet::new(),
@@ -548,6 +607,10 @@ impl Lowerer {
             import_cycles: Vec::new(),
             loaded_import_targets: HashSet::new(),
             dependency_import_depth: 0,
+            direct_enum_owners: HashMap::new(),
+            direct_enum_wanted: HashSet::new(),
+            import_key_stack: Vec::new(),
+            enum_loads: HashMap::new(),
             memory_warnings: MemoryWarningCollector::new(), // Lenient mode (warnings only)
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),
@@ -602,7 +665,7 @@ impl Lowerer {
             duplicate_global_struct_defs: None,
             struct_decl_files: HashMap::new(),
             struct_field_defaults: HashMap::new(),
-            struct_field_type_names: HashMap::new(),
+            struct_field_declared_types: HashMap::new(),
             ambiguous_field_names: None,
             global_enum_defs: None,
             untyped_empty_array_locals: HashSet::new(),
@@ -1345,6 +1408,109 @@ impl Lowerer {
             .get(importer)?
             .get(ns)
             .map(String::as_str)
+    }
+
+    /// `(owner, name)` of the free function a bare `name`, referenced from the
+    /// function being lowered, binds to when ANOTHER module of the flattened
+    /// unit declares it: the definition its import names (selective, alias,
+    /// re-export facade, single glob source), else the unit's only definition
+    /// (the flattened namespace binds a bare name with no import at all).
+    /// `None` for the caller's own definition and for anything ambiguous.
+    fn flatten_foreign_callable_definer(&self, name: &str) -> Option<(String, String)> {
+        let current = self.current_function_owner.as_deref();
+        if self.flatten_owner_defines(current, name) {
+            return None;
+        }
+        let importer = current.unwrap_or("<entry>");
+        if let Some((source_owner, source_name)) = self
+            .flatten_owner_import_bindings
+            .get(importer)
+            .and_then(|bindings| bindings.get(name))
+        {
+            // An unresolved walk (hop budget, ambiguous facade) falls through to
+            // the glob and only-definition rules: the name still binds.
+            if let Some(definer) = self.flatten_reexport_definer(importer, source_owner, source_name) {
+                return Some(definer);
+            }
+        }
+        let mut declarers: Vec<(String, String)> = Vec::new();
+        for glob_owner in self.flatten_owner_glob_sources.get(importer).into_iter().flatten() {
+            if let Some(declarer) = self.flatten_reexport_definer(importer, glob_owner, name) {
+                if !declarers.contains(&declarer) {
+                    declarers.push(declarer);
+                }
+            }
+        }
+        match declarers.len() {
+            0 => {}
+            1 => return declarers.pop(),
+            _ => return None,
+        }
+        let owners = self.flatten_fn_owners.get(name)?;
+        let only = owners.first()?.clone()?;
+        owners
+            .iter()
+            .all(|owner| owner.as_deref() == Some(only.as_str()))
+            .then(|| (only, name.to_string()))
+    }
+
+    /// JIT run lane: a bare `name` lowered as a module-level callable (call,
+    /// value, alias) is a use of it by the module being lowered. Record it
+    /// when it reaches a private fn of another directory (the interpreter's
+    /// call rule, `check_private_call_visibility`, with a lexical caller).
+    /// jit_main_lane_skips_private_import_visibility_2026-11-13.
+    pub(super) fn gate_private_fn_ref(&self, name: &str) {
+        if !private_ref_gate_armed() {
+            return;
+        }
+        if let Some((owner, source_name)) = self.flatten_foreign_callable_definer(name) {
+            self.record_private_ref(&owner, &source_name);
+        }
+    }
+
+    /// `ns.member` through a whole-module import (see `gate_private_fn_ref`).
+    pub(super) fn gate_private_namespace_ref(&self, ns: &str, member: &str) {
+        if !private_ref_gate_armed() {
+            return;
+        }
+        let Some(source_owner) = self.flatten_namespace_owner(ns) else {
+            return;
+        };
+        let importer = self.current_function_owner.as_deref().unwrap_or("<entry>");
+        if let Some((owner, name)) = self.flatten_reexport_definer(importer, source_owner, member) {
+            self.record_private_ref(&owner, &name);
+        }
+    }
+
+    fn record_private_ref(&self, owner: &str, name: &str) {
+        use crate::interpreter::interpreter_module::check_private_call_visibility;
+        let caller: std::sync::Arc<str> = match (&self.current_function_owner, &self.current_file) {
+            (Some(owner), _) => std::sync::Arc::from(owner.as_str()),
+            (None, Some(entry)) => {
+                std::sync::Arc::from(crate::interpreter::normalize_path_key(entry).to_string_lossy().as_ref())
+            }
+            (None, None) => return,
+        };
+        let owner: std::sync::Arc<str> = std::sync::Arc::from(owner);
+        if let Err(error) = check_private_call_visibility(name, &owner, &caller) {
+            let message = error.to_string();
+            // Same name `lower_function` emits the function under: a method
+            // keeps `Type.method`, a free function its flatten symbol.
+            let function = self.current_function_name.as_ref().map(|name| {
+                if name.contains('.') {
+                    name.clone()
+                } else {
+                    self.flatten_emitted_symbol(self.current_function_owner.as_deref(), name)
+                }
+            });
+            PRIVATE_REF_VIOLATIONS.with(|cell| {
+                if let Some(found) = cell.borrow_mut().as_mut() {
+                    if !found.iter().any(|v| v.function == function && v.message == message) {
+                        found.push(PrivateRefViolation { function, message });
+                    }
+                }
+            });
+        }
     }
 
     /// Owner-exact symbol of free function `member` reached as `ns.member(...)`

@@ -71,6 +71,7 @@ pub mod cache_host_authority_v1;
 pub mod fork_shared_heap_v1;
 pub mod cuda_runtime;
 pub mod process_observation_v4_twins;
+pub mod process_tree_observation_v1;
 pub mod debug;
 pub mod directx_submission_twins;
 pub mod executor;
@@ -558,6 +559,7 @@ fn runtime_symbol_table_excludes_disabled_tls_providers() {
         "rt_tls_server_create_from_der",
         "rt_tls_server_read_checked",
         "rt_tls_server_shutdown",
+        "rt_tls_server_upgrade_tcp",
         "rt_tls_server_write",
         "rt_tls_server_write_bytes",
     ];
@@ -1194,7 +1196,7 @@ pub use value::{
     rt_tls_client_write, rt_tls_client_write_timeout, rt_tls_get_cipher_suite, rt_tls_get_negotiated_alpn,
     rt_tls_get_protocol_version, rt_tls_is_handshake_complete, rt_tls_server_accept, rt_tls_server_close_connection,
     rt_tls_server_create, rt_tls_server_create_from_der, rt_tls_server_read_checked, rt_tls_server_shutdown,
-    rt_tls_server_write, rt_tls_server_write_bytes,
+    rt_tls_server_upgrade_tcp, rt_tls_server_write, rt_tls_server_write_bytes,
 };
 
 // Re-export contract violation types and SFFI functions (CTR-050-054)

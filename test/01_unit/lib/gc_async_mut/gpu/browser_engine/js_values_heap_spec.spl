@@ -1,0 +1,166 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/js/values.spl 1%
+# @tag: unit, browser_engine, js
+#
+# Value model of the in-tree JS engine: ECMAScript ToBoolean, typeof and strict
+# equality on the seven value kinds, own-property storage on objects
+# (read-only properties ignore writes, delete removes, missing reads are
+# undefined) and heap allocation (ids are unique and increasing; objects and
+# functions are looked up by id). The interpreter built on top of this model is
+# NOT asserted here: it mis-evaluates basic programs on this seed (see
+# doc/08_tracking/bug/js_engine_interpreter_wrong_results_2026-11-14.md).
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.js.values.{
+    JsVal, JsProp, JsObj, JsHeap,
+    js_to_bool, js_to_number, js_to_string, js_typeof, js_strict_equal
+}
+
+describe "JS value model":
+
+    context "ToBoolean":
+
+        it "is false for undefined, null, zero and the empty string":
+            expect(js_to_bool(JsVal.Undefined)).to_equal(false)
+            expect(js_to_bool(JsVal.Null)).to_equal(false)
+            expect(js_to_bool(JsVal.Num(0.0))).to_equal(false)
+            expect(js_to_bool(JsVal.Str(""))).to_equal(false)
+            expect(js_to_bool(JsVal.Bool(false))).to_equal(false)
+
+        it "is true for non-zero numbers, non-empty strings, objects and functions":
+            expect(js_to_bool(JsVal.Num(-1.5))).to_equal(true)
+            expect(js_to_bool(JsVal.Str("0"))).to_equal(true)
+            expect(js_to_bool(JsVal.Bool(true))).to_equal(true)
+            expect(js_to_bool(JsVal.Obj(1))).to_equal(true)
+            expect(js_to_bool(JsVal.Func(2))).to_equal(true)
+
+    context "typeof":
+
+        it "names each kind, with null reported as object":
+            expect(js_typeof(JsVal.Undefined)).to_equal("undefined")
+            expect(js_typeof(JsVal.Null)).to_equal("object")
+            expect(js_typeof(JsVal.Bool(true))).to_equal("boolean")
+            expect(js_typeof(JsVal.Num(1.0))).to_equal("number")
+            expect(js_typeof(JsVal.Str("s"))).to_equal("string")
+            expect(js_typeof(JsVal.Obj(1))).to_equal("object")
+            expect(js_typeof(JsVal.Func(1))).to_equal("function")
+
+    context "ToNumber and ToString of primitives":
+
+        it "converts booleans and null to numbers":
+            expect(js_to_number(JsVal.Bool(true))).to_equal(1.0)
+            expect(js_to_number(JsVal.Bool(false))).to_equal(0.0)
+            expect(js_to_number(JsVal.Null)).to_equal(0.0)
+            expect(js_to_number(JsVal.Num(2.5))).to_equal(2.5)
+
+        it "names the non-numeric primitives":
+            expect(js_to_string(JsVal.Undefined)).to_equal("undefined")
+            expect(js_to_string(JsVal.Null)).to_equal("null")
+            expect(js_to_string(JsVal.Bool(true))).to_equal("true")
+            expect(js_to_string(JsVal.Bool(false))).to_equal("false")
+            expect(js_to_string(JsVal.Str("abc"))).to_equal("abc")
+            expect(js_to_string(JsVal.Obj(3))).to_equal("[object Object]")
+
+    context "strict equality":
+
+        it "compares same-kind values by value":
+            expect(js_strict_equal(JsVal.Num(1.0), JsVal.Num(1.0))).to_equal(true)
+            expect(js_strict_equal(JsVal.Num(1.0), JsVal.Num(2.0))).to_equal(false)
+            expect(js_strict_equal(JsVal.Str("a"), JsVal.Str("a"))).to_equal(true)
+            expect(js_strict_equal(JsVal.Str("a"), JsVal.Str("b"))).to_equal(false)
+            expect(js_strict_equal(JsVal.Bool(true), JsVal.Bool(true))).to_equal(true)
+            expect(js_strict_equal(JsVal.Bool(true), JsVal.Bool(false))).to_equal(false)
+            expect(js_strict_equal(JsVal.Undefined, JsVal.Undefined)).to_equal(true)
+            expect(js_strict_equal(JsVal.Null, JsVal.Null)).to_equal(true)
+
+        it "never equates different kinds":
+            expect(js_strict_equal(JsVal.Num(1.0), JsVal.Str("1"))).to_equal(false)
+            expect(js_strict_equal(JsVal.Null, JsVal.Undefined)).to_equal(false)
+            expect(js_strict_equal(JsVal.Undefined, JsVal.Null)).to_equal(false)
+            expect(js_strict_equal(JsVal.Bool(true), JsVal.Num(1.0))).to_equal(false)
+            expect(js_strict_equal(JsVal.Str(""), JsVal.Bool(false))).to_equal(false)
+            expect(js_strict_equal(JsVal.Obj(1), JsVal.Func(1))).to_equal(false)
+            expect(js_strict_equal(JsVal.Func(1), JsVal.Obj(1))).to_equal(false)
+
+        it "compares objects and functions by identity":
+            expect(js_strict_equal(JsVal.Obj(4), JsVal.Obj(4))).to_equal(true)
+            expect(js_strict_equal(JsVal.Obj(4), JsVal.Obj(5))).to_equal(false)
+            expect(js_strict_equal(JsVal.Func(7), JsVal.Func(7))).to_equal(true)
+            expect(js_strict_equal(JsVal.Func(7), JsVal.Func(8))).to_equal(false)
+
+    context "object properties":
+
+        it "reads a missing property as undefined":
+            var o = JsObj.create(1)
+            expect(js_typeof(o.get_prop("x"))).to_equal("undefined")
+            expect(o.has_prop("x")).to_equal(false)
+            expect(o.prototype_id).to_equal(-1)
+
+        it "stores, overwrites and enumerates properties in insertion order":
+            var o = JsObj.create(1)
+            o.set_prop("a", JsVal.Num(1.0))
+            o.set_prop("b", JsVal.Str("two"))
+            o.set_prop("a", JsVal.Num(3.0))
+            expect(js_to_number(o.get_prop("a"))).to_equal(3.0)
+            expect(js_to_string(o.get_prop("b"))).to_equal("two")
+            expect(o.prop_keys()).to_equal(["a", "b"])
+
+        it "ignores a write to a read-only property":
+            var o = JsObj.create(1)
+            o.props.push(JsProp.readonly("k", JsVal.Num(1.0)))
+            o.set_prop("k", JsVal.Num(2.0))
+            expect(js_to_number(o.get_prop("k"))).to_equal(1.0)
+
+        it "deletes a property and reports whether it existed":
+            var o = JsObj.create(1)
+            o.set_prop("a", JsVal.Num(1.0))
+            o.set_prop("b", JsVal.Num(2.0))
+            expect(o.delete_prop("a")).to_equal(true)
+            expect(o.delete_prop("a")).to_equal(false)
+            expect(o.has_prop("a")).to_equal(false)
+            expect(o.prop_keys()).to_equal(["b"])
+
+        it "records the prototype id":
+            expect(JsObj.with_proto(5, 2).prototype_id).to_equal(2)
+
+    context "heap":
+
+        it "hands out increasing ids across objects and functions":
+            var h = JsHeap.new()
+            val a = h.alloc_object()
+            val f = h.alloc_func("add", ["x", "y"], 0)
+            val b = h.alloc_object_with_proto(a)
+            val n = h.alloc_native_func("log", 9)
+            expect(a).to_equal(1)
+            expect(f).to_equal(2)
+            expect(b).to_equal(3)
+            expect(n).to_equal(4)
+
+        it "finds objects and functions only under their own kind":
+            var h = JsHeap.new()
+            val a = h.alloc_object()
+            val f = h.alloc_func("add", ["x", "y"], 0)
+            expect(h.get_object(a).unwrap().id).to_equal(a)
+            expect(h.get_func(f).unwrap().name).to_equal("add")
+            expect(h.get_func(f).unwrap().params).to_equal(["x", "y"])
+            expect(h.get_object(f) == nil).to_equal(true)
+            expect(h.get_func(a) == nil).to_equal(true)
+            expect(h.get_object(99) == nil).to_equal(true)
+
+        it "links a prototype":
+            var h = JsHeap.new()
+            val a = h.alloc_object()
+            val b = h.alloc_object_with_proto(a)
+            expect(h.get_object(b).unwrap().prototype_id).to_equal(a)
+
+        it "sets and gets properties through the heap":
+            var h = JsHeap.new()
+            val a = h.alloc_object()
+            val b = h.alloc_object()
+            h.set_object_prop(a, "k", JsVal.Str("v"))
+            expect(js_to_string(h.get_object_prop(a, "k"))).to_equal("v")
+            expect(js_typeof(h.get_object_prop(b, "k"))).to_equal("undefined")
+            expect(js_typeof(h.get_object_prop(99, "k"))).to_equal("undefined")
+            h.set_object_prop(99, "k", JsVal.Num(1.0))
+            expect(js_typeof(h.get_object_prop(99, "k"))).to_equal("undefined")

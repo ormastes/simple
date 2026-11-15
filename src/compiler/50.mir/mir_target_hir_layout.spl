@@ -7,7 +7,7 @@ use compiler.hir.hir_definitions.{HirField}
 use compiler.hir.target_hir.hir_snapshot.{HirSnapshotId, hir_snapshot_id_equals, hir_snapshot_id_text}
 use compiler.hir.target_hir.target_hir.{TargetHIR}
 use compiler.hir.target_hir.target_hir_resolution.{target_hir_builder_new, target_hir_builder_resolve_required, target_hir_builder_freeze, target_hir_abi}
-use compiler.types.type_layout.{LayoutAttr, TypeLayout, FieldLayout, compute_struct_layout, compute_struct_layout_for_arch}
+use compiler.types.type_layout.{LayoutAttr, TypeLayout, FieldLayout, compute_struct_layout, compute_struct_layout_for_target}
 use compiler.common.mir_target_context.{MirTargetContext}
 use compiler.hir.target_hir.hir_snapshot.{hir_snapshot_id_new}
 use compiler.hir.target_hir.target_hir.{target_hir_for_context}
@@ -46,7 +46,10 @@ fn mir_target_hir_struct_layout(view: TargetHIR, snapshot: HirSnapshotId, type_n
     val arch = _mir_thir_arch(view.target.arch)
     if arch.is_err():
         return Err(arch.unwrap_err())
-    val layout: TypeLayout = compute_struct_layout_for_arch(fields, attr, arch.unwrap())
+    val target_layout = compute_struct_layout_for_target(fields, attr, view.target)
+    if target_layout.is_err():
+        return Err(target_layout.unwrap_err())
+    val layout: TypeLayout = target_layout.unwrap()
     # Offsets are reported in declaration order, whatever the physical order.
     var offsets: [i64] = []
     for field in fields:
@@ -78,7 +81,7 @@ fn mir_target_hir_fn_abi(view: TargetHIR, snapshot: HirSnapshotId, fn_name: text
 # The legacy compute_struct_layout table is fixed LP64 (pointer/usize = 8,
 # i64/f64 align 8). Every supported host and every 64-bit target uses exactly
 # that table, so those keep calling it unchanged (byte-identical host builds).
-# A 32-bit lowering target must not inherit LP64 offsets: it gets the arch table.
+# A 32-bit lowering target uses architecture and OS ABI policy together.
 fn mir_legacy_layout_arch(arch: text) -> TargetArch?:
     if arch == "x86":
         return Some(TargetArch.X86)
@@ -91,7 +94,7 @@ fn mir_legacy_layout_arch(arch: text) -> TargetArch?:
 fn mir_target_aware_struct_layout(target: MirTargetContext, fields: [HirField], attr: LayoutAttr) -> TypeLayout:
     val arch = mir_legacy_layout_arch(target.arch)
     if arch.?:
-        return compute_struct_layout_for_arch(fields, attr, arch.unwrap())
+        return compute_struct_layout_for_target(fields, attr, target).unwrap()
     compute_struct_layout(fields, attr)
 
 # Live wiring (SIMPLE_TARGET_HIR_MODE): legacy returns the legacy layout

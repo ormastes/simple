@@ -1,0 +1,248 @@
+"""
+## Purpose and audience
+Purpose: Pin how line boxes and formatting-context blocks FIT beside floats,
+against Chrome 159 (CSS 2.2 section 9.5), in layout and in both paint lanes:
+a line that cannot take its first word beside the floats moves below them;
+`<br style="clear:both">` clears; every line of a wrapped run is bounded by
+all the floats that intersect THAT line (not only the nearest float bottom);
+a block that establishes a formatting context is fitted over its whole height;
+and centred / right-aligned / RTL lines are aligned inside the float-shortened
+line box.
+Audience: browser-engine layout and paint maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless shell, 900x4000,
+`body{margin:0;font:16px/1.5 sans-serif}`, getBoundingClientRect and
+`Range.getClientRects()` relative to the 400 px (or 300 px) wrapper; a line
+rect's top is the line top + 3, and so is the y of a Draw IR text command). Text x values are fractional in Chrome and
+whole pixels here, so text x is asserted within 1 px.
+
+| case | markup (inside the wrapper)                                                  | Chrome |
+|------|------------------------------------------------------------------------------|--------|
+| A    | two `float:left;width:50%;height:60px`, `<p margin:0>footer text</p>`, `<div n>` | p 0,0,400,84; text line at y=60 x=0; n at y=84 |
+| B    | same floats 50 px tall, `<p><span x>footer</span> text</p>`                  | p h=74; x.y = 53 |
+| C    | `float:left 100x60`, `aa<br style="clear:both"><span y>bb</span>`            | wrapper h=84; y.y = 63 |
+| D    | `float:left 380x30`, `<div>word another</div>`                               | div h=54; text line at y=30 x=0 |
+| E    | `float:left 100x40` + `float:right 100x120` + 15 ten-letter words            | lines x: 100,100,0,0,0,0 at y 0,24,48,72,96,120; widths <= 200,200,300,300,300,400; wrapper h=144 |
+| F    | 300 px: `float:left 100x20`, `float:left;clear:left 200x100`, `overflow:hidden;height:150px` | 200,0,100,150 |
+| G    | same floats, `overflow:hidden` (auto height) then `<div v>`                  | 200,0,100,24; v at y=24 |
+| H    | same floats, `overflow:hidden;width:150px;height:50px`                       | 0,120,150,50 |
+| I    | `text-align:right`, `float:right 100x60`, `aaaa bbbb` (75.64 px)             | text x = 224.36 |
+| J    | `text-align:center`, same                                                    | text x = 112.17 |
+| K    | `text-align:right`, `float:right 100x30`, 8 ten-letter words                 | lines x: 33.14, 71.28, 217.58 |
+| L    | `direction:rtl`, `float:right 100x60`, `aaaa bbbb`                           | text x = 224.36 |
+| M    | `text-align:center`, `float:left 100x30`, 8 ten-letter words                 | lines x: 116.56, 135.64, 108.78 |
+
+Not covered: a generated `::after` clearfix (this renderer builds no `::after`
+box, so `.clearfix::after{clear:both}` cannot clear; the block-level
+`clear` and `<br clear>` forms above are the supported ones).
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-FLOAT-LINE-FIT-CHROME159-001 — line boxes and formatting-context blocks fit beside floats over their own extent, and paint agrees with layout.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.common.ui.draw_ir.{DRAW_IR_COMMAND_TEXT}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id, simple_web_layout_render_html_draw_ir,
+    simple_web_layout_render_html_software_pixels
+}
+
+val VW: i32 = 420
+val VH: i32 = 260
+val HEAD: text = "<html><head><style>body{margin:0;background:#fff;color:#000;font:16px/1.5 sans-serif}.w{width:400px}.t{width:300px}</style></head><body>"
+val TAIL: text = "</body></html>"
+val COLS: text = "<div id=\"a\" style=\"float:left;width:50%;height:60px\">A</div><div id=\"b\" style=\"float:left;width:50%;height:60px\">B</div>"
+val WORDS15: text = "aaaaaaaaaa bbbbbbbbbb cccccccccc dddddddddd eeeeeeeeee ffffffffff gggggggggg hhhhhhhhhh iiiiiiiiii jjjjjjjjjj kkkkkkkkkk llllllllll mmmmmmmmmm nnnnnnnnnn oooooooooo"
+val WORDS8: text = "aaaaaaaaaa bbbbbbbbbb cccccccccc dddddddddd eeeeeeeeee ffffffffff gggggggggg hhhhhhhhhh"
+val TWO_FLOATS: text = "<div class=\"w\" id=\"w\"><div style=\"float:left;width:100px;height:40px\"></div><div style=\"float:right;width:100px;height:120px\"></div>" + WORDS15 + "</div>"
+val STAIR: text = "<div class=\"t\"><div style=\"float:left;width:100px;height:20px\"></div><div style=\"float:left;clear:left;width:200px;height:100px\"></div>"
+
+fn field(inner: text, id: text, name: text) -> i32:
+    simple_web_layout_debug_layout_by_id(HEAD + inner + TAIL, VW, VH, id, name).to_int()
+
+fn box(inner: text, id: text) -> text:
+    "{field(inner, id, \"x\")},{field(inner, id, \"y\")},{field(inner, id, \"w\")},{field(inner, id, \"h\")}"
+
+# x (or y) of the first Draw IR text command whose text contains `needle`.
+fn text_x(inner: text, needle: text) -> i32:
+    val composition = simple_web_layout_render_html_draw_ir(HEAD + inner + TAIL, VW, VH)
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.kind == DRAW_IR_COMMAND_TEXT and command.text_value.contains(needle):
+                return command.x
+    -1000
+
+fn text_y(inner: text, needle: text) -> i32:
+    val composition = simple_web_layout_render_html_draw_ir(HEAD + inner + TAIL, VW, VH)
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.kind == DRAW_IR_COMMAND_TEXT and command.text_value.contains(needle):
+                return command.y
+    -1000
+
+# First dark column of the software lane in the row band [y0, y1), or -1.
+fn ink_x(inner: text, y0: i32, y1: i32) -> i32:
+    val px = simple_web_layout_render_html_software_pixels(HEAD + inner + TAIL, VW, VH)
+    var x = 0
+    while x < VW:
+        var y = y0
+        while y < y1:
+            if ((px[y * VW + x] >> 8) & 255) < 128:
+                return x
+            y = y + 1
+        x = x + 1
+    -1
+
+fn off(actual: i32, chrome: i32) -> i32:
+    if actual > chrome: actual - chrome else: chrome - actual
+
+describe "line boxes and formatting-context blocks fit beside floats":
+    it "AC-1: a line with no room beside two half-width floats starts below them":
+        step("Chrome 159: p 0,0,400,84; the text rect at y=63 (line top 60), x=0; the next block at y=84")
+        val page = "<div class=\"w\">" + COLS + "<p id=\"p\" style=\"margin:0\">footer text</p><div id=\"n\">nn</div></div>"
+        expect(box(page, "p")).to_equal("0,0,400,84")
+        expect(field(page, "n", "y")).to_equal(84)
+        expect(text_x(page, "footer")).to_equal(0)
+        expect(text_y(page, "footer")).to_equal(63)
+        step("software lane: no ink of the footer inside the float rows, ink at the left edge below them")
+        expect(ink_x(page, 24, 60)).to_equal(-1)
+        expect(ink_x(page, 60, 84)).to_be_less_than(4)
+
+    it "AC-2: the same for a line that opens with an inline element, at the exact float bottom":
+        step("Chrome 159: floats 50 px tall -> p 74 tall, the span at y=53 (line top 50)")
+        val page = "<div class=\"w\"><div style=\"float:left;width:50%;height:50px\">A</div><div style=\"float:left;width:50%;height:50px\">B</div><p id=\"p\" style=\"margin:0\"><span id=\"x\">footer</span> text</p></div>"
+        expect(field(page, "p", "h")).to_equal(74)
+        expect(off(field(page, "x", "y"), 53)).to_be_less_than(2)
+        expect(field(page, "x", "x")).to_equal(0)
+
+    it "AC-3: <br style=clear:both> starts the next line below the floats":
+        step("Chrome 159: wrapper 84 tall, the span after the br at y=63")
+        val page = "<div class=\"w\" id=\"w\"><div style=\"float:left;width:100px;height:60px\"></div>aa<br style=\"clear:both\"><span id=\"y\">bb</span></div>"
+        expect(field(page, "w", "h")).to_equal(84)
+        expect(off(field(page, "y", "y"), 63)).to_be_less_than(2)
+        expect(field(page, "y", "x")).to_equal(0)
+
+    it "AC-4: a first word wider than the room beside a float drops below it":
+        step("Chrome 159: 380 px float, 20 px of room -> the text rect is at y=33 (line top 30), the block 54 tall")
+        val page = "<div class=\"w\"><div style=\"float:left;width:380px;height:30px\"></div><div id=\"r\">word another</div></div>"
+        expect(field(page, "r", "h")).to_equal(54)
+        expect(text_x(page, "word")).to_equal(0)
+        expect(text_y(page, "word")).to_equal(33)
+
+    it "AC-5: each line is bounded by the floats that intersect that line":
+        step("Chrome 159: left float to y=40, right float to y=120 -> line x 100,100,0,0,0,0; wrapper 144 tall")
+        expect(field(TWO_FLOATS, "w", "h")).to_equal(144)
+        expect(field(TWO_FLOATS, "w", "text_lines")).to_equal(6)
+        expect(text_x(TWO_FLOATS, "aaaaaaaaaa")).to_equal(100)
+        expect(text_x(TWO_FLOATS, "cccccccccc")).to_equal(100)
+        expect(text_x(TWO_FLOATS, "eeeeeeeeee")).to_equal(0)
+        expect(text_x(TWO_FLOATS, "hhhhhhhhhh")).to_equal(0)
+        expect(text_x(TWO_FLOATS, "mmmmmmmmmm")).to_equal(0)
+        expect(text_x(TWO_FLOATS, "oooooooooo")).to_equal(0)
+        step("Chrome 159: text rect tops 3,27,51,75,99,123 (line tops 0..120) -- the lines under the right float stay 300 px wide")
+        expect(text_y(TWO_FLOATS, "cccccccccc")).to_equal(27)
+        expect(text_y(TWO_FLOATS, "eeeeeeeeee")).to_equal(51)
+        expect(text_y(TWO_FLOATS, "hhhhhhhhhh")).to_equal(75)
+        expect(text_y(TWO_FLOATS, "mmmmmmmmmm")).to_equal(99)
+        expect(text_y(TWO_FLOATS, "oooooooooo")).to_equal(123)
+
+    it "AC-6: the software lane paints those lines in the same places":
+        step("lines 0-1 start at x=100, lines 2-5 at x=0; nothing is painted under the right float (x >= 300) above y=120")
+        expect(off(ink_x(TWO_FLOATS, 0, 24), 100)).to_be_less_than(4)
+        expect(off(ink_x(TWO_FLOATS, 24, 48), 100)).to_be_less_than(4)
+        expect(ink_x(TWO_FLOATS, 48, 72)).to_be_less_than(4)
+        expect(ink_x(TWO_FLOATS, 96, 120)).to_be_less_than(4)
+        val px = simple_web_layout_render_html_software_pixels(HEAD + TWO_FLOATS + TAIL, VW, VH)
+        var under_float = 0
+        var y = 0
+        while y < 120:
+            var x = 300
+            while x < 400:
+                if ((px[y * VW + x] >> 8) & 255) < 128:
+                    under_float = under_float + 1
+                x = x + 1
+            y = y + 1
+        expect(under_float).to_equal(0)
+
+    it "AC-7: a formatting-context block is fitted over its whole height":
+        step("Chrome 159: 150 px tall beside a 100x20 then a 200x100 float -> 200,0,100,150")
+        expect(box(STAIR + "<div id=\"t\" style=\"overflow:hidden;height:150px\">x</div></div>", "t")).to_equal("200,0,100,150")
+        step("Chrome 159: auto height -> 200,0,100,24; the next plain block at y=24")
+        val auto_h = STAIR + "<div id=\"t\" style=\"overflow:hidden\">x</div><div id=\"v\">y</div></div>"
+        expect(box(auto_h, "t")).to_equal("200,0,100,24")
+        expect(field(auto_h, "v", "y")).to_equal(24)
+        step("Chrome 159: a 150 px wide one fits nowhere beside them -> 0,120,150,50")
+        expect(box(STAIR + "<div id=\"t\" style=\"overflow:hidden;width:150px;height:50px\">x</div></div>", "t")).to_equal("0,120,150,50")
+
+    it "AC-8: a right-aligned or centred single line is aligned in the shortened line box":
+        step("Chrome 159: 300 px line beside a right float, 75.64 px text -> right 224.36, centre 112.17")
+        val right = "<div class=\"w\" style=\"text-align:right\"><div style=\"float:right;width:100px;height:60px\"></div>aaaa bbbb</div>"
+        expect(off(text_x(right, "aaaa"), 224)).to_be_less_than(2)
+        expect(off(ink_x(right, 0, 24), 224)).to_be_less_than(4)
+        val centre = "<div class=\"w\" style=\"text-align:center\"><div style=\"float:right;width:100px;height:60px\"></div>aaaa bbbb</div>"
+        expect(off(text_x(centre, "aaaa"), 112)).to_be_less_than(2)
+        expect(off(ink_x(centre, 0, 24), 112)).to_be_less_than(4)
+
+    it "AC-9: an RTL line beside a right float ends at the float's left edge":
+        step("Chrome 159: text x = 224.36")
+        val rtl = "<div class=\"w\" style=\"direction:rtl\"><div style=\"float:right;width:100px;height:60px\"></div>aaaa bbbb</div>"
+        expect(off(text_x(rtl, "aaaa"), 224)).to_be_less_than(2)
+
+    it "AC-10: wrapped right-aligned lines use each line's own box":
+        step("Chrome 159: float:right 100x30 -> line x 33.14, 71.28 (300 px lines), then 217.58 (400 px line)")
+        val page = "<div class=\"w\" id=\"w\" style=\"text-align:right\"><div style=\"float:right;width:100px;height:30px\"></div>" + WORDS8 + "</div>"
+        expect(field(page, "w", "h")).to_equal(72)
+        expect(off(text_x(page, "aaaaaaaaaa"), 33)).to_be_less_than(2)
+        expect(off(text_x(page, "dddddddddd"), 71)).to_be_less_than(2)
+        expect(off(text_x(page, "gggggggggg"), 218)).to_be_less_than(2)
+        expect(off(ink_x(page, 0, 24), 33)).to_be_less_than(4)
+        expect(off(ink_x(page, 48, 72), 218)).to_be_less_than(4)
+
+    it "AC-11: wrapped centred lines beside a left float":
+        step("Chrome 159: float:left 100x30 -> line x 116.56, 135.64 (300 px lines from x=100), then 108.78")
+        val page = "<div class=\"w\" style=\"text-align:center\"><div style=\"float:left;width:100px;height:30px\"></div>" + WORDS8 + "</div>"
+        expect(off(text_x(page, "aaaaaaaaaa"), 117)).to_be_less_than(2)
+        expect(off(text_x(page, "dddddddddd"), 136)).to_be_less_than(2)
+        expect(off(text_x(page, "gggggggggg"), 109)).to_be_less_than(2)
+
+    it "AC-12: control — text below every float is laid out and painted as if there were none":
+        step("a float 10 px tall above a block that starts at y=24: every line at x=0")
+        val page = "<div class=\"w\"><div style=\"float:left;width:100px;height:10px\"></div><div>one</div><div id=\"q\" style=\"width:200px\">mmmmmmmm nnnnnnnnnnnn oooooooooooo</div></div>"
+        expect(field(page, "q", "y")).to_equal(24)
+        expect(text_x(page, "mmmmmmmm")).to_equal(0)
+        expect(text_x(page, "oooooooooooo")).to_equal(0)
+
+    it "AC-13: a word wider than its column overflows on one line beside a float it does not touch":
+        step("Chrome 159: 300 px block, float:left 50x200, `<p margin-left:60px>` holding a 513 px URL -> p 60,0,240,24, one line, next block at y=24")
+        val page = "<div style=\"width:300px\"><div style=\"float:left;width:50px;height:200px\"></div><p id=\"u\" style=\"margin:0 0 0 60px\">https://example.com/a/very/long/path/that/does/not/fit/in/the/column/at/all</p><div id=\"n\">nn</div></div>"
+        expect(box(page, "u")).to_equal("60,0,240,24")
+        expect(field(page, "u", "text_lines")).to_equal(1)
+        expect(field(page, "n", "y")).to_equal(24)
+        expect(text_x(page, "https")).to_equal(60)
+
+    it "AC-14: a long word on a float-shortened line is moved down whole, never chopped":
+        step("Chrome 159: `aa URL bb` beside a 50x60 float: `aa` at x=50, the URL whole on its own line at x=0, `bb` on the line after it")
+        val page = "<div style=\"width:300px\"><div style=\"float:left;width:50px;height:60px\"></div><p id=\"u\" style=\"margin:0\">aa https://example.com/a/very/long/path/that/does/not/fit/in/the/column bb</p></div>"
+        expect(text_x(page, "aa")).to_equal(50)
+        expect(text_x(page, "https://example.com/a/very/long/path/that/does/not/fit/in/the/column")).to_equal(0)
+        expect(text_x(page, "bb")).to_equal(0)
+        expect(text_y(page, "bb") - text_y(page, "https")).to_equal(24)
+
+    it "AC-15: nested formatting-context blocks beside floats are laid out once per level":
+        step("Chrome 159 (measured, 400 px wrapper): 22 levels of overflow:hidden, each beside a 4x4 left float -> innermost box 88,0,312,24. A trial layout per level that is not reused costs 2^22 layouts and does not finish")
+        var open = ""
+        var close = ""
+        var level = 0
+        while level < 22:
+            open = open + "<div style=\"overflow:hidden\"><div style=\"float:left;width:4px;height:4px\"></div>"
+            close = close + "</div>"
+            level = level + 1
+        val page = "<div class=\"w\">" + open + "<div id=\"q\" style=\"overflow:hidden\">x</div>" + close + "</div>"
+        expect(box(page, "q")).to_equal("88,0,312,24")
+
+    it "AC-16: an inherited, authored text-align:left stays left under direction:rtl":
+        step("Chrome 159: parent text-align:left, child direction:rtl -> text x = 0; no text-align anywhere -> 224.36; ltr child of an rtl parent -> 0")
+        expect(text_x("<div style=\"width:300px;text-align:left\"><div style=\"direction:rtl\">aaaa bbbb</div></div>", "aaaa")).to_equal(0)
+        expect(off(text_x("<div style=\"width:300px\"><div style=\"direction:rtl\">aaaa bbbb</div></div>", "aaaa"), 224)).to_be_less_than(2)
+        expect(text_x("<div style=\"width:300px;direction:rtl\"><div style=\"direction:ltr\">aaaa bbbb</div></div>", "aaaa")).to_equal(0)

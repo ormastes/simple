@@ -120,6 +120,14 @@ prior compile-time attempt at the same idea (`src/compiler/35.semantics/lint/mat
 `src/compiler/95.interp/interpreter/pattern.spl`) is dead code, uncalled,
 precisely because of this.
 
+**Scope of this table (2026-11-14).** It describes the pure-Simple **core
+interpreter** only. On the Rust seed (interpreter and JIT/native) a `match`
+that takes no arm is a hard runtime error under **every** profile — statement
+and expression form, any scrutinee type — per the owner decision recorded in
+`doc/08_tracking/bug/match_statement_no_arm_silent_noop_2026-11-14.md`. The
+core interpreter's warn-by-default row below is a tracked gap against that
+rule, not a second policy.
+
 Two independent diagnostics, both interpreter-tier, both landed in
 `src/compiler/10.frontend/core/interpreter/eval_tables.spl` and wired from
 `SIMPLE_SAFETY_PROFILE` in `eval_decls.spl`'s `eval_init()`:

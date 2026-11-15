@@ -485,18 +485,72 @@ fn provided_names_registry() -> &'static std::sync::Mutex<HashMap<std::path::Pat
     REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
-thread_local! {
-    /// Private top-level fn names per owning module. Thread-local (same scope as
-    /// `FUNCTION_MODULE_OWNER` / `CURRENT_EXEC_MODULE`, which the call-time gate
-    /// reads alongside it), so the per-call check takes NO lock.
-    static PRIVATE_FNS_BY_OWNER: std::cell::RefCell<HashMap<Arc<str>, Arc<std::collections::HashSet<String>>>> =
-        std::cell::RefCell::new(HashMap::new());
+type PrivateFnNames = Arc<std::collections::HashSet<String>>;
+
+/// Private top-level fn names per owning module, process-wide (a call made on
+/// another thread is judged by the same set). Filled when the flattening
+/// loader parses a module, before any importer's top-level code can run, and
+/// again when the interpreter loader evaluates it.
+fn private_fn_registry() -> &'static std::sync::RwLock<HashMap<Arc<str>, PrivateFnNames>> {
+    static REGISTRY: OnceLock<std::sync::RwLock<HashMap<Arc<str>, PrivateFnNames>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::RwLock::new(HashMap::new()))
 }
 
-fn register_private_fns(owner: Arc<str>, names: Arc<std::collections::HashSet<String>>) {
-    PRIVATE_FNS_BY_OWNER.with(|reg| {
-        reg.borrow_mut().insert(owner, names);
-    });
+/// Bumped on every change to `private_fn_registry`; invalidates the
+/// per-thread cache below.
+static PRIVATE_FN_REGISTRY_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+thread_local! {
+    /// Per-thread cache of `private_fn_registry`: (generation, owner -> names,
+    /// `None` = no entry), so the per-call check takes no lock once an owner
+    /// has been looked up.
+    static PRIVATE_FNS_BY_OWNER: std::cell::RefCell<(u64, HashMap<Arc<str>, Option<PrivateFnNames>>)> =
+        std::cell::RefCell::new((0, HashMap::new()));
+}
+
+fn register_private_fns(owner: Arc<str>, names: PrivateFnNames) {
+    let Ok(mut registry) = private_fn_registry().write() else {
+        return;
+    };
+    if registry.get(&owner).is_some_and(|known| **known == *names) {
+        return;
+    }
+    registry.insert(owner, names);
+    PRIVATE_FN_REGISTRY_GEN.fetch_add(1, std::sync::atomic::Ordering::Release);
+}
+
+/// Is `name` a private top-level fn of module `owner` (owner-key form)?
+pub(crate) fn is_private_fn_of(owner: &Arc<str>, name: &str) -> bool {
+    let generation = PRIVATE_FN_REGISTRY_GEN.load(std::sync::atomic::Ordering::Acquire);
+    PRIVATE_FNS_BY_OWNER.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.0 != generation {
+            cache.0 = generation;
+            cache.1.clear();
+        }
+        if let Some(names) = cache.1.get(owner) {
+            return names.as_ref().is_some_and(|s| s.contains(name));
+        }
+        let names = private_fn_registry()
+            .read()
+            .ok()
+            .and_then(|registry| registry.get(owner).cloned());
+        let hit = names.as_ref().is_some_and(|s| s.contains(name));
+        cache.1.insert(Arc::clone(owner), names);
+        hit
+    })
+}
+
+/// Record the private fns of a module the flattening loader just parsed
+/// (`items` = the module's own items, export statements included). The
+/// interpreter loader registers a module only after evaluating it, which is
+/// after the flattened top-level initializers of its importers have run
+/// (private_fn_registry_late_for_importer_top_level_2026-11-14).
+pub(crate) fn register_module_private_fns(module_path: &Path, items: &[Node]) {
+    let names = private_top_level_fn_names(items);
+    if !names.is_empty() {
+        register_private_fns(super::module_cache::module_owner_key(module_path), Arc::new(names));
+    }
 }
 
 fn record_provided_names(module_path: &Path, provided: ProvidedNames) {
@@ -2852,10 +2906,11 @@ mod private_fn_visibility_tests {
 /// Callers under `test/` are exempt (owner decision: white-box tests may use
 /// private names of the module they test); `src/**` callers stay strict.
 ///
-/// Thread scope: the private-name registry is thread-local, so a module loaded
-/// on thread A and called from thread B finds no entry and the check is skipped
-/// (fails open, same as the pre-gate behaviour and as `FUNCTION_MODULE_OWNER`).
-fn is_test_caller(current: &str) -> bool {
+/// Thread scope: the private-name registry is process-wide, so a call made on
+/// another thread is judged by the same names. The owner of a definition is
+/// still thread-local (`FUNCTION_MODULE_OWNER`); a definition with no recorded
+/// owner is not judged.
+pub(crate) fn is_test_caller(current: &str) -> bool {
     // `\` and `/` are both separators; leading `./` (or `.\`) runs are
     // stripped. Allocation-free: closure creation calls this on hot paths.
     let mut s = current;
@@ -2876,18 +2931,35 @@ thread_local! {
     /// A closure body INHERITS `CURRENT_EXEC_MODULE` from whoever invokes it,
     /// so a test's `\: private_fn()` handed to a `src/**` helper used to be
     /// judged as a call from that helper
-    /// (test_private_access_closure_attribution_2026-11-14). Thread-local like
-    /// `PRIVATE_FNS_BY_OWNER`; set only through `ClosureOriginGuard`.
+    /// (test_private_access_closure_attribution_2026-11-14). Thread-local; set only through `ClosureOriginGuard`.
     static CLOSURE_ORIGIN_IS_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    /// Caller override: owner key of the module whose TOP-LEVEL code is
+    /// running (an imported module's evaluation or a flattened global
+    /// initializer), or that wrote the closure body now running; cleared by
+    /// an owned named function frame. Neither has a `CURRENT_EXEC_MODULE` of
+    /// its own (top level: `None`/`<entry>`; a closure inherits its
+    /// invoker's), so the call rule needs it to name the caller
+    /// (private_call_gate_skips_import_bound_and_entry_calls_2026-11-14).
+    /// Set only through `ClosureOriginGuard`.
+    static TOP_LEVEL_MODULE: std::cell::RefCell<Option<Arc<str>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Scoped `CLOSURE_ORIGIN_IS_TEST` value, restored on drop (early `?` returns
+/// Scoped `CLOSURE_ORIGIN_IS_TEST` (and, for a named frame or a module top
+/// level, `TOP_LEVEL_MODULE`) value, restored on drop (early `?` returns
 /// included). `enter(None)` marks an owned named function frame.
-pub(crate) struct ClosureOriginGuard(Option<bool>);
+pub(crate) struct ClosureOriginGuard {
+    origin: Option<bool>,
+    top_level: Option<Option<Arc<str>>>,
+}
 
 impl ClosureOriginGuard {
     pub(crate) fn enter(origin_is_test: Option<bool>) -> Self {
-        ClosureOriginGuard(CLOSURE_ORIGIN_IS_TEST.with(|c| c.replace(origin_is_test)))
+        let origin = CLOSURE_ORIGIN_IS_TEST.with(|c| c.replace(origin_is_test));
+        // A named frame is its owner's code, never a module's top level.
+        let top_level = origin_is_test
+            .is_none()
+            .then(|| TOP_LEVEL_MODULE.with(|c| c.borrow_mut().take()));
+        ClosureOriginGuard { origin, top_level }
     }
 
     /// Top-level code of module `module_path` (an imported module's
@@ -2896,13 +2968,65 @@ impl ClosureOriginGuard {
     /// script's top level, and may be triggered from a test frame (a
     /// block-scoped `use`), so its origin must be set explicitly.
     pub(crate) fn enter_module_top_level(module_path: Option<&str>) -> Self {
-        Self::enter(Some(module_path.is_some_and(is_test_caller)))
+        let origin = CLOSURE_ORIGIN_IS_TEST.with(|c| c.replace(Some(module_path.is_some_and(is_test_caller))));
+        let key = module_path.map(|p| super::module_cache::module_owner_key(Path::new(p)));
+        let top_level = Some(TOP_LEVEL_MODULE.with(|c| c.replace(key)));
+        ClosureOriginGuard { origin, top_level }
+    }
+
+    /// A closure body (lambda, block closure, owner-less nested `fn`) runs as
+    /// the module that wrote it: its captured env's stamps (`stamp_closure_origin`).
+    /// An unstamped env leaves the caller to the invoking frame.
+    pub(crate) fn enter_closure(env: &Env) -> Self {
+        let origin = CLOSURE_ORIGIN_IS_TEST.with(|c| c.replace(Some(env.closure_in_test())));
+        let top_level = env
+            .closure_caller()
+            .map(|caller| TOP_LEVEL_MODULE.with(|c| c.replace(Some(Arc::clone(caller)))));
+        ClosureOriginGuard { origin, top_level }
+    }
+
+    /// An owned fn body run without a named frame (a decorator applied as a
+    /// value): the caller is its owner module.
+    pub(crate) fn enter_owned(owner: &str) -> Self {
+        let origin = CLOSURE_ORIGIN_IS_TEST.with(|c| c.replace(Some(owner_written_in_test(Some(owner)))));
+        // An entry-script fn (`<entry>`) is the entry file's code, never the
+        // exempt `<entry>` caller.
+        let caller: Arc<str> = if owner == "<entry>" {
+            crate::interpreter::CURRENT_FILE
+                .with(|c| c.borrow().as_deref().map(super::module_cache::module_owner_key))
+                .unwrap_or_else(|| Arc::from(owner))
+        } else {
+            Arc::from(owner)
+        };
+        let top_level = Some(TOP_LEVEL_MODULE.with(|c| c.replace(Some(caller))));
+        ClosureOriginGuard { origin, top_level }
     }
 }
 
 impl Drop for ClosureOriginGuard {
     fn drop(&mut self) {
-        CLOSURE_ORIGIN_IS_TEST.with(|c| c.set(self.0));
+        CLOSURE_ORIGIN_IS_TEST.with(|c| c.set(self.origin));
+        if let Some(prev) = self.top_level.take() {
+            TOP_LEVEL_MODULE.with(|c| *c.borrow_mut() = prev);
+        }
+    }
+}
+
+/// The module a private-fn call is made FROM, for the call rule: the module
+/// whose top-level code is running, else the executing function's owner,
+/// else (an entry-script function `<entry>`, or the entry's own top level)
+/// the entry file's owner key. `<entry>` is returned only when the entry
+/// file is unknown; the rule keeps exempting that case as before.
+pub(crate) fn private_call_caller() -> Arc<str> {
+    if let Some(module) = TOP_LEVEL_MODULE.with(|c| c.borrow().clone()) {
+        return module;
+    }
+    let current = crate::interpreter::CURRENT_EXEC_MODULE.with(|c| c.borrow().clone());
+    match current {
+        Some(owner) if &*owner != "<entry>" => owner,
+        _ => crate::interpreter::CURRENT_FILE
+            .with(|c| c.borrow().as_deref().map(super::module_cache::module_owner_key))
+            .unwrap_or_else(|| Arc::from("<entry>")),
     }
 }
 
@@ -2937,8 +3061,15 @@ pub(crate) fn owner_written_in_test(owner: Option<&str>) -> bool {
 /// a nested `fn` value created now.
 pub(crate) fn capture_env_with_origin(env: &Env) -> Env {
     let mut captured = env.clone();
-    captured.set_closure_in_test(closure_created_in_test());
+    stamp_closure_origin(&mut captured);
     captured
+}
+
+/// Stamp a closure's captured env with where it is being written: test-ness
+/// and the writing module (read back by `ClosureOriginGuard::enter_closure`).
+pub(crate) fn stamp_closure_origin(captured: &mut Env) {
+    captured.set_closure_in_test(closure_created_in_test());
+    captured.set_closure_caller(Some(private_call_caller()));
 }
 
 pub(crate) fn check_private_call_visibility(
@@ -2953,7 +3084,7 @@ pub(crate) fn check_private_call_visibility(
     if CLOSURE_ORIGIN_IS_TEST.with(|c| c.get()) == Some(true) {
         return Ok(());
     }
-    let is_private = PRIVATE_FNS_BY_OWNER.with(|reg| reg.borrow().get(owner).is_some_and(|s| s.contains(name)));
+    let is_private = is_private_fn_of(owner, name);
     if !is_private {
         return Ok(());
     }
@@ -3000,13 +3131,23 @@ mod private_call_visibility_tests {
     }
 
     #[test]
-    fn registry_is_thread_local_so_cross_thread_call_fails_open() {
+    fn registry_is_process_wide_so_cross_thread_call_is_an_error() {
         let owner = register("zz_fx/app/sub/xthread.spl", "secret_helper");
         let cur: Arc<str> = Arc::from("zz_fx/app/other/caller.spl");
         assert!(check_private_call_visibility("secret_helper", &owner, &cur).is_err());
         let (o2, c2) = (owner.clone(), cur.clone());
-        let other_thread = std::thread::spawn(move || check_private_call_visibility("secret_helper", &o2, &c2).is_ok());
-        assert!(other_thread.join().unwrap(), "documented: unregistered on another thread => check skipped");
+        let other_thread = std::thread::spawn(move || check_private_call_visibility("secret_helper", &o2, &c2).is_err());
+        assert!(other_thread.join().unwrap(), "a call on another thread sees the same private names");
+    }
+
+    #[test]
+    fn a_name_registered_after_a_cached_miss_is_seen() {
+        let owner: Arc<str> = Arc::from("zz_fx/app/sub/late.spl");
+        let cur: Arc<str> = Arc::from("zz_fx/app/other/caller.spl");
+        // Unknown owner: allowed, and the miss is cached on this thread.
+        assert!(check_private_call_visibility("late_helper", &owner, &cur).is_ok());
+        register_private_fns(owner.clone(), Arc::new(["late_helper".to_string()].into_iter().collect()));
+        assert!(check_private_call_visibility("late_helper", &owner, &cur).is_err());
     }
 
     #[test]
@@ -3102,6 +3243,63 @@ mod private_call_visibility_tests {
         assert!(!owner_written_in_test(None));
         set_file(None);
         assert!(!owner_written_in_test(Some("<entry>")), "unknown entry file stays strict");
+    }
+
+    #[test]
+    fn private_call_caller_names_module_top_level_owner_or_entry_file() {
+        // private_call_gate_skips_import_bound_and_entry_calls_2026-11-14.
+        let set_owner = |o: Option<&str>| {
+            crate::interpreter::CURRENT_EXEC_MODULE.with(|c| *c.borrow_mut() = o.map(Arc::from));
+        };
+        let set_file = |f: Option<&str>| {
+            crate::interpreter::CURRENT_FILE.with(|c| *c.borrow_mut() = f.map(std::path::PathBuf::from));
+        };
+        set_file(Some("/zz_fx_caller/src/app/main.spl"));
+        set_owner(None);
+        assert_eq!(&*private_call_caller(), "/zz_fx_caller/src/app/main.spl", "entry top level");
+        set_owner(Some("<entry>"));
+        assert_eq!(&*private_call_caller(), "/zz_fx_caller/src/app/main.spl", "entry fn");
+        set_owner(Some("/zz_fx_caller/src/app/runner/run.spl"));
+        assert_eq!(&*private_call_caller(), "/zz_fx_caller/src/app/runner/run.spl", "owned fn");
+        {
+            // A module's top level wins over an inherited `<entry>` owner (a
+            // block-scoped `use` inside an entry fn) ...
+            set_owner(Some("<entry>"));
+            let _top = ClosureOriginGuard::enter_module_top_level(Some("/zz_fx_caller/src/app/other/topglob.spl"));
+            assert_eq!(&*private_call_caller(), "/zz_fx_caller/src/app/other/topglob.spl");
+            {
+                // ... until a named frame runs: that frame is its owner's code.
+                set_owner(Some("/zz_fx_caller/src/app/runner/run.spl"));
+                let _named = ClosureOriginGuard::enter(None);
+                assert_eq!(&*private_call_caller(), "/zz_fx_caller/src/app/runner/run.spl");
+                {
+                    // An unstamped closure body run there keeps the inherited caller.
+                    let _closure = ClosureOriginGuard::enter_closure(&Env::new());
+                    assert_eq!(&*private_call_caller(), "/zz_fx_caller/src/app/runner/run.spl");
+                }
+                {
+                    // A stamped closure body runs as the module that wrote it ...
+                    let mut written = Env::new();
+                    written.set_closure_caller(Some(Arc::from("/zz_fx_caller/src/app/sub/lamlib.spl")));
+                    let _closure = ClosureOriginGuard::enter_closure(&written);
+                    assert_eq!(&*private_call_caller(), "/zz_fx_caller/src/app/sub/lamlib.spl", "closure writer");
+                    {
+                        // ... and a named fn it calls is that fn's owner again.
+                        let _named = ClosureOriginGuard::enter(None);
+                        assert_eq!(&*private_call_caller(), "/zz_fx_caller/src/app/runner/run.spl", "no leak");
+                    }
+                    let _owned = ClosureOriginGuard::enter_owned("/zz_fx_caller/src/app/sub/deco.spl");
+                    assert_eq!(&*private_call_caller(), "/zz_fx_caller/src/app/sub/deco.spl", "decorator owner");
+                }
+                assert_eq!(&*private_call_caller(), "/zz_fx_caller/src/app/runner/run.spl", "closure restored");
+            }
+            set_owner(Some("<entry>"));
+            assert_eq!(&*private_call_caller(), "/zz_fx_caller/src/app/other/topglob.spl", "restored");
+        }
+        assert_eq!(&*private_call_caller(), "/zz_fx_caller/src/app/main.spl", "top level restored");
+        set_file(None);
+        assert_eq!(&*private_call_caller(), "<entry>", "unknown entry file keeps the old exemption");
+        set_owner(None);
     }
 
     #[test]

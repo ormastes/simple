@@ -1,0 +1,119 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# bug: doc/08_tracking/bug/core_interp_per_iteration_array_leak_2026-11-14.md
+#
+# The seed JIT runtime never frees an array object. The core interpreter used
+# to mint fresh arrays on its hottest paths: `scope_hm_keys[d] = []` on every
+# scope push, `val row = scope_hm_keys[d]` row copies on every define /
+# lookup / assign, and a CoreStmt (four arrays) per evaluated statement just
+# to read its tag. A 1M-iteration `for` loop in the core interpreter leaked
+# ~33 arrays (~5 KB) per iteration, and
+# stmt_for_comprehension_no_silent_iteration_cap_spec.spl peaked at 15.2 GB.
+#
+# This spec counts live runtime Array objects (rt_heap_live_count_by_kind(2))
+# and auxiliary (array data) bytes. The control example proves the counter
+# observes array allocations on this engine, so the bounds are not vacuous.
+#
+# @jit_spec_entry
+# The heap counters only observe runtime heap objects, i.e. the JIT lane.
+
+use std.spec.step
+
+use compiler.core.interpreter.mod.{core_interpret}
+use compiler.core.interpreter.eval.{eval_has_error}
+use compiler.core.interpreter.value.{val_get_int}
+use compiler.core.interpreter.env.{env_init, env_push_scope, env_pop_scope, env_define, env_lookup, env_assign}
+use compiler.core.interpreter.env.{env_push_frame, env_pop_frame, env_get_local, env_set_local}
+
+extern fn rt_heap_live_count_by_kind(kind: i64) -> i64
+extern fn rt_heap_aux_live_bytes() -> i64
+
+val HEAP_KIND_ARRAY: i64 = 2
+
+var kept_rows: [[i64]] = []
+
+fn live_arrays() -> i64:
+    rt_heap_live_count_by_kind(HEAP_KIND_ARRAY)
+
+describe "core interpreter does not leak arrays per scope operation or loop iteration":
+    it "control: 1,000 arrays held live are observed by the live-array counter":
+        step("Verify: the counter sees array allocations on this engine")
+        kept_rows = []
+        val before = live_arrays()
+        var j = 0
+        while j < 1000:
+            kept_rows.push([j, j + 1])
+            j = j + 1
+        expect(kept_rows.len()).to_equal(1000)
+        expect(kept_rows[999][1]).to_equal(1000)
+        expect(live_arrays() - before >= 1000).to_equal(true)
+
+    it "scope push, define, lookup, assign and pop allocate nothing once the slot exists":
+        step("Verify: 1,000 scoped define/lookup/assign cycles leave array count and bytes flat")
+        env_init()
+        env_define("outer", 41)
+        # Warm the inner slot so its rows exist (and have capacity) first.
+        env_push_scope()
+        env_define("i", 0)
+        env_pop_scope()
+        val before = live_arrays()
+        val aux_before = rt_heap_aux_live_bytes()
+        var j = 0
+        var seen = 0
+        var assign_misses = 0
+        while j < 1000:
+            env_push_scope()
+            env_define("i", j)
+            env_define("i", j + 1)
+            seen = seen + env_lookup("i") + env_lookup("outer")
+            # No expect() inside the measured loop: assertion bookkeeping
+            # must not be counted against the environment.
+            if not env_assign("outer", 41):
+                assign_misses = assign_misses + 1
+            env_pop_scope()
+            j = j + 1
+        val array_delta = live_arrays() - before
+        val aux_delta = rt_heap_aux_live_bytes() - aux_before
+        expect(assign_misses).to_equal(0)
+        expect(seen).to_equal(500500 + 41000)
+        expect(array_delta).to_equal(0)
+        expect(aux_delta).to_equal(0)
+
+    it "a reused scope slot starts empty: a binding does not survive its scope":
+        step("Verify: after pop + push, the inner name is gone and the outer one is visible")
+        env_init()
+        env_define("outer", 7)
+        env_push_scope()
+        env_define("inner", 5)
+        env_pop_scope()
+        env_push_scope()
+        expect(env_lookup("inner")).to_equal(-1)
+        expect(env_lookup("outer")).to_equal(7)
+        env_pop_scope()
+
+    it "fast-local reads do not copy the frame row":
+        step("Verify: 1,000 env_get_local reads leave the live-array count flat")
+        env_init()
+        env_push_frame(4)
+        env_set_local(2, 9)
+        val before = live_arrays()
+        var j = 0
+        var sum = 0
+        while j < 1000:
+            sum = sum + env_get_local(2)
+            j = j + 1
+        val array_delta = live_arrays() - before
+        env_pop_frame()
+        expect(sum).to_equal(9000)
+        expect(array_delta).to_equal(0)
+
+    it "a core-interpreted range-for loop allocates at most a few arrays per iteration":
+        step("Verify: 10,000 iterations of `acc = acc + 1` stay under 8 arrays per iteration")
+        # Measured 2026-11-14: 33 arrays/iteration before, 5 after (the rest is
+        # val_alloc's two struct rows per non-cached int, filed in the bug).
+        val src = "var acc: i64 = 0\nfor i in 0..10000:\n    acc = acc + 1\nacc\n"
+        val before = live_arrays()
+        val result = core_interpret(src, "env_scope_loop_leak_bound.spl")
+        val per_iteration = (live_arrays() - before) / 10000
+        expect(eval_has_error()).to_equal(false)
+        expect(val_get_int(result)).to_equal(10000)
+        expect(per_iteration < 8).to_equal(true)

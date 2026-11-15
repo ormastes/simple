@@ -52,6 +52,9 @@ struct AdviceRule {
     /// by NAME, which may find a different same-named fn.
     declared: Arc<FunctionDef>,
     origin_in_test: bool,
+    /// Module that declared the advice (`private_call_caller()` then), its
+    /// caller for the private-fn rule when the pinned definition runs.
+    origin_caller: Arc<str>,
 }
 
 thread_local! {
@@ -102,6 +105,7 @@ pub(crate) fn register_advice(
             order,
             declared,
             origin_in_test: crate::interpreter::interpreter_module::closure_created_in_test(),
+            origin_caller: crate::interpreter::interpreter_module::private_call_caller(),
         });
     });
     Ok(())
@@ -169,7 +173,7 @@ fn function_signature(func: &FunctionDef) -> String {
 /// `func`, highest priority first. `before` runs highest-priority-first;
 /// `after_*` runs highest-priority-LAST (aop_spec.spl Behaviors), so the
 /// caller reverses for the after kinds.
-fn matching_advice(func: &FunctionDef, kind: AdviceType) -> Vec<(String, Arc<FunctionDef>, bool)> {
+fn matching_advice(func: &FunctionDef, kind: AdviceType) -> Vec<(String, Arc<FunctionDef>, bool, Arc<str>)> {
     let signature = function_signature(func);
     let attrs = function_attrs(func);
     let ctx = MatchContext::new()
@@ -186,7 +190,7 @@ fn matching_advice(func: &FunctionDef, kind: AdviceType) -> Vec<(String, Arc<Fun
         matched.sort_by(|a, b| b.priority.cmp(&a.priority).then_with(|| a.order.cmp(&b.order)));
         matched
             .into_iter()
-            .map(|r| (r.advice.clone(), Arc::clone(&r.declared), r.origin_in_test))
+            .map(|r| (r.advice.clone(), Arc::clone(&r.declared), r.origin_in_test, Arc::clone(&r.origin_caller)))
             .collect()
     })
 }
@@ -255,7 +259,7 @@ fn run_kind(
     if reverse {
         names.reverse();
     }
-    for (name, declared, declared_in_test) in names {
+    for (name, declared, declared_in_test, declared_caller) in names {
         // The rule outlived the scope its advice was declared in — the
         // registry is process-wide but `on ...` is a scoped statement, and a
         // nested advice function is gone once its block ends. `register_advice`
@@ -265,10 +269,12 @@ fn run_kind(
             continue;
         };
         // A same-named fn other than the declared one gets no test origin.
-        let origin_in_test = declared_in_test && Arc::ptr_eq(&declared, &advice_fn);
+        let pinned = Arc::ptr_eq(&declared, &advice_fn);
+        let origin_in_test = declared_in_test && pinned;
+        let origin_caller = pinned.then_some(declared_caller);
         IN_ADVICE.with(|c| *c.borrow_mut() = true);
         let outcome =
-            exec_advice_in_join_point_scope(&advice_fn, origin_in_test, env, functions, classes, enums, impl_methods);
+            exec_advice_in_join_point_scope(&advice_fn, origin_in_test, origin_caller, env, functions, classes, enums, impl_methods);
         IN_ADVICE.with(|c| *c.borrow_mut() = false);
         outcome?;
     }
@@ -294,6 +300,7 @@ fn run_kind(
 fn exec_advice_in_join_point_scope(
     advice_fn: &FunctionDef,
     origin_in_test: bool,
+    origin_caller: Option<Arc<str>>,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, Arc<ClassDef>>,
@@ -305,6 +312,7 @@ fn exec_advice_in_join_point_scope(
     // body reads its origin from this env (execute_function_body), so give it
     // the declaration's own. An owned advice fn ignores the stamp.
     advice_env.set_closure_in_test(origin_in_test);
+    advice_env.set_closure_caller(origin_caller);
     super::function_exec::execute_function_body(
         advice_fn,
         HashMap::new(),

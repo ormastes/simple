@@ -1,0 +1,44 @@
+"""
+## Purpose and audience
+Purpose: Pin that the SOFTWARE-pixel lane keeps bitmap-cell advances for 9..15
+px text. That lane paints every size below 16 px with the 5x7 bitmap
+rasteriser; the Draw IR lanes paint the resolved face. Resolving real-face
+advances for both (Liberation Sans `l` = 3 px at 13 px, bitmap `l` cell = 4 px)
+made the software lane's glyphs touch: `ll` painted as one joined blob.
+Audience: browser-engine layout and software-raster maintainers.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-SOFTWARE-LANE-BITMAP-ADVANCE-001 — the software lane's text advances are never narrower than the bitmap glyph it paints.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels
+}
+
+val W: i32 = 40
+val H: i32 = 20
+
+fn ink_columns(html: text) -> text:
+    """One char per column: `#` if any pixel in the column is dark."""
+    val px = simple_web_layout_render_html_software_pixels(html, W, H)
+    var out = ""
+    var x = 0
+    while x < W:
+        var dark = false
+        var y = 0
+        while y < H:
+            if ((px[y * W + x] >> 8) & 255) < 128:
+                dark = true
+            y = y + 1
+        out = out + (if dark: "#" else: ".")
+        x = x + 1
+    out
+
+describe "software lane keeps bitmap glyph spacing at 9..15 px":
+    it "AC-1: two 13 px `l` glyphs are separated by a blank column":
+        step("Each bitmap `l` is 3 inked columns; a 3 px real-face advance joined them into `######`")
+        val cols = ink_columns("<html><body style=\"margin:0;background:#fff;color:#000;font:13px sans-serif\">ll</body></html>")
+        expect(cols).to_contain("###.###")
+        expect(cols.contains("######")).to_equal(false)

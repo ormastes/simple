@@ -1,0 +1,156 @@
+# @req REQ-SSPEC-UNIT
+# @cover src/compiler/50.mir/_MirLoweringExpr/enum_constructor_payload.spl
+# @cover src/compiler/20.hir/hir_lowering/statements.spl
+#
+# Regression: bootstrap run 31 (Stage 2 compiling the pinned 5fc681dfd66
+# tree) failed MIR on compiler.hir.hir_lowering.statements with
+# `enum construction 'HirStmtKind.Let': payload type mismatch at 1` at the
+# three `HirStmtKind.Let(symbol, binding_type, init)` constructions. Shape:
+#
+#     val hir_type = if has_annotation: self.lower_type(t) else: nil
+#     val binding_type: HirType = if has_annotation: hir_type else: payload(..)
+#
+# A `T?` / `T` join is `T?`, so the annotated binding is remembered as
+# `HirType?` and the MIR payload check refuses it for the non-optional slot.
+# That refusal is correct (never widen nil); what was wrong is the source,
+# which had lost its a7c07361cbc unwrap in 04922c108b3 and regained it in
+# 83634778a5f. This spec drives the real pure-Simple HIR + MIR lowering, so
+# it is red/green without a Stage 2 binary, and pins the three source sites.
+# Record: doc/08_tracking/bug/stage3_let_payload_unguarded_optional_arm_2026-11-14.md
+use std.spec.*
+use std.io_runtime.{file_read}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn _let_join_errors(body: text) -> [text]:
+    val prelude = "struct HT:\n    kind: i64\nenum SK:\n    Let(sym: i64, type_: HT, init: i64)\n    Keep(type_: HT?)\nfn lower_type(x: i64) -> HT:\n    HT(kind: x + 100)\nfn payload_type(x: i64) -> HT:\n    HT(kind: x)\n"
+    val filename = "let_annotated_optional_join.spl"
+    val parsed = parse_full_frontend(prelude + body, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var errors: [text] = []
+    for error in hir_lowering.errors:
+        errors.push("HIR: " + error.message)
+    for error in lowering.errors:
+        errors.push("MIR: " + error.message)
+    if mir.functions.len() == 0:
+        errors.push("no lowered functions")
+    for error in errors:
+        print "LET_JOIN_DIAGNOSTIC={error}"
+    errors
+
+fn _mismatches(errors: [text]) -> i64:
+    var count = 0
+    for error in errors:
+        if error.starts_with("MIR: enum construction") and error.contains("payload type mismatch at 1"):
+            count = count + 1
+    count
+
+fn _names_unguarded_optional(errors: [text]) -> bool:
+    for error in errors:
+        if error.contains("optional 'HT?' value into non-optional payload slot (declared 'HT'); unwrap it first (`if val`)"):
+            return true
+    false
+
+val _NULLABLE_MERGE = "fn lower(has_annotation: bool, ast: i64) -> SK:\n    val hir_type = if has_annotation:\n        lower_type(ast)\n    else:\n        nil\n"
+
+# Annotated `: HirType = if ..:` joins in `source` whose first arm is a bare
+# local that is itself bound without the `: HirType` annotation (the nullable
+# merge). `if val x = opt:` joins bind no such local and are not counted.
+fn _nullable_arm_joins(source: text) -> i64:
+    val lines = source.split("\n")
+    var found = 0
+    var i = 0
+    while i + 1 < lines.len():
+        val line = lines[i].trim()
+        if line.starts_with("val ") and line.contains(": HirType = if ") and line.ends_with(":"):
+            val arm = lines[i + 1].trim()
+            var j = i - 1
+            while j >= 0:
+                val earlier = lines[j].trim()
+                if earlier.starts_with("val " + arm + " ") or earlier.starts_with("var " + arm + " "):
+                    found = found + 1
+                    j = -1
+                elif earlier.starts_with("val " + arm + ":") or earlier.starts_with("var " + arm + ":"):
+                    j = -1
+                else:
+                    j = j - 1
+        i = i + 1
+    found
+
+describe "annotated let joined from an optional arm into an enum payload":
+    it "rejects the bare optional arm and names the unwrap (pinned 5fc681dfd66 shape)":
+        val errors = _let_join_errors(_NULLABLE_MERGE + "    val binding_type: HT = if has_annotation:\n        hir_type\n    else:\n        payload_type(7)\n    SK.Let(1, binding_type, 2)\n")
+        expect(errors.len()).to_equal(1)
+        expect(_mismatches(errors)).to_equal(1)
+        expect(_names_unguarded_optional(errors)).to_equal(true)
+
+    it "rejects the same join without the annotation":
+        val errors = _let_join_errors(_NULLABLE_MERGE + "    val binding_type = if has_annotation:\n        hir_type\n    else:\n        payload_type(7)\n    SK.Let(1, binding_type, 2)\n")
+        expect(_mismatches(errors)).to_equal(1)
+        expect(_names_unguarded_optional(errors)).to_equal(true)
+
+    it "rejects the optional local passed straight into the slot":
+        val errors = _let_join_errors(_NULLABLE_MERGE + "    SK.Let(1, hir_type, 2)\n")
+        expect(_mismatches(errors)).to_equal(1)
+        expect(_names_unguarded_optional(errors)).to_equal(true)
+
+    it "rejects an annotated copy of the optional local":
+        val errors = _let_join_errors(_NULLABLE_MERGE + "    val binding_type: HT = hir_type\n    SK.Let(1, binding_type, 2)\n")
+        expect(_mismatches(errors)).to_equal(1)
+        expect(_names_unguarded_optional(errors)).to_equal(true)
+
+    it "accepts the annotation lowered once into a plain binding (release tip shape)":
+        val errors = _let_join_errors("fn lower(has_annotation: bool, ast: i64) -> SK:\n    val annotated: HT = if has_annotation:\n        lower_type(ast)\n    else:\n        HT(kind: -1)\n    val hir_type = if has_annotation:\n        annotated\n    else:\n        nil\n    val binding_type: HT = if has_annotation:\n        annotated\n    else:\n        payload_type(7)\n    SK.Let(1, binding_type, 2)\n")
+        expect(errors.len()).to_equal(0)
+
+    it "accepts the if-val unwrap of the optional arm":
+        val errors = _let_join_errors(_NULLABLE_MERGE + "    val binding_type: HT = if val annotated = hir_type:\n        annotated\n    else:\n        payload_type(7)\n    SK.Let(1, binding_type, 2)\n")
+        expect(errors.len()).to_equal(0)
+
+    it "keeps the optional local valid for a declared optional slot":
+        val errors = _let_join_errors(_NULLABLE_MERGE + "    SK.Keep(hir_type)\n")
+        expect(errors.len()).to_equal(0)
+
+    it "keeps the nil-literal wording for a nil in the non-optional slot":
+        val errors = _let_join_errors("fn lower() -> SK:\n    SK.Let(1, nil, 2)\n")
+        expect(_mismatches(errors)).to_equal(1)
+        expect(_names_unguarded_optional(errors)).to_equal(false)
+        expect(errors[0].contains("nil into non-optional payload slot (declared 'HT')")).to_equal(true)
+
+    it "keeps the bare stem for a foreign nominal payload":
+        val errors = _let_join_errors("struct Other:\n    kind: i64\nfn lower() -> SK:\n    val other = Other(kind: 1)\n    SK.Let(1, other, 2)\n")
+        expect(_mismatches(errors)).to_equal(1)
+        expect(_names_unguarded_optional(errors)).to_equal(false)
+
+    it "does not suggest an unwrap for an optional of another nominal":
+        val errors = _let_join_errors("struct Other:\n    kind: i64\nfn lower(c: bool) -> SK:\n    val other = if c:\n        Other(kind: 1)\n    else:\n        nil\n    SK.Let(1, other, 2)\n")
+        expect(_mismatches(errors)).to_equal(1)
+        expect(_names_unguarded_optional(errors)).to_equal(false)
+
+    it "keeps the bare stem for a non-binding argument and for an optional slot":
+        val literal = _let_join_errors("fn lower() -> SK:\n    SK.Let(1, 5, 2)\n")
+        expect(_mismatches(literal)).to_equal(1)
+        expect(_names_unguarded_optional(literal)).to_equal(false)
+        val foreign = _let_join_errors("struct Other:\n    kind: i64\nfn lower() -> SK:\n    val other = Other(kind: 1)\n    SK.Keep(other)\n")
+        expect(foreign.len()).to_equal(1)
+        expect(_names_unguarded_optional(foreign)).to_equal(false)
+
+describe "HirStmtKind.Let construction sites in statements.spl":
+    it "counts a nullable-merge arm joined into the annotated binding type":
+        expect(_nullable_arm_joins("    val hir_type = if has_annotation:\n        self.lower_type(t)\n    else:\n        nil\n    val binding_type: HirType = if has_annotation:\n        hir_type\n    else:\n        self.payload(init)\n")).to_equal(1)
+
+    it "does not count the plain annotated copy or the if-val unwrap":
+        expect(_nullable_arm_joins("    val annotated_hir_type: HirType = if has_annotation:\n        self.lower_type(t)\n    else:\n        HirType(kind: HirTypeKind.Error, span: s.span)\n    val binding_type: HirType = if has_annotation:\n        annotated_hir_type\n    else:\n        self.payload(init)\n")).to_equal(0)
+        expect(_nullable_arm_joins("    val hir_type = if has_annotation:\n        self.lower_type(t)\n    else:\n        nil\n    val binding_type: HirType = if val annotated_type = hir_type:\n        annotated_type\n    else:\n        self.payload(init)\n")).to_equal(0)
+
+    it "has no such join left in the tree":
+        val source = file_read("src/compiler/20.hir/hir_lowering/statements.spl")
+        expect(source.contains("HirStmtKind.Let(")).to_equal(true)
+        expect(_nullable_arm_joins(source)).to_equal(0)

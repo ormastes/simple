@@ -83,8 +83,8 @@ fn engine_http_chunked_body_v3(wire: [u8], start: i64) -> Result<[u8], text>:
         cursor = cursor + size + 2
         chunks = chunks + 1
 
-fn engine_http_decode_v3(action: text, wire: [u8]) -> Result<LinuxEngineExecHttpResponseV3, text>:
-    if not ["create", "inspect", "start", "info"].contains(action): return Err("engine-exec-http-action")
+# Neutral bounded framing only. Action/status/content semantics stay in callers.
+pub fn linux_engine_http_frame_decode_v3(wire: [u8], expected_status: i64) -> Result<LinuxEngineExecHttpResponseV3, text>:
     if wire.len() > 2 * LINUX_ENGINE_EXEC_BODY_LIMIT_V3 + 16384: return Err("engine-exec-http-wire-bound")
     var end = -1
     var index = 0
@@ -113,7 +113,6 @@ fn engine_http_decode_v3(action: text, wire: [u8]) -> Result<LinuxEngineExecHttp
     for line in lines:
         for byte in line.bytes():
             if byte == 10 or byte == 13: return Err("engine-exec-http-header-control")
-    val expected_status = if action == "create": 201 else: 200
     if not lines[0].starts_with("HTTP/1.1 " + expected_status.to_text() + " "):
         return Err("engine-exec-http-status")
     for byte in lines[0].bytes():
@@ -161,12 +160,19 @@ fn engine_http_decode_v3(action: text, wire: [u8]) -> Result<LinuxEngineExecHttp
     else:
         if wire.len() - end != length: return Err("engine-exec-http-incomplete-or-trailing")
         wire[end:]
-    val expected_type = if action == "start": "text/plain; charset=us-ascii" else: "application/json"
-    if content_type != expected_type: return Err("engine-exec-http-content-type")
     val body = validated_utf8_bytes_to_text_linear(body_bytes)?
-    if action == "start" and body != "\n": return Err("engine-exec-http-start-body")
-    if action == "info" and api_version != "5.2.5": return Err("engine-info-api-version-mismatch")
-    Ok(LinuxEngineExecHttpResponseV3(action: action, status: expected_status, content_type: content_type, body: body, api_version: api_version))
+    Ok(LinuxEngineExecHttpResponseV3(action: "", status: expected_status, content_type: content_type, body: body, api_version: api_version))
+
+fn engine_http_decode_v3(action: text, wire: [u8]) -> Result<LinuxEngineExecHttpResponseV3, text>:
+    if not ["create", "inspect", "start", "info"].contains(action): return Err("engine-exec-http-action")
+    val expected_status = if action == "create": 201 else: 200
+    var response = linux_engine_http_frame_decode_v3(wire, expected_status)?
+    val expected_type = if action == "start": "text/plain; charset=us-ascii" else: "application/json"
+    if response.content_type != expected_type: return Err("engine-exec-http-content-type")
+    if action == "start" and response.body != "\n": return Err("engine-exec-http-start-body")
+    if action == "info" and response.api_version != "5.2.5": return Err("engine-info-api-version-mismatch")
+    response.action = action
+    Ok(response)
 
 pub fn linux_engine_exec_http_decode_v3(action: text, wire: [u8]) -> Result<LinuxEngineExecHttpResponseV3, text>:
     if not ["create", "inspect", "start"].contains(action): return Err("engine-exec-http-action")

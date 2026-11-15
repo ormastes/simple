@@ -1335,6 +1335,11 @@ pub struct CowEnv {
     /// so the private-fn call rule treats the test, not the invoking frame,
     /// as the caller. Bug: test_private_access_closure_attribution_2026-11-14.
     closure_in_test: bool,
+    /// Module that wrote the closure (`private_call_caller()` at capture);
+    /// installed as the caller while its body runs, so the call rule judges
+    /// the writer, not whoever invokes it. `None` = unstamped (strict).
+    /// Bug: private_call_gate_skips_import_bound_and_entry_calls_2026-11-14.
+    closure_caller: Option<Arc<str>>,
 }
 
 /// Payload of [`CowEnv::declared_int_widths`]: the live `name -> width` map
@@ -1404,6 +1409,7 @@ impl CowEnv {
             field_prebinds: FrameSet::default(),
             declared_int_widths: None,
             closure_in_test: false,
+            closure_caller: None,
         }
     }
 
@@ -1670,6 +1676,15 @@ impl CowEnv {
 
     pub fn set_closure_in_test(&mut self, in_test: bool) {
         self.closure_in_test = in_test;
+    }
+
+    /// See [`CowEnv::closure_caller`] (the field).
+    pub fn closure_caller(&self) -> Option<&Arc<str>> {
+        self.closure_caller.as_ref()
+    }
+
+    pub fn set_closure_caller(&mut self, caller: Option<Arc<str>>) {
+        self.closure_caller = caller;
     }
 
     /// Re-point the scope at the current live stores. O(1): the frame keeps
@@ -2225,6 +2240,7 @@ impl CowEnv {
             field_prebinds: FrameSet::default(),
             declared_int_widths: None,
             closure_in_test: false,
+            closure_caller: None,
         }
     }
 
@@ -2246,6 +2262,7 @@ impl CowEnv {
             field_prebinds: FrameSet::default(),
             declared_int_widths: None,
             closure_in_test: false,
+            closure_caller: None,
         }
     }
 
@@ -2360,6 +2377,7 @@ impl Clone for CowEnv {
             field_prebinds: self.field_prebinds.clone(),
             declared_int_widths: self.declared_int_widths.clone(),
             closure_in_test: self.closure_in_test,
+            closure_caller: self.closure_caller.clone(),
         }
     }
 }

@@ -1,0 +1,184 @@
+# Metadata-only admitted-child cancellation, never native teardown or release.
+use std.nogc_sync_mut.orchestration.host_local_root_v1.HostLocalRootV1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostReservationAuthorizationContextV1
+use std.nogc_sync_mut.orchestration.host_enrollment_v1.host_enrollment_payload_digest_v1
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.{LocalAuthorityPolicyV1, local_authority_policy_load_v1}
+use std.nogc_sync_mut.orchestration.host_runtime_exec_projection_v3.host_runtime_exec_child_packet_v3
+use std.nogc_sync_mut.orchestration.host_runtime_exec_no_begin_cancel_evidence_v3.{host_runtime_exec_no_begin_cancel_load_v3, host_runtime_exec_no_begin_cancel_match_v3}
+use std.nogc_sync_mut.orchestration.host_exec_private_publication_v3.host_exec_private_publish_v3
+use std.common.contracts.orchestration.host_runtime_exec_no_begin_cancel_v3.*
+use std.common.contracts.orchestration.host_runtime_exec_v3.host_runtime_exec_request_encode_v3
+use std.common.contracts.orchestration.host_capacity_v1.HostReservationStateV1
+use std.common.contracts.distributed_control_v2.{OperationEnvelopeV2, ExecutionGrantV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_authority_codec_v2.{distributed_encode_signed_grant_v2, distributed_encode_signed_approval_v2}
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_host_scope_bytes_v2, container_scope_fence_id_v2}
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_lookup_v2, distributed_operation_journal_history_batch_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_record_outcome_v2
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.nogc_sync_mut.io.path_identity.path_entry_present
+use std.common.crypto.sha256.sha256_text
+use std.io_runtime.host_os
+
+pub struct HostRuntimeExecAdmittedCancelTurnV3:
+    local: HostLocalRootV1
+    receipt: Option<HostRuntimeExecNoBeginCancelReceiptV3>
+    cancelled: bool
+    recovery_required: bool
+    error: text
+
+fn no_begin_cancel_error_v3(local: HostLocalRootV1, receipt: Option<HostRuntimeExecNoBeginCancelReceiptV3>,
+        recovery: bool, reason: text) -> HostRuntimeExecAdmittedCancelTurnV3:
+    HostRuntimeExecAdmittedCancelTurnV3(local, receipt, false, recovery, reason)
+
+fn no_begin_admitted_v3(journal: DistributedOperationJournalV2, child: OperationEnvelopeV2) -> Result<bool, text>:
+    val row = distributed_operation_journal_lookup_v2(journal, child.id)?
+    if row.envelope != distributed_encode_operation_v2(child)?: return Err("host-exec-no-begin-child-envelope")
+    if row.state != "admitted": return Err("host-exec-no-begin-admitted-required")
+    Ok(true)
+
+fn no_begin_authority_v3(policy: LocalAuthorityPolicyV1, parent: OperationEnvelopeV2,
+        signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2,
+        before: HostReservationAuthorizationContextV1, after: HostReservationAuthorizationContextV1) -> Result<ExecutionGrantV2, text>:
+    if (after.grant_clock <= 0 or after.monotonic_ms < 0 or after.grant_clock < before.grant_clock or
+            after.monotonic_ms < before.monotonic_ms): return Err("host-exec-no-begin-clock-regressed")
+    if (after.policy_revision != before.policy_revision or after.revocation_epoch != before.revocation_epoch or
+            after.session_generation != before.session_generation or after.policy_revision != policy.snapshot.policy_revision or
+            after.revocation_epoch != policy.snapshot.revocation_epoch or after.session_generation != policy.session_generation):
+        return Err("host-exec-no-begin-context-changed")
+    var cleanup = parent
+    cleanup.operation = "host_cleanup_v1"
+    distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, signed, approval, cleanup, after.grant_clock,
+        policy.snapshot.generation, after.policy_revision, after.revocation_epoch, after.session_generation)
+
+fn no_begin_current_root_v3(local: HostLocalRootV1, scope: ContainerHostScopeV2,
+        parent: OperationEnvelopeV2) -> Result<bool, text>:
+    if local.capacity.journal.owned_lock.is_none(): return Err("host-exec-no-begin-owned-writer-required")
+    if not local.capacity.ledger.continuity_proven: return Err("host-exec-no-begin-reconciliation-required")
+    if local.capacity.ledger.revision != local.capacity.journal.sequence + 1: return Err("host-exec-no-begin-projection-stale")
+    val capacity = local.capacity.ledger.capacity
+    if (container_host_scope_bytes_v2(scope)? != container_host_scope_bytes_v2(local.scope)? or
+            capacity.physical_host_id != scope.physical_host_id or capacity.boot_id != container_scope_fence_id_v2(scope)? or
+            capacity.provider_generation != scope.provider_generation or capacity.authority_id != "host-" + host_enrollment_payload_digest_v1(local.binding)?):
+        return Err("host-exec-no-begin-root-mismatch")
+    var count = 0
+    for row in local.capacity.ledger.reservations:
+        if row.operation_id == parent.id:
+            count = count + 1
+            if row.state == HostReservationStateV1.Released or row.payload_digest != parent.payload_digest or row.memory_bytes != parent.memory_bytes:
+                return Err("host-exec-no-begin-parent-not-charged")
+    if count != 1: return Err("host-exec-no-begin-parent-charge-required")
+    Ok(true)
+
+pub fn host_runtime_exec_cancel_admitted_v3(local: HostLocalRootV1, parent_operation_id: text, child_operation_id: text,
+        signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2,
+        context: HostReservationAuthorizationContextV1,
+        refresh: fn() -> HostReservationAuthorizationContextV1) -> HostRuntimeExecAdmittedCancelTurnV3:
+    var current = local
+    if host_os() != "linux": return no_begin_cancel_error_v3(current, nil, false, "host-exec-no-begin-private-linux-required")
+    val row = distributed_operation_journal_lookup_v2(current.capacity.journal, child_operation_id)
+    if row.is_err(): return no_begin_cancel_error_v3(current, nil, false, row.unwrap_err())
+    val decoded = distributed_decode_operation_v2(row.unwrap().envelope)
+    if decoded.is_err(): return no_begin_cancel_error_v3(current, nil, true, decoded.unwrap_err())
+    val child = decoded.unwrap()
+    if child.operation != "host_runtime_exec_v3": return no_begin_cancel_error_v3(current, nil, false, "host-exec-no-begin-child-required")
+    if row.unwrap().state != "admitted": return no_begin_cancel_error_v3(current, nil, true, "host-exec-no-begin-admitted-required")
+    val original = host_runtime_exec_child_packet_v3(current.capacity.journal, current.capacity.ledger.capacity, child)
+    if original.is_err(): return no_begin_cancel_error_v3(current, nil, true, original.unwrap_err())
+    val packet = original.unwrap()
+    val parent = packet.parent_binding.host_operation
+    if parent.id != parent_operation_id: return no_begin_cancel_error_v3(current, nil, false, "host-exec-no-begin-parent-id")
+    val plan = packet.intent.request.parent
+    val scope = ContainerHostScopeV2(physical_host_id: plan.physical_host_id, service_scope_id: plan.service_scope_id,
+        boot_id: plan.boot_id, provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,
+        continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
+    val root_match = no_begin_current_root_v3(current, scope, parent)
+    if root_match.is_err(): return no_begin_cancel_error_v3(current, nil, false, root_match.unwrap_err())
+    val loaded = local_authority_policy_load_v1(current.root, current.binding.policy_digest)
+    if loaded.is_err(): return no_begin_cancel_error_v3(current, nil, false, loaded.unwrap_err())
+    val policy = loaded.unwrap()
+    val source = file_read_regular_no_follow_bounded(current.root + "/authority-policy.sdn", 1048576)
+    if source.is_err(): return no_begin_cancel_error_v3(current, nil, false, source.unwrap_err())
+    if policy.source_digest != current.policy.source_digest or sha256_text(source.unwrap()) != policy.source_digest:
+        return no_begin_cancel_error_v3(current, nil, false, "host-exec-no-begin-policy-changed")
+    val directory = current.capacity.journal.root + "/host-runtime-exec-no-begin-cancellations"
+    val directory_present = path_entry_present(directory)
+    if directory_present.is_err(): return no_begin_cancel_error_v3(current, nil, true, directory_present.unwrap_err())
+    var existing = false
+    if directory_present.unwrap():
+        val found = path_entry_present(directory + "/" + sha256_text(child.id) + ".sdn")
+        if found.is_err(): return no_begin_cancel_error_v3(current, nil, true, found.unwrap_err())
+        existing = found.unwrap()
+    val initial = refresh()
+    val authorized = no_begin_authority_v3(policy, parent, signed, approval, context, initial)
+    if authorized.is_err(): return no_begin_cancel_error_v3(current, nil, existing, authorized.unwrap_err())
+    var candidate: Option<HostRuntimeExecNoBeginCancelReceiptV3> = nil
+    if existing:
+        val retained = host_runtime_exec_no_begin_cancel_load_v3(current.capacity.journal, child)
+        if retained.is_err(): return no_begin_cancel_error_v3(current, nil, true, retained.unwrap_err())
+        val receipt = retained.unwrap()
+        if initial.grant_clock < receipt.authorized_unix_ms or initial.monotonic_ms < receipt.monotonic_ms:
+            return no_begin_cancel_error_v3(current, Some(receipt), true, "host-exec-no-begin-recorded-clock-regressed")
+        val binding = host_runtime_exec_no_begin_cancel_match_v3(current.capacity.journal, current.capacity.ledger.capacity, child, receipt)
+        if binding.is_err(): return no_begin_cancel_error_v3(current, Some(receipt), true, binding.unwrap_err())
+        if not binding.unwrap(): return no_begin_cancel_error_v3(current, Some(receipt), true, "host-exec-no-begin-binding-refused")
+        val same_signed = distributed_encode_signed_grant_v2(signed)
+        val old_signed = distributed_encode_signed_grant_v2(receipt.signed)
+        val same_approval = distributed_encode_signed_approval_v2(approval)
+        val old_approval = distributed_encode_signed_approval_v2(receipt.approval)
+        if (same_signed.is_err() or old_signed.is_err() or same_approval.is_err() or old_approval.is_err() or
+                same_signed.unwrap() != old_signed.unwrap() or same_approval.unwrap() != old_approval.unwrap() or
+                receipt.policy_bytes != source.unwrap()):
+            return no_begin_cancel_error_v3(current, Some(receipt), true, "host-exec-no-begin-fixed-proof-mismatch")
+        val history = distributed_operation_journal_history_batch_v2(current.capacity.journal)
+        if history.is_err(): return no_begin_cancel_error_v3(current, Some(receipt), true, history.unwrap_err())
+        val index = history.unwrap()
+        if (not index.revision_endpoints.contains_key(receipt.before_commit_digest) or
+                index.revision_endpoints[receipt.before_commit_digest] != receipt.before_sequence or
+                not index.operations.contains_key(child.id) or index.operations[child.id].admitted_sequence > receipt.before_sequence):
+            return no_begin_cancel_error_v3(current, Some(receipt), true, "host-exec-no-begin-prefix-not-ancestor")
+        candidate = Some(receipt)
+    else:
+        val current_row = no_begin_admitted_v3(current.capacity.journal, child)
+        if current_row.is_err(): return no_begin_cancel_error_v3(current, nil, true, current_row.unwrap_err())
+        val packet_bytes = host_runtime_exec_request_encode_v3(packet)
+        if packet_bytes.is_err(): return no_begin_cancel_error_v3(current, nil, true, packet_bytes.unwrap_err())
+        candidate = Some(HostRuntimeExecNoBeginCancelReceiptV3(parent_operation: parent, child_operation: child,
+            child_packet_digest: sha256_text(packet_bytes.unwrap()), scope: scope, journal_authority_digest: current.capacity.journal.authority_digest,
+            before_commit_digest: current.capacity.journal.revision, before_sequence: current.capacity.journal.sequence,
+            signed: signed, approval: approval, policy_bytes: source.unwrap(), policy_digest: policy.source_digest,
+            authorized_unix_ms: initial.grant_clock, monotonic_ms: initial.monotonic_ms, policy_revision: initial.policy_revision,
+            revocation_epoch: initial.revocation_epoch, session_generation: initial.session_generation))
+    val receipt = candidate.unwrap()
+    val binding = host_runtime_exec_no_begin_cancel_match_v3(current.capacity.journal, current.capacity.ledger.capacity, child, receipt)
+    if binding.is_err(): return no_begin_cancel_error_v3(current, Some(receipt), true, binding.unwrap_err())
+    if not binding.unwrap(): return no_begin_cancel_error_v3(current, Some(receipt), true, "host-exec-no-begin-binding-refused")
+    val bytes = host_runtime_exec_no_begin_cancel_receipt_encode_v3(receipt)
+    if bytes.is_err(): return no_begin_cancel_error_v3(current, Some(receipt), true, bytes.unwrap_err())
+    # Scoped read-only loan to this SYNCHRONOUS same-parent callback. No owner
+    # commit/close, HostRoot/Container capture, job transfer or retained callback.
+    val journal = current.capacity.journal
+    val guard = fn() -> Result<HostReservationAuthorizationContextV1, text>:
+        val still_admitted = no_begin_admitted_v3(journal, child)?
+        val fresh = refresh()
+        val verified = no_begin_authority_v3(policy, parent, signed, approval, initial, fresh)?
+        Ok(fresh)
+    val published = host_exec_private_publish_v3(current.capacity.journal.root, "host-runtime-exec-no-begin-cancellations",
+        sha256_text(child.id) + ".sdn", bytes.unwrap(), guard)
+    if published.error != "" or published.recovery_required:
+        val reason = if published.error != "": published.error else: "host-exec-no-begin-publication-recovery"
+        return no_begin_cancel_error_v3(current, Some(receipt), true, reason + ":retained-stage:" + published.stage_path)
+    if published.context.is_none(): return no_begin_cancel_error_v3(current, Some(receipt), true, "host-exec-no-begin-publication-context")
+    val fresh = refresh()
+    val final_authority = no_begin_authority_v3(policy, parent, signed, approval, published.context.unwrap(), fresh)
+    if final_authority.is_err(): return no_begin_cancel_error_v3(current, Some(receipt), true, final_authority.unwrap_err())
+    val admitted = no_begin_admitted_v3(current.capacity.journal, child)
+    if admitted.is_err(): return no_begin_cancel_error_v3(current, Some(receipt), true, admitted.unwrap_err())
+    val outcome = daemon_operation_record_outcome_v2(current.capacity.journal, child, "cancelled", sha256_text(bytes.unwrap()))
+    if outcome.is_err(): return no_begin_cancel_error_v3(current, Some(receipt), true, outcome.unwrap_err())
+    current.capacity.journal = outcome.unwrap()
+    current.capacity.ledger.revision = current.capacity.journal.sequence + 1
+    HostRuntimeExecAdmittedCancelTurnV3(current, Some(receipt), true, false, "")

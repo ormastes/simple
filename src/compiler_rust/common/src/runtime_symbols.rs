@@ -2274,6 +2274,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_tls_server_create_from_der",
     "rt_tls_server_read_checked",
     "rt_tls_server_shutdown",
+    "rt_tls_server_upgrade_tcp",
     "rt_tls_server_write",
     "rt_tls_server_write_bytes",
     "rt_tls_set",
@@ -2620,6 +2621,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_vulkan_discard_graphics_command",
     "rt_vulkan_end_graphics",
     "rt_vulkan_selected_device_name",
+    "rt_vulkan_selected_device_identity_v1",
     "rt_vulkan_submit_graphics_and_wait_fence",
     "rt_write_file",
     // Native socket / HTTP externs. These use the no_mangle C ABI in

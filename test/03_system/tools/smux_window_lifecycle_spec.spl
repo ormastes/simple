@@ -2,8 +2,9 @@
 ## Purpose
 REQ-CMUX-002/004/005/008/010: checked window deletion and final-session lifetime.
 ## Evidence boundary
-Authoring is NOT_RUN. Pure record cases prove pruning invariants only. Native
-cases require actual Windows children and an admitted Phase 3 runner.
+Pure record cases prove pruning invariants only. Native cases require actual
+children on the host's SOSIX providers (ConPTY/cmd.exe on Windows, a Unix PTY
+and /bin/sh elsewhere).
 # @manual: primary
 # @capture: text
 """
@@ -44,6 +45,24 @@ fn window_lifecycle_check(session: text, removed: text, remaining: text):
     expect(windows[0].id).to_equal(remaining)
     expect(smux_list_panes(session, removed).len()).to_equal(0)
     expect(smux_window_closing(session, removed)).to_equal(false)
+
+fn window_lifecycle_shell_program() -> text:
+    if sosix_platform() == "windows": return "cmd.exe"
+    return "/bin/sh"
+
+fn window_lifecycle_shell_args() -> [text]:
+    if sosix_platform() == "windows": return ["/Q"]
+    return []
+
+fn window_lifecycle_shell() -> text:
+    if sosix_platform() == "windows": return "cmd.exe /Q"
+    return "/bin/sh -i"
+
+# The sum is absent from the command: only the child can compute it.
+fn window_lifecycle_sum(left: i64, right: i64) -> text:
+    val expression = left.to_text() + "+" + right.to_text()
+    if sosix_platform() == "windows": return "set /a " + expression
+    return "echo $((" + expression + "))"
 
 # @inline
 fn window_lifecycle_registry() -> ServiceState:
@@ -200,18 +219,17 @@ describe "smux removes owned windows without phantom sessions":
         expect(smux_remote_dispatch(second_prefix + "windows " + ids[0])).to_equal(smux_missing_session_reply(ids[0]))
         expect(smux_client_check_lease(ids[0], "second", second).is_err()).to_equal(true)
 
-    it "should terminate a real detached Windows PTY window while its sibling child keeps working":
+    it "should terminate a real detached PTY window while its sibling child keeps working":
         val ids = window_lifecycle_setup()
-        expect(sosix_platform()).to_equal("windows")
-        val target_spawned = smux_pane_spawn_pty(ids[0], ids[1], ids[2], "cmd.exe /Q")
-        val sibling_spawned = smux_pane_spawn_pty(ids[0], ids[3], ids[4], "cmd.exe /Q")
+        val target_spawned = smux_pane_spawn_pty(ids[0], ids[1], ids[2], window_lifecycle_shell())
+        val sibling_spawned = smux_pane_spawn_pty(ids[0], ids[3], ids[4], window_lifecycle_shell())
         val attached = smux_attach(ids[0], "viewer", 80, 24).attached
         val detached = smux_detach_from(ids[0], "viewer")
-        val initial_sent = smux_send_command(ids[0], ids[1], ids[2], "set /a 3141+2718")
+        val initial_sent = smux_send_command(ids[0], ids[1], ids[2], window_lifecycle_sum(3141, 2718))
         val before = window_lifecycle_output(ids[0], ids[1], ids[2], "5859")
         step("Close the real detached target and require fresh computation from the surviving child")
         val killed = window_lifecycle_kill(ids[0], ids[1])
-        val sent = smux_send_command(ids[0], ids[3], ids[4], "set /a 1618+1414")
+        val sent = smux_send_command(ids[0], ids[3], ids[4], window_lifecycle_sum(1618, 1414))
         val after = window_lifecycle_output(ids[0], ids[3], ids[4], "3032")
         val remaining = smux_list_windows(ids[0])
         val cleaned = window_lifecycle_kill(ids[0], ids[3])
@@ -232,14 +250,13 @@ describe "smux removes owned windows without phantom sessions":
         expect(cleaned.is_ok()).to_equal(true)
         expect(sosix_pty_cleanup_pending()).to_equal(0)
 
-    it "should close a real Windows piped child before removing the final window":
+    it "should close a real piped child before removing the final window":
         smux_reset_for_test()
-        expect(sosix_platform()).to_equal("windows")
         val session = smux_create_session("piped")
         val window = smux_list_windows(session.id)[0]
         val pane = smux_list_panes(session.id, window.id)[0]
-        val spawned = smux_pane_spawn(session.id, window.id, pane.id, "cmd.exe", ["/Q"])
-        val sent = smux_send_command(session.id, window.id, pane.id, "set /a 2718+1618")
+        val spawned = smux_pane_spawn(session.id, window.id, pane.id, window_lifecycle_shell_program(), window_lifecycle_shell_args())
+        val sent = smux_send_command(session.id, window.id, pane.id, window_lifecycle_sum(2718, 1618))
         val output = window_lifecycle_output(session.id, window.id, pane.id, "4336")
         step("Use checked piped-process close through final-window session teardown")
         val killed = window_lifecycle_kill(session.id, window.id)

@@ -1,80 +1,171 @@
+"""
+SPipe process harness — provider adapters and shared hook/gate core.
+
+Purpose and audience: executable specification for engineers maintaining the
+cross-provider SPipe process harness (`std.nogc_async_mut.spipe_process_harness`).
+It pins the closed `Provider` set (claude, codex, gemini, kimi, unknown), the
+stable `Unknown` fallback for unrecognised names, each provider's hook event
+list, the advisory-only Kimi adapter, typed hook envelopes, and the prevention
+gate verdict.
+"""
+# @cover src/lib/nogc_async_mut/spipe_process_harness/core.spl 80%
+# plan: simple_traceability_spipe_bug_mcp_skills_improvement_plan_2026-11-14 §8.2 ; wiki: doc/00_llm_process/feature_expert/spipe_provider_adapters/skill.md
+
 use std.nogc_async_mut.spipe_process_harness.core.{
-    normalize_provider, state_path, event_log_path, provider_hook_events,
+    normalize_provider, provider_slug, state_path, event_log_path, provider_hook_events,
     hook_command, hook_jsonl, gate_from_state, render_state, render_hud,
     deploy_snippets
 }
-use std.nogc_async_mut.spipe_process_harness.types.{HudSnapshot}
-use std.spec.{describe, it, expect}
+use std.nogc_async_mut.spipe_process_harness.types.{
+    Provider, GateVerdict, HookSessionId, ModelName, FeatureSlug, HudSnapshot
+}
+use std.spec.{describe, it, expect, step}
 
 describe "SPipe process harness":
     describe "provider normalization":
-        it "normalizes the three supported LLM providers":
-            expect(normalize_provider("Claude Code")).to_equal("claude")
-            expect(normalize_provider("Codex GPT")).to_equal("codex")
-            expect(normalize_provider("Google Gemini")).to_equal("gemini")
+        it "recognises the four supported providers case-insensitively":
+            # @req SKILL-001
+            step("parse mixed-case provider labels")
+            expect(normalize_provider("Claude Code")).to_equal(Provider.Claude)
+            expect(normalize_provider("Codex GPT")).to_equal(Provider.Codex)
+            expect(normalize_provider("Google Gemini")).to_equal(Provider.Gemini)
+            expect(normalize_provider("KIMI")).to_equal(Provider.Kimi)
+            step("trim surrounding whitespace before matching")
+            expect(normalize_provider("  kimi  ")).to_equal(Provider.Kimi)
 
-        it "keeps unknown provider names stable":
-            expect(normalize_provider("LocalAgent")).to_equal("localagent")
+        it "renders each provider as its stable slug":
+            # @req SKILL-001
+            step("map every enum value to its slug")
+            expect(provider_slug(Provider.Claude)).to_equal("claude")
+            expect(provider_slug(Provider.Codex)).to_equal("codex")
+            expect(provider_slug(Provider.Gemini)).to_equal("gemini")
+            expect(provider_slug(Provider.Kimi)).to_equal("kimi")
+            expect(provider_slug(Provider.Unknown)).to_equal("unknown")
+
+        it "maps unrecognised and empty names to Unknown, never the raw string":
+            # @req SKILL-002
+            step("an unrecognised name is Unknown")
+            expect(normalize_provider("foo")).to_equal(Provider.Unknown)
+            expect(normalize_provider("LocalAgent")).to_equal(Provider.Unknown)
+            step("empty and whitespace-only names are Unknown")
+            expect(normalize_provider("")).to_equal(Provider.Unknown)
+            expect(normalize_provider("   ")).to_equal(Provider.Unknown)
+            step("the slug of an unrecognised name is the fixed word unknown")
+            expect(provider_slug(normalize_provider("foo"))).to_equal("unknown")
+
+        it "resolves an ambiguous label by the documented precedence":
+            # @req SKILL-002
+            step("claude is checked before kimi")
+            expect(normalize_provider("kimi-via-claude")).to_equal(Provider.Claude)
 
     describe "state and event paths":
         it "uses the default feature when blank":
-            expect(state_path("")).to_equal(".spipe/spipe-process-harness/state.md")
-            expect(event_log_path("")).to_equal(".spipe/spipe-process-harness/events.jsonl")
+            # @req SKILL-001
+            step("blank feature slug falls back to the harness default")
+            expect(state_path(FeatureSlug(value: ""))).to_equal(".spipe/spipe-process-harness/state.md")
+            expect(event_log_path(FeatureSlug(value: ""))).to_equal(".spipe/spipe-process-harness/events.jsonl")
 
         it "uses feature-specific durable state":
-            expect(state_path("demo")).to_equal(".spipe/demo/state.md")
+            # @req SKILL-001
+            step("feature slug selects the state directory")
+            expect(state_path(FeatureSlug(value: "demo"))).to_equal(".spipe/demo/state.md")
 
     describe "hook metadata":
         it "lists Claude hook events":
-            val events = provider_hook_events("claude")
+            # @req SKILL-001
+            step("claude exposes the nine documented Claude Code hooks")
+            val events = provider_hook_events(Provider.Claude)
+            expect(events.len()).to_equal(9)
             expect(events).to_contain("PreToolUse")
             expect(events).to_contain("SessionStart")
 
         it "lists Codex and Gemini lifecycle events":
-            expect(provider_hook_events("codex")).to_contain("turn_finish")
-            expect(provider_hook_events("gemini")).to_contain("prompt_submit")
+            # @req SKILL-001
+            step("codex and gemini expose five lifecycle events each")
+            expect(provider_hook_events(Provider.Codex)).to_contain("turn_finish")
+            expect(provider_hook_events(Provider.Codex).len()).to_equal(5)
+            expect(provider_hook_events(Provider.Gemini)).to_contain("prompt_submit")
+            expect(provider_hook_events(Provider.Gemini).len()).to_equal(5)
 
-        it "builds provider-specific hook command":
-            expect(hook_command("gemini")).to_equal("bin/simple spipe-process-harness hook --provider gemini")
+        it "lists no native hook events for the advisory Kimi adapter":
+            # @req SKILL-003
+            step("kimi has no documented native hook surface, so no event names are invented")
+            expect(provider_hook_events(Provider.Kimi).len()).to_equal(0)
+
+        it "lists no hook events for an unknown provider":
+            # @req SKILL-002
+            step("unknown providers get no hook events")
+            expect(provider_hook_events(normalize_provider("foo")).len()).to_equal(0)
+
+        it "builds provider-specific hook commands":
+            # @req SKILL-001
+            step("the hook command names the provider slug")
+            expect(hook_command(Provider.Gemini)).to_equal("bin/simple spipe-process-harness hook --provider gemini")
+            expect(hook_command(Provider.Kimi)).to_equal("bin/simple spipe-process-harness hook --provider kimi")
+            step("an unknown provider is labelled unknown")
+            expect(hook_command(normalize_provider("foo"))).to_equal("bin/simple spipe-process-harness hook --provider unknown")
 
         it "renders an append-only JSONL hook envelope":
-            val line = hook_jsonl("codex", "tool_start", "sid1", "gpt-5", "{\"x\":1}")
+            # @req SKILL-001
+            step("typed session and model ids are serialized as plain strings")
+            val line = hook_jsonl(Provider.Codex, "tool_start", HookSessionId(value: "sid1"), ModelName(value: "gpt-5"), "{\"x\":1}")
             expect(line).to_contain("\"provider\":\"codex\"")
             expect(line).to_contain("\"event\":\"tool_start\"")
             expect(line).to_contain("\"session_id\":\"sid1\"")
             expect(line).to_contain("\"model\":\"gpt-5\"")
-            expect(line).to_contain("\"raw\"")
+            expect(line).to_contain("\"raw\":\"")
+
+        it "records an unrecognised provider as unknown in the envelope":
+            # @req SKILL-002
+            step("raw provider text never leaks into the envelope")
+            val line = hook_jsonl(normalize_provider("foo"), "tool_start", HookSessionId(value: "s"), ModelName(value: "m"), "{}")
+            expect(line).to_contain("\"provider\":\"unknown\"")
+            expect(line.contains("foo")).to_equal(false)
 
     describe "prevention gate":
         it "blocks missing state":
+            # @req SKILL-004
+            step("empty state is a block verdict")
             val decision = gate_from_state("", true)
-            expect(decision.allowed).to_equal(false)
-            expect(decision.exit_code).to_equal(2)
+            expect(decision.verdict).to_equal(GateVerdict.Block)
+            expect(decision.reason).to_equal("missing SPipe state")
 
         it "blocks when approval is required and absent":
-            val state = render_state("demo", "request", "goal", false)
+            # @req SKILL-004
+            step("unapproved rendered state is blocked")
+            val state = render_state(FeatureSlug(value: "demo"), "request", "goal", false)
             val decision = gate_from_state(state, true)
-            expect(decision.allowed).to_equal(false)
+            expect(decision.verdict).to_equal(GateVerdict.Block)
             expect(decision.reason).to_equal("user approval missing")
 
         it "allows approved state":
-            val state = render_state("demo", "request", "goal", true)
+            # @req SKILL-004
+            step("approved rendered state is allowed")
+            val state = render_state(FeatureSlug(value: "demo"), "request", "goal", true)
             val decision = gate_from_state(state, true)
-            expect(decision.allowed).to_equal(true)
-            expect(decision.exit_code).to_equal(0)
+            expect(decision.verdict).to_equal(GateVerdict.Allow)
 
-        it "blocks explicit prevention marker":
-            val decision = gate_from_state("User Approved: true\nPrevent: block\n", true)
-            expect(decision.allowed).to_equal(false)
-            expect(decision.reason).to_equal("SPipe prevention gate is blocking")
+        it "blocks explicit prevention and failed status markers":
+            # @req SKILL-004
+            step("Prevent: block wins over approval")
+            val blocked = gate_from_state("User Approved: true\nPrevent: block\n", true)
+            expect(blocked.verdict).to_equal(GateVerdict.Block)
+            expect(blocked.reason).to_equal("SPipe prevention gate is blocking")
+            step("STATUS: FAIL wins over approval")
+            val failed = gate_from_state("User Approved: true\nSTATUS: FAIL\n", true)
+            expect(failed.verdict).to_equal(GateVerdict.Block)
 
-        it "blocks failed status marker":
-            val decision = gate_from_state("User Approved: true\nSTATUS: FAIL\n", true)
-            expect(decision.allowed).to_equal(false)
-            expect(decision.reason).to_equal("SPipe prevention gate is blocking")
+        it "lists all four providers in rendered state":
+            # @req SKILL-003
+            step("the state's provider line names kimi as advisory")
+            val state = render_state(FeatureSlug(value: "demo"), "request", "goal", true)
+            expect(state).to_contain("- Hook Providers: codex, claude, gemini, kimi (advisory)")
+            expect(state).to_contain("# SPipe State: demo")
 
     describe "HUD and deploy":
         it "renders compact CLI HUD":
+            # @req SKILL-001
+            step("render every HUD field")
             val snapshot = HudSnapshot(
                 model: "gpt-5",
                 jj_worktree: "abc",
@@ -88,9 +179,25 @@ describe "SPipe process harness":
             expect(hud).to_contain("jj=abc")
             expect(hud).to_contain("goal=ship")
 
-        it "generates snippets for all providers":
+        it "generates one deploy snippet per supported provider":
+            # @req SKILL-001
+            # @req SKILL-003
+            step("four snippets in claude, codex, gemini, kimi order")
             val snippets = deploy_snippets()
-            expect(snippets.len()).to_equal(3)
-            expect(snippets[0].provider).to_equal("claude")
-            expect(snippets[1].provider).to_equal("codex")
-            expect(snippets[2].provider).to_equal("gemini")
+            expect(snippets.len()).to_equal(4)
+            expect(snippets[0].provider).to_equal(Provider.Claude)
+            expect(snippets[1].provider).to_equal(Provider.Codex)
+            expect(snippets[2].provider).to_equal(Provider.Gemini)
+            expect(snippets[3].provider).to_equal(Provider.Kimi)
+
+        it "renders the Kimi snippet as advisory with no invented hook config":
+            # @req SKILL-003
+            step("kimi snippet states advisory mode and the manual hook command")
+            val kimi = deploy_snippets()[3]
+            expect(kimi.path).to_equal(".spipe/hook-deploy/kimi-advisory.sdn")
+            expect(kimi.content).to_contain("mode: advisory")
+            expect(kimi.content).to_contain("native_hooks: none")
+            expect(kimi.content).to_contain("bin/simple spipe-process-harness hook --provider kimi")
+            step("no snippet is ever emitted for the unknown fallback")
+            for snippet in deploy_snippets():
+                expect(snippet.provider == Provider.Unknown).to_equal(false)

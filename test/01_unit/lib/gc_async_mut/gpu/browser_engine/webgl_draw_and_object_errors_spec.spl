@@ -1,0 +1,194 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/webgl_context.spl 1%
+# @tag: unit, browser_engine, webgl
+#
+# WebGL draw-call argument validation and object lifetime errors. OpenGL ES
+# checks arguments in a fixed order, so each case isolates one rule: an
+# unknown primitive mode is INVALID_ENUM (1280) before anything else; a
+# negative first / count / offset / instance count is INVALID_VALUE (1281);
+# drawing without a current program is INVALID_OPERATION (1282). Deleting the
+# null object (-1) succeeds silently, deleting an unknown name is
+# INVALID_VALUE, and a failed draw must not count as a draw call.
+# drawBuffers / readBuffer accept only BACK or NONE on the default framebuffer.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.webgl_context.{WebGLContext, webgl_create_context}
+
+val TRIANGLES: i32 = 4
+val UNSIGNED_SHORT: i32 = 5123
+val BACK: i32 = 1029
+val COLOR_ATTACHMENT0: i32 = 36064
+
+describe "WebGL draw and object errors":
+
+    context "draw argument order":
+
+        it "rejects an unknown mode first":
+            var ctx = webgl_create_context(2, 16, 16)
+            expect(ctx.draw_arrays(99, -1, -1)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1280)
+            expect(ctx.draw_arrays_instanced(99, -1, -1, -1)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1280)
+            expect(ctx.draw_elements(99, -1, UNSIGNED_SHORT, -1)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1280)
+            expect(ctx.draw_elements_instanced(99, -1, UNSIGNED_SHORT, -1, -1)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1280)
+
+        it "rejects negative counts and offsets next":
+            var ctx = webgl_create_context(2, 16, 16)
+            expect(ctx.draw_arrays(TRIANGLES, -1, 3)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+            expect(ctx.draw_arrays(TRIANGLES, 0, -3)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+            expect(ctx.draw_arrays_instanced(TRIANGLES, 0, 3, -1)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+            expect(ctx.draw_elements(TRIANGLES, -3, UNSIGNED_SHORT, 0)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+            expect(ctx.draw_elements(TRIANGLES, 3, UNSIGNED_SHORT, -2)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+            expect(ctx.draw_elements_instanced(TRIANGLES, 3, UNSIGNED_SHORT, 0, -1)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+
+        it "rejects a draw without a current program and counts no draw call":
+            var ctx = webgl_create_context(2, 16, 16)
+            val before = ctx.render_commands.len()
+            expect(ctx.draw_arrays(TRIANGLES, 0, 3)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1282)
+            expect(ctx.draw_arrays_instanced(TRIANGLES, 0, 3, 2)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1282)
+            expect(ctx.draw_elements(TRIANGLES, 3, UNSIGNED_SHORT, 0)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1282)
+            expect(ctx.draw_elements_instanced(TRIANGLES, 3, UNSIGNED_SHORT, 0, 2)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1282)
+            expect(ctx.draw_call_count).to_equal(0)
+            expect(ctx.indexed_draw_call_count).to_equal(0)
+            expect(ctx.render_commands.len()).to_equal(before)
+
+        it "reports a lost context for every draw entry point":
+            var ctx = webgl_create_context(2, 16, 16)
+            ctx.lose_context()
+            expect(ctx.draw_arrays(TRIANGLES, 0, 3)).to_equal(false)
+            expect(ctx.draw_arrays_instanced(TRIANGLES, 0, 3, 1)).to_equal(false)
+            expect(ctx.draw_elements(TRIANGLES, 3, UNSIGNED_SHORT, 0)).to_equal(false)
+            expect(ctx.draw_elements_instanced(TRIANGLES, 3, UNSIGNED_SHORT, 0, 1)).to_equal(false)
+            expect(ctx.get_error()).to_equal(37442)
+
+    context "draw and read buffer selection":
+
+        it "needs WebGL 2 or the extension":
+            var ctx = webgl_create_context(1, 16, 16)
+            expect(ctx.draw_buffers([BACK])).to_equal(false)
+            expect(ctx.get_error()).to_equal(1282)
+            expect(ctx.read_buffer(BACK)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1282)
+
+        it "accepts BACK and NONE on the default framebuffer":
+            var ctx = webgl_create_context(2, 16, 16)
+            expect(ctx.draw_buffers([BACK])).to_equal(true)
+            expect(ctx.draw_buffers).to_equal([BACK])
+            expect(ctx.draw_buffers([0])).to_equal(true)
+            expect(ctx.read_buffer(BACK)).to_equal(true)
+            expect(ctx.read_buffer).to_equal(BACK)
+            expect(ctx.read_buffer(0)).to_equal(true)
+            expect(ctx.get_error()).to_equal(0)
+
+        it "rejects a colour attachment on the default framebuffer":
+            var ctx = webgl_create_context(2, 16, 16)
+            expect(ctx.draw_buffers([COLOR_ATTACHMENT0])).to_equal(false)
+            expect(ctx.get_error()).to_equal(1282)
+            expect(ctx.read_buffer(COLOR_ATTACHMENT0)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1282)
+
+        it "rejects an empty or multi-entry list on the default framebuffer":
+            var ctx = webgl_create_context(2, 16, 16)
+            var none: [i32] = []
+            expect(ctx.draw_buffers(none)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+            expect(ctx.draw_buffers([BACK, 0])).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+
+    context "deleting objects":
+
+        it "treats the null object as a silent success":
+            var ctx = webgl_create_context(2, 16, 16)
+            expect(ctx.delete_buffer(-1)).to_equal(true)
+            expect(ctx.delete_texture(-1)).to_equal(true)
+            expect(ctx.delete_sampler(-1)).to_equal(true)
+            expect(ctx.delete_framebuffer(-1)).to_equal(true)
+            expect(ctx.delete_renderbuffer(-1)).to_equal(true)
+            expect(ctx.delete_vertex_array(-1)).to_equal(true)
+            expect(ctx.delete_shader(-1)).to_equal(true)
+            expect(ctx.delete_program(-1)).to_equal(true)
+            expect(ctx.get_error()).to_equal(0)
+
+        it "reports INVALID_VALUE for a name that was never created":
+            var ctx = webgl_create_context(2, 16, 16)
+            expect(ctx.delete_buffer(4242)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+            expect(ctx.delete_texture(4242)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+            expect(ctx.delete_sampler(4242)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+            expect(ctx.delete_renderbuffer(4242)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+            expect(ctx.delete_vertex_array(4242)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+            expect(ctx.delete_shader(4242)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+            expect(ctx.delete_program(4242)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+
+        it "deletes a buffer once and rejects the second delete":
+            var ctx = webgl_create_context(2, 16, 16)
+            val b = ctx.create_buffer()
+            expect(ctx.is_buffer(b.id)).to_equal(true)
+            expect(ctx.delete_buffer(b.id)).to_equal(true)
+            expect(ctx.is_buffer(b.id)).to_equal(false)
+            expect(ctx.delete_buffer(b.id)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+
+        it "refuses every delete on a lost context":
+            var ctx = webgl_create_context(2, 16, 16)
+            ctx.lose_context()
+            expect(ctx.delete_buffer(-1)).to_equal(false)
+            expect(ctx.delete_texture(-1)).to_equal(false)
+            expect(ctx.delete_sampler(-1)).to_equal(false)
+            expect(ctx.delete_framebuffer(-1)).to_equal(false)
+            expect(ctx.delete_renderbuffer(-1)).to_equal(false)
+            expect(ctx.delete_vertex_array(-1)).to_equal(false)
+            expect(ctx.delete_shader(-1)).to_equal(false)
+            expect(ctx.delete_program(-1)).to_equal(false)
+
+    context "vertex array binding":
+
+        it "binds the null vertex array and rejects an unknown one":
+            var ctx = webgl_create_context(2, 16, 16)
+            expect(ctx.bind_vertex_array(-1)).to_equal(true)
+            expect(ctx.bound_vertex_array).to_equal(-1)
+            expect(ctx.bind_vertex_array(4242)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+
+        it "binds a created vertex array and unbinds it again":
+            var ctx = webgl_create_context(2, 16, 16)
+            val vao = ctx.create_vertex_array()
+            expect(ctx.bind_vertex_array(vao.id)).to_equal(true)
+            expect(ctx.bound_vertex_array).to_equal(vao.id)
+            expect(ctx.bind_vertex_array(-1)).to_equal(true)
+            expect(ctx.bound_vertex_array).to_equal(-1)
+
+    context "pixel store":
+
+        it "accepts the two colour-space conversion values and rejects others":
+            var ctx = webgl_create_context(1, 16, 16)
+            expect(ctx.pixel_store_i(37443, 37444)).to_equal(true)
+            expect(ctx.unpack_colorspace_conversion).to_equal(37444)
+            expect(ctx.pixel_store_i(37443, 0)).to_equal(true)
+            expect(ctx.unpack_colorspace_conversion).to_equal(0)
+            expect(ctx.pixel_store_i(37443, 5)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+
+        it "rejects an unknown parameter name":
+            var ctx = webgl_create_context(1, 16, 16)
+            expect(ctx.pixel_store_i(4242, 1)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1280)

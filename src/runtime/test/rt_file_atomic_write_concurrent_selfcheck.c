@@ -25,7 +25,12 @@ static void* w(void*a){long i=(long)a;for(int k=0;k<1500;k++) if(!rt_file_atomic
 static void* r(void*a){static char b[400000];long n=0;while(!stop){FILE*f=fopen(P,"rb");if(!f)continue;size_t g=fread(b,1,sizeof b,f);fclose(f);n++;
  int ok=0;for(int i=0;i<4;i++)if((int)g==lens[i]){ok=1;for(size_t j=0;j<g;j++)if(b[j]!='a'+i)ok=0;}
  if(!ok){printf("PARTIAL len=%zu\n",g);exit(2);}}printf("reads=%ld\n",n);return 0;}
-int main(int c,char**v){P=v[1];pv=TV(P);umask(022);
+int main(int c,char**v){
+#ifdef _WIN32
+ /* Exit 77 = SKIP (not applicable on this host), never a pass. */
+ fputs("POSIX only: umask/chmod mode contract; the Windows rename retry has no coverage here\n",stderr);return 77;
+#endif
+ if(c<2){fputs("needs a scratch file path\n",stderr);return 64;}P=v[1];pv=TV(P);umask(022);
  for(int i=0;i<4;i++){char*s=malloc(lens[i]+1);memset(s,'a'+i,lens[i]);s[lens[i]]=0;vals[i]=TV(s);}
  rt_file_atomic_write(pv,vals[2]);
  struct stat st;stat(P,&st);printf("newmode=%o\n",st.st_mode&0777);if((st.st_mode&0777)!=0644)return 3;
@@ -37,5 +42,7 @@ int main(int c,char**v){P=v[1];pv=TV(P);umask(022);
   FILE*f=fopen(P,"rb");size_t g=fread(b,1,8,f);fclose(f);if(g!=5||memcmp(b,raw,5))return 6;}
  puts("OK");return 0;}
 #include <sys/stat.h>
+#ifndef SIMPLE_TEST_CORE_RUNTIME /* c-runtime test kind: the core-C owners link instead */
 char* spl_strdup(const char*s){return strdup(s);}
 _Bool rt_is_dir(const char*p){struct stat s;return stat(p,&s)==0&&S_ISDIR(s.st_mode);}
+#endif

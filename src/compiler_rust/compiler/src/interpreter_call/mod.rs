@@ -61,6 +61,46 @@ fn enum_variant_arity_error(enum_name: &str, variant_name: &str, expected: usize
     )
 }
 
+/// Apply an unapplied payload variant (`Kind.Pay`, or `X.Pay` out of a
+/// `mod X:` dict) to its arguments: arity check, then one payload value or a
+/// tuple of them.
+pub(crate) fn construct_enum_variant(
+    enum_name: String,
+    variant_name: String,
+    args: &[Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    let enum_def = crate::interpreter::owner_module_enum(&enum_name)
+        .or_else(|| enums.get(&enum_name).cloned())
+        .or_else(|| crate::interpreter::BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(&enum_name).cloned()))
+        .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(&enum_name).cloned()));
+    if let Some(enum_def) = enum_def {
+        validate_enum_variant_arity(&enum_def, &variant_name, args.len())?;
+    }
+    let payload = if args.is_empty() {
+        None
+    } else if args.len() == 1 {
+        let val = evaluate_expr(&args[0].value, env, functions, classes, enums, impl_methods)?;
+        Some(Box::new(val))
+    } else {
+        // Multiple args - wrap in tuple
+        let vals: Result<Vec<Value>, _> = args
+            .iter()
+            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+            .collect();
+        Some(Box::new(Value::Tuple(vals?)))
+    };
+    Ok(Value::Enum {
+        enum_name,
+        variant: variant_name,
+        payload,
+    })
+}
+
 pub(crate) fn validate_enum_variant_arity(
     enum_def: &EnumDef,
     variant_name: &str,
@@ -208,12 +248,64 @@ fn overload_score(func: &FunctionDef, values: &[Value]) -> Option<usize> {
 }
 
 /// Reject a call that reaches a private top-level `fn` of another directory.
-fn gate_private_call(name: &str, func: &Arc<FunctionDef>) -> Result<(), CompileError> {
+/// Applied wherever the CALLER names the function (bare, import-bound,
+/// module-qualified), never at callee entry: a module may hand its own
+/// private fn to anyone as a value. The caller is `private_call_caller()`:
+/// a module top level, a function's owner, or the entry file
+/// (private_call_gate_skips_import_bound_and_entry_calls_2026-11-14).
+pub(crate) fn gate_private_call(name: &str, func: &Arc<FunctionDef>) -> Result<(), CompileError> {
     if !matches!(func.visibility, simple_parser::ast::Visibility::Private) {
         return Ok(());
     }
-    if let (Some(owner), Some(cur)) = (function_module_owner(func), CURRENT_EXEC_MODULE.with(|c| c.borrow().clone())) {
-        crate::interpreter::interpreter_module::check_private_call_visibility(name, &owner, &cur)?;
+    let Some(owner) = function_module_owner(func) else {
+        return Ok(());
+    };
+    // The entry's own fns are never in the private registry; skip the
+    // caller lookup on that hot path.
+    if &*owner == "<entry>" {
+        return Ok(());
+    }
+    let cur = crate::interpreter::interpreter_module::private_call_caller();
+    crate::interpreter::interpreter_module::check_private_call_visibility(name, &owner, &cur)
+}
+
+/// A module namespace handed out whole (`values`, `entries`, iteration, a
+/// copy made to mutate or merge it) names every private fn it stores under
+/// that fn's own name, exactly as `m["f"]` names one. A dict program code
+/// built is not a namespace and is not judged.
+pub(crate) fn gate_module_namespace_handout(map: &DictMap) -> Result<(), CompileError> {
+    if !crate::interpreter::is_module_namespace_dict(map) {
+        return Ok(());
+    }
+    gate_namespace_private_entries(map)
+}
+
+/// `module_dict_make_mut` for a program's `d[k] = v`: the write copies a
+/// module namespace into a plain dict, so the namespace is judged first.
+pub(crate) fn namespace_make_mut_for_write(dict: &mut Arc<DictMap>) -> Result<&mut DictMap, CompileError> {
+    gate_module_namespace_handout(dict)?;
+    Ok(crate::interpreter::module_dict_make_mut(dict))
+}
+
+/// The judging half of `gate_module_namespace_handout`, for a caller that
+/// already knows the entries come from a namespace (its flat surface).
+/// Judged in name order, so the refusal names the same fn on every lane
+/// (namespace insertion order differs between the JIT and interpreter loaders).
+pub(crate) fn gate_namespace_private_entries(entries: &DictMap) -> Result<(), CompileError> {
+    let mut private_fns: Vec<&Arc<FunctionDef>> = entries
+        .iter()
+        .filter_map(|(key, stored)| match stored {
+            Value::Function { def, .. }
+                if matches!(def.visibility, simple_parser::ast::Visibility::Private) && def.name == *key =>
+            {
+                Some(def)
+            }
+            _ => None,
+        })
+        .collect();
+    private_fns.sort_by(|a, b| a.name.cmp(&b.name));
+    for def in private_fns {
+        gate_private_call(&def.name, def)?;
     }
     Ok(())
 }
@@ -310,6 +402,54 @@ fn candidate_declared_by(
     all_candidates(name, functions)
         .into_iter()
         .find(|candidate| function_module_owner(candidate).is_some_and(|o| *o == *owner))
+}
+
+/// The calling module's OWN declaration of `name`, when `found` (what a
+/// bare-name table handed back) belongs to another module. The flat function
+/// table and the flattened top-level env are last-registration-wins, so two
+/// modules with a same-named private helper used to reach whichever loaded
+/// last through a fn value, UFCS or a pipeline, and the private-call gate
+/// then judged the wrong definition.
+pub(crate) fn caller_own_function(name: &str, found: &Arc<FunctionDef>) -> Option<Arc<FunctionDef>> {
+    // Only a private helper is module-local by intent; a `pub` fn keeps the
+    // flat lookup (and costs nothing here on the UFCS hot path).
+    if !matches!(found.visibility, simple_parser::ast::Visibility::Private) {
+        return None;
+    }
+    let found_owner = function_module_owner(found)?;
+    let caller = crate::interpreter::interpreter_module::private_call_caller();
+    if *found_owner == *caller {
+        return None;
+    }
+    // Entry-file fns are owned by `<entry>`, not by the entry file's key.
+    let caller_is_entry = crate::interpreter::CURRENT_FILE.with(|c| {
+        c.borrow()
+            .as_deref()
+            .is_some_and(|entry| *crate::interpreter::normalize_path_key(entry).to_string_lossy() == *caller)
+    });
+    let caller_owner: &str = if caller_is_entry { "<entry>" } else { &caller };
+    if *found_owner == *caller_owner {
+        return None;
+    }
+    FUNCTION_OVERLOADS.with(|cell| {
+        cell.borrow().get(name).and_then(|candidates| {
+            candidates
+                .iter()
+                .find(|candidate| function_module_owner(candidate).is_some_and(|owner| *owner == *caller_owner))
+                .cloned()
+        })
+    })
+}
+
+/// The definition a bare `name` names for the code now running, at the
+/// fallbacks that take the flat table's entry (fn value, UFCS, pipeline):
+/// the calling module's own declaration first (`caller_own_function`).
+pub(crate) fn caller_bound_function(
+    name: &str,
+    functions: &HashMap<String, Arc<FunctionDef>>,
+) -> Option<Arc<FunctionDef>> {
+    let flat = functions.get(name)?;
+    Some(caller_own_function(name, flat).unwrap_or_else(|| Arc::clone(flat)))
 }
 
 /// True when module `owner` itself DECLARES `name` (owner-mangled symbol or an
@@ -930,6 +1070,10 @@ pub(crate) fn evaluate_call(
                 // call to m's definition; only when no such binding resolves
                 // does the historical score/tie selection below apply.
                 if let Some(func) = import_bound_candidate(name, functions, &evaluated_args) {
+                    // A glob import binds the name; it does not make it visible.
+                    // Judge the definition the binding resolved to (its own
+                    // name), not the call-site spelling.
+                    gate_private_call(&func.name, &func)?;
                     return core::exec_function_with_values_and_writeback(
                         &func,
                         evaluated_args,
@@ -1039,6 +1183,12 @@ pub(crate) fn evaluate_call(
         let env_fn_binding_shadows_flat = matches!(env.get(name), Some(Value::Function { .. }));
         if env_fn_binding_shadows_flat {
             if let Some(val) = env.get(name).cloned() {
+                // An env-bound import (notably `use m.{secret as s}`, which
+                // never enters FUNCTION_OVERLOADS) is gated by the def's own
+                // name; nested fns have no owner and pass.
+                if let Value::Function { def, .. } = &val {
+                    gate_private_call(&def.name, def)?;
+                }
                 if let Some(result) =
                     call_value_as_callable(val, args, env, functions, classes, enums, impl_methods)?
                 {
@@ -1162,6 +1312,8 @@ pub(crate) fn evaluate_call(
                 // Look up function in the module's exports
                 if let Some(func_val) = crate::interpreter::module_dict_get(&module_dict, field) {
                     if let Value::Function { def, captured_env, .. } = func_val {
+                        // Qualifying a private fn does not make it visible.
+                        gate_private_call(&def.name, &def)?;
                         let mut captured_env_clone = Env::clone(&captured_env);
                         return core::exec_function_with_captured_env(
                             &def,
@@ -1375,7 +1527,9 @@ pub(crate) fn evaluate_call(
             }
 
             // Fall back to global functions if module lookup failed
-            if let Some(func) = functions.get(field).cloned() {
+            if let Some(func) = caller_bound_function(field, functions) {
+                // A bare-name call spelled `m.f()`: same visibility rule.
+                gate_private_call(&func.name, &func)?;
                 return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
             } else if classes.contains_key(field) {
                 return core::instantiate_class(field, args, env, functions, classes, enums, impl_methods);
@@ -1664,7 +1818,9 @@ pub(crate) fn evaluate_call(
                 || GLOBAL_ENUMS.with(|cell| cell.borrow().contains_key(type_name))
                 || BITFIELDS.with(|cell| cell.borrow().contains_key(type_name));
             if !path_receiver_is_type {
-                if let Some(func) = functions.get(method_name).cloned() {
+                if let Some(func) = caller_bound_function(method_name, functions) {
+                    // A bare-name call spelled `m::f()`: same visibility rule.
+                    gate_private_call(&func.name, &func)?;
                     return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
                 } else if classes.contains_key(method_name) {
                     return core::instantiate_class(method_name, args, env, functions, classes, enums, impl_methods);
@@ -2064,7 +2220,7 @@ pub(crate) fn evaluate_call(
         Value::BlockClosure { nodes, env: captured } => {
             let captured_clone = Env::clone(&captured);
             let _closure_origin =
-                crate::interpreter::interpreter_module::ClosureOriginGuard::enter(Some(captured.closure_in_test()));
+                crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
             block_execution::exec_block_closure(&nodes, &captured_clone, functions, classes, enums, impl_methods)
         }
         Value::Function { def, captured_env, .. } => {
@@ -2104,33 +2260,7 @@ pub(crate) fn evaluate_call(
         Value::EnumVariantConstructor {
             enum_name,
             variant_name,
-        } => {
-            let enum_def = crate::interpreter::owner_module_enum(&enum_name)
-                .or_else(|| enums.get(&enum_name).cloned())
-                .or_else(|| crate::interpreter::BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(&enum_name).cloned()))
-                .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(&enum_name).cloned()));
-            if let Some(enum_def) = enum_def {
-                validate_enum_variant_arity(&enum_def, &variant_name, args.len())?;
-            }
-            let payload = if args.is_empty() {
-                None
-            } else if args.len() == 1 {
-                let val = evaluate_expr(&args[0].value, env, functions, classes, enums, impl_methods)?;
-                Some(Box::new(val))
-            } else {
-                // Multiple args - wrap in tuple
-                let vals: Result<Vec<Value>, _> = args
-                    .iter()
-                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
-                    .collect();
-                Some(Box::new(Value::Tuple(vals?)))
-            };
-            Ok(Value::Enum {
-                enum_name,
-                variant: variant_name,
-                payload,
-            })
-        }
+        } => construct_enum_variant(enum_name, variant_name, args, env, functions, classes, enums, impl_methods),
         Value::Object { ref class, ref fields } => {
             // Support __call__ protocol: objects with __call__ method are callable
             let evaluated_args: Vec<Value> = args

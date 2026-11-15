@@ -26,6 +26,8 @@ use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_funct
     bootstrap_mir_static_name_at, bootstrap_mir_static_type_tag_at,
     bootstrap_mir_static_init_kind_at, bootstrap_mir_static_init_payload_at,
     bootstrap_mir_static_alignment_at, bootstrap_mir_static_visibility_at, bootstrap_mir_static_external_at}
+# Records in the Windows XRay ring-mode ring (__simple_xray_ring_v1); 24 B each.
+const XRAY_RING_CAPACITY_V1: i64 = 65536
 # These implementation helpers belong to the SSA transform owner. The public
 # facade also exports them; its separate native-resolution regression remains
 # covered by mir_opt_facade_ssa_owner_spec.spl.
@@ -506,6 +508,9 @@ impl MirTextCodegen for MirToLlvm:
         # module's functions. Off leaves both empty.
         self.fn_xray_mode = {}
         self.xray_module_on = false
+        self.xray_flag_guard = false
+        self.xray_site = {}
+        self.xray_guard_seq = 0
         for fn_owner in mir_module_functions_sorted(module):
             # Source-facing runtime aliases can also have ordinary local bodies.
             # Remember their identity before emission: callers may sort before
@@ -564,13 +569,17 @@ impl MirTextCodegen for MirToLlvm:
         # no LLVM spelling; the debug-only bootstrap function table is not
         # keyed by this module's functions.
         if self.xray_module_on:
-            if not self.target_os.starts_with("linux"):
-                self.codegen_error("XRAY-E-UNSUPPORTED-TARGET: LLVM XRay sleds are admitted for Linux triples only (target os '{self.target_os}')")
+            # Windows: flag-guard sleds (no patching); Linux: compiler-rt sleds.
+            self.xray_flag_guard = self.target_os.starts_with("windows")
+            if not self.xray_flag_guard and not self.target_os.starts_with("linux"):
+                self.codegen_error("XRAY-E-UNSUPPORTED-TARGET: LLVM XRay sleds are admitted for Linux and Windows triples only (target os '{self.target_os}')")
             if self.bootstrap_string_globals_active:
                 self.codegen_error("XRAY-E-UNSUPPORTED-TARGET: LLVM XRay is not supported on the bootstrap translation path")
             for fn_mode in mir_module_functions_sorted(module):
                 if fn_mode.xray_mode == 1:
                     self.codegen_error("XRAY-E-UNSUPPORTED-MODE: LLVM cannot emit exit sleds without tail-exit sleds (xray_mode 1 in '{fn_mode.name}')")
+            if self.xray_flag_guard:
+                self.emit_xray_flag_guard_globals(module)
 
         # mutglobal lane (module-level `var` mutation storage, see
         # scratchpad/mutglobal_plan.md): emit real LLVM `@name = global ...`
@@ -1086,11 +1095,12 @@ impl MirTextCodegen for MirToLlvm:
         # noinline). Explicit @inline functions are never-listed (mode 0).
         val xray_mode = if self.fn_xray_mode.has(name): self.fn_xray_mode[name] else: 0
         var attrs = " nounwind" + placement_attrs
-        if is_readonly and not placement_naked:
+        if is_readonly and not placement_naked and not (self.xray_flag_guard and xray_mode > 0):
             attrs = attrs + " readonly"
         if ((is_small and xray_mode == 0) or self.fn_inline.has(name)) and not placement_naked:
             attrs = attrs + " alwaysinline"
-        attrs = attrs + llvm_xray_function_attrs(xray_mode, self.xray_module_on)
+        if not self.xray_flag_guard:
+            attrs = attrs + llvm_xray_function_attrs(xray_mode, self.xray_module_on)
         if ir_handle >= 0 or placement_naked or placement_suffix != "" or placement_prefix != "define":
             val param_str = params.join(", ")
             var dbg_suffix = ""
@@ -1123,6 +1133,9 @@ impl MirTextCodegen for MirToLlvm:
 
         val is_start = name == "_start"
         var block_i = 0
+        if self.xray_flag_guard and xray_mode > 0 and self.xray_site.has(name) and not placement_naked and body.blocks.len() > 0:
+            self.builder.emit_label("xray_entry")
+            self.emit_xray_flag_guard(name, 0, "bb{body.blocks[0].bootstrap_block_id_value()}")
         if placement_naked:
             # Design A.2 `@naked`: never run the generic block translator --
             # it materialises locals/params as allocas inside a prologue-free
@@ -1149,6 +1162,92 @@ impl MirTextCodegen for MirToLlvm:
             self.builder.end_function()
         if bootstrap_debug:
             print "[mir-to-llvm] function:done {name}"
+
+    me emit_xray_flag_guard_globals(module: MirModule):
+        """Windows flag-guard route: one activation slot per sled function, one
+        exported descriptor `{ count, [count x ptr] }` listing the slots in site
+        order, and the edge hook declaration. Site id = index in that order."""
+        var slots: [text] = []
+        var slot_names: [text] = []
+        for fn_slot in mir_module_functions_sorted(module):
+            if fn_slot.xray_mode > 0:
+                val symbol = self.llvm_function_symbol_name(fn_slot.name)
+                self.xray_site[fn_slot.name] = slots.len()
+                slots = slots.push("ptr @__simple_xray_slot_{symbol}")
+                slot_names = slot_names.push("@__simple_xray_slot_{symbol}")
+        self.builder.emit("")
+        self.builder.emit("; XRay flag-guard sleds (Windows)")
+        # No dllexport: one explicit export turns MinGW lld auto-export off and
+        # the DLL loses every function export (bug
+        # xray_win_flag_guard_dllexport_disables_mingw_auto_export_2026-11-15).
+        for slot_name in slot_names:
+            self.builder.emit("{slot_name} = internal global i8 0")
+        self.builder.emit("@__simple_xray_descriptor_v1 = constant {{ i64, [{slots.len()} x ptr] }} {{ i64 {slots.len()}, [{slots.len()} x ptr] [{slots.join(", ")}] }}")
+        # Site id -> Simple function name, parallel to the descriptor.
+        var name_refs: [text] = []
+        var site_index = 0
+        for fn_name in mir_module_functions_sorted(module):
+            if fn_name.xray_mode > 0:
+                val name_len = escaped_string_byte_len(fn_name.name) + 1
+                val name_text = escape_llvm_string(fn_name.name)
+                self.builder.emit("@__simple_xray_name_{site_index} = private unnamed_addr constant [{name_len} x i8] c\"{name_text}\\00\"")
+                name_refs = name_refs.push("ptr @__simple_xray_name_{site_index}")
+                site_index = site_index + 1
+        self.builder.emit("@__simple_xray_names_v1 = constant {{ i64, [{name_refs.len()} x ptr] }} {{ i64 {name_refs.len()}, [{name_refs.len()} x ptr] [{name_refs.join(", ")}] }}")
+        self.builder.emit("@__simple_xray_hook_v1 = global ptr null")
+        # Ring mode (PROVISIONAL): with a null hook the edge appends one
+        # {site, kind, pad, seq} record to this exported fixed-size ring. The
+        # write index is claimed by atomicrmw add (lockless); a claim past
+        # capacity is dropped and counted; seq = index+1 is release-stored last
+        # so a reader sees only complete records.
+        val cap = XRAY_RING_CAPACITY_V1
+        val ring_ty = "{{ i64, i64, i64, [{cap} x {{ i64, i32, i32, i64 }}] }}"
+        self.builder.emit("@__simple_xray_ring_v1 = global {ring_ty} {{ i64 {cap}, i64 0, i64 0, [{cap} x {{ i64, i32, i32, i64 }}] zeroinitializer }}")
+        self.builder.emit("define internal void @__simple_xray_edge_v1(i64 %site, i32 %kind) nounwind {{")
+        self.builder.emit("xe_entry:")
+        self.builder.emit("  %h = load volatile ptr, ptr @__simple_xray_hook_v1")
+        self.builder.emit("  %set = icmp ne ptr %h, null")
+        self.builder.emit("  br i1 %set, label %xe_call, label %xe_ring")
+        self.builder.emit("xe_call:")
+        self.builder.emit("  call void %h(i64 %site, i32 %kind)")
+        self.builder.emit("  br label %xe_done")
+        self.builder.emit("xe_ring:")
+        self.builder.emit("  %xe_widx = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v1, i32 0, i32 1")
+        self.builder.emit("  %xe_i = atomicrmw add ptr %xe_widx, i64 1 monotonic")
+        self.builder.emit("  %xe_full = icmp uge i64 %xe_i, {cap}")
+        self.builder.emit("  br i1 %xe_full, label %xe_drop, label %xe_store")
+        self.builder.emit("xe_drop:")
+        self.builder.emit("  %xe_dropped = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v1, i32 0, i32 2")
+        self.builder.emit("  %xe_d = atomicrmw add ptr %xe_dropped, i64 1 monotonic")
+        self.builder.emit("  br label %xe_done")
+        self.builder.emit("xe_store:")
+        self.builder.emit("  %xe_rsite = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v1, i32 0, i32 3, i64 %xe_i, i32 0")
+        self.builder.emit("  store i64 %site, ptr %xe_rsite, align 8")
+        self.builder.emit("  %xe_rkind = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v1, i32 0, i32 3, i64 %xe_i, i32 1")
+        self.builder.emit("  store i32 %kind, ptr %xe_rkind, align 4")
+        self.builder.emit("  %xe_seq = add i64 %xe_i, 1")
+        self.builder.emit("  %xe_rseq = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v1, i32 0, i32 3, i64 %xe_i, i32 3")
+        self.builder.emit("  store atomic i64 %xe_seq, ptr %xe_rseq release, align 8")
+        self.builder.emit("  br label %xe_done")
+        self.builder.emit("xe_done:")
+        self.builder.emit("  ret void")
+        self.builder.emit("}}")
+
+    me emit_xray_flag_guard(name: text, kind: i64, continue_label: text):
+        """Load the slot; when set call the edge hook. Falls through to
+        `continue_label` (which this method emits when it is not an existing block)."""
+        val seq = self.xray_guard_seq
+        self.xray_guard_seq = seq + 1
+        val site = self.xray_site[name]
+        val symbol = self.llvm_function_symbol_name(name)
+        self.builder.emit("  %xg{seq} = load volatile i8, ptr @__simple_xray_slot_{symbol}")
+        self.builder.emit("  %xc{seq} = icmp ne i8 %xg{seq}, 0")
+        self.builder.emit("  br i1 %xc{seq}, label %xs{seq}, label %{continue_label}")
+        self.builder.emit_label("xs{seq}")
+        self.builder.emit("  call void @__simple_xray_edge_v1(i64 {site}, i32 {kind})")
+        self.builder.emit("  br label %{continue_label}")
+        if continue_label == "xr{seq}":
+            self.builder.emit_label(continue_label)
 
     me translate_naked_body(name: text, body: MirBody):
         """Design A.2 `@naked` (seed parity with compile_naked_function): the
@@ -1938,6 +2037,8 @@ impl MirTextCodegen for MirToLlvm:
             print "[mir-to-llvm] terminator:kind index={block_index}"
         match term:
             case Ret(_):
+                if self.xray_flag_guard and self.xray_site.has(self.current_function_name) and not self.fn_naked.has(self.current_function_name):
+                    self.emit_xray_flag_guard(self.current_function_name, 1, "xr{self.xray_guard_seq}")
                 val ret_kind = blocks[block_index].bootstrap_ret_kind()
                 if bootstrap_debug:
                     print "[mir-to-llvm] terminator:ret-scalar-kind index={block_index} kind={ret_kind}"

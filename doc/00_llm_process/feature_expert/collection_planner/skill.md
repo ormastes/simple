@@ -106,3 +106,5 @@ COL-04 and COL-09 scenarios run; the populated-map ones need
 Owner question (W4b): frozen reads are not captured, so a site read mostly
 through views reports few lookups and `auto` feedback never promotes its next
 instances. Capturing them needs the lockless capture runtime (adaptive lane).
+
+Static selection (2026-11-14): `src/compiler/35.semantics/perf/collection_static_select_v1.spl` composes SDN `data_policy.rules` -> `resolved_collection_policy_for_site_v1` -> `collection_policy_decide_v1` -> `collection_policy_apply_{map,set}_v1` at a creation site (`collection_static_select_{map,set}_v1`); empty SDN = untouched container. No product construction site calls it yet, and the `.sprof` leg is not wired (see PR).

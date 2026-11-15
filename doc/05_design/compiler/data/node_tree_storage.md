@@ -382,3 +382,100 @@ shared read-only by every MIR shard worker, instead of N decoded copies.
   regeneration goes through `simple test` until fixed.
 - Interpreter-lane numbers over-state bytes per node; they rank the phases and
   attributes, the native lane confirms the absolute savings.
+
+### 7.4 AST placement census (measured 2026-11-14, node-attribute step 3)
+
+Probe: `test/05_perf/compiler/data/ast_placement_census_probe_spec.spl` (perf lane,
+`SIMPLE_PERF_PROBES=1`), seed-tip interpreter, Windows. Inputs: 6 real modules
+(`mir_lowering_stmts`, `data_schema_resolver`, `attr_access_sites`, `_AstExpr/nodes`,
+`driver_types`, `test_runner_single`) = **24,936 expr nodes, 6,137 stmt nodes**, parsed
+with `parse_module_body` after `reset_all_pools()`. A slot counts as populated when it
+differs from `expr_alloc`'s default. **Access frequency is NOT measured** (no dynamic
+read counters exist; the static fan-in scan timed out) — class "hot" below is by role,
+not by count, and must be confirmed by the native lane before any default flip.
+
+| column | populated | density | class (proposed) | reason |
+|---|---|---|---|---|
+| expr `tag` | 24,936 | 100% | main node | every node, 8 B, read on every dispatch |
+| expr `span` | 24,936 | 100% | main node | every node, diagnostics + HIR |
+| expr `i_val` | 17,046 | 68% | main node | dense small scalar (op / int value / ident id by tag) |
+| expr `s_val` | 17,188 | 69% | array (column) | dense but a wide text ref; read per tag family |
+| expr `left` | 9,096 | 36% | array (column) | mid density; node-id scalar |
+| expr `right` | 3,056 | 12% | array (column) / hash | binary/index/range only |
+| expr `extra` | 101 | 0.4% | sparse hash | almost always -1 |
+| expr `args` | 3,179 | 13% | sparse hash | list ref; 87% share one empty list |
+| expr `arg_names` | 2,926 | 12% | sparse hash | call-site named args only |
+| expr `stmts` | 188 | 0.8% | sparse hash | block-like exprs only |
+| expr `call_type_args` | 3 | 0.01% | sparse hash | turbofish only |
+| expr `f_val` | 0 | 0% | sparse hash (unconfirmed) | none in this sample; needs a float-bearing input |
+| stmt `expr` | 5,942 | 97% | main node | dense node-id scalar |
+| stmt `name` | 1,586 | 26% | array (column) | let/var names |
+| stmt `type_tag` | 1,275 | 21% | array (column) | annotated bindings |
+| stmt `if_single_else` | 157 | 2.6% | sparse hash | if-statements only |
+| stmt `body` | 0 | 0% | n/a | bodies live in `stmt_body_flat` + offsets, not `stmt_body` |
+
+Per-tag shape (tag ids from `_AstExpr/nodes.spl`): IDENT (6) = 11,960 nodes (48%)
+uses only `i_val`+`s_val`; BINARY (7) = 1,974 (7.9%) uses `i_val` (op), `left`,
+`right` on 100% of its own nodes; CALL (9) 1,571 uses `left`+`args`, 87% with named
+args absent; FIELD_ACCESS (11) 1,988 uses `i_val`,`s_val`,`left`.
+
+Findings that change the plan:
+- **`op` is family-sparse.** The pilot gives `op` a column indexed by global node id;
+  that column is 7.9% dense for Binary alone (92% of slots empty). A column wins only
+  when indexed per tag family (a view-local index); over the global id space the sparse
+  hash is the smaller choice for any attribute whose owning tag is under ~25% of nodes.
+- `left`/`right`/`extra` are tag-conditional: dense within their tags, sparse overall.
+- `args`/`arg_names`/`stmts`/`extra`/`call_type_args` are each < 15% populated and
+  hold list/text refs: first hash candidates after the two pilot attributes.
+- Not yet censused: decl columns, `asm_*` expr columns, HIR/MIR nodes.
+
+### 7.5 Node attributes applied to the real AST pool (2026-11-14, step 4)
+
+Switch: env `SIMPLE_NODE_ATTR=extra=<token>,s_val=<token>` (tokens `direct`,
+`column`, `sparse_hash`), read ONCE per `expr_reset` by `expr_attr_apply_config` in
+`10.frontend/core/_AstExpr/nodes.spl`; per access only an `[i64]` mode slot is read, no
+string compare. Unset/`direct` = today's owner arrays, no store constructed. An unknown
+token returns Err and leaves everything off.
+
+SDN rule (2026-11-15, lane nodeattr2): placement is also selectable by the existing
+`data_policy.rules` layout rows (no new format) addressed `compiler.ast.Expr.extra` /
+`compiler.ast.Expr.s_val` (site), `compiler.ast.Expr` (type), `compiler.ast` (module) or
+project, resolved by `data_attr_storage_resolve_v1` with default `direct`
+(`expr_attr_apply_sdn(source, path, override_spec)`). The rule file path comes from env
+`SIMPLE_NODE_ATTR_SDN`, read at `expr_reset`; `SIMPLE_NODE_ATTR` is applied AFTER the
+rules and overrides them. Neither set, or empty rules plus empty override, is the off
+identity (no store). A bad layout token or a bad/unreadable rule file returns Err and
+leaves the switch off. Default stays OFF.
+
+Applied (real `ExprStore` owner arrays `expr_extra`, `expr_s_val`; `inferred_type` has no
+owner in the real AST pool, so the 0.4%-dense `extra` is the sparse-hash candidate and
+69%-dense `s_val` the dense-column candidate). `op` was NOT applied (7.9% dense).
+Writes go through `expr_*_put`, reads through `expr_*_get`; the flat snapshot codec
+uses `*_dense()` / `*_load()`.
+
+Evidence (seed-tip interpreter, Windows, `ast_attr_apply_spec` 11/11 (7 env + 4 SDN-rule: site rules for both attrs with identical parse, no-rules/override precedence, bogus layout rejected, rule file via env at reset)): off-identity
+(parse fingerprint equals the pre-change constant), value+presence parity for extra on
+hash and column, s_val (text) on column and hash, array<->hash<->column switching by
+config alone with parity both ways, combined extra+s_val identical fingerprint.
+Regressions: `ast_pool_snapshot_spec` 5/5, `ast_node_pool_pilot_spec` 6/6,
+`attribute_schema_v1_spec` 9/9.
+
+Perf (parse-only of `mir_lowering_stmts.spl`, 12,266 exprs; same seed binary and tree,
+only the switch toggled; 3 alternating rounds, one process per run; wall = in-process
+parse_ms, peak RSS = PowerShell `Process.PeakWorkingSet64` polled externally every
+100 ms; host loaded, so rounds drift 84 s -> 118 s):
+
+| run | off parse_ms / peak MB | extra=sparse_hash | s_val=column |
+|---|---|---|---|
+| round 1 | 83910 / 231.3 | 79336 / 231.0 | 84647 / 231.7 |
+| round 2 | 92077 / 230.8 | 91034 / 230.8 | 91149 / 230.9 |
+| round 3 | 118385 / 231.0 | 96244 / 231.2 | 92294 / 230.8 |
+| mean | 98124 | 88871 | 89363 |
+
+Round-to-round drift (load) dwarfs any switch effect; within each round the on-runs are
+not slower than off. Peak working set is identical to 0.5 MB (about 231 MB for every
+config). `memory_usage()` in-process: 6455 off, 6496 extra=sparse_hash, 6491
+s_val=column (+36..41, units unrecorded). Conclusion: no measurable time or peak-RSS
+cost; no win either on the interpreter lane.
+Caveats: static fan-in of `expr_get_extra(` is 23 sites/10 files; dynamic read counters
+need a product hook (no cheap existing one) and were not added. Default stays off.

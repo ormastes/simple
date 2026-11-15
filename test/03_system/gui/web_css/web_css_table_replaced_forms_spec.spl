@@ -68,6 +68,7 @@ weakened test.
 use std.spec.step
 
 use std.spec.*
+use std.nogc_sync_mut.sffi.io.{file_exists}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_draw_ir,
     simple_web_layout_render_html_draw_ir_with_images,
@@ -77,6 +78,12 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_cpu.{
 use std.common.gpu.simpleos_host_gpu_draw_ir.{
     SimpleOsHostGpuImageResource, simpleos_host_gpu_image_resource}
 use common.ui.draw_ir.{DrawIrCommand, DrawIrComposition}
+
+fn _macos_control_faces() -> bool:
+    file_exists("/System/Library/Fonts/Helvetica.ttc")
+
+fn _linux_control_faces() -> bool:
+    not _macos_control_faces() and file_exists("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf")
 
 fn _draw_ir_command_by_id(
     commands: [DrawIrCommand], component_id: text
@@ -234,11 +241,25 @@ describe "Web CSS table, replaced-element, and forms layout":
         val btn = _draw_ir_command_by_id(commands, "btn")
         val inp = _draw_ir_command_by_id(commands, "inp")
 
-        step("Assert the button grew its border-box by its own padding around the label content")
+        step("Assert the button grew its border-box by its own border and padding around the label content")
+        # FACE-INDEPENDENT (Chrome's UA sheet on every platform): `border: 2px`
+        # and `padding: 1px 6px`, so the content box starts at x=8 and the
+        # border box is the label plus 16. The `content_rect.x == 6` this row
+        # used to carry was a border-less button and matched no browser.
         expect(btn.x).to_equal(0)
-        expect(btn.width).to_equal(33)
-        expect(btn.content_rect.x).to_equal(6)
-        expect(btn.content_rect.width).to_equal(21)
+        expect(btn.content_rect.x).to_equal(8)
+        expect(btn.width).to_equal(btn.content_rect.width + 16)
+        # FACE-DEPENDENT: the `OK` label. Chrome 159 on Linux (Liberation
+        # Sans) measures it 19.27 px, button 35.27; integer boxes ceil to 20 /
+        # 36. The 21 / 33 this row carried came from this engine's
+        # bitmap-clamped 13 px advances, not from a browser, and were already
+        # red on Linux (29 at 212090742df, 31 at 8f83a7b9c4a). No Chrome
+        # measurement of the Helvetica label exists here, so that host is
+        # asserted on its face-independent rows above only (not skipped), until
+        # a Chrome measurement on Helvetica exists (bug: web_render_chrome_lane_review_residue_2026-11-14 #9).
+        if _linux_control_faces():
+            expect(btn.width).to_equal(36)
+            expect(btn.content_rect.width).to_equal(20)
 
         step("Assert the input sits to the right of the button and reserves its own padded box")
         expect(inp.x).to_equal(btn.x + btn.width)

@@ -39,10 +39,14 @@ use app.llm_caret.cs_dashboard.{CsDashboard, cs_dashboard_new, cs_refresh,
 
 val QUESTION = "What is 4711 times 3? Reply with only the number."
 val ANSWER = "14133"
+# Short distinctive slice of QUESTION: a wrapped echo still contains it.
+val QUESTION_ECHO = "4711 times 3"
+val ECHO_BUDGET_S = 30
 
 struct LiveRun:
     launched: text
     answered: bool
+    delivered: bool
     screen: text
     frame: text
     killed: text
@@ -78,7 +82,15 @@ fn drive_agent(session: text, harness: text, budget_s: i64) -> LiveRun:
     var quiet = 0
     var last = ""
     var waited = 0
-    while waited < budget_s and not answered:
+    # A quiet screen is not proof the agent's input line is live: Kimi's cold
+    # start draws its welcome box and holds still before it accepts input, so
+    # the typed question can vanish. Require the question to echo in the pane
+    # within ECHO_BUDGET_S of sending; otherwise stop and report it undelivered
+    # rather than waiting the whole budget for an answer to a question never asked.
+    var delivered = false
+    var sent_at = 0
+    var undelivered = false
+    while waited < budget_s and not answered and not undelivered:
         thread_sleep_ms(1000)
         waited = waited + 1
         d = cs_refresh(d)
@@ -102,6 +114,7 @@ fn drive_agent(session: text, harness: text, budget_s: i64) -> LiveRun:
                 val (after_send, _s) = _cmd(d, QUESTION)
                 d = after_send
                 sent = true
+                sent_at = waited
         elif shown.contains("Continue anyway?"):
             # Codex asks before falling back when it dislikes TERM; "y" is a
             # text line, not a named key. (pane_backend now sets TERM for
@@ -109,12 +122,17 @@ fn drive_agent(session: text, harness: text, budget_s: i64) -> LiveRun:
             val (after_y, _y) = _cmd(d, "y")
             d = after_y
         elif shown.contains(ANSWER):
+            delivered = true
             answered = true
+        elif shown.contains(QUESTION_ECHO):
+            delivered = true
+        elif not delivered and waited - sent_at >= ECHO_BUDGET_S:
+            undelivered = true
         last = shown
     val screen = d.screen.join("\n")
     val frame = cs_render(d, 140, 34)
     val (_gone, killed) = _cmd(d, "/kill a1")
-    LiveRun(launched: launched, answered: answered, screen: screen,
+    LiveRun(launched: launched, answered: answered, delivered: delivered, screen: screen,
         frame: frame, killed: killed)
 
 # An agent CLI absent from this host is a visible BLOCKED row, not a pass and
@@ -129,7 +147,7 @@ fn _blocked(harness: text) -> bool:
 # provider-side usage/rate limit is a visible BLOCKED row: the
 # dashboard-to-pane pipeline worked end to end; the host account is exhausted.
 fn _provider_limited(run: LiveRun, harness: text) -> bool:
-    if run.screen.contains("usage limit") or run.screen.contains("rate limit"):
+    if run.screen.contains("usage limit") or run.screen.contains("rate limit") or run.screen.lower().contains("quota exceeded"):
         pending("BLOCKED: " + harness +
             " account is provider-rate-limited on this host; the pane pipeline itself delivered the question and received a reply")
         return true
@@ -227,6 +245,8 @@ describe "cs dashboard drives live agents in panes":
         # @capture(tui): split frame with Kimi's answer on the right
         step("The pane was created for the agent")
         expect(run.launched).to_contain("launched a1 in pane")
+        step("The question reached Kimi's input line")
+        expect(if run.delivered: "delivered" else: "question not delivered").to_equal("delivered")
         step("Kimi computed the answer, and it shows in the agent half of the frame")
         expect(run.answered).to_equal(true)
         expect(right_half(run.frame)).to_contain(ANSWER)

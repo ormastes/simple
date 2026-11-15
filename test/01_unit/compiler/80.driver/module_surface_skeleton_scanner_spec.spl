@@ -1,0 +1,309 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+## Purpose and audience
+`module_surface_skeleton_v1` blanks function bodies line for line. It is a
+line scanner, not a parser: it must not take text inside a comment, a string
+or a multi-line string for a declaration, must find the end of a multi-line
+header, and must keep every body the surface is read from (generic, inline,
+const, async, trait defaults, contract clauses, body-level externs).
+
+These cases pin the scanner on text alone: each one states which lines stay
+verbatim and which become the single `pass_do_nothing` stub. Surface equality
+with the full parse is pinned next to it in
+`hir_worker_closure_digest_parity_spec.spl`.
+Audience: compiler engineers maintaining the surface skeleton.
+
+Fixture notation, so the cases stay readable without escapes:
+`~` is a double quote, `^` a backslash, `$<` and `>$` are braces.
+"""
+
+# @tag: unit, compiler, driver, cache
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.string_core.{char_from_code}
+use compiler.driver.cache.module_surface_skeleton_v1.{module_surface_skeleton_v1}
+
+val STUB: text = "    pass_do_nothing"
+
+fn fx(lines: [text]) -> text:
+    lines.join("\n").replace("~", char_from_code(34)).replace("^", char_from_code(92)).replace("$<", char_from_code(123)).replace(">$", char_from_code(125))
+
+fn skel(lines: [text]) -> [text]:
+    module_surface_skeleton_v1(fx(lines)).split("\n")
+
+# The body of `fn tail` after `lines` is blanked exactly when the scanner left
+# the text before it in a clean state.
+fn tail_is_blanked(lines: [text]) -> bool:
+    var all: [text] = []
+    for line in lines:
+        all.push(line)
+    all.push("fn tail() -> i64:")
+    all.push("    9")
+    val out = skel(all)
+    out.len() == all.len() and out[all.len() - 2] == "fn tail() -> i64:" and out[all.len() - 1] == STUB
+
+describe "surface skeleton scanner: comments and ordinary strings":
+    it "ignores delimiters in comments and in one-line strings":
+        val lines = [
+            "fn body() -> text:",
+            "    # prose with one triple delimiter ~~~",
+            "    val x = 1 # inline prose with '''",
+            "    val s = ~hash # and escaped ^~ quote and slash ^^~",
+            "    val r = r~raw hash # and slash ^~",
+            "    val t = bar~not raw ^~ still open~",
+            "    s",
+            "r~raw at column zero~"
+        ]
+        val out = skel(lines)
+        expect(out[1]).to_equal(STUB)
+        expect(out[2]).to_equal("")
+        expect(out[6]).to_equal("")
+        expect(out[7].starts_with("r")).to_equal(true)
+        expect(tail_is_blanked(lines)).to_equal(true)
+
+    it "follows a string continued by a backslash at the end of the line":
+        val lines = [
+            "fn body() -> text:",
+            "    val c = ~first^",
+            "fn fake_member():^",
+            "    still $<x>$ text $<bad and ^~ escaped ^",
+            "    closes~",
+            "    c"
+        ]
+        val out = skel(lines)
+        step("The continued lines are string content, not a header and its body")
+        expect(out[1]).to_equal(STUB)
+        expect(out[2]).to_equal("")
+        expect(out[3]).to_equal("")
+        expect(tail_is_blanked(lines)).to_equal(true)
+
+    it "drops the continuation when the next line neither closes nor continues":
+        val lines = [
+            "fn body() -> text:",
+            "    val c = 'first^",
+            "    dangling line without a close",
+            "    c"
+        ]
+        expect(tail_is_blanked(lines)).to_equal(true)
+
+describe "surface skeleton scanner: interpolation":
+    it "skips a nested string operand inside an interpolation":
+        val lines = [
+            "fn body() -> text:",
+            "    val a = ~$<items.join(~'''~)>$~",
+            "    val b = ~$<if ok: ~y~ else: ~n~>$~",
+            "    val c = ~$<x == ~y~>$$<x != ~y~>$$<x <= ~y~>$$<x >= ~y~>$$<x ?? ~y~>$~",
+            "    val d = ~$<x < ~y~>$$<x > ~y~>$$<x + ~y~>$$<x - ~y~>$$<x * ~y~>$$<x / ~y~>$$<x % ~y~>$$<[x, ~y~]>$~",
+            "    val e = ~$<x and ~y~>$$<x or ~y~>$$<not ~y~>$$<x in ~y~>$~",
+            "    val h = ~$<match x: ~y~>$$<a else~y~>$~",
+            "    val i = ~$<'a' + $<1>$ + (2)>$~",
+            "    val l = ~$<a + ~esc ^~ q~>$~",
+            "    a"
+        ]
+        expect(tail_is_blanked(lines)).to_equal(true)
+
+    it "takes a brace for a literal when no operand can start there":
+        val lines = [
+            "fn body() -> text:",
+            "    val f = ~$< ~lit~>$~",
+            "    val g = ~$<x ~lit~>$~",
+            "    val j = ~$<~direct~>$~",
+            "    val k = ~$<unclosed~",
+            "    val m = ~$<open (paren~",
+            "    val n = ~$<brand ~y~>$~",
+            "    val o = ~$<xy ~lit~>$~",
+            "    f"
+        ]
+        expect(tail_is_blanked(lines)).to_equal(true)
+
+    it "skips an interpolation on a continued line":
+        val lines = [
+            "fn body() -> text:",
+            "    val c = ~first^",
+            "    $<x + ~'''~>$ and $<bad ^",
+            "    end~",
+            "    c"
+        ]
+        expect(tail_is_blanked(lines)).to_equal(true)
+
+describe "surface skeleton scanner: multi-line strings":
+    it "keeps header-looking lines inside triple-quoted strings as content":
+        val lines = [
+            "@inline",
+            "fn multiline() -> text:",
+            "    val single = '''",
+            "fn fake_single():",
+            "    pass",
+            "~~~ mismatched delimiter stays content",
+            "    '''",
+            "    val double = ~~~",
+            "fn fake_double():",
+            "    pass",
+            "    ~~~",
+            "    ~done~"
+        ]
+        val out = skel(lines)
+        expect(out[3]).to_equal("fn fake_single():")
+        expect(out[4]).to_equal("    pass")
+        expect(out[8]).to_equal("fn fake_double():")
+        expect(out[9]).to_equal("    pass")
+        expect(tail_is_blanked(lines)).to_equal(true)
+
+    it "keeps a module-level multi-line string verbatim":
+        val lines = [
+            "~~~",
+            "fn doc_example():",
+            "    body",
+            "~~~",
+            "",
+            "# fn in_a_comment():",
+            "fn real() -> i64:",
+            "    1"
+        ]
+        val out = skel(lines)
+        expect(out[1]).to_equal("fn doc_example():")
+        expect(out[2]).to_equal("    body")
+        expect(out[5]).to_equal("# fn in_a_comment():")
+        expect(out[7]).to_equal(STUB)
+
+    it "blanks a body that holds a multi-line string":
+        val lines = [
+            "fn body() -> text:",
+            "    val doc = ~~~",
+            "column zero content",
+            "    ~~~",
+            "    doc"
+        ]
+        val out = skel(lines)
+        expect(out[1]).to_equal(STUB)
+        expect(out[2]).to_equal("")
+        expect(tail_is_blanked(lines)).to_equal(true)
+
+describe "surface skeleton scanner: headers":
+    it "keeps trait blocks verbatim":
+        val lines = [
+            "pub trait Shape:",
+            "    fn area() -> i64:",
+            "        0",
+            "",
+            "    fn name() -> text",
+            "trait Other:",
+            "    fn x() -> i64:",
+            "        1"
+        ]
+        val out = skel(lines)
+        expect(out[2]).to_equal("        0")
+        expect(out[7]).to_equal("        1")
+        expect(tail_is_blanked(lines)).to_equal(true)
+
+    it "keeps generic, inline and const bodies":
+        val lines = [
+            "@inline(always)",
+            "fn a() -> i64:",
+            "    1",
+            "@always_inline",
+            "fn b() -> i64:",
+            "    2",
+            "@inline",
+            "@deprecated",
+            "fn c() -> i64:",
+            "    3",
+            "pub const fn d() -> i64:",
+            "    4",
+            "fn e<T>(x: T) -> T:",
+            "    x",
+            "@deprecated",
+            "fn plain() -> i64:",
+            "    5"
+        ]
+        val out = skel(lines)
+        expect(out[2]).to_equal("    1")
+        expect(out[5]).to_equal("    2")
+        expect(out[9]).to_equal("    3")
+        expect(out[11]).to_equal("    4")
+        expect(out[13]).to_equal("    x")
+        expect(out[16]).to_equal(STUB)
+
+    it "finds the end of a multi-line header and leaves non-bodies alone":
+        val lines = [
+            "pub(package) static fn g(",
+            "        a: i64,",
+            "        b: i64",
+            ") -> i64:",
+            "    val c = a + b",
+            "",
+            "    c",
+            "fn one_line(a: i64) -> i64: a + 5",
+            "extern fn rt_ext(a: i64) -> i64",
+            "kernel fn k() -> i64:",
+            "    7",
+            "class P:",
+            "    x: i64",
+            "    me bump():",
+            "        self.x = self.x + 1",
+            "val LIMIT: i64 = 4"
+        ]
+        val out = skel(lines)
+        expect(out[3]).to_equal(") -> i64:")
+        expect(out[4]).to_equal(STUB)
+        expect(out[5]).to_equal("")
+        expect(out[6]).to_equal("")
+        expect(out[7]).to_equal("fn one_line(a: i64) -> i64: a + 5")
+        expect(out[8]).to_equal("extern fn rt_ext(a: i64) -> i64")
+        expect(out[10]).to_equal(STUB)
+        expect(out[14]).to_equal("        pass_do_nothing")
+        expect(out[15]).to_equal("val LIMIT: i64 = 4")
+
+    it "leaves a header that never closes its parameter list":
+        val lines = ["fn ok() -> i64:", "    1", "fn never_closed(a: i64,", "    b: i64"]
+        val out = skel(lines)
+        expect(out[1]).to_equal(STUB)
+        expect(out[2]).to_equal("fn never_closed(a: i64,")
+        expect(out[3]).to_equal("    b: i64")
+
+    it "normalizes CRLF line ends":
+        val out = module_surface_skeleton_v1("fn a() -> i64:\r\n    1\r\n").split("\n")
+        expect(out[0]).to_equal("fn a() -> i64:")
+        expect(out[1]).to_equal(STUB)
+
+describe "surface skeleton scanner: bodies the surface is read from":
+    it "keeps a body that holds any contract clause":
+        for clause in ["in: a > 0", "requires: a > 0", "invariant: a > 0", "ensures: a > 0", "decreases: a",
+                "out(r): r > 0", "out_err(e): e != nil", "proof uses: lemma_a", "proof\tuses: lemma_b"]:
+            val out = skel(["fn c(a: i64) -> i64:", "    " + clause, "    a"])
+            expect(out[1]).to_equal("    " + clause)
+            expect(out[2]).to_equal("    a")
+
+    it "blanks a body whose lines only look like a clause":
+        for line in ["inner = 1", "out(a)", "output(a): a", "out a", "out(a", "out_err: a", "proof of: a",
+                "proof uses lemma", "requires_all(a)"]:
+            val out = skel(["fn c(a: i64) -> i64:", "    " + line, "    a"])
+            expect(out[1]).to_equal(STUB)
+            expect(out[2]).to_equal("")
+
+    it "keeps a body that declares an extern, also behind an attribute":
+        val plain = skel(["fn now() -> i64:", "    extern fn rt_time_millis() -> i64", "    rt_time_millis()"])
+        expect(plain[2]).to_equal("    rt_time_millis()")
+        val attributed = skel(["me read() -> i64:", "    @unsafe(reason: ~mmio~) extern fn mmio_read8(addr: i64) -> i64", "    mmio_read8(0)"])
+        expect(attributed[2]).to_equal("    mmio_read8(0)")
+        val other = skel(["fn now() -> i64:", "    val external = 1", "    external"])
+        expect(other[1]).to_equal(STUB)
+
+    it "keeps every async fn body":
+        val out = skel(["pub async fn outer() -> i64:", "    val a = await inner()", "    a + 1", "fn sync() -> i64:", "    2"])
+        expect(out[1]).to_equal("    val a = await inner()")
+        expect(out[2]).to_equal("    a + 1")
+        expect(out[4]).to_equal(STUB)
+
+    it "keeps a constructor-like body that holds the letters self":
+        for name in ["new", "create", "default", "from_text"]:
+            val kept = skel(["class P:", "    x: i64", "    pub fn " + name + "() -> i64:", "        self.x"])
+            expect(kept[3]).to_equal("        self.x")
+            val blanked = skel(["class P:", "    x: i64", "    pub fn " + name + "() -> i64:", "        41"])
+            expect(blanked[3]).to_equal("        pass_do_nothing")
+        for name in ["value", "with_fix", "init", "renew", "from"]:
+            val out = skel(["class P:", "    x: i64", "    fn " + name + "() -> i64:", "        self.x"])
+            expect(out[3]).to_equal("        pass_do_nothing")

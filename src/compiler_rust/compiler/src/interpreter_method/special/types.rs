@@ -294,6 +294,7 @@ pub fn handle_option_methods(
                 env: captured,
             } = func_arg
             {
+                let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
                 let mut local_env = Env::clone(&captured);
                 return Ok(Some(evaluate_expr(
                     &body,
@@ -502,6 +503,7 @@ pub fn handle_result_methods(
                     env: captured,
                 } = func_arg
                 {
+                    let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
                     let mut local_env = Env::clone(&captured);
                     if let Some(param) = params.first() {
                         local_env.insert(param.clone(), err_val.as_ref().clone());

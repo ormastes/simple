@@ -476,3 +476,44 @@ constant or function body can construct a payload:
    last-wins bare rows (unchanged semantics); the strict check's typed
    path then keys off the qualified owner, and the bare collision still
    routes to the untyped constructor path -- same as the direct lane.
+
+## 2026-11-14 follow-up: the 3 residual HirStmtKind.Let sites — a7c07361cbc was silently reverted
+
+The post-#9048 bootstrap_main probe (fatal_count=14) still carried
+`enum construction 'compiler.hir.hir_definitions.HirStmtKind.Let': payload
+type mismatch at 1` x3 at `20.hir/hir_lowering/statements.spl:1112:61,
+1237:41, 1279:41` (function=lower_hir_stmt). Root cause: the fix for exactly
+these three sites, `a7c07361cbc` "fix(hir): unwrap the annotation before the
+Let binding_type join (3 sites)" (2026-11-13), was later clobbered — the
+current tree again has the pre-fix shape `val binding_type: HirType = if
+has_annotation: hir_type else: ...` where the `hir_type` arm is the
+`HirType?` nullable merge, so the join remembers `HirType?` and the strict
+MIR payload check rejects it in the non-optional slot. (The sibling
+`04922c108b3` "restore dropped Let payload alignment (rebase casualty of
+7458f79f30d overlap)" shows the same class of loss; `4edef8fab8e` "feat:
+snapshot current development state" reverted `vr_hir_type_bare` back to
+`vr_hir_type` at the Var fast path.)
+
+Fix (worktree perf-fix-resid, branch work/stage3-residual-families-20261114):
+re-applied the unwrap at all three sites, but in the shape that SURVIVED in
+the current tree (the `val` path, statements.spl:1015-1025): lower the
+annotation ONCE into a bare `(*_)annotated_hir_type: HirType` (Error
+placeholder when absent), derive the nullable `hir_type` from it, and join
+on the boolean flag — never on the nullable. Sites: the Var fast path
+(vr_annotated_hir_type, ~:1083) and the StmtKind.Val / StmtKind.Var match
+arms (annotated_hir_type, ~:1206 and ~:1242).
+
+Verification (stage-2 binary 02501e23, gen4 lane, direct lane probes,
+worktree sources):
+- 15-line mechanism repro: `val binding_type: T = if c: t_optional else:
+  T(...)` into a non-optional named payload slot FAILS
+  (`payload type mismatch at 1`, f3_shape_bad2.spl); the bare-copy join
+  PASSES (f3_shape_good2.spl). Scalar (text) payloads do NOT reproduce —
+  only named/record payloads, matching the lane evidence.
+- Real module, before: direct-lane `--entry-closure` compile of
+  `src/compiler/20.hir/hir_lowering/statements.spl` fails with EXACTLY the
+  boot-probe lines (1112:61, 1237:41, 1279:41, fatal_count=3 for the
+  module; build/resid-probe/f3-before.log).
+- Real module, after: same probe, same binary, fixed sources — 0 payload
+  mismatches (build/resid-probe/f3-after.log); the build then fails only at
+  link with the expected `___simple_main` missing (library module, no main).

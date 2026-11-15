@@ -1,0 +1,111 @@
+"""
+AST placement census probe (node attributes, step 3): parses real compiler
+modules into the flat pools and reports, per expression and statement column,
+how many node slots hold a non-default value (population density), plus the
+tag histogram and each column's density per tag. Readers are the storage
+owners classifying each attribute as main-node (dense, small), array/column
+(dense, cold or wide) or sparse hash. Design: doc/05_design/compiler/data/node_tree_storage.md.
+SIMPLE_PERF_PROBES=1 <simple> test test/05_perf/compiler/data/ast_placement_census_probe_spec.spl
+Without SIMPLE_PERF_PROBES=1 the example prints "skipped: perf lane" and passes.
+Density is measured; access frequency is the STATIC accessor fan-in recorded in
+the design doc (no dynamic read counters exist). The example fails only when a
+module parses zero nodes.
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
+use compiler.core.types.{reset_all_pools}
+use compiler.core.parser.{parser_init_with_path}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.core.ast.{expr_count, stmt_count, expr_get_tag, expr_get_int, expr_get_float, expr_get_str, expr_get_left, expr_get_right, expr_get_extra, expr_get_args, expr_get_call_type_args, expr_get_arg_names, expr_get_stmts}
+use compiler.core.ast_stmt.{stmt_tag, stmt_expr, stmt_name, stmt_type_tag, stmt_body, stmt_if_single_else}
+
+val CENSUS_MODULES: [text] = [
+    "src/compiler/50.mir/mir_lowering_stmts.spl",
+    "src/compiler/00.common/data/data_schema_resolver.spl",
+    "src/compiler/20.hir/hir_lowering/attr_access_sites.spl",
+    "src/compiler/10.frontend/core/_AstExpr/nodes.spl",
+    "src/compiler/80.driver/driver_types.spl",
+    "src/app/test_runner_new/test_runner_single.spl"]
+
+val EXPR_COLS: [text] = ["i_val", "f_val", "s_val", "left", "right", "extra", "args", "call_type_args", "arg_names", "stmts"]
+val STMT_COLS: [text] = ["expr", "name", "type_tag", "body", "if_single_else"]
+
+fn expr_nondefault(col: i64, i: i64) -> bool:
+    if col == 0: return expr_get_int(i) != 0
+    if col == 1: return expr_get_float(i) != ""
+    if col == 2: return expr_get_str(i) != ""
+    if col == 3: return expr_get_left(i) != -1
+    if col == 4: return expr_get_right(i) != -1
+    if col == 5: return expr_get_extra(i) != -1
+    if col == 6: return expr_get_args(i).len() > 0
+    if col == 7: return expr_get_call_type_args(i).len() > 0
+    if col == 8: return expr_get_arg_names(i).len() > 0
+    expr_get_stmts(i).len() > 0
+
+fn stmt_nondefault(col: i64, i: i64) -> bool:
+    if col == 0: return stmt_expr[i] != -1
+    if col == 1: return stmt_name[i] != ""
+    if col == 2: return stmt_type_tag[i] != -1 and stmt_type_tag[i] != 0
+    if col == 3: return stmt_body[i].len() > 0
+    stmt_if_single_else[i] != -1 and stmt_if_single_else[i] != 0
+
+describe "AST placement census":
+    it "reports per-column density over real compiler modules":
+        if (env_get_opt("SIMPLE_PERF_PROBES") ?? "") != "1":
+            print "skipped: perf lane (set SIMPLE_PERF_PROBES=1)"
+            expect(true).to_equal(true)
+            return
+        var total_expr = 0
+        var total_stmt = 0
+        var expr_hits: [i64] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        var stmt_hits: [i64] = [0, 0, 0, 0, 0]
+        var tag_count: Dict<i64, i64> = {}
+        var tag_hits: Dict<text, i64> = {}
+        for path in CENSUS_MODULES:
+            reset_all_pools()
+            parser_init_with_path(file_read(path), path)
+            parse_module_body()
+            val ne = expr_count()
+            val ns = stmt_count()
+            total_expr = total_expr + ne
+            total_stmt = total_stmt + ns
+            var i = 0
+            while i < ne:
+                val tag = expr_get_tag(i)
+                tag_count[tag] = (tag_count[tag] ?? 0) + 1
+                var c = 0
+                while c < 10:
+                    if expr_nondefault(c, i):
+                        expr_hits[c] = expr_hits[c] + 1
+                        val key = "{tag}:{EXPR_COLS[c]}"
+                        tag_hits[key] = (tag_hits[key] ?? 0) + 1
+                    c = c + 1
+                i = i + 1
+            var s = 0
+            while s < ns:
+                var c2 = 0
+                while c2 < 5:
+                    if stmt_nondefault(c2, s):
+                        stmt_hits[c2] = stmt_hits[c2] + 1
+                    c2 = c2 + 1
+                s = s + 1
+            print "CENSUS module={path} exprs={ne} stmts={ns}"
+        print "CENSUS totals exprs={total_expr} stmts={total_stmt}"
+        var c = 0
+        while c < 10:
+            print "CENSUS expr_col={EXPR_COLS[c]} nondefault={expr_hits[c]} of {total_expr}"
+            c = c + 1
+        var c3 = 0
+        while c3 < 5:
+            print "CENSUS stmt_col={STMT_COLS[c3]} nondefault={stmt_hits[c3]} of {total_stmt}"
+            c3 = c3 + 1
+        for tag in tag_count.keys():
+            var line = "CENSUS tag={tag} n={tag_count[tag]}"
+            for col in EXPR_COLS:
+                val h = tag_hits["{tag}:{col}"] ?? 0
+                if h > 0:
+                    line = line + " {col}={h}"
+            print line
+        expect(total_expr > 0).to_equal(true)

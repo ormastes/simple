@@ -44,7 +44,8 @@ pub fn extract_keyframes(css: text) -> KeyframeRegistry:
     val registry = KeyframeRegistry.new()
     val lower = css.lower()
     var pos = 0
-    while pos < css.len() and registry.entries.len() < MAX_KEYFRAME_RULES:
+    val css_blen = css.byte_len()
+    while pos < css_blen and registry.entries.len() < MAX_KEYFRAME_RULES:
         val kf_pos = sb_find(lower, "@keyframes", pos)
         if kf_pos >= 999999999:
             break
@@ -108,7 +109,7 @@ fn _parse_keyframe_body(body: text) -> [Keyframe]:
     var pos = 0
     var parsed_offset_count = 0
     while (
-        pos < body.len() and
+        pos < body.byte_len() and
         parsed_offset_count < MAX_KEYFRAMES_PER_RULE
     ):
         val open = sb_find(body, "{", pos)
@@ -197,28 +198,30 @@ fn _keyframe_number_token_is_valid(token: text) -> bool:
     val number_start = if (
         token.starts_with("+") or token.starts_with("-")
     ): 1 else: 0
-    if number_start >= token.len():
+    if number_start >= token.byte_len():
         return false
     var exponent_at = -1
     var scan = number_start
-    while scan < token.len():
-        if token.char_at(scan) == "e":
+    val token_blen = token.byte_len()
+    while scan < token_blen:
+        if token.substring(scan, scan + 1) == "e":
             if exponent_at >= 0:
                 return false
             exponent_at = scan
         scan = scan + 1
-    val number_end = if exponent_at >= 0: exponent_at else: token.len()
+    val number_end = if exponent_at >= 0: exponent_at else: token.byte_len()
     if exponent_at >= 0:
         var exponent_i = exponent_at + 1
-        if exponent_i < token.len() and (
-            token.char_at(exponent_i) == "+" or
-            token.char_at(exponent_i) == "-"
+        if exponent_i < token.byte_len() and (
+            token.substring(exponent_i, exponent_i + 1) == "+" or
+            token.substring(exponent_i, exponent_i + 1) == "-"
         ):
             exponent_i = exponent_i + 1
-        if exponent_i >= token.len():
+        if exponent_i >= token.byte_len():
             return false
-        while exponent_i < token.len():
-            if not "0123456789".contains(token.char_at(exponent_i)):
+        val token_blen2 = token.byte_len()
+        while exponent_i < token_blen2:
+            if not "0123456789".contains(token.substring(exponent_i, exponent_i + 1)):
                 return false
             exponent_i = exponent_i + 1
     var saw_digit = false
@@ -226,7 +229,7 @@ fn _keyframe_number_token_is_valid(token: text) -> bool:
     var digit_after_dot = false
     var i = number_start
     while i < number_end:
-        val c = token.char_at(i)
+        val c = token.substring(i, i + 1)
         if c == "." and not saw_dot:
             saw_dot = true
         else:
@@ -258,21 +261,22 @@ fn flatten_supports_blocks(css_text: text) -> text:
     val lower = css_text.lower()
     var out = ""
     var pos = 0
-    while pos < css_text.len():
+    val css_text_blen = css_text.byte_len()
+    while pos < css_text_blen:
         val sup_pos = sb_find(lower, "@supports", pos)
         if sup_pos >= 999999999:
-            out = out + css_text.slice(pos, css_text.byte_len())
+            out = out + css_text.slice(pos, css_text_blen)
             break
         out = out + css_text.slice(pos, sup_pos)
         val after_kw = sup_pos + 9
         val open = sb_find(css_text, "{", after_kw)
         if open >= 999999999:
-            out = out + css_text.slice(sup_pos, css_text.byte_len())
+            out = out + css_text.slice(sup_pos, css_text_blen)
             break
         val condition = css_text.slice(after_kw, open).trim()
         val close = find_matching_brace(css_text, open)
         if close >= 999999999:
-            out = out + css_text.slice(sup_pos, css_text.byte_len())
+            out = out + css_text.slice(sup_pos, css_text_blen)
             break
         if eval_supports_query(condition):
             val inner = css_text.slice(open + 1, close).trim()
@@ -289,7 +293,8 @@ pub fn extract_style_blocks(html: text) -> [text]:
     var blocks: [text] = []
     var pos = 0
     val lower = html.lower()
-    while pos < lower.len():
+    val lower_blen = lower.byte_len()
+    while pos < lower_blen:
         val style_open = sb_find(lower, "<style", pos)
         if style_open >= 999999999:
             break
@@ -313,19 +318,20 @@ fn strip_keyframe_blocks(css_text: text) -> text:
     val lower = css_text.lower()
     var out = ""
     var pos = 0
-    while pos < css_text.len():
+    val css_text_blen = css_text.byte_len()
+    while pos < css_text_blen:
         val kf_pos = sb_find(lower, "@keyframes", pos)
         if kf_pos >= 999999999:
-            out = out + css_text.slice(pos, css_text.byte_len())
+            out = out + css_text.slice(pos, css_text_blen)
             break
         out = out + css_text.slice(pos, kf_pos)
         val open = sb_find(css_text, "{", kf_pos + 10)
         if open >= 999999999:
-            out = out + css_text.slice(kf_pos, css_text.byte_len())
+            out = out + css_text.slice(kf_pos, css_text_blen)
             break
         val close = find_matching_brace(css_text, open)
         if close >= 999999999:
-            out = out + css_text.slice(kf_pos, css_text.byte_len())
+            out = out + css_text.slice(kf_pos, css_text_blen)
             break
         pos = close + 1
     out
@@ -336,7 +342,7 @@ pub fn parse_css_rules(css_text: text) -> [CssRule]:
     val after_supports = flatten_supports_blocks(css_text)
     val after_keyframes = strip_keyframe_blocks(after_supports)
     val normalized_css = flatten_simple_nested_rules(flatten_layer_blocks(after_keyframes))
-    val len = normalized_css.len()
+    val len = normalized_css.byte_len()
 
     while pos < len:
         pos = sb_skip_ws_comments(normalized_css, pos)
@@ -373,19 +379,20 @@ fn flatten_layer_blocks(css_text: text) -> text:
     val lower = css_text.lower()
     var out = ""
     var pos = 0
-    while pos < css_text.len():
+    val css_text_blen = css_text.byte_len()
+    while pos < css_text_blen:
         val layer_pos = sb_find(lower, "@layer", pos)
         if layer_pos >= 999999999:
-            out = out + css_text.slice(pos, css_text.byte_len())
+            out = out + css_text.slice(pos, css_text_blen)
             break
         out = out + css_text.slice(pos, layer_pos)
         val open = sb_find(css_text, "{", layer_pos)
         if open >= 999999999:
-            out = out + css_text.slice(layer_pos, css_text.byte_len())
+            out = out + css_text.slice(layer_pos, css_text_blen)
             break
         val close = find_matching_brace(css_text, open)
         if close >= 999999999:
-            out = out + css_text.slice(layer_pos, css_text.byte_len())
+            out = out + css_text.slice(layer_pos, css_text_blen)
             break
         val inner = css_text.slice(open + 1, close).trim()
         if inner.len() > 0:
@@ -397,14 +404,15 @@ fn flatten_simple_nested_rules(css_text: text) -> text:
     """Expose bounded parent-referencing CSS nesting to the flat rule parser."""
     var out = ""
     var pos = 0
-    while pos < css_text.len():
+    val css_text_blen = css_text.byte_len()
+    while pos < css_text_blen:
         val open = sb_find(css_text, "{", pos)
         if open >= 999999999:
-            out = out + css_text.slice(pos, css_text.byte_len())
+            out = out + css_text.slice(pos, css_text_blen)
             break
         val close = find_matching_brace(css_text, open)
         if close >= 999999999:
-            out = out + css_text.slice(pos, css_text.byte_len())
+            out = out + css_text.slice(pos, css_text_blen)
             break
         val selector = css_text.slice(pos, open).trim()
         val body = css_text.slice(open + 1, close)
@@ -419,15 +427,16 @@ fn flatten_one_nested_rule(selector: text, body: text) -> text:
     var direct_body = ""
     var nested_rules = ""
     var pos = 0
-    while pos < body.len():
+    val body_blen = body.byte_len()
+    while pos < body_blen:
         val open = sb_find(body, "{", pos)
         if open >= 999999999:
-            direct_body = direct_body + body.slice(pos, body.byte_len())
+            direct_body = direct_body + body.slice(pos, body_blen)
             break
         val nested_start = last_nested_selector_start(body, pos, open)
         val close = find_matching_brace(body, open)
         if close >= 999999999:
-            direct_body = direct_body + body.slice(pos, body.byte_len())
+            direct_body = direct_body + body.slice(pos, body_blen)
             break
         val nested_selector = body.slice(nested_start, open).trim()
         val nested_body = body.slice(open + 1, close).trim()
@@ -445,7 +454,7 @@ fn flatten_one_nested_rule(selector: text, body: text) -> text:
 fn last_nested_selector_start(body: text, start: i32, nested_open: i32) -> i32:
     var pos = nested_open - 1
     while pos >= start:
-        val ch = body.char_at(pos)
+        val ch = body.substring(pos, pos + 1)
         if ch == ";" or ch == "}":
             return pos + 1
         pos = pos - 1
@@ -501,8 +510,9 @@ pub fn collect_css_vars(rules: [CssRule]) -> [CssDecl]:
 fn _find_var_call_end(value: text, var_start: i64) -> i64:
     var depth = 0
     var pos = var_start
-    while pos < value.len():
-        val ch = value.char_at(pos)
+    val value_blen = value.byte_len()
+    while pos < value_blen:
+        val ch = value.substring(pos, pos + 1)
         if ch == "(":
             depth = depth + 1
         elif ch == ")":
@@ -693,30 +703,33 @@ fn sb_background_shorthand_color_value(value: text) -> text:
     if trimmed.len() == 0:
         return ""
     var pos = 0
-    while pos < trimmed.len():
-        while pos < trimmed.len() and trimmed.slice(pos, pos + 1) == " ":
+    val trimmed_blen = trimmed.byte_len()
+    while pos < trimmed_blen:
+        val trimmed_blen2 = trimmed.byte_len()
+        while pos < trimmed_blen2 and trimmed.slice(pos, pos + 1) == " ":
             pos = pos + 1
-        if pos >= trimmed.len():
+        if pos >= trimmed.byte_len():
             break
         val token = sb_background_token_from(trimmed, pos)
         if token.len() == 0:
             break
         val lower = token.lower()
         if lower.starts_with("url(") or lower.starts_with("linear-gradient") or lower.starts_with("radial-gradient"):
-            pos = pos + token.len()
+            pos = pos + token.byte_len()
             continue
         if token.starts_with("#") or lower.starts_with("rgb(") or lower.starts_with("rgba(") or lower.starts_with("hsl(") or lower.starts_with("hsla(") or lower == "transparent" or lower == "currentcolor":
             return token
         val parsed = parse_color_value(token)
         if parsed != 0x000000FF or lower == "black":
             return token
-        pos = pos + token.len()
+        pos = pos + token.byte_len()
     ""
 
 fn sb_background_token_from(value: text, start: i32) -> text:
     var end = start
     var depth: i32 = 0
-    while end < value.len():
+    val value_blen = value.byte_len()
+    while end < value_blen:
         val ch = value.slice(end, end + 1)
         if ch == "(":
             depth = depth + 1

@@ -1100,7 +1100,21 @@ impl Lowerer {
         index: usize,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
-        let recv_hir = Box::new(self.lower_expr(receiver, ctx)?);
+        let lowered_receiver = self.lower_expr(receiver, ctx)?;
+        // `.0`/`.1` on a `(A, B)?` local read after a nil check: the value may
+        // be the boxed `Some` enum, so project the payload first (same as the
+        // FieldAccess path); raw payloads pass through unchanged.
+        let recv_hir = Box::new(if let Some(inner) = self.optional_struct_inner_type(lowered_receiver.ty) {
+            HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_unwrap_or_self".to_string(),
+                    args: vec![lowered_receiver],
+                },
+                ty: inner,
+            }
+        } else {
+            lowered_receiver
+        });
         // Per-INDEX element type. `get_index_element_type` has no index and
         // returned one type for every position (element 0's type / ANY),
         // which mis-typed every field of a HETEROGENEOUS tuple past index 0:

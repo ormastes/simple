@@ -1,0 +1,124 @@
+# @cover src/compiler/20.hir/hir_lowering/statements.spl 5%
+"""
+## Purpose and audience
+`Immutable<T>` is a live, read-only projection (immutable-views plan section 2,
+phase P2a). A write through it is a compile error `E_IMMUTABLE_WRITE`; another
+mutable alias may still write and the live view observes it. Readers are
+compiler authors.
+Plan: doc/03_plan/compiler/data/immutable_views_async_init_revisions_2026-11-13.md
+(IMM-01, IMM-02). Category: Language.
+## Operator workflow
+bin/simple test test/01_unit/compiler/semantics/immutable_view_write_spec.spl
+## Compatibility and limitations
+The rule runs inside HIR lowering (statements.spl `flag_immutable_view_write`); the
+pipeline is inlined per `it` (harness landmine: see param_mutability_semantic_spec.spl).
+Direct, compound and nested field/index writes rooted at an `Immutable<T>`
+parameter or annotated local are judged. Aliasing the view into another
+binding and mutating methods are not yet tracked.
+## Verification guidance and troubleshooting
+A RED on the "ordinary parameter" case means the rule leaks onto plain params.
+"""
+# @manual_section: Immutable view
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.{HirLowering, LoweringError}
+use compiler.hir.hir_lowering.items.*
+
+fn count_imm(errors: [LoweringError]) -> i64:
+    var n = 0
+    for e in errors:
+        if e.message.starts_with("E_IMMUTABLE_WRITE"):
+            n = n + 1
+    n
+
+describe "IMM-01 write through Immutable<T>":
+    it "rejects a field write through an Immutable<T> parameter":
+        val src = "class AstNode:\n" +
+            "    value: i64\n" +
+            "\n" +
+            "fn poke(live: Immutable<AstNode>):\n" +
+            "    live.value = 30\n"
+        val parsed = parse_full_frontend(src, "testdata/imm01_write.spl", "imm01_write", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/imm01_write.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(count_imm(hir_lowering.errors)).to_equal(1)
+
+    it "rejects a compound field write through an Immutable<T> parameter":
+        val src = "class AstNode:\n" +
+            "    value: i64\n" +
+            "\n" +
+            "fn poke(live: Immutable<AstNode>):\n" +
+            "    live.value += 1\n"
+        val parsed = parse_full_frontend(src, "testdata/imm01_compound.spl", "imm01_compound", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/imm01_compound.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(count_imm(hir_lowering.errors)).to_equal(1)
+
+    it "rejects a nested field write through an Immutable<T> parameter":
+        val src = "class Inner:\n" +
+            "    n: i64\n" +
+            "\n" +
+            "class Outer:\n" +
+            "    inner: Inner\n" +
+            "\n" +
+            "fn poke(live: Immutable<Outer>):\n" +
+            "    live.inner.n = 5\n"
+        val parsed = parse_full_frontend(src, "testdata/imm01_nested.spl", "imm01_nested", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/imm01_nested.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(count_imm(hir_lowering.errors)).to_equal(1)
+
+    it "rejects a field write through an Immutable<T> local binding":
+        val src = "class AstNode:\n" +
+            "    value: i64\n" +
+            "\n" +
+            "fn poke(n: AstNode):\n" +
+            "    val live: Immutable<AstNode> = n\n" +
+            "    live.value = 30\n"
+        val parsed = parse_full_frontend(src, "testdata/imm01_local.spl", "imm01_local", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/imm01_local.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(count_imm(hir_lowering.errors)).to_equal(1)
+
+    it "lowers Immutable<T> to a resolved type with no lowering error":
+        val src = "class AstNode:\n" +
+            "    value: i64\n" +
+            "\n" +
+            "fn peek(live: Immutable<AstNode>) -> i64:\n" +
+            "    live.value\n"
+        val parsed = parse_full_frontend(src, "testdata/imm01_resolved.spl", "imm01_resolved", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/imm01_resolved.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(hir_lowering.errors.len()).to_equal(0)
+
+    it "is silent for reads through an Immutable<T> parameter":
+        val src = "class AstNode:\n" +
+            "    value: i64\n" +
+            "\n" +
+            "fn peek(live: Immutable<AstNode>) -> i64:\n" +
+            "    live.value\n"
+        val parsed = parse_full_frontend(src, "testdata/imm01_read.spl", "imm01_read", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/imm01_read.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(count_imm(hir_lowering.errors)).to_equal(0)
+
+    it "is silent for a write through an ordinary class parameter":
+        val src = "class AstNode:\n" +
+            "    value: i64\n" +
+            "\n" +
+            "fn poke(n: AstNode):\n" +
+            "    n.value = 30\n"
+        val parsed = parse_full_frontend(src, "testdata/imm01_plain.spl", "imm01_plain", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/imm01_plain.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(count_imm(hir_lowering.errors)).to_equal(0)
+
+describe "IMM-02 live view observes a mutable alias write":
+    it "reads the new value through the live view":
+        class Box:
+            value: i64
+        val n = Box(value: 10)
+        val live: Immutable<Box> = n
+        n.value = 20
+        expect(live.value).to_equal(20)

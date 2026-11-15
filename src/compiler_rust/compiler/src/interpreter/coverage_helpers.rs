@@ -18,7 +18,12 @@ use crate::value::{Env, Value};
 ///
 /// Returns (file_path, line, column) if available, otherwise None
 pub fn extract_node_location(node: &Node) -> Option<(String, usize, usize)> {
-    let span = match node {
+    recordable_node_span(node).map(span_to_location)
+}
+
+/// Span of a statement kind the line collector records, `None` for the rest.
+fn recordable_node_span(node: &Node) -> Option<&Span> {
+    match node {
         Node::Let(stmt) => Some(&stmt.span),
         Node::Const(stmt) => Some(&stmt.span),
         Node::Static(stmt) => Some(&stmt.span),
@@ -35,9 +40,7 @@ pub fn extract_node_location(node: &Node) -> Option<(String, usize, usize)> {
         Node::Context(stmt) => Some(&stmt.span),
         // Expression nodes - not typically tracked for line coverage
         _ => None,
-    };
-
-    span.map(span_to_location)
+    }
 }
 
 /// Extract source location from specific expression types
@@ -169,6 +172,36 @@ pub fn record_node_coverage(node: &Node) {
         if let Some(cov) = crate::coverage::get_global_coverage() {
             if let Ok(mut cov) = cov.lock() {
                 cov.record_line(std::path::Path::new(&file), line);
+            }
+        }
+    }
+}
+
+/// `record_node_coverage`, filed under the module that WROTE the statement.
+///
+/// For the executors that bypass `exec_node` and were recording nothing:
+///   * the block-closure executors (`interpreter_call/block_execution.rs`)
+///     interpret every statement kind of a multi-line lambda / block closure
+///     body themselves, so no line of such a body was ever recorded;
+///   * a value-position `match` (`interpreter/expr/control.rs`) runs an arm's
+///     tail `if` / `match` through `exec_if_core` / `exec_match_core`.
+///
+/// The file is not `current_coverage_file`: a closure body inherits
+/// `CURRENT_EXEC_MODULE` from whoever invokes it, so a lambda handed to a
+/// function of another module would mark its own line numbers as hit in
+/// that module's file. `private_call_caller` names the writing module from
+/// the closure's origin stamp, and outside a closure body is the same
+/// owner / entry-file / `<entry>` fallback as `current_coverage_file`.
+pub(crate) fn record_node_coverage_lexical(node: &Node) {
+    if !is_coverage_enabled() {
+        return;
+    }
+
+    if let Some(span) = recordable_node_span(node) {
+        let file = crate::interpreter::interpreter_module::private_call_caller();
+        if let Some(cov) = crate::coverage::get_global_coverage() {
+            if let Ok(mut cov) = cov.lock() {
+                cov.record_line(std::path::Path::new(&*file), span.line);
             }
         }
     }

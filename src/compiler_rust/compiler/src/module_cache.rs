@@ -938,6 +938,19 @@ pub fn module_dict_view(dict: &Arc<DictMap>) -> Option<TableView> {
         .and_then(|(held, view)| Arc::ptr_eq(held, dict).then(|| view.clone()))
 }
 
+/// Whether `dict` is a registered module export table, i.e. a module
+/// namespace value rather than a dict built by program code.
+pub fn is_module_namespace_dict(dict: &DictMap) -> bool {
+    let addr = dict as *const DictMap as usize;
+    if !maybe_registered(addr) {
+        return false;
+    }
+    module_dict_tables()
+        .read()
+        .get(&addr)
+        .is_some_and(|(held, _)| Arc::as_ptr(held) as usize == addr)
+}
+
 /// The registered view of `dict` when it resolves anything beyond `dict`
 /// itself; `None` for plain dicts and modules that imported nothing whole.
 pub fn layered_view(dict: &Arc<DictMap>) -> Option<TableView> {
@@ -1314,6 +1327,18 @@ pub fn filter_functions_from_value(value: &Value) -> Value {
                     .map(|(k, v)| (k.clone(), filter_functions_from_value(v)))
                     .collect(),
             );
+            // The filtered copy of a module namespace is still that namespace
+            // (`is_module_namespace_dict`). Registered as already filtered, so
+            // importers layer it as a leaf exactly as an unregistered dict.
+            if let Some(view) = module_dict_view(dict) {
+                register_module_dict(
+                    &filtered,
+                    TableView {
+                        table: view.table,
+                        filtered: true,
+                    },
+                );
+            }
             let delta = FILTERED_DICT_CACHE
                 .with(|c| c.borrow_mut().insert(key, (Arc::clone(dict), Arc::clone(&filtered))));
             mirror_stats(

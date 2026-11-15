@@ -94,6 +94,17 @@ only, NOT qualified on a Mac):
   after activation workspace read and output create are allowed, workspace
   write, private/host-scope/sibling-attempt/`/private/etc` reads, loopback inet
   connect and `fork` are denied, and only the attempt broker socket connects.
+  The probe now reports every `seatbelt_qualification_plan_v1` canary as
+  `canary <id> allow|deny` after an unconfined reachability control; on this
+  Mac all 23 match (incl. symlink/case-alias to protected roots, home sentinel,
+  IPv6/UDP/DNS/listen, other unix socket, mach-lookup, fork/posix_spawn/execve,
+  refused-profile reporting; `child-inherits-confinement` comes from a real
+  grandchild under the same profile plus `(allow process-fork)` only, and DNS
+  and mach-lookup have unconfined controls). `seatbelt_manifest_from_probe_v1` decodes that
+  transcript into a manifest that `seatbelt_capability_status_v1` reports
+  `qualified` for the observed build (checked under `bin/simple test`; the
+  seed `run` mode diverges, see
+  `doc/08_tracking/bug/seed_run_mode_or_compare_diverges_from_test_2026-11-14.md`).
   Launch step 7 is therefore `qualified-darwin-native`; steps 2-6, 8-10 and
   fresh-worker admission stay unsupported, so the adapter still blocks with
   `darwin-worker-admission-unwired`. BSD: the probe is Darwin-only (exit 77

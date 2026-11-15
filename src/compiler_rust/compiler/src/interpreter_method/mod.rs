@@ -45,6 +45,7 @@ fn call_callable_field(
                 arg_vals.push(evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
             }
             // Create local env from captured env and bind params
+            let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured_env);
             let mut local_env = Env::clone(captured_env);
             for (i, param) in params.iter().enumerate() {
                 if let Some(val) = arg_vals.get(i) {
@@ -466,6 +467,8 @@ pub(crate) fn evaluate_method_call(
             receiver_is_enum,
         ) {
             if let Some(func) = functions.get(method).cloned() {
+                // A bare-name call spelled `m.f()`: same visibility rule.
+                crate::interpreter::interpreter_call::gate_private_call(&func.name, &func)?;
                 return exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
             }
             if classes.contains_key(method) {
@@ -531,6 +534,9 @@ pub(crate) fn evaluate_method_call(
         };
         if let Some(func_val) = lookup(method) {
             if let Value::Function { def, captured_env, .. } = &func_val {
+                // `m.f()` names `f` exactly like a bare call does; qualifying
+                // it does not make a private fn visible.
+                crate::interpreter::interpreter_call::gate_private_call(&def.name, def)?;
                 let mut captured_env_clone = Env::clone(captured_env);
                 return exec_function_with_captured_env(
                     def,
@@ -545,6 +551,23 @@ pub(crate) fn evaluate_method_call(
             }
             if let Value::Constructor { class_name } = &func_val {
                 return instantiate_class(class_name, args, env, functions, classes, enums, impl_methods);
+            }
+            // `X.Pay(3)`: a payload variant of an enum declared in `mod X:`.
+            if let Value::EnumVariantConstructor {
+                enum_name,
+                variant_name,
+            } = func_val
+            {
+                return crate::interpreter::interpreter_call::construct_enum_variant(
+                    enum_name,
+                    variant_name,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                );
             }
         }
         // Self-named module shadowing: `use a.b.Foo.{Foo}` binds the *module*
@@ -1774,6 +1797,7 @@ pub(crate) fn evaluate_method_call(
                         env: captured,
                     } = func
                     {
+                        let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
                         let mut local_env = Env::clone(&captured);
                         // No args to bind for or_else
                         return evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods);
@@ -1802,6 +1826,7 @@ pub(crate) fn evaluate_method_call(
                         env: captured,
                     } = func
                     {
+                        let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
                         let mut local_env = Env::clone(&captured);
                         return evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods);
                     }
@@ -1959,7 +1984,8 @@ pub(crate) fn evaluate_method_call(
 
     // UFCS Fallback: Try to find a free function with the method name
     // This allows both len(x) and x.len() syntax to work
-    if let Some(func) = functions.get(method).cloned() {
+    if let Some(func) = crate::interpreter::interpreter_call::caller_bound_function(method, functions) {
+        crate::interpreter::interpreter_call::gate_private_call(&func.name, &func)?;
         // Evaluate all arguments to values
         let mut arg_values = vec![recv_val.clone()]; // Receiver becomes first argument
         for arg in args {
@@ -2230,6 +2256,7 @@ pub(crate) fn evaluate_method_call_with_self_update(
                     for arg in args {
                         arg_vals.push(evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
                     }
+                    let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured_env);
                     let mut local_env = Env::clone(captured_env);
                     for (i, param) in params.iter().enumerate() {
                         if let Some(val) = arg_vals.get(i) {
@@ -2276,7 +2303,8 @@ pub(crate) fn evaluate_method_call_with_self_update(
             return Ok((result, None));
         }
         // UFCS Fallback: Try to find a free function with the method name
-        if let Some(func) = functions.get(method).cloned() {
+        if let Some(func) = crate::interpreter::interpreter_call::caller_bound_function(method, functions) {
+            crate::interpreter::interpreter_call::gate_private_call(&func.name, &func)?;
             // Evaluate all arguments to values
             let mut arg_values = vec![recv_val.clone()]; // Receiver becomes first argument
             for arg in args {

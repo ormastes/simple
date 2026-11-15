@@ -1,0 +1,224 @@
+"""
+## Purpose and audience
+Purpose: Pin the web renderer's CSS colour parser to CSS Color 4 values.
+`parse_color("red")` answered #dc3232, a themed palette value hard-coded
+ahead of the named-colour table, so every `red` on a page (text, borders,
+backgrounds, gradient stops) painted the wrong colour. The same parser read
+`rgb(100%,0%,0%)` as rgb(100, 0, 0) and ignored the alpha of space-syntax
+`rgb(r g b / a)`.
+Audience: browser-engine style and paint maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless shell, `getComputedStyle(span).color`
+with `span.style.color = <value>`, parent `color: rgb(1,2,3)`):
+| value                    | Chrome                    | ARGB here  |
+|--------------------------|---------------------------|------------|
+| `red` / `Red`            | rgb(255, 0, 0)            | ffff0000   |
+| `lime`                   | rgb(0, 255, 0)            | ff00ff00   |
+| `green`                  | rgb(0, 128, 0)            | ff008000   |
+| `gray` / `grey`          | rgb(128, 128, 128)        | ff808080   |
+| `silver`                 | rgb(192, 192, 192)        | ffc0c0c0   |
+| `maroon`                 | rgb(128, 0, 0)            | ff800000   |
+| `purple`                 | rgb(128, 0, 128)          | ff800080   |
+| `fuchsia`                | rgb(255, 0, 255)          | ffff00ff   |
+| `olive`                  | rgb(128, 128, 0)          | ff808000   |
+| `navy`                   | rgb(0, 0, 128)            | ff000080   |
+| `teal`                   | rgb(0, 128, 128)          | ff008080   |
+| `aqua`                   | rgb(0, 255, 255)          | ff00ffff   |
+| `orange`                 | rgb(255, 165, 0)          | ffffa500   |
+| `rebeccapurple`          | rgb(102, 51, 153)         | ff663399   |
+| `cornflowerblue`         | rgb(100, 149, 237)        | ff6495ed   |
+| `darkgray`               | rgb(169, 169, 169)        | ffa9a9a9   |
+| `lightgoldenrodyellow`   | rgb(250, 250, 210)        | fffafad2   |
+| `#f00` / `#ff0000`       | rgb(255, 0, 0)            | ffff0000   |
+| `#f008`                  | rgba(255, 0, 0, 0.533)    | 88ff0000   |
+| `#ff000080`              | rgba(255, 0, 0, 0.5)      | 80ff0000   |
+| `#ABCDEF`                | rgb(171, 205, 239)        | ffabcdef   |
+| `rgb(255, 128, 0)`       | rgb(255, 128, 0)          | ffff8000   |
+| `rgba(0,0,255,0.5)`      | rgba(0, 0, 255, 0.5)      | 800000ff   |
+| `rgb(255 0 0)`           | rgb(255, 0, 0)            | ffff0000   |
+| `rgb(255 0 0 / 50%)`     | rgba(255, 0, 0, 0.5)      | 80ff0000   |
+| `rgb(100%,0%,0%)`        | rgb(255, 0, 0)            | ffff0000   |
+| `rgb(100% 50% 0%)`       | rgb(255, 128, 0)          | ffff8000   |
+| `rgba(0 0 255 / .25)`    | rgba(0, 0, 255, 0.25)     | 400000ff   |
+| `rgb(255,0,0,0.5)`       | rgba(255, 0, 0, 0.5)      | 80ff0000   |
+| `hsl(120,100%,50%)`      | rgb(0, 255, 0)            | ff00ff00   |
+| `hsl(120deg 100% 25%)`   | rgb(0, 128, 0)            | ff008000   |
+| `hsla(240,100%,50%,0.5)` | rgba(0, 0, 255, 0.5)      | 800000ff   |
+| `hsl(0 100% 50% / 0.5)`  | rgba(255, 0, 0, 0.5)      | 80ff0000   |
+| `transparent`            | rgba(0, 0, 0, 0)          | 0 (none)   |
+Alpha is round(a * 255). `currentColor` needs the inherited colour, which
+this context-free entry point does not have: it answers 0 (resolved by the
+cascade instead).
+
+Shorthand page (`--window-size=420,200`, stacked 20px-wide blocks, screenshot
+pixels down column x = 1 / x = 10): `background:#0f0;background:rgb(1,2)`
+stays #00ff00 (y 0..9); `border:3px solid #00f;border:3px solid
+hsl(foo,1%,2%)`, `border-top:...;border-top:3px solid rgb(1,2)` and
+`outline:...;outline:3px solid rgb(x,1,2)` keep their blue; `border:4px
+solid rgba(255,0,0,.5)` is #ff7f7f (y 50..61); `color:rgba(0,0,0,0)` paints
+no text (y 66..81); `border-top:4px solid transparent;border-left:4px solid
+hsl(0 100% 50% / .5)` is #ff7f7f down the left side from y 88 (Chrome
+antialiases its mitred corner at y 87). An unclosed `background:rgb(0,255,0`
+at the end of a style attribute paints green in Chrome (y 104..113) and
+nothing in Simple -- open, filed in the residue record.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-CSS-COLOR-PARSE-001 — CSS named colours, hex, rgb()/rgba() and hsl()/hsla() parse to the CSS Color 4 values Chrome 159 computes.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_color, parse_color_alpha}
+use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.{parse_box_shadow_layers}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
+
+val SHORTHAND_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}div{{width:20px;height:10px;margin:0 0 4px 0}}#a{{background:#00ff00;background:rgb(1,2)}}#b{{border:3px solid #0000ff;border:3px solid hsl(foo,1%,2%);height:4px}}#c{{border-top:3px solid #0000ff;border-top:3px solid rgb(1,2);height:4px}}#d{{outline:3px solid #0000ff;outline:3px solid rgb(x,1,2);margin:3px 3px 7px 3px;height:4px;width:14px}}#e{{border:4px solid rgba(255,0,0,.5);height:4px;width:12px}}#f{{color:rgba(0,0,0,0);font:16px/16px sans-serif;height:16px}}#g{{border-top:4px solid transparent;border-left:4px solid hsl(0 100% 50% / .5);height:10px;width:10px}}#k{{width:420px;height:10px}}</style></head><body><div id=a></div><div id=b></div><div id=c></div><div id=d></div><div id=e></div><div id=f>MMMM</div><div id=g></div><div id=k style=\"background:rgb(0,255,0\"></div></body></html>"
+
+val CASCADE_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}div{{width:20px;height:20px;margin:0}}#a{{background-color:#00ff00;background-color:hsl(foo, bar, baz)}}#b{{background-color:#00ff00;background-color:rgb(foo, 0, 0)}}#c{{background-color:#00ff00;background-color:hsl(120, bar, 50%)}}#d{{border:5px solid #0000ff;border-color:hsla(0,0%,0%,0);height:10px;width:10px}}#e{{background:#fff;border:5px solid #0000ff;border-color:hsl(0 100% 50% / .5);height:10px;width:10px}}</style></head><body><div id=a></div><div id=b></div><div id=c></div><div id=d></div><div id=e></div></body></html>"
+
+describe "CSS colour parsing":
+    it "AC-1: named colours are the CSS Color 4 values, any case":
+        step("Chrome 159: red ff0000, lime 00ff00, green 008000, gray 808080, ... (table above)")
+        expect(parse_color_alpha("red")).to_equal(0xFFFF0000u32)
+        expect(parse_color_alpha("Red")).to_equal(0xFFFF0000u32)
+        expect(parse_color("red")).to_equal(0xFFFF0000u32)
+        expect(parse_color_alpha("lime")).to_equal(0xFF00FF00u32)
+        expect(parse_color_alpha("green")).to_equal(0xFF008000u32)
+        expect(parse_color_alpha("gray")).to_equal(0xFF808080u32)
+        expect(parse_color_alpha("grey")).to_equal(0xFF808080u32)
+        expect(parse_color_alpha("silver")).to_equal(0xFFC0C0C0u32)
+        expect(parse_color_alpha("maroon")).to_equal(0xFF800000u32)
+        expect(parse_color_alpha("purple")).to_equal(0xFF800080u32)
+        expect(parse_color_alpha("fuchsia")).to_equal(0xFFFF00FFu32)
+        expect(parse_color_alpha("olive")).to_equal(0xFF808000u32)
+        expect(parse_color_alpha("navy")).to_equal(0xFF000080u32)
+        expect(parse_color_alpha("teal")).to_equal(0xFF008080u32)
+        expect(parse_color_alpha("aqua")).to_equal(0xFF00FFFFu32)
+        expect(parse_color_alpha("orange")).to_equal(0xFFFFA500u32)
+        expect(parse_color_alpha("rebeccapurple")).to_equal(0xFF663399u32)
+        expect(parse_color_alpha("cornflowerblue")).to_equal(0xFF6495EDu32)
+        expect(parse_color_alpha("darkgray")).to_equal(0xFFA9A9A9u32)
+        expect(parse_color_alpha("lightgoldenrodyellow")).to_equal(0xFFFAFAD2u32)
+        expect(parse_color_alpha("white")).to_equal(0xFFFFFFFFu32)
+        expect(parse_color_alpha("black")).to_equal(0xFF000000u32)
+        expect(parse_color_alpha("blue")).to_equal(0xFF0000FFu32)
+
+    it "AC-2: hex 3 / 4 / 6 / 8 digits":
+        step("Chrome 159: #f00 and #ff0000 opaque red, #f008 alpha 0.533, #ff000080 alpha 0.5")
+        expect(parse_color_alpha("#f00")).to_equal(0xFFFF0000u32)
+        expect(parse_color_alpha("#ff0000")).to_equal(0xFFFF0000u32)
+        expect(parse_color_alpha("#f008")).to_equal(0x88FF0000u32)
+        expect(parse_color_alpha("#ff000080")).to_equal(0x80FF0000u32)
+        expect(parse_color_alpha("#ABCDEF")).to_equal(0xFFABCDEFu32)
+
+    it "AC-3: rgb() / rgba(), comma and space syntax, percentages, alpha":
+        step("Chrome 159: rows rgb(255, 128, 0) .. rgb(255,0,0,0.5) of the table")
+        expect(parse_color_alpha("rgb(255, 128, 0)")).to_equal(0xFFFF8000u32)
+        expect(parse_color_alpha("rgba(0,0,255,0.5)")).to_equal(0x800000FFu32)
+        expect(parse_color_alpha("rgb(255 0 0)")).to_equal(0xFFFF0000u32)
+        expect(parse_color_alpha("rgb(255 0 0 / 50%)")).to_equal(0x80FF0000u32)
+        expect(parse_color_alpha("rgb(100%,0%,0%)")).to_equal(0xFFFF0000u32)
+        expect(parse_color_alpha("rgb(100% 50% 0%)")).to_equal(0xFFFF8000u32)
+        expect(parse_color_alpha("rgba(0 0 255 / .25)")).to_equal(0x400000FFu32)
+        expect(parse_color_alpha("rgb(255,0,0,0.5)")).to_equal(0x80FF0000u32)
+        step("the opaque entry point answers the same opaque colour")
+        expect(parse_color("rgb(100% 50% 0%)")).to_equal(0xFFFF8000u32)
+
+    it "AC-4: hsl() / hsla()":
+        step("Chrome 159: hsl(120,100%,50%) 00ff00, hsl(120deg 100% 25%) 008000, hsla(240,100%,50%,0.5), hsl(0 100% 50% / 0.5)")
+        expect(parse_color_alpha("hsl(120,100%,50%)")).to_equal(0xFF00FF00u32)
+        expect(parse_color_alpha("hsl(120deg 100% 25%)")).to_equal(0xFF008000u32)
+        expect(parse_color_alpha("hsla(240,100%,50%,0.5)")).to_equal(0x800000FFu32)
+        expect(parse_color_alpha("hsl(0 100% 50% / 0.5)")).to_equal(0x80FF0000u32)
+
+    it "AC-5: transparent and currentColor are not colours here":
+        expect(parse_color_alpha("transparent")).to_equal(0u32)
+        expect(parse_color_alpha("currentColor")).to_equal(0u32)
+
+    it "AC-6: a box-shadow takes any CSS colour, not only black / white / red":
+        step("Chrome 159: `box-shadow: 0 0 4px rebeccapurple` computes rgb(102, 51, 153); hsl(120deg 100% 25%) is rgb(0, 128, 0)")
+        val named = parse_box_shadow_layers("0 0 4px rebeccapurple", 0u32)
+        expect(named.valid).to_equal(true)
+        expect(named.layers[0].color_rgba).to_equal(0xFF663399u32)
+        val hsl = parse_box_shadow_layers("0 0 4px hsl(120deg 100% 25%)", 0u32)
+        expect(hsl.valid).to_equal(true)
+        expect(hsl.layers[0].color_rgba).to_equal(0xFF008000u32)
+        val red = parse_box_shadow_layers("1px 2px red", 0u32)
+        expect(red.layers[0].color_rgba).to_equal(0xFFFF0000u32)
+
+    it "AC-7: an invalid rgb() / hsl() is not a colour, so the declaration is dropped":
+        step("Chrome 159: `hsl(foo, bar, baz)`, `rgb(foo, 0, 0)`, `hsl(120, bar, 50%)` leave the earlier value")
+        for bad in ["hsl(foo, bar, baz)", "hsla(foo, bar, baz, 1)", "rgb(foo, 0, 0)", "rgba(1, 2, x, 1)", "hsl(120, bar, 50%)", "rgb(1, 2)", "rgb(1 2 3 / )", "rgb(255, 0, 0 / 0.5)", "hsl(120 100% 50% 1)"]:
+            expect(parse_color(bad)).to_equal(0u32)
+            expect(parse_color_alpha(bad)).to_equal(0u32)
+
+    it "AC-8: hsl() / hsla() and space-syntax rgb() keep their alpha in the opaque-named entry point":
+        step("Chrome 159: `border-color: hsla(0,0%,0%,0)` is transparent, `hsl(0 100% 50% / .5)` is half red")
+        expect(parse_color("hsla(0,0%,0%,0)")).to_equal(0u32)
+        expect(parse_color("hsl(0 100% 50% / .5)")).to_equal(0x80FF0000u32)
+        expect(parse_color("hsla(240,100%,50%,0.5)")).to_equal(0x800000FFu32)
+        expect(parse_color("rgb(0 0 255 / 50%)")).to_equal(0x800000FFu32)
+        expect(parse_color_alpha("hsl(0 100% 50% / 50%)")).to_equal(0x80FF0000u32)
+
+    it "AC-9: painted -- an invalid colour keeps the earlier one, a translucent border stays translucent":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(CASCADE_PAGE, 420, 140, "cpu_simd")
+        step("Chrome 159: column x = 2 is #00ff00 for y 0..59 and #ff7f7f on the half-red border (80..)")
+        expect(px[2 + 10 * 420] & 0xFFFFFFu32).to_equal(0x00FF00u32)
+        expect(px[2 + 30 * 420] & 0xFFFFFFu32).to_equal(0x00FF00u32)
+        expect(px[2 + 50 * 420] & 0xFFFFFFu32).to_equal(0x00FF00u32)
+        val half = px[2 + 82 * 420]
+        expect(((half >> 16u32) & 255u32) as i32).to_equal(255)
+        expect((((half >> 8u32) & 255u32) as i32 - 127) * (((half >> 8u32) & 255u32) as i32 - 127) <= 1).to_equal(true)
+
+# Largest channel difference between Simple's pixel and a Chrome colour.
+fn off(px: [u32], x: i32, y: i32, chrome: u32) -> i32:
+    val p = px[x + y * 420]
+    var m = 0
+    for shift in [16u32, 8u32, 0u32]:
+        val a = ((p >> shift) & 255u32) as i32
+        val b = ((chrome >> shift) & 255u32) as i32
+        val d = if a > b: a - b else: b - a
+        if d > m:
+            m = d
+    m
+
+describe "CSS colour in shorthands and translucent paint":
+    it "AC-10: an invalid colour inside a shorthand drops the whole declaration":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(SHORTHAND_PAGE, 420, 200, "cpu_simd")
+        step("Chrome 159: background, border, border-top and outline keep the earlier value")
+        expect(off(px, 1, 5, 0x00ff00u32)).to_equal(0)
+        expect(off(px, 1, 15, 0x0000ffu32)).to_equal(0)
+        expect(off(px, 10, 15, 0x0000ffu32)).to_equal(0)
+        expect(off(px, 10, 29, 0x0000ffu32)).to_equal(0)
+        expect(off(px, 1, 40, 0x0000ffu32)).to_equal(0)
+
+    it "AC-11: legacy comma rgba() keeps its alpha":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(SHORTHAND_PAGE, 420, 200, "cpu_simd")
+        step("Chrome 159: `border:4px solid rgba(255,0,0,.5)` over white is #ff7f7f")
+        expect(off(px, 1, 55, 0xff7f7fu32) <= 1).to_equal(true)
+        expect(off(px, 10, 51, 0xff7f7fu32) <= 1).to_equal(true)
+        expect(off(px, 10, 56, 0xffffffu32)).to_equal(0)
+        expect(parse_color("rgba(255,0,0,.5)")).to_equal(0x80FF0000u32)
+        expect(parse_color("rgba(0,0,0,0)")).to_equal(0u32)
+
+    it "AC-12: `color: rgba(0,0,0,0)` paints no text":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(SHORTHAND_PAGE, 420, 200, "cpu_simd")
+        step("Chrome 159: rows 66..81 are white across the text")
+        var dark = 0
+        var y = 66
+        while y < 82:
+            var x = 0
+            while x < 80:
+                if off(px, x, y, 0xffffffu32) > 0:
+                    dark = dark + 1
+                x = x + 1
+            y = y + 1
+        expect(dark).to_equal(0)
+
+    it "AC-13: a translucent side next to an unpainted side fills its corner":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(SHORTHAND_PAGE, 420, 200, "cpu_simd")
+        step("Chrome 159: `border-top:4px solid transparent; border-left:4px solid hsl(0 100% 50% / .5)`: #ff7f7f at (1, 88), (1, 89), (1, 95)")
+        expect(off(px, 1, 88, 0xff7f7fu32) <= 1).to_equal(true)
+        expect(off(px, 1, 89, 0xff7f7fu32) <= 1).to_equal(true)
+        expect(off(px, 1, 95, 0xff7f7fu32) <= 1).to_equal(true)
+

@@ -1,13 +1,12 @@
+use compiler.frontend.core.aop_predicate_parser.{aop_predicate_canonical_text}
+
 # AOP cache group keys (Semantic Incremental Build v2, design §16.2).
 #
 # Built over what the tree ACTUALLY has today (plan §2b reality gaps):
-#   - There are NO pointcuts. Matching is `WeavingRule.predicate_text`, an
-#     opaque string. We hash it (normalized) as the selector identity.
-#     SPEC-FORWARD prerequisite: a normalized pointcut query IR + typed
-#     matcher replacing `predicate_text`. Until then `normalized_query_digest`
-#     is a *textual* normalization (trim + collapse internal whitespace), NOT
-#     a semantic one — two semantically equal predicates spelled differently
-#     get different digests (safe: over-invalidates, never under-invalidates).
+#   - Pointcut selectors use shared lexical canonicalization (schema v2).
+#     This is not a semantic query IR: Boolean-equivalent reordered queries
+#     may still have distinct digests. Legacy non-selector predicates retain
+#     whitespace normalization; no typed field consumer is enabled here.
 #   - A join-point descriptor can only read JoinPointContext's real fields:
 #     function_name, module_path, signature, attributes, effects.
 #   - Weaving mutates MIR in place (50.mir/mir_aop_injection.spl); there is
@@ -28,7 +27,7 @@ use compiler.mdsoc.weaving.advice_form.{AdviceForm}
 
 # Version of the matcher/selector schema. Bump when the meaning of
 # predicate_text matching changes (e.g. when the typed query IR lands).
-val AOP_MATCHER_SCHEMA_VERSION: i64 = 1
+val AOP_MATCHER_SCHEMA_VERSION: i64 = 2
 # Version of the join-point descriptor schema (the field set below).
 pub val AOP_DESCRIPTOR_SCHEMA_VERSION: i64 = 1
 
@@ -41,10 +40,13 @@ fn aop_empty_seq_sentinel() -> text:
 # Selector identity (stands in for "normalized pointcut query", plan §2b)
 # ============================================================================
 
-# Textual normalization of predicate_text: trim + collapse internal
-# whitespace runs to a single space. Prerequisite for anything stronger:
-# a real normalized query IR.
+# Shared selector tokens normalize punctuation/whitespace and comments.
+# Legacy non-selector predicates retain their prior whitespace contract.
 fn aop_normalize_predicate(p: text) -> text:
+    val trimmed = p.trim()
+    val legacy = trimmed.starts_with("@") or trimmed.starts_with("module:") or trimmed.starts_with("effect:")
+    if p.contains("(") and not legacy:
+        return aop_predicate_canonical_text(p)
     var out = ""
     var pending_space = false
     var started = false

@@ -15,7 +15,7 @@ fn _css_root_prefix_is_preamble(prefix: text) -> bool:
             if comment_close < 0:
                 return false
             remaining = remaining.substring(
-                comment_close + 2, remaining.len()
+                comment_close + 2, remaining.byte_len()
             ).trim()
         elif remaining.starts_with("@"):
             val semicolon = find_from(remaining, ";", 1)
@@ -23,7 +23,7 @@ fn _css_root_prefix_is_preamble(prefix: text) -> bool:
             if semicolon < 0 or (brace >= 0 and brace < semicolon):
                 return false
             remaining = remaining.substring(
-                semicolon + 1, remaining.len()
+                semicolon + 1, remaining.byte_len()
             ).trim()
         else:
             return false
@@ -59,7 +59,7 @@ fn _css_collect_custom_props(css: text, root_attrs: text) -> text:
             break
         var selector_start = rp
         while selector_start > 0:
-            val previous = css[selector_start - 1:selector_start - 1 + 1]
+            val previous = css.substring(selector_start - 1, selector_start - 1 + 1)
             if previous == "{" or previous == "}" or previous == ",":
                 break
             selector_start = selector_start - 1
@@ -92,7 +92,7 @@ fn _css_collect_custom_props(css: text, root_attrs: text) -> text:
         if close < 0:
             break
         val body = css.substring(brace + 1, close)
-        val body_len = body.len()
+        val body_len = body.byte_len()
         var bp: i64 = 0
         var bg = 0
         while bp < body_len and bg < 400:  # cpu-lane-loop-ok: walks the `--name: value` declarations inside one small `:root` block body via native find_from, capped at 400 declarations per block
@@ -146,7 +146,7 @@ fn _css_collect_scoped_custom_props(css: text, existing: text) -> text:
     var pool = existing
     var pos: i64 = 0
     var guard = 0
-    val css_len = css.len()
+    val css_len = css.byte_len()
     while pos < css_len and guard < 400:  # cpu-lane-loop-ok: walks `--name:` declarations located by native find_from, hard-capped at 400; once per style invalidation
         guard = guard + 1
         val dd = find_from(css, "--", pos)
@@ -171,7 +171,7 @@ fn _css_collect_scoped_custom_props(css: text, existing: text) -> text:
         val name = css.substring(dd, colon).trim()
         val prop_val = css.substring(colon + 1, val_end).trim()
         if (
-            name.len() > 2 and prop_val.len() > 0 and
+            name.byte_len() > 2 and prop_val.len() > 0 and
             name.index_of(" ") < 0 and entry_i < entries.len() and
             not _css_props_contains_name(pool, name)
         ):
@@ -214,7 +214,7 @@ fn _css_resolve_vars(
     var first_unresolved_sw_portable = false
     var first_unresolved_prop_idx = -1
     var resolved_len = 0
-    val css_len = css.len()
+    val css_len = css.byte_len()
     var scan = 0
     var vg = 0
     while scan < css_len and vg < 400:  # cpu-lane-loop-ok: walks the `var(` occurrences in one stylesheet via native find_from, capped at 400 substitutions per resolve pass; once per style invalidation
@@ -230,9 +230,9 @@ fn _css_resolve_vars(
         var depth = 1
         var k = open + 4
         while k < css_len and depth > 0:  # cpu-lane-loop-ok: matches the closing paren of ONE `var(` by paren depth; bound is the distance to that paren and it exits at depth 0
-            if css[k] == "(":
+            if css.substring(k, k + 1) == "(":
                 depth = depth + 1
-            elif css[k] == ")":
+            elif css.substring(k, k + 1) == ")":
                 depth = depth - 1
             k = k + 1
         if depth != 0:
@@ -246,9 +246,9 @@ fn _css_resolve_vars(
         var cdepth = 0
         var comma = -1
         var m = 0
-        val inner_len = inner.len()
+        val inner_len = inner.byte_len()
         while m < inner_len:  # cpu-lane-loop-ok: scans ONE var() argument for its first top-level comma; bound is that argument's length, not the sheet's
-            val ch = inner[m]
+            val ch = inner.substring(m, m + 1)
             if ch == "(":
                 cdepth = cdepth + 1
             elif ch == ")":
@@ -537,9 +537,9 @@ fn _css_scan_rules_simple(css: text, requested_rule_cap: i32) -> CssRuleScan:
             wrapper_counts: [], wrapper_kinds: [], wrapper_preludes: []
         )
     val structural_cap = rule_cap * 2 + 64
-    var cutoff = css.len()
+    var cutoff = css.byte_len()
     var excessive_structure = false
-    if css.len() > structural_cap:
+    if css.byte_len() > structural_cap:
         excessive_structure = (
             css.len() - css.replace("{", "").len() > structural_cap
         )
@@ -551,7 +551,7 @@ fn _css_scan_rules_simple(css: text, requested_rule_cap: i32) -> CssRuleScan:
         # ponytail: hostile sheets keep a byte-bounded prefix; add a native
         # positional-count primitive only if standards-level recovery matters.
         cutoff = structural_cap
-    val bounded_css = if cutoff < css.len():
+    val bounded_css = if cutoff < css.byte_len():
         css.substring(0, cutoff)
     else:
         css
@@ -710,14 +710,14 @@ fn _html_template_tag_present(lower: text) -> bool:
     while at >= 0:  # cpu-lane-loop-ok: one iteration per literal `template` occurrence in the document (2-3 on every catalog page), not per character
         var p = at - 1
         # cpu-lane-loop-ok: walks back over the whitespace immediately before ONE occurrence
-        while p >= 0 and _is_html_space(lower[p:p + 1]):
+        while p >= 0 and _is_html_space(lower.substring(p, p + 1)):
             p = p - 1
-        if p >= 0 and lower[p:p + 1] == "/":
+        if p >= 0 and lower.substring(p, p + 1) == "/":
             p = p - 1
             # cpu-lane-loop-ok: whitespace between `<` and `/` of ONE closing tag
-            while p >= 0 and _is_html_space(lower[p:p + 1]):
+            while p >= 0 and _is_html_space(lower.substring(p, p + 1)):
                 p = p - 1
-        if p >= 0 and lower[p:p + 1] == "<":
+        if p >= 0 and lower.substring(p, p + 1) == "<":
             return true
         at = find_from(lower, "template", at + 1)
     false
@@ -731,15 +731,16 @@ fn _html_without_inert_template_sources_scan(source: text) -> text:
     var pos = 0
     var depth = 0
     var guard = 0
-    while pos < source.len() and guard < SIMPLE_WEB_MAX_HTML_PARTS:  # cpu-lane-loop-ok: walks the tags of the HTML source via native find_from to elide inert <template> bodies, capped by SIMPLE_WEB_MAX_HTML_PARTS; once per parse
+    val source_blen = source.byte_len()
+    while pos < source_blen and guard < SIMPLE_WEB_MAX_HTML_PARTS:  # cpu-lane-loop-ok: walks the tags of the HTML source via native find_from to elide inert <template> bodies, capped by SIMPLE_WEB_MAX_HTML_PARTS; once per parse
         guard = guard + 1
         val lt = find_from(lower, "<", pos)
         if lt < 0:
-            pos = source.len()
+            pos = source_blen
             continue
         val gt = find_from(lower, ">", lt + 1)
         if gt < 0:
-            pos = source.len()
+            pos = source_blen
             continue
         val inner = lower.substring(lt + 1, gt).trim()
         val closing = text_starts_with_portable(inner, "/")
@@ -750,12 +751,12 @@ fn _html_without_inert_template_sources_scan(source: text) -> text:
         var name_end = 0
         # cpu-lane-loop-ok: scans the characters of ONE tag name until whitespace or `/`; bound is that tag name's length, not the document's
         while (
-            name_end < raw_name.len() and
-            raw_name[name_end:name_end + 1] != " " and
-            raw_name[name_end:name_end + 1] != "\t" and
-            raw_name[name_end:name_end + 1] != "\n" and
-            raw_name[name_end:name_end + 1] != "\r" and
-            raw_name[name_end:name_end + 1] != "/"
+            name_end < raw_name.byte_len() and
+            raw_name.substring(name_end, name_end + 1) != " " and
+            raw_name.substring(name_end, name_end + 1) != "\t" and
+            raw_name.substring(name_end, name_end + 1) != "\n" and
+            raw_name.substring(name_end, name_end + 1) != "\r" and
+            raw_name.substring(name_end, name_end + 1) != "/"
         ):
             name_end = name_end + 1
         val name = raw_name.substring(0, name_end)
@@ -774,11 +775,11 @@ fn _html_without_inert_template_sources_scan(source: text) -> text:
                     depth = 513
         if not closing and (name == "script" or name == "style"):
             val close = find_from(lower, "</{name}", gt + 1)
-            pos = if close < 0: source.len() else: close
+            pos = if close < 0: source_blen else: close
         else:
             pos = gt + 1
-    if depth == 0 and visible_start < source.len():
-        parts.push(source.substring(visible_start, source.byte_len()))
+    if depth == 0 and visible_start < source_blen:
+        parts.push(source.substring(visible_start, source_blen))
     parts.join("")
 
 fn _extract_css_vw_with_rule_limit(
@@ -821,10 +822,10 @@ fn _extract_css_vw_with_rule_limit(
     while html_tag >= 0 and html_tag_guard < 20:  # cpu-lane-loop-ok: detector false positive: bound is the literal guard `< 20` retries while locating the real `<html` tag
         html_tag_guard = html_tag_guard + 1
         val after_tag = html_tag + 5
-        if after_tag >= html.len():
+        if after_tag >= html.byte_len():
             html_tag = -1
             break
-        val boundary = html[after_tag:after_tag + 1]
+        val boundary = html.substring(after_tag, after_tag + 1)
         if boundary == ">" or boundary == " " or boundary == "\t" or boundary == "\n" or boundary == "\r":
             break
         html_tag = find_from(html, "<html", after_tag)
@@ -982,7 +983,7 @@ fn _extract_css_vw_with_rule_limit(
                     CssWrapperKind.Supports:
                         include = eval_supports_query(
                             wrapper_prelude.substring(
-                                9, wrapper_prelude.len()
+                                9, wrapper_prelude.byte_len()
                             ).trim()
                         )
                     CssWrapperKind.Layer:

@@ -6,6 +6,15 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#if defined(SIMPLE_TEST_CORE_RUNTIME)
+/* c-runtime test kind: links hosted_cocoa.c, a compositor host owner that is not part
+ * of the core-C runtime roster (runtime_core_c_sources_v1).
+ * Exit 64 = needs its owning harness; never counted as a pass. */
+int main(void) {
+    fputs("hosted_cocoa_frame_selfcheck: needs its owning harness (see file header)\n", stderr);
+    return 64;
+}
+#else
 #ifdef __APPLE__
 #include <pthread.h>
 #include <sched.h>
@@ -112,3 +121,4 @@ int main(void) {
     puts("COCOA_FRAME_SELFCHECK_PASS");
     return 0;
 }
+#endif /* SIMPLE_TEST_CORE_RUNTIME */

@@ -1,0 +1,73 @@
+"""SimpleOS PTY provider: the `std.sys.pty` surface over in-process ShellApps.
+
+SimpleOS has no native-script interpreter and no `rt_pty_*` runtime, so a pane
+spawn of `/sys/apps/shell` (PTY_SHS_SIMPLEOS_COMMAND) attaches an in-process
+`ShellApp` to the handle: write -> feed_remote_input, read -> take_remote_output,
+shell exit -> handle not running. Spawning anything else is refused.
+
+Design: doc/05_design/pty_shell_kinds_shs_default.md section 5 phase 3.
+"""
+use os.apps.shell.shell_app.{ShellApp}
+use std.sys.pty_shell.{PTY_SHS_SIMPLEOS_COMMAND}
+
+var _shells: [ShellApp] = []
+var _open: [bool] = []
+var _spawned: [bool] = []
+var _running: [bool] = []
+
+fn _valid(handle: i32) -> bool:
+    handle >= 0 and (handle as i64) < _open.len() and _open[handle]
+
+pub fn open(rows: i32, cols: i32) -> i32:
+    if rows <= 0 or cols <= 0:
+        return -1
+    _shells = _shells.push(ShellApp.new())
+    _open = _open.push(true)
+    _spawned = _spawned.push(false)
+    _running = _running.push(false)
+    (_open.len() - 1) as i32
+
+pub fn spawn_v1(handle: i32, program: text) -> Result<i64, text>:
+    if not _valid(handle):
+        return Err("invalid pty handle")
+    if program != PTY_SHS_SIMPLEOS_COMMAND:
+        return Err("pty-native-spawn-unavailable-on-simpleos: " + program)
+    if _spawned[handle]:
+        return Err("pty handle already spawned")
+    _spawned[handle] = true
+    _running[handle] = true
+    _shells[handle].show_prompt()
+    Ok(handle as i64)
+
+pub fn spawn(handle: i32, program: text) -> i64:
+    spawn_v1(handle, program).unwrap_or(-1)
+
+pub fn write(handle: i32, data: text) -> bool:
+    if not _valid(handle) or not _running[handle]:
+        return false
+    var shell = _shells[handle]
+    val alive = shell.feed_remote_input(data)
+    _shells[handle] = shell
+    if not alive:
+        _running[handle] = false
+    true
+
+pub fn read(handle: i32, timeout_ms: i32) -> text:
+    if not _valid(handle) or timeout_ms < 0:
+        return ""
+    _shells[handle].take_remote_output()
+
+pub fn is_running(handle: i32) -> bool:
+    _valid(handle) and _running[handle]
+
+pub fn close(handle: i32) -> bool:
+    if not _valid(handle):
+        return false
+    _open[handle] = false
+    _running[handle] = false
+    true
+
+pub fn platform_default_shell() -> text:
+    PTY_SHS_SIMPLEOS_COMMAND
+
+export open, spawn, spawn_v1, write, read, is_running, close, platform_default_shell

@@ -1,6 +1,7 @@
 # @cover src/lib/nogc_sync_mut/trace/xray_llvm_adapter_v1.spl
 # @cover src/lib/nogc_sync_mut/trace/xray_native_sled_leaf_v1.spl
 # @cover src/lib/common/trace/observer_profile_v1.spl
+# @cover src/lib/common/trace/trace_edge_select_v1.spl
 # @cover src/lib/nogc_sync_mut/trace/xray_data_profiling_v1.spl
 # @req REQ-XRAY-V1-API-01
 """
@@ -40,6 +41,7 @@ use std.common.trace.observer_collector_v1.*
 use std.common.trace.observer_profile_v1.*
 use std.common.trace.observer_aspect_config_v1.{trace_aspect_config_v1}
 use std.common.trace.xray_native_selection_v1.*
+use std.common.trace.trace_edge_select_v1.*
 use std.common.trace.xray_native_map_format_v1.*
 use std.nogc_sync_mut.trace.xray_llvm_adapter_v1.*
 use std.nogc_sync_mut.trace.xray_data_profiling_v1.{XrayDataProfilingV1}
@@ -445,6 +447,28 @@ fn sc_container_switch_follows_enable_disable(h: XrayBackendHarnessV1):
     expect(policy.after(h.state_code())).to_equal(false)
     expect(legacy.after(h.state_code())).to_equal(true)
 
+fn sc_edge_layer_selection(h: XrayBackendHarnessV1):
+    var params = AspectParamsV1.defaults()
+    val source = "edge layer\nrule layer alpha=L1\nrule layer beta=L2\nrule layer gamma=L2"
+    params.ext.push(ParamExt(ASPECT_TRACE_EDGES_EXT_V1, 1, source.bytes(), TRACE_EDGES_SCHEMA_V1))
+    val spec = trace_aspect_edge_spec_v1(params).unwrap().unwrap()
+    val map = name_map(h)
+    val names = trace_edge_selection_names_v1(map, spec)
+    expect(names).to_equal(["alpha", "beta", "gamma"])
+    val selection = xray_native_selection_v1(map, names, XRAY_HARNESS_MODULE_V1, XRAY_HARNESS_INCARNATION_V1).unwrap()
+    val prepared = h.prepare(xray_harness_config_v1(h), selection).unwrap()
+    val session = h.start(prepared, ARENA).unwrap()
+    var collector = TraceReferenceCollectorV1.create(session.generation, 64, 4).unwrap()
+    val events = simulate_program(h, collector, session.generation)
+    val profile = trace_edge_fold_v1(events, trace_edge_table_v1(map, spec), spec.selectors[0])
+    expect(trace_edge_lines_v1(profile)).to_equal(["edge layer L1->L2 calls=1 inclusive_ns=10 exclusive_ns=10"])
+    expect(h.request_stop(session)).to_equal(Ok(TraceSessionStateV1.Drained))
+    # malformed selector fails closed: no spec, so nothing is selected
+    var bad = AspectParamsV1.defaults()
+    bad.ext.push(ParamExt(ASPECT_TRACE_EDGES_EXT_V1, 1, "edge nonsense".bytes(), TRACE_EDGES_SCHEMA_V1))
+    expect(trace_aspect_edge_spec_v1(bad).is_err()).to_equal(true)
+    expect(xray_harness_partially_on_functions_v1(h)).to_equal([])
+
 # ---------------------------------------------------------------------------
 # One describe per backend; the bodies are the same functions.
 # ---------------------------------------------------------------------------
@@ -473,6 +497,8 @@ describe "XRay backend differential IN — llvm":
         sc_config_sdn_round_trip(xray_llvm_harness_v1())
     it "container switching follows runtime enable/disable":
         sc_container_switch_follows_enable_disable(xray_llvm_harness_v1())
+    it "edge selection: cross-layer edges fold and malformed selectors fail closed":
+        sc_edge_layer_selection(xray_llvm_harness_v1())
 
 describe "XRay backend differential IN — simple-aarch64":
     it "resolves build routes and refuses non-Linux-ELF targets":
@@ -499,6 +525,8 @@ describe "XRay backend differential IN — simple-aarch64":
         sc_config_sdn_round_trip(xray_simple_aarch64_harness_v1())
     it "container switching follows runtime enable/disable":
         sc_container_switch_follows_enable_disable(xray_simple_aarch64_harness_v1())
+    it "edge selection: cross-layer edges fold and malformed selectors fail closed":
+        sc_edge_layer_selection(xray_simple_aarch64_harness_v1())
 
 describe "XRay backend differential IN — simple-x86_64":
     it "resolves build routes and refuses non-Linux-ELF targets":
@@ -525,6 +553,8 @@ describe "XRay backend differential IN — simple-x86_64":
         sc_config_sdn_round_trip(xray_simple_x86_64_harness_v1())
     it "container switching follows runtime enable/disable":
         sc_container_switch_follows_enable_disable(xray_simple_x86_64_harness_v1())
+    it "edge selection: cross-layer edges fold and malformed selectors fail closed":
+        sc_edge_layer_selection(xray_simple_x86_64_harness_v1())
 
 describe "XRay backend differential IN — simple-win64 (stage 3, PE image)":
     it "resolves build routes and refuses non-Linux-ELF targets":
@@ -551,3 +581,5 @@ describe "XRay backend differential IN — simple-win64 (stage 3, PE image)":
         sc_config_sdn_round_trip(xray_simple_win64_harness_v1())
     it "container switching follows runtime enable/disable":
         sc_container_switch_follows_enable_disable(xray_simple_win64_harness_v1())
+    it "edge selection: cross-layer edges fold and malformed selectors fail closed":
+        sc_edge_layer_selection(xray_simple_win64_harness_v1())

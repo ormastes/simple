@@ -206,17 +206,17 @@ fn _fetch_pixel(image: SkImage, px: i64, py: i64) -> SkColor4f:
     else if image.pixels.length() == 0:
         _transparent_black()
     else:
-        # pixels stored as packed ARGB i64 per pixel (4 bytes per pixel, width*height entries)
-        val idx = py * w + px
-        val pixel_count = image.pixels.length()
-        if idx < 0 or idx >= pixel_count:
+        # SkImage.pixels holds 4 i64 entries per pixel, one channel byte each,
+        # in A,R,G,B order (entity/image.spl, sk_image_empty, SkCpuSurface,
+        # and the Engine2D bridge's sk_image_to_u32_pixels all use this layout).
+        val base = (py * w + px) * 4
+        if base < 0 or base + 3 >= image.pixels.length():
             _transparent_black()
         else:
-            val packed = image.pixels[idx]
-            val a = ((packed >> 24) & 0xFF).to_f64() / 255.0
-            val r = ((packed >> 16) & 0xFF).to_f64() / 255.0
-            val g = ((packed >> 8) & 0xFF).to_f64() / 255.0
-            val b = (packed & 0xFF).to_f64() / 255.0
+            val a = (image.pixels[base] & 0xFF).to_f64() / 255.0
+            val r = (image.pixels[base + 1] & 0xFF).to_f64() / 255.0
+            val g = (image.pixels[base + 2] & 0xFF).to_f64() / 255.0
+            val b = (image.pixels[base + 3] & 0xFF).to_f64() / 255.0
             SkColor4f(r: r, g: g, b: b, a: a)
 
 fn sample_image_nearest(image: SkImage, u: f64, v: f64) -> SkColor4f:
@@ -233,8 +233,11 @@ fn sample_image_bilinear(image: SkImage, u: f64, v: f64) -> SkColor4f:
     else:
         val x0 = u.to_i64()
         val y0 = v.to_i64()
-        val x1 = x0 + 1
-        val y1 = y0 + 1
+        # Clamp the +1 neighbours to the last texel (clamp-to-edge) so a sample
+        # inside the image's final row/column does not blend toward the
+        # transparent out-of-bounds fetch and fade the image border.
+        val x1 = if x0 + 1 < image.info.width: x0 + 1 else: x0
+        val y1 = if y0 + 1 < image.info.height: y0 + 1 else: y0
         val tx = u - x0.to_f64()
         val ty = v - y0.to_f64()
         val c00 = _fetch_pixel(image, x0, y0)

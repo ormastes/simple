@@ -117,3 +117,13 @@ entry. The leaf is deliberately not `rt_*`. Mac-qualified 2026-11-14: Darwin
 `local_unix_v1_selfcheck.c` PASS and the disposable-child probe
 `src/runtime/test/sosix_darwin_sandbox_v1_selfcheck.c` 12/12 on the compiled
 attempt profile (see `doc/04_architecture/native_macos_simple_container.md`). Design: `doc/05_design/simple_container_macos_seatbelt.md` §2.3/§9.1/§15.2.
+
+## PTY shell kinds (2026-11-14)
+
+`std.sosix.pty` is the single PTY entry point (smux and Caret import nothing
+lower). A pane names a shell kind: `shs` (the Simple shell, `ShellApp`, hosted
+via `src/app/shs/main.spl`; the only kind on SimpleOS) or `native`
+(`/bin/sh`, `cmd.exe`; refused on SimpleOS). `sosix_pty_default_shell()` is
+native on hosts unless `SIMPLE_PTY_SHELL=shs`. Unix `rt_pty_spawn` accepts a
+command line with arguments (falls back to `/bin/sh -c "exec <line>"`).
+Design and open phases: `doc/05_design/pty_shell_kinds_shs_default.md`.

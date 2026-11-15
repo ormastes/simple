@@ -98,6 +98,41 @@ describe "LLM Caret agent worktrees":
         expect(r.status).to_equal("error")
         expect(r.reason).to_equal("worktree_add_failed")
 
+    it "names a tree the way git does when the not-yet-created root sits behind a symlink":
+        # @req REQ-APP-LLM-CARET-WORKSPACE-001
+        # Regression: doc/08_tracking/bug/caret_workspace_canonical_root_gnu_realpath_m_macos_2026-11-14.md
+        step("Reach the scratch root through a symlink; the worktree root below it does not exist yet")
+        val root = _scratch("symlink")
+        dir_remove_all(root)
+        val repo = _fixture_repo(root)
+        dir_create_all(root + "/real")
+        process_run("ln", ["-s", root + "/real", root + "/link"])
+        val ws = agent_workspace("caret-wt-link", repo, root + "/link/trees")
+
+        step("The agent's tree is listed by git under exactly the path the workspace reports")
+        expect(worktree_add(ws, "agent-a").status).to_equal("ok")
+        expect(worktree_list(ws)).to_contain(worktree_path(ws, "agent-a"))
+        expect(worktree_remove(ws, "agent-a").status).to_equal("ok")
+        dir_remove_all(root)
+
+    it "resolves the deepest existing ancestor and keeps the missing tail of a worktree root":
+        # @req REQ-APP-LLM-CARET-WORKSPACE-001
+        step("A root several missing levels below a symlink resolves to the real directory plus the tail")
+        val root = _scratch("canonical")
+        dir_remove_all(root)
+        dir_create_all(root + "/real")
+        process_run("ln", ["-s", root + "/real", root + "/link"])
+        val (real, _e, _c) = process_run("realpath", [root + "/real"])
+        expect(agent_workspace("c1", "/r", root + "/link/a/b/trees").worktree_root).to_equal(
+            real.trim() + "/a/b/trees")
+
+        step("An existing root resolves to itself; a relative missing root is anchored at the cwd")
+        expect(agent_workspace("c2", "/r", root + "/link").worktree_root).to_equal(real.trim())
+        val (here, _e2, _c2) = process_run("realpath", ["."])
+        expect(agent_workspace("c3", "/r", "caret-missing-root-x/trees").worktree_root).to_equal(
+            here.trim() + "/caret-missing-root-x/trees")
+        dir_remove_all(root)
+
 # @manual_section: agent-tmux-sessions
 describe "LLM Caret agent tmux sessions":
     it "broadcasts one command to every pane and each pane shows it":
@@ -212,6 +247,9 @@ describe "LLM Caret workspace recursion protection":
                 "-t", ws.session, "-F", "#" + "{" + "pane_id" + "}"])
             own = ids.split("\n")[0].trim()
             expect(own.starts_with("%")).to_be(true)
+            # tmux sets TMUX (`<socket path>,<pid>,<session>`) beside TMUX_PANE; the
+            # pane id only means something on the server that socket names.
+            env_set("TMUX", "/tmp/tmux-spec/" + ws.socket + ",1,0")
         env_set(own_env, own)
 
         step("A broadcast reaches every OTHER pane only")
@@ -220,6 +258,14 @@ describe "LLM Caret workspace recursion protection":
         expect(reached).not_to_contain(own)
         expect(list_panes(ws).len()).to_equal(2)  # oracle: the session still holds exactly two panes
         expect(list_panes_except(ws, own).len()).to_equal(1)  # oracle: excluding the own pane leaves exactly one recipient
+
+        if workspace_backend() == "tmux":
+            step("The same pane id on ANOTHER tmux server names no pane of this workspace")
+            # Bug smux_caret_broadcast_skips_private_pane_from_outer_tmux_2026-11-14:
+            # pane ids are per server, so an outer `%0` must not drop this server `%0`.
+            env_set("TMUX", "/tmp/tmux-spec/some-other-server,1,0")
+            expect(send_to_each_pane(ws, "echo FOREIGN_TMUX_PANE").len()).to_equal(2)  # oracle: both panes of a two-pane session
+            env_set("TMUX", "")
         env_set(own_env, "")
         session_kill(ws)
         dir_remove_all(root)

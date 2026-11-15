@@ -648,9 +648,15 @@ fn primitive_field_method_call_is_builtin_qualified() {
     )
     .unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })));
+    // Contract commit b137e4a602b: scalar text conversions never enter nominal
+    // suffix-based dispatch; narrow ints use BoxInt + rt_value_to_string.
     assert!(has_inst(&mir, |i| matches!(
         i,
-        MirInst::MethodCallStatic { func_name, .. } if func_name == "i32.to_string"
+        MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_to_string")
+    )));
+    assert!(!has_inst(&mir, |i| matches!(
+        i,
+        MirInst::MethodCallStatic { func_name, .. } if func_name.ends_with(".to_string")
     )));
 }
 

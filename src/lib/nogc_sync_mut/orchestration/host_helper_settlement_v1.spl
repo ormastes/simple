@@ -2,7 +2,10 @@
 # settlement -> correlated ACK. No grant freshness check applies to cleanup.
 # Trusted same-process composition only. The typed ACK is not a signed IPC
 # authority; independent service authentication remains a separate boundary.
-use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{HostCapacityOwnerV1, host_capacity_owner_settle_v1}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostCapacityOwnerV1
+pub use std.nogc_sync_mut.orchestration.host_helper_settlement_commit_v1.HostHelperSettlementAckV1
+use std.nogc_sync_mut.orchestration.host_helper_settlement_commit_v1.{HostHelperSettlementCommitTurnV1,
+    host_helper_settlement_commit_v1}
 use std.nogc_sync_mut.orchestration.host_helper_stream_owner_v1.HostHelperStreamRetainedV1
 use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.*
 use std.nogc_sync_mut.orchestration.host_helper_settlement_receipt_v1.*
@@ -15,16 +18,6 @@ use std.common.build_manager.group_process_stream_protocol_v2.group_process_stre
 use std.nogc_sync_mut.io.group_process_owner.{GroupProcessStreamOwnerV2, group_process_stream_cleanup_proof_v2, group_process_stream_collect_reap_v2}
 use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedSpawnV2, PipedProcessRefV1, process_retire_piped_owned_v2}
 use std.common.crypto.sha256.sha256_text
-
-pub struct HostHelperSettlementAckV1:
-    operation_id: text
-    request_digest: text
-    prepared_receipt_digest: text
-    native_identity_digest: text
-    tree_receipt_digest: text
-    outcome_digest: text
-    journal_revision: text
-    journal_sequence: i64
 
 pub struct HostHelperSettlementTurnV1:
     owner: HostCapacityOwnerV1
@@ -53,17 +46,6 @@ pub struct HostHelperRecoveredSettlementTurnV1:
     recovery_required: bool
     error: text
     ack: HostHelperSettlementAckV1?
-
-struct HostHelperSettlementProofV1:
-    outcome: text
-    tree_receipt_digest: text
-    request_digest: text
-    prepared_receipt_digest: text
-
-struct HostHelperSettlementCoreTurnV1:
-    owner: HostCapacityOwnerV1
-    ack: HostHelperSettlementAckV1?
-    error: text
 
 fn host_helper_stream_ref_metadata_v1(native: GroupProcessStreamOwnerV2,
         reference: PipedProcessRefV1?) -> Result<(), text>:
@@ -105,7 +87,7 @@ fn host_helper_live_native_v1(root: text, retained: HostHelperStreamRetainedV1) 
     Ok(native)
 
 fn host_helper_settlement_prepare_v1(owner: HostCapacityOwnerV1, operation: OperationEnvelopeV2,
-        native: GroupProcessStreamOwnerV2) -> Result<HostHelperSettlementProofV1, text>:
+        native: GroupProcessStreamOwnerV2) -> Result<text, text>:
     val state = daemon_operation_exact_v2(owner.journal, operation)?
     if not ["executing", "outcome-unknown", "completed"].contains(state.state):
         return Err("helper-stream-settlement-execution-required")
@@ -126,28 +108,14 @@ fn host_helper_settlement_prepare_v1(owner: HostCapacityOwnerV1, operation: Oper
     host_helper_stream_publish_v1(root, operation.id, "settlement", outcome, false)?
     # publish verifies exact readback/sync; the host hook independently reloads
     # and revalidates all metadata/proof before committing its journal event.
-    Ok(HostHelperSettlementProofV1(outcome: outcome, tree_receipt_digest: reap.tree_receipt_digest,
-        request_digest: context.consumed.output_plan.request_digest,
-        prepared_receipt_digest: context.consumed.prepared_receipt_digest))
+    Ok(outcome)
 
 fn host_helper_settlement_core_v1(owner: HostCapacityOwnerV1, operation: OperationEnvelopeV2,
-        native: GroupProcessStreamOwnerV2) -> HostHelperSettlementCoreTurnV1:
+        native: GroupProcessStreamOwnerV2) -> HostHelperSettlementCommitTurnV1:
     val proof = match host_helper_settlement_prepare_v1(owner, operation, native):
         case Ok(value): value
-        case Err(reason): return HostHelperSettlementCoreTurnV1(owner, None, reason)
-    val committed = host_capacity_owner_settle_v1(owner, operation)
-    if not committed.settled: return HostHelperSettlementCoreTurnV1(committed.owner, None, committed.error)
-    val state = match daemon_operation_exact_v2(committed.owner.journal, operation):
-        case Ok(value): value
-        case Err(reason): return HostHelperSettlementCoreTurnV1(committed.owner, None, reason)
-    val outcome_digest = sha256_text(proof.outcome)
-    if state.state != "completed" or state.outcome_digest != outcome_digest:
-        return HostHelperSettlementCoreTurnV1(committed.owner, None, "helper-stream-journal-settlement-mismatch")
-    val ack = HostHelperSettlementAckV1(operation_id: operation.id, request_digest: proof.request_digest,
-        prepared_receipt_digest: proof.prepared_receipt_digest, native_identity_digest: native.identity_digest,
-        tree_receipt_digest: proof.tree_receipt_digest, outcome_digest: outcome_digest,
-        journal_revision: committed.owner.journal.revision, journal_sequence: committed.owner.journal.sequence)
-    HostHelperSettlementCoreTurnV1(committed.owner, Some(ack), "")
+        case Err(reason): return HostHelperSettlementCommitTurnV1(owner, None, reason)
+    host_helper_settlement_commit_v1(owner, operation, "host-helper-stream-settlement", proof)
 
 pub fn host_helper_settle_output_v1(owner: HostCapacityOwnerV1,
         retained: HostHelperStreamRetainedV1) -> HostHelperSettlementTurnV1:

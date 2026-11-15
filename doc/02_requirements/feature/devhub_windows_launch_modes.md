@@ -11,8 +11,11 @@ failing explicitly is a partial delivery, not an AV recovery feature.
 - REQ-DHLM-002: Until an actual admitted loader exists, explicit loading mode
   fails with exit 78 before executing or probing any runtime or loader.
 - REQ-DHLM-003: Neither selection silently falls back to another mode.
-- REQ-DHLM-004: Ordinary dispatch reports mode, artifact, receipt, and version;
-  unsupported and admission failures report the selected mode and next action.
+- REQ-DHLM-004: Ordinary dispatch reports mode, artifact, receipt, and version
+  under `--verbose` and on every failed launch (a successful default launch keeps
+  stderr empty, REQ-DEVHUB-TERM-001); unsupported and admission failures report
+  the selected mode and next action. `bin/devhub.cmd` follows the same
+  contract (identity captured to a temp file, replayed on failure, echoed on `--verbose`).
 - REQ-DHLM-005: Neither selection changes antivirus policy or exclusions.
 
 Focused executable coverage: `test/00_unit/scripts/devhub_windows_launch_modes_test.shs`.

@@ -11,6 +11,16 @@
 #include <time.h>
 #include <unistd.h>
 
+#if defined(SIMPLE_TEST_CORE_RUNTIME)
+/* c-runtime test kind: links the staged Rust browser HTTP provider library and live
+ * hosts, supplied by scripts/check/check-runtime-https-provider.shs.
+ * Exit 64 = needs its owning harness; never counted as a pass. */
+int main(void) {
+    fputs("rt_browser_http_job_provider_selfcheck: needs its owning harness (see file header)\n", stderr);
+    return 64;
+}
+#else
+
 typedef uint64_t RuntimeValue;
 
 extern RuntimeValue rt_string_new(const uint8_t *bytes, uint64_t len);
@@ -149,3 +159,4 @@ int main(int argc, char **argv) {
     if (result != 0) return result;
     return run_case(argv[2], 1);
 }
+#endif /* SIMPLE_TEST_CORE_RUNTIME */

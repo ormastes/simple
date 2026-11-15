@@ -1,0 +1,69 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+
+"""
+Caret workbench capability checklist (REQ-CARET-UI-020, CU-020).
+Each row is met / partial / blocked from probe facts, never hard-coded.
+"""
+
+use std.spec.*
+use app.llm_caret.workbench.capability_checklist.{CapabilityStatus, CapabilityProbes, CapabilityRow, capability_rows, capability_lines, capability_probes_live, capability_row_for}
+
+fn _none() -> CapabilityProbes:
+    CapabilityProbes(live_panes: 0, observer_events: 0, ext_manifest_ok: false, ext_views: 0,
+        ext_leftover: 0, trace_view_declared: false, skill_count: 0, loaded_skills: [])
+
+fn _full() -> CapabilityProbes:
+    CapabilityProbes(live_panes: 2, observer_events: 5, ext_manifest_ok: true, ext_views: 5,
+        ext_leftover: 0, trace_view_declared: true, skill_count: 12, loaded_skills: [])
+
+describe "Caret capability checklist (CU-020)":
+    it "reports nothing met when every probe is empty":
+        # @req REQ-CARET-UI-020
+        step("Evaluate rows against zero probes")
+        var met = 0
+        for r in capability_rows(_none()):
+            if r.status == CapabilityStatus.Met:
+                met = met + 1
+        expect(met).to_equal(0)
+
+    it "turns local session and observer met only from probe facts":
+        # @req REQ-CARET-UI-020
+        step("Evaluate rows against populated probes")
+        expect(capability_row_for(_full(), "local_session").status).to_equal(CapabilityStatus.Met)
+        expect(capability_row_for(_full(), "observer").status).to_equal(CapabilityStatus.Met)
+        expect(capability_row_for(_none(), "local_session").status).to_equal(CapabilityStatus.Partial)
+        expect(capability_row_for(_none(), "terminal_passthrough").status).to_equal(CapabilityStatus.Blocked)
+
+    it "keeps remote fleet blocked with a reason even with every probe populated":
+        # @req REQ-CARET-UI-020
+        step("Evaluate remote_fleet against full probes")
+        val r = capability_row_for(_full(), "remote_fleet")
+        expect(r.status).to_equal(CapabilityStatus.Blocked)
+        expect(r.reason.len() > 0).to_equal(true)
+
+    it "never reports skills as fully met because loaded state is not provider-reported":
+        # @req REQ-CARET-UI-020
+        step("Evaluate skills row")
+        expect(capability_row_for(_full(), "skills").status).to_equal(CapabilityStatus.Partial)
+        expect(capability_row_for(_none(), "skills").status).to_equal(CapabilityStatus.Blocked)
+
+    it "flags extension leftovers as partial":
+        # @req REQ-CARET-UI-020
+        step("Evaluate extensions with a leftover registration")
+        val p = CapabilityProbes(live_panes: 0, observer_events: 0, ext_manifest_ok: true, ext_views: 5,
+            ext_leftover: 2, trace_view_declared: true, skill_count: 0, loaded_skills: [])
+        expect(capability_row_for(p, "extensions_views").status).to_equal(CapabilityStatus.Partial)
+
+    it "renders one line per row with status and reason":
+        # @req REQ-CARET-UI-020
+        step("Render lines")
+        val lines = capability_lines(capability_rows(_none()))
+        expect(lines.len()).to_equal(capability_rows(_none()).len())
+        expect(lines[0].contains("blocked") or lines[0].contains("partial")).to_equal(true)
+
+    it "gathers live probes without claiming remote support":
+        # @req REQ-CARET-UI-020
+        step("Probe the live process")
+        val p = capability_probes_live()
+        expect(p.ext_manifest_ok).to_equal(true)
+        expect(capability_row_for(p, "remote_fleet").status).to_equal(CapabilityStatus.Blocked)

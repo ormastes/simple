@@ -210,14 +210,25 @@ pub fn signature_of(name: &str) -> Option<(Ret, &'static str)> {
 
 /// Resolve a symbol in the running process.
 ///
-/// The runtime is linked into the binary and its `rt_vulkan_*` symbols are in
-/// the dynamic symbol table, so `RTLD_DEFAULT` resolves them without opening
-/// any library. A null result means the binary was linked without the runtime,
-/// which is a build error rather than a missing Vulkan installation — the
-/// message says so instead of blaming the driver.
+/// The runtime is linked into the binary, and its generated static symbol
+/// table (`simple_runtime::RUNTIME_SYMBOL_ENTRIES`, the same registry the JIT
+/// links against) holds every `rt_vulkan_*` address. That table is consulted
+/// first because it works on every host: a PE executable has no export table
+/// for these functions, so an OS self-lookup alone finds nothing on Windows.
+/// The OS lookup stays as the fallback for a table that lacks the name. A
+/// miss in both means the binary was linked without the runtime, which is a
+/// build error rather than a missing Vulkan installation — the message says so
+/// instead of blaming the driver.
 fn symbol(name: &str) -> Result<usize, CompileError> {
-    match super::dl_compat::dlsym_self_compat(name) {
-        Some(addr) => Ok(addr as usize),
+    // Idempotent; the runtime's own constructor normally ran already.
+    simple_runtime::register_static_runtime_symbols();
+    let linked = simple_native_loader::static_provider()
+        .get_symbol(name)
+        .filter(|ptr| !ptr.is_null())
+        .map(|ptr| ptr as usize)
+        .or_else(|| super::dl_compat::dlsym_self_compat(name).map(|addr| addr as usize));
+    match linked {
+        Some(addr) => Ok(addr),
         None => Err(CompileError::runtime(format!(
             "Vulkan runtime entry point '{name}' is not linked into this binary \
              (expected it from src/compiler_rust/runtime/src/vulkan_graphics_runtime*.rs)"
@@ -557,6 +568,22 @@ mod tests {
         assert_eq!(text_fns.len(), 8, "expected 8 text returns, got {text_fns:?}");
         assert!(text_fns.contains(&"rt_vulkan_selected_device_name"));
         assert!(text_fns.contains(&"rt_vulkan_get_last_error"));
+    }
+
+    /// Every registered entry point resolves to linked code on every host.
+    ///
+    /// A PE executable has no export table for the runtime's `#[no_mangle]`
+    /// functions, so an OS self-lookup alone left the whole family unreachable
+    /// on Windows while the same build worked on Unix.
+    /// Bug: doc/08_tracking/bug/seed_windows_dlsym_self_no_pe_exports_2026-11-14.md
+    #[test]
+    fn every_registered_entry_point_resolves_in_process() {
+        let unresolved: Vec<&str> = VULKAN_FNS
+            .iter()
+            .map(|(name, _, _)| *name)
+            .filter(|name| !matches!(symbol(name), Ok(addr) if addr != 0))
+            .collect();
+        assert!(unresolved.is_empty(), "unresolved rt_vulkan_* entry points: {unresolved:?}");
     }
 
     /// A text-returning entry point yields text, never an integer.

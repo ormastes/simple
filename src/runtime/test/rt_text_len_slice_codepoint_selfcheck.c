@@ -17,7 +17,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Under the c-runtime test kind (SIMPLE_TEST_CORE_RUNTIME) the core-C owner
+ * runtime_legacy_core.c defines spl_panic instead. */
+#ifndef SIMPLE_TEST_CORE_RUNTIME
 void spl_panic(const char* msg) { fprintf(stderr, "PANIC: %s\n", msg ? msg : ""); exit(101); }
+#endif
 /* rt_slice's UTF-8 slice audit hook lives in runtime_simd_utf8.c, which this
  * standalone link does not pull in (an unresolved call under /FORCE would jump
  * to address 0). Audit off. */

@@ -22,21 +22,25 @@ use std.common.spec.evidence.evidence_comparator.{compare_evidence}
 
 extern fn rt_getpid() -> i64
 extern fn rt_file_read_text(path: text) -> text?
-extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
-extern fn rt_file_delete(path: text) -> bool
-
-fn _spec_file_write(path: text, content: text) -> bool:
-    rt_file_delete(path)
-    rt_file_write_text_at(path, 0, content) >= 0
 
 fn _spec_file_read(path: text) -> text:
     rt_file_read_text(path) ?? ""
 
 fn bug_resolve_cli_fixture_root() -> text:
-    "/tmp/bug_resolve_cli_spec_{rt_getpid()}"
+    "build/bug_resolve_cli_spec_{rt_getpid()}"
 
 fn bug_resolve_cli_fixture_db_path(root: text) -> text:
     "{root}/doc/08_tracking/bug/bug_db.sdn"
+
+fn bug_resolve_cli_add_bug(root: text, id: text, file: text) -> i64:
+    val simple_bin = "$repo/bin/simple"
+    val r = shell("repo=$PWD; cd {root} && SIMPLE_LIB=$repo/src {simple_bin} run $repo/src/app/bug_add/main.spl --id={id} --severity=p2 --title='token receipt bug' --file={file} --repro='bin/simple test'")
+    r.exit_code
+
+fn bug_resolve_cli_resolve(root: text, id: text, tokens: text, knowledge: text) -> i64:
+    val simple_bin = "$repo/bin/simple"
+    val r = shell("repo=$PWD; cd {root} && SIMPLE_LIB=$repo/src {simple_bin} run $repo/src/app/bug_resolve/main.spl --id={id} --date=2026-11-14 {tokens} --token-provider=test-provider --token-source=test-session --knowledge={knowledge} --reproducer=r_spec.spl --prevention=p_spec.spl")
+    r.exit_code
 
 describe "bug-resolve CLI":
     # @manual scenario evidence
@@ -51,15 +55,11 @@ describe "bug-resolve CLI":
         val bug_resolve_main = "$repo/src/app/bug_resolve/main.spl"
 
         shell("repo=$PWD; mkdir -p '{root}/doc/08_tracking/bug'")
-        # Write a minimal valid empty bug database so bug_add can load it
-        val empty_db_content = "bugs_active |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n\n\nbug_descriptions |bug_id, line_num, content|\n\n\nbug_fix_strategies |bug_id, line_num, content|\n\n\nbug_investigation_logs |bug_id, line_num, content|\n\n\nbugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n\n"
-        val created = _spec_file_write(db_path, empty_db_content)
-        expect(created).to_equal(true)
 
         val added = shell("repo=$PWD; cd {root} && SIMPLE_LIB={simple_src} {simple_bin} run {bug_add_main} --id=bug_resolve_cli_fix_001 --severity=p2 --title='CLI bug resolve fix' --file=src/app/dashboard/assistant_collectors.spl --repro='bin/simple dashboard assistant'")
         expect(added.exit_code).to_equal(0)
 
-        val resolved = shell("repo=$PWD; cd {root} && SIMPLE_LIB={simple_src} {simple_bin} run {bug_resolve_main} --id=bug_resolve_cli_fix_001 --date=2026-04-15 --input-tokens=100 --output-tokens=50 --cache-read-tokens=25 --cache-create-tokens=5 --token-provider=test-provider --token-source=test-session --knowledge=none")
+        val resolved = shell("repo=$PWD; cd {root} && mkdir -p t && : > t/r_spec.spl && : > t/p_spec.spl && SIMPLE_LIB={simple_src} {simple_bin} run {bug_resolve_main} --id=bug_resolve_cli_fix_001 --date=2026-04-15 --input-tokens=100 --output-tokens=50 --cache-read-tokens=25 --cache-create-tokens=5 --token-provider=test-provider --token-source=test-session --knowledge=none --reproducer=t/r_spec.spl --prevention=t/p_spec.spl")
         expect(resolved.exit_code).to_equal(0)
 
         val content = _spec_file_read(db_path)
@@ -78,3 +78,60 @@ describe "bug-resolve CLI":
         expect(comparison.status).to_equal(EvidenceStatus.passed)
 
         shell("repo=$PWD; rm -rf {root}")
+
+    it "persists a structured token receipt that survives a fresh load":
+        # @req REQ-SSPEC-APP
+        step("resolve a bug and reload the database from disk")
+        val root = "{bug_resolve_cli_fixture_root()}_rt"
+        val db_path = bug_resolve_cli_fixture_db_path(root)
+        shell("mkdir -p '{root}/doc/08_tracking/bug' && touch '{root}/r_spec.spl' '{root}/p_spec.spl'")
+        expect(bug_resolve_cli_add_bug(root, "tok_rt_001", "src/compiler/x.spl")).to_equal(0)
+
+        expect(bug_resolve_cli_resolve(root, "tok_rt_001", "--input-tokens=10 --output-tokens=20 --cache-read-tokens=3 --cache-create-tokens=2", "none")).to_equal(0)
+
+        step("the bug_token_usage row carries category, total and provider")
+        val content = _spec_file_read(db_path)
+        expect(content.contains("bug_token_usage")).to_equal(true)
+        expect(content.contains("tok_rt_001, compiler, test-provider, 10, 20, 3, 2, 35, test-session, none, 2026-11-14")).to_equal(true)
+
+        step("a second resolve in the same category sees the first as its comparable cohort")
+        expect(bug_resolve_cli_add_bug(root, "tok_rt_002", "src/compiler/y.spl")).to_equal(0)
+        expect(bug_resolve_cli_resolve(root, "tok_rt_002", "--input-tokens=100 --output-tokens=100 --cache-read-tokens=0 --cache-create-tokens=0", "none")).to_equal(1)
+        val after_reject = _spec_file_read(db_path)
+        expect(after_reject.contains("tok_rt_002, compiler")).to_equal(false)
+        expect(after_reject.contains("tok_rt_002, P2, closed")).to_equal(false)
+        shell("rm -rf {root}")
+
+    it "rejects an unknown bug id and writes nothing":
+        # @req REQ-SSPEC-APP
+        step("resolve an id that was never added")
+        val root = "{bug_resolve_cli_fixture_root()}_unk"
+        val db_path = bug_resolve_cli_fixture_db_path(root)
+        shell("mkdir -p '{root}/doc/08_tracking/bug' && touch '{root}/r_spec.spl' '{root}/p_spec.spl'")
+        expect(bug_resolve_cli_add_bug(root, "tok_unk_seed", "src/lib/x.spl")).to_equal(0)
+        val before = _spec_file_read(db_path)
+
+        val code = bug_resolve_cli_resolve(root, "no_such_bug", "--input-tokens=1 --output-tokens=1 --cache-read-tokens=1 --cache-create-tokens=1", "none")
+        expect(code).to_equal(1)
+
+        step("the database file is byte-identical")
+        expect(_spec_file_read(db_path)).to_equal(before)
+        shell("rm -rf {root}")
+
+    it "rejects a missing token receipt and writes nothing":
+        # @req REQ-SSPEC-APP
+        step("resolve without any token flags")
+        val root = "{bug_resolve_cli_fixture_root()}_nr"
+        val db_path = bug_resolve_cli_fixture_db_path(root)
+        shell("mkdir -p '{root}/doc/08_tracking/bug' && touch '{root}/r_spec.spl' '{root}/p_spec.spl'")
+        expect(bug_resolve_cli_add_bug(root, "tok_nr_001", "src/lib/x.spl")).to_equal(0)
+        val before = _spec_file_read(db_path)
+
+        val code = bug_resolve_cli_resolve(root, "tok_nr_001", "", "none")
+        expect(code).to_equal(1)
+
+        step("the bug stays open and no token row exists")
+        val after = _spec_file_read(db_path)
+        expect(after).to_equal(before)
+        expect(after.contains("tok_nr_001, P2, closed")).to_equal(false)
+        shell("rm -rf {root}")

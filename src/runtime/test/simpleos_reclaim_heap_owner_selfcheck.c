@@ -1,6 +1,15 @@
 /* Compiled after the exact malloc/free/realloc/calloc + NVMe allocation owner
  * extracted from baremetal_stubs.c by check-simpleos-reclaim-heap.shs. Only
  * serial diagnostics and the hardware panic exit are adapted for the host. */
+#ifndef SIMPLEOS_RECLAIM_HEAP_H
+/* Compiled alone (not after the extracted owner) this is not a program over
+ * anything. Exit 64 = needs its owning harness; never counted as a pass. */
+#include <stdio.h>
+int main(void) {
+    fputs("simpleos_reclaim_heap_owner_selfcheck: run by scripts/check/check-simpleos-reclaim-heap.shs\n", stderr);
+    return 64;
+}
+#else
 int main(void)
 {
     unsigned checks = 0;
@@ -47,3 +56,4 @@ int main(void)
     printf("PASS simpleos allocation owner: %u assertions; retained + frame scratch + NVMe\n", checks);
     return 0;
 }
+#endif /* SIMPLEOS_RECLAIM_HEAP_H */

@@ -1,0 +1,181 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/net/ws_frame_codec.spl 78%
+# @tag: unit, browser_engine, net, websocket
+#
+# WebSocket frame codec against RFC 6455 section 5: the base framing octets
+# (FIN|opcode, MASK|length, 16-bit extended length), the masking transform and
+# the close payload. The "Hello" frames are the worked examples of RFC 6455
+# section 5.7: unmasked 81 05 48 65 6c 6c 6f and masked with key 37 fa 21 3d
+# giving payload 7f 9f 4d 51 58. Octets are read back as integers so the
+# expectations do not depend on how bytes above 0x7f are carried in text.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.net.ws_utils.{decode_byte_val}
+use std.gc_async_mut.gpu.browser_engine.net.ws_frame_codec.{
+    WsFrame, WsOpcode,
+    opcode_to_id, id_to_opcode, opcode_name, is_control_opcode,
+    encode_frame, decode_frame, apply_mask, apply_client_mask,
+    ws_frame_xor_byte, encode_close_payload, decode_close_payload
+}
+
+fn _octets(data: text) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < data.len():
+        out.push(decode_byte_val(data, i))
+        i = i + 1
+    out
+
+fn _repeat(ch: text, n: i64) -> text:
+    var s = ""
+    var i = 0
+    while i < n:
+        s = s + ch
+        i = i + 1
+    s
+
+describe "WebSocket frame codec (RFC 6455 section 5)":
+
+    context "opcodes":
+
+        it "maps opcodes to their wire ids":
+            expect(opcode_to_id(WsOpcode.Continuation)).to_equal(0)
+            expect(opcode_to_id(WsOpcode.Text)).to_equal(1)
+            expect(opcode_to_id(WsOpcode.Binary)).to_equal(2)
+            expect(opcode_to_id(WsOpcode.Close)).to_equal(8)
+            expect(opcode_to_id(WsOpcode.Ping)).to_equal(9)
+            expect(opcode_to_id(WsOpcode.Pong)).to_equal(10)
+
+        it "maps wire ids back to names":
+            expect(opcode_name(id_to_opcode(0).unwrap())).to_equal("CONTINUATION")
+            expect(opcode_name(id_to_opcode(1).unwrap())).to_equal("TEXT")
+            expect(opcode_name(id_to_opcode(2).unwrap())).to_equal("BINARY")
+            expect(opcode_name(id_to_opcode(8).unwrap())).to_equal("CLOSE")
+            expect(opcode_name(id_to_opcode(9).unwrap())).to_equal("PING")
+            expect(opcode_name(id_to_opcode(10).unwrap())).to_equal("PONG")
+
+        it "rejects the reserved opcodes":
+            expect(id_to_opcode(3).is_err()).to_equal(true)
+            expect(id_to_opcode(11).is_err()).to_equal(true)
+
+        it "classifies close, ping and pong as control frames":
+            expect(is_control_opcode(WsOpcode.Close)).to_equal(true)
+            expect(is_control_opcode(WsOpcode.Ping)).to_equal(true)
+            expect(is_control_opcode(WsOpcode.Pong)).to_equal(true)
+            expect(is_control_opcode(WsOpcode.Text)).to_equal(false)
+            expect(is_control_opcode(WsOpcode.Binary)).to_equal(false)
+            expect(is_control_opcode(WsOpcode.Continuation)).to_equal(false)
+            expect(WsFrame.ping_frame().is_control()).to_equal(true)
+            expect(WsFrame.text_frame("x").is_control()).to_equal(false)
+
+    context "unmasked frames":
+
+        it "encodes the RFC single-frame unmasked text example":
+            expect(_octets(encode_frame(WsFrame.text_frame("Hello")))).to_equal([129, 5, 72, 101, 108, 108, 111])
+
+        it "clears FIN for a non-final fragment":
+            val wire = encode_frame(WsFrame.create(false, WsOpcode.Text, "Hel"))
+            expect(decode_byte_val(wire, 0)).to_equal(1)
+            expect(decode_byte_val(wire, 1)).to_equal(3)
+
+        it "encodes binary, ping and pong opcodes with FIN":
+            expect(decode_byte_val(encode_frame(WsFrame.binary_frame("ab")), 0)).to_equal(130)
+            expect(_octets(encode_frame(WsFrame.ping_frame()))).to_equal([137, 0])
+            expect(decode_byte_val(encode_frame(WsFrame.pong_frame("p")), 0)).to_equal(138)
+
+        it "switches to the 16-bit extended length at 126 octets":
+            val small = encode_frame(WsFrame.binary_frame(_repeat("a", 125)))
+            expect(small.len()).to_equal(127)
+            expect(decode_byte_val(small, 1)).to_equal(125)
+            val big = encode_frame(WsFrame.binary_frame(_repeat("a", 300)))
+            expect(big.len()).to_equal(304)
+            expect(decode_byte_val(big, 1)).to_equal(126)
+            expect(decode_byte_val(big, 2)).to_equal(1)
+            expect(decode_byte_val(big, 3)).to_equal(44)
+
+        it "round-trips a short text frame":
+            val back = decode_frame(encode_frame(WsFrame.text_frame("Hello"))).unwrap()
+            expect(back.fin).to_equal(true)
+            expect(opcode_name(back.opcode)).to_equal("TEXT")
+            expect(back.masked).to_equal(false)
+            expect(back.length).to_equal(5)
+            expect(back.payload).to_equal("Hello")
+
+        it "round-trips an extended-length frame":
+            val body = _repeat("z", 300)
+            val back = decode_frame(encode_frame(WsFrame.binary_frame(body))).unwrap()
+            expect(back.length).to_equal(300)
+            expect(back.payload).to_equal(body)
+            expect(opcode_name(back.opcode)).to_equal("BINARY")
+
+        it "rejects input shorter than the two-octet base header":
+            expect(decode_frame("").is_err()).to_equal(true)
+            expect(decode_frame("a").is_err()).to_equal(true)
+
+        it "describes a frame for diagnostics":
+            expect(WsFrame.text_frame("Hello").description()).to_equal("TEXT [FIN] unmasked len=5")
+            expect(WsFrame.create(false, WsOpcode.Binary, "ab").description()).to_equal("BINARY [...] unmasked len=2")
+
+    context "masking":
+
+        it "xors single octets":
+            expect(ws_frame_xor_byte(72, 55)).to_equal(127)
+            expect(ws_frame_xor_byte(255, 255)).to_equal(0)
+            expect(ws_frame_xor_byte(170, 85)).to_equal(255)
+            expect(ws_frame_xor_byte(0, 61)).to_equal(61)
+
+        it "masks Hello with the RFC key":
+            expect(_octets(apply_mask("Hello", [55, 250, 33, 61]))).to_equal([127, 159, 77, 81, 88])
+
+        it "is its own inverse":
+            expect(apply_mask(apply_mask("Hello, WebSocket", [55, 250, 33, 61]), [55, 250, 33, 61])).to_equal("Hello, WebSocket")
+
+        it "leaves data alone when the key is not four octets":
+            expect(apply_mask("Hello", [1, 2, 3])).to_equal("Hello")
+
+        it "encodes the RFC single-frame masked text example":
+            val frame = apply_client_mask(WsFrame.text_frame("Hello"), [55, 250, 33, 61])
+            expect(frame.masked).to_equal(true)
+            expect(_octets(encode_frame(frame))).to_equal([129, 133, 55, 250, 33, 61, 127, 159, 77, 81, 88])
+
+        it "decodes a masked frame to its key and still-masked payload":
+            val wire = encode_frame(apply_client_mask(WsFrame.text_frame("Hello"), [55, 250, 33, 61]))
+            val back = decode_frame(wire).unwrap()
+            expect(back.masked).to_equal(true)
+            expect(back.length).to_equal(5)
+            expect(back.mask_key).to_equal([55, 250, 33, 61])
+            expect(_octets(back.payload)).to_equal([127, 159, 77, 81, 88])
+
+        it "recovers the clear payload by applying the decoded key":
+            val wire = encode_frame(apply_client_mask(WsFrame.text_frame("Hello"), [55, 250, 33, 61]))
+            val back = decode_frame(wire).unwrap()
+            expect(apply_mask(back.payload, back.mask_key)).to_equal("Hello")
+
+        it "rejects a masked frame truncated inside the key":
+            val wire = encode_frame(apply_client_mask(WsFrame.text_frame("Hello"), [55, 250, 33, 61]))
+            expect(decode_frame(wire.slice(0, 4)).is_err()).to_equal(true)
+
+    context "close payload":
+
+        it "encodes the status code big-endian before the reason":
+            expect(_octets(encode_close_payload(1000, "bye"))).to_equal([3, 232, 98, 121, 101])
+
+        it "encodes a bare status code":
+            expect(_octets(encode_close_payload(1001, ""))).to_equal([3, 233])
+
+        it "decodes code and reason":
+            val p = decode_close_payload(encode_close_payload(1002, "protocol"))
+            expect(p.first).to_equal(1002)
+            expect(p.second).to_equal("protocol")
+
+        it "reports 1005 no-status for an empty close payload":
+            val p = decode_close_payload("")
+            expect(p.first).to_equal(1005)
+            expect(p.second).to_equal("")
+
+        it "builds a close frame carrying the encoded payload":
+            val f = WsFrame.close_frame(1000, "done")
+            expect(opcode_name(f.opcode)).to_equal("CLOSE")
+            expect(f.length).to_equal(6)
+            expect(decode_close_payload(f.payload).first).to_equal(1000)

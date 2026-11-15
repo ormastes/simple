@@ -1,5 +1,8 @@
 /* Source-only until allocated. Include canonical owner once; link normal CoreC
  * arrays, sealed executable pin and memory owners, never fake support symbols. */
+#if !defined(__linux__)
+#error "requires Linux: Linux process-observation v4/v6 owner and --wrap=rt_array_new,read,setpgid link"
+#endif
 #define _GNU_SOURCE
 #define RT_PROCESS_OBSERVATION_V4_TESTING 1
 #include <assert.h>

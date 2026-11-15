@@ -15,7 +15,7 @@ use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, lo
 use os.kernel.errno.{EACCES, ENOSYS, ECONNREFUSED, ENOTCONN, EAGAIN, EMFILE, EADDRINUSE}
 use os.kernel.net.socket_ipc_transport.{socket_ipc_send_bytes, socket_ipc_recv_bytes}
 use os.kernel.fd_table.{fd_alloc, fd_set, fd_close, fd_is_valid, fd_get_status_flags, fd_get_type, fd_get_backend_handle, fd_update_ready}
-use os.kernel.fd_table.{FD_NET_PORT_NONE, fd_set_net_bound_port, fd_get_net_bound_port, fd_set_net_server_port, fd_get_net_server_port}
+use os.kernel.fd_table.{FD_NET_PORT_NONE, fd_set_net_bound_port, fd_get_net_bound_port, fd_set_net_server_port, fd_get_net_server_port, fd_set_net_bound_endpoint, fd_get_net_bound_endpoint}
 use os.ai_cli_js_node_contract.{AiCliManifest, ai_cli_socket_network_decision}
 # Well-known netstack service IPC port
 val _NET_PORT: u64 = 2
@@ -38,8 +38,6 @@ val _POLLOUT: i16 = 4
 val _POLLERR: i16 = 8
 
 var g_ai_cli_socket_manifest: AiCliManifest? = nil
-var g_ai_cli_socket_bound_fds: [i32] = []
-var g_ai_cli_socket_bound_endpoints: [text] = []
 
 extern fn unsafe_addr_of(ref: any) -> u64
 use os.kernel.boot.mmio.{mmio_write8, mmio_read8}
@@ -74,13 +72,9 @@ fn sockaddr_any(port: u16) -> SockaddrIn:
 
 fn set_ai_cli_socket_manifest_for_test(manifest: AiCliManifest):
     g_ai_cli_socket_manifest = manifest
-    g_ai_cli_socket_bound_fds = []
-    g_ai_cli_socket_bound_endpoints = []
 
 fn clear_ai_cli_socket_manifest_for_test():
     g_ai_cli_socket_manifest = nil
-    g_ai_cli_socket_bound_fds = []
-    g_ai_cli_socket_bound_endpoints = []
 
 # ============================================================================
 # Socket Operations
@@ -348,23 +342,16 @@ fn _ipv4_addr_text(addr: u32) -> text:
     val d = ((addr >> 24) & 0xFF) as u32
     "{a}.{b}.{c}.{d}"
 
+# The bound endpoint lives on the fd table's open-file description (see the
+# port provenance note above): dup shares it, every release path resets it.
 fn _record_bound_endpoint(fd: i32, endpoint: text):
-    var i = 0
-    while i < g_ai_cli_socket_bound_fds.len():
-        if g_ai_cli_socket_bound_fds[i] == fd:
-            g_ai_cli_socket_bound_endpoints[i] = endpoint
-            return
-        i = i + 1
-    g_ai_cli_socket_bound_fds.push(fd)
-    g_ai_cli_socket_bound_endpoints.push(endpoint)
+    fd_set_net_bound_endpoint(fd, endpoint)
 
 fn _bound_endpoint_for_fd(fd: i32) -> text?:
-    var i = 0
-    while i < g_ai_cli_socket_bound_fds.len():
-        if g_ai_cli_socket_bound_fds[i] == fd:
-            return Some(g_ai_cli_socket_bound_endpoints[i])
-        i = i + 1
-    nil
+    val endpoint = fd_get_net_bound_endpoint(fd)
+    if endpoint == "":
+        return nil
+    Some(endpoint)
 
 fn _array_data_ptr(data: [u8]) -> u64:
     val hdr = unsafe_addr_of(data)

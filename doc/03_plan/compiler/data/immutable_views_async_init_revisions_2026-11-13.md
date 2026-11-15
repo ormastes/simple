@@ -114,6 +114,17 @@ code. The census is non-zero, so the default stays `off`. Migration
 candidates are the DESUGARED optional pairs, which want a real `T?` or field
 defaults, and `@required_init(warning)` per module.
 
+**Re-run sample (2026-11-15, revhooks lane; partial, NOT a full census).** Verifier
+at `origin/release/1.0.0` @ `cd0630ec257` (includes the named/positional mapping
+fix), `src/compiler` files declaring a struct/class (1,481 listed, 61 chunks of
+25, textual prefilter not applied), seed `simple.exe`, one process at a time.
+Stopped by the coordinator after 2 chunks: 50 files
+(`00.common/_Attributes/decl_attrs.spl` .. `00.common/cache_contract/hash_algorithm_registry_v1.spl`,
+alphabetical, so one directory prefix only), 278 sites judged, 0 offender rows,
+0 unjudged, 0 parse-failed. Each chunk took about 4-5 minutes, so the full pass is
+several hours. The 2026-11-13 figures above stay the reference; the default
+stays `off`.
+
 **Verifier false positive found and fixed.** The first chunk reported 6 rows
 at `00.common/cache_contract/aspect_match_shard_v1.spl:190`. That site is a
 struct update `T(..f, facts_key: …)`. The spread arrives as
@@ -137,6 +148,24 @@ record what the parser accepts today (`Immutable<T>` types,
 `@support_async_immutable`, `async <expr>` as a constructor argument,
 `await x.field`). The library-level `AsyncInit<T>`/`InitProducer<T>` fallback of
 §3.1 is the default assumption until a probe proves otherwise.
+
+### Lane assignment (2026-11-14)
+
+Owner direction 2026-11-14: complete this plan together with the node-attribute
+program, SPipe + TDD, Windows and pure Simple first. Assignments only; state is
+tracked in the progress file's "Owner goal and lane assignment (2026-11-14)".
+
+| Phase | Lane / branch | Order and limits |
+|---|---|---|
+| P2 `Immutable<T>` (IMM-01/02) | immview, `work/immutable-views-async-init-2-20261114` | First. Real grammar and type support, not lenience; a write through the projection is a named compile error. The seed must accept the syntax; a seed change is reported, not rebuilt by the lane |
+| P3 async registered init (ASY-01/02/06/07/08) | immview | Second. On `phase_cell_*_v1` by name; includes parsing `async <expr>` as a constructor argument. 2026-11-15: ASY-02 / `E_ATTR_NOT_READY` landed for direct unawaited pending-field reads (`attr_not_ready_v1_spec`); `E_INIT_CAPABILITY_ESCAPE` blocked on an undefined "region" (`doc/08_tracking/bug/immutable_async_open_questions_2026-11-15.md`) |
+| P2 `RevisionImmutable<T>` / `FrozenImmutable<T>` (IMM-03/04) | immview | Third. Handle semantics only; REV-01/02 cache identity stays with W8 and the missing hook is named | 
+| W8 REV-01/02 hooks (revhooks, 2026-11-15) | `work/revision-hooks-20261115` | REV-02: `FileAstV1` codec pinned by `rev02_frozen_file_ast_codec_spec` (5/5). REV-01: SCV lease hook; `rev01_pinned_revision_lease_spec` 1 green, 1 RED (one lease per process), bug filed, owner decision. `E_INIT_CAPABILITY_ESCAPE`: PROVISIONAL region, default off, `init_capability_escape_v1_spec` 4/4 |
+| P1 census re-run | immview | The 2026-11-13 figures predate the named/positional mapping fix; re-run for `src/compiler`. The gate default stays `off` |
+| P4 storage backend unification | nodeattr, `work/node-attr-storage-20261114` | One `AttributeSchema`; array <-> hash switch by tag or SDN rule; default off |
+| P5 static profile-guided selection (PROF-01) | tracesel, `work/trace-layer-feature-select-20261114` | After the layer/feature trace fold |
+| P6 opt-in runtime switching (PROF-02/03) | tracesel | Opt-in path only, default off. Previously "not scheduled by this plan"; scheduled by the owner direction above |
+| P7 | program | Includes the default-on rule: phase 3 must complete with managed storage enabled before any default flip |
 
 
 ## 0. Executive decision

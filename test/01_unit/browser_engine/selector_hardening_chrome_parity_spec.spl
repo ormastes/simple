@@ -1,0 +1,238 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core_selectors.spl 1%
+# @tag: unit, browser_engine, css, selectors
+#
+# Selector hardening rows against Chrome 159.0.8154.6 (headless shell,
+# getComputedStyle): invalid combinator placement, `:checked`, escaped
+# combinator characters and specificity of the functional pseudo-classes.
+#
+# Fixture A (matched ids for `#fx SELECTOR {width:50px}` over a 200px base):
+#   div#box: i#b1.a  b#b2  div#h1.a > span#cx
+#   form#f: input#k1[checkbox,checked] input#k2[radio,checked] input#k3[text,checked]
+#           input#k4[checkbox] input#k5[checked] div#k6[checked]
+#           select#sel > (option#o1, option#o2[selected])  label#lb
+#   p#e2  i#e3[class="a/"]  b#e4          (the class of e3 is the two bytes a, backslash)
+#
+# | selector | Chrome 159 matches |
+# |---|---|
+# | `div >` | (none) |
+# | `i +` | (none) |
+# | `i ~` | (none) |
+# | `i > + b` | (none) |
+# | `i + ~ b` | (none) |
+# | `i ~ ~ b` | (none) |
+# | `i + + b` | (none) |
+# | `div > > span` | (none) |
+# | `:checked` | k1 k2 o2 |
+# | `input:checked` | k1 k2 |
+# | `option:checked` | o2 |
+# | `:checked ~ label` | lb |
+# | `input:not(:checked)` | k3 k4 k5 |
+# | `:checked + input` | k2 k3 |
+# | `.a/+b` | (none) |
+# | `.a/~b` | (none) |
+# | `.a/>b` | (none) |
+# | `i + b` | b2 e4 |
+# | `i + b` | b2 e4 |
+# | `i ~ b` | b2 e4 |
+#
+# An invalid selector (trailing or doubled combinator) drops the rule. `.a/+b`
+# with a backslash is ONE class selector for the class "a+b"; splitting it at
+# the `+` would wrongly match b#e4 after i#e3. Matching the class "a+b" itself
+# needs identifier unescaping in class comparison, which is not implemented
+# and is not asserted here.
+#
+# Fixture B (cascade): base `i, div {width:200px}`, then rule 1 {width:50px},
+# then rule 2 {width:70px}; the probed element shows which rule won, i.e.
+# whether rule 1 is MORE specific than rule 2 (equal specificity -> rule 2).
+#
+# | rule 1 | rule 2 | probe | Chrome width |
+# |---|---|---|---|
+# | `i:nth-child(1 of #b1)` | `#b1.a` | b1 | 50 |
+# | `i:nth-child(1 of #b1)` | `i#b1.a` | b1 | 70 |
+# | `:is(#b1, .zz)` | `i.a.a.a` | b1 | 50 |
+# | `:is(#b1, .zz)` | `#b1` | b1 | 70 |
+# | `:not(#zz)` | `i.a` | b1 | 50 |
+# | `:not(#zz)` | `#b1` | b1 | 70 |
+# | `:not(.zz, #zz)` | `i.a` | b1 | 50 |
+# | `:where(#b1)` | `b` | b1 | 200 |
+# | `div:has(#cx)` | `#h1` | h1 | 50 |
+# | `div:has(#cx)` | `div#h1` | h1 | 70 |
+# | `:has(span)` | `div` | h1 | 70 |
+# | `:has(span)` | `div.a` | h1 | 70 |
+# | `:nth-child(1)` | `i` | b1 | 50 |
+# | `:nth-child(1)` | `.a` | b1 | 70 |
+# | `i:nth-child(1 of .a)` | `i.a` | b1 | 50 |
+# | `i:nth-child(1 of .a)` | `i.a.a` | b1 | 70 |
+# | `:nth-last-child(1 of i, #b1)` | `#b1` | b1 | 50 |
+# | `:nth-last-child(1 of i, #b1)` | `#b1.a` | b1 | 70 |
+# | `:is(i, .a)` | `i` | b1 | 50 |
+# | `:is(i, .a)` | `.a` | b1 | 70 |
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.{
+    simple_web_layout_debug_style_by_id, simple_web_layout_debug_selector_parse_equivalence
+}
+
+fn _fixture(css: text) -> text:
+    "<html><head><style>#fx * {{ display:block; width:200px; height:2px }} " + css + "</style></head><body><div id=\"fx\"><div id=\"box\"><i id=\"b1\" class=\"a\"></i><b id=\"b2\"></b><div id=\"h1\" class=\"a\"><span id=\"cx\"></span></div></div><form id=\"f\"><input id=\"k1\" type=\"checkbox\" checked><input id=\"k2\" type=\"radio\" checked><input id=\"k3\" type=\"text\" checked><input id=\"k4\" type=\"checkbox\"><input id=\"k5\" checked><div id=\"k6\" checked></div><select id=\"sel\"><option id=\"o1\"></option><option id=\"o2\" selected></option></select><label id=\"lb\"></label></form><p id=\"e2\"></p><i id=\"e3\" class=\"a\\\"></i><b id=\"e4\"></b></div></body></html>"
+
+fn _matched(selector: text) -> text:
+    val html = _fixture("#fx " + selector + " {{ width:50px }}")
+    var out = ""
+    for id in ["b1", "b2", "h1", "cx", "k1", "k2", "k3", "k4", "k5", "k6", "o1", "o2", "lb", "e2", "e3", "e4", "box", "f", "sel"]:
+        if simple_web_layout_debug_style_by_id(html, id, "width") == "50":
+            out = out + id + ","
+    out
+
+fn _cascade(first: text, second: text, id: text) -> text:
+    val html = "<html><head><style>i, div {{ display:block; width:200px; height:2px }} " + first + " {{ width:50px }} " + second + " {{ width:70px }}</style></head><body><div id=\"box\"><i id=\"b1\" class=\"a\"></i><b id=\"b2\"></b><div id=\"h1\" class=\"a\"><span id=\"cx\"></span></div></div></body></html>"
+    simple_web_layout_debug_style_by_id(html, id, "width")
+
+describe "Selector hardening vs Chrome 159":
+
+    context "invalid combinator placement":
+
+        it "div > -> none":
+            expect(_matched("div >")).to_equal("")
+
+        it "i + -> none":
+            expect(_matched("i +")).to_equal("")
+
+        it "i ~ -> none":
+            expect(_matched("i ~")).to_equal("")
+
+        it "i > + b -> none":
+            expect(_matched("i > + b")).to_equal("")
+
+        it "i + ~ b -> none":
+            expect(_matched("i + ~ b")).to_equal("")
+
+        it "i ~ ~ b -> none":
+            expect(_matched("i ~ ~ b")).to_equal("")
+
+        it "i + + b -> none":
+            expect(_matched("i + + b")).to_equal("")
+
+        it "div > > span -> none":
+            expect(_matched("div > > span")).to_equal("")
+
+    context "valid controls":
+
+        it "i + b -> b2 e4":
+            expect(_matched("i\t+\nb")).to_equal("b2,e4,")
+
+        it "i + b -> b2 e4":
+            expect(_matched("i + b")).to_equal("b2,e4,")
+
+        it "i ~ b -> b2 e4":
+            expect(_matched("i ~ b")).to_equal("b2,e4,")
+
+    context ":checked":
+
+        it ":checked -> k1 k2 o2":
+            expect(_matched(":checked")).to_equal("k1,k2,o2,")
+
+        it "input:checked -> k1 k2":
+            expect(_matched("input:checked")).to_equal("k1,k2,")
+
+        it "option:checked -> o2":
+            expect(_matched("option:checked")).to_equal("o2,")
+
+        it ":checked ~ label -> lb":
+            expect(_matched(":checked ~ label")).to_equal("lb,")
+
+        it "input:not(:checked) -> k3 k4 k5":
+            expect(_matched("input:not(:checked)")).to_equal("k3,k4,k5,")
+
+        it ":checked + input -> k2 k3":
+            expect(_matched(":checked + input")).to_equal("k2,k3,")
+
+    context "escaped combinator characters":
+
+        it ".a/+b -> none":
+            expect(_matched(".a\\+b")).to_equal("")
+
+        it ".a/~b -> none":
+            expect(_matched(".a\\~b")).to_equal("")
+
+        it ".a/>b -> none":
+            expect(_matched(".a\\>b")).to_equal("")
+
+    context ":checked type is case-insensitive":
+
+        it "matches type=CHECKBOX and type=Radio":
+            # Chrome 159: attribute values of `type` are ASCII case-insensitive.
+            val html = "<html><head><style>input {{ width:200px }} :checked {{ width:50px }}</style></head><body><input id=\"u1\" type=\"CHECKBOX\" checked><input id=\"u2\" type=\"Radio\" checked><input id=\"u3\" type=\"TEXT\" checked></body></html>"
+            expect(simple_web_layout_debug_style_by_id(html, "u1", "width")).to_equal("50")
+            expect(simple_web_layout_debug_style_by_id(html, "u2", "width")).to_equal("50")
+            expect(simple_web_layout_debug_style_by_id(html, "u3", "width")).to_equal("200")
+
+    context "path agreement":
+
+        it "text and pre-parsed paths agree on every fixture A row":
+            expect(simple_web_layout_debug_selector_parse_equivalence(_fixture("#fx div > {{ width:50px }} #fx i + {{ width:50px }} #fx i ~ {{ width:50px }} #fx i > + b {{ width:50px }} #fx i + ~ b {{ width:50px }} #fx i ~ ~ b {{ width:50px }} #fx i + + b {{ width:50px }} #fx div > > span {{ width:50px }} #fx :checked {{ width:50px }} #fx input:checked {{ width:50px }} #fx option:checked {{ width:50px }} #fx :checked ~ label {{ width:50px }} #fx input:not(:checked) {{ width:50px }} #fx :checked + input {{ width:50px }} #fx .a\\+b {{ width:50px }} #fx .a\\~b {{ width:50px }} #fx .a\\>b {{ width:50px }} #fx i\t+\nb {{ width:50px }} #fx i + b {{ width:50px }} #fx i ~ b {{ width:50px }}"), 0 - 1).starts_with("ok ")).to_equal(true)
+
+    context "specificity of functional pseudo-classes":
+
+        it "i:nth-child(1 of #b1) then #b1.a -> 50":
+            expect(_cascade("i:nth-child(1 of #b1)", "#b1.a", "b1")).to_equal("50")
+
+        it "i:nth-child(1 of #b1) then i#b1.a -> 70":
+            expect(_cascade("i:nth-child(1 of #b1)", "i#b1.a", "b1")).to_equal("70")
+
+        it ":is(#b1, .zz) then i.a.a.a -> 50":
+            expect(_cascade(":is(#b1, .zz)", "i.a.a.a", "b1")).to_equal("50")
+
+        it ":is(#b1, .zz) then #b1 -> 70":
+            expect(_cascade(":is(#b1, .zz)", "#b1", "b1")).to_equal("70")
+
+        it ":not(#zz) then i.a -> 50":
+            expect(_cascade(":not(#zz)", "i.a", "b1")).to_equal("50")
+
+        it ":not(#zz) then #b1 -> 70":
+            expect(_cascade(":not(#zz)", "#b1", "b1")).to_equal("70")
+
+        it ":not(.zz, #zz) then i.a -> 50":
+            expect(_cascade(":not(.zz, #zz)", "i.a", "b1")).to_equal("50")
+
+        it ":where(#b1) then b -> 200":
+            expect(_cascade(":where(#b1)", "b", "b1")).to_equal("200")
+
+        it "div:has(#cx) then #h1 -> 50":
+            expect(_cascade("div:has(#cx)", "#h1", "h1")).to_equal("50")
+
+        it "div:has(#cx) then div#h1 -> 70":
+            expect(_cascade("div:has(#cx)", "div#h1", "h1")).to_equal("70")
+
+        it ":has(span) then div -> 70":
+            expect(_cascade(":has(span)", "div", "h1")).to_equal("70")
+
+        it ":has(span) then div.a -> 70":
+            expect(_cascade(":has(span)", "div.a", "h1")).to_equal("70")
+
+        it ":nth-child(1) then i -> 50":
+            expect(_cascade(":nth-child(1)", "i", "b1")).to_equal("50")
+
+        it ":nth-child(1) then .a -> 70":
+            expect(_cascade(":nth-child(1)", ".a", "b1")).to_equal("70")
+
+        it "i:nth-child(1 of .a) then i.a -> 50":
+            expect(_cascade("i:nth-child(1 of .a)", "i.a", "b1")).to_equal("50")
+
+        it "i:nth-child(1 of .a) then i.a.a -> 70":
+            expect(_cascade("i:nth-child(1 of .a)", "i.a.a", "b1")).to_equal("70")
+
+        it ":nth-last-child(1 of i, #b1) then #b1 -> 50":
+            expect(_cascade(":nth-last-child(1 of i, #b1)", "#b1", "b1")).to_equal("50")
+
+        it ":nth-last-child(1 of i, #b1) then #b1.a -> 70":
+            expect(_cascade(":nth-last-child(1 of i, #b1)", "#b1.a", "b1")).to_equal("70")
+
+        it ":is(i, .a) then i -> 50":
+            expect(_cascade(":is(i, .a)", "i", "b1")).to_equal("50")
+
+        it ":is(i, .a) then .a -> 70":
+            expect(_cascade(":is(i, .a)", ".a", "b1")).to_equal("70")
+

@@ -1,0 +1,119 @@
+"""
+## Purpose and audience
+Purpose: Pin that a `#text` run which starts MID-LINE (after an inline
+sibling) and wraps continues at the LEFT edge of the line box, using the full
+container width — one inline formatting context with line boxes. The renderer
+used to wrap such a run inside its own column `[run start x, container right]`,
+so the continuation line hung under the run's own start like a hanging indent
+(catalog `animation.html`: `<li><code>animation-delay</code> — partial; …`;
+the fixture uses an ASCII hyphen so it does not depend on non-ASCII metrics).
+Audience: browser-engine inline-layout maintainers.
+
+Chrome oracle (Chrome 159 headless shell, 900x760, element
+getBoundingClientRect / Range.getClientRects of the text node, page
+`*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}`,
+Liberation Sans / DejaVu Sans Mono):
+
+| fixture                         | rect                | x      | y (rel. block top) |
+|---------------------------------|---------------------|--------|--------------------|
+| LI   `<code>` (li content x=40) | element             | 40     | +4                 |
+| LI   text after the code        | line 0              | 184.03 | +3                 |
+| LI   text after the code        | line 1              | 40     | +28                |
+| NOFIT 200px p, `<code>` 163.23  | text, single line   | 0      | +27  (p h=48)      |
+| TAIL 300px p, `<b>` 35.55 wide  | text line 0         | 35.55  | +3                 |
+| TAIL                            | text line 1         | 0      | +27                |
+| TAIL                            | `<b id=e2>tail</b>` | 121.86 | +27  (p h=48)      |
+| THREE 300px p                   | text lines 0/1/2    | 35.55 / 0 / 0 | p h=72      |
+
+Chrome's line-0 rect of a text node INCLUDES the collapsed leading space (one
+4.45 px space), so its first GLYPH is at 184.03 + 4.45 = 188.48 in LI. The
+renderer's text box starts at the first glyph and its advances are whole
+pixels (code 144 + space 5), hence `189` below.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-INLINE-LINE-BOX-WRAP-001 — a wrapped text run that starts mid-line continues at the line box's left edge.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.common.ui.draw_ir.{DRAW_IR_COMMAND_TEXT}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id, simple_web_layout_render_html_draw_ir
+}
+
+val VW: i32 = 900
+val VH: i32 = 760
+val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}</style></head><body>"
+val LI: text = "<ul><li id=\"a\"><code id=\"c\">animation-delay</code> - partial; values=time-and-keyword; owner=simple_web_html_layout_renderer.spl and then several more plain words so that this run wraps</li></ul>"
+val NOFIT: text = "<p id=\"b\" style=\"width:200px\"><code id=\"bc\">aaaaaaaaaaaaaaaaa</code> supercalifragilistic word</p>"
+val TAIL: text = "<p id=\"e\" style=\"width:300px\"><b id=\"e1\">Bold</b> some long text that wraps onto a second line here <b id=\"e2\">tail</b> end</p>"
+val THREE: text = "<p id=\"g\" style=\"width:300px\"><b id=\"g1\">Bold</b> some long text that wraps onto a second line here and then onto a third line as well okay</p>"
+
+fn probe(inner: text, id: text, name: text) -> text:
+    simple_web_layout_debug_layout_by_id(
+        HEAD + inner + "</body></html>", VW, VH, id, name)
+
+# x of the first Draw IR text command whose text contains `needle`.
+fn draw_ir_text_x(inner: text, needle: text) -> i32:
+    val composition = simple_web_layout_render_html_draw_ir(
+        HEAD + inner + "</body></html>", VW, VH)
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.kind == DRAW_IR_COMMAND_TEXT and command.text_value.contains(needle):
+                return command.x
+    -1
+
+describe "a wrapped text run after an inline sibling continues at the line box's left edge":
+    it "AC-1: control — the li content starts at x=40 and the code sits there":
+        step("Chrome: li x=40, code x=40")
+        expect(probe(LI, "a", "x")).to_equal("40")
+        expect(probe(LI, "c", "x")).to_equal("40")
+
+    it "AC-2: the run wraps to two lines":
+        step("Chrome: two client rects for the text node")
+        expect(probe(LI, "a", "text_lines")).to_equal("2")
+
+    it "AC-3: the first line starts right of the code":
+        step("Chrome: rect x=184.03 + 4.45 leading space = first glyph at 188.48")
+        expect(probe(LI, "a", "text_line_x0")).to_equal("189")
+
+    it "AC-4: the continuation line starts at the li's content-left":
+        step("Chrome: line 1 x=40, NOT under the run's own start (189)")
+        expect(probe(LI, "a", "text_line_x1")).to_equal("40")
+
+    it "AC-5: the Draw IR painter places both lines the same way":
+        step("first line command at 189, continuation command at 40")
+        expect(draw_ir_text_x(LI, "partial")).to_equal(189)
+        expect(draw_ir_text_x(LI, "this run wraps")).to_equal(40)
+
+describe "a run whose first word does not fit the line remainder starts a new line":
+    it "AC-6: the whole run moves to the next line at the block's left edge":
+        step("Chrome: text is ONE line at x=0, below the code")
+        expect(probe(NOFIT, "b", "text_lines")).to_equal("1")
+        expect(probe(NOFIT, "b", "text_line_x0")).to_equal("0")
+
+    it "AC-7: the block is two line boxes tall":
+        step("Chrome: p height 48")
+        expect(probe(NOFIT, "b", "h")).to_equal("48")
+
+describe "inline content after a wrapped run continues on the run's last line":
+    it "AC-8: the wrapped run's continuation starts at x=0":
+        step("Chrome: line 1 x=0")
+        expect(probe(TAIL, "e", "text_lines")).to_equal("2")
+        expect(probe(TAIL, "e", "text_line_x1")).to_equal("0")
+
+    it "AC-9: the following <b> sits on the second line after the run's tail":
+        step("Chrome: b#e2 x=121.86, one line (24 px) below b#e1")
+        expect(probe(TAIL, "e2", "x")).to_equal("122")
+        expect(probe(TAIL, "e2", "y")).to_equal((probe(TAIL, "e1", "y").to_int() + 24).to_string())
+
+    it "AC-10: the block stays two line boxes tall":
+        step("Chrome: p height 48")
+        expect(probe(TAIL, "e", "h")).to_equal("48")
+
+describe "every continuation line uses the full line box":
+    it "AC-11: a three-line run keeps a 72 px block":
+        step("Chrome: three lines, p height 72")
+        expect(probe(THREE, "g", "text_lines")).to_equal("3")
+        expect(probe(THREE, "g", "text_line_x1")).to_equal("0")
+        expect(probe(THREE, "g", "h")).to_equal("72")

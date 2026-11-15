@@ -11,65 +11,120 @@
 # Predicate Validation
 # ============================================================================
 
-fn validate_predicate(input: text) -> text:
-    """Validate a pointcut expression. Returns empty string on success, error message on failure."""
-    if input == nil or input.len() == 0:
+pub fn aop_predicate_tokens(input: text) -> [text]:
+    """Shared lexical contract for raw and parser-serialized pointcuts."""
+    var tokens: [text] = []
+    var word = ""
+    var comment = false
+    for ch in input.chars():
+        if comment:
+            if ch == "\n" or ch == "\r":
+                comment = false
+        elif ch == "#":
+            if word != "":
+                tokens.push(word)
+                word = ""
+            comment = true
+        elif ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            if word != "":
+                tokens.push(word)
+                word = ""
+        elif ch == "(" or ch == ")" or ch == "&" or ch == "|" or ch == "!" or ch == "." or ch == "*" or ch == ",":
+            if word != "":
+                tokens.push(word)
+                word = ""
+            tokens.push(ch)
+        else:
+            word = word + ch
+    if word != "":
+        tokens.push(word)
+    tokens
+
+pub fn aop_predicate_canonical_text(input: text) -> text:
+    var result = ""
+    for token in aop_predicate_tokens(input):
+        if result != "":
+            result = result + " "
+        result = result + token
+    result
+
+pub fn validate_predicate(input: text) -> text:
+    """Validate Boolean selector syntax without enabling deferred selectors."""
+    if input == nil:
         return "E1501: empty pointcut expression"
-    val trimmed = text_trim(input)
-    if trimmed.len() == 0:
+    validate_predicate_tokens(aop_predicate_tokens(input))
+
+pub fn validate_predicate_tokens(tokens: [text]) -> text:
+    """Validate the shared token array without scanning source twice."""
+    if tokens.len() == 0:
         return "E1501: empty pointcut expression"
-    # Wildcard-only is always valid
-    if trimmed == "*":
+    if tokens.len() == 1 and tokens[0] == "*":
         return ""
-    # Check for balanced parentheses
-    var paren_depth = 0
-    var ci = 0
-    while ci < trimmed.len():
-        if trimmed[ci] == "(":
-            paren_depth = paren_depth + 1
-        elif trimmed[ci] == ")":
-            paren_depth = paren_depth - 1
-            if paren_depth < 0:
+    var i = 0
+    var depth = 0
+    var needs_operand = true
+    while i < tokens.len():
+        val token = tokens[i]
+        if needs_operand:
+            if token == ")" or token == "&" or token == "|":
+                return "E1501: expected pointcut operand"
+            if token == "!":
+                i = i + 1
+            elif token == "(":
+                depth = depth + 1
+                i = i + 1
+            else:
+                val err = validate_selector(token)
+                if err != "":
+                    return err
+                if i + 1 >= tokens.len():
+                    return "E1501: expected selector argument list"
+                if tokens[i + 1] != "(":
+                    return "E1501: expected selector argument list"
+                i = i + 2
+                val content_start = i
+                var selector_depth = 1
+                while i < tokens.len() and selector_depth > 0:
+                    if tokens[i] == "(":
+                        selector_depth = selector_depth + 1
+                    elif tokens[i] == ")":
+                        selector_depth = selector_depth - 1
+                    i = i + 1
+                if selector_depth != 0:
+                    return "E1501: unmatched opening parenthesis in pointcut"
+                if i == content_start + 1:
+                    return "E1501: empty selector argument list"
+                needs_operand = false
+        elif token == "&" or token == "|":
+            needs_operand = true
+            i = i + 1
+        elif token == ")":
+            if depth == 0:
                 return "E1501: unmatched closing parenthesis in pointcut"
-        ci = ci + 1
-    if paren_depth != 0:
+            depth = depth - 1
+            i = i + 1
+        else:
+            return "E1501: expected Boolean operator in pointcut"
+    if needs_operand:
+        return "E1501: expected pointcut operand"
+    if depth != 0:
         return "E1501: unmatched opening parenthesis in pointcut"
-    # Tokenize and validate selectors
-    val selectors = extract_selectors(trimmed)
-    for sel in selectors:
-        val err = validate_selector(sel)
-        if err.len() > 0:
-            return err
     ""
 
 fn extract_selectors(expr: text) -> [text]:
-    """Extract selector names from a pointcut expression (e.g. 'execution', 'within')."""
+    """Return selector names using the shared lexical boundary."""
+    val tokens = aop_predicate_tokens(expr)
     var result: [text] = []
     var i = 0
-    while i < expr.len():
-        val ch = expr[i]
-        # Skip operators and whitespace
-        if ch == "&" or ch == "|" or ch == "!" or ch == " " or ch == "(" or ch == ")":
-            i = i + 1
-        elif aop_is_ident_start(ch):
-            # Collect identifier
-            var ident = ""
-            while i < expr.len() and aop_is_ident_continue(expr[i]):
-                ident = ident + expr[i]
+    while i + 1 < tokens.len():
+        if tokens[i].len() > 0 and aop_is_ident_start(tokens[i][0]) and tokens[i + 1] == "(":
+            result.push(tokens[i])
+            i = i + 2
+            var depth = 1
+            while i < tokens.len() and depth > 0:
+                if tokens[i] == "(": depth = depth + 1
+                elif tokens[i] == ")": depth = depth - 1
                 i = i + 1
-            # Check if followed by '(' — then it's a selector call
-            if i < expr.len() and expr[i] == "(":
-                result.push(ident)
-                # Skip past the '(' and content to matching ')'
-                var depth = 1
-                i = i + 1
-                while i < expr.len() and depth > 0:
-                    if expr[i] == "(":
-                        depth = depth + 1
-                    elif expr[i] == ")":
-                        depth = depth - 1
-                    i = i + 1
-            # else: bare identifier (e.g. glob pattern), skip
         else:
             i = i + 1
     result

@@ -20,6 +20,7 @@ use std.test_runner.test_db_core.{parse_rfc3339_to_micros}
 use std.nogc_sync_mut.test_runner.test_db_record.{TestDbFileRow}
 use std.common.traceability.case_events.{decode_trace_case_events}
 use std.common.traceability.run_plan.{TraceRunPlan}
+use std.common.traceability.test_query.{TestQuery, TestQueryPage, TestQueryRow, TestQueryError, TestQueryErrorKind, TestRunId, TestPlannedCaseId, TestPlannedCaseIdentity, project_run_case_rows, paginate_test_query_rows}
 use std.common.traceability.run_request.{TraceRunRequest, validate_trace_run_request, materialize_trace_run_plan}
 use std.common.traceability.run_request_codec.{encode_trace_run_request}
 use std.common.traceability.sspec_inventory.{TraceSspecPlannedRequest}
@@ -248,6 +249,44 @@ class RunnerTestDb:
         val _deleted = self.db.cleanup_stale_runs(max_age_hours)
         # Custom API returns void, unified returns count - discard result
         ()
+
+    # Read-only typed attempt rows for one exact case. Never mutates or saves;
+    # an unreadable trace table is a typed error, never an empty success.
+    fn query_case_attempts(query: TestQuery) -> Result<TestQueryPage, TestQueryError>:
+        var run_ids: [text] = []
+        val known = self.db.list_runs("")
+        match query.run_id:
+            case Some(requested):
+                var found = false
+                for run in known:
+                    if run.run_id == requested.value:
+                        found = true
+                if not found:
+                    return Err(TestQueryError(kind: TestQueryErrorKind.UnknownRun, detail: "run not found: " + requested.value))
+                run_ids.push(requested.value)
+            case None:
+                for run in known:
+                    run_ids.push(run.run_id)
+        var rows: [TestQueryRow] = []
+        for run_id in run_ids:
+            val events = match self.db.get_trace_case_events(run_id, query.case_key.path.value):
+                case Ok(items): items
+                case Err(reason): return Err(TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: reason))
+            if events.len() == 0:
+                continue
+            val plan = match self.db.get_trace_run_plan(run_id):
+                case Ok(found): found
+                case Err(reason): return Err(TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: reason))
+            var planned = TestPlannedCaseIdentity.Missing
+            match plan:
+                case Some(frozen):
+                    for item in frozen.cases:
+                        if item.test_path == query.case_key.path.value and item.case_name == query.case_key.name.value:
+                            planned = TestPlannedCaseIdentity.Recorded(id: TestPlannedCaseId(value: item.case_id))
+                case None: pass
+            for row in project_run_case_rows(query.case_key, TestRunId(value: run_id), planned, events):
+                rows.push(row)
+        paginate_test_query_rows(rows, query)
 
     # Prune old runs
     me prune_runs(keep_count: i64):

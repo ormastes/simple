@@ -366,29 +366,86 @@ fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
     relative_path
 
 fn resolve_with_numbered_dirs(base: text, parts: [text]) -> text:
-    """Walk path parts, resolving each segment with NN. prefix fallback."""
-    var current_dir = base
-    var pi: i64 = 0
-    val last_idx = parts.len() - 1
+    """Resolve dotted `parts` under `base` to an existing `.spl` file.
 
-    for part in parts:
-        if pi < last_idx:
-            # Intermediate segment — must be a directory
-            val direct = _sffi_path_join(current_dir, part)
-            if dir_exists(direct):
-                current_dir = direct
-            else:
-                # Try numbered directory
-                val numbered = find_numbered_dir_interp(current_dir, part)
-                if numbered != "":
-                    current_dir = numbered
-                else:
-                    return ""
-        else:
-            # Last segment — try as .spl file
-            val file_path = _sffi_path_join(current_dir, part + ".spl")
+    Each intermediate segment is tried as a direct child, as an `NN.segment`
+    numbered layer, and as a child nested inside a numbered layer
+    (`compiler.core.lexer` -> `src/compiler/10.frontend/core/lexer.spl`), with
+    backtracking. Returns "" when no candidate chain holds the file."""
+    val last_idx = parts.len() - 1
+    if last_idx < 0:
+        return ""
+    _resolve_dir_chain_leaf(base, parts, 0, last_idx, parts[last_idx], false)
+
+fn _numbered_dir_prefix_len(entry: text) -> i64:
+    """Length of the all-digit `NN` prefix of an `NN.name` entry, else 0."""
+    var dot_pos: i64 = -1
+    var ci: i64 = 0
+    for ch in entry:
+        if ch == "." and dot_pos == -1:
+            dot_pos = ci
+        ci = ci + 1
+    if dot_pos < 1 or dot_pos > 3:
+        return 0
+    for ch in entry.substring(0, dot_pos):
+        if ch < "0" or ch > "9":
+            return 0
+    dot_pos
+
+fn _segment_dirs_in_numbered_layers(parent: text, segment: text) -> [text]:
+    """Every `<parent>/NN.layer/<segment>` directory, sorted by path.
+
+    A package can live inside a numbered layer without being a layer itself:
+    `core` is `src/compiler/10.frontend/core`, not `src/compiler/NN.core`."""
+    var found: [text] = []
+    if not dir_exists(parent):
+        return found
+    for entry in dir_list_or_empty(parent):
+        if _numbered_dir_prefix_len(entry) > 0:
+            val nested = _sffi_path_join(_sffi_path_join(parent, entry), segment)
+            if dir_exists(nested):
+                # Insert in sorted position: directory listing order is not
+                # guaranteed, and the first layer must win deterministically.
+                var sorted: [text] = []
+                var placed = false
+                for existing in found:
+                    if not placed and nested < existing:
+                        sorted = sorted + [nested]
+                        placed = true
+                    sorted = sorted + [existing]
+                if not placed:
+                    sorted = sorted + [nested]
+                found = sorted
+    found
+
+fn _resolve_dir_chain_leaf(current: text, parts: [text], depth: i64, dir_count: i64, name: text, transparent: bool) -> text:
+    """Walk `parts[depth..dir_count]` as directories under `current`, then
+    resolve `name` in the reached directory: as `name`.spl, or (when
+    `transparent`) inside its `_`-prefixed descendant folders. A candidate
+    directory whose subtree lacks the leaf is abandoned for the next one.
+    Returns an existing file path or ""."""
+    if depth >= dir_count:
+        if transparent:
+            return _find_transparent_file(current, name)
+        val file_path = _sffi_path_join(current, name + ".spl")
+        if file_exists(file_path):
             return file_path
-        pi = pi + 1
+        return ""
+    val part = parts[depth]
+    val direct = _sffi_path_join(current, part)
+    if dir_exists(direct):
+        val via_direct = _resolve_dir_chain_leaf(direct, parts, depth + 1, dir_count, name, transparent)
+        if via_direct != "":
+            return via_direct
+    val numbered = find_numbered_dir_interp(current, part)
+    if numbered != "":
+        val via_numbered = _resolve_dir_chain_leaf(numbered, parts, depth + 1, dir_count, name, transparent)
+        if via_numbered != "":
+            return via_numbered
+    for nested in _segment_dirs_in_numbered_layers(current, part):
+        val via_nested = _resolve_dir_chain_leaf(nested, parts, depth + 1, dir_count, name, transparent)
+        if via_nested != "":
+            return via_nested
     ""
 
 fn find_numbered_dir_interp(parent: text, segment: text) -> text:
@@ -398,28 +455,11 @@ fn find_numbered_dir_interp(parent: text, segment: text) -> text:
 
     val entries = dir_list_or_empty(parent)
     for entry in entries:
-        # Look for dot in entry name
-        var dot_pos: i64 = -1
-        var ci: i64 = 0
-        for ch in entry:
-            if ch == "." and dot_pos == -1:
-                dot_pos = ci
-            ci = ci + 1
-
-        if dot_pos >= 1 and dot_pos <= 3:
-            # Check if prefix is all digits
-            val prefix = entry.substring(0, dot_pos)
-            var all_digits = true
-            for ch in prefix:
-                if ch < "0" or ch > "9":
-                    all_digits = false
-
-            if all_digits:
-                val name = entry.substring(dot_pos + 1)
-                if name == segment:
-                    val full_path = _sffi_path_join(parent, entry)
-                    if dir_exists(full_path):
-                        return full_path
+        val dot_pos = _numbered_dir_prefix_len(entry)
+        if dot_pos > 0 and entry.substring(dot_pos + 1) == segment:
+            val full_path = _sffi_path_join(parent, entry)
+            if dir_exists(full_path):
+                return full_path
     ""
 
 fn _find_transparent_file(dir: text, name: text) -> text:
@@ -441,26 +481,8 @@ fn _find_transparent_file(dir: text, name: text) -> text:
                     return deeper
     ""
 
-fn _walk_dir_chain(base: text, parts: [text]) -> text:
-    """Resolve intermediate dir `parts` under `base` (direct child or NN.
-    numbered child). Returns concrete dir path, or "" if a segment is missing."""
-    var cur = base
-    for part in parts:
-        val direct = _sffi_path_join(cur, part)
-        if dir_exists(direct):
-            cur = direct
-        else:
-            val numbered = find_numbered_dir_interp(cur, part)
-            if numbered != "":
-                cur = numbered
-            else:
-                return ""
-    cur
-
 fn _resolve_transparent(base: text, dir_parts: [text], name: text) -> text:
-    """Walk `dir_parts` under `base`, then search `_`-transparent descendants
-    for `name`.spl. Empty `dir_parts` searches `base` itself."""
-    val dir = _walk_dir_chain(base, dir_parts)
-    if dir == "":
-        return ""
-    _find_transparent_file(dir, name)
+    """Walk `dir_parts` under `base` (same candidate chain as
+    resolve_with_numbered_dirs), then search `_`-transparent descendants for
+    `name`.spl. Empty `dir_parts` searches `base` itself."""
+    _resolve_dir_chain_leaf(base, dir_parts, 0, dir_parts.len(), name, true)

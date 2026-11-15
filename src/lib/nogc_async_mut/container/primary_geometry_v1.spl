@@ -1,0 +1,76 @@
+# Common provider dispatch. This operation owns only its HTTP exchange, never
+# another terminal reader, session, Host root, or input/geometry issuer.
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_scope_v2}
+use std.nogc_async_mut.container.terminal_session_v1.{ContainerPrimaryAttachSessionV1,
+    container_primary_geometry_authorized_v1, container_primary_attach_identity_v1}
+use std.common.contracts.container.primary_geometry_v1.{ContainerPrimaryGeometryRequestV1, container_primary_geometry_request_same_v1}
+use std.common.contracts.container.execution_v2.container_host_scope_bytes_v2
+use std.nogc_async_mut.container.providers.linux.primary_geometry_owner_v1.{LinuxPrimaryGeometryOwnerV1,
+    LinuxPrimaryGeometryTurnV1, linux_primary_geometry_new_v1}
+
+pub class ContainerPrimaryGeometryOwnerV1:
+    native: LinuxPrimaryGeometryOwnerV1
+    session_identity: text
+    request: ContainerPrimaryGeometryRequestV1
+    policy_bytes: text
+
+pub struct ContainerPrimaryGeometryTurnV1:
+    owner: ContainerPrimaryGeometryOwnerV1?
+    phase: text
+    disposition: text
+    cleanup_pending: bool
+    error: text
+
+fn geometry_rejected_v1(reason: text) -> ContainerPrimaryGeometryTurnV1:
+    ContainerPrimaryGeometryTurnV1(nil, "done", "rejected", false, reason)
+
+fn geometry_turn_v1(owner: ContainerPrimaryGeometryOwnerV1, native: LinuxPrimaryGeometryTurnV1) -> ContainerPrimaryGeometryTurnV1:
+    var current = owner
+    current.native = native.owner
+    ContainerPrimaryGeometryTurnV1(Some(current), native.phase, native.disposition, native.cleanup_pending, native.error)
+
+pub fn simple_container_primary_geometry_begin_v1(container: SimpleContainerOwnerV2,
+        session: ContainerPrimaryAttachSessionV1, policy_bytes: text,
+        request: ContainerPrimaryGeometryRequestV1) -> ContainerPrimaryGeometryTurnV1:
+    val plan = container_primary_geometry_authorized_v1(session, request)
+    if plan.is_err(): return geometry_rejected_v1(plan.unwrap_err())
+    val actual = container_host_scope_bytes_v2(simple_container_scope_v2(container))
+    val target = container_host_scope_bytes_v2(request.target.scope)
+    if actual.is_err() or target.is_err() or actual.unwrap() != target.unwrap(): return geometry_rejected_v1("primary-geometry-host-scope-changed")
+    match container:
+        case SimpleContainerOwnerV2.Linux(_, adapter):
+            val context = adapter.primary_geometry_context_v1(plan.unwrap(), policy_bytes)
+            if context.is_err(): return geometry_rejected_v1(context.unwrap_err())
+            val native = linux_primary_geometry_new_v1(plan.unwrap(), request, context.unwrap().0, context.unwrap().1)
+            if native.is_err(): return geometry_rejected_v1(native.unwrap_err())
+            val owner = ContainerPrimaryGeometryOwnerV1(native: native.unwrap(),
+                session_identity: container_primary_attach_identity_v1(session), request: request, policy_bytes: policy_bytes)
+            ContainerPrimaryGeometryTurnV1(Some(owner), "connect", "pending", false, "")
+        case _: geometry_rejected_v1("primary-geometry-provider-unsupported")
+
+pub fn simple_container_primary_geometry_cancel_v1(owner: ContainerPrimaryGeometryOwnerV1,
+        reason: text) -> ContainerPrimaryGeometryTurnV1:
+    var current = owner
+    val native = current.native.cancel(reason)
+    geometry_turn_v1(current, native)
+
+pub fn simple_container_primary_geometry_step_v1(container: SimpleContainerOwnerV2,
+        session: ContainerPrimaryAttachSessionV1, owner: ContainerPrimaryGeometryOwnerV1,
+        current_request: ContainerPrimaryGeometryRequestV1, budget_ms: i64) -> ContainerPrimaryGeometryTurnV1:
+    var current = owner
+    val same = container_primary_geometry_request_same_v1(current_request, current.request)
+    if (same.is_err() or not same.unwrap() or container_primary_attach_identity_v1(session) != current.session_identity):
+        return simple_container_primary_geometry_cancel_v1(current, "primary-geometry-request-changed")
+    val plan = container_primary_geometry_authorized_v1(session, current_request)
+    if plan.is_err(): return simple_container_primary_geometry_cancel_v1(current, plan.unwrap_err())
+    val actual = container_host_scope_bytes_v2(simple_container_scope_v2(container))
+    val target = container_host_scope_bytes_v2(current_request.target.scope)
+    if actual.is_err() or target.is_err() or actual.unwrap() != target.unwrap():
+        return simple_container_primary_geometry_cancel_v1(current, "primary-geometry-host-scope-changed")
+    match container:
+        case SimpleContainerOwnerV2.Linux(_, adapter):
+            val context = adapter.primary_geometry_context_v1(plan.unwrap(), current.policy_bytes)
+            if context.is_err(): return simple_container_primary_geometry_cancel_v1(current, context.unwrap_err())
+            val stepped = current.native.step(budget_ms)
+            geometry_turn_v1(current, stepped)
+        case _: simple_container_primary_geometry_cancel_v1(current, "primary-geometry-provider-unsupported")

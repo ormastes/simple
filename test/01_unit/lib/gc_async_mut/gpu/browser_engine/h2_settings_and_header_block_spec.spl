@@ -1,0 +1,210 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/net/h2_settings.spl 1%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/net/h2_hpack.spl 1%
+# @tag: unit, browser_engine, net, http2
+#
+# HTTP/2 SETTINGS payload (RFC 7540 section 6.5: 6 octets per parameter, a
+# 16-bit identifier then a 32-bit value; identifiers 1 header table size,
+# 2 enable push, 3 max concurrent streams, 4 initial window size, 5 max frame
+# size; defaults 4096 / 65535 / 16384) and the literal-without-indexing header
+# block this client emits (RFC 7541 section 6.2.2 with one-octet lengths),
+# plus request-body splitting into DATA frames with END_STREAM on the last.
+# Every value asserted here has all of its octets below 0x80. Octets 0x80..0xFF
+# do not survive this codec's text carrier (a 200-octet DATA frame decodes
+# with length 0, the default 65535 window encodes as 0); that defect is filed in
+# doc/08_tracking/bug/h2_text_carrier_loses_high_octets_2026-11-14.md and is
+# deliberately not asserted here.
+
+use std.spec.{describe, context, it, expect}
+use std.common.js.types.pair.{Pair}
+use std.gc_async_mut.gpu.browser_engine.net.h2_frame.{decode_byte, decode_uint16, decode_uint32, frame_type_name}
+use std.gc_async_mut.gpu.browser_engine.net.h2_settings.{
+    H2Settings, default_settings, encode_settings, encode_setting_param, apply_remote_settings
+}
+use std.gc_async_mut.gpu.browser_engine.net.h2_hpack.{
+    encode_header_block, decode_header_block, serialize_headers, extract_h2_status,
+    filter_pseudo_headers, has_header, split_into_data_frames
+}
+
+fn _headers() -> [Pair<text, text>]:
+    [
+        Pair(first: ":status", second: "404"),
+        Pair(first: "content-type", second: "text/html"),
+        Pair(first: "x-empty", second: "")
+    ]
+
+describe "HTTP/2 settings and header blocks":
+
+    context "defaults":
+
+        it "uses the RFC 7540 initial values":
+            val s = default_settings()
+            expect(s.header_table_size).to_equal(4096)
+            expect(s.initial_window_size).to_equal(65535)
+            expect(s.max_frame_size).to_equal(16384)
+            expect(s.max_concurrent_streams).to_equal(100)
+            expect(s.enable_push).to_equal(false)
+
+    context "SETTINGS payload":
+
+        it "encodes one parameter as a 16-bit id and a 32-bit value":
+            val p = encode_setting_param(4, 0x01020304)
+            expect(p.len()).to_equal(6)
+            expect(decode_uint16(p, 0)).to_equal(4)
+            expect(decode_byte(p, 2)).to_equal(1)
+            expect(decode_byte(p, 3)).to_equal(2)
+            expect(decode_byte(p, 4)).to_equal(3)
+            expect(decode_byte(p, 5)).to_equal(4)
+
+        it "emits the five parameters in identifier order":
+            var s = default_settings()
+            s.initial_window_size = 300
+            s.max_concurrent_streams = 7
+            val payload = encode_settings(s)
+            expect(payload.len()).to_equal(30)
+            expect(decode_uint16(payload, 0)).to_equal(1)
+            expect(decode_uint32(payload, 2)).to_equal(4096)
+            expect(decode_uint16(payload, 6)).to_equal(2)
+            expect(decode_uint32(payload, 8)).to_equal(0)
+            expect(decode_uint16(payload, 12)).to_equal(3)
+            expect(decode_uint32(payload, 14)).to_equal(7)
+            expect(decode_uint16(payload, 18)).to_equal(4)
+            expect(decode_uint32(payload, 20)).to_equal(300)
+            expect(decode_uint16(payload, 24)).to_equal(5)
+            expect(decode_uint32(payload, 26)).to_equal(16384)
+
+        it "encodes enable push as 1":
+            var s = default_settings()
+            s.enable_push = true
+            expect(decode_uint32(encode_settings(s), 8)).to_equal(1)
+
+    context "applying the peer's settings":
+
+        it "overrides only the parameters the peer sent":
+            val remote = encode_setting_param(3, 25) + encode_setting_param(5, 20000)
+            val s = apply_remote_settings(default_settings(), remote)
+            expect(s.max_concurrent_streams).to_equal(25)
+            expect(s.max_frame_size).to_equal(20000)
+            expect(s.header_table_size).to_equal(4096)
+            expect(s.initial_window_size).to_equal(65535)
+            expect(s.enable_push).to_equal(false)
+
+        it "applies header table size, push and window":
+            val remote = encode_setting_param(1, 1024) + encode_setting_param(2, 1) + encode_setting_param(4, 4660)
+            val s = apply_remote_settings(default_settings(), remote)
+            expect(s.header_table_size).to_equal(1024)
+            expect(s.enable_push).to_equal(true)
+            expect(s.initial_window_size).to_equal(4660)
+
+        it "lets a later duplicate win and ignores unknown identifiers":
+            val remote = encode_setting_param(3, 5) + encode_setting_param(9, 77) + encode_setting_param(3, 9)
+            val s = apply_remote_settings(default_settings(), remote)
+            expect(s.max_concurrent_streams).to_equal(9)
+            expect(s.max_frame_size).to_equal(16384)
+
+        it "ignores a trailing partial parameter and leaves the local copy untouched":
+            val local = default_settings()
+            val s = apply_remote_settings(local, encode_setting_param(3, 5) + "abc")
+            expect(s.max_concurrent_streams).to_equal(5)
+            expect(local.max_concurrent_streams).to_equal(100)
+
+        it "round-trips a full settings payload":
+            var sent = default_settings()
+            sent.max_concurrent_streams = 42
+            sent.initial_window_size = 12345
+            sent.max_frame_size = 16500
+            sent.header_table_size = 100
+            sent.enable_push = true
+            val got = apply_remote_settings(default_settings(), encode_settings(sent))
+            expect(got.max_concurrent_streams).to_equal(42)
+            expect(got.initial_window_size).to_equal(12345)
+            expect(got.max_frame_size).to_equal(16500)
+            expect(got.header_table_size).to_equal(100)
+            expect(got.enable_push).to_equal(true)
+
+    context "header block":
+
+        it "encodes prefix, name length, name, value length, value":
+            val block = encode_header_block([Pair(first: "a", second: "bc")])
+            expect(block.len()).to_equal(6)
+            expect(decode_byte(block, 0)).to_equal(0)
+            expect(decode_byte(block, 1)).to_equal(1)
+            expect(block.slice(2, 3)).to_equal("a")
+            expect(decode_byte(block, 3)).to_equal(2)
+            expect(block.slice(4, 6)).to_equal("bc")
+
+        it "encodes nothing for an empty header list":
+            var none: [Pair<text, text>] = []
+            expect(encode_header_block(none)).to_equal("")
+            expect(decode_header_block("").unwrap().len()).to_equal(0)
+
+        it "round-trips names and values including an empty value":
+            val back = decode_header_block(encode_header_block(_headers())).unwrap()
+            expect(back.len()).to_equal(3)
+            expect(back[0].first).to_equal(":status")
+            expect(back[0].second).to_equal("404")
+            expect(back[1].first).to_equal("content-type")
+            expect(back[1].second).to_equal("text/html")
+            expect(back[2].first).to_equal("x-empty")
+            expect(back[2].second).to_equal("")
+
+        it "rejects an indexed or Huffman representation it cannot decode":
+            expect(decode_header_block("A").is_err()).to_equal(true)
+
+        it "rejects a block truncated at each field":
+            val block = encode_header_block([Pair(first: "name", second: "value")])
+            expect(decode_header_block(block.slice(0, 1)).is_err()).to_equal(true)
+            expect(decode_header_block(block.slice(0, 4)).is_err()).to_equal(true)
+            expect(decode_header_block(block.slice(0, 6)).is_err()).to_equal(true)
+            expect(decode_header_block(block.slice(0, 9)).is_err()).to_equal(true)
+            expect(decode_header_block(block).is_ok()).to_equal(true)
+
+    context "response header helpers":
+
+        it "reads :status and defaults to 200 without it":
+            expect(extract_h2_status(_headers())).to_equal(404)
+            expect(extract_h2_status([Pair(first: "content-type", second: "text/html")])).to_equal(200)
+
+        it "drops pseudo-headers and keeps the rest in order":
+            val rest = filter_pseudo_headers(_headers())
+            expect(rest.len()).to_equal(2)
+            expect(rest[0].first).to_equal("content-type")
+            expect(rest[1].first).to_equal("x-empty")
+
+        it "serialises one CRLF-terminated line per header":
+            expect(serialize_headers(filter_pseudo_headers(_headers()))).to_equal("content-type: text/html\r\nx-empty: \r\n")
+
+        it "finds a header name case-insensitively and only as a whole name":
+            val raw = "Content-Type: text/html\r\nX-Trace: 1\r\n"
+            expect(has_header(raw, "content-type")).to_equal(true)
+            expect(has_header(raw, "X-TRACE")).to_equal(true)
+            expect(has_header(raw, "content")).to_equal(false)
+            expect(has_header(raw, "text/html")).to_equal(false)
+
+    context "DATA frame splitting":
+
+        it "splits a body at the max frame size with END_STREAM on the last frame only":
+            val frames = split_into_data_frames("abcdefghij", 5, 4)
+            expect(frames.len()).to_equal(3)
+            expect(frames[0].payload).to_equal("abcd")
+            expect(frames[1].payload).to_equal("efgh")
+            expect(frames[2].payload).to_equal("ij")
+            expect(frames[0].is_end_stream()).to_equal(false)
+            expect(frames[1].is_end_stream()).to_equal(false)
+            expect(frames[2].is_end_stream()).to_equal(true)
+            expect(frames[2].stream_id).to_equal(5)
+            expect(frame_type_name(frames[0].frame_type)).to_equal("DATA")
+
+        it "does not add an empty frame when the body is an exact multiple":
+            val frames = split_into_data_frames("abcdefgh", 1, 4)
+            expect(frames.len()).to_equal(2)
+            expect(frames[1].payload).to_equal("efgh")
+            expect(frames[1].is_end_stream()).to_equal(true)
+
+        it "sends one empty END_STREAM frame for an empty body":
+            val frames = split_into_data_frames("", 3, 4)
+            expect(frames.len()).to_equal(1)
+            expect(frames[0].length).to_equal(0)
+            expect(frames[0].is_end_stream()).to_equal(true)
+            expect(frames[0].stream_id).to_equal(3)

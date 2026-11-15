@@ -587,6 +587,7 @@ pub(super) fn eval_op_expr(
                                     body,
                                     env: lambda_env,
                                 } => {
+                                    let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&lambda_env);
                                     let mut local_env = Env::clone(&lambda_env);
                                     for (i, param_name) in params.iter().enumerate() {
                                         if let Some(arg) = all_args.get(i) {
@@ -600,7 +601,8 @@ pub(super) fn eval_op_expr(
                                 _ => {
                                     // Try looking up function by name
                                     if let Expr::Identifier(name) = callee.as_ref() {
-                                        if let Some(func_def) = functions.get(name).cloned() {
+                                        if let Some(func_def) = crate::interpreter::interpreter_call::caller_bound_function(name, functions) {
+                                            crate::interpreter::interpreter_call::gate_private_call(&func_def.name, &func_def)?;
                                             let mut env_clone = env.clone();
                                             return Ok(Some(super::super::exec_function_with_values(
                                                 &func_def,
@@ -644,6 +646,7 @@ pub(super) fn eval_op_expr(
                                     body,
                                     env: lambda_env,
                                 } => {
+                                    let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&lambda_env);
                                     let mut local_env = Env::clone(&lambda_env);
                                     if let Some(param_name) = params.first() {
                                         local_env.insert(param_name.clone(), left_val);
@@ -655,7 +658,8 @@ pub(super) fn eval_op_expr(
                                 _ => {
                                     // Try looking up function by name from the right expression
                                     if let Expr::Identifier(name) = right.as_ref() {
-                                        if let Some(func_def) = functions.get(name).cloned() {
+                                        if let Some(func_def) = crate::interpreter::interpreter_call::caller_bound_function(name, functions) {
+                                            crate::interpreter::interpreter_call::gate_private_call(&func_def.name, &func_def)?;
                                             let mut env_clone = env.clone();
                                             return Ok(Some(super::super::exec_function_with_values(
                                                 &func_def,

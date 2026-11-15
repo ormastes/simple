@@ -25,6 +25,16 @@ fn pattern_enum_name_matches(pattern_name: &str, value_name: &str) -> bool {
     })
 }
 
+/// Does the user enum `enum_name` declare its own `Some` or `None` variant?
+/// Such an enum is matched by variant name, never through the flat-Option
+/// look-through in `pattern_matches`.
+fn enum_declares_option_variant(enum_name: &str, enums: &Enums) -> bool {
+    let declares = |def: &simple_parser::ast::EnumDef| def.variants.iter().any(|v| v.name == "Some" || v.name == "None");
+    if let Some(def) = enums.get(enum_name) {
+        return declares(def);
+    }
+    BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).is_some_and(|def| declares(def)))
+}
 
 /// Number of times an Option pattern (`Some(..)` / `None` / `nil`) was tested
 /// against a `Result` value. Counted on every detection; the stderr warning is
@@ -220,6 +230,66 @@ fn has_binder_or_wildcard_alternative(pattern: &Pattern) -> bool {
     }
 }
 
+/// A variant-shaped pattern NODE (not looking through `|`/`: T`, which recurse
+/// on their own) that can never match a callable or type value.
+fn variant_node_over_callable(pattern: &Pattern) -> Option<String> {
+    match pattern {
+        Pattern::Identifier(_) | Pattern::Enum { .. } => variant_arm_over_callable(pattern),
+        _ => None,
+    }
+}
+
+thread_local! {
+    /// True while [`match_arm_matches`] is testing an arm. Only then does
+    /// [`pattern_matches`] refuse a variant-spelled SUB-pattern over a callable
+    /// payload; `val`/`if val`/`for` destructuring keeps binding it.
+    static MATCH_ARM_MODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The first sub-pattern refused under [`MATCH_ARM_MODE`] in the current arm.
+    static MATCH_ARM_REFUSAL: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Enters arm mode with no recorded refusal; restores the previous state on
+/// drop, including on `?` error paths.
+struct MatchArmModeGuard {
+    prev_mode: bool,
+    prev_refusal: Option<(String, String)>,
+}
+
+impl MatchArmModeGuard {
+    fn enter() -> Self {
+        let prev_mode = MATCH_ARM_MODE.with(|m| m.replace(true));
+        let prev_refusal = MATCH_ARM_REFUSAL.with(|r| r.borrow_mut().take());
+        Self { prev_mode, prev_refusal }
+    }
+
+    fn take_refusal(&self) -> Option<(String, String)> {
+        MATCH_ARM_REFUSAL.with(|r| r.borrow_mut().take())
+    }
+}
+
+impl Drop for MatchArmModeGuard {
+    fn drop(&mut self) {
+        MATCH_ARM_MODE.with(|m| m.set(self.prev_mode));
+        let prev = self.prev_refusal.take();
+        MATCH_ARM_REFUSAL.with(|r| *r.borrow_mut() = prev);
+    }
+}
+
+/// `value` is pre-rendered as "<type_name> value <display>".
+fn callable_scrutinee_error(subject: &str, value: &str, arm: &str) -> CompileError {
+    let ctx = crate::error::ErrorContext::new()
+        .with_code(crate::error::codes::INVALID_PATTERN)
+        .with_help("the scrutinee should be an enum value; check that the enum variant expression did not resolve to a same-named class, function or type");
+    CompileError::semantic_with_context(
+        format!("invalid pattern: {subject} is a {value}, not an enum value; {arm} can never match it"),
+        ctx,
+    )
+}
+
+fn describe_callable(value: &Value) -> String {
+    format!("{} value {}", value.type_name(), value.to_display_string())
+}
+
 /// Match one `match` arm. Identical to [`pattern_matches`] except that a
 /// variant-shaped arm reached with a constructor/function/type scrutinee is a
 /// runtime error instead of a silent answer: `case I8:` used to bind such a
@@ -227,6 +297,12 @@ fn has_binder_or_wildcard_alternative(pattern: &Pattern) -> bool {
 /// (match_on_callable_scrutinee_silently_takes_first_arm_2026-11-14). Only the
 /// match-arm loops call this; `val`/`if val`/`for` binding keeps
 /// [`pattern_matches`], where `val Handler = some_fn` is a legitimate binding.
+///
+/// The same holds for a variant-spelled SUB-pattern (`case W(I8):`,
+/// `case Some(I8):`) reached with a callable payload: under arm mode it fails
+/// to match and is recorded, and the arm errors if it then does not match at
+/// all. An alternative that does match (`case W(I8 | f):`, `case W(I8) | _:`)
+/// still wins, as at the top level.
 pub(crate) fn match_arm_matches(
     pattern: &Pattern,
     value: &Value,
@@ -238,21 +314,25 @@ pub(crate) fn match_arm_matches(
     // still matches anything.
     if is_callable_or_type_value(value) && !has_binder_or_wildcard_alternative(pattern) {
         if let Some(arm) = variant_arm_over_callable(pattern) {
-            let ctx = crate::error::ErrorContext::new()
-                .with_code(crate::error::codes::INVALID_PATTERN)
-                .with_help("the scrutinee should be an enum value; check that the enum variant expression did not resolve to a same-named class, function or type");
-            return Err(CompileError::semantic_with_context(
-                format!(
-                    "invalid pattern: match scrutinee is a {} value {}, not an enum value; arm `case {}:` can never match it",
-                    value.type_name(),
-                    value.to_display_string(),
-                    arm
-                ),
-                ctx,
+            return Err(callable_scrutinee_error(
+                "match scrutinee",
+                &describe_callable(value),
+                &format!("arm `case {arm}:`"),
             ));
         }
     }
-    pattern_matches(pattern, value, bindings, enums, classes)
+    let guard = MatchArmModeGuard::enter();
+    let matched = pattern_matches(pattern, value, bindings, enums, classes)?;
+    if !matched {
+        if let Some((sub, payload)) = guard.take_refusal() {
+            return Err(callable_scrutinee_error(
+                "match payload",
+                &payload,
+                &format!("sub-pattern `{sub}`"),
+            ));
+        }
+    }
+    Ok(matched)
 }
 
 /// Check if a pattern matches a value, populating bindings.
@@ -281,6 +361,21 @@ pub(crate) fn pattern_matches(
     } else {
         value
     };
+    // Inside a `match` arm, a variant-spelled sub-pattern over a callable
+    // payload (`case W(I8):` on `W(Vec4f)`) does not bind: it fails and is
+    // recorded, and `match_arm_matches` errors if the whole arm then fails.
+    // Value shape first, so data values never pay the thread-local read.
+    if is_callable_or_type_value(orig) && MATCH_ARM_MODE.with(|m| m.get()) {
+        if let Some(sub) = variant_node_over_callable(pattern) {
+            MATCH_ARM_REFUSAL.with(|r| {
+                let mut slot = r.borrow_mut();
+                if slot.is_none() {
+                    *slot = Some((sub, describe_callable(orig)));
+                }
+            });
+            return Ok(false);
+        }
+    }
     match pattern {
         Pattern::Wildcard => Ok(true),
 
@@ -597,6 +692,32 @@ pub(crate) fn pattern_matches(
                         }
                     }
                 }
+                // The converse: a `Kind?` slot holding a BARE `Kind` value (no
+                // Option wrapper -- parameter binding, typed `val` and field
+                // init never Some-wrap) is its own `Some` payload, exactly like
+                // the bare scalar handled by the flat-Option arm above. Without
+                // this no `case Some(...)` arm matched it at all (`Some(F32)`,
+                // `Some(Wrap(n))`, even `Some(x)` fell to `case _:`). Excluded:
+                // Option/Result values, and an enum that declares its own
+                // `Some`/`None` variants (`enum Opt: Some(i64) | None`), which
+                // keeps the name-keyed match above. When the definition is not
+                // visible here, a value whose variant is itself spelled
+                // `Some`/`None` is left alone for the same reason.
+                // optional_enum_some_variant_match_engine_divergence_2026-11-14
+                if variant == "Some"
+                    && matches!(enum_name.as_str(), "Option" | "_")
+                    && !matches!(ve.as_str(), "Option" | "Result")
+                    && !matches!(vv.as_str(), "Some" | "None")
+                    && !enum_declares_option_variant(ve, enums)
+                {
+                    return match payload {
+                        None => Ok(true),
+                        Some(patterns) if patterns.len() == 1 => {
+                            pattern_matches(&patterns[0], value, bindings, enums, classes)
+                        }
+                        _ => Ok(false),
+                    };
+                }
             }
 
             // Positional class/struct pattern: `case ClassName(a, b, c)` where the value is
@@ -738,9 +859,17 @@ pub(crate) fn pattern_matches(
         }
 
         Pattern::Or(patterns) => {
+            // A callable-payload refusal recorded by a losing alternative is
+            // dropped when a later alternative matches, like its bindings.
+            let saved_refusal = MATCH_ARM_MODE
+                .with(|m| m.get())
+                .then(|| MATCH_ARM_REFUSAL.with(|r| r.borrow().clone()));
             for pat in patterns {
                 let mut temp_bindings = HashMap::new();
                 if pattern_matches(pat, orig, &mut temp_bindings, enums, classes)? {
+                    if let Some(saved) = saved_refusal {
+                        MATCH_ARM_REFUSAL.with(|r| *r.borrow_mut() = saved);
+                    }
                     bindings.extend(temp_bindings);
                     return Ok(true);
                 }
@@ -1051,6 +1180,14 @@ pub(crate) fn merge_match_arm_subject_bindings(
     let mut current = subject_place
         .and_then(|place| crate::interpreter::place::place_slot_ref(env, place).cloned())
         .unwrap_or_else(|| subject_fallback.clone());
+    // The arm itself stored a new value into the subject place (e.g.
+    // `case Some(cur): var s = cur; s.xs.push(x); g = Some(s)`). That explicit
+    // store is the newer truth: merging the stale payload binding's containers
+    // over it would rewind the store. See
+    // doc/08_tracking/bug/executable_authority_registry_slots_lost_on_store_2026-11-15.md.
+    if subject_place.is_some() && current != *subject_fallback {
+        return;
+    }
     let mut changed = false;
     for (name, steps) in &paths {
         let Some((_, binding)) = binding_values.iter().find(|(n, _)| n == name) else {
@@ -1126,9 +1263,18 @@ mod tests {
 
     use super::{match_arm_matches, pattern_matches, OPTION_PATTERN_OVER_RESULT_HITS};
 
+    /// Start each snippet from a fresh interpreter, like one `simple run`
+    /// process. Without it a previous snippet's module globals (functions
+    /// included) on the same test thread answered calls in the next one.
+    fn fresh_interpreter() {
+        crate::interpreter::clear_module_cache();
+        crate::interpreter::clear_interpreter_state();
+    }
+
     /// Run a Simple snippet and return the exit code.
     /// Use `main = <expr>` to set a numeric exit code (0 = ok, non-zero = error).
     fn run(src: &str) -> i32 {
+        fresh_interpreter();
         let mut parser = Parser::new(src);
         let module = parser.parse().expect("parse");
         evaluate_module(&module.items).expect("evaluate")
@@ -1188,6 +1334,44 @@ mod tests {
     // Each asserts a VALUE, not just that an arm was taken: a test that only
     // checked "the Some arm fired" would pass even if the binding were garbage,
     // which is exactly the mistake the original report made about the JIT.
+
+    /// An arm that copies the payload, grows it, and stores it back into the
+    /// matched global must keep the store: the post-arm payload merge must not
+    /// overwrite it with the stale binding's (empty) array.
+    #[test]
+    fn match_arm_store_into_subject_global_is_not_rewound_by_payload_merge() {
+        let src = r#"
+struct S:
+    n: i64
+    xs: [i64]
+
+var g: S? = nil
+
+fn reset():
+    g = Some(S(n: 0, xs: []))
+
+fn add(x: i64):
+    match g:
+        case Some(cur):
+            var s = cur
+            s.xs.push(x)
+            s.n = s.n + 1
+            g = Some(s)
+        case None:
+            pass
+
+fn len_of() -> i64:
+    match g:
+        case Some(c): c.xs.len() * 10 + c.n
+        case None: -1
+
+reset()
+add(5)
+add(6)
+main = len_of() - 22
+"#;
+        assert_eq!(run(src), 0);
+    }
 
     #[test]
     fn some_pattern_matches_bare_value_at_nullable_param_and_binds_it() {
@@ -2028,6 +2212,7 @@ main = classify(0) + 10 * classify(5) + 100 * classify(42) + 1000 * classify(100
     // this suite pins the match-arm check itself.
 
     fn run_err(src: &str) -> String {
+        fresh_interpreter();
         let mut parser = Parser::new(src);
         let module = parser.parse().expect("parse");
         match evaluate_module(&module.items) {
@@ -2119,6 +2304,59 @@ main = classify(0) + 10 * classify(5) + 100 * classify(42) + 1000 * classify(100
         assert!(pattern_matches(&Pattern::Identifier("Handler".to_string()), &ctor, &mut bindings, &enums, &classes).unwrap());
     }
 
+    // Residual: a variant-spelled SUB-pattern over a callable payload
+    // (`case W(I8):` on `W(Vec4f)`) bound it silently.
+    #[test]
+    fn nested_variant_sub_pattern_over_callable_payload_is_refused() {
+        let enums = HashMap::new();
+        let classes = HashMap::new();
+        let ctor = Value::Constructor { class_name: "Vec4f".to_string() };
+        let wrapped = Value::Enum {
+            enum_name: "Wrap".to_string(),
+            variant: "W".to_string(),
+            payload: Some(Box::new(ctor.clone())),
+        };
+        let w = |p: Pattern| Pattern::Enum { name: "_".to_string(), variant: "W".to_string(), payload: Some(vec![p]) };
+        let some = |p: Pattern| Pattern::Enum { name: "Option".to_string(), variant: "Some".to_string(), payload: Some(vec![p]) };
+        let i8 = || Pattern::Identifier("I8".to_string());
+        let qualified = Pattern::Enum { name: "Kind".to_string(), variant: "I8".to_string(), payload: None };
+        for (pattern, value) in [
+            (w(i8()), &wrapped),
+            (w(qualified), &wrapped),
+            (some(i8()), &ctor),
+            (Pattern::Tuple(vec![i8(), Pattern::Wildcard]), &Value::Tuple(vec![ctor.clone(), Value::Int(1)])),
+        ] {
+            let mut bindings = HashMap::new();
+            let err = match_arm_matches(&pattern, value, &mut bindings, &enums, &classes).unwrap_err();
+            assert!(format!("{err:?}").contains("sub-pattern `"), "{err:?}");
+            assert!(bindings.is_empty());
+        }
+        // A matching alternative still wins; binders still bind.
+        for pattern in [
+            w(Pattern::Or(vec![i8(), Pattern::Identifier("f".to_string())])),
+            Pattern::Or(vec![w(i8()), Pattern::Wildcard]),
+            w(Pattern::Identifier("f".to_string())),
+        ] {
+            let mut bindings = HashMap::new();
+            assert!(match_arm_matches(&pattern, &wrapped, &mut bindings, &enums, &classes).unwrap());
+        }
+        // `case (W(I8) | W(f), 0):` on `(W(Vec4f), 1)`: the matching `W(f)`
+        // drops the `I8` refusal, so the arm is a plain miss, not an error.
+        let or_then_miss = Pattern::Tuple(vec![
+            Pattern::Or(vec![w(i8()), w(Pattern::Identifier("f".to_string()))]),
+            Pattern::Literal(Box::new(Expr::Integer(0))),
+        ]);
+        let pair = Value::Tuple(vec![wrapped.clone(), Value::Int(1)]);
+        let mut bindings = HashMap::new();
+        assert!(!match_arm_matches(&or_then_miss, &pair, &mut bindings, &enums, &classes).unwrap());
+        // Outside a match arm (`val`/`if val` destructuring) nothing changes,
+        // and the arm mode does not leak out of `match_arm_matches`.
+        let mut bindings = HashMap::new();
+        assert!(pattern_matches(&w(i8()), &wrapped, &mut bindings, &enums, &classes).unwrap());
+        assert!(matches!(bindings.get("I8"), Some(Value::Constructor { .. })));
+        assert!(!super::MATCH_ARM_MODE.with(|m| m.get()));
+    }
+
     // JIT residual of the same bug, interpreter twin: a callable bound to a
     // `Kind` / `Kind?` parameter is refused at the call boundary. Without it,
     // `case Some(I8):` over a `Kind?` parameter matched a constructor silently
@@ -2151,12 +2389,58 @@ main = classify(0) + 10 * classify(5) + 100 * classify(42) + 1000 * classify(100
         // Controls: a real variant into `Kind` and `Kind?`, and a function
         // into a fn-typed parameter, still bind.
         let fns = "fn code(k: Kind) -> i64:\n    match k:\n        case I8: 1\n        case _: 3\nfn opt(k: Kind?) -> i64:\n    match k:\n        case _: 30\nfn apply(f: fn() -> i64) -> i64:\n    f()\n";
-        // Only "binds without error" is asserted for `code`: under this
-        // `main = expr` harness a real `Kind.I8` takes `case _:` even through
-        // an untyped parameter (pre-existing harness divergence from the CLI,
-        // recorded in the bug doc); the CLI spec pins the variant answer.
+        assert_eq!(run(&format!("{decls}{fns}main = code(Kind.I8)\n")), 1);
         assert_eq!(run(&format!("{decls}{fns}main = code(Kind.F32)\n")), 3);
         assert_eq!(run(&format!("{decls}{fns}main = opt(Kind.F32)\n")), 30);
         assert_eq!(run(&format!("{decls}{fns}main = 100 * apply(helper)\n")), 100);
+    }
+
+    // --- optional_enum_some_variant_match_engine_divergence_2026-11-14 ---
+
+    // The `main = expr` harness used to take `case _:` for a real `Kind.I8`
+    // while `simple run` of the same source answered the `I8` arm. Cause: `run`
+    // reused the thread's interpreter state, so an earlier snippet's
+    // `fn code(...)` (here: one with only `case _: 3`) answered the call. The
+    // CLI evaluates one module per process and never saw it.
+    #[test]
+    fn harness_real_enum_value_takes_its_variant_arm() {
+        let decls = "enum Kind:\n    I8\n    F32\n";
+        let stale = "fn code(k: Kind) -> i64:\n    match k:\n        case _: 3\n";
+        assert_eq!(run(&format!("{decls}{stale}main = code(Kind.I8)\n")), 3);
+        let untyped = "fn code(k) -> i64:\n    match k:\n        case I8: 1\n        case F32: 2\n        case _: 3\n";
+        let typed = "fn code(k: Kind) -> i64:\n    match k:\n        case I8: 1\n        case F32: 2\n        case _: 3\n";
+        for callee in [untyped, typed] {
+            assert_eq!(run(&format!("{decls}{callee}main = code(Kind.I8)\n")), 1, "{callee}");
+            assert_eq!(run(&format!("{decls}{callee}main = code(Kind.F32)\n")), 2, "{callee}");
+        }
+    }
+
+    // A `Kind?` slot holding a bare `Kind` value is its own `Some` payload,
+    // exactly like a bare scalar in a `T?` slot.
+    #[test]
+    fn some_variant_pattern_looks_through_a_bare_enum_in_an_optional_slot() {
+        let decls = "enum Kind:\n    I8\n    F32\n    Wrap(i64)\n";
+        let opt = "fn opt(k: Kind?) -> i64:\n    match k:\n        case Some(I8): 1\n        case Some(F32): 2\n        case Some(Wrap(n)): 10 + n\n        case None: 4\n        case _: 5\n";
+        for (call, want) in [("opt(Kind.F32)", 2), ("opt(Kind.I8)", 1), ("opt(Kind.Wrap(7))", 17), ("opt(nil)", 4), ("opt(Some(Kind.F32))", 2)] {
+            assert_eq!(run(&format!("{decls}{opt}main = {call}\n")), want, "{call}");
+        }
+        let binder = "fn b(k: Kind?) -> i64:\n    match k:\n        case Some(x): 1\n        case _: 5\n";
+        assert_eq!(run(&format!("{decls}{binder}main = b(Kind.F32)\n")), 1);
+        assert_eq!(run(&format!("{decls}{binder}main = b(nil)\n")), 5);
+    }
+
+    // Guards: a user enum that declares its own `Some` keeps name-keyed
+    // matching (its other variants never match `case Some(x):`), and Result /
+    // None / nil never match `Some`.
+    #[test]
+    fn some_pattern_look_through_keeps_its_guards() {
+        let own_some = "enum Opt:\n    Some(i64)\n    None\nfn f(o: Opt) -> i64:\n    match o:\n        case Some(x): x\n        case _: 99\n";
+        assert_eq!(run(&format!("{own_some}main = f(Opt.None)\n")), 99);
+        assert_eq!(run(&format!("{own_some}main = f(Opt.Some(7))\n")), 7);
+        let none_some = "fn f(o) -> i64:\n    match o:\n        case Some(x): 1\n        case _: 5\n";
+        assert_eq!(run(&format!("{none_some}main = f(None)\n")), 5);
+        assert_eq!(run(&format!("{none_some}main = f(nil)\n")), 5);
+        assert_eq!(run(&format!("{none_some}main = f(Ok(1))\n")), 5);
+        assert_eq!(run(&format!("{none_some}main = f(Err(1))\n")), 5);
     }
 }

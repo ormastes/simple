@@ -97,8 +97,11 @@ var of_ready_generations: [u64; 256] = [0; 256]
 val FD_NET_PORT_NONE: u32 = 0x10000u32
 var of_net_bound_ports: [u32; 256] = [0x10000u32; 256]
 var of_net_server_ports: [u32; 256] = [0x10000u32; 256]
+# AI-CLI manifest endpoint ("a.b.c.d:port") recorded at bind and read by the
+# listen grant decision. "" = unset. Same open-file ownership as the ports.
+var of_net_bound_endpoints: [text; 256] = [""; 256]
 
-fn fd_table_init():
+pub fn fd_table_init():
     """Initialize FD table with stdin/stdout/stderr on serial."""
     var i: u64 = 0
     while i < MAX_FDS:
@@ -122,6 +125,7 @@ fn fd_table_init():
         of_ready_generations[i] = 0
         of_net_bound_ports[i] = FD_NET_PORT_NONE
         of_net_server_ports[i] = FD_NET_PORT_NONE
+        of_net_bound_endpoints[i] = ""
         i = i + 1
     i = 0
     while i < MAX_FD_CONTEXTS:
@@ -299,6 +303,7 @@ fn _fd_release_object_ref(obj: u64):
         of_ready_generations[obj] = 0
         of_net_bound_ports[obj] = FD_NET_PORT_NONE
         of_net_server_ports[obj] = FD_NET_PORT_NONE
+        of_net_bound_endpoints[obj] = ""
     else:
         _fd_refresh_object_mirrors(obj)
 
@@ -344,6 +349,7 @@ fn fd_set(fd: i32, fd_type: u8, flags: u32, ipc_port: u64) -> i32:
     of_ready_generations[obj] = 0
     of_net_bound_ports[obj] = FD_NET_PORT_NONE
     of_net_server_ports[obj] = FD_NET_PORT_NONE
+    of_net_bound_endpoints[obj] = ""
     fd_objects[idx] = obj
     fd_fd_flags[idx] = if (flags & O_CLOEXEC) != 0: FD_CLOEXEC else: 0
     _fd_mirror_from_object(fd)
@@ -641,6 +647,19 @@ fn fd_get_net_server_port(fd: i32) -> u32:
         return FD_NET_PORT_NONE
     of_net_server_ports[fd_objects[fd as u64]]
 
+fn fd_set_net_bound_endpoint(fd: i32, endpoint: text) -> i32:
+    """Record the AI-CLI endpoint text this descriptor's socket is bound to."""
+    if not fd_is_valid(fd):
+        return -9
+    of_net_bound_endpoints[fd_objects[fd as u64]] = endpoint
+    0
+
+fn fd_get_net_bound_endpoint(fd: i32) -> text:
+    """Bound endpoint text, or "" when unset or fd is invalid."""
+    if not fd_is_valid(fd):
+        return ""
+    of_net_bound_endpoints[fd_objects[fd as u64]]
+
 fn fd_get_object_id(fd: i32) -> u64:
     """Return the shared open-file-description token for this descriptor."""
     if not fd_is_valid(fd):
@@ -655,7 +674,7 @@ fn fd_get_refcount(fd: i32) -> u32:
     val idx: u64 = fd as u64
     of_refcounts[fd_objects[idx]]
 
-fn fd_poll_ready(fd: i32, events: i16) -> i16:
+pub fn fd_poll_ready(fd: i32, events: i16) -> i16:
     """Return current readiness for poll/select without blocking."""
     if not fd_is_valid(fd):
         return POLLNVAL
@@ -685,7 +704,7 @@ fn fd_set_poll_notification(fd: i32, events: i16, notif_id: u64) -> i32:
         of_error_notifs[obj] = notif_id
     0
 
-fn fd_poll_notification(fd: i32, events: i16) -> u64:
+pub fn fd_poll_notification(fd: i32, events: i16) -> u64:
     """Return a notification that can wake the requested poll interest."""
     if not fd_is_valid(fd):
         return 0

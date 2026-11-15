@@ -11,6 +11,20 @@ use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 use crate::CompileError;
 
+/// Type of an imported module global declared without an annotation, for the
+/// scalar literal initializers the declaring module also infers
+/// (`module_pass.rs`, `Node::Let` / `Node::Static`). Both sides must agree: the
+/// declaring module stores a raw i64/bool word for these, and an importer that
+/// types the same global ANY reads that word as a tagged value (200 -> 25).
+fn unannotated_literal_global_type(value: Option<&Expr>) -> TypeId {
+    match value {
+        Some(Expr::Bool(_)) => TypeId::BOOL,
+        Some(Expr::String(_)) | Some(Expr::FString { .. }) => TypeId::STRING,
+        Some(expr) if super::module_lowering::try_const_eval(expr).is_some() => TypeId::I64,
+        _ => TypeId::ANY,
+    }
+}
+
 /// Read + parse an imported module, memoized per process.
 ///
 /// The memo itself is `module_cache::PARSED_SOURCE_CACHE`, which the
@@ -367,10 +381,17 @@ impl Lowerer {
                 }
             }
 
-            if self.dependency_import_depth == 0 {
-                if let Some(symbol_ty) = self.globals.get(&original_name).copied() {
-                    self.globals.insert(alias_name.clone(), symbol_ty);
-                }
+            // A dependency's own alias (`use m.{f as g}` inside an imported
+            // module) is private to that module. Publishing its callable
+            // metadata under the bare alias retyped the lowered module's own
+            // `g`: `crypto_text_to_bytes as text_to_bytes` (`[i64]`) in a
+            // dependency made an explicitly imported `text_to_bytes` (`[u8]`)
+            // read packed bytes as 8-byte words.
+            if self.dependency_import_depth > 0 {
+                continue;
+            }
+            if let Some(symbol_ty) = self.globals.get(&original_name).copied() {
+                self.globals.insert(alias_name.clone(), symbol_ty);
             }
             if let Some(return_ty) = self.method_return_types.get(&original_name).copied() {
                 self.method_return_types.insert(alias_name.clone(), return_ty);
@@ -452,6 +473,52 @@ impl Lowerer {
         }
     }
 
+    /// Remember the enum an import load registered, under every import still on
+    /// the active load stack, so a cached re-import can re-assert it.
+    fn record_loaded_enum(&mut self, name: &str, ty: HirType, file: &std::path::Path) {
+        for key in &self.import_key_stack {
+            self.enum_loads
+                .entry(key.clone())
+                .or_default()
+                .push((name.to_string(), ty.clone(), file.to_path_buf()));
+        }
+    }
+
+    /// Whether an imported enum declaration may be (re)registered under its bare
+    /// name. A name some `use` of the module being lowered requests explicitly is
+    /// owned by the first file that declares it during that import; a same-named
+    /// enum from another file (e.g. a dependency's own `use`) is refused.
+    fn claim_imported_enum_name(&mut self, name: &str, declaration_file: &std::path::Path) -> bool {
+        if !self.direct_enum_wanted.contains(name) {
+            return true;
+        }
+        match self.direct_enum_owners.get(name) {
+            Some(owner) => owner == declaration_file,
+            None => {
+                self.direct_enum_owners.insert(name.to_string(), declaration_file.to_path_buf());
+                true
+            }
+        }
+    }
+
+    /// A cached explicit import still owns the enum names it requests: another
+    /// load may have re-registered a same-named enum since, so restore this one.
+    fn reassert_cached_enums(&mut self, import_key: &(PathBuf, String), target: &ImportTarget) {
+        let mut requested = Vec::new();
+        Self::requested_import_names(target, &mut requested);
+        for name in requested {
+            let found = self
+                .enum_loads
+                .get(import_key)
+                .and_then(|loads| loads.iter().rev().find(|(loaded, _, _)| *loaded == name))
+                .map(|(_, ty, file)| (ty.clone(), file.clone()));
+            if let Some((ty, file)) = found {
+                self.module.types.update_named(name.clone(), ty);
+                self.direct_enum_owners.insert(name, file);
+            }
+        }
+    }
+
     fn register_imported_symbols_from_items(&mut self, items: &[Node], target: &ImportTarget, declaration_file: &std::path::Path) -> LowerResult<usize> {
         let mut imported_count = 0;
 
@@ -487,7 +554,7 @@ impl Lowerer {
                     }
                 }
                 Node::Enum(enum_def) => {
-                    if self.should_import_symbol(&enum_def.name, target) {
+                    if self.should_import_symbol(&enum_def.name, target) && self.claim_imported_enum_name(&enum_def.name, declaration_file) {
                         let variants = enum_def
                             .variants
                             .iter()
@@ -503,16 +570,15 @@ impl Lowerer {
                             .collect();
                         // Use update_named to update the placeholder created in Pass 0
                         // (keeps the same TypeId so earlier references stay valid)
-                        self.module.types.update_named(
-                            enum_def.name.clone(),
-                            HirType::Enum {
-                                name: enum_def.name.clone(),
-                                variants,
-                                generic_params: enum_def.generic_params.clone(),
-                                is_generic_template: enum_def.is_generic_template,
-                                type_bindings: std::collections::HashMap::new(),
-                            },
-                        );
+                        let enum_type = HirType::Enum {
+                            name: enum_def.name.clone(),
+                            variants,
+                            generic_params: enum_def.generic_params.clone(),
+                            is_generic_template: enum_def.is_generic_template,
+                            type_bindings: std::collections::HashMap::new(),
+                        };
+                        self.module.types.update_named(enum_def.name.clone(), enum_type.clone());
+                        self.record_loaded_enum(&enum_def.name, enum_type, declaration_file);
                         // Enum BODY methods: mirror the `Node::Impl` branch
                         // below for return types only. Without this an
                         // imported `SdnValue.get(k) -> SdnValue?` answered ANY
@@ -612,7 +678,7 @@ impl Lowerer {
                         let ty = if let Some(ref t) = static_stmt.ty {
                             self.resolve_type(t).unwrap_or(TypeId::ANY)
                         } else {
-                            TypeId::ANY
+                            unannotated_literal_global_type(Some(&static_stmt.value))
                         };
                         self.globals.insert(static_stmt.name.clone(), ty);
                         imported_count += 1;
@@ -645,7 +711,7 @@ impl Lowerer {
                             } else if let Some(t) = Self::extract_pattern_type(&let_stmt.pattern) {
                                 self.resolve_type(t).unwrap_or(TypeId::ANY)
                             } else {
-                                TypeId::ANY
+                                unannotated_literal_global_type(let_stmt.value.as_ref())
                             };
                             self.globals.insert(n, ty);
                             imported_count += 1;
@@ -1046,6 +1112,15 @@ impl Lowerer {
         if Self::is_non_addressable_root_import(module_path, target) {
             return Ok(());
         }
+        if self.dependency_import_depth == 0 {
+            // An explicit `use` of a name (re)claims it for the load below.
+            let mut requested = Vec::new();
+            Self::requested_import_names(target, &mut requested);
+            for name in requested {
+                self.direct_enum_owners.remove(&name);
+                self.direct_enum_wanted.insert(name);
+            }
+        }
 
         // Only proceed if we have a module resolver
         let (resolver, current_file) = match (&self.module_resolver, &self.current_file) {
@@ -1067,6 +1142,9 @@ impl Lowerer {
         let caller_key = crate::interpreter::normalize_path_key(current_file);
         let import_key = (unit_key.clone(), Self::import_target_cache_key(target));
         if self.loaded_import_targets.contains(&import_key) {
+            if self.dependency_import_depth == 0 {
+                self.reassert_cached_enums(&import_key, target);
+            }
             self.bind_imported_defaults(&unit_key, &caller_key, target);
             self.bind_imported_trait_declarations(&unit_key, &caller_key, target);
             // The cached load may have been a dependency-only load, which keeps
@@ -1107,10 +1185,12 @@ impl Lowerer {
         }
         self.loaded_modules.insert(unit_key.clone());
         self.import_stack.push(resolved.path.clone());
+        self.import_key_stack.push(import_key.clone());
 
         if resolved.path.extension().is_some_and(|ext| ext == "smf") {
             let result = self.load_types_from_smf(&resolved.path, target);
             self.import_stack.pop();
+            self.import_key_stack.pop();
             self.loaded_modules.remove(&unit_key);
             if result.is_ok() {
                 self.loaded_import_targets.insert(import_key);
@@ -1183,6 +1263,7 @@ impl Lowerer {
 
         self.current_file = previous_file;
         self.import_stack.pop();
+        self.import_key_stack.pop();
         self.loaded_modules.remove(&unit_key);
         if result.is_ok() {
             self.bind_imported_defaults(&unit_key, &caller_key, target);
@@ -1385,7 +1466,7 @@ impl Lowerer {
         }
     }
 
-    fn should_import_symbol(&self, name: &str, target: &ImportTarget) -> bool {
+    pub(super) fn should_import_symbol(&self, name: &str, target: &ImportTarget) -> bool {
         match target {
             ImportTarget::Glob => !name.starts_with('_'),
             ImportTarget::Single(n) => n == name, // Import if matches
@@ -1989,6 +2070,50 @@ fn available(backend: SelectedBackend) -> bool:
         assert!(lowered.imported_function_names.contains("public_api"));
         assert!(lowered.globals.iter().any(|(name, _)| name == "public_value"));
         assert!(!lowered.globals.iter().any(|(name, _)| name == "_yield_cache"));
+    }
+
+    /// An unannotated module `val` must have the SAME global type in an
+    /// importer as in its declaring module. The declaring module infers i64 /
+    /// bool / text from the literal and stores the raw word; an importer that
+    /// typed it ANY read that raw word as a tagged RuntimeValue, so native
+    /// `val CAP = 200` arrived as 25 (200 >> 3) — devhub history truncated at
+    /// 25 rows (devhub_native_sqlcipher_history_truncated_at_25_rows_2026-11-14).
+    #[test]
+    fn imported_unannotated_literal_val_keeps_declaring_module_type() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        fs::write(
+            src.join("limits.spl"),
+            "val UNTYPED_CAP = 200\nval DERIVED_CAP = 8 * 25\nval ENABLED = true\nval LABEL = \"cap\"\nstatic STATIC_CAP = 200\n",
+        )
+        .unwrap();
+        let main_path = src.join("main.spl");
+        fs::write(
+            &main_path,
+            "use limits.{UNTYPED_CAP, DERIVED_CAP, ENABLED, LABEL, STATIC_CAP}\nfn clamp(x: i64) -> i64:\n    if x > UNTYPED_CAP:\n        return UNTYPED_CAP\n    x\n",
+        )
+        .unwrap();
+
+        let source = crate::read_trace::rts(file!(), line!(), &main_path).unwrap();
+        let ast = Parser::new(&source).parse().expect("parse failed");
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+        let lowered = Lowerer::with_module_resolver(resolver, main_path)
+            .lower_module(&ast)
+            .expect("HIR lowering should succeed");
+
+        let global_type = |wanted: &str| {
+            lowered
+                .globals
+                .iter()
+                .find(|(name, _)| name == wanted)
+                .map(|(_, ty)| *ty)
+                .unwrap_or_else(|| panic!("{wanted} must be an importer global"))
+        };
+        assert_eq!(global_type("UNTYPED_CAP"), TypeId::I64);
+        assert_eq!(global_type("DERIVED_CAP"), TypeId::I64);
+        assert_eq!(global_type("ENABLED"), TypeId::BOOL);
+        assert_eq!(global_type("LABEL"), TypeId::STRING);
+        assert_eq!(global_type("STATIC_CAP"), TypeId::I64);
     }
 
     #[test]

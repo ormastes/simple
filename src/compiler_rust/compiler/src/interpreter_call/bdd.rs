@@ -618,7 +618,7 @@ pub(crate) fn exec_block_value(
         Value::BlockClosure { nodes, env: captured } => {
             let captured_clone = Env::clone(&captured);
             let _closure_origin =
-                crate::interpreter::interpreter_module::ClosureOriginGuard::enter(Some(captured.closure_in_test()));
+                crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
             exec_block_closure(&nodes, &captured_clone, functions, classes, enums, impl_methods)
         }
         // A pending example (`it "x"` with no body) legitimately has a Nil body.
@@ -668,7 +668,7 @@ fn exec_bdd_block_into(
         } => {
             if params.is_empty() {
                 if let Expr::DoBlock(nodes) = body.as_ref() {
-                    let _closure_origin = ClosureOriginGuard::enter(Some(captured.closure_in_test()));
+                    let _closure_origin = ClosureOriginGuard::enter_closure(&captured);
                     return localize_bdd_return(exec_block_closure_into(
                         nodes,
                         env,
@@ -693,7 +693,7 @@ fn exec_bdd_block_into(
             )
         }
         Value::BlockClosure { nodes, env: captured } => {
-            let _closure_origin = ClosureOriginGuard::enter(Some(captured.closure_in_test()));
+            let _closure_origin = ClosureOriginGuard::enter_closure(&captured);
             localize_bdd_return(exec_block_closure_into(
                 &nodes,
                 env,
@@ -839,10 +839,10 @@ fn eval_arg(
     }
 }
 
-/// Evaluate an operand that sits in an ASSERTION position (an `expect(...)`
+/// The value of an operand that sits in an ASSERTION position (an `expect(...)`
 /// subject, or either side of a comparison inside one).
 ///
-/// Identical to `evaluate_expr` except for `expr.?` (`Expr::ExistsCheck`).
+/// Identical to the `evaluate_expr` result except for `expr.?` (`Expr::ExistsCheck`).
 /// The parser documents `.?` as "existence check — is present/non-empty",
 /// returning a bool (`simple_parser::token`, `TokenKind::DotQuestion`), but the
 /// evaluator deliberately yields the PRESENT PAYLOAD (or `Value::Nil` when
@@ -857,19 +857,44 @@ fn eval_arg(
 /// `.?` to its documented bool contract here restores the intended meaning
 /// without touching the payload-binding contract at condition/let-pattern sites.
 /// See doc/08_tracking/bug/sspec_test_path_value_semantics_divergence_2026-07-20.md.
-fn eval_assertion_operand(
-    expr: &Expr,
+/// Applied to an ALREADY-EVALUATED operand so the caller evaluates it once.
+fn collapse_assertion_operand(expr: &Expr, value: &Value) -> Value {
+    if matches!(expr, Expr::ExistsCheck(_)) {
+        return Value::Bool(!matches!(value, Value::Nil));
+    }
+    value.clone()
+}
+
+/// `left <op> right` over ALREADY-EVALUATED operands, through the standard
+/// binary evaluator so ordering semantics (unsigned, float, text, `__lt__`)
+/// stay identical to `simple run`. The values are bound to NUL-prefixed
+/// temporaries no source name can spell — the same pattern as the compound
+/// field-setter path in interpreter/node_exec.rs — and removed before the
+/// result is propagated, so no operand expression is ever re-evaluated.
+#[allow(clippy::too_many_arguments)]
+fn eval_ordered_cmp_on_values(
+    op: BinOp,
+    left: Value,
+    right: Value,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    let value = evaluate_expr(expr, env, functions, classes, enums, impl_methods)?;
-    if matches!(expr, Expr::ExistsCheck(_)) {
-        return Ok(Value::Bool(!matches!(value, Value::Nil)));
-    }
-    Ok(value)
+    let lhs_temp = "\u{0}expect_cmp_lhs".to_string();
+    let rhs_temp = "\u{0}expect_cmp_rhs".to_string();
+    env.insert(lhs_temp.clone(), left);
+    env.insert(rhs_temp.clone(), right);
+    let binary = Expr::Binary {
+        op,
+        left: Box::new(Expr::Identifier(lhs_temp.clone())),
+        right: Box::new(Expr::Identifier(rhs_temp.clone())),
+    };
+    let result = evaluate_expr(&binary, env, functions, classes, enums, impl_methods);
+    env.remove(&lhs_temp);
+    env.remove(&rhs_temp);
+    result
 }
 
 pub(super) fn eval_bdd_builtin(
@@ -1404,15 +1429,23 @@ pub(super) fn eval_bdd_builtin(
                     // comparison (`opt.? == nil`), the documented contract; the
                     // bool collapse would turn it into `false == nil` and
                     // diverge from `simple run`. Keep the payload there.
+                    //
+                    // Each operand is evaluated EXACTLY ONCE (left, then right);
+                    // every arm below works on these values. Re-evaluating the
+                    // subject re-ran side-effecting operands, so
+                    // `expect(store.allocate_id() > id)` asserted on a second
+                    // allocation (bug method_chain_poisons_receiver_type_2026-09-16).
+                    let left_raw = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
+                    let right_raw = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
                     let left_val = if matches!(right.as_ref(), Expr::Nil) {
-                        evaluate_expr(left, env, functions, classes, enums, impl_methods)?
+                        left_raw.clone()
                     } else {
-                        eval_assertion_operand(left, env, functions, classes, enums, impl_methods)?
+                        collapse_assertion_operand(left, &left_raw)
                     };
                     let right_val = if matches!(left.as_ref(), Expr::Nil) {
-                        evaluate_expr(right, env, functions, classes, enums, impl_methods)?
+                        right_raw.clone()
                     } else {
-                        eval_assertion_operand(right, env, functions, classes, enums, impl_methods)?
+                        collapse_assertion_operand(right, &right_raw)
                     };
                     let (matched, op_word) = match op {
                         // Bridge `nil` (Value::Nil) and `Option::None`: the language's
@@ -1454,7 +1487,16 @@ pub(super) fn eval_bdd_builtin(
                                 BinOp::GtEq => ">=",
                                 _ => "?",
                             };
-                            let value = evaluate_expr(arg_expr, env, functions, classes, enums, impl_methods)?;
+                            let value = eval_ordered_cmp_on_values(
+                                *op,
+                                left_raw,
+                                right_raw,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?;
                             if !value.truthy() {
                                 BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = true);
                                 BDD_PROVISIONAL_SEQ

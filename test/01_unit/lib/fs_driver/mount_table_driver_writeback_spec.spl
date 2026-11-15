@@ -1,0 +1,71 @@
+"""Mount-table driver state must survive dispatch.
+
+Drivers are value structs inside `DriverInstance`. A mutating driver call made
+through the mount table (open, close, opendir, mkdir, link, ...) must leave its
+effect on the mounted driver, not on a discarded copy. The original defect: a
+RamFS `open_for_execute` handle could not be closed (InvalidArg) or read back,
+so a rejected managed launch could never release its loader authority.
+"""
+
+use std.spec.{describe, it, expect}
+use std.fs_driver.mount_table.{MountTable}
+use std.fs_driver.mount_table_support.{PositionedDriverKind}
+use std.fs_driver.types.{MountOptions, OpenFlags, ExecuteTrust}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.ramfs.{RamFsDriver}
+
+fn _ramfs_table() -> MountTable:
+    var table = MountTable.new()
+    val mounted = table.mount("/", DriverInstance.RamFs(driver: RamFsDriver.new()),
+        MountOptions.default())
+    expect(mounted.is_ok()).to_equal(true)
+    table
+
+fn _payload() -> [u8]:
+    var bytes: [u8] = []
+    while bytes.len() < 64:
+        bytes.push(0x41.to_u8())
+    bytes
+
+fn _write_file(table: MountTable, path: text) -> MountTable:
+    var t = table
+    match t.open(path, OpenFlags.create_write()):
+        case Err(_): expect("open-create").to_equal("ok")
+        case Ok(h):
+            val written = t.positioned_write_bytes(h.id, PositionedDriverKind.Auto,
+                0u64, _payload())
+            expect(written.is_ok()).to_equal(true)
+            expect(t.close(h).is_ok()).to_equal(true)
+    t
+
+describe "mount table driver write-back":
+    # @req REQ-FS-DRIVER-WRITEBACK
+    it "closes a RamFS execute handle opened through the mount table":
+        var table = _write_file(_ramfs_table(), "/exe")
+        match table.open_for_execute("/exe", ExecuteTrust.Trusted):
+            case Err(_): expect("open_for_execute").to_equal("ok")
+            case Ok(binding):
+                expect(table.close(binding.file_handle).is_ok()).to_equal(true)
+
+    it "closes an ordinary RamFS handle and rejects a second close":
+        var table = _write_file(_ramfs_table(), "/plain")
+        match table.open("/plain", OpenFlags.read_only()):
+            case Err(_): expect("open").to_equal("ok")
+            case Ok(h):
+                expect(table.close(h).is_ok()).to_equal(true)
+                expect(table.close(h).is_ok()).to_equal(false)
+
+    it "keeps directories created through the mount table":
+        var table = _ramfs_table()
+        expect(table.mkdir("/d", 0o755u32).is_ok()).to_equal(true)
+        expect(table.stat("/d").is_ok()).to_equal(true)
+
+    it "keeps two RamFS execute handles independently closable":
+        var table = _write_file(_ramfs_table(), "/exe2")
+        val a = table.open_for_execute("/exe2", ExecuteTrust.Trusted)
+        val b = table.open_for_execute("/exe2", ExecuteTrust.Trusted)
+        expect(a.is_ok()).to_equal(true)
+        expect(b.is_ok()).to_equal(true)
+        expect(table.close(b.unwrap().file_handle).is_ok()).to_equal(true)
+        expect(table.close(a.unwrap().file_handle).is_ok()).to_equal(true)
+        expect(table.close(a.unwrap().file_handle).is_ok()).to_equal(false)

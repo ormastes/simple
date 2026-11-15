@@ -3,8 +3,9 @@
 Rename and kill real smux sessions without resetting unrelated owners.
 ## Evidence boundary
 Pure registry cases exercise the actual removal gate with explicit records;
-they do not simulate native close success. The last case requires Windows
-ConPTY and proves cleanup only through the actual API/provider contract.
+they do not simulate native close success. The last case requires the host's
+real SOSIX PTY provider (ConPTY on Windows, a Unix PTY elsewhere) and proves
+cleanup only through the actual API/provider contract.
 # @manual: primary
 # @capture: text
 """
@@ -22,6 +23,14 @@ use os.apps.smux.client_notifications.{smux_notifications_enqueue, smux_notifica
 use os.apps.smux.smux_remote.{smux_remote_dispatch, smux_remote_reply_ok}
 use std.nogc_sync_mut.sosix.process.{sosix_platform, sosix_sleep_ms}
 use std.nogc_sync_mut.sosix.pty.{sosix_pty_cleanup_pending}
+
+fn lifecycle_shell_program() -> text:
+    if sosix_platform() == "windows": return "cmd.exe"
+    return "/bin/sh"
+
+fn lifecycle_shell() -> text:
+    if sosix_platform() == "windows": return "cmd.exe /Q"
+    return "/bin/sh -i"
 
 # @inline
 fn lifecycle_session(name: text) -> [text]:
@@ -175,12 +184,11 @@ describe "smux session lifecycle retains ownership until native close confirms":
         expect(smux_create_session("replacement").id).to_equal("id25")
         expect(smux_list_sessions().len()).to_equal(8)
 
-    it "terminates a detached real Windows PTY owner and refuses mutations while close is pending":
+    it "terminates a detached real PTY owner and refuses mutations while close is pending":
         smux_reset_for_test()
-        expect(sosix_platform()).to_equal("windows")
         val target = lifecycle_session("live")
         val survivor = lifecycle_session("survivor")
-        expect(smux_pane_spawn_pty(target[0], target[1], target[2], "cmd.exe /Q").is_ok()).to_equal(true)
+        expect(smux_pane_spawn_pty(target[0], target[1], target[2], lifecycle_shell()).is_ok()).to_equal(true)
         expect(smux_attach(target[0], "viewer", 80, 24).attached).to_equal(true)
         expect(smux_detach_from(target[0], "viewer")).to_equal(true)
         step("Request actual native cleanup and retry only the retained pending owner")
@@ -191,8 +199,8 @@ describe "smux session lifecycle retains ownership until native close confirms":
             expect(smux_attach(target[0], "late", 80, 24).attached).to_equal(false)
             expect(smux_new_window(target[0], "late").id).to_equal("")
             expect(smux_split_pane(target[0], target[1], target[2], "vertical").is_err()).to_equal(true)
-            expect(smux_pane_spawn(target[0], target[1], target[2], "cmd.exe", []).is_err()).to_equal(true)
-            expect(smux_pane_spawn_pty(target[0], target[1], target[2], "cmd.exe").is_err()).to_equal(true)
+            expect(smux_pane_spawn(target[0], target[1], target[2], lifecycle_shell_program(), []).is_err()).to_equal(true)
+            expect(smux_pane_spawn_pty(target[0], target[1], target[2], lifecycle_shell_program()).is_err()).to_equal(true)
             expect(smux_send_text(target[0], target[1], target[2], "echo late\r").is_err()).to_equal(true)
             expect(smux_paste_text(target[0], target[1], target[2], "late").is_err()).to_equal(true)
             expect(smux_rename_session(target[0], "late").is_err()).to_equal(true)

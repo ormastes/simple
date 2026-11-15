@@ -7,7 +7,25 @@ pub struct HirExpr {
     pub ty: TypeId,
 }
 
+/// Prefix of the `rt_panic` message that ends a `match` arm chain whose
+/// subject hit no arm (`hir/lower/expr/control.rs::match_exhausted_message`).
+pub const MATCH_EXHAUSTED_PANIC_PREFIX: &str = "invalid pattern: match ";
+
 impl HirExpr {
+    /// True for the synthetic `rt_panic(..)` tail a `match` lowering appends
+    /// for "no arm matched". It diverges, so it contributes no value: analyses
+    /// that ask "does this branch leave a value / of which type" must treat a
+    /// branch consisting of it exactly like a missing `else`.
+    pub fn is_match_exhausted_panic(&self) -> bool {
+        match &self.kind {
+            HirExprKind::BuiltinCall { name, args } if name == "rt_panic" => matches!(
+                args.first().map(|arg| &arg.kind),
+                Some(HirExprKind::String(msg)) if msg.starts_with(MATCH_EXHAUSTED_PANIC_PREFIX)
+            ),
+            _ => false,
+        }
+    }
+
     /// Substitute local variable references in an expression (CTR-012)
     ///
     /// This is used for module boundary checking to adapt type invariants

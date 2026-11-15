@@ -1,0 +1,39 @@
+"""
+Perf probe for node attributes applied to the real AST pool: parses a fixed large
+compiler file under the placement config in env SIMPLE_NODE_ATTR (read by
+expr_reset) and prints wall time and RSS. Run it as separate processes, alternating
+off/on, three each. Prints "skipped" unless SIMPLE_PERF_PROBES=1.
+SIMPLE_PERF_PROBES=1 SIMPLE_NODE_ATTR=extra=sparse_hash <simple> test <this file>
+Read counters are NOT added to product code; access frequency is the static fan-in
+recorded in node_tree_storage.md. Fails only when nothing parsed.
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
+use compiler.core.types.{reset_all_pools}
+use compiler.core.parser.{parser_init_with_path}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.core.ast.{expr_count, expr_attr_extra_placement, expr_attr_extra_present}
+
+extern fn rt_time_now_micros() -> i64
+extern fn memory_usage() -> i64
+
+val PERF_INPUT = "src/compiler/50.mir/mir_lowering_stmts.spl"
+
+describe "AST attribute apply perf":
+    it "parses the fixed large file and prints time and RSS":
+        if (env_get_opt("SIMPLE_PERF_PROBES") ?? "") != "1":
+            print "skipped: perf lane"
+            expect(true).to_equal(true)
+            return
+        val source = file_read(PERF_INPUT)
+        val r0 = memory_usage()
+        val t0 = rt_time_now_micros()
+        reset_all_pools()
+        parser_init_with_path(source, PERF_INPUT)
+        parse_module_body()
+        val t1 = rt_time_now_micros()
+        val r1 = memory_usage()
+        print "APPLYPERF placement={expr_attr_extra_placement()} exprs={expr_count()} parse_ms={(t1 - t0) / 1000} rss_after={r1} rss_delta={r1 - r0} extra_present={expr_attr_extra_present()}"
+        expect(expr_count() > 0).to_equal(true)

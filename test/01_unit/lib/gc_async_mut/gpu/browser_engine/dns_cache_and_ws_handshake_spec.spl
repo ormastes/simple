@@ -1,0 +1,175 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/net/dns.spl 1%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/net/ws_handshake.spl 1%
+# @tag: unit, browser_engine, net, dns, websocket
+#
+# Two network pieces that need no socket: the DNS answer cache (an entry is
+# usable while now - created_at <= ttl, the stored ttl is clamped to the
+# cache's maximum, names are case-insensitive and a trailing root dot is
+# ignored) and the WebSocket opening handshake (RFC 6455 section 4: the
+# request the client sends and each reason the server response is rejected).
+# The handshake key/accept pair is the RFC 6455 section 1.3 example.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.net.dns.{
+    DnsCache, DnsCacheEntry, normalize_hostname, parse_system_dns_addresses, text_array_contains
+}
+use std.gc_async_mut.gpu.browser_engine.net.ws_handshake.{
+    build_upgrade_request, validate_handshake_response
+}
+
+val KEY: text = "dGhlIHNhbXBsZSBub25jZQ=="
+val ACCEPT: text = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+
+fn _response(status: text, upgrade: text, connection: text, accept: text, extra: text) -> text:
+    var r = status + "\r\n"
+    if upgrade != "":
+        r = r + "Upgrade: " + upgrade + "\r\n"
+    if connection != "":
+        r = r + "Connection: " + connection + "\r\n"
+    if accept != "":
+        r = r + "Sec-WebSocket-Accept: " + accept + "\r\n"
+    r + extra + "\r\n"
+
+fn _ok_response(extra: text) -> text:
+    _response("HTTP/1.1 101 Switching Protocols", "websocket", "Upgrade", ACCEPT, extra)
+
+describe "DNS cache and WebSocket handshake":
+
+    context "DNS cache entries":
+
+        it "expires strictly after its ttl":
+            val e = DnsCacheEntry.create("example.test", ["10.0.0.1"], 100, 30)
+            expect(e.is_expired(100)).to_equal(false)
+            expect(e.is_expired(130)).to_equal(false)
+            expect(e.is_expired(131)).to_equal(true)
+
+    context "DNS cache":
+
+        it "returns stored addresses until the ttl passes, then forgets them":
+            var cache = DnsCache.create(300)
+            cache.store("example.test", ["10.0.0.1", "10.0.0.2"], 1000, 60)
+            expect(cache.lookup("example.test", 1060).unwrap()).to_equal(["10.0.0.1", "10.0.0.2"])
+            expect(cache.size()).to_equal(1)
+            expect(cache.lookup("example.test", 1061) == nil).to_equal(true)
+            expect(cache.size()).to_equal(0)
+
+        it "clamps a long ttl to the cache maximum":
+            var cache = DnsCache.create(300)
+            cache.store("example.test", ["10.0.0.1"], 1000, 86400)
+            expect(cache.lookup("example.test", 1300) == nil).to_equal(false)
+            expect(cache.lookup("example.test", 1301) == nil).to_equal(true)
+
+        it "treats names case-insensitively and ignores a trailing dot":
+            var cache = DnsCache.create(300)
+            cache.store("Example.TEST.", ["10.0.0.1"], 0, 60)
+            expect(cache.lookup("example.test", 1).unwrap()).to_equal(["10.0.0.1"])
+            expect(cache.lookup("EXAMPLE.test.", 1).unwrap()).to_equal(["10.0.0.1"])
+            expect(cache.size()).to_equal(1)
+
+        it "replaces the answer for a name instead of adding a second entry":
+            var cache = DnsCache.create(300)
+            cache.store("example.test", ["10.0.0.1"], 0, 60)
+            cache.store("example.test", ["10.0.0.9"], 5, 60)
+            expect(cache.size()).to_equal(1)
+            expect(cache.lookup("example.test", 6).unwrap()).to_equal(["10.0.0.9"])
+
+        it "misses an unknown name":
+            var cache = DnsCache.create(300)
+            expect(cache.lookup("nowhere.test", 0) == nil).to_equal(true)
+            expect(cache.find_index("nowhere.test")).to_equal(-1)
+
+        it "invalidates one name and flushes all":
+            var cache = DnsCache.create(300)
+            cache.store("a.test", ["10.0.0.1"], 0, 60)
+            cache.store("b.test", ["10.0.0.2"], 0, 60)
+            cache.store("c.test", ["10.0.0.3"], 0, 60)
+            cache.invalidate("B.test")
+            expect(cache.size()).to_equal(2)
+            expect(cache.lookup("b.test", 1) == nil).to_equal(true)
+            expect(cache.lookup("a.test", 1).unwrap()).to_equal(["10.0.0.1"])
+            expect(cache.lookup("c.test", 1).unwrap()).to_equal(["10.0.0.3"])
+            cache.invalidate("missing.test")
+            expect(cache.size()).to_equal(2)
+            cache.flush()
+            expect(cache.size()).to_equal(0)
+
+    context "DNS helpers":
+
+        it "normalises case and trailing dots but keeps a lone dot":
+            expect(normalize_hostname("WWW.Example.Test")).to_equal("www.example.test")
+            expect(normalize_hostname("example.test..")).to_equal("example.test")
+            expect(normalize_hostname(".")).to_equal(".")
+
+        it "splits a resolver answer, trimming blanks and dropping duplicates":
+            expect(parse_system_dns_addresses("10.0.0.1, 10.0.0.2 ,10.0.0.1,,")).to_equal(["10.0.0.1", "10.0.0.2"])
+            expect(parse_system_dns_addresses("").len()).to_equal(0)
+
+        it "checks list membership exactly":
+            expect(text_array_contains(["a", "bc"], "bc")).to_equal(true)
+            expect(text_array_contains(["a", "bc"], "b")).to_equal(false)
+
+    context "WebSocket upgrade request":
+
+        it "writes the request line and the mandatory upgrade headers":
+            val req = build_upgrade_request("example.test", 443, "/chat?x=1", KEY, [])
+            expect(req.starts_with("GET /chat?x=1 HTTP/1.1\r\n")).to_equal(true)
+            expect(req.contains("\r\nHost: example.test\r\n")).to_equal(true)
+            expect(req.contains("\r\nUpgrade: websocket\r\n")).to_equal(true)
+            expect(req.contains("\r\nConnection: Upgrade\r\n")).to_equal(true)
+            expect(req.contains("\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n")).to_equal(true)
+            expect(req.contains("\r\nSec-WebSocket-Version: 13\r\n")).to_equal(true)
+            expect(req.ends_with("\r\n\r\n")).to_equal(true)
+            expect(req.contains("Sec-WebSocket-Protocol")).to_equal(false)
+
+        it "adds the port to Host only when it is not a default port":
+            expect(build_upgrade_request("example.test", 80, "/", KEY, []).contains("\r\nHost: example.test\r\n")).to_equal(true)
+            expect(build_upgrade_request("example.test", 8080, "/", KEY, []).contains("\r\nHost: example.test:8080\r\n")).to_equal(true)
+
+        it "requests the root path when none is given":
+            expect(build_upgrade_request("example.test", 443, "", KEY, []).starts_with("GET / HTTP/1.1\r\n")).to_equal(true)
+
+        it "lists requested subprotocols in order":
+            val req = build_upgrade_request("example.test", 443, "/", KEY, ["chat", "superchat"])
+            expect(req.contains("\r\nSec-WebSocket-Protocol: chat, superchat\r\n")).to_equal(true)
+
+    context "WebSocket handshake response":
+
+        it "accepts the RFC example response":
+            val r = validate_handshake_response(_ok_response(""), KEY, [])
+            expect(r.is_ok()).to_equal(true)
+            expect(r.unwrap().protocol).to_equal("")
+
+        it "accepts header names and the websocket token in any case":
+            val raw = "HTTP/1.1 101 Switching Protocols\r\nUPGRADE: WebSocket\r\nconnection: keep-alive, Upgrade\r\nsec-websocket-accept: " + ACCEPT + "\r\n\r\n"
+            expect(validate_handshake_response(raw, KEY, []).is_ok()).to_equal(true)
+
+        it "rejects a status other than 101":
+            expect(validate_handshake_response(_response("HTTP/1.1 200 OK", "websocket", "Upgrade", ACCEPT, ""), KEY, []).is_err()).to_equal(true)
+            expect(validate_handshake_response(_response("NOTHTTP 101 x", "websocket", "Upgrade", ACCEPT, ""), KEY, []).is_err()).to_equal(true)
+            expect(validate_handshake_response(_response("HTTP/1.1 1010 x", "websocket", "Upgrade", ACCEPT, ""), KEY, []).is_err()).to_equal(true)
+
+        it "rejects a missing or wrong Upgrade header":
+            expect(validate_handshake_response(_response("HTTP/1.1 101 Switching Protocols", "", "Upgrade", ACCEPT, ""), KEY, []).is_err()).to_equal(true)
+            expect(validate_handshake_response(_response("HTTP/1.1 101 Switching Protocols", "h2c", "Upgrade", ACCEPT, ""), KEY, []).is_err()).to_equal(true)
+
+        it "rejects a missing or wrong Connection header":
+            expect(validate_handshake_response(_response("HTTP/1.1 101 Switching Protocols", "websocket", "", ACCEPT, ""), KEY, []).is_err()).to_equal(true)
+            expect(validate_handshake_response(_response("HTTP/1.1 101 Switching Protocols", "websocket", "close", ACCEPT, ""), KEY, []).is_err()).to_equal(true)
+
+        it "rejects a missing or wrong accept key":
+            expect(validate_handshake_response(_response("HTTP/1.1 101 Switching Protocols", "websocket", "Upgrade", "", ""), KEY, []).is_err()).to_equal(true)
+            expect(validate_handshake_response(_response("HTTP/1.1 101 Switching Protocols", "websocket", "Upgrade", "AAAAAAAAAAAAAAAAAAAAAAAAAAA=", ""), KEY, []).is_err()).to_equal(true)
+            expect(validate_handshake_response(_ok_response(""), "x3JJHMbDL1EzLkh9GBhXDw==", []).is_err()).to_equal(true)
+
+        it "returns the negotiated subprotocol when it was requested":
+            val r = validate_handshake_response(_ok_response("Sec-WebSocket-Protocol: superchat\r\n"), KEY, ["chat", "superchat"])
+            expect(r.is_ok()).to_equal(true)
+            expect(r.unwrap().protocol).to_equal("superchat")
+
+        it "rejects a subprotocol the client did not request":
+            expect(validate_handshake_response(_ok_response("Sec-WebSocket-Protocol: other\r\n"), KEY, ["chat"]).is_err()).to_equal(true)
+
+        it "rejects an empty response":
+            expect(validate_handshake_response("", KEY, []).is_err()).to_equal(true)

@@ -1539,16 +1539,58 @@ fn test_value_match_with_wildcard_has_no_exhaustion_panic() {
 }
 
 /// Statement-position matches (value discarded) with no matching arm and no
-/// wildcard stay a silent fall-through: self-hosted compiler code relies on it.
+/// wildcard fail closed too (owner decision 2026-11-14): no silent fall-through.
 #[test]
-fn test_statement_match_without_wildcard_stays_silent() {
+fn test_statement_match_without_wildcard_fails_closed() {
     let source = "fn run(n: i64):\n    match n:\n        case 1: print \"one\"\n    print \"done\"\n";
     let module = parse_and_lower(source).unwrap();
     let func = module.functions.iter().find(|f| f.name == "run").unwrap();
     let repr = format!("{:?}", func.body);
     assert!(
-        !repr.contains("match expression exhausted"),
-        "statement-position match must not carry an exhaustion panic: {repr}"
+        repr.contains("rt_panic") && repr.contains("match statement exhausted without matching any pattern"),
+        "statement-position match must lower to an exhaustion rt_panic: {repr}"
+    );
+}
+
+/// The implicit tail `match` of a function with a declared non-void return is
+/// its return value, so exhausting the arms fails closed like the `val` form
+/// (the doc's original repro, `fn pick(s: text) -> i64: match s: ..`,
+/// printed 0 rc=0). seed_value_match_no_arm_yields_nil_2026-11-02.
+#[test]
+fn test_tail_match_without_wildcard_fails_closed() {
+    let source = "fn pick(s: text) -> i64:\n    match s:\n        case \"a\": 1\n        case \"b\": 2\n";
+    let module = parse_and_lower(source).unwrap();
+    let func = module.functions.iter().find(|f| f.name == "pick").unwrap();
+    let repr = format!("{:?}", func.body);
+    assert!(
+        repr.contains("rt_panic") && repr.contains("match expression exhausted"),
+        "exhausted tail match must lower to rt_panic: {repr}"
+    );
+}
+
+/// A tail match with a wildcard never reaches the exhaustion path. A tail
+/// match of a function with no declared return is a plain statement match: it
+/// fails closed too (owner decision 2026-11-14), reported as the statement form.
+#[test]
+fn test_tail_match_with_wildcard_has_no_panic_and_void_tail_is_statement_form() {
+    let lower = |source: &str| {
+        let module = parse_and_lower(source).unwrap();
+        let func = module.functions.iter().find(|f| f.name == "pick" || f.name == "run").unwrap();
+        format!("{:?}", func.body)
+    };
+    let wildcard = lower("fn pick(s: text) -> i64:\n    match s:\n        case \"a\": 1\n        case _: 0\n");
+    assert!(
+        !wildcard.contains("exhausted without matching any pattern"),
+        "wildcard tail match must not carry an exhaustion panic: {wildcard}"
+    );
+    let void_tail = lower("fn run(n: i64):\n    match n:\n        case 1: print \"one\"\n");
+    assert!(
+        void_tail.contains("rt_panic") && void_tail.contains("match statement exhausted without matching any pattern"),
+        "void tail match must fail closed as a statement match: {void_tail}"
+    );
+    assert!(
+        !void_tail.contains("match expression exhausted"),
+        "void tail match is not value-position: {void_tail}"
     );
 }
 

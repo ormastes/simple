@@ -1,7 +1,8 @@
 """
 REQ-CMUX-004/005/008/010: authoritative window zoom and restore.
-Source-authored NOT_RUN. Pure state controls are not native resize evidence.
-The final case requires admitted Windows ConPTY and the linked PID owner.
+Pure state controls are not native resize evidence. The final case requires
+the host's real SOSIX PTY provider (ConPTY on Windows, a Unix PTY elsewhere)
+and the linked PID owner.
 # @manual: primary
 # @capture: text
 """
@@ -29,6 +30,16 @@ use os.apps.smux.api.{smux_reset_for_test, smux_create_session, smux_list_window
 use std.sosix.time.{sosix_sleep_ms, sosix_time_now_monotonic_ms}
 use std.sosix.process.{sosix_process_exists}
 use std.sosix.pty.{sosix_pty_cleanup_pending}
+use std.sosix.host.{sosix_platform_name}
+
+fn zoom_shell() -> text:
+    if sosix_platform_name() == "windows": return "cmd.exe /d /q"
+    return "/bin/sh -i"
+
+fn zoom_probe_command(label: text) -> text:
+    if sosix_platform_name() == "windows":
+        return "powershell.exe -NoProfile -Command \"Write-Output ('" + label + "_' + [Console]::WindowWidth + 'x' + [Console]::WindowHeight)\""
+    return "set -- $(stty size); echo " + label + "_$2x$1"
 
 fn zoom_setup() -> ServiceState:
     val rects = [MuxRect(pane_id: "p1", col: 0, row: 0, cols: 39, rows: 24),
@@ -70,8 +81,7 @@ fn zoom_output(session: text, window: text, pane: text, marker: text) -> text:
 # Expected dimensions are absent from the command itself: only the child can
 # produce the full marker by measuring its actual inherited console viewport.
 fn zoom_probe(session: text, window: text, pane: text, label: text, dimensions: text) -> bool:
-    val command = "powershell.exe -NoProfile -Command \"Write-Output ('" + label + "_' + [Console]::WindowWidth + 'x' + [Console]::WindowHeight)\""
-    val sent = smux_send_command(session, window, pane, command)
+    val sent = smux_send_command(session, window, pane, zoom_probe_command(label))
     val output = zoom_output(session, window, pane, label + "_" + dimensions)
     return sent.is_ok() and output.contains(label + "_" + dimensions)
 
@@ -280,15 +290,15 @@ describe "authoritative smux window zoom":
             expect(smux_remote_reply_ok(malformed)).to_equal(false)
         expect(smux_kill_session(session.id).is_ok()).to_equal(true)
 
-    it "measures actual ConPTY zoom, shared resize, restored child viewports and cleanup":
-        step("Create two real ConPTY children and measure the original split sizes")
+    it "measures actual PTY zoom, shared resize, restored child viewports and cleanup":
+        step("Create two real PTY children and measure the original split sizes")
         smux_reset_for_test()
         val session = smux_create_session("zoom-native")
         val window = smux_list_windows(session.id)[0]
         val first = smux_list_panes(session.id, window.id)[0]
         val second = smux_split_pane(session.id, window.id, first.id, "vertical").unwrap()
-        val target = smux_pane_spawn_pty(session.id, window.id, first.id, "cmd.exe /d /q")
-        val sibling = smux_pane_spawn_pty(session.id, window.id, second.id, "cmd.exe /d /q")
+        val target = smux_pane_spawn_pty(session.id, window.id, first.id, zoom_shell())
+        val sibling = smux_pane_spawn_pty(session.id, window.id, second.id, zoom_shell())
         val target_pid = if target.is_ok(): target.unwrap() else: -1
         val sibling_pid = if sibling.is_ok(): sibling.unwrap() else: -1
         val base_first = zoom_probe(session.id, window.id, first.id, "BASE_A", "39x24")

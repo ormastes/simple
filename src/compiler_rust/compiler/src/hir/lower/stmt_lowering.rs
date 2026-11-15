@@ -259,7 +259,10 @@ impl Lowerer {
     /// Preserve only an exact declared trait identity for a local receiver.
     /// This does not change the runtime value or DI/security type-name hints.
     pub(super) fn declared_trait_dispatch(&self, declared: &ast::Type) -> Option<HirTraitDispatch> {
-        let ast::Type::Simple(name) = declared else { return None; };
+        let name = match declared {
+            ast::Type::Simple(name) | ast::Type::Generic { name, .. } => name,
+            _ => return None,
+        };
         self.trait_declaration_for_current_owner(name)
     }
 
@@ -274,14 +277,23 @@ impl Lowerer {
         }
     }
 
-    /// The if-let / match subject temp inherits the payload trait of the
-    /// `Option<Trait>` local it was read from.
+    /// The subject temp inherits only its Optional payload's exact trait
+    /// identity. A field uses its authored type, never a method-name guess.
     pub(super) fn carry_optional_trait_subject(&self, subject: &Expr, subject_idx: usize, ctx: &mut FunctionContext) {
-        let Expr::Identifier(name) = subject else { return; };
-        let Some(dispatch) = ctx.lookup(name).and_then(|index| ctx.optional_trait_payloads.get(&index)).cloned() else {
-            return;
+        let dispatch = match subject {
+            Expr::Identifier(name) => ctx.lookup(name)
+                .and_then(|index| ctx.optional_trait_payloads.get(&index)).cloned(),
+            Expr::FieldAccess { receiver, field } => {
+                match self.receiver_field_declared_type(receiver, field, ctx) {
+                    Some((owner, ast::Type::Optional(inner))) => self.declared_trait_dispatch_in_owner(inner, owner),
+                    _ => None,
+                }
+            }
+            _ => None,
         };
-        ctx.optional_trait_payloads.insert(subject_idx, dispatch);
+        if let Some(dispatch) = dispatch {
+            ctx.optional_trait_payloads.insert(subject_idx, dispatch);
+        }
     }
 
     /// Give the PAYLOAD binding of an `Option<Trait>` subject its declared
@@ -308,26 +320,26 @@ impl Lowerer {
         }
     }
 
+    pub(super) fn declared_trait_dispatch_in_owner(&self, declared: &ast::Type, owner: &str) -> Option<HirTraitDispatch> {
+        let name = match declared {
+            ast::Type::Simple(name) | ast::Type::Generic { name, .. } => name,
+            _ => return None,
+        };
+        self.trait_declaration_for_owner(name, owner)
+    }
+
+    fn trait_declaration_for_owner(&self, authored_name: &str, owner: &str) -> Option<HirTraitDispatch> {
+        let declared_in = |owner: &str, name: &str| {
+            self.trait_declared_owners.get(std::path::Path::new(owner)).and_then(|traits| traits.get(name)).cloned()
+        };
+        if let Some(found) = declared_in(owner, authored_name) { return Some(found); }
+        let (source_owner, source_name) = self.flatten_owner_import_bindings.get(owner)?.get(authored_name)?;
+        declared_in(source_owner, source_name)
+    }
+
     pub(super) fn trait_declaration_for_current_owner(&self, authored_name: &str) -> Option<HirTraitDispatch> {
-        // In a flattened unit, a function from an imported module carries its
-        // flatten owner, and `register_trait` keys a flattened trait by that
-        // same owner string, not by `current_file` (the compile root). Look
-        // in the owner first, then in the owner's own `use` binding for the
-        // name; anything else keeps the file-keyed lookup.
         if let Some(owner) = self.current_function_owner.as_deref() {
-            let declared_in = |owner: &str, name: &str| {
-                self.trait_declared_owners.get(std::path::Path::new(owner)).and_then(|traits| traits.get(name)).cloned()
-            };
-            if let Some(found) = declared_in(owner, authored_name) {
-                return Some(found);
-            }
-            if let Some((source_owner, source_name)) =
-                self.flatten_owner_import_bindings.get(owner).and_then(|bindings| bindings.get(authored_name))
-            {
-                if let Some(found) = declared_in(source_owner, source_name) {
-                    return Some(found);
-                }
-            }
+            if let Some(found) = self.trait_declaration_for_owner(authored_name, owner) { return Some(found); }
         }
         self.trait_declaration_in_file(authored_name, self.current_file.as_deref())
     }
@@ -1534,10 +1546,14 @@ impl Lowerer {
                 if let Some(stmts) = self.try_lower_bdd_statement(expr, ctx)? {
                     return Ok(stmts);
                 }
-                // Statement-position match: value discarded, so exhausting
-                // every arm stays a silent fall-through (no exhaustion panic).
+                // A match in statement position fails closed when no arm
+                // matches, exactly like a value-position one (owner decision
+                // 2026-11-14). The implicit tail of a non-void function IS the
+                // return value, so its failure is reported as the expression form.
                 let hir_expr = if let Expr::Match { subject, arms } = expr {
-                    self.lower_match_with(subject, arms, false, ctx)?
+                    let is_value_tail = self.value_tail_match == Some(node as *const Node as usize);
+                    let form = if is_value_tail { "expression" } else { "statement" };
+                    self.lower_match_with(subject, arms, form, ctx)?
                 } else {
                     self.lower_expr(expr, ctx)?
                 };
@@ -1546,7 +1562,8 @@ impl Lowerer {
 
             Node::Match(match_stmt) => {
                 // Lower match statement to a chain of If-Else statements
-                self.lower_match_stmt(match_stmt, ctx)
+                let is_value_tail = self.value_tail_match == Some(node as *const Node as usize);
+                self.lower_match_stmt(match_stmt, is_value_tail, ctx)
             }
 
             Node::Pass(_) => {
@@ -1962,7 +1979,12 @@ impl Lowerer {
     }
 
     /// Lower a match statement to a chain of If-Else statements
-    fn lower_match_stmt(&mut self, match_stmt: &MatchStmt, ctx: &mut FunctionContext) -> LowerResult<Vec<HirStmt>> {
+    fn lower_match_stmt(
+        &mut self,
+        match_stmt: &MatchStmt,
+        value_tail: bool,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Vec<HirStmt>> {
         // Lower the subject expression once
         let subject_hir = self.lower_subject_for_patterns(&match_stmt.subject, match_stmt.arms.iter().map(|a| &a.pattern), false, ctx)?;
         let subject_ty = subject_hir.ty;
@@ -1980,7 +2002,20 @@ impl Lowerer {
         };
 
         // Build the chain of If-Else statements from the arms
-        let if_chain = self.lower_match_arms_stmt(subject_idx, subject_ty, &match_stmt.arms, ctx)?;
+        // No arm matched and no unguarded wildcard: the chain ends in an
+        // `rt_panic` (owner decision 2026-11-14). For the implicit tail of a
+        // non-void function the match value IS the return value, so the panic
+        // is reported as the expression form and typed as the declared return:
+        // the tail merge type and `validate_implicit_return_type` then see the
+        // real arms' type.
+        let (form, exhaust_ty) = if value_tail {
+            ("expression", ctx.return_type)
+        } else {
+            ("statement", TypeId::NIL)
+        };
+        let exhaust_msg = super::expr::control::match_exhausted_message(form, Some(("match", match_stmt.span.line)));
+        let if_chain =
+            self.lower_match_arms_stmt(subject_idx, subject_ty, &match_stmt.arms, &exhaust_msg, exhaust_ty, ctx)?;
 
         let mut result = vec![store_stmt];
         result.extend(if_chain);
@@ -2163,7 +2198,7 @@ impl Lowerer {
     /// tagged word by name + type); anything else (an unresolved
     /// `Option<ANY>`) keeps the subject type so the value is not retyped on a
     /// guess. `None` for any subject that is not this Option form.
-    fn optional_enum_payload_inner(&self, subject_ty: TypeId) -> Option<TypeId> {
+    pub(crate) fn optional_enum_payload_inner(&self, subject_ty: TypeId) -> Option<TypeId> {
         let Some(HirType::Enum { name, variants, .. }) = self.module.types.get(subject_ty) else {
             return None;
         };
@@ -3215,10 +3250,16 @@ impl Lowerer {
         subject_idx: usize,
         subject_ty: TypeId,
         arms: &[ast::MatchArm],
+        exhaust_msg: &str,
+        exhaust_ty: TypeId,
         ctx: &mut FunctionContext,
     ) -> LowerResult<Vec<HirStmt>> {
         if arms.is_empty() {
-            return Ok(Vec::new());
+            // No arm matched and no wildcard: fail closed at runtime, like the
+            // interpreter and value-position matches (owner decision 2026-11-14).
+            let mut panic = super::expr::control::match_exhausted_panic(exhaust_msg);
+            panic.ty = exhaust_ty;
+            return Ok(vec![HirStmt::Expr(panic)]);
         }
 
         let arm = &arms[0];
@@ -3259,7 +3300,7 @@ impl Lowerer {
         self.restore_match_bindings(previous_bindings, ctx);
 
         // Recursively build the else branch from remaining arms
-        let else_block = self.lower_match_arms_stmt(subject_idx, subject_ty, remaining_arms, ctx)?;
+        let else_block = self.lower_match_arms_stmt(subject_idx, subject_ty, remaining_arms, exhaust_msg, exhaust_ty, ctx)?;
 
         // Build an If statement
         let if_stmt = HirStmt::If {
@@ -3613,15 +3654,12 @@ impl Lowerer {
                         ty: TypeId::BOOL,
                     });
                 }
-                // Special handling for Some - check not-none
+                // Special handling for Some - check not-none, AND the payload
+                // sub-patterns. Testing presence alone made `case Some(I8):`
+                // match every non-nil `Kind?` (the first `Some(...)` arm won).
+                // optional_enum_some_variant_match_engine_divergence_2026-11-14
                 if variant == "Some" && !subject_enum_owns_variant {
-                    return Ok(HirExpr {
-                        kind: HirExprKind::BuiltinCall {
-                            name: "rt_is_some".to_string(),
-                            args: vec![subject_ref],
-                        },
-                        ty: TypeId::BOOL,
-                    });
+                    return Ok(self.optional_some_condition(pattern, subject_ty, subject_ref, ctx));
                 }
 
                 // Positional class/struct pattern: `case ClassName(a, b, c)` where the

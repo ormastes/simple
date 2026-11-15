@@ -39,7 +39,7 @@ Why `@tag:in-development` (counted, never skipped, never a PASS claim):
 Each describe runs ONE capped native build; keep them serial.
 """
 use std.spec.*
-use std.nogc_sync_mut.io_runtime.{process_run_timeout, env_get, read_file_text, file_exists}
+use std.nogc_sync_mut.io_runtime.{process_run_timeout, env_get, read_file_text, file_exists, host_os}
 
 # Per-lane wall budget. XRAY_OUT_LANE_TIMEOUT_MS shortens it when only the
 # spec's own parsing/verdict path is under test (the lanes then fail fast).
@@ -100,6 +100,13 @@ fn assert_edges(label: text, entries: i64, exits: i64, others: i64, after_stop: 
     if val stamps = timestamps_nonzero:
         expect(stamps).to_equal(total)
 
+fn elf_host_blocked(lane: text) -> bool:
+    # BLOCKED, never a crash or a silent pass: ELF lanes need a Linux host + compiler-rt.
+    if host_os() != "linux":
+        fail("BLOCKED: {lane} is an ELF/Linux lane (needs a Linux host with clang + compiler-rt); host is " + host_os() + "; resume on Linux: sh {lane}")
+        return true
+    false
+
 fn kept_dir(stderr: text) -> text:
     for line in stderr.split("\n"):
         if line.starts_with("kept: "): return line.substring(6, line.len()).trim()
@@ -111,6 +118,7 @@ fn cleanup(dir: text):
 
 describe "XRay backend differential OUT — simple (pure-Simple sleds, in-process patch)":
     it "traces only the selected functions, toggles at runtime, matches the untraced baseline":
+        if elf_host_blocked("scripts/check/check-xray-native-inprocess-e2e.shs"): return
         val (stdout, stderr, status) = process_run_timeout("sh",
             ["scripts/check/check-xray-native-inprocess-e2e.shs", "--simple", simple_binary(), "--keep"], lane_timeout_ms())
         val dir = kept_dir(stderr)
@@ -146,6 +154,7 @@ describe "XRay backend differential OUT — simple (pure-Simple sleds, in-proces
 
 describe "XRay backend differential OUT — llvm (compiler-rt sleds)":
     it "traces only the selected functions, toggles at runtime, matches the untraced baseline":
+        if elf_host_blocked("scripts/check/check-xray-llvm-adapter-e2e.shs"): return
         val (stdout, _, status) = process_run_timeout("sh", ["scripts/check/check-xray-llvm-adapter-e2e.shs"], lane_timeout_ms())
         val verdict_lines = stdout.trim().split("\n")
         expect(verdict_lines[verdict_lines.len() - 1].starts_with("PASS")).to_equal(true)

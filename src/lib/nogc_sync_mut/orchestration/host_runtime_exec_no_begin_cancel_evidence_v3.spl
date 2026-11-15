@@ -1,0 +1,96 @@
+# Cycle-free historical proof. No root/capacity owner, native effect, lease,
+# current authorization clock or parent release is reconstructed from data.
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    DistributedOperationJournalHistoryBatchV2, distributed_operation_journal_lookup_v2}
+use std.common.contracts.orchestration.host_capacity_v1.HostCapacityV1
+use std.common.contracts.orchestration.host_runtime_exec_no_begin_cancel_v3.*
+use std.common.contracts.orchestration.host_runtime_exec_v3.host_runtime_exec_request_encode_v3
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_host_scope_bytes_v2}
+use std.nogc_sync_mut.orchestration.host_runtime_exec_projection_v3.host_runtime_exec_child_packet_v3
+use std.nogc_sync_mut.orchestration.host_cleanup_store_v1.host_cleanup_private_read_v1
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.local_authority_policy_decode_v1
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.nogc_sync_mut.io.path_identity.path_entry_present
+use std.nogc_sync_mut.io.retained_file.retained_directory_open_trusted_v1
+use std.common.crypto.sha256.sha256_text
+
+# Stable protected-parent model, identical to the landed BEGIN interlock.
+# Unknown/symlink/inaccessible directory state is never an absence result.
+fn no_begin_entry_present_v3(journal: DistributedOperationJournalV2, kind: text, id: text) -> Result<bool, text>:
+    val directory = journal.root + "/" + kind
+    if not path_entry_present(directory)?: return Ok(false)
+    var parent = retained_directory_open_trusted_v1(directory)?
+    val found = path_entry_present(directory + "/" + sha256_text(id) + ".sdn")
+    val closed = parent.close()
+    if not closed: return Err("host-exec-no-begin-directory-close")
+    found
+
+pub fn host_runtime_exec_no_begin_cancel_load_v3(journal: DistributedOperationJournalV2,
+        child_operation: OperationEnvelopeV2) -> Result<HostRuntimeExecNoBeginCancelReceiptV3, text>:
+    val current = distributed_operation_journal_lookup_v2(journal, child_operation.id)?
+    if current.envelope != distributed_encode_operation_v2(child_operation)?: return Err("host-exec-no-begin-child-envelope")
+    val source = host_cleanup_private_read_v1(journal.root + "/host-runtime-exec-no-begin-cancellations",
+        sha256_text(child_operation.id) + ".sdn", 4194304)?
+    val receipt = host_runtime_exec_no_begin_cancel_receipt_decode_v3(source)?
+    if distributed_encode_operation_v2(receipt.child_operation)? != current.envelope: return Err("host-exec-no-begin-receipt-child")
+    Ok(receipt)
+
+# Shared original binding and historical SDK proof, also used for an admitted
+# producer's exact immutable-receipt resume. This alone does NOT qualify an edge.
+pub fn host_runtime_exec_no_begin_cancel_match_v3(journal: DistributedOperationJournalV2,
+        capacity: HostCapacityV1, child: OperationEnvelopeV2,
+        receipt: HostRuntimeExecNoBeginCancelReceiptV3) -> Result<bool, text>:
+    val canonical = host_runtime_exec_no_begin_cancel_receipt_encode_v3(receipt)?
+    val packet = host_runtime_exec_child_packet_v3(journal, capacity, child)?
+    val plan = packet.intent.request.parent
+    val scope = ContainerHostScopeV2(physical_host_id: plan.physical_host_id, service_scope_id: plan.service_scope_id,
+        boot_id: plan.boot_id, provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,
+        continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
+    if (distributed_encode_operation_v2(receipt.parent_operation)? != distributed_encode_operation_v2(packet.parent_binding.host_operation)? or
+            distributed_encode_operation_v2(receipt.child_operation)? != distributed_encode_operation_v2(child)? or
+            receipt.child_packet_digest != sha256_text(host_runtime_exec_request_encode_v3(packet)?) or
+            receipt.journal_authority_digest != journal.authority_digest or
+            container_host_scope_bytes_v2(receipt.scope)? != container_host_scope_bytes_v2(scope)?):
+        return Err("host-exec-no-begin-original-binding")
+    if no_begin_entry_present_v3(journal, "host-runtime-exec-delegations", child.id)?:
+        return Err("host-exec-no-begin-delegation-present")
+    val policy = local_authority_policy_decode_v1(receipt.policy_bytes)?
+    if (policy.source_digest != receipt.policy_digest or policy.snapshot.policy_revision != receipt.policy_revision or
+            policy.snapshot.revocation_epoch != receipt.revocation_epoch or policy.session_generation != receipt.session_generation):
+        return Err("host-exec-no-begin-historical-policy")
+    var cleanup = receipt.parent_operation
+    cleanup.operation = "host_cleanup_v1"
+    val grant = distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, receipt.signed, receipt.approval,
+        cleanup, receipt.authorized_unix_ms, policy.snapshot.generation, receipt.policy_revision,
+        receipt.revocation_epoch, receipt.session_generation)?
+    Ok(true)
+
+pub fn host_runtime_exec_no_begin_cancel_validate_v3(journal: DistributedOperationJournalV2,
+        capacity: HostCapacityV1, child: OperationEnvelopeV2,
+        history: DistributedOperationJournalHistoryBatchV2) -> Result<bool, text>:
+    # History comes only from the canonical current-owner batch builder. It is
+    # never deserialized/caller-selected authority, and is stale after mutation.
+    if (history.authority_digest != journal.authority_digest or history.head_commit_digest != journal.revision or
+            history.head_sequence != journal.sequence): return Err("host-exec-no-begin-history-stale")
+    val row = distributed_operation_journal_lookup_v2(journal, child.id)?
+    if row.envelope != distributed_encode_operation_v2(child)?: return Err("host-exec-no-begin-child-envelope")
+    if row.state != "cancelled": return Ok(false)
+    if not no_begin_entry_present_v3(journal, "host-runtime-exec-no-begin-cancellations", child.id)?: return Ok(false)
+    val receipt = host_runtime_exec_no_begin_cancel_load_v3(journal, child)?
+    val binding = host_runtime_exec_no_begin_cancel_match_v3(journal, capacity, child, receipt)?
+    if not binding: return Err("host-exec-no-begin-binding-refused")
+    if not history.operations.contains_key(child.id): return Err("host-exec-no-begin-history-missing")
+    val edge = history.operations[child.id]
+    val digest = host_runtime_exec_no_begin_cancel_receipt_digest_v3(receipt)?
+    if (edge.envelope_digest != row.envelope_digest or edge.last_from_state != "admitted" or edge.last_to_state != "cancelled" or
+            edge.last_outcome_digest != row.outcome_digest or row.outcome_digest != digest or edge.admitted_sequence <= 0 or
+            edge.admitted_sequence > receipt.before_sequence or receipt.before_sequence >= edge.last_sequence or
+            edge.last_sequence > history.head_sequence): return Err("host-exec-no-begin-origin-not-admitted")
+    if (not history.revision_endpoints.contains_key(receipt.before_commit_digest) or
+            history.revision_endpoints[receipt.before_commit_digest] != receipt.before_sequence or
+            not history.revision_endpoints.contains_key(edge.last_commit_digest) or
+            history.revision_endpoints[edge.last_commit_digest] < edge.last_sequence):
+        return Err("host-exec-no-begin-prefix-not-ancestor")
+    Ok(true)

@@ -31,7 +31,9 @@
 # Runtime externs
 # ============================================================================
 
-use app.io.mod.{process_run}
+use app.io.mod.{process_run, process_run_timeout}
+use std.nogc_async_mut.sosix.pty.{sosix_pty_native_exec_argv}
+use std.nogc_async_mut.sosix.{sosix_which}
 use std.io_runtime.{read_file_text}
 use std.io_runtime.{file_write}
 use std.io_runtime.{file_exists}
@@ -97,7 +99,9 @@ fn _json_unescape(s: text) -> text:
             i = i + 1
     out
 
-pub fn _json_get_str(json: text, key: text) -> text:
+# (found, value): found is false when the key is absent or its value is not a
+# complete JSON string (a tool call cut off mid-value has no closing quote).
+fn _json_find_str(json: text, key: text) -> (bool, text):
     # Do NOT pre-unescape here: the escaped-flag scanner below plus
     # _json_unescape handle JSON escapes correctly. A prior pre-pass that
     # rewrote \" -> " truncated any quoted value (regression, see
@@ -105,23 +109,28 @@ pub fn _json_get_str(json: text, key: text) -> text:
     val search = _Q() + key + _Q() + ":"
     val idx = _idx(json, search)
     if idx < 0:
-        return ""
+        return (false, "")
     val after = json.substring(idx + search.len()).trim()
     if not after.starts_with(_Q()):
-        return ""
+        return (false, "")
     val rest = after.substring(1)
     var end = 0
     var escaped = false
-    while end < rest.len():
-        val ch = rest[end]
+    # Byte scan: quote and backslash are ASCII and never occur inside a
+    # multi-byte UTF-8 sequence, and substring() takes byte offsets.
+    while end < rest.byte_len():
+        val b = rest.byte_at(end)
         if escaped:
             escaped = false
-        elif ch == "\\":
+        elif b == 92:
             escaped = true
-        elif ch == "\"":
-            return _json_unescape(rest.substring(0, end))
+        elif b == 34:
+            return (true, _json_unescape(rest.substring(0, end)))
         end = end + 1
-    ""
+    (false, "")
+
+pub fn _json_get_str(json: text, key: text) -> text:
+    _json_find_str(json, key).1
 
 fn _json_get_int(json: text, key: text, dflt: i64) -> i64:
     val search = _Q() + key + _Q() + ":"
@@ -296,9 +305,9 @@ fn guard_path(policy: PermissionPolicy, path: text) -> (text, text):
 val MAX_TOOL_OUTPUT = 30000
 
 fn _truncate(s: text, max_len: i64) -> text:
-    if s.len() <= max_len:
+    if s.byte_len() <= max_len:
         return s
-    s.substring(0, max_len) + "\n[output truncated: " + s.len().to_text() + " bytes total]"
+    s.substring(0, max_len) + "\n[output truncated: " + s.byte_len().to_text() + " bytes total]"
 
 fn _pad_left(s: text, width: i64) -> text:
     var r = s
@@ -323,13 +332,25 @@ fn exec_bash(workspace_root: text, input: text) -> ToolResult:
     var timeout_ms = _json_get_int(input, "timeout_ms", 120000)
     if timeout_ms <= 0:
         timeout_ms = 120000
-    var secs = timeout_ms / 1000
-    if secs < 1:
-        secs = 1
-    var wrapped = "timeout " + secs.to_text() + " /bin/sh -c " + _sq(command)
+    # The shell comes from the SOSIX PTY facade (native: /bin/sh or cmd.exe);
+    # the timeout is enforced by the process runner, not a `timeout` binary.
+    val probe = sosix_pty_native_exec_argv("")
+    if not probe.is_ok():
+        return new_tool_error("", "bash: no native shell on this platform")
+    val native_shell: text = probe.unwrap()[0]
+    # Agent commands are POSIX: on Windows prefer `sh` on PATH (as Caret's
+    # panes do) and fall back to the facade's cmd.exe.
+    val posix = native_shell != "cmd.exe" or sosix_which("sh") != ""
+    var wrapped = command
     if workspace_root != "":
-        wrapped = "cd " + _sq(workspace_root) + " && " + wrapped
-    val (out, errout, code) = process_run("/bin/sh", ["-c", wrapped])
+        if posix:
+            wrapped = "cd " + _sq(workspace_root) + " && " + command
+        else:
+            wrapped = "cd /d \"" + workspace_root + "\" && " + command
+    var argv = sosix_pty_native_exec_argv(wrapped).unwrap_or([])
+    if posix and argv[0] == "cmd.exe":
+        argv = ["sh", "-c", wrapped]
+    val (out, errout, code) = process_run_timeout(argv[0], argv[1:], timeout_ms)
     val stdout = out ?? ""
     val stderr = errout ?? ""
     var content = stdout
@@ -382,12 +403,12 @@ fn exec_write_file(policy: PermissionPolicy, input: text) -> ToolResult:
 fn _count_occurrences(s: text, needle: text) -> i64:
     var n = 0
     var pos = 0
-    while pos <= s.len() - needle.len():
+    while pos <= s.byte_len() - needle.byte_len():
         val i = _idx(s.substring(pos), needle)
         if i < 0:
             break
         n = n + 1
-        pos = pos + i + needle.len()
+        pos = pos + i + needle.byte_len()
     n
 
 fn exec_edit_file(policy: PermissionPolicy, input: text) -> ToolResult:
@@ -398,7 +419,12 @@ fn exec_edit_file(policy: PermissionPolicy, input: text) -> ToolResult:
     if not file_exists(full):
         return new_tool_error("", "edit_file: file not found: " + path)
     val old_text = _json_get_str(input, "old_text")
-    val new_text = _json_get_str(input, "new_text")
+    # A missing or cut-off new_text must not be read as "" -- that silently
+    # DELETED the matched text (observed: "replaced 1 occurrence (462 -> 0 chars)").
+    val new_found = _json_find_str(input, "new_text")
+    if not new_found.0:
+        return new_tool_error("", "edit_file: new_text is missing or not a complete JSON string; nothing was changed")
+    val new_text = new_found.1
     if old_text == "":
         return new_tool_error("", "edit_file: old_text must not be empty")
     val raw = read_file_text(full)

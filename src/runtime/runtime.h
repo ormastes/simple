@@ -585,6 +585,8 @@ int64_t rt_host_memory_headroom_bytes_v1(void);
 int64_t rt_host_disk_headroom_bytes_v1(int64_t path);
 const char* rt_interp_cstr(int64_t value);
 int64_t  rt_string_bytes(int64_t string);
+/* Tagged text -> canonical byte-array handle; length preserves embedded NUL. */
+int64_t  rt_text_to_bytes(int64_t text_value);
 int64_t  rt_string_chars(int64_t string);
 int64_t  rt_string_builder_new(void);
 int64_t  rt_string_builder_push(int64_t handle, int64_t string);
@@ -1375,6 +1377,10 @@ bool     rt_process_kill(int64_t pid);
 bool     rt_pty_is_running(int64_t handle);
 bool     rt_pty_resize(int64_t handle, int32_t rows, int32_t cols);
 bool     rt_pty_hangup(int64_t handle);
+int64_t  rt_pty_spawn_exec_v1(int32_t handle, const char* program, SplArray* args,
+                              const char* cwd, SplArray* env);
+int64_t  rt_pty_write_bytes_v1(int64_t handle, SplArray* data);
+int64_t  rt_pty_exit_code_v1(int64_t handle);
 bool     rt_process_owned_cancel(uint64_t slot, uint64_t generation,
                                  int64_t pid, uint64_t start_identity,
                                  RtOwnedProcessCancelReceipt* receipt);

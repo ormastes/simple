@@ -42,3 +42,46 @@ The current instruction is to use a genuine Phase3 compiler and, if needed, rebu
 Required Caret operations cannot become optional to mask an implementation gap. Optional terminal extensions may report Unsupported without mutation. Distinguish unsupported, permission denial, unavailable transport, invalid/stale targets, busy/timeout and partial commit. Do not silently switch backends or blindly replay a timed-out launch/delete.
 
 N2 requires both backend cohorts, concurrency/recovery/slow-consumer controls and a real 24-hour soak each. No shortened run, source review, authored case count, successful command formatting or historical different-producer result qualifies that gate.
+
+## Pane shell: shs or native
+
+A pane's shell is chosen by kind through `std.sosix.pty`:
+
+```bash
+SIMPLE_PTY_SHELL=shs      # default everywhere: the Simple shell (same commands on every OS)
+SIMPLE_PTY_SHELL=native   # opt out on Windows/macOS/Linux/BSD: /bin/sh or cmd.exe
+SIMPLE_SHS_COMMAND='simple /abs/path/src/app/shs/main.spl'   # hosted shs launcher
+```
+
+From code, ask for a kind explicitly instead of hard-coding a shell:
+
+```simple
+use std.sosix.pty.{sosix_pty_shell_command_v1, SOSIX_PTY_SHELL_SHS}
+val shell = sosix_pty_shell_command_v1(SOSIX_PTY_SHELL_SHS)?
+smux_pane_spawn_pty(session, window, pane, shell)
+```
+
+SimpleOS always uses shs; it has no native shell. Hosted shs
+(`ShellApp.hosted_on_host`, `src/os/apps/shell/shell_host.spl`) runs over the
+real host filesystem (`ls`/`cat`/`cd`, and `cd` moves the process cwd),
+expands `$VAR` from the host environment (`export` reaches children), and
+launches unknown commands as host programs through the SOSIX process facade.
+A host whose shs launcher cannot be resolved (no `SIMPLE_SHS_COMMAND`, no
+`SIMPLE_BINARY` + `src/app/shs/main.spl`) falls back to the native shell.
+Details: `doc/05_design/pty_shell_kinds_shs_default.md`.
+
+### One-shot commands (no PTY)
+
+Caret runs non-interactive commands (the agent `bash` tool, the agent manager
+view, tmux pane wrappers) through `sosix_pty_native_exec_argv(cmd)`, the
+native case of `sosix_pty_shell_exec_argv_v1(kind, cmd)`,
+which returns `/bin/sh -c <cmd>` or `cmd.exe /d /s /c <cmd>` for `native`.
+`shs` has no `-c` entry yet and is refused (`pty-shell-shs-exec-unsupported`),
+as is `native` on SimpleOS. The `bash` tool's timeout is enforced by the process
+runner, not by a `timeout` binary. `test/01_unit/app/llm_caret/caret_shell_routing_spec.spl`
+keeps `/bin/sh` literals out of the routed files.
+
+Still direct, on purpose: the Windows smux pane path in `agent_workspace.spl`
+runs a POSIX script through `sh` on PATH (cmd.exe cannot parse it), and the
+Windows owner launch uses PowerShell `Start-Process` for a hidden detached
+start. tmux remains the POSIX pane backend binary, not a shell.

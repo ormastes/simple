@@ -40,7 +40,7 @@ static int read_expect(const char *path, int64_t max, uint64_t size) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 2) return 2;
+    if (argc != 2) return 64; /* EX_USAGE: needs a scratch file path */
     const char *path = argv[1];
     FILE *file = fopen(path, "wb");
     if (!file || fwrite("hello", 1, 5, file) != 5 || fclose(file)) return 3;

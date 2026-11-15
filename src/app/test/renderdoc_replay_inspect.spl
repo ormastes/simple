@@ -35,6 +35,27 @@ fn _count_marker(content: text, marker: text) -> i64:
         offset = offset + relative + marker.len()
     count
 
+fn _chunk_tags(xml: text) -> [text]:
+    """The attribute text of every `<chunk ...>` OPENING TAG, in one pass.
+    Only the tag itself is kept, so a name that appears in a nested element
+    (`<metadata name="vkCmdDispatch">`) or in text is not evidence of a
+    recorded command."""
+    var tags: [text] = []
+    val parts = xml.split("<chunk ")
+    var i = 1
+    while i < parts.len():
+        val end = parts[i].index_of(">")
+        if end >= 0: tags.push(parts[i][0:end])
+        i = i + 1
+    tags
+
+fn _count_chunk_named(tags: [text], name_prefix: text) -> i64:
+    val needle = "name=\"" + name_prefix
+    var count: i64 = 0
+    for tag in tags:
+        if tag.contains(needle): count = count + 1
+    count
+
 fn _renderdoc_header_driver(xml: text) -> text:
     val header_marker = "<header>"
     if _count_marker(xml, header_marker) != 1 or
@@ -87,11 +108,12 @@ fn parse_renderdoc_capture_xml(xml: text, capture_path: text, xml_path: text, ex
     val chunks = _count_marker(xml, "<chunk ")
     # RenderDoc does not guarantee attribute order. Current XML emits id and
     # chunkIndex before name, while older fixtures put name first.
-    val dispatches = _count_marker(xml, "name=\"vkCmdDispatch\"")
-    val draws = _count_marker(xml, "name=\"vkCmdDraw")
-    val pipelines = _count_marker(xml, "name=\"vkCreateComputePipelines\"") + _count_marker(xml, "name=\"vkCreateGraphicsPipelines\"")
-    val shaders = _count_marker(xml, "name=\"vkCreateShaderModule\"")
-    val resources = _count_marker(xml, "name=\"vkCreateBuffer\"") + _count_marker(xml, "name=\"vkCreateImage\"")
+    val tags = _chunk_tags(xml)
+    val dispatches = _count_chunk_named(tags, "vkCmdDispatch\"")
+    val draws = _count_chunk_named(tags, "vkCmdDraw")
+    val pipelines = _count_chunk_named(tags, "vkCreateComputePipelines\"") + _count_chunk_named(tags, "vkCreateGraphicsPipelines\"")
+    val shaders = _count_chunk_named(tags, "vkCreateShaderModule\"")
+    val resources = _count_chunk_named(tags, "vkCreateBuffer\"") + _count_chunk_named(tags, "vkCreateImage\"")
     val relevant = dispatches + draws
     var reason = "pass"
     if driver == "unknown": reason = "unsupported-capture-driver"
