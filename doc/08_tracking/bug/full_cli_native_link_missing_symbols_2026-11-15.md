@@ -33,3 +33,14 @@ spl_fonts_call_layout_text`. The hosted lane links the C core runtime
 ## Evidence
 Regression spec: `test/01_unit/lib/nogc_sync_mut/fs/flat_file_metadata_spec.spl`
 (RED: `semantic: unknown extern function: file_metadata`; GREEN: 1 passed).
+
+## Native CLI smoke (phase-1 seed, K1 `llvm` composition)
+Build: `native-build --source src/compositions/kernel_llvm --source src/compositions/cuda_disabled --source src/compiler --source src/app --source src/lib --source src/plugins --entry-closure src/app/cli/main.spl`
+-> `Build complete: 3153 compiled, 0 cached, 0 failed`, 84027 KB, 415 abort-stubs.
+sha256 `7f9c35460ecc4deb39ba43a3cc76c81de87573d52b6b41032183a38a0b14bf40`.
+(Without the K1 composition every command fails closed with `PLUG-E-K1-POLICY`.)
+- `--version` -> rc=0, `Simple v1.0.0-rc.1`.
+- `test <spec>` -> rc=1, `SCV-E-ADMISSION: snapshot-read-failed:test/cert/tool_qual/meta/deterministic/01_arithmetic.spl`
+  (that path is a git symlink -> `../../positive/01_arithmetic.spl`; the native
+  SCV snapshot reader (`src/lib/scv/compile_snapshot.spl`) refuses it, while the
+  seed interpreter runs the same spec GREEN). **Open**, next gap for the native CLI.
