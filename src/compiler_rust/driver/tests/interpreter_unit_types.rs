@@ -812,3 +812,42 @@ main = 1
     let result = run_code(code, &[], "");
     assert!(result.is_err());
 }
+
+// ============= Canonical constructible `unit Name: T [as suffix]` =============
+
+#[test]
+fn interpreter_unit_decl_constructible_with_suffix() {
+    let code = r#"
+unit ByteCount: u64 as Bc
+
+val b = ByteCount(value: 7)
+main = b.value
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 7);
+}
+
+#[test]
+fn interpreter_unit_decl_constructible_without_suffix() {
+    let code = r#"
+unit BitCount: u64
+
+val n = BitCount(value: 56)
+main = n.value
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 56);
+}
+
+#[test]
+fn interpreter_unit_decl_suffix_literal_still_works_with_constructor() {
+    let code = r#"
+unit UserId: i64 as uid
+
+val a = UserId(value: 5)
+let b = 42_uid
+main = a.value
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 5);
+}
