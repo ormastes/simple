@@ -169,11 +169,34 @@ describe "Cranelift AOT function value without an address is a module compile er
         val message = p3_message(p3_module("p3panic_fn_addr_probe", func))
         expect(message).to_contain("E-BACKEND-CRANELIFT-FUNCTION-ADDRESS: '': function value in p3_addr_taker")
 
+describe "Cranelift AOT callable without a proven origin is a module compile error":
+    # mir_call_origin_uses_local_symbols_named panics on MirCallOrigin.Unknown
+    # (unknown_call_origin_panics_codegen_worker_2026-11-12): an Unknown
+    # origin is a property of the module's MIR, so it fails that module.
+    it "fails the module on a call whose origin is Unknown":
+        val callee = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("p3panic.unknown.callee"), p3_fn_ptr()),
+            call_origin: MirCallOrigin.Unknown)
+        val func = p3_fn(1, "p3_unknown_caller", [],
+            [p3_inst(MirInstKind.Call(nil, callee, []))], p3_int(0))
+        val message = p3_message(p3_module("p3panic_unknown_call_probe", func))
+        expect(message).to_contain("E-BACKEND-CRANELIFT-CALL-ORIGIN: p3panic.unknown.callee: call in p3_unknown_caller")
+
+    it "fails the module on a function value whose origin is Unknown":
+        val value = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("p3panic.unknown.value"), p3_fn_ptr()),
+            call_origin: MirCallOrigin.Unknown)
+        val func = p3_fn(1, "p3_unknown_value", [], [], value)
+        val message = p3_adapter_message(p3_module("p3panic_unknown_value_probe", func))
+        expect(message).to_contain("E-BACKEND-CRANELIFT-CALL-ORIGIN: p3panic.unknown.value: function value in p3_unknown_value")
+
 describe "Cranelift AOT module codegen error leaves the next module intact":
     it "compiles a clean module after a failed one":
         val bad = p3_fn(1, "p3_global_reader", [p3_local(0, MirType.i64())],
             [p3_inst(MirInstKind.LoadGlobal(LocalId(id: 0), SymbolId(id: 77)))], p3_copy(0))
         expect(p3_message(p3_module("p3panic_first_probe", bad))).to_contain("E-BACKEND-CRANELIFT-GLOBAL-UNDECLARED")
+        # The entry closed the module record: nothing is left open or pending.
+        expect(cl_aot_call_abi_end().len()).to_equal(0)
         expect(p3_message(p3_clean_module("p3panic_clean_after_probe"))).to_equal("compiled")
 
     it "compiles the clean module through the adapter entry":
