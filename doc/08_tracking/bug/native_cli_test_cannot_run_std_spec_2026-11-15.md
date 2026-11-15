@@ -54,21 +54,30 @@ Rebuilt with the K1 command in `full_cli_native_link_missing_symbols_2026-11-15.
   So `test <spec>` still reports no passed examples. The brief's goal of
   nonzero passed was **not** reached.
 
-## Open (plan): std.spec still cannot run on this walker
-Next: builtin method calls on text, arrays and dicts (`len` first). The
-walker's `MethodCall` arm errors on `MethodResolution.Unresolved`, which is
-what builtin receiver methods lower to, and on `TraitMethod`.
-The walker has no arms for most HIR kinds that std.spec and real specs use:
-statements `Return`/`Break`/`Continue`/`While`/`For`/`Loop` are not covered
-(stmts handled: Let, Assign, Expr, Block, AsmAssert). Expression kinds not
-handled include `MatchCase`, `While`, `For`, `Loop`, `Return`, `Try`,
-`OptionalChain`, `NullCoalesce`, `ExistsCheck`, `Unwrap`, `StructLit`,
-`EnumLit`, `Cast`, `As`, `Range`, `Comprehension`, `TupleIndex`, `With`,
-`TryCatch` and `TypeTest`. Module-level `val`/`var` of a provider are not
-initialized. Interpolation `:format` specs are ignored. Each is its own slice.
-The alternative is to route native `run`/`test` to a complete engine, such as
-the MIR interpreter (`95.interp/mir_interpreter.spl`), which no CLI path
-calls today.
+## Slice 1 (2026-11-16): builtin methods, loops, return, literal match
+`interpreter_control.spl` adds: Unresolved receiver methods dispatched on the
+runtime value (text len/is_empty/trim/contains/starts_with/ends_with/split;
+array len/is_empty/push (written back to the variable)/contains; dict
+len/is_empty/keys/contains_key/has; int/bool to_text), dict indexing,
+`While`/`Loop`/`For` (array, text, dict keys, bounded `Range`), `Return`/
+`Break`/`Continue` (a `BackendErrorKind.ControlFlow` error; the return value
+rides on `BackendError.ctl_value` because a value parked on the by-value
+Environment is lost across copies), and `MatchCase` with wildcard/literal/
+binding/or patterns plus guards. Spec:
+`test/01_unit/compiler/backend/interpreter_backend_walker_slice1_spec.spl`.
+
+Alternatives checked: `src/app/interpreter` (25k lines) has rotted: it imports
+`parser.treesitter` / `lib.parser.parser`, which do not exist, and `run`
+on it fails at parse in `core/__init__.spl:18`. The MIR interpreter keeps
+values in i64 slots with placeholder `rt_array_*` stubs (lines 1114-1137) and
+no text/dict model, so it is not a drop-in for std.spec either.
+
+## Open (plan): remaining walker gaps
+`TraitMethod` calls; expression kinds `Try`, `OptionalChain`, `NullCoalesce`,
+`ExistsCheck`, `Unwrap`, `StructLit`, `EnumLit`, `Cast`, `As`,
+`Comprehension`, `TupleIndex`, `With`, `TryCatch`, `TypeTest`; enum/struct/
+tuple match patterns; open ranges; module-level `val`/`var` of a provider;
+interpolation `:format` specs. Each is its own slice.
 
 ## Perf (recorded, not fixed here)
 `cli_tip.exe run` of a two-file program takes 48 s wall, while the HIR phase
