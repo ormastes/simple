@@ -103,3 +103,29 @@ link log contains no `__vtable__` stub. The native spec
 `test/03_system/app/devhub/messenger/native_binary_messaging_mcp_worker_spec.spl`
 gives `Results: 3 total, 3 passed, 0 failed`. The status stays
 verification-pending until a deployed compiler includes the fix.
+
+## Root cause pinned (2026-11-15, follow-up)
+
+The entry module's binding was recorded — for the WRONG unit. An importer
+outside every stdlib family (`test/fixtures/...`) resolves
+`std.mcp_sdk.transport.transport` through `resolve_stdlib_from_root`'s family
+loop (`module_resolver/resolution.rs`). Families are tried
+`nogc_async_mut` first, and `resolve_module_in_dir`'s "directory is its own
+module" rule (`.../transport` + last segment `transport`) returned
+`nogc_async_mut/mcp_sdk/transport/__init__.spl` (no trait) before
+`nogc_sync_mut/mcp_sdk/transport/transport.spl` was ever tried. Importers
+inside `src/lib` resolve family-relative and got the real file, which is why
+only entries outside the source root failed. Measured with the real fixture:
+`resolve entry=...nogc_async_mut\mcp_sdk\transport\__init__.spl`,
+`resolve app=...nogc_sync_mut\mcp_sdk\transport\transport.spl`.
+
+Fix: a package-self match is now deferred until every family has been tried
+for a real module. The `unique_used_trait_declaration` fallback from #9362 is
+deleted (no longer needed). Cargo regression:
+`test_native_entry_outside_src_binds_imported_trait_from_later_family_file`
+(FAILS on the pre-fix resolver, passes now).
+
+Pure-Simple compiler audit: `src/compiler/99.loader/module_resolver/resolution.spl`
+has no package-self rule and tries `nogc_sync_mut` before `nogc_async_mut`;
+HIR binds imported traits by name (`imported_traits`), not by caller path —
+same gap not present. Not run natively (no deployed full pure-Simple CLI).
