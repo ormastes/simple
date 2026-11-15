@@ -107,6 +107,10 @@ of a comparison use the same font at the same size.
   `#####` / `#...#` x3, identical on `cpu` and `software`, with no in-between
   values. The old "per-pixel AA" row asserted the bilinear blur that only
   scale 2 produces.
+- AA coverage lives in the vector-face high-dpi row: Liberation Sans, "Ab" at
+  50 px (16 CSS px x 3.125) on a 96x64 surface, fg white / bg black -> 333
+  intermediate-red pixels, cpu == software == vulkan (llvmpipe) byte for byte
+  (`draw_text_bg_spec`, 2026-11-15).
 - Scale-1 atlas numbers: `"Vulkan Text 42"` is 70x7, 145 ink pixels (atlas
   composite == CPU raster); atlas 475x7 (95 cells x 5 px); identity
   `engine2d-bitmap-5x7-scale1`; `'A'` at `atlas_x` 165.
