@@ -1,0 +1,66 @@
+# The pure-Simple HIR interpreter (the engine behind the native CLI's `run`
+# and `test`) must run the option/result idioms std.spec itself uses:
+# `??`, `.?`, `?` propagation, optional chaining, enum and struct values,
+# enum/struct/tuple match patterns, casts and user/trait method calls.
+#
+# @cover src/compiler/70.backend/backend/interpreter_expr.spl
+# @cover src/compiler/70.backend/backend/interpreter_control.spl
+# @cover src/compiler/70.backend/backend/interpreter_optional.spl
+#
+# doc/08_tracking/bug/native_cli_test_cannot_run_std_spec_2026-11-15.md
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.backend.backend_types.*
+use compiler.backend.interpreter.{InterpreterBackendImpl}
+use compiler.common.config.{Logger}
+
+fn ws2_run(src: text) -> text:
+    val module = parse_full_frontend(src, "ws2_main.spl", "ws2_main", Logger(level: 0))
+    var lowering = HirLowering.with_filename("ws2_main.spl")
+    val hir = lowering.lower_module(module)
+    var backend = InterpreterBackendImpl.new()
+    match backend.interpret_hir_module(hir):
+        case Ok(BackendResult.Value(Value.String(s))): "string:" + s
+        case Ok(BackendResult.Value(Value.Int(n))): "int:" + n.to_text()
+        case Ok(BackendResult.Value(Value.Bool(b))): "bool:" + b.to_text()
+        case Ok(_): "other"
+        case Err(e): "error:" + e.message
+
+describe "HIR interpreter option, enum and method idioms":
+    it "falls back with ?? on None and nil but keeps a present value":
+        expect(ws2_run("fn pick(x: i64?) -> i64:\n    x ?? 7\n\nfn main() -> i64:\n    pick(Some(3)) + pick(None) + pick(nil)\n")).to_equal("int:17")
+
+    it "answers .? presence for Some, None and text":
+        expect(ws2_run("fn has(x: i64?) -> bool:\n    x.?\n\nfn main() -> bool:\n    has(Some(0)) and not has(None)\n")).to_equal("bool:true")
+
+    it "propagates an Err with ? and unwraps an Ok":
+        expect(ws2_run("fn half(n: i64) -> Result<i64, text>:\n    if n % 2 == 0:\n        Ok(n / 2)\n    else:\n        Err(\"odd\")\n\nfn quarter(n: i64) -> Result<i64, text>:\n    val h = half(n)?\n    half(h)\n\nfn score(r: Result<i64, text>) -> i64:\n    match r:\n        case Ok(v): v\n        case Err(_): -1\n\nfn main() -> i64:\n    score(quarter(12)) * 10 + score(quarter(6))\n")).to_equal("int:29")
+
+    it "binds a Some payload with if val and skips None":
+        expect(ws2_run("fn get(x: i64?) -> i64:\n    if val v = x:\n        v + 1\n    else:\n        0\n\nfn main() -> i64:\n    get(Some(4)) + get(None)\n")).to_equal("int:5")
+
+    it "matches Some and None arms":
+        expect(ws2_run("fn show(x: text?) -> text:\n    match x:\n        case Some(s): s\n        case None: \"-\"\n\nfn main() -> text:\n    show(Some(\"a\")) + show(None)\n")).to_equal("string:a-")
+
+    it "builds and matches a user enum with payload":
+        expect(ws2_run("enum Shape:\n    Dot\n    Square(side: i64)\n\nfn area(s: Shape) -> i64:\n    match s:\n        case Shape.Square(n): n * n\n        case Shape.Dot: 1\n\nfn main() -> i64:\n    area(Shape.Square(3)) + area(Shape.Dot)\n")).to_equal("int:10")
+
+    it "destructures a tuple in a match arm":
+        expect(ws2_run("fn main() -> i64:\n    val t = (3, 4)\n    match t:\n        case (a, b): a * 10 + b\n")).to_equal("int:34")
+
+    it "reads a field through optional chaining":
+        expect(ws2_run("struct Box:\n    n: i64\n\nfn peek(b: Box?) -> i64:\n    b?.n ?? -1\n\nfn main() -> i64:\n    peek(Some(Box(n: 5))) * 10 + peek(None)\n")).to_equal("int:49")
+
+    it "casts between int and float":
+        expect(ws2_run("fn main() -> i64:\n    val f = 7 as f64\n    val n = (f * 1.5) as i64\n    n\n")).to_equal("int:10")
+
+    it "calls a user method on a struct":
+        expect(ws2_run("struct Pt:\n    x: i64\n    y: i64\n\nimpl Pt:\n    fn sum() -> i64:\n        self.x + self.y\n    fn scaled(k: i64) -> i64:\n        self.sum() * k\n\nfn main() -> i64:\n    val p = Pt(x: 2, y: 3)\n    p.scaled(4)\n")).to_equal("int:20")
+
+    it "calls a trait method on a struct":
+        expect(ws2_run("trait Named:\n    fn name() -> text\n\nstruct Cat:\n    age: i64\n\nimpl Named for Cat:\n    fn name() -> text:\n        \"cat\{self.age\}\"\n\nfn main() -> text:\n    val c = Cat(age: 2)\n    c.name()\n")).to_equal("string:cat2")
