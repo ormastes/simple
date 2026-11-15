@@ -5,8 +5,11 @@
 # a RISC-V object either failed to link or came out as a host-arch image. A
 # freestanding target has no OS, crt or libc to link against: the image is the
 # user objects placed by a linker script. The caller may pass its own script
-# (`-T x.ld` or `-Wl,-T,x.ld` in the native linker flags); otherwise a default
-# per-arch script is written next to the output.
+# (`-T x.ld` / `-Wl,-T,x.ld` in the native linker flags, or the env knob
+# SIMPLE_BAREMETAL_LINKER_SCRIPT); otherwise a default per-arch script is
+# written next to the output. The image still needs `_start` and any extern
+# helpers (e.g. rt_mmio_write8) from the caller's objects: there is no
+# freestanding runtime yet (bug baremetal_no_freestanding_runtime_2026_11_15).
 #
 # The default load bases match the real-firmware handoff used by the board
 # proxies (.claude/rules/board-runnable.md): riscv = OpenSBI next stage
@@ -80,7 +83,11 @@ pub fn link_baremetal_native_v1(objects: [text], output: text, arch: text,
     if not file_write(script, baremetal_default_linker_script_v1(arch)):
         return Err("baremetal link: cannot write linker script {script}")
     val lld = env_get("SIMPLE_BAREMETAL_LD") ?? "ld.lld"
-    val argv = baremetal_link_argv_v1(objects, output, script, linker_flags)
+    # The CLI does not fill native_linker_flags; SIMPLE_BAREMETAL_LINKER_SCRIPT
+    # is the CLI-reachable way to supply a board script.
+    val board_script = env_get("SIMPLE_BAREMETAL_LINKER_SCRIPT") ?? ""
+    val flags = if board_script != "": linker_flags + ["-T", board_script] else: linker_flags
+    val argv = baremetal_link_argv_v1(objects, output, script, flags)
     val (_out, err, code) = process_run(lld, argv)
     val cmd = argv.join(" ")
     if code != 0:
