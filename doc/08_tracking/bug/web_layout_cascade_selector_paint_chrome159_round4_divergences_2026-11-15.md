@@ -50,9 +50,6 @@ Found while raising unit coverage of `layout_with_style_flow`
 | case | selector | markup | Chrome | actual |
 |---|---|---|---:|---:|
 | is_list | `:is(p, div).k` | `<div id="t" class="k"></div>` | 77 | 10 |
-| first_of_type | `b:first-of-type` | `<section><i></i><b id="t"></b><b></b></section>` | 77 | 10 |
-| last_of_type | `b:last-of-type` | `<section><b></b><b id="t"></b><i></i></section>` | 77 | 10 |
-| only_of_type | `b:only-of-type` | `<section><i></i><b id="t"></b><i></i></section>` | 77 | 10 |
 | invalid_in_list | `div, p:frobnicate` | `<div id="t"></div>` | 10 | 77 |
 
 ### Painted pixels (RRGGBB at x:y)
@@ -88,3 +85,4 @@ kept out of them until fixed.
 - `casc_rem_width` (2026-11-16): every `rem` was resolved against a fixed 16px. The cascade now records the `html` element's computed font-size (`css_cascade_root_font_set`, `..._declarations.spl`) and `rem` in width/height, padding, font-size and min/max-width reads it. The `margin-left`/`margin-right` longhands also parsed `em`/`rem` as 0 (bare `parse_int`); they now resolve them. Pinned by `test/01_unit/browser_engine/rem_uses_root_font_size_chrome159_spec.spl` (Chrome 159 values). Still open: the `margin` shorthand, `margin-inline-*`, and vertical margins in `em`/`rem`.
 - `casc_box_sizing_inherit` (2026-11-16): `box-sizing:inherit` was read as "not border-box". `Style.inherit_border_box` now captures the parent's value in `inherit_from` (and is part of `inherited_digest`, so the cascade memo cannot share an entry across different parents), and both dispatchers honour `inherit`. Pinned by `test/01_unit/browser_engine/box_sizing_inherit_chrome159_spec.spl`. That spec uses `height:20px` because a border-box height below padding+border is a SEPARATE defect, filed above as `border_box_height_floor`: the content box must floor at 0, but the ~15 `st.height_px - pad - border` sites in `..._layout_engine.spl` do not floor it.
 - `compound_tag_class_id` (2026-11-16): the selector parser, the text matcher, the rule-bucket key and specificity all assumed the order `tag#id.class`, so `div.a.b#t` read its tag as `div.a.b`, and `.a#t` bucketed under the class `a#t`. One splitter, `_compound_base_tokens` (`..._core_selectors.spl`), now serves all four and accepts any order. `*` counts as no tag, and two different ids never match. Specificity now counts every class: `#id.a.b` was 110 and is now 120. Pinned by `test/01_unit/browser_engine/compound_selector_any_order_chrome159_spec.spl` (base 3/9, head 9/9).
+- `first_of_type`/`last_of_type`/`only_of_type` (2026-11-16): no code existed for these names, so `_pseudo_code_for` returned -1 and the selector was dead. Added `PSEUDO_FIRST/LAST/ONLY_OF_TYPE` with branches in both the text-path and parsed-path matchers (`_type_position`/`_type_count`), and `-of-type` in `_option_needs_ctx` so `:not(:first-of-type)` gets sibling context. Pinned by `test/01_unit/browser_engine/of_type_pseudo_classes_chrome159_spec.spl` (base 3/7, head 7/7).

@@ -2028,3 +2028,7 @@ never cache an answer computed while exhausted) —
 ## 2026-11-16 — compound selectors in any order
 
 - **One splitter, four consumers.** `_compound_base_tokens` feeds `parse_selector_part` (ParsedSel), `base_selector_matches` (text path, the debug oracle's other side), `selector_bucket_kind/value_from_base` (rule candidate buckets), and `_part_specificity`. If a bucket key is wrong, the rule is never a candidate. The matcher alone cannot show this: `.a#t` matched once parsed, but it sat in the `a#t` class bucket.
+
+## 2026-11-16 — :first/last/only-of-type
+
+- **A new structural pseudo-class needs SIX touch points** in `..._core_selectors.spl`: the `PSEUDO_*` code, `_pseudo_code_for`, the text-path allow-list in `simple_match` (the `pseudo != ...` chain), the text-path ctx branch, the parsed-path ctx branch, and `_option_needs_ctx` (without it, `:not(X)` is evaluated with no siblings). Miss the allow-list and the text path returns false while the parsed path matches; `web_selector_parsed_equivalence_spec` catches that.
