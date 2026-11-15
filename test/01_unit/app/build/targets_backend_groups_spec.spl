@@ -1,0 +1,77 @@
+"""
+## Purpose and audience
+I add opt-in backend provider build groups (C, VHDL, CUDA, ROCm/HIP, Vulkan) under
+`config/build/` and include them from the root `targets.sdn`. This spec proves each
+file parses cleanly, that a default build never resolves them, and that naming a
+group selects exactly its members. For engineers wiring backend plugin builds.
+
+## Operator workflow
+Run `bin/simple test test/01_unit/app/build/targets_backend_groups_spec.spl` from the repo root.
+
+## Compatibility and limitations
+Groups are `default: false`. Entries are the backend sources that exist today.
+`runtime_gpu.sdn` is intentionally absent: no Simple entry source exists for it.
+
+## Verification guidance and troubleshooting
+A `target-error: missing-entry:` means a group names a source file that is not in the tree.
+"""
+# @manual_section: opt-in backend build groups
+# @req REQ-BUILD-GROUP-004 each backend group file parses and validates
+# @req REQ-BUILD-GROUP-005 the default selection resolves no backend target
+# @req REQ-BUILD-GROUP-006 selecting a backend group resolves exactly its members
+
+use app.build.targets.build_targets.{
+    load_targets_file, validate_targets, default_group_targets, group_targets
+}
+use std.spec.step
+
+fn _in(xs: [text], needle: text) -> bool:
+    var i = 0
+    while i < xs.len():
+        if xs[i] == needle:
+            return true
+        i = i + 1
+    false
+
+describe "opt-in backend build groups":
+    """
+    As a backend owner, I keep my provider out of the default build and build it
+    only when I name its group.
+    """
+
+    it "parses and validates every backend group file":
+        # @req REQ-BUILD-GROUP-004
+        for name in ["c", "vhdl", "cuda", "rocm", "vulkan"]:
+            step("Given config/build/backends_" + name + ".sdn")
+            val ts = load_targets_file("config/build/backends_" + name + ".sdn", ".")
+            step("Then it parses and validates with no errors")
+            expect(ts.errors.len()).to_equal(0)
+            expect(validate_targets(ts, ".").len()).to_equal(0)
+            expect(ts.groups.len()).to_equal(1)
+            expect(ts.groups[0].is_default).to_equal(false)
+
+    it "leaves every backend target out of the default selection":
+        # @req REQ-BUILD-GROUP-005
+        step("Given the root targets.sdn that includes all backend groups")
+        val ts = load_targets_file("targets.sdn", ".")
+        expect(validate_targets(ts, ".").len()).to_equal(0)
+        step("When I ask for the default selection")
+        val sel = default_group_targets(ts)
+        step("Then only host members are selected and no //backend: target is")
+        expect(sel.len()).to_equal(3)
+        for t in ["//backend:c", "//backend:vhdl", "//backend:cuda", "//backend:hip", "//backend:vulkan"]:
+            expect(_in(sel, t)).to_equal(false)
+
+    it "selects exactly one provider per named group":
+        # @req REQ-BUILD-GROUP-006
+        step("Given the root targets.sdn")
+        val ts = load_targets_file("targets.sdn", ".")
+        step("When I select each group by name")
+        val pairs = [["backends_c", "//backend:c"], ["backends_vhdl", "//backend:vhdl"],
+            ["backends_cuda", "//backend:cuda"], ["backends_rocm", "//backend:hip"],
+            ["backends_vulkan", "//backend:vulkan"]]
+        for p in pairs:
+            val sel = group_targets(ts, p[0])
+            step("Then " + p[0] + " resolves exactly its member")
+            expect(sel.len()).to_equal(1)
+            expect(sel[0]).to_equal(p[1])
