@@ -2701,7 +2701,7 @@ impl MirLowering:
                     case _: ()
             case MethodCall(receiver, method, method_args, resolution):
                 # Try RTI first (with declared receiver type if available)
-                val receiver_type_for_rti = self.enum_match_method_receiver_type(receiver)
+                val receiver_type_for_rti = self.receiver_declared_type(receiver)
                 val (rti_answered, rti_type) = self.rti_enum_match_subject_type(expr, receiver_type_for_rti)
                 if rti_answered:
                     return rti_type
@@ -2858,24 +2858,43 @@ impl MirLowering:
             case _: ()
         None
 
-    me enum_match_method_receiver_type(receiver: HirExpr) -> HirType?:
-        """Declared receiver of a match-subject method call. A typed binding or
-        field chain answers through receiver_declared_type; an element read of
-        a declared container (`stores[0].get(i)` with `stores: [Store<i64>]`)
-        answers with the declared element type, so RTI can substitute a generic
-        owner's arguments into the method's declared `Result<T, E>`. Only a
-        nominal element is admitted here; receiver_declared_type itself stays
-        unchanged for its other consumers."""
-        if val declared = self.receiver_declared_type(receiver):
-            return Some(declared)
-        match receiver.kind:
-            case HirExprKind.Index(_, _):
-                if val element = self.declared_container_read_type(receiver):
-                    match element.kind:
-                        case HirTypeKind.Named(_, _): return Some(element)
+    me enum_match_declared_owner_key(scrutinee: HirExpr, owner_keys: [text]) -> text:
+        """Owner key, among `owner_keys`, of the builtin Result/Option that a
+        method-call subject's callee declares as its return
+        (`stores[0].get(i)` with `fn get(..) -> Result<T, E>` on a generic
+        class). Attribution only: no type is recorded for the subject, its
+        payload or the call result, so value conventions are untouched
+        (bug native_generic_class_result_payload_times_8_2026-11-15). Empty
+        when the declaration is unknown or names another type."""
+        var wanted = ""
+        match scrutinee.kind:
+            case MethodCall(receiver, method, _, _):
+                var receiver_type = self.receiver_declared_type(receiver)
+                if receiver_type == None:
+                    match receiver.kind:
+                        case HirExprKind.Index(_, _): receiver_type = self.declared_container_read_type(receiver)
+                        case _: ()
+                if val found_receiver = receiver_type:
+                    match found_receiver.kind:
+                        case HirTypeKind.Named(owner_symbol, _):
+                            if val method_id = self.symbols.lookup_method_in_type(owner_symbol, method):
+                                if val declared = self.resolved_call_hir_return_type(method_id):
+                                    match declared.kind:
+                                        case HirTypeKind.Result(_, _): wanted = "Result"
+                                        case HirTypeKind.Optional(_): wanted = "Option"
+                                        case _: ()
                         case _: ()
             case _: ()
-        None
+        if wanted == "":
+            return ""
+        var found = ""
+        for raw_key in owner_keys:
+            val key: text = raw_key
+            if self.enum_bare_of(key) == wanted:
+                if found != "":
+                    return ""
+                found = key
+        found
 
     me enum_match_unwrapped_type(receiver: HirExpr) -> HirType?:
         """Payload type of a builtin Option/Result unwrap on `receiver`."""
@@ -4471,8 +4490,17 @@ impl MirLowering:
                         # truthful, so that case reaches the loud ambiguity
                         # error below instead.
                         val owner_keys = self.variant_owner_keys(variant)
-                        val owner_count = owner_keys.len()
+                        var owner_count = owner_keys.len()
                         var owner = if owner_count > 0: owner_keys[0] else: ""
+                        if owner_count > 1:
+                            # A method-call subject whose callee DECLARES a
+                            # Result/Option return owns the bare arm. Only the
+                            # owner is taken; the subject stays untyped, so the
+                            # payload bind is exactly the unambiguous path's.
+                            val declared_owner = self.enum_match_declared_owner_key(scrutinee, owner_keys)
+                            if declared_owner != "":
+                                owner = declared_owner
+                                owner_count = 1
                         if owner_count == 1:
                             d = self.enum_variant_discriminant(owner, variant)
                             if enum_name == "":

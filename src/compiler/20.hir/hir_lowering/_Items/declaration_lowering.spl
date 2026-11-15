@@ -98,32 +98,6 @@ fn hir_generic_fn_is_template(name: text, type_param_count: i64) -> bool:
 # Reads the parser-recorded span for a declaration index. Falls back to an
 # empty span only when the id is invalid, so a missing location stays visibly
 # empty rather than pointing at a wrong line.
-fn hir_decl_type_mentions_type_param(ty: HirType, symbols: SymbolTable) -> bool:
-    """True when a type parameter occurs anywhere in a declared type, under
-    either spelling (`TypeParam`, or `Named` of a TypeParam symbol)."""
-    match ty.kind:
-        case HirTypeKind.TypeParam(_, _): true
-        case HirTypeKind.Named(sym, args):
-            if val info = symbols.get_symbol_raw(sym.id):
-                if info.kind == SymbolKind.TypeParam:
-                    return true
-            hir_decl_types_mention_type_param(args, symbols)
-        case HirTypeKind.Array(elem, _): hir_decl_type_mentions_type_param(elem, symbols)
-        case HirTypeKind.Slice(elem): hir_decl_type_mentions_type_param(elem, symbols)
-        case HirTypeKind.Optional(inner): hir_decl_type_mentions_type_param(inner, symbols)
-        case HirTypeKind.Dict(k, v): hir_decl_type_mentions_type_param(k, symbols) or hir_decl_type_mentions_type_param(v, symbols)
-        case HirTypeKind.Result(ok, err): hir_decl_type_mentions_type_param(ok, symbols) or hir_decl_type_mentions_type_param(err, symbols)
-        case HirTypeKind.Tuple(elems): hir_decl_types_mention_type_param(elems, symbols)
-        case HirTypeKind.Function(fn_params, ret, _): hir_decl_types_mention_type_param(fn_params, symbols) or hir_decl_type_mentions_type_param(ret, symbols)
-        case _: false
-
-fn hir_decl_types_mention_type_param(types: [HirType], symbols: SymbolTable) -> bool:
-    for raw in types:
-        val t: HirType = raw
-        if hir_decl_type_mentions_type_param(t, symbols):
-            return true
-    false
-
 fn declaration_span_for(decl_idx: i64) -> Span:
     val span_id = decl_get_span(decl_idx)
     if not span_is_valid(span_id):
@@ -625,31 +599,7 @@ impl HirLowering:
         # Generic predeclarations are untyped until their binders are lowered.
         # Publish their semantic signature independently of the bootstrap ABI;
         # generic callers need the declared result even when a binder occurs only there.
-        # A method of a generic owner (`impl Store<T>: fn get(..) -> Result<T, E>`)
-        # is predeclared untyped too (module_declarations_bootstrap: its owner's
-        # binders are not in scope there), even with no type params of its own.
-        # Without this its only declaration was the bootstrap-erased i64 return,
-        # so RTI answered `xs[0].get(i)` / `t.get(i)` as i64 and a bare `case
-        # Ok(v)` arm had no Result owner (native_generic_method_result_match).
-        # Only when no parameter mentions a type parameter: a typed symbol makes
-        # call sites box a `T` argument into a tagged word (rt_value_int_wide),
-        # while untyped callers pass it raw and the erased body and its Result
-        # consumers read it raw. Typing `set(value: T)` turned 42 into 336
-        # (bug native_generic_class_result_payload_times_8_2026-11-15).
-        var generic_owner_method = false
-        if fn_.has_return_type and type_params.len() == 0 and (fn_.is_method or fn_.is_static):
-            if val generic_owner_type = self.current_method_self_type:
-                match generic_owner_type.kind:
-                    case HirTypeKind.Named(generic_owner, _):
-                        if self.owner_type_param_names_raw(generic_owner.id).len() > 0:
-                            if val untyped_symbol = self.symbols.get_symbol_raw(fn_symbol_id.id):
-                                generic_owner_method = untyped_symbol.type_ == nil
-                    case _: ()
-            for raw_generic_param in params:
-                val generic_param: HirParam = raw_generic_param
-                if hir_decl_type_mentions_type_param(generic_param.type_, self.symbols):
-                    generic_owner_method = false
-        if fn_.has_return_type and (type_params.len() > 0 or generic_owner_method):
+        if fn_.has_return_type and type_params.len() > 0:
             if val declared_symbol = self.symbols.get_symbol_raw(fn_symbol_id.id):
                 var semantic_symbol = declared_symbol
                 var semantic_params: [HirType] = []

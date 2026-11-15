@@ -1,14 +1,19 @@
-# Native oracle: a generic class method's declared Result<T, E> owns bare
-# Ok/Err arms (match subject, let-bound match, unwrap_or, `?`) for receivers
-# read out of a module-level array (`int_stores[0].get(i)`) and a typed local,
-# with T = i64 and T = text, including after `set`. Arm selection AND payload
-# values must match the seed: the i64 rows (42, ok 43) are the regression
-# guard for the x8 encoding a13439c4680 introduced by typing `set(value: T)`
-# (doc/08_tracking/bug/native_generic_class_result_payload_times_8_2026-11-15.md).
-# `.ok` + `if val` and f64 rows live in ../native_generic_payload_encoding_known_wrong.
-# Shape of compiler.frontend.core._AstExpr.nodes:509/560 (expr_extra_get /
-# expr_s_val_get over [AttributeStoreV1<T>]); spec guard:
-# test/01_unit/compiler/mir/generic_method_result_match_subject_spec.spl.
+# Native oracle: a generic class method's declared Result<T, E> / T? owns
+# bare Ok/Err/Some/None arms when another enum (Probe) declares them too, for
+# receivers read out of a module-level array (`int_stores[0].get(i)`), with
+# T = i64, text and bool, and the Result then consumed directly by `match`,
+# by `?`, passed to a call and returned. Shape of
+# compiler.frontend.core._AstExpr.nodes:509/560 (expr_extra_get / expr_s_val_get
+# over [AttributeStoreV1<T>]).
+# Proof obligation: with Probe's Ok/Err/Some/None renamed away, the old Stage 2
+# (run 34, 43d59a39947) prints exactly these lines on cranelift and llvm; with
+# Probe as written it fails "bare variant 'Ok' is ambiguous". The fix only picks
+# the owner, so native output must equal the seed with no other change.
+# Let-bound rows: ../native_generic_method_result_let_bound. Known-wrong rows
+# (`.ok` + `if val`, f64, let-bound text, Result read back from an array):
+# ../native_generic_payload_encoding_known_wrong.
+# Bug: doc/08_tracking/bug/native_generic_class_result_payload_times_8_2026-11-15.md
+# Spec: test/01_unit/compiler/mir/generic_method_result_match_subject_spec.spl
 # Build: SIMPLE_BOOTSTRAP=1 native-build main.spl --entry-closure (cranelift, llvm).
 # Expected stdout (seed `simple run main.spl`; native must equal it):
 # -1
@@ -16,28 +21,36 @@
 # -1
 # <none>
 # hello
-# dflt
+# false
+# true
+# absent: no extra entry for node 7
 # 42
-# -2
-# 1042
-# -7
+# -1
 # ok 43
 # err absent: no extra entry for node 4
+# 42
+# -3
+# 42
 # 1
 # probe other
 
 use store.{Store, store_new}
 
-# A second enum declaring Ok/Err makes a bare arm ambiguous unless the
-# subject's declared Result owns it (as in the full compiler closure).
+# A second enum declaring Ok/Err/Some/None makes every bare arm below
+# ambiguous unless the subject's declared Result/Option owns it (as in the
+# full compiler closure). Remove it to get the run-34 baseline program.
 enum Probe:
     Ok
     Err
+    Some
+    None
     Other
 
 var int_stores: [Store<i64>] = []
 var text_stores: [Store<text>] = []
+var bool_stores: [Store<bool>] = []
 
+# direct match subject
 fn int_get(idx: i64) -> i64:
     match int_stores[0].get(idx):
         case Ok(v): v
@@ -48,17 +61,22 @@ fn text_get(idx: i64) -> text:
         case Ok(v): v
         case Err(_): "<none>"
 
-fn local_get(t: Store<i64>, idx: i64) -> i64:
-    match t.get(idx):
+fn bool_get(idx: i64) -> bool:
+    match bool_stores[0].get(idx):
         case Ok(v): v
-        case Err(_): -2
+        case Err(_): false
 
-fn int_bound(idx: i64) -> i64:
-    val q = int_stores[0].get(idx)
-    match q:
-        case Ok(v): v + 1000
-        case Err(_): int_stores[0].get(idx).unwrap_or(-7)
+fn err_text(idx: i64) -> text:
+    match int_stores[0].get(idx):
+        case Ok(_): "ok"
+        case Err(e): e
 
+fn int_find(idx: i64) -> i64:
+    match int_stores[0].find(idx):
+        case Some(v): v
+        case None: -1
+
+# `?`
 fn int_try(idx: i64) -> Result<i64, text>:
     val v = int_stores[0].get(idx)?
     Ok(v + 1)
@@ -68,9 +86,20 @@ fn try_text(idx: i64) -> text:
         case Ok(v): "ok {v}"
         case Err(e): "err {e}"
 
+# passed to a call
+fn show(r: Result<i64, text>) -> i64:
+    match r:
+        case Ok(v): v
+        case Err(_): -3
+
+# returned
+fn pass_through(idx: i64) -> Result<i64, text>:
+    int_stores[0].get(idx)
+
 fn main():
     int_stores.push(store_new<i64>("extra"))
     text_stores.push(store_new<text>("s_val"))
+    bool_stores.push(store_new<bool>("flag"))
     print(int_get(2))
     int_stores[0].set(2, 42)
     print(int_get(2))
@@ -78,13 +107,17 @@ fn main():
     print(text_get(0))
     text_stores[0].set(0, "hello")
     print(text_get(0))
-    print(text_stores[0].get(5).unwrap_or("dflt"))
-    print(local_get(int_stores[0], 2))
-    print(local_get(int_stores[0], 9))
-    print(int_bound(2))
-    print(int_bound(3))
+    print(bool_get(1))
+    bool_stores[0].set(1, true)
+    print(bool_get(1))
+    print(err_text(7))
+    print(int_find(2))
+    print(int_find(5))
     print(try_text(2))
     print(try_text(4))
+    print(show(int_stores[0].get(2)))
+    print(show(int_stores[0].get(6)))
+    print(show(pass_through(2)))
     print(int_stores[0].len())
     match Probe.Other:
         case Probe.Ok: print("probe ok")
