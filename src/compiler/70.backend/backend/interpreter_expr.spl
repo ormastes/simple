@@ -16,7 +16,52 @@ use compiler.backend.interpreter.{
 use compiler.backend.interpreter_calls.*
 use compiler.semantics.perf_facts.builtin_collection.{resolve_builtin_collection_operation}
 
+fn interp_string_segments(value: text) -> [text]:
+    """Literal text around the top-level `{...}` regions of an interpolated
+    string, N+1 segments for N regions. Mirrors MIR's
+    split_interpolation_segments (including `{{`/`}}` escapes) so the
+    segments line up positionally with the interpolation list."""
+    var segments: [text] = []
+    var cur = ""
+    var depth = 0
+    var i = 0
+    val n = value.len()
+    while i < n:
+        val ch = value[i:i + 1]
+        val ch_next = if i + 1 < n: value[i + 1:i + 2] else: ""
+        if depth == 0 and ch == "{" and ch_next == "{":
+            cur = cur + "{"
+            i = i + 1
+        elif depth == 0 and ch == "}" and ch_next == "}":
+            cur = cur + "}"
+            i = i + 1
+        elif depth == 0 and ch == "{":
+            segments = segments.push(cur)
+            cur = ""
+            depth = 1
+        elif depth > 0 and ch == "{":
+            depth = depth + 1
+        elif depth > 0 and ch == "}":
+            depth = depth - 1
+        elif depth == 0:
+            cur = cur + ch
+        i = i + 1
+    segments = segments.push(cur)
+    segments
+
 impl InterpreterBackendImpl:
+    fn eval_interpolated_string(value: text, interps: [HirInterpolation], ctx: EvalContext) -> Result<Value, BackendError>:
+        val segments = interp_string_segments(value)
+        var out = segments[0]
+        var k = 0
+        while k < interps.len() and k + 1 < segments.len():
+            val item: HirInterpolation = interps[k]
+            val part = self.eval_expr(item.expr, ctx)?
+            out = out + self.value_to_string(part) + segments[k + 1]
+            k = k + 1
+        val string_value: Value = backend_value_string_v1(out)
+        Ok(string_value)
+
     fn eval_expr(expr: HirExpr, ctx: EvalContext) -> Result<Value, BackendError>:
         val ee_disc: i64 = interp_enum_discriminant_raw(expr.kind)
         itrace("[EE] eval_expr entry disc={ee_disc}")
@@ -82,8 +127,13 @@ impl InterpreterBackendImpl:
                 # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
                 Ok(backend_value_float_v1(value.to_float()))
 
-            case HirExprKind.StringLit(value, _):
+            case HirExprKind.StringLit(value, interps_opt):
                 itrace("[EE] StringLit arm")
+                val interpolations: [HirInterpolation]? = interps_opt
+                if val present = interpolations:
+                    val interp_list: [HirInterpolation] = present
+                    if interp_list.len() > 0:
+                        return self.eval_interpolated_string(value, interp_list, ctx)
                 # Hoist nested enum construction: direct Ok(Value.String(...))
                 # loses the inner payload on the current stage4 AOT path.
                 # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value

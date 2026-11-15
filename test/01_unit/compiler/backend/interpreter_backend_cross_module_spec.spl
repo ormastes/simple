@@ -1,0 +1,68 @@
+# The pure-Simple HIR interpreter (the engine behind the native CLI's `run`
+# and `test`) must evaluate string interpolation and call functions that are
+# defined in an imported module.
+#
+# @cover src/compiler/70.backend/backend/interpreter_expr.spl
+# @cover src/compiler/70.backend/backend/interpreter_calls.spl
+#
+# doc/08_tracking/bug/native_cli_test_cannot_run_std_spec_2026-11-15.md
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.backend.backend_types.*
+use compiler.backend.interpreter.{InterpreterBackendImpl}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+
+fn xm_lower(src: text, path: text, module_name: text) -> HirModule:
+    val module = parse_full_frontend(src, path, module_name, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    lowering.lower_module(module)
+
+fn xm_lower_importing(src: text, path: text, module_name: text, dep_src: text, dep_path: text, dep_name: text) -> HirModule:
+    """Lower `src` the way the driver does: with the imported module's surface registered."""
+    val log = Logger(level: 0)
+    val dep_module = parse_full_frontend(dep_src, dep_path, dep_name, log)
+    val module = parse_full_frontend(src, path, module_name, log)
+    var modules: Dict<text, Module> = {}
+    modules[dep_name] = dep_module
+    modules[module_name] = module
+    val sources = [SourceFile(path: dep_path, content: dep_src, module_name: dep_name), SourceFile(path: path, content: src, module_name: module_name)]
+    var lowering = hirlowering_for_module(path, module_surfaces_from_modules(modules, sources).unwrap())
+    lowering.lower_module(module)
+
+fn xm_result_text(result: Result<BackendResult, BackendError>) -> text:
+    match result:
+        case Ok(BackendResult.Value(Value.String(s))): "string:" + s
+        case Ok(BackendResult.Value(Value.Int(n))): "int:" + n.to_text()
+        case Ok(_): "other"
+        case Err(e): "error:" + e.message
+
+describe "HIR interpreter strings and imported functions":
+    it "fills interpolation slots with evaluated values":
+        val hir = xm_lower("fn main() -> text:\n    \"sum={{2 + 3}}!\"\n", "xm_interp.spl", "xm_interp")
+        var backend = InterpreterBackendImpl.new()
+        expect(xm_result_text(backend.interpret_hir_module(hir))).to_equal("string:sum=5!")
+
+    it "calls a function defined in an imported module":
+        val dep_src = "pub fn helper_add(a: i64, b: i64) -> i64:\n    a + b\n"
+        val provider = xm_lower(dep_src, "xm_b.spl", "xm_b")
+        val entry = xm_lower_importing("use xm_b.\{helper_add\}\n\nfn main() -> i64:\n    helper_add(2, 3)\n", "xm_a.spl", "xm_a", dep_src, "xm_b.spl", "xm_b")
+        var providers: Dict<text, HirModule> = {}
+        providers["xm_b"] = provider
+        var backend = InterpreterBackendImpl.new()
+        expect(xm_result_text(backend.interpret_hir_module_with_live_providers(entry, providers))).to_equal("int:5")
+
+    it "prefers the entry module's own function over an imported one with the same name":
+        val provider = xm_lower("fn pick() -> i64:\n    1\n", "xm_c.spl", "xm_c")
+        val entry = xm_lower("fn pick() -> i64:\n    2\n\nfn main() -> i64:\n    pick()\n", "xm_d.spl", "xm_d")
+        var providers: Dict<text, HirModule> = {}
+        providers["xm_c"] = provider
+        var backend = InterpreterBackendImpl.new()
+        expect(xm_result_text(backend.interpret_hir_module_with_live_providers(entry, providers))).to_equal("int:2")
