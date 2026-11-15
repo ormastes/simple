@@ -90,3 +90,25 @@ byte-identical between `--backend cpu_simd` and `--backend vulkan` (llvmpipe)
 forms-media Vulkan work is unchanged (39 font composites, pack_full=12,
 pack_incremental=9 before and after); wall-time deltas between runs were not
 attributed (shared host).
+
+Review follow-ups (same day):
+
+- With a clip set, `composite_font_batch` copies the quads and the batch only
+  when some quad crosses the clip (`vulkan_font_quads_within_clip`); Draw IR
+  sets a clip for every control text run, and nearly all of them lie inside
+  it. forms-media 900x760 on vulkan (llvmpipe), `simple run` of a one-page
+  render, same seed: before 81.10 s / 75.63 s (load ~4, maxrss 1.08-1.11 GB),
+  after 84.60 s / 87.02 s (load ~7, maxrss 1.06-1.09 GB), pixel checksum
+  identical (`sum=2697697746427296`). The page is dominated by other work and
+  the host load doubled between the runs, so no wall-time win is claimed; the
+  change removes one quad array plus one `FontRenderBatch` copy per
+  inside-clip run.
+- New rows: left/top partial clip (atlas read position shifted, byte-equal to
+  software), a run whose origin is off the top-left, host rows for the clip
+  helpers (atlas_x/atlas_y shift on left/top trim, negative origin, exclusive
+  right/bottom edges), and a Draw IR row proving valid advances are applied
+  (encoded `7,7` == `[7, 7]`, != `[3, 11]`; the advances must sum to the
+  command width or the run falls back to the font's own advances).
+- The Vulkan rows print `[skip] <row>: no llvmpipe ICD at
+  /usr/share/vulkan/icd.d/lvp_icd.json; this Vulkan row was not exercised`
+  when the ICD is missing. A green run on such a host is not Vulkan evidence.

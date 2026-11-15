@@ -1875,3 +1875,11 @@ never cache an answer computed while exhausted) —
 - `engine2d_software_offscreen_dispatch_spec` (0/3) asserts a software rung
   that `engine.spl` todo 303 says does not exist; filed, not edited:
   `doc/08_tracking/bug/engine2d_software_offscreen_dispatch_spec_asserts_missing_rung_2026-11-15.md`.
+- Hosts without `/usr/share/vulkan/icd.d/lvp_icd.json` do NOT exercise the
+  Vulkan rows of `vulkan_text_advances_clip_parity_spec` or AC-13 of
+  `linear_gradient_angle_draw_ir_chrome159_spec`: each prints a
+  `[skip] ... was not exercised` line and returns. Read the log, not the
+  pass count, before citing them as Vulkan evidence.
+- Draw IR advances are applied only when they sum to the command width;
+  otherwise the run silently paints with the font's own advances. A test of
+  "advances applied" must set the width to the sum (see the `7,7` row).

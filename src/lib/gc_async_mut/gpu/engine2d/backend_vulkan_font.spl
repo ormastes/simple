@@ -814,6 +814,24 @@ fn vulkan_bitmap_text_quads(text_val: text, color: u32, scale: i32, advance: i32
         i = i + 1
     quads
 
+fn vulkan_font_quads_within_clip(quads: [FontRenderQuad], origin_x: i32, origin_y: i32,
+                                 clip_x: i32, clip_y: i32, clip_w: i32,
+                                 clip_h: i32) -> bool:
+    """True when every quad's destination rect lies wholly inside the clip, so
+    `vulkan_bitmap_text_clip_quads` would return the quads unchanged."""
+    if clip_w <= 0 or clip_h <= 0:
+        return quads.len() == 0
+    val cl = clip_x.to_i64()
+    val ct = clip_y.to_i64()
+    val cr = cl + clip_w.to_i64()
+    val cb = ct + clip_h.to_i64()
+    for q in quads:
+        val dl = origin_x.to_i64() + q.dst_x.to_i64()
+        val dt = origin_y.to_i64() + q.dst_y.to_i64()
+        if dl < cl or dt < ct or dl + q.width.to_i64() > cr or dt + q.height.to_i64() > cb:
+            return false
+    true
+
 fn vulkan_bitmap_text_clip_quads(quads: [FontRenderQuad], origin_x: i32, origin_y: i32,
                                  clip_x: i32, clip_y: i32, clip_w: i32,
                                  clip_h: i32) -> [FontRenderQuad]:
@@ -1194,7 +1212,12 @@ impl VulkanBackend:
         # vector-face composite ignored it, so Draw IR text clipped to a control
         # box painted its descenders below the box on Vulkan only (forms page,
         # 62 px over 8 catalog pages at 900x760; vulkan_text_advances_clip_parity_spec).
-        val drawn_quads = if self.clip_enabled:
+        # Draw IR clips every control's text, and most of it lies wholly
+        # inside: copy the quads (and the batch) only when one needs trimming.
+        val trim = self.clip_enabled and not vulkan_font_quads_within_clip(
+            batch.quads, origin_x, origin_y,
+            self.clip_x, self.clip_y, self.clip_w, self.clip_h)
+        val drawn_quads = if trim:
             vulkan_bitmap_text_clip_quads(batch.quads, origin_x, origin_y,
                 self.clip_x, self.clip_y, self.clip_w, self.clip_h)
         else:
@@ -1209,7 +1232,7 @@ impl VulkanBackend:
             return _vulkan_font_evidence(self.font_atlas_pipeline_evidence(), "clipped-out",
                 "font-quads-outside-clip", self.d_font_atlas, 0, 0, 0,
                 batch.quads.len(), 0, false, false, self.d_framebuffer, 0, 0, 0, false)
-        val drawn = if drawn_quads.len() == batch.quads.len() and not self.clip_enabled:
+        val drawn = if not trim:
             batch
         else:
             _vulkan_font_batch_with_quads(batch, drawn_quads, batch.dirty_rects)
@@ -2109,6 +2132,7 @@ export vulkan_bitmap_font_atlas_width, vulkan_bitmap_font_atlas_height
 export vulkan_bitmap_font_identity, vulkan_bitmap_text_atlas_eligible
 export vulkan_bitmap_font_atlas_pixels, vulkan_bitmap_text_quads
 export vulkan_bitmap_text_clip_quads
+export vulkan_font_quads_within_clip
 export vulkan_bitmap_text_atlas_block_reason, vulkan_font_batch_composited
 export vulkan_text_atlas_fallback_safe
 use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
