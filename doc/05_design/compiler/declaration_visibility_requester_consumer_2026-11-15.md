@@ -109,3 +109,34 @@ existing bare `Box<T = Target>` positive oracle where Target is a proved
 same-source nominal (UNRUN). Bounds, primitive/formal/compound/qualified defaults
 and cross-module default dependencies remain unavailable; they require their
 actual respective resolution proofs. Sibling facade provenance remains missing.
+
+## Authenticated direct sibling source checkpoint (2026-11-15)
+
+The unchanged legal `use physical.body.{Target}; export Target` success oracle now
+has a production resolver branch. Canonical source admission retains its exact
+namespace key; aliases cannot replace it. Inventory observations retain the
+selected source SHA through SourceFile, driver ownership copy, frozen evidence,
+semantic identity and promotion roots. The direct-folder-source receipt selects
+that key before legacy resolution and requires both authenticated source hashes,
+a shared snapshot, complete policy observations, and same immediate folder.
+A registered namespace parent retains authority over child selection; failure
+there cannot fall through into this branch. No implicit name-only sibling search
+or canonical-path reconstruction is authorized.
+
+The existing typed selected-export edge supplies import row/item, binding category,
+role, projection and registry generation. The requester joins that edge to the
+new route receipt and revalidates exact admission names, importer ownership,
+policy digests, hashes, snapshot and route/registry generation. Explicit export
+may promote omitted declaration intent within the selected sibling hop; explicit
+pri remains denied. The external facade child and all crossed ancestors are
+checked before this inner hop. A direct sibling receipt belongs only to its
+actual importer; it is not external permission for the implementation module.
+
+Six new negative cases cover private child aliases, explicit pri, stale source
+inventory/admission namespace, closed ancestor, arbitrary same-path alias, and
+rebound target. The earlier expected-success oracle is unchanged. Total consumer
+cases: 26 authored, UNRUN. The nine receipt cases also remain UNRUN. Source hygiene
+is separate from runtime RED/GREEN: no qualified SSpec producer exists in this
+lane; no seed fallback, full build, or runtime PASS is claimed. Bounds, other
+default forms, implicit sibling lookup, cross-folder/glob/qualified exports and
+full visibility/runtime/lifetime/performance qualification remain incomplete.

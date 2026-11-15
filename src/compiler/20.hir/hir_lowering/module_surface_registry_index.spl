@@ -1,6 +1,6 @@
 use compiler.common.cache.module_child_selection_receipt_v1.{ModuleChildSelectionReceiptV1}
 use compiler.hir.hir_lowering.module_surface_selected_exports_v1.{module_surface_selected_exports_build_v1, module_surface_selected_exports_project_v1}
-use compiler.hir.hir_lowering.module_child_selection_v1.{module_child_select_configured_v1}
+use compiler.hir.hir_lowering.module_child_selection_v1.{module_child_select_configured_v1, module_direct_folder_select_v1}
 # Frozen registry indexes and import/export route projections.
 use compiler.common.library_mode_policy_v1.{library_mode_generic_import_v1, library_mode_import_key_v1}
 
@@ -65,6 +65,7 @@ fn _module_surface_final_semantic_digest(surface: ModuleSurface, selected_digest
     digest = module_surface_semantic_mix(digest, "schema", "module-surface-frozen-typed-exports-v2")
     digest = module_surface_semantic_mix(digest, "selected-export-digest", selected_digest)
     digest = module_surface_semantic_mix(digest, "manifest-permission-input", manifest_digest)
+    digest = module_surface_semantic_mix(digest, "admitted-direct-name", surface.admitted_direct_name_v1)
     for limb in [surface.semantic_hash0, surface.semantic_hash1, surface.semantic_hash2, surface.semantic_hash3]:
         digest = module_surface_semantic_mix(digest, "declaration-limb", "{limb}")
     if surface.import_item_offsets.len() != surface.import_target_names.len() + 1: return ""
@@ -76,7 +77,7 @@ fn _module_surface_final_semantic_digest(surface: ModuleSurface, selected_digest
         if i >= surface.import_child_selections_v1.len(): return ""
         val child_selection = surface.import_child_selections_v1[i]
         digest = module_surface_semantic_mix(digest, "child-selected", "{child_selection.selected}")
-        for field in [child_selection.configured_namespace, child_selection.selected_name,
+        for field in [child_selection.route_kind, child_selection.direct_source_sha256, child_selection.target_policy_digest, child_selection.configured_namespace, child_selection.selected_name,
                 child_selection.child_name, "{child_selection.child_ordinal}", child_selection.child_modifier,
                 child_selection.policy_digest, child_selection.target_digest, child_selection.target_kind,
                 child_selection.configured_route_generation]:
@@ -678,6 +679,8 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
             val configured_import = library_mode_import_key_v1(import_decl.module,
                 registry.library_mode, surface.module_name)
             var child_selection = module_child_select_configured_v1(registry, configured_import)
+            if not child_selection.selected:
+                child_selection = module_direct_folder_select_v1(registry, surface_index, configured_import)
             # Self-file imports have an existing package redirection rule;
             # that legacy branch cannot borrow a namespace-child receipt.
             if child_selection.selected and child_selection.target_path == surface.canonical_path:

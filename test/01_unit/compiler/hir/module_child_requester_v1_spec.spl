@@ -67,11 +67,12 @@ fn requester_fixture_v1(body: text, declaration: text = "pub struct Target:\n   
         source_file_with_manifest_evidence_v1(SourceFile(path: target, content: declaration, module_name: "physical.body"), requester_evidence_v1(target, inventory, policies)),
         SourceFile(path: target, content: declaration, module_name: "configured.open"),
         SourceFile(path: target, content: declaration, module_name: "configured.hidden"),
+        SourceFile(path: target, content: declaration, module_name: "alternate.body"),
         source_file_with_manifest_evidence_v1(SourceFile(path: facade, content: facade_body, module_name: "physical.facade"), requester_evidence_v1(facade, inventory, policies)),
         SourceFile(path: facade, content: facade_body, module_name: "configured.facade"),
         source_file_with_manifest_evidence_v1(SourceFile(path: requester, content: body, module_name: "caller"), requester_evidence_v1(requester, inventory, policies))]
     val registry = module_surfaces_from_modules({"physical.pkg": root_module, "configured": root_module,
-        "physical.body": target_module, "configured.open": target_module, "configured.hidden": target_module,
+        "physical.body": target_module, "configured.open": target_module, "configured.hidden": target_module, "alternate.body": target_module,
         "physical.facade": facade_module, "configured.facade": facade_module, "caller": caller_module}, sources).unwrap()
     val lowering = HirLowering.with_filename(requester)
     lowering.module_surfaces = registry
@@ -227,3 +228,55 @@ describe "configured child requester checks at actual type references":
         lowering.module_surfaces.surfaces[receipt.target_surface].composite_values = []
         expect(lowering.lower_named_kind("Box", [], Span.empty()) == HirTypeKind.Error).to_equal(true)
         expect(requester_denial_v1(lowering, "template-declaration-unavailable")).to_equal(true)
+
+    it "rejects a configured alias to the same sibling source without child authority":
+        val lowering = requester_fixture_v1("use configured.facade.\{Target\}\n", "struct Target:\n    value: i64\n",
+            "/snapshot/test/caller.spl", false, "use configured.hidden.\{Target\}\nexport Target\n")
+        expect(lowering.lower_named_kind("Target", [], Span.empty()) == HirTypeKind.Error).to_equal(true)
+        expect(requester_denial_v1(lowering, "private-child")).to_equal(true)
+
+    it "rejects explicit pri through an authenticated direct sibling facade":
+        val lowering = requester_fixture_v1("use configured.facade.\{Target\}\n", "pri struct Target:\n    value: i64\n",
+            "/snapshot/test/caller.spl", false, "use physical.body.\{Target\}\nexport Target\n")
+        expect(lowering.lower_named_kind("Target", [], Span.empty()) == HirTypeKind.Error).to_equal(true)
+        expect(requester_denial_v1(lowering, "explicit-pri")).to_equal(true)
+
+    it "rejects stale sibling evidence and replaced admission namespace":
+        val lowering = requester_fixture_v1("use configured.facade.\{Target\}\n", "struct Target:\n    value: i64\n",
+            "/snapshot/test/caller.spl", false, "use physical.body.\{Target\}\nexport Target\n")
+        val outer = lowering.module_child_binding_receipts_v1[0]
+        val hop = lowering.module_surfaces.surfaces[outer.target_surface].import_child_selections_v1[0]
+        expect(hop.route_kind).to_equal("direct-folder-source")
+        lowering.module_surfaces.surfaces[hop.target_surface].visibility_manifest_evidence_v1.selected_source_sha256 = "stale"
+        expect(lowering.lower_named_kind("Target", [], Span.empty()) == HirTypeKind.Error).to_equal(true)
+        expect(requester_denial_v1(lowering, "direct-source")).to_equal(true)
+        val rebound = requester_fixture_v1("use configured.facade.\{Target\}\n", "struct Target:\n    value: i64\n",
+            "/snapshot/test/caller.spl", false, "use physical.body.\{Target\}\nexport Target\n")
+        val selected = rebound.module_child_binding_receipts_v1[0]
+        val route = rebound.module_surfaces.surfaces[selected.target_surface].import_child_selections_v1[0]
+        rebound.module_surfaces.surfaces[route.target_surface].admitted_direct_name_v1 = "physical.wrong_sibling"
+        expect(rebound.lower_named_kind("Target", [], Span.empty()) == HirTypeKind.Error).to_equal(true)
+        expect(requester_denial_v1(rebound, "direct-source")).to_equal(true)
+
+    it "keeps external closed ancestors closed around a sibling facade":
+        val lowering = requester_fixture_v1("use configured.facade.\{Target\}\n", "struct Target:\n    value: i64\n",
+            "/snapshot/src/caller.spl", true, "use physical.body.\{Target\}\nexport Target\n")
+        expect(lowering.lower_named_kind("Target", [], Span.empty()) == HirTypeKind.Error).to_equal(true)
+        expect(requester_denial_v1(lowering, "closed-ancestor")).to_equal(true)
+
+    it "does not promote an arbitrary alias even when its path equals the admitted sibling":
+        val lowering = requester_fixture_v1("use configured.facade.\{Target\}\n", "struct Target:\n    value: i64\n",
+            "/snapshot/test/caller.spl", false, "use alternate.body.\{Target\}\nexport Target\n")
+        expect(lowering.lower_named_kind("Target", [], Span.empty()) == HirTypeKind.Error).to_equal(true)
+        expect(requester_denial_v1(lowering, "export-import-route-unavailable")).to_equal(true)
+
+    it "rejects a sibling receipt rebound to a different selected target":
+        val lowering = requester_fixture_v1("use configured.facade.\{Target\}\n", "struct Target:\n    value: i64\n",
+            "/snapshot/test/caller.spl", false, "use physical.body.\{Target\}\nexport Target\n")
+        val outer = lowering.module_child_binding_receipts_v1[0]
+        val facade = lowering.module_surfaces.surfaces[outer.target_surface]
+        var hop = facade.import_child_selections_v1[0]
+        hop.target_surface = outer.manifest_surface
+        facade.import_child_selections_v1[0] = hop
+        expect(lowering.lower_named_kind("Target", [], Span.empty()) == HirTypeKind.Error).to_equal(true)
+        expect(requester_denial_v1(lowering, "export-import-route-mismatch")).to_equal(true)

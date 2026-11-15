@@ -1,3 +1,5 @@
+use compiler.common.cache.visibility_manifest_read_v1.{visibility_manifest_parent_v1}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
 # Explicit configured namespace-child selection. Legacy flat aliases remain
 # unavailable; no path-to-public-child search is permitted here.
 use compiler.common.cache.module_child_selection_receipt_v1.{ModuleChildSelectionReceiptV1}
@@ -50,6 +52,80 @@ pub(package) fn module_child_select_configured_v1(registry: ModuleSurfacesByName
                 registry_generation: registry.generation)
     ModuleChildSelectionReceiptV1()
 
+# Exact canonical source admission is selected before legacy resolution. An
+# arbitrary alias with the same target cannot enter this owner branch.
+pub(package) fn module_direct_folder_select_v1(registry: ModuleSurfacesByName,
+        source_index: i64, configured_name: text) -> ModuleChildSelectionReceiptV1:
+    if source_index < 0 or source_index >= registry.surfaces.len() or registry.generation <= 0:
+        return ModuleChildSelectionReceiptV1()
+    val dot = configured_name.last_index_of(".")
+    if dot <= 0: return ModuleChildSelectionReceiptV1()
+    # A configured parent owns its child policy, including unavailable policy.
+    # Never recover a failed child selection by treating it as a direct source.
+    if module_surface_registry_index(registry, configured_name.substring(0, dot)) >= 0:
+        return ModuleChildSelectionReceiptV1()
+    val target_index = module_surface_registry_index(registry, configured_name)
+    if target_index < 0 or target_index == source_index: return ModuleChildSelectionReceiptV1()
+    val source = registry.surfaces[source_index]
+    val target = registry.surfaces[target_index]
+    if target.admitted_direct_name_v1 != configured_name: return ModuleChildSelectionReceiptV1()
+    val source_evidence = source.visibility_manifest_evidence_v1
+    val target_evidence = target.visibility_manifest_evidence_v1
+    if (not builder_digest_valid_v1(source_evidence.selected_source_sha256) or
+            not builder_digest_valid_v1(target_evidence.selected_source_sha256) or
+            source_evidence.selected_source_sha256 != source.source_sha256_v1 or
+            target_evidence.selected_source_sha256 != target.source_sha256_v1 or
+            source_evidence.snapshot_id != target_evidence.snapshot_id or
+            module_surface_manifest_ready_reason_v1(source.canonical_path, source_evidence) != "" or
+            module_surface_manifest_ready_reason_v1(target.canonical_path, target_evidence) != ""):
+        return ModuleChildSelectionReceiptV1()
+    # Location constrains eligibility only after exact binding selection.
+    if visibility_manifest_parent_v1(source.canonical_path) != visibility_manifest_parent_v1(target.canonical_path):
+        return ModuleChildSelectionReceiptV1()
+    return ModuleChildSelectionReceiptV1(selected: true, reason: "selected-direct-source",
+        route_kind: "direct-folder-source", configured_namespace: source.admitted_direct_name_v1,
+        selected_name: configured_name, manifest_surface: source_index, manifest_path: source.canonical_path,
+        direct_source_sha256: source.source_sha256_v1,
+        policy_digest: module_surface_manifest_digest_v1(source.canonical_path, source_evidence),
+        target_policy_digest: module_surface_manifest_digest_v1(target.canonical_path, target_evidence),
+        snapshot_id: source_evidence.snapshot_id, target_surface: target_index,
+        target_path: target.canonical_path, target_digest: target.source_sha256_v1, target_kind: "source-file",
+        configured_route_generation: registry.configured_route_generation_v1, registry_generation: registry.generation)
+
+fn module_direct_folder_validate_v1(registry: ModuleSurfacesByName,
+        receipt: ModuleChildSelectionReceiptV1) -> text:
+    val source = registry.surfaces[receipt.manifest_surface]
+    val target = registry.surfaces[receipt.target_surface]
+    val dot = receipt.selected_name.last_index_of(".")
+    if dot <= 0: return "direct-source-name-invalid"
+    if (module_surface_registry_index(registry, receipt.selected_name.substring(0, dot)) >= 0 or
+            module_surface_registry_index(registry, receipt.selected_name) != receipt.target_surface or
+            module_surface_registry_index(registry, receipt.configured_namespace) != receipt.manifest_surface or
+            source.admitted_direct_name_v1 != receipt.configured_namespace or
+            target.admitted_direct_name_v1 != receipt.selected_name):
+        return "direct-source-binding-mismatch"
+    val source_evidence = source.visibility_manifest_evidence_v1
+    val target_evidence = target.visibility_manifest_evidence_v1
+    if (receipt.manifest_path != source.canonical_path or receipt.target_path != target.canonical_path or
+            receipt.target_kind != "source-file" or receipt.snapshot_id != source_evidence.snapshot_id or
+            receipt.snapshot_id != target_evidence.snapshot_id or
+            not builder_digest_valid_v1(receipt.direct_source_sha256) or
+            not builder_digest_valid_v1(receipt.target_digest) or
+            receipt.direct_source_sha256 != source.source_sha256_v1 or
+            receipt.direct_source_sha256 != source_evidence.selected_source_sha256 or
+            receipt.target_digest != target.source_sha256_v1 or
+            receipt.target_digest != target_evidence.selected_source_sha256):
+        return "direct-source-snapshot-mismatch"
+    if (module_surface_manifest_ready_reason_v1(source.canonical_path, source_evidence) != "" or
+            module_surface_manifest_ready_reason_v1(target.canonical_path, target_evidence) != "" or
+            receipt.policy_digest == "" or receipt.target_policy_digest == "" or
+            receipt.policy_digest != module_surface_manifest_digest_v1(source.canonical_path, source_evidence) or
+            receipt.target_policy_digest != module_surface_manifest_digest_v1(target.canonical_path, target_evidence)):
+        return "direct-source-policy-mismatch"
+    if visibility_manifest_parent_v1(source.canonical_path) != visibility_manifest_parent_v1(target.canonical_path):
+        return "direct-source-folder-mismatch"
+    ""
+
 pub fn module_child_selection_validate_v1(registry: ModuleSurfacesByName,
         receipt: ModuleChildSelectionReceiptV1) -> text:
     """Validate a selected receipt against its frozen owner; empty means current
@@ -62,6 +138,9 @@ pub fn module_child_selection_validate_v1(registry: ModuleSurfacesByName,
     if (receipt.manifest_surface < 0 or receipt.manifest_surface >= registry.surfaces.len() or
             receipt.target_surface < 0 or receipt.target_surface >= registry.surfaces.len()):
         return "module-child-owner-missing"
+    if receipt.route_kind == "direct-folder-source":
+        return module_direct_folder_validate_v1(registry, receipt)
+    if receipt.route_kind != "namespace-child": return "module-child-route-kind-unavailable"
     if (module_surface_registry_index(registry, receipt.configured_namespace) != receipt.manifest_surface or
             module_surface_registry_index(registry, receipt.selected_name) != receipt.target_surface or
             receipt.selected_name != receipt.configured_namespace + "." + receipt.child_name):
