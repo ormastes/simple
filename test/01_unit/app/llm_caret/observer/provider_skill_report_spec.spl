@@ -7,7 +7,9 @@ use app.llm_caret.messaging.adapter.agent.hook_bridge.{drain_hook_events}
 use app.llm_caret.observer.provider_adapters.{claude_loaded_skill}
 use app.llm_caret.observer.observer_log.{observer_reset, observer_loaded_skills}
 use app.llm_caret.observer.session_status.{session_loaded_skills_text}
-use app.llm_caret.workbench.session_contract.{SessionId, SessionView, new_session_view}
+use app.llm_caret.workbench.session_contract.{SessionId, SessionView, InputMode, new_session_view, new_draft}
+use app.llm_caret.workbench.tui_layout.{compute_layout, CompactView}
+use app.llm_caret.workbench.tui_view.{new_render_input, render_workbench}
 use app.llm_caret.workbench.capability_checklist.{CapabilityStatus, CapabilityProbes, capability_row_for}
 
 fn _view() -> SessionView:
@@ -58,3 +60,15 @@ describe "provider loaded-skill reporting (CU-020)":
         val r = capability_row_for(_probes(["spipe"]), "skills")
         expect(r.status).to_equal(CapabilityStatus.Met)
         expect(r.reason).to_contain("loaded: spipe")
+
+    it "shows reported skills on the workbench status line":
+        # @req CU-020
+        step("drain a skill hook then render")
+        observer_reset()
+        var store = PureSqlMessagingStore.open_memory()
+        _enqueue(store, "t1", "PreToolUse", _skill_payload("spipe"), 5)
+        drain_hook_events(store, 10)
+        val v = _view()
+        val layout = compute_layout(160, 40, CompactView.Session, 1)
+        val input = new_render_input([v], v.id, new_draft(v.id, InputMode.Message), "roster")
+        expect(render_workbench(layout, input).join("\n")).to_contain("skills: spipe")
