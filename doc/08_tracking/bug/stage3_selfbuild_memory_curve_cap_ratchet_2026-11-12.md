@@ -156,3 +156,16 @@ hold ~1/8 of the closure instead of all 1650 modules, cutting the per-process
 peak from ~36 GiB to an estimated ~5-8 GiB -- under any plausible admission
 floor. Stage2 rebuild required (the stage2 binary must carry the shard
 machinery). The old pin's admitted stage2 remains on disk as evidence.
+
+## Ratchet is host-global and monotonic (2026-11-16 ~03:00 KST)
+
+Attempting to rebase the stage3 admission floor by rebuilding stage2 under a
+48 GiB ceiling FAILED: `previous` stays 58720256 even with a fresh
+--output dir. The ceiling ratchet is recorded host-globally (not per-output)
+and is monotonic -- the 56 GiB widened default (eighth widening) is now the
+permanent floor on this host. Consequence: stage3 admission requires
+MemAvailable >= 74.7 GiB (4/3 x 56) for ANY lane on this host, regardless of
+the actual (MIR-sharded ~13 GiB) footprint. The only honest paths: a host
+memory window >= 74.7 GiB, or a tip change making the admission shard-aware
+(the claim-size comment at resume-stage3-from-admitted.sh:972 says admission
+still prices the full closure).
