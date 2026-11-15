@@ -45,8 +45,11 @@ has no equivalent runtime-primary issuer request; generic pane SendLiteral/SendK
 cannot bypass its guarded input boundary. Windows already has adopted-connection
 input install/write/state/revoke in `providers/windows/primary_connection_v2.spl`.
 It requires its genuine session, current Input lease/target, nonce and controlled
-native pipe receipt. The missing composition is the tagged common issuer/CoreMux
-route consuming that existing leaf; the Linux service path does not supply it.
+native pipe receipt. The common tagged input/write modules and retained V5 issuer
+already consume that leaf. The missing routed app/client activation and actual
+controlled stdin EOF must use that existing chain. See the current-release source
+inventory in `provider_cli_smux_existing_input_composition_v1.md`; V4-only searches
+do not establish absence of the V5 implementation.
 
 Resume refuses before effects until genuine source/workspace/session ownership is
 bound. A UUID identifies CLI selector data, not custody of another session store.

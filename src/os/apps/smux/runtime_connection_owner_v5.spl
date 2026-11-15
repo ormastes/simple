@@ -1,10 +1,13 @@
+use std.common.contracts.container.pre_start_constraint_v1.{ContainerPreStartConstraintV1, container_pre_start_constraint_copy_v1}
+use std.common.contracts.container.execution_v2.ContainerHostScopeV2
+use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
 # One generic service owner. Host journal mutations return to this canonical
 # domain before a response or another connection step; panes alone drain IO.
 use std.nogc_sync_mut.orchestration.host_service_domain_v3.{HostServiceDomainV3, host_service_domain_turn_v3,
     HostServiceCleanupV3, host_service_domain_close_v3}
 use std.nogc_sync_mut.orchestration.host_service_domain_v2.HostServiceRequestV2
 use std.nogc_sync_mut.orchestration.host_service_execution_v4.{HostServiceExecutionV4,
-    host_service_execution_begin_v4, host_service_execution_step_v4}
+    host_service_execution_begin_constrained_v4, host_service_execution_step_v4}
 use std.nogc_sync_mut.orchestration.host_primary_connection_service_v3.*
 use std.nogc_sync_mut.orchestration.host_primary_connection_preparation_v3.host_primary_connection_expire_prepared_v3
 use std.nogc_sync_mut.orchestration.host_primary_connection_planning_v4.{HostPrimaryConnectionPlanningV4,
@@ -72,6 +75,7 @@ pub class SmuxRuntimeConnectionOwnerV5:
     execution: HostServiceExecutionV4? = nil
     execution_operation_id: text = ""
     execution_request_digest: text = ""
+    execution_constraint: Option<ContainerPreStartConstraintV1> = nil
     execution_response: text = ""
     execution_error: text = ""
     execution_exit_code: i64 = 0
@@ -412,24 +416,52 @@ fn index_v5(owner: SmuxRuntimeConnectionOwnerV5, uid: text) -> int:
 
 # Existing shared Host request vocabulary. Blocking lifecycle effects are
 # explicitly reserved for the owned continuation port, not this control turn.
+pub fn smux_runtime_connection_scope_v5(owner: SmuxRuntimeConnectionOwnerV5) -> ContainerHostScopeV2:
+    match owner.domain.local:
+        case HostLocalRootV3.Linux(local): local.scope
+        case HostLocalRootV3.Windows(local): local.scope_v3()
+
+fn connection_constraint_equal_v5(left: Option<ContainerPreStartConstraintV1>,
+        right: Option<ContainerPreStartConstraintV1>) -> bool:
+    if left.is_none() or right.is_none(): return left.is_none() and right.is_none()
+    val a = left.unwrap()
+    val b = right.unwrap()
+    (a.request_digest == b.request_digest and a.scope_bytes == b.scope_bytes and
+        a.provider_generation == b.provider_generation and a.requested_image_ref == b.requested_image_ref and
+        a.requested_image_kind == b.requested_image_kind and a.image_config_id == b.image_config_id and
+        a.primary_argv == b.primary_argv and a.working_directory == b.working_directory and
+        a.configured_user == b.configured_user and a.environment_digest == b.environment_digest and
+        a.mounts == b.mounts and a.require_readonly_rootfs == b.require_readonly_rootfs)
+
 pub fn smux_runtime_connection_host_v5(original: SmuxRuntimeConnectionOwnerV5,
         request: HostServiceRequestV2) -> SmuxRuntimeConnectionTurnV5:
+    smux_runtime_connection_host_constrained_v5(original, request, nil)
+
+# Restriction only: this is the SAME retained signed Host domain and writer.
+pub fn smux_runtime_connection_host_constrained_v5(original: SmuxRuntimeConnectionOwnerV5,
+        request: HostServiceRequestV2, requested_constraint: Option<ContainerPreStartConstraintV1>) -> SmuxRuntimeConnectionTurnV5:
+    if requested_constraint.is_some() and request.action != "host-execute":
+        return reply_v5(original, "runtime-host-constraint-action")
+    val constraint = if requested_constraint.is_some(): Some(container_pre_start_constraint_copy_v1(requested_constraint.unwrap())) else: nil
     if original.closing: return reply_v5(original, "runtime-connection-closing")
     var owner = original
     if request.action != "host-status" and geometry_pending_v5(owner): return reply_v5(owner, "runtime-geometry-pending")
     if request.action == "host-execute":
         val digest = sha256_text(request.operation_id + "\n" + request.payload)
         if owner.execution_request_digest == digest:
+            if not connection_constraint_equal_v5(owner.execution_constraint, constraint):
+                return reply_v5(owner, "runtime-host-execution-constraint-changed")
             return SmuxRuntimeConnectionTurnV5(owner, nil, nil, owner.execution_response, owner.execution_error)
         if owner.execution != nil: return reply_v5(owner, "runtime-host-execution-pending")
         if owner.planning != nil: return reply_v5(owner, "runtime-connection-inspection-pending")
         for entry in owner.entries:
             if entry.task != nil and entry.task.unwrap().pending_v3(): return reply_v5(owner, "runtime-connection-opening")
-        val begun = host_service_execution_begin_v4(owner.domain, request)
+        val begun = host_service_execution_begin_constrained_v4(owner.domain, request, constraint)
         owner.domain = begun.domain
         owner.execution = begun.continuation
         owner.execution_operation_id = request.operation_id
         owner.execution_request_digest = digest
+        owner.execution_constraint = constraint
         owner.execution_response = begun.response ?? ""
         owner.execution_error = begun.error
         owner.execution_exit_code = begun.exit_code
