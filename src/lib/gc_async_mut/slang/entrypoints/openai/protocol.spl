@@ -217,6 +217,31 @@ struct ChatPart:
     data: text
     format: text
 
+struct CompletionRequest:
+    model: text
+    prompt: text
+    max_tokens: i64
+
+# Parse a /v1/completions body. `prompt` must be a JSON string; Err carries the
+# client-facing reason.
+fn parse_completion_request(body: text) -> Result<CompletionRequest, text>:
+    if body.trim() == "":
+        return Err("request body is empty")
+    val parsed = json_parse_with_error(body)
+    if parsed.1 != "":
+        return Err("request body is not valid JSON: " + parsed.1)
+    if not body.trim().starts_with("{"):
+        return Err("request body must be a JSON object")
+    val model = json_string_field(body, "model")
+    if model == "":
+        return Err("missing or empty required field: model")
+    val prompt = json_string_field(body, "prompt")
+    if prompt == "":
+        return Err("missing or empty required field: prompt (must be a string)")
+    if json_bool_field_is_true(body, "stream"):
+        return Err("streaming is not supported by this slang build; send stream=false")
+    Ok(CompletionRequest(model: model, prompt: prompt, max_tokens: json_int_field(body, "max_tokens", 0)))
+
 struct ChatMessage:
     role: text
     content: text
@@ -381,6 +406,13 @@ fn openai_chat_completion_response(model: text, content: text, prompt_tokens: i6
     val body = "{\"id\":\"chatcmpl-slang\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"" + _escape_json_text(model) + "\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"" + _escape_json_text(content) + "\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":" + prompt_tokens.to_text() + ",\"completion_tokens\":" + completion_tokens.to_text() + ",\"total_tokens\":" + (prompt_tokens + completion_tokens).to_text() + "}}}}"
     ApiResponse(status: 200, body: body)
 
+# OpenAI legacy text-completion envelope. Like the chat envelope, only emitted
+# for text a model actually produced; usage is omitted because slang does not
+# count tokens (doc/08_tracking/bug/slang_openai_usage_counts_always_zero_2026-11-15.md).
+fn openai_text_completion_response(model: text, content: text) -> ApiResponse:
+    val body = "{\"id\":\"cmpl-slang\",\"object\":\"text_completion\",\"created\":0,\"model\":\"" + _escape_json_text(model) + "\",\"choices\":[{\"text\":\"" + _escape_json_text(content) + "\",\"index\":0,\"logprobs\":null,\"finish_reason\":\"stop\"}]}"
+    ApiResponse(status: 200, body: body)
+
 # OpenAI error envelope: {"error":{"message","type","param","code"}}.
 # `detail_json` is appended verbatim inside the error object when non-empty so
 # callers can attach machine-readable diagnostics next to the human message.
@@ -406,3 +438,4 @@ export json_string_field, json_int_field, json_bool_field_is_true, json_array_ob
 export parse_chat_request, openai_error_response, openai_models_response
 export ChatMessage, chat_messages_from_body, openai_chat_completion_response
 export ChatPart, ChatPartError, chat_messages_parse, chat_message_media_count, base64_payload_is_strict
+export CompletionRequest, parse_completion_request, openai_text_completion_response

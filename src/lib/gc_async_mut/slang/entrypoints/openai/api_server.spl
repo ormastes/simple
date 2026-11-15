@@ -10,14 +10,16 @@
 # Routes:
 #   GET  /v1/models           -> 200 model list (empty list when no packs)
 #   POST /v1/chat/completions -> 400 / 404 / 503, see serving_chat.spl
+#   POST /v1/completions      -> legacy text completion (raw prompt, no chat template)
+#   GET  /health              -> 200 {"status":"ok"}
 # Anything else is 404; a known path with the wrong method is 405.
 # Streaming is out of scope and is rejected as a 400 by the request parser.
 
-use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, openai_error_response, openai_models_response}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, openai_error_response, openai_models_response, openai_text_completion_response, parse_completion_request}
 use std.gc_async_mut.slang.entrypoints.openai.serving_models.{discover_models, model_ids}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{scan_model_root}
-use std.gc_async_mut.slang.engine.llm_engine.{engine_backend_available}
-use std.gc_async_mut.slang.entrypoints.openai.serving_chat.{serve_chat_completions}
+use std.gc_async_mut.slang.engine.llm_engine.{engine_backend_available, engine_complete}
+use std.gc_async_mut.slang.entrypoints.openai.serving_chat.{serve_chat_completions, model_not_found_response, engine_refusal_response}
 
 fn _strip_query(path: text) -> text:
     val at = path.find("?")
@@ -44,6 +46,23 @@ fn serve_models(model_root: text) -> ApiResponse:
             ids.push(m.id)
     openai_models_response(ids, "slang")
 
+fn serve_completions(model_root: text, body: text) -> ApiResponse:
+    match parse_completion_request(body):
+        Err(reason):
+            openai_error_response(400, reason, "invalid_request_error", "invalid_request", "")
+        Ok(request):
+            var known = false
+            for m in scan_model_root(model_root, engine_backend_available()):
+                if m.id == request.model:
+                    known = true
+            if not known:
+                return model_not_found_response(request.model)
+            match engine_complete(model_root, request.model, request.prompt, request.max_tokens):
+                Err(reason):
+                    engine_refusal_response(request.model, reason)
+                Ok(content):
+                    openai_text_completion_response(request.model, content)
+
 fn slang_api_dispatch(method: text, path: text, body: text, model_root: text) -> ApiResponse:
     val route = _normalize(path)
     val verb = method.trim().to_upper()
@@ -55,6 +74,14 @@ fn slang_api_dispatch(method: text, path: text, body: text, model_root: text) ->
         if verb != "POST":
             return openai_error_response(405, "method " + verb + " is not allowed on /v1/chat/completions", "invalid_request_error", "method_not_allowed", "")
         return serve_chat_completions(model_root, body)
+    if route == "/v1/completions":
+        if verb != "POST":
+            return openai_error_response(405, "method " + verb + " is not allowed on /v1/completions", "invalid_request_error", "method_not_allowed", "")
+        return serve_completions(model_root, body)
+    if route == "/health":
+        if verb != "GET":
+            return openai_error_response(405, "method " + verb + " is not allowed on /health", "invalid_request_error", "method_not_allowed", "")
+        return ApiResponse(status: 200, body: "{\"status\":\"ok\"}")
     openai_error_response(404, "unknown route " + route, "invalid_request_error", "not_found", "")
 
-export serve_models, slang_api_dispatch
+export serve_models, serve_completions, slang_api_dispatch

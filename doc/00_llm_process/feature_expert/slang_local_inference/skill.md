@@ -57,6 +57,25 @@ Caret side: providers `slang` (HTTP) and `slang_local` (in-process) in
   ggml-backed path announces itself separately with `"stub":false` and
   `"backend":"ggml"`.
 
+## OpenAI HTTP surface: supported vs not (live-verified 2026-11-15, Windows, Qwen2.5-1.5B)
+
+Specs: `test/03_system/lib/slang/feature/slang_openai_conformance_live_spec.spl` (passing),
+`..._in_development_spec.spl` (expected red; bug
+`doc/08_tracking/bug/slang_openai_stop_stream_finish_reason_unimplemented_2026-11-15.md`).
+
+| Feature | Status |
+|---|---|
+| `POST /v1/chat/completions` non-stream, system/multi-turn messages | works |
+| `POST /v1/completions` (raw prompt, `text_completion`, no usage) | works |
+| `GET /v1/models`, `GET /health` | works |
+| 400 malformed/missing messages, 404 `model_not_found` / `not_found`, 405 | works (OpenAI error envelope) |
+| temperature 0 repeat identical, two concurrent connections | works |
+| `finish_reason: "length"` on `max_tokens` | no: always `stop` |
+| `stop` sequences | no: ignored |
+| `stream: true` (SSE) | no: 400 |
+| `temperature`/`top_p`/`seed`/`n` | ignored (greedy) |
+| usage token counts | always 0 (own bug) |
+
 ## Current limits
 
 - ggml lane: GGUF only. Safetensors Llama (MHA) is served by the pure runner (see Runner dispatch); other safetensors (BF16, NVFP4, GQA) is recognised and refused.
