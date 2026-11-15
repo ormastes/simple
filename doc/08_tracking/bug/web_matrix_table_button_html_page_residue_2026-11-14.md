@@ -152,17 +152,28 @@ max-content of mixed inline content, control UA font reset, `h6` margins
   being typed. Spec rows AC-4..6 of the gradient spec.
 - **Gradients, open:**
   - px stop positions (`red 20px`) are not parsed; the stop takes the
-    evenly spaced default.
-  - The engine2d ramp (`emu_draw_linear_gradient_stops`) spans the line
-    between the pixel centres of the extreme corners, not the CSS gradient
-    line length `|w sin a| + |h cos a|` the fb raster uses, so the two lanes
-    disagree by up to a pixel's worth of ramp at the ends.
-  - The two lanes round a mixed stop's alpha differently (fb raster:
-    rounded Q16 weights; engine2d ramp: truncated permille), so a
-    translucent ramp can differ by 1 between them.
-  - The new gradient spec rows render through `cpu_simd` only; the engine2d
-    ramp `emu_draw_linear_gradient_stops` as used by the Vulkan / Draw IR
-    backends has no Chrome-numbered row of its own.
+    evenly spaced default. Chrome numbers for both lanes:
+    `web_gradient_px_stop_position_unresolved_2026-11-15.md`.
+  - **Fixed 2026-11-15 (engine2d lane parity):** the engine2d ramp
+    (`emu_draw_linear_gradient_stops`) now uses the fb raster's mapping
+    exactly -- Q16 angle, line `|w sin a| + |h cos a|` through the box
+    edges, 1025-entry LUT, rounded premultiplied alpha. Opaque angled /
+    multi-stop gradients are bit-identical between the Draw IR lane and `cpu_simd` (was 16
+    levels on a 12x6 `to bottom right` box, 13 on a 10x10 45deg box).
+    Translucent stops still differ by up to 2: the fb raster quantises
+    each pixel's alpha to 0..100 % (`background_gradient_pixel_opacity`);
+    the Draw IR lane is the closer of the two to Chrome there. Pinned by
+    `linear_gradient_angle_draw_ir_chrome159_spec.spl` (AC-1..11, AC-10
+    and AC-11 red -> green). The fb raster keeps its own copy of the Q16
+    helpers (`gradient_angle_sin_cos_q16`, `linear_gradient_color_at`);
+    folding it onto the engine2d twins is a browser_engine edit left
+    for when that tree is not being edited by another lane.
+  - **Open (fb raster):** the default top-to-bottom two-stop ramp
+    (`mix_color_vertical_centered`) puts the exact stop colours on the first
+    and last rows; Chrome 159 samples row centres (10x10 `#000 -> #fff` row
+    0: Chrome #0d0d0d, Draw IR #0d0d0d, fb raster #000000; 12x6 red -> blue
+    up to 21 off). Pinned on the Draw IR side by AC-12 of
+    `linear_gradient_angle_draw_ir_chrome159_spec.spl`.
   - `flex:1 1 100px;max-width:25%` (a growing item with a definite basis)
     is not frozen at its max-width; only zero-basis items are.
 - **Fixed from the 5066a3eeae1 / 5ffa5564085 review:** an angle token is
