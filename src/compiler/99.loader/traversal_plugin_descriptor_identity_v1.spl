@@ -1,0 +1,54 @@
+# Bounded identity transport only; decoding never grants code admission.
+use compiler.common.cache_contract.aspect_plugin_model_v1.{PluginInstanceDescriptorV1, PluginConfigValueV1}
+use compiler.common.cache_contract.traversal_plugin_selection_v1.{TraversalPluginDescriptorV1, traversal_descriptor_identity_v1}
+use compiler.common.cache.canonical_identity.{canon_field}
+val TRAVERSAL_PLUGIN_DESCRIPTOR_MAX_CHARS_V1: i64 = 131072
+
+fn _traversal_identity_read_string_v1(chars: [text], start: i64) -> Result<(text, i64), text>:
+    if start < 0 or start >= chars.len() or chars[start] != "S":
+        return Err("traversal-provider-identity-string-tag")
+    var cursor = start + 1
+    var count: i64 = 0
+    var digits = 0
+    while cursor < chars.len() and chars[cursor] != ":":
+        val ch = chars[cursor]
+        if ch < "0" or ch > "9": return Err("traversal-provider-identity-length")
+        val digit = ch.byte_at(0) - "0".byte_at(0)
+        if count > (65536 - digit) / 10: return Err("traversal-provider-identity-field-budget")
+        count = count * 10 + digit
+        digits = digits + 1
+        cursor = cursor + 1
+    if digits == 0 or cursor >= chars.len() or chars[cursor] != ":":
+        return Err("traversal-provider-identity-length")
+    cursor = cursor + 1
+    if count > chars.len() - cursor: return Err("traversal-provider-identity-truncated")
+    var parts: [text] = []
+    for index in cursor..(cursor + count): parts.push(chars[index])
+    Ok((parts.join(""), cursor + count))
+
+pub fn traversal_plugin_descriptor_decode_identity_v1(identity: text) -> Result<TraversalPluginDescriptorV1, text>:
+    if identity == "" or identity.len() > TRAVERSAL_PLUGIN_DESCRIPTOR_MAX_CHARS_V1:
+        return Err("traversal-provider-identity-budget")
+    val prefix = canon_field("simple/admitted-traversal-provider/v1", "")
+    if not identity.starts_with(prefix): return Err("traversal-provider-identity-domain")
+    val chars = identity.chars()
+    var cursor = prefix.len()
+    if cursor + 3 > chars.len() or chars[cursor] != "Q" or
+            chars[cursor + 1] != "7" or chars[cursor + 2] != ":":
+        return Err("traversal-provider-identity-sequence")
+    cursor = cursor + 3
+    var fields: [text] = []
+    for _ in 0..7:
+        val parsed = _traversal_identity_read_string_v1(chars, cursor)?
+        fields.push(parsed.0)
+        cursor = parsed.1
+    if cursor != chars.len(): return Err("traversal-provider-identity-trailing-data")
+    val values: [PluginConfigValueV1] = []
+    val descriptor = TraversalPluginDescriptorV1(provider_id: fields[0],
+        provider_code_digest: fields[1], entry_identity: fields[2],
+        abi_schema: fields[3], policy_identity: fields[4],
+        instance: PluginInstanceDescriptorV1(key: fields[5],
+            canonical_identity: fields[6], values: values))
+    val canonical = traversal_descriptor_identity_v1(descriptor)?
+    if canonical != identity: return Err("traversal-provider-identity-noncanonical")
+    Ok(descriptor)

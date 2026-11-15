@@ -14,3 +14,18 @@ normal host-policy loader may create the positive selection. It also checks
 changed-request, identity corruption and unissued-token refusal. It does not
 claim successful provider dispatch: the fixture entry deliberately returns -17.
 No build or execution has been performed for this fixture.
+
+Run fresh processes with optional fourth argument `capacity` and `concurrent`.
+The first proves exactly 127 further successful mappings after the initial
+admission and then an explicit capacity refusal. The second runs four joined
+workers with 40 requests each and asserts the same total; no mutex is held over
+mapping or signature work. Requests are immutable parent loans retained through
+join, workers own local results, and only scalar counts cross back. Existing
+approved tokens remain usable after capacity exhaustion. These scenarios are
+authored/unrun, not a thread-safety or physical-memory qualification.
+
+The production quota is 128 **mapping attempts per process**, including in-flight
+and failed attempts. Attempts are reserved only after policy/artifact checks,
+but before the exact-map effect, and never refunded because a failed load can
+retain a sealed snapshot descriptor. This staging limit bounds that retained
+resource; it does not prove a global RSS ceiling or permit hot unload.

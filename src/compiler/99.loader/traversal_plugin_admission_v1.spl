@@ -1,9 +1,22 @@
+use std.common.binary_inspect.{hex_to_bytes}
+use std.nogc_sync_mut.concurrent.mutex.{mutex_new_gate_handle_v1,
+    mutex_lock_gate_handle_v1, mutex_unlock_gate_handle_v1}
+use std.nogc_sync_mut.sffi.rc_graph.{rc_share_process_root_v1, rc_process_root_count_v1}
+use std.nogc_sync_mut.sffi.dynamic.{DynI64FnSlot, provider_lifetime_register_bound_v1,
+    provider_lifetime_begin_bound_v1, provider_lifetime_end_v1}
+use std.nogc_sync_mut.sffi.bounded_bytes.{foreign_bytes_allocate, foreign_bytes_copy_in,
+    foreign_bytes_copy_out, foreign_bytes_release}
+use compiler.loader.traversal_plugin_descriptor_identity_v1.{traversal_plugin_descriptor_decode_identity_v1}
+use compiler.loader.traversal_plugin_wire_v1.{traversal_plugin_wire_request_v1, traversal_plugin_wire_response_v1}
+use compiler.common.cache_contract.aspect_traversal_v1.{DirTldrViewV1}
+use compiler.common.cache_contract.aspect_match_shard_v1.{PointcutSelectorV1, WeavePlanDeltaV1}
+
 # H5: externally authorized, signed traversal-plugin allowlist.
 #
-# The policy is supplied by the trusted compiler composition root. The
-# signature covers the exact canonical SDN bytes; neither the plugin nor its
-# own manifest may supply/adopt the trust root. This module only validates
-# policy and returns a typed entry. Effectful loading is a separate owner.
+# This fixed owner resolves host user trust, verifies exact signed policy,
+# maps through the typed host facade and privately mints approved selections.
+# Neither a plugin nor a caller-supplied key/DTO can mint compiler authority.
+# Generic mapping lifetime alone is insufficient; the private table is required.
 
 use std.common.sdn.value.{SdnValue}
 use std.common.sdn.strict_v1.{sdn_parse_strict_v1}
@@ -17,19 +30,19 @@ use compiler.common.cache_contract.hash_algorithm_registry_v1.{
     DigestV1, HASH_ALGO_SHA256_V1, digest_v1_parse, digest_v1_text
 }
 use compiler.common.cache_contract.aspect_plugin_model_v1.{PluginInstanceDescriptorV1,
-    PluginConfigValueV1}
+    PluginConfigValueV1, PluginDefinitionV1, PluginConfigFieldV1, PluginFieldRoleV1, plugin_instance_descriptor_v1}
 use compiler.common.cache_contract.traversal_plugin_selection_v1.{TraversalPluginSelectionV1,
-    TraversalPluginDescriptorV1, traversal_descriptor_identity_v1}
-use compiler.common.cache.canonical_identity.{canon_field}
+    TraversalPluginDescriptorV1, traversal_descriptor_identity_v1, traversal_selection_identity_v1, traversal_policy_identity_v1}
+use compiler.common.cache.canonical_identity.{canon_field, canon_seq, canon_str}
 use std.nogc_sync_mut.io_runtime.{platform_name, host_arch}
 use compiler.frontend.core.cfg_platform.{cfg_normalize_arch}
-use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded_bytes}
 use std.nogc_sync_mut.sffi.dynlib_exact_admission_v1.{
     DynlibAdmissionErrorV1, dynlib_admit_exact_v1,
     dynlib_symbol_address_v1, dynlib_admitted_close_v1
 }
 use compiler.loader.traversal_plugin_elf_gate_v1.{traversal_plugin_elf_gate_v1}
-use compiler.common.driver_core_types.{TraversalPluginProviderRequestV1}
+use compiler.common.driver_core_types.{TraversalPluginProviderRequestV1, traversal_plugin_provider_request_v1}
 use compiler.loader.traversal_plugin_host_trust_v1.{
     traversal_plugin_host_trust_root_resolve_v1}
 
@@ -41,12 +54,9 @@ pub val TRAVERSAL_PLUGIN_ABI_ID_V1: text = "simple-traversal-plugin/v1"
 pub val TRAVERSAL_PLUGIN_MAX_WIRE_BYTES_V1: i64 = 1048576
 pub val TRAVERSAL_PLUGIN_DESCRIPTOR_MAX_CHARS_V1: i64 = 131072
 
-var _traversal_plugin_host_arch_cache_v1: text = ""
-
 fn _traversal_plugin_host_arch_v1() -> text:
-    if _traversal_plugin_host_arch_cache_v1 == "":
-        _traversal_plugin_host_arch_cache_v1 = cfg_normalize_arch(host_arch())
-    _traversal_plugin_host_arch_cache_v1
+    # Cold admission observation, never memoized into a session-owned global.
+    cfg_normalize_arch(host_arch())
 
 pub struct TraversalPluginAllowlistEntryV1:
     provider_id: text
@@ -60,10 +70,11 @@ pub struct VerifiedTraversalPluginAllowlistV1:
     source_digest: text
     host_abi_fingerprint: text
 
-pub class AdmittedTraversalPluginProviderV1:
+class AdmittedTraversalPluginProviderV1:
     provider_id: text
     code_digest: text
     abi_fingerprint: text
+    policy_identity: text
     artifact_path: text
     library_handle: i64
     entry_symbol_address: i64
@@ -109,55 +120,6 @@ fn _traversal_allowlist_path_valid_v1(path: text) -> bool:
     for component in path.split("/"):
         if component == ".." or component == ".": return false
     true
-
-fn _traversal_identity_read_string_v1(chars: [text], start: i64) -> Result<(text, i64), text>:
-    if start < 0 or start >= chars.len() or chars[start] != "S":
-        return Err("traversal-provider-identity-string-tag")
-    var cursor = start + 1
-    var count: i64 = 0
-    var digits = 0
-    while cursor < chars.len() and chars[cursor] != ":":
-        val ch = chars[cursor]
-        if ch < "0" or ch > "9": return Err("traversal-provider-identity-length")
-        val digit = ch.byte_at(0) - "0".byte_at(0)
-        if count > (65536 - digit) / 10: return Err("traversal-provider-identity-field-budget")
-        count = count * 10 + digit
-        digits = digits + 1
-        cursor = cursor + 1
-    if digits == 0 or cursor >= chars.len() or chars[cursor] != ":":
-        return Err("traversal-provider-identity-length")
-    cursor = cursor + 1
-    if count > chars.len() - cursor: return Err("traversal-provider-identity-truncated")
-    var parts: [text] = []
-    for index in cursor..(cursor + count): parts.push(chars[index])
-    Ok((parts.join(""), cursor + count))
-
-fn _traversal_descriptor_decode_identity_v1(identity: text) -> Result<TraversalPluginDescriptorV1, text>:
-    if identity == "" or identity.len() > TRAVERSAL_PLUGIN_DESCRIPTOR_MAX_CHARS_V1:
-        return Err("traversal-provider-identity-budget")
-    val prefix = canon_field("simple/admitted-traversal-provider/v1", "")
-    if not identity.starts_with(prefix): return Err("traversal-provider-identity-domain")
-    val chars = identity.chars()
-    var cursor = prefix.len()
-    if cursor + 3 > chars.len() or chars[cursor] != "Q" or
-            chars[cursor + 1] != "7" or chars[cursor + 2] != ":":
-        return Err("traversal-provider-identity-sequence")
-    cursor = cursor + 3
-    var fields: [text] = []
-    for _ in 0..7:
-        val parsed = _traversal_identity_read_string_v1(chars, cursor)?
-        fields.push(parsed.0)
-        cursor = parsed.1
-    if cursor != chars.len(): return Err("traversal-provider-identity-trailing-data")
-    val values: [PluginConfigValueV1] = []
-    val descriptor = TraversalPluginDescriptorV1(provider_id: fields[0],
-        provider_code_digest: fields[1], entry_identity: fields[2],
-        abi_schema: fields[3], policy_identity: fields[4],
-        instance: PluginInstanceDescriptorV1(key: fields[5],
-            canonical_identity: fields[6], values: values))
-    val canonical = traversal_descriptor_identity_v1(descriptor)?
-    if canonical != identity: return Err("traversal-provider-identity-noncanonical")
-    Ok(descriptor)
 
 pub fn traversal_plugin_host_abi_fingerprint_v1() -> text:
     if platform_name() != "linux": return ""
@@ -254,7 +216,7 @@ pub fn traversal_plugin_allowlist_select_v1(policy: VerifiedTraversalPluginAllow
     Err("traversal-provider-not-admitted")
 
 @unsafe(reason: "loads only a signed, SHA-pinned, dependency-free traversal provider", capabilities: [ffi, raw_ptr])
-fn traversal_plugin_provider_load_v1(source: text, signature: [u8],
+pri fn traversal_plugin_provider_load_v1(source: text, signature: [u8],
         external_trust_root: [u8], provider_id: text) -> Result<AdmittedTraversalPluginProviderV1, text>:
     """Verify signed local policy and exact bytes before any loader effect.
 
@@ -267,8 +229,10 @@ fn traversal_plugin_provider_load_v1(source: text, signature: [u8],
     val policy = traversal_plugin_allowlist_verify_decode_v1(source, signature,
         external_trust_root)?
     val entry = traversal_plugin_allowlist_select_v1(policy, provider_id)?
+    val policy_identity = traversal_policy_identity_v1(policy.source_digest,
+        "sha256:" + sha256_u8_hex(external_trust_root))?
     val arch = _traversal_plugin_host_arch_v1()
-    val artifact = match file_read_regular_no_follow_bounded(entry.artifact_path,
+    val artifact = match file_read_regular_no_follow_bounded_bytes(entry.artifact_path,
             TRAVERSAL_PLUGIN_ARTIFACT_MAX_BYTES_V1):
         case Ok(bytes): bytes
         case Err(_): return Err("traversal-provider-artifact-unreadable")
@@ -276,6 +240,10 @@ fn traversal_plugin_provider_load_v1(source: text, signature: [u8],
         return Err("traversal-provider-digest-mismatch")
     val elf_error = traversal_plugin_elf_gate_v1(artifact, arch, entry.entry_symbol)
     if elf_error != "": return Err(elf_error)
+    # Reserve before any exact-map effect, outside loader locks. Failures stay
+    # charged because the host facade intentionally retains snapshot descriptors.
+    if not _traversal_reserve_mapping_attempt_v1():
+        return Err("traversal-provider-mapping-attempt-capacity")
     val admitted = unsafe(capabilities: [ffi, raw_ptr]):
         dynlib_admit_exact_v1(entry.artifact_path, entry.code_digest.hex)
     val admitted_handle = match admitted:
@@ -302,10 +270,10 @@ fn traversal_plugin_provider_load_v1(source: text, signature: [u8],
         return Err("traversal-provider-entry-symbol-missing")
     Ok(AdmittedTraversalPluginProviderV1(provider_id: entry.provider_id,
         code_digest: digest_v1_text(entry.code_digest),
-        abi_fingerprint: entry.abi_fingerprint, artifact_path: entry.artifact_path,
+        abi_fingerprint: entry.abi_fingerprint, policy_identity: policy_identity, artifact_path: entry.artifact_path,
         library_handle: admitted_handle, entry_symbol_address: symbol))
 
-fn traversal_plugin_provider_load_request_v1(
+pri fn traversal_plugin_provider_load_request_v1(
         request: TraversalPluginProviderRequestV1) -> Result<AdmittedTraversalPluginProviderV1, text>:
     """Read local signed policy files and then admit the exact pinned provider.
 
@@ -314,14 +282,14 @@ fn traversal_plugin_provider_load_request_v1(
     configuration resolver, independently of CLI/project/plugin inputs.
     Every file read rejects symlinks and is bounded. No network loader is used.
     """
-    val policy_bytes = match file_read_regular_no_follow_bounded(
+    val policy_bytes = match file_read_regular_no_follow_bounded_bytes(
             request.allowlist_path, TRAVERSAL_PLUGIN_ALLOWLIST_MAX_SOURCE_BYTES_V1):
         case Ok(value): value
         case Err(_): return Err("traversal-allowlist-unreadable")
     val policy_text = match validated_utf8_bytes_to_text_linear(policy_bytes):
         case Ok(value): value
         case Err(_): return Err("traversal-allowlist-utf8-invalid")
-    val signature = match file_read_regular_no_follow_bounded(request.signature_path, 64):
+    val signature = match file_read_regular_no_follow_bounded_bytes(request.signature_path, 64):
         case Ok(value): value
         case Err(_): return Err("traversal-allowlist-signature-unreadable")
     if signature.len() != 64: return Err("traversal-allowlist-signature-required")
@@ -329,14 +297,228 @@ fn traversal_plugin_provider_load_request_v1(
     traversal_plugin_provider_load_v1(policy_text, signature,
         host_trust_root.public_key, request.provider_id)
 
+# Compiler admission is separate from the generic mapping lifetime. Only the
+# file-private mint below can append a row after fixed-host signed admission.
+# Flat <=32-bit words permit one process RC root without session-owned children.
+val _TRAVERSAL_APPROVAL_ROW_WORDS_V1: i64 = 20
+val _TRAVERSAL_APPROVAL_CAPACITY_V1: i64 = 128
+val _traversal_approval_gate_v1: i64 = mutex_new_gate_handle_v1(0)
+var _traversal_approval_rows_v1: [i64] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+]
+
+pri fn _traversal_approval_initialize_v1() -> bool:
+    if _traversal_approval_gate_v1 <= 0: panic("traversal-approval-gate-unavailable")
+    val rooted = unsafe(capabilities: [ffi]): rc_share_process_root_v1(_traversal_approval_rows_v1)
+    if not rooted: panic("traversal-approval-process-root-refused")
+    val count = unsafe(capabilities: [ffi]): rc_process_root_count_v1(_traversal_approval_rows_v1)
+    if count != 1: panic("traversal-approval-process-root-count")
+    true
+
+val _traversal_approval_ready_v1 = _traversal_approval_initialize_v1()
+# Every attempt reaching exact mapping can pin a snapshot descriptor even on
+# failure. The monotone budget therefore includes pending and failed attempts;
+# it is never refunded merely because no approved selection was published.
+var _traversal_mapping_attempts_v1: i64 = 0
+
+pri fn _traversal_reserve_mapping_attempt_v1() -> bool:
+    if not _traversal_approval_ready_v1 or
+            not mutex_lock_gate_handle_v1(_traversal_approval_gate_v1): return false
+    val allowed = _traversal_mapping_attempts_v1 < _TRAVERSAL_APPROVAL_CAPACITY_V1
+    if allowed: _traversal_mapping_attempts_v1 = _traversal_mapping_attempts_v1 + 1
+    _traversal_approval_unlock_v1()
+    allowed
+
+pri fn _traversal_approval_unlock_v1():
+    if not mutex_unlock_gate_handle_v1(_traversal_approval_gate_v1, 0):
+        panic("traversal-approval-unlock-failed")
+
+pri fn _traversal_sha_words_v1(value: text) -> [i64]:
+    val bytes = hex_to_bytes(sha256_text(value))
+    if bytes.len() != 32: panic("traversal-approval-sha256-shape")
+    var words: [i64] = []
+    for word in 0..8:
+        var value: i64 = 0
+        for offset in 0..4: value = value * 256 + bytes[word * 4 + offset]
+        words.push(value)
+    words
+
+pri fn _traversal_join_words_v1(high: i64, low: i64) -> u64:
+    ((high as u64) << 32) | (low as u64)
+
+pri fn _traversal_request_words_v1(request: TraversalPluginProviderRequestV1) -> Result<[i64], text>:
+    # This hosted v1 accepts already resolved absolute source paths only.
+    # Acquisition spellings bind the token; they are not semantic cache inputs.
+    val checked = traversal_plugin_provider_request_v1(request.provider_id,
+        request.allowlist_path, request.signature_path)?
+    for path in [checked.allowlist_path, checked.signature_path]:
+        if not _traversal_allowlist_path_valid_v1(path) or path.contains("//"):
+            return Err("traversal-provider-request-path-not-resolved")
+    Ok(_traversal_sha_words_v1(canon_field("simple/traversal-acquisition/v1",
+        canon_seq([canon_str(checked.provider_id), canon_str(checked.allowlist_path),
+            canon_str(checked.signature_path)]))))
+
+# Returned lease is local owned data. The approval table retains no descriptor
+# strings, arbitrary graph or callback. Lifetime reservation spans the whole call.
+class TraversalPluginApprovedLeaseV1:
+    descriptor: TraversalPluginDescriptorV1
+    lifetime_identity: u64
+    entry_address: i64
+
+pri fn _traversal_selection_lease_v1(selection: TraversalPluginSelectionV1,
+        request: TraversalPluginProviderRequestV1?) -> Result<TraversalPluginApprovedLeaseV1, text>:
+    val identity = traversal_selection_identity_v1(selection)?
+    val descriptor_words = _traversal_sha_words_v1(identity)
+    var request_words: [i64] = []
+    if request != nil: request_words = _traversal_request_words_v1(request.unwrap())?
+    if not _traversal_approval_ready_v1 or
+            not mutex_lock_gate_handle_v1(_traversal_approval_gate_v1):
+        return Err("traversal-approval-gate-unavailable")
+    val token = selection.provider_token
+    val row_count = _traversal_approval_rows_v1.len() / _TRAVERSAL_APPROVAL_ROW_WORDS_V1
+    var matches = token > 0 and token < row_count
+    var lifetime = 0u64
+    var entry: i64 = 0
+    if matches:
+        val base = token * _TRAVERSAL_APPROVAL_ROW_WORDS_V1
+        for index in 0..8:
+            if _traversal_approval_rows_v1[base + 4 + index] != descriptor_words[index]: matches = false
+            if request != nil and _traversal_approval_rows_v1[base + 12 + index] != request_words[index]: matches = false
+        if matches:
+            lifetime = _traversal_join_words_v1(_traversal_approval_rows_v1[base],
+                _traversal_approval_rows_v1[base + 1])
+            entry = _traversal_join_words_v1(_traversal_approval_rows_v1[base + 2],
+                _traversal_approval_rows_v1[base + 3]) as i64
+    _traversal_approval_unlock_v1()
+    if not matches or lifetime == 0u64 or entry <= 0:
+        return Err("traversal-provider-private-admission-mismatch")
+    # Decode only authenticated canonical bytes; descriptor fields never confer
+    # authority by themselves. A generic public register cannot create this row.
+    val descriptor = traversal_plugin_descriptor_decode_identity_v1(identity)?
+    val handle = unsafe(capabilities: [ffi]): provider_lifetime_begin_bound_v1(lifetime,
+        _traversal_join_words_v1(descriptor_words[0], descriptor_words[1]),
+        _traversal_join_words_v1(descriptor_words[2], descriptor_words[3]),
+        _traversal_join_words_v1(descriptor_words[4], descriptor_words[5]),
+        _traversal_join_words_v1(descriptor_words[6], descriptor_words[7]))
+    if handle <= 0: return Err("traversal-provider-lifetime-unavailable")
+    Ok(TraversalPluginApprovedLeaseV1(descriptor, lifetime, entry))
+
+# Ownership is accepted only on Ok. On Err the caller still closes the raw map.
+# This function is file-private: no external caller can assert signed admission.
+pri fn _traversal_mint_selection_v1(provider: AdmittedTraversalPluginProviderV1,
+        request: TraversalPluginProviderRequestV1) -> Result<TraversalPluginSelectionV1, text>:
+    val request_words = _traversal_request_words_v1(request)?
+    val abi = TRAVERSAL_PLUGIN_ABI_ID_V1 + ":" + provider.abi_fingerprint
+    val instance = plugin_instance_descriptor_v1(PluginDefinitionV1(code_digest: provider.code_digest,
+        fields: [PluginConfigFieldV1(name: "entry", role: PluginFieldRoleV1.Instance),
+            PluginConfigFieldV1(name: "abi", role: PluginFieldRoleV1.Instance)]),
+        [PluginConfigValueV1(name: "entry", value: TRAVERSAL_PLUGIN_ENTRY_SYMBOL_V1),
+            PluginConfigValueV1(name: "abi", value: abi)])?
+    val descriptor = TraversalPluginDescriptorV1(provider_id: provider.provider_id,
+        provider_code_digest: provider.code_digest, entry_identity: TRAVERSAL_PLUGIN_ENTRY_SYMBOL_V1,
+        abi_schema: abi, policy_identity: provider.policy_identity, instance: instance)
+    val identity = traversal_descriptor_identity_v1(descriptor)?
+    val words = _traversal_sha_words_v1(identity)
+    if not _traversal_approval_ready_v1 or
+            not mutex_lock_gate_handle_v1(_traversal_approval_gate_v1):
+        return Err("traversal-approval-gate-unavailable")
+    val token = _traversal_approval_rows_v1.len() / _TRAVERSAL_APPROVAL_ROW_WORDS_V1
+    if token > _TRAVERSAL_APPROVAL_CAPACITY_V1:
+        _traversal_approval_unlock_v1()
+        return Err("traversal-provider-retention-capacity")
+    val lifetime = unsafe(capabilities: [ffi]): provider_lifetime_register_bound_v1(provider.library_handle,
+        _traversal_join_words_v1(words[0], words[1]), _traversal_join_words_v1(words[2], words[3]),
+        _traversal_join_words_v1(words[4], words[5]), _traversal_join_words_v1(words[6], words[7]))
+    if lifetime == 0u64:
+        _traversal_approval_unlock_v1()
+        return Err("traversal-provider-lifetime-capacity")
+    # All fields are validated before registering ownership. From this point
+    # publication is an append of fixed immediate words, with no fallible return.
+    _traversal_approval_rows_v1.push((lifetime >> 32) as i64)
+    _traversal_approval_rows_v1.push((lifetime & 4294967295u64) as i64)
+    val address = provider.entry_symbol_address as u64
+    _traversal_approval_rows_v1.push((address >> 32) as i64)
+    _traversal_approval_rows_v1.push((address & 4294967295u64) as i64)
+    for word in words: _traversal_approval_rows_v1.push(word)
+    for word in request_words: _traversal_approval_rows_v1.push(word)
+    if _traversal_approval_rows_v1.len() != (token + 1) * _TRAVERSAL_APPROVAL_ROW_WORDS_V1:
+        panic("traversal-approval-row-publication-failed")
+    _traversal_approval_unlock_v1()
+    Ok(TraversalPluginSelectionV1(provider_token: token, canonical_identity: identity))
+
+pub fn traversal_plugin_selection_load_v1(request: TraversalPluginProviderRequestV1
+        ) -> Result<TraversalPluginSelectionV1, text>:
+    # The typed fixed host facade rejects unsupported mapping capability before
+    # effect. No caller supplies a trust key, verifier, callback or approved row.
+    if traversal_plugin_host_abi_fingerprint_v1() == "":
+        return Err("traversal-provider-host-unsupported")
+    val _request_words = _traversal_request_words_v1(request)?
+    val provider = traversal_plugin_provider_load_request_v1(request)?
+    val selected = _traversal_mint_selection_v1(provider, request)
+    if selected.is_err():
+        unsafe(capabilities: [ffi]): dynlib_admitted_close_v1(provider.library_handle)
+    selected
+
+pub fn traversal_plugin_selection_validate_v1(selection: TraversalPluginSelectionV1
+        ) -> Result<TraversalPluginDescriptorV1, text>:
+    val lease = _traversal_selection_lease_v1(selection, nil)?
+    # end's bool means final retired-entry reclamation, not release success.
+    # false is the expected result for this resident, non-retired provider.
+    unsafe(capabilities: [ffi]): provider_lifetime_end_v1(lease.lifetime_identity)
+    Ok(lease.descriptor)
+
+pub fn traversal_plugin_selection_validate_request_v1(selection: TraversalPluginSelectionV1,
+        request: TraversalPluginProviderRequestV1) -> Result<TraversalPluginDescriptorV1, text>:
+    val lease = _traversal_selection_lease_v1(selection, Some(request))?
+    # end's bool means final retired-entry reclamation, not release success.
+    # false is the expected result for this resident, non-retired provider.
+    unsafe(capabilities: [ffi]): provider_lifetime_end_v1(lease.lifetime_identity)
+    Ok(lease.descriptor)
+
+pri fn _traversal_dispatch_borrowed_v1(lease: TraversalPluginApprovedLeaseV1,
+        identity: text, view: DirTldrViewV1, selector: PointcutSelectorV1
+        ) -> Result<WeavePlanDeltaV1, text>:
+    val request = traversal_plugin_wire_request_v1(identity, view, selector)?
+    val input = text_to_bytes(request.payload)
+    val input_pointer = unsafe(capabilities: [ffi, raw_ptr]): foreign_bytes_copy_in(input)
+    if input_pointer == 0: return Err("traversal-provider-input-allocation")
+    val output_pointer = unsafe(capabilities: [ffi, raw_ptr]): foreign_bytes_allocate(TRAVERSAL_PLUGIN_MAX_WIRE_BYTES_V1)
+    if output_pointer == 0:
+        unsafe(capabilities: [ffi, raw_ptr]): foreign_bytes_release(input_pointer)
+        return Err("traversal-provider-output-allocation")
+    val slot = DynI64FnSlot(fptr: lease.entry_address, symbol: lease.descriptor.entry_identity,
+        provider_path: "admitted-traversal-provider", arity: 4, lifetime_identity: lease.lifetime_identity)
+    val called = unsafe(capabilities: [ffi, raw_ptr]): slot.call_checked(
+        [input_pointer, input.len(), output_pointer, TRAVERSAL_PLUGIN_MAX_WIRE_BYTES_V1])
+    var bytes: [u8] = []
+    if called.is_ok() and called.unwrap() > 0 and called.unwrap() <= TRAVERSAL_PLUGIN_MAX_WIRE_BYTES_V1:
+        bytes = unsafe(capabilities: [ffi, raw_ptr]): foreign_bytes_copy_out(output_pointer, called.unwrap())
+    unsafe(capabilities: [ffi, raw_ptr]):
+        foreign_bytes_release(output_pointer)
+        foreign_bytes_release(input_pointer)
+    if called.is_err(): return Err("traversal-provider-call-failed:" + called.unwrap_err())
+    if called.unwrap() <= 0 or called.unwrap() > TRAVERSAL_PLUGIN_MAX_WIRE_BYTES_V1:
+        return Err("traversal-provider-response-length")
+    if bytes.len() != called.unwrap(): return Err("traversal-provider-response-copy")
+    val response_text = validated_utf8_bytes_to_text_linear(bytes)?
+    traversal_plugin_wire_response_v1(response_text, request.request_digest)
+
+pub fn traversal_plugin_selection_dispatch_v1(selection: TraversalPluginSelectionV1,
+        view: DirTldrViewV1, selector: PointcutSelectorV1) -> Result<WeavePlanDeltaV1, text>:
+    val lease = _traversal_selection_lease_v1(selection, nil)?
+    val result = _traversal_dispatch_borrowed_v1(lease, selection.canonical_identity, view, selector)
+    unsafe(capabilities: [ffi]): provider_lifetime_end_v1(lease.lifetime_identity)
+    result
+
 export TRAVERSAL_PLUGIN_ALLOWLIST_MAX_SOURCE_BYTES_V1,
     TRAVERSAL_PLUGIN_ALLOWLIST_MAX_ENTRIES_V1,
     TRAVERSAL_PLUGIN_ARTIFACT_MAX_BYTES_V1,
     TRAVERSAL_PLUGIN_ENTRY_SYMBOL_V1, TRAVERSAL_PLUGIN_ABI_ID_V1,
     TRAVERSAL_PLUGIN_MAX_WIRE_BYTES_V1
 export TraversalPluginAllowlistEntryV1, VerifiedTraversalPluginAllowlistV1
-export AdmittedTraversalPluginProviderV1
 export traversal_plugin_host_abi_fingerprint_v1
 export traversal_plugin_allowlist_verify_decode_v1, traversal_plugin_allowlist_select_v1
-export traversal_plugin_provider_load_v1
-export traversal_plugin_provider_load_request_v1
+
+export traversal_plugin_selection_load_v1, traversal_plugin_selection_validate_v1
+export traversal_plugin_selection_validate_request_v1, traversal_plugin_selection_dispatch_v1
