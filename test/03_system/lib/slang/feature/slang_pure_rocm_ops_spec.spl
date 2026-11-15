@@ -10,9 +10,9 @@ Skips with a reason when the ROCm DLLs or the model file are absent.
 use std.spec.*
 use std.io_runtime.{file_exists, file_read_bytes}
 use std.gc_async_mut.gpu.rocm.hip_compute.{rocm_available_at, rocm_bin_default}
-use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values, tensor_matvec, tensor_decode_f32_le}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values, tensor_matvec, tensor_decode_f32_le, tensor_rope, tensor_kv_write, tensor_row, tensor_argmax}
 use std.gc_async_mut.slang.model_executor.pure.weights.{pure_weights_f32_ranges, PureF32Range}
-use std.gc_async_mut.slang.model_executor.pure.tensor_ops_rocm.{rocm_ops_open, rocm_ops_device_name, rocm_tensor_upload, rocm_tensor_upload_f32_bytes, rocm_tensor_download, rocm_tensor_matvec, rocm_tensor_free, rocm_ops_sync}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops_rocm.{rocm_ops_open, rocm_ops_device_name, rocm_tensor_upload, rocm_tensor_upload_f32_bytes, rocm_tensor_download, rocm_tensor_matvec, rocm_tensor_free, rocm_ops_sync, rocm_tensor_rope, rocm_tensor_kv_write, rocm_tensor_row, rocm_tensor_argmax}
 
 extern fn rt_time_now_nanos() -> i64
 
@@ -120,3 +120,43 @@ describe "slang pure runner ROCm provider (system)":
             print "PERF rel_err small={e_small} head={e_head}"
             expect(e_small < 0.0001).to_equal(true)
             expect(e_head < 0.0001).to_equal(true)
+
+    it "runs rope, kv_write, row lookup and argmax on the GPU and matches the CPU ops":
+        if not rocm_available_at(rocm_bin_default()):
+            print "SKIP: ROCm DLLs not found in {rocm_bin_default()}"
+        else:
+            val ops = rocm_ops_open().unwrap()
+            # rope: 6 heads x 48, position 7, theta 10000
+            val x = tensor_from_values(rand_values(288, 5), [288])
+            val dx = rocm_tensor_upload(ops, x).unwrap()
+            val rope_gpu = rocm_tensor_download(ops, rocm_tensor_rope(ops, dx, 7, 6, 48, 10000.0).unwrap()).unwrap()
+            val e_rope = rel_err(rope_gpu, tensor_rope(x, 7, 6, 48, 10000.0))
+            # kv_write: row 2 of a [4, 6] buffer, in place
+            val buf = tensor_from_values(rand_values(24, 6), [4, 6])
+            val row = tensor_from_values(rand_values(6, 7), [6])
+            val dbuf = rocm_tensor_upload(ops, buf).unwrap()
+            val drow = rocm_tensor_upload(ops, row).unwrap()
+            rocm_tensor_kv_write(ops, dbuf, 2, drow).unwrap()
+            val kv_gpu = rocm_tensor_download(ops, dbuf).unwrap()
+            val e_kv = rel_err(kv_gpu, tensor_kv_write(buf, 2, row))
+            # row lookup: row 3 of a [5, 6] table
+            val table = tensor_from_values(rand_values(30, 8), [5, 6])
+            val dtable = rocm_tensor_upload(ops, table).unwrap()
+            val row_gpu = rocm_tensor_download(ops, rocm_tensor_row(ops, dtable, 3).unwrap()).unwrap()
+            val e_row = rel_err(row_gpu, tensor_row(table, 3))
+            # argmax over 32000: unique max, then a tie that must resolve to the lowest index
+            var vals = rand_values(32000, 9)
+            vals[31337] = 5.0
+            val unique_gpu = rocm_tensor_argmax(ops, rocm_tensor_upload(ops, tensor_from_values(vals, [32000])).unwrap()).unwrap()
+            vals[31337] = 0.5
+            vals[20000] = 7.0
+            vals[100] = 7.0
+            val tied = tensor_from_values(vals, [32000])
+            val tie_gpu = rocm_tensor_argmax(ops, rocm_tensor_upload(ops, tied).unwrap()).unwrap()
+            print "PARITY rope={e_rope} kv_write={e_kv} row={e_row} argmax_unique={unique_gpu} argmax_tie={tie_gpu} (cpu tie={tensor_argmax(tied)})"
+            expect(e_rope < 0.0001).to_equal(true)
+            expect(e_kv < 0.0001).to_equal(true)
+            expect(e_row < 0.0001).to_equal(true)
+            expect(unique_gpu).to_equal(31337)
+            expect(tie_gpu).to_equal(tensor_argmax(tied))
+            expect(tie_gpu).to_equal(100)
