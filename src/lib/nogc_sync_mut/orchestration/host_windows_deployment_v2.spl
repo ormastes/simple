@@ -4,6 +4,8 @@ use std.nogc_sync_mut.io.windows_private_file_v1.*
 use std.nogc_sync_mut.io.windows_journal_store_v1.{WindowsJournalStoreOpenV1, WindowsJournalStoreV1}
 use std.nogc_sync_mut.orchestration.host_service_private_receipt_v2.{HostServicePrivateCleanupV2, host_service_private_cleanup_v2}
 use std.nogc_sync_mut.orchestration.host_service_enrollment_v2.*
+use std.nogc_sync_mut.orchestration.host_service_enrollment_proof_v3.*
+use std.nogc_sync_mut.container.machine_authority_v1.*
 use std.nogc_sync_mut.orchestration.host_enrollment_v1.{HostEnrollmentCredentialV1,
     host_enrollment_credential_encode_v1, host_enrollment_credential_decode_v1}
 use std.nogc_sync_mut.orchestration.local_authority_policy_v1.{LocalAuthorityPolicyV1, local_authority_policy_decode_v1}
@@ -45,9 +47,29 @@ pub struct HostWindowsDeploymentResidueV2:
     claim_digest: text
     phase: HostWindowsDeploymentPhaseV2
 
+pub enum HostWindowsDeploymentMachineCleanupV3:
+    Authority(MachineContainerAuthorityV1)
+    Opening(MachineContainerAuthorityCleanupV1)
+    Claim(MachineManagedClaimV1)
+
 pub struct HostWindowsDeploymentCleanupV2:
     native: HostServicePrivateCleanupV2
     residue: Option<HostWindowsDeploymentResidueV2>
+    machine: Option<HostWindowsDeploymentMachineCleanupV3> = nil
+    error: text = ""
+
+# Diagnostic progress only, never native ownership or admission authority.
+pub struct HostWindowsCleanupDispositionV3:
+    consumed: bool
+    error: text
+
+pub fn host_windows_cleanup_disposition_v3(state: text, prior_error: text = "",
+        prefix: text = "windows-deployment-machine-close") -> HostWindowsCleanupDispositionV3:
+    var error = prior_error
+    val consumed = ["released", "consumed-error"].contains(state)
+    if error == "" and state == "consumed-error": error = prefix + ":consumed-error"
+    if error == "" and not consumed and state != "retained": error = prefix + ":" + state
+    HostWindowsCleanupDispositionV3(consumed, error)
 
 pub struct HostWindowsDeploymentCleanupTurnV2:
     cleanup: Option<HostWindowsDeploymentCleanupV2>
@@ -72,9 +94,19 @@ pub class HostWindowsDeploymentOwnerV2:
     residue: HostWindowsDeploymentResidueV2
     claim_bytes: text
     manifest_bytes: text
+    enrollment_proof: Option<VerifiedHostServiceEnrollmentV3> = nil
+    machine_claim: Option<MachineManagedClaimV1> = nil
 
     pub fn binding_v2() -> HostServiceEnrollmentBindingV2: self.binding
     pub fn metadata_v2() -> HostPrivateMetadataV2: self.metadata
+
+    # Authenticated controller authority is separate from the Host journal ID.
+    # The returned snapshot is data, never another writer or claim constructor.
+    pub fn machine_scope_v3() -> Result<MachineManagedClaimSnapshotV1, text>:
+        if self.enrollment_proof.is_none() or self.machine_claim.is_none():
+            return Err("windows-deployment-machine-claim-missing")
+        val claim = self.machine_claim.unwrap()
+        claim.current_v1(self.enrollment_proof.unwrap())
 
     # These are trusted owner ports, not pathname admission. Every use rechecks
     # the same retained deployment generations and signed installed provenance.
@@ -111,6 +143,8 @@ struct DeploymentAuthorizationV2:
     credential: HostEnrollmentCredentialV1
     policy: LocalAuthorityPolicyV1
     floor: i64
+    machine_claim: Option<MachineManagedClaimV1> = nil
+    enrollment_proof: Option<VerifiedHostServiceEnrollmentV3> = nil
 
 struct DeploymentIoV2:
     native: HostServicePrivateCleanupV2
@@ -212,19 +246,75 @@ pub fn host_windows_deployment_records_check_v2(binding: HostServiceEnrollmentBi
         return Err("windows-deployment-manifest-provenance-mismatch")
     Ok(at)
 
+struct DeploymentMachineCloseV3:
+    state: text
+    error: text
+
+fn deployment_machine_close_v3(cleanup: HostWindowsDeploymentMachineCleanupV3) -> DeploymentMachineCloseV3:
+    match cleanup:
+        case HostWindowsDeploymentMachineCleanupV3.Authority(owner):
+            val state = owner.close_v1()
+            DeploymentMachineCloseV3(state, owner.close_diagnostic_v1())
+        case HostWindowsDeploymentMachineCleanupV3.Opening(owner):
+            val state = machine_container_authority_cleanup_v1(owner)
+            DeploymentMachineCloseV3(state, machine_container_authority_cleanup_diagnostic_v1(owner))
+        case HostWindowsDeploymentMachineCleanupV3.Claim(owner):
+            val state = owner.close_v1()
+            DeploymentMachineCloseV3(state, owner.close_diagnostic_v1())
+
 pub fn host_windows_deployment_cleanup_v2(cleanup: HostWindowsDeploymentCleanupV2) -> HostWindowsDeploymentCleanupTurnV2:
-    val pending = host_service_private_cleanup_v2(cleanup.native)
+    var current = cleanup
+    if val machine = current.machine:
+        # The caller closes the Host journal first. This closes only the global
+        # writer; neither successful close nor failed enrollment refunds charge.
+        val closed = deployment_machine_close_v3(machine)
+        if current.error == "" and closed.error != "": current.error = closed.error
+        val disposition = host_windows_cleanup_disposition_v3(closed.state, current.error)
+        current.error = disposition.error
+        if not disposition.consumed:
+            # The claim still borrows these native policy/manifest generations.
+            return HostWindowsDeploymentCleanupTurnV2(Some(current), current.residue, false,
+                if current.error != "": current.error else: "windows-deployment-machine-close:" + closed.state)
+        # Clear before attempting another component. A consumed close with a
+        # diagnostic cannot be retried through a copied native owner token.
+        current.machine = nil
+    val pending = host_service_private_cleanup_v2(current.native)
+    val native_state = if pending.is_some(): "retained" else: "released"
+    val disposition = host_windows_cleanup_disposition_v3(native_state, current.error, "windows-deployment-native-close")
+    current.error = disposition.error
     if val retained = pending:
-        return HostWindowsDeploymentCleanupTurnV2(Some(HostWindowsDeploymentCleanupV2(retained, cleanup.residue)),
-            cleanup.residue, false, "windows-deployment-native-close-pending")
-    HostWindowsDeploymentCleanupTurnV2(nil, cleanup.residue, true, "")
+        current.native = retained
+        return HostWindowsDeploymentCleanupTurnV2(Some(current), current.residue, false,
+            if current.error != "": current.error else: "windows-deployment-native-close-pending")
+    HostWindowsDeploymentCleanupTurnV2(nil, current.residue, true, current.error)
 
 fn deployment_fail_v2(native: HostServicePrivateCleanupV2, residue: Option<HostWindowsDeploymentResidueV2>,
-        error: text) -> HostWindowsDeploymentOpenV2:
-    val closed = host_windows_deployment_cleanup_v2(HostWindowsDeploymentCleanupV2(native, residue))
+        error: text, machine: Option<HostWindowsDeploymentMachineCleanupV3> = nil) -> HostWindowsDeploymentOpenV2:
+    val closed = host_windows_deployment_cleanup_v2(HostWindowsDeploymentCleanupV2(native, residue, machine))
     if val pending = closed.cleanup: return HostWindowsDeploymentOpenV2.CleanupRequired(pending, error)
     if val retained = residue: return HostWindowsDeploymentOpenV2.RecoveryRequired(retained, error)
     HostWindowsDeploymentOpenV2.Rejected(error)
+
+struct DeploymentMachineAdmissionV3:
+    claim: Option<MachineManagedClaimV1>
+    cleanup: Option<HostWindowsDeploymentMachineCleanupV3>
+    error: text
+
+fn deployment_machine_admit_v3(proof: VerifiedHostServiceEnrollmentV3) -> DeploymentMachineAdmissionV3:
+    val authority = match machine_container_authority_open_v1():
+        case MachineContainerAuthorityOpenV1.Ready(owner): owner
+        case MachineContainerAuthorityOpenV1.Rejected(reason): return DeploymentMachineAdmissionV3(nil, nil, reason)
+        case MachineContainerAuthorityOpenV1.CleanupRequired(owner, reason):
+            return DeploymentMachineAdmissionV3(nil, Some(HostWindowsDeploymentMachineCleanupV3.Opening(owner)), reason)
+    # Retain the actual writer before admission: even a failed/ambiguous commit
+    # must return its cleanup authority instead of opening a competing writer.
+    var retained = DeploymentMachineAdmissionV3(nil, Some(HostWindowsDeploymentMachineCleanupV3.Authority(authority)), "")
+    val claimed = authority.managed_claim_v1(proof)
+    if claimed.is_err():
+        retained.error = claimed.unwrap_err()
+        return retained
+    val claim = claimed.unwrap()
+    DeploymentMachineAdmissionV3(Some(claim), Some(HostWindowsDeploymentMachineCleanupV3.Claim(claim)), "")
 
 fn deployment_native_error_v2(native: HostServicePrivateCleanupV2, error: WindowsPrivateErrorV1) -> HostServicePrivateCleanupV2:
     var result = native
@@ -266,9 +356,15 @@ fn deployment_authorize_v2(auth: DeploymentAuthorizationV2) -> Result<i64, text>
     if now <= 0 or now < auth.floor: return Err("windows-deployment-clock-regressed")
     val grant = host_service_enrollment_authorize_v2(auth.binding, auth.credential, auth.policy,
         deployment_context_v2(auth.policy, now))?
+    if val machine = auth.machine_claim:
+        if auth.enrollment_proof.is_none(): return Err("windows-deployment-machine-proof-missing")
+        val current = machine.current_v1(auth.enrollment_proof.unwrap())?
     Ok(now)
 
 fn deployment_boundary_v2(auth: DeploymentAuthorizationV2, validated_at: i64) -> Result<i64, text>:
+    if val machine = auth.machine_claim:
+        if auth.enrollment_proof.is_none(): return Err("windows-deployment-machine-proof-missing")
+        val current = machine.current_v1(auth.enrollment_proof.unwrap())?
     val now = deployment_now_v2()
     if now <= 0 or now < validated_at or now < auth.floor: return Err("windows-deployment-clock-regressed")
     val scope = distributed_grant_authorize_v2(auth.credential.signed.grant, auth.credential.operation,
@@ -395,7 +491,7 @@ pub fn host_windows_deployment_enroll_v2(anchor: HostWindowsDeploymentAnchorV2,
     if decoded.is_err(): return deployment_fail_v2(native, nil, decoded.unwrap_err())
     val policy = decoded.unwrap().policy
     val config = decoded.unwrap().configuration
-    if (config.controller_ref != credential.signed.issuer_id or config.physical_host_id != binding.physical_host_id or
+    if (config.physical_host_id != binding.physical_host_id or
             config.service_scope_id != binding.service_scope_id or config.runtime_class_ref != binding.backend or config.journal_root != "journal" or
             config.exclusive_device_ids.len() != 0 or config.cpu_ceiling_millis != binding.physical_cpu_millis or
             config.memory_ceiling_bytes != binding.physical_memory_bytes):
@@ -405,18 +501,32 @@ pub fn host_windows_deployment_enroll_v2(anchor: HostWindowsDeploymentAnchorV2,
     val preliminary = deployment_authorize_v2(auth)
     if preliminary.is_err(): return deployment_fail_v2(native, nil, preliminary.unwrap_err())
     auth.floor = preliminary.unwrap()
-    val observed = deployment_observe_v2(binding, decoded.unwrap())
-    if observed.is_err(): return deployment_fail_v2(native, nil, observed.unwrap_err())
-    val checked = deployment_authorize_v2(auth)
-    if checked.is_err(): return deployment_fail_v2(native, nil, checked.unwrap_err())
-    auth.floor = checked.unwrap()
+    if config.controller_ref != credential.signed.issuer_id:
+        return deployment_fail_v2(native, nil, "windows-deployment-controller-mismatch")
     val encoded_credential = host_enrollment_credential_encode_v1(credential)
     if encoded_credential.is_err(): return deployment_fail_v2(native, nil, encoded_credential.unwrap_err())
+    val proof_result = host_service_enrollment_prepare_proof_v3(native.roots[0], native.files[0], binding,
+        credential, configuration_bytes, engine_policy_bytes, broker_policy_bytes)
+    if proof_result.is_err(): return deployment_fail_v2(native, nil, proof_result.unwrap_err())
+    val admitted = deployment_machine_admit_v3(proof_result.unwrap())
+    val machine = admitted.cleanup
+    if admitted.error != "": return deployment_fail_v2(native, nil, admitted.error, machine)
+    auth.machine_claim = admitted.claim
+    auth.enrollment_proof = Some(proof_result.unwrap())
+    # Caller-selected metadata must never execute its observer until the actual
+    # installed machine owner has pinned and charged this exact enrollment.
+    val observed = deployment_observe_v2(binding, decoded.unwrap())
+    if observed.is_err(): return deployment_fail_v2(native, nil, observed.unwrap_err(), machine)
+    val checked = deployment_authorize_v2(auth)
+    if checked.is_err(): return deployment_fail_v2(native, nil, checked.unwrap_err(), machine)
+    auth.floor = checked.unwrap()
+    # The exact signed physical ceiling (including broker partition) is now
+    # durably charged in the one machine WAL, before any deployment publication.
     val nonce = sosix_random_hex(32) ?? ""
-    if not builder_digest_valid_v1(nonce): return deployment_fail_v2(native, nil, "windows-deployment-entropy")
+    if not builder_digest_valid_v1(nonce): return deployment_fail_v2(native, nil, "windows-deployment-entropy", machine)
     val encoded_claim = host_windows_deployment_claim_bytes_v2(binding, credential.operation.id,
         sha256_text(encoded_credential.unwrap()), nonce, auth.floor)
-    if encoded_claim.is_err(): return deployment_fail_v2(native, nil, encoded_claim.unwrap_err())
+    if encoded_claim.is_err(): return deployment_fail_v2(native, nil, encoded_claim.unwrap_err(), machine)
     val claim_bytes = encoded_claim.unwrap()
     var residue = HostWindowsDeploymentResidueV2(host_windows_deployment_claim_name_v2(binding).unwrap(), "host-root-" + nonce,
         nonce, host_service_enrollment_payload_digest_v2(binding).unwrap(), sha256_text(claim_bytes),
@@ -424,14 +534,19 @@ pub fn host_windows_deployment_enroll_v2(anchor: HostWindowsDeploymentAnchorV2,
     val parent = native.roots[0]
     val claimed = deployment_publish_v2(parent, residue.claim_name, claim_bytes, nonce, native, Some(auth))
     native = claimed.native
-    if claimed.error != "": return deployment_fail_v2(native, Some(residue), claimed.error)
+    if claimed.error != "": return deployment_fail_v2(native, Some(residue), claimed.error, machine)
     auth.floor = claimed.validated_at
     residue.phase = HostWindowsDeploymentPhaseV2.Claimed
     residue.phase = HostWindowsDeploymentPhaseV2.ChildAttemptedUnknown
+    val child_authority = deployment_authorize_v2(auth)
+    if child_authority.is_err(): return deployment_fail_v2(native, Some(residue), child_authority.unwrap_err(), machine)
+    val child_boundary = deployment_boundary_v2(auth, child_authority.unwrap())
+    if child_boundary.is_err(): return deployment_fail_v2(native, Some(residue), child_boundary.unwrap_err(), machine)
+    auth.floor = child_boundary.unwrap()
     val created = parent.child_directory(residue.root_child, true)
     if created.is_err():
         val issue = created.unwrap_err()
-        return deployment_fail_v2(deployment_native_error_v2(native, issue), Some(residue), issue.message)
+        return deployment_fail_v2(deployment_native_error_v2(native, issue), Some(residue), issue.message, machine)
     val root = created.unwrap()
     native.roots.push(root)
     residue.phase = HostWindowsDeploymentPhaseV2.ChildCreated
@@ -440,30 +555,35 @@ pub fn host_windows_deployment_enroll_v2(anchor: HostWindowsDeploymentAnchorV2,
     val names = ["host-config.sdn", "authority-policy.sdn", "engine-policy.sdn", "broker-policy.sdn",
         "enrollment-binding.sdn", "enrollment-credential.sdn"]
     for index in 0..6:
-        val stored = deployment_publish_v2(root, names[index], sources[index], nonce, native, nil)
+        val stored = deployment_publish_v2(root, names[index], sources[index], nonce, native, Some(auth))
         native = stored.native
-        if stored.error != "": return deployment_fail_v2(native, Some(residue), stored.error)
+        if stored.error != "": return deployment_fail_v2(native, Some(residue), stored.error, machine)
+        auth.floor = stored.validated_at
     val installed = deployment_metadata_v2(native, binding)
-    if installed.is_err(): return deployment_fail_v2(native, Some(residue), installed.unwrap_err())
+    if installed.is_err(): return deployment_fail_v2(native, Some(residue), installed.unwrap_err(), machine)
     val refreshed = deployment_observe_v2(binding, installed.unwrap())
-    if refreshed.is_err(): return deployment_fail_v2(native, Some(residue), refreshed.unwrap_err())
+    if refreshed.is_err(): return deployment_fail_v2(native, Some(residue), refreshed.unwrap_err(), machine)
     val final_auth = deployment_authorize_v2(auth)
-    if final_auth.is_err(): return deployment_fail_v2(native, Some(residue), final_auth.unwrap_err())
+    if final_auth.is_err(): return deployment_fail_v2(native, Some(residue), final_auth.unwrap_err(), machine)
     auth.floor = final_auth.unwrap()
     val encoded_manifest = host_windows_deployment_manifest_bytes_v2(binding, claim_bytes, auth.floor)
-    if encoded_manifest.is_err(): return deployment_fail_v2(native, Some(residue), encoded_manifest.unwrap_err())
+    if encoded_manifest.is_err(): return deployment_fail_v2(native, Some(residue), encoded_manifest.unwrap_err(), machine)
     residue.phase = HostWindowsDeploymentPhaseV2.ManifestAttemptedUnknown
     val completed = deployment_publish_v2(root, "host-root.sdn", encoded_manifest.unwrap(), nonce, native, Some(auth))
     native = completed.native
-    if completed.error != "": return deployment_fail_v2(native, Some(residue), completed.error)
+    if completed.error != "": return deployment_fail_v2(native, Some(residue), completed.error, machine)
     residue.phase = HostWindowsDeploymentPhaseV2.Enrolled
+    val recovered_proof = host_service_enrollment_recover_proof_v3(native.roots[0], native.files[0], binding,
+        credential, configuration_bytes, engine_policy_bytes, broker_policy_bytes, native.files[8])
+    if recovered_proof.is_err(): return deployment_fail_v2(native, Some(residue), recovered_proof.unwrap_err(), machine)
     val owner = HostWindowsDeploymentOwnerV2(anchor: anchor, binding: binding, metadata: installed.unwrap(), credential: credential,
-        native: native, residue: residue, claim_bytes: claim_bytes, manifest_bytes: encoded_manifest.unwrap())
+        native: native, residue: residue, claim_bytes: claim_bytes, manifest_bytes: encoded_manifest.unwrap(),
+        enrollment_proof: Some(recovered_proof.unwrap()), machine_claim: admitted.claim)
     val validated = deployment_owner_check_v2(owner, false)
-    if validated.is_err(): return deployment_fail_v2(native, Some(residue), validated.unwrap_err())
+    if validated.is_err(): return deployment_fail_v2(native, Some(residue), validated.unwrap_err(), machine)
     HostWindowsDeploymentOpenV2.Ready(owner)
 
-fn deployment_owner_check_v2(owner: HostWindowsDeploymentOwnerV2, observe: bool) -> Result<bool, text>:
+fn deployment_owner_check_v2(owner: HostWindowsDeploymentOwnerV2, observe: bool, require_machine: bool = true) -> Result<bool, text>:
     val anchored = deployment_anchor_check_v2(owner.anchor, owner.binding)?
     if owner.native.roots.len() != 2 or owner.native.files.len() != 9: return Err("windows-deployment-owner-shape")
     for root in owner.native.roots:
@@ -484,14 +604,25 @@ fn deployment_owner_check_v2(owner: HostWindowsDeploymentOwnerV2, observe: bool)
             owner.credential.operation.id != claim.operation_id):
         return Err("windows-deployment-credential-changed")
     val metadata = deployment_metadata_v2(owner.native, owner.binding)?
-    if metadata.configuration.controller_ref != owner.credential.signed.issuer_id:
-        return Err("windows-deployment-controller-mismatch")
     val now = deployment_now_v2()
     if now <= 0 or at > now: return Err("windows-deployment-historical-clock")
     # Historical completed provenance only. This does not refresh enrollment
     # expiry or authorize any runtime operation at today's clock.
     val historical = host_service_enrollment_authorize_v2(owner.binding, owner.credential, metadata.policy,
         deployment_context_v2(metadata.policy, at))?
+    if metadata.configuration.controller_ref != owner.credential.signed.issuer_id:
+        return Err("windows-deployment-controller-mismatch")
+    if require_machine:
+        val machine = owner.machine_scope_v3()?
+        if (machine.issuer_id != owner.credential.signed.issuer_id or
+                machine.authority_policy_digest != owner.binding.policy_digest or
+                machine.physical_host_id != owner.binding.physical_host_id or
+                machine.native_machine_id != owner.binding.native_machine_id or
+                machine.service_scope_id != owner.binding.service_scope_id or
+                machine.provider_identity_digest != owner.binding.provider_identity_digest or
+                machine.cpu_millis != owner.binding.physical_cpu_millis or
+                machine.memory_bytes != owner.binding.physical_memory_bytes):
+            return Err("windows-deployment-machine-claim-binding")
     if observe:
         val observed = deployment_observe_v2(owner.binding, metadata)?
     for file in owner.native.files:
@@ -542,18 +673,31 @@ pub fn host_windows_deployment_reopen_v2(anchor: HostWindowsDeploymentAnchorV2,
     val owner = HostWindowsDeploymentOwnerV2(anchor: anchor, binding: binding, metadata: metadata.unwrap(),
         credential: credential.unwrap(), native: native, residue: residue,
         claim_bytes: claimed.source, manifest_bytes: sources[6])
-    val checked = deployment_owner_check_v2(owner, true)
+    val checked = deployment_owner_check_v2(owner, false, false)
     if checked.is_err(): return deployment_fail_v2(native, Some(residue), checked.unwrap_err())
+    val proof = host_service_enrollment_recover_proof_v3(native.roots[0], native.files[0], binding,
+        credential.unwrap(), sources[0], sources[2], sources[3], native.files[8])
+    if proof.is_err(): return deployment_fail_v2(native, Some(residue), proof.unwrap_err())
+    val admitted = deployment_machine_admit_v3(proof.unwrap())
+    if admitted.error != "": return deployment_fail_v2(native, Some(residue), admitted.error, admitted.cleanup)
     residue.phase = HostWindowsDeploymentPhaseV2.Enrolled
-    HostWindowsDeploymentOpenV2.Ready(HostWindowsDeploymentOwnerV2(anchor: anchor, binding: binding,
+    val retained_owner = HostWindowsDeploymentOwnerV2(anchor: anchor, binding: binding,
         metadata: metadata.unwrap(), credential: credential.unwrap(), native: native, residue: residue,
-        claim_bytes: claimed.source, manifest_bytes: sources[6]))
+        claim_bytes: claimed.source, manifest_bytes: sources[6],
+        enrollment_proof: Some(proof.unwrap()), machine_claim: admitted.claim)
+    val current = deployment_owner_check_v2(retained_owner, true)
+    if current.is_err(): return deployment_fail_v2(native, Some(residue), current.unwrap_err(), admitted.cleanup)
+    HostWindowsDeploymentOpenV2.Ready(retained_owner)
 
 pub fn host_windows_deployment_close_v2(owner: HostWindowsDeploymentOwnerV2) -> HostWindowsDeploymentCleanupTurnV2:
-    host_windows_deployment_cleanup_v2(HostWindowsDeploymentCleanupV2(owner.native, Some(owner.residue)))
+    var machine: Option<HostWindowsDeploymentMachineCleanupV3> = nil
+    if val claim = owner.machine_claim: machine = Some(HostWindowsDeploymentMachineCleanupV3.Claim(claim))
+    host_windows_deployment_cleanup_v2(HostWindowsDeploymentCleanupV2(owner.native, Some(owner.residue), machine))
 
 export HostWindowsDeploymentAnchorV2, HostWindowsDeploymentOwnerV2, HostWindowsDeploymentOpenV2
 export HostWindowsDeploymentPhaseV2, HostWindowsDeploymentResidueV2, HostWindowsDeploymentCleanupV2
+export HostWindowsDeploymentMachineCleanupV3
+export HostWindowsCleanupDispositionV3, host_windows_cleanup_disposition_v3
 export HostWindowsDeploymentCleanupTurnV2, host_windows_deployment_cleanup_v2
 export host_windows_deployment_claim_name_v2, host_windows_deployment_claim_bytes_v2
 export host_windows_deployment_manifest_bytes_v2, host_windows_deployment_records_check_v2

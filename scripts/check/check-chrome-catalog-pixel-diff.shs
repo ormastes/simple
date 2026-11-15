@@ -96,6 +96,25 @@ find_simple() {
     return 1
 }
 
+# newest_playwright_chrome <home> -> the full Playwright Chromium with the
+# HIGHEST build number under <home>, or nothing. Compared as numbers: the glob
+# expands in name order, where chromium-999 sorts after chromium-1255.
+newest_playwright_chrome() {
+    np_best=""
+    np_best_n=-1
+    for np_c in "$1"/.cache/ms-playwright/chromium-*/chrome-linux*/chrome; do
+        [ -x "$np_c" ] || continue
+        np_n=${np_c#"$1"/.cache/ms-playwright/chromium-}
+        np_n=${np_n%%/*}
+        case "$np_n" in ''|*[!0-9]*) continue ;; esac
+        if [ "$np_n" -gt "$np_best_n" ]; then
+            np_best_n=$np_n
+            np_best=$np_c
+        fi
+    done
+    printf '%s' "$np_best"
+}
+
 find_chrome() {
     # CHROME_BIN wins when set. Playwright's Chromium (`npx playwright install
     # chromium`) is the no-root path on linux-arm64, where Google ships no Chrome.
@@ -108,10 +127,7 @@ find_chrome() {
     # Newest Playwright build wins: UA defaults change between Chrome versions
     # (Chromium 131 still shrinks `section h1`; Chrome 159 does not), so an old
     # reference browser is a wrong oracle, not a stricter one.
-    newest=""
-    for candidate in "$HOME"/.cache/ms-playwright/chromium-*/chrome-linux*/chrome; do
-        [ -x "$candidate" ] && newest="$candidate"
-    done
+    newest=$(newest_playwright_chrome "$HOME")
     [ -n "$newest" ] && { echo "$newest"; return 0; }
     for candidate in \
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
@@ -221,6 +237,15 @@ run_selftest() {
     printf 'P6\n4 1\n255\n' > "$st_dir/diff.simple.ppm"
     printf '\0\0\377\0\0\377\0\0\377\0\0\377' >> "$st_dir/diff.simple.ppm"
     cp "$st_dir/same.simple.ppm" "$st_dir/diff.chrome.ppm"
+    # The newest Playwright build is chosen by NUMBER: chromium-999 must not
+    # beat chromium-1255 (it does in glob name order).
+    for st_b in 999 1255 1200; do
+        mkdir -p "$st_dir/home/.cache/ms-playwright/chromium-$st_b/chrome-linux-arm64"
+        printf '#!/bin/sh\n' > "$st_dir/home/.cache/ms-playwright/chromium-$st_b/chrome-linux-arm64/chrome"
+        chmod +x "$st_dir/home/.cache/ms-playwright/chromium-$st_b/chrome-linux-arm64/chrome"
+    done
+    st_pick=$(newest_playwright_chrome "$st_dir/home")
+    [ "$st_pick" = "$st_dir/home/.cache/ms-playwright/chromium-1255/chrome-linux-arm64/chrome" ] || { echo "selftest: newest Playwright build picked '$st_pick', want chromium-1255"; return 1; }
 
     same_out=$("$SIMPLE_BIN" run src/app/ui/chrome_showcase/pixel_diff.spl \
         --pair "$st_dir/same.chrome.ppm" "$st_dir/same.simple.ppm" 2>/dev/null)
@@ -273,7 +298,7 @@ if ! run_selftest; then
     exit 2
 fi
 if [ "$SELFTEST" -eq 1 ]; then
-    echo "PASS — 9 selftest fixture(s) checked, differ discriminates, viewport crop is explicit, zero-pixel-render is named, ratchet names regressions"
+    echo "PASS — 10 selftest fixture(s) checked, newest Playwright build by number, differ discriminates, viewport crop is explicit, zero-pixel-render is named, ratchet names regressions"
     exit 0
 fi
 

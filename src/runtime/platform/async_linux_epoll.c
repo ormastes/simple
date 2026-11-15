@@ -32,9 +32,11 @@
 #include <time.h>
 #include <sched.h>
 
-/* Forward declarations for SplArray (defined in runtime.h / runtime.c) */
+/* Forward declarations for SplArray. spl_array_new (not the runtime.c-only
+ * spl_array_new_i64 alias) so the core-C bundle, which excludes runtime.c,
+ * defines everything this file references. */
 typedef struct SplArray SplArray;
-SplArray* spl_array_new_i64(void);
+SplArray* spl_array_new(void);
 void      spl_array_push_i64(SplArray* a, int64_t n);
 
 /* ===== Internal Constants ===== */
@@ -927,7 +929,7 @@ int64_t rt_epoll_ctl(int64_t epfd, int64_t op, int64_t fd, int64_t events) {
 }
 
 SplArray* rt_epoll_wait(int64_t epfd, int64_t max_events, int64_t timeout_ms) {
-    SplArray* result = spl_array_new_i64();
+    SplArray* result = spl_array_new();
 
     int n = (int)max_events;
     if (n > EPOLL_MAX_EVENTS) n = EPOLL_MAX_EVENTS;
