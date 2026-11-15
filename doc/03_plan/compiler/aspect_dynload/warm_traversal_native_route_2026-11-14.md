@@ -127,3 +127,22 @@ are separate process runs (128 total mapping attempts per process, including fai
 effects). No successful native invocation/delta, Windows-off build, warm-cache
 performance or authenticated worker transport is established by this checkpoint.
 Do not retry the earlier six projected qualification cycles as this acceptance.
+
+
+### Managed transport prerequisite checkpoint
+
+The bounded canonical SDN envelope contains only acquisition paths/provider ID,
+expected full semantic descriptor and job-scope SHA; it contains no token, native
+address, signing key or callback. Parent export requires actual private approval.
+Child admission verifies current host-signed policy and compares the expected
+descriptor before artifact read/mapping; it then performs ordinary artifact
+verification and issues its own approval. The separate child fixture creates a
+real checked driver, but all execution is UNRUN.
+
+Do not enable grouped compilation from this helper alone. The existing manager
+creates variant/index/warm-route receipts before group preparation. Their typed
+variant still excludes provider identity. Next change must bind the envelope and
+semantic identity through that producer, canonical manifest/run digests, earliest
+cache namespaces, child argv/request and result receipts. Existing nil wire bytes
+should remain unchanged. Other shard variants stay rejected until individually
+connected. No actual worker route completion is claimed by this prerequisite.

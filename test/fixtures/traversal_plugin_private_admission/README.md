@@ -29,3 +29,19 @@ and failed attempts. Attempts are reserved only after policy/artifact checks,
 but before the exact-map effect, and never refunded because a failed load can
 retain a sealed snapshot descriptor. This staging limit bounds that retained
 resource; it does not prove a global RSS ceiling or permit hot unload.
+
+
+Transport prerequisite mode (authored/unrun): run the parent fixture with fourth
+argument `transport`; it writes canonical `transport.sdn` and the expected scope
+SHA to the scratch directory. Build `transport_child.spl` separately and launch
+it in another process with that SDN path, the scope SHA, and `accept`. It receives
+no signing seed/token and must independently read host trust and map the pinned
+provider before creating its actual driver. For negative runs in fresh processes,
+replace the policy, signature or artifact after parent publication and use
+`reject`; restore the original files between independent cases. Missing transport
+and wrong scope have direct assertions. The parent test key remains confined to
+the isolated fixture; production transport cannot choose a trust key.
+
+This is an application-boundary prerequisite, not a completed managed-worker
+route. Group/index manifest, provider-bound index variant, receipt/cache transport
+remain unwired; native-build continues to reject selected managed/shard requests.

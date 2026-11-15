@@ -1,0 +1,93 @@
+# Acquisition provenance, not authority. A managed channel must bind these bytes
+# and expected scope into its own manifest before calling child reacquisition.
+# No parent token, callback, trust key or native address crosses this boundary.
+use compiler.common.driver_compile_options.{TraversalPluginProviderRequestV1,
+    traversal_plugin_provider_request_v1}
+use compiler.common.cache_contract.traversal_plugin_selection_v1.{TraversalPluginSelectionV1,
+    traversal_descriptor_identity_v1}
+use compiler.loader.traversal_plugin_selection_owner_v1.{traversal_plugin_selection_validate_request_v1}
+use compiler.loader.traversal_plugin_admission_v1.{traversal_plugin_selection_load_v1}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.sdn.strict_v1.{sdn_parse_strict_v1}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.build_manager.grouped_native_contract.{native_group_absolute_path_valid_v1}
+
+pub struct TraversalPluginTransportV1:
+    request: TraversalPluginProviderRequestV1
+    expected_identity: text
+    scope_identity: text
+
+fn _traversal_transport_encode_v1(value: TraversalPluginTransportV1) -> Result<text, text>:
+    val request = traversal_plugin_provider_request_v1(value.request.provider_id,
+        value.request.allowlist_path, value.request.signature_path)?
+    if (not native_group_absolute_path_valid_v1(request.allowlist_path) or
+            not native_group_absolute_path_valid_v1(request.signature_path) or
+            not builder_digest_valid_v1(value.scope_identity) or
+            value.expected_identity == "" or value.expected_identity.byte_len() > 65536):
+        return Err("traversal-transport-fields-invalid")
+    val payload = sdn_encode_canonical(SdnValue.Dict({
+        "schema": SdnValue.Int(1),
+        "providerId": SdnValue.String(request.provider_id),
+        "allowlistPath": SdnValue.String(request.allowlist_path),
+        "signaturePath": SdnValue.String(request.signature_path),
+        "expectedIdentity": SdnValue.String(value.expected_identity),
+        "scopeIdentity": SdnValue.String(value.scope_identity)})) + "\n"
+    if payload.byte_len() > 131072: return Err("traversal-transport-budget")
+    Ok(payload)
+
+fn _traversal_transport_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    if not fields.contains_key(key): return Err("traversal-transport-field-missing")
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("traversal-transport-field-type")
+
+pub fn cli_traversal_plugin_transport_decode_v1(payload: text) -> Result<TraversalPluginTransportV1, text>:
+    if payload == "" or payload.byte_len() > 131072: return Err("traversal-transport-budget")
+    val parsed = match sdn_parse_strict_v1(payload, SdnStrictLimitsV1(
+            max_source_bytes: 131072, max_depth: 2, max_nodes: 16,
+            max_rows: 0, max_cells: 0, max_columns: 6)):
+        case Ok(value): value
+        case Err(_): return Err("traversal-transport-syntax")
+    if parsed.consumed_bytes != payload.byte_len(): return Err("traversal-transport-trailing")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("traversal-transport-object-required")
+    if fields.len() != 6: return Err("traversal-transport-field-count")
+    for key in fields.keys():
+        if not ["schema", "providerId", "allowlistPath", "signaturePath",
+                "expectedIdentity", "scopeIdentity"].contains(key):
+            return Err("traversal-transport-field-unknown")
+    match fields["schema"]:
+        case SdnValue.Int(1): pass
+        case _: return Err("traversal-transport-schema")
+    val request = traversal_plugin_provider_request_v1(
+        _traversal_transport_text_v1(fields, "providerId")?,
+        _traversal_transport_text_v1(fields, "allowlistPath")?,
+        _traversal_transport_text_v1(fields, "signaturePath")?)?
+    val value = TraversalPluginTransportV1(request,
+        _traversal_transport_text_v1(fields, "expectedIdentity")?,
+        _traversal_transport_text_v1(fields, "scopeIdentity")?)
+    if _traversal_transport_encode_v1(value)? != payload:
+        return Err("traversal-transport-noncanonical")
+    Ok(value)
+
+pub fn cli_traversal_plugin_transport_export_v1(request: TraversalPluginProviderRequestV1,
+        selection: TraversalPluginSelectionV1, scope_identity: text) -> Result<text, text>:
+    val descriptor = traversal_plugin_selection_validate_request_v1(selection, request)?
+    _traversal_transport_encode_v1(TraversalPluginTransportV1(request,
+        traversal_descriptor_identity_v1(descriptor)?, scope_identity))
+
+pub fn cli_traversal_plugin_reacquire_v1(payload: text,
+        expected_scope_identity: text) -> Result<TraversalPluginSelectionV1, text>:
+    val transport = cli_traversal_plugin_transport_decode_v1(payload)?
+    if transport.scope_identity != expected_scope_identity:
+        return Err("traversal-transport-scope-mismatch")
+    # The fixed host owner rereads policy/signature/artifact and issues a new
+    # process-local approval. A changed host root also changes policy identity.
+    val selected = traversal_plugin_selection_load_v1(transport.request, transport.expected_identity)?
+    val descriptor = traversal_plugin_selection_validate_request_v1(selected, transport.request)?
+    if traversal_descriptor_identity_v1(descriptor)? != transport.expected_identity:
+        return Err("traversal-transport-descriptor-mismatch")
+    Ok(selected)
