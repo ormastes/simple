@@ -2953,6 +2953,66 @@ impl MirLowering:
             self.presence_word_locals[result.id] = present_bit
         result
 
+    me runtime_option_scalar_payload(base: HirExpr, base_local: LocalId, result_type: MirType) -> LocalId:
+        """Present-edge payload of `.?` over a runtime-value word (`xs[k]` via
+        rt_array_get) whose declared type is a scalar `T?`.
+
+        A `[T?]` element is the Option BOX itself (rt_enum_new(1, 0, raw)), and
+        a concrete box carries the RAW payload; decoding the word as a tagged
+        runtime value read the handle bits (`index 1: some 195219007798705`)
+        and float/bool garbage. A Some box yields its raw payload (the if-val
+        binder's float/bool decode runs on the present edge, lower_if); any
+        other present word keeps the runtime decode it always had.
+        doc/08_tracking/bug/native_if_val_presence_test_dropped_2026-11-15.md"""
+        var scalar_payload = false
+        if val declared_inner = self.option_inner_hir_type_for_local(base, base_local):
+            match declared_inner.kind:
+                case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char: scalar_payload = true
+                case _: ()
+        if not scalar_payload:
+            return self.decode_runtime_value(base_local, result_type)
+        var b = self.builder
+        val check_fn = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_check_variant"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.bool(), is_variadic: false)))
+        ), call_origin: MirCallOrigin.Runtime)
+        # Option's runtime enum id is 1 (emit_option_handle_with_disc); Some = 0.
+        val option_id = b.emit_const_int(1)
+        val some_disc = b.emit_const_int(0)
+        val is_some_box = b.emit_call(check_fn, [mir_operand_copy(base_local), mir_operand_copy(option_id), mir_operand_copy(some_disc)], MirType.bool())
+        if is_some_box == None:
+            self.builder = b
+            return self.decode_runtime_value(base_local, result_type)
+        val box_block = b.new_block(Some("option_element_box_payload"))
+        val word_block = b.new_block(Some("option_element_runtime_word"))
+        val merge_block = b.new_block(Some("option_element_payload_merge"))
+        val payload = b.new_temp(result_type)
+        b.terminate_if(mir_operand_copy(is_some_box.unwrap()), box_block, word_block)
+        self.builder = b
+
+        var b_box = self.builder
+        b_box.switch_to_block(box_block)
+        self.builder = b_box
+        val raw_payload = self.enum_payload_value(self.option_payload_or_self(base_local), result_type)
+        b_box = self.builder
+        b_box.emit_copy(payload, raw_payload)
+        b_box.terminate_goto(merge_block)
+        self.builder = b_box
+
+        var b_word = self.builder
+        b_word.switch_to_block(word_block)
+        self.builder = b_word
+        val decoded_word = self.decode_runtime_value(base_local, result_type)
+        b_word = self.builder
+        b_word.emit_copy(payload, decoded_word)
+        b_word.terminate_goto(merge_block)
+        self.builder = b_word
+
+        var b_merge = self.builder
+        b_merge.switch_to_block(merge_block)
+        self.builder = b_merge
+        payload
+
     me lower_dict_runtime_get(base: HirExpr, base_local: LocalId, dict_key: LocalId) -> LocalId:
         self.lower_dict_runtime_read(base, base_local, dict_key, false)
 
@@ -7447,7 +7507,7 @@ impl MirLowering:
                     # scalar payload: integer unboxing would destroy that handle.
                     ()
                 elif self.is_runtime_value_local(base_local.id) and not self.option_value_locals.contains(base_local.id):
-                    some_value = self.decode_runtime_value(base_local, result_type)
+                    some_value = self.runtime_option_scalar_payload(base, base_local, result_type)
                 else:
                     some_value = self.enum_payload_value(some_value, result_type)
                     # `if val x = first([7])`: the binder keeps the declared

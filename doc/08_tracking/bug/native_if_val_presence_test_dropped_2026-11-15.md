@@ -78,16 +78,26 @@ that proves it present:
 
 ## Not fixed here (separate defects, still red natively after this fix)
 
-- `[i64?]` element payload: ExistsCheck's runtime-value arm decodes the Option
-  HANDLE (`decode_runtime_value(base_local)`) instead of its raw payload. The
-  None row is fixed (presence now comes from `rt_is_some`); the Some payload is
-  still wrong.
-- `.err` text binder printed as an integer. It may be fixed by the
-  decoded-text mark, but this is unverified natively.
-- LLVM `row_field` `Holder(slot: opt_int(k))`: the struct ctor stores an
-  `i64?` call result through `ptrtoint ptr %lN` while the call returns `i64`
-  (`llc: '%l1' defined with type 'i64' but expected 'ptr'`). This is pre-existing
-  on the pre-fix Stage 2. The fixture binds the field through an annotated
-  local instead.
+The first two are recorded with seed and native output in
+`test/fixtures/native_if_val_presence_known_wrong/main.spl`.
+
+- `.err` text binder printed as an integer: `err f: some 222296153947184` on
+  the cranelift Stage 2 of b19a14b4c9f, where the seed prints `some bad`.
+- LLVM llc type error when an erased call result is used as a pointer:
+  `make_items()[k]`, and `Holder(slot: opt_int(k))` (pre-existing on the
+  pre-fix Stage 2) — `'%l1' defined with type 'i64' but expected 'ptr'`. The
+  main fixture binds through an annotated local instead.
+
+## Follow-up fix: `[T?]` element payload
+
+`if val x = xs[k]` on `[T?]` printed handle bits on the b19a14b4c9f Stage 2
+(`index 1: some 204292096560561`, `index 2: some 204292096561057`,
+`index 3: some 204292096561553`), f64 garbage and `index_bool 2: some false`.
+ExistsCheck's runtime-value arm decoded the Option box word as a tagged
+runtime value. `runtime_option_scalar_payload` (`expr_dispatch.spl`) now
+tests `rt_enum_check_variant(word, 1, 0)` for a scalar `T?` element and
+takes the box's raw payload; any other word keeps the old decode. Spec:
+`optional_array_ifval_payload_spec` bootstrap-mode group, red 8/9, green 9/9.
+Not yet verified natively (needs a Stage 2 rebuild).
 - The seed itself prints `none` for `if val x = 3` on a plain i64 and for
   `.ok` of `Ok(3)`. These are seed-divergent rows in the fixture.
