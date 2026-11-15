@@ -1232,13 +1232,17 @@ fn emu_draw_linear_gradient_stops(mut core: RenderBackend, x: i32, y: i32, w: i3
     if len_q16 < 1:
         len_q16 = 1
     # The ramp is sampled once into 1025 entries (t16 >> 6); per pixel is one
-    # multiply-add and a lookup.
+    # multiply-add and a lookup. A box with fewer pixels than the table
+    # evaluates the same quantised position per pixel instead (identical
+    # colours): building the table cost 6000 12x6 boxes +87 MB RSS.
+    val use_lut = (w as i64) * (h as i64) > 1025
     var lut: [u32] = []
-    var li = 0
-    # cpu-lane-loop-ok: one-time 1025-entry gradient LUT build per box, not per pixel
-    while li <= 1024:
-        lut.push(_emu_gradient_color_at_q16(colors, positions_permille, (li as i64) * 64))
-        li = li + 1
+    if use_lut:
+        var li = 0
+        # cpu-lane-loop-ok: one-time 1025-entry gradient LUT build per box, not per pixel
+        while li <= 1024:
+            lut.push(_emu_gradient_color_at_q16(colors, positions_permille, (li as i64) * 64))
+            li = li + 1
     # One `draw_image` per row: a diagonal ramp changes colour every pixel or
     # two, and one `draw_rect_filled` per colour run made the catalog `html`
     # page render 212 s -> 334 s (its 120deg header alone).
@@ -1262,7 +1266,7 @@ fn emu_draw_linear_gradient_stops(mut core: RenderBackend, x: i32, y: i32, w: i3
                 t16 = 0
             if t16 > 65536:
                 t16 = 65536
-            row[px] = lut[(t16 / 64) as i32]
+            row[px] = if use_lut: lut[(t16 / 64) as i32] else: _emu_gradient_color_at_q16(colors, positions_permille, (t16 / 64) * 64)
             px = px + 1
         if any_alpha:
             core.draw_image_blend(x, y + py, w, 1, row)
