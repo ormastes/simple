@@ -1915,3 +1915,23 @@ never cache an answer computed while exhausted) —
   line box, so `aa<br>bb` used to overlap the next line). `wrap-reverse`
   keeps the old placement. Matrix 102 -> 95 cells (21 `cc-fx-fw-wrap-*`
   ids). Spec: `flex_wrap_line_stretch_chrome159_spec.spl`.
+
+## 2026-11-15 — `simple_web_renderer_spec` was red from a stale snapshot; the matrix gate picks full Chrome
+
+- **Trap — a red main spec can be a lost harness, not a lost feature.**
+  `88aac2ffe28` (release/1.0 transplant) replaced the spec with an older copy:
+  five helpers, three rows, ten imports and the head of the content-visibility
+  row vanished, so 9 rows died on `function/variable ... not found`. Before
+  triaging a value, grep the spec for every `_helper(` it calls and diff the
+  row against `88aac2ffe28^`. Restored: 111 -> 114 rows, 83 -> 92 passing;
+  the 22 left are classed in
+  `doc/08_tracking/bug/simple_web_renderer_spec_red_rows_2026-11-15.md`.
+- **The matrix gate no longer takes the headless shell.** Without
+  `CHROME_BIN` it uses a system Chrome, else the newest Playwright
+  `chromium-*/chrome-linux*/chrome`; a headless shell (found or passed) is an
+  ERROR naming the reason (`full_chrome_in`, `is_headless_shell`; selftest 11
+  -> 14 fixtures). The geometry differ's own preference for the shell is
+  unchanged.
+- Batch 1 (`71ff31154d5`) catalog 900 px: every page equal to its row
+  (worst css-paint 6.80); `html` 216.2 s vs 226.6 s at base, `css-layout`
+  266.0 s vs 274.3 s, same seed.
