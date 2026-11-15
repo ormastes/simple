@@ -369,3 +369,94 @@ $S run src/app/traceability/query_main.spl refs file test/01_unit/app/traceabili
   ingested by the lightweight query path.
 - Seed state: with a seed lacking the #7214 owned-process fix the three git/index
   scenarios fail with `owned process start: invalid 4-word receipt` (7/10 pass).
+
+## Analysis subcommands: matrix, links, explain, diff, report (verified 2026-11-16)
+
+Verified with the Rust seed `bin/simple.exe` at release tip `75d3cba7d16`.
+The seed's top-level dispatcher does NOT route `trace` (`simple.exe trace ...`
+prints `error: file not found: trace`), so every example below runs the
+subcommand entry directly. The pure-Simple CLI routes `trace` to the same
+file (`src/app/cli/_CliMain/main_and_help.spl:619`).
+
+```bash
+bin/simple run src/app/traceability/query_main.spl <subcommand> [options]
+```
+
+Shared options: `--snapshot --format --limit --spec-root --bug-db --path
+--declaration` (`--format table|sdn`). Each subcommand prints a header
+(`Snapshot`, `Profile`, `Graph complete`, `Qualification`) so a result can
+never be read as certified.
+
+| Subcommand | Purpose |
+| --- | --- |
+| `matrix` | Requirements by feature/component/layer axis; requirements with no entity on an axis are counted as `unassigned`, never dropped |
+| `links --check` | Dangling or mis-kinded edges |
+| `explain <id> --why-incomplete` | Why one requirement lacks an implementing or verifying link |
+| `diff --base <ref> --head <ref>` | Requirement changes between two snapshots |
+| `report` | Totals plus one `missing:` line per unlinked requirement |
+
+```text
+$ bin/simple run src/app/traceability/query_main.spl matrix
+Snapshot: worktree:sha256:a116f472...30ed
+Profile: worktree
+Graph complete: true
+Qualification: unverified; admission eligible: false
+ROW	COL	COUNTS
+Rows: 0; columns: 1; non-empty cells: 0; unassigned requirements: 20      (exit 0)
+
+$ ... links --check
+Edges checked: 101; issues: 0; requirements linked: 0; verified: 0        (exit 0)
+
+$ ... explain req:REQ-TRC-001 --why-incomplete
+req:REQ-TRC-001: Native SDN structured interfaces
+implementation: missing
+verification: missing
+why: no implemented_by link
+why: no verifying link                                                    (exit 0)
+
+$ ... explain req:X --why-incomplete
+ERROR TRACE-QUERY-NOT-FOUND: no requirement req:X                         (exit 1)
+
+$ ... report
+Requirements: 20; linked: 0; verified: 0; missing: 20; unknown: 0; link issues: 0
+missing: req:REQ-TRC-001 ...                                              (exit 0)
+
+$ ... diff --base=git:HEAD --head=git:HEAD
+Changed requirements: 0                                                   (exit 0)
+
+$ ... matrix --format=sdn
+{admission_eligible: false, cells: [], graph_complete: true, profile: worktree, qualification: unverified, schema: simple.trace.matrix/v1, snapshot: "worktree:sha256:...", unassigned: 20}
+```
+
+Exit codes (observed): 0 ok; 1 `links` issue or unknown `explain` id; 2 usage
+error, incomplete graph or capture failure, or a non-`worktree` profile
+(`report --profile=release` printed its report and exited 2 because only
+`worktree` is evaluated).
+
+Honesty limits:
+- Nothing here ever reports `Verified`. No passing-run evidence source is wired
+  (`doc/08_tracking/bug/trace_cmds_no_passing_evidence_source_2026-11-15.md`); a
+  verifying structural link is `Linked`, and `verified: 0` is the only value.
+- `trace missing --profile=release` is rejected on the seed:
+  `ERROR TRACE-QUERY-INVALID: unknown option --profile` (exit 2), contrary to
+  the feature note. `--profile` worked on `report`. On the seed,
+  `traceability-check --profile=release` returned a `TRC-CONFIG-CAPTURE`
+  incomplete result (exit 2), so its profile behaviour was not demonstrated.
+
+### `trace missing`
+
+```text
+$ bin/simple run src/app/traceability/query_main.spl missing --spec-root=test/01_unit/app/traceability
+ID	IMPLEMENTATION	VERIFICATION	TITLE
+req:REQ-TRC-001	missing	linked	Native SDN structured interfaces
+req:REQ-TRC-002	missing	missing	Semantic requirement and acceptance resolution
+...
+Requirements: 20; with a missing link: 20; shown: 20                      (exit 0)
+```
+
+`--spec-root` reads `# @req` sidecar annotations. Pointing it at all of
+`test/01_unit` exhausted the spec budget
+(`ERROR TRACE-ANNOTATION-CAPTURE: spec file budget of 4096 exhausted`, exit 2),
+so scope it to a subdirectory. The exit code of `missing` on an incomplete
+graph is being changed by another change: treat it as pending. Here a complete
+graph exits 0 even though links are missing.
