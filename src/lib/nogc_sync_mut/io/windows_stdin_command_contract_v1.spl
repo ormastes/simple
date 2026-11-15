@@ -1,0 +1,122 @@
+# Pure bounded request/result contracts. SSH argv and protected credential-store
+# admission belong to the authenticated caller, never raw path-mode guesses here.
+use std.nogc_sync_mut.io.windows_command_contract_v2.{WindowsCommandRequestV2,
+    windows_command_request_validate_v2, windows_command_line_v2}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.text_bytes.bytes_to_text
+use std.nogc_sync_mut.io.windows_process_text.{windows_process_quote_arg_bytes_v1, windows_process_utf16_units_v1}
+
+pub struct WindowsStdinCommandRequestV1:
+    program: text
+    expected_digest: text
+    args: [text]
+    environment: [text]
+    directory: text
+    input: [u8]
+    timeout_ms: i64
+    max_stdout_bytes: i64
+    max_stderr_bytes: i64
+    expires_at_unix_ms: i64
+
+pub struct WindowsStdinCommandResultV1:
+    stdout: [u8]
+    stderr: [u8]
+    exit_code: i64
+    input_written: i64
+    stdin_closed: bool
+    stdout_eof: bool
+    stderr_eof: bool
+    stdout_truncated: bool
+    stderr_truncated: bool
+    executable_digest: text
+    reaped: bool
+    cleanup_confirmed: bool
+    limit_type: text
+    effect_attempted: bool
+
+pub fn windows_stdin_command_base_v1(request: WindowsStdinCommandRequestV1) -> WindowsCommandRequestV2:
+    WindowsCommandRequestV2(program: request.program, args: request.args, environment: request.environment,
+        directory: request.directory, timeout_ms: request.timeout_ms, max_output_bytes: 16777216,
+        expires_at_unix_ms: request.expires_at_unix_ms)
+
+# Reject device/UNC/relative paths, ADS, dot components, reserved DOS devices,
+# trailing-dot/space aliases and wildcards. Native retained ancestor checks
+# remain mandatory; this pure shape check is not ACL or identity evidence.
+pub fn windows_stdin_absolute_path_v1(path: text) -> bool:
+    val value = path.replace("/", "\\")
+    if value.byte_len() < 3 or value.byte_at(1) != 58 or value.byte_at(2) != 92: return false
+    val drive = value.byte_at(0)
+    if not ((drive >= 65 and drive <= 90) or (drive >= 97 and drive <= 122)): return false
+    if value.byte_len() == 3: return true
+    val parts = value.substring(3, value.byte_len()).split("\\")
+    if parts.len() > 128: return false
+    for part in parts:
+        if part == "" or part == "." or part == ".." or part.ends_with(".") or part.ends_with(" "): return false
+        for byte in part.bytes():
+            if byte < 32 or [34, 42, 58, 60, 62, 63, 124].contains(byte as i64): return false
+        val stem = part.split(".")[0].to_upper()
+        if ["CON", "PRN", "AUX", "NUL"].contains(stem): return false
+        if stem.len() == 4 and (stem.starts_with("COM") or stem.starts_with("LPT")):
+            if stem.byte_at(3) >= 49 and stem.byte_at(3) <= 57: return false
+    true
+
+pub fn windows_stdin_command_validate_v1(request: WindowsStdinCommandRequestV1) -> Result<(), text>:
+    windows_command_request_validate_v2(windows_stdin_command_base_v1(request))?
+    if request.program.byte_len() <= 3 or not windows_stdin_absolute_path_v1(request.program) or not windows_stdin_absolute_path_v1(request.directory):
+        return Err("windows-stdin-explicit-path-policy")
+    if not builder_digest_valid_v1(request.expected_digest): return Err("windows-stdin-executable-digest")
+    if request.input.len() > 2105360 or request.max_stdout_bytes < 1 or request.max_stdout_bytes > 16777216 or
+            request.max_stderr_bytes < 1 or request.max_stderr_bytes > 16777216:
+        return Err("windows-stdin-command-bound")
+    Ok(())
+
+pub fn windows_stdin_command_freeze_v1(request: WindowsStdinCommandRequestV1) -> WindowsStdinCommandRequestV1:
+    var args: [text] = []
+    var environment: [text] = []
+    var input: [u8] = []
+    for argument in request.args: args.push(argument)
+    for assignment in request.environment: environment.push(assignment)
+    for byte in request.input: input.push(byte)
+    WindowsStdinCommandRequestV1(program: request.program, expected_digest: request.expected_digest,
+        args: args, environment: environment, directory: request.directory, input: input,
+        timeout_ms: request.timeout_ms, max_stdout_bytes: request.max_stdout_bytes,
+        max_stderr_bytes: request.max_stderr_bytes, expires_at_unix_ms: request.expires_at_unix_ms)
+
+pub fn windows_stdin_native_anchor_v1(path: text) -> Result<text, text>:
+    val prefix = "\\Device\\HarddiskVolume"
+    if not path.starts_with(prefix): return Err("windows-stdin-pin-native-volume-unsupported")
+    var index = prefix.byte_len()
+    val first = index
+    while index < path.byte_len() and path.byte_at(index) >= 48 and path.byte_at(index) <= 57:
+        index = index + 1
+    if index == first or index >= path.byte_len() or path.byte_at(index) != 92 or path.contains("\0"):
+        return Err("windows-stdin-pin-native-volume-unsupported")
+    val anchor = "\\\\?\\GLOBALROOT" + path
+    Ok(anchor + (if anchor.ends_with("\\"): "" else: "\\"))
+
+pub fn windows_stdin_native_line_v1(request: WindowsStdinCommandRequestV1, image: text) -> Result<text, text>:
+    windows_stdin_command_validate_v1(request)?
+    if not image.starts_with("\\\\?\\GLOBALROOT\\Device\\HarddiskVolume"):
+        return Err("windows-stdin-launch-image-not-native")
+    # Called only with the actual retained pin's OS-resolved image spelling.
+    var command = bytes_to_text(windows_process_quote_arg_bytes_v1(image)?)
+    for argument in request.args: command = command + " " + bytes_to_text(windows_process_quote_arg_bytes_v1(argument)?)
+    if windows_process_utf16_units_v1(command, false) > 32766: return Err("windows-stdin-native-command-bound")
+    Ok(command)
+
+pub fn windows_stdin_command_line_v1(request: WindowsStdinCommandRequestV1) -> Result<text, text>:
+    windows_stdin_command_validate_v1(request)?
+    windows_command_line_v2(windows_stdin_command_base_v1(request))
+
+# Completed bytes are local pipe facts only; never a remote task effect receipt.
+pub fn windows_stdin_completed_prefix_v1(previous: i64, completed: i64, submitted: i64,
+        total: i64) -> Result<i64, text>:
+    if previous < 0 or previous > total or submitted < 1 or submitted > 4096 or
+            submitted > total - previous or completed < 1 or completed > submitted:
+        return Err("windows-stdin-completion-range")
+    Ok(previous + completed)
+
+pub fn windows_stdin_io_failure_complete_v1(error: i64) -> bool:
+    # Only documented terminal cancellation/broken-pipe results discharge the
+    # OVERLAPPED storage. Invalid handle/parameter and unknown codes retain it.
+    [995, 109, 232, 233].contains(error)
