@@ -1,3 +1,4 @@
+use compiler.hir.hir_lowering.imported_nominal_default_v1.{ImportedNominalDefaultSelectionV1, imported_nominal_default_row_v1}
 use compiler.hir.hir_lowering.imported_alias_target_v1.{ImportedAliasTargetSelectionV1, imported_alias_target_row_v1}
 # Bounded requester enforcement for actual source bindings with selected-child
 # provenance. Legacy absence is not a grant; it stays with existing enforcement.
@@ -6,7 +7,7 @@ use compiler.common.cache.visibility_manifest_read_v1.{visibility_manifest_paren
 use compiler.common.diagnostics.span.{Span}
 use compiler.frontend.parser_types.{ParserTypeParam}
 use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
-use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolTable}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.module_child_binding_v1.*
 use compiler.hir.hir_lowering.module_child_selection_v1.{module_child_selection_validate_v1}
@@ -34,8 +35,11 @@ fn requester_parameters_need_closure_v1(parameters: [ParserTypeParam]) -> bool:
         if parameter.has_default or parameter.bounds.len() > 0: return true
     false
 
-fn requester_template_reason_v1(registry: ModuleSurfacesByName, proofs: [ImportedAliasTargetSelectionV1],
-        surface: ModuleSurface, category: text, name: text) -> text:
+fn requester_template_reason_v1(registry: ModuleSurfacesByName, symbols: SymbolTable,
+        proofs: [ImportedAliasTargetSelectionV1], defaults: [ImportedNominalDefaultSelectionV1],
+        surface: ModuleSurface, category: text, name: text, budget: RequesterExportBudgetV1) -> text:
+    if budget.remaining <= 0: return "generic-proof-budget-unavailable"
+    budget.remaining = budget.remaining - 1
     # Outer authorization must not bless unproven nominal dependencies that
     # will be selected only after imported template elaboration changes owner.
     if category == "type_alias":
@@ -47,15 +51,17 @@ fn requester_template_reason_v1(registry: ModuleSurfacesByName, proofs: [Importe
         if target.source_modifier == "pri": return "alias-explicit-pri-target"
         if target.source_modifier != "public" and target.source_modifier != "omitted":
             return "alias-target-policy-unavailable"
-        return requester_template_reason_v1(registry, proofs, surface, proof.target_category, proof.target_name)
+        return requester_template_reason_v1(registry, symbols, proofs, defaults, surface, proof.target_category, proof.target_name, budget)
     if category == "class" or category == "struct":
         for declaration in surface.composite_values:
-            if declaration.name == name and requester_parameters_need_closure_v1(declaration.type_params):
-                return "generic-route-closure-unavailable"
+            if declaration.name == name:
+                return requester_parameters_reason_v1(registry, symbols, proofs, defaults, surface,
+                    category, name, declaration.type_params, budget)
     elif category == "enum":
         for declaration in surface.enum_values:
-            if declaration.name == name and requester_parameters_need_closure_v1(declaration.type_params):
-                return "generic-route-closure-unavailable"
+            if declaration.name == name:
+                return requester_parameters_reason_v1(registry, symbols, proofs, defaults, surface,
+                    category, name, declaration.type_params, budget)
     elif category == "trait":
         for declaration in surface.trait_values:
             if declaration.name == name and (requester_parameters_need_closure_v1(declaration.type_params) or
@@ -65,6 +71,30 @@ fn requester_template_reason_v1(registry: ModuleSurfacesByName, proofs: [Importe
         for declaration in surface.callable_values:
             if declaration.name == name and requester_parameters_need_closure_v1(declaration.type_params):
                 return "generic-route-closure-unavailable"
+    ""
+
+fn requester_parameters_reason_v1(registry: ModuleSurfacesByName, symbols: SymbolTable,
+        aliases: [ImportedAliasTargetSelectionV1], defaults: [ImportedNominalDefaultSelectionV1],
+        source: ModuleSurface, category: text, name: text, parameters: [ParserTypeParam],
+        budget: RequesterExportBudgetV1) -> text:
+    for index in 0..parameters.len():
+        if budget.remaining <= 0: return "generic-proof-budget-unavailable"
+        budget.remaining = budget.remaining - 1
+        val parameter = parameters[index]
+        if parameter.bounds.len() > 0: return "generic-route-closure-unavailable"
+        if not parameter.has_default: continue
+        val row = imported_nominal_default_row_v1(registry, symbols, defaults,
+            source.physical_index, name, category, index, parameter)
+        if row < 0: return "generic-route-closure-unavailable"
+        val proof: ImportedNominalDefaultSelectionV1 = defaults[row]
+        val target = module_surface_declaration_authority_lookup_typed_v1(
+            source.declaration_authority_index, proof.target_name, proof.target_category)
+        if target.source_modifier == "pri": return "generic-explicit-pri-target"
+        if target.source_modifier != "public" and target.source_modifier != "omitted":
+            return "generic-target-policy-unavailable"
+        val reason = requester_template_reason_v1(registry, symbols, aliases, defaults,
+            source, proof.target_category, proof.target_name, budget)
+        if reason != "": return reason
     ""
 
 fn requester_declaration_reason_v1(modifier: text, owner: text, requester: text, exporting: bool) -> text:
@@ -111,7 +141,8 @@ fn requester_child_route_reason_v1(registry: ModuleSurfacesByName,
 # admitted by this first consumer slice.
 fn requester_export_reason_v1(registry: ModuleSurfacesByName, surface_index: i64,
         category: ModuleSurfaceExportCategoryV1, name: text, role: ModuleSurfaceExportBindingRoleV1,
-        requester: text, depth: i64, visited: [i64], budget: RequesterExportBudgetV1, proofs: [ImportedAliasTargetSelectionV1]) -> text:
+        requester: text, depth: i64, visited: [i64], budget: RequesterExportBudgetV1, proofs: [ImportedAliasTargetSelectionV1],
+        symbols: SymbolTable, defaults: [ImportedNominalDefaultSelectionV1]) -> text:
     if budget.remaining <= 0: return "export-budget-unavailable"
     budget.remaining = budget.remaining - 1
     if depth >= 32: return "export-depth-unavailable"
@@ -131,7 +162,7 @@ fn requester_export_reason_v1(registry: ModuleSurfacesByName, surface_index: i64
         if marker.is_err(): return "export-direct-marker-unavailable"
         val intent_reason = requester_declaration_reason_v1(authority.source_modifier, authority.source_path, requester, true)
         if intent_reason != "": return intent_reason
-        return requester_template_reason_v1(registry, proofs, surface, module_surface_export_category_name_v1(category), name)
+        return requester_template_reason_v1(registry, symbols, proofs, defaults, surface, module_surface_export_category_name_v1(category), name, budget)
     var next_visited = visited.copy()
     next_visited.push(selected.binding_row)
     var last_reason = "export-route-unavailable"
@@ -175,7 +206,7 @@ fn requester_export_reason_v1(registry: ModuleSurfacesByName, surface_index: i64
             last_reason = "export-snapshot-unavailable"
             continue
         val reason = requester_export_reason_v1(registry, edge.target_surface, edge.target_category,
-            edge.target_name, edge.target_role, surface.canonical_path, depth + 1, next_visited, budget, proofs)
+            edge.target_name, edge.target_role, surface.canonical_path, depth + 1, next_visited, budget, proofs, symbols, defaults)
         if reason == "": return ""
         last_reason = reason
     last_reason
@@ -221,13 +252,13 @@ impl HirLowering:
                                 reason = "declaration-origin-unavailable"
                             else:
                                 reason = requester_declaration_reason_v1(direct.source_modifier, direct.source_path, requester, false)
-                                if reason == "": reason = requester_template_reason_v1(self.module_surfaces, self.imported_alias_targets_v1, source, category_name, source_name)
+                                if reason == "": reason = requester_template_reason_v1(self.module_surfaces, self.symbols, self.imported_alias_targets_v1, self.imported_nominal_defaults_v1, source, category_name, source_name, RequesterExportBudgetV1(remaining: 256))
                         elif direct_selection.state != ModuleSurfaceExportSelectionStateV1.Missing:
                             reason = "declaration-origin-unavailable:" + direct_selection.reason
                         else:
                             reason = requester_export_reason_v1(self.module_surfaces, receipt.target_surface,
                                 category, source_name, ModuleSurfaceExportBindingRoleV1.Export,
-                                requester, 0, [], RequesterExportBudgetV1(remaining: 256), self.imported_alias_targets_v1)
+                                requester, 0, [], RequesterExportBudgetV1(remaining: 256), self.imported_alias_targets_v1, self.symbols, self.imported_nominal_defaults_v1)
         if reason == "": return false
         self.error("[E-HIR-REQUESTER-ROUTE] `" + name + "`: " + reason, span)
         true

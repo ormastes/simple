@@ -1,3 +1,4 @@
+use compiler.hir.hir_lowering.imported_nominal_default_v1.*
 # HIR item lowering - module, import, and bootstrap-flat lowering.
 use compiler.hir.hir_lowering.hir_phase_profile.{hir_ambig_dep_trace, hir_ambig_dep_trace_enabled, hir_phase_profile_now, hir_phase_profile_add, hir_phase_profile_count_qtype, hir_phase_profile_count_explicit_scan, HIR_PROF_RIS_SIGTYPE, HIR_PROF_RIS_CALLABLE_DEPS, HIR_PROF_RIS_DECLARED_DEP, HIR_PROF_RIS_EXPLICIT_DEP, HIR_PROF_RIS_PAYLOAD, HIR_PROF_RIS_METHODS}
 use compiler.hir.hir_lowering._Items.module_lowering.*
@@ -1450,14 +1451,20 @@ impl HirLowering:
         self.materialize_imported_field_package_dependency(
             imported_mod.physical_index, dependency_name, import_span, materialize_enum)
 
-    me materialize_imported_owner_parameter_dependencies(imported_mod: ModuleSurface, imported_mod_name: text, owner_type_params: [ParserTypeParam], import_span: Span, materialize_enum: bool) -> bool:
+    me materialize_imported_owner_parameter_dependencies(imported_mod: ModuleSurface, imported_mod_name: text, owner_type_params: [ParserTypeParam], import_span: Span, materialize_enum: bool, owner_declaration_name: text = "", owner_category: text = "") -> bool:
         var valid = true
+        var parameter_index = 0
         for parameter in owner_type_params:
             var types: [Type] = []
             for bound in parameter.bounds:
                 types = types.push(bound)
             if parameter.has_default:
                 types = types.push(parameter.default)
+            val default_name = if parameter.has_default and owner_declaration_name != "":
+                parser_type_kind_named_name(parameter.default.kind)
+            else: ""
+            var selected_default = -1
+            var type_index = 0
             for type_ in types:
                 for dependency in parser_type_named_dependencies(type_):
                     val name = hir_dependency_type_name(dependency)
@@ -1484,10 +1491,20 @@ impl HirLowering:
                         # where-bound lowering treats them (types.spl builtin
                         # bound arm); an imported owner's `where K: Eq + Ord`
                         # must not poison every importer.
-                        if self.qtype_raw_counted(imported_mod.module_name, name) < 0 and
-                           not hir_owner_bound_is_ambient_builtin_trait(name):
+                        val selected_dependency = self.qtype_raw_counted(imported_mod.module_name, name)
+                        if parameter.has_default and type_index == parameter.bounds.len() and name == default_name:
+                            selected_default = selected_dependency
+                        if selected_dependency < 0 and not hir_owner_bound_is_ambient_builtin_trait(name):
                             self.error("unresolved imported owner type parameter dependency: {name}", type_.span)
                             valid = false
+                type_index = type_index + 1
+            if selected_default >= 0:
+                # The dependency owner above selected this qualified SymbolId
+                # for this default occurrence; skipped formals/builtins cannot
+                # manufacture a receipt from an unrelated existing binding.
+                self.record_imported_nominal_default_v1(imported_mod.physical_index,
+                    owner_declaration_name, owner_category, parameter_index, parameter, selected_default)
+            parameter_index = parameter_index + 1
         valid
 
     me materialize_imported_callable_type_arguments_with_owner(imported_mod: ModuleSurface, imported_mod_name: text, type_: Type, import_span: Span, materialize_enum: bool, owner_type_params: [ParserTypeParam]):

@@ -167,13 +167,14 @@ describe "configured child requester checks at actual type references":
             "pub struct Target:\n    value: i64\npub type Alias = Target\n")
         expect(lowering.lower_named_kind("Alias", [], Span.empty()) == HirTypeKind.Error).to_equal(false)
 
-    # Required positives remain NOT-YET-SUPPORTED. Keep the success oracles;
-    # do not turn missing capability into intended denial or placeholder passes.
+    # This required sibling positive remains NOT-YET-SUPPORTED. Keep its
+    # success oracle; do not turn missing capability into intended denial.
     it "supports an explicit sibling facade export without requiring a public implementation child":
         val lowering = requester_fixture_v1("use configured.facade.\{Target\}\n", "struct Target:\n    value: i64\n",
             "/snapshot/test/caller.spl", false, "use physical.body.\{Target\}\nexport Target\n")
         expect(lowering.lower_named_kind("Target", [], Span.empty()) == HirTypeKind.Error).to_equal(false)
 
+    # Success oracle predates the actual selected nominal-default producer.
     it "supports valid imported generic defaults with proved public dependencies":
         val lowering = requester_fixture_v1("use configured.open.\{Box\}\n",
             "pub struct Target:\n    value: i64\npub struct Box<T = Target>:\n    value: T\n")
@@ -196,3 +197,25 @@ describe "configured child requester checks at actual type references":
         expect(requester_denial_v1(lowering, "alias-route-closure-unavailable")).to_equal(true)
         lowering.begin_module("/snapshot/test/next.spl")
         expect(lowering.imported_alias_targets_v1.len()).to_equal(0)
+
+    it "rejects an actual same-source generic default selecting explicit pri":
+        val lowering = requester_fixture_v1("use configured.open.\{Box\}\n",
+            "pri struct Target:\n    value: i64\npub struct Box<T = Target>:\n    value: T\n")
+        expect(lowering.lower_named_kind("Box", [], Span.empty()) == HirTypeKind.Error).to_equal(true)
+        expect(requester_denial_v1(lowering, "generic-explicit-pri-target")).to_equal(true)
+
+    it "rejects a changed owner-qualified default binding and clears default proofs on reset":
+        val lowering = requester_fixture_v1("use configured.open.\{Box, Other\}\n",
+            "pub struct Target:\n    value: i64\npub struct Other:\n    value: i64\npub struct Box<T = Target>:\n    value: T\n")
+        expect(lowering.imported_nominal_defaults_v1.len()).to_be_greater_than(0)
+        val replacement = lowering.symbols.lookup_or_invalid("Other")
+        lowering.symbols.bind_qualified_type("physical.body", "Target", replacement)
+        expect(lowering.lower_named_kind("Box", [], Span.empty()) == HirTypeKind.Error).to_equal(true)
+        expect(requester_denial_v1(lowering, "generic-route-closure-unavailable")).to_equal(true)
+        lowering.begin_module("/snapshot/test/next.spl")
+        expect(lowering.imported_nominal_defaults_v1.len()).to_equal(0)
+
+    it "does not mistake an earlier formal default for a same-named source declaration":
+        val lowering = requester_fixture_v1("use configured.open.\{Box\}\n",
+            "pub struct Target:\n    value: i64\npub struct Box<Target, U = Target>:\n    value: U\n")
+        expect(lowering.imported_nominal_defaults_v1.len()).to_equal(0)

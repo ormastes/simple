@@ -42,3 +42,10 @@ The earlier valid-public-alias success oracle is retained and now intended
 supported. Two new regressions cover explicit-private target rejection and stale
 projection/reset handling. Sixteen consumer cases remain UNRUN; the valid
 generic-default and sibling-facade success requirements remain unsupported.
+
+Next finite checkpoint implements bare same-source nominal-default selection
+proofs at the owner dependency/type-resolution operation. The existing valid
+Box<T = Target> success oracle is unchanged and now intended supported. Three
+new regressions cover pri, qualified-binding mutation/reset and formal shadowing.
+Nineteen consumer cases remain UNRUN. Bounds and other default shapes remain
+unavailable; authenticated sibling facade selection remains an unmet positive.

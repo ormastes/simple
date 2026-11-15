@@ -1,0 +1,84 @@
+# Selected dependency evidence for a bare, same-source nominal default. The
+# materialization/type-resolution owner supplies the actual qualified SymbolId.
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_types.{SymbolTable}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.frontend.parser_types.{ParserTypeParam}
+use compiler.frontend.parser_types_expr.{parser_type_kind_named_name, parser_type_kind_named_args}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName, module_surface_declaration_authority_lookup_typed_v1, module_surface_authority_category_v1}
+
+pub struct ImportedNominalDefaultSelectionV1:
+    source_surface: i64
+    owner_name: text
+    owner_category: text
+    owner_projection: text
+    parameter_index: i64
+    parameter_name: text
+    target_name: text
+    target_category: text
+    target_projection: text
+    selected_symbol: i64
+    source_sha256: text
+    snapshot_id: text
+    generation: i64
+    configured_generation: text
+
+impl HirLowering:
+    me record_imported_nominal_default_v1(source_index: i64, owner_name: text, owner_category: text,
+            parameter_index: i64, parameter: ParserTypeParam, selected_symbol: i64):
+        if not parameter.has_default or selected_symbol < 0 or owner_name == "": return
+        if source_index < 0 or source_index >= self.module_surfaces.surfaces.len(): return
+        val name = parser_type_kind_named_name(parameter.default.kind)
+        if name == "" or parser_type_kind_named_args(parameter.default.kind).len() != 0: return
+        val actual = self.symbols.get_symbol_raw(selected_symbol)
+        if actual == nil: return
+        val category = module_surface_authority_category_v1(actual.declaration_projection_key_v1)
+        if not ["class", "struct", "enum", "trait", "bitfield"].contains(category): return
+        val source = self.module_surfaces.surfaces[source_index]
+        val owner = module_surface_declaration_authority_lookup_typed_v1(source.declaration_authority_index, owner_name, owner_category)
+        val target = module_surface_declaration_authority_lookup_typed_v1(source.declaration_authority_index, name, category)
+        if (not owner.found or not target.found or owner.source_path != source.canonical_path or
+                target.source_path != source.canonical_path or actual.declaration_source_path_v1 != source.canonical_path or
+                actual.declaration_projection_key_v1 != target.projection_key): return
+        self.imported_nominal_defaults_v1.push(ImportedNominalDefaultSelectionV1(
+            source_surface: source_index, owner_name: owner_name, owner_category: owner_category,
+            owner_projection: owner.projection_key, parameter_index: parameter_index, parameter_name: parameter.name,
+            target_name: name, target_category: category, target_projection: target.projection_key,
+            selected_symbol: selected_symbol, source_sha256: source.source_sha256_v1,
+            snapshot_id: source.visibility_manifest_evidence_v1.snapshot_id,
+            generation: self.module_surfaces.generation,
+            configured_generation: self.module_surfaces.configured_route_generation_v1))
+
+pub fn imported_nominal_default_row_v1(registry: ModuleSurfacesByName, symbols: SymbolTable,
+        proofs: [ImportedNominalDefaultSelectionV1], source_index: i64, owner_name: text,
+        owner_category: text, parameter_index: i64, parameter: ParserTypeParam) -> i64:
+    if source_index < 0 or source_index >= registry.surfaces.len() or not parameter.has_default: return -1
+    val source = registry.surfaces[source_index]
+    val target_name = parser_type_kind_named_name(parameter.default.kind)
+    if target_name == "" or parser_type_kind_named_args(parameter.default.kind).len() != 0: return -1
+    var row = proofs.len() - 1
+    while row >= 0:
+        val proof: ImportedNominalDefaultSelectionV1 = proofs[row]
+        if (proof.source_surface == source_index and proof.owner_name == owner_name and
+                proof.owner_category == owner_category and proof.parameter_index == parameter_index):
+            if (not registry.frozen or proof.generation != registry.generation or
+                    proof.configured_generation != registry.configured_route_generation_v1 or
+                    proof.source_sha256 == "" or proof.source_sha256 != source.source_sha256_v1 or
+                    proof.snapshot_id == "" or proof.snapshot_id != source.visibility_manifest_evidence_v1.snapshot_id or
+                    proof.parameter_name != parameter.name or proof.target_name != target_name): return -1
+            if not ["class", "struct", "enum", "trait", "bitfield"].contains(proof.target_category): return -1
+            val owner = module_surface_declaration_authority_lookup_typed_v1(source.declaration_authority_index, owner_name, owner_category)
+            val target = module_surface_declaration_authority_lookup_typed_v1(source.declaration_authority_index, target_name, proof.target_category)
+            if (not owner.found or not target.found or owner.projection_key != proof.owner_projection or
+                    target.projection_key != proof.target_projection or owner.source_path != source.canonical_path or
+                    target.source_path != source.canonical_path): return -1
+            val selected = symbols.lookup_qualified_type_raw(source.module_name, target_name)
+            if selected < 0 or selected != proof.selected_symbol: return -1
+            val actual = symbols.get_symbol_raw(selected)
+            if actual == nil or actual.declaration_projection_key_v1 != target.projection_key or actual.declaration_source_path_v1 != source.canonical_path:
+                return -1
+            return row
+        row = row - 1
+    -1
+
+export ImportedNominalDefaultSelectionV1, imported_nominal_default_row_v1

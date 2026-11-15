@@ -91,3 +91,21 @@ The preexisting positive public `Alias = Target` requirement is now intended
 supported by this source path (runtime remains UNRUN). General alias templates,
 valid generic defaults/bounds and authenticated sibling import provenance remain
 unfinished. The two corresponding positive success oracles remain unsupported.
+
+## Actual same-source nominal-default selection producer
+
+For imported composites/enums, the existing owner-parameter dependency
+materializer now retains the exact qualified SymbolId returned for a bare
+nominal default occurrence after materialization. It records parameter position,
+owner and selected target projections/category, source SHA, snapshot and registry
+generations. This is not a later scan for a matching physical target. Formals,
+builtins, compound defaults and unresolved owner selections cannot mint proofs.
+
+The requester verifies the current qualified binding still selects that symbol,
+checks same-source declaration authority, rejects explicit-private defaults, and
+traverses any additional nominal template proof using a shared 256-step budget.
+Default proof rows are module-local and cleared on reset. This supports the
+existing bare `Box<T = Target>` positive oracle where Target is a proved
+same-source nominal (UNRUN). Bounds, primitive/formal/compound/qualified defaults
+and cross-module default dependencies remain unavailable; they require their
+actual respective resolution proofs. Sibling facade provenance remains missing.

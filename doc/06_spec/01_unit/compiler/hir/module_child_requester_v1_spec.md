@@ -1,6 +1,6 @@
 # Selected-child requester regressions
 
-Status: sixteen authored executable cases; UNRUN. RED/GREEN execution is blocked by
+Status: nineteen authored executable cases; UNRUN. RED/GREEN execution is blocked by
 the absence of an admitted general pure-Simple SSpec runner. The frozen policy
 fixtures are injected test inputs, not evidence of driver/frontend authentication.
 
@@ -33,3 +33,10 @@ The follow-up same-file alias producer addresses the preserved public-alias
 positive oracle. Two added cases reject an explicit-private selected alias
 target and a corrupted proof, and check module-reset cleanup. All remain UNRUN.
 The valid-default and sibling-facade positive cases are still known unsupported.
+
+The selected nominal-default producer now addresses the preexisting bare valid
+generic-default positive oracle. Three additional cases cover explicit-private
+selected defaults, changed owner-qualified bindings/reset, and formal shadowing
+that must not produce an unrelated nominal proof. All nineteen cases remain
+UNRUN; the sibling-facade positive is still known unsupported. Other default
+forms and bounds remain outside the supported producer slice.
