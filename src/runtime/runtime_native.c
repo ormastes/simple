@@ -22252,3 +22252,22 @@ int64_t rt_collection_set(int64_t receiver, int64_t key, int64_t value) {
 
 /* Single hosted owner for read-back workspace storage capabilities. */
 #include "runtime_workspace_storage_v1.c"
+
+/* Kernel object identity for the Windows service-logon namespace owner.
+ * CompareObjectHandles lives only in kernelbase.dll (not in llvm-mingw's
+ * kernel32/advapi32/ntdll import libraries), so a direct Simple extern leaves
+ * it unresolved at link. Resolve it at run time; report "not identical" (0)
+ * when the entry point is unavailable so callers fail closed. */
+int32_t rt_win_compare_object_handles(int64_t first, int64_t second) {
+#if defined(_WIN32)
+    typedef BOOL (WINAPI *compare_fn)(HANDLE, HANDLE);
+    HMODULE kb = GetModuleHandleW(L"kernelbase.dll");
+    compare_fn fn = kb ? (compare_fn)(void *)GetProcAddress(kb, "CompareObjectHandles") : NULL;
+    if (!fn) return 0;
+    return fn((HANDLE)(intptr_t)first, (HANDLE)(intptr_t)second) ? 1 : 0;
+#else
+    (void)first;
+    (void)second;
+    return 0;
+#endif
+}
