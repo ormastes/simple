@@ -1,0 +1,85 @@
+# AUTHORED_NOT_RUN. Fixed command DATA tests, no native/effect qualification.
+use std.spec.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.configuration_inspect_query_v1.*
+use std.nogc_async_mut.container.shared.configuration_query_v1.{configuration_container_command_v1, configuration_image_command_v1}
+use std.nogc_async_mut.container.shared.input_configuration_query_v1.configuration_selected_command_v2
+
+fn inspect_identity_fixture_v1(windows: bool = false) -> RuntimeIdentityV1:
+    RuntimeIdentityV1(pod_uid: "job", attempt: 1, operation_id: "operation", engine: if windows: "docker" else: "podman",
+        native_id: "c".repeat(64), node_boot_id: "boot", provider_generation: 4)
+
+describe "common fixed configuration query DATA":
+    it "keeps before and after as the same bounded inspect command with explicit platform labels":
+        step("Select the four container variants without accepting a caller format or argv")
+        for windows in [false, true]:
+            val identity = inspect_identity_fixture_v1(windows)
+            val before = container_configuration_inspect_command_v1(ContainerConfigurationInspectKindV1.ConfigurationBefore, identity, windows).unwrap()
+            val after = container_configuration_inspect_command_v1(ContainerConfigurationInspectKindV1.ConfigurationAfter, identity, windows).unwrap()
+            val input_before = container_configuration_inspect_command_v1(ContainerConfigurationInspectKindV1.InputConfigurationBefore, identity, windows).unwrap()
+            val input_after = container_configuration_inspect_command_v1(ContainerConfigurationInspectKindV1.InputConfigurationAfter, identity, windows).unwrap()
+            expect(before.operation).to_equal("configuration-container")
+            expect(before.program).to_equal(identity.engine)
+            expect(before.args.len()).to_equal(5)
+            expect(before.args[0]).to_equal("container")
+            expect(before.args[1]).to_equal("inspect")
+            expect(before.args[2]).to_equal("--format")
+            expect(before.args[4]).to_equal(identity.native_id)
+            expect(after.args).to_equal(before.args)
+            expect(after.operation).to_equal(before.operation)
+            expect(before.args[3].contains(if windows: "simple.pod" else: "io.simpleorch.pod_uid")).to_equal(true)
+            expect(before.args[3].contains(".Config.OpenStdin")).to_equal(false)
+            expect(input_before.operation).to_equal("input-configuration-container")
+            expect(input_before.args[3].contains(".Config.OpenStdin")).to_equal(true)
+            expect(input_before.args[3].contains(".Config.Tty")).to_equal(true)
+            expect(input_before.args[3].contains(".Config.StdinOnce")).to_equal(true)
+            expect(input_after.args).to_equal(input_before.args)
+            expect(input_after.operation).to_equal(input_before.operation)
+
+    it "requires a full image config ID only for the two image variants and preserves its bytes":
+        step("Keep the observed image ID distinct from the container ID and repository manifest")
+        val identity = inspect_identity_fixture_v1()
+        for kind in [ContainerConfigurationInspectKindV1.ConfigurationImage, ContainerConfigurationInspectKindV1.InputConfigurationImage]:
+            for image in ["a".repeat(64), "sha256:" + "a".repeat(64)]:
+                val command = container_configuration_inspect_command_v1(kind, identity, false, image).unwrap()
+                expect(command.operation).to_equal("configuration-image")
+                expect(command.args[0]).to_equal("image")
+                expect(command.args[1]).to_equal("inspect")
+                expect(command.args[2]).to_equal("--format")
+                expect(command.args[4]).to_equal(image)
+                expect(command.args[4] == identity.native_id).to_equal(false)
+            for invalid in ["", "short", "repo@sha256:" + "a".repeat(64), "A".repeat(64), "--format", "sha256:" + "a".repeat(63)]:
+                expect(container_configuration_inspect_command_v1(kind, identity, false, invalid).unwrap_err()).to_equal("configuration-native-image-id")
+        for kind in [ContainerConfigurationInspectKindV1.ConfigurationBefore, ContainerConfigurationInspectKindV1.ConfigurationAfter,
+                ContainerConfigurationInspectKindV1.InputConfigurationBefore, ContainerConfigurationInspectKindV1.InputConfigurationAfter]:
+            expect(container_configuration_inspect_command_v1(kind, identity, false, "a".repeat(64)).unwrap_err()).to_equal("configuration-inspect-image-id-for-non-image")
+
+    it "rejects malformed native IDs without turning them into a template or command argument":
+        step("Refuse an option-like or incomplete container target")
+        var identity = inspect_identity_fixture_v1()
+        for invalid in ["", "--root=untrusted", "c".repeat(63), "C".repeat(64), "c".repeat(63) + "\0"]:
+            identity.native_id = invalid
+            expect(container_configuration_inspect_command_v1(ContainerConfigurationInspectKindV1.ConfigurationBefore, identity, false).unwrap_err()).to_equal("configuration-native-image-id")
+
+    it "keeps the existing async factory signatures mapped to byte-equivalent selected commands":
+        step("Exercise all three compatibility forwarders against their exact closed kinds")
+        for windows in [false, true]:
+            val identity = inspect_identity_fixture_v1(windows)
+            val core = container_configuration_inspect_command_v1(ContainerConfigurationInspectKindV1.ConfigurationBefore, identity, windows).unwrap()
+            val input = container_configuration_inspect_command_v1(ContainerConfigurationInspectKindV1.InputConfigurationBefore, identity, windows).unwrap()
+            val old = configuration_container_command_v1(identity, windows).unwrap()
+            expect(old.args).to_equal(core.args)
+            expect(old.program).to_equal(core.program)
+            expect(old.operation).to_equal(core.operation)
+            for include_input in [false, true]:
+                val selected = configuration_selected_command_v2(identity, windows, include_input).unwrap()
+                val expected = if include_input: input else: core
+                expect(selected.args).to_equal(expected.args)
+                expect(selected.program).to_equal(expected.program)
+                expect(selected.operation).to_equal(expected.operation)
+            val image = "sha256:" + "a".repeat(64)
+            val common = container_configuration_inspect_command_v1(ContainerConfigurationInspectKindV1.ConfigurationImage, identity, windows, image).unwrap()
+            val old_image = configuration_image_command_v1(identity.engine, image).unwrap()
+            expect(old_image.args).to_equal(common.args)
+            expect(old_image.program).to_equal(common.program)
+            expect(old_image.operation).to_equal(common.operation)
