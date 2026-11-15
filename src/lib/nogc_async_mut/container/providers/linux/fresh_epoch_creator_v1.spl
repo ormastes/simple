@@ -1,0 +1,81 @@
+# Actual first provider-process consumer. A preparation proof or a durable
+# row/snapshot is not accepted here: only the private admission owner holding
+# the original writer and actual same-generation successor can reach spawn.
+use std.nogc_sync_mut.container.machine_authority_v1.MachineFreshEpochAdmissionOwnerV1
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.MachineFreshEpochRecordV1
+use std.nogc_sync_mut.container.machine_fresh_epoch_lifecycle_v1.MachineFreshEpochProcessCleanupV1
+use std.common.build_manager.group_process_stream_protocol_v2.GroupProcessStreamLaunchV2
+use std.nogc_sync_mut.io.group_process_owner.GroupProcessStreamOwnerV2
+use std.nogc_sync_mut.io.process_ops.PipedProcessRefV1
+
+pub class LinuxFreshEpochProviderCreatorV1:
+    admission: Option<MachineFreshEpochAdmissionOwnerV1>
+    unattached_process: Option<GroupProcessStreamOwnerV2>
+    unattached_reference: Option<PipedProcessRefV1>
+    unattached_cleanup: Option<MachineFreshEpochProcessCleanupV1>
+    error: text
+
+    # This validates an actual owned, profiled process. It is not endpoint
+    # peer identity, workload ancestry, transport authentication or a request
+    # reservation. Those separate facts are required before a workload grant.
+    pub fn current_v1() -> Result<MachineFreshEpochRecordV1, text>:
+        if self.error != "": return Err(self.error)
+        if self.unattached_process.is_some() or self.admission.is_none():
+            return Err("linux-fresh-epoch-provider-cleanup-only")
+        val admission = self.admission.unwrap()
+        admission.provider_process_current_v1()
+
+    pub fn close_v1() -> LinuxFreshEpochProviderCloseTurnV1:
+        var current = self
+        # An exceptional failed canonical attach still returns all actual
+        # native outputs. Retire them before closing the original writer.
+        if val process = current.unattached_process:
+            if current.unattached_cleanup.is_none():
+                return LinuxFreshEpochProviderCloseTurnV1(Some(current), false, "linux-fresh-epoch-process-custody-missing")
+            val cleanup = current.unattached_cleanup.unwrap()
+            val closed = cleanup.close_v1(process, current.unattached_reference)
+            if current.error == "" and closed.error != "": current.error = closed.error
+            if not closed.consumed:
+                return LinuxFreshEpochProviderCloseTurnV1(Some(current), false, current.error)
+            current.unattached_process = nil
+            current.unattached_reference = nil
+            current.unattached_cleanup = nil
+        elif val cleanup = current.unattached_cleanup:
+            val closed = cleanup.no_process_v1()
+            if current.error == "" and closed.error != "": current.error = closed.error
+            if not closed.consumed: return LinuxFreshEpochProviderCloseTurnV1(Some(current), false,
+                if current.error != "": current.error else: "linux-fresh-epoch-process-outcome-unresolved")
+            current.unattached_cleanup = nil
+        if val admission = current.admission:
+            val closed = admission.close_v1()
+            current.admission = closed.owner
+            if not closed.closed and current.admission.is_none(): current.admission = Some(admission)
+            if current.error == "" and closed.error != "": current.error = closed.error
+            if not closed.closed or current.admission.is_some():
+                return LinuxFreshEpochProviderCloseTurnV1(Some(current), false, current.error)
+        LinuxFreshEpochProviderCloseTurnV1(nil, true, current.error)
+
+pub struct LinuxFreshEpochProviderCloseTurnV1:
+    owner: Option<LinuxFreshEpochProviderCreatorV1>
+    closed: bool
+    error: text
+
+pub enum LinuxFreshEpochProviderOpenV1:
+    Started(owner: LinuxFreshEpochProviderCreatorV1)
+    Retained(owner: LinuxFreshEpochProviderCreatorV1, reason: text)
+
+pub fn linux_fresh_epoch_provider_start_v1(admission: MachineFreshEpochAdmissionOwnerV1,
+        template: GroupProcessStreamLaunchV2) -> LinuxFreshEpochProviderOpenV1:
+    # The actual creator consumes its permit before native process creation.
+    # Capture the returned original owner and every native cleanup output
+    # before any post-effect check can fail or encode a response.
+    val spawned = admission.start_provider_v1(template)
+    val owner = LinuxFreshEpochProviderCreatorV1(admission: Some(spawned.owner),
+        unattached_process: spawned.process, unattached_reference: spawned.reference,
+        unattached_cleanup: spawned.fallback, error: spawned.error)
+    if not spawned.started or spawned.error != "":
+        return LinuxFreshEpochProviderOpenV1.Retained(owner,
+            if spawned.error != "": spawned.error else: "linux-fresh-epoch-provider-start-unconfirmed")
+    val current = owner.current_v1()
+    if current.is_err(): return LinuxFreshEpochProviderOpenV1.Retained(owner, current.unwrap_err())
+    LinuxFreshEpochProviderOpenV1.Started(owner)

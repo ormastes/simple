@@ -1,0 +1,149 @@
+# Windows selection adapter for the real counted-stdin job owner. Its native
+# resource state remains below this facade; no application OS branch is needed.
+use std.nogc_sync_mut.io.stdin_command_contract_v1.*
+use std.nogc_sync_mut.io.windows_stdin_command_owner_v1.{WindowsStdinCommandOwnerV1,
+    windows_stdin_command_begin_v1, windows_stdin_command_step_v1}
+use std.nogc_sync_mut.io.windows_stdin_command_contract_v1.WindowsStdinCommandRequestV1
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow, file_size_raw, file_read_regular_no_follow_bounded_bytes}
+use std.nogc_sync_mut.io.dir_ops.dir_is_real_no_follow
+use std.nogc_sync_mut.io.env_ops.env_get
+use std.nogc_sync_mut.io.time_ops.sleep_ms
+use std.nogc_sync_mut.io.host_identity_store_v1.{HostIdentityStoreV1, host_identity_store_open_v1,
+    host_identity_store_read_v1, host_identity_store_close_v1}
+
+pub class StdinCommandPlatformOwnerV1:
+    var native: WindowsStdinCommandOwnerV1
+    var consumed: bool
+
+pub struct StdinCommandPlatformTurnV1:
+    owner: Option<StdinCommandPlatformOwnerV1>
+    result: Option<StdinCommandResultV1>
+    error: text
+
+pub fn stdin_command_platform_file_no_follow_v1(path: text, maximum: i64) -> bool:
+    if not stdin_command_path_valid_v1(path) or path.starts_with("/"): return false
+    val tail = path.substring(3, path.byte_len())
+    val parts = tail.split("/")
+    var parent = path.substring(0, 2)
+    if not dir_is_real_no_follow(parent + "/"): return false
+    for index in 0..(parts.len() - 1):
+        parent = parent + "/" + parts[index]
+        if not dir_is_real_no_follow(parent): return false
+    if not file_is_regular_no_follow(path): return false
+    val size = file_size_raw(path)
+    size > 0 and size <= maximum
+
+fn stdin_command_windows_profile_finish_v1(owner: Option<HostIdentityStoreV1>,
+        bytes: Option<[u8]>, error: text) -> StdinCommandProfileReadTurnV1:
+    var retained = owner
+    var reason = error
+    if val actual = retained:
+        val closed = host_identity_store_close_v1(actual)
+        retained = closed.owner
+        if (not closed.completed or closed.error != "") and reason == "":
+            reason = "command-profile-close-unconfirmed"
+    if retained != nil and reason == "": reason = "command-profile-cleanup-pending"
+    StdinCommandProfileReadTurnV1(retained, if reason == "": bytes else: nil, reason)
+
+pub fn stdin_command_platform_profile_read_v1(path: text) -> StdinCommandProfileReadTurnV1:
+    # Separate .profile role: never decode a private key or host-pin record as
+    # executable authority. Preserve the root's original namespace spelling.
+    if path.byte_len() < 1 or path.byte_len() > 32760:
+        return StdinCommandProfileReadTurnV1(nil, nil, "command-protected-profile-size")
+    var last = -1
+    var previous = -1
+    for index in 0..path.byte_len():
+        val c = path.byte_at(index)
+        if c == 47 or c == 92:
+            previous = last
+            last = index
+    if previous < 1 or last <= previous + 1 or last + 1 >= path.byte_len():
+        return StdinCommandProfileReadTurnV1(nil, nil, "command-protected-profile-path")
+    val root = path.substring(0, previous)
+    val directory = path.substring(previous + 1, last)
+    val leaf = path.substring(last + 1, path.byte_len())
+    if (not stdin_command_store_root_valid_v1(root) or root.starts_with("/") or directory != "journal" or
+            leaf.len() != 72 or not leaf.ends_with(".profile") or
+            not stdin_command_digest_valid_v1(leaf.substring(0, 64))):
+        return StdinCommandProfileReadTurnV1(nil, nil, "command-protected-profile-role")
+    val opened = host_identity_store_open_v1(root)
+    if not opened.ready or opened.cleanup_pending or opened.error != "" or opened.owner == nil:
+        return stdin_command_windows_profile_finish_v1(opened.owner, nil, "command-protected-profile-open")
+    val read = host_identity_store_read_v1(opened.owner.unwrap(), leaf, 65536)
+    if read.error != "" or read.cleanup_pending or read.absent or read.bytes == nil:
+        return stdin_command_windows_profile_finish_v1(Some(read.owner), nil, "command-protected-profile-read")
+    stdin_command_windows_profile_finish_v1(Some(read.owner), read.bytes, "")
+
+pub fn stdin_command_platform_files_admit_v1(program: text, private_path: text, public_path: text,
+        expected_digest: text, protected_store: bool) -> Result<(), text>:
+    if not protected_store: return Err("command-protected-store-required")
+    if not stdin_command_digest_valid_v1(expected_digest): return Err("command-program-digest-required")
+    if not stdin_command_platform_file_no_follow_v1(program, 67108864): return Err("command-program-file")
+    if (not stdin_command_path_valid_v1(private_path) or private_path.starts_with("/") or
+            not stdin_command_path_valid_v1(public_path) or public_path.starts_with("/")):
+        return Err("command-protected-path-invalid")
+    Ok(())
+
+fn stdin_command_windows_parent_v1(path: text) -> text:
+    val parts = path.split("/")
+    var parent = parts[0]
+    for index in 1..(parts.len() - 1): parent = parent + "/" + parts[index]
+    # A root directory is represented as C:/, never the drive-relative C:.
+    if parts.len() == 2: parent = parent + "/"
+    parent
+
+pub fn stdin_command_platform_begin_v1(request: StdinCommandRequestV1) -> StdinCommandPlatformTurnV1:
+    if not stdin_command_path_valid_v1(request.program) or request.program.starts_with("/"):
+        return StdinCommandPlatformTurnV1(nil, nil, "command-program-path")
+    val directory = if request.directory == "": stdin_command_windows_parent_v1(request.program) else: request.directory
+    var environment = request.environment
+    if environment.len() == 0:
+        # The Windows owner receives an explicit environment block. Preserve
+        # only this required OS locator, not arbitrary SSH/agent/loader options.
+        val system_root = env_get("SystemRoot")
+        if system_root.len() < 1: return StdinCommandPlatformTurnV1(nil, nil, "command-system-root-unavailable")
+        val normalized = system_root.replace("\\", "/")
+        if not stdin_command_path_valid_v1(normalized) or normalized.starts_with("/"):
+            return StdinCommandPlatformTurnV1(nil, nil, "command-system-root-unavailable")
+        environment = ["SystemRoot=" + system_root]
+    val opened = windows_stdin_command_begin_v1(WindowsStdinCommandRequestV1(program: request.program,
+        expected_digest: request.expected_digest, args: request.args, environment: environment,
+        directory: directory, input: request.input, timeout_ms: request.timeout_ms,
+        max_stdout_bytes: request.max_stdout_bytes, max_stderr_bytes: request.max_stderr_bytes,
+        expires_at_unix_ms: request.expires_at_unix_ms))
+    var owner: Option<StdinCommandPlatformOwnerV1> = nil
+    if val native = opened.owner: owner = Some(StdinCommandPlatformOwnerV1(native: native, consumed: false))
+    # A begin receipt never synthesizes completion or drops a retained owner.
+    if opened.result != nil:
+        return StdinCommandPlatformTurnV1(owner, nil,
+            if opened.error == "": "command-unexpected-begin-result" else: opened.error)
+    StdinCommandPlatformTurnV1(owner, nil, opened.error)
+
+pub fn stdin_command_platform_step_v1(owner: StdinCommandPlatformOwnerV1, cancel: bool) -> StdinCommandPlatformTurnV1:
+    var current = owner
+    if current.consumed: return StdinCommandPlatformTurnV1(nil, nil, "command-owner-consumed")
+    val turn = windows_stdin_command_step_v1(current.native, cancel)
+    # The lower cooperative owner remains zero-wait. This synchronous facade
+    # yields one bounded scheduling tick for an unfinished healthy poll, as
+    # POSIX poll does, so finite caller budgets preserve SSH handshake time.
+    # This is neither reconnect nor operation retry. Cancellation/completion
+    # and failure cleanup do not incur an extra scheduling wait.
+    if turn.owner != nil and turn.error == "" and not cancel:
+        sleep_ms(STDIN_COMMAND_POLL_WAIT_MS_V1)
+    var retained: Option<StdinCommandPlatformOwnerV1> = nil
+    if val native = turn.owner:
+        current.native = native
+        retained = Some(current)
+    else:
+        current.consumed = true
+    var normalized: Option<StdinCommandResultV1> = nil
+    var error = turn.error
+    if val result = turn.result:
+        normalized = Some(StdinCommandResultV1(stdout: result.stdout, stderr: result.stderr,
+            exit_code: result.exit_code, input_written: result.input_written, stdin_closed: result.stdin_closed,
+            stdout_eof: result.stdout_eof, stderr_eof: result.stderr_eof,
+            stdout_truncated: result.stdout_truncated, stderr_truncated: result.stderr_truncated,
+            executable_digest: result.executable_digest, reaped: result.reaped,
+            cleanup_confirmed: result.cleanup_confirmed, effect_attempted: result.effect_attempted))
+        if retained == nil and not result.cleanup_confirmed and error == "": error = "command-cleanup-unconfirmed"
+    StdinCommandPlatformTurnV1(retained, normalized, error)

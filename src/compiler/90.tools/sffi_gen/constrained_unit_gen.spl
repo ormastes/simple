@@ -1,0 +1,113 @@
+# SFFI Wrapper Generator - Constrained Unit Return Facade
+#
+# A unit returned from an extern may carry an integer range. Such a return is
+# checked before it is trusted: the generated facade calls a private raw extern,
+# validates the range, and returns Result<Unit, ConstraintError>. A unit with no
+# range is a direct projection (the extern is declared with the unit type).
+# A range the generator cannot express yields SPL-SFFI-RANGE-001 and no source.
+
+use std.common.text.{parse_i64}
+
+pub struct ConstrainedUnitReturn:
+    extern_name: text
+    # Parameter list as written in a signature, e.g. "fd: i32"
+    params: text
+    # Argument list as written in a call, e.g. "fd"
+    arg_names: text
+    unit_name: text
+    # Underlying ABI representation of the unit, e.g. "i32"
+    abi_type: text
+    # Inclusive integer bounds as literals; "" means unbounded on that side
+    range_min: text
+    range_max: text
+
+pub struct UnitReturnFacade:
+    source: text
+    # "" when generation succeeded
+    diagnostic: text
+
+fn _is_int_abi(abi_type: text) -> bool:
+    match abi_type:
+        case "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64":
+            true
+        case _:
+            false
+
+fn _is_int_literal(s: text) -> bool:
+    if s == "" or s == "-":
+        return false
+    var first = true
+    for c in s.chars():
+        val sign_ok = first and c == "-"
+        if not sign_ok and (c < "0" or c > "9"):
+            return false
+        first = false
+    true
+
+# Bounds are compared as i64; u64 is capped at the i64 maximum (literal limit).
+fn _abi_min(abi_type: text) -> i64:
+    match abi_type:
+        case "i8":
+            -128
+        case "i16":
+            -32768
+        case "i32":
+            -2147483648
+        case "i64":
+            -9223372036854775807
+        case _:
+            0
+
+fn _abi_max(abi_type: text) -> i64:
+    match abi_type:
+        case "i8":
+            127
+        case "i16":
+            32767
+        case "i32":
+            2147483647
+        case "u8":
+            255
+        case "u16":
+            65535
+        case "u32":
+            4294967295
+        case _:
+            9223372036854775807
+
+fn _range_error(spec: ConstrainedUnitReturn, why: text) -> UnitReturnFacade:
+    UnitReturnFacade(source: "", diagnostic: "SPL-SFFI-RANGE-001: cannot generate a checked facade for unit {spec.unit_name} returned by {spec.extern_name}: {why}")
+
+pub fn generate_unit_return_facade(spec: ConstrainedUnitReturn) -> UnitReturnFacade:
+    if spec.range_min == "" and spec.range_max == "":
+        val direct = "extern fn {spec.extern_name}({spec.params}) -> {spec.unit_name}\n"
+        return UnitReturnFacade(source: direct, diagnostic: "")
+    if not _is_int_abi(spec.abi_type):
+        return _range_error(spec, "range over non-integer representation {spec.abi_type}")
+    if spec.range_min != "" and not _is_int_literal(spec.range_min):
+        return _range_error(spec, "minimum is not an integer literal")
+    if spec.range_max != "" and not _is_int_literal(spec.range_max):
+        return _range_error(spec, "maximum is not an integer literal")
+    if spec.range_min != "" and spec.range_max != "" and parse_i64(spec.range_min) > parse_i64(spec.range_max):
+        return _range_error(spec, "minimum {spec.range_min} is greater than maximum {spec.range_max}")
+    val lo = _abi_min(spec.abi_type)
+    val hi = _abi_max(spec.abi_type)
+    if spec.range_min != "" and (parse_i64(spec.range_min) < lo or parse_i64(spec.range_min) > hi):
+        return _range_error(spec, "minimum {spec.range_min} is outside {spec.abi_type}")
+    if spec.range_max != "" and (parse_i64(spec.range_max) < lo or parse_i64(spec.range_max) > hi):
+        return _range_error(spec, "maximum {spec.range_max} is outside {spec.abi_type}")
+    var conds: [text] = []
+    if spec.range_min != "":
+        conds.push("raw < {spec.range_min}")
+    if spec.range_max != "":
+        conds.push("raw > {spec.range_max}")
+    val cond = conds.join(" or ")
+    val raw_name = "__raw_{spec.extern_name}"
+    var out = ""
+    out = out + "extern fn {raw_name}({spec.params}) -> {spec.abi_type}\n\n"
+    out = out + "pub fn {spec.extern_name}({spec.params}) -> Result<{spec.unit_name}, ConstraintError>:\n"
+    out = out + "    val raw = {raw_name}({spec.arg_names})\n"
+    out = out + "    if {cond}:\n"
+    out = out + "        return Err(ConstraintError.out_of_range(\"{spec.unit_name}\", raw, \"{spec.range_min}\", \"{spec.range_max}\"))\n"
+    out = out + "    Ok({spec.unit_name}(raw))\n"
+    UnitReturnFacade(source: out, diagnostic: "")

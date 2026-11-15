@@ -1,0 +1,137 @@
+# Offline application producer BEFORE reservation/signing. Candidate scope and
+# policy are unverified input; no native owner, socket, journal or grant opens.
+use app.io.mod.file_read_regular_no_follow_bounded
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use app.orchestrator.server_config_load_v1.server_config_load_v1
+use std.common.config_core.server_context_types_v1.{ServerConfigV1, server_consumer_valid_v1, server_name_valid_v1}
+use std.common.config_core.server_context_resolve_v1.resolve_server_context_v1
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, ContainerExecutionRequestV2,
+    container_host_scope_decode_v2, container_scope_fence_id_v2,
+    container_execution_request_encode_v2, container_execution_plan_digest_v2}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.fs.host_path.host_path_is_absolute
+use std.nogc_async_mut.container.server_launch_projection_v1.container_server_linux_request_v1
+use std.nogc_async_mut.container.server_windows_launch_projection_v1.container_server_windows_request_v1
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_decode_v1
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.linux_oci_engine_policy_decode_v1
+use std.nogc_async_mut.container.providers.windows.docker_codec_v1.windows_docker_request_decode_v1
+use std.nogc_async_mut.container.providers.windows.docker_policy_codec_v1.windows_docker_policy_decode_v1
+
+pub struct ContainerPlanCandidateContextV1:
+    backend: text
+    scope: ContainerHostScopeV2
+    provider_policy: text
+
+fn container_plan_strict_v1(source: text, maximum: i64, depth: i64, nodes: i64) -> Result<SdnValue, text>:
+    if source.byte_len() < 1 or source.byte_len() > maximum: return Err("container-plan-input-size")
+    val limits = SdnStrictLimitsV1(max_source_bytes: maximum, max_depth: depth,
+        max_nodes: nodes, max_rows: 0, max_cells: 0, max_columns: 2048)
+    match sdn_parse_strict_v1(source, limits):
+        case Ok(document): Ok(document.value)
+        case Err(issue): Err("container-plan-sdn:" + issue.code)
+
+fn container_plan_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    if not fields.contains_key(key): return Err("container-plan-context-field-missing:" + key)
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("container-plan-context-field-type:" + key)
+
+pub fn container_plan_candidate_decode_v1(source: text) -> Result<ContainerPlanCandidateContextV1, text>:
+    val fields = match container_plan_strict_v1(source, 524288, 2, 16)?:
+        case SdnValue.Dict(value): value
+        case _: return Err("container-plan-context-object-required")
+    val known = ["version", "kind", "backend", "scope", "providerPolicy"]
+    for key in fields.keys():
+        if not known.contains(key): return Err("container-plan-context-field-unknown:" + key)
+    if not fields.contains_key("version"): return Err("container-plan-context-version")
+    match fields["version"]:
+        case SdnValue.Int(value):
+            if value != 1: return Err("container-plan-context-version")
+        case _: return Err("container-plan-context-version")
+    if container_plan_text_v1(fields, "kind")? != "container-plan-candidate-context":
+        return Err("container-plan-context-kind")
+    val backend = container_plan_text_v1(fields, "backend")?
+    if not ["linux-podman", "windows-docker-process"].contains(backend):
+        return Err("container-plan-backend-unsupported")
+    val scope_source = container_plan_text_v1(fields, "scope")?
+    val scope_value = container_plan_strict_v1(scope_source, 16384, 2, 64)?
+    val scope = container_host_scope_decode_v2(scope_source)?
+    val policy = container_plan_text_v1(fields, "providerPolicy")?
+    val policy_value = container_plan_strict_v1(policy, 163840, 4, 256)?
+    if backend == "linux-podman":
+        val decoded = linux_oci_engine_policy_decode_v1(policy)?
+    else:
+        val decoded = windows_docker_policy_decode_v1(policy)?
+        if (decoded.provider_generation != scope.provider_generation or
+                decoded.node_boot_id != container_scope_fence_id_v2(scope)?):
+            return Err("container-plan-candidate-policy-scope-mismatch")
+    Ok(ContainerPlanCandidateContextV1(backend: backend, scope: scope, provider_policy: policy))
+
+# Shared by the actual command and source-only scenarios. Native retained
+# records have semantic digests, but contain no signed execution authority.
+pub fn orchestrator_container_plan_prepare_source_v1(backend: text, context_source: text,
+        native_source: text, config: ServerConfigV1, consumer: text,
+        explicit_context: text, explicit_server: text) -> Result<text, text>:
+    val candidate = container_plan_candidate_decode_v1(context_source)?
+    if candidate.backend != backend: return Err("container-plan-backend-mismatch")
+    val syntax = container_plan_strict_v1(native_source, 1048576, 8, 8192)?
+    val selected = resolve_server_context_v1(config, consumer, explicit_server, explicit_context, true)?
+    val execution = if backend == "linux-podman":
+        val native = linux_oci_retained_request_decode_v1(native_source)?
+        container_server_linux_request_v1(candidate.scope, native, selected)?
+    else:
+        val policy = windows_docker_policy_decode_v1(candidate.provider_policy)?
+        val native = windows_docker_request_decode_v1(policy, native_source)?
+        container_server_windows_request_v1(candidate.scope, policy, native, selected)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("container-plan-candidate-preparation"),
+        "backend": SdnValue.String(backend),
+        "execution": SdnValue.String(container_execution_request_encode_v2(execution)?),
+        "planDigest": SdnValue.String(container_execution_plan_digest_v2(execution.plan)?),
+        "requestDigest": SdnValue.String(execution.plan.request_digest),
+        "candidateContextDigest": SdnValue.String(sha256_text(context_source)),
+        "providerPolicyDigest": SdnValue.String(sha256_text(candidate.provider_policy)),
+        "signingRequired": SdnValue.Bool(true), "admissionRequired": SdnValue.Bool(true),
+        "ownerVerified": SdnValue.Bool(false), "executionAuthorized": SdnValue.Bool(false)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+fn container_plan_path_v1(path: text) -> bool:
+    (path.byte_len() <= 4096 and host_path_is_absolute(path) and
+        not path.contains("\0") and not path.contains("\n") and not path.contains("\r") and not path.contains("\t"))
+
+fn container_plan_error_v1(reason: text) -> OrchestratorValidationReplyV1:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("container-plan-preparation-error"), "code": SdnValue.String(reason),
+        "signingRequired": SdnValue.Bool(true), "admissionRequired": SdnValue.Bool(true),
+        "ownerVerified": SdnValue.Bool(false), "executionAuthorized": SdnValue.Bool(false)}
+    OrchestratorValidationReplyV1(exit_code: 1, output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn orchestrator_container_plan_prepare_v1(args: [text]) -> OrchestratorValidationReplyV1:
+    if args.len() != 8 or args[0] != "container-plan-prepare":
+        return container_plan_error_v1("usage: container-plan-prepare <backend> <candidate-context.sdn> <native-request.sdn> <config|-> <consumer> <context|-> <server|->; expected exactly 8 arguments including command")
+    if not ["linux-podman", "windows-docker-process"].contains(args[1]):
+        return container_plan_error_v1("container-plan-backend-unsupported")
+    if (not container_plan_path_v1(args[2]) or not container_plan_path_v1(args[3]) or
+            (args[4] != "-" and not container_plan_path_v1(args[4]))):
+        return container_plan_error_v1("container-plan-path-invalid")
+    if (not server_consumer_valid_v1(args[5]) or
+            (args[6] != "-" and not server_name_valid_v1(args[6])) or
+            (args[7] != "-" and not server_name_valid_v1(args[7]))):
+        return container_plan_error_v1("container-plan-selector-invalid")
+    val context = file_read_regular_no_follow_bounded(args[2], 524288)
+    val native = file_read_regular_no_follow_bounded(args[3], 1048576)
+    if context.is_err() or native.is_err(): return container_plan_error_v1("container-plan-input-unavailable")
+    val config = server_config_load_v1(if args[4] == "-": "" else: args[4])
+    if config.is_err(): return container_plan_error_v1(config.unwrap_err())
+    val prepared = orchestrator_container_plan_prepare_source_v1(args[1], context.unwrap(), native.unwrap(),
+        config.unwrap(), args[5], if args[6] == "-": "" else: args[6], if args[7] == "-": "" else: args[7])
+    match prepared:
+        case Ok(output): OrchestratorValidationReplyV1(exit_code: 0, output: output)
+        case Err(reason): container_plan_error_v1(reason)
+
+export ContainerPlanCandidateContextV1, container_plan_candidate_decode_v1
+export orchestrator_container_plan_prepare_source_v1, orchestrator_container_plan_prepare_v1

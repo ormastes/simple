@@ -10,7 +10,7 @@
 # base inside an ENFORCING tree RSS cap -- both figures are named).
 use app.cli.shard_mem_clamp.{SHARD_FLOOR_UNKNOWN_PARENT_KB_V1, SHARD_MIR_WORKER_KB_V1,
     SHARD_MIR_WORKER_FLOOR_KB_V1, SHARD_MIR_WORKER_PER_MODULE_KB_V1, SHARD_HIR_WORKER_KB_V1,
-    shard_worker_budget_kb, shard_mem_available_kb, shard_mem_available_kb_from_field,
+    shard_mem_available_kb, shard_mem_available_kb_from_field,
     shard_host_worker_budget_kb, shard_cgroup_memory_max_kb, shard_tree_budget_kb_for,
     shard_pool_effective_budget_for_v1, shard_tree_headroom_kib_v1}
 use app.io.env_ops.{env_get}
@@ -120,10 +120,24 @@ pub fn file_worker_pool_admission_usable_kb_v1(avail_kb: i64, declared_kb: i64, 
     if effective < 0 or (usable > 0 and usable <= effective): return usable
     return effective
 
-# A valid phase env value (SIMPLE_HIR/MIR_SHARD_WORKER_KB) or the host config
-# key worker_mem_mib is an explicit override; explicit budgets are never scaled.
-pub fn file_worker_pool_budget_explicit_v1(env_field: text, host_mib_field: text) -> bool:
-    return shard_mem_available_kb_from_field(env_field) > 0 or shard_host_worker_budget_kb(host_mib_field) > 0
+# Phase price: a valid SIMPLE_*_SHARD_WORKER_KB env value wins in every mode;
+# the host key worker_mem_mib is a measured SHARD worker figure (26624 MiB on
+# the phase-3 Windows host) and applies only when shard_mode is true; the
+# per-file pool otherwise takes default_kb (bug
+# phase3_per_file_pool_refused_26gib_worker_price_windows_2026-11-15).
+pub fn file_worker_pool_phase_price_kb_v1(env_field: text, host_mib_field: text, default_kb: i64, shard_mode: bool) -> i64:
+    val env_kb = shard_mem_available_kb_from_field(env_field)
+    if env_kb > 0: return env_kb
+    if shard_mode:
+        val host_kb = shard_host_worker_budget_kb(host_mib_field)
+        if host_kb > 0: return host_kb
+    return default_kb
+
+# Explicit (never scaled) iff the price came from an override that applies in
+# this mode: the env value always, the host key only in shard mode.
+pub fn file_worker_pool_price_explicit_v1(env_field: text, host_mib_field: text, shard_mode: bool) -> bool:
+    if shard_mem_available_kb_from_field(env_field) > 0: return true
+    return shard_mode and shard_host_worker_budget_kb(host_mib_field) > 0
 
 # Scale to host: when 2 workers fit at the 9 GB default, the budget is
 # unchanged (big hosts behave exactly as before). Otherwise it drops toward
@@ -164,8 +178,10 @@ pub fn file_worker_pool_live_admission_usable_kb_v1() -> i64:
 # Live HIR per-worker budget (override > host worker_mem_mib > scaled 9 GB
 # default), priced from what HIR admission grants, not from 60% of free.
 pub fn file_worker_pool_hir_budget_kb_v1() -> i64:
-    val explicit = file_worker_pool_budget_explicit_v1(env_get("SIMPLE_HIR_SHARD_WORKER_KB") ?? "", host_limit_value("worker_mem_mib"))
-    val budget = shard_worker_budget_kb("SIMPLE_HIR_SHARD_WORKER_KB", SHARD_HIR_WORKER_KB_V1)
+    val env_field = env_get("SIMPLE_HIR_SHARD_WORKER_KB") ?? ""
+    val host_field = host_limit_value("worker_mem_mib")
+    val explicit = file_worker_pool_price_explicit_v1(env_field, host_field, false)
+    val budget = file_worker_pool_phase_price_kb_v1(env_field, host_field, SHARD_HIR_WORKER_KB_V1, false)
     return file_worker_pool_phase_budget_kb_v1(budget, explicit, file_worker_pool_live_admission_usable_kb_v1(), file_worker_pool_host_pointer_bits_v1())
 
 # Live MIR per-worker budget for a closure of `modules`. `scale` is true only
@@ -173,8 +189,10 @@ pub fn file_worker_pool_hir_budget_kb_v1() -> i64:
 # SHARD worker holds the whole-program HIR (24-25 GiB measured, run 11), so the
 # shard path keeps the closure price and only takes the address-space clamp.
 pub fn file_worker_pool_mir_budget_kb_v1(modules: i64, scale: bool) -> i64:
-    val explicit = file_worker_pool_budget_explicit_v1(env_get("SIMPLE_MIR_SHARD_WORKER_KB") ?? "", host_limit_value("worker_mem_mib"))
-    val budget = shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", file_worker_pool_mir_default_price_kb_v1(modules, scale))
+    val env_field = env_get("SIMPLE_MIR_SHARD_WORKER_KB") ?? ""
+    val host_field = host_limit_value("worker_mem_mib")
+    val explicit = file_worker_pool_price_explicit_v1(env_field, host_field, not scale)
+    val budget = file_worker_pool_phase_price_kb_v1(env_field, host_field, file_worker_pool_mir_default_price_kb_v1(modules, scale), not scale)
     val usable_kb = if scale: file_worker_pool_live_usable_kb_v1() else: 0
     return file_worker_pool_phase_budget_kb_v1(budget, explicit, usable_kb, file_worker_pool_host_pointer_bits_v1())
 

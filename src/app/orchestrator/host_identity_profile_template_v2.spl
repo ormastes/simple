@@ -1,0 +1,141 @@
+# Installer input values only. Templates contain no key/pin paths and mint no
+# projection authority; the installer must obtain an actual paired owner.
+use app.orchestrator.server_ssh_types_v1.ServerSshProfileV1
+use app.orchestrator.server_ssh_profile_v1.{server_ssh_profile_decode_v1,
+    server_ssh_profile_validate_v1, server_ssh_path_valid_v1}
+use std.common.config_core.server_context_types_v1.server_name_valid_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.text_bytes.{boxed_text_bytes_checked, utf8_bytes_valid}
+use std.nogc_sync_mut.io.stdin_command_v1.{stdin_command_store_root_valid_v1, stdin_command_digest_valid_v1}
+use std.nogc_sync_mut.io.host_identity_ssh_projection_v1.HostIdentitySshPathsV1
+
+pub struct HostIdentityProfileTemplateV2:
+    auth_ref: text
+    trust_ref: text
+    user: text
+    ssh_executable: text
+    host_key_alias: text
+    store_root: text
+    ssh_digest: text = ""
+
+pub struct HostIdentityProfileSelectionV2:
+    template: HostIdentityProfileTemplateV2
+    # Present only for the unchanged complete-profile input form.
+    expected_paths: Option<HostIdentitySshPathsV1>
+
+fn identity_template_fields_v2(source: text) -> Result<Dict<text, SdnValue>, text>:
+    if source.byte_len() < 1 or source.byte_len() > 65536: return Err("host-identity-template-size")
+    val bytes = match boxed_text_bytes_checked(source):
+        case Err(_): return Err("host-identity-template-allocation")
+        case Ok(value): value
+    if not utf8_bytes_valid(bytes): return Err("host-identity-template-utf8")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 65536,
+            max_depth: 2, max_nodes: 40, max_rows: 0, max_cells: 0, max_columns: 11)):
+        case Err(_): return Err("host-identity-template-syntax")
+        case Ok(value): value
+    match parsed.value:
+        case SdnValue.Dict(fields): Ok(fields)
+        case _: Err("host-identity-template-object")
+
+fn identity_template_text_v2(fields: Dict<text, SdnValue>, key: text, maximum: i64) -> Result<text, text>:
+    if not fields.contains_key(key): return Err("host-identity-template-fields")
+    match fields[key]:
+        case SdnValue.String(value):
+            if value.byte_len() < 1 or value.byte_len() > maximum: return Err("host-identity-template-text-bound")
+            Ok(value)
+        case _: Err("host-identity-template-text")
+
+fn identity_template_atom_v2(value: text) -> bool:
+    if value.byte_len() < 1 or value.byte_len() > 128 or value.starts_with("-") or value.starts_with("."): return false
+    for c in value.chars():
+        if ((c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+                (c >= "0" and c <= "9") or c == "_" or c == "-" or c == "."):
+            continue
+        return false
+    true
+
+# Match the common private reference grammar using its public segment checker,
+# without constructing a dummy full profile or placeholder filesystem path.
+fn identity_template_reference_v2(value: text, scheme: text) -> bool:
+    if value.byte_len() > 256 or not value.starts_with(scheme): return false
+    val suffix = value.substring(scheme.byte_len(), value.byte_len())
+    if suffix == "": return false
+    for part in suffix.split("/"):
+        if not server_name_valid_v1(part) or part == "." or part == "..": return false
+    true
+
+fn identity_template_validate_v2(value: HostIdentityProfileTemplateV2) -> Result<(), text>:
+    if not identity_template_atom_v2(value.user) or not identity_template_atom_v2(value.host_key_alias):
+        return Err("host-identity-template-atom")
+    if not server_ssh_path_valid_v1(value.ssh_executable) or not stdin_command_store_root_valid_v1(value.store_root):
+        return Err("host-identity-template-path")
+    if value.ssh_digest != "" and not stdin_command_digest_valid_v1(value.ssh_digest):
+        return Err("host-identity-template-digest")
+    if (not identity_template_reference_v2(value.auth_ref, "secret://") or
+            not identity_template_reference_v2(value.trust_ref, "trust://")):
+        return Err("host-identity-template-reference")
+    Ok(())
+
+fn identity_template_decode_fields_v2(fields: Dict<text, SdnValue>) -> Result<HostIdentityProfileTemplateV2, text>:
+    val required = ["version", "kind", "authRef", "trustRef", "user", "sshExecutable", "hostKeyAlias", "storeRoot"]
+    for key in fields.keys():
+        # In particular, BOTH path fields are forbidden, even if empty.
+        if not required.contains(key) and key != "sshDigest": return Err("host-identity-template-unknown-field")
+    for key in required:
+        if not fields.contains_key(key): return Err("host-identity-template-fields")
+    match fields["version"]:
+        case SdnValue.Int(value):
+            if value != 1: return Err("host-identity-template-version")
+        case _: return Err("host-identity-template-version")
+    if identity_template_text_v2(fields, "kind", 64)? != "server-ssh-profile-template":
+        return Err("host-identity-template-kind")
+    var value = HostIdentityProfileTemplateV2(auth_ref: identity_template_text_v2(fields, "authRef", 4096)?,
+        trust_ref: identity_template_text_v2(fields, "trustRef", 4096)?, user: identity_template_text_v2(fields, "user", 128)?,
+        ssh_executable: identity_template_text_v2(fields, "sshExecutable", 4096)?,
+        host_key_alias: identity_template_text_v2(fields, "hostKeyAlias", 128)?,
+        store_root: identity_template_text_v2(fields, "storeRoot", 32760)?)
+    if fields.contains_key("sshDigest"): value.ssh_digest = identity_template_text_v2(fields, "sshDigest", 64)?
+    identity_template_validate_v2(value)?
+    Ok(value)
+
+pub fn host_identity_profile_template_decode_v2(source: text) -> Result<HostIdentityProfileTemplateV2, text>:
+    identity_template_decode_fields_v2(identity_template_fields_v2(source)?)
+
+pub fn host_identity_profile_selection_v2(source: text, root: text) -> Result<HostIdentityProfileSelectionV2, text>:
+    val fields = identity_template_fields_v2(source)?
+    val kind = identity_template_text_v2(fields, "kind", 64)?
+    val selected = match kind:
+        case "server-ssh-profile-template":
+            HostIdentityProfileSelectionV2(template: identity_template_decode_fields_v2(fields)?, expected_paths: nil)
+        case "server-ssh-profile":
+            val profile = server_ssh_profile_decode_v1(source)?
+            HostIdentityProfileSelectionV2(template: HostIdentityProfileTemplateV2(auth_ref: profile.auth_ref,
+                trust_ref: profile.trust_ref, user: profile.user, ssh_executable: profile.ssh_executable,
+                host_key_alias: profile.host_key_alias, store_root: profile.store_root, ssh_digest: profile.ssh_digest),
+                expected_paths: Some(HostIdentitySshPathsV1(identity_path: profile.identity_path, known_hosts_path: profile.known_hosts_path)))
+        case _: return Err("host-identity-template-kind")
+    if selected.template.store_root == "" or selected.template.store_root != root:
+        return Err("host-identity-profile-store-binding")
+    Ok(selected)
+
+# Pure data transformation only. A successful result is NOT a Ready pair;
+# production calls this only after the opaque paired paths port proves current.
+pub fn host_identity_profile_complete_v2(selected: HostIdentityProfileSelectionV2, root: text,
+        paths: HostIdentitySshPathsV1) -> Result<ServerSshProfileV1, text>:
+    val value = selected.template
+    if value.store_root != root or value.store_root == "": return Err("host-identity-profile-store-binding")
+    identity_template_validate_v2(value)?
+    if val expected = selected.expected_paths:
+        if expected.identity_path != paths.identity_path or expected.known_hosts_path != paths.known_hosts_path:
+            return Err("host-identity-profile-paired-path-mismatch")
+    val profile = ServerSshProfileV1(auth_ref: value.auth_ref, trust_ref: value.trust_ref,
+        user: value.user, ssh_executable: value.ssh_executable, identity_path: paths.identity_path,
+        known_hosts_path: paths.known_hosts_path, host_key_alias: value.host_key_alias,
+        store_root: value.store_root, ssh_digest: value.ssh_digest)
+    server_ssh_profile_validate_v1(profile)?
+    Ok(profile)
+
+export HostIdentityProfileTemplateV2, HostIdentityProfileSelectionV2
+export host_identity_profile_template_decode_v2, host_identity_profile_selection_v2, host_identity_profile_complete_v2

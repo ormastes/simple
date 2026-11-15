@@ -1,0 +1,239 @@
+# Authored acceptance tests; runtime execution is tracked separately by the
+# integration owner. These tests do not claim an executed PASS.
+use std.spec.*
+use std.fs.{read_file}
+use std.common.config_core.server_context_types_v1.*
+use std.common.config_core.server_context_decode_v1.{decode_server_config_v1}
+use std.common.config_core.server_context_resolve_v1.{resolve_server_context_v1}
+
+fn server_context_fixture_v1(name: text = "shared") -> text:
+    read_file("test/fixtures/server_contexts/" + name + ".sdn")
+
+fn server_test_record_v1(host: text, container_host: text = "") -> ServerRecordV1:
+    ServerRecordV1(name: "remote", transport: "ssh", host: host, port: 22,
+        container_host: container_host, auth_ref: "secret://test/login",
+        tls_ref: "trust://test/known-hosts", remote_executable: "/opt/simple/bin/simple")
+
+fn server_test_config_v1(record: ServerRecordV1) -> ServerConfigV1:
+    val refs: Dict<text, text> = {}
+    ServerConfigV1(current_context: "dev", servers: [record], contexts: [
+        ServerContextV1(name: "dev", shared_server: record.name, consumer_refs: refs)])
+
+describe "shared server context V1 strict contract":
+    it "selects one shared server for every supported consumer":
+        step("Select a shared orchestration server")
+        val config = decode_server_config_v1(server_context_fixture_v1()).unwrap()
+        expect(config.servers.len()).to_equal(3)
+        expect(config.contexts.len()).to_equal(2)
+        for consumer in ["simple", "orchestrator", "caret", "agent"]:
+            val selected = resolve_server_context_v1(config, consumer, "", "", false).unwrap()
+            expect(selected.record.name).to_equal("shared")
+            expect(selected.record.host).to_equal("build.example.test")
+            expect(selected.record.port).to_equal(22)
+            expect(selected.record.remote_executable).to_equal("/opt/simple/bin/simple-orchestrator")
+            expect(selected.consumer).to_equal(consumer)
+            expect(selected.context).to_equal("workstation")
+            expect(selected.source).to_equal("context_shared")
+
+    it "uses consumer overrides and shared fallback within the selected context":
+        step("Override a consumer server")
+        val config = decode_server_config_v1(server_context_fixture_v1("consumer_override")).unwrap()
+        val caret = resolve_server_context_v1(config, "caret", "", "", false).unwrap()
+        expect(caret.record.transport).to_equal("local")
+        expect(caret.source).to_equal("context_consumer")
+        val agent = resolve_server_context_v1(config, "agent", "", "", false).unwrap()
+        expect(agent.record.name).to_equal("shared")
+        expect(agent.source).to_equal("context_shared")
+
+    it "selects an explicit context before the current context":
+        val config = decode_server_config_v1(server_context_fixture_v1()).unwrap()
+        val selected = resolve_server_context_v1(config, "simple", "", "development", false).unwrap()
+        expect(selected.record.name).to_equal("alternate")
+        expect(selected.context).to_equal("development")
+        val agent = resolve_server_context_v1(config, "agent", "", "development", false).unwrap()
+        expect(agent.record.name).to_equal("shared")
+        expect(agent.source).to_equal("context_consumer")
+
+    it "lets explicit server selection override both consumer and shared selections":
+        val config = decode_server_config_v1(server_context_fixture_v1()).unwrap()
+        val selected = resolve_server_context_v1(config, "caret", "alternate", "development", false).unwrap()
+        expect(selected.record.name).to_equal("alternate")
+        expect(selected.source).to_equal("explicit_server")
+
+    it "fails every invalid explicit selection including a context masked by a server":
+        val config = decode_server_config_v1(server_context_fixture_v1()).unwrap()
+        expect(resolve_server_context_v1(config, "simple", "missing", "", false).unwrap_err()).to_equal("server-selected-server-missing")
+        expect(resolve_server_context_v1(config, "simple", "shared", "missing", false).unwrap_err()).to_equal("server-selected-context-missing")
+        expect(resolve_server_context_v1(config, "unknown", "", "", false).unwrap_err()).to_equal("server-consumer-invalid")
+
+    it "provides the missing-file local default independently of document decoding":
+        val config = default_server_config_v1()
+        val selected = resolve_server_context_v1(config, "simple", "", "", false).unwrap()
+        expect(selected.record.transport).to_equal("local")
+        expect(selected.record.host).to_equal("")
+        expect(selected.record.port).to_equal(0)
+        for source in ["", "# empty\n", "{}"]:
+            expect(decode_server_config_v1(source).is_err()).to_equal(true)
+
+    it "rejects duplicate keys unknown fields inline credentials and dangling references":
+        for fixture in ["duplicate_key", "unknown_key", "inline_credentials", "dangling_reference"]:
+            expect(decode_server_config_v1(server_context_fixture_v1(fixture)).is_err()).to_equal(true)
+        val source = server_context_fixture_v1()
+        for authored in [source + "version: 1\n", source + "unknown: true\n",
+                source.replace("sharedServer: shared", "sharedServer: missing"),
+                source.replace("currentContext: workstation", "currentContext: missing"),
+                source.replace("caret: local", "unknown: local"),
+                source.replace("transport: local", "transport: local\n        host: localhost")]:
+            expect(decode_server_config_v1(authored).is_err()).to_equal(true)
+
+    it "rejects duplicate decoded keys and nested duplicate references":
+        val source = server_context_fixture_v1("consumer_override")
+        expect(decode_server_config_v1(source.replace("caret: local", "caret: local\n            caret: shared")).is_err()).to_equal(true)
+        expect(decode_server_config_v1(source.replace("sharedServer: shared", "sharedServer: shared\n        sharedServer: local")).is_err()).to_equal(true)
+        expect(decode_server_config_v1(source.replace("version: 1", "version: 1\n\"version\": 1")).is_err()).to_equal(true)
+
+    it "rejects scalar coercion unsupported versions and malformed syntax":
+        val source = server_context_fixture_v1()
+        for authored in [source.replace("version: 1", "version: 2"),
+                source.replace("version: 1", "version: \"1\""),
+                source.replace("port: 22\n", "port: \"22\"\n"),
+                source.replace("port: 22\n", "port: 22.0\n"),
+                source.replace("host: build.example.test", "host: [build.example.test]"),
+                source.replace("sharedServer: shared", "sharedServer: true"),
+                source + "\tbad: syntax\n"]:
+            expect(decode_server_config_v1(authored).is_err()).to_equal(true)
+
+    it "validates strict IPv4 and DNS without accepting URL or shell fragments":
+        for host in ["10.20.30.40", "127.0.0.1", "Build.example.test", "build-host", "localhost"]:
+            expect(server_host_validate_v1(host).is_ok()).to_equal(true)
+        for host in ["", "256.1.1.1", "127.1", "2130706433", "01.2.3.4", "1.2.3.",
+                "0x7f000001", "0X7f.0.0.1", "0177.0.0.1",
+                "bad..example", "-bad.test", "bad-.test", "bad_name", "build.test/evil", "user@host", "host;id", " host", "host."]:
+            expect(server_host_validate_v1(host).is_err()).to_equal(true)
+        expect(server_host_validate_v1("::1").unwrap_err()).to_equal("server-host-ipv6-unsupported")
+
+    it "requires opaque authentication and trust references with a safe absolute executable":
+        val valid = server_test_record_v1("build.example.test")
+        for value in ["", "password", "secret://", "secret://work/../login", "secret://work/login?token=x"]:
+            var record = valid
+            record.auth_ref = value
+            expect(server_record_validate_v1(record).is_err()).to_equal(true)
+        for value in ["", "trust://", "accept-any-host", "trust://work/known hosts"]:
+            var record = valid
+            record.tls_ref = value
+            expect(server_record_validate_v1(record).is_err()).to_equal(true)
+        for value in ["", "simple", "/", "/opt/../simple", "/opt//simple", "/opt/simple;id", "/opt/simple --flag"]:
+            var record = valid
+            record.remote_executable = value
+            expect(server_record_validate_v1(record).is_err()).to_equal(true)
+        for port in [0, -1, 65536]:
+            var record = valid
+            record.port = port
+            expect(server_record_validate_v1(record).is_err()).to_equal(true)
+
+    it "rejects multibyte reference and executable suffixes while preserving ASCII records":
+        val valid = server_test_record_v1("build.example.test")
+        expect(server_record_validate_v1(valid).unwrap()).to_equal(true)
+        for suffix in ["λ", "😀"]:
+            var record = valid
+            record.auth_ref = "secret://test/" + suffix
+            expect(server_record_validate_v1(record).unwrap_err()).to_equal("server-auth-reference-required")
+            record = valid
+            record.tls_ref = "trust://test/" + suffix
+            expect(server_record_validate_v1(record).unwrap_err()).to_equal("server-trust-reference-required")
+            record = valid
+            record.remote_executable = "/opt/simple/" + suffix
+            expect(server_record_validate_v1(record).unwrap_err()).to_equal("server-remote-executable-invalid")
+
+    it "keeps host selection pure and uses the container override only in a container":
+        val config = decode_server_config_v1(server_context_fixture_v1()).unwrap()
+        val selected = resolve_server_context_v1(config, "simple", "", "", true).unwrap()
+        expect(selected.record.host).to_equal("192.168.50.2")
+        expect(selected.record.container_host).to_equal("192.168.50.2")
+        val ordinary = resolve_server_context_v1(config, "simple", "", "", false).unwrap()
+        expect(ordinary.record.host).to_equal("build.example.test")
+        val no_override = resolve_server_context_v1(config, "simple", "alternate", "", true).unwrap()
+        expect(no_override.record.host).to_equal("10.20.30.40")
+
+    it "rejects local loopback and unspecified container destinations without fallback":
+        expect(resolve_server_context_v1(default_server_config_v1(), "simple", "", "", true).unwrap_err()).to_equal("server-container-local-forbidden")
+        for host in ["localhost", "LOCALHOST", "test.localhost", "localhost.localdomain", "ip6-localhost", "127.0.0.1", "127.2.3.4", "0.0.0.0"]:
+            val config = server_test_config_v1(server_test_record_v1(host))
+            expect(resolve_server_context_v1(config, "simple", "", "", true).unwrap_err()).to_equal("server-container-host-local")
+            val override = server_test_config_v1(server_test_record_v1("build.test", host))
+            expect(resolve_server_context_v1(override, "simple", "", "", true).is_err()).to_equal(true)
+        val reachable = server_test_config_v1(server_test_record_v1("127.0.0.1", "host.docker.internal"))
+        expect(resolve_server_context_v1(reachable, "simple", "", "", true).unwrap().record.host).to_equal("host.docker.internal")
+        # Service DNS suffixes are not inherently loopback. Connectivity and
+        # network admission belong to the provider, not a DNS-spelling guess.
+        for host in ["build.local", "orchestrator.default.svc.cluster.local"]:
+            val config = server_test_config_v1(server_test_record_v1(host))
+            expect(resolve_server_context_v1(config, "simple", "", "", true).unwrap().record.host).to_equal(host)
+
+    it "represents HTTPS but explicitly rejects it for current consumers":
+        var record = server_test_record_v1("build.example.test")
+        record.transport = "https"
+        record.port = 443
+        record.remote_executable = ""
+        expect(server_record_validate_v1(record).is_ok()).to_equal(true)
+        val config = server_test_config_v1(record)
+        expect(resolve_server_context_v1(config, "simple", "", "", false).unwrap_err()).to_equal("server-consumer-transport-unsupported")
+        record.remote_executable = "/opt/simple/bin/simple"
+        expect(server_record_validate_v1(record).unwrap_err()).to_equal("server-https-executable-forbidden")
+
+    it "rejects unsupported transports bad names and local remote-only fields":
+        var record = server_test_record_v1("build.test")
+        record.transport = "http"
+        expect(server_record_validate_v1(record).unwrap_err()).to_equal("server-transport-invalid")
+        record = server_test_record_v1("build.test")
+        record.name = "../remote"
+        expect(server_record_validate_v1(record).unwrap_err()).to_equal("server-name-invalid")
+        val source = "version: 1\ncurrentContext: dev\nservers:\n    local:\n        transport: local\n        "
+        val suffix = "\ncontexts:\n    dev:\n        sharedServer: local\n"
+        for field in ["host: localhost", "port: 1", "containerHost: build.test",
+                "authRef: password", "tlsRef: trust", "remoteExecutable: /opt/simple"]:
+            expect(decode_server_config_v1(source + field + suffix).is_err()).to_equal(true)
+
+    it "accepts sixteen distinct records and contexts at the document boundary":
+        var source = "version: 1\ncurrentContext: context0\nservers:\n"
+        for index in 0..16:
+            source = source + "    server" + index.to_text() + ":\n        transport: local\n"
+        source = source + "contexts:\n"
+        for index in 0..16:
+            source = source + "    context" + index.to_text() + ":\n        sharedServer: server" + index.to_text() + "\n"
+        val config = decode_server_config_v1(source).unwrap()
+        expect(config.servers.len()).to_equal(16)
+        expect(config.contexts.len()).to_equal(16)
+        expect(resolve_server_context_v1(config, "simple", "", "context15", false).unwrap().record.name).to_equal("server15")
+        val seventeenth_context = source + "    context16:\n        sharedServer: server0\n"
+        expect(decode_server_config_v1(seventeenth_context).unwrap_err()).to_contain("server-context-limit")
+
+    it "rejects invalid programmatically constructed configurations":
+        val record = server_test_record_v1("build.example.test")
+        var config = server_test_config_v1(record)
+        config.servers.push(record)
+        expect(server_config_validate_v1(config).unwrap_err()).to_equal("server-name-duplicate")
+        config = server_test_config_v1(record)
+        config.contexts.push(config.contexts[0])
+        expect(server_config_validate_v1(config).unwrap_err()).to_equal("server-context-name-duplicate")
+        config = server_test_config_v1(record)
+        config.current_context = "missing"
+        expect(resolve_server_context_v1(config, "simple", "remote", "dev", false).unwrap_err()).to_equal("server-current-context-missing")
+
+    it "enforces source byte record context field and parser budgets":
+        var oversized = "x"
+        while oversized.byte_len() <= 65536: oversized = oversized + oversized
+        expect(decode_server_config_v1(oversized).unwrap_err()).to_equal("server-config-source-limit")
+        var multibyte = "λ"
+        while multibyte.byte_len() <= 65536: multibyte = multibyte + multibyte
+        expect(decode_server_config_v1(multibyte).unwrap_err()).to_equal("server-config-source-limit")
+        var config = server_test_config_v1(server_test_record_v1("build.test"))
+        while config.servers.len() <= 16: config.servers.push(config.servers[0])
+        expect(server_config_validate_v1(config).unwrap_err()).to_equal("server-record-limit")
+        config = server_test_config_v1(server_test_record_v1("build.test"))
+        while config.contexts.len() <= 16: config.contexts.push(config.contexts[0])
+        expect(server_config_validate_v1(config).unwrap_err()).to_equal("server-context-limit")
+        var long_label = "a"
+        while long_label.byte_len() < 64: long_label = long_label + "a"
+        expect(server_host_validate_v1(long_label).is_err()).to_equal(true)
+        expect(decode_server_config_v1("version: 1\nservers: [[[[[[[1]]]]]]]\n").is_err()).to_equal(true)
