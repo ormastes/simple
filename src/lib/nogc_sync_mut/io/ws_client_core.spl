@@ -14,7 +14,9 @@
 # here), extensions, subprotocols.
 
 use std.nogc_sync_mut.io.tcp.{TcpStream}
-use std.nogc_sync_mut.http.ws.ws_handshake.{ws_build_client_request, ws_validate_server_response}
+use std.nogc_sync_mut.http.ws.ws_handshake.{ws_build_client_request, ws_compute_accept_key}
+use std.nogc_sync_mut.http.response.{parse_response}
+use std.nogc_sync_mut.http.headers.{get_header}
 use std.common.base_encoding.base64.{base64_encode_bytes}
 use std.common.text_bytes.{bytes_to_text}
 use std.nogc_sync_mut.sffi.math.{random_i64_raw}
@@ -158,6 +160,17 @@ fn _ws_read_handshake(fd: i64) -> text:
             return bytes_to_text(buf)
     ""
 
+fn _ws_upgrade_accepted(head: text, key: text) -> bool:
+    """101 status + matching Sec-WebSocket-Accept, parsed by the std HTTP response parser."""
+    if head == "":
+        return false
+    val parsed = parse_response(head)
+    if parsed[1] != 101:
+        return false
+    match get_header(parsed[3], "Sec-WebSocket-Accept"):
+        case Some(accept): accept.trim() == ws_compute_accept_key(key)
+        case None: false
+
 fn _ws_close_fd(fd: i64) -> bool:
     var stream = TcpStream.from_accepted_fd(fd)
     match stream.close():
@@ -178,8 +191,7 @@ fn rt_ws_connect(url: text) -> i64:
     if not _ws_write_all(fd, request.bytes()):
         _ws_close_fd(fd)
         return 0
-    val response = _ws_read_handshake(fd)
-    if not ws_validate_server_response(response, key):
+    if not _ws_upgrade_accepted(_ws_read_handshake(fd), key):
         _ws_close_fd(fd)
         return 0
     fd

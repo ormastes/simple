@@ -72,3 +72,12 @@ fixture worker printed `Option::Some(8)` where the worker returned `1` (looks
 like a tagged-int join payload); the interpreter returns `1`. Needs its own bug.
 `test --mode=native` with the seed ran the spec on the interpreter (runner says
 so), so the native evidence above is from the standalone build.
+
+HTTP reuse (owner directive 2026-11-15: the Upgrade handshake uses the std HTTP code, and only the framing is new):
+the client builds the request with `http/ws/ws_handshake.ws_build_client_request`. It parses the 101 reply with
+`nogc_sync_mut/http/response.parse_response` plus `http/headers.get_header`, and checks
+`ws_compute_accept_key` (std `crypto/sha1` + base64). The spec's echo server parses the upgrade request with
+`http/request.parse_request` + `get_header` and replies with `ws_build_server_response`.
+For this, `request.spl`/`response.spl` moved from the dead `import x from "std/http/..."`
+form to `use std.nogc_sync_mut.http.*`, which had failed with `function from not found`. Also `parse_request`, `parse_response`
+and `get_header` are now `pub`. Re-verified: interpreted `3 passed`, native 17 compiled / 25 cached, same output.
