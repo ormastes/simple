@@ -534,3 +534,16 @@ handler/dllexport problem, so no spec was converted to the ring path.
 
 The Windows ring path is covered by `xray_win_ring_e2e_host.spl` (fixture run, not an SSpec).
 A Windows system spec wrapping it needs a new lane script and is not part of this change.
+
+## Shared wrapper + spy/profile (lane xrayshared, 2026-11-15)
+
+| Item | State |
+|---|---|
+| `XrayBackendV1` = `XrayLlvmLeafV1` + `XrayEdgeSourceV1` (`src/lib/nogc_sync_mut/trace/xray_spy_v1.spl`) | landed in PR |
+| Linux backend (`XrayBackendV1.linux`): spec with fake compiler-rt-style leaf | green |
+| Windows backend (`XrayBackendV1.windows`): real `XrayWinFlagLeafV1` over modelled DLL ring | green except time |
+| `XraySpyV1.log_lines()` (spy) / `.profile()`: identical on both backends | green |
+| Windows edges stamped (profile time) | RED: bug `xray_win_ring_edges_unstamped_profile_time_zero_2026-11-15` |
+| Linux fixture `xray_native_program_host.spl` repointed onto `XraySpyV1` | open (Linux-only lane, not runnable here) |
+
+Spec: `test/01_unit/lib/xray/xray_spy_backend_v1_spec.spl` 6 pass / 1 fail. Off-identity: no existing file changed in `src/`; `xray_win_flag_leaf_v1_spec` 9/0 and `xray_llvm_adapter_v1_spec` 16/0 are unchanged.
