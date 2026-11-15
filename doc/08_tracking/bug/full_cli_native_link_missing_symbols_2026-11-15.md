@@ -44,3 +44,18 @@ sha256 `7f9c35460ecc4deb39ba43a3cc76c81de87573d52b6b41032183a38a0b14bf40`.
   (that path is a git symlink -> `../../positive/01_arithmetic.spl`; the native
   SCV snapshot reader (`src/lib/scv/compile_snapshot.spl`) refuses it, while the
   seed interpreter runs the same spec GREEN). **Open**, next gap for the native CLI.
+
+## Addendum: `CompareObjectHandles` unresolved (release tip, f2c15a69f33)
+`windows_service_logon_namespace_abi_v1.spl` declared `CompareObjectHandles`
+as a direct extern; llvm-mingw's kernel32/kernelbase/advapi32/ntdll import
+libs do not export it (only libmincore/libonecore), and the seed link list does
+not add those. Fix: `rt_win_compare_object_handles` in `runtime_native.c`
+(core-C member) resolves it via `GetProcAddress(GetModuleHandleW(L"kernelbase.dll"))`,
+returns 0 (not identical, fail closed) when unavailable or off Windows.
+Result: full CLI links (`Build complete: 3713 units, 0 failed`), `--version` rc=0.
+**Not covered / open:** (1) Rust seed interpreter twin of the extern is not
+registered (no seed rebuild in this lane), so the interpreted spec
+`test/01_unit/lib/io/windows_compare_object_handles_spec.spl` stays red under the
+seed; (2) the native CLI's `test` command fails every spec with
+`function 'describe' not found` (std.spec not resolved in the native interpreter).
+Status: verification-pending.
