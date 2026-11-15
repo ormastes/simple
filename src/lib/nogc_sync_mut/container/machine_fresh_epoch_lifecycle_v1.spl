@@ -1,0 +1,272 @@
+# Canonical once-only progress and actual creator-process retention. This is
+# neither installed epoch custody nor durable admission. An actual admission
+# owner keeps its token private; another token confers no launch right.
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+use std.nogc_sync_mut.io.thread.thread_native_current_id
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.nogc_sync_mut.io.group_process_owner.GroupProcessStreamOwnerV2
+use std.nogc_sync_mut.io.process_ops.{PipedProcessRefV1, PipedProcessOwnedTransferV2,
+    process_validate_piped_owned_transfer_v2, process_cleanup_piped_owned_v2, process_piped_ref_equal_v1}
+use std.common.build_manager.group_process_stream_protocol_v2.group_process_stream_template_encode_v3
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.container.machine_fresh_epoch_process_progress_v1.*
+
+struct FreshEpochLifecycleStateV1:
+    phase: text
+    intent_digest: text
+    commit_digest: text
+    error: text
+    process: Option<GroupProcessStreamOwnerV2> = nil
+    reference: Option<PipedProcessRefV1> = nil
+    intent_bytes: text = ""
+    deadline: i64 = 0
+    intent_at: i64 = 0
+    fallback_phase: text = ""
+    fallback_identity: text = ""
+    fallback_reference: Option<PipedProcessRefV1> = nil
+
+var fresh_epoch_lifecycle_states_v1: [FreshEpochLifecycleStateV1] = []
+var fresh_epoch_lifecycle_thread_v1: i64 = 0
+
+fn fresh_epoch_lifecycle_entry_v1() -> Result<(), text>:
+    val origin = linux_machine_process_origin_check_v1()?
+    val current = thread_native_current_id()
+    if current <= 0: return Err("machine-fresh-epoch-thread-unavailable")
+    if fresh_epoch_lifecycle_thread_v1 == 0: fresh_epoch_lifecycle_thread_v1 = current
+    if fresh_epoch_lifecycle_thread_v1 != current: return Err("machine-fresh-epoch-foreign-thread")
+    Ok(())
+
+pub class MachineFreshEpochLifecycleV1:
+    slot: i64
+    generation: i64
+
+    pub fn phase_v1() -> Result<text, text>:
+        val checked = fresh_epoch_lifecycle_current_v1(self)?
+        Ok(checked.phase)
+
+    pub fn begin_intent_v1(digest: text, template: text, deadline: i64, at: i64) -> Result<(), text>:
+        val current = fresh_epoch_lifecycle_current_v1(self)?
+        if (current.phase != "admitted" or not builder_digest_valid_v1(digest) or template == "" or
+                at <= 0 or deadline <= at):
+            return Err("machine-fresh-epoch-creator-already-attempted")
+        fresh_epoch_lifecycle_states_v1[self.slot].phase = "intent-attempted"
+        fresh_epoch_lifecycle_states_v1[self.slot].intent_digest = digest
+        fresh_epoch_lifecycle_states_v1[self.slot].intent_bytes = template
+        fresh_epoch_lifecycle_states_v1[self.slot].deadline = deadline
+        fresh_epoch_lifecycle_states_v1[self.slot].intent_at = at
+        Ok(())
+
+    pub fn commit_intent_v1(digest: text) -> Result<(), text>:
+        val current = fresh_epoch_lifecycle_current_v1(self)?
+        if current.phase != "intent-attempted" or not builder_digest_valid_v1(digest):
+            return Err("machine-fresh-epoch-intent-phase")
+        fresh_epoch_lifecycle_states_v1[self.slot].commit_digest = digest
+        fresh_epoch_lifecycle_states_v1[self.slot].phase = "intent-committed"
+        Ok(())
+
+    # Must execute before calling the native creator, including on copied caps.
+    pub fn consume_launch_v1() -> Result<(), text>:
+        val current = fresh_epoch_lifecycle_current_v1(self)?
+        if current.phase != "intent-committed": return Err("machine-fresh-epoch-launch-permit-consumed")
+        fresh_epoch_lifecycle_states_v1[self.slot].phase = "launch-attempted"
+        Ok(())
+
+    pub fn attach_process_v1(process: GroupProcessStreamOwnerV2, reference: Option<PipedProcessRefV1>) -> Result<(), text>:
+        val current = fresh_epoch_lifecycle_current_v1(self)?
+        if current.phase != "launch-attempted" or current.process.is_some() or current.fallback_phase != "unresolved":
+            return Err("machine-fresh-epoch-process-already-retained")
+        if current.fallback_identity != "":
+            val matched = fresh_epoch_fallback_match_v1(current, process, reference)?
+        # Record the exact actual native return before policy/template
+        # postvalidation. Even an unexpected returned image must remain
+        # cleanable through its own native owner, not through a future grant.
+        val binding = machine_fresh_epoch_process_progress_v1(fresh_epoch_progress_v1(current), process.identity_digest, "bind")?
+        fresh_epoch_apply_progress_v1(self, binding)
+        fresh_epoch_lifecycle_states_v1[self.slot].fallback_reference = reference
+        val matched = fresh_epoch_fallback_template_v1(current, process)?
+        val transferred = machine_fresh_epoch_process_progress_v1(binding, process.identity_digest, "transferred")?
+        fresh_epoch_lifecycle_states_v1[self.slot].process = Some(process)
+        fresh_epoch_lifecycle_states_v1[self.slot].reference = reference
+        fresh_epoch_apply_progress_v1(self, transferred)
+        Ok(())
+
+    pub fn reserve_process_cleanup_v1() -> Result<MachineFreshEpochProcessCleanupV1, text>:
+        val current = fresh_epoch_lifecycle_current_v1(self)?
+        if current.phase != "launch-attempted" or current.fallback_phase != "":
+            return Err("machine-fresh-epoch-cleanup-reservation-phase")
+        fresh_epoch_lifecycle_states_v1[self.slot].fallback_phase = "unresolved"
+        Ok(MachineFreshEpochProcessCleanupV1(lifecycle: self))
+
+    # Called only after the actual native creator returns its no-owner rejection.
+    # This is private-owner bookkeeping, never an absence/debit-release grant.
+    pub fn native_rejected_v1(error: text) -> Result<(), text>:
+        val current = fresh_epoch_lifecycle_current_v1(self)?
+        if current.fallback_phase != "unresolved" or current.process.is_some():
+            return Err("machine-fresh-epoch-rejection-phase")
+        val resolved = machine_fresh_epoch_process_progress_v1(fresh_epoch_progress_v1(current), "", "no-owner", error)?
+        fresh_epoch_apply_progress_v1(self, resolved)
+        Ok(())
+
+    pub fn process_current_v1() -> Result<(), text>:
+        val current = fresh_epoch_lifecycle_current_v1(self)?
+        if current.process.is_none() or current.reference.is_none(): return Err("machine-fresh-epoch-process-not-confirmed")
+        process_validate_piped_owned_transfer_v2(PipedProcessOwnedTransferV2(owner: current.process.unwrap(),
+            reference: current.reference.unwrap()))
+
+    # This invokes the existing exact owned process cleanup proof. Neither a
+    # flag, a stale alias nor an intent row can erase an actual process owner.
+    pub fn close_process_v1() -> Result<(), text>:
+        val current = fresh_epoch_lifecycle_current_v1(self)?
+        if val process = current.process:
+            val candidate = machine_fresh_epoch_process_progress_v1(fresh_epoch_progress_v1(current), process.identity_digest, "consumed")?
+            val closed = process_cleanup_piped_owned_v2(process, current.reference)
+            if closed.is_err():
+                val pending = machine_fresh_epoch_process_progress_v1(fresh_epoch_progress_v1(current),
+                    process.identity_digest, "retained", closed.unwrap_err())?
+                fresh_epoch_apply_progress_v1(self, pending)
+                return Err(pending.error)
+            fresh_epoch_lifecycle_states_v1[self.slot].process = nil
+            fresh_epoch_lifecycle_states_v1[self.slot].reference = nil
+            fresh_epoch_apply_progress_v1(self, candidate)
+        elif current.fallback_phase == "unresolved" or current.fallback_phase == "transferred":
+            return Err("machine-fresh-epoch-fallback-cleanup-required")
+        Ok(())
+
+    pub fn retain_diagnostic_v1(error: text) -> Result<text, text>:
+        val current = fresh_epoch_lifecycle_current_v1(self)?
+        if current.error == "" and error != "": fresh_epoch_lifecycle_states_v1[self.slot].error = error
+        Ok(fresh_epoch_lifecycle_states_v1[self.slot].error)
+
+    pub fn intent_commit_v1() -> Result<text, text>:
+        val current = fresh_epoch_lifecycle_current_v1(self)?
+        Ok(current.commit_digest)
+
+    pub fn intent_v1() -> Result<text, text>:
+        val current = fresh_epoch_lifecycle_current_v1(self)?
+        Ok(current.intent_digest)
+
+    pub fn template_v1() -> Result<text, text>:
+        val current = fresh_epoch_lifecycle_current_v1(self)?
+        Ok(current.intent_bytes)
+
+    pub fn deadline_v1() -> Result<i64, text>:
+        val current = fresh_epoch_lifecycle_current_v1(self)?
+        Ok(current.deadline)
+
+    pub fn intent_at_v1() -> Result<i64, text>:
+        val current = fresh_epoch_lifecycle_current_v1(self)?
+        Ok(current.intent_at)
+
+    pub fn unknown_v1(error: text) -> Result<(), text>:
+        val current = fresh_epoch_lifecycle_current_v1(self)?
+        if current.phase == "closed": return Err("machine-fresh-epoch-already-closed")
+        fresh_epoch_lifecycle_states_v1[self.slot].phase = "unknown"
+        if current.error == "": fresh_epoch_lifecycle_states_v1[self.slot].error = error
+        Ok(())
+
+    pub fn closing_v1() -> Result<(), text>:
+        val current = fresh_epoch_lifecycle_current_v1(self)?
+        if current.phase == "closed": return Ok(())
+        fresh_epoch_lifecycle_states_v1[self.slot].phase = "closing"
+        Ok(())
+
+    pub fn closed_v1(error: text) -> Result<(), text>:
+        val current = fresh_epoch_lifecycle_current_v1(self)?
+        if current.phase != "closing" and current.phase != "closed": return Err("machine-fresh-epoch-close-phase")
+        if (current.process.is_some() or current.reference.is_some() or
+                current.fallback_phase == "unresolved" or current.fallback_phase == "transferred"):
+            return Err("machine-fresh-epoch-process-still-retained")
+        if current.error == "": fresh_epoch_lifecycle_states_v1[self.slot].error = error
+        fresh_epoch_lifecycle_states_v1[self.slot].phase = "closed"
+        Ok(())
+
+    pub fn diagnostic_v1() -> Result<text, text>:
+        val current = fresh_epoch_lifecycle_current_v1(self)?
+        Ok(current.error)
+
+pub struct MachineFreshEpochProcessCleanupTurnV1:
+    consumed: bool
+    error: text
+
+# Reserved before spawn and copied with an exceptional actual native carrier.
+# Only this token's recorded, identity-bound positive native consumption makes
+# a later alias idempotent. A raw stale result never confirms consumption.
+pub class MachineFreshEpochProcessCleanupV1:
+    lifecycle: MachineFreshEpochLifecycleV1
+
+    pub fn no_process_v1() -> MachineFreshEpochProcessCleanupTurnV1:
+        val current = fresh_epoch_lifecycle_current_v1(self.lifecycle)
+        if current.is_err(): return MachineFreshEpochProcessCleanupTurnV1(false, current.unwrap_err())
+        val state = current.unwrap()
+        MachineFreshEpochProcessCleanupTurnV1(state.fallback_phase == "no-owner", state.error)
+
+    pub fn close_v1(process: GroupProcessStreamOwnerV2,
+            reference: Option<PipedProcessRefV1>) -> MachineFreshEpochProcessCleanupTurnV1:
+        val observed = fresh_epoch_lifecycle_current_v1(self.lifecycle)
+        if observed.is_err(): return MachineFreshEpochProcessCleanupTurnV1(false, observed.unwrap_err())
+        val current = observed.unwrap()
+        val matched = fresh_epoch_fallback_match_v1(current, process, reference)
+        if matched.is_err():
+            val diagnostic = self.lifecycle.retain_diagnostic_v1(matched.unwrap_err())
+            return MachineFreshEpochProcessCleanupTurnV1(false,
+                if diagnostic.is_ok(): diagnostic.unwrap() else: matched.unwrap_err())
+        if current.fallback_phase == "consumed": return MachineFreshEpochProcessCleanupTurnV1(true, current.error)
+        if current.fallback_phase != "unresolved":
+            return MachineFreshEpochProcessCleanupTurnV1(false, "machine-fresh-epoch-fallback-not-owned")
+        val bound = machine_fresh_epoch_process_progress_v1(fresh_epoch_progress_v1(current), process.identity_digest, "bind")
+        if bound.is_err(): return MachineFreshEpochProcessCleanupTurnV1(false, bound.unwrap_err())
+        val candidate = machine_fresh_epoch_process_progress_v1(bound.unwrap(), process.identity_digest, "consumed")
+        if candidate.is_err(): return MachineFreshEpochProcessCleanupTurnV1(false, candidate.unwrap_err())
+        fresh_epoch_apply_progress_v1(self.lifecycle, bound.unwrap())
+        fresh_epoch_lifecycle_states_v1[self.lifecycle.slot].fallback_reference = reference
+        val closed = process_cleanup_piped_owned_v2(process, reference)
+        if closed.is_err():
+            val pending = machine_fresh_epoch_process_progress_v1(bound.unwrap(), process.identity_digest, "retained", closed.unwrap_err())
+            if pending.is_err(): return MachineFreshEpochProcessCleanupTurnV1(false, pending.unwrap_err())
+            fresh_epoch_apply_progress_v1(self.lifecycle, pending.unwrap())
+            return MachineFreshEpochProcessCleanupTurnV1(false, pending.unwrap().error)
+        fresh_epoch_apply_progress_v1(self.lifecycle, candidate.unwrap())
+        MachineFreshEpochProcessCleanupTurnV1(true, candidate.unwrap().error)
+
+fn fresh_epoch_progress_v1(state: FreshEpochLifecycleStateV1) -> MachineFreshEpochProcessProgressV1:
+    MachineFreshEpochProcessProgressV1(state.fallback_phase, state.fallback_identity, state.error)
+
+# Only callers that have checked the genuine origin/current slot use this
+# infallible metadata commit, after the actual native outcome when consuming.
+fn fresh_epoch_apply_progress_v1(owner: MachineFreshEpochLifecycleV1, progress: MachineFreshEpochProcessProgressV1):
+    fresh_epoch_lifecycle_states_v1[owner.slot].fallback_phase = progress.phase
+    fresh_epoch_lifecycle_states_v1[owner.slot].fallback_identity = progress.identity
+    fresh_epoch_lifecycle_states_v1[owner.slot].error = progress.error
+
+fn fresh_epoch_fallback_match_v1(state: FreshEpochLifecycleStateV1, process: GroupProcessStreamOwnerV2,
+        reference: Option<PipedProcessRefV1>) -> Result<(), text>:
+    if state.fallback_identity != "":
+        if state.fallback_identity != process.identity_digest: return Err("machine-fresh-epoch-fallback-identity-mismatch")
+        if state.fallback_reference.is_some() != reference.is_some(): return Err("machine-fresh-epoch-fallback-reference-mismatch")
+        if val expected = state.fallback_reference:
+            if not process_piped_ref_equal_v1(expected, reference.unwrap()): return Err("machine-fresh-epoch-fallback-reference-mismatch")
+    else:
+        val matched = fresh_epoch_fallback_template_v1(state, process)?
+    Ok(())
+
+fn fresh_epoch_fallback_template_v1(state: FreshEpochLifecycleStateV1,
+        process: GroupProcessStreamOwnerV2) -> Result<(), text>:
+    var template = process.launch
+    template.transport_generation = 0
+    template.request.launch_deadline_unix_ms = 0
+    val wire = group_process_stream_template_encode_v3(template)?
+    if sha256_text(wire) != state.intent_digest: return Err("machine-fresh-epoch-fallback-template-mismatch")
+    Ok(())
+
+fn fresh_epoch_lifecycle_current_v1(owner: MachineFreshEpochLifecycleV1) -> Result<FreshEpochLifecycleStateV1, text>:
+    val origin = fresh_epoch_lifecycle_entry_v1()?
+    if owner.slot < 0 or owner.slot >= fresh_epoch_lifecycle_states_v1.len() or owner.generation != owner.slot + 1:
+        return Err("machine-fresh-epoch-lifecycle-generation")
+    Ok(fresh_epoch_lifecycle_states_v1[owner.slot])
+
+pub fn machine_fresh_epoch_lifecycle_open_v1() -> Result<MachineFreshEpochLifecycleV1, text>:
+    val origin = fresh_epoch_lifecycle_entry_v1()?
+    if fresh_epoch_lifecycle_states_v1.len() >= 256: return Err("machine-fresh-epoch-lifecycle-full")
+    val slot = fresh_epoch_lifecycle_states_v1.len()
+    fresh_epoch_lifecycle_states_v1.push(FreshEpochLifecycleStateV1("admitted", "", "", ""))
+    Ok(MachineFreshEpochLifecycleV1(slot: slot, generation: slot + 1))
