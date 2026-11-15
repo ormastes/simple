@@ -1,0 +1,117 @@
+# @cover src/lib/nogc_sync_mut/trace/xray_win_flag_leaf_v1.spl
+# @cover src/lib/nogc_sync_mut/trace/xray_spy_v1.spl
+# @req REQ-XRAY-V1-API-01
+"""
+# Windows XRay ring: counter ticks -> nanoseconds
+
+Ring ABI v2 stamps each edge with `llvm.readcyclecounter` (rdtsc ticks). The
+leaf converts at drain time with a tick frequency calibrated once against the
+host monotonic clock, so `XraySpyV1.profile()` reports ns on Windows like on
+Linux. `tick_hz == 0` keeps raw ticks (off-identity).
+"""
+use std.spec.*
+use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_ptr_read_i64, rt_ptr_write_i64, rt_ptr_write_u8}
+use std.nogc_sync_mut.trace.observer_native_channel_v1.*
+use std.nogc_sync_mut.trace.xray_win_flag_leaf_v1.*
+use std.nogc_sync_mut.trace.xray_spy_v1.{XrayBackendV1}
+
+class FakeTsDll:
+    descriptor: i64
+    hook: i64
+    ring: i64
+
+impl XrayWinModulePortV1 for FakeTsDll:
+    fn symbol(name: text) -> i64:
+        if name == XRAY_WIN_DESCRIPTOR_SYMBOL_V1: return self.descriptor
+        if name == XRAY_WIN_HOOK_SYMBOL_V1: return self.hook
+        if name == XRAY_WIN_RING_SYMBOL_V1: return self.ring
+        0
+    fn handler_address() -> i64:
+        0
+
+fn fake_ts_dll(capacity: i64) -> FakeTsDll:
+    val descriptor = rt_alloc(16)
+    val hook = rt_alloc(8)
+    val ring = rt_alloc(24 + capacity * 32)
+    unsafe(capabilities: [ffi]):
+        val slot = rt_alloc(8)
+        rt_ptr_write_u8(slot, 0, 0)
+        rt_ptr_write_i64(descriptor, 0, 1)
+        rt_ptr_write_i64(descriptor, 8, slot)
+        rt_ptr_write_i64(hook, 0, 0)
+        rt_ptr_write_i64(ring, 0, capacity)
+        for i in 0..(2 + capacity * 4):
+            rt_ptr_write_i64(ring, 8 + i * 8, 0)
+    FakeTsDll(descriptor: descriptor, hook: hook, ring: ring)
+
+# Drop-mode edge with an explicit tick stamp.
+fn ts_edge(ring: i64, site: i64, kind: i64, ticks: i64):
+    unsafe(capabilities: [ffi]):
+        val i = rt_ptr_read_i64(ring, 8)
+        rt_ptr_write_i64(ring, 8, i + 1)
+        rt_ptr_write_i64(ring, 24 + i * 32, site)
+        rt_ptr_write_i64(ring, 32 + i * 32, kind)
+        rt_ptr_write_i64(ring, 48 + i * 32, ticks)
+        rt_ptr_write_i64(ring, 40 + i * 32, i + 1)
+
+fn channel(capacity: i64) -> i64:
+    val bytes = trace_native_channel_bytes_v1(capacity)
+    val arena = rt_alloc(bytes)
+    unsafe(capabilities: [ffi]):
+        expect(trace_native_channel_initialize_v1(arena, bytes, capacity, 7, 9)).to_equal(1)
+    arena
+
+fn polled_ts(arena: i64) -> [i64]:
+    var out: [i64] = []
+    val buf = rt_alloc(96)
+    unsafe(capabilities: [ffi]):
+        while trace_native_channel_poll_into_v1(arena, buf, 96) == 1:
+            out.push(rt_ptr_read_i64(buf, 48))
+    out
+
+describe "XRay Windows tick to ns":
+    # @req REQ-XRAY-V1-API-01
+    it "converts ticks to ns without overflow":
+        step("Exact second at 3 GHz")
+        expect(xray_win_ticks_to_ns_v1(3000000000u64, 3000000000) as i64).to_equal(1000000000)
+        step("1e18 ticks at 3 GHz stays exact (no 64-bit overflow)")
+        expect(xray_win_ticks_to_ns_v1(1000000000000000000u64, 3000000000) as i64).to_equal(333333333333333333)
+        step("hz 0 is the identity")
+        expect(xray_win_ticks_to_ns_v1(12345u64, 0) as i64).to_equal(12345)
+
+    # @req REQ-XRAY-V1-API-01
+    it "calibrates a plausible tick frequency":
+        val hz = xray_win_calibrate_tick_hz_v1(5000000)
+        assert_true(hz > 100000000)
+        assert_true(hz < 100000000000)
+
+    # @req REQ-XRAY-V1-API-01
+    it "drain stamps channel records in ns once tick_hz is set":
+        val dll = fake_ts_dll(4)
+        val arena = channel(16)
+        var leaf = XrayWinFlagLeafV1.bind(dll)
+        expect(leaf.install(arena, 7u64, 9u64, 1u64)).to_equal(1)
+        leaf.set_tick_hz(500000000)
+        ts_edge(dll.ring, 0, 0, 100)
+        ts_edge(dll.ring, 0, 1, 350)
+        expect(leaf.drain()).to_equal(2)
+        expect(polled_ts(arena)).to_equal([200, 700])
+
+    # @req REQ-XRAY-V1-API-01
+    it "keeps raw ticks when tick_hz is 0 (off identity)":
+        val dll = fake_ts_dll(4)
+        val arena = channel(16)
+        var leaf = XrayWinFlagLeafV1.bind(dll)
+        expect(leaf.install(arena, 7u64, 9u64, 1u64)).to_equal(1)
+        expect(leaf.tick_hz).to_equal(0)
+        ts_edge(dll.ring, 0, 0, 100)
+        expect(leaf.drain()).to_equal(1)
+        expect(polled_ts(arena)).to_equal([100])
+
+    # @req REQ-XRAY-V1-API-01
+    it "windows backend calibrates once so profile reports ns":
+        val dll = fake_ts_dll(4)
+        val backend = XrayBackendV1.windows(XrayWinFlagLeafV1.bind(dll))
+        assert_true(backend.edges.tick_hz() > 100000000)
+        step("Linux edges are already ns: tick_hz 0")
+        expect(XrayBackendV1.linux(XrayWinFlagLeafV1.bind(dll), []).edges.tick_hz()).to_equal(0)

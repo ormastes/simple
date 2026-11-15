@@ -44,6 +44,30 @@ pub trait XrayWinModulePortV1:
 @unsafe(reason: "resolves an exported symbol on a loaded host DLL", capabilities: [ffi])
 extern fn rt_host_dynlib_symbol(handle: i64, name: text) -> i64
 
+# Same TSC the in-process DLL's llvm.readcyclecounter reads (x86_64 rdtsc).
+extern fn rt_perf_rdtsc() -> i64
+extern fn rt_time_monotonic_ns() -> i64
+
+# ticks -> ns at `tick_hz` ticks/s, split so ticks * 1e9 never overflows.
+# hz <= 0 is the identity (ticks already ns, or uncalibrated).
+pub fn xray_win_ticks_to_ns_v1(ticks: u64, tick_hz: i64) -> u64:
+    if tick_hz <= 0: return ticks
+    val hz = tick_hz as u64
+    (ticks / hz) * 1000000000u64 + ((ticks % hz) * 1000000000u64) / hz
+
+# Calibrate rdtsc against the monotonic clock over `window_ns` (busy wait,
+# once per backend). Returns ticks/s, 0 when the clock did not advance.
+pub fn xray_win_calibrate_tick_hz_v1(window_ns: i64) -> i64:
+    val t0 = rt_time_monotonic_ns()
+    val c0 = rt_perf_rdtsc()
+    var t1 = rt_time_monotonic_ns()
+    while t1 - t0 < window_ns:
+        t1 = rt_time_monotonic_ns()
+    val c1 = rt_perf_rdtsc()
+    val dt = t1 - t0
+    if dt <= 0 or c1 <= c0: return 0
+    ((c1 - c0) as u64 * 1000000000u64 / dt as u64) as i64
+
 # Host binding over the existing dynload path. handler_address is 0 (no
 # C-callable entry for xray_win_edge_record_v1 from an interpreted host), so
 # this port installs in ring mode only: the DLL records edges in its own ring
@@ -91,14 +115,20 @@ pub class XrayWinFlagLeafV1:
     ring_wrap: bool
     ring_skipped_count: i64
     ring_stall: i64
+    # Ring ts ticks per second; 0 = channel keeps raw ticks.
+    tick_hz: i64
     sink: XrayWinEdgeSinkV1
 
 impl XrayWinFlagLeafV1:
     static fn bind(port: XrayWinModulePortV1) -> XrayWinFlagLeafV1:
         XrayWinFlagLeafV1(port: port, descriptor: port.symbol(XRAY_WIN_DESCRIPTOR_SYMBOL_V1),
             hook: port.symbol(XRAY_WIN_HOOK_SYMBOL_V1), ring: port.symbol(XRAY_WIN_RING_SYMBOL_V1),
-            ring_read: 0, ring_wrap: port.symbol(XRAY_WIN_RING_WRAP_SYMBOL_V1) != 0, ring_skipped_count: 0, ring_stall: -1,
+            ring_read: 0, ring_wrap: port.symbol(XRAY_WIN_RING_WRAP_SYMBOL_V1) != 0, ring_skipped_count: 0, ring_stall: -1, tick_hz: 0,
             sink: XrayWinEdgeSinkV1(arena: 0, generation: 0u64, context: 0u64, module_instance: 0u64))
+
+    # Ring ts unit: ticks per second (0 = keep raw ticks). Set before enable.
+    me set_tick_hz(hz: i64):
+        self.tick_hz = if hz > 0: hz else: 0
 
     # Edges the DLL dropped because the ring was full (0 without a ring).
     fn ring_dropped() -> i64:
@@ -124,7 +154,7 @@ impl XrayWinFlagLeafV1:
                 val site = rt_ptr_read_i64(self.ring, rec)
                 val kind = (rt_ptr_read_i64(self.ring, rec + 8) & 4294967295) as i32
                 val ts = rt_ptr_read_i64(self.ring, rec + 24) as u64
-                xray_win_edge_record_stamped_v1(self.sink, site, kind, ts)
+                xray_win_edge_record_stamped_v1(self.sink, site, kind, xray_win_ticks_to_ns_v1(ts, self.tick_hz))
                 self.ring_read = self.ring_read + 1
                 n = n + 1
         n
@@ -159,7 +189,7 @@ impl XrayWinFlagLeafV1:
                     val kind = (rt_ptr_read_i64(self.ring, rec + 8) & 4294967295) as i32
                     val ts = rt_ptr_read_i64(self.ring, rec + 24) as u64
                     if rt_ptr_read_i64(self.ring, rec + 16) == expect_seq:
-                        xray_win_edge_record_stamped_v1(self.sink, site, kind, ts)
+                        xray_win_edge_record_stamped_v1(self.sink, site, kind, xray_win_ticks_to_ns_v1(ts, self.tick_hz))
                         n = n + 1
                     else:
                         self.ring_skipped_count = self.ring_skipped_count + 1
