@@ -82,3 +82,25 @@ POSIX uses `nohup ... >/dev/null 2>&1 &`. Only the Windows path has been run.
 - No `bin/simple test --compare-view` flag; the environment variable is the option.
 - macOS screen probe (falls back to maximized).
 - PNG encoding runs on the interpreter; very large buffers are slow when the option is on.
+
+## Pixel-compare resolution rule (owner, 2026-11-15)
+
+- **Never lower resolution to meet a perf budget or to make a compare pass.**
+  Downscaling, a smaller viewport, a lower DPI, blur or widened tolerance that
+  hides a real difference is a defect, not a fix. Fix the renderer or the perf.
+- **Text compares:** a rasterized vector (outline) font must be rendered at
+  **300 DPI or more** (CSS device scale >= 3.125, i.e. 16px text >= 50 device px)
+  so glyph shape, not hinting noise, is compared. Otherwise use a
+  **pixel-based (bitmap) font** at its native size, where every pixel is exact
+  and tolerance can be 0.
+- A text compare must assert a pass bar (differing pixels / max channel delta).
+  A diagnostic that only checks "it ran" is not a compare.
+- Inspect pairs with `SIMPLE_COMPARE_VIEW=stay|auto` (A / B / DIFF panes).
+
+Current gap (checked 2026-11-15):
+`test/03_system/gui/pixel_compare/chromium_vs_simple_text_spec.spl` renders a
+vector font (Liberation Mono 16px, smoothing off) at 1x / 96 DPI into 320x240
+and only asserts `diff >= 0` — it violates both rules. Its Chrome capture
+`build/pixel_compare/electron_simple_text.json` is also absent on Windows, so it
+cannot run here. Fix: capture at device scale >= 3.125 (or switch the fixture
+to a bitmap font) and assert a real threshold.
