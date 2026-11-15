@@ -27,6 +27,8 @@ pub const XRAY_WIN_DESCRIPTOR_SYMBOL_V1: text = "__simple_xray_descriptor_v1"
 pub const XRAY_WIN_NAMES_SYMBOL_V1: text = "__simple_xray_names_v1"
 pub const XRAY_WIN_HOOK_SYMBOL_V1: text = "__simple_xray_hook_v1"
 pub const XRAY_WIN_RING_SYMBOL_V1: text = "__simple_xray_ring_v2"
+# Present (i64 1) only in a wrap-mode module; absent = drop mode.
+pub const XRAY_WIN_RING_WRAP_SYMBOL_V1: text = "__simple_xray_ring_wrap_v2"
 const XRAY_WIN_MAX_SITES_V1: i64 = 4096
 
 # The effect boundary: symbol lookup on the loaded DLL, and the C-callable
@@ -86,13 +88,16 @@ pub class XrayWinFlagLeafV1:
     hook: i64
     ring: i64
     ring_read: i64
+    ring_wrap: bool
+    ring_skipped_count: i64
+    ring_stall: i64
     sink: XrayWinEdgeSinkV1
 
 impl XrayWinFlagLeafV1:
     static fn bind(port: XrayWinModulePortV1) -> XrayWinFlagLeafV1:
         XrayWinFlagLeafV1(port: port, descriptor: port.symbol(XRAY_WIN_DESCRIPTOR_SYMBOL_V1),
             hook: port.symbol(XRAY_WIN_HOOK_SYMBOL_V1), ring: port.symbol(XRAY_WIN_RING_SYMBOL_V1),
-            ring_read: 0,
+            ring_read: 0, ring_wrap: port.symbol(XRAY_WIN_RING_WRAP_SYMBOL_V1) != 0, ring_skipped_count: 0, ring_stall: -1,
             sink: XrayWinEdgeSinkV1(arena: 0, generation: 0u64, context: 0u64, module_instance: 0u64))
 
     # Edges the DLL dropped because the ring was full (0 without a ring).
@@ -103,10 +108,11 @@ impl XrayWinFlagLeafV1:
     # Ring mode: turn every newly published ring record into one raw-edge
     # channel record. A record is published once its seq equals index + 1; the
     # first unpublished one stops the drain (retried next call). Returns the
-    # number of records drained. The ring does not wrap: once full, the DLL
-    # drops and counts.
+    # number of records drained. Drop mode (no wrap symbol): once full, the DLL
+    # drops and counts. Wrap mode: see drain_wrap.
     me drain() -> i64:
         if self.ring == 0 or self.sink.arena == 0: return 0
+        if self.ring_wrap: return self.drain_wrap()
         var n = 0
         unsafe(capabilities: [ffi]):
             val cap = rt_ptr_read_i64(self.ring, 0)
@@ -122,6 +128,49 @@ impl XrayWinFlagLeafV1:
                 self.ring_read = self.ring_read + 1
                 n = n + 1
         n
+
+    # Wrap mode: claims are read in order from at most `cap` behind the write
+    # index (older ones were overwritten: skipped). Claim c lives in slot
+    # c mod cap and is accepted only when its seq is c + 1 before and after
+    # the payload read; a larger seq means a later lap overwrote it (skipped),
+    # a smaller one means it is not yet published (drain stops, retried). A
+    # slow writer of an older lap can publish over a newer claim, leaving a
+    # smaller nonzero seq forever: when the same claim is still stuck on the
+    # next drain it is skipped (ring_stall remembers the claim).
+    me drain_wrap() -> i64:
+        var n = 0
+        unsafe(capabilities: [ffi]):
+            val cap = rt_ptr_read_i64(self.ring, 0)
+            val end = rt_ptr_read_i64(self.ring, 8)
+            if end - self.ring_read > cap:
+                self.ring_skipped_count = self.ring_skipped_count + (end - cap - self.ring_read)
+                self.ring_read = end - cap
+            while self.ring_read < end:
+                val rec = 24 + (self.ring_read % cap) * 32
+                val expect_seq = self.ring_read + 1
+                val seq = rt_ptr_read_i64(self.ring, rec + 16)
+                if seq < expect_seq:
+                    if seq == 0 or self.ring_stall != self.ring_read:
+                        self.ring_stall = self.ring_read
+                        break
+                    self.ring_skipped_count = self.ring_skipped_count + 1
+                elif seq == expect_seq:
+                    val site = rt_ptr_read_i64(self.ring, rec)
+                    val kind = (rt_ptr_read_i64(self.ring, rec + 8) & 4294967295) as i32
+                    val ts = rt_ptr_read_i64(self.ring, rec + 24) as u64
+                    if rt_ptr_read_i64(self.ring, rec + 16) == expect_seq:
+                        xray_win_edge_record_stamped_v1(self.sink, site, kind, ts)
+                        n = n + 1
+                    else:
+                        self.ring_skipped_count = self.ring_skipped_count + 1
+                else:
+                    self.ring_skipped_count = self.ring_skipped_count + 1
+                self.ring_read = self.ring_read + 1
+        n
+
+    # Wrap-mode claims never delivered (overwritten or torn); 0 in drop mode.
+    fn ring_skipped() -> i64:
+        self.ring_skipped_count
 
     fn slot_address(id: i64) -> i64:
         if id < 1 or id > self.max_function_id(): return 0
