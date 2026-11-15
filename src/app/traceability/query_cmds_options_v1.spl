@@ -1,0 +1,124 @@
+# Options for `simple trace matrix|links|explain|diff|report`.
+# Command-specific options are stripped here; every remaining argument goes through
+# the strict P0 parser (as a `missing` request) so snapshot, format, limit, path,
+# declaration, spec-root and bug-db validation has exactly one owner.
+use std.common.traceability.profile_v1.{TraceProfile, trace_profile_parse_v1}
+use std.common.traceability.query_missing_v1.{TraceRequirementIdV1}
+use std.common.traceability.query_matrix_v1.{TraceMatrixAxisV1, trace_matrix_axis_parse_v1}
+use app.traceability.query_options_v1.{TraceQueryOptionsV1, trace_query_options_parse_v1}
+
+pub enum TraceCmdKindV1:
+    Matrix
+    Links
+    Explain
+    Diff
+    Report
+
+pub struct TraceCmdOptionsV1:
+    command: TraceCmdKindV1
+    query: TraceQueryOptionsV1    # shared snapshot/format options; the head side for diff
+    base: TraceQueryOptionsV1?    # diff only
+    rows: TraceMatrixAxisV1 = TraceMatrixAxisV1.Layer
+    cols: TraceMatrixAxisV1 = TraceMatrixAxisV1.Feature
+    profile: TraceProfile = TraceProfile.Worktree
+    requirement: TraceRequirementIdV1?
+
+fn cmd_kind_v1(name: text) -> TraceCmdKindV1?:
+    match name:
+        case "matrix": Some(TraceCmdKindV1.Matrix)
+        case "links": Some(TraceCmdKindV1.Links)
+        case "explain": Some(TraceCmdKindV1.Explain)
+        case "diff": Some(TraceCmdKindV1.Diff)
+        case "report": Some(TraceCmdKindV1.Report)
+        case _: None
+
+pub fn trace_cmd_kind_of_v1(args: [text]) -> TraceCmdKindV1?:
+    if args.len() == 0: return None
+    cmd_kind_v1(args[0])
+
+fn cmd_shared_parse_v1(shared: [text]) -> Result<TraceQueryOptionsV1, text>:
+    var args: [text] = ["missing"]
+    for arg in shared:
+        args.push(arg)
+    trace_query_options_parse_v1(args)
+
+pub fn trace_cmd_options_parse_v1(args: [text]) -> Result<TraceCmdOptionsV1, text>:
+    val command = match cmd_kind_v1(args[0]):
+        case Some(value): value
+        case None: return Err("TRACE-QUERY-INVALID: unknown trace command")
+    var shared: [text] = []
+    var rows = TraceMatrixAxisV1.Layer
+    var cols = TraceMatrixAxisV1.Feature
+    var profile = TraceProfile.Worktree
+    var requirement: TraceRequirementIdV1? = None
+    var base_snapshot = ""
+    var head_snapshot = ""
+    var index = 1
+    while index < args.len():
+        val arg = args[index]
+        if not arg.starts_with("--"):
+            if command != TraceCmdKindV1.Explain or requirement.is_some():
+                return Err("TRACE-QUERY-INVALID: unexpected argument " + arg)
+            # Plan ids are written bare (REQ-TRC-016); graph requirement nodes are `req:<id>`.
+            requirement = Some(TraceRequirementIdV1(value: if arg.starts_with("req:"): arg else: "req:" + arg))
+            index = index + 1
+            continue
+        if arg == "--check" or arg == "--why-incomplete":
+            index = index + 1
+            continue
+        val equal = arg.index_of("=") ?? -1
+        var name = arg
+        var value = ""
+        if equal >= 0:
+            name = arg.substring(0, equal)
+            value = arg.substring(equal + 1, arg.byte_len())
+        elif name == "--rows" or name == "--cols" or name == "--profile" or name == "--base" or name == "--head":
+            if index + 1 >= args.len() or args[index + 1].starts_with("--"):
+                return Err("TRACE-QUERY-INVALID: missing option value")
+            index = index + 1
+            value = args[index]
+        if name == "--rows":
+            rows = trace_matrix_axis_parse_v1(value)?
+        elif name == "--cols":
+            cols = trace_matrix_axis_parse_v1(value)?
+        elif name == "--profile":
+            profile = trace_profile_parse_v1(value)?
+        elif name == "--base":
+            base_snapshot = value
+        elif name == "--head":
+            head_snapshot = value
+        else:
+            shared.push(arg)
+        index = index + 1
+    if command == TraceCmdKindV1.Explain and requirement.is_none():
+        return Err("TRACE-QUERY-INVALID: explain requires a requirement id")
+    if command != TraceCmdKindV1.Diff and (base_snapshot != "" or head_snapshot != ""):
+        return Err("TRACE-QUERY-INVALID: --base and --head apply only to diff")
+    var query = cmd_shared_parse_v1(shared)?
+    var base: TraceQueryOptionsV1? = None
+    if command == TraceCmdKindV1.Diff:
+        if base_snapshot == "":
+            return Err("TRACE-QUERY-INVALID: diff requires --base=<snapshot>")
+        var base_args = shared
+        base_args.push("--snapshot=" + base_snapshot)
+        base = Some(cmd_shared_parse_v1(base_args)?)
+        if head_snapshot != "":
+            var head_args = shared
+            head_args.push("--snapshot=" + head_snapshot)
+            query = cmd_shared_parse_v1(head_args)?
+    Ok(TraceCmdOptionsV1(command: command, query: query, base: base, rows: rows, cols: cols,
+        profile: profile, requirement: requirement))
+
+pub fn trace_cmd_help_v1() -> text:
+    "Usage: simple trace matrix [--rows=layer|component|feature] [--cols=...] [options]\n" +
+    "       simple trace links [--check] [options]\n" +
+    "       simple trace explain <requirement-id> [--why-incomplete] [options]\n" +
+    "       simple trace diff --base=<snapshot> [--head=<snapshot>] [options]\n" +
+    "       simple trace report [options]\n" +
+    "  Linked means a structural link only; Verified needs passing test evidence.\n" +
+    "  An incomplete graph, or a profile other than worktree, exits 2.\n" +
+    "  links exits 1 when a dangling or mis-kinded link exists; explain exits 1 for an unknown id.\n" +
+    "  --profile=worktree|editor|commit|push|remote|audit|ci|release\n" +
+    "  Shared options as for `trace missing`: --snapshot --format=table|sdn --limit --spec-root --bug-db\n" +
+    "  --path --declaration. diff takes --base/--head in place of --snapshot.\n"
+
