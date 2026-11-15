@@ -37,7 +37,6 @@ Found while raising unit coverage of `layout_with_style_flow`
 | flex_basis_pct | `<div style="display:flex;width:200px"><div id=a style="flex-basis:25%;height:10px"></div><div id=b style="flex-basis:50%;height:10px"></div></div>` | a=0,0,50,10 b=50,0,100,10 | a=0,0,100,10 b=100,0,100,10 |
 | flex_min_w | `<div style="display:flex;width:100px"><div id=a style="flex:1;min-width:70px;height:10px"></div><div id=b style="flex:1;height:10px"></div></div>` | a=0,0,70,10 b=70,0,30,10 | a=0,0,70,10 b=70,0,50,10 |
 | flex_nested_col | `<div style="display:flex;width:200px"><div id=c style="display:flex;flex-direction:column;flex:1"><div id=a style="height:10px"></div><div id=b style="height:10px;flex-grow:0"></div></div><div id=d style="width:50px;height:30px"></div></div>` | c=0,0,150,30 a=0,0,150,10 b=0,10,150,10 d=150,0,50,30 | c=0,0,150,20 a=0,0,150,10 b=0,10,150,10 d=150,0,50,30 |
-| block_min_max | `<div id=a style="width:50%;max-width:300px;min-width:500px;height:10px"></div>` | a=0,0,500,10 | a=0,0,300,10 |
 
 ### Cascade
 
@@ -84,3 +83,7 @@ Found while raising unit coverage of `layout_with_style_flow`
 `test/01_unit/lib/gc_async_mut/gpu/browser_engine/`) assert the rows of the
 same harnesses where the renderer agrees with Chrome; every row above is
 kept out of them until fixed.
+
+## Fixed
+
+- `block_min_max` (2026-11-16): `constrained_outer_width` applied min-width before max-width, so a smaller max-width won; the auto-margin centring clamp ignored min-width entirely. Both now apply max first, then min (CSS 2.1 10.4). Pinned by `test/01_unit/browser_engine/min_width_beats_max_width_chrome159_spec.spl` (percentage, px and auto width, padding/border, auto margins; Chrome 159 values).
