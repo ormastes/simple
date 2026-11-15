@@ -6,6 +6,7 @@
 import std.spec
 use std.spec.step
 use std.common.traceability.model.*
+use std.common.traceability.trace_ids_v1.{TracePageCompletenessV1}
 use std.common.traceability.schema.{trace_edge_id}
 use std.common.traceability.query.*
 
@@ -24,19 +25,19 @@ describe "Bounded snapshot graph queries":
         step("Request one visible neighbor of the shared test")
         val graph = query_graph()
         val first = query_trace_graph(graph, TraceQuery(snapshot_id: "snapshot:q", selected_id: "test:shared", direction: "outgoing", limit: 2, cursor: ""))
-        expect(first.total_count).to_equal(3)
+        expect(first.total_count.value).to_equal(3)
         expect(first.nodes.len()).to_equal(2)
         expect(first.nodes[0].id).to_equal("test:shared")
         expect(first.nodes[1].id).to_equal("source:a")
         expect(first.edges.len()).to_equal(1)
-        expect(first.complete).to_equal(false)
+        expect(first.complete == TracePageCompletenessV1.Complete).to_equal(false)
         step("Continue the generation-bound cursor without losing the selected node")
-        val second = query_trace_graph(graph, TraceQuery(snapshot_id: "snapshot:q", selected_id: "test:shared", direction: "outgoing", limit: 2, cursor: first.next_cursor))
+        val second = query_trace_graph(graph, TraceQuery(snapshot_id: "snapshot:q", selected_id: "test:shared", direction: "outgoing", limit: 2, cursor: first.next_cursor.value))
         expect(second.nodes[0].id).to_equal("test:shared")
         expect(second.nodes[1].id).to_equal("source:b")
         expect(second.edges[0].to_id).to_equal("source:b")
-        expect(second.complete).to_equal(true)
-        expect(second.total_count).to_equal(3)
+        expect(second.complete == TracePageCompletenessV1.Complete).to_equal(true)
+        expect(second.total_count.value).to_equal(3)
 
     it "refuses mixed snapshots and cursors from another query shape":
         # @req REQ-TRC-015 REQ-TRC-020
@@ -44,10 +45,10 @@ describe "Bounded snapshot graph queries":
         step("Attempt to reuse the neighborhood cursor for a different selection")
         val graph = query_graph()
         val wrong = query_trace_graph(graph, TraceQuery(snapshot_id: "snapshot:other", selected_id: "", direction: "all", limit: 10, cursor: ""))
-        expect(wrong.complete).to_equal(false)
+        expect(wrong.complete == TracePageCompletenessV1.Complete).to_equal(false)
         expect(wrong.nodes.len()).to_equal(0)
         val first = query_trace_graph(graph, TraceQuery(snapshot_id: "snapshot:q", selected_id: "test:shared", direction: "both", limit: 2, cursor: ""))
-        val changed = query_trace_graph(graph, TraceQuery(snapshot_id: "snapshot:q", selected_id: "source:a", direction: "incoming", limit: 2, cursor: first.next_cursor))
+        val changed = query_trace_graph(graph, TraceQuery(snapshot_id: "snapshot:q", selected_id: "source:a", direction: "incoming", limit: 2, cursor: first.next_cursor.value))
         expect(changed.nodes.len()).to_equal(0)
         expect(changed.diagnostics[0].message).to_contain("cursor")
 
@@ -58,8 +59,8 @@ describe "Bounded snapshot graph queries":
         var graph = query_graph()
         val first = query_trace_graph(graph, TraceQuery(snapshot_id: "snapshot:q", selected_id: "", direction: "all", limit: 1, cursor: ""))
         graph.generation_id = "generation:q2"
-        val stale = query_trace_graph(graph, TraceQuery(snapshot_id: "snapshot:q", selected_id: "", direction: "all", limit: 1, cursor: first.next_cursor))
-        expect(stale.complete).to_equal(false)
+        val stale = query_trace_graph(graph, TraceQuery(snapshot_id: "snapshot:q", selected_id: "", direction: "all", limit: 1, cursor: first.next_cursor.value))
+        expect(stale.complete == TracePageCompletenessV1.Complete).to_equal(false)
         expect(stale.nodes.len()).to_equal(0)
 
     it "shows incomplete graph diagnostics even when its only page is complete":
@@ -69,7 +70,7 @@ describe "Bounded snapshot graph queries":
         var graph = query_graph()
         graph.complete = false
         val result = query_trace_graph(graph, TraceQuery(snapshot_id: "snapshot:q", selected_id: "", direction: "all", limit: 200, cursor: ""))
-        expect(result.complete).to_equal(true)
+        expect(result.complete == TracePageCompletenessV1.Complete).to_equal(true)
         expect(result.nodes.len()).to_equal(3)
         expect(result.diagnostics[0].code).to_equal("TRACE-SNAPSHOT-INCOMPLETE")
         expect(graph.complete).to_equal(false)
@@ -80,20 +81,20 @@ describe "Bounded snapshot graph queries":
         step("Check invalid query inputs without returning a truncated green result")
         val graph = query_graph()
         val limit = query_trace_graph(graph, TraceQuery(snapshot_id: "snapshot:q", selected_id: "", direction: "all", limit: 201, cursor: ""))
-        expect(limit.complete).to_equal(false)
+        expect(limit.complete == TracePageCompletenessV1.Complete).to_equal(false)
         val missing = query_trace_graph(graph, TraceQuery(snapshot_id: "snapshot:q", selected_id: "missing", direction: "both", limit: 10, cursor: ""))
         expect(missing.nodes.len()).to_equal(0)
         val malformed = query_trace_graph(graph, TraceQuery(snapshot_id: "snapshot:q", selected_id: "", direction: "all", limit: 1, cursor: "generation:q||all|-1"))
-        expect(malformed.complete).to_equal(false)
+        expect(malformed.complete == TracePageCompletenessV1.Complete).to_equal(false)
         val no_progress = query_trace_graph(graph, TraceQuery(snapshot_id: "snapshot:q", selected_id: "test:shared", direction: "both", limit: 1, cursor: ""))
-        expect(no_progress.complete).to_equal(false)
+        expect(no_progress.complete == TracePageCompletenessV1.Complete).to_equal(false)
 
     it "returns only real incoming relations and stable sorted all-node pages":
         # @req REQ-TRC-015 REQ-TRC-016
         step("Read the source's incoming shared-test relation")
         val graph = query_graph()
         val incoming = query_trace_graph(graph, TraceQuery(snapshot_id: "snapshot:q", selected_id: "source:a", direction: "incoming", limit: 10, cursor: ""))
-        expect(incoming.total_count).to_equal(2)
+        expect(incoming.total_count.value).to_equal(2)
         expect(incoming.edges.len()).to_equal(1)
         expect(incoming.edges[0].from_id).to_equal("test:shared")
         expect(incoming.edges[0].to_id).to_equal("source:a")
