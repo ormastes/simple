@@ -351,7 +351,7 @@ fn flex_item_min_content_w(nodes: [HNode], styles: [Style], child_index: HtmlChi
             if word_w > widest:
                 widest = word_w
         elif cst.display != "none" and cst.display != "marker" and not cst.position_absolute:
-            val child_w = if cst.width_px > 0:
+            val child_w = if cst.width_px > 0 or cst.width_zero:
                 css_outer_width(nodes[c], cst, cst.width_px)
             else:
                 flex_item_min_content_w(nodes, styles, child_index, c)
@@ -376,7 +376,7 @@ fn flex_zero_basis_floor_w(nodes: [HNode], styles: [Style], child_index: HtmlChi
 
 # Outer width a `width` declaration gives the item (0 for auto).
 fn flex_item_authored_outer_w(node: HNode, st: Style, container_w: i32) -> i32:
-    if st.width_px > 0:
+    if st.width_px > 0 or st.width_zero:
         if node.has_widget_class or node.has_icon_image_class or st.border_box:
             return st.width_px
         return st.width_px + st.pad_l + st.pad_r + st.border_l + st.border_r
@@ -691,7 +691,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
     val explicit_node_w = css_outer_width(node, st, st.width_px)
     # width_px > 0: explicit px. width_px < 0: percentage of available width
     # (negative sentinel from apply_decls). width_px == 0: fill available width.
-    var node_w = if st.width_px > 0: explicit_node_w else: w
+    var node_w = if st.width_px > 0 or st.width_zero: explicit_node_w else: w
     if st.flex_basis_px > 0 and w > 0:
         node_w = w
     if st.width_px < 0:
@@ -699,7 +699,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         if node_w < 1:
             node_w = 1
     out_bw[i] = node_w
-    if node.tag != "#text" and st.width_px == 0 and st.white_space_nowrap:
+    if node.tag != "#text" and st.width_px == 0 and not st.width_zero and st.white_space_nowrap:
         val nowrap_intrinsic = intrinsic_text_width(nodes, styles, child_index, i, out_intrinsic_widths)
         out_intrinsic_widths = nowrap_intrinsic.widths
         if nowrap_intrinsic.width > node_w:
@@ -728,7 +728,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             out_bw[i] = constrained_outer_width(
                 node, st, replaced_default_box_w(node.tag) + st.pad_l + st.pad_r + st.border_l + st.border_r
             )
-        elif st.width_px == 0:
+        elif st.width_px == 0 and not st.width_zero:
             out_bw[i] = constrained_outer_width(
                 node, st, replaced_auto_box_w(node, st, w)
             )
@@ -832,7 +832,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         val auto_control_h = control_rows * control_line_h + control_inner_pad + st.pad_t + st.pad_b + border_y
         val h = constrained_outer_height(node, st, if st.height_px > 0: explicit_control_h else: auto_control_h)
         out_bh[i] = h
-        if st.width_px == 0:
+        if st.width_px == 0 and not st.width_zero:
             # Intrinsic width: `size` columns for <input>, `cols` for
             # <textarea>, the widest <option> label for <select> — each in the
             # control's own UA font, plus its padding and border.
@@ -899,7 +899,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         # replaced box is 1 px. Chrome gives a srcless, sizeless `<img>` a 0x0
         # box, so the new value is the closer of the two — but it is a change,
         # and it is unmeasured by this catalog, not verified by it.
-        if st.width_px == 0:
+        if st.width_px == 0 and not st.width_zero:
             val img_attr_w = parse_int(attr_value(node.attrs_raw, "width"))
             if img_attr_w > 0:
                 out_bw[i] = constrained_outer_width(node, st, img_attr_w)
@@ -940,13 +940,45 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
     val table_spacing_y = if st.border_collapse == "collapse": 0 else: st.border_spacing_y_px
     val scrollbar_gutter = 15
     val content_height_limit = definite_content_height_limit(node, st)
+    # border-collapse geometry (uniform-border slice, honest limits): the
+    # grid tracks are sized with half-borders shared between neighbours
+    # (see explicit_auto_table_column_offsets); the outer half-border of
+    # the first column/row shifts the grid origin by round-half-up, the
+    # last column's outer half (rounded down) is taken off the width the
+    # columns fill -- Chrome's `width:400px` collapsed table spans its
+    # cells over 399px, 0.5px in from each side
+    # (table_collapsed_border_paint_chrome159_spec.spl) -- and each row
+    # sheds the shared half of its cells' top+bottom borders.
+    # Non-uniform per-edge winner widths and row/col spans are NOT
+    # modelled here -- they keep the plain separate-model geometry.
+    val table_collapse = st.display == "table" and st.border_collapse == "collapse"
+    var collapse_outer_x = 0
+    var collapse_outer_r = 0
+    var collapse_outer_y = 0
+    var collapse_outer_b = 0
+    var collapse_row_shave = 0
+    if table_collapse:
+        val collapse_rows = simple_web_collect_table_rows(nodes, child_index, i)
+        if collapse_rows.rows.len() > 0:
+            var probe_cell = child_index.first_child[collapse_rows.rows[0]]
+            while probe_cell >= 0 and styles[probe_cell].display != "table-cell":
+                probe_cell = child_index.next_sibling[probe_cell]
+            if probe_cell >= 0:
+                collapse_outer_x = (styles[probe_cell].border_l + 1) / 2
+                collapse_outer_r = styles[probe_cell].border_r / 2
+                collapse_outer_y = (styles[probe_cell].border_t + 1) / 2
+                collapse_outer_b = styles[probe_cell].border_b / 2
+                collapse_row_shave = (
+                    styles[probe_cell].border_t + styles[probe_cell].border_b
+                ) / 2
     val auto_column_offsets = if (
         st.display == "table" and st.table_layout == "auto"
     ):
         # width:auto tables shrink to fit: pass 0 as the available inner
         # width so no leftover space is distributed across the columns.
         explicit_auto_table_column_offsets(
-            nodes, styles, child_index, i, iw,
+            nodes, styles, child_index, i,
+            iw - collapse_outer_x - collapse_outer_r,
             table_spacing_x, table_spacing_y,
             # A table FILLS a width it states — and a PERCENTAGE width is stated
             # too. `width_px` holds a percentage as a NEGATIVE value, so the
@@ -972,34 +1004,16 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         val column_count = simple_web_fixed_table_column_count(
             nodes, child_index, table_rows
         )
-        # border-collapse geometry (uniform-border slice, honest limits): the
-        # grid tracks were sized with half-borders shared between neighbours
-        # (see explicit_auto_table_column_offsets); the outer half-border of
-        # the first column/row shifts the grid origin by round-half-up, and
-        # each row sheds the shared half of its cells' top+bottom borders.
-        # Non-uniform per-edge winner widths and row/col spans are NOT
-        # modelled here — they keep the plain separate-model geometry.
-        val table_collapse = st.border_collapse == "collapse"
-        var collapse_outer_x = 0
-        var collapse_outer_y = 0
-        var collapse_row_shave = 0
-        if table_collapse and table_rows.rows.len() > 0:
-            var probe_cell = child_index.first_child[table_rows.rows[0]]
-            while probe_cell >= 0 and styles[probe_cell].display != "table-cell":
-                probe_cell = child_index.next_sibling[probe_cell]
-            if probe_cell >= 0:
-                collapse_outer_x = (styles[probe_cell].border_l + 1) / 2
-                collapse_outer_y = (styles[probe_cell].border_t + 1) / 2
-                collapse_row_shave = (
-                    styles[probe_cell].border_t + styles[probe_cell].border_b
-                ) / 2
         var table_grid_width = if (
             st.table_layout == "auto" and
             auto_column_offsets.len() > column_count
         ):
             auto_column_offsets[column_count]
         else:
-            iw - table_spacing_x * (column_count + 1)
+            (
+                iw - collapse_outer_x - collapse_outer_r -
+                table_spacing_x * (column_count + 1)
+            )
         if table_grid_width < column_count:
             table_grid_width = column_count
         val table_inner_width = (
@@ -1078,7 +1092,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         (
                             ix + collapse_outer_x +
                             table_spacing_x * (used_columns + 1) +
-                            table_grid_width * used_columns / column_count
+                            (table_grid_width * used_columns * 2 + column_count) /
+                            (column_count * 2)
                         )
                     var next_columns = used_columns + span
                     if next_columns > column_count:
@@ -1096,9 +1111,22 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         (
                             ix + collapse_outer_x +
                             table_spacing_x * next_columns +
-                            table_grid_width * next_columns / column_count
+                            (table_grid_width * next_columns * 2 + column_count) /
+                            (column_count * 2)
                         )
-                    val allocated_cell_width = cell_right - cell_x
+                    # border-collapse: the tracks share each border half and
+                    # half, so a cell's box reaches out over the outer half of
+                    # its own borders -- (b+1)/2 before, b/2 after -- and
+                    # neighbouring boxes overlap on the one shared line, which
+                    # is where Chrome paints it and puts the content after it
+                    # (table_collapsed_border_paint_chrome159_spec.spl).
+                    val lead_x = if table_collapse: (styles[cell].border_l + 1) / 2 else: 0
+                    val lead_y = if table_collapse: (styles[cell].border_t + 1) / 2 else: 0
+                    val box_x = cell_x - lead_x
+                    val allocated_cell_width = (
+                        cell_right - box_x +
+                        (if table_collapse: styles[cell].border_r / 2 else: 0)
+                    )
                     var cell_layout_style = styles[cell]
                     if st.table_layout == "auto":
                         var cell_layout_width = allocated_cell_width
@@ -1114,7 +1142,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         )
                     val cell_result = layout_with_style(
                         nodes, styles, child_index, cell,
-                        cell_x, table_y, allocated_cell_width,
+                        box_x, table_y - lead_y, allocated_cell_width,
                         viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh,
                         out_wrap_starts, out_wrap_ends,
                         out_intrinsic_widths, cell_layout_style
@@ -1135,7 +1163,13 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             cell = child_index.first_child[table_row]
             while cell >= 0:
                 if styles[cell].display == "table-cell":
-                    out_bh[cell] = row_h
+                    out_bh[cell] = if table_collapse:
+                        (
+                            row_h + (styles[cell].border_t + 1) / 2 +
+                            styles[cell].border_b / 2
+                        )
+                    else:
+                        row_h
                 cell = child_index.next_sibling[cell]
             out_bh[table_row] = row_h
             table_y = table_y + row_h + table_spacing_y
@@ -1145,6 +1179,10 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     out_by[table_group]
                 )
             table_row_index = table_row_index + 1
+        # The last row's outer bottom half-border (rounded down) is part of
+        # the table: a 2px collapsed border otherwise overhangs it by 1px.
+        if table_rows.rows.len() > 0:
+            table_y = table_y + collapse_outer_b
         table_child = child_index.first_child[i]
         while table_child >= 0:
             if (
@@ -1210,6 +1248,11 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         var grid_child = child_index.first_child[i]
         while grid_child >= 0:
             val grid_child_style = styles[grid_child]
+            if simple_web_style_hot_is_display_none(computed_style_hot_from(grid_child_style)):
+                out_bw[grid_child] = 0
+                out_bh[grid_child] = 0
+                grid_child = child_index.next_sibling[grid_child]
+                continue
             var grid_column = grid_placement_start(
                 grid_child_style.grid_column
             )
@@ -1481,7 +1524,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         cst
                     val cml = resolve_horizontal_margin_px(cst.margin_l, iw)
                     val cmr = resolve_horizontal_margin_px(cst.margin_r, iw)
-                    var base_w_wrap = if flex_item_zero_basis(cst): flex_zero_basis_floor_w(nodes, styles, child_index, fm, cst, iw) else: if cst.flex_basis_px > 0: cst.flex_basis_px else: if cst.width_px > 0: if nodes[fm].has_widget_class or nodes[fm].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r else: if cst.width_px < 0: iw else: iw
+                    var base_w_wrap = if flex_item_zero_basis(cst): flex_zero_basis_floor_w(nodes, styles, child_index, fm, cst, iw) else: if cst.flex_basis_px > 0: cst.flex_basis_px else: if cst.width_px > 0 or cst.width_zero: if nodes[fm].has_widget_class or nodes[fm].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r else: if cst.width_px < 0: iw else: iw
                     base_w_wrap = flex_wrap_auto_base_width(nodes, styles, child_index, fm, cst, iw, base_w_wrap)
                     val measured_ml = if cst.margin_l_auto: 0 else: cml
                     val measured_mr = if cst.margin_r_auto: 0 else: cmr
@@ -1649,7 +1692,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         line_distribution.auto_margin
                     else:
                         cmr
-                    var base_w_wrap = if flex_item_zero_basis(cst): flex_zero_basis_floor_w(nodes, styles, child_index, fc_wrap, cst, iw) else: if cst.flex_basis_px > 0: cst.flex_basis_px else: if cst.width_px > 0: if nodes[fc_wrap].has_widget_class or nodes[fc_wrap].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r else: if cst.width_px < 0: iw else: iw
+                    var base_w_wrap = if flex_item_zero_basis(cst): flex_zero_basis_floor_w(nodes, styles, child_index, fc_wrap, cst, iw) else: if cst.flex_basis_px > 0: cst.flex_basis_px else: if cst.width_px > 0 or cst.width_zero: if nodes[fc_wrap].has_widget_class or nodes[fc_wrap].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r else: if cst.width_px < 0: iw else: iw
                     base_w_wrap = flex_wrap_auto_base_width(nodes, styles, child_index, fc_wrap, cst, iw, base_w_wrap)
                     if (
                         flex_child_count_wrap > 0 and
@@ -1999,7 +2042,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         if floor_intrinsic.width > 0 and remaining_w < floor_intrinsic.width:
                             remaining_w = floor_intrinsic.width
                     force_used_w = true
-                elif cst.width_px == 0 and cst.flex_basis_px == 0 and cst.flex_grow == 0:
+                elif cst.width_px == 0 and not cst.width_zero and cst.flex_basis_px == 0 and cst.flex_grow == 0:
                     val intrinsic = intrinsic_text_width(nodes, styles, child_index, fc, out_intrinsic_widths)
                     out_intrinsic_widths = intrinsic.widths
                     val intrinsic_w = intrinsic.width
@@ -2011,14 +2054,14 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         remaining_w = cumulative_target - flex_width_assigned
                         flex_weight_used = flex_weight_used + grow
                         flex_width_assigned = cumulative_target
-                elif cst.width_px == 0 and cst.flex_basis_px > 0 and cst.flex_grow == 0:
+                elif cst.width_px == 0 and not cst.width_zero and cst.flex_basis_px > 0 and cst.flex_grow == 0:
                     # Sized by flex-basis alone. The measuring pass counted this
                     # item as a definite basis, so there is no auto weight for it
                     # to take a share of; falling into the auto-width branch below
                     # left it the whole remaining inner width (282 px of a 300 px
                     # row) and pushed every later item out of the container.
                     remaining_w = cst.flex_basis_px
-                elif cst.width_px == 0:
+                elif cst.width_px == 0 and not cst.width_zero:
                     if auto_weight > 0:
                         val grow = if cst.flex_grow > 0: cst.flex_grow else: 1
                         val cumulative_target = (auto_avail * (flex_weight_used + grow) + auto_weight - 1) / auto_weight
@@ -2162,14 +2205,15 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             flex_h = 1
         out_bh[i] = flex_h
         return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, flex_h)
-    if st.display == "flex" and st.flex_direction == "column":
+    val col_reverse = st.flex_direction == "column-reverse"
+    if st.display == "flex" and (st.flex_direction == "column" or col_reverse):
         var col_nonabs_count = 0
         var col_run_h = 0
         var col_auto_main_margin_count = 0
         var col_measure = child_index.first_child[i]
         while col_measure >= 0:
             val measure_st = styles[col_measure]
-            if not measure_st.position_absolute:
+            if not measure_st.position_absolute and not simple_web_style_hot_is_display_none(computed_style_hot_from(measure_st)):
                 val measure_height_px = resolve_percent_height_px(measure_st.height_px, content_height_limit)
                 val resolved_measure_st = if measure_height_px > 0 and measure_height_px != measure_st.height_px:
                     style_with_height(measure_st, measure_height_px)
@@ -2220,7 +2264,11 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         var flex_child_count_col = 0
         while flex_c >= 0:
             val cst = flex_item_percent_style(styles[flex_c], iw, content_height_limit)
-            if cst.position_absolute:
+            if simple_web_style_hot_is_display_none(computed_style_hot_from(cst)):
+                # No flex item (whitespace-only text included): no gap either.
+                out_bw[flex_c] = 0
+                out_bh[flex_c] = 0
+            elif cst.position_absolute:
                 val absolute_containing_h = content_height_limit + st.pad_t + st.pad_b
                 val ax = absolute_child_x(nodes, styles, child_index, flex_c, x, st, nodes[flex_c], cst, iw, viewport_w)
                 val ay = absolute_child_y(nodes, styles, flex_c, y, st, nodes[flex_c], cst, absolute_containing_h, viewport_h)
@@ -2253,7 +2301,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     child_w = 1
                 var child_x = ix + cml
                 val col_item_align = effective_item_align(st, resolved_cst)
-                val col_child_outer_w = if resolved_cst.width_px > 0:
+                val col_child_outer_w = if resolved_cst.width_px > 0 or resolved_cst.width_zero:
                     if nodes[flex_c].has_widget_class or nodes[flex_c].has_icon_image_class or resolved_cst.border_box: resolved_cst.width_px else: resolved_cst.width_px + resolved_cst.pad_l + resolved_cst.pad_r + resolved_cst.border_l + resolved_cst.border_r
                 else:
                     child_w
@@ -2295,6 +2343,42 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 flex_h_col = fill_bottom_col - y
         if flex_h_col < 1:
             flex_h_col = 1
+        if col_reverse:
+            # `column-reverse`: main-start is the bottom of the content box.
+            # The column was laid out top-down; restack the in-flow items in
+            # DOM order upward from the bottom, each keeping its own physical
+            # margins and its relative offset (subtrees move with them).
+            # Chrome 159, 24px items in a 90px column: flex-start/normal/end
+            # pack at the bottom (66, 42, 14 with a 4px margin-top on the
+            # middle one); flex-end and `start` (the physical top) pack at
+            # the top; center/space-* keep their reversed order.
+            # ponytail: auto main-axis margins and `order` are not modelled
+            # here (residue record); they restack as flex-start.
+            val jc = st.justify_content
+            var bottom_offset = 0
+            var gap_extra_rev = 0
+            if col_auto_main_margin_count == 0:
+                if jc == "flex-end" or jc == "start":
+                    bottom_offset = col_positive_free_space
+                elif jc != "flex-start" and jc != "normal" and jc != "end":
+                    bottom_offset = col_justify_start_offset
+                    gap_extra_rev = col_justify_gap_extra
+            var cursor = y + flex_h_col - st.pad_b - st.border_b - bottom_offset
+            var placed = 0
+            var rc = child_index.first_child[i]
+            while rc >= 0:
+                val rst = styles[rc]
+                if not rst.position_absolute and not simple_web_style_hot_is_display_none(computed_style_hot_from(rst)):
+                    if placed > 0:
+                        cursor = cursor - st.row_gap_px - gap_extra_rev
+                    val new_y = cursor - rst.margin_b - out_bh[rc]
+                    val flow_y = out_by[rc] - (if rst.position_relative: rst.top_px else: 0)
+                    val moved = offset_layout_subtree(child_index, rc, 0, new_y - flow_y, out_bx, out_by)
+                    out_bx = moved.bx
+                    out_by = moved.by
+                    cursor = new_y - rst.margin_t
+                    placed = placed + 1
+                rc = child_index.next_sibling[rc]
         out_bh[i] = flex_h_col
         return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, flex_h_col)
     var cy = y + st.border_t + st.pad_t
@@ -2348,7 +2432,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         ):
             val legend_intrinsic = intrinsic_text_width(nodes, styles, child_index, c, out_intrinsic_widths)
             out_intrinsic_widths = legend_intrinsic.widths
-            var legend_w = if cst.width_px > 0:
+            var legend_w = if cst.width_px > 0 or cst.width_zero:
                 css_outer_width(nodes[c], cst, cst.width_px)
             else:
                 legend_intrinsic.width
@@ -2432,7 +2516,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 # (CSS 2.2 10.3.5), the max-content width capped by the
                 # containing block -- the measurement absolute boxes use.
                 val float_percent_w = if cst.width_px < 0: iw * (0 - cst.width_px) / 100 else: 0
-                var float_w = if cst.width_px > 0:
+                var float_w = if cst.width_px > 0 or cst.width_zero:
                     css_outer_width(nodes[c], fcst, cst.width_px)
                 elif cst.width_px < 0:
                     css_outer_width(nodes[c], fcst, float_percent_w)
@@ -2460,7 +2544,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         float_fit = iw - fml - fmr
                     constrained_outer_width(nodes[c], fcst, float_fit)
                 val float_style = if cst.width_px < 0: style_with_width(fcst, float_percent_w) else: fcst
-                if float_w < 1:
+                if float_w < 1 and not (cst.width_zero and float_w == 0):
                     float_w = 1
                 val float_outer_w = fml + float_w + fmr
                 # In an open line the float joins that line when it fits
@@ -2515,7 +2599,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 if not in_inline_run and prev_margin_b != 0:
                     cy = cy + prev_margin_b
                     prev_margin_b = 0
-                if cst.display == "inline" and nodes[c].tag == "br":
+                # A newline kept by white-space breaks the line like `<br>`.
+                val kept_breaks = html_kept_newlines(nodes[c], cst.white_space_newline)
+                if cst.display == "inline" and (nodes[c].tag == "br" or kept_breaks > 0):
                     val break_line_h = style_line_h(cst)
                     if not in_inline_run:
                         inline_line_h = break_line_h
@@ -2542,6 +2628,10 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     out_bx = aligned.bx
                     out_by = aligned.by
                     cy = cy + aligned.height
+                    # `\n\n` kept by white-space: each further newline is an
+                    # empty line (Chrome 159: b 48 below a).
+                    if kept_breaks > 1:
+                        cy = cy + (kept_breaks - 1) * break_line_h
                     # `<br clear>` / `br { clear }`: the next line starts
                     # below the floats it names.
                     if cst.clear_mode != 0:
@@ -2656,7 +2746,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 # Percentage min-/max- sizes resolve against this line box's
                 # containing block, not the width the box is later laid out in.
                 var resolved_inline_style = style_with_resolved_percent_min_max(cst, iw, content_height_limit)
-                if inline_block and cst.width_px > 0:
+                if inline_block and (cst.width_px > 0 or cst.width_zero):
                     inline_w = css_outer_width(nodes[c], cst, cst.width_px)
                 elif inline_block and cst.width_px < 0:
                     val percent_content_w = iw * (0 - cst.width_px) / 100
@@ -2704,7 +2794,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     inline_w = css_outer_width(
                         nodes[c], resolved_inline_style, media_percent_w
                     )
-                elif inline_replaced and cst.width_px == 0:
+                elif inline_replaced and cst.width_px == 0 and not cst.width_zero:
                     val predicted_w = constrained_outer_width(
                         nodes[c], resolved_inline_style,
                         replaced_auto_box_w(
@@ -2713,7 +2803,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     )
                     if predicted_w > inline_w:
                         inline_w = predicted_w
-                elif inline_replaced and cst.width_px > 0:
+                elif inline_replaced and (cst.width_px > 0 or cst.width_zero):
                     val css_replaced_w = css_outer_width(
                         nodes[c], cst, cst.width_px
                     )
@@ -3107,7 +3197,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 # an implied max-width, and 100% of the container left nothing
                 # to share (test/01_unit/browser_engine/
                 # margin_auto_clamped_width_centering_spec.spl).
-                val authored_w = if cst.width_px > 0:
+                val authored_w = if cst.width_px > 0 or cst.width_zero:
                     cst.width_px
                 elif cst.width_px < 0:
                     child_w * (0 - cst.width_px) / 100
@@ -3156,7 +3246,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             if float_ctx_count() > g_float_base and cy < g_float_max_y1 and float_ctx_establishes_bfc(nodes, styles, c, cst):
                 val beside_x0 = child_x
                 val beside_w0 = child_w
-                val beside_min_w = if cst.width_px > 0: css_outer_width(nodes[c], cst, cst.width_px) else: 1
+                val beside_min_w = if cst.width_px > 0 or cst.width_zero: css_outer_width(nodes[c], cst, cst.width_px) else: 1
                 var beside_guard = float_ctx_count() + 2
                 while beside_guard > 0:
                     val top_left = float_ctx_left_edge(cy, cy + 1, beside_x0)
@@ -3166,7 +3256,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         if resolved_cst.height_px > 0:
                             beside_h = css_outer_height(nodes[c], resolved_cst, resolved_cst.height_px)
                         else:
-                            val beside_try_w = if cst.width_px == 0: top_right - top_left else: beside_w0
+                            val beside_try_w = if cst.width_px == 0 and not cst.width_zero: top_right - top_left else: beside_w0
                             val beside_try = layout_with_style(nodes, styles, child_index, c, top_left, cy, beside_try_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
                             out_bx = beside_try.bx
                             out_by = beside_try.by
@@ -3191,7 +3281,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         # Fits here; an auto width takes the narrowest room
                         # over the box's height.
                         child_x = span_left
-                        if cst.width_px == 0:
+                        if cst.width_px == 0 and not cst.width_zero:
                             child_w = span_right - span_left
                         beside_guard = 0
                     else:

@@ -1297,15 +1297,41 @@ fn fb_background_radial_stack_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32
 
 fn fb_border_sides_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, bl: i32, bt: i32, br: i32, bb: i32, cl: u32, ct: u32, cr: u32, cb: u32, clip: ClipRect) -> [u32]:
     var out = fb
+    if _fb_border_mitred(bl, bt, br, bb, cl, ct, cr, cb):
+        return _fb_border_sides_mitred(fb, fbw, fbh, x, y, w, h, bl, bt, br, bb, cl, ct, cr, cb, clip)
     if bt > 0 and ct != 0u32:
-        out = fb_rect_clip(out, fbw, fbh, x, y, w, bt, ct, clip)
+        out = _fb_border_side_clip(out, fbw, fbh, x, y, w, bt, ct, clip)
     if bb > 0 and cb != 0u32:
-        out = fb_rect_clip(out, fbw, fbh, x, y + h - bb, w, bb, cb, clip)
+        out = _fb_border_side_clip(out, fbw, fbh, x, y + h - bb, w, bb, cb, clip)
+    # A translucent left/right side skips the rows a painted top/bottom side
+    # already covered, so a corner is blended once, not twice -- and keeps
+    # the rows of an unpainted side, so the corner is not left empty.
+    val top_rows = if ct != 0u32: bt else: 0
+    val bottom_rows = if cb != 0u32: bb else: 0
     if bl > 0 and cl != 0u32:
-        out = fb_rect_clip(out, fbw, fbh, x, y, bl, h, cl, clip)
+        if _fb_border_translucent(cl):
+            out = _fb_border_side_clip(out, fbw, fbh, x, y + top_rows, bl, h - top_rows - bottom_rows, cl, clip)
+        else:
+            out = _fb_border_side_clip(out, fbw, fbh, x, y, bl, h, cl, clip)
     if br > 0 and cr != 0u32:
-        out = fb_rect_clip(out, fbw, fbh, x + w - br, y, br, h, cr, clip)
+        if _fb_border_translucent(cr):
+            out = _fb_border_side_clip(out, fbw, fbh, x + w - br, y + top_rows, br, h - top_rows - bottom_rows, cr, clip)
+        else:
+            out = _fb_border_side_clip(out, fbw, fbh, x + w - br, y, br, h, cr, clip)
     out
+
+fn _fb_border_translucent(color: u32) -> bool:
+    val alpha = ((color >> 24) & 255u32) as i32
+    alpha > 0 and alpha < 255
+
+# A translucent border colour (`hsl(0 100% 50% / .5)`) blends over what is
+# under it, as Chrome does; it used to be stored raw, alpha byte and all. An
+# alpha byte of 0 is a colour packed without one and stays opaque.
+fn _fb_border_side_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, color: u32, clip: ClipRect) -> [u32]:
+    if not _fb_border_translucent(color):
+        return fb_rect_clip(fb, fbw, fbh, x, y, w, h, color, clip)
+    val alpha = ((color >> 24) & 255u32) as i32
+    fb_rect_opacity_clip(fb, fbw, fbh, x, y, w, h, color | 0xFF000000u32, (alpha * 100 + 127) / 255, clip)
 
 fn fb_outline_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, outline_w: i32, outline_offset: i32, color: u32, clip: ClipRect) -> [u32]:
     if outline_w <= 0 or color == 0u32:
@@ -1383,7 +1409,7 @@ fn fb_glyph_thin_scaled_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: 
                         while dx < block_w:
                             val xx = bx0 + dx
                             if xx >= 0 and xx < fbw and xx >= clip.x0 and xx < clip.x1:
-                                out[row + xx] = color
+                                out[row + xx] = _fb_text_px(color, out[row + xx])
                             dx = dx + 1
                     dy = dy + 1
             rx = rx + 1
@@ -1516,7 +1542,7 @@ fn fb_glyph_sparse(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color
                 val xx = x + italic_shift + rx
                 val yy = y + ry
                 if xx >= 0 and xx < fbw and yy >= 0 and yy < fbh:
-                    out[yy * fbw + xx] = color
+                    out[yy * fbw + xx] = _fb_text_px(color, out[yy * fbw + xx])
             rx = rx + 1
         ry = ry + 1
     out
@@ -1841,3 +1867,118 @@ fn fb_text_flow_chrome_overlay(fb: [u32], fbw: i32, fbh: i32) -> [u32]:
             out[idx] = text_flow_correction_colors[i]
         i = i + 1
     out
+
+# Two adjacent sides of different colours (`transparent` counts) meet on the
+# diagonal from the outer to the inner corner, as Chrome paints them: a CSS
+# triangle (`border:20px solid transparent; border-top-color:red`) is a
+# triangle, not a red rectangle. Same-coloured neighbours keep the plain
+# rectangles of fb_border_sides_clip, so a uniform border is unchanged.
+fn _fb_border_mitred(bl: i32, bt: i32, br: i32, bb: i32, cl: u32, ct: u32, cr: u32, cb: u32) -> bool:
+    val tl = bt > 0 and bl > 0 and ct != cl
+    val tr = bt > 0 and br > 0 and ct != cr
+    val bl_corner = bb > 0 and bl > 0 and cb != cl
+    val br_corner = bb > 0 and br > 0 and cb != cr
+    tl or tr or bl_corner or br_corner
+
+# Row `r` (0 at the outer edge) of a side `side_w` thick, against a neighbour
+# `cross_w` thick: the first column (from the outer corner) the side owns
+# whole, times 2, plus 1 when the column before it is cut in half by the
+# diagonal. A pixel belongs to the side when its centre lies past the
+# diagonal, (2c+1) * side_w > (2r+1) * cross_w.
+fn _fb_mitre_cut(r: i32, side_w: i32, cross_w: i32) -> i32:
+    val num = (2 * r + 1) * cross_w
+    var c = 0
+    while (2 * c + 1) * side_w <= num:
+        c = c + 1
+    if c > 0 and (2 * c - 1) * side_w == num:
+        return c * 2 + 1
+    c * 2
+
+# The half-covered diagonal pixel: half of each side, painted ONCE as the
+# 50/50 mix (two sequential half blends weighted the first side 25%). A
+# transparent side (0) contributes nothing.
+fn _fb_mitre_pixel(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, ca: u32, cb: u32, clip: ClipRect) -> [u32]:
+    if ca == 0u32 and cb == 0u32:
+        return fb
+    val mix = mitre_mix_color(ca, cb)
+    val a = ((mix >> 24) & 255u32) as i32
+    fb_rect_opacity_clip(fb, fbw, fbh, x, y, 1, 1, mix | 0xFF000000u32, (a * 100 + 127) / 255, clip)
+
+# 50/50 mix of two side colours as one colour with its own alpha (the alpha
+# byte 0 of a non-zero colour means opaque here). Premultiplied average.
+fn mitre_mix_color(ca: u32, cb: u32) -> u32:
+    var r = 0
+    var g = 0
+    var b = 0
+    var a_sum = 0
+    for c in [ca, cb]:
+        if c != 0u32:
+            val a0 = ((c >> 24) & 255u32) as i32
+            val ea = if a0 == 0: 255 else: a0
+            r = r + (((c >> 16) & 255u32) as i32) * ea
+            g = g + (((c >> 8) & 255u32) as i32) * ea
+            b = b + ((c & 255u32) as i32) * ea
+            a_sum = a_sum + ea
+    if a_sum == 0:
+        return 0u32
+    val a = a_sum / 2
+    ((a as u32) << 24) | (((r / a_sum) as u32) << 16) | (((g / a_sum) as u32) << 8) | ((b / a_sum) as u32)
+
+fn _fb_border_sides_mitred(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, bl: i32, bt: i32, br: i32, bb: i32, cl: u32, ct: u32, cr: u32, cb: u32, clip: ClipRect) -> [u32]:
+    var out = fb
+    # Horizontal sides, one row at a time: row r of the top side and row r
+    # (counted up from the bottom edge) of the bottom side.
+    for side in [0, 1]:
+        val thick = if side == 0: bt else: bb
+        val c = if side == 0: ct else: cb
+        var r = 0
+        while r < thick:
+            val py = if side == 0: y + r else: y + h - 1 - r
+            var l_full = 0
+            var r_full = 0
+            if bl > 0 and cl != c:
+                val cut = _fb_mitre_cut(r, thick, bl)
+                l_full = cut / 2
+                if cut % 2 == 1:
+                    out = _fb_mitre_pixel(out, fbw, fbh, x + l_full - 1, py, c, cl, clip)
+            if br > 0 and cr != c:
+                val cut = _fb_mitre_cut(r, thick, br)
+                r_full = cut / 2
+                if cut % 2 == 1:
+                    out = _fb_mitre_pixel(out, fbw, fbh, x + w - r_full, py, c, cr, clip)
+            if c != 0u32 and w - l_full - r_full > 0:
+                out = _fb_border_side_clip(out, fbw, fbh, x + l_full, py, w - l_full - r_full, 1, c, clip)
+            r = r + 1
+    # Vertical sides: the rows between the horizontal sides whole, and inside
+    # a mitred corner only the columns before the diagonal. A same-coloured
+    # corner was already painted by the horizontal side.
+    for side in [0, 1]:
+        val thick = if side == 0: bl else: br
+        val c = if side == 0: cl else: cr
+        if thick > 0 and c != 0u32:
+            val px0 = if side == 0: x else: x + w - thick
+            if h - bt - bb > 0:
+                out = _fb_border_side_clip(out, fbw, fbh, px0, y + bt, thick, h - bt - bb, c, clip)
+            for end in [0, 1]:
+                val cross = if end == 0: bt else: bb
+                val cc = if end == 0: ct else: cb
+                if cross > 0 and cc != c:
+                    var r = 0
+                    while r < cross:
+                        val cut = _fb_mitre_cut(r, cross, thick)
+                        val own = cut / 2 - cut % 2
+                        if own > 0:
+                            val py = if end == 0: y + r else: y + h - 1 - r
+                            val ox = if side == 0: x else: x + w - own
+                            out = _fb_border_side_clip(out, fbw, fbh, ox, py, own, 1, c, clip)
+                        r = r + 1
+    out
+
+# A glyph pixel: `color: rgba(0,0,0,.5)` blends over what is under it, as
+# Chrome does (the 5x7 lane wrote it opaque). An alpha byte of 0 is a colour
+# packed without one and stays opaque.
+fn _fb_text_px(color: u32, dst: u32) -> u32:
+    val a = ((color >> 24) & 255u32) as i32
+    if a > 0 and a < 255:
+        return composite_over_base(color | 0xFF000000u32, a, dst)
+    color

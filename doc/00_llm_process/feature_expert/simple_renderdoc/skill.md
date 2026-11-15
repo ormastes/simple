@@ -109,6 +109,12 @@ SPipe lane. Never replace explicit fail placeholders with false-green passes.
   anywhere, so `<metadata name="vkCmdDispatch">` passed as a dispatch.
   Real capture check (web7 `overview.simple.rdc` → 1.8 MB XML, 1637 chunks):
   pass, 205 dispatches, 5 pipelines, 5 shaders, 33 resources, 8.8 s wall.
-- `renderdoc_simple_gate_spec` needs a runnable inspector binary: in a
-  worktree with no `bin/simple` set `RDOC_REPLAY_SIMPLE_BIN`, otherwise every
-  replay reason is `simple-replay-inspector-missing`.
+- `renderdoc_simple_gate_spec` needs a runnable inspector binary to exercise
+  a real replay: in a worktree with no `bin/simple` set
+  `RDOC_REPLAY_SIMPLE_BIN`. Since 2026-11-15 the gate checks `renderdoccmd`
+  BEFORE the inspector binary (as `inspect_renderdoc_capture` does), so a host
+  with no RenderDoc reports `renderdoccmd-missing` in any checkout; before
+  that, the "synthetic magic file" case failed in every worktree with
+  `simple-replay-inspector-missing` (10/11 -> 11/11 without the env var).
+  `renderdoc_replay_inspect_spec` is 8/8 at `fa2dd425635` (default mode and
+  `--mode=interpreter`); the earlier 7/8 did not reproduce.

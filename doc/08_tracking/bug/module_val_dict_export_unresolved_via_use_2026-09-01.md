@@ -140,3 +140,20 @@ fn main():
 
 Observed on seeds built from release/1.0.0 on 2026-11-14 and 2026-11-15; the
 direct call `exist_pub("x")` works.
+
+## Addendum 2026-11-15 (second) — residual root-caused and fixed
+
+The last failing case was not a filesystem problem. `dir.remove(path)` on the
+`std.shell.dir` module ran the built-in dict mutator `remove` (returning the
+module itself) instead of the module's own `remove` function: the interpreter's
+in-place dict mutation fast paths pre-empted the member-function lookup that
+the ordinary method path already does. Those fast paths now step aside when
+the dict stores a function under the called name.
+
+- `test/01_unit/lib/std/shell/file_system_spec.spl`: 8/9 -> 9/9.
+- `test/01_unit/bugs/dict_member_fn_over_builtin_mutator_spec.spl`: 1/3 -> 3/3
+  (module member call, dict-stored function, and a plain dict still removing).
+- 56-spec sweep, before vs after: only those two change.
+
+The `Function 'q' not found` repro in the previous addendum is a different
+defect (dot-call on a module-level dict on the JIT lane) and is still open.

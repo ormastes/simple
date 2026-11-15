@@ -3,6 +3,8 @@ use std.common.contracts.container.execution_options_v1.{OciEnvironmentEntryV1, 
 use std.common.crypto.sha256.sha256_text
 use std.nogc_async_mut.container.shared.request_digest_v1.container_digest_vector_v1
 use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.contracts.container.execution_v2.ContainerMountProjectionV2
+use std.nogc_async_mut.container.providers.linux.local_mounts_v5.linux_local_mounts_validate_v5
 
 pub struct LinuxOciRequestV1:
     pod_uid: text
@@ -41,6 +43,9 @@ pub struct LinuxOciRequestV1:
     # A selected candidate uses V4 data; legacy effect paths refuse it until a
     # separately installed containment owner exists. Empty preserves V1–V3.
     containment_profile_digest: text = ""
+    # Nonempty selects retained/digest V5. Metadata only; native source-object
+    # admission is required separately before any effect.
+    mounts: [ContainerMountProjectionV2] = []
 
 pub fn linux_oci_user_selection_v3(request: LinuxOciRequestV1) -> bool:
     request.user_uid != -1 or request.user_gid != -1 or request.user_namespace_mode != ""
@@ -49,6 +54,8 @@ pub fn linux_oci_user_selection_v3(request: LinuxOciRequestV1) -> bool:
 # intent. Every execution field, including currently inert fields, is included.
 # Field hashes keep arbitrary UTF-8 and delimiters unambiguous in canonical SDN.
 fn request_fields_v1(request: LinuxOciRequestV1) -> Result<[text], text>:
+    val mounts_valid = linux_local_mounts_validate_v5(request.mounts,
+        request.build_input_root, request.build_output_root, request.bundle_path)?
     if request.containment_profile_digest != "" and not builder_digest_valid_v1(request.containment_profile_digest):
         return Err("request-containment-profile-digest-invalid")
     if linux_oci_user_selection_v3(request):
@@ -71,6 +78,9 @@ fn request_fields_v1(request: LinuxOciRequestV1) -> Result<[text], text>:
     for entry in request.environment:
         values.push(entry.name)
         values.push(entry.value)
+    for mount in request.mounts:
+        values.push(mount.host_root)
+        values.push(mount.guest_root)
     var total = 0
     for value in values:
         if value.contains("\0"): return Err("request-field-contains-nul")
@@ -100,6 +110,11 @@ pub fn linux_oci_request_digest_v1(request: LinuxOciRequestV1) -> Result<text, t
         body = "version: 4\nkind: linux-oci-request-digest\nterminalMode: " + request.terminal_mode + "\n" +
             "userUid: " + request.user_uid.to_text() + "\nuserGid: " + request.user_gid.to_text() + "\n" +
             "userNamespaceMode: \"" + request.user_namespace_mode + "\"\ncontainmentProfileDigest: \"" + request.containment_profile_digest + "\"\n"
+    if request.mounts.len() > 0:
+        body = "version: 5\nkind: linux-oci-request-digest\nterminalMode: " + request.terminal_mode + "\n" +
+            "userUid: " + request.user_uid.to_text() + "\nuserGid: " + request.user_gid.to_text() + "\n" +
+            "userNamespaceModeDigest: \"" + sha256_text(request.user_namespace_mode) + "\"\n" +
+            "containmentProfileDigestDigest: \"" + sha256_text(request.containment_profile_digest) + "\"\n"
     var index = 0
     while index < names.len():
         body = body + names[index] + "Digest: \"" + sha256_text(values[index]) + "\"\n"
@@ -110,4 +125,10 @@ pub fn linux_oci_request_digest_v1(request: LinuxOciRequestV1) -> Result<text, t
     for entry in request.environment:
         body = body + "    - nameDigest: \"" + sha256_text(entry.name) + "\"\n"
         body = body + "      valueDigest: \"" + sha256_text(entry.value) + "\"\n"
+    if request.mounts.len() > 0:
+        body = body + "mountCount: " + request.mounts.len().to_text() + "\nmounts:\n"
+        for mount in request.mounts:
+            body = body + "    - hostRootDigest: \"" + sha256_text(mount.host_root) + "\"\n"
+            body = body + "      guestRootDigest: \"" + sha256_text(mount.guest_root) + "\"\n"
+            body = body + "      readOnly: " + (if mount.read_only: "true" else: "false") + "\n"
     Ok(sha256_text(body))

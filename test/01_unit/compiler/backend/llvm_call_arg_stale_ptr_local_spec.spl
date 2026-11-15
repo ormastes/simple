@@ -1,0 +1,42 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# Regression: phase-2 native-build of lib.common.encoding.external_text emitted
+# `call ptr @unicode_scalar_from_utf8(ptr %l26)` where `%l26 = call i64
+# @external_wide_bytes(...)` -- llc-18: "'%l26' defined with type 'i64' but
+# expected 'ptr'". The sticky ptr_locals flag (from the MIR `[i64]` type)
+# outlived translate_call's override of the destination to the callee's i64
+# return, and the call-arg path trusted the flag over the SSA value's type.
+
+use std.spec.step
+
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+
+fn stale_ptr_call_arg_output() -> text:
+    var translator = MirToLlvm.create("test.llvm.call_arg_stale_ptr", CodegenTarget.X86_64, nil)
+    # %l0 was defined as `call i64 @external_wide_bytes(...)`, but its MIR
+    # type ([i64]) primed ptr_locals[0].
+    translator.local_types[0] = "i64"
+    translator.value_types["%l0"] = "i64"
+    translator.ptr_locals[0] = true
+    translator.defined_locals[0] = true
+    # No registered param types: the callee lives in another module and is
+    # only `declare ptr @take_ptr(...)`.
+    val func = MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str("take_ptr"),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+    ))
+    val call = MirInst(kind: MirInstKind.Call(Some(LocalId(id: 1)), func, [MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))]), span: nil)
+    translator.translate_call_at([call], 0, -1)
+    translator.builder.build()
+
+describe "LLVM call args use the SSA value's recorded type":
+    it "converts an i64-defined local with a stale ptr flag for an undeclared-param callee":
+        # @req REQ-SSPEC-UNIT
+        step("translate a call whose ptr param receives an i64 SSA value flagged ptr")
+        val output = stale_ptr_call_arg_output()
+
+        expect(output).to_contain("inttoptr i64 %l0 to ptr")
+        expect(output.contains("(ptr %l0)")).to_equal(false)

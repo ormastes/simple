@@ -415,20 +415,43 @@ fn resolve_stdlib_from_root(
     segments: &[String],
     original_path: &ModulePath,
 ) -> ResolveResult<ResolvedModule> {
-    if let Ok(resolved) = resolver.resolve_from_base(root, segments, original_path) {
-        return Ok(resolved);
-    }
-
-    for subdir in STDLIB_FAMILY_DIRS {
-        let candidate = root.join(subdir);
-        if p_is_dir(&candidate) {
-            if let Ok(resolved) = resolver.resolve_from_base(&candidate, segments, original_path) {
+    // A "package is its own module" match (`a.pkg.pkg` -> `a/pkg/__init__.spl`,
+    // see `resolve_module_in_dir`) is only a fallback: a later family that has
+    // the real `a/pkg/pkg.spl` must win. Otherwise an importer outside every
+    // family (native-project entry under `test/`) bound
+    // `std.mcp_sdk.transport.transport` to `nogc_async_mut/.../transport/__init__.spl`
+    // instead of `nogc_sync_mut/.../transport/transport.spl`, so no trait
+    // declaration was bound for it.
+    // doc/08_tracking/bug/native_user_class_imported_trait_vtable_missing_2026-11-15.md
+    let mut deferred: Option<ResolvedModule> = None;
+    let bases = std::iter::once(root.to_path_buf())
+        .chain(STDLIB_FAMILY_DIRS.iter().map(|subdir| root.join(subdir)).filter(|c| p_is_dir(c)));
+    for base in bases {
+        if let Ok(resolved) = resolver.resolve_from_base(&base, segments, original_path) {
+            if !is_self_package_match(&resolved, segments) {
                 return Ok(resolved);
             }
+            deferred.get_or_insert(resolved);
         }
     }
 
-    Err(CompileError::semantic("stdlib module not found".to_string()))
+    deferred.ok_or_else(|| CompileError::semantic("stdlib module not found".to_string()))
+}
+
+/// `segments = [.., pkg, pkg]` resolved to `pkg/__init__.spl` (the package
+/// itself), not to a child package `pkg/pkg/__init__.spl`.
+fn is_self_package_match(resolved: &ResolvedModule, segments: &[String]) -> bool {
+    let n = segments.len();
+    if !resolved.is_directory || n < 2 || segments[n - 1] != segments[n - 2] {
+        return false;
+    }
+    let module_name = |dir: Option<&Path>| {
+        dir.and_then(|d| d.file_name()).and_then(|s| s.to_str())
+            .map(|name| name.split_once('.').map_or(name, |(_, rest)| rest).to_string())
+    };
+    let package_dir = resolved.path.parent();
+    module_name(package_dir).as_deref() == Some(segments[n - 1].as_str())
+        && module_name(package_dir.and_then(Path::parent)).as_deref() != Some(segments[n - 1].as_str())
 }
 
 fn resolve_stdlib_namespace_from_root(root: &Path, original_path: &ModulePath) -> ResolveResult<ResolvedModule> {

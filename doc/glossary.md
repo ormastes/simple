@@ -1191,3 +1191,17 @@ diagnostic harness driven by `scripts/check/check-windows-native-mdi-evidence.{s
 and needs a message pump, window lifecycle and pixel readback that `CompositorBackend`
 does not expose. It is not duplication debt; do not "fix" it by routing it through the
 backend, which would destroy what it measures.
+
+## XRay (shared wrapper, backends, spy, profile)
+
+Simple's dynamic function-entry/exit tracing. **Wrapper interface**
+`XrayBackendV1` (`src/lib/nogc_sync_mut/trace/xray_spy_v1.spl`) is one
+pure-Simple interface built by composition: the control-plane leaf
+`XrayLlvmLeafV1` (install / enable site / disable site / close) plus the edge
+source `XrayEdgeSourceV1` (drain edges / site names). **Backends:** Linux =
+compiler-rt or native sled leaf, whose handler writes the channel directly;
+Windows = `XrayWinFlagLeafV1`, which uses flag-guard slots and an in-DLL ring
+drained into the channel. **Spy** is log mode: `XraySpyV1.log_lines()` prints
+one `enter|exit <name>` line per edge. **Profile** is `XraySpyV1.profile()`,
+which folds the same drained events with `trace_profile_fold_v1`. Both share
+one implementation and run unchanged on either OS.

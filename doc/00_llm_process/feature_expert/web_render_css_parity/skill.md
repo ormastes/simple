@@ -1669,7 +1669,7 @@ never cache an answer computed while exhausted) —
   `gradient_corner_dir_q16`. Interpolation is premultiplied; stop positions
   never decrease. Emit a ramp a ROW at a time (`draw_image`): one
   `draw_rect_filled` per colour run cost the catalog `html` page 120 s.
-  Test with hex stops: `parse_color("red")` is #dc3232. The corner codes
+  (`parse_color("red")` was #dc3232 until 2026-11-15.) The corner codes
   (>= 1000) share the angle slot, so every real angle must be reduced to
   0..359 first (`3turn` painted as "to top left" until it was). Ramp
   positions multiply by 1000: keep them in i64 past ~1073 px.
@@ -1695,3 +1695,162 @@ never cache an answer computed while exhausted) —
   </span>cd`), or the start of the next (`inline_subtree_edge_is_space`).
   Text controls are clamped by min/max-width (`constrained_outer_width`)
   and atomic inline boxes carry their horizontal margins.
+- **Trap — one colour parser, CSS Color 4 values.** `parse_color` and
+  `parse_color_alpha` hand `rgb()` / `hsl()` and keywords to dom_color's
+  `parse_color_value_checked`, alpha kept in every syntax. 0 means
+  "transparent or invalid" to every caller, so an invalid value must be
+  rejected (never read as 0 = black), and a colour longhand OR shorthand
+  (`background`, `border*`, `outline`) holding a malformed colour function
+  is dropped whole in `_decl_table_build_inner`. A shortcut keyword above the table (`red` = #dc3232 survived
+  for months) silently repaints every page; pin new forms in
+  `css_color_parse_chrome159_spec.spl` against `getComputedStyle`.
+- **Trap — a collapsed cell's box overlaps its neighbour.** In
+  `border-collapse: collapse` the tracks hold half of each shared border, so
+  the cell box is laid out from `cell_x - (b+1)/2` to `cell_right + b/2`
+  (layout_engine table loop) and paints its full border with the ordinary
+  paint path. Moving the border paint instead of the box leaves the content
+  one pixel off (seen and reverted). Column edges round half up in both
+  `table_distribute_auto_columns` and the fixed split; probe a fraction
+  >= .5 when pinning one, or floor passes too
+  (`table_collapsed_border_paint_chrome159_spec.spl`).
+
+## 2026-11-15 — lane parity: Draw IR gradients, cpu_simd vs Vulkan census, hardware Vulkan 4K
+
+- **Draw IR angled / multi-stop linear gradients now match the fb raster
+  bit for bit (opaque).**
+  `emu_draw_linear_gradient_stops` (`engine2d/backend_emu.spl`) used the
+  corner pixel CENTRES as the line ends (`(w-1)` span) and truncated alpha;
+  it now uses the fb raster's mapping (integer Q16 sin/cos tables generated
+  from `gradient_angle_sin_cos_q16`'s series -- this file is also the
+  baremetal raster, so no `f64` -- line `|w sin a| + |h cos a|`, `t16 / 64`
+  quantisation, rounded premultiplied alpha). Was 13-16 levels off on 10x10 /
+  12x6 boxes. Spec: `test/01_unit/browser_engine/linear_gradient_angle_draw_ir_chrome159_spec.spl`
+  (Chrome 159 rows for 45/135deg, `to bottom right` on 12x6, translucent
+  stops, and a whole-box lane-parity row; 9/11 -> 11/11). Translucent stops
+  stay up to 2 apart: the fb raster quantises alpha to 0..100 %.
+- **The default top-to-bottom two-stop ramp changed on the Draw IR lane
+  too** (it goes through the same primitive): row centres along the line
+  instead of exact stops on the first/last row. That is what Chrome does --
+  10x10 `#000 -> #fff` row 0: Chrome #0d0d0d, Draw IR #0d0d0d (was #000000).
+  The fb raster keeps its endpoint-exact dithered painter
+  (`mix_color_vertical_centered`), which is now the outlier: #000000 there,
+  up to 21 off on 12x6, within 2 on 200x100 (AC-11 bounds it at 2, AC-12
+  pins Chrome). AC-13 runs the primitive on a real `VulkanBackend`
+  (llvmpipe): device readback equals the software reference pixel for pixel.
+- **Trap: the catalog gate's `vulkan` lane never calls that function.**
+  `simple_web_render_html_to_pixels_with_engine2d_backend` paints non-"text
+  document" pages through the fb raster and presents them; only the Draw IR
+  entry `simple_web_layout_render_html_pixels_engine2d` reaches
+  `draw_gradient_rect_stops`. And that entry with `"vulkan"` resolved to
+  `selected=cpu` in a probe -- read `Engine2dDrawIrAdvResult.selected_backend`
+  before claiming a GPU ran. `feature_showcase.spl` is the place where the
+  primitive runs on a real `VulkanBackend` (byte-identical, 38 primitives).
+- **cpu_simd vs Vulkan (llvmpipe), 900x760: 62 pixels over all 8 pages**,
+  all text ink: some glyphs one row lower on Vulkan (per glyph, root cause
+  not found); Chrome mismatch identical per page. Record + 25 px repro:
+  `doc/08_tracking/bug/web_vulkan_lane_control_text_one_row_past_clip_2026-11-15.md`.
+- **Hardware Vulkan 4K (NVIDIA GB10, driver 580.173.02,
+  `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json`, strict
+  backend):** runs. overview 0.24, html 1.67, css-layout 2.09, css-paint
+  2.41, forms-media 1.96, animation 2.23, evidence 0.15, tab-bar 0.05 --
+  identical to the llvmpipe rows. 932 s for 8 pages (llvmpipe 1012 s), max
+  RSS 4.5 GB: the interpreted page pipeline dominates, not the device. Run
+  with `--baseline <nonexistent>` so it is compared, not judged against the
+  llvmpipe file. The RenderDoc layer still cannot load on this driver.
+- **Perf note (not fixed):** on llvmpipe at 900x760 `font_atlas_pack_u32_to_u8`
+  is 54 s of forms-media's 76 s render (byte-lane atlas repack; the typed
+  `SIMPLE_VK_FONT_UPLOAD=u32` lane is opt-in).
+- Gradient paint cost, same seed: 300 x 900x100 120deg boxes 1.02 s -> 0.39 s
+  wall (startup 0.24 s), RSS +4 MB; 6000 12x6 boxes 0.25 s -> 0.25 s, +5 MB
+  (boxes under 1025 px skip the table; a table per box cost +87 MB).
+
+## 2026-11-15 — transparent is a value, mitred border corners, `width:0`, column-reverse, border cascade, whitespace by computed display
+
+- **Trap — 0 still means "unset" to the parsers; transparency is decided at
+  the applier.** `_parse_color_delegated` keeps returning 0 for both
+  `transparent` and garbage. Every applier that must *override* an earlier
+  colour asks `_decl_transparent_color(raw)` (any top-level token with alpha
+  0, functions kept whole by `_decl_top_level_tokens`), so
+  `background:red;background:transparent`, `color:transparent` and
+  `border-*-color:transparent` clear the earlier value instead of being
+  ignored. Both paths need it: the declaration table appliers
+  (`_decl_apply`) AND the dispatch fast path in `..._declarations.spl`
+  (`color`, `outline`) — the review caught the fast path missing it.
+  Alpha-0 hex (`#f000`, `#ff000000`) returns 0 too.
+- **Trap — named colours inside shorthands never parsed.** `border:4px solid
+  blue` painted nothing until `_shorthand_color_token` ran before the
+  rgb/hsl/hash fallback in `parse_color_any`. Multi-value `border-color`
+  takes 1-4 values (top right bottom left); a first-token-only parse
+  painted a square instead of a triangle.
+- **Mitre.** A corner pixel belongs to a side when
+  `(2c+1)*side_w > (2r+1)*cross_w`; the exact diagonal pixel gets ONE
+  premultiplied 50/50 mix (`mitre_mix_color`; Chrome #7f0080 for red/blue,
+  #ff7f7f for red/transparent). Blending it once per side double-blends.
+  Framebuffer twin `_fb_border_sides_mitred`, Draw IR twin
+  `_engine2d_draw_ir_render_borders_mitred`; only taken when adjacent sides
+  differ.
+- **`width:0` is a set width.** `node_w == 0` used to mean auto, so a CSS
+  triangle was full width and `width:0;white-space:nowrap` grew. The
+  `width_zero` style flag (copied in `copy_from`, `style_with_width`,
+  `style_with_height_without_grid_fields`; false whenever the final width is
+  not 0, so `width:0;inline-size:50%` is 150) is honoured by the "is width
+  set" tests in layout_engine, `constrained_outer_width` (its `< 1 -> 1`
+  clamp made every zero box 1px -- the first cut missed it), floats, abspos
+  and the flex sizing branches. `height:0` is still auto (48 sites; filed).
+- **Text alpha.** `_fb_text_px` blends glyph pixels with alpha 1..254 in the
+  5x7 bitmap lane; engine2d `SoftwareBackend.draw_text` blends via
+  `sw_blend_const_raw_span`. TTF and other backends: open.
+- **Unclosed function at the end of an inline style** (`color:rgb(0,255,0`)
+  is closed by `_inline_style_closed` before the priority split (CSS
+  Syntax: EOF closes open blocks).
+- **Trap — whitespace is judged by COMPUTED display, never by tag.** The
+  parser keeps a whitespace-only text node after any element as one space
+  (never inside `<pre>`), and `compute_styles_with_material` hides it
+  (display:none) inside flex/grid/table containers and beside a block-level
+  sibling. The first cut kept it after "inline tags" and broke two catalog
+  pages: forms-media (`label{display:block}` -> an extra line per control,
+  6.37 -> 9.46) and tab-bar (a space flex item + two gaps between every
+  button, 0.68 -> 2.00). Flex row/column and grid loops now skip
+  display:none children (no item, no gap). Kept whitespace fixed the
+  animation page's 4-9px shifts. Simple's space advance is 6px vs Chrome
+  4.45 — open.
+- **Trap — a shorthand must store its longhands at its own source
+  position.** The appliers run in a fixed order, so
+  `border-top-color:red;border-color:blue` stayed red until
+  `_border_shorthand_longhands` (foundation, `_decl_table_build_inner`)
+  started writing `border-*-color/width/style` entries right after the
+  shorthand; the last-wins lookup then sees source order. A `border-color`
+  with a non-colour token returns `["!"]` and drops the whole declaration.
+  A shorthand also stores what it omits (width 3px, style none, color
+  `currentcolor` -> the element colour): `border-top-style:dashed;border:2px
+  red` paints nothing in Chrome. Logical properties (shorthands AND
+  longhands) are stored as their physical longhands only (horizontal-tb
+  ltr), so the fixed-order logical appliers never re-apply them; only a
+  `var()` value still reaches them. Trap: the table used to be allocated at
+  26 slots per declaration whenever the text held "border" (even
+  `box-sizing:border-box`) and was never trimmed -- every lookup scanned
+  the empty slots. It is cut to the used length now.
+- **Trap -- abspos stretch tests must read "is set", not "> 0".**
+  `left:0` and `inset:0` were never stretched because the test was
+  `left_px > 0`; use `left_auto`. The rtl over-constraint rule applies only
+  with a definite width and uses the containing block's direction.
+- **Trap -- outline `auto` is not a border style.** `css_border_style_token`
+  does not know it; `outline_shorthand_paint_width_px` is the one resolver
+  for both appliers (omitted width = 3px, omitted style = no paint).
+- **Trap -- `white_space_pre` means nowrap too.** It cannot carry
+  `pre-wrap`/`pre-line`; a kept newline between elements uses
+  `Style.white_space_newline` + `HNode.ws_raw` (`html_kept_newlines` counts
+  them; extra newlines add line heights) and is laid out by the `<br>`
+  branches (layout_engine, layout_foundation measure). A multi-space
+  whitespace node is NOT collapsed by normal-mode layout, so the parser
+  stores the space count only inside preformatted tags.
+- **`flex-direction: column-reverse`** restacks bottom-up from the content
+  bottom in DOM order with physical margins (reflecting the column result
+  got asymmetric margins wrong: t=38 vs Chrome 42). Chrome 159:
+  flex-start/normal/`end` pack at the bottom, flex-end and `start` (the
+  physical top) at the top, center/space-* keep the reversed order. Move
+  items with `offset_layout_subtree` by (target - flow y): `out_by` already
+  holds the `position:relative` offset, so subtracting it from the box y
+  instead dropped `top:10px`. Auto main margins and `order` are not
+  modelled (filed). Next cluster: flex-wrap line stretch under a definite
+  height (align-content stretch; Chrome items 45 tall, Simple 24).
