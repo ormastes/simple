@@ -111,3 +111,61 @@ per consumer) and 10502b44377/92237f6276d (per-module AOT codegen errors
 fail their module, not the worker), plus the memory reductions
 (5f80235594b interface-only HIR + serial MIR sharding; 7074bd686e7
 essential-backend closure shrink).
+
+## 2026-11-15 addendum 2: cycle 26 at 43d32352d40 — same deterministic crash; the non-determinism hypothesis is retracted
+
+Cycle 26 (receipt-authorized full run, clean tip 43d32352d40, no local
+patches; 56 GiB cap per #9452; campaign 28800 s): `compiler_cli_build` again
+CRASHed, status 139 at 5,802 s — `done=672 total=3186 current=batch-85`,
+immediately after the serial in-process `[NATIVE] codegen: 8 uncached
+module(s)` step of the native_compile batch whose first module is
+`lib.common.ui.ios.builder`:
+
+```
+[build] phase=native_compile ... done=0 total=8 ... current=lib.common.ui.ios.builder
+[NATIVE] codegen: 8 uncached module(s), concurrency=1 (serial lane in this process: backend session owns codegen)
+[build] phase=native_staged ... done=672 total=3186 ... current=batch-85  -> exit 139
+```
+
+Cross-tip comparison (all receipt-authorized, MSVC, stage2-candidate):
+
+- 189dabae8e3 (cycle 25b): crash at 6,562 s, MIR 650/3148, batch-81, after
+  the same [NATIVE] codegen step; row self-report 32.8 GiB.
+- b5d93e48cd8 (cycle 24d, this doc's original filing): crash at 5,458 s,
+  128/3157 recorded, `native_staged ... done=672 total=3157 ... batch-85`.
+- 43d32352d40 (cycle 26): crash at 5,802 s, done=672/3186, batch-85.
+
+The `done=672` closure offset is CONSTANT across all three tips (batch
+number varies with closure size). The crash is therefore DETERMINISTIC at a
+fixed closure offset — addendum 1's "non-deterministic or
+cache/state-dependent" hypothesis is retracted; prior cycles that "reached
+MIR 1832" simply never completed the crashing batch's codegen step.
+
+Candidate fixes CARRIED by 43d32352d40 did NOT fix it: e250454f1aa (MIR
+erased-generic payload decoded exactly once per consumer) and
+10502b44377/92237f6276d (per-module AOT codegen errors fail their module,
+not the worker). The crash follows the serial native codegen of one specific
+8-module batch (first module `lib.common.ui.ios.builder`) — the defect is in
+the stage2 candidate's native codegen for that module/batch, not in MIR
+decode or in error isolation.
+
+Minimal-repro path (next debugger): extract the exact native-build argv the
+`compiler_cli_build` row uses from scripts/bootstrap/bootstrap-phase-verification.shs,
+then narrow the closure to the crashing batch's 8 modules (batch membership
+is visible in the row log around the last `[NATIVE] codegen: 8 uncached
+module(s)` line; the batch's earlier members include
+lib.nogc_async_mut.database.feature_utils, lib.common.text_whitespace,
+lib.nogc_sync_mut.ui.gui_renderer, lib.common.ui.wm_chrome_theme). The
+admitted stage2 compiler and runtime snapshot are preserved under
+build/bootstrap/pinned-src/pinned-43d32352d40d/build/bootstrap/c26s2/.
+No WER application crash dump exists (ReportArchive/ReportQueue and the
+output tree checked), so the stack must come from a debugger attached to the
+standalone repro.
+
+Memory wall status: definitively closed. With the 52/56 GiB ceilings
+(#9396/#9452) the watchdog never fired in cycles 25b/26 (tree peaked ~32
+GiB, well under cap); no RSS kill at any point. The ONLY blocker for the
+Windows stage2 lane is this codegen SIGSEGV (plus Regression 1's AttrOwnerV1
+object-safety at >= b5d93e48cd8, absent at 189dabae8e3, untested at
+43d32352d40's test_runner row — which PASSED in cycle 26, so Regression 1
+appears fixed by the native-trait lanes landing near #9563).
