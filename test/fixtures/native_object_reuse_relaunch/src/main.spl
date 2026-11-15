@@ -1,0 +1,42 @@
+# Native oracle: a relaunched MIR-shard native-build reuses the objects of
+# the previous launch (doc: native object reuse across Stage 3 relaunches,
+# 2026-11-15). The shard workers' object-cache scope used to fold the
+# per-launch closure-request path/digest, the bootstrap watchdog session
+# id/exec and the per-worker dataset cap, so every relaunch got a fresh
+# scope and `cached=0`.
+#
+# Procedure (needs an ADMITTED Stage 2: binary + its admission.env, else the
+# compiler identity is uncacheable by design and nothing is ever reused):
+#   1. cp -r this directory to a scratch dir W; cd W; git init; git add src;
+#      git commit (the SCV source authority admits committed git sources).
+#   2. Run twice with the same --cache-dir C and -o OUT, deleting OUT between
+#      runs, and give run 2 a different SIMPLE_BOOTSTRAP_SESSION_ID /
+#      SIMPLE_BOOTSTRAP_SESSION_EXEC (an executable that drops "--" and execs
+#      the rest) and a different SIMPLE_MIR_SHARD_WORKER_KB:
+#        SIMPLE_BOOTSTRAP= SIMPLE_SHARD_SMALL_CLOSURE_MAX=0 SIMPLE_MIR_SHARD_COUNT=2
+#        SIMPLE_NATIVE_GO_TO_END=1 SIMPLE_FILE_WORKERS=0 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1
+#        SIMPLE_CACHE_SCOPE=<lane> SIMPLE_ABI_POLICY=v1 SIMPLE_ABI_ADMISSION_RECEIPT=<admission.env>
+#        SIMPLE_FRONTEND_CACHE=1 SIMPLE_FRONTEND_CACHE_DIR=C/frontend SIMPLE_HIR_CACHE=1
+#        SIMPLE_HIR_CACHE_DIR=C/hir SIMPLE_NATIVE_ARENA_DECLS=1 SIMPLE_NO_STUB_FALLBACK=1
+#        <stage2> native-build --backend=cranelift --source src --entry-closure src/main.spl
+#          --cache-dir C -o OUT
+#      The log must show `[mir-shard] shards=2`, otherwise the claim path was
+#      not exercised.
+#   3. Kill variant: kill run 1 by PID once its log shows `phase=link`, then
+#      run 2 as above.
+# Expected: run 1 prints two `[NATIVE] codegen: 2 uncached module(s)` lines;
+# run 2 prints no `uncached` line and four `[NATIVE] cache hit:` lines
+# (alpha, beta, gamma, main), and OUT prints the same stdout as run 1.
+# Must NOT reuse: edit alpha_value's body (alpha rebuilt), change its
+# signature (alpha and beta rebuilt), or pass --backend=llvm (all rebuilt);
+# commit each edit before the run.
+# Expected stdout:
+# beta 23
+# gamma-7
+use beta.{beta_value}
+use gamma.{gamma_label}
+
+fn main() -> i64:
+    print("beta {beta_value(4)}")
+    print(gamma_label(7))
+    0
