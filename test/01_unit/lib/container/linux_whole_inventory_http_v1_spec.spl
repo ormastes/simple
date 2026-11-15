@@ -1,0 +1,62 @@
+# AUTHORED_NOT_RUN. Data-only negative contracts cannot mint an inventory owner.
+use std.spec.{describe, it, expect}
+use std.nogc_async_mut.container.providers.linux.whole_inventory_http_v1.*
+
+describe "Whole installed provider inventory finite wire codec":
+    it "requests stopped and external containers with no scope or pagination filter":
+        val request = linux_whole_inventory_request_v1("containers").unwrap()
+        expect(request).to_equal(("GET /v5.2.5/libpod/containers/json?all=true&external=true HTTP/1.1\r\n" +
+            "Host: localhost\r\nAccept: application/json\r\nConnection: close\r\nContent-Length: 0\r\n\r\n").bytes())
+        expect(linux_whole_inventory_request_v1("images").unwrap()).to_equal((
+            "GET /v5.2.5/libpod/images/json?all=true HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\n" +
+            "Connection: close\r\nContent-Length: 0\r\n\r\n").bytes())
+        expect(linux_whole_inventory_request_v1("containers?filters=label").is_err()).to_equal(true)
+        expect(linux_whole_inventory_classes_v1().len()).to_equal(6)
+
+    it "refuses missing EOF-equivalent framing, null, wrong identity casing and duplicate identities":
+        val header = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nLibpod-API-Version: 5.2.5\r\nConnection: close\r\nContent-Length: "
+        expect(linux_whole_inventory_response_v1("containers", (header + "3\r\n\r\n[]").bytes()).is_err()).to_equal(true)
+        expect(linux_whole_inventory_response_v1("pods", (header + "4\r\n\r\nnull").bytes()).is_err()).to_equal(true)
+        val wrong = "[{\"ID\":\"not-an-Id\"}]"
+        expect(linux_whole_inventory_response_v1("containers", (header + str(wrong.byte_len()) + "\r\n\r\n" + wrong).bytes()).is_err()).to_equal(true)
+        val duplicate = "[{\"Name\":\"same\"},{\"Name\":\"same\"}]"
+        expect(linux_whole_inventory_response_v1("volumes", (header + str(duplicate.byte_len()) + "\r\n\r\n" + duplicate).bytes()).is_err()).to_equal(true)
+
+    it "refuses pagination markers, wrong pinned API, duplicate JSON keys and non-array summaries":
+        val header = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nLibpod-API-Version: 5.2.5\r\nContent-Length: "
+        val summary = "{\"items\":[],\"next\":\"page2\"}"
+        expect(linux_whole_inventory_response_v1("networks", (header + str(summary.byte_len()) + "\r\n\r\n" + summary).bytes()).is_err()).to_equal(true)
+        val duplicate_key = "[{\"ID\":\"one\",\"ID\":\"two\"}]"
+        expect(linux_whole_inventory_response_v1("secrets", (header + str(duplicate_key.byte_len()) + "\r\n\r\n" + duplicate_key).bytes()).is_err()).to_equal(true)
+        val wrong_version = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nLibpod-API-Version: 5.3.0\r\nContent-Length: 2\r\n\r\n[]"
+        expect(linux_whole_inventory_response_v1("images", wrong_version.bytes()).is_err()).to_equal(true)
+        val continued = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nLibpod-API-Version: 5.2.5\r\nLink: </next>; rel=next\r\nContent-Length: 2\r\n\r\n[]"
+        expect(linux_whole_inventory_response_v1("containers", continued.bytes()).is_err()).to_equal(true)
+
+    it "consumes explicit reader close errors once and retains their sticky diagnostic":
+        val acquired = LinuxInventoryCleanupProgressV1(reader_consumed: false, socket_consumed: true)
+        val consumed = linux_inventory_cleanup_record_v1(acquired, LinuxInventoryCleanupComponentV1.Reader,
+            "consumed-error", "inventory-reader-close:consumed-error")
+        expect(consumed.reader_consumed).to_equal(true)
+        expect(consumed.socket_consumed).to_equal(true)
+        expect(consumed.first_diagnostic).to_equal("inventory-reader-close:consumed-error")
+        val alias_retry = linux_inventory_cleanup_record_v1(consumed, LinuxInventoryCleanupComponentV1.Reader,
+            "stale", "must-not-replace-consumed-diagnostic")
+        expect(alias_retry.reader_consumed).to_equal(true)
+        expect(alias_retry.first_diagnostic).to_equal(consumed.first_diagnostic)
+
+    it "keeps stale, foreign and retained resources pending while allowing independent socket consumption":
+        val acquired = LinuxInventoryCleanupProgressV1(reader_consumed: false, socket_consumed: false)
+        for disposition in ["stale", "retained", "foreign-context", ""]:
+            val pending = linux_inventory_cleanup_record_v1(acquired, LinuxInventoryCleanupComponentV1.Reader,
+                disposition, "inventory-reader-pending")
+            expect(pending.reader_consumed).to_equal(false)
+            expect(pending.socket_consumed).to_equal(false)
+        val socket = linux_inventory_cleanup_record_v1(acquired, LinuxInventoryCleanupComponentV1.Socket,
+            "consumed-error", "inventory-socket-consumed-error")
+        expect(socket.socket_consumed).to_equal(true)
+        expect(socket.reader_consumed).to_equal(false)
+        val finished = linux_inventory_cleanup_record_v1(socket, LinuxInventoryCleanupComponentV1.Reader, "released", "")
+        expect(finished.reader_consumed).to_equal(true)
+        expect(finished.socket_consumed).to_equal(true)
+        expect(finished.first_diagnostic).to_equal("inventory-socket-consumed-error")

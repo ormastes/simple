@@ -1746,8 +1746,8 @@ never cache an answer computed while exhausted) —
   before claiming a GPU ran. `feature_showcase.spl` is the place where the
   primitive runs on a real `VulkanBackend` (byte-identical, 38 primitives).
 - **cpu_simd vs Vulkan (llvmpipe), 900x760: 62 pixels over all 8 pages**,
-  all text ink: some glyphs one row lower on Vulkan (per glyph, root cause
-  not found); Chrome mismatch identical per page. Record + 25 px repro:
+  all text ink: some glyphs one row lower on Vulkan; Chrome mismatch
+  identical per page. FIXED the same day (see the next section). Record + 25 px repro:
   `doc/08_tracking/bug/web_vulkan_lane_control_text_one_row_past_clip_2026-11-15.md`.
 - **Hardware Vulkan 4K (NVIDIA GB10, driver 580.173.02,
   `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json`, strict
@@ -1763,3 +1763,175 @@ never cache an answer computed while exhausted) —
 - Gradient paint cost, same seed: 300 x 900x100 120deg boxes 1.02 s -> 0.39 s
   wall (startup 0.24 s), RSS +4 MB; 6000 12x6 boxes 0.25 s -> 0.25 s, +5 MB
   (boxes under 1025 px skip the table; a table per box cost +87 MB).
+
+## 2026-11-15 — transparent is a value, mitred border corners, `width:0`, column-reverse, border cascade, whitespace by computed display
+
+- **Trap — 0 still means "unset" to the parsers; transparency is decided at
+  the applier.** `_parse_color_delegated` keeps returning 0 for both
+  `transparent` and garbage. Every applier that must *override* an earlier
+  colour asks `_decl_transparent_color(raw)` (any top-level token with alpha
+  0, functions kept whole by `_decl_top_level_tokens`), so
+  `background:red;background:transparent`, `color:transparent` and
+  `border-*-color:transparent` clear the earlier value instead of being
+  ignored. Both paths need it: the declaration table appliers
+  (`_decl_apply`) AND the dispatch fast path in `..._declarations.spl`
+  (`color`, `outline`) — the review caught the fast path missing it.
+  Alpha-0 hex (`#f000`, `#ff000000`) returns 0 too.
+- **Trap — named colours inside shorthands never parsed.** `border:4px solid
+  blue` painted nothing until `_shorthand_color_token` ran before the
+  rgb/hsl/hash fallback in `parse_color_any`. Multi-value `border-color`
+  takes 1-4 values (top right bottom left); a first-token-only parse
+  painted a square instead of a triangle.
+- **Mitre.** A corner pixel belongs to a side when
+  `(2c+1)*side_w > (2r+1)*cross_w`; the exact diagonal pixel gets ONE
+  premultiplied 50/50 mix (`mitre_mix_color`; Chrome #7f0080 for red/blue,
+  #ff7f7f for red/transparent). Blending it once per side double-blends.
+  Framebuffer twin `_fb_border_sides_mitred`, Draw IR twin
+  `_engine2d_draw_ir_render_borders_mitred`; only taken when adjacent sides
+  differ.
+- **`width:0` is a set width.** `node_w == 0` used to mean auto, so a CSS
+  triangle was full width and `width:0;white-space:nowrap` grew. The
+  `width_zero` style flag (copied in `copy_from`, `style_with_width`,
+  `style_with_height_without_grid_fields`; false whenever the final width is
+  not 0, so `width:0;inline-size:50%` is 150) is honoured by the "is width
+  set" tests in layout_engine, `constrained_outer_width` (its `< 1 -> 1`
+  clamp made every zero box 1px -- the first cut missed it), floats, abspos
+  and the flex sizing branches. `height:0` is still auto (48 sites; filed).
+- **Text alpha.** `_fb_text_px` blends glyph pixels with alpha 1..254 in the
+  5x7 bitmap lane; engine2d `SoftwareBackend.draw_text` blends via
+  `sw_blend_const_raw_span`. TTF and other backends: open.
+- **Unclosed function at the end of an inline style** (`color:rgb(0,255,0`)
+  is closed by `_inline_style_closed` before the priority split (CSS
+  Syntax: EOF closes open blocks).
+- **Trap — whitespace is judged by COMPUTED display, never by tag.** The
+  parser keeps a whitespace-only text node after any element as one space
+  (never inside `<pre>`), and `compute_styles_with_material` hides it
+  (display:none) inside flex/grid/table containers and beside a block-level
+  sibling. The first cut kept it after "inline tags" and broke two catalog
+  pages: forms-media (`label{display:block}` -> an extra line per control,
+  6.37 -> 9.46) and tab-bar (a space flex item + two gaps between every
+  button, 0.68 -> 2.00). Flex row/column and grid loops now skip
+  display:none children (no item, no gap). Kept whitespace fixed the
+  animation page's 4-9px shifts. Simple's space advance is 6px vs Chrome
+  4.45 — open.
+- **Trap — a shorthand must store its longhands at its own source
+  position.** The appliers run in a fixed order, so
+  `border-top-color:red;border-color:blue` stayed red until
+  `_border_shorthand_longhands` (foundation, `_decl_table_build_inner`)
+  started writing `border-*-color/width/style` entries right after the
+  shorthand; the last-wins lookup then sees source order. A `border-color`
+  with a non-colour token returns `["!"]` and drops the whole declaration.
+  A shorthand also stores what it omits (width 3px, style none, color
+  `currentcolor` -> the element colour): `border-top-style:dashed;border:2px
+  red` paints nothing in Chrome. Logical properties (shorthands AND
+  longhands) are stored as their physical longhands only (horizontal-tb
+  ltr), so the fixed-order logical appliers never re-apply them; only a
+  `var()` value still reaches them. Trap: the table used to be allocated at
+  26 slots per declaration whenever the text held "border" (even
+  `box-sizing:border-box`) and was never trimmed -- every lookup scanned
+  the empty slots. It is cut to the used length now.
+- **Trap -- abspos stretch tests must read "is set", not "> 0".**
+  `left:0` and `inset:0` were never stretched because the test was
+  `left_px > 0`; use `left_auto`. The rtl over-constraint rule applies only
+  with a definite width and uses the containing block's direction.
+- **Trap -- outline `auto` is not a border style.** `css_border_style_token`
+  does not know it; `outline_shorthand_paint_width_px` is the one resolver
+  for both appliers (omitted width = 3px, omitted style = no paint).
+- **Trap -- `white_space_pre` means nowrap too.** It cannot carry
+  `pre-wrap`/`pre-line`; a kept newline between elements uses
+  `Style.white_space_newline` + `HNode.ws_raw` (`html_kept_newlines` counts
+  them; extra newlines add line heights) and is laid out by the `<br>`
+  branches (layout_engine, layout_foundation measure). A multi-space
+  whitespace node is NOT collapsed by normal-mode layout, so the parser
+  stores the space count only inside preformatted tags.
+- **`flex-direction: column-reverse`** restacks bottom-up from the content
+  bottom in DOM order with physical margins (reflecting the column result
+  got asymmetric margins wrong: t=38 vs Chrome 42). Chrome 159:
+  flex-start/normal/`end` pack at the bottom, flex-end and `start` (the
+  physical top) at the top, center/space-* keep the reversed order. Move
+  items with `offset_layout_subtree` by (target - flow y): `out_by` already
+  holds the `position:relative` offset, so subtracting it from the box y
+  instead dropped `top:10px`. Auto main margins and `order` are not
+  modelled (filed). Next cluster: flex-wrap line stretch under a definite
+  height (align-content stretch; Chrome items 45 tall, Simple 24).
+
+## 2026-11-15 — Vulkan text clip: cpu_simd and Vulkan byte-identical
+
+- Root cause of the 62 px: `VulkanBackend.composite_font_batch` (the
+  vector-face path behind `draw_text_with_advances`) ignored `set_clip`; only
+  the bitmap path baked the clip into its quads. Draw IR clips control text to
+  its box, so descenders spilled below `<input>`/`<select>` on Vulkan only.
+  Fixed by clipping the quads on the host; a fully clipped batch is the
+  admitted status `clipped-out`. Record:
+  `doc/08_tracking/bug/web_vulkan_lane_control_text_one_row_past_clip_2026-11-15.md`;
+  RenderDoc params-buffer evidence in the simple_renderdoc skill.
+- 900x760: all 8 catalog pages `cmp`-identical cpu_simd vs Vulkan (llvmpipe).
+- `draw_ir_adv_branch_coverage_spec` hostile-advance row expected 8 skips,
+  but the executor now paints such runs with the font's own advances
+  (`text-advance-arity` fallback; no code emits `text-font-advances` any more,
+  only a stale comment at `draw_ir_adv.spl:555`). Row re-pinned to 9 rendered /
+  0 skipped plus a pixel row proving hostile advances paint exactly like no
+  advances.
+- `engine2d_software_offscreen_dispatch_spec` (0/3) asserts a software rung
+  that `engine.spl` todo 303 says does not exist; filed, not edited:
+  `doc/08_tracking/bug/engine2d_software_offscreen_dispatch_spec_asserts_missing_rung_2026-11-15.md`.
+- Hosts without `/usr/share/vulkan/icd.d/lvp_icd.json` do NOT exercise the
+  Vulkan rows of `vulkan_text_advances_clip_parity_spec` or AC-13 of
+  `linear_gradient_angle_draw_ir_chrome159_spec`: each prints a
+  `[skip] ... was not exercised` line and returns. Read the log, not the
+  pass count, before citing them as Vulkan evidence.
+- Draw IR advances are applied only when they sum to the command width;
+  otherwise the run silently paints with the font's own advances. A test of
+  "advances applied" must set the width to the sum (see the `7,7` row).
+
+## 2026-11-15 — wrapped flex lines size their items; the headless shell is not the oracle
+
+- **Trap — the gates must run FULL Chrome.** With no `CHROME_BIN`, the
+  harvester (`check-chrome-layout-geometry-diff.shs --print-chrome`) prefers
+  the Playwright headless shell, which resolves `monospace` to DejaVu Sans
+  Mono through fontconfig: every `<code>` line box is 1px shorter and the
+  matrix reports 28 NEW ids (127 cells) at an untouched base. Full Chrome
+  (`CHROME_BIN=$HOME/.cache/ms-playwright/chromium-1255/chrome-linux-arm64/chrome
+  CHROME_NO_SANDBOX=1`) gives the recorded 102. Never baseline those ids;
+  cross-check any hand measurement of text from the headless shell.
+- **Fonts on both sides (audit).** Simple's Linux face set is Liberation
+  Sans / Serif / Mono (`browser_host_has_measured_linux_face_set`). Chrome is
+  not handed that file: it resolves the generics through fontconfig to its
+  Arial / Times New Roman / Courier New defaults, which this host aliases to
+  the same Liberation files -- same face by host configuration only. The
+  catalog uses 16px / 24px text and no `@font-face`; no fixture enlarges
+  text to hide a mismatch. High-DPI comparison (owner rule: >= 300 dpi or a
+  shared 1px bitmap font) is blocked on a device scale the renderer does not
+  have: `doc/08_tracking/bug/web_render_no_device_scale_hidpi_gate_2026-11-15.md`.
+- **Wrapped lines align their items.** The wrap branch placed each line at
+  its align-content-stretched offset but laid every item out at content
+  height. After the line loop, each in-flow item is aligned inside its line
+  (CSS Flexbox 9.4 step 11): an auto-height `stretch` item (not replaced,
+  no max-height, no auto cross margin) grows to the line's cross size, an
+  `end`/`flex-end`/`center` item moves down by the free space
+  (`offset_layout_subtree`). The line cross size is the larger of the
+  stretched estimate and the tallest real item, and the next line starts
+  below the REAL items (`line_heights` estimates an auto-height item as one
+  line box, so `aa<br>bb` used to overlap the next line). `wrap-reverse`
+  keeps the old placement. Matrix 102 -> 95 cells (21 `cc-fx-fw-wrap-*`
+  ids). Spec: `flex_wrap_line_stretch_chrome159_spec.spl`.
+
+## 2026-11-15 — `simple_web_renderer_spec` was red from a stale snapshot; the matrix gate picks full Chrome
+
+- **Trap — a red main spec can be a lost harness, not a lost feature.**
+  `88aac2ffe28` (release/1.0 transplant) replaced the spec with an older copy:
+  five helpers, three rows, ten imports and the head of the content-visibility
+  row vanished, so 9 rows died on `function/variable ... not found`. Before
+  triaging a value, grep the spec for every `_helper(` it calls and diff the
+  row against `88aac2ffe28^`. Restored: 111 -> 114 rows, 83 -> 92 passing;
+  the 22 left are classed in
+  `doc/08_tracking/bug/simple_web_renderer_spec_red_rows_2026-11-15.md`.
+- **The matrix gate no longer takes the headless shell.** Without
+  `CHROME_BIN` it uses a system Chrome, else the newest Playwright
+  `chromium-*/chrome-linux*/chrome`; a headless shell (found or passed) is an
+  ERROR naming the reason (`full_chrome_in`, `is_headless_shell`; selftest 11
+  -> 14 fixtures). The geometry differ's own preference for the shell is
+  unchanged.
+- Batch 1 (`71ff31154d5`) catalog 900 px: every page equal to its row
+  (worst css-paint 6.80); `html` 216.2 s vs 226.6 s at base, `css-layout`
+  266.0 s vs 274.3 s, same seed.

@@ -1,0 +1,225 @@
+# @cover src/lib/nogc_sync_mut/trace/xray_spy_v1.spl
+# @req REQ-XRAY-V1-API-01
+"""
+# XRay shared wrapper: one spy (log) and one profile over two backends
+
+The wrapper (`XrayBackendV1`) is ONE interface: the existing control-plane leaf
+(`XrayLlvmLeafV1`: install / enable site / disable site / close) composed with
+an edge source (`XrayEdgeSourceV1`: drain edges / site names). `XraySpyV1`
+drives it, and spy (log lines) and profile (`trace_profile_fold_v1`) both read
+the SAME drained event list, so they cannot differ per OS.
+
+The same edge script runs over:
+- the Linux backend: a fake compiler-rt leaf whose handler writes the channel
+  directly (edges stamped, `drain` is a no-op), with names from the map;
+- the Windows backend: the real `XrayWinFlagLeafV1` over a resident model of
+  the emitted DLL (descriptor, names, ring), ring mode, drained by the leaf.
+"""
+use std.spec.*
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_profile_v1.*
+use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_ptr_read_i64, rt_ptr_write_i64, rt_ptr_write_u8, rt_ptr_read_u8}
+use std.nogc_sync_mut.trace.xray_llvm_adapter_v1.*
+use std.nogc_sync_mut.trace.observer_native_channel_v1.*
+use std.nogc_sync_mut.trace.xray_win_flag_leaf_v1.*
+use std.nogc_sync_mut.trace.xray_spy_v1.*
+
+val NAMES: [text] = ["main", "work", "idle"]
+
+# ---- Linux-style fake leaf: slots + a handler that stamps and records ----
+class FakeLinuxLeaf:
+    slots: [i64]
+    arena: i64
+    generation: u64
+    context: u64
+    module_instance: u64
+    clock: u64
+
+impl XrayLlvmLeafV1 for FakeLinuxLeaf:
+    fn sled_kind() -> TraceBackendV1:
+        TraceBackendV1.Llvm
+    fn max_function_id() -> i64:
+        self.slots.len()
+    me install(arena: i64, generation: u64, context: u64, module_instance: u64) -> i64:
+        self.arena = arena
+        self.generation = generation
+        self.context = context
+        self.module_instance = module_instance
+        1
+    me patch_function(id: i64) -> i64:
+        if id < 1 or id > self.slots.len(): return XRAY_LLVM_STATUS_INVALID_ID_V1
+        self.slots[id - 1] = 1
+        XRAY_LLVM_STATUS_SUCCESS_V1
+    me unpatch_function(id: i64) -> i64:
+        if id < 1 or id > self.slots.len(): return XRAY_LLVM_STATUS_INVALID_ID_V1
+        self.slots[id - 1] = 0
+        XRAY_LLVM_STATUS_SUCCESS_V1
+    me close(arena: i64) -> i64:
+        unsafe(capabilities: [ffi]): trace_native_channel_close_v1(arena)
+
+impl FakeLinuxLeaf:
+    # The compiler-rt handler shim: a patched sled records one stamped edge.
+    me fire(site: i64, kind: i64):
+        if self.slots[site] == 0: return
+        self.clock = self.clock + 10u64
+        val code: u64 = if kind == 0: 1u64 else: 2u64
+        val id = (site + 1) as u64
+        unsafe(capabilities: [ffi]):
+            trace_native_channel_record_words_v1(self.arena, 1u64 | (96u64 << 16) | (code << 32),
+                self.generation, self.module_instance, id | (id << 32), self.context,
+                0u64, self.clock, 0u64, 0u64, 0u64, 0u64)
+
+# ---- Windows DLL model (emitted layout), ring mode ----
+class FakeWinDll:
+    descriptor: i64
+    names: i64
+    hook: i64
+    ring: i64
+
+impl XrayWinModulePortV1 for FakeWinDll:
+    fn symbol(name: text) -> i64:
+        if name == XRAY_WIN_DESCRIPTOR_SYMBOL_V1: return self.descriptor
+        if name == XRAY_WIN_NAMES_SYMBOL_V1: return self.names
+        if name == XRAY_WIN_HOOK_SYMBOL_V1: return self.hook
+        if name == XRAY_WIN_RING_SYMBOL_V1: return self.ring
+        0
+    fn handler_address() -> i64:
+        0
+
+fn c_string(value: text) -> i64:
+    val bytes = value.bytes()
+    val addr = rt_alloc(bytes.len() + 1)
+    unsafe(capabilities: [ffi]):
+        for i in 0..bytes.len():
+            rt_ptr_write_u8(addr, i, bytes[i] as i64)
+        rt_ptr_write_u8(addr, bytes.len(), 0)
+    addr
+
+fn fake_dll(names: [text], ring_capacity: i64) -> FakeWinDll:
+    val n = names.len()
+    val descriptor = rt_alloc(8 + n * 8)
+    val table = rt_alloc(8 + n * 8)
+    val hook = rt_alloc(8)
+    val ring = rt_alloc(24 + ring_capacity * 24)
+    unsafe(capabilities: [ffi]):
+        rt_ptr_write_i64(descriptor, 0, n)
+        rt_ptr_write_i64(table, 0, n)
+        rt_ptr_write_i64(hook, 0, 0)
+        for i in 0..n:
+            val slot = rt_alloc(8)
+            rt_ptr_write_u8(slot, 0, 0)
+            rt_ptr_write_i64(descriptor, 8 + i * 8, slot)
+            rt_ptr_write_i64(table, 8 + i * 8, c_string(names[i]))
+        rt_ptr_write_i64(ring, 0, ring_capacity)
+        for i in 0..(2 + ring_capacity * 3):
+            rt_ptr_write_i64(ring, 8 + i * 8, 0)
+    FakeWinDll(descriptor: descriptor, names: table, hook: hook, ring: ring)
+
+# Replays the emitted guard in ring mode: load slot, append to the ring if set.
+fn win_fire(dll: FakeWinDll, site: i64, kind: i64):
+    unsafe(capabilities: [ffi]):
+        if rt_ptr_read_u8(rt_ptr_read_i64(dll.descriptor, 8 + site * 8), 0) == 0: return
+        val i = rt_ptr_read_i64(dll.ring, 8)
+        rt_ptr_write_i64(dll.ring, 8, i + 1)
+        rt_ptr_write_i64(dll.ring, 24 + i * 24, site)
+        rt_ptr_write_i64(dll.ring, 32 + i * 24, kind)
+        rt_ptr_write_i64(dll.ring, 40 + i * 24, i + 1)
+
+fn config_v1() -> TraceConfigV1:
+    TraceConfigV1(instrumentation: TraceInstrumentationV1.Dynamic,
+        backend: TraceBackendV1.Llvm, consistency: TraceConsistencyV1.RawEdges,
+        patch_mode: TracePatchModeV1.Quiescent, abi_profile: "linux-aarch64-llvm-xray",
+        event_mask: 7, buffer_bytes: 98304, max_contexts: 1, max_depth: 128,
+        max_resident_generations: 8)
+
+fn selection_v1(sites: [u32]) -> TraceSelectionV1:
+    var out: [TraceSiteV1] = []
+    for site in sites:
+        out.push(TraceSiteV1(module_instance: 1, site_id: site))
+    TraceSelectionV1(manifest_incarnation: 1, sites: out)
+
+# The edge script both backends replay: main -> work -> (idle, unselected),
+# then a call after disable that must record nothing.
+val SCRIPT_SITES: [i64] = [0, 1, 2, 2, 1, 0, 0]
+val SCRIPT_KINDS: [i64] = [0, 0, 0, 1, 1, 1, 0]
+
+fn run_linux() -> XraySpyV1:
+    var leaf = FakeLinuxLeaf(slots: [0, 0, 0], arena: 0, generation: 0u64, context: 0u64,
+        module_instance: 0u64, clock: 0u64)
+    var spy = XraySpyV1.create(XrayBackendV1.linux(leaf, NAMES), 1u64, 64)
+    expect(spy.enable(config_v1(), selection_v1([1, 2])).is_ok()).to_equal(true)
+    for i in 0..6:
+        leaf.fire(SCRIPT_SITES[i], SCRIPT_KINDS[i])
+    expect(spy.disable().is_ok()).to_equal(true)
+    leaf.fire(SCRIPT_SITES[6], SCRIPT_KINDS[6])
+    spy.collect()
+    spy
+
+fn run_windows() -> XraySpyV1:
+    val dll = fake_dll(NAMES, 16)
+    var spy = XraySpyV1.create(XrayBackendV1.windows(XrayWinFlagLeafV1.bind(dll)), 1u64, 64)
+    expect(spy.enable(config_v1(), selection_v1([1, 2])).is_ok()).to_equal(true)
+    for i in 0..6:
+        win_fire(dll, SCRIPT_SITES[i], SCRIPT_KINDS[i])
+    expect(spy.disable().is_ok()).to_equal(true)
+    win_fire(dll, SCRIPT_SITES[6], SCRIPT_KINDS[6])
+    spy.collect()
+    spy
+
+fn profile_shape(profile: TraceProfileV1) -> text:
+    var out = "events={profile.events} unmatched={profile.unmatched_exits} open={profile.open_entries}"
+    for row in profile.functions:
+        out = out + " f{row.function_id}:calls={row.calls}:depth={row.max_depth}"
+    out
+
+fn stamped(spy: XraySpyV1) -> i64:
+    var n = 0
+    for event in spy.events:
+        if event.timestamp != 0u64: n = n + 1
+    n
+
+val EXPECTED_LOG: [text] = ["enter main", "enter work", "exit work", "exit main"]
+
+describe "XRay shared wrapper: spy and profile over both backends":
+    it "spy logs the selected edges by name over the Linux backend":
+        step("main and work selected; idle is not; the post-disable call records nothing")
+        expect(run_linux().log_lines()).to_equal(EXPECTED_LOG)
+
+    it "spy logs the same lines over the Windows backend":
+        expect(run_windows().log_lines()).to_equal(EXPECTED_LOG)
+
+    it "profile has the same shape over both backends":
+        val linux = profile_shape(run_linux().profile())
+        expect(linux).to_equal("events=4 unmatched=0 open=0 f1:calls=1:depth=1 f2:calls=1:depth=2")
+        expect(profile_shape(run_windows().profile())).to_equal(linux)
+
+    it "profile inclusive time is measured on the Linux backend":
+        val row = trace_profile_function_v1(run_linux().profile(), 1u32)
+        expect(row.unwrap().inclusive_ns).to_equal(30u64)
+
+    # RED by design: Windows ring records carry no time (bug
+    # xray_win_ring_edges_unstamped_profile_time_zero_2026-11-15).
+    it "every drained edge is stamped on both backends":
+        expect(stamped(run_linux())).to_equal(4)
+        expect(stamped(run_windows())).to_equal(4)
+
+    it "re-enable reuses the one channel arena and poll buffer":
+        val dll = fake_dll(NAMES, 16)
+        var spy = XraySpyV1.create(XrayBackendV1.windows(XrayWinFlagLeafV1.bind(dll)), 1u64, 64)
+        val poll = spy.poll_raw
+        expect(spy.enable(config_v1(), selection_v1([1])).is_ok()).to_equal(true)
+        val arena = spy.arena_raw
+        expect(spy.disable().is_ok()).to_equal(true)
+        step("second generation: same memory, fresh events")
+        expect(spy.enable(config_v1(), selection_v1([2])).is_ok()).to_equal(true)
+        expect(spy.arena_raw).to_equal(arena)
+        expect(spy.poll_raw).to_equal(poll)
+        win_fire(dll, 1, 0)
+        win_fire(dll, 1, 1)
+        expect(spy.disable().is_ok()).to_equal(true)
+        expect(spy.log_lines()).to_equal(["enter work", "exit work"])
+
+    it "a disabled spy is idle and drains nothing new":
+        var spy = run_windows()
+        expect(spy.collect()).to_equal(0)
+        expect(spy.adapter.state_code()).to_equal(XRAY_LLVM_STATE_IDLE_V1)

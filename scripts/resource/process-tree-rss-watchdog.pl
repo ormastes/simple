@@ -106,7 +106,12 @@ for my $key (qw(max-rss-kib interval-ms timeout-seconds term-grace-seconds)) {
 # so ~1.7 GiB headroom is real. 52 GiB admits the plateau. Evidence:
 # doc/08_tracking/bug/rss_static_ceiling_52gib_request_2026-11-14.md.
 # Keep in sync with tree-rss-policy.shs.
-my $compiler_ceiling_kib = 54525952;
+# Eighth widening 2026-11-15: 52 GiB rung brackets the measured 50.34 GiB
+# plateau (recorded at MIR 1832/3148, before codegen). Codegen historically
+# adds the final peak growth; the host is single-tenant (system ~11 GiB,
+# balloon releases on demand), so 56 GiB is the next evidence-based rung.
+# Keep in sync with tree-rss-policy.shs.
+my $compiler_ceiling_kib = 58720256;
 my $worker_target_kib = 976562;
 my $budget_ceiling_kib = $compiler_ceiling_kib;
 $opt{'budget-scope'} =~ /\A(?:compiler|aggregate-tests)\z/

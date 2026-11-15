@@ -1,6 +1,25 @@
 # Builtin sheets/slides registries unreachable after onCommand activation
 
-Status: open
+Status: verification-pending
+
+## Root cause and fix (2026-11-15, branch work/caret-activation-bugdb-fix)
+
+`extension_host_with_builtins()` has been genuinely lazy since 2026-07-31
+(identical to `extension_host_with_builtins_indexed()`, no eager activate-all
+loop), so no registry hook ran until an activation event fired. The two specs
+asserted `is_active == true` immediately after construction, i.e. they were
+stale against the lazy design (and contradicted the same file's later
+"indexed host runs no activation hook" spec). The product code was correct:
+firing the builtin's own `onCommand` (`activate_command`) populates the
+registry. Fix: the two specs now assert the lazy pre-state, fire
+`activate_command("sheets.function.double")` / `("slides.layout.titleDiagram")`
+and then assert the same registry outcomes (assertions strengthened, not
+weakened). RED: executed=10 passed=8 failed=2. GREEN: executed=11 passed=11.
+Prevention spec (same file): every builtin with an activation hook runs it
+when one of its own contributed commands activates.
+Runtime/native unqualified (seed interpreter, Windows).
+
+# Original report
 Severity: P3
 Found: 2026-11-15, lane `work/caret-tui-captures-20261115` (PR #9332)
 Binary: seed interpreter, Windows

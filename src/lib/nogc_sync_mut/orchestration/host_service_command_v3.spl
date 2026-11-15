@@ -1,0 +1,71 @@
+# Trusted local administrator CLI composition. These startup arguments are not
+# accepted by the service request wire. Binding bytes still require the actual
+# protected deployment's historical signed enrollment and exact installed pins.
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.*
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.HostServiceRequestV2
+use std.nogc_sync_mut.orchestration.host_windows_deployment_v2.HostWindowsDeploymentAnchorV2
+use std.nogc_sync_mut.orchestration.host_service_enrollment_v2.host_service_enrollment_payload_decode_v2
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct HostServiceCommandReplyV3:
+    exit_code: i64
+    output: text
+    cleanup: Option<HostServiceCleanupV3> = nil
+
+fn service_command_error_v3(reason: text, cleanup: Option<HostServiceCleanupV3> = nil) -> HostServiceCommandReplyV3:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("host-service-command-error"),
+        "error": SdnValue.String(reason), "cleanupPending": SdnValue.Bool(cleanup.is_some())}
+    HostServiceCommandReplyV3(2, sdn_encode_canonical(SdnValue.Dict(fields)) + "\n", cleanup)
+
+# Public syntax is identical on every OS. Backend selection occurs in the Host
+# library; the application never opens platform handles or invents root proof.
+pub fn host_service_command_shape_v3(args: [text]) -> text:
+    if args.len() < 7 or args.len() > 8 or args[0] != "host-service": return "host-service-usage"
+    if not ["linux-podman", "windows-docker-process"].contains(args[1]): return "host-service-backend"
+    if args[2] == "": return "host-service-installed-anchor-required"
+    if args[1] == "linux-podman" and (args[3] != "-" or args[4] != "-"): return "host-service-linux-anchor-fields"
+    if args[1] == "windows-docker-process" and (args[3] == "-" or args[4] == "-"): return "host-service-windows-anchor-fields"
+    if args[5] == "host-status":
+        if args.len() != 7 or args[6] != "-": return "host-service-status-fields"
+    elif ["host-prepare", "host-validate", "host-execute", "host-parent-budget"].contains(args[5]):
+        if args.len() != 8 or args[6] == "-" or args[7] == "": return "host-service-request-fields"
+    else: return "host-service-action-unsupported"
+    ""
+
+pub fn host_service_command_v3(args: [text]) -> HostServiceCommandReplyV3:
+    val invalid = host_service_command_shape_v3(args)
+    if invalid != "": return service_command_error_v3(invalid)
+    var payload = ""
+    if args.len() == 8:
+        val read = file_read_regular_no_follow_bounded(args[7], 2097152)
+        if read.is_err(): return service_command_error_v3(read.unwrap_err())
+        payload = read.unwrap()
+    var opened: HostServiceDomainOpenV3 = HostServiceDomainOpenV3.Rejected("host-service-backend")
+    if args[1] == "linux-podman": opened = host_service_domain_open_linux_v3(args[2])
+    else:
+        val bytes = file_read_regular_no_follow_bounded(args[4], 16384)
+        if bytes.is_err(): return service_command_error_v3(bytes.unwrap_err())
+        val binding = host_service_enrollment_payload_decode_v2(bytes.unwrap())
+        if binding.is_err(): return service_command_error_v3(binding.unwrap_err())
+        opened = host_service_domain_open_windows_v3(HostWindowsDeploymentAnchorV2(args[2], args[3]), binding.unwrap())
+    var retained: Option<HostServiceDomainV3> = nil
+    var startup_error = ""
+    match opened:
+        case HostServiceDomainOpenV3.Ready(owner): retained = Some(owner)
+        case HostServiceDomainOpenV3.Pending(owner, error):
+            retained = Some(owner)
+            startup_error = error
+        case HostServiceDomainOpenV3.Rejected(error): return service_command_error_v3(error)
+        case HostServiceDomainOpenV3.CleanupRequired(cleanup, error): return service_command_error_v3(error, Some(cleanup))
+    if startup_error != "":
+        val closed = host_service_domain_close_v3(retained.unwrap())
+        return service_command_error_v3("host-service-startup-quarantine:" + startup_error + ":" + closed.error, closed.cleanup)
+    val request = HostServiceRequestV2(args[5], if args[6] == "-": "" else: args[6], payload)
+    val turn = if request.action == "host-execute": host_service_domain_effect_turn_v3(retained.unwrap(), request)
+        else: host_service_domain_turn_v3(retained.unwrap(), request)
+    val closed = host_service_domain_close_v3(turn.owner)
+    if not closed.closed or closed.error != "":
+        return service_command_error_v3("host-service-close:" + closed.error, closed.cleanup)
+    HostServiceCommandReplyV3(turn.exit_code, turn.response)

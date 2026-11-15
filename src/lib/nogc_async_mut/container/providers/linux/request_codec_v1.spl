@@ -2,6 +2,7 @@
 # decoding is data-only and grants no runtime or filesystem authority.
 use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_bounds_v1, linux_oci_request_digest_v1, linux_oci_user_selection_v3}
 use std.common.contracts.container.execution_options_v1.OciEnvironmentEntryV1
+use std.common.contracts.container.execution_v2.ContainerMountProjectionV2
 use std.common.contracts.orchestration.resource_v1.{RejectionV1, reject, parse_resource_document, as_dict, as_array, only_known, require}
 use std.common.sdn.value.{SdnValue, SdnSpan}
 use std.common.sdn.encode.sdn_encode_canonical
@@ -49,6 +50,19 @@ pub fn linux_oci_retained_request_encode_v1(request: LinuxOciRequestV1) -> Resul
         fields["userGid"] = SdnValue.Int(request.user_gid)
         fields["userNamespaceMode"] = SdnValue.String(request.user_namespace_mode)
         fields["containmentProfileDigest"] = SdnValue.String(request.containment_profile_digest)
+    if request.mounts.len() > 0:
+        fields["version"] = SdnValue.Int(5)
+        fields["terminalMode"] = SdnValue.String(request.terminal_mode)
+        fields["userUid"] = SdnValue.Int(request.user_uid)
+        fields["userGid"] = SdnValue.Int(request.user_gid)
+        fields["userNamespaceMode"] = SdnValue.String(request.user_namespace_mode)
+        fields["containmentProfileDigest"] = SdnValue.String(request.containment_profile_digest)
+        var mounts: [SdnValue] = []
+        for mount in request.mounts:
+            val item: Dict<text, SdnValue> = {"hostRoot": SdnValue.String(mount.host_root),
+                "guestRoot": SdnValue.String(mount.guest_root), "readOnly": SdnValue.Bool(mount.read_only)}
+            mounts.push(SdnValue.Dict(item))
+        fields["mounts"] = SdnValue.Array(mounts)
     val body = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
     if body.len() > 1048576: return Err("retained-request-record-too-large")
     Ok(body)
@@ -63,21 +77,21 @@ fn request_fields_decode_v1(source: text) -> Result<LinuxOciRequestV1, Rejection
     only_known(fields, ["version", "kind", "podUid", "attempt", "operationId", "requestDigest", "image",
         "bundlePath", "command", "args", "timeoutMs", "cpuLimitMillis", "memoryLimitBytes", "pidLimit",
         "networkPolicy", "filesystemPolicy", "buildInputRoot", "buildOutputRoot", "replaceEntrypoint",
-        "environment", "workingDirectory", "terminalMode", "userUid", "userGid", "userNamespaceMode", "containmentProfileDigest"], "", spans)?
+        "environment", "workingDirectory", "terminalMode", "userUid", "userGid", "userNamespaceMode", "containmentProfileDigest", "mounts"], "", spans)?
     val version = container_record_integer_v1(fields, "version", spans)?
-    if version != 1 and version != 2 and version != 3 and version != 4:
+    if version != 1 and version != 2 and version != 3 and version != 4 and version != 5:
         return Err(reject("version", "version", "unsupported retained request version", spans))
     var terminal_mode = "none"
-    if version == 2 or version == 3 or version == 4:
+    if version >= 2:
         terminal_mode = container_record_text_v1(fields, "terminalMode", spans)?
-        if terminal_mode != "stdin" and terminal_mode != "tty" and not ((version == 3 or version == 4) and terminal_mode == "none"):
+        if terminal_mode != "stdin" and terminal_mode != "tty" and not (version >= 3 and terminal_mode == "none"):
             return Err(reject("terminal", "terminalMode", "unsupported interactive terminal mode", spans))
     elif fields.contains_key("terminalMode"):
         return Err(reject("version", "terminalMode", "terminal mode requires version 2", spans))
     var user_uid: i64 = -1
     var user_gid: i64 = -1
     var user_namespace_mode = ""
-    if version == 3 or version == 4:
+    if version >= 3:
         user_uid = container_record_integer_v1(fields, "userUid", spans)?
         user_gid = container_record_integer_v1(fields, "userGid", spans)?
         user_namespace_mode = container_record_text_v1(fields, "userNamespaceMode", spans)?
@@ -86,12 +100,28 @@ fn request_fields_decode_v1(source: text) -> Result<LinuxOciRequestV1, Rejection
     elif fields.contains_key("userUid") or fields.contains_key("userGid") or fields.contains_key("userNamespaceMode"):
         return Err(reject("version", "userUid", "user selection requires version 3", spans))
     var containment_profile_digest = ""
-    if version == 4:
+    if version >= 4:
         containment_profile_digest = container_record_text_v1(fields, "containmentProfileDigest", spans)?
-        if containment_profile_digest == "":
+        if version == 4 and containment_profile_digest == "":
             return Err(reject("containment", "containmentProfileDigest", "explicit containment digest required", spans))
     elif fields.contains_key("containmentProfileDigest"):
         return Err(reject("version", "containmentProfileDigest", "containment selection requires version 4", spans))
+    var mounts: [ContainerMountProjectionV2] = []
+    if version == 5:
+        val items = as_array(require(fields, "mounts", "", spans)?, "mounts", spans)?
+        if items.len() == 0 or items.len() > 64:
+            return Err(reject("limit", "mounts", "version 5 requires 1..64 mounts", spans))
+        for item in items:
+            val mount = as_dict(item, "mounts", spans)?
+            only_known(mount, ["hostRoot", "guestRoot", "readOnly"], "mounts", spans)?
+            val host = container_record_string_v1(require(mount, "hostRoot", "mounts", spans)?, "mounts.hostRoot", spans)?
+            val guest = container_record_string_v1(require(mount, "guestRoot", "mounts", spans)?, "mounts.guestRoot", spans)?
+            val read_only = match require(mount, "readOnly", "mounts", spans)?:
+                case SdnValue.Bool(value): value
+                case _: return Err(reject("type", "mounts.readOnly", "expected boolean", spans))
+            mounts.push(ContainerMountProjectionV2(host_root: host, guest_root: guest, read_only: read_only))
+    elif fields.contains_key("mounts"):
+        return Err(reject("version", "mounts", "mounts require version 5", spans))
     if container_record_text_v1(fields, "kind", spans)? != "linux-oci-retained-request":
         return Err(reject("kind", "kind", "unsupported retained request kind", spans))
     val replace_entrypoint = match require(fields, "replaceEntrypoint", "", spans)?:
@@ -126,7 +156,7 @@ fn request_fields_decode_v1(source: text) -> Result<LinuxOciRequestV1, Rejection
         replace_entrypoint: replace_entrypoint, environment: environment,
         working_directory: container_record_text_v1(fields, "workingDirectory", spans)?, terminal_mode: terminal_mode,
         user_uid: user_uid, user_gid: user_gid, user_namespace_mode: user_namespace_mode,
-        containment_profile_digest: containment_profile_digest)
+        containment_profile_digest: containment_profile_digest, mounts: mounts)
     val digest = match linux_oci_request_digest_v1(request):
         case Ok(value): value
         case Err(reason): return Err(reject("request", "", reason, spans))
