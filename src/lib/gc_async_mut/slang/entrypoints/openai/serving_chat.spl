@@ -12,11 +12,13 @@
 # It now has one. A GGUF model, with the ggml backend built, is served by the
 # engine in std.gc_async_mut.slang.engine.llm_engine: slang owns the decode
 # loop, the residency decision and the memory budget; ggml supplies the
-# kernels. Every OTHER case still refuses:
+# kernels. A safetensors Llama the pure runner supports is served by the pure
+# runner; the engine's select_runner (engine/runner_dispatch.spl) picks, and
+# SLANG_RUNNER=pure|ggml forces. Every OTHER case still refuses:
 #   - a slang pack     -> 503, byte-for-byte the SAME announced-stub payload it
 #                        returned before this file gained an engine at all,
 #                        with the SAME stub payload it returned before
-#   - safetensors      -> 503, the ggml backend reads GGUF only
+#   - other safetensors -> 503, no runner supports it (reason names why)
 #   - no backend built -> 503, naming the library that is absent
 #   - will not fit     -> 503, naming the arithmetic that refused it
 
@@ -24,6 +26,7 @@ use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, ChatMessage
 use std.gc_async_mut.slang.entrypoints.openai.serving_models.{SlangModelEntry, discover_models, find_model}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel, scan_model_root}
 use std.gc_async_mut.slang.engine.llm_engine.{engine_backend_available, engine_complete_chat, engine_complete_chat_media, engine_media_caps_for, engine_lib_path}
+use std.gc_async_mut.slang.engine.runner_dispatch.{RunnerKind, select_runner}
 use std.gc_async_mut.slang.model_executor.backend.{MediaBlob}
 use std.common.base_encoding.base64.{base64_decode_bytes}
 use std.gc_async_mut.slang.model_executor.backend.{chat_frame, SLANG_MEDIA_MARKER}
@@ -164,6 +167,15 @@ fn serve_media_chat(model_root: text, model_id: text, framed: text, messages: [C
             engine_refusal_response(model_id, reason)
         Ok(content):
             openai_chat_completion_response(model_id, content, 0, 0)
+# The same conversation as plain text, for a runner with no chat template (the
+# pure runner on a base model such as stories15M): the non-empty message
+# contents in order, newline-separated, with no role names or special tokens.
+fn chat_plain_prompt_from_body(body: text) -> text:
+    var parts: [text] = []
+    for message in chat_messages_from_body(body):
+        if message.content.trim() != "":
+            parts.push(message.content)
+    parts.join("\n")
 
 fn serve_chat_completions(model_root: text, body: text) -> ApiResponse:
     match parse_chat_request(body):
@@ -195,13 +207,18 @@ fn serve_chat_completions(model_root: text, body: text) -> ApiResponse:
                     return refusal
                 Ok(_): ()
             if media_part_count(messages) > 0:
+                match select_runner(found!):
+                    Ok(RunnerKind.Pure):
+                        return _unsupported_modality("model '" + request.model + "' is served by the pure runner, which is text only; the request carries image/audio part(s) and slang will not route them to another runner or answer as if they were absent")
+                    _: ()
+            if media_part_count(messages) > 0:
                 return serve_media_chat(model_root, request.model, framed, messages, request.max_tokens)
-            match engine_complete_chat(model_root, request.model, framed, request.max_tokens):
+            match engine_complete_chat(model_root, request.model, framed, chat_plain_prompt_from_body(body), request.max_tokens):
                 Err(reason):
                     engine_refusal_response(request.model, reason)
-                Ok(content):
-                    openai_chat_completion_response(request.model, content, 0, 0)
+                Ok(done):
+                    openai_chat_completion_response(request.model, done.content, done.prompt_tokens, done.completion_tokens)
 
 export slang_implemented_phase, slang_missing_inference_phases
 export model_not_runnable_response, model_not_found_response, engine_refusal_response
-export serve_chat_completions, chat_frames_from_body, chat_frames_from_messages, media_refusal
+export serve_chat_completions, chat_frames_from_body, chat_frames_from_messages, chat_plain_prompt_from_body, media_refusal

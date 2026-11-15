@@ -1,7 +1,7 @@
 # Feature expert: slang local inference
 
 **Feature:** running a local LLM through slang, and reaching it from caret.
-**Last updated:** 2026-09-04
+**Last updated:** 2026-11-15
 
 ## The one-sentence shape
 
@@ -59,7 +59,7 @@ Caret side: providers `slang` (HTTP) and `slang_local` (in-process) in
 
 ## Current limits
 
-- GGUF only. safetensors (BF16, NVFP4) is recognised and refused.
+- ggml lane: GGUF only. Safetensors Llama (MHA) is served by the pure runner (see Runner dispatch); other safetensors (BF16, NVFP4, GQA) is recognised and refused.
 - One model, one context, greedy sampling, one request at a time.
 - No continuous batching (master plan A5). Prefix caching DOES exist: the
   serial exact-prefix snapshot cache (S1-S3, shim `slang_prefix_*`) is on by
@@ -76,6 +76,37 @@ Caret side: providers `slang` (HTTP) and `slang_local` (in-process) in
 - The HTTP path is unreachable on the bootstrap seed; see
   `doc/08_tracking/bug/seed_jit_cannot_resolve_text_dot_from_char_code_2026-09-04.md`
   and `doc/08_tracking/bug/seed_http_server_handle_connection_dispatch_2026-09-04.md`.
+
+## Runner dispatch: pure runner or llama.cpp wrapper (2026-11-15)
+
+```
+slang -> pure LLM runner    src/lib/gc_async_mut/slang/model_executor/pure/   (safetensors Llama)
+slang -> llama.cpp wrapper  model_executor/backend.spl + slang_ggml shim       (GGUF)
+```
+
+- **Dispatch point:** `engine_complete_chat` in `engine/llm_engine.spl` (and
+  `engine_ensure_loaded` for preload) calls `select_runner`
+  (`engine/runner_dispatch.spl`). GGUF -> `RunnerKind.Ggml`; safetensors whose
+  `config.json` is `LlamaForCausalLM` with MHA (no GQA) and a single
+  `model.safetensors` + `tokenizer.json` -> `RunnerKind.Pure`. `SLANG_RUNNER=pure|ggml`
+  forces; an impossible forced choice (pure on GGUF, ggml on safetensors) or any
+  other value is an explicit 503 `model_not_runnable`, never a fallback.
+- **Pure lane** (`engine/pure_lane.spl`): `llm_engine` owns one `PureLane`
+  (model + tokenizer + ONE `KvSession`) across requests, so a request sharing a
+  token prefix re-uses cached K/V rows. `engine_pure_stats()` exposes the last
+  request's reused / evaluated positions; `engine_last_runner()` says which
+  runner served the last chat. Loading either lane unloads the other.
+- **No chat template on the pure lane:** the prompt is the non-empty message
+  contents joined by newlines (`chat_plain_prompt_from_body`); a single message
+  is passed as-is. Greedy only; generation is bounded by the model's context.
+- **Usage counts are real** for both runners (`EngineChatResult.prompt_tokens` /
+  `completion_tokens`; the ggml count comes from `BackendGeneration.prompt_tokens`).
+- **GPU seam:** a GPU variant of the pure runner plugs in at `RunnerKind.Pure`
+  / `pure_lane_load`; `pure_runner_unsupported_reason` is its load gate.
+- Evidence: `test/03_system/lib/slang/feature/slang_runner_dispatch_live_spec.spl`
+  (`SLANG_LIVE=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi/slang_ggml.dll`).
+  The seed interpreter runs the pure lane at ~0.1 token/s; set
+  `SIMPLE_TIMEOUT_SECONDS=3600`.
 
 ## Upgrade path to pure Simple
 

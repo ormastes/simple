@@ -1,0 +1,147 @@
+# @cover src/lib/gc_async_mut/slang/engine/runner_dispatch.spl 80%
+# @cover src/lib/gc_async_mut/slang/engine/pure_lane.spl 80%
+# @cover src/lib/gc_async_mut/slang/engine/llm_engine.spl 60%
+# @cover src/lib/gc_async_mut/slang/entrypoints/openai/serving_chat.spl 80%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# design: doc/00_llm_process/feature_expert/slang_local_inference/skill.md
+
+"""
+## Purpose and audience
+Purpose: prove that slang serves chat completions through EITHER runner, chosen
+per model, through the public OpenAI entrypoint (`slang_api_dispatch`, the same
+function `src/app/slang_server/main.spl` binds to HTTP) and not through the
+pure library directly.
+
+    slang -> pure LLM runner   (safetensors Llama: stories15M)
+    slang -> llama.cpp wrapper (GGUF: Qwen2.5-1.5B)
+
+Audience: maintainers of the engine's runner dispatch and the OpenAI entrypoints.
+
+## What is checked
+- stories15M is served by the pure runner and "Once upon a time" continues
+  ", there was a little girl named Lily"; usage counts are real (> 0);
+- a second request sharing the prefix re-uses the resident KvSession and
+  evaluates fewer positions than a fresh session would;
+- the Qwen2.5-1.5B GGUF is still served by the llama.cpp lane, with real usage;
+- forcing SLANG_RUNNER=pure on the GGUF model is an explicit 503 error naming
+  the forced choice, not a fallback to the ggml lane; forcing ggml on the
+  safetensors model likewise; an unknown SLANG_RUNNER value is an error.
+Each request prints `SLANG_DISPATCH runner=<...>`.
+
+## Compatibility and limitations
+Runs only with SLANG_LIVE=1 and SLANG_MODEL_ROOT naming a root that holds
+`llama2c-stories15M` (and, for the ggml scenario, the Qwen GGUF plus a built
+shim named by SLANG_GGML_LIB). Missing prerequisites skip with the reason. The
+seed interpreter does about 0.1 token/s on the pure runner, so budgets are tiny.
+The pure runner has no chat template: the prompt is the message text.
+"""
+
+use std.spec.{describe, it, expect, step, skip, fail}
+use std.io_runtime.{env_get, env_set, is_dir}
+use std.gc_async_mut.slang.entrypoints.openai.api_server.{slang_api_dispatch}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{json_string_field, json_int_field}
+use std.gc_async_mut.slang.engine.llm_engine.{engine_last_runner, engine_pure_stats, engine_backend_available, engine_set_n_ctx_text, engine_unload}
+
+val PURE_MODEL = "llama2c-stories15M"
+val GGML_MODEL = "Qwen2.5-1.5B-Instruct-Q4_K_M"
+
+fn _root() -> text:
+    env_get("SLANG_MODEL_ROOT") ?? ""
+
+fn _gate() -> text:
+    if (env_get("SLANG_LIVE") ?? "") != "1":
+        return "SLANG_LIVE=1 not set"
+    if _root() == "" or not is_dir(_root() + "/" + PURE_MODEL):
+        return "'" + PURE_MODEL + "' not under SLANG_MODEL_ROOT '" + _root() + "'"
+    ""
+
+fn _ggml_gate() -> text:
+    val g = _gate()
+    if g != "":
+        return g
+    if not is_dir(_root() + "/" + GGML_MODEL):
+        return "'" + GGML_MODEL + "' not under SLANG_MODEL_ROOT"
+    if not engine_backend_available():
+        return "ggml shim not found (SLANG_GGML_LIB=build/sffi/slang_ggml.dll)"
+    ""
+
+fn _chat(model: text, prompt: text, max_tokens: i64) -> (i64, text):
+    val body = "{\"model\":\"" + model + "\",\"max_tokens\":" + max_tokens.to_text() + ",\"messages\":[{\"role\":\"user\",\"content\":\"" + prompt + "\"}]}"
+    val r = slang_api_dispatch("POST", "/v1/chat/completions", body, _root())
+    print "SLANG_DISPATCH model=" + model + " runner=" + engine_last_runner() + " status=" + r.status.to_text() + " body=" + r.body
+    (r.status as i64, r.body)
+
+describe "slang dispatches a model to the pure runner or the llama.cpp wrapper":
+
+    it "serves stories15M through the pure runner with real usage":
+        val gate = _gate()
+        if gate != "":
+            skip("serves stories15M through the pure runner with real usage", gate)
+        else:
+            step("POST a completion for the safetensors model through slang_api_dispatch")
+            val r = _chat(PURE_MODEL, "Once upon a time", 10)
+            expect(r.0).to_equal(200)
+            expect(engine_last_runner()).to_equal("pure")
+            val content = json_string_field(r.1, "content")
+            expect(content.starts_with(", there was a little girl named Lily")).to_equal(true)
+            expect(json_int_field(r.1, "prompt_tokens", -1)).to_equal(5)
+            expect(json_int_field(r.1, "completion_tokens", -1) > 0).to_equal(true)
+
+    it "re-uses the resident KvSession for a second request sharing the prefix":
+        val gate = _gate()
+        if gate != "":
+            skip("re-uses the resident KvSession for a second request sharing the prefix", gate)
+        else:
+            step("Second request extends the first prompt by a few generated words")
+            val r = _chat(PURE_MODEL, "Once upon a time, there was a little", 2)
+            expect(r.0).to_equal(200)
+            expect(engine_last_runner()).to_equal("pure")
+            val stats = engine_pure_stats()
+            expect(stats != nil).to_equal(true)
+            val s = stats!
+            val prompt_tokens = json_int_field(r.1, "prompt_tokens", -1)
+            val completion = json_int_field(r.1, "completion_tokens", -1)
+            # a fresh session would evaluate every prompt position plus all but the last generated token
+            val fresh_cost = prompt_tokens + completion - 1
+            print "SLANG_DISPATCH reused=" + s.last_reused_positions.to_text() + " evaluated=" + s.last_evaluated_positions.to_text() + " fresh_cost=" + fresh_cost.to_text()
+            expect(s.last_reused_positions > 5).to_equal(true)
+            expect(s.last_evaluated_positions < fresh_cost).to_equal(true)
+            expect(s.requests).to_equal(2)
+
+    it "still serves the Qwen GGUF through the llama.cpp wrapper":
+        val gate = _ggml_gate()
+        if gate != "":
+            skip("still serves the Qwen GGUF through the llama.cpp wrapper", gate)
+        else:
+            expect(engine_set_n_ctx_text("2048")).to_equal(true)
+            val r = _chat(GGML_MODEL, "Say exactly: hello", 8)
+            expect(r.0).to_equal(200)
+            expect(engine_last_runner()).to_equal("ggml")
+            expect(json_int_field(r.1, "prompt_tokens", -1) > 0).to_equal(true)
+            expect(json_int_field(r.1, "completion_tokens", -1) > 0).to_equal(true)
+
+    it "refuses an impossible forced runner explicitly instead of falling back":
+        val gate = _gate()
+        if gate != "":
+            skip("refuses an impossible forced runner explicitly instead of falling back", gate)
+        elif not is_dir(_root() + "/" + GGML_MODEL):
+            skip("refuses an impossible forced runner explicitly instead of falling back", "'" + GGML_MODEL + "' not under SLANG_MODEL_ROOT")
+        else:
+            step("SLANG_RUNNER=pure on the GGUF model is a 503 naming the forced choice")
+            val _a = env_set("SLANG_RUNNER", "pure")
+            val gguf = _chat(GGML_MODEL, "hello", 4)
+            expect(gguf.0).to_equal(503)
+            expect(json_string_field(gguf.1, "message").contains("SLANG_RUNNER=pure was forced")).to_equal(true)
+            expect(gguf.1.contains("\"choices\"")).to_equal(false)
+            step("SLANG_RUNNER=ggml on the safetensors model is a 503 too")
+            val _b = env_set("SLANG_RUNNER", "ggml")
+            val st = _chat(PURE_MODEL, "hello", 4)
+            expect(st.0).to_equal(503)
+            expect(json_string_field(st.1, "message").contains("SLANG_RUNNER=ggml was forced")).to_equal(true)
+            step("An unknown SLANG_RUNNER value is an error")
+            val _c = env_set("SLANG_RUNNER", "tpu")
+            val bad = _chat(PURE_MODEL, "hello", 4)
+            expect(bad.0).to_equal(503)
+            expect(json_string_field(bad.1, "message").contains("not a runner")).to_equal(true)
+            val _d = env_set("SLANG_RUNNER", "")
+            val _u = engine_unload()
