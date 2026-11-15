@@ -136,6 +136,13 @@ describe "trait-object conversion at implicit tails (bootstrap HIR)":
         val l = lower_bootstrap(DECLS + "fn some_tag(k: i64) -> Tag?:\n    Some(Alpha(k: k))\n")
         expect(l.errors).to_equal("")
         expect(mir_of(l, "some_tag")).to_contain(CAST)
+        # The converted, re-wrapped Some must be what is returned: the
+        # implicit tail lowers exactly like `return Some(..)`. Returning the
+        # original handle hands the caller a raw struct payload (native
+        # SIGSEGV at 0x10 reading the missing table).
+        val ex = lower_bootstrap(DECLS + "fn some_tag(k: i64) -> Tag?:\n    return Some(Alpha(k: k))\n")
+        # Blocks only: `return` adds one unused Unit temp to the locals.
+        expect(mir_of(l, "some_tag").split("\"blocks\":")[1]).to_equal(mir_of(ex, "some_tag").split("\"blocks\":")[1])
 
     it "refuses a disallowed instantiation reached through an implicit tail":
         val src = "type Flag = bool\n\n" + DECLS + "class RCell:\n    cell: Flag?\n\nimpl Reader<Flag> for RCell:\n    fn read(node: i64) -> Flag?:\n        self.cell\n\nfn make() -> Reader<Flag>:\n    RCell(cell: Some(false))\n"
