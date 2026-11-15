@@ -88,7 +88,12 @@ use compiler.driver.driver_build.go_to_end_trial_link_v1.{go_to_end_trial_from_i
     go_to_end_trial_inputs_from_ledger_v1, go_to_end_trial_link_options_v1}
 use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_outcome_v1,
     native_mir_shard_outcome_after_hir_errors_v1, native_mir_shard_hir_compile_errors_recorded_v1,
-    native_mir_shard_hir_compile_errors_path_v1}
+    native_mir_shard_hir_compile_errors_path_v1, native_mir_shard_run_key_v1,
+    native_mir_shard_run_key_mismatch_v1, native_mir_shard_resume_adopt_v1, native_mir_shard_claim_cap_v1,
+    native_mir_shard_run_key_selection_v1, native_mir_shard_resume_full_pass_line_v1}
+use compiler.driver.driver_build.incremental.{native_build_compiler_identity, native_build_cache_lane}
+use compiler.driver.cache.native_build_environment_identity.{native_build_module_environment_fingerprint_v1}
+use compiler.core.cfg_platform.{cfg_guard_context_identity_v1}
 use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_V1, NATIVE_PER_FILE_PIPELINE_DEFAULT_V1, native_file_worker_pool_request_v1,
     NATIVE_FILE_WORKER_QUEUE_ENV_V1, NATIVE_FILE_WORKER_HIR_QUEUE_ENV_V1, NATIVE_FILE_WORKER_OWNER_ENV_V1,
     NativeFileWorkerReceiptV1, native_bootstrap_stage3_per_file_selected_v1, native_file_worker_spec_from_args_v1,
@@ -1151,7 +1156,7 @@ pub fn native_build_path_parent_v1(path: text) -> text:
 
 fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         base: [text], queue_dir: text, args: [text], count: i64, parallel: i64,
-        simple_bin: text, timeout_ms: i64) -> LedgerShardRunV1:
+        simple_bin: text, timeout_ms: i64, spawn_limit: i64 = 0) -> LedgerShardRunV1:
     val old_queue = native_build_env_saved_v1(queue_env)
     val old_owner = native_build_env_saved_v1(owner_env)
     if not env_set(queue_env, queue_dir):
@@ -1218,7 +1223,11 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     val commit_reserve_kib: i64 = build_memory_reserve_kib()
     var pending: [i64] = []
     var i: i64 = 0
-    while i < count:
+    # A resumed MIR ledger (run_mir_shards) needs only enough owners for its
+    # unclaimed rows; owners keep the "<i>/<count>" spec, so the claim cap
+    # (the per-worker memory bound) is unchanged.
+    val spawn = if spawn_limit > 0 and spawn_limit < count: spawn_limit else: count
+    while i < spawn:
         pending = pending.push(i)
         i = i + 1
     var generation: i64 = 0
@@ -1556,6 +1565,56 @@ fn native_build_mir_shard_count(parallel: i64) -> i64:
     val configured = (env_get("SIMPLE_MIR_SHARD_COUNT") ?? "").to_i64() ?? 0
     if configured > 0: configured else: parallel
 
+# Claim resume (driver_build/native_mir_shard.spl): record this launch's run
+# key in `queue_dir`; when the previous launch over the same ledger root has an
+# equal key, adopt its verified PASS rows before any worker starts. Returns
+# ("link", 0) when every row was adopted, ("fail", 0) on a ledger write
+# failure, else ("run", owners to spawn; 0 = all `count`). Any key mismatch is
+# a full pass naming the first differing component.
+fn run_mir_shards_resume_v1(args: [text], queue_dir: text, count: i64,
+        fork_workers: i64) -> (text, i64):
+    val (root, _selection) = shard_ledger_root_v1(args)
+    val latest = "{root}/mir-run-latest"
+    val prior = if file_exists(latest): file_read(latest).trim() else: ""
+    val compiler = native_build_compiler_identity()
+    val environment = native_build_module_environment_fingerprint_v1()
+    if compiler.starts_with("uncacheable"):
+        print "[mir-shard] resume: full pass; compiler identity is uncacheable ({compiler})"
+        return ("run", 0)
+    if not environment.valid:
+        print "[mir-shard] resume: full pass; environment fingerprint unavailable ({environment.reason})"
+        return ("run", 0)
+    val key = native_mir_shard_run_key_v1(compiler, environment.digest,
+        cfg_guard_context_identity_v1(), native_build_cache_lane(), args, count, fork_workers,
+        native_mir_shard_run_key_selection_v1(env_get("SIMPLE_ICE_SKIP_MODULES") ?? "",
+            env_get("SIMPLE_NATIVE_GO_TO_END") ?? "", env_get("SIMPLE_MIR_SHARD_ONLY_PATHS") ?? ""))
+    if not file_atomic_write("{queue_dir}/run-key", key):
+        print "[mir-shard] resume: full pass; run key not recorded"
+        return ("run", 0)
+    val prior_key = if prior != "" and file_exists("{prior}/run-key"): file_read("{prior}/run-key") else: ""
+    var mismatch = "no-prior-ledger"
+    if prior != "" and dir_exists(prior):
+        mismatch = native_mir_shard_run_key_mismatch_v1(prior_key, key)
+    # The pointer moves only once this ledger holds every row it will adopt,
+    # so a launch killed while seeding leaves the previous ledger in place.
+    if mismatch != "":
+        val _pointed = file_atomic_write(latest, queue_dir)
+        print native_mir_shard_resume_full_pass_line_v1(mismatch, prior)
+        return ("run", 0)
+    val resumed = native_mir_shard_resume_adopt_v1(prior, queue_dir)
+    if resumed.reason != "":
+        eprint "[mir-shard] resume: ledger seeding failed ({resumed.reason}); ledger={queue_dir}"
+        return ("fail", 0)
+    val _pointed = file_atomic_write(latest, queue_dir)
+    print "[mir-shard] resume: adopted={resumed.adopted} requeued={resumed.requeued} prior={prior}"
+    val unclaimed = hir_shard_recovery_unclaimed_count(queue_dir)
+    if unclaimed == 0:
+        return ("link", 0)
+    val rows = file_read("{queue_dir}/inventory").split("\n").len() - 1
+    val cap = native_mir_shard_claim_cap_v1("0/{count}", rows)
+    val owners = if cap > 0: (unclaimed + cap - 1) / cap else: count
+    ("run", owners)
+
 # Returns (outcome, ledger): outcome is native_mir_shard_outcome_v1's
 # "link" (ledger = the sealed directory), "fail" or "fallback" (ledger "").
 fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64) -> (text, text):
@@ -1567,8 +1626,6 @@ fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64
         eprint "[mir-shard] cannot establish invocation ledger"
         # No worker ran: nothing claimed, nothing left running.
         return (native_mir_shard_outcome_v1(1, 0, 0, true), "")
-    val old_export_dir = native_build_env_saved_v1("SIMPLE_MIR_SHARD_EXPORT_DIR")
-    val export_dir = run_mir_shard_export_summaries(base, queue_dir, simple_bin, timeout_ms)
     var count = native_build_mir_shard_count(parallel)
     # EXPERIMENTAL SIMPLE_MIR_FORK_WORKERS=N: spawn ONE root shard worker; it
     # forks N copy-on-write MIR children after HIR lowering
@@ -1580,13 +1637,21 @@ fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64
         count = 1
         run_parallel = 1
         print "[mir-shard] fork_workers={fork_workers} (experimental): one root worker"
+    val (resume_code, spawn_limit) = run_mir_shards_resume_v1(args, queue_dir, count, fork_workers)
+    if resume_code == "fail":
+        return ("fail", "")
+    if resume_code == "link":
+        print "[mir-shard] resume: every row adopted; no MIR worker spawned ledger={queue_dir}"
+        return ("link", queue_dir)
+    val old_export_dir = native_build_env_saved_v1("SIMPLE_MIR_SHARD_EXPORT_DIR")
+    val export_dir = run_mir_shard_export_summaries(base, queue_dir, simple_bin, timeout_ms)
     print "[mir-shard] shards={count} parallel={run_parallel} ledger={queue_dir}"
     if not env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", export_dir):
         eprint "[mir-shard] export directory environment could not be installed"
         return ("fail", "")
     val run = run_ledger_shards("mir-shard", "--mir-shard", "SIMPLE_MIR_SHARD_QUEUE",
         "SIMPLE_MIR_SHARD_OWNER", base, queue_dir, args, count, run_parallel,
-        simple_bin, timeout_ms)
+        simple_bin, timeout_ms, spawn_limit)
     native_build_env_restore_v1("SIMPLE_MIR_SHARD_EXPORT_DIR", old_export_dir)
     val hir_compile_errors = native_mir_shard_hir_compile_errors_recorded_v1(queue_dir)
     val outcome = native_mir_shard_outcome_after_hir_errors_v1(
