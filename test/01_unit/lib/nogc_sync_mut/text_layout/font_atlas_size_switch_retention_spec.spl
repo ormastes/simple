@@ -1,0 +1,107 @@
+"""
+Purpose: Pin that changing the text SIZE does not wipe the shared glyph atlas.
+
+`FontRenderer._activate_render_config` reset the whole atlas whenever the
+render-config identity changed, and that identity carries `size=`. Atlas cells
+are already keyed by (face, generation, glyph, codepoint, size), so a 16 px and
+a 13 px run can share one atlas -- but every size change threw it away. On the
+900x760 forms-media catalog page (Liberation Sans 16/13, Bold 24, DejaVu Sans
+Mono) that was the source of the Vulkan lane's 12 full 1,048,576-pixel atlas
+repacks (`font_atlas_pack_u32_to_u8`): each wipe also re-keyed the owner, so its
+parked atlas could no longer be restored either.
+Audience: text-layout / Engine2D font maintainers.
+"""
+
+"""
+Traceability: REQ-TEXT-LAYOUT-ATLAS-SIZE-RETENTION-001 — a size switch keeps the atlas cells already rasterised.
+"""
+use std.spec.*
+use std.nogc_sync_mut.sffi.io.{file_exists}
+use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer}
+use std.nogc_sync_mut.text_layout.font_types.{font_render_config_identity_sizeless, font_render_batch_atlas_owner_identity}
+
+val SANS = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val BLACK: u32 = 0xff000000u32
+
+fn no_face(row: text) -> bool:
+    if file_exists(SANS):
+        return false
+    print("[skip] {row}: no Liberation Sans at {SANS}; this row was not exercised")
+    true
+
+describe "FontRenderer atlas across a text-size switch":
+    it "keeps the 16 px cells when a 13 px run is drawn in between":
+        if no_face("size-switch-retention"):
+            return
+        var r = FontRenderer.new()
+        expect(r.try_load_runtime_ttf(SANS)).to_equal(true)
+
+        step("16 px run inserts its glyphs")
+        val first = r.prepare_text_with_advances("Ab", r.measure_text_advances("Ab", 16), BLACK, 16)
+        expect(first.valid).to_equal(true)
+        expect(first.quads.len()).to_equal(2)
+        expect(first.dirty_rects.len()).to_equal(2)
+        val seq_after_first = r.staged_atlas_owner_sequence
+
+        step("13 px run of other glyphs inserts only its own cells")
+        val second = r.prepare_text_with_advances("cd", r.measure_text_advances("cd", 13), BLACK, 13)
+        expect(second.valid).to_equal(true)
+        expect(second.dirty_rects.len()).to_equal(2)
+        expect(r.staged_atlas_owner_sequence).to_equal(seq_after_first + 1)
+
+        step("back at 16 px: every glyph is already in the atlas, at the same cell")
+        val third = r.prepare_text_with_advances("Ab", r.measure_text_advances("Ab", 16), BLACK, 16)
+        expect(third.valid).to_equal(true)
+        expect(third.quads.len()).to_equal(2)
+        expect(third.dirty_rects.len()).to_equal(0)
+        expect(third.quads[0].atlas_x).to_equal(first.quads[0].atlas_x)
+        expect(third.quads[0].atlas_y).to_equal(first.quads[0].atlas_y)
+        expect(third.quads[1].atlas_x).to_equal(first.quads[1].atlas_x)
+        expect(third.quads[1].atlas_y).to_equal(first.quads[1].atlas_y)
+        step("no new mutation, so the owner sequence is still contiguous for a mirror")
+        expect(r.staged_atlas_owner_sequence).to_equal(seq_after_first + 1)
+        step("a GPU mirror keyed on the atlas owner sees ONE owner across both sizes")
+        expect(first.render_config_identity == second.render_config_identity).to_equal(false)
+        expect(font_render_batch_atlas_owner_identity(second)).to_equal(font_render_batch_atlas_owner_identity(first))
+        expect(font_render_batch_atlas_owner_identity(third)).to_equal(font_render_batch_atlas_owner_identity(first))
+
+    it "still paints the same coverage for the reused cells":
+        if no_face("size-switch-coverage"):
+            return
+        var r = FontRenderer.new()
+        expect(r.try_load_runtime_ttf(SANS)).to_equal(true)
+        val first = r.prepare_text_with_advances("A", r.measure_text_advances("A", 16), BLACK, 16)
+        val q = first.quads[0]
+        var before: [u32] = []
+        var row = 0
+        while row < q.height:
+            var col = 0
+            while col < q.width:
+                before.push(first.atlas_pixels[(q.atlas_y + row) * first.atlas_width + q.atlas_x + col])
+                col = col + 1
+            row = row + 1
+        r.prepare_text_with_advances("x", r.measure_text_advances("x", 13), BLACK, 13)
+        val again = r.prepare_text_with_advances("A", r.measure_text_advances("A", 16), BLACK, 16)
+        val q2 = again.quads[0]
+        var after: [u32] = []
+        row = 0
+        while row < q2.height:
+            var col = 0
+            while col < q2.width:
+                after.push(again.atlas_pixels[(q2.atlas_y + row) * again.atlas_width + q2.atlas_x + col])
+                col = col + 1
+            row = row + 1
+        var ink = 0
+        for p in before:
+            if ((p >> 24) & 0xffu32) > 0u32:
+                ink = ink + 1
+        expect(ink > 0).to_equal(true)
+        expect(after).to_equal(before)
+
+describe "font_render_config_identity_sizeless":
+    it "masks only the size field of a render-config identity":
+        expect(font_render_config_identity_sizeless("font-config-v1|script=4:auto|size=16|weight=6:normal")).to_equal("font-config-v1|script=4:auto|size=*|weight=6:normal")
+        expect(font_render_config_identity_sizeless("font-config-v1|script=4:auto|size=13|weight=6:normal")).to_equal("font-config-v1|script=4:auto|size=*|weight=6:normal")
+        expect(font_render_config_identity_sizeless("a|weight=4:bold|size=24")).to_equal("a|weight=4:bold|size=*")
+        expect(font_render_config_identity_sizeless("a|weight=4:bold")).to_equal("a|weight=4:bold")
+        expect(font_render_config_identity_sizeless("")).to_equal("")

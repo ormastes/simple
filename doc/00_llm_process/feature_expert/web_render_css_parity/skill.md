@@ -1757,9 +1757,15 @@ never cache an answer computed while exhausted) —
   RSS 4.5 GB: the interpreted page pipeline dominates, not the device. Run
   with `--baseline <nonexistent>` so it is compared, not judged against the
   llvmpipe file. The RenderDoc layer still cannot load on this driver.
-- **Perf note (not fixed):** on llvmpipe at 900x760 `font_atlas_pack_u32_to_u8`
-  is 54 s of forms-media's 76 s render (byte-lane atlas repack; the typed
-  `SIMPLE_VK_FONT_UPLOAD=u32` lane is opt-in).
+- **Perf note (superseded 2026-11-15):** the "54 s of 76 s" `font_atlas_pack_u32_to_u8`
+  figure is stale. On tree `7b88ee7874a` with the same seed, forms-media renders
+  in 13-17 s and the pack was 0.8-1.5 s (21 packs, ~60 ms each); the drop came
+  from upstream source, not from the binary. 12 of those packs were full
+  repacks caused by the atlas being wiped on every text-size change, fixed in
+  `doc/08_tracking/bug/font_atlas_wiped_on_size_change_full_vulkan_repacks_2026-11-15.md`
+  (12 -> 3 full packs). The opt-in `SIMPLE_VK_FONT_UPLOAD=u32` lane renders a
+  DIFFERENT pixel sum (`2697956136642868` vs `2697697746427296`) and must not
+  become the default until that is explained.
 - Gradient paint cost, same seed: 300 x 900x100 120deg boxes 1.02 s -> 0.39 s
   wall (startup 0.24 s), RSS +4 MB; 6000 12x6 boxes 0.25 s -> 0.25 s, +5 MB
   (boxes under 1025 px skip the table; a table per box cost +87 MB).
