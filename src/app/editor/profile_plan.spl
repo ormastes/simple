@@ -8,7 +8,7 @@
 
 use app.editor.editor_controller.{EditorController}
 use app.llm_caret.workbench.key_resolver.{KeyFocus}
-use app.llm_caret.workbench.session_source.{live_focus, live_selected_provider}
+use app.llm_caret.workbench.session_source.{publish_live_focus, live_selected_provider}
 
 struct ProfilePlan:
     ok: bool
@@ -48,15 +48,33 @@ fn caret_context_keys(focus: KeyFocus, provider: text) -> [text]:
 fn profile_sync_context_with(ctrl: EditorController, profile: text, focus: KeyFocus, provider: text):
     if profile != "caret":
         return
-    ctrl.extension_host.set_context_keys(caret_context_keys(focus, provider))
+    val keys = caret_context_keys(focus, provider)
+    if ctrl.extension_host.context_keys == keys:
+        return
+    ctrl.extension_host.set_context_keys(keys)
+
+# Focused pane kind of the IDE shell: an open palette is an overlay, the
+# terminal panel is a raw CLI surface, everything else is a native view.
+fn shell_key_focus(ctrl: EditorController) -> KeyFocus:
+    if ctrl.palette_state != nil:
+        return KeyFocus.Overlay
+    if ctrl.focus_panel == "terminal":
+        return KeyFocus.TerminalSurface
+    KeyFocus.NativeView
 
 # Production caller of ExtensionHost.set_context_keys: shells call this each
 # frame so keybinding/view `when` clauses see the live focus and session kind.
+# The shell's real focus is published first so live_focus() is accurate in an
+# `ide --profile caret` process (no workbench key loop runs there).
 fn profile_sync_context(ctrl: EditorController, profile: text):
-    profile_sync_context_with(ctrl, profile, live_focus(), live_selected_provider())
+    if profile != "caret":
+        return
+    val focus = shell_key_focus(ctrl)
+    publish_live_focus(focus)
+    profile_sync_context_with(ctrl, profile, focus, live_selected_provider())
 
 # The one view list both shells render: contributed views whose `when` holds.
 fn shell_view_ids(ctrl: EditorController) -> [text]:
     ctrl.extension_host.visible_view_ids()
 
-export ProfilePlan, profile_activation_plan, profile_apply, shell_view_ids, caret_context_keys, profile_sync_context_with, profile_sync_context
+export shell_key_focus, ProfilePlan,profile_activation_plan, profile_apply, shell_view_ids, caret_context_keys, profile_sync_context_with, profile_sync_context
