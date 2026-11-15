@@ -1,0 +1,318 @@
+# Native `if val` presence-test oracle.
+# Bug: doc/08_tracking/bug/native_if_val_presence_test_dropped_2026-11-15.md
+# Every row prints `<row> <value>`; a native build must print exactly the
+# seed's stdout below (`simple run main.spl`). Payloads 0, 3 (== the nil
+# marker word) and a negative number are deliberate.
+# SEED-DIVERGENT rows (after the `--- seed-divergent` line): the seed
+# interpreter prints `none` for `if val x = 3` on a plain i64 and for
+# `if val x = r.ok` when r is Ok(3) -- it reads the payload word 3 as nil
+# (a SEED bug; the language says a present 3 is present). The correct
+# output, which native must print, is given after the seed block.
+# SEED_STDOUT_BEGIN
+#   call_int 0: none
+#   call_int 1: some 0
+#   call_int 2: some 3
+#   call_int 3: some -7
+#   call_text t: some hi
+#   call_text f: none
+#   call_bool 0: none
+#   call_bool 1: some false
+#   call_bool 2: some true
+#   call_float t: some -2.5
+#   call_float f: none
+#   call_arr t: some 2 5
+#   call_arr f: none
+#   call_point t: some 3 -1
+#   call_point f: none
+#   local 0: none
+#   param 0: none
+#   field 0: none false -100
+#   index 0: none
+#   elif 0: none
+#   match 0: none
+#   exists 0: absent
+#   try 0: none
+#   coalesce 0: got -99
+#   local 1: some 0
+#   param 1: some 0
+#   field 1: some 0 true 0
+#   index 1: some 0
+#   elif 1: some 0
+#   match 1: some 0
+#   exists 1: present
+#   try 1: some 10
+#   coalesce 1: got 0
+#   local 2: some 3
+#   param 2: some 3
+#   field 2: some 3 true 3
+#   index 2: some 3
+#   elif 2: some 3
+#   match 2: some 3
+#   exists 2: present
+#   try 2: some 13
+#   coalesce 2: got 3
+#   local 3: some -7
+#   param 3: some -7
+#   field 3: some -7 true -7
+#   index 3: some -7
+#   elif 3: some -7
+#   match 3: some -7
+#   exists 3: present
+#   try 3: some 3
+#   coalesce 3: got -7
+#   param lit-none: none
+#   dict a: some 0
+#   dict b: some 3
+#   dict c: some 16
+#   dict d: some -8
+#   dict z: none
+#   ok t: some 42
+#   ok f: none
+#   err t: none
+#   err f: some bad
+#   nested 2 0: outer 3
+#   nested 2 1: both 3 0
+#   nested 0 2: none
+#   plain -7: some -7
+#   plain 0: some 0
+#   --- seed-divergent
+#   ok3 t: none
+#   ok3 f: none
+#   plain 3: none
+#   while: seen 2,1,0,
+# SEED_STDOUT_END
+# Correct (native) output differs from the seed ONLY in the three
+# seed-divergent rows: `ok3 t: some 3`, `ok3 f: none`, `plain 3: some 3`.
+# Build (from a probe dir OUTSIDE test/): SIMPLE_BOOTSTRAP=1 native-build
+#   main.spl --entry-closure --backend=cranelift|llvm
+
+struct Point:
+    x: i64
+    y: i64
+
+class Holder:
+    slot: i64?
+
+    fn has() -> bool:
+        if val _v = self.slot:
+            return true
+        false
+
+    fn read() -> i64:
+        if val v = self.slot:
+            return v
+        -100
+
+fn opt_int(k: i64) -> i64?:
+    if k == 0: return None
+    if k == 1: return Some(0)
+    if k == 2: return Some(3)
+    Some(-7)
+
+fn opt_text(b: bool) -> text?:
+    if b: return Some("hi")
+    None
+
+fn opt_bool(k: i64) -> bool?:
+    if k == 0: return None
+    if k == 1: return Some(false)
+    Some(true)
+
+fn opt_float(b: bool) -> f64?:
+    if b: return Some(-2.5)
+    None
+
+fn opt_arr(b: bool) -> [i64]?:
+    if b: return Some([4, 5])
+    None
+
+fn opt_point(b: bool) -> Point?:
+    if b: return Some(Point(x: 3, y: -1))
+    None
+
+fn res(b: bool) -> Result<i64, text>:
+    if b: return Ok(42)
+    Err("bad")
+
+fn row_call_int(k: i64) -> text:
+    if val x = opt_int(k):
+        return "some {x}"
+    "none"
+
+fn row_call_text(b: bool) -> text:
+    if val x = opt_text(b):
+        return "some {x}"
+    "none"
+
+fn row_call_bool(k: i64) -> text:
+    if val x = opt_bool(k):
+        if x: return "some true"
+        return "some false"
+    "none"
+
+fn row_call_float(b: bool) -> text:
+    if val x = opt_float(b):
+        return "some {x}"
+    "none"
+
+fn row_call_arr(b: bool) -> text:
+    if val x = opt_arr(b):
+        return "some {x.len()} {x[1]}"
+    "none"
+
+fn row_call_point(b: bool) -> text:
+    if val p = opt_point(b):
+        return "some {p.x} {p.y}"
+    "none"
+
+fn row_local(k: i64) -> text:
+    val o: i64? = opt_int(k)
+    if val x = o:
+        return "some {x}"
+    "none"
+
+fn row_param(o: i64?) -> text:
+    if val x = o:
+        return "some {x}"
+    "none"
+
+fn row_field(k: i64) -> text:
+    val slot: i64? = opt_int(k)
+    val h = Holder(slot: slot)
+    if val x = h.slot:
+        return "some {x} {h.has()} {h.read()}"
+    "none {h.has()} {h.read()}"
+
+fn row_index(k: i64) -> text:
+    val xs: [i64?] = [None, Some(0), Some(3), Some(-7)]
+    if val x = xs[k]:
+        return "some {x}"
+    "none"
+
+fn row_dict(k: text) -> text:
+    val d: {text: i64} = {"a": 0, "b": 3, "c": 16, "d": -8}
+    if val x = d.get(k):
+        return "some {x}"
+    "none"
+
+fn row_ok(b: bool) -> text:
+    if val x = res(b).ok:
+        return "some {x}"
+    "none"
+
+fn row_err(b: bool) -> text:
+    if val e = res(b).err:
+        return "some {e}"
+    "none"
+
+fn row_elif(k: i64) -> text:
+    if k == 99:
+        return "never"
+    elif val x = opt_int(k):
+        return "some {x}"
+    "none"
+
+fn row_nested(a: i64, b: i64) -> text:
+    if val x = opt_int(a):
+        if val y = opt_int(b):
+            return "both {x} {y}"
+        return "outer {x}"
+    "none"
+
+var while_left: i64 = 3
+
+fn next_item() -> i64?:
+    if while_left == 0: return None
+    while_left = while_left - 1
+    Some(while_left)
+
+fn row_while() -> text:
+    var acc = ""
+    while val x = next_item():
+        acc = acc + "{x},"
+    "seen {acc}"
+
+# Control rows: shapes that must not change behaviour.
+fn row_match(k: i64) -> text:
+    match opt_int(k):
+        case Some(x): "some {x}"
+        case None: "none"
+
+fn row_exists(k: i64) -> text:
+    if opt_int(k).?: return "present"
+    "absent"
+
+fn try_add(k: i64) -> i64?:
+    val x = opt_int(k)?
+    Some(x + 10)
+
+fn row_try(k: i64) -> text:
+    row_param(try_add(k))
+
+fn row_coalesce(k: i64) -> text:
+    val x = opt_int(k) ?? -99
+    "got {x}"
+
+fn res3(b: bool) -> Result<i64, text>:
+    if b: return Ok(3)
+    Err("bad")
+
+fn row_ok3(b: bool) -> text:
+    if val x = res3(b).ok:
+        return "some {x}"
+    "none"
+
+fn row_plain_scalar(v: i64) -> text:
+    if val x = v:
+        return "some {x}"
+    "none"
+
+fn main():
+    var k = 0
+    while k < 4:
+        print "call_int {k}: {row_call_int(k)}"
+        k = k + 1
+    print "call_text t: {row_call_text(true)}"
+    print "call_text f: {row_call_text(false)}"
+    print "call_bool 0: {row_call_bool(0)}"
+    print "call_bool 1: {row_call_bool(1)}"
+    print "call_bool 2: {row_call_bool(2)}"
+    print "call_float t: {row_call_float(true)}"
+    print "call_float f: {row_call_float(false)}"
+    print "call_arr t: {row_call_arr(true)}"
+    print "call_arr f: {row_call_arr(false)}"
+    print "call_point t: {row_call_point(true)}"
+    print "call_point f: {row_call_point(false)}"
+    k = 0
+    while k < 4:
+        print "local {k}: {row_local(k)}"
+        print "param {k}: {row_param(opt_int(k))}"
+        print "field {k}: {row_field(k)}"
+        print "index {k}: {row_index(k)}"
+        print "elif {k}: {row_elif(k)}"
+        print "match {k}: {row_match(k)}"
+        print "exists {k}: {row_exists(k)}"
+        print "try {k}: {row_try(k)}"
+        print "coalesce {k}: {row_coalesce(k)}"
+        k = k + 1
+    print "param lit-none: {row_param(None)}"
+    print "dict a: {row_dict(\"a\")}"
+    print "dict b: {row_dict(\"b\")}"
+    print "dict c: {row_dict(\"c\")}"
+    print "dict d: {row_dict(\"d\")}"
+    print "dict z: {row_dict(\"z\")}"
+    print "ok t: {row_ok(true)}"
+    print "ok f: {row_ok(false)}"
+    print "err t: {row_err(true)}"
+    print "err f: {row_err(false)}"
+    print "nested 2 0: {row_nested(2, 0)}"
+    print "nested 2 1: {row_nested(2, 1)}"
+    print "nested 0 2: {row_nested(0, 2)}"
+    print "plain -7: {row_plain_scalar(-7)}"
+    print "plain 0: {row_plain_scalar(0)}"
+    print "--- seed-divergent"
+    print "ok3 t: {row_ok3(true)}"
+    print "ok3 f: {row_ok3(false)}"
+    print "plain 3: {row_plain_scalar(3)}"
+    # Last: a dropped presence test makes this loop never end.
+    print "while: {row_while()}"
