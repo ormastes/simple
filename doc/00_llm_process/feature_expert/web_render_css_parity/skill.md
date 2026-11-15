@@ -1763,3 +1763,94 @@ never cache an answer computed while exhausted) —
 - Gradient paint cost, same seed: 300 x 900x100 120deg boxes 1.02 s -> 0.39 s
   wall (startup 0.24 s), RSS +4 MB; 6000 12x6 boxes 0.25 s -> 0.25 s, +5 MB
   (boxes under 1025 px skip the table; a table per box cost +87 MB).
+
+## 2026-11-15 — transparent is a value, mitred border corners, `width:0`, column-reverse, border cascade, whitespace by computed display
+
+- **Trap — 0 still means "unset" to the parsers; transparency is decided at
+  the applier.** `_parse_color_delegated` keeps returning 0 for both
+  `transparent` and garbage. Every applier that must *override* an earlier
+  colour asks `_decl_transparent_color(raw)` (any top-level token with alpha
+  0, functions kept whole by `_decl_top_level_tokens`), so
+  `background:red;background:transparent`, `color:transparent` and
+  `border-*-color:transparent` clear the earlier value instead of being
+  ignored. Both paths need it: the declaration table appliers
+  (`_decl_apply`) AND the dispatch fast path in `..._declarations.spl`
+  (`color`, `outline`) — the review caught the fast path missing it.
+  Alpha-0 hex (`#f000`, `#ff000000`) returns 0 too.
+- **Trap — named colours inside shorthands never parsed.** `border:4px solid
+  blue` painted nothing until `_shorthand_color_token` ran before the
+  rgb/hsl/hash fallback in `parse_color_any`. Multi-value `border-color`
+  takes 1-4 values (top right bottom left); a first-token-only parse
+  painted a square instead of a triangle.
+- **Mitre.** A corner pixel belongs to a side when
+  `(2c+1)*side_w > (2r+1)*cross_w`; the exact diagonal pixel gets ONE
+  premultiplied 50/50 mix (`mitre_mix_color`; Chrome #7f0080 for red/blue,
+  #ff7f7f for red/transparent). Blending it once per side double-blends.
+  Framebuffer twin `_fb_border_sides_mitred`, Draw IR twin
+  `_engine2d_draw_ir_render_borders_mitred`; only taken when adjacent sides
+  differ.
+- **`width:0` is a set width.** `node_w == 0` used to mean auto, so a CSS
+  triangle was full width and `width:0;white-space:nowrap` grew. The
+  `width_zero` style flag (copied in `copy_from`, `style_with_width`,
+  `style_with_height_without_grid_fields`; false whenever the final width is
+  not 0, so `width:0;inline-size:50%` is 150) is honoured by the "is width
+  set" tests in layout_engine, `constrained_outer_width` (its `< 1 -> 1`
+  clamp made every zero box 1px -- the first cut missed it), floats, abspos
+  and the flex sizing branches. `height:0` is still auto (48 sites; filed).
+- **Text alpha.** `_fb_text_px` blends glyph pixels with alpha 1..254 in the
+  5x7 bitmap lane; engine2d `SoftwareBackend.draw_text` blends via
+  `sw_blend_const_raw_span`. TTF and other backends: open.
+- **Unclosed function at the end of an inline style** (`color:rgb(0,255,0`)
+  is closed by `_inline_style_closed` before the priority split (CSS
+  Syntax: EOF closes open blocks).
+- **Trap — whitespace is judged by COMPUTED display, never by tag.** The
+  parser keeps a whitespace-only text node after any element as one space
+  (never inside `<pre>`), and `compute_styles_with_material` hides it
+  (display:none) inside flex/grid/table containers and beside a block-level
+  sibling. The first cut kept it after "inline tags" and broke two catalog
+  pages: forms-media (`label{display:block}` -> an extra line per control,
+  6.37 -> 9.46) and tab-bar (a space flex item + two gaps between every
+  button, 0.68 -> 2.00). Flex row/column and grid loops now skip
+  display:none children (no item, no gap). Kept whitespace fixed the
+  animation page's 4-9px shifts. Simple's space advance is 6px vs Chrome
+  4.45 — open.
+- **Trap — a shorthand must store its longhands at its own source
+  position.** The appliers run in a fixed order, so
+  `border-top-color:red;border-color:blue` stayed red until
+  `_border_shorthand_longhands` (foundation, `_decl_table_build_inner`)
+  started writing `border-*-color/width/style` entries right after the
+  shorthand; the last-wins lookup then sees source order. A `border-color`
+  with a non-colour token returns `["!"]` and drops the whole declaration.
+  A shorthand also stores what it omits (width 3px, style none, color
+  `currentcolor` -> the element colour): `border-top-style:dashed;border:2px
+  red` paints nothing in Chrome. Logical properties (shorthands AND
+  longhands) are stored as their physical longhands only (horizontal-tb
+  ltr), so the fixed-order logical appliers never re-apply them; only a
+  `var()` value still reaches them. Trap: the table used to be allocated at
+  26 slots per declaration whenever the text held "border" (even
+  `box-sizing:border-box`) and was never trimmed -- every lookup scanned
+  the empty slots. It is cut to the used length now.
+- **Trap -- abspos stretch tests must read "is set", not "> 0".**
+  `left:0` and `inset:0` were never stretched because the test was
+  `left_px > 0`; use `left_auto`. The rtl over-constraint rule applies only
+  with a definite width and uses the containing block's direction.
+- **Trap -- outline `auto` is not a border style.** `css_border_style_token`
+  does not know it; `outline_shorthand_paint_width_px` is the one resolver
+  for both appliers (omitted width = 3px, omitted style = no paint).
+- **Trap -- `white_space_pre` means nowrap too.** It cannot carry
+  `pre-wrap`/`pre-line`; a kept newline between elements uses
+  `Style.white_space_newline` + `HNode.ws_raw` (`html_kept_newlines` counts
+  them; extra newlines add line heights) and is laid out by the `<br>`
+  branches (layout_engine, layout_foundation measure). A multi-space
+  whitespace node is NOT collapsed by normal-mode layout, so the parser
+  stores the space count only inside preformatted tags.
+- **`flex-direction: column-reverse`** restacks bottom-up from the content
+  bottom in DOM order with physical margins (reflecting the column result
+  got asymmetric margins wrong: t=38 vs Chrome 42). Chrome 159:
+  flex-start/normal/`end` pack at the bottom, flex-end and `start` (the
+  physical top) at the top, center/space-* keep the reversed order. Move
+  items with `offset_layout_subtree` by (target - flow y): `out_by` already
+  holds the `position:relative` offset, so subtracting it from the box y
+  instead dropped `top:10px`. Auto main margins and `order` are not
+  modelled (filed). Next cluster: flex-wrap line stretch under a definite
+  height (align-content stretch; Chrome items 45 tall, Simple 24).

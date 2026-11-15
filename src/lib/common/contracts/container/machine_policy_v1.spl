@@ -1,0 +1,175 @@
+# Pure installed-policy schema and integrity only. Decoding supplies neither
+# installed-file provenance, authenticated principals nor machine authority.
+# Provider policy text is opaque here; native providers must decode it later.
+# Wire schema V2 requires an explicit managed verification-policy trust pin.
+# Legacy wire V1 is refused; this codec performs no installation or migration.
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.{sdn_encode_canonical, sdn_encoded_text_size_v1}
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct MachineContainerProviderPolicyV1:
+    backend: text
+    identity_digest: text
+    policy_bytes: text
+
+pub struct MachineContainerPolicyV1:
+    authority_id: text
+    physical_host_id: text
+    native_machine_id: text
+    mode: text
+    # Exact authenticated controller issuer to match later; not enrollment ID.
+    managed_authority_id: text
+    managed_authority_policy_digest: text
+    cpu_millis: i64
+    memory_bytes: i64
+    providers: [MachineContainerProviderPolicyV1]
+    local_principals: [text]
+
+fn machine_identity_text_v1(value: text) -> bool:
+    if value.byte_len() < 1 or value.byte_len() > 256: return false
+    for ch in value.chars():
+        val scalar = ch.char_code_at(0)
+        if scalar < 32 or (scalar >= 127 and scalar <= 159): return false
+    true
+
+fn machine_policy_fields_v1(policy: MachineContainerPolicyV1) -> Result<(), text>:
+    # Shared builder identifiers deliberately impose ASCII [A-Za-z0-9_-],
+    # length1..128, a stricter bound than the general identity ceiling256.
+    if not builder_identifier_valid_v1(policy.authority_id) or not builder_identifier_valid_v1(policy.physical_host_id):
+        return Err("machine-container-policy-identifier-invalid")
+    if not machine_identity_text_v1(policy.native_machine_id): return Err("machine-container-policy-native-id-invalid")
+    if policy.mode == "standalone":
+        if policy.managed_authority_id != "" or policy.managed_authority_policy_digest != "" or policy.local_principals.len() == 0:
+            return Err("machine-container-policy-standalone-authority-separation")
+    elif policy.mode == "managed":
+        if not machine_identity_text_v1(policy.managed_authority_id) or policy.local_principals.len() != 0:
+            return Err("machine-container-policy-managed-authority-separation")
+        if not builder_digest_valid_v1(policy.managed_authority_policy_digest):
+            return Err("machine-container-policy-managed-authority-policy-digest")
+    else:
+        return Err("machine-container-policy-mode-invalid")
+    if (policy.cpu_millis < 1 or policy.cpu_millis > 64000 or
+            policy.memory_bytes < 1 or policy.memory_bytes > 1125899906842624):
+        return Err("machine-container-policy-resource-bounds")
+    if policy.providers.len() < 1 or policy.providers.len() > 16 or policy.local_principals.len() > 128:
+        return Err("machine-container-policy-field-count")
+    var providers: [text] = []
+    for provider in policy.providers:
+        if not ["linux-podman", "windows-docker-process"].contains(provider.backend):
+            return Err("machine-container-policy-backend-invalid")
+        if not builder_digest_valid_v1(provider.identity_digest): return Err("machine-container-policy-provider-digest-invalid")
+        if provider.policy_bytes.byte_len() < 1 or provider.policy_bytes.byte_len() > 1048576 or provider.policy_bytes.contains("\0"):
+            return Err("machine-container-policy-provider-bytes-invalid")
+        val key = provider.backend + ":" + provider.identity_digest
+        if providers.contains(key): return Err("machine-container-policy-provider-duplicate")
+        providers.push(key)
+    var principals: [text] = []
+    for principal in policy.local_principals:
+        if not machine_identity_text_v1(principal): return Err("machine-container-policy-principal-invalid")
+        if principals.contains(principal): return Err("machine-container-policy-principal-duplicate")
+        principals.push(principal)
+    Ok(())
+
+fn machine_policy_value_v1(policy: MachineContainerPolicyV1, include_provider_bytes: bool) -> SdnValue:
+    var providers: [SdnValue] = []
+    for provider in policy.providers:
+        val fields: Dict<text, SdnValue> = {"backend": SdnValue.String(provider.backend),
+            "identityDigest": SdnValue.String(provider.identity_digest),
+            "policyBytes": SdnValue.String(if include_provider_bytes: provider.policy_bytes else: "")}
+        providers.push(SdnValue.Dict(fields))
+    var principals: [SdnValue] = []
+    for principal in policy.local_principals: principals.push(SdnValue.String(principal))
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("machine-container-policy"),
+        "authorityId": SdnValue.String(policy.authority_id), "physicalHostId": SdnValue.String(policy.physical_host_id),
+        "nativeMachineId": SdnValue.String(policy.native_machine_id), "mode": SdnValue.String(policy.mode),
+        "managedAuthorityId": SdnValue.String(policy.managed_authority_id), "cpuMillis": SdnValue.Int(policy.cpu_millis),
+        "managedAuthorityPolicyDigest": SdnValue.String(policy.managed_authority_policy_digest),
+        "memoryBytes": SdnValue.Int(policy.memory_bytes), "providers": SdnValue.Array(providers),
+        "localPrincipals": SdnValue.Array(principals)}
+    SdnValue.Dict(fields)
+
+pub fn machine_container_policy_bytes_v1(policy: MachineContainerPolicyV1) -> Result<text, text>:
+    val checked = machine_policy_fields_v1(policy)?
+    # Bound exact escaped output before serializing large opaque provider text.
+    # Each skeleton provider string is exactly two quote bytes, replaced by the
+    # shared serializer's exact encoded-text size; all other fields are equal.
+    val skeleton = sdn_encode_canonical(machine_policy_value_v1(policy, false)) + "\n"
+    var size = skeleton.byte_len()
+    for provider in policy.providers:
+        size = size + sdn_encoded_text_size_v1(provider.policy_bytes) - 2
+        if size > 1048576: return Err("machine-container-policy-source-size")
+    val source = sdn_encode_canonical(machine_policy_value_v1(policy, true)) + "\n"
+    if source.byte_len() > 1048576: return Err("machine-container-policy-source-size")
+    Ok(source)
+
+pub fn machine_container_policy_validate_v1(policy: MachineContainerPolicyV1) -> Result<(), text>:
+    val source = machine_container_policy_bytes_v1(policy)?
+    Ok(())
+
+pub fn machine_container_policy_digest_v1(policy: MachineContainerPolicyV1) -> Result<text, text>:
+    val source = machine_container_policy_bytes_v1(policy)?
+    Ok(sha256_text(source))
+
+fn machine_policy_keys_v1(fields: Dict<text, SdnValue>, names: [text]) -> Result<(), text>:
+    for key in fields.keys():
+        if not names.contains(key): return Err("machine-container-policy-unknown-field:" + key)
+    for key in names:
+        if not fields.contains_key(key): return Err("machine-container-policy-missing-field:" + key)
+    Ok(())
+
+fn machine_policy_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("machine-container-policy-text-required:" + key)
+
+fn machine_policy_integer_v1(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("machine-container-policy-integer-required:" + key)
+
+pub fn machine_container_policy_decode_v1(source: text) -> Result<MachineContainerPolicyV1, text>:
+    if source.byte_len() < 1 or source.byte_len() > 1048576: return Err("machine-container-policy-source-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 1048576,
+            max_depth: 4, max_nodes: 1024, max_rows: 0, max_cells: 0, max_columns: 16)):
+        case Ok(value): value
+        case Err(_): return Err("machine-container-policy-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("machine-container-policy-object-required")
+    if not fields.contains_key("version"): return Err("machine-container-policy-missing-field:version")
+    if machine_policy_integer_v1(fields, "version")? != 2: return Err("machine-container-policy-version")
+    val keys = machine_policy_keys_v1(fields, ["version", "kind", "authorityId", "physicalHostId", "nativeMachineId",
+        "mode", "managedAuthorityId", "managedAuthorityPolicyDigest", "cpuMillis", "memoryBytes", "providers", "localPrincipals"])?
+    if machine_policy_text_v1(fields, "kind")? != "machine-container-policy": return Err("machine-container-policy-kind")
+    val values = match fields["providers"]:
+        case SdnValue.Array(value): value
+        case _: return Err("machine-container-policy-provider-array-required")
+    if values.len() < 1 or values.len() > 16: return Err("machine-container-policy-field-count")
+    var providers: [MachineContainerProviderPolicyV1] = []
+    for value in values:
+        val provider = match value:
+            case SdnValue.Dict(entry): entry
+            case _: return Err("machine-container-policy-provider-object-required")
+        val provider_keys = machine_policy_keys_v1(provider, ["backend", "identityDigest", "policyBytes"])?
+        providers.push(MachineContainerProviderPolicyV1(backend: machine_policy_text_v1(provider, "backend")?,
+            identity_digest: machine_policy_text_v1(provider, "identityDigest")?, policy_bytes: machine_policy_text_v1(provider, "policyBytes")?))
+    val entries = match fields["localPrincipals"]:
+        case SdnValue.Array(value): value
+        case _: return Err("machine-container-policy-principal-array-required")
+    if entries.len() > 128: return Err("machine-container-policy-field-count")
+    var principals: [text] = []
+    for entry in entries:
+        match entry:
+            case SdnValue.String(value): principals.push(value)
+            case _: return Err("machine-container-policy-principal-text-required")
+    val policy = MachineContainerPolicyV1(authority_id: machine_policy_text_v1(fields, "authorityId")?,
+        physical_host_id: machine_policy_text_v1(fields, "physicalHostId")?, native_machine_id: machine_policy_text_v1(fields, "nativeMachineId")?,
+        mode: machine_policy_text_v1(fields, "mode")?, managed_authority_id: machine_policy_text_v1(fields, "managedAuthorityId")?,
+        managed_authority_policy_digest: machine_policy_text_v1(fields, "managedAuthorityPolicyDigest")?,
+        cpu_millis: machine_policy_integer_v1(fields, "cpuMillis")?, memory_bytes: machine_policy_integer_v1(fields, "memoryBytes")?,
+        providers: providers, local_principals: principals)
+    if machine_container_policy_bytes_v1(policy)? != source: return Err("machine-container-policy-noncanonical")
+    Ok(policy)

@@ -377,7 +377,10 @@ pub fn expr_owner_span(idx: i64) -> i64: expr_span[idx]
 fn expr_owner_span_set(idx: i64, value: i64):
     expr_span[idx] = value
     expr_i64_set(idx, "SPAN", value)
-pub fn expr_owner_int(idx: i64) -> i64: expr_i_val[idx]
+pub fn expr_owner_int(idx: i64) -> i64:
+    if expr_attr_int_route[0] == 0:
+        return expr_i_val[idx]
+    expr_op_or_int_get(idx)
 pub fn expr_owner_float(idx: i64) -> text: expr_f_val[idx]
 pub fn expr_owner_str(idx: i64) -> text: expr_s_val_get(idx)
 pub fn expr_owner_left(idx: i64) -> i64: expr_left[idx]
@@ -392,6 +395,23 @@ var expr_attr_extra_mode: [i64] = [0]
 var expr_attr_extra_stores: [AttributeStoreV1<i64>] = []
 var expr_attr_s_val_mode: [i64] = [0]
 var expr_attr_s_val_stores: [AttributeStoreV1<text>] = []
+# Node attribute `op` (AttrId compiler.ast#op): the `i_val` slot of BINARY (7),
+# UNARY (8) and COMPOUND_ASSIGN (24) nodes, 7.9% of the global id space, so
+# sparse_hash is the placement choice; column is supported for parity only (it
+# wins only with a per-tag-family index). Other tags keep `i_val` in the array.
+var expr_attr_op_mode: [i64] = [0]
+var expr_attr_op_stores: [AttributeStoreV1<i64>] = []
+# 1 when op is placed off the array or access counting is on: the only extra
+# per-read cost of `expr_owner_int` on the default path is this slot read.
+var expr_attr_int_route: [i64] = [0]
+# Access counters (env SIMPLE_NODE_ATTR_COUNT=1, resolved at expr_reset; default
+# off). Slots: extra reads, extra writes, s_val reads, s_val writes, op reads,
+# op writes. Cumulative for the process while on; zeroed when switched on.
+var expr_attr_count_on: [i64] = [0]
+var expr_attr_counts: [i64] = [0, 0, 0, 0, 0, 0]
+# Driver latch (C.2): [SIMPLE_NODE_ATTR, SIMPLE_NODE_ATTR_SDN, SIMPLE_NODE_ATTR_COUNT]
+# captured once by expr_attr_driver_latch; empty = read the env at each expr_reset.
+var expr_attr_latch: [text] = []
 
 fn expr_attr_mode_of(token: text) -> Result<i64, text>:
     match attr_placement_from_token_v1(token):
@@ -411,6 +431,18 @@ fn expr_attr_nil_guard():
         expr_attr_extra_stores = []
     if expr_attr_s_val_stores == nil:
         expr_attr_s_val_stores = []
+    if expr_attr_op_mode == nil or expr_attr_op_mode.len() == 0:
+        expr_attr_op_mode = [0]
+    if expr_attr_op_stores == nil:
+        expr_attr_op_stores = []
+    if expr_attr_int_route == nil or expr_attr_int_route.len() == 0:
+        expr_attr_int_route = [0]
+    if expr_attr_count_on == nil or expr_attr_count_on.len() == 0:
+        expr_attr_count_on = [0]
+    if expr_attr_counts == nil or expr_attr_counts.len() != 6:
+        expr_attr_counts = [0, 0, 0, 0, 0, 0]
+    if expr_attr_latch == nil:
+        expr_attr_latch = []
 
 fn expr_attr_placement_of(mode: i64) -> AttrPlacementV1:
     if mode == 1: AttrPlacementV1.Column else: AttrPlacementV1.SparseHash
@@ -447,30 +479,50 @@ fn expr_attr_self_check_failed(mode: i64):
     eprint("node-attr: {token} store failed its round-trip self-check on this build; staying on direct storage (see doc/08_tracking/bug/native_erased_generic_optional_return_2026-11-15.md)")
 
 # Config text: comma list of `<attr>=<direct|column|sparse_hash>` for attr in
-# extra, s_val. Unknown attrs are ignored; an unknown token turns everything off.
+# extra, s_val, op. Unknown attrs are ignored; an unknown token turns everything off.
 pub fn expr_attr_apply_config(spec: text) -> Result<bool, text>:
     expr_attr_nil_guard()
     var extra_mode = 0
     var s_mode = 0
+    var op_mode = 0
     for part in spec.split(","):
         val kv = part.trim().split("=")
         if kv.len() != 2:
             continue
         val key = kv[0].trim()
-        if key != "extra" and key != "s_val":
+        if key != "extra" and key != "s_val" and key != "op":
             continue
         match expr_attr_mode_of(kv[1].trim()):
             case Ok(m):
                 if key == "extra":
                     extra_mode = m
+                elif key == "op":
+                    op_mode = m
                 else:
                     s_mode = m
             case Err(e):
                 expr_attr_extra_mode[0] = 0
                 expr_attr_s_val_mode[0] = 0
+                expr_attr_op_mode[0] = 0
+                expr_attr_int_route[0] = expr_attr_count_on[0]
                 expr_attr_extra_stores.clear()
                 expr_attr_s_val_stores.clear()
+                expr_attr_op_stores.clear()
                 return Err(e)
+    if op_mode != 0 and not expr_attr_i64_round_trips(expr_attr_placement_of(op_mode)):
+        expr_attr_self_check_failed(op_mode)
+        op_mode = 0
+    # Store first, then mode + route: a failed store must never leave mode != 0
+    # with an empty store list (next [0] access would be out of bounds).
+    expr_attr_op_mode[0] = 0
+    expr_attr_int_route[0] = expr_attr_count_on[0]
+    expr_attr_op_stores.clear()
+    if op_mode != 0:
+        match attr_store_detached_v1("op", expr_attr_placement_of(op_mode)):
+            case Ok(store): expr_attr_op_stores.push(store)
+            case Err(e): return Err(e)
+        expr_attr_op_mode[0] = op_mode
+        expr_attr_int_route[0] = 1
     if extra_mode != 0 and not expr_attr_i64_round_trips(expr_attr_placement_of(extra_mode)):
         expr_attr_self_check_failed(extra_mode)
         extra_mode = 0
@@ -506,7 +558,7 @@ pub fn expr_attr_apply_sdn(source: text, path: text, override_spec: text) -> Res
     if source.trim() != "":
         match data_policy_rules_from_sdn_v1(source, path, EXPR_ATTR_TREE):
             case Ok(rules):
-                for attr in ["extra", "s_val"]:
+                for attr in ["extra", "s_val", "op"]:
                     match data_attr_storage_resolve_v1(EXPR_ATTR_TREE, EXPR_ATTR_VIEW, attr, rules, "direct"):
                         case Ok(choice): spec = spec + attr + "=" + choice.choice + ","
                         case Err(d):
@@ -521,10 +573,24 @@ pub fn expr_attr_apply_sdn(source: text, path: text, override_spec: text) -> Res
     expr_attr_apply_config(spec + override_spec)
 
 # expr_reset entry: rule file from env SIMPLE_NODE_ATTR_SDN (optional), then the
-# SIMPLE_NODE_ATTR override. Both unset is the off identity.
+# SIMPLE_NODE_ATTR override. Both unset is the off identity. When the driver has
+# latched (expr_attr_driver_latch), the latched values are used and env is not read.
+fn expr_attr_setting(slot: i64, name: text) -> text:
+    if expr_attr_latch.len() == 3:
+        return expr_attr_latch[slot]
+    env_get_nullable(name) ?? ""
+
 fn expr_attr_apply_env() -> Result<bool, text>:
-    val override_spec = env_get_nullable("SIMPLE_NODE_ATTR") ?? ""
-    val sdn_path = env_get_nullable("SIMPLE_NODE_ATTR_SDN") ?? ""
+    expr_attr_nil_guard()
+    val override_spec = expr_attr_setting(0, "SIMPLE_NODE_ATTR")
+    val sdn_path = expr_attr_setting(1, "SIMPLE_NODE_ATTR_SDN")
+    val count_on = if expr_attr_setting(2, "SIMPLE_NODE_ATTR_COUNT") == "1": 1 else: 0
+    if count_on == 1 and expr_attr_count_on[0] == 0:
+        var i = 0
+        while i < 6:
+            expr_attr_counts[i] = 0
+            i = i + 1
+    expr_attr_count_on[0] = count_on
     if sdn_path == "":
         return expr_attr_apply_config(override_spec)
     match file_read_nullable(sdn_path):
@@ -544,6 +610,8 @@ pub fn expr_attr_extra_present() -> i64:
     expr_attr_extra_stores[0].len()
 
 fn expr_extra_get(idx: i64) -> i64:
+    if expr_attr_count_on[0] != 0:
+        expr_attr_counts[0] = expr_attr_counts[0] + 1
     if expr_attr_extra_mode[0] == 0:
         return expr_extra[idx]
     match expr_attr_extra_stores[0].get(idx):
@@ -551,6 +619,8 @@ fn expr_extra_get(idx: i64) -> i64:
         case Err(_): -1
 
 fn expr_extra_put(idx: i64, value: i64):
+    if expr_attr_count_on[0] != 0:
+        expr_attr_counts[1] = expr_attr_counts[1] + 1
     if expr_attr_extra_mode[0] == 0:
         expr_extra[idx] = value
         return
@@ -595,6 +665,8 @@ pub fn expr_attr_s_val_present() -> i64:
     expr_attr_s_val_stores[0].len()
 
 fn expr_s_val_get(idx: i64) -> text:
+    if expr_attr_count_on[0] != 0:
+        expr_attr_counts[2] = expr_attr_counts[2] + 1
     if expr_attr_s_val_mode[0] == 0:
         return expr_s_val[idx]
     match expr_attr_s_val_stores[0].get(idx):
@@ -602,6 +674,8 @@ fn expr_s_val_get(idx: i64) -> text:
         case Err(_): ""
 
 fn expr_s_val_put(idx: i64, value: text):
+    if expr_attr_count_on[0] != 0:
+        expr_attr_counts[3] = expr_attr_counts[3] + 1
     if expr_attr_s_val_mode[0] == 0:
         expr_s_val[idx] = value
         return
@@ -635,6 +709,122 @@ fn expr_s_val_load(values: [text]):
             expr_attr_s_val_stores[0].set(i, values[i])
         i = i + 1
 
+pub fn expr_attr_op_placement() -> text:
+    if expr_attr_op_mode[0] == 1: return "column"
+    if expr_attr_op_mode[0] == 2: return "sparse_hash"
+    "direct"
+
+# Entries held by the op store (one per op-family node); -1 when op is direct.
+pub fn expr_attr_op_present() -> i64:
+    if expr_attr_op_mode[0] == 0: return -1
+    expr_attr_op_stores[0].len()
+
+fn expr_is_op_tag(idx: i64) -> bool:
+    val t = expr_tag[idx]
+    t == 7 or t == EXPR_UNARY or t == EXPR_COMPOUND_ASSIGN
+
+# Uncounted op/i_val read and write, used by the routed accessors and tag moves.
+fn expr_int_raw_get(idx: i64) -> i64:
+    if expr_attr_op_mode[0] == 0 or not expr_is_op_tag(idx):
+        return expr_i_val[idx]
+    match expr_attr_op_stores[0].get(idx):
+        case Ok(v): v
+        case Err(_): 0
+
+fn expr_int_raw_set(idx: i64, value: i64):
+    if expr_attr_op_mode[0] == 0 or not expr_is_op_tag(idx):
+        expr_i_val[idx] = value
+        return
+    expr_i_val[idx] = 0
+    expr_attr_op_stores[0].set(idx, value)
+
+fn expr_op_or_int_get(idx: i64) -> i64:
+    if expr_attr_count_on[0] != 0 and expr_is_op_tag(idx):
+        expr_attr_counts[4] = expr_attr_counts[4] + 1
+    expr_int_raw_get(idx)
+
+fn expr_op_put(idx: i64, value: i64):
+    if expr_attr_count_on[0] != 0:
+        expr_attr_counts[5] = expr_attr_counts[5] + 1
+    expr_int_raw_set(idx, value)
+
+# Dense i_val view (op merged back) for the pool snapshot codec.
+fn expr_i_val_dense() -> [i64]:
+    if expr_attr_op_mode[0] == 0:
+        return expr_i_val
+    var out: [i64] = []
+    var i = 0
+    while i < expr_i_val.len():
+        out.push(expr_int_raw_get(i))
+        i = i + 1
+    out
+
+# Split a dense i_val back into array + op store; expr_tag must already be installed.
+fn expr_i_val_load(values: [i64]):
+    expr_i_val = values
+    if expr_attr_op_mode[0] == 0:
+        return
+    expr_attr_op_stores.clear()
+    match attr_store_detached_v1("op", expr_attr_placement_of(expr_attr_op_mode[0])):
+        case Ok(store): expr_attr_op_stores.push(store)
+        case Err(_):
+            # values is dense (op included), so falling back to direct is lossless.
+            expr_attr_op_mode[0] = 0
+            expr_attr_int_route[0] = expr_attr_count_on[0]
+            return
+    var i = 0
+    while i < values.len():
+        if expr_is_op_tag(i):
+            expr_int_raw_set(i, values[i])
+        i = i + 1
+
+# [reads, writes] for attr extra / s_val / op; [-1, -1] when counting is off.
+pub fn expr_attr_access_counts(attr: text) -> [i64]:
+    expr_attr_nil_guard()
+    if expr_attr_count_on[0] == 0:
+        return [-1, -1]
+    var base = 4
+    if attr == "extra":
+        base = 0
+    if attr == "s_val":
+        base = 2
+    [expr_attr_counts[base], expr_attr_counts[base + 1]]
+
+# One line per process for placement decisions; "" when counting is off.
+pub fn expr_attr_access_summary() -> text:
+    expr_attr_nil_guard()
+    if expr_attr_count_on[0] == 0:
+        return ""
+    var parts: [text] = []
+    for attr in ["extra", "s_val", "op"]:
+        val c = expr_attr_access_counts(attr)
+        parts.push("{attr} reads={c[0]} writes={c[1]}")
+    "node-attr access: " + parts.join("; ")
+
+# C.2 driver adoption: capture SIMPLE_NODE_ATTR / SIMPLE_NODE_ATTR_SDN /
+# SIMPLE_NODE_ATTR_COUNT once (first call wins) and apply them; later expr_reset
+# calls reuse the latched values. A bad config is reported once and leaves it off.
+pub fn expr_attr_driver_latch() -> Result<bool, text>:
+    expr_attr_nil_guard()
+    if expr_attr_latch.len() == 3:
+        return Ok(true)
+    expr_attr_latch.push(env_get_nullable("SIMPLE_NODE_ATTR") ?? "")
+    expr_attr_latch.push(env_get_nullable("SIMPLE_NODE_ATTR_SDN") ?? "")
+    expr_attr_latch.push(env_get_nullable("SIMPLE_NODE_ATTR_COUNT") ?? "")
+    val r = expr_attr_apply_env()
+    match r:
+        case Ok(_): pass
+        case Err(e):
+            eprint("node-attr: config rejected, staying on direct storage: {e}")
+            expr_attr_latch[0] = ""
+            expr_attr_latch[1] = ""
+    r
+
+# Drop the driver latch so expr_reset reads the env again (tests, tool reuse).
+pub fn expr_attr_latch_clear():
+    expr_attr_nil_guard()
+    expr_attr_latch.clear()
+
 pub fn expr_owner_extra(idx: i64) -> i64: expr_extra_get(idx)
 pub fn expr_owner_args(idx: i64) -> [i64]: expr_args[idx]
 pub fn expr_owner_arg_names(idx: i64) -> [text]: expr_arg_names[idx]
@@ -644,11 +834,25 @@ fn expr_owner_asm_outputs(idx: i64) -> [i64]: expr_asm_outputs[idx]
 fn expr_owner_asm_locations(idx: i64) -> [text]: expr_asm_locations[idx]
 pub fn expr_owner_stmts(idx: i64) -> [i64]: expr_stmts[idx]
 fn expr_owner_tag_set(idx: i64, value: i64):
+    if expr_attr_op_mode[0] == 0:
+        expr_tag[idx] = value
+        return
+    # op placed off the array: move the i_val between store and array with the tag.
+    val v = expr_int_raw_get(idx)
+    if expr_is_op_tag(idx):
+        expr_attr_op_stores[0].retire(idx)
     expr_tag[idx] = value
+    expr_int_raw_set(idx, v)
 fn expr_owner_args_set(idx: i64, value: [i64]):
     expr_args[idx] = value
 pub fn expr_owner_int_set(idx: i64, value: i64):
-    expr_i_val[idx] = value
+    if expr_attr_int_route[0] == 0:
+        expr_i_val[idx] = value
+        return
+    if expr_is_op_tag(idx):
+        expr_op_put(idx, value)
+    else:
+        expr_i_val[idx] = value
 fn expr_owner_float_set(idx: i64, value: text):
     expr_f_val[idx] = value
 fn expr_owner_str_set(idx: i64, value: text):
@@ -911,7 +1115,7 @@ pub fn expr_ident(name: text, span_id: i64) -> i64:
 
 pub fn expr_binary(op: i64, left_idx: i64, right_idx: i64, span_id: i64) -> i64:
     val idx = expr_alloc(7, span_id)
-    expr_i_val[idx] = op
+    expr_op_put(idx, op)
     expr_i64_set(idx, "I", op)
     expr_left[idx] = left_idx
     expr_i64_set(idx, "LEFT", left_idx)
@@ -921,7 +1125,7 @@ pub fn expr_binary(op: i64, left_idx: i64, right_idx: i64, span_id: i64) -> i64:
 
 pub fn expr_unary(op: i64, operand: i64, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_UNARY, span_id)
-    expr_i_val[idx] = op
+    expr_op_put(idx, op)
     expr_i64_set(idx, "I", op)
     expr_left[idx] = operand
     expr_i64_set(idx, "LEFT", operand)
@@ -1202,7 +1406,7 @@ pub fn expr_assign(target: i64, value: i64, span_id: i64) -> i64:
 
 pub fn expr_compound_assign(op: i64, target: i64, value: i64, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_COMPOUND_ASSIGN, span_id)
-    expr_i_val[idx] = op
+    expr_op_put(idx, op)
     expr_i64_set(idx, "I", op)
     expr_left[idx] = target
     expr_i64_set(idx, "LEFT", target)
@@ -1384,7 +1588,7 @@ pub fn flat_expr_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_i64(expr_env_mirror_high_slot))
     parts = parts.push(flat_pool_enc_i64(expr_extra_dense()))
     parts = parts.push(flat_pool_enc_text(expr_f_val))
-    parts = parts.push(flat_pool_enc_i64(expr_i_val))
+    parts = parts.push(flat_pool_enc_i64(expr_i_val_dense()))
     parts = parts.push(flat_pool_enc_i64(expr_left))
     parts = parts.push(flat_pool_enc_i64(expr_right))
     parts = parts.push(flat_pool_enc_text(expr_s_val_dense()))
@@ -1430,6 +1634,7 @@ pub fn flat_expr_pools_restore(r: FlatPoolReader) -> bool:
     expr_span = flat_pool_dec_i64_into(expr_span, r)
     expr_stmts = flat_pool_dec_i64_list_into(expr_stmts, r)
     expr_tag = flat_pool_dec_i64_into(expr_tag, r)
+    expr_i_val_load(expr_i_val)
     r.ok
 
 # Live line chunks of this family's CLEAR pools, in dump order, for the
@@ -1482,7 +1687,7 @@ pub fn expr_store_state_take() -> ExprStoreState:
         expr_env_mirror_high_slot: expr_env_mirror_high_slot,
         expr_tag: expr_tag,
         expr_span: expr_span,
-        expr_i_val: expr_i_val,
+        expr_i_val: expr_i_val_dense(),
         expr_f_val: expr_f_val,
         expr_s_val: expr_s_val_dense(),
         expr_left: expr_left,
@@ -1543,7 +1748,7 @@ pub fn expr_store_state_install(s: ExprStoreState):
     expr_env_mirror_high_slot = s.expr_env_mirror_high_slot
     expr_tag = s.expr_tag
     expr_span = s.expr_span
-    expr_i_val = s.expr_i_val
+    expr_i_val_load(s.expr_i_val)
     expr_f_val = s.expr_f_val
     expr_s_val_load(s.expr_s_val)
     expr_left = s.expr_left

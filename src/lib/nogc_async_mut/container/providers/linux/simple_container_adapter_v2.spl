@@ -252,7 +252,7 @@ impl LinuxSimpleContainerAdapterV2:
         val projection = ContainerRequestProjectionV2(workload_uid: decoded.pod_uid, attempt: decoded.attempt,
             operation_id: decoded.operation_id, request_digest: digest, cpu_millis: decoded.cpu_limit_millis,
             memory_bytes: decoded.memory_limit_bytes, timeout_ms: decoded.timeout_ms, has_devices: false,
-            has_workspace: decoded.bundle_path != "" or decoded.build_input_root != "" or decoded.build_output_root != "")
+            has_workspace: decoded.bundle_path != "" or decoded.build_input_root != "" or decoded.build_output_root != "" or decoded.mounts.len() > 0)
         Ok((decoded, projection))
 
     pub fn project(request: ContainerExecutionRequestV2) -> Result<ContainerRequestProjectionV2, text>:
@@ -266,10 +266,15 @@ impl LinuxSimpleContainerAdapterV2:
         Ok(true)
 
     fn _exec_configuration_v3(parent: ContainerExecutionRequestV2, installed: ContainerExecInstalledV3,
-            admission: ContainerExecAdmissionV3) -> Result<bool, text>:
+            admission: ContainerExecAdmissionV3, operation: text) -> Result<bool, text>:
         if self.provider.containment_policy.?: return Err("containment-exec-control-not-installed")
         if self.provider.scripted: return Err("container-exec-scripted-owner-unsupported")
         val checked = self._checked_request_v2(parent)?
+        # This private routing selector is fixed by the two owner methods;
+        # it is not a caller-supplied mount grant. Inspect keeps its existing
+        # known-birth recovery route without allowing a new exec effect.
+        if operation == "begin" and checked.0.mounts.len() > 0:
+            return Err("linux-mount-native-admission-not-installed")
         val matched = container_exec_installed_match_v3(installed, admission)?
         if (self.provider.engine != "podman" or not self.provider.engine_policy.? or
                 not self.provider.engine_baseline.?): return Err("container-exec-managed-podman-required")
@@ -286,7 +291,7 @@ impl LinuxSimpleContainerAdapterV2:
     pub me exec_begin_v3(parent: ContainerExecutionRequestV2, installed: ContainerExecInstalledV3,
             admission: ContainerExecAdmissionV3, observed: ContainerExecControlObservationV3,
             action: text) -> LinuxOciEngineExecTurnV3:
-        match self._exec_configuration_v3(parent, installed, admission):
+        match self._exec_configuration_v3(parent, installed, admission, "begin"):
             case Err(reason):
                 return LinuxOciEngineExecTurnV3(owner: nil, birth: nil, inspection: nil, phase: "rejected", error: reason)
             case Ok(_): pass
@@ -294,7 +299,7 @@ impl LinuxSimpleContainerAdapterV2:
 
     pub me exec_inspect_v3(parent: ContainerExecutionRequestV2, installed: ContainerExecInstalledV3,
             admission: ContainerExecAdmissionV3) -> LinuxOciEngineExecTurnV3:
-        match self._exec_configuration_v3(parent, installed, admission):
+        match self._exec_configuration_v3(parent, installed, admission, "inspect"):
             case Err(reason):
                 return LinuxOciEngineExecTurnV3(owner: nil, birth: nil, inspection: nil, phase: "rejected", error: reason)
             case Ok(_): pass
