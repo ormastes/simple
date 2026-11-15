@@ -872,20 +872,53 @@ fn ed_scalar_mul(scalar: [u8], p: EdPoint) -> EdPoint:
 
     Fixes `doc/08_tracking/bug/ed25519_scalar_mul_not_constant_time_2026-05-01.md`.
     """
+    val table = _ed_point_table_16(p)
     var result = ed_point_identity()
-    var base = p
-    var seen_nonzero = false
-    var bit_idx: u64 = 0
-    while bit_idx < 256:
-        if _ed_scalar_bit(scalar, bit_idx) == 1:
-            if seen_nonzero:
-                result = ed_point_add(result, base)
-            else:
-                result = base
-                seen_nonzero = true
-        base = ed_point_double(base)
-        bit_idx = bit_idx + 1
+    var byte_idx: i64 = 31
+    while byte_idx >= 0:
+        val byte_val = _ed_u8_at(scalar, byte_idx.to_u64()).to_u64()
+        result = _ed_point_double4(result)
+        result = ed_point_add(result, _ed_point_select_16(table, (byte_val >> 4) & 0xFu64))
+        result = _ed_point_double4(result)
+        result = ed_point_add(result, _ed_point_select_16(table, byte_val & 0xFu64))
+        byte_idx = byte_idx - 1
     result
+
+fn _ed_point_double4(p: EdPoint) -> EdPoint:
+    """Four successive doublings (one 4-bit window step). Branch-free."""
+    ed_point_double(ed_point_double(ed_point_double(ed_point_double(p))))
+
+fn _ed_point_table_16(p: EdPoint) -> [EdPoint]:
+    """Build [0*P, 1*P, ..., 15*P]. Independent of any secret scalar."""
+    var table: [EdPoint] = [ed_point_identity()]
+    var idx: u64 = 1
+    while idx < 16:
+        table.push(ed_point_add(table[idx - 1], p))
+        idx = idx + 1
+    table
+
+fn _ed_ct_eq_u64(a: u64, b: u64) -> u64:
+    """Return 1 if a == b else 0, without a data-dependent branch.
+
+    `z | (0 - z)` has its top bit set for every non-zero z, so the shifted
+    top bit is 0 exactly when a == b; the final XOR inverts it.
+    """
+    val z: u64 = a ^ b
+    ((z | (0u64 - z)) >> 63) ^ 1u64
+
+fn _ed_point_select_16(table: [EdPoint], digit: u64) -> EdPoint:
+    """Constant-time table lookup: return table[digit] touching every entry.
+
+    Every one of the 16 entries is read and folded through `ed_point_cselect`
+    with an XOR-mask, so neither the memory access pattern nor the executed
+    instruction sequence depends on the (secret) `digit`.
+    """
+    var acc = ed_point_identity()
+    var idx: u64 = 0
+    while idx < 16:
+        acc = ed_point_cselect(acc, table[idx], _ed_ct_eq_u64(idx, digit))
+        idx = idx + 1
+    acc
 
 fn _ed_scalar_mul_basepoint_cached(scalar: [u8]) -> EdPoint:
     var result = _small_ed_point_identity()
@@ -930,29 +963,18 @@ fn _ed_scalar_mul_basepoint_cached(scalar: [u8]) -> EdPoint:
 
     _small_ed_point_to_ed(result)
 
-fn _ed_scalar_bit(scalar: [u8], bit_idx: u64) -> u64:
-    val byte_idx = bit_idx / 8
-    val bit_in_byte = bit_idx - byte_idx * 8
-    (_ed_u8_at(scalar, byte_idx).to_u64() >> bit_in_byte) & 1
-
 fn ed_scalar_mul_basepoint_simple(scalar: [u8]) -> EdPoint:
-    var result = ed_point_identity()
-    var base = _ed25519_base_point()
-    var seen_nonzero = false
-    var bit_idx: u64 = 0
-    while bit_idx < 256:
-        if _ed_scalar_bit(scalar, bit_idx) == 1:
-            if seen_nonzero:
-                result = ed_point_add(result, base)
-            else:
-                result = base
-                seen_nonzero = true
-        base = ed_point_double(base)
-        bit_idx = bit_idx + 1
-    result
+    """Constant-time basepoint multiply.
+
+    Historically a double-and-add loop that branched on each secret scalar
+    bit (`if _ed_scalar_bit(...) == 1`), a timing side channel on every
+    signing operation. It now delegates to the branch-free windowed
+    `ed_scalar_mul`; the name is kept for existing call sites.
+    """
+    ed_scalar_mul(scalar, _ed25519_base_point())
 
 fn ed_scalar_mul_basepoint(scalar: [u8]) -> EdPoint:
-    ed_scalar_mul_basepoint_simple(scalar)
+    ed_scalar_mul(scalar, _ed25519_base_point())
 
 # ============================================================================
 # Point Encoding / Decoding (RFC 8032 section 5.1.2)

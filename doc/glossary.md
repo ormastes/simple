@@ -257,6 +257,17 @@ Decision:
 - Best tradeoff is **shared core + Loader/JIT policy wrappers**.
 - One mapper with only config flags is workable but tends to grow mode conditionals and weak ownership rules.
 
+## Region (init capability)
+
+For `E_INIT_CAPABILITY_ESCAPE` (immutable async init): the async producer of a
+late-initialised immutable field (`async_init(...)`) is outside the constructing
+scope's mutation region, so it may only receive IMMUTABLE input. A `var`
+binding, `mut T`/`&mut` parameter, `me`-method `self`, borrow/view-typed binding or
+closure capturing mutable state, anywhere in the argument, is rejected; `val`
+bindings, immutable parameters and literals are accepted. Assignment to an
+immutable binding (`val x = counter`) is the gate. Owner decision 2026-11-15,
+`doc/08_tracking/bug/immutable_async_open_questions_2026-11-15.md` section 4.
+
 ## Remote interpreter
 Remote interpreter executes same frontend/lowering contract but targets remote memory.
 

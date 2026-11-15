@@ -220,9 +220,13 @@ describe "XRay LLVM flag-guard sleds (Windows)":
         a record index by `atomicrmw add` on the write index (lockless), drops and
         counts when full, and publishes the record by a release store of seq."""
         val ir = xray_attr_translator("windows").translate_module(xray_attr_module([xray_attr_fn(1, "xr_tail", 2)]))
-        step("Header {capacity, write index, dropped} then capacity x {site, kind, pad, seq}")
-        expect(xray_count_of(ir, "@__simple_xray_ring_v1 =")).to_equal(1)
-        expect(ir).to_contain("@__simple_xray_ring_v1 = global { i64, i64, i64, [65536 x { i64, i32, i32, i64 }] } { i64 65536, i64 0, i64 0, [65536 x { i64, i32, i32, i64 }] zeroinitializer }")
+        step("Header {capacity, write index, dropped} then capacity x {site, kind, pad, seq, ts} (ABI v2)")
+        expect(xray_count_of(ir, "@__simple_xray_ring_v2 =")).to_equal(1)
+        expect(xray_count_of(ir, "@__simple_xray_ring_v1")).to_equal(0)
+        expect(ir).to_contain("@__simple_xray_ring_v2 = global { i64, i64, i64, [65536 x { i64, i32, i32, i64, i64 }] } { i64 65536, i64 0, i64 0, [65536 x { i64, i32, i32, i64, i64 }] zeroinitializer }")
+        step("The edge stamps ts from llvm.readcyclecounter before the release seq store")
+        expect(xray_count_of(ir, "declare i64 @llvm.readcyclecounter()")).to_equal(1)
+        expect(ir).to_contain("%xe_ts = call i64 @llvm.readcyclecounter()\n  %xe_rts = getelementptr inbounds { i64, i64, i64, [65536 x { i64, i32, i32, i64, i64 }] }, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 4\n  store i64 %xe_ts, ptr %xe_rts, align 8\n  %xe_seq = add i64 %xe_i, 1")
         step("The null-hook branch appends to the ring; the hook branch is unchanged")
         expect(ir).to_contain("br i1 %set, label %xe_call, label %xe_ring")
         expect(ir).to_contain("call void %h(i64 %site, i32 %kind)")

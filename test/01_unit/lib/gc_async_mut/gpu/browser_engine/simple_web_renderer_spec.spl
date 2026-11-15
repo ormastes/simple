@@ -77,6 +77,18 @@ use common.ui.draw_ir.{DrawIrCommand}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{
     simpleos_host_gpu_image_resource
 }
+use std.nogc_sync_mut.text_layout.font_provider.{browser_host_has_measured_linux_face_set}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendStatus}
+use std.gc_async_mut.gpu.engine2d.helpers_availability.{backend_canonical_name}
+
+# Host-dependent: a requested GPU backend keeps its canonical name only when
+# this host can initialize it (independent Engine2D probe); otherwise the
+# honest fallback is "software" (9970185d1de contract, e.g. Metal on Linux).
+fn _backend_name_on_this_host(canonical: text) -> text:
+    if Engine2D.probe_backend(96, 64, canonical).status == BackendStatus.Initialized:
+        return canonical
+    "software"
 
 fn _count_non_bg(pixels: [u32], bg: u32) -> i32:
     var count: i32 = 0
@@ -1304,8 +1316,15 @@ describe "SimpleWebRenderer":
         val execution = simple_web_layout_render_html_readback_engine2d_result(
             html, 96, 48, "software")
 
-        expect(execution.vector_font_identity).to_equal("")
-        expect(execution.vector_font_pixel_size).to_equal(0)  # oracle: 0 is the pinned authoritative contract value
+        # Face-dependent: on the measured Linux face set the host resolves
+        # Liberation Sans for the default sans-serif, so there IS a resolved
+        # face and its size is the authored 17px. Elsewhere no face resolves.
+        if browser_host_has_measured_linux_face_set():
+            expect(execution.vector_font_identity).to_contain("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf")
+            expect(execution.vector_font_pixel_size).to_equal(17)
+        else:
+            expect(execution.vector_font_identity).to_equal("")
+            expect(execution.vector_font_pixel_size).to_equal(0)  # oracle: 0 is the pinned authoritative contract value
 
     it "renders aspect-ratio boxes from a definite width":
         # @req REQ-WEB-RENDER-001
@@ -1918,18 +1937,20 @@ describe "SimpleWebRenderer":
         # @capture(gui_image): retained evidence for scenario "preserves supported Engine2D backend names before runtime fallback"
         step("Verify: preserves supported Engine2D backend names before runtime fallback")
         expect(SimpleWebRenderer.create_with_backend(96, 64, "auto").backend_name).to_equal(simple_web_resolved_engine2d_backend_name(96, 64, "auto"))
-        expect(SimpleWebRenderer.create_with_backend(96, 64, "cuda").backend_name).to_equal("cuda")
-        expect(SimpleWebRenderer.create_with_backend(96, 64, "hip").backend_name).to_equal("rocm")
-        expect(SimpleWebRenderer.create_with_backend(96, 64, "opencl").backend_name).to_equal("opencl")
-        expect(SimpleWebRenderer.create_with_backend(96, 64, "vulkan").backend_name).to_equal("vulkan")
-        expect(SimpleWebRenderer.create_with_backend(96, 64, "metal").backend_name).to_equal("metal")
+        expect(SimpleWebRenderer.create_with_backend(96, 64, "cuda").backend_name).to_equal(_backend_name_on_this_host("cuda"))
+        expect(SimpleWebRenderer.create_with_backend(96, 64, "hip").backend_name).to_equal(_backend_name_on_this_host("rocm"))
+        expect(SimpleWebRenderer.create_with_backend(96, 64, "opencl").backend_name).to_equal(_backend_name_on_this_host("opencl"))
+        expect(SimpleWebRenderer.create_with_backend(96, 64, "vulkan").backend_name).to_equal(_backend_name_on_this_host("vulkan"))
+        expect(SimpleWebRenderer.create_with_backend(96, 64, "metal").backend_name).to_equal(_backend_name_on_this_host("metal"))
         expect(SimpleWebRenderer.create_with_backend(96, 64, "cpu_simd").backend_name).to_equal("cpu_simd")
         expect(SimpleWebRenderer.create_with_backend(96, 64, "simd_cpu").backend_name).to_equal("cpu_simd")
-        expect(simple_web_resolved_engine2d_backend_name(96, 64, "cuda")).to_equal("cuda")
-        expect(simple_web_resolved_engine2d_backend_name(96, 64, "hip")).to_equal("rocm")
-        expect(simple_web_resolved_engine2d_backend_name(96, 64, "opencl")).to_equal("opencl")
-        expect(simple_web_resolved_engine2d_backend_name(96, 64, "vulkan")).to_equal("vulkan")
-        expect(simple_web_resolved_engine2d_backend_name(96, 64, "metal")).to_equal("metal")
+        # Alias canonicalization is host-independent even where the backend is absent.
+        expect(backend_canonical_name("hip")).to_equal("rocm")
+        expect(simple_web_resolved_engine2d_backend_name(96, 64, "cuda")).to_equal(_backend_name_on_this_host("cuda"))
+        expect(simple_web_resolved_engine2d_backend_name(96, 64, "hip")).to_equal(_backend_name_on_this_host("rocm"))
+        expect(simple_web_resolved_engine2d_backend_name(96, 64, "opencl")).to_equal(_backend_name_on_this_host("opencl"))
+        expect(simple_web_resolved_engine2d_backend_name(96, 64, "vulkan")).to_equal(_backend_name_on_this_host("vulkan"))
+        expect(simple_web_resolved_engine2d_backend_name(96, 64, "metal")).to_equal(_backend_name_on_this_host("metal"))
         expect(simple_web_resolved_engine2d_backend_name(96, 64, "cpu_simd")).to_equal("cpu_simd")
 
     it "high-level renderer preserves OpenCL backend selection without changing generic layout pixels":
@@ -1939,7 +1960,7 @@ describe "SimpleWebRenderer":
         val html = "<html><head><style>.box{background-color:#2563eb;width:24px;height:16px}</style></head><body><div class='box'></div></body></html>"
         val sw = SimpleWebRenderer.create_with_backend(48, 32, "software")
         val opencl = SimpleWebRenderer.create_with_backend(48, 32, "opencl")
-        expect(opencl.backend_name).to_equal("opencl")
+        expect(opencl.backend_name).to_equal(_backend_name_on_this_host("opencl"))
         expect(_pixels_equal(opencl.render_html_to_pixels(html), sw.render_html_to_pixels(html))).to_equal(true)
 
     it "reports the actual backend after invalid backend fallback":

@@ -1,0 +1,131 @@
+"""
+## Purpose and audience
+Purpose: pin how slang's OpenAI chat protocol carries image, audio and video
+content parts. Audience: engineers wiring a multimodal OpenAI client at slang.
+
+## Operator workflow
+I send a chat request whose user message holds text plus an image or a
+recording. slang must either hand that medium to a model that can take it, or
+refuse the request with an OpenAI-style error that names the problem. It must
+never drop the medium and answer the text alone, because that answer would be
+about a picture the model never saw.
+
+## Compatibility and limitations
+Media travel inline as base64 (`data:` URLs for image_url/video_url,
+`input_audio.data`); remote http(s) URLs are refused because slang has no
+network owner for client media. Video is refused outright: slang has no video
+container decoder and does not run ffmpeg. The fixtures here carry tiny
+base64 payloads, so nothing is decoded in this spec.
+"""
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{chat_messages_parse, chat_messages_from_body, json_string_field, base64_payload_is_strict}
+use std.gc_async_mut.slang.entrypoints.openai.serving_chat.{chat_frames_from_body}
+use std.gc_async_mut.slang.entrypoints.openai.api_server.{slang_api_dispatch}
+use std.gc_async_mut.slang.engine.llm_engine.{engine_set_lib_path}
+use std.io_runtime.{dir_create_all, file_write, dir_remove_all}
+
+fn _text_part(t: text) -> text:
+    "{\"type\":\"text\",\"text\":\"" + t + "\"}"
+
+fn _image_part(url: text) -> text:
+    "{\"type\":\"image_url\",\"image_url\":{\"url\":\"" + url + "\"}}}}"
+
+fn _audio_part(data: text, format: text) -> text:
+    "{\"type\":\"input_audio\",\"input_audio\":{\"data\":\"" + data + "\",\"format\":\"" + format + "\"}}}}"
+
+fn _video_part(url: text) -> text:
+    "{\"type\":\"video_url\",\"video_url\":{\"url\":\"" + url + "\"}}}}"
+
+fn _body(model: text, parts: text) -> text:
+    "{\"model\":\"" + model + "\",\"messages\":[{\"role\":\"user\",\"content\":[" + parts + "]}]}"
+
+fn _text_only_root() -> text:
+    val root = "build/test/slang_media_parts/gguf"
+    dir_remove_all(root)
+    dir_create_all(root + "/tiny-gguf")
+    file_write(root + "/tiny-gguf/model.gguf", "GGUF not a loadable model, only the magic")
+    # No backend library: the refusal under test must come from the media
+    # check, never from whether this host happens to have a ggml build.
+    engine_set_lib_path("build/test/slang_media_parts/no-such-backend.dll")
+    root
+
+fn _post(body: text) -> text:
+    val response = slang_api_dispatch("POST", "/v1/chat/completions", body, _text_only_root())
+    response.status.to_text() + " " + json_string_field(response.body, "code")
+
+describe "chat content parts are typed, not flattened":
+    it "keeps a text-only message exactly as before":
+        step("A plain string content is one text part and the same joined text")
+        match chat_messages_parse("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"):
+            Ok(messages):
+                expect(messages.len()).to_equal(1)
+                expect(messages[0].content).to_equal("hi")
+                expect(messages[0].parts.len()).to_equal(1)
+                expect(messages[0].parts[0].kind).to_equal("text")
+            Err(_):
+                expect("parse error").to_equal("ok")
+
+    it "carries an image_url data URL as an image part in client order":
+        step("Text before the image stays text; the image is kept, not dropped")
+        match chat_messages_parse(_body("m", _text_part("what is this?") + "," + _image_part("data:image/jpeg;base64,aGVsbG8="))):
+            Ok(messages):
+                expect(messages[0].content).to_equal("what is this?")
+                expect(messages[0].parts.len()).to_equal(2)
+                expect(messages[0].parts[1].kind).to_equal("image")
+                expect(messages[0].parts[1].format).to_equal("jpeg")
+                expect(messages[0].parts[1].data).to_equal("aGVsbG8=")
+            Err(error):
+                expect(error.message).to_equal("")
+
+    it "carries an input_audio part with its format":
+        match chat_messages_parse(_body("m", _audio_part("aGVsbG8=", "mp3"))):
+            Ok(messages):
+                expect(messages[0].parts.len()).to_equal(1)
+                expect(messages[0].parts[0].kind).to_equal("audio")
+                expect(messages[0].parts[0].format).to_equal("mp3")
+            Err(error):
+                expect(error.message).to_equal("")
+
+    it "puts one media marker where each media part was":
+        step("A message holding only media is still readable: the marker is its content")
+        expect(chat_frames_from_body(_body("m", _image_part("data:image/png;base64,aGVsbG8=") + "," + _text_part("describe")))).to_equal("4:user19:<__media__>describe")
+
+describe "media that cannot be carried faithfully is refused":
+    it "refuses a remote image URL by name":
+        match chat_messages_parse(_body("m", _image_part("https://example.com/cat.png"))):
+            Ok(_):
+                expect("accepted").to_equal("refused")
+            Err(error):
+                expect(error.code).to_equal("unsupported_media_url")
+        expect(_post(_body("tiny-gguf", _image_part("https://example.com/cat.png")))).to_equal("400 unsupported_media_url")
+
+    it "refuses malformed base64 rather than decoding it leniently":
+        expect(base64_payload_is_strict("aGVsbG8=")).to_equal(true)
+        expect(base64_payload_is_strict("aGVsbG8")).to_equal(false)
+        expect(base64_payload_is_strict("aG$sbG8=")).to_equal(false)
+        expect(base64_payload_is_strict("a=VsbG8=")).to_equal(false)
+        expect(_post(_body("tiny-gguf", _audio_part("aGVsbG8", "wav")))).to_equal("400 invalid_media")
+
+    it "never reduces a refused media request to its text":
+        step("The text-only view of a refused body is empty, so it cannot be served as text")
+        expect(chat_messages_from_body(_body("m", _text_part("hi") + "," + _image_part("http://x/y.png"))).len()).to_equal(0)
+
+    it "refuses an unknown content part type":
+        expect(_post(_body("tiny-gguf", "{\"type\":\"hologram\"}"))).to_equal("400 invalid_request")
+
+describe "a model that cannot take the medium answers an OpenAI error":
+    it "answers 400 unsupported_modality for an image sent to a text-only model":
+        step("The refusal comes before any engine call, so nothing is generated")
+        expect(_post(_body("tiny-gguf", _text_part("what is this?") + "," + _image_part("data:image/jpeg;base64,aGVsbG8=")))).to_equal("400 unsupported_modality")
+
+    it "answers 400 unsupported_modality for audio sent to a text-only model":
+        expect(_post(_body("tiny-gguf", _audio_part("aGVsbG8=", "wav")))).to_equal("400 unsupported_modality")
+
+    it "refuses video and says why":
+        val response = slang_api_dispatch("POST", "/v1/chat/completions", _body("tiny-gguf", _video_part("data:video/mp4;base64,aGVsbG8=")), _text_only_root())
+        expect(response.status).to_equal(400)
+        expect(json_string_field(response.body, "code")).to_equal("unsupported_modality")
+        expect(json_string_field(response.body, "message").find("video input is not supported") >= 0).to_equal(true)

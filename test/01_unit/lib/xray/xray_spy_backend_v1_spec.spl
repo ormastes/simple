@@ -100,7 +100,7 @@ fn fake_dll(names: [text], ring_capacity: i64) -> FakeWinDll:
     val descriptor = rt_alloc(8 + n * 8)
     val table = rt_alloc(8 + n * 8)
     val hook = rt_alloc(8)
-    val ring = rt_alloc(24 + ring_capacity * 24)
+    val ring = rt_alloc(24 + ring_capacity * 32)
     unsafe(capabilities: [ffi]):
         rt_ptr_write_i64(descriptor, 0, n)
         rt_ptr_write_i64(table, 0, n)
@@ -111,19 +111,21 @@ fn fake_dll(names: [text], ring_capacity: i64) -> FakeWinDll:
             rt_ptr_write_i64(descriptor, 8 + i * 8, slot)
             rt_ptr_write_i64(table, 8 + i * 8, c_string(names[i]))
         rt_ptr_write_i64(ring, 0, ring_capacity)
-        for i in 0..(2 + ring_capacity * 3):
+        for i in 0..(2 + ring_capacity * 4):
             rt_ptr_write_i64(ring, 8 + i * 8, 0)
     FakeWinDll(descriptor: descriptor, names: table, hook: hook, ring: ring)
 
 # Replays the emitted guard in ring mode: load slot, append to the ring if set.
+# Ring ABI v2 record {site, kind, pad, seq, ts}; the model counter ticks 10 per edge.
 fn win_fire(dll: FakeWinDll, site: i64, kind: i64):
     unsafe(capabilities: [ffi]):
         if rt_ptr_read_u8(rt_ptr_read_i64(dll.descriptor, 8 + site * 8), 0) == 0: return
         val i = rt_ptr_read_i64(dll.ring, 8)
         rt_ptr_write_i64(dll.ring, 8, i + 1)
-        rt_ptr_write_i64(dll.ring, 24 + i * 24, site)
-        rt_ptr_write_i64(dll.ring, 32 + i * 24, kind)
-        rt_ptr_write_i64(dll.ring, 40 + i * 24, i + 1)
+        rt_ptr_write_i64(dll.ring, 24 + i * 32, site)
+        rt_ptr_write_i64(dll.ring, 32 + i * 32, kind)
+        rt_ptr_write_i64(dll.ring, 48 + i * 32, (i + 1) * 10)
+        rt_ptr_write_i64(dll.ring, 40 + i * 32, i + 1)
 
 fn config_v1() -> TraceConfigV1:
     TraceConfigV1(instrumentation: TraceInstrumentationV1.Dynamic,
@@ -197,11 +199,28 @@ describe "XRay shared wrapper: spy and profile over both backends":
         val row = trace_profile_function_v1(run_linux().profile(), 1u32)
         expect(row.unwrap().inclusive_ns).to_equal(30u64)
 
-    # RED by design: Windows ring records carry no time (bug
-    # xray_win_ring_edges_unstamped_profile_time_zero_2026-11-15).
+    # Repro for bug xray_win_ring_edges_unstamped_profile_time_zero_2026-11-15:
+    # ring ABI v2 carries the edge's own ts and drain() forwards it.
     it "every drained edge is stamped on both backends":
         expect(stamped(run_linux())).to_equal(4)
         expect(stamped(run_windows())).to_equal(4)
+
+    # @req REQ-XRAY-V1-API-01
+    it "drained timestamps are monotonic within a thread and time the profile":
+        """Generalisation of the stamp bug: one thread's ring records are
+        claimed in program order, so the drained ts sequence must be
+        non-decreasing and the profile must use the edge time, not drain time."""
+        var spy = run_windows()
+        step("one thread: each drained ts is >= the previous one")
+        var prev = 0u64
+        var monotonic = true
+        for event in spy.events:
+            if event.timestamp < prev: monotonic = false
+            prev = event.timestamp
+        expect(monotonic).to_equal(true)
+        step("main entry ts 10 .. exit ts 40 (model ticks): inclusive 30, same as Linux")
+        val row = trace_profile_function_v1(spy.profile(), 1u32)
+        expect(row.unwrap().inclusive_ns).to_equal(30u64)
 
     it "re-enable reuses the one channel arena and poll buffer":
         val dll = fake_dll(NAMES, 16)

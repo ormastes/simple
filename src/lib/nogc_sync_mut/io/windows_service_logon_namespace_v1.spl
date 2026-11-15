@@ -1,0 +1,551 @@
+# Service-only minimum namespace custody. SOURCE_AUTHORED_NOT_RUN.
+# Ordinary path output is DATA, never a credential/file capability. The store
+# must compare its retained global writer with an actually opened reader root.
+use std.nogc_sync_mut.io.windows_service_logon_namespace_contract_v1.{windows_service_namespace_root_shape_v1,
+    windows_service_namespace_fixed_target_v1, windows_service_namespace_mutation_mask_v1,
+    windows_service_namespace_service_fields_v1}
+
+pub class WindowsServiceLogonNamespaceOwnerV1:
+    slot: i64
+    generation: i64
+
+pub struct WindowsServiceLogonNamespaceOpenTurnV1:
+    owner: Option<WindowsServiceLogonNamespaceOwnerV1>
+    ready: bool
+    error: text
+
+pub struct WindowsServiceLogonNamespaceCloseTurnV1:
+    owner: Option<WindowsServiceLogonNamespaceOwnerV1>
+    completed: bool
+    error: text
+
+pub fn windows_service_logon_namespace_open_v1() -> WindowsServiceLogonNamespaceOpenTurnV1:
+    @when(os="windows"):
+    unsafe(capabilities: [ffi, raw_ptr]): namespace_open_v1()
+    @else:
+    WindowsServiceLogonNamespaceOpenTurnV1(owner: nil, ready: false, error: "windows-service-namespace-host-unsupported")
+    @end
+
+pub fn windows_service_logon_namespace_step_v1(owner: WindowsServiceLogonNamespaceOwnerV1) -> WindowsServiceLogonNamespaceOpenTurnV1:
+    @when(os="windows"):
+    unsafe(capabilities: [ffi, raw_ptr]): namespace_step_v1(owner)
+    @else:
+    WindowsServiceLogonNamespaceOpenTurnV1(owner: Some(owner), ready: false, error: "windows-service-namespace-host-unsupported")
+    @end
+
+pub fn windows_service_logon_namespace_current_v1(owner: WindowsServiceLogonNamespaceOwnerV1) -> Result<(), text>:
+    @when(os="windows"):
+    unsafe(capabilities: [ffi, raw_ptr]): namespace_current_entry_v1(owner)
+    @else:
+    Err("windows-service-namespace-host-unsupported")
+    @end
+
+pub fn windows_service_logon_namespace_candidate_path_v1(owner: WindowsServiceLogonNamespaceOwnerV1,
+        native_root: text) -> Result<text, text>:
+    @when(os="windows"):
+    unsafe(capabilities: [ffi, raw_ptr]): namespace_candidate_entry_v1(owner, native_root)
+    @else:
+    Err("windows-service-namespace-host-unsupported")
+    @end
+
+pub fn windows_service_logon_namespace_close_v1(owner: WindowsServiceLogonNamespaceOwnerV1) -> WindowsServiceLogonNamespaceCloseTurnV1:
+    @when(os="windows"):
+    unsafe(capabilities: [ffi, raw_ptr]): namespace_close_v1(owner)
+    @else:
+    WindowsServiceLogonNamespaceCloseTurnV1(owner: Some(owner), completed: false, error: "windows-service-namespace-host-unsupported")
+    @end
+
+@when(os="windows"):
+use std.nogc_sync_mut.io.windows_service_logon_namespace_abi_v1.*
+use std.nogc_sync_mut.io.windows_local_process_principal_v1.{WindowsLocalProcessPrincipalV1,
+    WindowsLocalProcessPrincipalOpenV1, windows_local_process_principal_open_v1}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32,
+    volatile_read_u64, volatile_write_u16, volatile_write_u32, volatile_write_u64}
+
+# Arena32768, disjoint lifetimes: HANDLE-out0/length8/context16;
+# TOKEN_USER64..319/length320; STATISTICS336..391/length392;
+# TokenSessionId400/length404; IOSB416; volume448; FileId512;
+# UNICODE_STRING1024/OBJECT_ATTRIBUTES1040/name1152..9343;
+# link UNICODE_STRING10240/target10304..12351;
+# directory entry14000..18095; security outputs20000..20023;
+# ACL info20100/ACE output20120. No pointer or HANDLE leaves this capsule.
+struct ServiceNamespaceStateV1:
+    generation: i64
+    process_id: i64
+    thread_id: i64
+    heap: i64
+    principal: Option<WindowsLocalProcessPrincipalV1> = nil
+    identity: text = ""
+    arena: i64 = 0
+    handles: [i64] = []
+    security: i64 = 0
+    lsa: i64 = 0
+    stage: i64 = 0
+    drive: text = ""
+    target: text = ""
+    file_identity: [i64] = []
+    error: text = ""
+    closing: bool = false
+    closed: bool = false
+
+# Handle indices: current DOS directory0/global DOS directory1/global drive2/
+# volume3/temporary directory4/temporary drive5/process token6.
+var service_namespace_slots_v1: [ServiceNamespaceStateV1] = []
+var service_namespace_active_v1: i64 = 0
+
+@unsafe(reason: "actual native canonical Windows thread before any registry access", capabilities: [ffi])
+fn namespace_entry_v1() -> Result<(), text>:
+    if rt_is_interpreter_runtime() or rt_is_jit_runtime(): return Err("windows-service-namespace-native-required")
+    if rt_windows_pty_owner_thread_guard_v1() != 1: return Err("windows-service-namespace-thread-required")
+    Ok(())
+
+@unsafe(reason: "compare actual origin before using canonical slot; no caller PID authority", capabilities: [ffi])
+fn namespace_load_v1(owner: WindowsServiceLogonNamespaceOwnerV1) -> Result<ServiceNamespaceStateV1, text>:
+    namespace_entry_v1()?
+    if owner.slot < 0 or owner.slot >= service_namespace_slots_v1.len(): return Err("windows-service-namespace-stale")
+    val state = service_namespace_slots_v1[owner.slot]
+    if state.generation != owner.generation: return Err("windows-service-namespace-stale")
+    if state.process_id != GetCurrentProcessId() as i64 or state.thread_id != GetCurrentThreadId() as i64:
+        return Err("windows-service-namespace-origin-mismatch")
+    Ok(state)
+
+fn namespace_fail_v1(slot: i64, reason: text) -> text:
+    var state = service_namespace_slots_v1[slot]
+    if state.error == "": state.error = reason
+    state.closing = true
+    service_namespace_slots_v1[slot] = state
+    state.error
+
+fn namespace_turn_v1(owner: WindowsServiceLogonNamespaceOwnerV1) -> WindowsServiceLogonNamespaceOpenTurnV1:
+    val state = service_namespace_slots_v1[owner.slot]
+    WindowsServiceLogonNamespaceOpenTurnV1(owner: Some(owner), ready: state.stage == 3 and not state.closing and not state.closed,
+        error: state.error)
+
+@unsafe(reason: "owner-owned bounded ASCII object name and exact Win64 native attribute layout", capabilities: [ffi, raw_ptr])
+fn namespace_attributes_v1(slot: i64, name: text, root: i64) -> Result<(), text>:
+    if name.byte_len() < 1 or name.byte_len() > 4095: return Err("windows-service-namespace-object-name-bound")
+    val a = service_namespace_slots_v1[slot].arena
+    for byte in name.bytes():
+        if byte == 0 or byte > 127: return Err("windows-service-namespace-object-name-not-ascii")
+    for index in 0..name.byte_len(): volatile_write_u16(a + 1152 + index * 2, name.byte_at(index) as i64)
+    volatile_write_u16(a + 1152 + name.byte_len() * 2, 0)
+    for index in 0..8: volatile_write_u64(a + 1024 + index * 8, 0)
+    volatile_write_u16(a + 1024, name.byte_len() * 2)
+    volatile_write_u16(a + 1026, name.byte_len() * 2 + 2)
+    volatile_write_u64(a + 1032, a + 1152)
+    volatile_write_u32(a + 1040, 48u32)
+    volatile_write_u64(a + 1048, root)
+    volatile_write_u64(a + 1056, a + 1024)
+    volatile_write_u32(a + 1064, 64u32)
+    Ok(())
+
+@unsafe(reason: "retain native output before interpreting status, including failing partial acquisition", capabilities: [ffi, raw_ptr])
+fn namespace_open_object_v1(slot: i64, index: i64, name: text, root: i64, link: bool) -> Result<(), text>:
+    val state = service_namespace_slots_v1[slot]
+    if state.handles[index] != 0: return Err("windows-service-namespace-object-cleanup-required")
+    namespace_attributes_v1(slot, name, root)?
+    volatile_write_u64(state.arena, 0)
+    val status = if link: NtOpenSymbolicLinkObject(state.arena, 131073u32, state.arena + 1040)
+        else: NtOpenDirectoryObject(state.arena, 131075u32, state.arena + 1040)
+    val handle = volatile_read_u64(state.arena)
+    var retained = service_namespace_slots_v1[slot]
+    retained.handles[index] = if handle == -1: 0 else: handle
+    service_namespace_slots_v1[slot] = retained
+    if status != 0 or handle == 0 or handle == -1: return Err("windows-service-namespace-object-open")
+    Ok(())
+
+@unsafe(reason: "clear exact native handle only after confirmed NT close", capabilities: [ffi])
+fn namespace_close_handle_v1(slot: i64, index: i64) -> Result<(), text>:
+    var state = service_namespace_slots_v1[slot]
+    if state.handles[index] == 0: return Ok(())
+    if NtClose(state.handles[index]) != 0: return Err("windows-service-namespace-handle-close-retained")
+    state.handles[index] = 0
+    service_namespace_slots_v1[slot] = state
+    Ok(())
+
+@unsafe(reason: "validate bounded actual TOKEN_USER before SID comparison and ACL use", capabilities: [ffi, raw_ptr])
+fn namespace_user_sid_v1(slot: i64) -> Result<i64, text>:
+    val a = service_namespace_slots_v1[slot].arena
+    val length = volatile_read_u32(a + 320) as i64
+    if length < 16 or length > 256: return Err("windows-service-namespace-token-user-length")
+    val sid = volatile_read_u64(a + 64)
+    if sid < a + 80 or sid > a + 64 + length - 8: return Err("windows-service-namespace-token-sid-bound")
+    val count = volatile_read_u8(sid + 1) as i64
+    if count > 15 or sid + 8 + count * 4 > a + 64 + length or IsValidSid(sid) == 0:
+        return Err("windows-service-namespace-token-sid-invalid")
+    Ok(sid)
+
+@unsafe(reason: "actual user SID rendered canonically to compare retained process principal", capabilities: [ffi, raw_ptr])
+fn namespace_sid_text_v1(sid: i64) -> text:
+    var authority: i64 = 0
+    for index in 0..6: authority = authority * 256 + volatile_read_u8(sid + 2 + index) as i64
+    var value = "windows:S-1-{authority}"
+    for index in 0..(volatile_read_u8(sid + 1) as i64): value = value + "-{volatile_read_u32(sid + 8 + index * 4)}"
+    value
+
+@unsafe(reason: "genuine LSA Service logon and actual token SID/AuthId/session, never caller assertions", capabilities: [ffi, raw_ptr])
+fn namespace_service_token_v1(slot: i64) -> Result<(), text>:
+    val initial = service_namespace_slots_v1[slot]
+    val principal = initial.principal.unwrap().current_v1()?
+    val a = initial.arena
+    volatile_write_u64(a, 0)
+    val opened = OpenProcessToken(GetCurrentProcess(), 8u32, a)
+    val handle = volatile_read_u64(a)
+    var state = service_namespace_slots_v1[slot]
+    state.handles[6] = if handle == -1: 0 else: handle
+    service_namespace_slots_v1[slot] = state
+    if opened == 0 or handle == 0 or handle == -1: return Err("windows-service-namespace-token-open")
+    if GetTokenInformation(handle, 1, a + 64, 256u32, a + 320) == 0 or
+            GetTokenInformation(handle, 10, a + 336, 56u32, a + 392) == 0 or
+            GetTokenInformation(handle, 12, a + 400, 4u32, a + 404) == 0:
+        return Err("windows-service-namespace-token-query")
+    if volatile_read_u32(a + 392) != 56 or volatile_read_u32(a + 360) != 1 or volatile_read_u32(a + 404) != 4:
+        return Err("windows-service-namespace-token-layout")
+    val sid = namespace_user_sid_v1(slot)?
+    if namespace_sid_text_v1(sid) != principal.principal_id: return Err("windows-service-namespace-principal-sid-mismatch")
+    val auth = "{volatile_read_u32(a + 348)}:{volatile_read_u32(a + 344)}"
+    if not principal.authority_namespace_id.ends_with("/logon:{auth}"):
+        return Err("windows-service-namespace-principal-authentication-mismatch")
+    volatile_write_u64(a, 0)
+    val status = LsaGetLogonSessionData(a + 344, a)
+    state = service_namespace_slots_v1[slot]
+    state.lsa = volatile_read_u64(a)
+    service_namespace_slots_v1[slot] = state
+    if status != 0 or state.lsa == 0: return Err("windows-service-namespace-lsa-query")
+    val data = state.lsa
+    if volatile_read_u32(data) < 136: return Err("windows-service-namespace-lsa-layout")
+    # SECURITY_LOGON_SESSION_DATA Win64: LUID4, LogonType64, Session68, Sid72.
+    val lsa_sid = volatile_read_u64(data + 72)
+    if lsa_sid == 0 or IsValidSid(lsa_sid) == 0: return Err("windows-service-namespace-lsa-sid")
+    val valid = windows_service_namespace_service_fields_v1(volatile_read_u32(data + 64) as i64,
+        volatile_read_u32(data + 4) == volatile_read_u32(a + 344) and volatile_read_u32(data + 8) == volatile_read_u32(a + 348),
+        EqualSid(sid, lsa_sid) != 0, volatile_read_u32(data + 68) == volatile_read_u32(a + 400))
+    if not valid: return Err("windows-service-namespace-service-logon-required")
+    if initial.principal.unwrap().current_v1()?.identity_digest != principal.identity_digest:
+        return Err("windows-service-namespace-principal-changed")
+    state = service_namespace_slots_v1[slot]
+    state.identity = principal.identity_digest
+    service_namespace_slots_v1[slot] = state
+    Ok(())
+
+@unsafe(reason: "ACL SID must be bounded inside owned descriptor before native validity checks", capabilities: [ffi, raw_ptr])
+fn namespace_descriptor_sid_v1(sid: i64, start: i64, end: i64) -> bool:
+    if sid < start or sid > end - 8: return false
+    val count = volatile_read_u8(sid + 1) as i64
+    count <= 15 and sid + 8 + count * 4 <= end and IsValidSid(sid) != 0
+
+@unsafe(reason: "minimum trust boundary actual service user/SYSTEM/Administrators, no same-authority isolation claim", capabilities: [ffi, raw_ptr])
+fn namespace_trusted_sid_v1(slot: i64, sid: i64) -> bool:
+    val user = namespace_user_sid_v1(slot)
+    if user.is_err(): return false
+    EqualSid(sid, user.unwrap()) != 0 or IsWellKnownSid(sid, 22) != 0 or IsWellKnownSid(sid, 26) != 0
+
+@unsafe(reason: "actual kernel object owner/DACL, bounded ACE parsing; retain security allocation on every failure", capabilities: [ffi, raw_ptr])
+fn namespace_audit_v1(slot: i64, handle: i64, link: bool) -> Result<(), text>:
+    val state = service_namespace_slots_v1[slot]
+    if state.security != 0: return Err("windows-service-namespace-security-cleanup-required")
+    val a = state.arena
+    for index in 0..3: volatile_write_u64(a + 20000 + index * 8, 0)
+    val status = GetSecurityInfo(handle, 6, 5u32, a + 20000, 0, a + 20008, 0, a + 20016)
+    var retained = service_namespace_slots_v1[slot]
+    retained.security = volatile_read_u64(a + 20016)
+    service_namespace_slots_v1[slot] = retained
+    if status != 0 or retained.security == 0: return Err("windows-service-namespace-security-query")
+    val sd = retained.security
+    val size = GetSecurityDescriptorLength(sd) as i64
+    if size < 20 or size > 65536: return Err("windows-service-namespace-security-size")
+    val end = sd + size
+    val owner = volatile_read_u64(a + 20000)
+    val acl = volatile_read_u64(a + 20008)
+    if not namespace_descriptor_sid_v1(owner, sd, end) or not namespace_trusted_sid_v1(slot, owner):
+        return Err("windows-service-namespace-security-owner")
+    if acl < sd or acl > end - 8 or IsValidAcl(acl) == 0: return Err("windows-service-namespace-security-dacl")
+    val acl_size = volatile_read_u16(acl + 2) as i64
+    if acl_size < 8 or acl + acl_size > end: return Err("windows-service-namespace-security-acl-bound")
+    if GetAclInformation(acl, a + 20100, 12u32, 2) == 0: return Err("windows-service-namespace-security-acl-query")
+    val count = volatile_read_u32(a + 20100) as i64
+    val used = volatile_read_u32(a + 20104) as i64
+    if count > 128 or used < 8 or used > acl_size: return Err("windows-service-namespace-security-acl-limit")
+    for index in 0..count:
+        volatile_write_u64(a + 20120, 0)
+        if GetAce(acl, index as u32, a + 20120) == 0: return Err("windows-service-namespace-security-ace-query")
+        val ace = volatile_read_u64(a + 20120)
+        if ace < acl + 8 or ace > acl + used - 4: return Err("windows-service-namespace-security-ace-bound")
+        val size = volatile_read_u16(ace + 2) as i64
+        if size < 4 or ace + size > acl + used: return Err("windows-service-namespace-security-ace-size")
+        val kind = volatile_read_u8(ace)
+        if kind != 0 and kind != 1: return Err("windows-service-namespace-security-ace-unsupported")
+        if size < 16: return Err("windows-service-namespace-security-ace-layout")
+        val sid = ace + 8
+        if not namespace_descriptor_sid_v1(sid, ace, ace + size): return Err("windows-service-namespace-security-ace-sid")
+        if kind == 0 and (volatile_read_u8(ace + 1) & 8u8) == 0u8:
+            if (volatile_read_u32(ace + 4) & windows_service_namespace_mutation_mask_v1(link)) != 0u32 and not namespace_trusted_sid_v1(slot, sid):
+                return Err("windows-service-namespace-untrusted-mutation")
+    if LocalFree(sd) != 0: return Err("windows-service-namespace-security-free-retained")
+    retained = service_namespace_slots_v1[slot]
+    retained.security = 0
+    service_namespace_slots_v1[slot] = retained
+    Ok(())
+
+@unsafe(reason: "actual directory reopening detects context/object replacement; failed close stays canonical", capabilities: [ffi, raw_ptr])
+fn namespace_directory_current_v1(slot: i64, name: text, expected: i64) -> Result<(), text>:
+    namespace_open_object_v1(slot, 4, name, 0, false)?
+    val observed = service_namespace_slots_v1[slot].handles[4]
+    val matches = CompareObjectHandles(expected, observed) != 0
+    namespace_close_handle_v1(slot, 4)?
+    if not matches: return Err("windows-service-namespace-directory-changed")
+    namespace_audit_v1(slot, expected, false)
+
+@unsafe(reason: "enumerate actual local DOS directory; inherited global lookup is not local absence evidence", capabilities: [ffi, raw_ptr])
+fn namespace_no_override_v1(slot: i64) -> Result<(), text>:
+    val state = service_namespace_slots_v1[slot]
+    if CompareObjectHandles(state.handles[0], state.handles[1]) != 0: return Ok(())
+    val a = state.arena
+    volatile_write_u32(a + 16, 0u32)
+    for index in 0..256:
+        volatile_write_u32(a + 8, 0u32)
+        val status = NtQueryDirectoryObject(state.handles[0], a + 14000, 4096u32, 1u8,
+            (if index == 0: 1u8 else: 0u8), a + 16, a + 8)
+        if status == -2147483622: return Ok(())  # STATUS_NO_MORE_ENTRIES
+        if status != 0: return Err("windows-service-namespace-local-directory-query")
+        val length = volatile_read_u32(a + 8) as i64
+        if length < 32 or length > 4096: return Err("windows-service-namespace-local-directory-length")
+        # OBJECT_DIRECTORY_INFORMATION Name is first UNICODE_STRING.
+        val bytes = volatile_read_u16(a + 14000) as i64
+        val maximum = volatile_read_u16(a + 14002) as i64
+        val name = volatile_read_u64(a + 14008)
+        if bytes % 2 != 0 or bytes > maximum or name < a + 14032 or name > a + 14000 + length - bytes:
+            return Err("windows-service-namespace-local-directory-name")
+        if bytes == 4 and volatile_read_u16(name + 2) == 58:
+            val code = volatile_read_u16(name) as i64
+            val expected = state.drive.byte_at(0) as i64
+            if code == expected or code == expected + 32: return Err("windows-service-namespace-local-drive-override")
+    Err("windows-service-namespace-local-directory-bound")
+
+@unsafe(reason: "bounded actual global link target, strict direct local-volume root only", capabilities: [ffi, raw_ptr])
+fn namespace_target_v1(slot: i64) -> Result<text, text>:
+    val state = service_namespace_slots_v1[slot]
+    val a = state.arena
+    for index in 0..2: volatile_write_u64(a + 10240 + index * 8, 0)
+    volatile_write_u16(a + 10242, 2048)
+    volatile_write_u64(a + 10248, a + 10304)
+    volatile_write_u32(a + 8, 0u32)
+    if NtQuerySymbolicLinkObject(state.handles[2], a + 10240, a + 8) != 0:
+        return Err("windows-service-namespace-drive-target-query")
+    val bytes = volatile_read_u16(a + 10240) as i64
+    if bytes < 2 or bytes > 2048 or bytes % 2 != 0 or volatile_read_u64(a + 10248) != a + 10304:
+        return Err("windows-service-namespace-drive-target-bound")
+    val alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz\\"
+    var result = ""
+    for index in 0..(bytes / 2):
+        val code = volatile_read_u16(a + 10304 + index * 2) as i64
+        var found = false
+        for offset in 0..alphabet.byte_len():
+            if alphabet.byte_at(offset) as i64 == code:
+                result = result + alphabet.substring(offset, offset + 1)
+                found = true
+        if not found: return Err("windows-service-namespace-drive-target-unsupported")
+    if not windows_service_namespace_fixed_target_v1(result): return Err("windows-service-namespace-fixed-volume-required")
+    Ok(result)
+
+@unsafe(reason: "actual local nonremovable disk and stable volume/root file identity", capabilities: [ffi, raw_ptr])
+fn namespace_volume_identity_v1(slot: i64) -> Result<[i64], text>:
+    val state = service_namespace_slots_v1[slot]
+    val a = state.arena
+    volatile_write_u64(a + 416, 0)
+    volatile_write_u64(a + 424, 0)
+    volatile_write_u64(a + 448, 0)
+    if NtQueryVolumeInformationFile(state.handles[3], a + 416, a + 448, 8u32, 4) != 0:
+        return Err("windows-service-namespace-volume-query")
+    if volatile_read_u32(a + 416) != 0u32 or volatile_read_u64(a + 424) != 8:
+        return Err("windows-service-namespace-volume-query-completion")
+    if volatile_read_u32(a + 448) != 7u32 or (volatile_read_u32(a + 452) & 17u32) != 0u32:
+        return Err("windows-service-namespace-local-fixed-disk-required")
+    if GetFileInformationByHandleEx(state.handles[3], 18, a + 512, 24u32) == 0:
+        return Err("windows-service-namespace-volume-identity-query")
+    Ok([volatile_read_u64(a + 512), volatile_read_u64(a + 520), volatile_read_u64(a + 528)])
+
+@unsafe(reason: "open retained native volume root without DOS translation or reparse following", capabilities: [ffi, raw_ptr])
+fn namespace_bind_volume_v1(slot: i64) -> Result<(), text>:
+    var state = service_namespace_slots_v1[slot]
+    namespace_no_override_v1(slot)?
+    namespace_open_object_v1(slot, 2, state.drive + ":", state.handles[1], true)?
+    namespace_audit_v1(slot, service_namespace_slots_v1[slot].handles[2], true)?
+    val target = namespace_target_v1(slot)?
+    namespace_attributes_v1(slot, target + "\\", 0)?
+    val a = state.arena
+    volatile_write_u32(a + 1064, 4160u32)  # OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE
+    volatile_write_u64(a, 0)
+    val status = NtCreateFile(a, 1048704u32, a + 1040, a + 416, 0, 0u32, 3u32, 1u32, 2097185u32, 0, 0u32)
+    val handle = volatile_read_u64(a)
+    state = service_namespace_slots_v1[slot]
+    state.handles[3] = if handle == -1: 0 else: handle
+    service_namespace_slots_v1[slot] = state
+    if status != 0 or handle == 0 or handle == -1: return Err("windows-service-namespace-volume-open")
+    val identity = namespace_volume_identity_v1(slot)?
+    state = service_namespace_slots_v1[slot]
+    state.target = target
+    state.file_identity = identity
+    service_namespace_slots_v1[slot] = state
+    Ok(())
+
+@unsafe(reason: "revalidate actual principal, current/global namespace objects, local override and retained drive mapping", capabilities: [ffi, raw_ptr])
+fn namespace_current_native_v1(slot: i64) -> Result<(), text>:
+    val state = service_namespace_slots_v1[slot]
+    if state.closed or state.closing or state.stage != 3: return Err("windows-service-namespace-not-current")
+    if state.principal.unwrap().current_v1()?.identity_digest != state.identity:
+        return Err("windows-service-namespace-principal-changed")
+    namespace_directory_current_v1(slot, "\\??", state.handles[0])?
+    namespace_directory_current_v1(slot, "\\GLOBAL??", state.handles[1])?
+    if state.drive != "":
+        if state.target == "": return Err("windows-service-namespace-drive-incomplete")
+        namespace_no_override_v1(slot)?
+        namespace_open_object_v1(slot, 5, state.drive + ":", state.handles[1], true)?
+        val matches = CompareObjectHandles(state.handles[2], service_namespace_slots_v1[slot].handles[5]) != 0
+        namespace_close_handle_v1(slot, 5)?
+        if not matches: return Err("windows-service-namespace-drive-object-changed")
+        namespace_audit_v1(slot, state.handles[2], true)?
+        if namespace_target_v1(slot)? != state.target or namespace_volume_identity_v1(slot)? != state.file_identity:
+            return Err("windows-service-namespace-drive-volume-changed")
+    if state.principal.unwrap().current_v1()?.identity_digest != state.identity:
+        return Err("windows-service-namespace-principal-changed")
+    Ok(())
+
+@unsafe(reason: "zero-argument native factory owns registry before allocating resources", capabilities: [ffi, raw_ptr])
+fn namespace_open_v1() -> WindowsServiceLogonNamespaceOpenTurnV1:
+    val entry = namespace_entry_v1()
+    if entry.is_err(): return WindowsServiceLogonNamespaceOpenTurnV1(owner: nil, ready: false, error: entry.unwrap_err())
+    if service_namespace_active_v1 >= 32 or service_namespace_slots_v1.len() >= 100000:
+        return WindowsServiceLogonNamespaceOpenTurnV1(owner: nil, ready: false, error: "windows-service-namespace-owner-bound")
+    val heap = GetProcessHeap()
+    if heap == 0: return WindowsServiceLogonNamespaceOpenTurnV1(owner: nil, ready: false, error: "windows-service-namespace-heap")
+    val slot = service_namespace_slots_v1.len()
+    var state = ServiceNamespaceStateV1(generation: slot + 1, process_id: GetCurrentProcessId() as i64,
+        thread_id: GetCurrentThreadId() as i64, heap: heap, handles: [0, 0, 0, 0, 0, 0, 0])
+    service_namespace_slots_v1.push(state)
+    service_namespace_active_v1 = service_namespace_active_v1 + 1
+    val owner = WindowsServiceLogonNamespaceOwnerV1(slot: slot, generation: state.generation)
+    state.arena = HeapAlloc(heap, 8u32, 32768u64)
+    service_namespace_slots_v1[slot] = state
+    if state.arena == 0: namespace_fail_v1(slot, "windows-service-namespace-arena")
+    namespace_turn_v1(owner)
+
+@unsafe(reason: "one finite admission phase per turn, actual principal retained on partial failure", capabilities: [ffi, raw_ptr])
+fn namespace_step_v1(owner: WindowsServiceLogonNamespaceOwnerV1) -> WindowsServiceLogonNamespaceOpenTurnV1:
+    val loaded = namespace_load_v1(owner)
+    if loaded.is_err(): return WindowsServiceLogonNamespaceOpenTurnV1(owner: Some(owner), ready: false, error: loaded.unwrap_err())
+    var state = loaded.unwrap()
+    if state.closed or state.closing: return namespace_turn_v1(owner)
+    if state.stage == 0:
+        match windows_local_process_principal_open_v1():
+            case WindowsLocalProcessPrincipalOpenV1.Rejected(reason): namespace_fail_v1(owner.slot, reason)
+            case WindowsLocalProcessPrincipalOpenV1.CleanupRequired(principal, reason):
+                state.principal = Some(principal)
+                service_namespace_slots_v1[owner.slot] = state
+                namespace_fail_v1(owner.slot, reason)
+            case WindowsLocalProcessPrincipalOpenV1.Ready(principal):
+                state.principal = Some(principal)
+                state.stage = 1
+                service_namespace_slots_v1[owner.slot] = state
+    elif state.stage == 1:
+        val checked = namespace_service_token_v1(owner.slot)
+        if checked.is_err(): namespace_fail_v1(owner.slot, checked.unwrap_err())
+        else:
+            state = service_namespace_slots_v1[owner.slot]
+            state.stage = 2
+            service_namespace_slots_v1[owner.slot] = state
+    elif state.stage == 2:
+        val checked = namespace_open_directories_v1(owner.slot)
+        if checked.is_err(): namespace_fail_v1(owner.slot, checked.unwrap_err())
+        else:
+            state = service_namespace_slots_v1[owner.slot]
+            state.stage = 3
+            service_namespace_slots_v1[owner.slot] = state
+            val current = namespace_current_native_v1(owner.slot)
+            if current.is_err(): namespace_fail_v1(owner.slot, current.unwrap_err())
+    else:
+        val checked = namespace_current_native_v1(owner.slot)
+        if checked.is_err(): namespace_fail_v1(owner.slot, checked.unwrap_err())
+    namespace_turn_v1(owner)
+
+@unsafe(reason: "open actual DOS directory objects and audit their authority", capabilities: [ffi, raw_ptr])
+fn namespace_open_directories_v1(slot: i64) -> Result<(), text>:
+    namespace_open_object_v1(slot, 0, "\\??", 0, false)?
+    namespace_open_object_v1(slot, 1, "\\GLOBAL??", 0, false)?
+    namespace_audit_v1(slot, service_namespace_slots_v1[slot].handles[0], false)?
+    namespace_audit_v1(slot, service_namespace_slots_v1[slot].handles[1], false)?
+    val state = service_namespace_slots_v1[slot]
+    if state.principal.unwrap().current_v1()?.identity_digest != state.identity: return Err("windows-service-namespace-principal-changed")
+    Ok(())
+
+@unsafe(reason: "canonical lookup and quarantine every failed current observation", capabilities: [ffi, raw_ptr])
+fn namespace_current_entry_v1(owner: WindowsServiceLogonNamespaceOwnerV1) -> Result<(), text>:
+    namespace_load_v1(owner)?
+    val checked = namespace_current_native_v1(owner.slot)
+    if checked.is_err(): return Err(namespace_fail_v1(owner.slot, checked.unwrap_err()))
+    Ok(())
+
+@unsafe(reason: "single-drive native admission; returned DOS spelling is candidate data, not an opened root", capabilities: [ffi, raw_ptr])
+fn namespace_candidate_entry_v1(owner: WindowsServiceLogonNamespaceOwnerV1, root: text) -> Result<text, text>:
+    namespace_load_v1(owner)?
+    val checked = namespace_candidate_native_v1(owner.slot, root)
+    if checked.is_err(): return Err(namespace_fail_v1(owner.slot, checked.unwrap_err()))
+    checked
+
+@unsafe(reason: "all native drive acquisition remains canonical even when candidate admission fails", capabilities: [ffi, raw_ptr])
+fn namespace_candidate_native_v1(slot: i64, root: text) -> Result<text, text>:
+    namespace_current_native_v1(slot)?
+    val candidate = windows_service_namespace_root_shape_v1(root)?
+    var state = service_namespace_slots_v1[slot]
+    val drive = candidate.substring(0, 1)
+    if state.drive != "" and state.drive != drive: return Err("windows-service-namespace-second-drive-refused")
+    if state.drive == "":
+        state.drive = drive
+        service_namespace_slots_v1[slot] = state
+        namespace_bind_volume_v1(slot)?
+    namespace_current_native_v1(slot)?
+    Ok(candidate)
+
+@unsafe(reason: "bounded positive-consumption cleanup independent of current namespace validity; principal closes last", capabilities: [ffi, raw_ptr])
+fn namespace_close_v1(owner: WindowsServiceLogonNamespaceOwnerV1) -> WindowsServiceLogonNamespaceCloseTurnV1:
+    val loaded = namespace_load_v1(owner)
+    if loaded.is_err(): return WindowsServiceLogonNamespaceCloseTurnV1(owner: Some(owner), completed: false, error: loaded.unwrap_err())
+    var state = loaded.unwrap()
+    if state.closed: return WindowsServiceLogonNamespaceCloseTurnV1(owner: nil, completed: true, error: state.error)
+    state.closing = true
+    service_namespace_slots_v1[owner.slot] = state
+    var cleanup_error = ""
+    var consumed = false
+    # At most one directly owned release per call; the final principal close
+    # has its existing finite internal cleanup bound. Descriptor/LSA storage
+    # stays valid until its API's exact positive release; do not free arena first.
+    if state.security != 0:
+        if LocalFree(state.security) == 0: state.security = 0
+        else: cleanup_error = "windows-service-namespace-security-free-retained"
+        consumed = true
+    elif state.lsa != 0:
+        if LsaFreeReturnBuffer(state.lsa) == 0: state.lsa = 0
+        else: cleanup_error = "windows-service-namespace-lsa-free-retained"
+        consumed = true
+    else:
+        for index in 0..7:
+            if not consumed and state.handles[index] != 0:
+                if NtClose(state.handles[index]) == 0: state.handles[index] = 0
+                else: cleanup_error = "windows-service-namespace-handle-close-retained"
+                consumed = true
+    if not consumed and state.arena != 0:
+        if HeapFree(state.heap, 0u32, state.arena) != 0: state.arena = 0
+        else: cleanup_error = "windows-service-namespace-arena-free-retained"
+        consumed = true
+    if not consumed and state.principal.is_some():
+        val disposition = state.principal.unwrap().close_v1()
+        if disposition == "released": state.principal = nil
+        else: cleanup_error = "windows-service-namespace-principal-{disposition}-retained"
+        consumed = true
+    if state.error == "" and cleanup_error != "": state.error = cleanup_error
+    if not consumed:
+        state.closed = true
+        service_namespace_active_v1 = service_namespace_active_v1 - 1
+    service_namespace_slots_v1[owner.slot] = state
+    WindowsServiceLogonNamespaceCloseTurnV1(owner: if state.closed: nil else: Some(owner), completed: state.closed, error: state.error)
+@end

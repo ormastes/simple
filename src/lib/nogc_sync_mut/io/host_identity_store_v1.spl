@@ -1,0 +1,68 @@
+# Protected retained SSH key/pin storage. Contents never enter diagnostics.
+# Storage is not a key parser or authentication authority; caller validates
+# existing key/public-wire/pin identity using its shared codec.
+pub use std.nogc_sync_mut.io.host_identity_store_abi_v1.HostIdentityStorePublicationV1
+use std.nogc_sync_mut.io.host_identity_store_abi_v1.host_identity_leaf_valid_v1
+@when(os="windows"):
+use std.nogc_sync_mut.io.host_identity_store_windows_v1.{HostIdentityPlatformV1, host_identity_platform_open_v1}
+@else:
+use std.nogc_sync_mut.io.host_identity_store_linux_v1.{HostIdentityPlatformV1, host_identity_platform_open_v1}
+@end
+
+pub class HostIdentityStoreV1:
+    platform: HostIdentityPlatformV1
+
+pub struct HostIdentityStoreOpenTurnV1:
+    owner: Option<HostIdentityStoreV1>
+    ready: bool
+    cleanup_pending: bool
+    error: text
+
+pub struct HostIdentityStoreReadTurnV1:
+    owner: HostIdentityStoreV1
+    bytes: Option<[u8]>
+    absent: bool
+    cleanup_pending: bool
+    error: text
+
+pub struct HostIdentityStorePublishTurnV1:
+    owner: HostIdentityStoreV1
+    publication: HostIdentityStorePublicationV1
+    file_synced: bool
+    namespace_synced: bool
+    cleanup_pending: bool
+    error: text
+
+pub struct HostIdentityStoreCloseTurnV1:
+    owner: Option<HostIdentityStoreV1>
+    completed: bool
+    error: text
+
+pub fn host_identity_store_open_v1(root: text) -> HostIdentityStoreOpenTurnV1:
+    val opened = host_identity_platform_open_v1(root)
+    var owner: Option<HostIdentityStoreV1> = None
+    if val actual = opened.owner: owner = Some(HostIdentityStoreV1(platform: actual))
+    HostIdentityStoreOpenTurnV1(owner, opened.ready, opened.cleanup_pending, opened.error)
+
+pub fn host_identity_store_read_v1(owner: HostIdentityStoreV1, leaf: text, maximum: i64) -> HostIdentityStoreReadTurnV1:
+    val read = owner.platform.read_v1(leaf, maximum)
+    # Nil is absence only when the underlying OS proved absence explicitly.
+    HostIdentityStoreReadTurnV1(owner, read.bytes, read.absent, read.cleanup_pending, read.error)
+
+pub fn host_identity_store_publish_v1(owner: HostIdentityStoreV1, leaf: text, bytes: [u8]) -> HostIdentityStorePublishTurnV1:
+    val result = owner.platform.publish_v1(leaf, bytes)
+    HostIdentityStorePublishTurnV1(owner, result.publication, result.file_synced,
+        result.namespace_synced, result.cleanup_pending, result.error)
+
+pub fn host_identity_store_close_v1(owner: HostIdentityStoreV1) -> HostIdentityStoreCloseTurnV1:
+    val result = owner.platform.close_v1()
+    HostIdentityStoreCloseTurnV1(if result.consumed: None else: Some(owner), result.completed, result.error)
+
+pub fn host_identity_store_path_v1(owner: HostIdentityStoreV1, leaf: text) -> Result<text, text>:
+    if not host_identity_leaf_valid_v1(leaf): return Err("identity-store-leaf")
+    owner.platform.path_v1(leaf)
+
+# Check transport support before generating/publishing secret material. The
+# caller retains this same canonical owner for cleanup after either result.
+pub fn host_identity_store_transport_preflight_v1(owner: HostIdentityStoreV1) -> Result<(), text>:
+    owner.platform.transport_preflight_v1()
