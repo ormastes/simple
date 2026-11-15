@@ -81,3 +81,21 @@ describe "record compared with None is a presence test":
         expect(opt.len() > 0).to_equal(true)
         expect(opt.contains("rt_is_none")).to_equal(false)
         expect(opt.contains("rt_text_eq_any")).to_equal(false)
+
+# Wider shapes from Stage 3: a record with a nested record field
+# (provider_globals.spl `module.functions[key] == None` loaded the nested field
+# from address 0), a dict index result (a miss is nil at run time; the seed
+# answers true), and a nested record field read (`f.sym == None`).
+val NESTED_SOURCE: text = "struct Sid:\n    id: i64\n\n" +
+    "struct F:\n    sym: Sid\n    name: text\n\n" +
+    "fn count(fs: [F]) -> i64:\n    var n = 0\n    for f in fs:\n        if f == None:\n            continue\n        n = n + 1\n    n\n\n" +
+    "fn hit_is_none(d: Dict<text, F>, k: text) -> bool:\n    d[k] == None\n\n" +
+    "fn sym_of(f: F) -> bool:\n    f.sym == None\n"
+
+describe "nested record, dict index result and field read compared with None":
+    it "each lowers to a presence test and never compares fields":
+        val fns = lower_module_json(NESTED_SOURCE)
+        expect_presence(fns, "count", "rt_is_none")
+        expect_presence(fns, "hit_is_none", "rt_is_none")
+        expect_presence(fns, "sym_of", "rt_is_none")
+        expect((fns["count"] ?? "").contains("rt_native_eq")).to_equal(false)
