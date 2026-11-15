@@ -16,7 +16,7 @@ cross-function origin summaries are later slices of the robust-boundary plan
 
 use std.spec.*
 use std.spec.step
-use compiler.semantics.lint.bound_late_cast.{check_bound_late_casts}
+use compiler.semantics.lint.bound_late_cast.{check_bound_late_casts, BoundLateCastFinding}
 
 # @manual_section: bound_late_cast
 describe "SPL-BOUND-002: late foreign-origin unit cast":
@@ -238,3 +238,54 @@ describe "SPL-BOUND-001: raw extern result escapes unconverted":
         step("Lint a shadowed raw, and a function returning Nil")
         val src = "extern fn c_read() -> i32\nfn f() -> i32:\n    var raw = c_read()\n    raw = 0\n    raw\nfn g() -> Nil:\n    val raw = c_read()\n    return nil\n"
         expect(check_bound_late_casts(src, "app/f.spl").len()).to_equal(0)
+
+fn _blc_count(fs: [BoundLateCastFinding], code: text) -> i64:
+    var n = 0
+    for f in fs:
+        if f.code == code:
+            n = n + 1
+    n
+
+describe "SPL-BOUND-002 same-file cross-function origin summaries":
+    """A non-boundary function that returns a raw foreign value makes calls to
+    it foreign; a boundary adapter that returns a unit does not."""
+
+    it "follows a foreign value through one helper function":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint Km(read_raw()) where read_raw returns the bare extern result")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn read_raw() -> i32:\n    c_read()\nfn late() -> Km:\n    Km(read_raw())\n"
+        val fs = check_bound_late_casts(src, "app/km.spl")
+        expect(_blc_count(fs, "SPL-BOUND-002")).to_equal(1)
+        expect(fs[fs.len() - 1].line_num).to_equal(6)
+
+    it "follows a foreign value through two helper functions":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint Km(mid()) where mid returns read_raw() which returns the extern")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn read_raw() -> i32:\n    return c_read()\nfn mid() -> i32:\n    val v = read_raw()\n    v\nfn late() -> Km:\n    Km(mid())\n"
+        val fs = check_bound_late_casts(src, "app/km.spl")
+        expect(_blc_count(fs, "SPL-BOUND-002")).to_equal(1)
+        expect(fs[fs.len() - 1].line_num).to_equal(9)
+
+    it "terminates on recursion and mutual recursion":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint self and mutually recursive helpers that never reach an extern")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn a() -> i32:\n    b()\nfn b() -> i32:\n    a()\nfn s() -> i32:\n    s()\nfn late() -> Km:\n    Km(a())\n"
+        expect(_blc_count(check_bound_late_casts(src, "app/km.spl"), "SPL-BOUND-002")).to_equal(0)
+
+    it "terminates and still reports when recursion reaches an extern":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint mutually recursive helpers where one returns the extern")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn a() -> i32:\n    b()\nfn b() -> i32:\n    val x = c_read()\n    return x\nfn late() -> Km:\n    Km(a())\n"
+        expect(_blc_count(check_bound_late_casts(src, "app/km.spl"), "SPL-BOUND-002")).to_equal(1)
+
+    it "does not treat a boundary adapter returning a unit as foreign":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a wrapper chain that goes through an ffi adapter returning Km")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\n@unsafe(reason: \"x\", capabilities: [ffi])\nfn hal() -> Km:\n    Km(c_read())\nfn wrap() -> Km:\n    hal()\nfn again() -> Km:\n    Km(wrap())\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(0)
+
+    it "does not treat a converted helper result as foreign":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a helper that clamps the extern result before returning it")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn safe_read() -> i32:\n    clamp_range(c_read())\nfn late() -> Km:\n    Km(safe_read())\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(0)
