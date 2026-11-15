@@ -1894,15 +1894,35 @@ fn _fb_mitre_cut(r: i32, side_w: i32, cross_w: i32) -> i32:
         return c * 2 + 1
     c * 2
 
-# The half-covered diagonal pixel: each painted side contributes half.
+# The half-covered diagonal pixel: half of each side, painted ONCE as the
+# 50/50 mix (two sequential half blends weighted the first side 25%). A
+# transparent side (0) contributes nothing.
 fn _fb_mitre_pixel(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, ca: u32, cb: u32, clip: ClipRect) -> [u32]:
-    var out = fb
+    if ca == 0u32 and cb == 0u32:
+        return fb
+    val mix = mitre_mix_color(ca, cb)
+    val a = ((mix >> 24) & 255u32) as i32
+    fb_rect_opacity_clip(fb, fbw, fbh, x, y, 1, 1, mix | 0xFF000000u32, (a * 100 + 127) / 255, clip)
+
+# 50/50 mix of two side colours as one colour with its own alpha (the alpha
+# byte 0 of a non-zero colour means opaque here). Premultiplied average.
+fn mitre_mix_color(ca: u32, cb: u32) -> u32:
+    var r = 0
+    var g = 0
+    var b = 0
+    var a_sum = 0
     for c in [ca, cb]:
         if c != 0u32:
-            val a = ((c >> 24) & 255u32) as i32
-            val full = if a == 0 or a == 255: 255 else: a
-            out = fb_rect_opacity_clip(out, fbw, fbh, x, y, 1, 1, c | 0xFF000000u32, (full * 50 + 127) / 255, clip)
-    out
+            val a0 = ((c >> 24) & 255u32) as i32
+            val ea = if a0 == 0: 255 else: a0
+            r = r + (((c >> 16) & 255u32) as i32) * ea
+            g = g + (((c >> 8) & 255u32) as i32) * ea
+            b = b + ((c & 255u32) as i32) * ea
+            a_sum = a_sum + ea
+    if a_sum == 0:
+        return 0u32
+    val a = a_sum / 2
+    ((a as u32) << 24) | (((r / a_sum) as u32) << 16) | (((g / a_sum) as u32) << 8) | ((b / a_sum) as u32)
 
 fn _fb_border_sides_mitred(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, bl: i32, bt: i32, br: i32, bb: i32, cl: u32, ct: u32, cr: u32, cb: u32, clip: ClipRect) -> [u32]:
     var out = fb

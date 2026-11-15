@@ -672,8 +672,22 @@ fn _engine2d_draw_ir_mitre_cut(r: i32, side_w: i32, cross_w: i32) -> i32:
         return c * 2 + 1
     c * 2
 
-fn _engine2d_draw_ir_half_alpha(color: u32) -> u32:
-    (color & 0xFFFFFFu32) | ((((color >> 24) & 0xFFu32) / 2u32) << 24)
+# 50/50 mix of the two sides on the diagonal pixel, painted once; an
+# invisible (alpha 0) side contributes nothing. Premultiplied average.
+fn _engine2d_draw_ir_mitre_mix(ca: u32, cb: u32) -> u32:
+    var r: u32 = 0u32
+    var g: u32 = 0u32
+    var b: u32 = 0u32
+    var a_sum: u32 = 0u32
+    for c in [ca, cb]:
+        val a = (c >> 24) & 0xFFu32
+        r = r + ((c >> 16) & 0xFFu32) * a
+        g = g + ((c >> 8) & 0xFFu32) * a
+        b = b + (c & 0xFFu32) * a
+        a_sum = a_sum + a
+    if a_sum == 0u32:
+        return 0u32
+    ((a_sum / 2u32) << 24) | ((r / a_sum) << 16) | ((g / a_sum) << 8) | (b / a_sum)
 
 fn _engine2d_draw_ir_render_borders_mitred(engine: Engine2D, x: i32, y: i32, w: i32, h: i32, bl: i32, bt: i32, br: i32, bb: i32, cl: u32, ct: u32, cr: u32, cb: u32) -> Engine2D:
     var eng = engine
@@ -690,16 +704,14 @@ fn _engine2d_draw_ir_render_borders_mitred(engine: Engine2D, x: i32, y: i32, w: 
                 val cut = _engine2d_draw_ir_mitre_cut(r, thick, bl)
                 l_full = cut / 2
                 if cut % 2 == 1:
-                    for hc in [c, cl]:
-                        if _engine2d_draw_ir_has_visible_alpha(hc):
-                            eng.draw_rect_filled(x + l_full - 1, py, 1, 1, _engine2d_draw_ir_half_alpha(hc))
+                    if _engine2d_draw_ir_has_visible_alpha(c) or _engine2d_draw_ir_has_visible_alpha(cl):
+                        eng.draw_rect_filled(x + l_full - 1, py, 1, 1, _engine2d_draw_ir_mitre_mix(c, cl))
             if br > 0 and cr != c:
                 val cut = _engine2d_draw_ir_mitre_cut(r, thick, br)
                 r_full = cut / 2
                 if cut % 2 == 1:
-                    for hc in [c, cr]:
-                        if _engine2d_draw_ir_has_visible_alpha(hc):
-                            eng.draw_rect_filled(x + w - r_full, py, 1, 1, _engine2d_draw_ir_half_alpha(hc))
+                    if _engine2d_draw_ir_has_visible_alpha(c) or _engine2d_draw_ir_has_visible_alpha(cr):
+                        eng.draw_rect_filled(x + w - r_full, py, 1, 1, _engine2d_draw_ir_mitre_mix(c, cr))
             if visible and w - l_full - r_full > 0:
                 eng.draw_rect_filled(x + l_full, py, w - l_full - r_full, 1, c)
             r = r + 1

@@ -42,6 +42,15 @@ Text alpha page (TEXT_ALPHA_PAGE, `--window-size=420,200`, 40px bands):
 (127 per channel, 4 and 257 pixels at it); `color:rgba(255,0,0,.5)` at 32px
 is #ff7f7f at its darkest. Both the 5x7 framebuffer lane and the Draw IR
 CPU lane wrote the glyph colour opaque (black, #ff0000).
+
+Review page (REVIEW_PAGE, `--window-size=420,200`): `#o` a later
+`outline:3px solid transparent` rule leaves white around the box ((1, 8),
+(12, 2)); `#p` (y 26..41) `color:#f000` alone in its rule paints no text;
+`#q` (y 50..69) `width:0;white-space:nowrap;border:5px solid blue` stays 10px
+wide -- (7, 52) and (1, 60) blue, (12, 55) white; `#s` (y 78..89)
+`border:4px solid;border-color:red blue` meets on the diagonal at #7f0080,
+the 50/50 mix: (0, 78), (1, 79), (3, 81), (3, 86), (0, 89); (0, 82) blue,
+(5, 78) red.
 """
 
 """
@@ -56,6 +65,8 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_cpu.{simple_w
 val TRANSPARENT_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}div{{width:20px;height:10px;margin:0 0 4px 0}}#a{{background:red;background:transparent}}#b{{background-color:red;background:transparent}}#c{{width:0;height:0;border:20px solid transparent;border-top-color:red}}#d{{color:red;color:transparent;font:16px/16px sans-serif;height:16px}}#e{{border:4px solid blue;border-color:transparent;height:4px;width:12px}}#g{{border:4px solid blue;height:4px;width:12px}}#g{{border-top-color:transparent}}#k{{width:420px;height:10px}}#m{{width:0;height:0;border-style:solid;border-width:20px;border-color:red transparent transparent transparent}}#n{{color:rgba(0,0,0,0);font:16px/16px sans-serif;height:16px}}</style></head><body><div id=a></div><div id=b></div><div id=c></div><div id=d>MMMM</div><div id=e></div><div id=g></div><div id=k style=\"background:rgb(0,255,0\"></div><div id=m></div><div id=n>MMMM</div></body></html>"
 
 val TEXT_ALPHA_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}div{{margin:0;height:40px}}#a{{color:rgba(0,0,0,.5);font:12px/40px sans-serif}}#b{{color:rgba(0,0,0,.5);font:32px/40px sans-serif}}#c{{color:rgba(255,0,0,.5);font:32px/40px sans-serif}}</style></head><body><div id=a>MMMM</div><div id=b>MMMM</div><div id=c>MMMM</div></body></html>"
+
+val REVIEW_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}div{{font:16px/16px sans-serif;height:16px;margin:0 0 8px 0}}#o{{outline:3px solid blue;width:20px;height:10px;margin:4px 4px 12px 4px}}#o{{outline:3px solid transparent}}#p{{color:#f000}}#s{{border:4px solid;border-color:red blue;width:12px;height:4px}}#q{{width:0;white-space:nowrap;height:10px;border:5px solid blue;color:#fff}}</style></head><body><div id=o></div><div id=p>MMMM</div><div id=q>MMMM</div><div id=s></div></body></html>"
 
 # Text pixels in the 40px band at `y0` and the darkest channel among them.
 fn band_text(px: [u32], y0: i32) -> (i32, i32):
@@ -185,3 +196,30 @@ describe "CSS transparent as a value":
             val (rn, rdark) = band_text(px, 80)
             expect(rn > 0).to_equal(true)
             expect(rdark >= 126).to_equal(true)
+
+    it "AC-8: dispatch-path colours, `width:0` with nowrap, and the mitre pixel mix":
+        for lane in [0, 1]:
+            val px = if lane == 0: simple_web_render_html_to_pixels_with_engine2d_backend(REVIEW_PAGE, 420, 200, "cpu_simd") else: simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(REVIEW_PAGE, 420, 200, "cpu_simd")
+            step("Chrome 159: a later `outline:3px solid transparent` paints no outline")
+            expect(off(px, 1, 8, 0xffffffu32)).to_equal(0)
+            expect(off(px, 12, 2, 0xffffffu32)).to_equal(0)
+            step("Chrome 159: `color:#f000` paints no text (y 26..41)")
+            var dark = 0
+            var y = 26
+            while y < 42:
+                var x = 0
+                while x < 100:
+                    if off(px, x, y, 0xffffffu32) > 0:
+                        dark = dark + 1
+                    x = x + 1
+                y = y + 1
+            expect(dark).to_equal(0)
+            step("Chrome 159: `width:0;white-space:nowrap` keeps the box 10px wide")
+            expect(off(px, 7, 52, 0x0000ffu32)).to_equal(0)
+            expect(off(px, 1, 60, 0x0000ffu32)).to_equal(0)
+            expect(off(px, 12, 55, 0xffffffu32)).to_equal(0)
+            step("Chrome 159: red top/bottom meet blue sides at #7f0080")
+            for xy in [(0, 78), (1, 79), (3, 81), (3, 86), (0, 89)]:
+                expect(off(px, xy.0, xy.1, 0x7f0080u32) <= 1).to_equal(true)
+            expect(off(px, 0, 82, 0x0000ffu32)).to_equal(0)
+            expect(off(px, 5, 78, 0xff0000u32)).to_equal(0)
