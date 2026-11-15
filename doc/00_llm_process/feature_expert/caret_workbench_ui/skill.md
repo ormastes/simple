@@ -49,3 +49,17 @@ Caret is a specialized profile of Simple IDE, not a new IDE. smux is the single 
 After research, requirements, design, implementation, verification, or release work changes this feature, refresh the links and lane status here and in the plan doc. CU-001..CU-020 status lives in the plan doc ("Acceptance CU-001..CU-020"). Lane PRs: wave 1 #9200-#9221, wave 2 #9233/#9234/#9237/#9242/#9243/#9287, wave 3 #9294/#9295/#9301/#9313/#9315/#9317.
 
 Template: [feature_skill.md](../../template/feature_skill.md)
+
+## Fleet transport (CU-001/CU-010, interpreter-verified only)
+
+`workbench/fleet_transport.spl` is the multi-host seam: a peer exports its LOCAL
+roster as a `v1` TAB-separated wire (`export_fleet_snapshot`, written each
+frame when `LLM_CARET_FLEET_EXPORT` is set); this host polls each declared host
+by running its transport command through `process_run_bounded`
+(`LLM_CARET_FLEET_HOSTS=id=ssh-target:path,id=local:path`; `local` = `cat path`
+loopback). Rows are namespaced `<host>/<id>`, labelled `<host>:<id>`; an
+unreachable host keeps its last rows as `Transport.Disconnected` +
+`ProcessLifecycle.Lost`. Production caller: `pane_team.publish_pane_team` ->
+`publish_fleet_sessions`. Spec: `test/01_unit/app/llm_caret/workbench/fleet_transport_spec.spl`.
+Gaps: no 50-agent/5-host scale run, no attention grouping, no real ssh run, no
+reconnect backoff, snapshot polling not push, remote input/send not forwarded.
