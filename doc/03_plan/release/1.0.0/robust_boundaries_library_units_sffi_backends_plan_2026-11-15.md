@@ -9,7 +9,7 @@
 
 | Date | Slice | What landed | Evidence |
 |---|---|---|---|
-| 2026-11-15 | D (policy scaffold) | `SPL-BOUND-001..003` (warn, no ratified error date), `SPL-SFFI-ABI-001`, `SPL-SFFI-RANGE-001` (deny now, `exception_policy: forbidden`) registered in `config/policy/diagnostic_policy.sdn` | `test/01_unit/compiler/diagnostics/diagnostic_rule_policy_spec.spl` |
+| 2026-11-15 | D (policy scaffold) | `SPL-BOUND-001..003` (warn, no ratified error date), `SPL-SFFI-ABI-001`, `SPL-SFFI-RANGE-001` (deny now via the `security` stage, `exception_policy: forbidden`) registered in `config/policy/diagnostic_policy.sdn`. Policy only: no detector emits these codes yet (slices B/C) | `test/01_unit/compiler/diagnostics/diagnostic_rule_policy_spec.spl` |
 
 Reconcile with (do not fork): `unit_primitive_api_lane_plan_2026-11-12.md`,
 `doc/05_design/compiler/incremental_build/library_unit_build_and_link.md`,
