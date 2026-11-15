@@ -1,0 +1,186 @@
+# DAE-02 / REQ-DAE02-SDK-SAFETY-001..003. Actual production SDK + native owner.
+# AUTHORED_NOT_RUN. Requires admitted Linux OwnedProcessLease V3 and /bin/sh,
+# /bin/sleep. No unrelated PID, test-process PID, or pre-existing daemon is used.
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.daemon_sdk.client.{daemon_ensure_responsive as sdk_sync_responsive}
+use std.nogc_async_mut.daemon_sdk.client.{daemon_ensure_responsive as sdk_async_responsive}
+use std.nogc_sync_mut.daemon_sdk.types.daemon_config_new
+use std.nogc_sync_mut.io.process_ops.{OwnedProcessLease}
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_sync_mut.io_runtime.dir_remove
+use std.common.text_bytes.bytes_to_text
+use std.io_runtime.{file_exists, file_write, read_file_text, getpid}
+
+var sdk_sentinel_lease: Option<OwnedProcessLease> = None
+var sdk_sentinel_pid: i64 = -1
+var sdk_sentinel_lock: text = ""
+var sdk_sentinel_root: text = ""
+var sdk_sentinel_collection_consumed: bool = false
+var sdk_sentinel_collection_unknown: bool = false
+var sdk_sentinel_cleanup_error: text = ""
+var sdk_sentinel_start_calls: i64 = 0
+var sdk_sentinel_ping_calls: i64 = 0
+var sdk_sentinel_publish_in_start: bool = false
+var sdk_sentinel_start_result: bool = false
+var sdk_sentinel_guard_failed: bool = false
+
+fn sdk_sentinel_lock_bytes() -> text:
+    str(sdk_sentinel_pid) + "\nowned-sentinel-fixture\n"
+
+fn sdk_sentinel_start_callback() -> bool:
+    sdk_sentinel_start_calls = sdk_sentinel_start_calls + 1
+    if sdk_sentinel_publish_in_start:
+        if not file_write(sdk_sentinel_lock, sdk_sentinel_lock_bytes()):
+            sdk_sentinel_guard_failed = true
+            return false
+    sdk_sentinel_start_result
+
+fn sdk_sentinel_failed_probe() -> bool:
+    sdk_sentinel_ping_calls = sdk_sentinel_ping_calls + 1
+    val lease = sdk_sentinel_lease.unwrap()
+    val observed = lease.poll(0, 64, 64)
+    if observed.is_err():
+        sdk_sentinel_guard_failed = true
+        # A successful callback result prevents the unsafe old failed-probe
+        # branch from signalling any PID after ownership becomes uncertain.
+        return true
+    val state = observed.unwrap()
+    if not state.live or state.terminal or state.runtime_error != 0:
+        sdk_sentinel_guard_failed = true
+        return true
+    false
+
+fn sdk_sentinel_open() -> Result<i64, text>:
+    if sdk_sentinel_lease != None: return Err("previous owned sentinel cleanup is still retained")
+    # This fixed trusted child prints its own PID before exec, keeping the
+    # same PID for sleep. The actual lease, not the printed PID, owns cleanup.
+    val receipt = OwnedProcessLease.start("/bin/sh", ["-c", "printf '%s\\n' \"$$\"; exec /bin/sleep 30"], [], 15000, 100, 4096)?
+    val lease = receipt.lease()
+    sdk_sentinel_lease = Some(lease)
+    var output = ""
+    for turn in 0..20:
+        val observed = lease.poll(50, 64, 64)?
+        if observed.runtime_error != 0 or not observed.live or observed.terminal:
+            return Err("actual owned sentinel is not live")
+        output = output + bytes_to_text(observed.stdout)
+        if output.byte_len() > 64: return Err("actual owned sentinel PID output exceeded its bound")
+        if output.contains("\n"):
+            val normalized = output.trim()
+            val pid = normalized.to_i64() ?? -1
+            if pid <= 0 or pid == getpid(): return Err("actual owned sentinel PID was invalid")
+            return Ok(pid)
+    Err("actual owned sentinel did not report its PID")
+
+fn sdk_sentinel_cleanup() -> Result<bool, text>:
+    if sdk_sentinel_collection_consumed:
+        if sdk_sentinel_cleanup_error != "": return Err(sdk_sentinel_cleanup_error)
+        return Ok(true)
+    if sdk_sentinel_collection_unknown: return Err(sdk_sentinel_cleanup_error)
+    if sdk_sentinel_lease == None: return Ok(true)
+    var lease = sdk_sentinel_lease.unwrap()
+    val initial = lease.poll(0, 64, 64)?
+    if initial.live:
+        val cancellation = lease.cancel()?
+        if not cancellation.accepted or cancellation.runtime_error != 0:
+            return Err("actual owned sentinel cancellation remains uncertain")
+    for turn in 0..40:
+        val state = lease.poll(50, 64, 64)?
+        if state.terminal:
+            val collected_result = lease.collect()
+            # collect mutates this exact lease even for consumed terminal
+            # errors. Publish it before interpreting the returned result.
+            sdk_sentinel_lease = Some(lease)
+            if collected_result.is_err():
+                sdk_sentinel_collection_unknown = true
+                return sdk_sentinel_cleanup_failure(collected_result.unwrap_err())
+            val collected = collected_result.unwrap()
+            if (collected.reaped and collected.runtime_error != 11 and
+                    collected.runtime_error != 16):
+                sdk_sentinel_collection_consumed = true
+                sdk_sentinel_lease = None
+                if collected.runtime_error != 0:
+                    return sdk_sentinel_cleanup_failure("actual owned sentinel collection consumed with error " + str(collected.runtime_error))
+                if sdk_sentinel_cleanup_error != "": return Err(sdk_sentinel_cleanup_error)
+                return Ok(true)
+            # Not reaped / 11 / 16 retains the actual updated live lease;
+            # only that state may be polled on a subsequent cleanup attempt.
+            return sdk_sentinel_cleanup_failure("actual owned sentinel collection remains retained")
+    Err("actual owned sentinel cleanup remains retained")
+
+fn sdk_sentinel_cleanup_failure(reason: text) -> Result<bool, text>:
+    if sdk_sentinel_cleanup_error == "": sdk_sentinel_cleanup_error = reason
+    Err(sdk_sentinel_cleanup_error)
+
+fn sdk_sentinel_remove_clean_root(cleanup: Result<bool, text>) -> bool:
+    if cleanup.is_err(): return false
+    if not cleanup.unwrap(): return false
+    if not dir_remove(sdk_sentinel_root, true):
+        val retained = sdk_sentinel_cleanup_failure("actual owned sentinel root removal remains uncertain")
+        return false
+    sdk_sentinel_root = ""
+    sdk_sentinel_lock = ""
+    sdk_sentinel_pid = -1
+    true
+
+fn sdk_sentinel_case(async_facade: bool, publish_in_start: bool, start_result: bool):
+    # Check retained state before making or publishing any new fixture path.
+    if (sdk_sentinel_lease != None or sdk_sentinel_root != "" or
+            sdk_sentinel_lock != "" or sdk_sentinel_cleanup_error != "" or
+            sdk_sentinel_collection_unknown):
+        assert(false)
+        return
+    val root = secure_temp_dir("build", "dae02-owned-sentinel").unwrap()
+    sdk_sentinel_root = root
+    sdk_sentinel_lock = root + "/lock"
+    sdk_sentinel_collection_consumed = false
+    sdk_sentinel_start_calls = 0
+    sdk_sentinel_ping_calls = 0
+    sdk_sentinel_guard_failed = false
+    sdk_sentinel_publish_in_start = publish_in_start
+    sdk_sentinel_start_result = start_result
+    val opened = sdk_sentinel_open()
+    if opened.is_err():
+        # Preserve the actual lease when cleanup cannot finish; no raw-PID
+        # cancellation, fabricated replacement owner or recursive cleanup.
+        val cleanup = sdk_sentinel_cleanup()
+        val removed = sdk_sentinel_remove_clean_root(cleanup)
+        assert(false)
+        return
+    sdk_sentinel_pid = opened.unwrap()
+    if not publish_in_start:
+        if not file_write(sdk_sentinel_lock, sdk_sentinel_lock_bytes()):
+            val cleanup = sdk_sentinel_cleanup()
+            val removed = sdk_sentinel_remove_clean_root(cleanup)
+            assert(false)
+            return
+    val expected_lock = sdk_sentinel_lock_bytes()
+    val config = daemon_config_new(sdk_sentinel_lock, root + "/requests", root + "/responses")
+    val result = if async_facade:
+        sdk_async_responsive(config, sdk_sentinel_start_callback, sdk_sentinel_failed_probe)
+    else: sdk_sync_responsive(config, sdk_sentinel_start_callback, sdk_sentinel_failed_probe)
+    val owned = sdk_sentinel_lease.unwrap()
+    val after = owned.poll(0, 64, 64)
+    val retained_lock = read_file_text(sdk_sentinel_lock)
+    val lock_exists = file_exists(sdk_sentinel_lock)
+    # Always reclaim the owned child before result assertions can abort.
+    val cleanup = sdk_sentinel_cleanup()
+    val cleaned = sdk_sentinel_remove_clean_root(cleanup)
+    expect(result).to_equal(false)
+    expect(sdk_sentinel_guard_failed).to_equal(false)
+    expect(sdk_sentinel_start_calls).to_equal(if publish_in_start: 1 else: 0)
+    expect(sdk_sentinel_ping_calls).to_equal(if not publish_in_start or start_result: 1 else: 0)
+    expect(after.is_ok()).to_equal(true)
+    expect(after.unwrap().live).to_equal(true)
+    expect(after.unwrap().terminal).to_equal(false)
+    expect(lock_exists).to_equal(true)
+    expect(retained_lock).to_equal(expected_lock)
+    expect(cleanup.is_ok()).to_equal(true)
+    expect(cleaned).to_equal(true)
+
+describe "DAE-02 failed readiness preserves an actual owned sentinel":
+    it "sync does not kill or replace an existing live PID-file sentinel": sdk_sentinel_case(false, false, false)
+    it "async facade does not kill or replace an existing live PID-file sentinel": sdk_sentinel_case(true, false, false)
+    it "sync does not restart after successful startup followed by a failed ping": sdk_sentinel_case(false, true, true)
+    it "async facade does not restart after successful startup followed by a failed ping": sdk_sentinel_case(true, true, true)
+    it "sync startup refusal does not kill a PID published by that callback": sdk_sentinel_case(false, true, false)
+    it "async startup refusal does not kill a PID published by that callback": sdk_sentinel_case(true, true, false)

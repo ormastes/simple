@@ -44,7 +44,10 @@ QEMU shared execution:
 - `handle_run_single` applies local admission before dedup/cache/execute.
 - `handle_session_acquire` applies QEMU admission for `session_kind=qemu_vm`.
 - `handle_status` exposes resource snapshot and effective QEMU limit.
-- `test_daemon_ensure_responsive` restarts an unresponsive lock owner.
+- `test_daemon_ensure_responsive` checks an already-running daemon and performs
+  one bounded ping. Unavailable readiness lets callers fall back to direct tests;
+  it does not kill or restart a PID-file owner. This app wrapper does not call
+  the generic SDK `daemon_ensure_responsive` helper.
 
 ## Verification
 
