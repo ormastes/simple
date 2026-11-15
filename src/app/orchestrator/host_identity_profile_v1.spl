@@ -3,15 +3,20 @@
 use app.orchestrator.validation.OrchestratorValidationReplyV1
 use app.orchestrator.server_ssh_types_v1.ServerSshProfileV1
 use app.orchestrator.server_ssh_profile_v1.{server_ssh_profile_decode_v1, server_ssh_path_valid_v1}
+use app.orchestrator.host_identity_profile_template_v2.{HostIdentityProfileSelectionV2,
+    host_identity_profile_selection_v2, host_identity_profile_complete_v2}
 use app.orchestrator.host_identity_public_v1.host_identity_known_hosts_validate_v1
 use app.orchestrator.host_identity_command_v1.{host_identity_failure_v1, host_identity_finish_v1,
-    host_identity_open_failure_v1, host_identity_projection_receipt_v1}
+    host_identity_open_failure_v1, host_identity_reply_v1}
 use std.common.crypto.sha256.sha256_text
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
 use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
 use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
 use std.nogc_sync_mut.io.host_identity_store_v1.*
+use std.nogc_sync_mut.io.host_identity_ssh_projection_v1.{HostIdentitySshProjectionV1, HostIdentitySshPathsV1,
+    host_identity_ssh_projection_begin_v1, host_identity_ssh_projection_step_v1,
+    host_identity_ssh_projection_paths_v1, host_identity_ssh_projection_close_v1}
 
 pub struct HostIdentityProfilePreparedV1:
     profile: ServerSshProfileV1
@@ -23,6 +28,9 @@ pub struct HostIdentityProfilePreparedV1:
 # fields never reach the protected store or a diagnostic.
 pub fn host_identity_profile_prepare_v1(source: text, root: text) -> Result<HostIdentityProfilePreparedV1, text>:
     val profile = server_ssh_profile_decode_v1(source)?
+    host_identity_profile_canonical_v2(profile, root)
+
+fn host_identity_profile_canonical_v2(profile: ServerSshProfileV1, root: text) -> Result<HostIdentityProfilePreparedV1, text>:
     if profile.store_root == "" or profile.store_root != root:
         return Err("host-identity-profile-store-binding")
     @when(os="windows"):
@@ -53,89 +61,183 @@ fn identity_profile_options_v1(args: [text]) -> Result<Dict<text, text>, text>:
     if options.len() != 2: return Err("host-identity-profile-install-options")
     Ok(options)
 
-fn identity_profile_not_ready_v1(prepared: HostIdentityProfilePreparedV1, owner: HostIdentityStoreV1,
-        projection_unavailable: bool, reason: text) -> OrchestratorValidationReplyV1:
-    host_identity_finish_v1({"status": SdnValue.String("profile-not-installed"),
-        "profileRef": SdnValue.String(prepared.profile_ref), "profileInstalled": SdnValue.Bool(false),
-        "publicationObserved": SdnValue.Bool(false), "transportProjectionUnavailable": SdnValue.Bool(projection_unavailable),
-        "code": SdnValue.String(reason)}, 1, owner)
+# Data-only production gate. It cannot prove a pair current; the command must
+# call the opaque paths port immediately before this check and publication.
+pub fn host_identity_profile_resolve_v2(selected: HostIdentityProfileSelectionV2, root: text,
+        paths: HostIdentitySshPathsV1) -> Result<HostIdentityProfilePreparedV1, text>:
+    host_identity_profile_canonical_v2(host_identity_profile_complete_v2(selected, root, paths)?, root)
+
+pub fn host_identity_profile_publication_match_v2(prepared: HostIdentityProfilePreparedV1,
+        root: text, auth_ref: text, trust_ref: text, paths: HostIdentitySshPathsV1,
+        pin_source: text) -> Result<(), text>:
+    val profile = prepared.profile
+    if profile.store_root != root or profile.auth_ref != auth_ref or profile.trust_ref != trust_ref:
+        return Err("host-identity-profile-reference-binding")
+    if (not server_ssh_path_valid_v1(paths.identity_path) or not server_ssh_path_valid_v1(paths.known_hosts_path) or
+            profile.identity_path != paths.identity_path or profile.known_hosts_path != paths.known_hosts_path):
+        return Err("host-identity-profile-paired-path-mismatch")
+    host_identity_known_hosts_validate_v1(pin_source, profile.host_key_alias)?
+    Ok(())
+
+# Preserve an earlier operation error and immutable publication facts when the
+# finite cleanup drain cannot confirm release. Values are receipts, not owners.
+pub fn host_identity_profile_cleanup_receipt_v2(fields: Dict<text, SdnValue>, reason: text) -> Dict<text, SdnValue>:
+    var output = fields
+    if not output.contains_key("operationStatus") and fields.contains_key("status"):
+        output["operationStatus"] = fields["status"]
+    if not output.contains_key("operationCode") and fields.contains_key("code"):
+        output["operationCode"] = fields["code"]
+    output["status"] = SdnValue.String("cleanup-required")
+    output["cleanupPending"] = SdnValue.Bool(true)
+    output["cleanupCode"] = SdnValue.String(reason)
+    if not output.contains_key("code"): output["code"] = SdnValue.String("host-identity-profile-pair-cleanup-unconfirmed")
+    output
+
+# Turn metadata controls whether a bounded phase may advance; these booleans
+# never manufacture the opaque owner used by the actual operation.
+pub fn host_identity_profile_pair_can_advance_v2(owner_present: bool, ready: bool,
+        cleanup_pending: bool, error: text) -> bool:
+    owner_present and not ready and not cleanup_pending and error == ""
+
+pub fn host_identity_profile_close_can_advance_v2(owner_present: bool, completed: bool, error: text) -> bool:
+    owner_present and not completed and error == "identity-ssh-projection-cleanup-pending"
+
+fn identity_profile_finish_pair_v2(fields: Dict<text, SdnValue>, exit_code: i64,
+        owner: HostIdentityStoreV1, projection: Option<HostIdentitySshProjectionV1>) -> OrchestratorValidationReplyV1:
+    var pending = projection
+    var remaining = 64
+    var cleanup_error = ""
+    while pending != nil and remaining > 0:
+        remaining = remaining - 1
+        val closed = host_identity_ssh_projection_close_v1(pending.unwrap())
+        pending = closed.owner
+        if closed.completed and closed.owner == nil and closed.error == "": break
+        # Only this explicit normal phase marker permits another close phase.
+        # Retained native failures stop immediately; no descriptor is retried.
+        if host_identity_profile_close_can_advance_v2(closed.owner != nil, closed.completed, closed.error):
+            continue
+        cleanup_error = if closed.error == "": "host-identity-profile-pair-close-unconfirmed" else: closed.error
+        break
+    if pending != nil or cleanup_error != "":
+        val reason = if cleanup_error != "": cleanup_error else: "host-identity-profile-pair-cleanup-budget"
+        val output = host_identity_profile_cleanup_receipt_v2(fields, reason)
+        var reply = host_identity_reply_v1(output, 1)
+        # The SAME parent canonically retains any actual paired child; do not
+        # call parent.close here and immediately retry the failed child close.
+        reply.host_identity_cleanup = Some(owner)
+        return reply
+    var output = fields
+    if fields.contains_key("code"):
+        output["operationCode"] = fields["code"]
+        if fields.contains_key("status"): output["operationStatus"] = fields["status"]
+    # Pair is confirmed retired (or no pair owner was returned). Parent close
+    # drains its canonical partial children and retains itself on uncertainty.
+    host_identity_finish_v1(output, exit_code, owner)
+
+fn identity_profile_error_pair_v2(fields: Dict<text, SdnValue>, reason: text,
+        owner: HostIdentityStoreV1, projection: Option<HostIdentitySshProjectionV1>) -> OrchestratorValidationReplyV1:
+    var output = fields
+    output["code"] = SdnValue.String(reason)
+    identity_profile_finish_pair_v2(output, 1, owner, projection)
 
 pub fn host_identity_profile_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
     val options = match identity_profile_options_v1(args):
         case Err(reason): return host_identity_failure_v1(reason, 2)
         case Ok(value): value
-    # Source is untrusted public SDN. Read one bounded nofollow file and then
-    # strictly decode; never copy arbitrary input bytes into a private role.
     if not server_ssh_path_valid_v1(options["--profile-file"]):
         return host_identity_failure_v1("host-identity-profile-source-path", 2)
     val source = match file_read_regular_no_follow_bounded(options["--profile-file"], 65536):
         case Err(_): return host_identity_failure_v1("host-identity-profile-source-unavailable", 1)
         case Ok(value): value
-    val prepared = match host_identity_profile_prepare_v1(source, options["--store-root"]):
+    val root = options["--store-root"]
+    val selected = match host_identity_profile_selection_v2(source, root):
         case Err(_): return host_identity_failure_v1("host-identity-profile-source-invalid", 2)
         case Ok(value): value
-    val opened = host_identity_store_open_v1(options["--store-root"])
+    val opened = host_identity_store_open_v1(root)
     if not opened.ready or opened.owner == nil or opened.cleanup_pending or opened.error != "":
         return host_identity_open_failure_v1(opened)
     var owner = opened.owner.unwrap()
-    match host_identity_store_transport_preflight_v1(owner):
-        case Err(reason):
-            val unavailable = reason == "identity-store-transport-projection-unavailable"
-            return identity_profile_not_ready_v1(prepared, owner, unavailable,
-                if unavailable: "host-identity-profile-transport-projection-unavailable" else: "host-identity-profile-store-preflight-failed")
-        case Ok(_): ()
-    # A usable transport profile requires actual supported key/pin projections
-    # BEFORE publishing profile bytes. Missing/unsupported authority is never
-    # reconstructed by stripping GLOBAL?? or concatenating the requested root.
-    val key_path = host_identity_store_path_v1(owner, sha256_text(prepared.profile.auth_ref) + ".key")
-    val key_projection = host_identity_projection_receipt_v1({}, key_path, "identityPath")
-    if not key_projection.available:
-        return identity_profile_not_ready_v1(prepared, owner, true, "host-identity-profile-key-projection-unavailable")
-    if key_path.unwrap() != prepared.profile.identity_path:
-        return identity_profile_not_ready_v1(prepared, owner, false, "host-identity-profile-key-path-mismatch")
-    val pin_leaf = sha256_text(prepared.profile.trust_ref) + ".hosts"
+    val auth_ref = selected.template.auth_ref
+    val trust_ref = selected.template.trust_ref
+    val pin_leaf = sha256_text(trust_ref) + ".hosts"
+    var fields: Dict<text, SdnValue> = {"status": SdnValue.String("profile-not-installed"),
+        "authRef": SdnValue.String(auth_ref), "trustRef": SdnValue.String(trust_ref),
+        "profileInstalled": SdnValue.Bool(false), "publicationObserved": SdnValue.Bool(false)}
+    # Exactly one pair acquisition against the same actual retained store.
+    # No generic Windows path/preflight downgrade, process launch or sleep.
+    var acquiring = host_identity_ssh_projection_begin_v1(owner, sha256_text(auth_ref) + ".key", pin_leaf)
+    var remaining = 64
+    while remaining > 0:
+        if not host_identity_profile_pair_can_advance_v2(acquiring.owner != nil, acquiring.ready, acquiring.cleanup_pending, acquiring.error): break
+        remaining = remaining - 1
+        acquiring = host_identity_ssh_projection_step_v1(acquiring.owner.unwrap(), owner, false)
+    val projection = acquiring.owner
+    if not acquiring.ready or projection == nil or acquiring.cleanup_pending or acquiring.error != "":
+        val reason = if acquiring.error != "": acquiring.error else: "host-identity-profile-pair-acquisition-budget"
+        return identity_profile_error_pair_v2(fields, reason, owner, projection)
+    val initial_paths = match host_identity_ssh_projection_paths_v1(projection.unwrap(), owner):
+        case Err(_): return identity_profile_error_pair_v2(fields, "host-identity-profile-pair-not-current", owner, projection)
+        case Ok(value): value
+    val prepared = match host_identity_profile_resolve_v2(selected, root, initial_paths):
+        case Err(_): return identity_profile_error_pair_v2(fields, "host-identity-profile-paired-input-mismatch", owner, projection)
+        case Ok(value): value
+    fields["profileRef"] = SdnValue.String(prepared.profile_ref)
     val pin = host_identity_store_read_v1(owner, pin_leaf, 4096)
     owner = pin.owner
     if pin.error != "" or pin.cleanup_pending or pin.absent or pin.bytes == nil:
-        return identity_profile_not_ready_v1(prepared, owner, false, "host-identity-profile-pin-unavailable")
+        return identity_profile_error_pair_v2(fields, "host-identity-profile-pin-unavailable", owner, projection)
     val pin_bytes = pin.bytes.unwrap()
     if not utf8_bytes_valid(pin_bytes):
-        return identity_profile_not_ready_v1(prepared, owner, false, "host-identity-profile-pin-invalid")
-    if host_identity_known_hosts_validate_v1(bytes_to_text(pin_bytes), prepared.profile.host_key_alias).is_err():
-        return identity_profile_not_ready_v1(prepared, owner, false, "host-identity-profile-pin-invalid")
-    val hosts_path = host_identity_store_path_v1(owner, pin_leaf)
-    val hosts_projection = host_identity_projection_receipt_v1({}, hosts_path, "knownHostsPath")
-    if not hosts_projection.available:
-        return identity_profile_not_ready_v1(prepared, owner, true, "host-identity-profile-pin-projection-unavailable")
-    if hosts_path.unwrap() != prepared.profile.known_hosts_path:
-        return identity_profile_not_ready_v1(prepared, owner, false, "host-identity-profile-pin-path-mismatch")
+        return identity_profile_error_pair_v2(fields, "host-identity-profile-pin-invalid", owner, projection)
+    val pin_source = bytes_to_text(pin_bytes)
+    # Actual current proof immediately precedes the pure data/alias gate and
+    # publication. An invalidated pair is never recreated or replaced.
+    val current_paths = match host_identity_ssh_projection_paths_v1(projection.unwrap(), owner):
+        case Err(_): return identity_profile_error_pair_v2(fields, "host-identity-profile-pair-not-current", owner, projection)
+        case Ok(value): value
+    match host_identity_profile_publication_match_v2(prepared, root, auth_ref, trust_ref, current_paths, pin_source):
+        case Err(_): return identity_profile_error_pair_v2(fields, "host-identity-profile-publication-binding", owner, projection)
+        case Ok(_): ()
     val published = host_identity_store_publish_v1(owner, prepared.leaf, prepared.canonical.bytes())
     owner = published.owner
-    var fields: Dict<text, SdnValue> = {"status": SdnValue.String("profile-publication-unconfirmed"),
-        "profileRef": SdnValue.String(prepared.profile_ref), "profileInstalled": SdnValue.Bool(false),
-        "publicationObserved": SdnValue.Bool(published.publication == HostIdentityStorePublicationV1.Published),
-        "fileSynced": SdnValue.Bool(published.file_synced), "namespaceSynced": SdnValue.Bool(published.namespace_synced)}
+    fields["status"] = SdnValue.String("profile-publication-unconfirmed")
+    fields["publicationObserved"] = SdnValue.Bool(published.publication == HostIdentityStorePublicationV1.Published)
+    fields["fileSynced"] = SdnValue.Bool(published.file_synced)
+    fields["namespaceSynced"] = SdnValue.Bool(published.namespace_synced)
     if published.error != "" or published.cleanup_pending:
-        fields["code"] = SdnValue.String("host-identity-profile-publication-unconfirmed")
-        return host_identity_finish_v1(fields, 1, owner)
+        return identity_profile_error_pair_v2(fields, "host-identity-profile-publication-unconfirmed", owner, projection)
     if published.publication == HostIdentityStorePublicationV1.Existing:
         val actual = host_identity_store_read_v1(owner, prepared.leaf, 65536)
         owner = actual.owner
         if actual.error != "" or actual.cleanup_pending or actual.absent or actual.bytes == nil:
-            fields["code"] = SdnValue.String("host-identity-profile-existing-unconfirmed")
-            return host_identity_finish_v1(fields, 1, owner)
-        if bytes_to_text(actual.bytes.unwrap()) != prepared.canonical:
-            fields["code"] = SdnValue.String("host-identity-profile-existing-conflict")
-            return host_identity_finish_v1(fields, 1, owner)
+            return identity_profile_error_pair_v2(fields, "host-identity-profile-existing-unconfirmed", owner, projection)
+        val actual_bytes = actual.bytes.unwrap()
+        if not utf8_bytes_valid(actual_bytes) or bytes_to_text(actual_bytes) != prepared.canonical:
+            return identity_profile_error_pair_v2(fields, "host-identity-profile-existing-conflict", owner, projection)
         fields["status"] = SdnValue.String("profile-existing")
     elif published.publication == HostIdentityStorePublicationV1.Published and published.file_synced:
         fields["status"] = SdnValue.String("profile-installed")
     else:
-        fields["code"] = SdnValue.String("host-identity-profile-publication-unconfirmed")
-        return host_identity_finish_v1(fields, 1, owner)
+        return identity_profile_error_pair_v2(fields, "host-identity-profile-publication-unconfirmed", owner, projection)
     fields["profileInstalled"] = SdnValue.Bool(true)
-    val projection = host_identity_projection_receipt_v1(fields,
-        host_identity_store_path_v1(owner, prepared.leaf), "profilePath")
-    host_identity_finish_v1(projection.fields, projection.exit_code, owner)
+    # Keep the SAME pair live through publication/readback and this final proof.
+    val final_paths = match host_identity_ssh_projection_paths_v1(projection.unwrap(), owner):
+        case Err(_): return identity_profile_error_pair_v2(fields, "host-identity-profile-pair-lost-after-publication", owner, projection)
+        case Ok(value): value
+    match host_identity_profile_publication_match_v2(prepared, root, auth_ref, trust_ref, final_paths, pin_source):
+        case Err(_): return identity_profile_error_pair_v2(fields, "host-identity-profile-pair-changed-after-publication", owner, projection)
+        case Ok(_): ()
+    # Config locator is a distinct protected .profile namespace value, NOT an
+    # external SSH credential projection. Preserve GLOBAL and publication facts.
+    val locator = match host_identity_store_profile_locator_v1(owner, prepared.leaf):
+        case Err(_):
+            fields["configLocatorUnavailable"] = SdnValue.Bool(true)
+            return identity_profile_error_pair_v2(fields, "host-identity-profile-locator-unavailable", owner, projection)
+        case Ok(value): value
+    fields["profilePath"] = SdnValue.String(locator)
+    fields["configLocatorUnavailable"] = SdnValue.Bool(false)
+    identity_profile_finish_pair_v2(fields, 0, owner, projection)
 
 export HostIdentityProfilePreparedV1, host_identity_profile_prepare_v1, host_identity_profile_command_v1
+export host_identity_profile_resolve_v2, host_identity_profile_publication_match_v2, host_identity_profile_cleanup_receipt_v2
+export host_identity_profile_pair_can_advance_v2, host_identity_profile_close_can_advance_v2
