@@ -1,0 +1,62 @@
+# Purpose and audience: production caller of ExtensionHost.set_context_keys (focus + selected session kind), for the caret team.
+# @req CU-006
+
+use std.spec.*
+use std.editor.core.session.{EditSession}
+use std.editor.extensions.manifest_sdn.{extension_manifest_decode}
+use app.editor.editor_controller.{EditorController}
+use app.editor.profile_plan.{profile_sync_context, profile_sync_context_with, caret_context_keys}
+use app.llm_caret.workbench.key_resolver.{KeyFocus}
+use app.llm_caret.workbench.session_source.{publish_live_focus, clear_live_sessions}
+
+fn _sdn() -> text:
+    "extension:\n" +
+    "  schema: simple.ide.extension/2\n" +
+    "  id: ctxdemo\n" +
+    "  display_name: Demo\n" +
+    "  version: 1.0.0\n" +
+    "  host: builtin\n" +
+    "activation:\n" +
+    '  events: ["onProfile:caret"]' + "\n" +
+    "contributes:\n" +
+    '  view_containers: [{id: "ctxdemo.box", title: "Box", location: "activitybar", order: 9}]' + "\n" +
+    '  views: [{id: "ctxdemo.term", kind: "list", container: "ctxdemo.box", provider: "p.a", when: "caret.focus.terminal && caret.session.claude"}]' + "\n"
+
+fn _ctrl() -> EditorController:
+    var session = EditSession.new()
+    session.open_empty()
+    val ctrl = EditorController.new(session)
+    ctrl.extension_host.register_manifest(extension_manifest_decode(_sdn()).manifest, "<test>")
+    ctrl.extension_host.activate_event("onProfile:caret")
+    ctrl
+
+describe "caret context keys":
+    it "keys name the focused pane and the selected session provider":
+        # @req CU-006
+        step("pure mapping")
+        expect(caret_context_keys(KeyFocus.TerminalSurface, "claude")).to_equal(["caret.focus.terminal", "caret.session.claude"])
+        expect(caret_context_keys(KeyFocus.NativeView, "")).to_equal(["caret.focus.native"])
+        expect(caret_context_keys(KeyFocus.Overlay, "codex")).to_equal(["caret.focus.overlay", "caret.session.codex"])
+
+    it "profile_sync_context feeds live state into the host so when clauses see it":
+        # @req CU-006
+        step("no live state: native focus only, view hidden")
+        clear_live_sessions()
+        val ctrl = _ctrl()
+        profile_sync_context(ctrl, "caret")
+        expect(ctrl.extension_host.context_keys).to_equal(["caret.focus.native"])
+        expect(ctrl.extension_host.view_visible("ctxdemo.term")).to_equal(false)
+        step("published terminal focus reaches the host")
+        publish_live_focus(KeyFocus.TerminalSurface)
+        profile_sync_context(ctrl, "caret")
+        expect(ctrl.extension_host.context_keys).to_equal(["caret.focus.terminal"])
+        step("claude session kind + terminal focus: view visible")
+        profile_sync_context_with(ctrl, "caret", KeyFocus.TerminalSurface, "claude")
+        expect(ctrl.extension_host.view_visible("ctxdemo.term")).to_equal(true)
+        step("native focus hides it again")
+        profile_sync_context_with(ctrl, "caret", KeyFocus.NativeView, "claude")
+        expect(ctrl.extension_host.view_visible("ctxdemo.term")).to_equal(false)
+        step("the editor profile never touches context keys")
+        ctrl.extension_host.set_context_keys(["x"])
+        profile_sync_context(ctrl, "editor")
+        expect(ctrl.extension_host.context_keys).to_equal(["x"])

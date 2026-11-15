@@ -16,12 +16,18 @@
 use app.llm_caret.observer.observation_builder.*
 use app.llm_caret.json_helpers.{extract_json_string}
 
+# Neither provider emits a dedicated heartbeat hook. A completed Claude tool
+# call (success or failure) is the only structured proof the job advanced, so
+# it doubles as the job heartbeat.
+fn _heartbeat(session: text, generation: i64, op: text, seq: i64, at_ms: i64) -> ObserverEvent:
+    observer_event(session, generation, op, seq, at_ms, ObserverEventKind.JobHeartbeat, "Claude tool call completed")
+
 fn claude_hook_events(session: text, generation: i64, op: text, seq: i64, at_ms: i64, hook_name: text) -> [ObserverEvent]:
     match hook_name:
         "PermissionRequest": [observer_event(session, generation, op, seq, at_ms, ObserverEventKind.StructuredApproval, "Claude permission request")]
         "PreToolUse": [observer_event(session, generation, op, seq, at_ms, ObserverEventKind.ToolStart, "Claude tool start")]
-        "PostToolUse": [observer_event(session, generation, op, seq, at_ms, ObserverEventKind.ToolEnd, "Claude tool end")]
-        "PostToolUseFailure": [observer_event(session, generation, op, seq, at_ms, ObserverEventKind.ToolEnd, "Claude tool failed")]
+        "PostToolUse": [observer_event(session, generation, op, seq, at_ms, ObserverEventKind.ToolEnd, "Claude tool end"), _heartbeat(session, generation, op, seq, at_ms)]
+        "PostToolUseFailure": [observer_event(session, generation, op, seq, at_ms, ObserverEventKind.ToolEnd, "Claude tool failed"), _heartbeat(session, generation, op, seq, at_ms)]
         "SubagentStart": [observer_event(session, generation, op, seq, at_ms, ObserverEventKind.ChildStarted, "Claude subagent start")]
         "SubagentStop": [observer_event(session, generation, op, seq, at_ms, ObserverEventKind.ChildFinished, "Claude subagent stop")]
         _: []
