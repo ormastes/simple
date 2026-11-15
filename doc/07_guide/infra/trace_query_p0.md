@@ -358,7 +358,7 @@ $S run src/app/traceability/query_main.spl refs file test/01_unit/app/traceabili
   `test`) it falls back to `simple run <spec>`, which emits the same verdict
   line and exit status. A genuine spec failure keeps its own verdict and is
   never retried. Fixture steps are unchanged.
-- Query exit 1 means "rendered, but the graph is incomplete"; a complete graph
+- Query exit 2 means "rendered, but the graph is incomplete" (1 = item not found); a complete graph
   exits 0 even when sidecar warnings (e.g. `TRACE-LEGACY-ROW`) are present. The
   spec derives its expected status from the page's `Graph complete:` line.
 - Requirement-to-spec links are sidecar references (`# @req` headers under
