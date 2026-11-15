@@ -1,0 +1,360 @@
+# Actual contained PRIMARY probe collection. No host task launch, executor,
+# admission factory, raw-ID constructor or DTO-to-receipt conversion exists here.
+# AUTHORED_NOT_RUN; depends on the separately reviewed common config/capture APIs.
+use std.common.contracts.provider_cli.adapter_types_v1.*
+use std.common.contracts.provider_cli.adapter_v1.{provider_cli_probe_count_v1, provider_cli_probe_argv_v1,
+    decode_provider_cli_version_v1, decode_provider_cli_help_v1, plan_provider_cli_action_v1}
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_backend_v2,
+    simple_container_scope_v2, simple_container_read_v2, simple_container_action_project_v2,
+    simple_container_configuration_observe_v1, ContainerExecutionLogsCaptureOwnerV1,
+    ContainerExecutionLogsCaptureObservationV1, ContainerExecutionLogsCaptureTurnV1,
+    simple_container_logs_capture_v1, simple_container_logs_capture_step_v1}
+use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, ContainerHostScopeV2,
+    container_host_scope_bytes_v2}
+use std.common.contracts.container.execution_configuration_v1.{ContainerExecutionConfigurationObservationV1, ContainerExecutionMountObservationV1}
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.nogc_sync_mut.io.process_capture_evidence_v1.ProcessCaptureEvidenceV1
+use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
+use std.common.crypto.sha256.sha256_text
+use std.common.text_bytes.{utf8_bytes_valid, bytes_to_text}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct ProviderCliContainedProbeSnapshotV1:
+    provider: ProviderCliProviderV1
+    probe_index: i64
+    configuration: ContainerExecutionConfigurationObservationV1
+    program_prefix: [text]
+    program_binding_digest: text
+    transcript_digest: text
+    transcript_bytes: i64
+
+# Copy diagnostic DATA without creating an opaque receipt or selection. Arrays
+# crossing the private receipt boundary must never expose its retained backing.
+pub fn provider_cli_contained_probe_snapshot_copy_v1(value: ProviderCliContainedProbeSnapshotV1) -> ProviderCliContainedProbeSnapshotV1:
+    var argv: [text] = []
+    var digests: [text] = []
+    var names: [text] = []
+    var defaults: [text] = []
+    var prefix: [text] = []
+    var mounts: [ContainerExecutionMountObservationV1] = []
+    for item in value.configuration.primary_argv: argv.push(item)
+    for item in value.configuration.image_repo_digests: digests.push(item)
+    for item in value.configuration.environment_names: names.push(item)
+    for item in value.configuration.image_default_environment_names: defaults.push(item)
+    for item in value.program_prefix: prefix.push(item)
+    for item in value.configuration.mounts:
+        mounts.push(ContainerExecutionMountObservationV1(kind: item.kind, source: item.source,
+            destination: item.destination, read_only: item.read_only))
+    val old = value.configuration
+    val configuration = ContainerExecutionConfigurationObservationV1(scope: old.scope, runtime: old.runtime,
+        request_digest: old.request_digest, requested_image_ref: old.requested_image_ref,
+        requested_image_kind: old.requested_image_kind, runtime_image_id: old.runtime_image_id,
+        image_config_id: old.image_config_id, image_repo_digests: digests, primary_argv: argv,
+        working_directory: old.working_directory, configured_user: old.configured_user,
+        readonly_rootfs: old.readonly_rootfs, mounts: mounts, environment_digest: old.environment_digest,
+        environment_names: names, image_default_environment_digest: old.image_default_environment_digest,
+        image_default_environment_names: defaults, configuration_digest: old.configuration_digest)
+    ProviderCliContainedProbeSnapshotV1(provider: value.provider, probe_index: value.probe_index,
+        configuration: configuration, program_prefix: prefix, program_binding_digest: value.program_binding_digest,
+        transcript_digest: value.transcript_digest, transcript_bytes: value.transcript_bytes)
+
+# Immutable compatibility evidence, not vendor provenance, auth, namespace,
+# resource authority or a task grant. Only the actual collector constructs it.
+pub class ProviderCliContainedProbeReceiptV1:
+    snapshot: ProviderCliContainedProbeSnapshotV1
+    transcript: text
+    evidence: ProcessCaptureEvidenceV1
+    pub fn snapshot_v1() -> ProviderCliContainedProbeSnapshotV1: provider_cli_contained_probe_snapshot_copy_v1(self.snapshot)
+
+pub class ProviderCliContainedSelectionV1:
+    provider: ProviderCliProviderV1
+    version: ProviderCliVersionDataV1
+    program_binding_digest: text
+    receipts: [ProviderCliContainedProbeReceiptV1]
+    pub fn version_data_v1() -> ProviderCliVersionDataV1: self.version
+    pub fn binding_digest_v1() -> text: self.program_binding_digest
+    pub fn plan_data_v1(request: ProviderCliRequestDataV1) -> Result<ProviderCliPlanDataV1, text>:
+        plan_provider_cli_action_v1(self.version, request)
+
+# Functional continuation: the native capture owner remains canonical below.
+# No second process/PTY registry or copied stdout accumulation is introduced.
+pub class ProviderCliContainedProbeOwnerV1:
+    container: SimpleContainerOwnerV2
+    request: ContainerExecutionRequestV2
+    provider: ProviderCliProviderV1
+    probe_index: i64
+    before: ContainerExecutionConfigurationObservationV1
+    program_prefix: [text]
+    program_binding_digest: text
+    capture: Option<ContainerExecutionLogsCaptureOwnerV1>
+    deadline_ns: i64
+    first_error: text
+
+pub struct ProviderCliContainedProbeTurnV1:
+    owner: SimpleContainerOwnerV2
+    probe: Option<ProviderCliContainedProbeOwnerV1>
+    receipt: Option<ProviderCliContainedProbeReceiptV1>
+    error: text
+
+fn contained_probe_failed_v1(owner: SimpleContainerOwnerV2, reason: text) -> ProviderCliContainedProbeTurnV1:
+    ProviderCliContainedProbeTurnV1(owner: owner, probe: None, receipt: None, error: reason)
+
+fn contained_probe_runtime_equal_v1(left: RuntimeIdentityV1, right: RuntimeIdentityV1) -> bool:
+    (left.pod_uid == right.pod_uid and left.attempt == right.attempt and left.engine == right.engine and
+        left.native_id == right.native_id and left.node_boot_id == right.node_boot_id and
+        left.provider_generation == right.provider_generation and left.operation_id == right.operation_id)
+
+fn contained_probe_budget_v1(deadline_ns: i64) -> bool:
+    val now = time_sample_monotonic_nanos_or_failure()
+    now > 0 and now < deadline_ns
+
+fn contained_probe_path_v1(path: text, backend: text) -> bool:
+    if path.byte_len() < 2 or path.byte_len() > 4096 or path.contains("\0"): return false
+    for byte in path.bytes():
+        if byte < 32 or byte == 127: return false
+    if backend == "linux-podman":
+        if not path.starts_with("/") or path.contains("//"): return false
+        for part in path.split("/"):
+            if part == "." or part == "..": return false
+        return true
+    if backend != "windows-docker-process" or path.byte_len() < 4: return false
+    val drive = path.byte_at(0)
+    if not ((drive >= 65 and drive <= 90) or (drive >= 97 and drive <= 122)): return false
+    if path.byte_at(1) != 58 or (path.byte_at(2) != 92 and path.byte_at(2) != 47): return false
+    for part in path.replace("\\", "/").split("/"):
+        if part == "." or part == "..": return false
+    true
+
+fn contained_probe_image_id_v1(value: text) -> Result<text, text>:
+    val digest = if value.starts_with("sha256:"): value.substring(7, value.byte_len()) else: value
+    if not builder_digest_valid_v1(digest): return Err("provider-probe-native-image-id-invalid")
+    Ok(digest)
+
+fn contained_probe_program_v1(provider: ProviderCliProviderV1, index: i64,
+        backend: text, value: ContainerExecutionConfigurationObservationV1) -> Result<[text], text>:
+    val arguments = provider_cli_probe_argv_v1(provider, index)?
+    val prefix_count = value.primary_argv.len() - arguments.len()
+    if prefix_count < 1 or prefix_count > 2: return Err("provider-probe-program-mapping-unsupported")
+    if prefix_count == 2 and provider != ProviderCliProviderV1.Gemini:
+        return Err("provider-probe-interpreter-mapping-unsupported")
+    var prefix: [text] = []
+    for at in 0..prefix_count:
+        if not contained_probe_path_v1(value.primary_argv[at], backend):
+            return Err("provider-probe-absolute-program-mapping-required")
+        prefix.push(value.primary_argv[at])
+    if prefix_count == 2:
+        val executable = prefix[0].replace("\\", "/").split("/")
+        val name = executable[executable.len() - 1].lower()
+        if name != "node" and name != "node.exe": return Err("provider-probe-node-interpreter-required")
+        if not (prefix[1].ends_with(".js") or prefix[1].ends_with(".mjs")):
+            return Err("provider-probe-script-mapping-unsupported")
+    for at in 0..arguments.len():
+        if value.primary_argv[prefix_count + at] != arguments[at]:
+            return Err("provider-probe-primary-argv-mismatch")
+    Ok(prefix)
+
+fn contained_probe_profile_v1(owner: SimpleContainerOwnerV2, request: ContainerExecutionRequestV2,
+        value: ContainerExecutionConfigurationObservationV1) -> Result<(), text>:
+    val backend = simple_container_backend_v2(owner)
+    val found_scope = container_host_scope_bytes_v2(value.scope)?
+    if found_scope != container_host_scope_bytes_v2(simple_container_scope_v2(owner))?:
+        return Err("provider-probe-actual-scope-mismatch")
+    if (value.request_digest != request.plan.request_digest or value.runtime.pod_uid != request.plan.workload_uid or
+            value.runtime.attempt != request.plan.attempt or value.runtime.operation_id != request.plan.operation_id or
+            value.runtime.provider_generation != request.plan.provider_generation or value.runtime.native_id == ""):
+        return Err("provider-probe-actual-request-runtime-mismatch")
+    if contained_probe_image_id_v1(value.runtime_image_id)? != contained_probe_image_id_v1(value.image_config_id)?:
+        return Err("provider-probe-container-image-config-mismatch")
+    if value.requested_image_kind == "repository-digest":
+        if not value.image_repo_digests.contains(value.requested_image_ref):
+            return Err("provider-probe-image-manifest-correspondence-missing")
+    elif value.requested_image_kind == "image-config-id":
+        if contained_probe_image_id_v1(value.requested_image_ref)? != contained_probe_image_id_v1(value.image_config_id)?:
+            return Err("provider-probe-requested-image-config-mismatch")
+    else: return Err("provider-probe-immutable-image-reference-required")
+    # No mounted executable/interpreter asset replacement, and the image's
+    # exact default environment. Fresh first-start custody is not proved here.
+    if value.mounts.len() != 0: return Err("provider-probe-mounted-program-profile-unsupported")
+    if (value.environment_digest != value.image_default_environment_digest or
+            value.environment_names != value.image_default_environment_names):
+        return Err("provider-probe-image-default-environment-required")
+    if not contained_probe_path_v1(value.working_directory, backend) or value.configured_user == "":
+        return Err("provider-probe-explicit-workdir-user-required")
+    if backend == "linux-podman" and not value.readonly_rootfs:
+        return Err("provider-probe-linux-readonly-root-required")
+    # Windows is not assigned a Linux read-only-root fact. A fresh primary
+    # transaction/image mapping and future genuine pre-start admission hook are
+    # required; this receipt cannot authorize reusing a mutable container.
+    val projected = simple_container_action_project_v2(owner, request)?
+    if (projected.argv != value.primary_argv or projected.working_directory != value.working_directory or
+            projected.mounts.len() != 0):
+        return Err("provider-probe-original-effective-command-mismatch")
+    Ok(())
+
+fn contained_probe_binding_v1(value: ContainerExecutionConfigurationObservationV1,
+        prefix: [text]) -> Result<text, text>:
+    var program: [SdnValue] = []
+    for part in prefix: program.push(SdnValue.String(part))
+    var names: [SdnValue] = []
+    for name in value.environment_names: names.push(SdnValue.String(name))
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("caret-contained-provider-program-v1"),
+        "scope": SdnValue.String(container_host_scope_bytes_v2(value.scope)?),
+        "requestedImageRef": SdnValue.String(value.requested_image_ref),
+        "requestedImageKind": SdnValue.String(value.requested_image_kind),
+        "imageConfig": SdnValue.String(contained_probe_image_id_v1(value.image_config_id)?),
+        "programPrefix": SdnValue.Array(program), "workdir": SdnValue.String(value.working_directory),
+        "configuredUser": SdnValue.String(value.configured_user), "envDigest": SdnValue.String(value.environment_digest),
+        "envNames": SdnValue.Array(names), "readonlyRootfs": SdnValue.Bool(value.readonly_rootfs)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))))
+
+fn contained_probe_evidence_v1(backend: text, evidence: ProcessCaptureEvidenceV1) -> Result<text, text>:
+    if not evidence.retirement_confirmed_v1() or evidence.terminal_v1() != Some(true):
+        return Err("provider-probe-capture-retirement-unproven")
+    val result = evidence.process_result_v1()
+    if result == None: return Err("provider-probe-capture-result-missing")
+    if result.unwrap().exit_code != 0 or result.unwrap().limit_exceeded or result.unwrap().limit_type != "":
+        return Err("provider-probe-capture-process-failed-or-limited")
+    val stdout = evidence.stdout_bytes_v1()
+    val stderr = evidence.stderr_bytes_v1()
+    if stdout.len() < 1 or stdout.len() > 131072 or stderr.len() != 0:
+        return Err("provider-probe-transcript-bound-or-stderr")
+    if not utf8_bytes_valid(stdout) or not utf8_bytes_valid(stderr): return Err("provider-probe-transcript-utf8")
+    if evidence.stdout_delivered_v1() != stdout.len() or evidence.stderr_delivered_v1() != stderr.len():
+        return Err("provider-probe-capture-delivery-mismatch")
+    if backend == "linux-podman":
+        if (evidence.output_complete_v1() != Some(true) or evidence.reaped_v1() != Some(true) or
+                evidence.identity_revalidated_v1() != Some(true) or evidence.native_error_v1() != Some(0) or
+                evidence.cancel_requested_v1() != Some(false) or evidence.stdout_truncated_v1() != Some(false) or
+                evidence.stderr_truncated_v1() != Some(false) or evidence.stdout_seen_v1() != Some(stdout.len()) or
+                evidence.stdout_kept_v1() != Some(stdout.len()) or evidence.stderr_seen_v1() != Some(stderr.len()) or
+                evidence.stderr_kept_v1() != Some(stderr.len())):
+            return Err("provider-probe-linux-native-output-incomplete")
+    elif backend == "windows-docker-process":
+        if evidence.stdout_eof_v1() != Some(true) or evidence.stderr_eof_v1() != Some(true):
+            return Err("provider-probe-windows-native-output-incomplete")
+        # Windows does not expose Linux seen/reap/identity/truncation fields.
+        # Actual stream EOF, native completion/retirement and bounded Result are
+        # checked; unavailable fields are never manufactured as false/zero.
+    else: return Err("provider-probe-backend-unsupported")
+    val text = bytes_to_text(stdout)
+    if result.unwrap().stdout != text or result.unwrap().stderr != "":
+        return Err("provider-probe-transcript-result-mismatch")
+    Ok(text)
+
+fn contained_probe_copy_v1(probe: ProviderCliContainedProbeOwnerV1, owner: SimpleContainerOwnerV2,
+        capture: Option<ContainerExecutionLogsCaptureOwnerV1>, reason: text) -> ProviderCliContainedProbeOwnerV1:
+    ProviderCliContainedProbeOwnerV1(container: owner, request: probe.request, provider: probe.provider,
+        probe_index: probe.probe_index, before: probe.before, program_prefix: probe.program_prefix,
+        program_binding_digest: probe.program_binding_digest, capture: capture,
+        deadline_ns: probe.deadline_ns, first_error: if probe.first_error != "": probe.first_error else: reason)
+
+fn contained_probe_finish_v1(probe: ProviderCliContainedProbeOwnerV1,
+        observation: ContainerExecutionLogsCaptureObservationV1) -> ProviderCliContainedProbeTurnV1:
+    if probe.capture != None: return ProviderCliContainedProbeTurnV1(probe.container, Some(probe), None, "")
+    if not contained_probe_budget_v1(probe.deadline_ns): return contained_probe_failed_v1(probe.container, "provider-probe-budget-expired")
+    if (observation.request_digest != probe.request.plan.request_digest or
+            not contained_probe_runtime_equal_v1(observation.runtime, probe.before.runtime)):
+        return contained_probe_failed_v1(probe.container, "provider-probe-log-runtime-mismatch")
+    val observed_scope = container_host_scope_bytes_v2(observation.scope)
+    val expected_scope = container_host_scope_bytes_v2(probe.before.scope)
+    if observed_scope.is_err() or expected_scope.is_err() or observed_scope.unwrap() != expected_scope.unwrap():
+        return contained_probe_failed_v1(probe.container, "provider-probe-log-scope-mismatch")
+    val transcript = contained_probe_evidence_v1(simple_container_backend_v2(probe.container), observation.evidence)
+    if transcript.is_err(): return contained_probe_failed_v1(probe.container, transcript.unwrap_err())
+    val after = simple_container_configuration_observe_v1(probe.container, probe.request)
+    if after.error != "" or after.observation == None:
+        return contained_probe_failed_v1(after.owner, "provider-probe-final-configuration:" + after.error)
+    if (after.observation.unwrap().configuration_digest != probe.before.configuration_digest or
+            not contained_probe_runtime_equal_v1(after.observation.unwrap().runtime, probe.before.runtime)):
+        return contained_probe_failed_v1(after.owner, "provider-probe-configuration-changed")
+    if not contained_probe_budget_v1(probe.deadline_ns): return contained_probe_failed_v1(after.owner, "provider-probe-budget-expired")
+    val snapshot = ProviderCliContainedProbeSnapshotV1(provider: probe.provider, probe_index: probe.probe_index,
+        configuration: probe.before, program_prefix: probe.program_prefix,
+        program_binding_digest: probe.program_binding_digest, transcript_digest: sha256_text(transcript.unwrap()),
+        transcript_bytes: transcript.unwrap().byte_len())
+    val receipt = ProviderCliContainedProbeReceiptV1(snapshot: snapshot, transcript: transcript.unwrap(), evidence: observation.evidence)
+    ProviderCliContainedProbeTurnV1(owner: after.owner, probe: None, receipt: Some(receipt), error: "")
+
+fn contained_probe_capture_turn_v1(probe: ProviderCliContainedProbeOwnerV1,
+        turn: ContainerExecutionLogsCaptureTurnV1, cancelled: bool) -> ProviderCliContainedProbeTurnV1:
+    var reason = turn.error
+    if cancelled and reason == "": reason = "provider-probe-cancelled-or-budget-expired"
+    val next = contained_probe_copy_v1(probe, turn.owner, turn.capture, reason)
+    if next.first_error != "":
+        return ProviderCliContainedProbeTurnV1(owner: turn.owner,
+            probe: if turn.capture != None: Some(next) else: None, receipt: None, error: next.first_error)
+    if turn.capture != None: return ProviderCliContainedProbeTurnV1(turn.owner, Some(next), None, "")
+    if turn.observation == None: return contained_probe_failed_v1(turn.owner, "provider-probe-complete-log-observation-missing")
+    contained_probe_finish_v1(next, turn.observation.unwrap())
+
+# Already admitted PRIMARY executions only. This function performs read-only
+# observation; it neither creates/starts a workload nor accepts caller output.
+pub fn provider_cli_container_probe_begin_v1(owner: SimpleContainerOwnerV2,
+        original_request: ContainerExecutionRequestV2, provider: ProviderCliProviderV1,
+        probe_index: i64) -> ProviderCliContainedProbeTurnV1:
+    if probe_index < 0 or probe_index >= provider_cli_probe_count_v1(provider):
+        return contained_probe_failed_v1(owner, "provider-probe-index")
+    val now = time_sample_monotonic_nanos_or_failure()
+    if now <= 0 or now > 9223372006854775807: return contained_probe_failed_v1(owner, "provider-probe-clock-unavailable")
+    val deadline = now + 30000000000
+    val configuration = simple_container_configuration_observe_v1(owner, original_request)
+    if configuration.error != "" or configuration.observation == None:
+        return contained_probe_failed_v1(configuration.owner, "provider-probe-configuration:" + configuration.error)
+    val before = configuration.observation.unwrap()
+    val profile = contained_probe_profile_v1(configuration.owner, original_request, before)
+    if profile.is_err(): return contained_probe_failed_v1(configuration.owner, profile.unwrap_err())
+    val prefix = contained_probe_program_v1(provider, probe_index, simple_container_backend_v2(configuration.owner), before)
+    if prefix.is_err(): return contained_probe_failed_v1(configuration.owner, prefix.unwrap_err())
+    val binding = contained_probe_binding_v1(before, prefix.unwrap())
+    if binding.is_err(): return contained_probe_failed_v1(configuration.owner, binding.unwrap_err())
+    if not contained_probe_budget_v1(deadline): return contained_probe_failed_v1(configuration.owner, "provider-probe-budget-expired")
+    val waited = simple_container_read_v2(configuration.owner, "wait", original_request)
+    if (waited.operation.status != "ok" or waited.operation.state.phase != "exited" or
+            waited.operation.state.exit_code != 0 or waited.operation.exit_code != 0 or
+            not contained_probe_runtime_equal_v1(waited.operation.state.identity, before.runtime)):
+        return contained_probe_failed_v1(waited.owner, "provider-probe-workload-exit-unproven")
+    if not contained_probe_budget_v1(deadline): return contained_probe_failed_v1(waited.owner, "provider-probe-budget-expired")
+    val probe = ProviderCliContainedProbeOwnerV1(container: waited.owner, request: original_request, provider: provider,
+        probe_index: probe_index, before: before, program_prefix: prefix.unwrap(),
+        program_binding_digest: binding.unwrap(), capture: None, deadline_ns: deadline, first_error: "")
+    val captured = simple_container_logs_capture_v1(waited.owner, original_request)
+    contained_probe_capture_turn_v1(probe, captured, false)
+
+pub fn provider_cli_container_probe_step_v1(probe: ProviderCliContainedProbeOwnerV1,
+        cancel: bool = false) -> ProviderCliContainedProbeTurnV1:
+    if probe.capture == None: return contained_probe_failed_v1(probe.container, "provider-probe-no-active-capture")
+    val cancelled = cancel or probe.first_error != "" or not contained_probe_budget_v1(probe.deadline_ns)
+    val turn = simple_container_logs_capture_step_v1(probe.container, probe.capture.unwrap(), cancelled)
+    # Cancels only this owned read-only capture. It never stops the container,
+    # settles its workload or releases its charge/admission/cleanup obligations.
+    contained_probe_capture_turn_v1(probe, turn, cancelled)
+
+pub fn provider_cli_contained_selection_v1(provider: ProviderCliProviderV1,
+        receipts: [ProviderCliContainedProbeReceiptV1]) -> Result<ProviderCliContainedSelectionV1, text>:
+    val count = provider_cli_probe_count_v1(provider)
+    if receipts.len() != count: return Err("provider-probe-complete-index-set-required")
+    var first: Option<ProviderCliContainedProbeReceiptV1> = None
+    for receipt in receipts:
+        if receipt.snapshot.provider != provider: return Err("provider-probe-family-mismatch")
+        if receipt.snapshot.probe_index == 0:
+            if first != None: return Err("provider-probe-duplicate-index")
+            first = Some(receipt)
+    if first == None: return Err("provider-probe-version-index-required")
+    val binding = first.unwrap().snapshot.program_binding_digest
+    val version = decode_provider_cli_version_v1(provider, first.unwrap().transcript)?
+    for index in 0..count:
+        var matches = 0
+        for receipt in receipts:
+            if receipt.snapshot.probe_index == index:
+                matches = matches + 1
+                if receipt.snapshot.program_binding_digest != binding:
+                    return Err("provider-probe-image-program-environment-scope-mismatch")
+                if index != 0:
+                    val decoded = decode_provider_cli_help_v1(version, index, receipt.transcript)?
+        if matches != 1: return Err("provider-probe-exact-index-set-required")
+    var retained: [ProviderCliContainedProbeReceiptV1] = []
+    for receipt in receipts: retained.push(receipt)
+    Ok(ProviderCliContainedSelectionV1(provider: provider, version: version,
+        program_binding_digest: binding, receipts: retained))
