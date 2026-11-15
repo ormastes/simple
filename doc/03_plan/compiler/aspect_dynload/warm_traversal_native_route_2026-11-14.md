@@ -146,3 +146,29 @@ semantic identity through that producer, canonical manifest/run digests, earlies
 cache namespaces, child argv/request and result receipts. Existing nil wire bytes
 should remain unchanged. Other shard variants stay rejected until individually
 connected. No actual worker route completion is claimed by this prerequisite.
+
+
+### Managed index source slice (runtime unqualified)
+
+The existing index-config producer now accepts an optional typed acquisition
+request, admits it under fixed host policy, and emits Config2 with five bounded
+acquisition/expected/scope fields. Config1 and the nil normalized profile remain
+unchanged. The semantic descriptor SHA enters the typed variant and therefore
+existing index/variant/receipt identities. The expected scope frames configured
+producer image, source inventory, phase, backend and target (not the circular
+provider-derived variant). Manager task inputs already pin the exact config bytes.
+
+The real index source-admission path independently reacquires before source/index
+CURRENT reads. It retains that local selection through full-index semantic request
+and the checked driver constructor; no token is serialized. The compiler semantic
+entry also checks request/selection before inventory reads. Parent roundtrip uses
+the captured admission and pure profile derivation, avoiding a second parent map.
+Diagnostics still refuse selected transport explicitly.
+
+Tests-first malformed/missing transport specs and a real-provider child fixture
+through the production variant admission are authored, UNRUN. The child config is
+an explicitly synthetic metadata universe; it does not prove actual SCV/index
+publication. Current bootstrap callsites default to nil; caller configuration,
+group-preparation/manifests and subsequent compile-worker receipts are not yet
+connected. Thus this slice does not enable native-build grouped requests or claim
+an end-to-end managed build. No native resource/performance claim is made.

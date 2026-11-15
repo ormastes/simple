@@ -1,11 +1,15 @@
+use compiler.common.driver_compile_options.{TraversalPluginProviderRequestV1}
+use app.io._CliCompile.traversal_plugin_composition_v1.{cli_traversal_plugin_acquire_v1}
+use app.io._CliCompile.traversal_plugin_transport_v1.{cli_traversal_plugin_transport_export_v1,
+    cli_traversal_plugin_transport_decode_v1}
 # The index builder receives the exact compiler-derived target-phase variant,
 # frozen SCV identity, and private per-task output roots.
 use app.bootstrap_builder.native_group_index_contract.{
-    native_group_index_config_decode_v1
+    native_group_index_config_decode_v1, native_group_index_traversal_scope_v1
 }
 use app.bootstrap_builder.native_group_index_variant.{
     native_group_index_variant_profile_v1,
-    native_group_index_variant_admit_v1, native_group_target_build_mode_v1
+    native_group_target_build_mode_v1
 }
 use app.bootstrap_builder.native_group_phase2_admission.{
     Phase2Stage2AdmissionV1
@@ -23,15 +27,23 @@ fn native_group_index_config_encode_for_producer_v1(
     authority_copy_path: text,
     phase: text,
     backend: text,
-    target: text
+    target: text,
+    traversal_request: TraversalPluginProviderRequestV1? = nil
 ) -> Result<text, text>:
+    var transport = ""
+    if traversal_request != nil:
+        val selection = cli_traversal_plugin_acquire_v1(traversal_request)?.unwrap()
+        val scope = native_group_index_traversal_scope_v1(producer_digest,
+            scv.source_inventory_digest, phase, backend, target)
+        transport = cli_traversal_plugin_transport_export_v1(traversal_request.unwrap(), selection, scope)?
     val build_mode = native_group_target_build_mode_v1(phase)?
     val profile = native_group_index_variant_profile_v1(
-        phase, backend, target, build_mode, "simple-v1")?
+        phase, backend, target, build_mode, "simple-v1", transport)?
     val snapshot = scv.snapshot
     val variant = profile.variant
+    val format = if transport == "": "SIMPLE-NATIVE-INDEX-BUILD-CONFIG-1" else: "SIMPLE-NATIVE-INDEX-BUILD-CONFIG-2"
     var rows = [
-        "format=SIMPLE-NATIVE-INDEX-BUILD-CONFIG-1",
+        "format=" + format,
         "phase={phase}", "backend={backend}", "target={target}",
         "producer_path={producer_path}",
         "producer_digest={producer_digest}",
@@ -62,6 +74,13 @@ fn native_group_index_config_encode_for_producer_v1(
         "variant_digest={profile.digest}",
         "variant_features_count={variant.features.len()}"
     ]
+    if transport != "":
+        val selected = cli_traversal_plugin_transport_decode_v1(transport)?
+        rows.push("traversal_provider_id=" + selected.request.provider_id)
+        rows.push("traversal_allowlist_path=" + selected.request.allowlist_path)
+        rows.push("traversal_signature_path=" + selected.request.signature_path)
+        rows.push("traversal_expected_identity=" + selected.expected_identity)
+        rows.push("traversal_scope_identity=" + selected.scope_identity)
     for index in 0..variant.features.len():
         rows = rows.push("variant_feature_{index}={variant.features[index]}")
     rows = rows.push(
@@ -76,7 +95,11 @@ fn native_group_index_config_encode_for_producer_v1(
             "variant_environment_input_{index}={variant.environment_inputs[index]}")
     val payload = rows.join("\n") + "\n"
     val parsed = native_group_index_config_decode_v1(payload)?
-    val admitted = native_group_index_variant_admit_v1(parsed)?
+    val admitted = native_group_index_variant_profile_v1(parsed.phase, parsed.backend,
+        parsed.target, parsed.variant.build_mode, parsed.variant.language_abi,
+        parsed.traversal_transport_v1)?
+    if parsed.traversal_transport_v1 != transport:
+        return Err("Phase2 native index provider transport roundtrip differs")
     if parsed.source_root != copied.source_root or
             parsed.snapshot_root != snapshot.snapshot_root or
             parsed.snapshot_inventory_digest != snapshot.inventory_digest or
@@ -96,11 +119,12 @@ fn phase2_native_index_config_encode_v1(
     authority_copy_path: text,
     phase: text,
     backend: text,
-    target: text
+    target: text,
+    traversal_request: TraversalPluginProviderRequestV1? = nil
 ) -> Result<text, text>:
     native_group_index_config_encode_for_producer_v1(
         admission.producer_path, admission.producer_digest,
-        copied, scv, authority_copy_path, phase, backend, target)
+        copied, scv, authority_copy_path, phase, backend, target, traversal_request)
 
 export phase2_native_index_config_encode_v1
 export native_group_index_config_encode_for_producer_v1

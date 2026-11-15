@@ -1,5 +1,8 @@
 # Bounded input and output wire contracts for a separate full-inventory
 # grouped-native index builder. No receipt is valid without compiler readback.
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.crypto.sha256.{sha256_text}
 use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1,
     config_variant_digest_v1}
 use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
@@ -32,6 +35,7 @@ struct NativeGroupIndexConfigV1:
     expected_current_digest: text
     variant: ConfigVariantKeyV1
     variant_digest: text
+    traversal_transport_v1: text = ""
 
 struct NativeGroupIndexReceiptV1:
     producer_digest: text
@@ -124,12 +128,19 @@ fn native_group_index_config_decode_v1(payload: text) -> Result<NativeGroupIndex
     val feature_count = native_group_index_decimal_v1(fields["variant_features_count"], 0, 64)?
     val option_count = native_group_index_decimal_v1(fields["variant_normalized_options_count"], 0, 128)?
     val environment_count = native_group_index_decimal_v1(fields["variant_environment_inputs_count"], 0, 128)?
-    if fields.len() != required.len() + feature_count + option_count + environment_count:
+    val selected_format = fields["format"] == "SIMPLE-NATIVE-INDEX-BUILD-CONFIG-2"
+    val traversal_fields = ["traversal_provider_id", "traversal_allowlist_path",
+        "traversal_signature_path", "traversal_expected_identity", "traversal_scope_identity"]
+    if selected_format:
+        for key in traversal_fields:
+            if not fields.contains_key(key): return Err("index traversal field missing: " + key)
+    val extra_count = if selected_format: 5 else: 0
+    if fields.len() != required.len() + feature_count + option_count + environment_count + extra_count:
         return Err("index config has unknown or omitted rows")
     val features = native_group_index_list_v1(fields, "variant_feature_", feature_count)?
     val options = native_group_index_list_v1(fields, "variant_normalized_option_", option_count)?
     val environment = native_group_index_list_v1(fields, "variant_environment_input_", environment_count)?
-    if fields["format"] != "SIMPLE-NATIVE-INDEX-BUILD-CONFIG-1" or
+    if (fields["format"] != "SIMPLE-NATIVE-INDEX-BUILD-CONFIG-1" and not selected_format) or
             fields["index_schema"] != "V4" or
             (fields["phase"] != "phase3" and fields["phase"] != "phase4") or
             (fields["backend"] != "llvm" and fields["backend"] != "cranelift") or
@@ -165,6 +176,14 @@ fn native_group_index_config_decode_v1(payload: text) -> Result<NativeGroupIndex
             variant.backend != fields["backend"] or
             config_variant_digest_v1(variant) != fields["variant_digest"]:
         return Err("index typed variant digest or target differs")
+    var transport = ""
+    if selected_format:
+        transport = sdn_encode_canonical(SdnValue.Dict({"schema": SdnValue.Int(1),
+            "providerId": SdnValue.String(fields["traversal_provider_id"]),
+            "allowlistPath": SdnValue.String(fields["traversal_allowlist_path"]),
+            "signaturePath": SdnValue.String(fields["traversal_signature_path"]),
+            "expectedIdentity": SdnValue.String(fields["traversal_expected_identity"]),
+            "scopeIdentity": SdnValue.String(fields["traversal_scope_identity"])})) + "\n"
     Ok(NativeGroupIndexConfigV1(fields["phase"], fields["backend"], fields["target"],
         fields["producer_path"], fields["producer_digest"], fields["source_root"],
         fields["snapshot_root"], fields["scv_revision_id"], fields["scv_commit_id"],
@@ -173,7 +192,7 @@ fn native_group_index_config_decode_v1(payload: text) -> Result<NativeGroupIndex
         generation, count, fields["full_source_authority_path"],
         fields["full_source_authority_digest"], fields["index_cache_root"],
         fields["output_root"], fields["expected_current_digest"], variant,
-        fields["variant_digest"]))
+        fields["variant_digest"], transport))
 
 fn native_group_index_receipt_encode_v1(value: NativeGroupIndexReceiptV1) -> text:
     for digest in [value.producer_digest, value.snapshot_inventory_digest,
@@ -224,3 +243,14 @@ export NativeGroupIndexConfigV1, NativeGroupIndexReceiptV1
 export native_group_index_config_decode_v1, native_group_index_receipt_encode_v1
 export native_group_index_receipt_decode_v1, native_group_index_absolute_v1
 export native_group_index_private_template_v1
+
+# Scope excludes the provider-derived variant to avoid a circular digest. The
+# complete selected config is pinned by the existing manager task input digest.
+fn native_group_index_traversal_scope_v1(producer_digest: text, inventory_digest: text,
+        phase: text, backend: text, target: text) -> text:
+    var framed = "simple-native-index-traversal-scope/v1\n"
+    for field in [producer_digest, inventory_digest, phase, backend, target]:
+        framed = framed + builder_wire_line_v1(field)
+    sha256_text(framed)
+
+export native_group_index_traversal_scope_v1

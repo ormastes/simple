@@ -1,5 +1,9 @@
 # AUTHORED/UNRUN. Separate process; never receives a parent token or signing key.
 # argv: canonical transport file, expected scope SHA256, accept|reject.
+use app.bootstrap_builder.native_group_index_contract.{NativeGroupIndexConfigV1,
+    native_group_index_traversal_scope_v1}
+use app.bootstrap_builder.native_group_index_variant.{native_group_index_variant_profile_v1,
+    native_group_index_variant_admit_v1}
 use app.io.cli_ops.{get_args}
 use app.io._CliCompile.traversal_plugin_transport_v1.{cli_traversal_plugin_transport_decode_v1,
     cli_traversal_plugin_reacquire_v1}
@@ -21,6 +25,27 @@ fn main() -> i32:
     val transport = cli_traversal_plugin_transport_decode_v1(source).unwrap()
     var options = driver_core_compile_options_default()
     options.traversal_plugin_request_v1 = Some(transport.request)
+    # This is a typed config test universe, not an actual SCV/index publication.
+    # Exercise the production managed variant owner, including policy re-admission.
+    val producer_digest = "a".repeat(64)
+    val inventory_digest = "b".repeat(64)
+    val scope = native_group_index_traversal_scope_v1(producer_digest, inventory_digest,
+        "phase4", "llvm", "x86_64-unknown-linux-gnu")
+    assert(args[2] == scope)
+    val profile = native_group_index_variant_profile_v1("phase4", "llvm",
+        "x86_64-unknown-linux-gnu", "release", "simple-v1", source).unwrap()
+    val config = NativeGroupIndexConfigV1("phase4", "llvm", "x86_64-unknown-linux-gnu",
+        "/fixture/compiler", producer_digest, "/fixture/source", "/fixture/snapshot",
+        "revision", "commit", "tree", "/fixture/receipt", "c".repeat(64),
+        "d".repeat(64), inventory_digest, 1, 1, "/fixture/authority", "e".repeat(64),
+        "@WORK@/index-owned", "@WORK@/index-output", "NONE", profile.variant,
+        profile.digest, source)
+    val admitted = native_group_index_variant_admit_v1(config).unwrap()
+    assert(admitted.options.traversal_plugin_resolved_identity_v1 == transport.expected_identity)
+    assert(admitted.traversal_selection != nil)
+    var stripped = config
+    stripped.traversal_transport_v1 = ""
+    assert(native_group_index_variant_admit_v1(stripped).is_err())
     val driver = cli_traversal_plugin_create_driver_v1(options, nil, Some(selected.unwrap())).unwrap()
     assert(driver.ctx.options.traversal_plugin_resolved_identity_v1 == transport.expected_identity)
     assert(driver.ctx.aop_traversal_plugin_selection_v1.unwrap().canonical_identity == transport.expected_identity)

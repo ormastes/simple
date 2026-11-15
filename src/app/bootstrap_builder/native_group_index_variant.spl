@@ -2,7 +2,12 @@
 # Features and environment inputs have no typed CompileOptions projection yet;
 # rejecting them prevents a caller assertion from masquerading as compiler
 # configuration authority.
-use app.bootstrap_builder.native_group_index_contract.{NativeGroupIndexConfigV1}
+use app.bootstrap_builder.native_group_index_contract.{NativeGroupIndexConfigV1, native_group_index_traversal_scope_v1}
+use app.io._CliCompile.traversal_plugin_transport_v1.{cli_traversal_plugin_transport_decode_v1,
+    cli_traversal_plugin_reacquire_v1}
+use compiler.common.cache_contract.traversal_plugin_selection_v1.{TraversalPluginSelectionV1}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use std.common.crypto.sha256.{sha256_text}
 use compiler.common.driver_compile_options.{CompileOptions,
     driver_core_compile_options_default, compileoptions_normalize_mir_optimization,
     compileoptions_target_profile_v1, target_profile_identity_fields_v1,
@@ -16,6 +21,7 @@ struct NativeGroupIndexVariantOptionsV1:
     options: CompileOptions
     variant: ConfigVariantKeyV1
     digest: text
+    traversal_selection: TraversalPluginSelectionV1? = nil
 
 fn native_group_index_variant_target_v1(target: text) -> bool:
     ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu",
@@ -28,7 +34,7 @@ fn native_group_target_build_mode_v1(phase: text) -> Result<text, text>:
     Err("index target phase unsupported")
 
 fn native_group_index_variant_profile_v1(phase: text, backend: text,
-        target: text, build_mode: text, language_abi: text
+        target: text, build_mode: text, language_abi: text, traversal_transport: text = ""
         ) -> Result<NativeGroupIndexVariantOptionsV1, text>:
     if (phase != "phase3" and phase != "phase4") or
             (backend != "llvm" and backend != "cranelift") or
@@ -42,6 +48,10 @@ fn native_group_index_variant_profile_v1(phase: text, backend: text,
         return Err("index target phase does not match build profile")
     val release = build_mode == "release"
     var options = driver_core_compile_options_default()
+    if traversal_transport != "":
+        val transport = cli_traversal_plugin_transport_decode_v1(traversal_transport)?
+        options.traversal_plugin_request_v1 = Some(transport.request)
+        options.traversal_plugin_resolved_identity_v1 = transport.expected_identity
     val default_debug_info = options.debug_info
     options.mode = CompileMode.Aot
     options.cli_mode_text = "aot"
@@ -79,6 +89,9 @@ fn native_group_index_variant_profile_v1(phase: text, backend: text,
     ]
     for field in target_profile_identity_fields_v1(target_profile):
         normalized.push(field)
+    if traversal_transport != "":
+        normalized.push("traversal_plugin_identity_sha256=" + sha256_text(options.traversal_plugin_resolved_identity_v1))
+        normalized = canonical_identity_sort_texts(normalized)
     val variant = ConfigVariantKeyV1(options.native_target,
         options.backend, [], options.build_mode, language_abi, normalized, [])
     val digest = config_variant_digest_v1(variant)
@@ -87,9 +100,14 @@ fn native_group_index_variant_profile_v1(phase: text, backend: text,
 
 fn native_group_index_variant_admit_v1(config: NativeGroupIndexConfigV1
         ) -> Result<NativeGroupIndexVariantOptionsV1, text>:
+    var selection: TraversalPluginSelectionV1? = nil
+    if config.traversal_transport_v1 != "":
+        val scope = native_group_index_traversal_scope_v1(config.producer_digest,
+            config.source_inventory_digest, config.phase, config.backend, config.target)
+        selection = Some(cli_traversal_plugin_reacquire_v1(config.traversal_transport_v1, scope)?)
     val derived = native_group_index_variant_profile_v1(config.phase,
         config.backend, config.target, config.variant.build_mode,
-        config.variant.language_abi)?
+        config.variant.language_abi, config.traversal_transport_v1)?
     if config.variant.target_triple != derived.variant.target_triple or
             config.variant.backend != derived.variant.backend or
             config.variant.features != derived.variant.features or
@@ -99,7 +117,7 @@ fn native_group_index_variant_admit_v1(config: NativeGroupIndexConfigV1
             config.variant.environment_inputs != derived.variant.environment_inputs or
             config.variant_digest != derived.digest:
         return Err("index supplied variant does not match typed CompileOptions")
-    Ok(derived)
+    Ok(NativeGroupIndexVariantOptionsV1(..derived, traversal_selection: selection))
 
 export NativeGroupIndexVariantOptionsV1
 export native_group_index_variant_target_v1, native_group_index_variant_profile_v1
