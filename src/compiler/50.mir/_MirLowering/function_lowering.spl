@@ -1975,6 +1975,9 @@ impl MirLowering:
                         ()
             var tail_coerced_to_bool = false
             var tail_float_coerced = false
+            var tail_trait_expected = false
+            if val trait_expected = expected_type:
+                tail_trait_expected = self.native_trait_owner_for_type(trait_expected) != ""
             match value.kind:
                 case HirExprKind.If(cond, then_, else_):
                     local = self.lower_if(cond, then_, else_, expected_type)
@@ -1982,6 +1985,16 @@ impl MirLowering:
                     local = self.lower_if_chain(arms, else_, expected_type)
                 case HirExprKind.MatchCase(scrutinee, arms):
                     local = self.lower_match_case(scrutinee, arms, expected_type)
+                case HirExprKind.Block(inner_block):
+                    # A desugared match (text/tuple patterns: `{ let s; if-chain }`)
+                    # into a `-> Trait` tail: keep the expected type so every
+                    # arm converts; lower_expr's Block arm would drop it.
+                    if tail_trait_expected:
+                        self.vm_check_desugared_match_block(value, inner_block)
+                        val inner_local = self.lower_block_expected(inner_block, expected_type)
+                        local = inner_local ?? LocalId(id: 0)
+                    else:
+                        local = self.lower_expr(value)
                 case HirExprKind.ExistsCheck(_):
                     if tail_bool_position:
                         local = self.lower_cond_expr(value)
@@ -2013,9 +2026,9 @@ impl MirLowering:
                         # did, so its joined (data, table) result is only typed.
                         # Recording the concrete value.type_ instead would make
                         # the caller's coerce wrap the object a second time.
-                        if self.native_trait_owner_for_type(found_expected) != "":
+                        if tail_trait_expected:
                             match value.kind:
-                                case HirExprKind.If(_, _, _) | HirExprKind.IfChain(_, _) | HirExprKind.MatchCase(_, _): ()
+                                case HirExprKind.If(_, _, _) | HirExprKind.IfChain(_, _) | HirExprKind.MatchCase(_, _) | HirExprKind.Block(_): ()
                                 case _:
                                     local = self.coerce_native_trait_object(local, value, found_expected)
                             self.remember_local_hir_type(local.id, found_expected, 0, 0)
