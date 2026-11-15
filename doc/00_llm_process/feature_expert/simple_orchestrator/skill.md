@@ -121,3 +121,29 @@ bin/simple test test/01_unit/lib/common/sdn/sdn_sequence_duplicate_key_spec.spl 
 - **`unshare -U` succeeds here while `unshare -Ur` and nested namespaces fail.**
   Probing "can I make a user namespace" says yes and is useless; probe the
   operation runc actually performs (`unshare --user --mount true`).
+
+## Shared server selection and controller gateway (2026-11-15)
+
+The [server-context guide](../../../07_guide/tooling/orchestration_server_contexts.md)
+describes the authored `server-resolve` and `server-request` CLI, shared and
+per-consumer SDN mappings, explicit container endpoints, SSH profiles and
+installed controller gateway policy. [Host identity setup](../../../07_guide/tooling/orchestration_host_identity.md)
+owns key and peer-policy provisioning. See [architecture](../../../04_architecture/server_contexts.md)
+and the [verification plan](../../../03_plan/sys_test/server_contexts.md).
+
+Keep submit/inspect/cancel with existing journal owners and signed
+dispatch/resume/inspect-execution with existing execution/host authorization
+owners. Framing correlation and selected endpoints grant no domain authority.
+Do not report desired cancellation as observed termination or retry an
+uncertain mutation with a new UID. Pure tests and the
+[unit manual](../../../06_spec/01_unit/lib/common/config_core/server_context_v1_spec.md)
+are authored, NOT_RUN. This increment supplies no remote/container deployment
+receipt, native qualification or completed orchestration milestone.
+
+`simple orchestrator container-plan-prepare` produces an unsigned candidate
+with public server discovery before hashing. Candidate scope/policy are
+unverified inputs; reservation, signing, submission and dispatch composition
+remain open. Follow the host identity guide's ordered generation/pin/profile/
+exchange flow; pending public registration grants no login authority. Windows
+external SSH key-path projection fails closed until its separate capability is
+available. These source paths and their manuals remain NOT_RUN.
