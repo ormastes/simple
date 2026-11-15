@@ -68,8 +68,10 @@ Caret side: providers `slang` (HTTP) and `slang_local` (in-process) in
   `test/03_system/lib/slang/feature/slang_kv_cache_live_spec.spl` and the
   2026-11-14 table in `test/05_perf/slang_kv_cache/README.md` (Qwen2.5-1.5B,
   CPU: exact repeat re-prefills 1 of 988 prompt tokens, ~40x faster request).
-  A hit's output may drift from a full prefill (first differing byte 2-42; ggml batch
-  shape, `doc/08_tracking/bug/slang_prefix_cache_hit_output_drift_2026-11-14.md`).
+  A hit is byte-identical to a full prefill: the shim decodes the last prompt
+  token alone on the cold and hit path alike (`slang_ggml_request_eval_prompt`),
+  so its logits come from one batch shape (fixed drift,
+  `doc/08_tracking/bug/slang_prefix_cache_hit_output_drift_2026-11-14.md`).
   The physical paged-KV lane needs a llama.cpp with `include/llama-slang-paged.h`.
 - The HTTP path is unreachable on the bootstrap seed; see
   `doc/08_tracking/bug/seed_jit_cannot_resolve_text_dot_from_char_code_2026-09-04.md`
