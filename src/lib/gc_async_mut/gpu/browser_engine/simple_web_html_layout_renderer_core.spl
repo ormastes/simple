@@ -421,6 +421,17 @@ fn _normalize_final_overflow_axes(
     normalized
 
 # The five tags named on both sides of Chrome's nested-list UA rule.
+fn _block_level_display(display: text) -> bool:
+    not (display.starts_with("inline") or display == "contents" or display == "none" or display == "marker" or display == "")
+
+# Containers whose whitespace-only text children generate no box.
+fn _whitespace_free_container(display: text) -> bool:
+    display == "flex" or display == "inline-flex" or display == "grid" or
+    display == "inline-grid" or display == "table" or display == "inline-table" or
+    display == "table-row" or display == "table-row-group" or
+    display == "table-header-group" or display == "table-footer-group" or
+    display == "table-column-group"
+
 fn list_container_tag(tag: text) -> bool:
     tag == "ul" or tag == "ol" or tag == "dl" or tag == "menu" or tag == "dir"
 
@@ -838,7 +849,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         var inline_normal = ""
         var inline_important = ""
         if nd.style_attr != "":
-            val inline_priority = css_declaration_priority_split(nd.style_attr)
+            val inline_priority = css_declaration_priority_split(_inline_style_closed(nd.style_attr))
             inline_normal = inline_priority.normal
             inline_important = inline_priority.important
         if _font_style_trace_on and nd.style_attr.len() > 0:
@@ -1376,6 +1387,34 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                     marker_st.display = "none"
                     styles[marker_i] = marker_st
         marker_i = marker_i + 1
+    # Whitespace-only text renders only between inline-level boxes: inside a
+    # flex/grid/table container, or beside a block-level box (computed
+    # display, so `img{display:block}` or `label{display:block}` counts), it
+    # generates nothing (CSS Text 4.1.1, Flexbox 4, Grid 6.2) -- the parser
+    # keeps it only for this pass to judge.
+    var ws_parent = 0
+    while ws_parent < node_count:  # cpu-lane-loop-ok: one pass over the document per style recompute; each child is visited once, from its parent
+        var ws_c = child_index.first_child[ws_parent]
+        if ws_c >= 0:
+            val box_parent = _whitespace_free_container(styles[ws_parent].display)
+            var prev_block = false
+            while ws_c >= 0:
+                if nodes[ws_c].tag == "#text" and nodes[ws_c].text_trimmed == "":
+                    var next = child_index.next_sibling[ws_c]
+                    while next >= 0 and (styles[next].display == "none" or styles[next].display == "marker"):
+                        next = child_index.next_sibling[next]
+                    val next_block = next >= 0 and nodes[next].tag != "#text" and _block_level_display(styles[next].display)
+                    # A kept newline beside a block is an empty line (Chrome
+                    # `<pre><div>a</div>\n<div>b</div>` puts b 48 below a).
+                    val kept_newline = html_kept_newlines(nodes[ws_c], styles[ws_c].white_space_newline) > 0
+                    if box_parent or ((prev_block or next_block) and not styles[ws_c].white_space_pre and not kept_newline):
+                        var ws_st = styles[ws_c]
+                        ws_st.display = "none"
+                        styles[ws_c] = ws_st
+                elif styles[ws_c].display != "none" and styles[ws_c].display != "marker":
+                    prev_block = nodes[ws_c].tag != "#text" and _block_level_display(styles[ws_c].display)
+                ws_c = child_index.next_sibling[ws_c]
+        ws_parent = ws_parent + 1
     if material_channel_ready:
         material_counts[0] = cpu_material_entry_count
         material_counts[1] = solid_material_entry_count
@@ -1575,3 +1614,26 @@ pub fn simple_web_layout_debug_style_by_id(html: text, id: text, field: text) ->
                 return st.backdrop_filter_raw
         i = i + 1
     ""
+
+# CSS closes blocks still open at the end of input, so a style attribute
+# ending inside a function (`style="background:rgb(0,255,0"`) applies as if
+# the `)` were there -- Chrome paints it green. Only the end of the
+# attribute closes: a `;` inside an open function is part of its value.
+fn _inline_style_closed(style: text) -> text:
+    if not style.contains("("):
+        return style
+    var depth = 0
+    var i = 0
+    val n = style.byte_len()
+    while i < n:
+        val ch = style.substring(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")" and depth > 0:
+            depth = depth - 1
+        i = i + 1
+    var out = style
+    while depth > 0:
+        out = out + ")"
+        depth = depth - 1
+    out
