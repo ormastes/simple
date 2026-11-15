@@ -1,0 +1,73 @@
+"""The full CLI keeps every backend after the bootstrap entry dropped them.
+
+Purpose: the essential-backend composition only changes what the bootstrap
+CLI links. The full CLI (src/app/cli/main.spl, Stage 4) must still reach every
+P-static backend through plugins.backend_registry.full_static_backend_registry,
+and that registry must install the VHDL driver lane the kernel driver no
+longer imports.
+
+Operator workflow: Stage 4 passes no kernel composition root, so
+app.cli.bootstrap_backend_installer binds the full src/app variant.
+
+Troubleshooting: if a case fails, a backend lost its only static edge from
+the full CLI; re-add it to full_static_backend_ports.spl or the registry.
+"""
+# @manual_section: compiler/backend_plugins
+use std.spec.*
+use compiler.common.source_root_resolution.{SourceRootResolutionV1}
+use compiler.driver.driver_source_loading.{
+    driver_resolve_closure_import_v1, driver_closure_native_owner_v1,
+    driver_closure_import_specs_v1}
+
+fn imports_of(path: text) -> [text]:
+    driver_closure_import_specs_v1(path)
+
+fn has_prefix(specs: [text], prefix: text) -> bool:
+    for spec in specs:
+        if spec.starts_with(prefix):
+            return true
+    false
+
+describe "full CLI backend reach":
+    it "binds the full installer under the Stage 4 roots":
+        # @req REQ-BACKEND-DYN-007
+        step("no kernel root: app.cli.bootstrap_backend_installer is the src/app full variant")
+        val roots = ["src/compositions/cuda_static", "src/compiler", "src/app", "src/lib",
+                     "src/os", "src/plugins"]
+        val spec = "app.cli.bootstrap_backend_installer"
+        var path = ""
+        match driver_resolve_closure_import_v1(spec, roots, "src/app/cli"):
+            case SourceRootResolutionV1.Found(found):
+                path = driver_closure_native_owner_v1(found, spec, "src/app/cli")
+            case _: ()
+        expect(path).to_contain("src/app/cli/bootstrap_backend_installer.spl")
+        expect(has_prefix(imports_of(path), "plugins.backend_registry.full_static_backend_registry")).to_equal(true)
+
+    it "installs the full registry from the full CLI entry":
+        # @req REQ-BACKEND-DYN-007
+        step("main_and_help imports the full static backend registry")
+        expect(has_prefix(imports_of("src/app/cli/_CliMain/main_and_help.spl"),
+            "plugins.backend_registry.full_static_backend_registry")).to_equal(true)
+
+    it "reaches every P-static backend through the full ports":
+        # @req REQ-BACKEND-DYN-007
+        step("full_static_backend_ports names each backend port")
+        val ports = imports_of("src/plugins/backend_registry/full_static_backend_ports.spl")
+        for prefix in ["plugins.backend_llvm_lib.", "plugins.backend_c.",
+                       "compiler.backend.wasm_codegen_adapter", "plugins.backend_native.",
+                       "plugins.backend_hip.", "plugins.backend_opencl.",
+                       "plugins.backend_vulkan.", "plugins.backend_lean.",
+                       "compiler.backend.byl_backend", "plugins.backend_vhdl.",
+                       "compiler.backend.irtc_codegen_adapter", "plugins.backend_lua."]:
+            expect(has_prefix(ports, prefix)).to_equal(true)
+        val registry = imports_of("src/plugins/backend_registry/full_static_backend_registry.spl")
+        expect(has_prefix(registry, "plugins.backend_registry.full_static_backend_ports")).to_equal(true)
+        expect(has_prefix(registry, "plugins.backend_registry.selected_cuda_backend")).to_equal(true)
+
+    it "installs the VHDL driver lane from the full registry and the VHDL entry":
+        # @req REQ-BACKEND-DYN-007
+        step("the full side is the only writer of the VHDL lane slot")
+        expect(has_prefix(imports_of("src/plugins/backend_registry/full_static_backend_registry.spl"),
+            "plugins.backend_vhdl.driver.driver_vhdl_lane_install")).to_equal(true)
+        expect(has_prefix(imports_of("src/app/cli/vhdl_compile_entry.spl"),
+            "plugins.backend_vhdl.driver.driver_vhdl_lane_install")).to_equal(true)
