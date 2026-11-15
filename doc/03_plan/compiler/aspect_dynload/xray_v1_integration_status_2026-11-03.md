@@ -534,3 +534,9 @@ handler/dllexport problem, so no spec was converted to the ring path.
 
 The Windows ring path is covered by `xray_win_ring_e2e_host.spl` (fixture run, not an SSpec).
 A Windows system spec wrapping it needs a new lane script and is not part of this change.
+
+**Update (2026-11-15, lane xraywin64, seed-attr2, Windows 11).** The win64 lane now exists:
+`scripts/check/check-xray-native-win64-inprocess-e2e.shs` (driver + ring host, CC = llvm-mingw
+clang; ERROR exit 2 off Windows x64). Lane: PASS, ~327 s.
+`xray_backend_differential_out_spec.spl`: 2/4 passed (was 1/4); "traces a --xray DLL in-process
+on a Windows x64 host" is green. The 2 remaining failures are the Linux/ELF lanes above.
