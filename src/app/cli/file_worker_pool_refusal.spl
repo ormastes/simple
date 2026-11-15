@@ -72,6 +72,19 @@ pub fn file_worker_pool_mir_price_kb_v1(modules: i64) -> i64:
     if scaled < SHARD_MIR_WORKER_FLOOR_KB_V1: return SHARD_MIR_WORKER_FLOOR_KB_V1
     return scaled
 
+# Per-file pool worker price: a per-file worker runs HIR+MIR for ONE file and
+# peaked at 5.04-5.65 GiB (2026-10-27), priced at SHARD_HIR_WORKER_KB_V1 (9 GB).
+# It never holds the whole-program HIR, so the closure-scaled MIR SHARD price
+# (26 GiB ceiling) refused the pool below ~91 GB free (bug
+# native_build_default_worker_budget_26gib_refuses_pool_at_49gb_free_2026-11-09).
+pub const FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1: i64 = SHARD_HIR_WORKER_KB_V1
+
+# Default MIR price before overrides: per-file pool -> the per-file figure;
+# MIR shard path -> the closure-scaled shard price.
+pub fn file_worker_pool_mir_default_price_kb_v1(modules: i64, per_file: bool) -> i64:
+    if per_file: return FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1
+    return file_worker_pool_mir_price_kb_v1(modules)
+
 # ===== scale-to-host default budget (user decision 2026-11-13) ===============
 # Lowest default per-worker budget: 6.5 GiB. The measured per-file worker
 # (HIR+MIR in one process) peaked at 5.04-5.65 GiB (2026-10-27, see
@@ -161,7 +174,7 @@ pub fn file_worker_pool_hir_budget_kb_v1() -> i64:
 # shard path keeps the closure price and only takes the address-space clamp.
 pub fn file_worker_pool_mir_budget_kb_v1(modules: i64, scale: bool) -> i64:
     val explicit = file_worker_pool_budget_explicit_v1(env_get("SIMPLE_MIR_SHARD_WORKER_KB") ?? "", host_limit_value("worker_mem_mib"))
-    val budget = shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", file_worker_pool_mir_price_kb_v1(modules))
+    val budget = shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", file_worker_pool_mir_default_price_kb_v1(modules, scale))
     val usable_kb = if scale: file_worker_pool_live_usable_kb_v1() else: 0
     return file_worker_pool_phase_budget_kb_v1(budget, explicit, usable_kb, file_worker_pool_host_pointer_bits_v1())
 
