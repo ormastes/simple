@@ -782,7 +782,7 @@ describe "draw_ir_adv per-side numeric border pixel outcomes":
         expect(outcome.3[(24 * W + 16) as i64]).to_equal(0xff2266aau32)
 
 describe "draw_ir_adv hostile advance-width guard outcomes":
-    it "rejects oversized, mismatched, negative and overflowing advance shapes and draws the valid one":
+    it "never stages oversized, mismatched, negative or overflowing advance shapes and still paints every run":
         var too_many: [i32] = [1; 4097]
         var huge_encoded = "7,7,"
         var doubles = 0
@@ -815,10 +815,29 @@ describe "draw_ir_adv hostile advance-width guard outcomes":
                 draw_ir_style_prop("font-advance-widths", "7,7")])
         ])
         expect(outcome.2).to_equal((W as i64) * (H as i64))
-        # only the valid encoded advances command draws; every hostile
-        # shape is rejected and skipped as text-font-advances
-        expect(outcome.0).to_equal(1)
-        expect(outcome.1).to_equal(8)
+        # A run whose resolved advances are unusable is painted with the
+        # font's own advances (draw_ir_adv.spl "text-advance-arity"
+        # fallback) instead of being skipped: one unstageable run used to
+        # drop every pixel of the page. So all nine render and none skip;
+        # the next row proves the hostile advances never reach the paint.
+        expect(outcome.0).to_equal(9)
+        expect(outcome.1).to_equal(0)
+
+    it "paints a hostile-advance run exactly like the same run with no advances":
+        val plain = _run([_raw_text("p-plain", "Ab", [], 4, [])])
+        expect(plain.0).to_equal(1)
+        var lit = 0
+        for px in plain.3:
+            if px != 0xff101010u32:
+                lit = lit + 1
+        expect(lit > 0).to_equal(true)
+        val negative = _run([_raw_text("p-negative", "Ab", [-1, 5], 4, [])])
+        expect(negative.3).to_equal(plain.3)
+        val overflow = _run([_raw_text("p-overflow", "Ab", [2147483647, 2147483647], 4, [])])
+        expect(overflow.3).to_equal(plain.3)
+        val enc_negative = _run([_raw_text("p-enc-negative", "Ab", [], 4, [
+            draw_ir_style_prop("font-advance-widths", "-5,7")])])
+        expect(enc_negative.3).to_equal(plain.3)
 
 describe "draw_ir_adv edge and overflow-geometry outcomes":
     it "strokes straight edges, skips routed edges and overflowing path points":

@@ -1746,8 +1746,8 @@ never cache an answer computed while exhausted) —
   before claiming a GPU ran. `feature_showcase.spl` is the place where the
   primitive runs on a real `VulkanBackend` (byte-identical, 38 primitives).
 - **cpu_simd vs Vulkan (llvmpipe), 900x760: 62 pixels over all 8 pages**,
-  all text ink: some glyphs one row lower on Vulkan (per glyph, root cause
-  not found); Chrome mismatch identical per page. Record + 25 px repro:
+  all text ink: some glyphs one row lower on Vulkan; Chrome mismatch
+  identical per page. FIXED the same day (see the next section). Record + 25 px repro:
   `doc/08_tracking/bug/web_vulkan_lane_control_text_one_row_past_clip_2026-11-15.md`.
 - **Hardware Vulkan 4K (NVIDIA GB10, driver 580.173.02,
   `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json`, strict
@@ -1854,3 +1854,24 @@ never cache an answer computed while exhausted) —
   instead dropped `top:10px`. Auto main margins and `order` are not
   modelled (filed). Next cluster: flex-wrap line stretch under a definite
   height (align-content stretch; Chrome items 45 tall, Simple 24).
+
+## 2026-11-15 — Vulkan text clip: cpu_simd and Vulkan byte-identical
+
+- Root cause of the 62 px: `VulkanBackend.composite_font_batch` (the
+  vector-face path behind `draw_text_with_advances`) ignored `set_clip`; only
+  the bitmap path baked the clip into its quads. Draw IR clips control text to
+  its box, so descenders spilled below `<input>`/`<select>` on Vulkan only.
+  Fixed by clipping the quads on the host; a fully clipped batch is the
+  admitted status `clipped-out`. Record:
+  `doc/08_tracking/bug/web_vulkan_lane_control_text_one_row_past_clip_2026-11-15.md`;
+  RenderDoc params-buffer evidence in the simple_renderdoc skill.
+- 900x760: all 8 catalog pages `cmp`-identical cpu_simd vs Vulkan (llvmpipe).
+- `draw_ir_adv_branch_coverage_spec` hostile-advance row expected 8 skips,
+  but the executor now paints such runs with the font's own advances
+  (`text-advance-arity` fallback; no code emits `text-font-advances` any more,
+  only a stale comment at `draw_ir_adv.spl:555`). Row re-pinned to 9 rendered /
+  0 skipped plus a pixel row proving hostile advances paint exactly like no
+  advances.
+- `engine2d_software_offscreen_dispatch_spec` (0/3) asserts a software rung
+  that `engine.spl` todo 303 says does not exist; filed, not edited:
+  `doc/08_tracking/bug/engine2d_software_offscreen_dispatch_spec_asserts_missing_rung_2026-11-15.md`.

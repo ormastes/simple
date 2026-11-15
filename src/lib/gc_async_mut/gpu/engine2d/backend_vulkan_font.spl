@@ -332,6 +332,14 @@ fn _vulkan_font_sub_batch(batch: FontRenderBatch, buckets: [i64],
         if buckets[i] == want:
             members.push(batch.quads[i])
         i = i + 1
+    var no_dirty: [FontRenderQuad] = []
+    _vulkan_font_batch_with_quads(batch, members,
+        if want == 0: batch.dirty_rects else: no_dirty)
+
+fn _vulkan_font_batch_with_quads(batch: FontRenderBatch, quads: [FontRenderQuad],
+                                 dirty_rects: [FontRenderQuad]) -> FontRenderBatch:
+    """`batch` with only `quads` and `dirty_rects` replaced. Keep the field list
+    exhaustive -- see `_vulkan_font_sub_batch` for what a dropped field costs."""
     FontRenderBatch(
         program_version: batch.program_version,
         transform_identity: batch.transform_identity,
@@ -341,9 +349,9 @@ fn _vulkan_font_sub_batch(batch: FontRenderBatch, buckets: [i64],
         atlas_width: batch.atlas_width,
         atlas_height: batch.atlas_height,
         atlas_pixels: batch.atlas_pixels,
-        quads: members,
+        quads: quads,
         atlas_generation: batch.atlas_generation,
-        dirty_rects: if want == 0: batch.dirty_rects else: [],
+        dirty_rects: dirty_rects,
         atlas_owner_generation: batch.atlas_owner_generation,
         atlas_owner_sequence: batch.atlas_owner_sequence,
         render_config_identity: batch.render_config_identity,
@@ -893,8 +901,14 @@ fn vulkan_font_batch_composited(status: text, quad_count: i64, dispatch_count: i
     `executed` and `recorded` are the literal statuses this module emits for a
     completed batch (:873 and :1077 record into a frame command; :935 and :1165
     report a waited submit), so the admitted set is not hypothetical.
+    `promoted` is an executed batch with proven parity (engine.spl admitted it
+    in 10b231914cf; this twin was not updated, so a promoted bitmap batch was
+    labelled abandoned). `clipped-out` (every quad outside the clip, nothing
+    dispatched) is drawn.
     """
-    (status == "executed" or status == "recorded") and
+    if status == "clipped-out":
+        return quad_count == batch_quads
+    (status == "executed" or status == "recorded" or status == "promoted") and
         quad_count == batch_quads and dispatch_count > 0
 
 fn vulkan_text_atlas_fallback_safe(status: text) -> bool:
@@ -1174,13 +1188,42 @@ impl VulkanBackend:
         # is skipped entirely -- byte-for-byte today's single call -- whenever
         # nothing overlaps, which is the common case (measured: 0 overlapping
         # pairs at 300x253, 19 across 496 quads at 900x760).
-        val buckets = vulkan_font_partition_quads(batch.quads)
+        #
+        # The clip rect (`Engine2D.set_clip` -> `self.clip_*`) is baked into the
+        # quads on the host, exactly as the bitmap path does. Before this the
+        # vector-face composite ignored it, so Draw IR text clipped to a control
+        # box painted its descenders below the box on Vulkan only (forms page,
+        # 62 px over 8 catalog pages at 900x760; vulkan_text_advances_clip_parity_spec).
+        val drawn_quads = if self.clip_enabled:
+            vulkan_bitmap_text_clip_quads(batch.quads, origin_x, origin_y,
+                self.clip_x, self.clip_y, self.clip_w, self.clip_h)
+        else:
+            batch.quads
+        if drawn_quads.len() == 0 and batch.quads.len() > 0:
+            # Every glyph lies outside the clip: drawn, as nothing (the CPU
+            # lane paints nothing either), so admit it without a CPU redraw.
+            # Nothing is uploaded, so the host mirror no longer matches a
+            # batch that carried new cells; the next upload repacks in full.
+            if batch.dirty_rects.len() > 0:
+                self.font_atlas_host_valid = false
+            return _vulkan_font_evidence(self.font_atlas_pipeline_evidence(), "clipped-out",
+                "font-quads-outside-clip", self.d_font_atlas, 0, 0, 0,
+                batch.quads.len(), 0, false, false, self.d_framebuffer, 0, 0, 0, false)
+        val drawn = if drawn_quads.len() == batch.quads.len() and not self.clip_enabled:
+            batch
+        else:
+            _vulkan_font_batch_with_quads(batch, drawn_quads, batch.dirty_rects)
+        val buckets = vulkan_font_partition_quads(drawn.quads)
         val bucket_count = vulkan_font_partition_bucket_count(buckets)
         var evidence = if bucket_count > 1:
-            self._composite_font_sub_batches(origin_x, origin_y, batch, buckets,
+            self._composite_font_sub_batches(origin_x, origin_y, drawn, buckets,
                 bucket_count, clock)
         else:
-            self._composite_font_batch_impl(origin_x, origin_y, batch, clock)
+            self._composite_font_batch_impl(origin_x, origin_y, drawn, clock)
+        # Callers judge "did this batch draw every glyph" against the batch
+        # they passed; glyphs the clip removed were drawn (as nothing).
+        if evidence.quad_count == drawn.quads.len():
+            evidence.quad_count = batch.quads.len()
         val total_ns = vulkan_font_elapsed_ns(started_ns, clock.now_micros() * 1000)
         # Reuse the composite's own clock rather than starting a second one:
         # this path is already measured, it just never reached the lane census.

@@ -1,0 +1,119 @@
+"""
+## Purpose and audience
+Purpose: Pin that resolved-advance text drawn under a clip rect paints the same
+pixels on the Vulkan font-atlas composite as on the software raster. The Draw IR
+text branch (`draw_ir_adv.spl`) sets `Engine2D.set_clip` to the control box and
+then calls `draw_text_with_advances`; the Vulkan lane composited the whole
+glyph quad (`VulkanBackend.composite_font_batch`) and ignored the clip, so
+descenders of `<input value="Simple">` painted below the control box on the
+catalog forms page (62 px over 8 pages at 900x760).
+Audience: Engine2D font / Vulkan backend maintainers.
+"""
+
+"""
+Traceability: REQ-ENGINE2D-VULKAN-TEXT-CLIP-PARITY-001 — Vulkan resolved-advance text honours the clip rect exactly as the software lane does.
+"""
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.io_runtime.{file_exists}
+
+val W: i32 = 64
+val H: i32 = 32
+val CLIP_BOTTOM: i32 = 14
+
+fn draw(e: Engine2D, clip_h: i32):
+    e.clear(0xFFFFFFFFu32)
+    e.set_clip(0, 0, W, clip_h)
+    val advances: [i32] = [9, 9, 9, 9, 9]
+    e.draw_text_with_advances(2, 2, "jpqgy", advances, 0xFF000000u32, 16)
+    e.clear_clip()
+    e.submit_batch()
+
+fn ink_rows_from(pixels: [u32], y0: i32) -> i32:
+    var n = 0
+    var y = y0
+    while y < H:
+        var x = 0
+        while x < W:
+            if pixels[x + y * W] != 0xFFFFFFFFu32:
+                n = n + 1
+            x = x + 1
+        y = y + 1
+    n
+
+describe "Vulkan resolved-advance text under a clip rect":
+    it "paints no glyph pixel below the clip and matches the software lane byte for byte":
+        if not file_exists("/usr/share/vulkan/icd.d/lvp_icd.json"):
+            step("no llvmpipe ICD on this host: no Vulkan device to compare")
+            return
+        var se = Engine2D.create_with_backend_fast(W, H, "software")
+        draw(se, CLIP_BOTTOM)
+        val soft = se.read_pixels()
+        step("the software lane clips the descenders and still draws ink above the clip")
+        expect(ink_rows_from(soft, CLIP_BOTTOM)).to_equal(0)
+        expect(ink_rows_from(soft, 0) > 0).to_equal(true)
+        var ve = Engine2D.create_with_backend_fast(W, H, "vulkan")
+        step("the engine really selected Vulkan and the font composite ran on it")
+        expect(ve.backend_name()).to_equal("vulkan")
+        draw(ve, CLIP_BOTTOM)
+        expect(ve.font_execution_target()).to_equal("vulkan")
+        val vk = ve.read_pixels()
+        step("no Vulkan glyph pixel lands at or below the clip bottom")
+        expect(ink_rows_from(vk, CLIP_BOTTOM)).to_equal(0)
+        step("every pixel equals the software lane")
+        var diff = 0
+        var i = 0
+        while i < W * H:
+            if vk[i] != soft[i]:
+                diff = diff + 1
+            i = i + 1
+        expect(diff).to_equal(0)
+
+    it "admits a fully clipped run on Vulkan without a CPU redraw and draws nothing":
+        if not file_exists("/usr/share/vulkan/icd.d/lvp_icd.json"):
+            step("no llvmpipe ICD on this host: no Vulkan device to compare")
+            return
+        var ve = Engine2D.create_with_backend_fast(W, H, "vulkan")
+        expect(ve.backend_name()).to_equal("vulkan")
+        ve.clear(0xFFFFFFFFu32)
+        step("a 1-row clip above the text (glyph tops start at y >= 2)")
+        ve.set_clip(0, 0, W, 1)
+        val advances: [i32] = [9, 9, 9, 9, 9]
+        expect(ve.draw_text_with_advances(2, 2, "jpqgy", advances, 0xFF000000u32, 16)).to_equal(true)
+        expect(ve.font_execution_target()).to_equal("vulkan")
+        step("the strict Vulkan-only entry point accepts it too")
+        expect(ve.draw_text_with_advances_vulkan_only(2, 2, "jpqgy", advances, 0xFF000000u32, 16)).to_equal(true)
+        ve.clear_clip()
+        ve.submit_batch()
+        expect(ink_rows_from(ve.read_pixels(), 0)).to_equal(0)
+
+    it "draws glyphs first staged under a full clip correctly once they are visible":
+        if not file_exists("/usr/share/vulkan/icd.d/lvp_icd.json"):
+            step("no llvmpipe ICD on this host: no Vulkan device to compare")
+            return
+        val advances: [i32] = [10, 10, 10]
+        var se = Engine2D.create_with_backend_fast(W, H, "software")
+        se.clear(0xFFFFFFFFu32)
+        se.draw_text_with_advances(2, 2, "KwX", advances, 0xFF000000u32, 16)
+        se.submit_batch()
+        val soft = se.read_pixels()
+        var ve = Engine2D.create_with_backend_fast(W, H, "vulkan")
+        ve.clear(0xFFFFFFFFu32)
+        step("the first draw of these glyphs is clipped out: their atlas cells are never uploaded")
+        ve.set_clip(0, 0, W, 1)
+        ve.draw_text_with_advances(2, 2, "KwX", advances, 0xFF000000u32, 16)
+        ve.clear_clip()
+        step("the same glyphs drawn visibly must not read stale atlas cells")
+        ve.draw_text_with_advances(2, 2, "KwX", advances, 0xFF000000u32, 16)
+        expect(ve.font_execution_target()).to_equal("vulkan")
+        ve.submit_batch()
+        val vk = ve.read_pixels()
+        expect(ink_rows_from(soft, 0) > 0).to_equal(true)
+        var diff = 0
+        var i = 0
+        while i < W * H:
+            if vk[i] != soft[i]:
+                diff = diff + 1
+            i = i + 1
+        expect(diff).to_equal(0)
