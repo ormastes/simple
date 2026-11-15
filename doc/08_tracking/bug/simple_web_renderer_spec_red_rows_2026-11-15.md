@@ -68,3 +68,30 @@ Class (c), environment-dependent — gated, no assertion removed:
   `LiberationSans-Regular.ttf` at 17 px; elsewhere the old `""`/`0` pin stands.
 
 Run: `95 passed, 19 failed` of 114 (was 92/22).
+
+## Batch 3b (2026-11-15): 4 more rows, 15 left
+
+- **Glyph ink (3 rows), stale pins re-measured against Chrome 159 (class a).**
+  The rows asserted exact text-colour pixels > 0 at 8 px, which is a property
+  of the upscaled 5x7 bitmap face, not of a real one. Full Chrome 159
+  (chromium-1255, same Liberation files) paints **0** exact-colour pixels at
+  8 px: `#111827` "chrome baseline" 0 exact / 226 ink pixels;
+  text-align-last 0 exact / 244 ink; the text-raster subtitle `#475569` 0
+  exact (its 16 px title has 15 exact `#0f172a`). Simple's vector face does
+  produce ink (203 non-white pixels at 8 px, darkest `#1e2434`); it was never
+  "no ink". The rows now assert ink (pixels different from the background,
+  inside the text band) and keep the lower-vs-upper and left-vs-right
+  inequality checks. The 5x7 face was not forced.
+- **Shorthand hex alpha (1 row), real defect (class b).** `#0008` over white
+  is `#777777` in Chrome 159 (re-measured; pin was right). The Draw IR compose
+  path used `_web_canvas_background`, which blends the quantized byte with a
+  256 denominator (`#787878`). It now uses `web_canvas_background_authored`,
+  the raster lane's authored-fraction compositor (8/15 for `#0008`).
+- **Aetheric gradient pin is NOT Chrome.** Chrome 159 paints `#575758` /
+  `#585859` on row 0 and `#535354` / `#525253` on row 1; the pin says
+  `#595959`, Simple paints `#5a5a5b`. Chrome samples vertical ramps at row
+  centres (4 px `#000->#fff` = 1F/60/9F/DF); the CPU raster ramp is
+  endpoint-exact since `92b33870986`, which was tuned to spec pins, not to
+  Chrome. Open: fix the ramp and re-pin to Chrome in its own change.
+
+Run: `99 passed, 15 failed` of 114.
