@@ -1,0 +1,60 @@
+# VHDL driver lane slot.
+#
+# VHDL is not a BackendPort: it lowers from HIR through HWIR inside the
+# CompilerDriver, so it cannot sit in the static backend table. The kernel
+# driver therefore never imports the VHDL plugin (plugins.backend_vhdl) or the
+# HWIR closure; it reaches them only through this slot.
+#
+# Concurrency contract (lockless, install-once): the slot is written exactly
+# once while a composition root installs its backends -- the full static
+# backend registry (plugins.backend_registry.full_static_backend_registry) and
+# the standalone VHDL entry install it; the essential bootstrap composition
+# leaves it empty. After that first install the slot is read-only: a second
+# install of the same lane is an idempotent no-op and any other lane is
+# refused, so no later write can race a reader and no lock is needed.
+#
+# An empty slot fails closed with PLUG-E-NOTFOUND naming the vhdl backend. It
+# never crashes and never falls back to another backend.
+
+use compiler.common.driver_core_types.{CompileResult}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.backend.static_backend_registry.{installed_k1_static_backend_policy_v1}
+
+pub struct DriverVhdlLaneV1:
+    name: text
+    # The driver is passed explicitly; the lane never captures a driver.
+    compile_driver_fn: fn(CompilerDriver, text) -> CompileResult
+    compile_file_fn: fn(text, text) -> CompileResult
+
+var _driver_vhdl_lanes_v1: [DriverVhdlLaneV1] = []
+
+pub fn install_driver_vhdl_lane_v1(lane: DriverVhdlLaneV1) -> bool:
+    if lane.name == "":
+        return false
+    if _driver_vhdl_lanes_v1.len() > 0:
+        return _driver_vhdl_lanes_v1[0].name == lane.name
+    _driver_vhdl_lanes_v1 = [lane]
+    true
+
+pub fn installed_driver_vhdl_lane_name_v1() -> text:
+    if _driver_vhdl_lanes_v1.len() == 0:
+        return ""
+    _driver_vhdl_lanes_v1[0].name
+
+pub fn driver_vhdl_lane_unavailable_message_v1(request: text) -> text:
+    val policy = installed_k1_static_backend_policy_v1()
+    val shown = if policy == "": "unselected" else: policy
+    "PLUG-E-NOTFOUND: backend 'vhdl' not linked in this build (K1 policy '{shown}'): " +
+        "{request} needs the full static backend composition " +
+        "(plugins.backend_registry.full_static_backend_registry, linked by the full CLI " +
+        "src/app/cli/main.spl) or the simple-vhdl entry (src/app/cli/vhdl_compile_entry.spl)"
+
+pub fn driver_vhdl_lane_compile_v1(driver: CompilerDriver, output: text) -> CompileResult:
+    if _driver_vhdl_lanes_v1.len() == 0:
+        return CompileResult.CodegenError(driver_vhdl_lane_unavailable_message_v1("--backend=vhdl"))
+    _driver_vhdl_lanes_v1[0].compile_driver_fn(driver, output)
+
+pub fn driver_vhdl_lane_compile_file_v1(path: text, output: text) -> CompileResult:
+    if _driver_vhdl_lanes_v1.len() == 0:
+        return CompileResult.CodegenError(driver_vhdl_lane_unavailable_message_v1("aot_vhdl_file"))
+    _driver_vhdl_lanes_v1[0].compile_file_fn(path, output)
