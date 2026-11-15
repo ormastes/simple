@@ -1,0 +1,392 @@
+# Actual protected existing files only. SOURCE_AUTHORED_NOT_RUN.
+# No listener authentication, nonce consumption, bearer export or publication.
+use std.nogc_sync_mut.io.windows_private_read_v2.{WindowsPrivateReadRootV2, WindowsPrivateReadFileV2,
+    windows_private_read_root_open_v2}
+use std.nogc_sync_mut.io.host_service_ready_protocol_v1.{HostServiceReadyMetadataV1,
+    host_service_auth_setup_path_v1, host_service_ready_validate_v1, host_service_setup_auth_v1,
+    HostServiceAuthLeaseV1, host_service_auth_lease_validate_v1}
+use std.nogc_sync_mut.io.retained_private_credential_protocol_v2.retained_credential_bytes_equal_v2
+use std.nogc_sync_mut.io.process_ops.process_capture_native_mode_check_v1
+use std.nogc_sync_mut.io.windows_command_owner_v2.windows_command_thread_check_v2
+use std.common.contracts.orchestration.host_service_auth_v6.HostServiceAuthContextV6
+use std.common.contracts.orchestration.host_service_operation_v6.host_service_hex_shape_v6
+use std.common.crypto.sha256.sha256_text
+use std.common.text_bytes.bytes_to_text
+
+pub class WindowsHostServiceReadyReaderV1:
+    slot: i64
+    generation: i64
+
+pub struct WindowsHostServiceReadyReaderOpenTurnV1:
+    owner: Option<WindowsHostServiceReadyReaderV1>
+    ready: bool
+    error: text
+
+pub struct WindowsHostServiceReadyReaderCloseTurnV1:
+    owner: Option<WindowsHostServiceReadyReaderV1>
+    completed: bool
+    error: text
+
+struct ReadyReaderStateV1:
+    generation: i64
+    expected_digest: text
+    expected_uid: text
+    expected_authority: text
+    selected_lease: text = ""
+    host_root: Option<WindowsPrivateReadRootV2> = nil
+    journal_root: Option<WindowsPrivateReadRootV2> = nil
+    ready_root: Option<WindowsPrivateReadRootV2> = nil
+    lease_file: Option<WindowsPrivateReadFileV2> = nil
+    root: Option<WindowsPrivateReadRootV2> = nil
+    ready_file: Option<WindowsPrivateReadFileV2> = nil
+    setup_file: Option<WindowsPrivateReadFileV2> = nil
+    extra_root: Option<WindowsPrivateReadRootV2> = nil
+    extra_file: Option<WindowsPrivateReadFileV2> = nil
+    ready_bytes: [u8] = []
+    setup_bytes: [u8] = []
+    metadata: Option<HostServiceReadyMetadataV1> = nil
+    usable: bool = false
+    closing: bool = false
+    closed: bool = false
+    error: text = ""
+
+var ready_readers_v1: [ReadyReaderStateV1] = []
+var ready_readers_active_v1: i64 = 0
+
+# The existing mode and native canonical-thread gates run before every registry
+# entry, including known closed tombstones. No raw token/handle can be supplied.
+fn ready_reader_entry_v1() -> Result<(), text>:
+    process_capture_native_mode_check_v1()?
+    windows_command_thread_check_v2()
+
+fn ready_reader_load_v1(owner: WindowsHostServiceReadyReaderV1) -> Result<ReadyReaderStateV1, text>:
+    ready_reader_entry_v1()?
+    if owner.slot < 0 or owner.slot >= ready_readers_v1.len(): return Err("host-ready-owner-unknown")
+    val state = ready_readers_v1[owner.slot]
+    if state.generation != owner.generation: return Err("host-ready-owner-generation")
+    Ok(state)
+
+fn ready_reader_fail_v1(slot: i64, reason: text) -> text:
+    var state = ready_readers_v1[slot]
+    if state.error == "": state.error = reason
+    state.usable = false
+    state.closing = true
+    ready_readers_v1[slot] = state
+    state.error
+
+fn ready_reader_result_v1(owner: WindowsHostServiceReadyReaderV1) -> WindowsHostServiceReadyReaderOpenTurnV1:
+    val state = ready_readers_v1[owner.slot]
+    WindowsHostServiceReadyReaderOpenTurnV1(owner: Some(owner), ready: state.usable and not state.closing, error: state.error)
+
+fn ready_reader_read_files_v1(slot: i64) -> Result<([u8], [u8]), text>:
+    var state = ready_readers_v1[slot]
+    if state.root.is_none() or state.ready_file.is_none() or state.setup_file.is_none():
+        return Err("host-ready-files-unavailable")
+    if (not state.root.unwrap().security_current() or not state.ready_file.unwrap().security_current() or
+            not state.setup_file.unwrap().security_current() or not state.host_root.unwrap().security_current() or
+            not state.journal_root.unwrap().security_current() or not state.ready_root.unwrap().security_current()): return Err("host-ready-protected-files-changed")
+    var ready_file = state.ready_file.unwrap()
+    val ready = ready_file.read_all_bounded(512)
+    state.ready_file = Some(ready_file)
+    ready_readers_v1[slot] = state
+    if ready.is_err(): return Err("host-ready-file-read-failed")
+    var setup_file = state.setup_file.unwrap()
+    val setup = setup_file.read_all_bounded(512)
+    state.setup_file = Some(setup_file)
+    ready_readers_v1[slot] = state
+    if setup.is_err(): return Err("host-ready-setup-read-failed")
+    if (not state.root.unwrap().security_current() or not ready_file.security_current() or
+            not setup_file.security_current() or not state.host_root.unwrap().security_current() or
+            not state.journal_root.unwrap().security_current() or not state.ready_root.unwrap().security_current()): return Err("host-ready-protected-files-changed")
+    Ok((ready.unwrap(), setup.unwrap()))
+
+# Short selector borrow: publish temporary file ownership before read, and
+# positively close before returning. A failed close stays owned/quarantined;
+# no deny-delete lease handle is carried over network/MAC work.
+fn ready_reader_lease_v1(slot: i64) -> Result<HostServiceAuthLeaseV1, text>:
+    var state = ready_readers_v1[slot]
+    if state.journal_root.is_none() or state.lease_file.is_some(): return Err("host-ready-selector-cleanup-required")
+    if not state.journal_root.unwrap().security_current(): return Err("host-ready-journal-root-changed")
+    val opened = state.journal_root.unwrap().open_file("parent.lease", 512u64)
+    if opened.is_err():
+        val failure = opened.unwrap_err()
+        state.lease_file = failure.cleanup_file
+        state.extra_root = failure.cleanup_root
+        ready_readers_v1[slot] = state
+        return Err("host-ready-selector-unavailable")
+    var file = opened.unwrap()
+    state.lease_file = Some(file)
+    ready_readers_v1[slot] = state
+    val bytes = file.read_all_bounded(512)
+    state.lease_file = Some(file)
+    if bytes.is_err() and state.error == "": state.error = "host-ready-selector-read-failed"
+    ready_readers_v1[slot] = state
+    val closed = file.close()
+    state.lease_file = if closed: nil else: Some(file)
+    ready_readers_v1[slot] = state
+    if not closed: return Err(if state.error != "": state.error else: "host-ready-selector-close-retained")
+    if bytes.is_err(): return Err("host-ready-selector-read-failed")
+    if not state.journal_root.unwrap().security_current(): return Err("host-ready-journal-root-changed")
+    host_service_auth_lease_validate_v1(bytes.unwrap(), state.expected_authority)
+
+fn ready_reader_admit_v1(owner: WindowsHostServiceReadyReaderV1, setup_path: text,
+        deployment_root: text) -> Result<(), text>:
+    val names = host_service_auth_setup_path_v1(setup_path)?
+    val root = windows_private_read_root_open_v2(names.parent)
+    var state = ready_readers_v1[owner.slot]
+    if root.is_err():
+        val failure = root.unwrap_err()
+        state.root = failure.cleanup_root
+        state.extra_file = failure.cleanup_file
+        ready_readers_v1[owner.slot] = state
+        return Err("host-ready-setup-root-open-failed")
+    state.root = Some(root.unwrap())
+    ready_readers_v1[owner.slot] = state
+    val setup = root.unwrap().open_file(names.setup_leaf, 512u64)
+    if setup.is_err():
+        val failure = setup.unwrap_err()
+        state.setup_file = failure.cleanup_file
+        state.extra_root = failure.cleanup_root
+        ready_readers_v1[owner.slot] = state
+        return Err("host-ready-setup-open-failed")
+    state.setup_file = Some(setup.unwrap())
+    ready_readers_v1[owner.slot] = state
+    val host = windows_private_read_root_open_v2(deployment_root)
+    if host.is_err():
+        val failure = host.unwrap_err()
+        state.host_root = failure.cleanup_root
+        state.extra_file = failure.cleanup_file
+        ready_readers_v1[owner.slot] = state
+        return Err("host-ready-deployment-root-open-failed")
+    state.host_root = Some(host.unwrap())
+    ready_readers_v1[owner.slot] = state
+    val journal = host.unwrap().child_directory("journal")
+    if journal.is_err():
+        val failure = journal.unwrap_err()
+        state.journal_root = failure.cleanup_root
+        state.extra_file = failure.cleanup_file
+        ready_readers_v1[owner.slot] = state
+        return Err("host-ready-journal-root-open-failed")
+    state.journal_root = Some(journal.unwrap())
+    ready_readers_v1[owner.slot] = state
+    val selected = ready_reader_lease_v1(owner.slot)?
+    state = ready_readers_v1[owner.slot]
+    state.selected_lease = selected.lease_digest
+    ready_readers_v1[owner.slot] = state
+    val directory = journal.unwrap().child_directory("host-service-ready-v6")
+    if directory.is_err():
+        val failure = directory.unwrap_err()
+        state.ready_root = failure.cleanup_root
+        state.extra_file = failure.cleanup_file
+        ready_readers_v1[owner.slot] = state
+        return Err("host-ready-selected-directory-unavailable")
+    state.ready_root = Some(directory.unwrap())
+    ready_readers_v1[owner.slot] = state
+    val ready = directory.unwrap().open_file(selected.lease_digest + ".sdn", 512u64)
+    if ready.is_err():
+        val failure = ready.unwrap_err()
+        state.ready_file = failure.cleanup_file
+        state.extra_root = failure.cleanup_root
+        ready_readers_v1[owner.slot] = state
+        return Err("host-ready-selected-record-unavailable")
+    state.ready_file = Some(ready.unwrap())
+    ready_readers_v1[owner.slot] = state
+    val actual = ready_reader_read_files_v1(owner.slot)?
+    val metadata = host_service_ready_validate_v1(actual.0, actual.1, state.expected_digest,
+        selected.lease_digest, state.expected_authority, state.expected_uid)?
+    val after = ready_reader_lease_v1(owner.slot)?
+    if after.lease_digest != selected.lease_digest: return Err("host-ready-selector-changed-during-open")
+    state = ready_readers_v1[owner.slot]
+    state.ready_bytes = actual.0
+    state.setup_bytes = actual.1
+    state.metadata = Some(metadata)
+    state.usable = true
+    ready_readers_v1[owner.slot] = state
+    Ok(())
+
+pub fn windows_host_service_ready_reader_open_v1(setup_path: text, expected_setup_digest: text,
+        host_deployment_root: text, expected_host_authority_digest: text, expected_publication_uid: text = "") -> WindowsHostServiceReadyReaderOpenTurnV1:
+    val entry = ready_reader_entry_v1()
+    if entry.is_err(): return WindowsHostServiceReadyReaderOpenTurnV1(nil, false, entry.unwrap_err())
+    if (not host_service_hex_shape_v6(expected_setup_digest, 64) or not host_service_hex_shape_v6(expected_host_authority_digest, 64) or
+            (expected_publication_uid != "" and not host_service_hex_shape_v6(expected_publication_uid, 32))):
+        return WindowsHostServiceReadyReaderOpenTurnV1(nil, false, "host-ready-pin-or-uid-shape")
+    val names = host_service_auth_setup_path_v1(setup_path)
+    if names.is_err(): return WindowsHostServiceReadyReaderOpenTurnV1(nil, false, names.unwrap_err())
+    if host_deployment_root == "" or host_deployment_root.byte_len() > 32000 or host_deployment_root.contains("\0"):
+        return WindowsHostServiceReadyReaderOpenTurnV1(nil, false, "host-ready-deployment-root-shape")
+    if ready_readers_active_v1 >= 32 or ready_readers_v1.len() >= 100000:
+        return WindowsHostServiceReadyReaderOpenTurnV1(nil, false, "host-ready-owner-bound")
+    val slot = ready_readers_v1.len()
+    val owner = WindowsHostServiceReadyReaderV1(slot: slot, generation: slot + 1)
+    ready_readers_v1.push(ReadyReaderStateV1(generation: slot + 1,
+        expected_digest: expected_setup_digest, expected_uid: expected_publication_uid, expected_authority: expected_host_authority_digest))
+    ready_readers_active_v1 = ready_readers_active_v1 + 1
+    val admitted = ready_reader_admit_v1(owner, setup_path, host_deployment_root)
+    if admitted.is_err(): ready_reader_fail_v1(slot, admitted.unwrap_err())
+    ready_reader_result_v1(owner)
+
+pub fn windows_host_service_ready_reader_current_v1(owner: WindowsHostServiceReadyReaderV1) -> Result<(), text>:
+    val state = ready_reader_load_v1(owner)?
+    if not state.usable or state.closing or state.closed:
+        return Err(if state.error != "": state.error else: "host-ready-owner-not-current")
+    val before = ready_reader_lease_v1(owner.slot)
+    if before.is_err(): return Err(ready_reader_fail_v1(owner.slot, before.unwrap_err()))
+    if before.unwrap().lease_digest != state.selected_lease:
+        return Err(ready_reader_fail_v1(owner.slot, "host-ready-selector-no-longer-selected"))
+    val actual = ready_reader_read_files_v1(owner.slot)
+    if actual.is_err(): return Err(ready_reader_fail_v1(owner.slot, actual.unwrap_err()))
+    val read = actual.unwrap()
+    if (not retained_credential_bytes_equal_v2(read.0, state.ready_bytes) or
+            not retained_credential_bytes_equal_v2(read.1, state.setup_bytes)):
+        return Err(ready_reader_fail_v1(owner.slot, "host-ready-retained-bytes-changed"))
+    val metadata = host_service_ready_validate_v1(read.0, read.1, state.expected_digest, state.selected_lease, state.expected_authority, state.expected_uid)
+    if metadata.is_err(): return Err(ready_reader_fail_v1(owner.slot, metadata.unwrap_err()))
+    val after = ready_reader_lease_v1(owner.slot)
+    if after.is_err(): return Err(ready_reader_fail_v1(owner.slot, after.unwrap_err()))
+    if after.unwrap().lease_digest != state.selected_lease:
+        return Err(ready_reader_fail_v1(owner.slot, "host-ready-selector-changed-during-current"))
+    Ok(())
+
+pub fn windows_host_service_ready_reader_endpoint_v1(owner: WindowsHostServiceReadyReaderV1) -> Result<text, text>:
+    windows_host_service_ready_reader_current_v1(owner)?
+    Ok(ready_readers_v1[owner.slot].metadata.unwrap().endpoint)
+
+pub fn windows_host_service_ready_reader_incarnation_v1(owner: WindowsHostServiceReadyReaderV1) -> Result<text, text>:
+    windows_host_service_ready_reader_current_v1(owner)?
+    Ok(ready_readers_v1[owner.slot].metadata.unwrap().incarnation)
+
+# DATA, never live PID/listener authority or saved-PID adoption.
+pub fn windows_host_service_ready_reader_expected_service_pid_v1(owner: WindowsHostServiceReadyReaderV1) -> Result<i64, text>:
+    windows_host_service_ready_reader_current_v1(owner)?
+    Ok(ready_readers_v1[owner.slot].metadata.unwrap().service_pid)
+
+# Private shared-secret use, never an accessor. Both current checks bracket
+# pure MAC work. Context/role/command digest are validated by the shared codec.
+fn ready_reader_auth_v1(owner: WindowsHostServiceReadyReaderV1, context: HostServiceAuthContextV6,
+        role: text, body: text, tag: Option<text>, server: bool) -> Result<text, text>:
+    windows_host_service_ready_reader_current_v1(owner)?
+    val state = ready_readers_v1[owner.slot]
+    var result: Result<text, text> = Err("host-ready-auth-role-or-context-rejected")
+    val permitted = if server: role == "challenge" or role == "reply" else: role == "request"
+    if context.service_incarnation == state.metadata.unwrap().incarnation and permitted:
+        result = host_service_setup_auth_v1(state.setup_bytes, state.expected_digest, state.expected_uid,
+            role, context, body, tag)
+    windows_host_service_ready_reader_current_v1(owner)?
+    result
+
+pub(package) fn windows_host_service_ready_reader_mac_request_v1(owner: WindowsHostServiceReadyReaderV1,
+        context: HostServiceAuthContextV6, exactcanonicalrequest: text) -> Result<text, text>:
+    ready_reader_auth_v1(owner, context, "request", exactcanonicalrequest, nil, false)
+
+pub(package) fn windows_host_service_ready_reader_verify_server_v1(owner: WindowsHostServiceReadyReaderV1,
+        context: HostServiceAuthContextV6, role: text, body: text, tag: text) -> Result<bool, text>:
+    val checked = ready_reader_auth_v1(owner, context, role, body, Some(tag), true)?
+    Ok(checked == "verified")
+
+pub(package) fn windows_host_service_ready_reader_server_tag_v1(owner: WindowsHostServiceReadyReaderV1,
+        context: HostServiceAuthContextV6, role: text, body: text) -> Result<text, text>:
+    ready_reader_auth_v1(owner, context, role, body, nil, true)
+
+pub(package) fn windows_host_service_ready_reader_verify_request_v1(owner: WindowsHostServiceReadyReaderV1,
+        context: HostServiceAuthContextV6, exactcanonicalrequest: text, tag: text) -> Result<bool, text>:
+    val checked = ready_reader_auth_v1(owner, context, "request", exactcanonicalrequest, Some(tag), false)?
+    Ok(checked == "verified")
+
+# No validity check is required to close exact retained capabilities. One file
+# or root close per turn, positive consumption only; failures keep the owner.
+pub fn windows_host_service_ready_reader_close_v1(owner: WindowsHostServiceReadyReaderV1) -> WindowsHostServiceReadyReaderCloseTurnV1:
+    val loaded = ready_reader_load_v1(owner)
+    if loaded.is_err(): return WindowsHostServiceReadyReaderCloseTurnV1(Some(owner), false, loaded.unwrap_err())
+    var state = loaded.unwrap()
+    if state.closed: return WindowsHostServiceReadyReaderCloseTurnV1(nil, true, state.error)
+    state.usable = false
+    state.closing = true
+    var consumed = false
+    var release_failed = false
+    if state.lease_file.is_some():
+        var file = state.lease_file.unwrap()
+        if file.close(): state.lease_file = nil
+        else:
+            state.lease_file = Some(file)
+            release_failed = true
+        consumed = true
+    elif state.extra_file.is_some():
+        var file = state.extra_file.unwrap()
+        if file.close(): state.extra_file = nil
+        else:
+            state.extra_file = Some(file)
+            release_failed = true
+        consumed = true
+    elif state.setup_file.is_some():
+        var file = state.setup_file.unwrap()
+        if file.close(): state.setup_file = nil
+        else:
+            state.setup_file = Some(file)
+            release_failed = true
+        consumed = true
+    elif state.ready_file.is_some():
+        var file = state.ready_file.unwrap()
+        if file.close(): state.ready_file = nil
+        else:
+            state.ready_file = Some(file)
+            release_failed = true
+        consumed = true
+    elif state.extra_root.is_some():
+        var root = state.extra_root.unwrap()
+        if root.close(): state.extra_root = nil
+        else:
+            state.extra_root = Some(root)
+            release_failed = true
+        consumed = true
+    elif state.ready_root.is_some():
+        var root = state.ready_root.unwrap()
+        if root.close(): state.ready_root = nil
+        else:
+            state.ready_root = Some(root)
+            release_failed = true
+        consumed = true
+    elif state.journal_root.is_some():
+        var root = state.journal_root.unwrap()
+        if root.close(): state.journal_root = nil
+        else:
+            state.journal_root = Some(root)
+            release_failed = true
+        consumed = true
+    elif state.host_root.is_some():
+        var root = state.host_root.unwrap()
+        if root.close(): state.host_root = nil
+        else:
+            state.host_root = Some(root)
+            release_failed = true
+        consumed = true
+    elif state.root.is_some():
+        var root = state.root.unwrap()
+        if root.close(): state.root = nil
+        else:
+            state.root = Some(root)
+            release_failed = true
+        consumed = true
+    if release_failed and state.error == "": state.error = "host-ready-native-close-retained"
+    if not consumed:
+        state.closed = true
+        state.ready_bytes = []
+        state.setup_bytes = []
+        state.metadata = nil
+        state.expected_digest = ""
+        state.expected_uid = ""
+        state.expected_authority = ""
+        state.selected_lease = ""
+        ready_readers_active_v1 = ready_readers_active_v1 - 1
+    ready_readers_v1[owner.slot] = state
+    WindowsHostServiceReadyReaderCloseTurnV1(if state.closed: nil else: Some(owner), state.closed, state.error)
+
+# Public immutable DATA for actual producer-to-reopen comparison, never Host
+# authority or a liveness claim.
+pub fn windows_host_service_ready_reader_ready_digest_v1(owner: WindowsHostServiceReadyReaderV1) -> Result<text, text>:
+    windows_host_service_ready_reader_current_v1(owner)?
+    Ok(sha256_text(bytes_to_text(ready_readers_v1[owner.slot].ready_bytes)))
+
+pub fn windows_host_service_ready_reader_host_lease_digest_v1(owner: WindowsHostServiceReadyReaderV1) -> Result<text, text>:
+    windows_host_service_ready_reader_current_v1(owner)?
+    Ok(ready_readers_v1[owner.slot].selected_lease)

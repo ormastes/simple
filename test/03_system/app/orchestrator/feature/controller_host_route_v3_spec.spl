@@ -1,0 +1,59 @@
+# AUTHORED_NOT_RUN. Requires a genuine installed local Windows Controller and
+# running authenticated Host. No fabricated journals, sockets or runtime owners.
+use std.spec.{describe, it, expect, step, fail}
+use std.sosix.host.sosix_file_read
+use app.orchestrator.command.orchestrator_command_v1
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use app.orchestrator.reply_cleanup_v2.orchestrator_reply_cleanup_v2
+use std.common.contracts.orchestration.host_controller_status_v3.host_controller_status_decode_v3
+use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+# Retain the actual whole reply through assertion/output lifetime; this is not
+# native capability persistence after this process exits.
+var _controller_route_reply_v3: Option<OrchestratorValidationReplyV1> = nil
+
+fn controller_route_fields_v3(source: text) -> Dict<text, SdnValue>:
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 2097152,
+        max_depth: 2, max_nodes: 32, max_rows: 0, max_cells: 0, max_columns: 12))
+    if parsed.is_err(): fail("invalid real Controller route fixture or response")
+    match parsed.unwrap().value:
+        case SdnValue.Dict(value): value
+        case _: fail("real Controller route data must be an object")
+
+fn controller_route_text_v3(fields: Dict<text, SdnValue>, key: text) -> text:
+    if not fields.contains_key(key): fail("missing public Controller route field")
+    match fields[key]:
+        case SdnValue.String(value): value
+        case _: fail("Controller route field must be text")
+
+describe "Actual installed Controller to retained Host route":
+    it "uses the real dispatcher, protected Controller journal, authenticated exchange and canonical cleanup":
+        step("Load a mandatory dedicated fixture with independently expected Host identity")
+        if _controller_route_reply_v3.is_some(): fail("fixture is single-use; previous actual reply remains retained")
+        val source = sosix_file_read("C:\\SimpleQualification\\controller-host-route-v3.sdn")
+        if source == "": fail("missing genuine installed Controller route fixture")
+        val fixture = controller_route_fields_v3(source)
+        expect(fixture.len()).to_equal(4)
+        val root = controller_route_text_v3(fixture, "controllerRoot")
+        val digest = controller_route_text_v3(fixture, "controllerConfigDigest")
+        val expected_scope = controller_route_text_v3(fixture, "expectedScopeDigest")
+        val expected_enrollment = controller_route_text_v3(fixture, "expectedEnrollmentDigest")
+        step("Call the production Controller status route against the actual live Host")
+        val invoked = orchestrator_command_v1(["controller-service-status", root, digest])
+        _controller_route_reply_v3 = Some(invoked)
+        step("Consume the canonical finalizer and retain its exact returned cleanup fields")
+        val finalized = orchestrator_reply_cleanup_v2(invoked)
+        _controller_route_reply_v3 = Some(finalized)
+        expect(finalized.exit_code).to_equal(0)
+        expect(finalized.controller_dispatch_cleanup.is_none()).to_equal(true)
+        expect(finalized.controller_root_cleanup.is_none()).to_equal(true)
+        val envelope = controller_route_fields_v3(finalized.output)
+        expect(controller_route_text_v3(envelope, "kind")).to_equal("controller-service-route")
+        expect(controller_route_text_v3(envelope, "error")).to_equal("")
+        val status = host_controller_status_decode_v3(controller_route_text_v3(envelope, "response")).unwrap()
+        expect(status.ready).to_equal(true)
+        expect(container_scope_fence_id_v2(status.scope).unwrap()).to_equal(expected_scope)
+        expect(status.enrollment_digest).to_equal(expected_enrollment)

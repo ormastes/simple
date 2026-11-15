@@ -1,0 +1,223 @@
+# Native Windows Controller root, using the existing shared journal and replay
+# oracle. Native handles remain present on every partial acquisition/close turn.
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v3.*
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.ControllerDispatchContextV1
+use std.nogc_sync_mut.orchestration.workload_store_v1.*
+use std.common.contracts.orchestration.assignment_v1.controller_assignment_authority_v1
+use std.common.task_runner.distributed_operation_journal_v2.*
+use std.nogc_sync_mut.io.windows_private_file_v1.*
+use std.nogc_sync_mut.io.file_lock_owned_v2.FileLockReleaseStateV2
+use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
+use std.common.crypto.sha256.sha256_text
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.nogc_sync_mut.io.windows_command_owner_v2.windows_command_thread_check_v2
+
+pub class ControllerLocalRootV3:
+    native_root: Option<WindowsPrivateRootV1> = nil
+    partial_file: Option<WindowsPrivateFileV1> = nil
+    native_store: Option<WindowsJournalStoreV1> = nil
+    journal: Option<DistributedOperationJournalV2> = nil
+    journal_cleanup: Option<DistributedOperationJournalOpenCleanupV2> = nil
+    workload: Option<ControllerWorkloadStoreV1> = nil
+    config: Option<ControllerDispatchConfigV3> = nil
+    config_bytes: text = ""
+    policy_bytes: text = ""
+    diagnostic_root: text = ""
+    closing: bool = false
+    quarantine: text = ""
+    consumed_close_error: text = ""
+
+    # Native owner identity only, independent of WAL revision/policy/liveness.
+    # Used to reject duplicate transfer into a canonical dispatch continuation;
+    # this comparison grants no IO and exposes no journal or native token.
+    pub fn same_journal_owner_v3(other: ControllerLocalRootV3) -> Result<bool, text>:
+        windows_command_thread_check_v2()?
+        if self.native_store.is_none() or other.native_store.is_none():
+            return Err("controller-local-journal-identity-unavailable")
+        Ok(self.native_store.unwrap().same_owner(other.native_store.unwrap()))
+
+    pub fn current_v3() -> Result<ControllerDispatchContextV1, text>:
+        if self.closing or self.quarantine != "": return Err("controller-local-root-quarantined:" + self.quarantine)
+        if (self.native_root.is_none() or self.native_store.is_none() or self.journal.is_none() or
+                self.workload.is_none() or self.config.is_none()): return Err("controller-local-root-incomplete")
+        val root = self.native_root.unwrap()
+        val store = self.native_store.unwrap()
+        val journal = self.journal.unwrap()
+        if not root.security_current() or not store.belongs_to(root): return Err("controller-local-root-origin")
+        if journal.windows_store.is_none() or not journal.windows_store.unwrap().same_owner(store):
+            return Err("controller-local-journal-origin")
+        val actual_config = distributed_operation_journal_read_required_v3(journal, "controller-config-v3.sdn", 32768)?
+        val actual_policy = distributed_operation_journal_read_required_v3(journal, "authority-policy.sdn", 1048576)?
+        if actual_config != self.config_bytes or actual_policy != self.policy_bytes:
+            return Err("controller-local-installed-bytes-changed")
+        if (self.workload.unwrap().journal.lease_digest != journal.lease_digest or
+                self.workload.unwrap().controller_id != self.config.unwrap().controller_id):
+            return Err("controller-local-workload-origin")
+        controller_dispatch_context_metadata_v3(self.config.unwrap(), actual_policy)
+
+    pub fn config_v3() -> Result<ControllerDispatchConfigV3, text>:
+        val current = self.current_v3()?
+        Ok(self.config.unwrap())
+
+    pub fn workload_v3() -> Result<ControllerWorkloadStoreV1, text>:
+        val current = self.current_v3()?
+        Ok(self.workload.unwrap())
+
+    # Keep the exact returned writer BEFORE fallible current/projection checks.
+    # Only same-root/same-native-writer/same-lease values may replace it.
+    pub me retain_v3(next: ControllerWorkloadStoreV1) -> Result<bool, text>:
+        if self.closing or self.journal.is_none() or self.native_store.is_none() or self.config.is_none():
+            return Err("controller-local-retain-unavailable")
+        val prior = self.journal.unwrap()
+        if (next.controller_id != self.config.unwrap().controller_id or
+                next.journal.authority_digest != prior.authority_digest or
+                next.journal.lease_digest != prior.lease_digest or next.journal.health_id != prior.health_id or
+                next.journal.windows_store.is_none() or
+                not next.journal.windows_store.unwrap().same_owner(self.native_store.unwrap())):
+            return Err("controller-local-retain-origin")
+        self.journal = Some(next.journal)
+        self.workload = Some(next)
+        val checked = self.current_v3()
+        if checked.is_err():
+            self.quarantine = checked.unwrap_err()
+            return Err(checked.unwrap_err())
+        Ok(true)
+
+pub struct ControllerLocalRootTurnV3:
+    owner: Option<ControllerLocalRootV3>
+    ready: bool
+    error: text
+
+pub struct ControllerLocalRootCloseV3:
+    owner: Option<ControllerLocalRootV3>
+    closed: bool
+    error: text
+
+fn controller_root_failed_v3(owner: ControllerLocalRootV3, reason: text) -> ControllerLocalRootTurnV3:
+    var retained = owner
+    retained.quarantine = reason
+    val resources = retained.native_root.is_some() or retained.partial_file.is_some() or
+        retained.native_store.is_some() or retained.journal.is_some() or retained.journal_cleanup.is_some()
+    ControllerLocalRootTurnV3(if resources: Some(retained) else: nil, false, reason)
+
+fn controller_root_acquire_v3(path: text) -> ControllerLocalRootTurnV3:
+    @when(os="windows"):
+    val supported = true
+    @else:
+    val supported = false
+    @end
+    if not supported: return ControllerLocalRootTurnV3(nil, false, "controller-local-native-backend-unsupported")
+    var owner = ControllerLocalRootV3(diagnostic_root: path)
+    match windows_private_root_open_v1(path):
+        case Ok(root): owner.native_root = Some(root)
+        case Err(issue):
+            owner.native_root = issue.cleanup_root
+            owner.partial_file = issue.cleanup_file
+            return controller_root_failed_v3(owner, issue.message)
+    match owner.native_root.unwrap().open_journal_store_v1():
+        case WindowsJournalStoreOpenV1.Ready(store): owner.native_store = Some(store)
+        case WindowsJournalStoreOpenV1.Rejected(reason): return controller_root_failed_v3(owner, reason)
+        case WindowsJournalStoreOpenV1.CleanupRequired(store, reason):
+            owner.native_store = Some(store)
+            return controller_root_failed_v3(owner, reason)
+    ControllerLocalRootTurnV3(Some(owner), false, "")
+
+fn controller_root_read_v3(owner: ControllerLocalRootV3, relative: text, maximum: i64) -> Result<text, text>:
+    if owner.native_root.is_none() or owner.native_store.is_none(): return Err("controller-local-read-owner")
+    val store = owner.native_store.unwrap()
+    if not store.belongs_to(owner.native_root.unwrap()): return Err("controller-local-read-origin")
+    val bytes = store.read(relative, maximum)?
+    if bytes.is_none(): return Err("controller-local-record-absent:" + relative)
+    Ok(bytes.unwrap())
+
+fn controller_root_project_v3(original: ControllerLocalRootV3, expected_digest: text) -> ControllerLocalRootTurnV3:
+    var owner = original
+    val config_bytes = controller_root_read_v3(owner, "controller-config-v3.sdn", 32768)
+    if config_bytes.is_err(): return controller_root_failed_v3(owner, config_bytes.unwrap_err())
+    if sha256_text(config_bytes.unwrap()) != expected_digest: return controller_root_failed_v3(owner, "controller-local-config-pin")
+    val config = controller_dispatch_config_decode_v3(config_bytes.unwrap())
+    if config.is_err(): return controller_root_failed_v3(owner, config.unwrap_err())
+    val policy = controller_root_read_v3(owner, "authority-policy.sdn", 1048576)
+    if policy.is_err(): return controller_root_failed_v3(owner, policy.unwrap_err())
+    val context = controller_dispatch_context_metadata_v3(config.unwrap(), policy.unwrap())
+    if context.is_err(): return controller_root_failed_v3(owner, context.unwrap_err())
+    owner.config = Some(config.unwrap())
+    owner.config_bytes = config_bytes.unwrap()
+    owner.policy_bytes = policy.unwrap()
+    val authority = controller_assignment_authority_v1(config.unwrap().controller_id)
+    if authority.is_err(): return controller_root_failed_v3(owner, authority.unwrap_err())
+    val nonce = sosix_random_hex(32)
+    if nonce.is_none(): return controller_root_failed_v3(owner, "controller-local-entropy-unavailable")
+    match distributed_operation_journal_open_windows_v3(owner.diagnostic_root + "\\journal", owner.native_store.unwrap(),
+            authority.unwrap(), nonce.unwrap(), 100000):
+        case DistributedOperationJournalOpenV2.Ready(journal): owner.journal = Some(journal)
+        case DistributedOperationJournalOpenV2.Rejected(reason): return controller_root_failed_v3(owner, reason)
+        case DistributedOperationJournalOpenV2.CleanupRequired(cleanup, reason):
+            owner.journal_cleanup = Some(cleanup)
+            return controller_root_failed_v3(owner, reason)
+    val projected = controller_workload_store_project_owned_v3(owner.journal.unwrap(), config.unwrap().controller_id)
+    if projected.is_err(): return controller_root_failed_v3(owner, projected.unwrap_err())
+    owner.journal = Some(projected.unwrap().journal)
+    owner.workload = Some(projected.unwrap())
+    val checked = owner.current_v3()
+    if checked.is_err(): return controller_root_failed_v3(owner, checked.unwrap_err())
+    ControllerLocalRootTurnV3(Some(owner), true, "")
+
+pub fn controller_local_root_open_v3(path: text, expected_config_digest: text) -> ControllerLocalRootTurnV3:
+    if not builder_digest_valid_v1(expected_config_digest): return ControllerLocalRootTurnV3(nil, false, "controller-local-config-pin")
+    val opened = controller_root_acquire_v3(path)
+    if opened.error != "" or opened.owner.is_none(): return opened
+    controller_root_project_v3(opened.owner.unwrap(), expected_config_digest)
+
+# Local administrator entry only, never an action accepted from workload wire.
+# Existing private root is a prerequisite. Its fixed journal child is acquired
+# by the native factory; publication is immutable and identical retries read back.
+pub fn controller_local_root_install_v3(path: text, config_bytes: text,
+        policy_bytes: text) -> ControllerLocalRootTurnV3:
+    val config = controller_dispatch_config_decode_v3(config_bytes)
+    if config.is_err(): return ControllerLocalRootTurnV3(nil, false, config.unwrap_err())
+    val context = controller_dispatch_context_metadata_v3(config.unwrap(), policy_bytes)
+    if context.is_err(): return ControllerLocalRootTurnV3(nil, false, context.unwrap_err())
+    val opened = controller_root_acquire_v3(path)
+    if opened.error != "" or opened.owner.is_none(): return opened
+    val owner = opened.owner.unwrap()
+    for record in [("authority-policy.sdn", policy_bytes), ("controller-config-v3.sdn", config_bytes)]:
+        val published = owner.native_store.unwrap().publish(record.0, record.1)
+        if published.is_err(): return controller_root_failed_v3(owner, published.unwrap_err())
+        val retained = controller_root_read_v3(owner, record.0, 1048576)
+        if retained.is_err(): return controller_root_failed_v3(owner, retained.unwrap_err())
+        if retained.unwrap() != record.1: return controller_root_failed_v3(owner, "controller-local-immutable-install-mismatch")
+    controller_root_project_v3(owner, sha256_text(config_bytes))
+
+pub fn controller_local_root_close_v3(original: ControllerLocalRootV3) -> ControllerLocalRootCloseV3:
+    var owner = original
+    owner.closing = true
+    owner.workload = nil
+    # Transfer the exact journal cleanup carrier before checking its outcome.
+    if owner.journal.is_some() or owner.journal_cleanup.is_some():
+        val closed = if owner.journal_cleanup.is_some(): distributed_operation_journal_open_cleanup_v2(owner.journal_cleanup.unwrap())
+            else: distributed_operation_journal_close_owned_v2(owner.journal.unwrap())
+        owner.journal = nil
+        owner.journal_cleanup = closed.cleanup
+        if closed.cleanup.is_none(): owner.native_store = nil
+        if not closed.closed or closed.error != "" or closed.state != FileLockReleaseStateV2.Released:
+            if closed.cleanup.is_none():
+                owner.consumed_close_error = "controller-local-journal-close-unconfirmed:" + closed.error
+            return ControllerLocalRootCloseV3(Some(owner), false, "controller-local-journal-close-unconfirmed:" + closed.error)
+    elif owner.native_store.is_some():
+        var store = owner.native_store.unwrap()
+        val state = store.close_state()
+        if state != "released": return ControllerLocalRootCloseV3(Some(owner), false, "controller-local-store-close:" + state)
+        owner.native_store = nil
+    if owner.partial_file.is_some():
+        var file = owner.partial_file.unwrap()
+        if not file.close(): return ControllerLocalRootCloseV3(Some(owner), false, "controller-local-file-close-unconfirmed")
+        owner.partial_file = nil
+    if owner.native_root.is_some():
+        var root = owner.native_root.unwrap()
+        if not root.close(): return ControllerLocalRootCloseV3(Some(owner), false, "controller-local-root-close-unconfirmed")
+        owner.native_root = nil
+    # Native obligations can be consumed without a confirmed release. Finish
+    # remaining owned cleanup, but never turn that historical uncertainty into
+    # a successful close or retry an already-consumed native handle.
+    ControllerLocalRootCloseV3(nil, owner.consumed_close_error == "", owner.consumed_close_error)

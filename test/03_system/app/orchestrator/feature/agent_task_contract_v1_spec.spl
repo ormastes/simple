@@ -1,0 +1,112 @@
+# @req REQ-TASK REQ-TASK-USE
+# Pure DATA/codec tests only. Execution NOT_RUN; no authorization is constructed.
+use std.common.contracts.orchestration.agent_invocation_binding_v1.AgentTaskInputV1
+use std.common.contracts.orchestration.agent_task_object_v1.*
+use std.common.contracts.orchestration.agent_task_use_v1.*
+use std.nogc_sync_mut.orchestration.controller_agent_task_objects_v1.*
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+
+fn task_contract_object_v1(content: text) -> AgentTaskInputV1:
+    AgentTaskInputV1(ns: "caret", reference: "task-immutable-42", content: content, content_digest: sha256_text(content))
+
+fn task_contract_use_v1() -> AgentTaskUseBindingV1:
+    AgentTaskUseBindingV1(controller_id: "controller", session_uid: "session", attempt: 1,
+        ns: "caret", task_ref: "task-immutable-42", task_digest: sha256_text("literal task\r\n"),
+        source_digest: "a".repeat(64), catalog_digest: "b".repeat(64), provider: "codex",
+        adapter_id: "codex-root-start-0.169.0-v1", model: "", host_scope_digest: "c".repeat(64))
+
+fn task_contract_wire_field_v1(source: text, key: text, value: SdnValue) -> text:
+    val parsed = parse_resource_document(source).unwrap()
+    var fields = as_dict(parsed.0, "", parsed.1).unwrap()
+    fields[key] = value
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+describe "strict immutable task and per-attempt use contracts":
+    it "preserves original CRLF CR Unicode and literal dash bytes":
+        step("Preserve the original task bytes and hash")
+        for content in ["literal task\r\n", "literal task\r", "한글", "-", ""]:
+            val task = task_contract_object_v1(content)
+            val bytes = agent_task_object_encode_v1(task).unwrap()
+            val decoded = agent_task_object_decode_v1(bytes).unwrap()
+            expect(decoded.content).to_equal(content)
+            expect(decoded.content_digest).to_equal(sha256_text(content))
+            expect(agent_task_object_encode_v1(decoded).unwrap()).to_equal(bytes)
+        val raw = task_contract_object_v1("literal task\r\n")
+        val normalized = task_contract_object_v1("literal task\n")
+        expect(agent_task_object_identity_digest_v1(raw).unwrap() == agent_task_object_identity_digest_v1(normalized).unwrap()).to_equal(false)
+
+    it "bounds raw UTF8 by bytes and rejects hash and identity substitution":
+        step("Reject oversized or substituted task objects")
+        expect(agent_task_object_encode_v1(task_contract_object_v1("a".repeat(4096))).is_ok()).to_equal(true)
+        expect(agent_task_object_encode_v1(task_contract_object_v1("a".repeat(4097))).unwrap_err()).to_equal("agent-task-content-size")
+        expect(agent_task_object_encode_v1(task_contract_object_v1("한".repeat(1366))).unwrap_err()).to_equal("agent-task-content-size")
+        var changed = task_contract_object_v1("body")
+        changed.content_digest = sha256_text("another body")
+        expect(agent_task_object_encode_v1(changed).unwrap_err()).to_equal("agent-task-content-mismatch")
+        changed = task_contract_object_v1("body")
+        changed.ns = "bad/namespace"
+        expect(agent_task_object_encode_v1(changed).is_err()).to_equal(true)
+        changed = task_contract_object_v1("body")
+        changed.reference = "line\ntwo"
+        expect(agent_task_object_encode_v1(changed).is_err()).to_equal(true)
+        changed.reference = " leading"
+        expect(agent_task_object_encode_v1(changed).is_err()).to_equal(true)
+
+    it "rejects unknown missing mistyped versioned duplicate and noncanonical task fields":
+        step("Reject malformed task records without a permissive fallback")
+        val bytes = agent_task_object_encode_v1(task_contract_object_v1("body")).unwrap()
+        expect(agent_task_object_decode_v1(task_contract_wire_field_v1(bytes, "extra", SdnValue.Int(1))).is_err()).to_equal(true)
+        expect(agent_task_object_decode_v1(task_contract_wire_field_v1(bytes, "version", SdnValue.Int(2))).is_err()).to_equal(true)
+        expect(agent_task_object_decode_v1(task_contract_wire_field_v1(bytes, "version", SdnValue.String("1"))).is_err()).to_equal(true)
+        expect(agent_task_object_decode_v1(task_contract_wire_field_v1(bytes, "content", SdnValue.Int(1))).is_err()).to_equal(true)
+        expect(agent_task_object_decode_v1("version: 1\nkind: agent-task-object\n").is_err()).to_equal(true)
+        expect(agent_task_object_decode_v1(bytes + "version: 1\n").is_err()).to_equal(true)
+        expect(agent_task_object_decode_v1(bytes + "\n").is_err()).to_equal(true)
+
+    it "pins one use identity and changes payload for every invocation selection field":
+        step("Pin Controller session and attempt while binding all use fields")
+        val binding = task_contract_use_v1()
+        val bytes = agent_task_use_encode_v1(binding).unwrap()
+        expect(agent_task_use_encode_v1(agent_task_use_decode_v1(bytes).unwrap()).unwrap()).to_equal(bytes)
+        val first = controller_agent_task_use_operation_v1(binding).unwrap()
+        for key in ["namespace", "taskRef", "taskDigest", "sourceDigest", "catalogDigest", "model", "hostScopeDigest"]:
+            val value = if key == "namespace": "other" else: if key == "taskRef": "other-task" else: if key == "model": "other-model" else: "d".repeat(64)
+            val changed = agent_task_use_decode_v1(task_contract_wire_field_v1(bytes, key, SdnValue.String(value))).unwrap()
+            val second = controller_agent_task_use_operation_v1(changed).unwrap()
+            expect(second.id).to_equal(first.id)
+            expect(second.payload_digest == first.payload_digest).to_equal(false)
+        for key in ["controllerId", "sessionUid"]:
+            val changed = agent_task_use_decode_v1(task_contract_wire_field_v1(bytes, key, SdnValue.String("other"))).unwrap()
+            expect(controller_agent_task_use_operation_v1(changed).unwrap().id == first.id).to_equal(false)
+        val next = agent_task_use_decode_v1(task_contract_wire_field_v1(bytes, "attempt", SdnValue.Int(2))).unwrap()
+        expect(controller_agent_task_use_operation_v1(next).unwrap().id == first.id).to_equal(false)
+
+    it "rejects unsupported intent provider adapter controls and invalid attempt":
+        step("Restrict this version to Codex interactive Start")
+        val binding = task_contract_use_v1()
+        val bytes = agent_task_use_encode_v1(binding).unwrap()
+        for key in ["intent", "provider", "adapterId", "kind"]:
+            expect(agent_task_use_decode_v1(task_contract_wire_field_v1(bytes, key, SdnValue.String("unsupported"))).is_err()).to_equal(true)
+        for value in [0, -1]:
+            expect(agent_task_use_decode_v1(task_contract_wire_field_v1(bytes, "attempt", SdnValue.Int(value))).is_err()).to_equal(true)
+        for model in ["a".repeat(257), "bad\nmodel", "bad\tmodel", "bad\0model"]:
+            expect(agent_task_use_decode_v1(task_contract_wire_field_v1(bytes, "model", SdnValue.String(model))).is_err()).to_equal(true)
+        expect(agent_task_use_decode_v1(task_contract_wire_field_v1(bytes, "version", SdnValue.Int(2))).is_err()).to_equal(true)
+        expect(agent_task_use_decode_v1(task_contract_wire_field_v1(bytes, "attempt", SdnValue.String("1"))).is_err()).to_equal(true)
+        expect(agent_task_use_decode_v1(task_contract_wire_field_v1(bytes, "extra", SdnValue.Bool(true))).is_err()).to_equal(true)
+        expect(agent_task_use_decode_v1("version: 1\nkind: agent-task-use\n").is_err()).to_equal(true)
+        expect(agent_task_use_decode_v1(bytes + "attempt: 1\n").is_err()).to_equal(true)
+        expect(agent_task_use_decode_v1(bytes + "\n").is_err()).to_equal(true)
+
+    it "scopes immutable retention identity to Controller namespace reference and raw version":
+        step("Keep distinct task versions addressable without latest resolution")
+        val task = task_contract_object_v1("raw\r\n")
+        val first = controller_agent_task_retain_operation_v1("controller", task).unwrap()
+        expect(controller_agent_task_retain_operation_v1("other", task).unwrap().id == first.id).to_equal(false)
+        for key in ["namespace", "reference", "contentDigest"]:
+            val id = controller_agent_task_operation_id_v1("controller", if key == "namespace": "other" else: task.ns,
+                if key == "reference": "other-task" else: task.reference, if key == "contentDigest": sha256_text("raw\n") else: task.content_digest).unwrap()
+            expect(id == first.id).to_equal(false)

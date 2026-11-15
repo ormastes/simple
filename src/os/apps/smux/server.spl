@@ -1,3 +1,7 @@
+use os.apps.smux.server_pending_client_v6.{PendingClient, authenticated_client_output_v6, prepare_reply, smux_pending_auth_request_v6, smux_pending_auth_line_limit_v6}
+use os.apps.smux.server_request_v1.{smux_server_token_valid_v1 as valid_token,
+    smux_server_endpoint_valid_v1 as local_endpoint, smux_server_stop_reply_v1,
+    smux_server_decode_reply, smux_server_request, smux_server_request_within}
 # Independent foreground owner for hosted smux. Request clients can exit while
 # this process keeps every pane and drains its output. No thread shares _svc.
 # TCP/ConPTY provider availability must be qualified on the selected runtime.
@@ -9,7 +13,6 @@ use std.sosix.pty.{sosix_pty_cleanup_pending as pty_cleanup_pending}
 use std.sosix.stdio.{sosix_println}
 use os.apps.smux.api.{smux_poll_output, smux_reset_for_test, smux_reap_expired_clients,
     smux_owner_snapshot, smux_configuration_revision, smux_window_closing}
-use os.apps.smux.service.ServiceState
 use os.apps.smux.smux_remote.{smux_remote_dispatch}
 use os.apps.smux.runtime_binding_protocol_v1.{smux_runtime_binding_capabilities_v1, smux_runtime_binding_refusal_v3}
 use os.apps.smux.client_leases.{SMUX_CLIENT_LEASE_SWEEP_MS}
@@ -50,20 +53,24 @@ use os.apps.smux.runtime_connection_owner_v5.{SmuxRuntimeConnectionOwnerV5,
     smux_runtime_connection_controls_sync_v5,
     smux_runtime_connection_poll_v5}
 use os.apps.smux.runtime_connection_dispatch_v5.smux_runtime_connection_dispatch_v5
+use os.apps.smux.runtime_authenticated_startup_v6.{smux_runtime_authenticated_prepare_v6,
+    smux_runtime_authenticated_reader_close_v6}
 use os.apps.smux.runtime_connection_recovery_v5.SmuxRuntimeServerTurnV5
 use std.nogc_sync_mut.orchestration.host_service_domain_v3.{HostServiceDomainV3, HostServiceCleanupV3,
     host_service_domain_close_v3, host_service_cleanup_v3}
 use std.sosix.host.{RetainedPrivateCredentialV2,
     retained_private_credential_open_v2, retained_private_credential_read_v2,
     retained_private_credential_publish_v2, retained_private_credential_close_v2}
+use std.nogc_sync_mut.io.host_service_ready_reader_v1.*
+use std.nogc_sync_mut.io.host_service_auth_connection_v6.*
+use std.common.contracts.orchestration.host_service_operation_v6.HostServiceOperationRequestV6
+use std.common.contracts.orchestration.host_service_operation_reply_v6.*
+use os.apps.smux.runtime_connection_owner_v5.{smux_runtime_connection_host_operation_v6,
+    smux_runtime_connection_stop_match_v6, smux_runtime_connection_auth_publication_v6,
+    smux_runtime_connection_auth_current_v6}
 
 const REQUEST_LIMIT: i64 = 4096
 const CONNECTION_REQUEST_LIMIT_V5: i64 = 2796500
-# The product's own capture_pane asks for history-joined 2000; a pane holding
-# one CLI run's compile-warning output can exceed 512 KiB, and the reply guard
-# must not be smaller than the product's own requests (it used to replace
-# such replies with `smux: reply exceeds limit`).
-const REPLY_LIMIT: i64 = 1048576
 const CLIENT_LIMIT: i64 = 16
 const CLIENT_DEADLINE_MS: i64 = 2000
 
@@ -84,6 +91,11 @@ var _runtime_connection_owner: SmuxRuntimeConnectionOwnerV5? = nil
 var _runtime_connection_domain: HostServiceDomainV3? = nil
 var _runtime_connection_cleanup: HostServiceCleanupV3? = nil
 var _runtime_connection_credential: RetainedPrivateCredentialV2? = nil
+var _runtime_auth_mode_v6: bool = false
+var _runtime_auth_reader_v6: Option<HostServiceReadyReaderV1> = nil
+var _runtime_auth_quiescing_v6: bool = false
+var _runtime_auth_error_v6: text = ""
+var _runtime_auth_connections_cleanup_v6: [HostServiceAuthConnectionV6] = []
 
 # Only native/host owned turns can advance these local observations. They
 # never authorize descriptor IO or a new writer; native generations do that.
@@ -165,43 +177,9 @@ fn runtime_stop_reply_v3() -> text:
     if not runtime_close_credential_v3(): return "smux: stop refused: credential cleanup unconfirmed"
     "smux: stopping server"
 
-class PendingClient:
-    stream: TcpStream
-    input: [u8]
-    output: [u8]
-    offset: i64
-    deadline: i64
-    replying: bool
-    stop_owner: bool
 
-fn valid_token(token: text) -> bool:
-    return token != "" and token.len() <= 128 and not token.contains(" ") and not token.contains("\t") and not token.contains("\r") and not token.contains("\n")
-
-fn local_endpoint(address: text) -> bool:
-    if not address.starts_with("127.0.0.1:"):
-        return false
-    val parts = address.split(":")
-    if parts.len() != 2:
-        return false
-    val port = parts[1].to_int() ?? 0
-    return port > 0 and port <= 65535
-
-# Pure stop admission; no native handle, signal or process lookup is performed.
-pub fn smux_server_stop_reply_v1(snapshot: ServiceState) -> text:
-    var index = 0
-    while index < snapshot.pane_count:
-        val pane = snapshot.get_pane(index)
-        if (pane.owned_terminal_session != nil or pane.helper_cleaned_awaiting_release or
-                pane.terminal_ref != nil):
-            return "smux: stop refused: terminal cleanup or host release pending"
-        index = index + 1
-    # Authenticated dispatch separately checks the configured owner, including
-    # provider CleanupRequired authority that has no pane/reference yet.
-    return "smux: stopping server"
-
-# One complete frame, without its newline. Authentication precedes command
-# dispatch, including stop-server. Neither errors nor logs reveal the token.
 pub fn smux_server_dispatch(request: text, token: text) -> text:
+    if _runtime_auth_mode_v6: return "smux: legacy protocol unavailable in authenticated Host mode"
     if text_to_bytes(request).len() > CONNECTION_REQUEST_LIMIT_V5 or request.contains("\n") or request.contains("\r"):
         return "smux: invalid request"
     if not valid_token(token):
@@ -326,45 +304,70 @@ pub fn smux_server_dispatch(request: text, token: text) -> text:
         _runtime_control_owner = Some(smux_primary_controls_sync_v4(_runtime_binding_owner.unwrap(), _runtime_control_owner.unwrap()))
     return reply
 
-fn prepare_reply(client: PendingClient, reply: text, stop: bool) -> PendingClient:
-    var output = text_to_bytes(reply)
-    if output.len() > REPLY_LIMIT:
-        output = text_to_bytes("smux: reply exceeds limit")
-    output = text_to_bytes("SMUX/1 " + output.len().to_text() + "\n") + output
-    return PendingClient(stream: client.stream, input: [], output: output,
-        offset: 0, deadline: time_now_monotonic_ms() + CLIENT_DEADLINE_MS,
-        replying: true, stop_owner: stop)
+fn authenticated_stop_v6(connection: HostServiceAuthConnectionV6,
+        request: HostServiceOperationRequestV6) -> HostServiceOperationReplyV6:
+    var reason = ""
+    val allowed = host_service_auth_connection_stop_guard_v6(connection)
+    if allowed.is_err(): reason = allowed.unwrap_err()
+    elif _runtime_connection_owner.is_none(): reason = "runtime-host-owner-unavailable"
+    else:
+        val matched = smux_runtime_connection_stop_match_v6(_runtime_connection_owner.unwrap(), request)
+        if matched.is_err(): reason = matched.unwrap_err()
+        elif smux_server_stop_reply_v1(smux_owner_snapshot()) != "smux: stopping server":
+            reason = "runtime-host-terminal-cleanup-pending"
+    if reason == "":
+        # No yield or callback between exact request checks, quiescing and close.
+        # A partial/failed close never reopens normal service admission.
+        _runtime_auth_quiescing_v6 = true
+        _runtime_cleanup_only = true
+        if not runtime_close_host_v3(): reason = "runtime-host-close-unconfirmed"
+        if reason != "" and _runtime_auth_error_v6 == "": _runtime_auth_error_v6 = reason
+    HostServiceOperationReplyV6(request.action, request.service_incarnation, "", request.scope_digest,
+        "", false, if reason == "": 0 else: 2, "", reason)
 
-# EOF alone cannot certify a complete response: a failed partial socket write
-# also ends the stream. The length frame makes truncation an explicit failure.
-pub fn smux_server_decode_reply(wire: [u8]) -> Result<text, text>:
-    var newline: i64 = -1
-    var i: i64 = 0
-    while i < wire.len() and i < 32 and newline < 0:
-        if wire[i] == 10:
-            newline = i
-        i = i + 1
-    if newline < 0:
-        return Err("invalid smux response header")
-    val header = bytes_to_text(wire[0:newline])
-    if not header.starts_with("SMUX/1 "):
-        return Err("invalid smux response header")
-    # to_int() yields 0 (not nil) for non-numeric text, so admit digits explicitly.
-    val length_text = header[7:]
-    if length_text == "" or length_text.len() > 19:
-        return Err("invalid smux response length")
-    for ch in length_text:
-        if ch < "0" or ch > "9":
-            return Err("invalid smux response length")
-    val length = length_text.to_int() ?? -1
-    if length < 0 or length > REPLY_LIMIT:
-        return Err("invalid smux response length")
-    if wire.len() - newline - 1 != length:
-        return Err("incomplete smux response")
-    return Ok(bytes_to_text(wire[newline + 1:]))
+fn authenticated_client_line_v6(original: PendingClient, line: text) -> PendingClient:
+    var client = original
+    if _runtime_auth_quiescing_v6 or _runtime_auth_reader_v6.is_none():
+        client.deadline = 0
+        return client
+    if _runtime_connection_owner.is_none():
+        client.deadline = 0
+        return client
+    val actual_journal = smux_runtime_connection_auth_current_v6(_runtime_connection_owner.unwrap())
+    if actual_journal.is_err():
+        client.deadline = 0
+        return client
+    val consumed = smux_pending_auth_request_v6(client, _runtime_auth_reader_v6.unwrap(), line)
+    client = consumed.client
+    if consumed.error != "":
+        client.deadline = 0
+        return client
+    if consumed.request.is_none(): return client
+    val connection = client.auth_connection.unwrap()
+    val request = consumed.request.unwrap()
+    var reply = HostServiceOperationReplyV6(request.action, request.service_incarnation, request.operation_id,
+        request.scope_digest, request.request_digest, false, 2, "", "runtime-host-owner-unavailable")
+    if request.action == "service-stop": reply = authenticated_stop_v6(connection, request)
+    elif _runtime_connection_owner.is_some():
+        val turn = smux_runtime_connection_host_operation_v6(_runtime_connection_owner.unwrap(), request)
+        _runtime_connection_owner = Some(turn.owner)
+        reply = turn.reply
+    # Preserve the real domain/cleanup result even if serialization or delivery
+    # later fails. Such a failure never authorizes resending the operation.
+    val encoded = host_service_operation_reply_encode_v6(reply)
+    if encoded.is_err():
+        if _runtime_auth_quiescing_v6 and _runtime_auth_error_v6 == "": _runtime_auth_error_v6 = encoded.unwrap_err()
+        client.stop_owner = _runtime_auth_quiescing_v6
+        client.deadline = 0
+        return client
+    val sealed = host_service_auth_connection_reply_v6(connection, encoded.unwrap())
+    if sealed.is_err():
+        if _runtime_auth_quiescing_v6 and _runtime_auth_error_v6 == "": _runtime_auth_error_v6 = sealed.unwrap_err()
+        client.stop_owner = _runtime_auth_quiescing_v6
+        client.deadline = 0
+        return client
+    authenticated_client_output_v6(client, sealed.unwrap(), false, _runtime_auth_quiescing_v6)
 
-# Explicit owner lifetime: EOF or closure of a request socket closes ONLY that
-# socket. Only authenticated stop-server shuts down children and the listener.
 pub fn smux_server_serve(address: text, token: text) -> i64:
     if not local_endpoint(address) or not valid_token(token):
         return 1
@@ -494,11 +497,17 @@ pub fn smux_server_serve_runtime_owner_file(path: text, host_root: text) -> i64:
 # An unsuccessful startup never turns absent ready publication into a release.
 fn runtime_connection_result_v5(code: i64) -> SmuxRuntimeServerTurnV5:
     val turn = SmuxRuntimeServerTurnV5(code, _runtime_connection_owner, _runtime_connection_domain,
-        _runtime_connection_cleanup, _runtime_connection_credential)
+        _runtime_connection_cleanup, _runtime_connection_credential, _runtime_auth_error_v6,
+        _runtime_auth_reader_v6, _runtime_auth_connections_cleanup_v6)
     _runtime_connection_owner = nil
     _runtime_connection_domain = nil
     _runtime_connection_cleanup = nil
     _runtime_connection_credential = nil
+    _runtime_auth_reader_v6 = nil
+    _runtime_auth_connections_cleanup_v6 = []
+    _runtime_auth_mode_v6 = false
+    _runtime_auth_quiescing_v6 = false
+    _runtime_auth_error_v6 = ""
     _runtime_configured = false
     _runtime_cleanup_only = false
     turn
@@ -572,6 +581,50 @@ pub fn smux_server_serve_runtime_domain_v5(path: text, domain: HostServiceDomain
     if failed: return runtime_connection_result_v5(1)
     runtime_connection_result_v5(code)
 
+fn runtime_authenticated_failed_v6(listener: Option<TcpListener>, reason: text) -> SmuxRuntimeServerTurnV5:
+    _runtime_auth_quiescing_v6 = true
+    _runtime_cleanup_only = true
+    if _runtime_auth_error_v6 == "": _runtime_auth_error_v6 = reason
+    if listener.is_some():
+        var retained_listener = listener.unwrap()
+        val closed = retained_listener.close()
+        # The existing TCP facade consumes this descriptor even on failure.
+        # Report uncertainty and never retry its raw number.
+        if closed.is_err() and _runtime_auth_error_v6 == "": _runtime_auth_error_v6 = "host-service-auth-listener-close-unconfirmed"
+    runtime_connection_result_v5(2)
+
+# Explicit mode over the same listener and same retained Host domain. The
+# private V6 setup never enters the legacy initial/ready parser or bearer wire.
+pub fn smux_server_serve_runtime_authenticated_v6(setup_path: text, setup_digest: text,
+        domain: HostServiceDomainV3, endpoint: text = "127.0.0.1:0") -> SmuxRuntimeServerTurnV5:
+    if endpoint != "127.0.0.1:0":
+        return SmuxRuntimeServerTurnV5(2, nil, Some(domain), nil, nil, "primary-service-loopback-auto-required")
+    if (_runtime_configured or _runtime_binding_owner.is_some() or _runtime_credential_owner.is_some() or
+            _runtime_connection_owner.is_some() or _runtime_connection_domain.is_some() or
+            _runtime_connection_cleanup.is_some() or _runtime_connection_credential.is_some() or _runtime_auth_reader_v6.is_some()):
+        return SmuxRuntimeServerTurnV5(2, nil, Some(domain), nil, nil, "primary-service-already-running")
+    _runtime_configured = true
+    _runtime_auth_mode_v6 = true
+    _runtime_cleanup_only = true
+    _runtime_host_released = false
+    _runtime_credential_consumed = true
+    val prepared = smux_runtime_authenticated_prepare_v6(setup_path, setup_digest, domain, endpoint)
+    _runtime_connection_domain = prepared.domain
+    _runtime_connection_owner = prepared.owner
+    _runtime_auth_reader_v6 = prepared.reader
+    if prepared.error != "" or prepared.listener.is_none():
+        return runtime_authenticated_failed_v6(prepared.listener, prepared.error)
+    _runtime_cleanup_only = false
+    val code = _serve_on(prepared.listener.unwrap(), prepared.address, "")
+    if _runtime_host_released and _runtime_auth_connections_cleanup_v6.len() == 0 and _runtime_auth_reader_v6.is_some():
+        val closed = smux_runtime_authenticated_reader_close_v6(_runtime_auth_reader_v6.unwrap())
+        _runtime_auth_reader_v6 = closed.owner
+        if (not closed.completed or closed.error != "") and _runtime_auth_error_v6 == "":
+            _runtime_auth_error_v6 = "host-service-auth-reader-close:" + closed.error
+    # Reader and any failed logical close stay in the existing process-local
+    # recovery carrier after socket/listener drain. No native cap is serialized.
+    runtime_connection_result_v5(if _runtime_host_released and _runtime_auth_error_v6 == "": code else: 2)
+
 fn _serve_on(bound_listener: TcpListener, address: text, token: text, initialized: bool = true) -> i64:
     var listener = bound_listener
     var clients: [PendingClient] = []
@@ -601,7 +654,9 @@ fn _serve_on(bound_listener: TcpListener, address: text, token: text, initialize
         if _runtime_connection_owner != nil and not _runtime_cleanup_only:
             _runtime_connection_owner = Some(smux_runtime_connection_poll_v5(_runtime_connection_owner.unwrap()))
         val _polled = smux_poll_output()
-        val accepted = listener.accept_timeout(10)
+        val accepted = if _runtime_auth_mode_v6 and _runtime_auth_quiescing_v6:
+            Err("host-service-auth-quiescing")
+        else: listener.accept_timeout(10)
         if accepted.is_ok():
             var stream = accepted.unwrap()
             if clients.len() >= CLIENT_LIMIT or not tcp_backend_set_nonblocking(stream.fd, true):
@@ -616,10 +671,9 @@ fn _serve_on(bound_listener: TcpListener, address: text, token: text, initialize
             var client = original
             var finished = time_now_monotonic_ms() >= client.deadline
             if not finished and not client.replying:
-                # A V5 signed request can be 2 MiB before base64 wrapping. One
-                # bounded 64 KiB read per turn keeps the existing absolute
-                # deadline usable without an unbounded per-peer drain loop.
-                val read = client.stream.read(65536)
+                val input_limit = if _runtime_auth_mode_v6: smux_pending_auth_line_limit_v6(client) else: CONNECTION_REQUEST_LIMIT_V5
+                val remaining = if _runtime_auth_mode_v6: input_limit - client.input.len() + 1 else: 65536
+                val read = client.stream.read(if remaining < 65536: remaining else: 65536)
                 if read.is_ok():
                     val chunk = read.unwrap()
                     if chunk.len() == 0:
@@ -636,18 +690,41 @@ fn _serve_on(bound_listener: TcpListener, address: text, token: text, initialize
                                 newline = i
                             i = i + 1
                         if newline >= 0:
-                            if newline != client.input.len() - 1 or newline > CONNECTION_REQUEST_LIMIT_V5:
-                                client = prepare_reply(client, "smux: invalid request", false)
+                            if newline != client.input.len() - 1 or (if _runtime_auth_mode_v6: client.input.len() > input_limit else: newline > CONNECTION_REQUEST_LIMIT_V5):
+                                if _runtime_auth_mode_v6: client.deadline = 0
+                                else: client = prepare_reply(client, "smux: invalid request", false)
                             else:
-                                val frame = bytes_to_text(client.input[0:newline])
-                                val reply = smux_server_dispatch(frame, token)
-                                client = prepare_reply(client, reply, reply == "smux: stopping server")
-                        elif client.input.len() > CONNECTION_REQUEST_LIMIT_V5:
-                            client = prepare_reply(client, "smux: invalid request", false)
+                                if _runtime_auth_mode_v6:
+                                    client = authenticated_client_line_v6(client, bytes_to_text(client.input))
+                                else:
+                                    val frame = bytes_to_text(client.input[0:newline])
+                                    val reply = smux_server_dispatch(frame, token)
+                                    client = prepare_reply(client, reply, reply == "smux: stopping server")
+                        elif client.input.len() > input_limit:
+                            if _runtime_auth_mode_v6: client.deadline = 0
+                            else: client = prepare_reply(client, "smux: invalid request", false)
                 # The current facade conflates WouldBlock with read errors.
                 # Keep partial input until the absolute deadline; never restart
                 # its clock when a peer trickles bytes into the socket.
-            if not finished and client.replying:
+            if _runtime_auth_mode_v6 and time_now_monotonic_ms() >= client.deadline: finished = true
+            if not finished and client.replying and _runtime_auth_mode_v6:
+                var end = client.offset + 65536
+                if end > client.output.len(): end = client.output.len()
+                val written = client.stream.write(client.output[client.offset:end])
+                if written.is_ok():
+                    val count = written.unwrap()
+                    if count <= 0 or count > end - client.offset: finished = true
+                    else:
+                        client.offset = client.offset + count
+                        if client.offset == client.output.len():
+                            if client.auth_challenge:
+                                client.auth_challenge = false
+                                client.replying = false
+                                client.input = []
+                                client.output = []
+                                client.offset = 0
+                            else: finished = true
+            elif not finished and client.replying:
                 # Drain as much of the reply as the socket takes NOW. One 4 KiB
                 # chunk per loop turn was not enough: every turn also polls the
                 # pane PTYs through the VT screen, so a pane printing a few
@@ -677,6 +754,14 @@ fn _serve_on(bound_listener: TcpListener, address: text, token: text, initialize
                 if progressed and not finished:
                     client.deadline = time_now_monotonic_ms() + CLIENT_DEADLINE_MS
             if finished:
+                if client.auth_connection.is_some():
+                    val retired = host_service_auth_connection_close_v6(client.auth_connection.unwrap())
+                    if retired.is_err():
+                        _runtime_auth_connections_cleanup_v6.push(client.auth_connection.unwrap())
+                        if _runtime_auth_error_v6 == "": _runtime_auth_error_v6 = retired.unwrap_err()
+                if (_runtime_auth_mode_v6 and client.stop_owner and
+                        (client.offset != client.output.len() or client.output.len() == 0)):
+                    if _runtime_auth_error_v6 == "": _runtime_auth_error_v6 = "host-service-auth-stop-delivery-unknown"
                 if client.stop_owner:
                     stop = true
                 if client.stream.close().is_err():
@@ -685,6 +770,11 @@ fn _serve_on(bound_listener: TcpListener, address: text, token: text, initialize
                 pending.push(client)
         clients = pending
     for client in clients:
+        if client.auth_connection.is_some():
+            val retired = host_service_auth_connection_close_v6(client.auth_connection.unwrap())
+            if retired.is_err():
+                _runtime_auth_connections_cleanup_v6.push(client.auth_connection.unwrap())
+                if _runtime_auth_error_v6 == "": _runtime_auth_error_v6 = retired.unwrap_err()
         var stream = client.stream
         if stream.close().is_err():
             socket_cleanup_failed = true
@@ -696,7 +786,7 @@ fn _serve_on(bound_listener: TcpListener, address: text, token: text, initialize
     while cleanup > 0 and time_now_monotonic_ms() < cleanup_deadline:
         thread_sleep_ms(5)
         cleanup = pty_cleanup_pending()
-    if cleanup != 0 or socket_cleanup_failed:
+    if cleanup != 0 or socket_cleanup_failed or _runtime_auth_error_v6 != "":
         return 1
     return 0
 
@@ -705,60 +795,4 @@ fn _serve_on(bound_listener: TcpListener, address: text, token: text, initialize
 # The owner answers a liveness query within the 1s default; a request it must
 # WORK for (spawn-window starts a ConPTY and a shell, kill-window reaps one)
 # takes seconds on a loaded box, so those callers pass `reply_ms`.
-pub fn smux_server_request(address: text, token: text, command: text) -> Result<text, text>:
-    smux_server_request_within(address, token, command, 1000)
-
-pub fn smux_server_request_within(address: text, token: text, command: text, reply_ms: i64) -> Result<text, text>:
-    if not local_endpoint(address) or not valid_token(token):
-        return Err("invalid smux endpoint or token")
-    if reply_ms < 1000:
-        return Err("invalid smux reply window")
-    val frame = token + " " + command
-    val request_limit = if command.starts_with("runtime-connection-v5 "): CONNECTION_REQUEST_LIMIT_V5 else: REQUEST_LIMIT
-    if text_to_bytes(frame).len() > request_limit or frame.contains("\n") or frame.contains("\r"):
-        return Err("invalid smux request")
-    val connected = TcpStream.connect_timeout(address, 1000)
-    if connected.is_err():
-        return Err("smux owner unavailable")
-    var stream = connected.unwrap()
-    if stream.set_read_timeout(reply_ms).is_err() or stream.set_write_timeout(1000).is_err():
-        val _closed = stream.close()
-        return Err("smux transport timeout unavailable")
-    val deadline = time_now_monotonic_ms() + reply_ms + 4000
-    val request_bytes = text_to_bytes(frame + "\n")
-    var offset: i64 = 0
-    while offset < request_bytes.len() and time_now_monotonic_ms() < deadline:
-        val written = stream.write(request_bytes[offset:])
-        if written.is_err():
-            val _closed = stream.close()
-            return Err("smux request write failed")
-        val count = written.unwrap()
-        if count <= 0:
-            val _closed = stream.close()
-            return Err("smux request write failed")
-        offset = offset + count
-    if offset != request_bytes.len():
-        val _closed = stream.close()
-        return Err("smux request write timeout")
-    var output: [u8] = []
-    while time_now_monotonic_ms() < deadline:
-        val read = stream.read(4096)
-        if read.is_err():
-            val _closed = stream.close()
-            return Err("smux response read failed")
-        if read.is_ok():
-            val chunk = read.unwrap()
-            if chunk.len() == 0:
-                if stream.close().is_err():
-                    return Err("smux response close failed")
-                if output.len() == 0:
-                    return Err("empty smux response")
-                return smux_server_decode_reply(output)
-            output = output + chunk
-            if output.len() > REPLY_LIMIT + 32:
-                val _closed = stream.close()
-                return Err("smux response exceeds limit")
-    val _closed = stream.close()
-    return Err("smux response timeout")
-
-export smux_server_dispatch, smux_server_stop_reply_v1, smux_server_decode_reply, smux_server_serve, smux_server_serve_owner_file, smux_server_serve_runtime_owner_file, smux_server_serve_runtime_domain_v5, smux_server_request, smux_server_request_within
+export smux_server_dispatch, smux_server_stop_reply_v1, smux_server_decode_reply, smux_server_serve, smux_server_serve_owner_file, smux_server_serve_runtime_owner_file, smux_server_serve_runtime_domain_v5, smux_server_serve_runtime_authenticated_v6, smux_server_request, smux_server_request_within
