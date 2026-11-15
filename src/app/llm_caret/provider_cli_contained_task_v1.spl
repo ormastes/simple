@@ -1,0 +1,93 @@
+# AUTHORED_NOT_RUN. Restrictive composition over existing signed Host execution;
+# no bare-host task, grant/deadline factory, copied-runtime-ID or new executor.
+use app.llm_caret.provider_cli_adapter_types_v1.*
+use app.llm_caret.provider_cli_container_probe_v1.{ProviderCliContainedSelectionV1,
+    ProviderCliContainedProbeReceiptV1}
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.{HostServiceDomainV3, HostServiceTurnV3,
+    host_service_domain_effect_constrained_turn_v3}
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.{HostServiceRequestV2,
+    host_service_request_error_v2, host_service_error_payload_v2}
+use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
+use std.nogc_sync_mut.orchestration.host_service_execution_v4.{HostServiceExecutionV4,
+    HostServiceExecutionTurnV4, host_service_execution_begin_constrained_v4, host_service_execution_step_v4}
+use std.nogc_sync_mut.orchestration.host_execution_envelope_v2.host_execution_decode_v2
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_host_scope_bytes_v2}
+use std.common.contracts.container.pre_start_constraint_v1.ContainerPreStartConstraintV1
+
+fn contained_task_scope_v1(domain: HostServiceDomainV3) -> ContainerHostScopeV2:
+    match domain.local:
+        case HostLocalRootV3.Linux(local): local.scope
+        case HostLocalRootV3.Windows(local): local.scope_v3()
+
+fn contained_task_constraint_v1(domain: HostServiceDomainV3, selection: ProviderCliContainedSelectionV1,
+        version_receipt: ProviderCliContainedProbeReceiptV1, request: HostServiceRequestV2,
+        action: ProviderCliRequestDataV1) -> Result<ContainerPreStartConstraintV1, text>:
+    provider_cli_contained_task_constraint_data_v1(contained_task_scope_v1(domain), selection, version_receipt, request, action)
+
+# Restrictive DATA projection for an actual owner composition. A caller scope or
+# matching DTO never supplies Host admission or an installed selection receipt.
+pub fn provider_cli_contained_task_constraint_data_v1(scope: ContainerHostScopeV2,
+        selection: ProviderCliContainedSelectionV1, version_receipt: ProviderCliContainedProbeReceiptV1,
+        request: HostServiceRequestV2, action: ProviderCliRequestDataV1) -> Result<ContainerPreStartConstraintV1, text>:
+    val invalid = host_service_request_error_v2(request)
+    if invalid != "": return Err(invalid)
+    if request.action != "host-execute": return Err("provider-contained-signed-host-execute-required")
+    # Launch-continuation cancellation is not workload interruption/settlement.
+    if action.action == ProviderCliActionV1.Interrupt: return Err("provider-contained-workload-control-owner-required")
+    if action.action == ProviderCliActionV1.Resume: return Err("provider-contained-resume-source-session-owner-required")
+    val version = selection.version_data_v1()
+    val observed = version_receipt.snapshot_v1()
+    if (observed.probe_index != 0 or observed.provider != version.provider or
+            observed.program_binding_digest != selection.binding_digest_v1()):
+        return Err("provider-contained-selection-version-receipt-mismatch")
+    if container_host_scope_bytes_v2(scope)? != container_host_scope_bytes_v2(observed.configuration.scope)?:
+        return Err("provider-contained-selection-host-generation-mismatch")
+    val planned = selection.plan_data_v1(action)?
+    if planned.control != ProviderCliControlDataV1.Argv:
+        return Err("provider-contained-action-has-no-executable-argv")
+    # A stdin payload cannot be supplied by killing/writing an engine transport.
+    # The genuine adopted CoreMux/input issuer route must be composed first.
+    if planned.stdin_text != "": return Err("provider-contained-owned-stdin-continuation-required")
+    var argv: [text] = []
+    for part in observed.program_prefix: argv.push(part)
+    for part in planned.argv: argv.push(part)
+    val envelope = host_execution_decode_v2(request.payload, scope)?
+    if envelope.operation.id != request.operation_id:
+        return Err("provider-contained-signed-operation-mismatch")
+    val baseline = observed.configuration
+    # This DATA only tightens the existing signed packet. The Host re-verifies
+    # its grant and invokes actual config on its own fresh create before start.
+    Ok(ContainerPreStartConstraintV1(request_digest: envelope.execution.plan.request_digest,
+        scope_bytes: container_host_scope_bytes_v2(scope)?, provider_generation: scope.provider_generation,
+        requested_image_ref: baseline.requested_image_ref, requested_image_kind: baseline.requested_image_kind,
+        image_config_id: baseline.image_config_id, primary_argv: argv,
+        working_directory: baseline.working_directory, configured_user: baseline.configured_user,
+        environment_digest: baseline.environment_digest, mounts: [],
+        require_readonly_rootfs: baseline.readonly_rootfs))
+
+# Explicit finite effect-worker entry: Linux and Windows retain their existing
+# synchronous signed Host route. Never invoke this on a control poll callback.
+pub fn provider_cli_contained_task_effect_v1(domain: HostServiceDomainV3,
+        selection: ProviderCliContainedSelectionV1, version_receipt: ProviderCliContainedProbeReceiptV1,
+        request: HostServiceRequestV2, action: ProviderCliRequestDataV1) -> HostServiceTurnV3:
+    val constraint = contained_task_constraint_v1(domain, selection, version_receipt, request, action)
+    if constraint.is_err():
+        return HostServiceTurnV3(domain, 1, host_service_error_payload_v2(request, constraint.unwrap_err(), false))
+    host_service_domain_effect_constrained_turn_v3(domain, request, Some(constraint.unwrap()))
+
+# Cooperative entry is the existing Windows Host continuation. Linux callers
+# use the finite worker entry above; no replacement scheduler is introduced.
+pub fn provider_cli_contained_task_begin_v1(domain: HostServiceDomainV3,
+        selection: ProviderCliContainedSelectionV1, version_receipt: ProviderCliContainedProbeReceiptV1,
+        request: HostServiceRequestV2, action: ProviderCliRequestDataV1) -> HostServiceExecutionTurnV4:
+    val constraint = contained_task_constraint_v1(domain, selection, version_receipt, request, action)
+    if constraint.is_err():
+        return HostServiceExecutionTurnV4(domain, nil,
+            Some(host_service_error_payload_v2(request, constraint.unwrap_err(), false)), 1, constraint.unwrap_err())
+    host_service_execution_begin_constrained_v4(domain, request, Some(constraint.unwrap()))
+
+pub fn provider_cli_contained_launch_step_v1(domain: HostServiceDomainV3,
+        continuation: HostServiceExecutionV4, cancel_launch: bool = false) -> HostServiceExecutionTurnV4:
+    # Retires pending launch helpers through their actual owner, never claims
+    # running-container cancellation or charge settlement from transport exit.
+    host_service_execution_step_v4(domain, continuation, cancel_launch)

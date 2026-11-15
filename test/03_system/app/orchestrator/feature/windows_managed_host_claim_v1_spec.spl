@@ -1,0 +1,98 @@
+# AUTHORED_NOT_RUN. Actual native private roots and real Ed25519 verification.
+# These proof cases do not establish installed machine pin or claim admission.
+# @req REQ-WINDOWS-MANAGED-HOST-001
+# @req REQ-WINDOWS-MANAGED-HOST-002
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.orchestration.host_service_enrollment_proof_v3.*
+use std.nogc_sync_mut.io.windows_private_file_v1.*
+use std.nogc_sync_mut.orchestration.host_service_private_receipt_v2.HostServicePrivateCleanupV2
+use test.fixtures.orchestration.host_windows_deployment_v2.*
+
+
+# Retain immediately, before any read/assertion or fallible close. Successful
+# closes remove only the last matching LIFO owner; failures keep exact tokens.
+var managed_host_fixture_native_cleanup_v1 = HostServicePrivateCleanupV2(files: [], roots: [])
+
+fn managed_host_fixture_native_error_v1(issue: WindowsPrivateErrorV1) -> text:
+    if val file = issue.cleanup_file: managed_host_fixture_native_cleanup_v1.files.push(file)
+    if val root = issue.cleanup_root: managed_host_fixture_native_cleanup_v1.roots.push(root)
+    issue.message
+
+fn managed_host_fixture_root_v1(path: text) -> Result<WindowsPrivateRootV1, text>:
+    match windows_private_root_open_v1(path):
+        case Ok(root):
+            managed_host_fixture_native_cleanup_v1.roots.push(root)
+            Ok(root)
+        case Err(issue): Err(managed_host_fixture_native_error_v1(issue))
+
+fn managed_host_fixture_file_v1(root: WindowsPrivateRootV1, name: text) -> Result<WindowsPrivateFileV1, text>:
+    match root.open_private_file(name, 1048576u64):
+        case Ok(file):
+            managed_host_fixture_native_cleanup_v1.files.push(file)
+            Ok(file)
+        case Err(issue): Err(managed_host_fixture_native_error_v1(issue))
+
+fn managed_host_fixture_close_file_v1(file: WindowsPrivateFileV1) -> bool:
+    var current = file
+    if not current.close(): return false
+    val files = managed_host_fixture_native_cleanup_v1.files
+    managed_host_fixture_native_cleanup_v1.files = files[0:files.len() - 1]
+    true
+
+fn managed_host_fixture_close_root_v1(root: WindowsPrivateRootV1) -> bool:
+    var current = root
+    if not current.close(): return false
+    val roots = managed_host_fixture_native_cleanup_v1.roots
+    managed_host_fixture_native_cleanup_v1.roots = roots[0:roots.len() - 1]
+    true
+
+describe "Actual Windows enrollment proof before managed machine admission":
+    it "refuses a matching issuer with an invalid signature before decoding poisoned provider policy":
+        step("Open an actual protected policy using the native private-file owner")
+        var fixture = windows_deployment_fixture_v2(true)
+        val root = managed_host_fixture_root_v1(fixture.anchor.machine_parent).unwrap()
+        val policy = managed_host_fixture_file_v1(root, "authority-policy.sdn").unwrap()
+        fixture.credential.approval.signature[0] = ((fixture.credential.approval.signature[0] as i64 + 1) % 256) as u8
+        step("Verify the real signature before an issuer string can become proof")
+        val rejected = host_service_enrollment_prepare_proof_v3(root, policy, fixture.binding,
+            fixture.credential, fixture.configuration, fixture.engine, fixture.broker)
+        val policy_closed = managed_host_fixture_close_file_v1(policy)
+        val root_closed = managed_host_fixture_close_root_v1(root)
+        expect(policy_closed).to_equal(true)
+        expect(root_closed).to_equal(true)
+        expect(rejected.is_err()).to_equal(true)
+        expect(rejected.unwrap_err()).to_equal("APPROVAL_SIGNATURE_INVALID")
+
+    it "derives the signed issuer and exact policy digest then invalidates borrowed proof after owner close":
+        step("Verify actual retained policy bytes and an actual signed enrollment")
+        val fixture = windows_deployment_fixture_v2()
+        val root = managed_host_fixture_root_v1(fixture.anchor.machine_parent).unwrap()
+        val policy = managed_host_fixture_file_v1(root, "authority-policy.sdn").unwrap()
+        val prepared = host_service_enrollment_prepare_proof_v3(root, policy, fixture.binding,
+            fixture.credential, fixture.configuration, fixture.engine, fixture.broker)
+        if prepared.is_err():
+            val policy_closed = managed_host_fixture_close_file_v1(policy)
+            val root_closed = managed_host_fixture_close_root_v1(root)
+            expect(policy_closed).to_equal(true)
+            expect(root_closed).to_equal(true)
+            fail("actual enrollment proof required: " + prepared.unwrap_err())
+        val proof = prepared.unwrap()
+        val snapshot = proof.current_v3()
+        step("Close only through the native owner and reject the copied borrowed proof")
+        val policy_closed = managed_host_fixture_close_file_v1(policy)
+        val root_closed = managed_host_fixture_close_root_v1(root)
+        val stale = proof.current_v3()
+        expect(policy_closed).to_equal(true)
+        expect(root_closed).to_equal(true)
+        expect(snapshot.is_ok()).to_equal(true)
+        expect(snapshot.unwrap().issuer_id).to_equal(fixture.credential.signed.issuer_id)
+        expect(snapshot.unwrap().authority_policy_digest).to_equal(fixture.binding.policy_digest)
+        expect(snapshot.unwrap().binding).to_equal(fixture.binding)
+        expect(snapshot.unwrap().provider_generation).to_be_greater_than(0)
+        expect(snapshot.unwrap().recover_only).to_equal(false)
+        expect(stale.is_err()).to_equal(true)
+
+    # REQ-WINDOWS-MANAGED-HOST-003: positive fresh enrollment is blocked by
+    # the real migration-fence genesis gate. The refusal regression is in
+    # windows_host_migration_genesis_guard_v1_spec.spl. Genuine existing-charge
+    # recovery remains NOT_COVERED; never preseed accounting rows as evidence.

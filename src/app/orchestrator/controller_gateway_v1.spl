@@ -1,0 +1,216 @@
+# SSH is authenticated carriage. Installed local controller policy selects the
+# domain; no wire field selects a filesystem root, executable or peer identity.
+use app.io.mod.{file_read_regular_no_follow_bounded, file_is_regular_no_follow}
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use app.orchestrator.local_controller.orchestrator_local_input_command_v1
+use app.orchestrator.execution.orchestrator_execution_input_command_v2
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.nogc_sync_mut.daemon_sdk.local_gateway_protocol_v1.LocalGatewayHeaderV1
+use std.nogc_sync_mut.file_system.metadata.file_mode_bits
+use std.nogc_sync_mut.fs.host_path.host_path_is_absolute
+use app.llm_caret.orchestrator_client.{CaretOrchestratorRequestV1, caret_orchestrator_decode_reply_v1}
+use app.llm_caret.orchestrator_execution_client_v2.{CaretExecutionRequestV2, caret_execution_decode_v2}
+use app.orchestrator.host_identity_exchange_v1.{host_identity_gateway_v1, host_identity_exchange_response_v1}
+use app.orchestrator.host_identity_public_v1.host_identity_public_parse_v1
+
+pub struct ControllerGatewayConfigV1:
+    state_root: text
+    controller_id: text
+    allowed_actions: [text]
+    server_name: text = ""
+    identity_store_root: text = ""
+    server_public_key_path: text = ""
+
+pub struct ControllerGatewayRequestV1:
+    action: text
+    controller_id: text
+    request_uid: text
+    source: text
+    ns: text
+    name: text
+    source_digest: text
+
+fn gateway_fields_v1(source: text, maximum: i64) -> Result<Dict<text, SdnValue>, text>:
+    val limits = SdnStrictLimitsV1(max_source_bytes: maximum, max_depth: 3,
+        max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 16)
+    val parsed = sdn_parse_strict_v1(source, limits)
+    if parsed.is_err(): return Err("controller-gateway-syntax")
+    match parsed.unwrap().value:
+        case SdnValue.Dict(fields): Ok(fields)
+        case _: Err("controller-gateway-object-required")
+
+fn gateway_keys_v1(fields: Dict<text, SdnValue>, keys: [text]) -> Result<(), text>:
+    if fields.len() != keys.len(): return Err("controller-gateway-fields")
+    for key in keys:
+        if not fields.contains_key(key): return Err("controller-gateway-fields")
+    match fields["version"]:
+        case SdnValue.Int(version):
+            if version != 1: return Err("controller-gateway-version")
+        case _: return Err("controller-gateway-version")
+    Ok(())
+
+fn gateway_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("controller-gateway-text:" + key)
+
+pub fn controller_gateway_actions_v1() -> [text]:
+    ["submit", "inspect", "cancel", "dispatch", "resume-execution", "inspect-execution", "identity-register", "identity-server"]
+
+pub fn controller_gateway_config_decode_v1(source: text) -> Result<ControllerGatewayConfigV1, text>:
+    var fields = gateway_fields_v1(source, 16384)?
+    for key in ["serverName", "identityStoreRoot", "serverPublicKeyPath"]:
+        if not fields.contains_key(key): fields[key] = SdnValue.String("")
+    gateway_keys_v1(fields, ["version", "stateRoot", "controllerId", "allowedActions", "serverName", "identityStoreRoot", "serverPublicKeyPath"])?
+    val root = gateway_text_v1(fields, "stateRoot")?
+    val controller = gateway_text_v1(fields, "controllerId")?
+    if not host_path_is_absolute(root) or root.bytes().len() > 4096 or root.contains("\0") or root.contains("\n") or root.contains("\r"):
+        return Err("controller-gateway-root")
+    if not builder_identifier_valid_v1(controller): return Err("controller-gateway-controller")
+    val values = match fields["allowedActions"]:
+        case SdnValue.Array(items): items
+        case _: return Err("controller-gateway-actions")
+    if values.len() == 0 or values.len() > 8: return Err("controller-gateway-actions")
+    var actions: [text] = []
+    for value in values:
+        val action = match value:
+            case SdnValue.String(item): item
+            case _: return Err("controller-gateway-actions")
+        if not controller_gateway_actions_v1().contains(action) or actions.contains(action):
+            return Err("controller-gateway-actions")
+        actions.push(action)
+    val server_name = gateway_text_v1(fields, "serverName")?
+    val identity_root = gateway_text_v1(fields, "identityStoreRoot")?
+    val server_public_key_path = gateway_text_v1(fields, "serverPublicKeyPath")?
+    if actions.contains("identity-register") or actions.contains("identity-server"):
+        if not builder_identifier_valid_v1(server_name) or not host_path_is_absolute(identity_root) or
+                not host_path_is_absolute(server_public_key_path): return Err("controller-gateway-identity-profile")
+    Ok(ControllerGatewayConfigV1(state_root: root, controller_id: controller, allowed_actions: actions,
+        server_name: server_name, identity_store_root: identity_root, server_public_key_path: server_public_key_path))
+
+pub fn controller_gateway_config_load_v1(path: text) -> Result<ControllerGatewayConfigV1, text>:
+    if not host_path_is_absolute(path) or not file_is_regular_no_follow(path): return Err("controller-gateway-profile-path")
+    val mode = file_mode_bits(path)
+    if mode < 0 or (mode & 0o400) == 0 or (mode & 0o7077) != 0: return Err("controller-gateway-profile-private-required")
+    val config = controller_gateway_config_decode_v1(file_read_regular_no_follow_bounded(path, 16384)?)?
+    if file_mode_bits(config.state_root) != 0o700: return Err("controller-gateway-root-private-required")
+    Ok(config)
+
+pub fn controller_gateway_request_decode_v1(source: text) -> Result<ControllerGatewayRequestV1, text>:
+    val fields = gateway_fields_v1(source, 2097152)?
+    gateway_keys_v1(fields, ["version", "action", "controllerId", "requestUid", "source", "namespace", "name", "sourceDigest"])?
+    val request = ControllerGatewayRequestV1(action: gateway_text_v1(fields, "action")?,
+        controller_id: gateway_text_v1(fields, "controllerId")?, request_uid: gateway_text_v1(fields, "requestUid")?,
+        source: gateway_text_v1(fields, "source")?, ns: gateway_text_v1(fields, "namespace")?,
+        name: gateway_text_v1(fields, "name")?, source_digest: gateway_text_v1(fields, "sourceDigest")?)
+    if not controller_gateway_actions_v1().contains(request.action): return Err("controller-gateway-action")
+    if not builder_identifier_valid_v1(request.controller_id) or not builder_identifier_valid_v1(request.request_uid):
+        return Err("controller-gateway-identity")
+    if request.action == "submit":
+        if request.source.bytes().len() == 0 or request.source.bytes().len() > 1048576 or
+                not builder_identifier_valid_v1(request.ns) or not builder_identifier_valid_v1(request.name) or request.source_digest != "":
+            return Err("controller-gateway-submit-fields")
+    elif request.action == "identity-register" or request.action == "identity-server":
+        if request.ns != "" or not builder_identifier_valid_v1(request.name) or request.source_digest != "":
+            return Err("controller-gateway-identity-fields")
+        if (request.action == "identity-register" and (request.source == "" or request.source.bytes().len() > 16384)) or
+                (request.action == "identity-server" and request.source != ""):
+            return Err("controller-gateway-identity-fields")
+    elif request.action == "dispatch" or request.action == "resume-execution":
+        if request.source == "" or request.ns != "" or request.name != "" or request.source_digest != "":
+            return Err("controller-gateway-execution-fields")
+    else:
+        if request.source != "" or request.ns != "" or request.name != "": return Err("controller-gateway-unused-fields")
+        if request.action == "cancel":
+            if not builder_digest_valid_v1(request.source_digest): return Err("controller-gateway-cancel-digest")
+        elif request.source_digest != "": return Err("controller-gateway-unused-fields")
+    Ok(request)
+
+pub fn controller_gateway_request_encode_v1(request: ControllerGatewayRequestV1) -> Result<text, text>:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "action": SdnValue.String(request.action),
+        "controllerId": SdnValue.String(request.controller_id), "requestUid": SdnValue.String(request.request_uid),
+        "source": SdnValue.String(request.source), "namespace": SdnValue.String(request.ns),
+        "name": SdnValue.String(request.name), "sourceDigest": SdnValue.String(request.source_digest)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    val checked = controller_gateway_request_decode_v1(source)?
+    Ok(source)
+
+pub fn controller_gateway_header_v1(source: text) -> Result<LocalGatewayHeaderV1, text>:
+    val request = controller_gateway_request_decode_v1(source)?
+    Ok(LocalGatewayHeaderV1(response: false, request_id: sha256_text(source), action: request.action,
+        operation_id: request.request_uid, exit_code: 0, payload_bytes: source.bytes().len(), handoff_metadata: ""))
+
+pub fn controller_gateway_authorize_v1(config: ControllerGatewayConfigV1,
+        header: LocalGatewayHeaderV1, source: text) -> Result<ControllerGatewayRequestV1, text>:
+    val request = controller_gateway_request_decode_v1(source)?
+    if header.response or header.request_id != sha256_text(source) or header.action != request.action or
+            header.operation_id != request.request_uid or header.payload_bytes != source.bytes().len() or
+            header.exit_code != 0 or header.handoff_metadata != "": return Err("controller-gateway-frame-correlation")
+    if request.controller_id != config.controller_id: return Err("controller-gateway-controller-mismatch")
+    if not config.allowed_actions.contains(request.action): return Err("controller-gateway-action-denied")
+    Ok(request)
+
+pub fn controller_gateway_dispatch_v1(config: ControllerGatewayConfigV1,
+        header: LocalGatewayHeaderV1, source: text) -> Result<OrchestratorValidationReplyV1, text>:
+    val request = controller_gateway_authorize_v1(config, header, source)?
+    if request.action == "identity-register" or request.action == "identity-server":
+        if request.name != config.server_name: return Err("controller-gateway-server-name-mismatch")
+        return Ok(host_identity_gateway_v1(request.action, config.controller_id, request.request_uid,
+            config.server_name, config.identity_store_root, config.server_public_key_path, request.source))
+    var args = [request.action, config.state_root, config.controller_id, request.request_uid]
+    if request.action == "submit":
+        args = args + ["framed-source", request.ns, request.name]
+    elif request.action == "cancel": args.push(request.source_digest)
+    elif request.action == "dispatch" or request.action == "resume-execution": args.push("framed-packet")
+    if ["dispatch", "resume-execution", "inspect-execution"].contains(request.action):
+        return Ok(orchestrator_execution_input_command_v2(args, Some(request.source)))
+    Ok(orchestrator_local_input_command_v1(args, Some(request.source)))
+
+# Fixed paths satisfy the existing decode-only API's local request shape;
+# these calls never execute a process or access those paths.
+pub fn controller_gateway_response_v1(request_source: text, response: text) -> Result<text, text>:
+    val request = controller_gateway_request_decode_v1(request_source)?
+    if request.action == "identity-register" or request.action == "identity-server":
+        val checked = host_identity_exchange_response_v1(request.action, request.controller_id, request.request_uid, request.name, response)?
+        val fields = gateway_fields_v1(response, 16384)?
+        if request.action == "identity-register":
+            val uploaded = host_identity_public_parse_v1(request.source)?
+            if gateway_text_v1(fields, "clientPublicKey")? != uploaded.public_key:
+                return Err("controller-identity-upload-mismatch")
+        # The public-key validator returns one key, but the caller needs the
+        # complete validated pending-grant receipt and durability fields.
+        return Ok(sdn_encode_canonical(SdnValue.Dict(fields)))
+    if ["dispatch", "resume-execution", "inspect-execution"].contains(request.action):
+        val packet_path = if request.action == "inspect-execution": "" else: "/transport-packet"
+        val shape = CaretExecutionRequestV2(executable: "/transport-decoder", action: request.action,
+            state_root: "/transport-state", controller_id: request.controller_id,
+            request_uid: request.request_uid, packet_path: packet_path)
+        val checked = caret_execution_decode_v2(shape, response, "", 0)
+        if not checked.confirmed: return Err(checked.code)
+        return Ok(checked.output)
+    if request.action == "cancel":
+        val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+            "kind": SdnValue.String("orchestrator-local-controller"),
+            "controllerId": SdnValue.String(request.controller_id), "requestUid": SdnValue.String(request.request_uid),
+            "executionAuthorized": SdnValue.Bool(false), "status": SdnValue.String("intent-cancelled"),
+            "sourceDigest": SdnValue.String(request.source_digest), "terminationObserved": SdnValue.Bool(false)}
+        val actual = gateway_fields_v1(response, 65536)?
+        if sdn_encode_canonical(SdnValue.Dict(actual)) != sdn_encode_canonical(SdnValue.Dict(fields)):
+            return Err("controller-cancellation-reply-mismatch")
+        return Ok(sdn_encode_canonical(SdnValue.Dict(actual)))
+    val source_path = if request.action == "submit": "/transport-source" else: ""
+    val shape = CaretOrchestratorRequestV1(executable: "/transport-decoder", action: request.action,
+        state_root: "/transport-state", controller_id: request.controller_id, request_uid: request.request_uid,
+        source_path: source_path, ns: request.ns, name: request.name)
+    val checked = caret_orchestrator_decode_reply_v1(shape, response, "", 0)
+    if not checked.confirmed: return Err(checked.code)
+    if request.action == "submit":
+        val fields = gateway_fields_v1(checked.output, 65536)?
+        if gateway_text_v1(fields, "sourceDigest")? != sha256_text(request.source):
+            return Err("controller-submit-source-digest-mismatch")
+    Ok(checked.output)

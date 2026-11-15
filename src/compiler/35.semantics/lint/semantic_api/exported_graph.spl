@@ -40,6 +40,9 @@ use compiler.core.ast.{
     decl_get_field_visibility, decl_get_visibility_text, decl_get_imports,
     decl_get_body, decl_get_span
 }
+use compiler.semantics.lint.semantic_api.package_manifest.{
+    semantic_api_manifest_parse, semantic_api_manifest_governs, semantic_api_manifest_names
+}
 use compiler.core.types.{span_is_valid, span_line}
 use compiler.semantics.lint.semantic_api.tag_walk.{
     TagLeaf, semantic_api_tag_memo_reset, semantic_api_tag_alias_register,
@@ -81,6 +84,9 @@ class _ExportedGraph:
     type_decl_by_name: Dict<text, i64>
     # effectively public names (pub, exported, or reached from a public surface)
     effective_public: Dict<text, bool>
+    # package `__init__.spl` narrows exports: only `pkg_names` are public
+    pkg_filter: bool
+    pkg_names: Dict<text, bool>
     # (decl, ctx) visited set
     visited: Dict<text, bool>
     findings: [SemanticApiFinding]
@@ -101,6 +107,9 @@ fn _is_pub_text(vis: text) -> bool:
     vis != "" and vis != "private"
 
 fn _graph_is_public(g: _ExportedGraph, idx: i64) -> bool:
+    if g.pkg_filter:
+        val pname = decl_get_name(idx)
+        return pname != "" and (g.pkg_names.contains_key(pname) or g.effective_public.contains_key(pname))
     if g.export_all:
         return true
     if _is_pub_text(decl_get_visibility_text(idx)):
@@ -194,7 +203,11 @@ fn _check_alias_decl(g: _ExportedGraph, idx: i64):
     # An alias reached only by PROMOTION (a public fn names it) is already
     # reported at every use site with the alias in the path; report the
     # alias itself only when it is exported in its own right.
-    if not (g.export_all or _is_pub_text(decl_get_visibility_text(idx)) or g.exported_names.contains_key(decl_get_name(idx))):
+    val own_right = if g.pkg_filter:
+        g.pkg_names.contains_key(decl_get_name(idx))
+    else:
+        g.export_all or _is_pub_text(decl_get_visibility_text(idx)) or g.exported_names.contains_key(decl_get_name(idx))
+    if not own_right:
         return
     val key = "{idx}:pub"
     if g.visited.contains_key(key):
@@ -264,10 +277,21 @@ fn _walk_public_roots(g: _ExportedGraph) -> bool:
 fn check_semantic_api_decls(decls: [i64]) -> [SemanticApiFinding]:
     """Entry point for the live lint: every primitive leaf reachable from this
     module's effectively exported type graph, one finding per type path."""
+    check_semantic_api_decls_for_package(decls, "", "")
+
+fn check_semantic_api_decls_for_package(decls: [i64], module_stem: text, manifest_text: text) -> [SemanticApiFinding]:
+    """Same walk, narrowed by the package `__init__.spl` text: when the manifest
+    names `module_stem` (export use names, or a private `mod`), only the
+    exported names are public, whether or not they are `pub` in the file."""
     semantic_api_tag_memo_reset()
     var g = _ExportedGraph(
         decls: decls, export_all: false, exported_names: {}, type_decl_by_name: {},
-        effective_public: {}, visited: {}, findings: [])
+        effective_public: {}, pkg_filter: false, pkg_names: {}, visited: {}, findings: [])
+    if module_stem != "" and manifest_text != "":
+        val manifest = semantic_api_manifest_parse(manifest_text)
+        if semantic_api_manifest_governs(manifest, module_stem):
+            g.pkg_filter = true
+            g.pkg_names = semantic_api_manifest_names(manifest, module_stem)
     # Pass 0: export surface, in-file type index, alias map.
     for idx in decls:
         val tag = decl_get_tag(idx)
@@ -305,7 +329,7 @@ fn semantic_api_findings_boundary(findings: [SemanticApiFinding]) -> [SemanticAp
     out
 
 export SemanticApiFinding
-export check_semantic_api_decls
+export check_semantic_api_decls, check_semantic_api_decls_for_package
 export semantic_api_findings_non_boundary, semantic_api_findings_boundary
 
 fn _display_name(name: text) -> text:

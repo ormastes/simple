@@ -812,3 +812,63 @@ main = 1
     let result = run_code(code, &[], "");
     assert!(result.is_err());
 }
+
+// ============= Canonical constructible `unit Name: T [as suffix]` =============
+
+#[test]
+fn interpreter_unit_decl_constructible_with_suffix() {
+    let code = r#"
+unit ByteCount: u64 as Bc
+
+val b = ByteCount(value: 7)
+main = b.value
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 7);
+}
+
+#[test]
+fn interpreter_unit_decl_constructible_without_suffix() {
+    let code = r#"
+unit BitCount: u64
+
+val n = BitCount(value: 56)
+main = n.value
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 56);
+}
+
+#[test]
+fn interpreter_unit_decl_suffix_literal_still_works_with_constructor() {
+    let code = r#"
+unit UserId: i64 as uid
+
+val a = UserId(value: 5)
+let b = 42_uid
+main = a.value
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 5);
+}
+
+#[test]
+fn interpreter_unit_decl_same_unit_arithmetic() {
+    let run = |expr: &str| {
+        let code = format!(
+            "unit ByteCount: u64 as Bc\n\nval a = ByteCount(value: 12)\nval b = ByteCount(value: 4)\nmain = {}\n",
+            expr
+        );
+        run_code(&code, &[], "").unwrap().exit_code
+    };
+    assert_eq!(run("(a + b).value"), 16);
+    assert_eq!(run("(a - b).value"), 8);
+    assert_eq!(run("(a * 3).value"), 36);
+    assert_eq!(run("(3 * a).value"), 36);
+    assert_eq!(run("(a / 2).value"), 6);
+    // U / U and U * U give the bare scalar, not the unit.
+    assert_eq!(run("a / b"), 3);
+    assert_eq!(run("a * b"), 48);
+    assert_eq!(run("if a < b: 1 else: 0"), 0);
+    assert_eq!(run("if b < a: 1 else: 0"), 1);
+}

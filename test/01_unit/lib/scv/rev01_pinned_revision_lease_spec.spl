@@ -1,18 +1,24 @@
 """REV-01 (immutable views plan 2026-11-13, section 10): old pinned readers stay stable.
 
 An editor process holds several retained document revisions while newer
-revisions are published. The reclamation hook is the SCV per-reader lease
-(`scv_compile_snapshot_lease_*`); a pinned revision must survive eviction and
-be reclaimed only after its lease is released.
+revisions are published. A build keeps ONE moving reader lease
+(`scv_compile_snapshot_lease_acquire_v1`); a process that holds several
+revisions at once (the LSP) pins each one by name
+(`scv_compile_snapshot_lease_pin_v1` / `..._unpin_v1`, owner decision REV-01
+option 1). A pinned revision survives eviction and is reclaimed after unpin.
+Pins are capped per process (`SIMPLE_SCV_PIN_MAX`, default 16): a pin beyond
+the cap is refused, never evicting another pin.
 """
 
 use std.spec.*
 use std.scv.compile_snapshot.{scv_compile_snapshot_provenance_v1,
     scv_compile_snapshot_receipt_v1, scv_compile_snapshot_retain_newest_v1,
-    scv_compile_snapshot_lease_acquire_v1, scv_compile_snapshot_lease_release_v1}
+    scv_compile_snapshot_lease_acquire_v1, scv_compile_snapshot_lease_release_v1,
+    scv_compile_snapshot_lease_pin_v1, scv_compile_snapshot_lease_unpin_v1,
+    scv_compile_snapshot_pin_warning_v1}
 use app.io.mod.{dir_create}
 use app.io.file_ops.{path_absolute}
-use std.nogc_sync_mut.io_runtime.{file_write, dir_exists}
+use std.nogc_sync_mut.io_runtime.{file_write, dir_exists, file_exists, env_set}
 
 extern fn rt_getpid() -> i64
 
@@ -31,6 +37,7 @@ fn _fixture(label: text, names: [text]) -> text:
 fn _alive(cache: text, name: text) -> bool: dir_exists(cache + "/snapshots/" + name)
 
 describe "REV-01 pinned revision reclamation":
+    # @req REV-01
     it "keeps one pinned old revision through several newer publishes and reclaims it after release":
         val cache = _fixture("one", [_rev("a"), _rev("b"), _rev("c"), _rev("d")])
         file_write(cache + "/receipts/" + _rev("a") + ".used", "1")
@@ -42,12 +49,67 @@ describe "REV-01 pinned revision reclamation":
         expect(scv_compile_snapshot_retain_newest_v1(cache, _rev("d"), 1, 0)).to_equal(1)
         expect(_alive(cache, _rev("a"))).to_equal(false)
 
+    # @req REV-01
     it "keeps every revision one reader process pins at the same time (several retained documents)":
+        step("pin two old revisions, then publish and sweep down to one")
         val cache = _fixture("two", [_rev("a"), _rev("b"), _rev("c"), _rev("d")])
         file_write(cache + "/receipts/" + _rev("a") + ".used", "1")
         file_write(cache + "/receipts/" + _rev("b") + ".used", "1")
-        scv_compile_snapshot_lease_acquire_v1(cache, _rev("a"))
-        scv_compile_snapshot_lease_acquire_v1(cache, _rev("b"))
-        discard scv_compile_snapshot_retain_newest_v1(cache, _rev("d"), 1, 0)
+        expect(scv_compile_snapshot_lease_pin_v1(cache, _rev("a")).is_ok()).to_equal(true)
+        expect(scv_compile_snapshot_lease_pin_v1(cache, _rev("b")).is_ok()).to_equal(true)
+        val _ignored = scv_compile_snapshot_retain_newest_v1(cache, _rev("d"), 1, 0)
         expect(_alive(cache, _rev("a"))).to_equal(true)
         expect(_alive(cache, _rev("b"))).to_equal(true)
+        expect(_alive(cache, _rev("c"))).to_equal(false)
+
+    # @req REV-01
+    it "reclaims a revision once it is unpinned, keeping the other pin":
+        val cache = _fixture("unpin", [_rev("a"), _rev("b"), _rev("d")])
+        file_write(cache + "/receipts/" + _rev("a") + ".used", "1")
+        file_write(cache + "/receipts/" + _rev("b") + ".used", "1")
+        val _ignored = scv_compile_snapshot_lease_pin_v1(cache, _rev("a"))
+        val _ignored = scv_compile_snapshot_lease_pin_v1(cache, _rev("b"))
+        scv_compile_snapshot_lease_unpin_v1(cache, _rev("a"))
+        expect(scv_compile_snapshot_retain_newest_v1(cache, _rev("d"), 1, 0)).to_equal(1)
+        expect(_alive(cache, _rev("a"))).to_equal(false)
+        expect(_alive(cache, _rev("b"))).to_equal(true)
+        scv_compile_snapshot_lease_unpin_v1(cache, _rev("b"))
+
+    # @req REV-01
+    it "refuses a pin beyond the per-process cap without evicting an existing pin":
+        env_set("SIMPLE_SCV_PIN_MAX", "2")
+        val cache = _fixture("cap", [_rev("a"), _rev("b"), _rev("c")])
+        expect(scv_compile_snapshot_lease_pin_v1(cache, _rev("a")).is_ok()).to_equal(true)
+        expect(scv_compile_snapshot_lease_pin_v1(cache, _rev("b")).is_ok()).to_equal(true)
+        expect(scv_compile_snapshot_lease_pin_v1(cache, _rev("a")).is_ok()).to_equal(true)
+        expect(scv_compile_snapshot_lease_pin_v1(cache, _rev("c")).is_err()).to_equal(true)
+        val pid = rt_getpid()
+        expect(file_exists(cache + "/receipts/" + _rev("a") + ".pin.{pid}")).to_equal(true)
+        expect(file_exists(cache + "/receipts/" + _rev("b") + ".pin.{pid}")).to_equal(true)
+        expect(file_exists(cache + "/receipts/" + _rev("c") + ".pin.{pid}")).to_equal(false)
+        expect(scv_compile_snapshot_pin_warning_v1(cache)).to_contain("cap")
+        env_set("SIMPLE_SCV_PIN_MAX", "")
+
+    # @req REV-01
+    it "warns when this process's pins exceed SIMPLE_SCV_SNAPSHOT_MAX":
+        env_set("SIMPLE_SCV_SNAPSHOT_MAX", "1")
+        val cache = _fixture("warn", [_rev("a"), _rev("b")])
+        val _ignored = scv_compile_snapshot_lease_pin_v1(cache, _rev("a"))
+        expect(scv_compile_snapshot_pin_warning_v1(cache)).to_equal("")
+        val _ignored = scv_compile_snapshot_lease_pin_v1(cache, _rev("b"))
+        expect(scv_compile_snapshot_pin_warning_v1(cache)).to_contain("SIMPLE_SCV_SNAPSHOT_MAX")
+        env_set("SIMPLE_SCV_SNAPSHOT_MAX", "")
+
+    # @req REV-01
+    it "leaves the build lease unchanged: acquire still moves the one lease and ignores pins (off-identity)":
+        val cache = _fixture("build", [_rev("a"), _rev("b"), _rev("c")])
+        val pid = rt_getpid()
+        val _ignored = scv_compile_snapshot_lease_pin_v1(cache, _rev("c"))
+        scv_compile_snapshot_lease_acquire_v1(cache, _rev("a"))
+        scv_compile_snapshot_lease_acquire_v1(cache, _rev("b"))
+        expect(file_exists(cache + "/receipts/" + _rev("a") + ".lease.{pid}")).to_equal(false)
+        expect(file_exists(cache + "/receipts/" + _rev("b") + ".lease.{pid}")).to_equal(true)
+        expect(file_exists(cache + "/receipts/" + _rev("c") + ".pin.{pid}")).to_equal(true)
+        scv_compile_snapshot_lease_release_v1(cache, _rev("b"))
+        expect(file_exists(cache + "/receipts/" + _rev("c") + ".pin.{pid}")).to_equal(true)
+        scv_compile_snapshot_lease_unpin_v1(cache, _rev("c"))

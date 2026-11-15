@@ -1,0 +1,91 @@
+# Runner for `simple trace matrix|links|explain|diff|report`.
+# Exit codes: 0 complete and clean; 1 a link issue or unknown id; 2 incomplete
+# graph, uncertified profile, or invalid input. Incomplete wins over 1.
+use std.common.traceability.query_missing_v1.{TraceRequirementCountV1}
+use std.common.traceability.query_status_v1.{TracePassingEvidenceV1, TraceCommandVerdictV1}
+use std.common.traceability.query_matrix_v1.{trace_matrix_v1}
+use std.common.traceability.query_links_v1.{trace_links_check_v1}
+use std.common.traceability.query_explain_v1.{trace_explain_requirement_v1}
+use std.common.traceability.query_diff_v1.{trace_diff_v1}
+use std.common.traceability.query_report_v1.{trace_report_v1}
+use app.traceability.query_options_v1.{trace_query_sdn_requested_v1}
+use app.traceability.query_snapshot_v1.{trace_query_build_snapshot_v1}
+use app.traceability.query_render_v1.{trace_query_error_v1}
+use app.traceability.query_cmds_options_v1.{TraceCmdKindV1, TraceCmdOptionsV1, trace_cmd_options_parse_v1, trace_cmd_help_v1}
+use app.traceability.query_cmds_render_v1.{trace_cmd_render_matrix_v1, trace_cmd_render_links_v1,
+    trace_cmd_render_explain_v1, trace_cmd_render_diff_v1, trace_cmd_render_report_v1}
+
+# Block form on purpose; see query_main.spl query_print_v1.
+fn cmd_print_v1(output: text):
+    if output.ends_with("\n"):
+        print output.substring(0, output.byte_len() - 1)
+    else:
+        print output
+
+fn cmd_exit_v1(verdict: TraceCommandVerdictV1, issue_found: bool) -> i64:
+    if verdict == TraceCommandVerdictV1.Incomplete: return 2
+    if issue_found: return 1
+    0
+
+pub struct TraceCmdExitV1:
+    value: i64
+
+pub fn run_trace_cmd_v1(args: [text]) -> TraceCmdExitV1:
+    TraceCmdExitV1(value: run_trace_cmd_code_v1(args))
+
+fn run_trace_cmd_code_v1(args: [text]) -> i64:
+    if args.len() == 2 and (args[1] == "--help" or args[1] == "-h"):
+        cmd_print_v1(trace_cmd_help_v1())
+        return 0
+    val options = match trace_cmd_options_parse_v1(args):
+        case Ok(value): value
+        case Err(reason):
+            val format = if trace_query_sdn_requested_v1(args): "sdn" else: "table"
+            cmd_print_v1(trace_query_error_v1(reason, "unresolved", format))
+            return 2
+    val build = match trace_query_build_snapshot_v1(options.query):
+        case Ok(value): value
+        case Err(reason):
+            cmd_print_v1(trace_query_error_v1(reason, options.query.snapshot, options.query.format))
+            return 2
+    # No trusted run source is wired to the CLI yet, so no requirement can reach
+    # Verified from here (doc/08_tracking/bug/trace_cmds_no_passing_evidence_source_2026-11-15.md).
+    val evidence: [TracePassingEvidenceV1] = []
+    val graph = build.graph
+    match options.command:
+        case TraceCmdKindV1.Matrix:
+            val result = trace_matrix_v1(graph, build.sidecar_references, evidence, options.rows, options.cols, options.profile)
+            cmd_print_v1(trace_cmd_render_matrix_v1(result, options))
+            return cmd_exit_v1(result.verdict, false)
+        case TraceCmdKindV1.Links:
+            val result = trace_links_check_v1(graph, build.sidecar_references, evidence, options.profile)
+            cmd_print_v1(trace_cmd_render_links_v1(result, options))
+            return cmd_exit_v1(result.verdict, result.issues.len() > 0)
+        case TraceCmdKindV1.Explain:
+            val id = options.requirement.unwrap()
+            match trace_explain_requirement_v1(graph, build.sidecar_references, evidence, id, options.profile):
+                case Some(result):
+                    cmd_print_v1(trace_cmd_render_explain_v1(result, options))
+                    return cmd_exit_v1(result.verdict, false)
+                case None:
+                    cmd_print_v1(trace_query_error_v1("TRACE-QUERY-NOT-FOUND: no requirement " + id.value,
+                        graph.subject.snapshot_id, options.query.format, true))
+                    return 1
+        case TraceCmdKindV1.Diff:
+            val base_options = options.base.unwrap()
+            val base_build = match trace_query_build_snapshot_v1(base_options):
+                case Ok(value): value
+                case Err(reason):
+                    cmd_print_v1(trace_query_error_v1(reason, base_options.snapshot, options.query.format))
+                    return 2
+            val result = trace_diff_v1(base_build.graph, base_build.sidecar_references, evidence,
+                graph, build.sidecar_references, evidence, options.profile)
+            cmd_print_v1(trace_cmd_render_diff_v1(result, options))
+            return cmd_exit_v1(result.verdict, false)
+        case TraceCmdKindV1.Report:
+            val result = trace_report_v1(graph, build.sidecar_references, evidence, options.profile,
+                TraceRequirementCountV1(value: options.query.limit))
+            cmd_print_v1(trace_cmd_render_report_v1(result, options))
+            return cmd_exit_v1(result.verdict, false)
+    2
+

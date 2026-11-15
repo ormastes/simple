@@ -1,0 +1,127 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+#
+# Reproducer for the seed-interpreter report that a function whose LAST
+# expression is `match raw.parse_int():` (Some/None arms) returned a wrong,
+# shared-looking value, while binding the Option first returned the right one.
+# Each form is called repeatedly with different inputs so a "second call
+# returns the first call's value" defect would show.
+# Record: doc/08_tracking/bug/2026-11-15_seed_tail_match_parse_int_wrong_value.md
+
+use std.spec.step
+
+fn tail_form(raw: text) -> i64:
+    match raw.parse_int():
+        case Some(n): n * 2 + 1
+        case None: -7
+
+fn bound_form(raw: text) -> i64:
+    val parsed = raw.parse_int()
+    match parsed:
+        case Some(n): n * 2 + 1
+        case None: -7
+
+fn val_form(raw: text) -> i64:
+    val out = match raw.parse_int():
+        case Some(n): n * 2 + 1
+        case None: -7
+    out
+
+struct Parser:
+    bias: i64
+
+    fn tail(raw: text) -> i64:
+        match raw.parse_int():
+            case Some(n): n + self.bias
+            case _: 0 - self.bias
+
+describe "tail-position match on parse_int":
+    it "returns each call's own value (tail form)":
+        step("call with 5, 20, bad, 5 again")
+        assert_equal(tail_form("5"), 11)
+        assert_equal(tail_form("20"), 41)
+        assert_equal(tail_form("bad"), -7)
+        assert_equal(tail_form("5"), 11)
+
+    it "returns each call's own value (bound form)":
+        step("same inputs through a bound Option")
+        assert_equal(bound_form("5"), 11)
+        assert_equal(bound_form("20"), 41)
+        assert_equal(bound_form("bad"), -7)
+        assert_equal(bound_form("5"), 11)
+
+    it "returns each call's own value (val-bound match result)":
+        step("same inputs through a val-bound match")
+        assert_equal(val_form("5"), 11)
+        assert_equal(val_form("20"), 41)
+        assert_equal(val_form("bad"), -7)
+
+    it "returns each call's own value for a method with a wildcard arm":
+        step("method tail match, loop over inputs")
+        val p = Parser(bias: 100)
+        var got: [i64] = []
+        for s in ["1", "2", "x", "3"]:
+            got.push(p.tail(s))
+        assert_equal(got, [101, 102, -100, 103])
+
+struct Parsed:
+    value: i64
+    ok: bool
+
+fn wrapped_tail(raw: text) -> Parsed:
+    match raw.trim().parse_int():
+        case Some(n): Parsed(value: n, ok: true)
+        case None: Parsed(value: 0, ok: false)
+
+fn checked(raw: text) -> Result<i64, text>:
+    match raw.parse_int():
+        case Some(n): Ok(n)
+        case None: Err("bad:" + raw)
+
+fn result_tail(raw: text) -> i64:
+    match checked(raw):
+        case Ok(n): n * 3
+        case Err(e): e.len()
+
+describe "tail-position match variants":
+    it "keeps wrapper-struct results distinct across calls with padded text":
+        step("trim then parse, three calls")
+        val a = wrapped_tail("  8 ")
+        val b = wrapped_tail("9")
+        val c = wrapped_tail("zz")
+        assert_equal(a.value, 8)
+        assert_equal(b.value, 9)
+        assert_equal(c.ok, false)
+        assert_equal(a.value, 8)
+
+    it "keeps Ok/Err tail matches distinct across calls":
+        step("Result-returning helper matched in tail position")
+        assert_equal(result_tail("4"), 12)
+        assert_equal(result_tail("nope"), 8)
+        assert_equal(result_tail("6"), 18)
+
+fn tail_i64(raw: text) -> i64:
+    match raw.parse_i64():
+        case Some(n): n * 2 + 1
+        case None: -7
+
+fn bound_i64(raw: text) -> i64:
+    val parsed = raw.parse_i64()
+    match parsed:
+        case Some(n): n * 2 + 1
+        case None: -7
+
+describe "tail-position match on the parse_i64 method":
+    it "returns each call's own value (tail form)":
+        step("parse_i64 tail match, four calls")
+        assert_equal(tail_i64("5"), 11)
+        assert_equal(tail_i64("20"), 41)
+        assert_equal(tail_i64("bad"), -7)
+        assert_equal(tail_i64("5"), 11)
+
+    it "returns each call's own value (bound form)":
+        step("parse_i64 bound match, four calls")
+        assert_equal(bound_i64("5"), 11)
+        assert_equal(bound_i64("20"), 41)
+        assert_equal(bound_i64("bad"), -7)
+        assert_equal(bound_i64("5"), 11)

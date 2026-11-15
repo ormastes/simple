@@ -113,7 +113,11 @@ pub fn engine2d_vulkan_font_batch_admits(status: text, quad_count: i64,
     nothing was recorded. "promoted" is an executed batch whose oracle
     parity and stage evidence were proven (`_vulkan_font_completion`); before
     it was admitted, the best outcome demoted the frame to the CPU lane.
+    "clipped-out" is the one zero-dispatch success: every quad lay outside the
+    clip rect, so there was nothing to draw (`composite_font_batch`).
     """
+    if status == "clipped-out":
+        return quad_count == batch_quads
     (status == "executed" or status == "recorded" or status == "promoted") and
         quad_count == batch_quads and dispatch_count > 0
 
@@ -201,7 +205,8 @@ pub fn engine2d_composite_region_milli(src: [u32], fb: [u32], fb_width: i32, fb_
                                    opacity_milli: i32) -> [u32]:
     """Canonical opacity_milli readback composite, per channel:
         a8  = opacity_milli * 255 / 1000            (floor)
-        out = (src*a8 + dst*(256 - a8)) >> 8        (truncate)
+        ea  = src_alpha * a8 / 255                   (floor; == a8 when opaque)
+        out = (src*ea + dst*(256 - ea)) >> 8        (truncate)
     This single truncating >>8 contract is what the spec oracles pin
     (half 500 -> 63, inactive 930 -> 117 for src=127 over dst=0); both the
     exact-/255 blend and a milli /1000 floor land one HIGH at 930 (118), and
@@ -209,7 +214,6 @@ pub fn engine2d_composite_region_milli(src: [u32], fb: [u32], fb_width: i32, fb_
     alpha-scale + draw_image_blend double-blend (see
     doc/08_tracking/bug/engine2d_parent_sampling_embed_opacity_one_ulp_parity_2026-08-16.md)."""
     val a8 = (opacity_milli * 255) / 1000
-    val inv8 = 256 - a8
     # i64 product: the i32 multiply wraps past ~46341^2 (same guard as
     # compositor.spl Layer.create). Only w*h entries are ever written here and
     # the sole caller (draw_ir_composite_readback) guarantees
@@ -228,10 +232,17 @@ pub fn engine2d_composite_region_milli(src: [u32], fb: [u32], fb_width: i32, fb_
             var d = 0u32
             if fx >= 0 and fx < fb_width and fy >= 0 and fy < fb_height:
                 d = fb[(fy * fb_width + fx).to_i64()]
-            val r = (color_r(s) * a8 + color_r(d) * inv8) >> 8
-            val g = (color_g(s) * a8 + color_g(d) * inv8) >> 8
-            val b = (color_b(s) * a8 + color_b(d) * inv8) >> 8
-            val a = (color_a(s) * a8 + color_a(d) * inv8) >> 8
+            # The layer's own per-pixel alpha scales the group opacity: a
+            # transparent child pixel leaves the parent untouched. ece10b378c8
+            # dropped this (the replaced alpha-scale path kept it), so a
+            # full-viewport opacity layer darkened every uncovered pixel.
+            # An opaque source keeps ea == a8, the pinned oracle values.
+            val ea = (color_a(s) * a8) / 255
+            val inv = 256 - ea
+            val r = (color_r(s) * ea + color_r(d) * inv) >> 8
+            val g = (color_g(s) * ea + color_g(d) * inv) >> 8
+            val b = (color_b(s) * ea + color_b(d) * inv) >> 8
+            val a = (color_a(s) * ea + color_a(d) * inv) >> 8
             out[idx] = rgba(r, g, b, a)
             col = col + 1
         row = row + 1

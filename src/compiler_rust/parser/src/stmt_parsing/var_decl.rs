@@ -985,8 +985,14 @@ impl Parser<'_> {
             other => vec![other],
         };
 
-        self.expect(&TokenKind::As)?;
-        let suffix = self.expect_identifier()?;
+        // The `as suffix` part is optional (canonical `unit Name: T`); an
+        // empty suffix means "no literal suffix registered".
+        let suffix = if self.check(&TokenKind::As) {
+            self.advance();
+            self.expect_identifier()?
+        } else {
+            String::new()
+        };
 
         Ok(Node::Unit(UnitDef {
             span: Span::new(

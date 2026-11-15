@@ -1372,8 +1372,16 @@ bool     rt_process_is_running(int64_t pid);
 int64_t  rt_process_start_identity(int64_t pid);
 bool     rt_process_kill(int64_t pid);
 /* C lane of the rt_pty_* family's liveness probe. POSIX takes the pty MASTER
-   fd and answers from POLLHUP; Windows cannot resolve the Rust lane's session
-   handle and answers false. See runtime_process.c for the full contract. */
+   fd and answers from POLLHUP; Windows answers from this lane's own ConPTY
+   session table. See runtime_process.c for the full contract. */
+#ifdef _WIN32
+/* Windows-only ConPTY lane; `text` values are RuntimeValue strings. */
+int32_t  rt_pty_open(int32_t rows, int32_t cols);
+int64_t  rt_pty_spawn(int32_t handle, int64_t program);
+bool     rt_pty_write(int64_t handle, int64_t data);
+int64_t  rt_pty_read(int64_t handle, int64_t timeout_ms);
+bool     rt_pty_close(int64_t handle);
+#endif
 bool     rt_pty_is_running(int64_t handle);
 bool     rt_pty_resize(int64_t handle, int32_t rows, int32_t cols);
 bool     rt_pty_hangup(int64_t handle);

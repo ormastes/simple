@@ -1,0 +1,939 @@
+use std.common.contracts.container.pre_start_constraint_v1.{ContainerPreStartConstraintV1, container_pre_start_constraint_copy_v1}
+use std.common.contracts.container.execution_v2.ContainerHostScopeV2
+use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
+# One generic service owner. Host journal mutations return to this canonical
+# domain before a response or another connection step; panes alone drain IO.
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.{HostServiceDomainV3, host_service_domain_turn_v3,
+    HostServiceCleanupV3, host_service_domain_close_v3}
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.HostServiceRequestV2
+use std.nogc_sync_mut.orchestration.host_service_execution_v4.{HostServiceExecutionV4,
+    host_service_execution_begin_constrained_v4, host_service_execution_step_v4}
+use std.nogc_sync_mut.orchestration.host_primary_connection_service_v3.*
+use std.nogc_sync_mut.orchestration.host_primary_connection_preparation_v3.host_primary_connection_expire_prepared_v3
+use std.nogc_sync_mut.orchestration.host_primary_connection_planning_v4.{HostPrimaryConnectionPlanningV4,
+    HostPrimaryConnectionPlanningTurnV4, host_primary_connection_plan_begin_v4, host_primary_connection_plan_step_v4}
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.host_helper_request_encode_v1
+use std.nogc_sync_mut.orchestration.host_helper_owner_v1.{HostHelperRequestV1, HostHelperLeaseV1}
+use std.common.contracts.orchestration.host_reservation_codec_v1.HostPreparedReservationReceiptV1
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.container.primary_connection_v2.{ContainerPrimaryConnectionPlanV2, container_primary_connection_scope_v2}
+use std.common.contracts.container.stream_v2.ContainerOutputResourcesV2
+use std.common.contracts.mux.session_runtime_control_v1.{SessionRuntimeControlTargetV1, SessionRuntimeControlKindV1,
+    session_runtime_control_target_digest_v1, session_runtime_control_target_binding_match_v1}
+use std.nogc_async_mut.container.terminal_session_v2.ContainerOwnedTerminalSessionV2
+use std.nogc_async_mut.container.terminal_session_v2.container_terminal_cleanup_v2
+use std.nogc_async_mut.container.terminal_primary_v2.container_primary_terminal_view_v2
+use os.apps.smux.runtime_connection_policy_v5.smux_runtime_connection_policy_load_v5
+use os.apps.smux.smux_runtime_control_owner_v1.{SmuxRuntimeControlOwnerV1, smux_runtime_control_owner_new_v1,
+    smux_runtime_control_issue_v1, smux_runtime_control_check_v1, smux_runtime_control_revoke_v1, smux_runtime_control_find_v1}
+use os.apps.smux.runtime_primary_request_v4.{SmuxRuntimePrimaryRequestV4, smux_runtime_primary_request_digest_v4}
+use os.apps.smux.runtime_binding_planning_v3.smux_runtime_binding_target_check_v3
+use os.apps.smux.api.{smux_client_lease_snapshot, smux_pane_adopt_primary_v5,
+    smux_owner_snapshot, smux_configuration_revision, smux_window_closing,
+    smux_pane_cleanup_primary_v5, smux_pane_primary_settlement_v5}
+use os.apps.smux.runtime_binding_target_v3.smux_runtime_target_v3
+use os.apps.smux.client_leases.ClientLease
+use std.nogc_async_mut.container.terminal_primary_input_v2.{container_primary_input_gate_v2,
+    container_primary_input_install_v2, container_primary_input_revoke_v2}
+use std.nogc_async_mut.container.terminal_primary_write_v2.*
+use std.sosix.time.sosix_time_now_monotonic_ms
+use std.sosix.entropy.sosix_random_hex
+use std.common.crypto.sha256.sha256_text
+use os.apps.smux.runtime_connection_geometry_v5.*
+use std.nogc_sync_mut.orchestration.host_primary_geometry_record_v1.HostPrimaryGeometryReceiptV1
+use std.common.contracts.container.primary_geometry_v1.{ContainerPrimaryGeometryRequestV1, container_primary_geometry_request_same_v1}
+use std.nogc_async_mut.container.terminal_primary_geometry_v2.container_primary_geometry_wire_digest_v2
+
+struct ConnectionEntryV5:
+    request: SmuxRuntimePrimaryRequestV4
+    plan: ContainerPrimaryConnectionPlanV2
+    target: SessionRuntimeControlTargetV1
+    prepared: HostPreparedReservationReceiptV1? = nil
+    helper: HostHelperLeaseV1? = nil
+    task: HostPrimaryConnectionTaskV3? = nil
+    retained: ContainerOwnedTerminalSessionV2? = nil
+    session_identity: text = ""
+    adopted: bool = false
+    error: text = ""
+    recovery_required: bool = false
+    input_request: ContainerPrimaryInputRequestV2? = nil
+    input_digest: text = ""
+    input_receipt: ContainerPrimaryInputWriteV2? = nil
+    settled: bool = false
+    release_requested: bool = false
+    prepare_deadline_ms: i64 = 0
+    prepare_request_digest: text = ""
+    geometry: SmuxConnectionGeometryV5? = nil
+
+pub class SmuxRuntimeConnectionOwnerV5:
+    domain: HostServiceDomainV3
+    service_incarnation: text
+    controls: SmuxRuntimeControlOwnerV1
+    entries: [ConnectionEntryV5]
+    closing: bool = false
+    control_sync_error: text = ""
+    execution: HostServiceExecutionV4? = nil
+    execution_operation_id: text = ""
+    execution_request_digest: text = ""
+    execution_constraint: Option<ContainerPreStartConstraintV1> = nil
+    execution_response: text = ""
+    execution_error: text = ""
+    execution_exit_code: i64 = 0
+    execution_cancelled: bool = false
+    cursor: int = 0
+    planning: HostPrimaryConnectionPlanningV4? = nil
+    planning_request: SmuxRuntimePrimaryRequestV4? = nil
+    planning_digest: text = ""
+    planning_client: text = ""
+    planning_token: text = ""
+    planning_error: text = ""
+    planning_cancelled: bool = false
+
+pub struct SmuxRuntimeConnectionOpenV5:
+    owner: SmuxRuntimeConnectionOwnerV5?
+    retained: HostServiceDomainV3?
+    error: text
+
+pub struct SmuxRuntimeConnectionTurnV5:
+    owner: SmuxRuntimeConnectionOwnerV5
+    plan: ContainerPrimaryConnectionPlanV2?
+    prepared: HostPreparedReservationReceiptV1?
+    response: text
+    error: text
+
+pub struct SmuxRuntimeConnectionInputTurnV5:
+    owner: SmuxRuntimeConnectionOwnerV5
+    revision: i64
+    nonce: text
+    receipt: ContainerPrimaryInputWriteV2?
+    error: text
+
+pub struct SmuxRuntimeConnectionCloseV5:
+    owner: SmuxRuntimeConnectionOwnerV5?
+    cleanup: HostServiceCleanupV3?
+    closed: bool
+    error: text
+
+pub fn smux_runtime_connection_stop_allowed_v5(owner: SmuxRuntimeConnectionOwnerV5) -> bool:
+    if owner.execution != nil or owner.planning != nil or owner.control_sync_error != "": return false
+    for entry in owner.entries:
+        if entry.geometry != nil and entry.geometry.unwrap().pending_v5(): return false
+        if not entry.settled and (entry.prepared != nil or entry.helper != nil or entry.task != nil or entry.retained != nil or entry.recovery_required): return false
+    true
+
+pub fn smux_runtime_connection_close_v5(owner: SmuxRuntimeConnectionOwnerV5) -> SmuxRuntimeConnectionCloseV5:
+    if not smux_runtime_connection_stop_allowed_v5(owner):
+        return SmuxRuntimeConnectionCloseV5(Some(owner), nil, false, "runtime-connection-release-pending")
+    val closed = host_service_domain_close_v3(owner.domain)
+    SmuxRuntimeConnectionCloseV5(nil, closed.cleanup, closed.closed, closed.error)
+
+pub fn smux_runtime_connection_release_v5(original: SmuxRuntimeConnectionOwnerV5,
+        uid: text) -> SmuxRuntimeConnectionTurnV5:
+    if original.execution != nil or original.planning != nil: return reply_v5(original, "runtime-host-execution-pending")
+    val index = index_v5(original, uid)
+    if index < 0: return reply_v5(original, "runtime-connection-binding-unavailable")
+    var owner = original
+    var entry = owner.entries[index]
+    if entry.settled: return reply_v5(owner, "")
+    entry.release_requested = true
+    owner.entries[index] = entry
+    if entry.geometry != nil and entry.geometry.unwrap().pending_v5():
+        owner = geometry_step_v5(owner, index, true)
+        entry = owner.entries[index]
+        if entry.geometry != nil and entry.geometry.unwrap().pending_v5(): return reply_v5(owner, "runtime-geometry-cleanup-pending")
+    if entry.task == nil and entry.helper != nil:
+        entry.task = Some(host_primary_connection_cleanup_task_v3(entry.plan, entry.helper.unwrap()))
+        owner.entries[index] = entry
+    if entry.task == nil:
+        if entry.prepared == nil: return reply_v5(owner, "runtime-connection-preparation-required")
+        val expired = host_primary_connection_expire_prepared_v3(owner.domain.local, entry.plan.identity.operation_id)
+        owner.domain = HostServiceDomainV3(expired.local)
+        entry.settled = expired.released
+        entry.error = expired.error
+        entry.recovery_required = expired.error != "" and expired.error != "prepare-not-expired"
+        owner.entries[index] = entry
+        return reply_v5(owner, expired.error)
+    if entry.task.unwrap().pending_v3() or entry.task.unwrap().has_session_v3():
+        val cancelled = host_primary_connection_progress_v3(owner.domain.local, entry.task.unwrap(), true)
+        owner.domain = HostServiceDomainV3(cancelled.local)
+        entry.task = cancelled.task
+        entry.error = cancelled.error
+        owner.entries[index] = entry
+        if entry.task == nil or entry.task.unwrap().pending_v3(): return reply_v5(owner, "runtime-connection-cleanup-pending")
+        if entry.task.unwrap().has_session_v3():
+            val transferred = host_primary_connection_cleanup_transfer_v3(entry.task.unwrap())
+            entry.task = Some(transferred.task)
+            entry.retained = transferred.session
+            owner.entries[index] = entry
+            if transferred.error != "": return reply_v5(owner, transferred.error)
+    var session: ContainerOwnedTerminalSessionV2? = entry.retained
+    if entry.adopted:
+        val borrowed = pane_session_v5(entry)
+        if borrowed.is_err(): return reply_v5(owner, borrowed.unwrap_err())
+        val revoked = container_primary_input_revoke_v2(borrowed.unwrap())
+        if revoked.is_err(): return reply_v5(owner, revoked.unwrap_err())
+        val cleaned = smux_pane_cleanup_primary_v5(entry.target.pane_id, entry.session_identity)
+        if cleaned.is_err(): return reply_v5(owner, cleaned.unwrap_err())
+        if not cleaned.unwrap(): return reply_v5(owner, "runtime-connection-cleanup-pending")
+        val updated = pane_session_v5(entry)
+        if updated.is_err(): return reply_v5(owner, updated.unwrap_err())
+        session = Some(updated.unwrap())
+    elif session != nil:
+        val cleaned = container_terminal_cleanup_v2(session.unwrap())
+        entry.retained = Some(cleaned.session)
+        owner.entries[index] = entry
+        if cleaned.error != "": return reply_v5(owner, cleaned.error)
+        if not cleaned.cleaned: return reply_v5(owner, "runtime-connection-cleanup-pending")
+        session = Some(cleaned.session)
+    if session == nil:
+        val abandoned = host_primary_connection_attempt_release_v3(owner.domain.local, entry.task.unwrap())
+        owner.domain = HostServiceDomainV3(abandoned.local)
+        entry.task = Some(abandoned.task)
+        entry.error = abandoned.error
+        entry.settled = abandoned.settled
+        if abandoned.settled: entry.recovery_required = false
+        owner.entries[index] = entry
+        return reply_v5(owner, abandoned.error)
+    val released = host_primary_connection_release_v3(owner.domain.local, entry.task.unwrap(), session.unwrap())
+    owner.domain = HostServiceDomainV3(released.local)
+    entry.task = Some(released.task)
+    if not entry.adopted: entry.retained = Some(released.session)
+    entry.error = released.error
+    owner.entries[index] = entry
+    if released.error != "" or released.ack == nil: return reply_v5(owner, released.error)
+    if entry.adopted:
+        val published = smux_pane_primary_settlement_v5(entry.target.pane_id, entry.session_identity, released.ack.unwrap())
+        if published.is_err(): return reply_v5(owner, published.unwrap_err())
+    entry.adopted = false
+    entry.retained = nil
+    entry.settled = true
+    owner.entries[index] = entry
+    reply_v5(owner, "")
+
+struct ConnectionResolvedV5:
+    session: ContainerOwnedTerminalSessionV2
+    target: SessionRuntimeControlTargetV1
+    attachment: ClientLease
+
+fn pane_session_v5(entry: ConnectionEntryV5) -> Result<ContainerOwnedTerminalSessionV2, text>:
+    val snapshot = smux_owner_snapshot()
+    val index = snapshot.find_pane_idx(entry.request.target.pane_id)
+    if index < 0: return Err("runtime-connection-pane-missing")
+    val pane = snapshot.get_pane(index)
+    if pane.owned_terminal_session == nil: return Err("runtime-connection-pane-owner-missing")
+    val session = pane.owned_terminal_session.unwrap()
+    val view = container_primary_terminal_view_v2(session)?
+    if view.fingerprint != entry.session_identity or view.adoption == nil:
+        return Err("runtime-connection-pane-owner-changed")
+    val adoption = view.adoption.unwrap()
+    if (adoption.binding_uid != entry.target.binding_uid or adoption.service_incarnation != entry.target.service_incarnation or
+            adoption.session_id != entry.target.session_id or adoption.window_id != entry.target.window_id or
+            adoption.pane_id != entry.target.pane_id or adoption.service_epoch != entry.target.service_epoch or
+            adoption.child_incarnation != entry.target.child_incarnation or pane.child_incarnation != entry.target.child_incarnation as u64):
+        return Err("runtime-connection-pane-adoption-changed")
+    Ok(session)
+
+fn resolve_v5(owner: SmuxRuntimeConnectionOwnerV5, index: int,
+        client_id: text, token: text) -> Result<ConnectionResolvedV5, text>:
+    val entry = owner.entries[index]
+    if not entry.adopted or entry.task == nil or entry.retained != nil or owner.closing:
+        return Err("runtime-connection-not-adopted")
+    host_primary_connection_control_live_v3(owner.domain.local, entry.task.unwrap())?
+    val policy = smux_runtime_connection_policy_load_v5(owner.domain.local)?
+    if (policy.principal_id != owner.controls.policy.principal_id or policy.allowed != owner.controls.policy.allowed or
+            policy.max_lease_ms != owner.controls.policy.max_lease_ms): return Err("runtime-connection-control-policy-changed")
+    val session = pane_session_v5(entry)?
+    val snapshot = smux_owner_snapshot()
+    val pane = snapshot.get_pane(snapshot.find_pane_idx(entry.target.pane_id))
+    if pane.helper_cleaned_awaiting_release or pane.terminal_eof or pane.terminal_read_error != "":
+        return Err("runtime-connection-stream-unavailable")
+    val attachment = smux_client_lease_snapshot(entry.target.session_id, client_id, token)?
+    val current = smux_runtime_target_v3(smux_owner_snapshot(), smux_configuration_revision(),
+        smux_window_closing(entry.target.session_id, entry.target.window_id), owner.service_incarnation,
+        entry.target.session_id, entry.target.window_id, entry.target.pane_id)?
+    if current.epoch != entry.target.service_epoch as u64 or current.child_incarnation != entry.target.child_incarnation as u64:
+        return Err("runtime-connection-target-changed")
+    var target = entry.target
+    target.client_id = attachment.client_id
+    target.attachment_generation = attachment.generation
+    session_runtime_control_target_binding_match_v1(entry.target, target)?
+    Ok(ConnectionResolvedV5(session, target, attachment))
+
+fn input_reply_v5(owner: SmuxRuntimeConnectionOwnerV5, index: int,
+        revision: i64, nonce: text, error: text) -> SmuxRuntimeConnectionInputTurnV5:
+    val receipt = if index < 0: nil else: owner.entries[index].input_receipt
+    SmuxRuntimeConnectionInputTurnV5(owner, revision, nonce, receipt, error)
+
+fn input_refresh_v5(original: SmuxRuntimeConnectionOwnerV5, index: int) -> SmuxRuntimeConnectionOwnerV5:
+    var owner = original
+    var entry = owner.entries[index]
+    if entry.input_request == nil: return owner
+    val session = pane_session_v5(entry)
+    if session.is_err(): return owner
+    val observed = container_primary_input_observe_v2(session.unwrap(), entry.input_request.unwrap())
+    if observed.is_ok() and observed.unwrap() != nil:
+        entry.input_receipt = observed.unwrap()
+        owner.entries[index] = entry
+    # An error or absent history never clears the reserved uncertainty.
+    owner
+
+pub fn smux_runtime_connection_input_issue_v5(original: SmuxRuntimeConnectionOwnerV5,
+        uid: text, client_id: text, token: text, expected_revision: i64,
+        expected_target_digest: text) -> SmuxRuntimeConnectionInputTurnV5:
+    val index = index_v5(original, uid)
+    if index < 0: return input_reply_v5(original, index, 0, "", "runtime-connection-binding-unavailable")
+    var owner = input_refresh_v5(original, index)
+    val resolved = resolve_v5(owner, index, client_id, token)
+    if resolved.is_err(): return input_reply_v5(owner, index, 0, "", resolved.unwrap_err())
+    val target_digest = session_runtime_control_target_digest_v1(resolved.unwrap().target)
+    if target_digest.is_err() or target_digest.unwrap() != expected_target_digest:
+        return input_reply_v5(owner, index, 0, "", "runtime-connection-target-digest")
+    val gate = container_primary_input_gate_v2(resolved.unwrap().session)
+    if gate.is_err(): return input_reply_v5(owner, index, 0, "", gate.unwrap_err())
+    if gate.unwrap().pending or gate.unwrap().unknown:
+        return input_reply_v5(owner, index, 0, "", "runtime-connection-input-unresolved")
+    if val receipt = owner.entries[index].input_receipt:
+        if receipt.disposition == ContainerPrimaryInputDispositionV2.Unknown or receipt.disposition == ContainerPrimaryInputDispositionV2.Queued:
+            return input_reply_v5(owner, index, 0, "", "runtime-connection-input-unresolved")
+    val fresh = sosix_random_hex(32)
+    if fresh == nil: return input_reply_v5(owner, index, 0, "", "runtime-connection-entropy-unavailable")
+    val issued = smux_runtime_control_issue_v1(owner.controls, resolved.unwrap().target, SessionRuntimeControlKindV1.Input,
+        token, resolved.unwrap().attachment.deadline_ms, expected_revision, fresh.unwrap(), sosix_time_now_monotonic_ms())
+    owner.controls = issued.owner
+    if issued.error != "" or issued.lease == nil: return input_reply_v5(owner, index, issued.revision, "", issued.error)
+    if (gate.unwrap().active and gate.unwrap().revision == issued.lease.unwrap().revision and
+            gate.unwrap().target_digest == target_digest.unwrap() and gate.unwrap().nonce_digest == issued.lease.unwrap().nonce_digest and
+            gate.unwrap().expires_monotonic_ns == issued.lease.unwrap().expires_monotonic_ms * 1000000):
+        return input_reply_v5(owner, index, issued.revision, issued.nonce, "")
+    val installed = container_primary_input_install_v2(resolved.unwrap().session, issued.lease.unwrap(),
+        resolved.unwrap().target, owner.controls.policy.principal_id, issued.nonce)
+    if installed.is_err(): return input_reply_v5(owner, index, issued.revision, issued.nonce, installed.unwrap_err())
+    val actual = installed.unwrap()
+    if (not actual.controlled or not actual.active or actual.pending or actual.unknown or
+            actual.revision != issued.lease.unwrap().revision or actual.target_digest != target_digest.unwrap() or
+            actual.nonce_digest != issued.lease.unwrap().nonce_digest or
+            actual.expires_monotonic_ns != issued.lease.unwrap().expires_monotonic_ms * 1000000):
+        return input_reply_v5(owner, index, issued.revision, issued.nonce, "runtime-connection-input-install-not-current")
+    input_reply_v5(owner, index, issued.revision, issued.nonce, "")
+
+pub fn smux_runtime_connection_input_write_v5(original: SmuxRuntimeConnectionOwnerV5,
+        uid: text, client_id: text, token: text, nonce: text, revision: i64,
+        attempt: i64, frame_sequence: i64, payload: text, offset: i64, maximum: i64) -> SmuxRuntimeConnectionInputTurnV5:
+    val index = index_v5(original, uid)
+    if index < 0: return input_reply_v5(original, index, 0, "", "runtime-connection-binding-unavailable")
+    if (payload.byte_len() < 1 or payload.byte_len() > 65536 or offset < 0 or offset >= payload.byte_len() or
+            maximum < 1 or maximum > 4096 or maximum > payload.byte_len() - offset or
+            attempt < 1 or attempt > 1152921504606846975 or frame_sequence < 1 or frame_sequence > 1152921504606846975):
+        return input_reply_v5(original, index, revision, "", "runtime-connection-input-range")
+    var owner = input_refresh_v5(original, index)
+    val resolved = resolve_v5(owner, index, client_id, token)
+    if resolved.is_err(): return input_reply_v5(owner, index, revision, "", resolved.unwrap_err())
+    val checked = smux_runtime_control_check_v1(owner.controls, uid, SessionRuntimeControlKindV1.Input,
+        nonce, revision, resolved.unwrap().target, sosix_time_now_monotonic_ms())
+    owner.controls = checked.owner
+    if checked.error != "" or checked.lease == nil: return input_reply_v5(owner, index, revision, "", checked.error)
+    val target_digest = session_runtime_control_target_digest_v1(resolved.unwrap().target)
+    if target_digest.is_err(): return input_reply_v5(owner, index, revision, "", target_digest.unwrap_err())
+    val digest = sha256_text(target_digest.unwrap() + "\n" + revision.to_text() + "\n" + sha256_text(nonce) + "\n" +
+        checked.lease.unwrap().expires_monotonic_ms.to_text() + "\n" + attempt.to_text() + "\n" + frame_sequence.to_text() + "\n" +
+        sha256_text(payload) + "\n" + offset.to_text() + "\n" + maximum.to_text())
+    var entry = owner.entries[index]
+    if val previous = entry.input_request:
+        if attempt == previous.attempt:
+            return input_reply_v5(owner, index, revision, "", if entry.input_digest == digest: "" else: "runtime-connection-attempt-changed")
+        if attempt != previous.attempt + 1: return input_reply_v5(owner, index, revision, "", "runtime-connection-attempt-not-next")
+        if entry.input_receipt == nil: return input_reply_v5(owner, index, revision, "", "runtime-connection-input-unresolved")
+        val prior = entry.input_receipt.unwrap().disposition
+        if prior == ContainerPrimaryInputDispositionV2.Unknown or prior == ContainerPrimaryInputDispositionV2.Queued:
+            return input_reply_v5(owner, index, revision, "", "runtime-connection-input-unresolved")
+        val accepted = owner.entries[index].input_receipt.unwrap().accepted_bytes
+        val next_offset = previous.offset + accepted
+        if next_offset < previous.payload.byte_len():
+            if frame_sequence != previous.frame_sequence or payload != previous.payload or offset != next_offset:
+                return input_reply_v5(owner, index, revision, "", "runtime-connection-input-suffix-required")
+        elif frame_sequence != previous.frame_sequence + 1 or offset != 0:
+            return input_reply_v5(owner, index, revision, "", "runtime-connection-input-next-frame-required")
+    elif attempt != 1 or frame_sequence != 1 or offset != 0:
+        return input_reply_v5(owner, index, revision, "", "runtime-connection-first-attempt")
+    val request = ContainerPrimaryInputRequestV2(checked.lease.unwrap(), resolved.unwrap().target,
+        owner.controls.policy.principal_id, nonce, attempt, frame_sequence, payload, offset, maximum)
+    entry.input_request = Some(request)
+    entry.input_digest = digest
+    entry.input_receipt = Some(ContainerPrimaryInputWriteV2(ContainerPrimaryInputDispositionV2.Unknown, attempt, -1,
+        "runtime-connection-awaiting-native-receipt"))
+    owner.entries[index] = entry
+    val written = container_primary_input_write_v2(resolved.unwrap().session, request)
+    if written.is_err(): return input_reply_v5(owner, index, revision, "", written.unwrap_err())
+    entry.input_receipt = Some(written.unwrap())
+    owner.entries[index] = entry
+    input_reply_v5(owner, index, revision, "", written.unwrap().error)
+
+pub fn smux_runtime_connection_input_observe_v5(original: SmuxRuntimeConnectionOwnerV5,
+        uid: text) -> SmuxRuntimeConnectionInputTurnV5:
+    val index = index_v5(original, uid)
+    if index < 0: return input_reply_v5(original, index, 0, "", "runtime-connection-binding-unavailable")
+    input_reply_v5(input_refresh_v5(original, index), index, 0, "", "")
+
+pub fn smux_runtime_connection_input_resolve_v5(owner: SmuxRuntimeConnectionOwnerV5,
+        uid: text, client_id: text, token: text) -> Result<text, text>:
+    val index = index_v5(owner, uid)
+    if index < 0: return Err("runtime-connection-binding-unavailable")
+    val resolved = resolve_v5(owner, index, client_id, token)?
+    session_runtime_control_target_digest_v1(resolved.target)
+
+pub fn smux_runtime_connection_input_revoke_v5(original: SmuxRuntimeConnectionOwnerV5,
+        uid: text, expected_revision: i64) -> SmuxRuntimeConnectionInputTurnV5:
+    val index = index_v5(original, uid)
+    if index < 0: return input_reply_v5(original, index, 0, "", "runtime-connection-binding-unavailable")
+    var owner = original
+    val revoked = smux_runtime_control_revoke_v1(owner.controls, uid, SessionRuntimeControlKindV1.Input,
+        expected_revision, sosix_time_now_monotonic_ms())
+    owner.controls = revoked.owner
+    if revoked.error != "": return input_reply_v5(owner, index, revoked.revision, "", revoked.error)
+    val session = pane_session_v5(owner.entries[index])
+    if session.is_err(): return input_reply_v5(owner, index, revoked.revision, "", session.unwrap_err())
+    val native = container_primary_input_revoke_v2(session.unwrap())
+    owner = input_refresh_v5(owner, index)
+    input_reply_v5(owner, index, revoked.revision, "", if native.is_err(): native.unwrap_err() else: "")
+
+pub fn smux_runtime_connection_open_v5(domain: HostServiceDomainV3,
+        incarnation: text) -> SmuxRuntimeConnectionOpenV5:
+    val policy = smux_runtime_connection_policy_load_v5(domain.local)
+    if policy.is_err(): return SmuxRuntimeConnectionOpenV5(nil, Some(domain), policy.unwrap_err())
+    if not host_primary_connection_supported_v3(domain.local):
+        return SmuxRuntimeConnectionOpenV5(nil, Some(domain), "runtime-connection-provider-unavailable")
+    val controls = smux_runtime_control_owner_new_v1(policy.unwrap(), incarnation)
+    if controls.is_err(): return SmuxRuntimeConnectionOpenV5(nil, Some(domain), controls.unwrap_err())
+    SmuxRuntimeConnectionOpenV5(Some(SmuxRuntimeConnectionOwnerV5(domain, incarnation, controls.unwrap(), [])), nil, "")
+
+fn reply_v5(owner: SmuxRuntimeConnectionOwnerV5, error: text) -> SmuxRuntimeConnectionTurnV5:
+    SmuxRuntimeConnectionTurnV5(owner, nil, nil, "", error)
+
+fn index_v5(owner: SmuxRuntimeConnectionOwnerV5, uid: text) -> int:
+    for index in 0..owner.entries.len():
+        if owner.entries[index].request.target.binding_uid == uid: return index
+    -1
+
+# Existing shared Host request vocabulary. Blocking lifecycle effects are
+# explicitly reserved for the owned continuation port, not this control turn.
+pub fn smux_runtime_connection_scope_v5(owner: SmuxRuntimeConnectionOwnerV5) -> ContainerHostScopeV2:
+    match owner.domain.local:
+        case HostLocalRootV3.Linux(local): local.scope
+        case HostLocalRootV3.Windows(local): local.scope_v3()
+
+fn connection_constraint_equal_v5(left: Option<ContainerPreStartConstraintV1>,
+        right: Option<ContainerPreStartConstraintV1>) -> bool:
+    if left.is_none() or right.is_none(): return left.is_none() and right.is_none()
+    val a = left.unwrap()
+    val b = right.unwrap()
+    (a.request_digest == b.request_digest and a.scope_bytes == b.scope_bytes and
+        a.provider_generation == b.provider_generation and a.requested_image_ref == b.requested_image_ref and
+        a.requested_image_kind == b.requested_image_kind and a.image_config_id == b.image_config_id and
+        a.primary_argv == b.primary_argv and a.working_directory == b.working_directory and
+        a.configured_user == b.configured_user and a.environment_digest == b.environment_digest and
+        a.mounts == b.mounts and a.require_readonly_rootfs == b.require_readonly_rootfs)
+
+pub fn smux_runtime_connection_host_v5(original: SmuxRuntimeConnectionOwnerV5,
+        request: HostServiceRequestV2) -> SmuxRuntimeConnectionTurnV5:
+    smux_runtime_connection_host_constrained_v5(original, request, nil)
+
+# Restriction only: this is the SAME retained signed Host domain and writer.
+pub fn smux_runtime_connection_host_constrained_v5(original: SmuxRuntimeConnectionOwnerV5,
+        request: HostServiceRequestV2, requested_constraint: Option<ContainerPreStartConstraintV1>) -> SmuxRuntimeConnectionTurnV5:
+    if requested_constraint.is_some() and request.action != "host-execute":
+        return reply_v5(original, "runtime-host-constraint-action")
+    val constraint = if requested_constraint.is_some(): Some(container_pre_start_constraint_copy_v1(requested_constraint.unwrap())) else: nil
+    if original.closing: return reply_v5(original, "runtime-connection-closing")
+    var owner = original
+    if request.action != "host-status" and geometry_pending_v5(owner): return reply_v5(owner, "runtime-geometry-pending")
+    if request.action == "host-execute":
+        val digest = sha256_text(request.operation_id + "\n" + request.payload)
+        if owner.execution_request_digest == digest:
+            if not connection_constraint_equal_v5(owner.execution_constraint, constraint):
+                return reply_v5(owner, "runtime-host-execution-constraint-changed")
+            return SmuxRuntimeConnectionTurnV5(owner, nil, nil, owner.execution_response, owner.execution_error)
+        if owner.execution != nil: return reply_v5(owner, "runtime-host-execution-pending")
+        if owner.planning != nil: return reply_v5(owner, "runtime-connection-inspection-pending")
+        for entry in owner.entries:
+            if entry.task != nil and entry.task.unwrap().pending_v3(): return reply_v5(owner, "runtime-connection-opening")
+        val begun = host_service_execution_begin_constrained_v4(owner.domain, request, constraint)
+        owner.domain = begun.domain
+        owner.execution = begun.continuation
+        owner.execution_operation_id = request.operation_id
+        owner.execution_request_digest = digest
+        owner.execution_constraint = constraint
+        owner.execution_response = begun.response ?? ""
+        owner.execution_error = begun.error
+        owner.execution_exit_code = begun.exit_code
+        owner.execution_cancelled = false
+        return SmuxRuntimeConnectionTurnV5(owner, nil, nil, owner.execution_response, owner.execution_error)
+    if (owner.execution != nil or owner.planning != nil) and request.action != "host-status":
+        return reply_v5(owner, "runtime-host-execution-pending")
+    val turn = host_service_domain_turn_v3(owner.domain, request)
+    owner.domain = turn.owner
+    SmuxRuntimeConnectionTurnV5(owner, nil, nil, turn.response,
+        if turn.exit_code == 0: "" else: "runtime-host-request-refused")
+
+pub fn smux_runtime_connection_plan_v5(original: SmuxRuntimeConnectionOwnerV5,
+        request: SmuxRuntimePrimaryRequestV4, resources: ContainerOutputResourcesV2,
+        client_id: text, attachment_token: text) -> SmuxRuntimeConnectionTurnV5:
+    if original.closing: return reply_v5(original, "runtime-connection-closing")
+    if original.execution != nil: return reply_v5(original, "runtime-host-execution-pending")
+    if geometry_pending_v5(original): return reply_v5(original, "runtime-geometry-pending")
+    val digest = smux_runtime_primary_request_digest_v4(request)
+    if digest.is_err(): return reply_v5(original, digest.unwrap_err())
+    val checked = smux_runtime_binding_target_check_v3(request.target, original.service_incarnation)
+    if checked.is_err(): return reply_v5(original, checked.unwrap_err())
+    val attachment = smux_client_lease_snapshot(request.target.session_id, client_id, attachment_token)
+    if attachment.is_err(): return reply_v5(original, attachment.unwrap_err())
+    if request.target.expected_epoch > 9223372036854775807 or request.target.expected_child_incarnation >= 9223372036854775807:
+        return reply_v5(original, "runtime-connection-target-bound")
+    val existing = index_v5(original, request.target.binding_uid)
+    if existing >= 0:
+        val entry = original.entries[existing]
+        if entry.plan.identity.binding_digest != digest.unwrap() or entry.plan.resources != resources:
+            return reply_v5(original, "runtime-connection-binding-exists")
+        return SmuxRuntimeConnectionTurnV5(original, Some(entry.plan), entry.prepared, "", entry.error)
+    if original.entries.len() >= 16: return reply_v5(original, "runtime-connection-capacity")
+    for entry in original.entries:
+        if entry.task != nil and entry.task.unwrap().pending_v3(): return reply_v5(original, "runtime-connection-opening")
+    var owner = original
+    val request_digest = sha256_text(digest.unwrap() + "\n" + resources.cpu_millis.to_text() + "\n" + resources.memory_bytes.to_text() +
+        "\n" + client_id + "\n" + sha256_text(attachment_token))
+    if owner.planning != nil:
+        return reply_v5(owner, if owner.planning_digest == request_digest: "runtime-connection-plan-pending" else: "runtime-connection-inspection-busy")
+    owner.planning_request = Some(request)
+    owner.planning_digest = request_digest
+    owner.planning_client = client_id
+    owner.planning_token = attachment_token
+    owner.planning_error = ""
+    owner.planning_cancelled = false
+    val turn = host_primary_connection_plan_begin_v4(owner.domain.local, request.target.workload_operation_id,
+        request.target.helper_operation_id, request.target.parent_budget_digest, digest.unwrap(), resources, request.terminal_mode)
+    planning_turn_v5(owner, turn)
+
+fn planning_turn_v5(original: SmuxRuntimeConnectionOwnerV5, turn: HostPrimaryConnectionPlanningTurnV4) -> SmuxRuntimeConnectionTurnV5:
+    var owner = original
+    owner.domain = HostServiceDomainV3(turn.local)
+    owner.planning = turn.planning
+    owner.planning_error = turn.error
+    if turn.planning != nil: return reply_v5(owner, if turn.error == "": "runtime-connection-plan-pending" else: turn.error)
+    if turn.error != "" or turn.plan == nil: return reply_v5(owner, if turn.error == "": "runtime-connection-plan-missing" else: turn.error)
+    if owner.planning_request == nil: return reply_v5(owner, "runtime-connection-planning-request-missing")
+    val request = owner.planning_request.unwrap()
+    val checked = smux_runtime_binding_target_check_v3(request.target, owner.service_incarnation)
+    if checked.is_err():
+        owner.planning_error = checked.unwrap_err()
+        return reply_v5(owner, checked.unwrap_err())
+    val attachment = smux_client_lease_snapshot(request.target.session_id, owner.planning_client, owner.planning_token)
+    if attachment.is_err():
+        owner.planning_error = attachment.unwrap_err()
+        return reply_v5(owner, attachment.unwrap_err())
+    val plan = turn.plan.unwrap()
+    val scope = container_primary_connection_scope_v2(plan)
+    val target = SessionRuntimeControlTargetV1(scope: scope, runtime: plan.runtime,
+        workload_request_digest: plan.workload.request_digest, binding_uid: request.target.binding_uid,
+        binding_digest: plan.identity.binding_digest, service_incarnation: owner.service_incarnation,
+        session_id: request.target.session_id, window_id: request.target.window_id, pane_id: request.target.pane_id,
+        service_epoch: request.target.expected_epoch as i64, child_incarnation: (request.target.expected_child_incarnation + 1) as i64,
+        client_id: attachment.unwrap().client_id, attachment_generation: attachment.unwrap().generation,
+        execution_kind: "primary", native_exec_id: "", exec_request_digest: "")
+    owner.entries.push(ConnectionEntryV5(request, plan, target))
+    SmuxRuntimeConnectionTurnV5(owner, Some(plan), nil, "", "")
+
+fn helper_match_v5(entry: ConnectionEntryV5, request: HostHelperRequestV1) -> bool:
+    (request.operation.id == entry.request.target.helper_operation_id and request.plan.helper_kind == "primary-connection" and
+        request.plan.request_digest == entry.plan.request_digest)
+
+pub fn smux_runtime_connection_prepare_v5(original: SmuxRuntimeConnectionOwnerV5,
+        uid: text, request: HostHelperRequestV1) -> SmuxRuntimeConnectionTurnV5:
+    val index = index_v5(original, uid)
+    if original.execution != nil or original.planning != nil: return reply_v5(original, "runtime-host-execution-pending")
+    if index < 0 or original.closing: return reply_v5(original, "runtime-connection-binding-unavailable")
+    var owner = original
+    var entry = owner.entries[index]
+    if not helper_match_v5(entry, request) or entry.task != nil or entry.helper != nil:
+        return reply_v5(owner, "runtime-connection-helper-mismatch")
+    val encoded = host_helper_request_encode_v1(request)
+    if encoded.is_err(): return reply_v5(owner, encoded.unwrap_err())
+    val digest = sha256_text(encoded.unwrap())
+    if entry.prepare_request_digest != "" and entry.prepare_request_digest != digest:
+        return reply_v5(owner, "runtime-connection-preparation-retry-mismatch")
+    if entry.recovery_required: return reply_v5(owner, "runtime-connection-preparation-recovery-required")
+    if entry.prepared != nil:
+        return SmuxRuntimeConnectionTurnV5(owner, nil, entry.prepared, "", entry.error)
+    entry.prepare_request_digest = digest
+    entry.prepare_deadline_ms = request.intent.reservation.prepare_deadline_ms
+    owner.entries[index] = entry
+    val turn = host_primary_connection_helper_prepare_v3(owner.domain.local, request)
+    owner.domain = HostServiceDomainV3(turn.local)
+    if turn.receipt != nil: entry.prepared = turn.receipt
+    entry.recovery_required = entry.recovery_required or turn.recovery_required
+    entry.error = turn.error
+    owner.entries[index] = entry
+    SmuxRuntimeConnectionTurnV5(owner, nil, turn.receipt, "", turn.error)
+
+pub fn smux_runtime_connection_bind_v5(original: SmuxRuntimeConnectionOwnerV5,
+        uid: text, request: HostHelperRequestV1, signed: DistributedSignedGrantV2,
+        approval: DistributedSignedApprovalV2) -> SmuxRuntimeConnectionTurnV5:
+    val index = index_v5(original, uid)
+    if original.execution != nil or original.planning != nil: return reply_v5(original, "runtime-host-execution-pending")
+    if geometry_pending_v5(original): return reply_v5(original, "runtime-geometry-pending")
+    for pending_entry in original.entries:
+        if pending_entry.task != nil and pending_entry.task.unwrap().pending_v3(): return reply_v5(original, "runtime-connection-opening")
+    if index < 0 or original.closing: return reply_v5(original, "runtime-connection-binding-unavailable")
+    var owner = original
+    var entry = owner.entries[index]
+    if (not helper_match_v5(entry, request) or entry.prepared == nil or entry.task != nil or
+            entry.helper != nil or entry.recovery_required): return reply_v5(owner, "runtime-connection-helper-unavailable")
+    val checked = smux_runtime_binding_target_check_v3(entry.request.target, owner.service_incarnation)
+    if checked.is_err(): return reply_v5(owner, checked.unwrap_err())
+    val begun = host_primary_connection_helper_begin_v3(owner.domain.local, request, entry.prepared.unwrap(), signed, approval)
+    owner.domain = HostServiceDomainV3(begun.local)
+    entry.helper = begun.helper
+    entry.recovery_required = begun.recovery_required
+    entry.error = begun.error
+    owner.entries[index] = entry
+    if begun.error != "" or begun.helper == nil: return reply_v5(owner, if begun.error == "": "runtime-connection-helper-missing" else: begun.error)
+    val opened = host_primary_connection_open_v3(owner.domain.local, entry.plan, begun.helper.unwrap())
+    owner.domain = HostServiceDomainV3(opened.local)
+    entry.task = opened.task
+    entry.error = opened.error
+    owner.entries[index] = entry
+    reply_v5(owner, opened.error)
+
+# At most one native exchange step per call. No output read occurs here; once
+# adopted, the canonical pane owns the only reader and the task retains metadata.
+pub fn smux_runtime_connection_progress_v5(original: SmuxRuntimeConnectionOwnerV5,
+        uid: text, cancel: bool) -> SmuxRuntimeConnectionTurnV5:
+    val index = index_v5(original, uid)
+    if original.execution != nil: return reply_v5(original, "runtime-host-execution-pending")
+    if index < 0:
+        if original.planning_request != nil and original.planning_request.unwrap().target.binding_uid == uid:
+            if original.planning == nil: return reply_v5(original, original.planning_error)
+            var planned_owner = original
+            planned_owner.planning_cancelled = original.planning_cancelled or cancel
+            val turn = host_primary_connection_plan_step_v4(planned_owner.domain.local, planned_owner.planning.unwrap(), planned_owner.planning_cancelled)
+            return planning_turn_v5(planned_owner, turn)
+        return reply_v5(original, "runtime-connection-binding-unavailable")
+    if original.planning != nil: return reply_v5(original, "runtime-connection-inspection-pending")
+    var owner = original
+    var entry = owner.entries[index]
+    if entry.task == nil or entry.adopted or entry.retained != nil: return reply_v5(owner, "runtime-connection-progress-state")
+    val progressed = host_primary_connection_progress_v3(owner.domain.local, entry.task.unwrap(), cancel or owner.closing)
+    owner.domain = HostServiceDomainV3(progressed.local)
+    entry.task = progressed.task
+    entry.error = progressed.error
+    owner.entries[index] = entry
+    if progressed.error != "" or progressed.task == nil: return reply_v5(owner, progressed.error)
+    if cancel or owner.closing or not progressed.task.unwrap().has_session_v3(): return reply_v5(owner, "")
+    val transfer = host_primary_connection_transfer_v3(progressed.task.unwrap())
+    entry.task = Some(transfer.task)
+    entry.retained = transfer.session
+    entry.error = transfer.error
+    owner.entries[index] = entry
+    if transfer.error != "" or transfer.session == nil: return reply_v5(owner, transfer.error)
+    val view = container_primary_terminal_view_v2(transfer.session.unwrap())
+    if view.is_err(): return reply_v5(owner, view.unwrap_err())
+    entry.session_identity = view.unwrap().fingerprint
+    val adopted = smux_pane_adopt_primary_v5(entry.target, entry.request.target.expected_revision, transfer.session.unwrap())
+    entry.retained = adopted.retained
+    entry.adopted = adopted.adopted
+    entry.error = adopted.error
+    owner.entries[index] = entry
+    reply_v5(owner, adopted.error)
+
+pub struct SmuxRuntimeHostProgressV5:
+    operation_id: text
+    pending: bool
+    response: text
+    exit_code: i64
+    error: text
+
+pub fn smux_runtime_connection_host_progress_v5(owner: SmuxRuntimeConnectionOwnerV5) -> SmuxRuntimeHostProgressV5:
+    SmuxRuntimeHostProgressV5(owner.execution_operation_id, owner.execution != nil,
+        owner.execution_response, owner.execution_exit_code, owner.execution_error)
+
+pub fn smux_runtime_connection_host_cancel_v5(original: SmuxRuntimeConnectionOwnerV5) -> SmuxRuntimeConnectionOwnerV5:
+    var owner = original
+    owner.execution_cancelled = true
+    if val execution = owner.execution:
+        val turn = host_service_execution_step_v4(owner.domain, execution, true)
+        owner.domain = turn.domain
+        owner.execution = turn.continuation
+        owner.execution_error = turn.error
+        owner.execution_exit_code = turn.exit_code
+        if val response = turn.response: owner.execution_response = response
+    owner
+
+# One actual cooperative stage per shared listener turn. The same canonical
+# thread owns Host progression and the native pipe; no worker receives copies.
+pub fn smux_runtime_connection_poll_v5(original: SmuxRuntimeConnectionOwnerV5) -> SmuxRuntimeConnectionOwnerV5:
+    var owner = original
+    if val execution = owner.execution:
+        val turn = host_service_execution_step_v4(owner.domain, execution, owner.closing or owner.execution_cancelled)
+        owner.domain = turn.domain
+        owner.execution = turn.continuation
+        owner.execution_error = turn.error
+        owner.execution_exit_code = turn.exit_code
+        if val response = turn.response: owner.execution_response = response
+        return owner
+    if val planning = owner.planning:
+        val turn = host_primary_connection_plan_step_v4(owner.domain.local, planning, owner.closing or owner.planning_cancelled)
+        return planning_turn_v5(owner, turn).owner
+    if owner.entries.len() == 0: return owner
+    var examined = 0
+    while examined < owner.entries.len():
+        if owner.cursor >= owner.entries.len(): owner.cursor = 0
+        val index = owner.cursor
+        owner.cursor = owner.cursor + 1
+        examined = examined + 1
+        val entry = owner.entries[index]
+        if entry.geometry != nil and entry.geometry.unwrap().pending_v5():
+            return geometry_step_v5(owner, index, owner.closing or entry.release_requested)
+        if (entry.release_requested and not entry.settled and not entry.recovery_required and entry.task == nil and
+                entry.helper == nil and entry.prepared != nil and sosix_time_now_monotonic_ms() >= entry.prepare_deadline_ms):
+            return smux_runtime_connection_release_v5(owner, entry.target.binding_uid).owner
+        if entry.task != nil and not entry.adopted and entry.retained == nil and not entry.settled:
+            if entry.task.unwrap().pending_v3() or entry.task.unwrap().has_session_v3():
+                return smux_runtime_connection_progress_v5(owner, entry.target.binding_uid, owner.closing).owner
+    owner
+
+pub fn smux_runtime_connection_recover_v5(original: SmuxRuntimeConnectionOwnerV5) -> SmuxRuntimeConnectionOwnerV5:
+    var owner = original
+    owner.closing = true
+    if owner.execution != nil: return smux_runtime_connection_host_cancel_v5(owner)
+    if val planning = owner.planning:
+        owner.planning_cancelled = true
+        val turn = host_primary_connection_plan_step_v4(owner.domain.local, planning, true)
+        return planning_turn_v5(owner, turn).owner
+    for entry in owner.entries:
+        if not entry.settled and (entry.task != nil or entry.prepared != nil):
+            return smux_runtime_connection_release_v5(owner, entry.target.binding_uid).owner
+    owner
+
+# Synchronize actual native gates after generic attachment mutations and sweeps.
+# Revocation never installs a lease or erases a queued/Unknown attempt receipt.
+pub fn smux_runtime_connection_controls_sync_v5(original: SmuxRuntimeConnectionOwnerV5) -> SmuxRuntimeConnectionOwnerV5:
+    var owner = original
+    owner.control_sync_error = ""
+    for index in 0..owner.entries.len():
+        val entry = owner.entries[index]
+        if not entry.adopted or entry.settled: continue
+        val session = pane_session_v5(entry)
+        if session.is_err():
+            owner.control_sync_error = session.unwrap_err()
+            continue
+        val state = container_primary_input_gate_v2(session.unwrap())
+        if state.is_err():
+            owner.control_sync_error = state.unwrap_err()
+            continue
+        val record = smux_runtime_control_find_v1(owner.controls, entry.target.binding_uid, SessionRuntimeControlKindV1.Input)
+        var eligible = false
+        if record != nil and record.unwrap().active and not owner.closing:
+            val value = record.unwrap()
+            val resolved = resolve_v5(owner, index, value.lease.target.client_id, value.attachment_token)
+            if resolved.is_ok():
+                val checked = smux_runtime_control_check_v1(owner.controls, entry.target.binding_uid,
+                    SessionRuntimeControlKindV1.Input, value.nonce, value.lease.revision,
+                    resolved.unwrap().target, sosix_time_now_monotonic_ms())
+                owner.controls = checked.owner
+                if checked.error == "" and checked.lease != nil:
+                    val lease = checked.lease.unwrap()
+                    val digest = session_runtime_control_target_digest_v1(lease.target)
+                    eligible = (digest.is_ok() and state.unwrap().controlled and state.unwrap().active and
+                        state.unwrap().target_digest == digest.unwrap() and state.unwrap().nonce_digest == lease.nonce_digest and
+                        state.unwrap().revision == lease.revision and lease.expires_monotonic_ms <= 9223372036854 and
+                        state.unwrap().expires_monotonic_ns == lease.expires_monotonic_ms * 1000000)
+        if eligible: continue
+        # Retire issuer first; an inactive native gate never authorizes reissue
+        # at the same revision. Revoke still retains any already queued bytes.
+        if record != nil and record.unwrap().active:
+            val retired = smux_runtime_control_revoke_v1(owner.controls, entry.target.binding_uid,
+                SessionRuntimeControlKindV1.Input, record.unwrap().lease.revision, sosix_time_now_monotonic_ms())
+            owner.controls = retired.owner
+            if retired.error != "": owner.control_sync_error = retired.error
+        if state.unwrap().active:
+            val revoked = container_primary_input_revoke_v2(session.unwrap())
+            if revoked.is_err(): owner.control_sync_error = revoked.unwrap_err()
+        owner = input_refresh_v5(owner, index)
+    # At most one Geometry exchange may be pending in this coordinator. Invalid
+    # generic attachment/policy changes cancel that owner before another write.
+    for index in 0..owner.entries.len():
+        val entry = owner.entries[index]
+        if not entry.adopted or entry.settled: continue
+        val record = smux_runtime_control_find_v1(owner.controls, entry.target.binding_uid, SessionRuntimeControlKindV1.Geometry)
+        var eligible = false
+        if record != nil and record.unwrap().active and not owner.closing:
+            val value = record.unwrap()
+            val resolved = resolve_v5(owner, index, value.lease.target.client_id, value.attachment_token)
+            if resolved.is_ok():
+                val checked = smux_runtime_control_check_v1(owner.controls, entry.target.binding_uid,
+                    SessionRuntimeControlKindV1.Geometry, value.nonce, value.lease.revision,
+                    resolved.unwrap().target, sosix_time_now_monotonic_ms())
+                owner.controls = checked.owner
+                eligible = checked.error == "" and checked.lease != nil
+        if eligible: continue
+        if record != nil and record.unwrap().active:
+            val retired = smux_runtime_control_revoke_v1(owner.controls, entry.target.binding_uid,
+                SessionRuntimeControlKindV1.Geometry, record.unwrap().lease.revision, sosix_time_now_monotonic_ms())
+            owner.controls = retired.owner
+            if retired.error != "": owner.control_sync_error = retired.error
+        if entry.geometry != nil and entry.geometry.unwrap().pending_v5():
+            owner = geometry_step_v5(owner, index, true)
+    owner
+
+pub struct SmuxRuntimeConnectionGeometryTurnV5:
+    owner: SmuxRuntimeConnectionOwnerV5
+    revision: i64
+    nonce: text
+    receipt: HostPrimaryGeometryReceiptV1?
+    error: text
+
+pub struct SmuxConnectionGeometryTargetV5:
+    target_digest: text
+    wire_digest: text
+
+fn geometry_pending_v5(owner: SmuxRuntimeConnectionOwnerV5) -> bool:
+    for entry in owner.entries:
+        if entry.geometry != nil and entry.geometry.unwrap().pending_v5(): return true
+    false
+
+fn geometry_reply_v5(owner: SmuxRuntimeConnectionOwnerV5, index: int,
+        revision: i64, nonce: text, error: text) -> SmuxRuntimeConnectionGeometryTurnV5:
+    val receipt = if index < 0 or owner.entries[index].geometry == nil: nil else: owner.entries[index].geometry.unwrap().receipt_v5()
+    SmuxRuntimeConnectionGeometryTurnV5(owner, revision, nonce, receipt, error)
+
+pub fn smux_runtime_connection_geometry_resolve_v5(owner: SmuxRuntimeConnectionOwnerV5,
+        uid: text, client: text, token: text, columns: i64, rows: i64) -> Result<SmuxConnectionGeometryTargetV5, text>:
+    val index = index_v5(owner, uid)
+    if index < 0: return Err("runtime-connection-binding-unavailable")
+    val resolved = resolve_v5(owner, index, client, token)?
+    Ok(SmuxConnectionGeometryTargetV5(session_runtime_control_target_digest_v1(resolved.target)?,
+        container_primary_geometry_wire_digest_v2(resolved.session, columns, rows)?))
+
+pub fn smux_runtime_connection_geometry_issue_v5(original: SmuxRuntimeConnectionOwnerV5,
+        uid: text, client: text, token: text, revision: i64, digest: text) -> SmuxRuntimeConnectionGeometryTurnV5:
+    val index = index_v5(original, uid)
+    if index < 0: return geometry_reply_v5(original, index, 0, "", "runtime-connection-binding-unavailable")
+    var owner = original
+    val entry = owner.entries[index]
+    if entry.geometry != nil and entry.geometry.unwrap().unresolved_v5():
+        return geometry_reply_v5(owner, index, revision, "", "runtime-geometry-prior-unresolved")
+    val resolved = resolve_v5(owner, index, client, token)
+    if resolved.is_err(): return geometry_reply_v5(owner, index, revision, "", resolved.unwrap_err())
+    val target = session_runtime_control_target_digest_v1(resolved.unwrap().target)
+    val tty = container_primary_geometry_wire_digest_v2(resolved.unwrap().session, 1, 1)
+    if tty.is_err(): return geometry_reply_v5(owner, index, revision, "", tty.unwrap_err())
+    if target.is_err() or target.unwrap() != digest: return geometry_reply_v5(owner, index, revision, "", "runtime-geometry-target-digest")
+    val nonce = sosix_random_hex(32)
+    if nonce == nil: return geometry_reply_v5(owner, index, revision, "", "runtime-connection-entropy-unavailable")
+    val issued = smux_runtime_control_issue_v1(owner.controls, resolved.unwrap().target, SessionRuntimeControlKindV1.Geometry,
+        token, resolved.unwrap().attachment.deadline_ms, revision, nonce.unwrap(), sosix_time_now_monotonic_ms())
+    owner.controls = issued.owner
+    geometry_reply_v5(owner, index, issued.revision, issued.nonce, issued.error)
+
+pub fn smux_runtime_connection_geometry_resize_v5(original: SmuxRuntimeConnectionOwnerV5,
+        uid: text, client: text, token: text, nonce: text, revision: i64,
+        attempt: i64, columns: i64, rows: i64, wire_digest: text) -> SmuxRuntimeConnectionGeometryTurnV5:
+    val index = index_v5(original, uid)
+    if index < 0: return geometry_reply_v5(original, index, revision, "", "runtime-connection-binding-unavailable")
+    var owner = original
+    if owner.execution != nil or owner.planning != nil: return geometry_reply_v5(owner, index, revision, "", "runtime-host-execution-pending")
+    for other in owner.entries:
+        if other.target.binding_uid != uid and other.geometry != nil and other.geometry.unwrap().pending_v5():
+            return geometry_reply_v5(owner, index, revision, "", "runtime-geometry-pending")
+        if other.task != nil and other.task.unwrap().pending_v3():
+            return geometry_reply_v5(owner, index, revision, "", "runtime-connection-opening")
+    val resolved = resolve_v5(owner, index, client, token)
+    if resolved.is_err(): return geometry_reply_v5(owner, index, revision, "", resolved.unwrap_err())
+    val wire = container_primary_geometry_wire_digest_v2(resolved.unwrap().session, columns, rows)
+    if wire.is_err(): return geometry_reply_v5(owner, index, revision, "", wire.unwrap_err())
+    if wire.unwrap() != wire_digest: return geometry_reply_v5(owner, index, revision, "", "runtime-geometry-wire-digest")
+    val checked = smux_runtime_control_check_v1(owner.controls, uid, SessionRuntimeControlKindV1.Geometry,
+        nonce, revision, resolved.unwrap().target, sosix_time_now_monotonic_ms())
+    owner.controls = checked.owner
+    if checked.error != "" or checked.lease == nil: return geometry_reply_v5(owner, index, revision, "", checked.error)
+    val request = ContainerPrimaryGeometryRequestV1(checked.lease.unwrap(), resolved.unwrap().target,
+        owner.controls.policy.principal_id, nonce, attempt, columns, rows, wire_digest)
+    var entry = owner.entries[index]
+    val state = entry.geometry ?? smux_connection_geometry_new_v5()
+    val begun = smux_connection_geometry_begin_v5(owner.domain, entry.task.unwrap(), resolved.unwrap().session, state, request)
+    owner.domain = begun.domain
+    entry.geometry = Some(begun.state)
+    owner.entries[index] = entry
+    geometry_reply_v5(owner, index, revision, "", begun.error)
+
+fn geometry_step_v5(original: SmuxRuntimeConnectionOwnerV5, index: int, cancel: bool) -> SmuxRuntimeConnectionOwnerV5:
+    var owner = original
+    var entry = owner.entries[index]
+    if entry.geometry == nil or not entry.geometry.unwrap().pending_v5(): return owner
+    val state = entry.geometry.unwrap()
+    val request = state.request_v5()
+    val record = smux_runtime_control_find_v1(owner.controls, entry.target.binding_uid, SessionRuntimeControlKindV1.Geometry)
+    var stop = cancel or owner.closing or request == nil or record == nil or entry.task == nil
+    var resolved: ConnectionResolvedV5? = nil
+    if not stop:
+        val live = record.unwrap()
+        val target = resolve_v5(owner, index, live.lease.target.client_id, live.attachment_token)
+        if not live.active or target.is_err(): stop = true
+        else:
+            resolved = Some(target.unwrap())
+            val checked = smux_runtime_control_check_v1(owner.controls, entry.target.binding_uid, SessionRuntimeControlKindV1.Geometry,
+                request.unwrap().nonce, request.unwrap().lease.revision, target.unwrap().target, sosix_time_now_monotonic_ms())
+            owner.controls = checked.owner
+            if checked.error != "" or checked.lease == nil: stop = true
+            else:
+                var current = request.unwrap()
+                current.lease = checked.lease.unwrap()
+                current.target = target.unwrap().target
+                val same = container_primary_geometry_request_same_v1(request.unwrap(), current)
+                if same.is_err() or not same.unwrap(): stop = true
+    val turn = if stop:
+        smux_connection_geometry_cancel_v5(owner.domain, state, "runtime-geometry-authority-retired")
+    else:
+        smux_connection_geometry_step_v5(owner.domain, entry.task.unwrap(), resolved.unwrap().session, state, request.unwrap())
+    owner.domain = turn.domain
+    entry.geometry = Some(turn.state)
+    owner.entries[index] = entry
+    owner
+
+pub fn smux_runtime_connection_geometry_observe_v5(owner: SmuxRuntimeConnectionOwnerV5,
+        uid: text) -> SmuxRuntimeConnectionGeometryTurnV5:
+    val index = index_v5(owner, uid)
+    if index < 0: return geometry_reply_v5(owner, index, 0, "", "runtime-connection-binding-unavailable")
+    val state = owner.entries[index].geometry
+    geometry_reply_v5(owner, index, 0, "", if state == nil: "runtime-geometry-no-attempt" else: state.unwrap().error_v5())
+
+pub fn smux_runtime_connection_geometry_cancel_v5(original: SmuxRuntimeConnectionOwnerV5,
+        uid: text, expected_revision: i64?) -> SmuxRuntimeConnectionGeometryTurnV5:
+    val index = index_v5(original, uid)
+    if index < 0: return geometry_reply_v5(original, index, 0, "", "runtime-connection-binding-unavailable")
+    var owner = original
+    val record = smux_runtime_control_find_v1(owner.controls, uid, SessionRuntimeControlKindV1.Geometry)
+    val revision = expected_revision ?? (if record == nil: 0 else: record.unwrap().lease.revision)
+    if record != nil:
+        val retired = smux_runtime_control_revoke_v1(owner.controls, uid, SessionRuntimeControlKindV1.Geometry,
+            revision, sosix_time_now_monotonic_ms())
+        owner.controls = retired.owner
+        if retired.error != "": return geometry_reply_v5(owner, index, retired.revision, "", retired.error)
+    elif expected_revision != nil: return geometry_reply_v5(owner, index, revision, "", "runtime-geometry-lease-unavailable")
+    owner = geometry_step_v5(owner, index, true)
+    val state = owner.entries[index].geometry
+    geometry_reply_v5(owner, index, revision, "", if state == nil: "" else: state.unwrap().error_v5())
+
+pub struct SmuxConnectionCapabilitiesV5:
+    available: bool
+    input_allowed: bool
+    geometry_allowed: bool
+
+pub fn smux_runtime_connection_capabilities_v5(owner: SmuxRuntimeConnectionOwnerV5) -> SmuxConnectionCapabilitiesV5:
+    if owner.closing or not host_primary_connection_supported_v3(owner.domain.local):
+        return SmuxConnectionCapabilitiesV5(false, false, false)
+    val policy = smux_runtime_connection_policy_load_v5(owner.domain.local)
+    if policy.is_err(): return SmuxConnectionCapabilitiesV5(false, false, false)
+    val current = policy.unwrap()
+    if (current.principal_id != owner.controls.policy.principal_id or current.allowed != owner.controls.policy.allowed or
+            current.max_lease_ms != owner.controls.policy.max_lease_ms): return SmuxConnectionCapabilitiesV5(false, false, false)
+    SmuxConnectionCapabilitiesV5(true, current.allowed.contains(SessionRuntimeControlKindV1.Input),
+        current.allowed.contains(SessionRuntimeControlKindV1.Geometry))

@@ -1322,14 +1322,26 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
             Node::Unit(u) => {
                 // Unit types define a newtype wrapper with a literal suffix
                 // Register the unit type name and its suffix for later use
-                units.insert(u.suffix.clone(), u.clone());
-                UNIT_SUFFIX_TO_FAMILY.with(|cell| {
-                    cell.borrow_mut().insert(u.suffix.clone(), u.name.clone());
-                });
-                USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| {
-                    cell.borrow_mut().insert(u.suffix.clone(), u.name.clone());
-                });
-                env.insert(u.name.clone(), Value::Nil);
+                if !u.suffix.is_empty() {
+                    units.insert(u.suffix.clone(), u.clone());
+                    UNIT_SUFFIX_TO_FAMILY.with(|cell| {
+                        cell.borrow_mut().insert(u.suffix.clone(), u.name.clone());
+                    });
+                    USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| {
+                        cell.borrow_mut().insert(u.suffix.clone(), u.name.clone());
+                    });
+                }
+                if let Some(class) = crate::interpreter_unit::unit_constructor_class(u) {
+                    env.insert(
+                        u.name.clone(),
+                        Value::Constructor {
+                            class_name: u.name.clone(),
+                        },
+                    );
+                    classes.insert(u.name.clone(), Arc::new(class));
+                } else {
+                    env.insert(u.name.clone(), Value::Nil);
+                }
             }
             Node::UnitFamily(uf) => {
                 // Unit family defines multiple related units with conversion factors
