@@ -160,3 +160,26 @@ Open items to record as todos, not NOTEs: `--emit-archive` archiver identity (mu
 whether `--no-mangle` already gives C-ABI symbol export on Windows PE (`__declspec(dllexport)`
 is in the C shim, so Simple symbols need only be visible to it); cpu_tiers.sdn alignment once the
 SIMD doc lands.
+
+## 5. Essential composition for the Phase 3 bootstrap binary (2026-11-15)
+
+Inventory (full-CLI HIR order of a real build, 3,155 modules): `plugins.backend_*`
+other than the registry 49, `plugins.backend_registry` 3, non-x86 native isel/encode
+(`isel_aarch64/riscv32/riscv64`, `encode_aarch64/riscv32/riscv64`, `riscv_encoding`) 7,
+Wasm/Byl/IrTc/hwir-to-VHDL adapters 4. About 63 modules are removable by this
+composition (`compiler.backend.*` total 215; LLVM 21 and Cranelift stay). The seam is
+`app.cli.bootstrap_backend_installer`, imported only by `bootstrap_main.spl` and
+`compile_targets.spl`; the full variant names `plugins.backend_registry.full_static_backend_registry`,
+the essential variant (`src/compositions/backends_essential/app/cli/bootstrap_backend_installer.spl`)
+does not.
+
+Build: list the composition roots ahead of `src/app` (first root wins), e.g.
+`--source src/compositions/kernel_llvm_cranelift --source src/compositions/backends_essential --source src/app ...`
+(LLVM-only: `kernel_llvm` instead of `kernel_llvm_cranelift`). The default build is unchanged.
+A request for a non-linked backend answers `PLUG-E-NOTFOUND: backend 'X' not linked ...`;
+a plugin path answers `PLUG-E-UNSUPPORTED` (no provider exports `simple_backend_plugin_v1`).
+
+NOT done: the full CLI (`_CliMain/main_and_help.spl`, `p3_groups/group_7.spl` ->
+`selected_cuda_backend`) still imports the full registry directly, so only the bootstrap
+entry shrinks; the P-static backends are not yet built as static libs / dynlib plugins
+(PR2-3 above); no native Phase 3 rebuild or memory measurement was run for this change.
