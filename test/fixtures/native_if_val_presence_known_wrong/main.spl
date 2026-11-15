@@ -1,0 +1,63 @@
+# KNOWN-WRONG native oracle for `if val` shapes left open by
+# doc/08_tracking/bug/native_if_val_presence_test_dropped_2026-11-15.md.
+# A native mismatch here is recorded, not a regression. The main oracle
+# (test/fixtures/native_if_val_presence/main.spl) holds only rows that a
+# native build must print exactly.
+# Seed stdout (`simple run main.spl`), one row per print:
+#   err t: none
+#   err f: some bad
+#   call 0: none
+#   call 1: some 0
+#   call 2: some 3
+#   ctor 0: none
+#   ctor 1: some 0
+#   ctor 2: some 3
+# Native, Stage 2 of b19a14b4c9f (presence fix in), measured 2026-11-15:
+#   cranelift: every row equals the seed EXCEPT
+#     err f: some 222296153947184     (the text payload printed as an integer;
+#     the `.err` text binder is not registered as text, so the interpolation
+#     renders the word with rt_raw_i64_to_string)
+#   llvm: the build FAILS in llc, first error
+#     `%l2 = call i64 @rt_array_len(ptr %l1)`: '%l1' defined with type 'i64'
+#     (the erased `make_items()` result fed to `[k]`). Same llc class as
+#     `Holder(slot: opt_int(k))` on the pre-fix Stage 2. llc stops at the
+#     first error, so the err and ctor rows are unmeasured on llvm.
+# Build: SIMPLE_BOOTSTRAP=1 native-build main.spl --entry-closure (cranelift, llvm).
+
+struct Bag:
+    items: [i64?]
+
+fn make_items() -> [i64?]:
+    [None, Some(0), Some(3)]
+
+fn res(b: bool) -> Result<i64, text>:
+    if b: return Ok(42)
+    Err("bad")
+
+fn row_err(b: bool) -> text:
+    if val e = res(b).err:
+        return "some {e}"
+    "none"
+
+fn row_call(k: i64) -> text:
+    if val x = make_items()[k]:
+        return "some {x}"
+    "none"
+
+fn row_ctor(k: i64) -> text:
+    val b = Bag(items: make_items())
+    if val x = b.items[k]:
+        return "some {x}"
+    "none"
+
+fn main():
+    print "err t: {row_err(true)}"
+    print "err f: {row_err(false)}"
+    var k = 0
+    while k < 3:
+        print "call {k}: {row_call(k)}"
+        k = k + 1
+    k = 0
+    while k < 3:
+        print "ctor {k}: {row_ctor(k)}"
+        k = k + 1
