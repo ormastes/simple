@@ -998,6 +998,10 @@ impl MirLowering:
             return
         # @workaround bug=stage2_local_symbol_index_bucket_tagged_id_2026-11-03 reason=stage2-compiled code round-trips the id through the [i64] index inconsistently (symbol 8 was hashed into bucket 1 of 16 while the lookup probed bucket 8, dump veh_13196); mirror every binding into the runtime-canonicalized Dict so find_local can resolve on an index miss
         self.local_map[symbol_id] = local
+        # A `var` bound straight to its initializer's local (struct/array
+        # paths) must not keep that local's presence bit.
+        if self.presence_word_locals.contains(local.id) and self.symbol_is_reassignable(symbol_id):
+            self.presence_word_locals[local.id] = -1
         if mir_nominal_profile_take_receipt():
             val binding_name = self.symbols.symbol_name_scalar_raw(symbol_id)
             val binding_owner = self.struct_value_syms.get(local.id) ?? ""
@@ -1285,6 +1289,15 @@ impl MirLowering:
         if self.presence_word_locals.contains(local_id):
             return self.presence_word_locals[local_id]
         -1
+
+    fn symbol_is_reassignable(symbol_id: i64) -> bool:
+        """A `var` binding. Its presence bit would be copied once, at the
+        binding, but a test lowered before a reassignment in a loop body runs
+        again after it, so a `var` never carries one (closures capture by
+        value and cannot assign it)."""
+        if val info = self.symbols.get_symbol_raw(symbol_id):
+            return info.is_mutable
+        false
 
     fn is_runtime_value_local(local_id: i64) -> bool:
         var i = self.runtime_value_local_ids.len() - 1

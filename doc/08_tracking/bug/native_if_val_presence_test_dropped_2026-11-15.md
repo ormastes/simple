@@ -81,8 +81,9 @@ that proves it present:
 The first two are recorded with seed and native output in
 `test/fixtures/native_if_val_presence_known_wrong/main.spl`.
 
-- `.err` text binder printed as an integer: `err f: some 222296153947184` on
-  the cranelift Stage 2 of b19a14b4c9f, where the seed prints `some bad`.
+- `.err` / `.ok` text binder printed as an integer: `err f: some 194129053457456`
+  and `ok_text t: some 194129053457936` on the cranelift Stage 2 of 59a93f2a5aa
+  (seed: `some bad`, `some hi`). Also wrong on the pre-fix Stage 2.
 - LLVM llc type error when an erased call result is used as a pointer:
   `make_items()[k]`, and `Holder(slot: opt_int(k))` (pre-existing on the
   pre-fix Stage 2) — `'%l1' defined with type 'i64' but expected 'ptr'`. The
@@ -98,6 +99,33 @@ runtime value. `runtime_option_scalar_payload` (`expr_dispatch.spl`) now
 tests `rt_enum_check_variant(word, 1, 0)` for a scalar `T?` element and
 takes the box's raw payload; any other word keeps the old decode. Spec:
 `optional_array_ifval_payload_spec` bootstrap-mode group, red 8/9, green 9/9.
-Not yet verified natively (needs a Stage 2 rebuild).
+Verified natively on the Stage 2 of 59a93f2a5aa: all 88 rows of the main
+fixture matched the seed on cranelift and llvm.
+
+## Follow-up fix: a `var` never carries a presence bit
+
+Review of 59a93f2a5aa: `var g = d.get(k)` copied the producer's bit, and the
+reassignment hook cleared it only in lowering order. A test lowered before
+`g = nil` in a loop body read the stale bit on the next iteration
+(`var_loop_eq: p0 p1`, `var_loop_ifval: some0 some3`; the pre-fix Stage 2 of
+f95b2204c0b7 prints the seed `p0 a1`, `some0 none`). A `var` binding
+(`HirSymbol.is_mutable`, `symbol_is_reassignable`) now gets no bit, both at
+the let copy and in `bind_local`, so it takes the pre-fix word path in every
+loop, arm and nesting. A `val` keeps the bit. Closures capture by value and
+cannot assign. The bit-clearing reassignment hook is gone.
+
+The same bit now answers `== None` (built-in None value) and `??`, so
+`if val`, `== nil`, `== None` and `??` agree on a `d.get(k)` word holding a
+stored 3 (`dget_agree t`: native `coal -5` before).
+
+Still on the word path, recorded in the known-wrong fixture: a `var` holding a
+stored 3 or a `.ok` word, a `var` copy of `d.get` (payload re-decoded:
+`some0` for 5), a capture of the word into a lambda, and an if-expression
+merge of it. The cross-lane `== None` hunk (772e1214788) is harmless after
+this: a bit-carrying operand returns before it.
+
+Specs: if_val_presence_test_spec 2/4 -> 4/4 (bootstrap-mode MIR: the var loop
+test no longer reads the d.get bit; `??` and `== None` read it once). The
+gate itself is not yet measured natively (next batched Stage 2).
 - The seed itself prints `none` for `if val x = 3` on a plain i64 and for
   `.ok` of `Ok(3)`. These are seed-divergent rows in the fixture.
