@@ -39,3 +39,5 @@ Media Queries 4 section 2.3: a media type that does not match the device
 `test/01_unit/lib/gc_async_mut/gpu/browser_engine/layout_renderer_media_query_and_alpha_spec.spl`
 asserts the width-feature and unknown-feature rows; the bare `print` row is
 kept out until fixed.
+
+Re-verified still OPEN 2026-11-15 at `ba2663afde6` (after the upstream border/abspos/whitespace fixes): every row above reproduces unchanged.

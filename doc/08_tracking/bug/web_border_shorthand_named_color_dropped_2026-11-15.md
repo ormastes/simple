@@ -1,6 +1,7 @@
 # Border shorthands drop a named colour: `border:2px solid red` paints no border (2026-11-15)
 
-Status: OPEN. Severity: medium for Simple web rendering (`border: 1px solid <keyword>`
+Status: FIXED (verified 2026-11-15 at `ba2663afde6`; fixed by the upstream border
+cascade / per-side border-color work that landed after `fa2dd425635`). Was: Severity: medium for Simple web rendering (`border: 1px solid <keyword>`
 is one of the most common declarations on the web; the border is laid out but
 painted transparent).
 
@@ -33,11 +34,12 @@ only searches for `rgb(`/`hsl(` functions and `#hex`. A named colour keyword
 (`red`, `gray`, `currentcolor`, ...) inside a multi-token shorthand is never
 tried. The same path serves `border`, `border-top/right/bottom/left`.
 
-A shorthand without a colour (`border:1px solid`) also yields 0 where CSS gives
+(Not re-verified after the fix:) a shorthand without a colour (`border:1px solid`) yielded 0 where CSS gives
 `currentcolor`.
 
 ## Test status
 
 `test/01_unit/lib/gc_async_mut/gpu/browser_engine/layout_renderer_draw_ir_style_props_spec.spl`
-asserts the longhand and the `#hex` shorthand; the named-keyword shorthand
-rows are kept out until fixed.
+asserts the longhand, the `#hex` shorthand, and -- since the fix -- the
+named-keyword `border-top:` and `border:` shorthands (`border-top-color` and
+`border-left-color` = 4294901760).
