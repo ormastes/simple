@@ -21,6 +21,9 @@ use app.llm_caret.multi_caret_manager.{MultiCaretManager, ManagedAgent,
 use app.llm_caret.workbench.session_contract.{SessionId, SessionView,
     ProcessLifecycle, AgentTurn, Transport, CapabilityEvidence,
     ComposerDraft, Delivery, new_session_id, same_session, draft_targets}
+use std.io_runtime.{file_write}
+use app.llm_caret.workbench.fleet_transport.{fleet_declare_host, fleet_poll_all,
+    fleet_clear, fleet_encode_snapshot}
 use app.llm_caret.workbench.pane_binding.{PaneBinding, PaneBindingResult,
     input_target_allowed}
 
@@ -235,6 +238,28 @@ pub fn observe_agent_generation(agent_id: text, pid: i64) -> i64:
     _live_ledger = ledger_observe_pid(_live_ledger, agent_id, pid)
     ledger_generation(_live_ledger, agent_id)
 
+# Fleet (CU-001/CU-010): declares a peer host polled by running `command args`.
+pub fn declare_fleet_host(host_id: text, command: text, args: [text]):
+    fleet_declare_host(host_id, command, args)
+
+# Polls every declared host and replaces that host's rows in the live roster
+# (idempotent; call after publish_manager_sessions, which overwrites the list).
+pub fn publish_fleet_sessions():
+    val remote = fleet_poll_all()
+    var kept: [SessionView] = []
+    for v in _live_sessions:
+        if not v.id.value.contains("/"):
+            kept.push(v)
+    _live_sessions = kept + remote
+
+# Writes this host's LOCAL rows (never relayed remote rows) for a peer to poll.
+pub fn export_fleet_snapshot(path: text) -> bool:
+    var local: [SessionView] = []
+    for v in _live_sessions:
+        if not v.id.value.contains("/"):
+            local.push(v)
+    file_write(path, fleet_encode_snapshot(local))
+
 pub fn select_live_session(id: SessionId):
     _live_selected = id.value
 
@@ -259,6 +284,7 @@ pub fn clear_live_sessions():
     _live_hints = no_hints
     _live_ledger = no_ledger
     _live_selected = ""
+    fleet_clear()
 
 # ============================================================================
 # Live terminal output for the active pane
@@ -314,4 +340,5 @@ export AgentProviderHint, SessionLedgerEntry, provider_for_agent, hints_declare,
 export publish_pane_binding, live_pane_bindings, live_pane_generation
 export publish_manager_sessions, select_live_session, live_sessions,
     live_selected, clear_live_sessions
+export declare_fleet_host, publish_fleet_sessions, export_fleet_snapshot
 export publish_pane_output, live_pane_id, live_pane_lines, clear_pane_output

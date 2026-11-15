@@ -8,15 +8,18 @@ Audience: caret-suite workbench engineers.
 Run `bin/simple test test/01_unit/app/llm_caret/workbench/fleet_transport_spec.spl`.
 """
 use std.spec.*
-use app.io.mod.{file_write}
+use std.io_runtime.{file_write}
 use app.llm_caret.workbench.session_contract.{SessionView, SessionId,
     new_session_view, ProcessLifecycle, AgentTurn, Transport}
 use app.llm_caret.workbench.session_source.{live_sessions, clear_live_sessions,
-    declare_fleet_host, publish_fleet_sessions, export_fleet_snapshot}
+    declare_fleet_host, publish_fleet_sessions, export_fleet_snapshot,
+    publish_manager_sessions}
+use app.llm_caret.agent_runtime.{AgentProcess, summarize_agent_team}
+use app.llm_caret.multi_caret_manager.{multi_caret_manager_of}
 use app.llm_caret.workbench.fleet_transport.{fleet_encode_snapshot, fleet_decode_snapshot}
 
-fn _running(id: text, provider: text, gen: i64) -> SessionView:
-    val base = new_session_view(SessionId(value: id, generation: gen), id, provider)
+fn _running(id: text, provider: text, generation: i64) -> SessionView:
+    val base = new_session_view(SessionId(value: id, generation: generation), id, provider)
     SessionView(id: base.id, label: base.label, provider: base.provider,
         lifecycle: ProcessLifecycle.Running, turn: AgentTurn.Working,
         transport: Transport.Ready, evidence: base.evidence, needs_attention: true)
@@ -69,15 +72,20 @@ describe "fleet transport":
         expect(a1[0].lifecycle).to_equal(ProcessLifecycle.Lost)
 
     it "exports the local roster so a peer host decodes the same rows":  # @req CU-001
-        step("export writes the wire a peer polls back")
+        step("export writes only LOCAL rows; a peer polls them back")
         clear_live_sessions()
         val src = "build/fleet_spec_src.snap"
         file_write(src, fleet_encode_snapshot([_running("z1", "claude", 5)]))
         declare_fleet_host("hostz", "cat", [src])
+        val team = summarize_agent_team("m", [AgentProcess(agent_id: "loc1",
+            status: "running", reason: "fixture", pid: 41)])
+        publish_manager_sessions(multi_caret_manager_of("m", "running", "fixture", 2, team))
         publish_fleet_sessions()
+        expect(live_sessions().len()).to_equal(2)
         val path = "build/fleet_spec_export.snap"
         expect(export_fleet_snapshot(path)).to_equal(true)
         clear_live_sessions()
         declare_fleet_host("hostd", "cat", [path])
         publish_fleet_sessions()
-        expect(_find(live_sessions(), "hostd/hostz/z1").len()).to_equal(1)
+        expect(live_sessions().len()).to_equal(1)
+        expect(_find(live_sessions(), "hostd/loc1").len()).to_equal(1)
