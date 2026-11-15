@@ -3,8 +3,11 @@
 set -u
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 worker=$root/scripts/bootstrap/lib/stage3-native-build-worker.sh
+resume=$root/scripts/bootstrap/resume-stage3-from-admitted.sh
 [ -f "$worker" ] || { echo 'FAIL: Stage 3 worker missing'; exit 1; }
+[ -f "$resume" ] || { echo 'FAIL: Stage 3 resume launcher missing'; exit 1; }
 sh -n "$worker" || exit 1
+sh -n "$resume" || exit 1
 
 grep -Fq 'stage3_streaming_surfaces=0' "$worker" || { echo 'FAIL: default retained-surface route changed'; exit 1; }
 grep -Fq 'if [ "${SIMPLE_MIR_SHARD_INTERFACE_HIR:-}" = 1 ]; then' "$worker" || { echo 'FAIL: interface opt-in guard missing'; exit 1; }
@@ -15,4 +18,10 @@ grep -Fq '${mir_interface_hir_env} ${mir_shard_count_env}' "$worker" || { echo '
 [ "$(grep -Fc 'stage3_streaming_surfaces=0' "$worker")" -eq 1 ] || { echo 'FAIL: default assignment is not unique'; exit 1; }
 [ "$(grep -Fc 'stage3_streaming_surfaces=1' "$worker")" -eq 1 ] || { echo 'FAIL: opt-in assignment is not unique'; exit 1; }
 
-echo 'PASS: Stage 3 serial opt-in forwards one-worker interface HIR with 8 shards; default route unchanged'
+# systemd/cgroup launchers do not reliably inherit the caller's environment.
+# Every worker entry must set the opt-in explicitly or the worker silently
+# falls back to retained surfaces and exceeds the low-memory RSS cap.
+worker_env='env SIMPLE_MIR_SHARD_INTERFACE_HIR="${SIMPLE_MIR_SHARD_INTERFACE_HIR:-}" SIMPLE_MIR_SHARD_COUNT="${SIMPLE_MIR_SHARD_COUNT:-8}" "$worker" "$stage3_transcript"'
+[ "$(grep -Fc "$worker_env" "$resume")" -eq 4 ] || { echo 'FAIL: a worker launch drops the interface-HIR environment'; exit 1; }
+
+echo 'PASS: Stage 3 serial opt-in reaches every worker launch; default route unchanged'

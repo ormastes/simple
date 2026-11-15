@@ -1,0 +1,130 @@
+"""
+## Purpose and audience
+Purpose: Pin that a multimodal projector (mmproj) GGUF is never chosen as the
+model and is exposed as `mmproj_path` instead. Audience: engineers serving
+vision/audio models whose directory holds a text GGUF plus a projector.
+
+## Compatibility and limitations
+A projector is recognised by GGUF metadata `general.architecture == "clip"`,
+read at fixed offsets (the key is the first KV in llama.cpp-written files).
+Only a file whose first key is something else falls back to the `mmproj`
+filename prefix. Fixtures here are 68-byte headers, not real models.
+"""
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{describe_model, gguf_entry_shard, gguf_is_projector, gguf_mmproj_path}
+use std.io_runtime.{dir_create_all, file_write_bytes, dir_remove_all}
+
+fn _push_u64(out: [u8], n: i64) -> [u8]:
+    var o = out
+    o.push(n as u8)
+    var i = 0
+    while i < 7:
+        o.push(0 as u8)
+        i = i + 1
+    o
+
+fn _push_text(out: [u8], s: text) -> [u8]:
+    var o = out
+    for b in s.bytes():
+        o.push(b)
+    o
+
+# magic, version 3, 0 tensors, 1 kv, then the first KV: <key> = <value> (string).
+fn gguf_with_first_kv(key: text, value: text) -> [u8]:
+    var o: [u8] = []
+    o = _push_text(o, "GGUF")
+    o.push(3 as u8)
+    o.push(0 as u8)
+    o.push(0 as u8)
+    o.push(0 as u8)
+    o = _push_u64(o, 0)
+    o = _push_u64(o, 1)
+    o = _push_u64(o, key.byte_len())
+    o = _push_text(o, key)
+    o.push(8 as u8)
+    o.push(0 as u8)
+    o.push(0 as u8)
+    o.push(0 as u8)
+    o = _push_u64(o, value.byte_len())
+    _push_text(o, value)
+
+fn arch(name: text) -> [u8]:
+    gguf_with_first_kv("general.architecture", name)
+
+fn fixture_dir(name: text) -> text:
+    val dir = "build/test/slang_native_formats_mmproj/" + name
+    dir_remove_all(dir)
+    dir_create_all(dir)
+    dir
+
+describe "a projector is never the model":
+    it "skips an mmproj that sorts before a lowercase model name":
+        step("Verify: mmproj-pixtral < pixtral-12b would have been the entry before")
+        val d = fixture_dir("pixtral")
+        file_write_bytes(d + "/mmproj-pixtral-12b-f16.gguf", arch("clip"))
+        file_write_bytes(d + "/pixtral-12b-Q4_K_M.gguf", arch("llama"))
+        expect(gguf_entry_shard(d).ends_with("pixtral-12b-Q4_K_M.gguf")).to_equal(true)
+        expect(gguf_mmproj_path(d).ends_with("mmproj-pixtral-12b-f16.gguf")).to_equal(true)
+
+    it "recognises the projector by metadata even when its name hides it":
+        step("Verify: architecture clip, not the filename, decides")
+        val d = fixture_dir("renamed")
+        file_write_bytes(d + "/aaa-vision.gguf", arch("clip"))
+        file_write_bytes(d + "/zzz-text.gguf", arch("qwen2"))
+        expect(gguf_is_projector(d + "/aaa-vision.gguf")).to_equal(true)
+        expect(gguf_entry_shard(d).ends_with("zzz-text.gguf")).to_equal(true)
+
+    it "does not treat a model named mmproj-something as a projector when metadata says otherwise":
+        step("Verify: metadata wins over the filename hint")
+        val d = fixture_dir("misnamed")
+        file_write_bytes(d + "/mmproj-looking.gguf", arch("llama"))
+        expect(gguf_is_projector(d + "/mmproj-looking.gguf")).to_equal(false)
+
+    it "falls back to the filename only when the first key is not the architecture":
+        step("Verify: the fallback is limited to unreadable metadata")
+        val d = fixture_dir("fallback")
+        file_write_bytes(d + "/mmproj-x.gguf", gguf_with_first_kv("general.name", "abcd"))
+        file_write_bytes(d + "/x.gguf", gguf_with_first_kv("general.name", "abcd"))
+        expect(gguf_is_projector(d + "/mmproj-x.gguf")).to_equal(true)
+        expect(gguf_is_projector(d + "/x.gguf")).to_equal(false)
+
+describe "describe_model exposes the projector":
+    it "reports mmproj_path for a text model plus one projector":
+        step("Verify: runnable text model carrying its projector path")
+        val d = fixture_dir("pair")
+        file_write_bytes(d + "/Model-Q8_0.gguf", arch("llama"))
+        file_write_bytes(d + "/mmproj-Model-Q8_0.gguf", arch("clip"))
+        val m = describe_model(d, true)
+        expect(m.runnable).to_equal(true)
+        expect(m.entry_path.ends_with("Model-Q8_0.gguf")).to_equal(true)
+        expect(m.mmproj_path.ends_with("mmproj-Model-Q8_0.gguf")).to_equal(true)
+
+    it "leaves mmproj_path empty for a plain text model":
+        step("Verify: text-only directories are unchanged")
+        val d = fixture_dir("plain")
+        file_write_bytes(d + "/model.gguf", arch("llama"))
+        val m = describe_model(d, true)
+        expect(m.runnable).to_equal(true)
+        expect(m.mmproj_path).to_equal("")
+
+    it "refuses two projectors as ambiguous":
+        step("Verify: exactly one projector is allowed")
+        val d = fixture_dir("two")
+        file_write_bytes(d + "/model.gguf", arch("llama"))
+        file_write_bytes(d + "/mmproj-a.gguf", arch("clip"))
+        file_write_bytes(d + "/mmproj-b.gguf", arch("clip"))
+        val m = describe_model(d, true)
+        expect(m.runnable).to_equal(false)
+        expect(m.reason.find("ambiguous") >= 0).to_equal(true)
+
+    it "refuses a directory holding only a projector":
+        step("Verify: a projector without a text model is not a model")
+        val d = fixture_dir("only")
+        file_write_bytes(d + "/mmproj-only.gguf", arch("clip"))
+        val m = describe_model(d, true)
+        expect(m.runnable).to_equal(false)
+        expect(m.format).to_equal("unknown")
+        expect(m.reason.find("projector") >= 0).to_equal(true)

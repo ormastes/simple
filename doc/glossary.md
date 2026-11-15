@@ -257,6 +257,17 @@ Decision:
 - Best tradeoff is **shared core + Loader/JIT policy wrappers**.
 - One mapper with only config flags is workable but tends to grow mode conditionals and weak ownership rules.
 
+## Region (init capability)
+
+For `E_INIT_CAPABILITY_ESCAPE` (immutable async init): the async producer of a
+late-initialised immutable field (`async_init(...)`) is outside the constructing
+scope's mutation region, so it may only receive IMMUTABLE input. A `var`
+binding, `mut T`/`&mut` parameter, `me`-method `self`, borrow/view-typed binding or
+closure capturing mutable state, anywhere in the argument, is rejected; `val`
+bindings, immutable parameters and literals are accepted. Assignment to an
+immutable binding (`val x = counter`) is the gate. Owner decision 2026-11-15,
+`doc/08_tracking/bug/immutable_async_open_questions_2026-11-15.md` section 4.
+
 ## Remote interpreter
 Remote interpreter executes same frontend/lowering contract but targets remote memory.
 
@@ -1191,3 +1202,17 @@ diagnostic harness driven by `scripts/check/check-windows-native-mdi-evidence.{s
 and needs a message pump, window lifecycle and pixel readback that `CompositorBackend`
 does not expose. It is not duplication debt; do not "fix" it by routing it through the
 backend, which would destroy what it measures.
+
+## XRay (shared wrapper, backends, spy, profile)
+
+Simple's dynamic function-entry/exit tracing. **Wrapper interface**
+`XrayBackendV1` (`src/lib/nogc_sync_mut/trace/xray_spy_v1.spl`) is one
+pure-Simple interface built by composition: the control-plane leaf
+`XrayLlvmLeafV1` (install / enable site / disable site / close) plus the edge
+source `XrayEdgeSourceV1` (drain edges / site names). **Backends:** Linux =
+compiler-rt or native sled leaf, whose handler writes the channel directly;
+Windows = `XrayWinFlagLeafV1`, which uses flag-guard slots and an in-DLL ring
+drained into the channel. **Spy** is log mode: `XraySpyV1.log_lines()` prints
+one `enter|exit <name>` line per edge. **Profile** is `XraySpyV1.profile()`,
+which folds the same drained events with `trace_profile_fold_v1`. Both share
+one implementation and run unchanged on either OS.

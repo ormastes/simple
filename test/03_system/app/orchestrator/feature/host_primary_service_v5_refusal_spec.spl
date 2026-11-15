@@ -1,0 +1,82 @@
+# codex-system-test
+# @req HOST-01 CTR-02
+# Evidence class: command-boundary. AUTHORED_NOT_RUN.
+# Calls the actual command only with invalid arguments. No fixture authority,
+# successful host opening, socket, native owner or runtime execution is claimed.
+use std.spec.*
+use app.orchestrator.host_primary_service_v5.{host_primary_service_shape_v5, host_primary_service_command_v5}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+fn primary_startup_arguments_v5() -> [text]:
+    ["host-primary-service", "windows-docker-process", "C:\\fixture-unavailable\\anchor",
+        "unverified-policy-pin", "C:\\fixture-unavailable\\binding.sdn", "127.0.0.1:0",
+        "C:\\fixture-unavailable\\credential.sdn"]
+
+fn assert_primary_startup_refusal_v5(args: [text], expected_error: text):
+    # Shape check is a guard against accidentally invoking a successful service
+    # startup from this fixture-free suite. Assert the actual command separately.
+    val observed = host_primary_service_shape_v5(args)
+    expect(observed).to_equal(expected_error)
+    if observed != expected_error: return
+    val reply = host_primary_service_command_v5(args)
+    expect(reply.exit_code).to_equal(2)
+    expect(reply.primary_service_recovery == nil).to_equal(true)
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(5),
+        "kind": SdnValue.String("host-primary-service"), "status": SdnValue.String("refused"),
+        "error": SdnValue.String(expected_error), "recoveryRequired": SdnValue.Bool(false)}
+    expect(reply.output).to_equal(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+describe "HOST-01 V5 command pre-effect refusal":
+    it "should reject missing, extra and incorrect command arguments":
+        step("Submit malformed command shapes to the actual command entrypoint")
+        assert_primary_startup_refusal_v5([], "host-primary-service-usage")
+        assert_primary_startup_refusal_v5(["host-primary-service"], "host-primary-service-usage")
+        var wrong = primary_startup_arguments_v5()
+        wrong[0] = "host-service"
+        assert_primary_startup_refusal_v5(wrong, "host-primary-service-usage")
+        var extra = primary_startup_arguments_v5()
+        extra.push("unexpected")
+        assert_primary_startup_refusal_v5(extra, "host-primary-service-usage")
+
+    it "should refuse unsupported direct-provider routes without opening a Host writer":
+        step("Select an unknown backend and the separately supported Linux service backend")
+        var unknown = primary_startup_arguments_v5()
+        unknown[1] = "docker"
+        assert_primary_startup_refusal_v5(unknown, "host-service-backend")
+        var linux = primary_startup_arguments_v5()
+        linux[1] = "linux-podman"
+        linux[3] = "-"
+        linux[4] = "-"
+        assert_primary_startup_refusal_v5(linux, "host-primary-provider-connection-unsupported")
+
+    it "should require installed Windows anchor fields before reading a binding file":
+        step("Remove each required administrator-supplied anchor field")
+        var missing_anchor = primary_startup_arguments_v5()
+        missing_anchor[2] = ""
+        assert_primary_startup_refusal_v5(missing_anchor, "host-service-installed-anchor-required")
+        for index in [3, 4]:
+            for missing in ["", "-"]:
+                var args = primary_startup_arguments_v5()
+                args[index] = missing
+                assert_primary_startup_refusal_v5(args, "host-service-windows-anchor-fields")
+
+    it "should refuse every noncanonical endpoint before Host admission":
+        step("Request public, fixed-port, hostname and malformed endpoints")
+        for endpoint in ["", "0.0.0.0:0", "127.0.0.1:7337", "localhost:0", "[::1]:0", "127.0.0.1:00", "127.0.0.1:0\0"]:
+            var args = primary_startup_arguments_v5()
+            args[5] = endpoint
+            assert_primary_startup_refusal_v5(args, "host-primary-service-loopback-auto-required")
+
+    it "should refuse missing and NUL-bearing credential paths before Host admission":
+        step("Submit absent and embedded-NUL credential path spellings")
+        for credential in ["", "\0", "C:\\credential\0.sdn"]:
+            var args = primary_startup_arguments_v5()
+            args[6] = credential
+            assert_primary_startup_refusal_v5(args, "host-primary-service-credential-required")
+
+    it "should keep valid argument shape distinct from enrollment and service readiness":
+        step("Validate syntax containing deliberately unverified fixture references without invoking startup")
+        expect(host_primary_service_shape_v5(primary_startup_arguments_v5())).to_equal("")
+        # Deliberately do not call command_v5 here: syntax grants no authority,
+        # and a positive startup requires the actual protected Windows fixture.

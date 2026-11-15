@@ -2,6 +2,8 @@
 # SOURCE_AUTHORED_NOT_RUN: unsafe source and linker route need independent review.
 # Public owners carry private slot/generation only; no root/path/native HANDLE
 # or constructor/factory accepting caller-controlled filesystem data is exposed.
+use std.nogc_sync_mut.database.wal.WalEntry
+use std.nogc_sync_mut.database.wal_segmented.DatabaseWalRevisionV1
 
 pub class WindowsMachinePolicyOwnerV1:
     slot: i64
@@ -9,9 +11,16 @@ pub class WindowsMachinePolicyOwnerV1:
 
     pub fn read_policy_v1() -> Result<[u8], text>:
         @when(os="windows"):
-        machine_read_v1(self.slot, self.generation)
+        machine_reader_read_v1(self.slot, self.generation)
         @else:
         Err("windows-machine-policy-host-unsupported")
+        @end
+
+    pub fn open_storage_v1() -> WindowsMachineStorageOpenV1:
+        @when(os="windows"):
+        machine_storage_open_v1(self.slot, self.generation)
+        @else:
+        WindowsMachineStorageOpenV1.Rejected("windows-machine-policy-host-unsupported")
         @end
 
     pub fn close_v1() -> text:
@@ -26,6 +35,37 @@ pub enum WindowsMachinePolicyOpenV1:
     CleanupRequired(owner: WindowsMachinePolicyOwnerV1, reason: text)
     Ready(owner: WindowsMachinePolicyOwnerV1)
 
+pub class WindowsMachineStorageV1:
+    slot: i64
+    generation: i64
+
+    # Internal library composition ports; no journal/root/identity arguments.
+    pub fn physical_capacity_v1() -> Result<(i64, i64), text>: machine_storage_capacity_v1(self.slot, self.generation)
+    pub fn bind_policy_v1(expected_bytes: text) -> Result<text, text>: machine_storage_bind_v1(self.slot, self.generation, expected_bytes)
+    pub fn wal_head_v1() -> Result<text, text>: machine_wal_head_v1(self.slot, self.generation)
+    pub fn wal_revision_v1(digest: text) -> Result<DatabaseWalRevisionV1, text>: machine_wal_revision_v1(self.slot, self.generation, digest)
+    pub fn wal_segment_v1(revision: DatabaseWalRevisionV1) -> Result<[WalEntry], text>: machine_wal_segment_v1(self.slot, self.generation, revision)
+    pub fn wal_commit_v1(expected_parent: text, entries: [WalEntry]) -> Result<DatabaseWalRevisionV1, text>: machine_wal_commit_v1(self.slot, self.generation, expected_parent, entries)
+
+    pub fn policy_bytes_v1() -> Result<[u8], text>:
+        @when(os="windows"):
+        machine_storage_read_v1(self.slot, self.generation)
+        @else:
+        Err("windows-machine-policy-host-unsupported")
+        @end
+
+    pub fn close_v1() -> text:
+        @when(os="windows"):
+        machine_storage_close_v1(self.slot, self.generation)
+        @else:
+        "stale"
+        @end
+
+pub enum WindowsMachineStorageOpenV1:
+    Rejected(reason: text)
+    CleanupRequired(owner: WindowsMachineStorageV1, reason: text)
+    Ready(owner: WindowsMachineStorageV1)
+
 pub fn windows_machine_policy_open_v1() -> WindowsMachinePolicyOpenV1:
     @when(os="windows"):
     machine_open_v1()
@@ -35,6 +75,15 @@ pub fn windows_machine_policy_open_v1() -> WindowsMachinePolicyOpenV1:
 
 @when(os="windows"):
 use std.nogc_sync_mut.io.windows_machine_policy_abi_v1.*
+use std.nogc_sync_mut.io.windows_private_file_v1.{WindowsPrivateRootV1, WindowsJournalStoreV1,
+    WindowsJournalStoreOpenV1, windows_private_root_open_v1}
+use std.common.string_core.char_from_code
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.text_bytes.text_to_utf8_bytes
+use std.nogc_sync_mut.io.windows_process_owner_abi.GlobalMemoryStatusEx
+use std.nogc_sync_mut.io.windows_job_stream_abi_v2.GetActiveProcessorCount
+use std.nogc_sync_mut.database.wal_segmented.{database_wal_current_v1, database_wal_revision_open_v1,
+    database_wal_segment_read_strict_v1, database_wal_commit_v1}
 use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32,
     volatile_read_u64, volatile_write_u8, volatile_write_u16, volatile_write_u32, volatile_write_u64}
 
@@ -44,6 +93,7 @@ use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, vola
 # control184/revision188, ACL_SIZE_INFORMATION192..203, ACE-out208,
 # ReadFile-count224, FILE_BASIC_INFO232..271, token-out280,
 # FILE_FS_DEVICE_INFORMATION304..311 (IOSB32..47 reused synchronously),
+# MEMORYSTATUSEX328..391, total physical bytes at336; no separate allocation.
 # native name512..66033 (32760 units plus terminator), read66048..1114623.
 struct MachinePolicyStateV1:
     generation: i64
@@ -55,6 +105,14 @@ struct MachinePolicyStateV1:
     handles: [i64] = []
     strict_start: i64 = 0
     file_index: i64 = -1
+    container_index: i64 = -1
+    state_index: i64 = -1
+    global_state_path: text = ""
+    storage_owned: bool = false
+    storage_phase: text = "reader"
+    private_root: Option<WindowsPrivateRootV1> = None
+    journal_store: Option<WindowsJournalStoreV1> = None
+    bound_policy_digest: text = ""
     ready: bool = false
     closing: bool = false
     closed: bool = false
@@ -118,6 +176,28 @@ fn machine_component_v1(pointer: i64, start: i64, count: i64) -> bool:
             return false
         index = index + 1
     true
+
+@unsafe(reason: "privately preserve actual OS UTF16 including surrogate pairs in the fixed global state pathname", capabilities: [ffi, raw_ptr])
+fn machine_state_path_v1(pointer: i64, units: i64) -> Result<text, text>:
+    var chunks: [text] = []
+    var index = 0
+    while index < units:
+        var scalar = volatile_read_u16(pointer + index * 2)
+        if scalar >= 55296 and scalar <= 56319:
+            if index + 1 >= units: return Err("windows-machine-policy-state-path-surrogate")
+            val low = volatile_read_u16(pointer + (index + 1) * 2)
+            if low < 56320 or low > 57343: return Err("windows-machine-policy-state-path-surrogate")
+            scalar = 65536 + ((scalar - 55296) << 10) + low - 56320
+            index = index + 1
+        elif scalar >= 56320 and scalar <= 57343:
+            return Err("windows-machine-policy-state-path-surrogate")
+        if scalar == 0: return Err("windows-machine-policy-state-path-nul")
+        val character = char_from_code(scalar)
+        if character == "": return Err("windows-machine-policy-state-path-encoding")
+        chunks.push(character)
+        index = index + 1
+    val separator = if units == 3: "" else: "\\"
+    Ok("\\GLOBAL??\\" + chunks.join("") + separator + "Simple\\Container\\state")
 
 @unsafe(reason: "bounded exact SYSTEM/Administrators SID classification inside the retained OS descriptor", capabilities: [ffi, raw_ptr])
 fn machine_sid_v1(sid: i64, descriptor: i64, length: i64) -> Result<(bool, i64), text>:
@@ -364,6 +444,10 @@ fn machine_open_v1() -> WindowsMachinePolicyOpenV1:
         if opened.is_err(): return machine_failure_v1(slot, opened.unwrap_err())
     state = machine_slots_v1[slot]
     state.file_index = state.handles.len() - 1
+    state.container_index = state.file_index - 1
+    val state_path = machine_state_path_v1(path, units)
+    if state_path.is_err(): return machine_failure_v1(slot, state_path.unwrap_err())
+    state.global_state_path = state_path.unwrap()
     # All path components now have retained handles. Free only shell storage.
     CoTaskMemFree(state.known_folder)
     state.known_folder = 0
@@ -382,7 +466,8 @@ fn machine_recheck_v1(slot: i64) -> Result<i64, text>:
     val state = machine_slots_v1[slot]
     var size = 0
     for index in 0..state.handles.len():
-        size = machine_metadata_v1(slot, state.handles[index], index != state.file_index)?
+        val observed_size = machine_metadata_v1(slot, state.handles[index], index != state.file_index)?
+        if index == state.file_index: size = observed_size
         if index == 0:
             val volume = machine_root_volume_v1(slot, state.handles[index])?
         val checked = machine_security_v1(slot, state.handles[index], index >= state.strict_start)?
@@ -392,6 +477,7 @@ fn machine_read_failure_v1(slot: i64, reason: text) -> Result<[u8], text>:
     var state = machine_slots_v1[slot]
     state.ready = false
     state.closing = true
+    if state.storage_owned: state.storage_phase = "cleanup"
     machine_slots_v1[slot] = state
     Err(reason)
 
@@ -429,12 +515,248 @@ fn machine_read_v1(slot: i64, generation: i64) -> Result<[u8], text>:
     for index in 0..size: bytes.push(volatile_read_u8(state.arena + 66048 + index) as u8)
     Ok(bytes)
 
-@unsafe(reason: "same-thread canonical close clears each resource only after its exact native release succeeds", capabilities: [ffi, raw_ptr])
+fn machine_reader_read_v1(slot: i64, generation: i64) -> Result<[u8], text>:
+    val entry = machine_entry_v1()?
+    val state = machine_slot_v1(slot, generation)?
+    if state.storage_owned: return Err("windows-machine-policy-reader-transferred")
+    machine_read_v1(slot, generation)
+
+fn machine_storage_failure_v1(slot: i64, reason: text) -> WindowsMachineStorageOpenV1:
+    var state = machine_slots_v1[slot]
+    state.ready = false
+    state.closing = true
+    state.storage_phase = "cleanup"
+    machine_slots_v1[slot] = state
+    WindowsMachineStorageOpenV1.CleanupRequired(WindowsMachineStorageV1(slot: slot, generation: state.generation), reason)
+
+# No path/config input and no capability getter. Requires the pending native
+# existing-export extension that accepts explicit canonical GLOBAL?? roots;
+# an older provider refuses that spelling rather than selecting a DOS fallback.
+fn machine_storage_open_v1(slot: i64, generation: i64) -> WindowsMachineStorageOpenV1:
+    val entry = machine_entry_v1()
+    if entry.is_err(): return WindowsMachineStorageOpenV1.Rejected(entry.unwrap_err())
+    val loaded = machine_slot_v1(slot, generation)
+    if loaded.is_err(): return WindowsMachineStorageOpenV1.Rejected(loaded.unwrap_err())
+    var state = loaded.unwrap()
+    if not state.ready or state.closing or state.storage_owned:
+        return WindowsMachineStorageOpenV1.Rejected("windows-machine-policy-reader-not-transferable")
+    # Preserve reader support for long Unicode OS paths even when the existing
+    # private facade's UTF8-byte path ceiling cannot admit storage reopening.
+    if state.global_state_path == "" or state.global_state_path.byte_len() > 32760 or state.container_index < 0:
+        return WindowsMachineStorageOpenV1.Rejected("windows-machine-policy-storage-global-path-bound")
+    state.storage_owned = true
+    state.storage_phase = "opening-state"
+    machine_slots_v1[slot] = state
+    val policy = machine_read_v1(slot, generation)
+    if policy.is_err(): return machine_storage_failure_v1(slot, policy.unwrap_err())
+    state = machine_slots_v1[slot]
+    val parent = state.handles[state.container_index]
+    val name = machine_fixed_name_v1(slot, "state")
+    val opened = machine_open_name_v1(slot, parent, name, 5, true, true)
+    if opened.is_err(): return machine_storage_failure_v1(slot, opened.unwrap_err())
+    state = machine_slots_v1[slot]
+    state.state_index = state.handles.len() - 1
+    state.storage_phase = "opening-private-root"
+    machine_slots_v1[slot] = state
+    val before = machine_recheck_v1(slot)
+    if before.is_err(): return machine_storage_failure_v1(slot, before.unwrap_err())
+    # Held state/ancestor handles deny DELETE sharing throughout this global
+    # reopen. Their exact metadata and SYSTEM/Admin ACLs are checked both sides.
+    match windows_private_root_open_v1(state.global_state_path):
+        case Ok(root):
+            state = machine_slots_v1[slot]
+            state.private_root = Some(root)
+            machine_slots_v1[slot] = state
+        case Err(error):
+            state = machine_slots_v1[slot]
+            # The actual root factory returns only cleanup_root, never a file.
+            state.private_root = error.cleanup_root
+            machine_slots_v1[slot] = state
+            return machine_storage_failure_v1(slot, error.message)
+    val after = machine_recheck_v1(slot)
+    if after.is_err(): return machine_storage_failure_v1(slot, after.unwrap_err())
+    state = machine_slots_v1[slot]
+    val root = state.private_root.unwrap()
+    if not root.security_current(): return machine_storage_failure_v1(slot, "windows-machine-policy-private-root-not-current")
+    state.storage_phase = "opening-journal"
+    machine_slots_v1[slot] = state
+    match root.open_journal_store_v1():
+        case WindowsJournalStoreOpenV1.Ready(store):
+            state = machine_slots_v1[slot]
+            state.journal_store = Some(store)
+            machine_slots_v1[slot] = state
+        case WindowsJournalStoreOpenV1.CleanupRequired(store, reason):
+            state = machine_slots_v1[slot]
+            state.journal_store = Some(store)
+            machine_slots_v1[slot] = state
+            return machine_storage_failure_v1(slot, reason)
+        case WindowsJournalStoreOpenV1.Rejected(reason):
+            return machine_storage_failure_v1(slot, reason)
+    val final_check = machine_recheck_v1(slot)
+    if final_check.is_err(): return machine_storage_failure_v1(slot, final_check.unwrap_err())
+    state = machine_slots_v1[slot]
+    val journal = state.journal_store.unwrap()
+    if not journal.belongs_to(root):
+        return machine_storage_failure_v1(slot, "windows-machine-policy-journal-root-provenance")
+    state.storage_phase = "ready"
+    machine_slots_v1[slot] = state
+    WindowsMachineStorageOpenV1.Ready(WindowsMachineStorageV1(slot: slot, generation: generation))
+
+fn machine_storage_read_v1(slot: i64, generation: i64) -> Result<[u8], text>:
+    val entry = machine_entry_v1()?
+    val state = machine_slot_v1(slot, generation)?
+    if not state.storage_owned or state.storage_phase != "ready" or state.closing:
+        return Err("windows-machine-policy-storage-not-ready")
+    if state.private_root == None or state.journal_store == None:
+        return machine_read_failure_v1(slot, "windows-machine-policy-storage-capability-missing")
+    val root = state.private_root.unwrap()
+    val journal = state.journal_store.unwrap()
+    if not journal.belongs_to(root): return machine_read_failure_v1(slot, "windows-machine-policy-storage-capability-not-current")
+    machine_read_v1(slot, generation)
+
+fn machine_mutation_error_v1(slot: i64, reason: text) -> text:
+    var state = machine_slots_v1[slot]
+    state.storage_phase = "quarantined"
+    machine_slots_v1[slot] = state
+    reason
+@unsafe(reason: "sample actual machine totals in retained same-thread arena; no heap temporary, cache or reservation claim", capabilities: [ffi, raw_ptr])
+fn machine_storage_capacity_v1(slot: i64, generation: i64) -> Result<(i64, i64), text>:
+    val policy = machine_storage_read_v1(slot, generation)?
+    val arena = machine_slots_v1[slot].arena + 328
+    for offset in 0..8: volatile_write_u64(arena + offset * 8, 0)
+    volatile_write_u32(arena, 64)
+    val memory_ok = GlobalMemoryStatusEx(arena)
+    val processors = GetActiveProcessorCount(0xffffu16) as i64
+    val physical_bytes = volatile_read_u64(arena + 8)
+    if memory_ok == 0 or physical_bytes <= 0 or processors <= 0 or processors > 9223372036854775807 / 1000:
+        return Err("windows-machine-policy-physical-capacity-unavailable")
+    Ok((processors * 1000, physical_bytes))
+fn machine_wal_identity_v1(state: MachinePolicyStateV1) -> text:
+    sha256_text("MACHINE-CONTAINER-WAL-V1\n" + state.bound_policy_digest + "\n")
+fn machine_storage_bind_v1(slot: i64, generation: i64, expected: text) -> Result<text, text>:
+    if expected.byte_len() < 1 or expected.byte_len() > 1048576: return Err("windows-machine-policy-binding-size")
+    val actual: [u8] = machine_storage_read_v1(slot, generation)?
+    val bytes: [u8] = text_to_utf8_bytes(expected)
+    if bytes.len() != expected.byte_len() or bytes.len() != actual.len():
+        return Err("windows-machine-policy-binding-bytes-differ")
+    for index in 0..bytes.len():
+        if bytes[index] != actual[index]: return Err("windows-machine-policy-binding-bytes-differ")
+    var state = machine_slots_v1[slot]
+    val digest = sha256_text(expected)
+    if state.bound_policy_digest != "" and state.bound_policy_digest != digest:
+        return Err("windows-machine-policy-binding-reset-refused")
+    val root = state.private_root.unwrap()
+    val journal = state.journal_store.unwrap()
+    val existing = journal.read("machine-capacity-policy.sdn", 1048576)?
+    if existing != None and existing.unwrap() != expected: return Err("windows-machine-policy-binding-winner-differs")
+    state.storage_phase = "mutating-bind"
+    machine_slots_v1[slot] = state
+    val published = journal.publish("machine-capacity-policy.sdn", expected)
+    if published.is_err(): return Err(machine_mutation_error_v1(slot, published.unwrap_err()))
+    val winner = match journal.read("machine-capacity-policy.sdn", 1048576):
+        case Ok(Some(value)): value
+        case Ok(None): return Err(machine_mutation_error_v1(slot, "windows-machine-policy-binding-winner-missing"))
+        case Err(reason): return Err(machine_mutation_error_v1(slot, reason))
+    if winner != expected: return Err(machine_mutation_error_v1(slot, "windows-machine-policy-binding-winner-differs"))
+    val rechecked = machine_read_v1(slot, generation)
+    if rechecked.is_err(): return Err(machine_mutation_error_v1(slot, rechecked.unwrap_err()))
+    if sha256_u8_hex(rechecked.unwrap()) != digest or not journal.belongs_to(root):
+        return Err(machine_mutation_error_v1(slot, "windows-machine-policy-binding-changed-during-publication"))
+    state = machine_slots_v1[slot]
+    state.bound_policy_digest = digest
+    state.storage_phase = "ready"
+    machine_slots_v1[slot] = state
+    Ok(digest)
+# Some(journal) is mandatory: the fixed root label is never a pathname fallback.
+fn machine_wal_state_v1(slot: i64, generation: i64, mutating: bool = false) -> Result<MachinePolicyStateV1, text>:
+    val entry = machine_entry_v1()?
+    val state = machine_slot_v1(slot, generation)?
+    val phase_ok = state.storage_phase == "ready" or (mutating and state.storage_phase == "mutating-wal")
+    if not state.storage_owned or state.closing or not phase_ok or state.bound_policy_digest == "":
+        return Err("windows-machine-policy-bound-storage-required")
+    if state.private_root == None or state.journal_store == None: return Err("windows-machine-policy-storage-capability-missing")
+    val root = state.private_root.unwrap()
+    val journal = state.journal_store.unwrap()
+    if not journal.belongs_to(root): return Err("windows-machine-policy-storage-capability-not-current")
+    val actual = machine_read_v1(slot, generation)?
+    if sha256_u8_hex(actual) != state.bound_policy_digest:
+        return Err(machine_mutation_error_v1(slot, "windows-machine-policy-bound-bytes-changed"))
+    machine_slot_v1(slot, generation)
+
+fn machine_wal_head_v1(slot: i64, generation: i64) -> Result<text, text>:
+    val state = machine_wal_state_v1(slot, generation)?
+    database_wal_current_v1("machine-container-wal-v1", machine_wal_identity_v1(state), state.journal_store)
+
+fn machine_wal_revision_v1(slot: i64, generation: i64, digest: text) -> Result<DatabaseWalRevisionV1, text>:
+    val state = machine_wal_state_v1(slot, generation)?
+    val revision = database_wal_revision_open_v1("machine-container-wal-v1", digest, state.journal_store)?
+    if revision.database_identity != machine_wal_identity_v1(state): return Err("windows-machine-policy-WAL-identity-differs")
+    Ok(revision)
+
+fn machine_wal_segment_v1(slot: i64, generation: i64, revision: DatabaseWalRevisionV1) -> Result<[WalEntry], text>:
+    val state = machine_wal_state_v1(slot, generation)?
+    if revision.database_identity != machine_wal_identity_v1(state): return Err("windows-machine-policy-WAL-identity-differs")
+    # Existing strict reader reopens the actual revision and compares all fields,
+    # including database_identity, before returning its validated segment.
+    database_wal_segment_read_strict_v1("machine-container-wal-v1", revision, state.journal_store)
+
+fn machine_wal_commit_v1(slot: i64, generation: i64, expected_parent: text, entries: [WalEntry]) -> Result<DatabaseWalRevisionV1, text>:
+    var state = machine_wal_state_v1(slot, generation)?
+    if entries.len() < 1 or entries.len() > 256: return Err("windows-machine-policy-WAL-entry-count")
+    for entry in entries:
+        if not ["machine-container-reservations-v1", "machine-container-scope-v1"].contains(entry.table_name):
+            return Err("windows-machine-policy-WAL-table-refused")
+    val identity = machine_wal_identity_v1(state)
+    state.storage_phase = "mutating-wal"
+    machine_slots_v1[slot] = state
+    val result = database_wal_commit_v1("machine-container-wal-v1", identity, expected_parent, entries, state.journal_store)
+    if result.is_err(): return Err(machine_mutation_error_v1(slot, result.unwrap_err()))
+    val revision = result.unwrap()
+    if revision.database_identity != identity: return Err(machine_mutation_error_v1(slot, "windows-machine-policy-WAL-identity-differs"))
+    val checked = machine_wal_state_v1(slot, generation, true)
+    if checked.is_err(): return Err(machine_mutation_error_v1(slot, checked.unwrap_err()))
+    state = checked.unwrap()
+    state.storage_phase = "ready"
+    machine_slots_v1[slot] = state
+    Ok(revision)
+
 fn machine_close_v1(slot: i64, generation: i64) -> text:
     if machine_entry_v1().is_err(): return "retained"
     val loaded = machine_slot_v1(slot, generation)
     if loaded.is_err(): return "stale"
+    val state = loaded.unwrap()
+    if state.storage_owned: return "retained"
+    machine_native_close_v1(slot, generation)
+
+fn machine_storage_close_v1(slot: i64, generation: i64) -> text:
+    if machine_entry_v1().is_err(): return "retained"
+    val loaded = machine_slot_v1(slot, generation)
+    if loaded.is_err(): return "stale"
     var state = loaded.unwrap()
+    if not state.storage_owned: return "stale"
+    state.ready = false
+    state.closing = true
+    state.storage_phase = "closing"
+    machine_slots_v1[slot] = state
+    if state.journal_store != None:
+        var journal = state.journal_store.unwrap()
+        if journal.close_state() != "released": return "retained"
+        state.journal_store = None
+        machine_slots_v1[slot] = state
+    if state.private_root != None:
+        var root = state.private_root.unwrap()
+        if not root.close(): return "retained"
+        state.private_root = None
+        machine_slots_v1[slot] = state
+    machine_native_close_v1(slot, generation)
+
+@unsafe(reason: "same-thread canonical close clears each resource only after its exact native release succeeds", capabilities: [ffi, raw_ptr])
+fn machine_native_close_v1(slot: i64, generation: i64) -> text:
+    if machine_entry_v1().is_err(): return "retained"
+    val loaded = machine_slot_v1(slot, generation)
+    if loaded.is_err(): return "stale"
+    var state = loaded.unwrap()
+    if state.private_root != None or state.journal_store != None: return "retained"
     state.ready = false
     state.closing = true
     machine_slots_v1[slot] = state
@@ -462,7 +784,15 @@ fn machine_close_v1(slot: i64, generation: i64) -> text:
         state.arena = 0
         machine_slots_v1[slot] = state
     state.closed = true
+    state.storage_phase = "closed"
     machine_slots_v1[slot] = state
     machine_active_v1 = machine_active_v1 - 1
     "released"
+@else:
+fn machine_storage_capacity_v1(slot: i64, generation: i64) -> Result<(i64, i64), text>: Err("windows-machine-policy-host-unsupported")
+fn machine_storage_bind_v1(slot: i64, generation: i64, expected: text) -> Result<text, text>: Err("windows-machine-policy-host-unsupported")
+fn machine_wal_head_v1(slot: i64, generation: i64) -> Result<text, text>: Err("windows-machine-policy-host-unsupported")
+fn machine_wal_revision_v1(slot: i64, generation: i64, digest: text) -> Result<DatabaseWalRevisionV1, text>: Err("windows-machine-policy-host-unsupported")
+fn machine_wal_segment_v1(slot: i64, generation: i64, revision: DatabaseWalRevisionV1) -> Result<[WalEntry], text>: Err("windows-machine-policy-host-unsupported")
+fn machine_wal_commit_v1(slot: i64, generation: i64, expected_parent: text, entries: [WalEntry]) -> Result<DatabaseWalRevisionV1, text>: Err("windows-machine-policy-host-unsupported")
 @end

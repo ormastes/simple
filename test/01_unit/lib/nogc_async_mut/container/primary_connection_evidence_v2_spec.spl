@@ -1,0 +1,150 @@
+# AUTHORED SOURCE-ONLY NOT_RUN. Metadata codec calls, never native absence proof.
+use std.spec.*
+use std.common.contracts.container.primary_connection_evidence_v2.*
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+fn connection_closed_fixture_v2() -> ContainerPrimaryConnectionClosedEvidenceV2:
+    ContainerPrimaryConnectionClosedEvidenceV2(request_digest: "a".repeat(64),
+        identity_digest: "b".repeat(64), pipe_slot: 7, pipe_generation: 19)
+
+fn connection_closed_fields_v2() -> Dict<text, SdnValue>:
+    val source = container_primary_connection_closed_encode_v2(connection_closed_fixture_v2()).unwrap()
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 4096,
+        max_depth: 2, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 16)).unwrap()
+    match parsed.value:
+        case SdnValue.Dict(fields): fields
+        case _: fail("closed connection metadata must encode a dictionary")
+
+fn connection_closed_wire_v2(fields: Dict<text, SdnValue>) -> text:
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+describe "Canonical closed Engine connection metadata":
+    it "roundtrips the exact fixed metadata domain and native correlation fields":
+        step("Encode and decode actual metadata while checking all fixed provider-format fields")
+        val evidence = connection_closed_fixture_v2()
+        val source = container_primary_connection_closed_encode_v2(evidence).unwrap()
+        val decoded = container_primary_connection_closed_decode_v2(source).unwrap()
+        expect(decoded.request_digest).to_equal(evidence.request_digest)
+        expect(decoded.identity_digest).to_equal(evidence.identity_digest)
+        expect(decoded.pipe_slot).to_equal(7)
+        expect(decoded.pipe_generation).to_equal(19)
+        expect(container_primary_connection_closed_encode_v2(decoded).unwrap()).to_equal(source)
+        val fields = connection_closed_fields_v2()
+        expect(fields.keys().len()).to_equal(11)
+        expect(fields["version"]).to_equal(SdnValue.Int(2))
+        expect(fields["kind"]).to_equal(SdnValue.String("container-primary-connection-closed"))
+        expect(fields["resourceDomain"]).to_equal(SdnValue.String("engine-attach-connection"))
+        expect(fields["provider"]).to_equal(SdnValue.String("windows-docker-process"))
+        expect(fields["closed"]).to_equal(SdnValue.Bool(true))
+        expect(fields["readPending"]).to_equal(SdnValue.Bool(false))
+        expect(fields["writePending"]).to_equal(SdnValue.Bool(false))
+        expect(connection_closed_wire_v2(fields)).to_equal(source)
+
+    it "permits exact slot boundaries and every positive signed generation without narrowing":
+        step("Preserve a zero slot, maximum i32 slot and maximum positive i64 generation")
+        for slot in [0, 2147483647]:
+            for generation in [1, 9223372036854775807]:
+                var evidence = connection_closed_fixture_v2()
+                evidence.pipe_slot = slot
+                evidence.pipe_generation = generation
+                val source = container_primary_connection_closed_encode_v2(evidence).unwrap()
+                val decoded = container_primary_connection_closed_decode_v2(source).unwrap()
+                expect(decoded.pipe_slot).to_equal(slot)
+                expect(decoded.pipe_generation).to_equal(generation)
+
+    it "requires lowercase 64hex request and identity digests on both encode and decode":
+        step("Reject empty short long uppercase and nonhex digest metadata")
+        for field in ["requestDigest", "identityDigest"]:
+            for invalid in ["", "abc", "a".repeat(65), "A".repeat(64), "g".repeat(64)]:
+                var evidence = connection_closed_fixture_v2()
+                if field == "requestDigest": evidence.request_digest = invalid
+                else: evidence.identity_digest = invalid
+                expect(container_primary_connection_closed_encode_v2(evidence).is_err()).to_equal(true)
+                var fields = connection_closed_fields_v2()
+                fields[field] = SdnValue.String(invalid)
+                expect(container_primary_connection_closed_decode_v2(connection_closed_wire_v2(fields)).is_err()).to_equal(true)
+
+    it "refuses out-of-range slot and nonpositive generation on both boundaries":
+        step("Reject signed underflow and values above the native slot domain before conversion")
+        for slot in [-1, 2147483648, 9223372036854775807]:
+            var evidence = connection_closed_fixture_v2()
+            evidence.pipe_slot = slot
+            expect(container_primary_connection_closed_encode_v2(evidence).is_err()).to_equal(true)
+            var fields = connection_closed_fields_v2()
+            fields["pipeSlot"] = SdnValue.Int(slot)
+            expect(container_primary_connection_closed_decode_v2(connection_closed_wire_v2(fields)).is_err()).to_equal(true)
+        for generation in [-9223372036854775807, -1, 0]:
+            var evidence = connection_closed_fixture_v2()
+            evidence.pipe_generation = generation
+            expect(container_primary_connection_closed_encode_v2(evidence).is_err()).to_equal(true)
+            var fields = connection_closed_fields_v2()
+            fields["pipeGeneration"] = SdnValue.Int(generation)
+            expect(container_primary_connection_closed_decode_v2(connection_closed_wire_v2(fields)).is_err()).to_equal(true)
+
+    it "requires every exact field and rejects unknown fields":
+        step("Omit each required key individually and add an unrecognized key to otherwise valid metadata")
+        val original = connection_closed_fields_v2()
+        for missing in original.keys():
+            var fields: Dict<text, SdnValue> = {}
+            for key in original.keys():
+                if key != missing: fields[key] = original[key]
+            expect(container_primary_connection_closed_decode_v2(connection_closed_wire_v2(fields)).is_err()).to_equal(true)
+        var extra = connection_closed_fields_v2()
+        extra["nativeProof"] = SdnValue.Bool(true)
+        expect(container_primary_connection_closed_decode_v2(connection_closed_wire_v2(extra)).is_err()).to_equal(true)
+
+    it "refuses coercions for every required field type":
+        step("Use quoted integers, integer booleans and numeric strings without accepting conversions")
+        val original = connection_closed_fields_v2()
+        for key in original.keys():
+            var fields = connection_closed_fields_v2()
+            if key == "version" or key == "pipeSlot" or key == "pipeGeneration":
+                fields[key] = SdnValue.String("2")
+            elif key == "closed" or key == "readPending" or key == "writePending":
+                fields[key] = SdnValue.Int(1)
+            else: fields[key] = SdnValue.Int(42)
+            expect(container_primary_connection_closed_decode_v2(connection_closed_wire_v2(fields)).is_err()).to_equal(true)
+        for value in [SdnValue.Bool(false), SdnValue.Float(7.0), SdnValue.Null]:
+            var fields = connection_closed_fields_v2()
+            fields["pipeSlot"] = value
+            expect(container_primary_connection_closed_decode_v2(connection_closed_wire_v2(fields)).is_err()).to_equal(true)
+
+    it "rejects other versions kinds resource domains and providers":
+        step("Prevent closed process or foreign-provider records from entering the connection metadata domain")
+        for version in [-1, 1, 3]:
+            var fields = connection_closed_fields_v2()
+            fields["version"] = SdnValue.Int(version)
+            expect(container_primary_connection_closed_decode_v2(connection_closed_wire_v2(fields)).is_err()).to_equal(true)
+        for key in ["kind", "resourceDomain", "provider"]:
+            var fields = connection_closed_fields_v2()
+            if key == "kind": fields[key] = SdnValue.String("container-helper-closed")
+            elif key == "resourceDomain": fields[key] = SdnValue.String("process-job")
+            else: fields[key] = SdnValue.String("linux-podman")
+            expect(container_primary_connection_closed_decode_v2(connection_closed_wire_v2(fields)).is_err()).to_equal(true)
+
+    it "requires actual closed flags and no pending read or write claims":
+        step("Reject every contradictory boolean state even when identifiers are well formed")
+        for key in ["closed", "readPending", "writePending"]:
+            var fields = connection_closed_fields_v2()
+            fields[key] = SdnValue.Bool(key != "closed")
+            expect(container_primary_connection_closed_decode_v2(connection_closed_wire_v2(fields)).is_err()).to_equal(true)
+
+    it "rejects noncanonical whitespace newline and duplicate-key spellings":
+        step("Require exactly the canonical producer bytes rather than a semantically similar encoding")
+        val source = container_primary_connection_closed_encode_v2(connection_closed_fixture_v2()).unwrap()
+        for changed in [" " + source, source + "\n", source.substring(0, source.len() - 1),
+                source.replace("\n", "\r\n"), "# comment\n" + source]:
+            expect(changed == source).to_equal(false)
+            expect(container_primary_connection_closed_decode_v2(changed).is_err()).to_equal(true)
+        val duplicate = "{version: 2, " + source.substring(1, source.len())
+        expect(container_primary_connection_closed_decode_v2(duplicate).is_err()).to_equal(true)
+
+    it "rejects empty oversized malformed and nondictionary source":
+        step("Bound source bytes before strict syntax and schema decoding")
+        expect(container_primary_connection_closed_decode_v2("").unwrap_err()).to_equal("primary-connection-closed-source-bound")
+        expect(container_primary_connection_closed_decode_v2(" ".repeat(4097)).unwrap_err()).to_equal("primary-connection-closed-source-bound")
+        for source in ["{", "[]\n", "null\n", "true\n", "[1, 2]\n"]:
+            expect(container_primary_connection_closed_decode_v2(source).is_err()).to_equal(true)

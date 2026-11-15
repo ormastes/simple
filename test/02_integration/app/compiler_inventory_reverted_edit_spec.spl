@@ -1,0 +1,199 @@
+# @req REQ-SCV-WARM-NO-EVENT-REFRESH
+# A warm SCV refresh learns about changes only from `git diff HEAD@cursor..HEAD`
+# and the CURRENT `git status`. A path that was dirty at the previous refresh
+# and is clean now (git checkout / git stash / edited back by hand / restored
+# after a delete) produced no event, so CURRENT kept the dirty row and a clean
+# tree compiled the reverted edit (native fixture printed `beta 27` for a
+# committed `beta 23`, 2026-11-15). Every case below must end on the committed
+# content digest.
+use std.spec.{describe, it, expect, step}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{dir_create_all, file_write, file_read, file_delete, process_run}
+use std.nogc_sync_mut.io_runtime.{dir_remove}
+use std.scv.compile_source_inventory.{compile_source_inventory_read_current_v1,
+    compile_source_inventory_read_pointer_content_v1}
+use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1,
+    compiler_inventory_admit_extra_roots_v1}
+
+extern fn rt_getpid() -> i64
+
+val REVERT_COMMITTED_SOURCE: text = "export fn a(): 1\n"
+val REVERT_EDITED_SOURCE: text = "export fn a(): 5\n"
+
+fn revert_git(root: text, args: [text]) -> i64:
+    val (_, _, code) = process_run("git", ["-C", root,
+        "-c", "user.name=Simple Test", "-c", "user.email=test@example.invalid",
+        "-c", "commit.gpgsign=false"] + args)
+    code
+
+fn revert_checkout(label: text) -> text:
+    val root = "build/test-artifacts/scv-reverted-edit-{label}-{rt_getpid()}"
+    dir_remove(root, true)
+    expect(dir_create_all(root + "/src")).to_equal(true)
+    expect(file_write(root + "/src/a.spl", REVERT_COMMITTED_SOURCE)).to_equal(true)
+    expect(revert_git(root, ["init", "-q"])).to_equal(0)
+    expect(revert_git(root, ["add", "src/a.spl"])).to_equal(0)
+    expect(revert_git(root, ["commit", "-qm", "seed"])).to_equal(0)
+    root
+
+# Content digest of src/a.spl in CURRENT, or "absent".
+fn revert_row_digest(cache: text) -> text:
+    val current = compile_source_inventory_read_current_v1(cache)
+    expect(current.valid).to_equal(true)
+    for entry in current.inventory!.entries:
+        if entry.source_identity == "src/a.spl":
+            return entry.content_digest
+    "absent"
+
+fn revert_refresh(root: text, cold: bool):
+    expect(compiler_inventory_refresh_v1(root, root + "/build/scv", ["src"], cold).valid).to_equal(true)
+
+describe "SCV warm refresh after a dirty path becomes clean":
+    it "re-reads a tracked file reverted with git checkout":
+        step("edit, refresh, revert with git checkout, refresh")
+        val root = revert_checkout("checkout")
+        revert_refresh(root, true)
+        expect(file_write(root + "/src/a.spl", REVERT_EDITED_SOURCE)).to_equal(true)
+        revert_refresh(root, false)
+        expect(revert_row_digest(root + "/build/scv")).to_equal(sha256_text(REVERT_EDITED_SOURCE))
+        expect(revert_git(root, ["checkout", "-q", "src/a.spl"])).to_equal(0)
+        revert_refresh(root, false)
+        expect(revert_row_digest(root + "/build/scv")).to_equal(sha256_text(REVERT_COMMITTED_SOURCE))
+
+    it "re-reads a tracked file reverted with git stash":
+        step("edit, refresh, git stash, refresh")
+        val root = revert_checkout("stash")
+        revert_refresh(root, true)
+        expect(file_write(root + "/src/a.spl", REVERT_EDITED_SOURCE)).to_equal(true)
+        revert_refresh(root, false)
+        expect(revert_git(root, ["stash", "-q"])).to_equal(0)
+        revert_refresh(root, false)
+        expect(revert_row_digest(root + "/build/scv")).to_equal(sha256_text(REVERT_COMMITTED_SOURCE))
+
+    it "re-reads a tracked file edited back by hand":
+        step("edit, refresh, write the committed bytes back, refresh")
+        val root = revert_checkout("hand")
+        revert_refresh(root, true)
+        expect(file_write(root + "/src/a.spl", REVERT_EDITED_SOURCE)).to_equal(true)
+        revert_refresh(root, false)
+        expect(file_write(root + "/src/a.spl", REVERT_COMMITTED_SOURCE)).to_equal(true)
+        revert_refresh(root, false)
+        expect(revert_row_digest(root + "/build/scv")).to_equal(sha256_text(REVERT_COMMITTED_SOURCE))
+
+    it "restores the row of a deleted tracked file brought back by git checkout":
+        step("delete, refresh, git checkout, refresh")
+        val root = revert_checkout("delete")
+        revert_refresh(root, true)
+        expect(file_delete(root + "/src/a.spl")).to_equal(true)
+        revert_refresh(root, false)
+        expect(revert_row_digest(root + "/build/scv")).to_equal("absent")
+        expect(revert_git(root, ["checkout", "-q", "src/a.spl"])).to_equal(0)
+        revert_refresh(root, false)
+        expect(revert_row_digest(root + "/build/scv")).to_equal(sha256_text(REVERT_COMMITTED_SOURCE))
+
+    it "re-reads a file that was already dirty at cold init":
+        step("edit, cold init, revert, warm refresh")
+        val root = revert_checkout("cold")
+        expect(file_write(root + "/src/a.spl", REVERT_EDITED_SOURCE)).to_equal(true)
+        revert_refresh(root, true)
+        expect(revert_row_digest(root + "/build/scv")).to_equal(sha256_text(REVERT_EDITED_SOURCE))
+        expect(revert_git(root, ["checkout", "-q", "src/a.spl"])).to_equal(0)
+        revert_refresh(root, false)
+        expect(revert_row_digest(root + "/build/scv")).to_equal(sha256_text(REVERT_COMMITTED_SOURCE))
+
+    it "keeps a committed edit once the path is no longer dirty":
+        step("edit, refresh, commit, refresh")
+        val root = revert_checkout("commit")
+        revert_refresh(root, true)
+        expect(file_write(root + "/src/a.spl", REVERT_EDITED_SOURCE)).to_equal(true)
+        revert_refresh(root, false)
+        expect(revert_git(root, ["commit", "-qam", "edit"])).to_equal(0)
+        revert_refresh(root, false)
+        expect(revert_row_digest(root + "/build/scv")).to_equal(sha256_text(REVERT_EDITED_SOURCE))
+
+    it "keeps a new file that went untracked, staged, committed":
+        step("create, refresh, git add, refresh, commit, refresh")
+        val root = revert_checkout("addcommit")
+        revert_refresh(root, true)
+        expect(file_write(root + "/src/b.spl", REVERT_EDITED_SOURCE)).to_equal(true)
+        revert_refresh(root, false)
+        expect(revert_git(root, ["add", "src/b.spl"])).to_equal(0)
+        revert_refresh(root, false)
+        expect(revert_git(root, ["commit", "-qm", "add b"])).to_equal(0)
+        revert_refresh(root, false)
+        val current = compile_source_inventory_read_current_v1(root + "/build/scv")
+        var found = ""
+        for entry in current.inventory!.entries:
+            if entry.source_identity == "src/b.spl": found = entry.content_digest
+        expect(found).to_equal(sha256_text(REVERT_EDITED_SOURCE))
+
+# The dirty-tracked sidecar lives beside the untracked membership records,
+# which older binaries keep reading unchanged; one file per inventory digest.
+fn revert_inventory_digest(cache: text) -> text:
+    (compile_source_inventory_read_pointer_content_v1(cache) ?? "").split("\n")[0]
+
+fn revert_sidecar(cache: text, digest: text) -> text:
+    cache + "/compile-events/dirty/" + digest + ".paths"
+
+describe "SCV refresh mixed with generations that carry no dirty sidecar":
+    it "detects a reverted edit after a refresh that published no sidecar":
+        step("edit, refresh, drop the sidecar as an older binary would, revert, refresh")
+        val root = revert_checkout("nosidecar")
+        val cache = root + "/build/scv"
+        revert_refresh(root, true)
+        expect(file_write(root + "/src/a.spl", REVERT_EDITED_SOURCE)).to_equal(true)
+        revert_refresh(root, false)
+        dir_remove(cache + "/compile-events/dirty", true)
+        expect(revert_git(root, ["checkout", "-q", "src/a.spl"])).to_equal(0)
+        revert_refresh(root, false)
+        expect(revert_row_digest(cache)).to_equal(sha256_text(REVERT_COMMITTED_SOURCE))
+
+    it "ignores a sidecar bound to another inventory generation":
+        step("clean refresh, edit, refresh, replace the sidecar with the clean one, revert, refresh")
+        val root = revert_checkout("stalesidecar")
+        val cache = root + "/build/scv"
+        revert_refresh(root, true)
+        val clean_digest = revert_inventory_digest(cache)
+        val clean_sidecar = file_read(revert_sidecar(cache, clean_digest))
+        expect(file_write(root + "/src/a.spl", REVERT_EDITED_SOURCE)).to_equal(true)
+        revert_refresh(root, false)
+        val edited_digest = revert_inventory_digest(cache)
+        expect(edited_digest == clean_digest).to_equal(false)
+        expect(file_write(revert_sidecar(cache, edited_digest), clean_sidecar)).to_equal(true)
+        expect(revert_git(root, ["checkout", "-q", "src/a.spl"])).to_equal(0)
+        revert_refresh(root, false)
+        expect(revert_row_digest(cache)).to_equal(sha256_text(REVERT_COMMITTED_SOURCE))
+
+describe "SCV dirty sidecar is bound and reused, not re-listed":
+    it "names the dirty path in the sidecar of the published generation":
+        val root = revert_checkout("bound")
+        val cache = root + "/build/scv"
+        revert_refresh(root, true)
+        val clean = file_read(revert_sidecar(cache, revert_inventory_digest(cache)))
+        expect(clean.starts_with("simple-compile-dirty-tracked-v1\n")).to_equal(true)
+        expect(file_write(root + "/src/a.spl", REVERT_EDITED_SOURCE)).to_equal(true)
+        revert_refresh(root, false)
+        val digest = revert_inventory_digest(cache)
+        expect(file_read(revert_sidecar(cache, digest))).to_equal(
+            "simple-compile-dirty-tracked-v1\ninventory={digest}\ncount=1\nsrc/a.spl")
+
+    it "keeps CURRENT byte-identical on a warm refresh with nothing changed":
+        val root = revert_checkout("noop")
+        val cache = root + "/build/scv"
+        revert_refresh(root, true)
+        val before = compile_source_inventory_read_pointer_content_v1(cache) ?? ""
+        revert_refresh(root, false)
+        expect(compile_source_inventory_read_pointer_content_v1(cache) ?? "").to_equal(before)
+
+    it "carries the sidecar to the generation an extra-root admission publishes":
+        val root = revert_checkout("extra")
+        val cache = root + "/build/scv"
+        revert_refresh(root, true)
+        val before = revert_inventory_digest(cache)
+        expect(dir_create_all(root + "/build/hw")).to_equal(true)
+        expect(file_write(root + "/build/hw/hello.spl", "export fn hw(): 1\n")).to_equal(true)
+        expect(compiler_inventory_admit_extra_roots_v1(root, cache, ["build/hw"]).valid).to_equal(true)
+        val after = revert_inventory_digest(cache)
+        expect(after == before).to_equal(false)
+        expect(file_read(revert_sidecar(cache, after)).starts_with(
+            "simple-compile-dirty-tracked-v1\ninventory={after}\n")).to_equal(true)

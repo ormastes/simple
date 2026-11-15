@@ -211,7 +211,11 @@ mir_shard_count_env=
 if [ "${SIMPLE_MIR_SHARD_INTERFACE_HIR:-}" = 1 ]; then
   stage3_streaming_surfaces=1
   mir_interface_hir_env="SIMPLE_MIR_SHARD_INTERFACE_HIR=1"
-  mir_shard_count_env="SIMPLE_MIR_SHARD_COUNT=${SIMPLE_MIR_SHARD_COUNT:-8}"
+  # Per-file lanes already carry one shard-count row. Duplicate names make
+  # the transcript writer fail closed before the compiler can start.
+  if [ -n "$whole_program_env" ]; then
+    mir_shard_count_env="SIMPLE_MIR_SHARD_COUNT=${SIMPLE_MIR_SHARD_COUNT:-8}"
+  fi
 fi
 bootstrap_stage3_run_transcribed "$transcript" "$root" "$log" \
   "$worker_home" "$worker_tmp" "$worker_path" RUST_LOG=error LIBRARY_PATH= \

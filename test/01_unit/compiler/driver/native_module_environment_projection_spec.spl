@@ -158,3 +158,84 @@ describe "native module delivery-intent projection":
         # Still a semantic field: the bootstrap marker keeps changing the scope.
         val bootstrap: [(text, text)] = [("PATH", "/usr/bin"), ("SIMPLE_BOOTSTRAP", "1")]
         expect(native_build_module_environment_snapshot_fingerprint_v1(bootstrap).digest == staged.digest).to_equal(false)
+
+    it "gives a relaunched MIR shard worker the same object scope as the killed launch":
+        # Replay of the MIR shard worker environment of two Stage 3 launches
+        # (bootstrap-fable-35, 2026-11-15): same compiler, same SCV snapshot,
+        # same --cache-dir; the coordinator pid/clock, the watchdog session and
+        # the per-worker dataset cap differ. All 1549 objects of launch 1 sat
+        # in one scope and launch 2 got a fresh one (cached=0).
+        val launch_1 = objreuse_mir_worker_env_v1("1473763", "4806744499",
+            "1473763", "BZ7QDHQu", "18432000000")
+        val launch_2 = objreuse_mir_worker_env_v1("2134674", "4818894709",
+            "2134674", "HDHJR4V3", "42119075840")
+        val first = native_build_module_environment_snapshot_fingerprint_v1(launch_1)
+        val second = native_build_module_environment_snapshot_fingerprint_v1(launch_2)
+        expect(first.valid).to_equal(true)
+        expect(second.valid).to_equal(true)
+        expect(first.digest).to_equal(second.digest)
+        # One key at a time, so each exclusion is pinned on its own.
+        val per_key: [(text, text)] = [
+            ("SIMPLE_PARSE_CLOSURE_REQUEST", "/c/frontend/closure-request-9-9/request.v1"),
+            ("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "ffff"),
+            ("SIMPLE_BOOTSTRAP_SESSION_ID", "9"),
+            ("SIMPLE_BOOTSTRAP_SESSION_EXEC", "/l/simple-rss-session-ZZZZZZZZ/bootstrap-session-exec"),
+            ("SIMPLE_GLOBAL_DATASET_MAX_BYTES", "1")]
+        for pair in per_key:
+            val moved = native_build_module_environment_snapshot_fingerprint_v1(
+                objreuse_env_replace_v1(launch_1, pair.0, pair.1))
+            expect(moved.digest).to_equal(first.digest)
+        # Retained inputs still move the scope: the source snapshot, a
+        # codegen switch, the compiler under test and the ABI receipt.
+        val retained: [(text, text)] = [
+            ("SIMPLE_SCV_TREE_ID", "scv-tree-v1-other"),
+            ("SIMPLE_SCV_REVISION_ID", "scv-revision-v2-other"),
+            ("SIMPLE_NATIVE_ARENA_DECLS", "0"),
+            ("SIMPLE_BINARY", "/other/simple"),
+            ("SIMPLE_ABI_ADMISSION_RECEIPT", "/other/admission.env")]
+        for pair in retained:
+            val moved = native_build_module_environment_snapshot_fingerprint_v1(
+                objreuse_env_replace_v1(launch_1, pair.0, pair.1))
+            expect(moved.digest == first.digest).to_equal(false)
+        # The complete capture (admission/no-op evidence) still records them.
+        expect(native_build_environment_snapshot_fingerprint_v1(launch_1).digest ==
+            native_build_environment_snapshot_fingerprint_v1(launch_2).digest).to_equal(false)
+
+fn objreuse_env_replace_v1(env: [(text, text)], name: text, value: text) -> [(text, text)]:
+    var out: [(text, text)] = []
+    for pair in env:
+        if pair.0 == name:
+            out.push((name, value))
+        else:
+            out.push(pair)
+    out
+
+fn objreuse_mir_worker_env_v1(coordinator_pid: text, clock_ms: text, session_id: text,
+        session_dir: text, dataset_bytes: text) -> [(text, text)]:
+    val s3 = "/b/stage3/aarch64-unknown-linux-gnu"
+    val request = "{s3}/stage3-native-cache/default/frontend/closure-request-{coordinator_pid}-{clock_ms}/request.v1"
+    [("PATH", "/usr/bin"), ("PWD", "/b"), ("TMPDIR", "{s3}/stage3-tmp"),
+        ("SIMPLE_ABI_ADMISSION_RECEIPT", "{s3}/stage2-admitted/admission.env"),
+        ("SIMPLE_ABI_POLICY", "v1"),
+        ("SIMPLE_BINARY", "{s3}/stage2-admitted/simple"),
+        ("SIMPLE_BOOTSTRAP", ""),
+        ("SIMPLE_BOOTSTRAP_SESSION_EXEC", "/b/logs/simple-rss-session-{session_dir}/bootstrap-session-exec"),
+        ("SIMPLE_BOOTSTRAP_SESSION_ID", session_id),
+        ("SIMPLE_BOOTSTRAP_RSS_CAP_MODE", "enforce"),
+        ("SIMPLE_COMPILER_PHASE_PROFILE_FILE", "{s3}/phase-profile.{coordinator_pid}.events"),
+        ("SIMPLE_EVIDENCE_RUN_ID", "stage3-{coordinator_pid}"),
+        ("SIMPLE_FRONTEND_CACHE_DIR", "{s3}/stage3-native-cache/default/frontend"),
+        ("SIMPLE_GLOBAL_DATASET_MAX_BYTES", dataset_bytes),
+        ("SIMPLE_ICE_DIR", "build/ice/{coordinator_pid}_n1"),
+        ("SIMPLE_MIR_SHARD_COUNT", "9"),
+        ("SIMPLE_MIR_SHARD_OWNER", "0/9@0"),
+        ("SIMPLE_MIR_SHARD_QUEUE", "{s3}/stage3-native-cache/hir/mir-queue-{coordinator_pid}-0"),
+        ("SIMPLE_NATIVE_ARENA_DECLS", "1"),
+        ("SIMPLE_NATIVE_BUILD_WORKER", "1"),
+        ("SIMPLE_PARSE_CLOSURE_CONSUMER", "1"),
+        ("SIMPLE_PARSE_CLOSURE_REQUEST", request),
+        ("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "digest-of-{request}"),
+        ("SIMPLE_PARSE_CLOSURE_SELECTED_COUNT", "1670"),
+        ("SIMPLE_SCV_REVISION_ID", "scv-revision-v2-0b1eb429"),
+        ("SIMPLE_SCV_SNAPSHOT_ROOT", "/b/build/scv/snapshots/scv-revision-v2-0b1eb429"),
+        ("SIMPLE_SCV_TREE_ID", "scv-tree-v1-27082117")]

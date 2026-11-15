@@ -355,6 +355,27 @@ fn native_build_module_environment_snapshot_fingerprint_v1(
         if pair.0 == "SIMPLE_BUILD_MEMORY_RESERVE_BYTES" or
                 pair.0 == "SIMPLE_HOST_CONFIG":
             continue
+        # Per-launch values every Stage 3 MIR shard worker inherits; folding
+        # them gave each relaunch a fresh object scope and cached=0 after a
+        # ~3 h pass (bootstrap-fable-35, 2026-11-15).
+        # - SIMPLE_PARSE_CLOSURE_REQUEST/_DIGEST: the coordinator's handoff
+        #   file (closure-request-<pid>-<ms>/request.v1) and the hash of its
+        #   wire, which embeds that path. Two launches' requests differ only
+        #   in that path. What the request selects is bound elsewhere: the
+        #   snapshot by the SIMPLE_SCV_* rows above and each object by its
+        #   own source identity and current-MIR capsule receipt.
+        # - SIMPLE_BOOTSTRAP_SESSION_ID/_EXEC: the RSS watchdog's session
+        #   (its pid, a mktemp helper path); read only to place spawned
+        #   children in that session (process_ops.spl).
+        # - SIMPLE_GLOBAL_DATASET_MAX_BYTES: the per-worker retention cap
+        #   run_ledger_shards derives from live headroom and the recorded
+        #   peak; its only reader is mem/global_dataset.spl's LRU limit.
+        if pair.0 == "SIMPLE_PARSE_CLOSURE_REQUEST" or
+                pair.0 == "SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST" or
+                pair.0 == "SIMPLE_BOOTSTRAP_SESSION_ID" or
+                pair.0 == "SIMPLE_BOOTSTRAP_SESSION_EXEC" or
+                pair.0 == "SIMPLE_GLOBAL_DATASET_MAX_BYTES":
+            continue
         projected = projected.push(pair)
     val module_capture = native_build_environment_snapshot_fingerprint_v1(projected)
     if not module_capture.valid: return module_capture

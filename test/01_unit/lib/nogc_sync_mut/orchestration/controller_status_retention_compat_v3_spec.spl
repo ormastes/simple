@@ -1,0 +1,71 @@
+# @req DAE-05-H
+# NOT_RUN. Pure structural status compatibility; context/request values below
+# are NOT admitted capabilities, a native identity or execution permission.
+use std.spec.{describe, it, expect}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.contracts.orchestration.assignment_v1.ControllerAssignmentBindingV1
+use std.common.contracts.orchestration.controller_dispatch_request_v2.ControllerDispatchRequestV2
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.{ControllerDispatchConfigV1, ControllerDispatchContextV1}
+use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v2.controller_dispatch_host_status_v2
+use test.fixtures.orchestration.host_execution_envelope_fixture_v2.host_execution_envelope_fixture_v2
+use test.fixtures.daemon_sdk.distributed_authority_verification_fixture_v2.verification_fixture
+
+struct RetentionStatusCompatibilityFixtureV3:
+    context: ControllerDispatchContextV1
+    packet: ControllerDispatchRequestV2
+    fields: Dict<text, SdnValue>
+
+fn retention_status_compatibility_fixture_v3() -> RetentionStatusCompatibilityFixtureV3:
+    val envelope = host_execution_envelope_fixture_v2()
+    val proof = verification_fixture()
+    val enrollment = "e".repeat(64)
+    val authority = "host-" + enrollment
+    var intent = envelope.common.intent
+    intent.fence.authority_id = authority
+    val binding = ControllerAssignmentBindingV1("controller", 1, envelope.common.execution.plan.workload_uid,
+        1, intent, envelope.common.operation)
+    # Signatures are unused by this structural checker; it is not the actual
+    # dispatch admission port and this fixture does not claim otherwise.
+    val packet = ControllerDispatchRequestV2(binding, envelope.common.operation, envelope.common.execution,
+        proof.signed, proof.approval, proof.signed, proof.approval, proof.signed, proof.approval,
+        proof.signed, proof.approval)
+    val context = ControllerDispatchContextV1(ControllerDispatchConfigV1("controller", 1,
+        "local-inprocess", "/structural-status-only", authority, "b".repeat(64), envelope.policy.source_digest), envelope.policy)
+    val plan = packet.execution.plan
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("host-local-status"),
+        "physicalHostId": SdnValue.String(intent.physical_host_id), "serviceScopeId": SdnValue.String(plan.service_scope_id),
+        "authorityId": SdnValue.String(authority), "bootId": SdnValue.String(plan.boot_id),
+        "fenceId": SdnValue.String(intent.fence.boot_id), "nativeMachineId": SdnValue.String(plan.native_machine_id),
+        "continuityMode": SdnValue.String(plan.continuity_mode), "continuityId": SdnValue.String(plan.continuity_id),
+        "providerGeneration": SdnValue.Int(plan.provider_generation), "revision": SdnValue.Int(1),
+        "cpuMillis": SdnValue.Int(4000), "memoryBytes": SdnValue.Int(8192),
+        "availableCpuMillis": SdnValue.Int(3000), "availableMemoryBytes": SdnValue.Int(7680),
+        "retainedReservations": SdnValue.Int(1), "providerIdentityDigest": SdnValue.String("b".repeat(64)),
+        "enrollmentBindingDigest": SdnValue.String(enrollment)}
+    RetentionStatusCompatibilityFixtureV3(context, packet, fields)
+
+describe "Optional Host retention status compatibility":
+    it "accepts old status and the bounded nested diagnostic without new authority":
+        val fixture = retention_status_compatibility_fixture_v3()
+        val old = sdn_encode_canonical(SdnValue.Dict(fixture.fields)) + "\n"
+        expect(controller_dispatch_host_status_v2(fixture.context, fixture.packet, old).unwrap()).to_equal(true)
+        var fields = fixture.fields
+        fields["retentionAssessment"] = SdnValue.Dict({"version": SdnValue.Int(1),
+            "state": SdnValue.String("Incomplete"), "examinedReservations": SdnValue.Int(4),
+            "totalReservations": SdnValue.Int(5), "omittedReservations": SdnValue.Int(1),
+            "reasons": SdnValue.Array([SdnValue.String("reservation-sample-incomplete")])})
+        val current = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+        expect(controller_dispatch_host_status_v2(fixture.context, fixture.packet, current).unwrap()).to_equal(true)
+
+    it "still rejects unrelated fields and authority mismatch despite the diagnostic":
+        val fixture = retention_status_compatibility_fixture_v3()
+        var fields = fixture.fields
+        fields["unrelated"] = SdnValue.Bool(true)
+        val unknown = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+        expect(controller_dispatch_host_status_v2(fixture.context, fixture.packet, unknown).unwrap_err()).to_equal("dispatch-host-status-unknown-field")
+        fields.remove("unrelated")
+        fields["retentionAssessment"] = SdnValue.Dict({"state": SdnValue.String("Incomplete")})
+        fields["authorityId"] = SdnValue.String("other-authority")
+        val mismatch = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+        expect(controller_dispatch_host_status_v2(fixture.context, fixture.packet, mismatch).unwrap_err()).to_equal("dispatch-host-continuity-mismatch")

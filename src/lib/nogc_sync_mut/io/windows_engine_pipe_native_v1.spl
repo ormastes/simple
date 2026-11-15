@@ -342,7 +342,8 @@ pub fn windows_engine_pipe_read_some_v1(lease: WindowsEnginePipeLeaseV1, max_byt
 # The broker, not this generic IO owner, validates the complete HTTP payload
 # and its scope. An admitted context is not an authorization grant.
 @unsafe(reason: "copies a bounded prefix and checks live admission immediately before WriteFile", capabilities: [ffi, raw_ptr])
-fn write(lease: WindowsEnginePipeLeaseV1, bytes: [u8], context: WindowsEnginePipeWriteContextV1?) -> Result<i64, text>:
+fn write(lease: WindowsEnginePipeLeaseV1, bytes: [u8], context: WindowsEnginePipeWriteContextV1?,
+        monotonic_deadline_ns: i64 = 0) -> Result<i64, text>:
     var state = load(lease)?
     if state.control != None: return Err("engine-pipe-controlled-write-required")
     if state.closed or state.closing or state.failed or not state.admitted: return Err("engine-pipe-write-owner-unavailable")
@@ -363,6 +364,10 @@ fn write(lease: WindowsEnginePipeLeaseV1, bytes: [u8], context: WindowsEnginePip
         val sampled = time_sample_unix_micros_or_failure()
         if sampled <= 0 or sampled / 1000 >= gate.expires_at_unix_ms:
             return Err("engine-pipe-create-start-write-expired-before-submission")
+    if monotonic_deadline_ns != 0:
+        val sampled = time_sample_monotonic_nanos_or_failure()
+        if sampled < 0 or sampled >= monotonic_deadline_ns:
+            return Err("engine-pipe-write-expired-before-submission")
     state.write_requested = count
     state.write_attempted = true
     state = store(lease, state)?
@@ -385,6 +390,14 @@ fn write(lease: WindowsEnginePipeLeaseV1, bytes: [u8], context: WindowsEnginePip
 pub fn windows_engine_pipe_write_some_v1(lease: WindowsEnginePipeLeaseV1, bytes: [u8]) -> Result<i64, text>:
     val owner = entry()?
     write(lease, bytes, nil)
+
+# Deadline metadata only. The caller must own a separately admitted effect.
+# This cannot bypass the permanent controlled-pipe refusal in write().
+pub fn windows_engine_pipe_write_some_until_v2(lease: WindowsEnginePipeLeaseV1,
+        bytes: [u8], monotonic_deadline_ns: i64) -> Result<i64, text>:
+    if monotonic_deadline_ns <= 0: return Err("engine-pipe-write-deadline-required")
+    val owner = entry()?
+    write(lease, bytes, nil, monotonic_deadline_ns)
 
 pub fn windows_engine_pipe_write_some_admitted_v1(lease: WindowsEnginePipeLeaseV1, bytes: [u8],
         context: WindowsEnginePipeWriteContextV1) -> Result<i64, text>:

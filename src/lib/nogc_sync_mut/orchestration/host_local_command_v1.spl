@@ -2,6 +2,7 @@
 # controller's configured local-inprocess target. No listener or second ledger.
 use std.nogc_sync_mut.orchestration.host_local_root_v1.*
 use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.host_operation_retention_assessment_v3.host_operation_retention_assessment_v3
 use std.nogc_sync_mut.orchestration.host_exec_control_installation_owner_v3.*
 use std.common.contracts.orchestration.host_exec_control_installation_v3.*
 use std.common.contracts.orchestration.host_containment_installation_v1.*
@@ -82,6 +83,7 @@ pub fn host_local_command_cleanup_v2(reply: HostLocalCommandReplyV1) -> HostLoca
 pub fn host_local_status_v1(local: HostLocalRootV1) -> Result<text, text>:
     val ledger = local.capacity.ledger
     val available = host_available_capacity_v1(ledger)?
+    val retention = host_operation_retention_assessment_v3(local.capacity)?
     val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("host-local-status"),
         "physicalHostId": SdnValue.String(ledger.capacity.physical_host_id),
         "serviceScopeId": SdnValue.String(local.config.service_scope_id),
@@ -93,7 +95,7 @@ pub fn host_local_status_v1(local: HostLocalRootV1) -> Result<text, text>:
         "providerGeneration": SdnValue.Int(ledger.capacity.provider_generation), "revision": SdnValue.Int(ledger.revision),
         "cpuMillis": SdnValue.Int(ledger.capacity.cpu_millis), "memoryBytes": SdnValue.Int(ledger.capacity.memory_bytes),
         "availableCpuMillis": SdnValue.Int(available.cpu_millis), "availableMemoryBytes": SdnValue.Int(available.memory_bytes),
-        "retainedReservations": SdnValue.Int(ledger.reservations.len())}
+        "retainedReservations": SdnValue.Int(ledger.reservations.len()), "retentionAssessment": retention}
     Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
 
 # Read the operation's protected retained packet and exact journal authority,
@@ -395,7 +397,7 @@ pub fn host_local_command_v1(args: [text]) -> HostLocalCommandReplyV1:
         case HostLocalRootOpenV2.CleanupRequired(cleanup, error):
             var reply = host_local_error_v1(action, operation_id, error, true)
             reply.journal_cleanup = Some(cleanup)
-            val state = file_lock_owner_state_v2(cleanup.lock)
+            val state = if cleanup.lock.is_some(): file_lock_owner_state_v2(cleanup.lock.unwrap()) else: "retained"
             reply.cleanup_state = Some(if state == "held" or state == "retained": FileLockReleaseStateV2.Retained
                 elif state == "stale": FileLockReleaseStateV2.Stale else: FileLockReleaseStateV2.Unknown)
             reply

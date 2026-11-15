@@ -1,0 +1,163 @@
+# Protected immutable connection-absence evidence. No decoder restores a live
+# pipe, replays attach, or substitutes connection closure for workload absence.
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_read_required_v3, distributed_operation_journal_read_v3}
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.contracts.orchestration.host_helper_plan_v1.host_helper_plan_bytes_v1
+use std.common.contracts.orchestration.host_reservation_codec_v1.{host_helper_reservation_receipt_v1,
+    host_reservation_encode_intent_v1}
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.{host_helper_request_load_owned_v2,
+    host_helper_request_encode_v1, host_helper_execution_proof_load_owned_v2, host_helper_execution_proof_decode_v1}
+use std.common.contracts.container.primary_connection_evidence_v2.container_primary_connection_closed_decode_v2
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+
+use std.common.contracts.container.primary_connection_attempt_v3.container_primary_connection_attempt_decode_v3
+
+pub struct HostPrimaryConnectionBasisV3:
+    operation_id: text
+    operation_digest: text
+    request_digest: text
+    prepared_receipt_digest: text
+    consumption_digest: text
+
+pub struct HostPrimaryConnectionSettlementFactsV2:
+    operation_id: text
+    operation_digest: text
+    request_digest: text
+    prepared_receipt_digest: text
+    consumption_digest: text
+    native_identity_digest: text
+    connection_receipt_digest: text
+
+fn fields_v2(source: text, kind: text, names: [text]) -> Result<Dict<text, SdnValue>, text>:
+    if source.byte_len() < 1 or source.byte_len() > 8388608: return Err("connection-record-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 8388608,
+            max_depth: 2, max_nodes: 48, max_rows: 0, max_cells: 0, max_columns: 24)):
+        case Ok(value): value
+        case Err(_): return Err("connection-record-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("connection-record-object")
+    for key in names:
+        if not fields.contains_key(key): return Err("connection-record-missing:" + key)
+    for key in fields.keys():
+        if not names.contains(key): return Err("connection-record-unknown:" + key)
+    if fields["version"] != SdnValue.Int(2) or fields["kind"] != SdnValue.String(kind):
+        return Err("connection-record-kind-version")
+    if sdn_encode_canonical(SdnValue.Dict(fields)) + "\n" != source: return Err("connection-record-noncanonical")
+    Ok(fields)
+
+fn text_v2(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("connection-record-text:" + key)
+
+fn int_v2(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("connection-record-integer:" + key)
+
+pub fn host_primary_connection_settlement_bytes_v2(facts: HostPrimaryConnectionSettlementFactsV2) -> Result<text, text>:
+    if facts.operation_id == "": return Err("connection-settlement-operation")
+    for digest in [facts.operation_digest, facts.request_digest, facts.prepared_receipt_digest,
+            facts.consumption_digest, facts.native_identity_digest, facts.connection_receipt_digest]:
+        if not builder_digest_valid_v1(digest): return Err("connection-settlement-digest")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("host-primary-connection-settlement"),
+        "operationId": SdnValue.String(facts.operation_id), "operationDigest": SdnValue.String(facts.operation_digest),
+        "requestDigest": SdnValue.String(facts.request_digest), "preparedReceiptDigest": SdnValue.String(facts.prepared_receipt_digest),
+        "consumptionDigest": SdnValue.String(facts.consumption_digest), "nativeIdentityDigest": SdnValue.String(facts.native_identity_digest),
+        "connectionReceiptDigest": SdnValue.String(facts.connection_receipt_digest)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+# Rebuild settlement from protected consumption, signed request/proof archives,
+# and the separately published actual closed receipt. Current expiry is not a
+# requirement for closing a connection or settling its already consumed charge.
+pub fn host_primary_connection_basis_v3(journal: DistributedOperationJournalV2, operation: OperationEnvelopeV2) -> Result<HostPrimaryConnectionBasisV3, text>:
+    if operation.operation != "host_helper_reservation_v1": return Err("connection-settlement-operation-domain")
+    val key = sha256_text(operation.id) + ".sdn"
+    val consumed = distributed_operation_journal_read_required_v3(journal, "primary-connection-consumed/" + key, 8388608)?
+    val fields = fields_v2(consumed, "host-primary-connection-consumed", ["version", "kind", "plan", "planDigest", "helperPlan",
+        "operation", "intent", "preparedReceiptDigest", "deadlineUnixMs", "grantId", "issuerId", "approverId", "packetDigest",
+        "executionProofDigest", "authorityPolicyDigest", "policyRevision", "revocationEpoch", "sessionGeneration"])?
+    val request = host_helper_request_load_owned_v2(journal, operation.id)?
+    if (request.plan.helper_kind != "primary-connection" or
+            distributed_encode_operation_v2(request.operation)? != distributed_encode_operation_v2(operation)? or
+            text_v2(fields, "operation")? != distributed_encode_operation_v2(operation)? or
+            text_v2(fields, "helperPlan")? != host_helper_plan_bytes_v1(request.plan)? or
+            text_v2(fields, "intent")? != host_reservation_encode_intent_v1(request.intent)? or
+            text_v2(fields, "packetDigest")? != sha256_text(host_helper_request_encode_v1(request)?)):
+        return Err("connection-settlement-request-chain")
+    val proof_bytes = host_helper_execution_proof_load_owned_v2(journal, operation.id)?
+    val proof = host_helper_execution_proof_decode_v1(request, proof_bytes)?
+    if (text_v2(fields, "executionProofDigest")? != sha256_text(proof_bytes) or
+            text_v2(fields, "grantId")? != proof.signed.grant.id or text_v2(fields, "issuerId")? != proof.signed.issuer_id or
+            text_v2(fields, "approverId")? != proof.approval.approver_id): return Err("connection-settlement-proof-chain")
+    var expiry = proof.signed.grant.expires_at
+    for bound in [proof.approval.expires_at, request.budget_proof.signed.grant.expires_at, request.budget_proof.approval.expires_at]:
+        if bound < expiry: expiry = bound
+    if expiry <= 0 or int_v2(fields, "deadlineUnixMs")? != expiry: return Err("connection-settlement-deadline")
+    for name in ["policyRevision", "revocationEpoch", "sessionGeneration"]:
+        if int_v2(fields, name)? < 0: return Err("connection-settlement-authority-context")
+    if not builder_digest_valid_v1(text_v2(fields, "authorityPolicyDigest")?): return Err("connection-settlement-policy-digest")
+    val plan_digest = text_v2(fields, "planDigest")?
+    if plan_digest != request.plan.request_digest or sha256_text(text_v2(fields, "plan")?) != plan_digest:
+        return Err("connection-settlement-plan-chain")
+    val prepared = host_helper_reservation_receipt_v1(request.intent, operation)?
+    if text_v2(fields, "preparedReceiptDigest")? != prepared.receipt_digest: return Err("connection-settlement-prepared-receipt")
+    Ok(HostPrimaryConnectionBasisV3(operation.id, sha256_text(distributed_encode_operation_v2(operation)?),
+        plan_digest, prepared.receipt_digest, sha256_text(consumed)))
+
+pub fn host_primary_connection_expected_facts_v2(journal: DistributedOperationJournalV2, operation: OperationEnvelopeV2) -> Result<HostPrimaryConnectionSettlementFactsV2, text>:
+    val basis = host_primary_connection_basis_v3(journal, operation)?
+    val closed_bytes = distributed_operation_journal_read_required_v3(journal,
+        "primary-connection-closed/" + sha256_text(operation.id) + ".sdn", 4096)?
+    val closed = container_primary_connection_closed_decode_v2(closed_bytes)?
+    if closed.request_digest != basis.request_digest: return Err("connection-settlement-closed-plan")
+    Ok(HostPrimaryConnectionSettlementFactsV2(basis.operation_id, basis.operation_digest, basis.request_digest,
+        basis.prepared_receipt_digest, basis.consumption_digest, closed.identity_digest, sha256_text(closed_bytes)))
+
+# A distinct attempt domain has no invented native identity for never-opened IO.
+pub fn host_primary_connection_attempt_settlement_bytes_v3(basis: HostPrimaryConnectionBasisV3,
+        terminal_bytes: text) -> Result<text, text>:
+    val terminal = container_primary_connection_attempt_decode_v3(terminal_bytes)?
+    if terminal.request_digest != basis.request_digest or terminal.consumption_digest != basis.consumption_digest:
+        return Err("connection-attempt-settlement-chain")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("host-primary-connection-attempt-settlement"),
+        "resourceDomain": SdnValue.String("engine-attach-attempt"), "operationId": SdnValue.String(basis.operation_id),
+        "operationDigest": SdnValue.String(basis.operation_digest), "requestDigest": SdnValue.String(basis.request_digest),
+        "preparedReceiptDigest": SdnValue.String(basis.prepared_receipt_digest), "consumptionDigest": SdnValue.String(basis.consumption_digest),
+        "disposition": SdnValue.String(terminal.disposition), "terminalEvidenceDigest": SdnValue.String(sha256_text(terminal_bytes))}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn host_primary_connection_attempt_evidence_v3(journal: DistributedOperationJournalV2,
+        operation: OperationEnvelopeV2) -> Result<text, text>:
+    val key = sha256_text(operation.id) + ".sdn"
+    val basis = host_primary_connection_basis_v3(journal, operation)?
+    val terminal = distributed_operation_journal_read_required_v3(journal, "primary-connection-attempt-terminal/" + key, 4096)?
+    val expected = host_primary_connection_attempt_settlement_bytes_v3(basis, terminal)?
+    val actual = distributed_operation_journal_read_required_v3(journal, "primary-connection-attempt-settlement/" + key, 4096)?
+    if actual != expected: return Err("connection-attempt-settlement-retained-mismatch")
+    Ok(actual)
+
+pub fn host_primary_connection_completion_evidence_v2(journal: DistributedOperationJournalV2,
+        operation: OperationEnvelopeV2) -> Result<text, text>:
+    val attempt = distributed_operation_journal_read_v3(journal,
+        "primary-connection-attempt-settlement/" + sha256_text(operation.id) + ".sdn", 4096)?
+    if attempt != nil:
+        # Two terminal publication domains for one helper are contradictory.
+        val ordinary = distributed_operation_journal_read_v3(journal,
+            "primary-connection-settlement/" + sha256_text(operation.id) + ".sdn", 4096)?
+        if ordinary != nil: return Err("connection-settlement-conflicting-domains")
+        return host_primary_connection_attempt_evidence_v3(journal, operation)
+    val expected = host_primary_connection_settlement_bytes_v2(host_primary_connection_expected_facts_v2(journal, operation)?)?
+    val actual = distributed_operation_journal_read_required_v3(journal,
+        "primary-connection-settlement/" + sha256_text(operation.id) + ".sdn", 4096)?
+    if actual != expected: return Err("connection-settlement-retained-mismatch")
+    Ok(actual)

@@ -219,10 +219,22 @@ fn hir_cache_closure_fallback_count_v1() -> i64:
 # doc/08_tracking/bug/hir_closure_digest_rekey_blocked_by_incomplete_interface_digest_2026-08-23.md):
 # spans are excluded, so an importer's cached HIR can carry stale line numbers
 # of a dependency's declarations after a line-shifting body edit there.
-# SIMPLE_HIR_CACHE_CLOSURE_KEY=content restores the byte-keyed rows (bisect
-# switch, kept for one release).
+#
+# Default is the CONTENT rows; interface rows are opt-in with
+# SIMPLE_HIR_CACHE_CLOSURE_KEY=interface (2026-11-15). The closure digest must
+# be a function of the sources alone, because every process of one build
+# (HIR shard workers, MIR children, the final consumer) recomputes it and the
+# HIR frozen inventory requires all shard workers to agree on it. A HIR shard
+# worker builds an empty-text PLACEHOLDER surface for every module outside its
+# closure slice (driver_worker_surface_closure_v1.spl step 4); a placeholder
+# keeps the source's content hash but its semantic digest is that of an empty
+# module, so interface rows differed between workers with different slices and
+# every worker after the first failed "HIR frozen inventory publication
+# failed: closure identity differs" (spec:
+# hir_worker_placeholder_closure_digest_spec). Interface rows are only sound in
+# a build with no placeholder surfaces, i.e. not on the HIR shard route.
 fn hir_cache_closure_digest(surfaces: ModuleSurfacesByName) -> text:
-    val content_rows = (sosix_env_get_nullable("SIMPLE_HIR_CACHE_CLOSURE_KEY") ?? "") == "content"
+    val content_rows = (sosix_env_get_nullable("SIMPLE_HIR_CACHE_CLOSURE_KEY") ?? "") != "interface"
     var rows: [text] = []
     var tokens: [text] = []
     var fallbacks = 0

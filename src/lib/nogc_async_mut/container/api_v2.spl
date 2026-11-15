@@ -1,3 +1,5 @@
+pub use std.nogc_async_mut.container.observation_v2.simple_container_observe_v2
+use std.nogc_async_mut.container.observation_v2.container_observation_validate_v2
 # The single Simple Container API routes actual platform owners, never a fake
 # trait probe. Returned turns retain the updated tagged owner after every call.
 use std.common.contracts.container.execution_v2.*
@@ -53,23 +55,7 @@ fn container_api_scope_v2(scope: ContainerHostScopeV2) -> bool:
     container_scope_fence_id_v2(scope).is_ok()
 
 fn container_api_observation_v2(backend: text, value: ContainerHostObservationV2) -> Result<ContainerHostObservationV2, text>:
-    if value.backend != backend or not container_api_text_v2(value.native_machine_id) or
-            not builder_digest_valid_v1(value.provider_identity_digest) or
-            not builder_identifier_valid_v1(value.architecture):
-        return Err("container-api-host-observation-invalid")
-    val identity = container_api_backend_v2(backend)?
-    if value.execution_os != container_backend_execution_os_v1(identity):
-        return Err("container-api-host-os-mismatch")
-    if value.continuity_assurance == "native-boot-incarnation-v1":
-        if not container_api_text_v2(value.native_boot_id): return Err("container-api-native-boot-required")
-        if value.boot_observation != "" and not container_api_text_v2(value.boot_observation):
-            return Err("container-api-boot-observation-invalid")
-    elif value.continuity_assurance == "machine-boot-counter-v1":
-        if value.native_boot_id != "" or not container_api_text_v2(value.boot_observation):
-            return Err("container-api-weak-boot-observation-invalid")
-    else:
-        return Err("container-api-continuity-assurance-unsupported")
-    Ok(value)
+    container_observation_validate_v2(backend, value)
 
 fn container_api_open_observation_v2(backend: text, scope: ContainerHostScopeV2,
         pin: text, observed: ContainerHostObservationV2) -> Result<bool, text>:
@@ -91,18 +77,6 @@ fn container_api_backend_v2(backend: text) -> Result<ContainerBackendIdentityV1,
         case Ok(identity): Ok(identity)
         case Err(reason): Err("container-api-" + reason)
 
-pub fn simple_container_observe_v2(backend: text, policy_bytes: text) -> Result<ContainerHostObservationV2, text>:
-    val identity = container_api_backend_v2(backend)?
-    if str_len(policy_bytes) == 0 or str_len(policy_bytes) > 1048576: return Err("container-api-policy-size")
-    match identity:
-        case ContainerBackendIdentityV1.LinuxPodman:
-            val observed = LinuxSimpleContainerAdapterV2.observe(policy_bytes)?
-            container_api_observation_v2(backend, observed)
-        case ContainerBackendIdentityV1.WindowsDockerProcess:
-            val observed = WindowsSimpleContainerAdapterV2.observe(policy_bytes)?
-            container_api_observation_v2(backend, observed)
-        case ContainerBackendIdentityV1.MacOsSeatbeltProcess:
-            Err("container-api-" + CONTAINER_BACKEND_UNQUALIFIED_SEATBELT_V1)
 
 pub fn simple_container_open_v2(backend: text, policy_bytes: text, state_root: text,
         scope: ContainerHostScopeV2, expected_provider_identity_digest: text, timeout_ms: i64) -> Result<SimpleContainerOwnerV2, text>:

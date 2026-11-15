@@ -34,6 +34,7 @@ model (`os.apps.smux.vt_screen`) missed an erase sequence.
 use std.spec
 use std.spec.{pending}
 use std.nogc_sync_mut.io.{thread_sleep_ms}
+use std.nogc_sync_mut.test_runner.test_runner_files.{strip_ansi}
 use app.llm_caret.cs_dashboard.{CsDashboard, cs_dashboard_new, cs_refresh,
     cs_render, cs_handle_command, cs_apply_action, cs_resolve_exe}
 
@@ -71,6 +72,30 @@ fn _dialog_key(screen: text) -> text:
         return "enter"
     ""
 
+# Harness-specific "input loop is live" marker, latched on top of the quiet
+# screen. Kimi draws its welcome box and `│ >` input box before its input loop
+# runs: on a cold start it then freezes for 10-40 s, buffering (or, past the
+# echo budget, apparently dropping) anything typed. Its status bar row
+# ("<model> thinking: <level>  <cwd>") only gains a right-hand segment - a key
+# tip such as "shift+enter: newline" / "@: mention files", or the git branch -
+# once the loop redraws it, so that segment is the ready signal. Captured
+# 2026-11-15: cold run welcome t=42 s with a bare status bar for 30+ s after the
+# question was typed (never echoed); warm run tip at t=10 s, echo at t=18 s.
+fn _input_ready(harness: text, screen: text) -> bool:
+    if harness != "kimi":
+        return true
+    if screen.contains("Preparing Kimi Code") or not screen.contains("Welcome to Kimi Code"):
+        return false
+    for row in screen.split("\n"):
+        val plain = strip_ansi(row).trim()
+        if plain.contains(" thinking: "):
+            var segments = 0
+            for part in plain.split("  "):
+                if part.trim() != "":
+                    segments = segments + 1
+            return segments >= 3
+    false
+
 # Launches `harness` from the dashboard, asks QUESTION through the input line
 # and waits up to `budget_s` seconds for ANSWER on the agent screen.
 fn drive_agent(session: text, harness: text, budget_s: i64) -> LiveRun:
@@ -82,14 +107,14 @@ fn drive_agent(session: text, harness: text, budget_s: i64) -> LiveRun:
     var quiet = 0
     var last = ""
     var waited = 0
-    # A quiet screen is not proof the agent's input line is live: Kimi's cold
-    # start draws its welcome box and holds still before it accepts input, so
-    # the typed question can vanish. Require the question to echo in the pane
+    # A quiet screen is not proof the agent's input line is live (see
+    # _input_ready); as a backstop, require the question to echo in the pane
     # within ECHO_BUDGET_S of sending; otherwise stop and report it undelivered
     # rather than waiting the whole budget for an answer to a question never asked.
     var delivered = false
     var sent_at = 0
     var undelivered = false
+    var live = false
     while waited < budget_s and not answered and not undelivered:
         thread_sleep_ms(1000)
         waited = waited + 1
@@ -110,7 +135,10 @@ fn drive_agent(session: text, harness: text, budget_s: i64) -> LiveRun:
                 quiet = quiet + 1
             else:
                 quiet = 0
-            if quiet >= 3:
+            # Latched: Kimi's key tip is transient, so seeing it once counts.
+            if _input_ready(harness, shown):
+                live = true
+            if quiet >= 3 and live:
                 val (after_send, _s) = _cmd(d, QUESTION)
                 d = after_send
                 sent = true
