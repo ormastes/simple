@@ -8,6 +8,7 @@ use compiler.backend.backend_types.{backend_value_bool_v1, backend_value_int_v1,
 # - value_to_string
 
 use compiler.hir.hir.*
+use compiler.hir.hir_types.{HirSymbol, HirModule}
 use compiler.common.diagnostics.span.{Span}
 use compiler.backend.backend_types.*
 use compiler.backend.env.{EvalContext, Environment}
@@ -158,6 +159,22 @@ impl InterpreterBackendImpl:
         else:
             nil
 
+    fn provider_context_for(name: text, ctx: EvalContext) -> EvalContext?:
+        """Context of the imported module that defines `name`, sharing the caller's env."""
+        if not ctx.has_fn_owner or not ctx.fn_owner.has(name):
+            return None
+        val owner: HirModule = ctx.fn_owner[name]
+        var names_map: Dict<i64, text> = {}
+        for osym_ in owner.symbols.symbols.values():
+            val os: HirSymbol = osym_
+            val os_id: i64 = os.id.id
+            names_map[os_id] = os.name
+        var fn_index: Dict<text, HirFunction> = {}
+        for ofn_ in owner.functions.values():
+            val of: HirFunction = ofn_
+            fn_index[of.name] = of
+        Some(EvalContext(env: ctx.env, module: owner, backend: ctx.backend, names: names_map, fn_by_name: fn_index, has_fn_index: true, fn_owner: ctx.fn_owner, has_fn_owner: true, strict_mem: ctx.strict_mem))
+
     fn call_function(fn_value: Value, args: [Value], ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
         itrace("[CF] call_function enter")
         match fn_value:
@@ -185,9 +202,13 @@ impl InterpreterBackendImpl:
                 # entry points). Last-writer-wins matches the old no-break loop.
                 val cf_target_hit = self.resolve_function_by_name(f_t.name, ctx)
                 if cf_target_hit.?:
-                    self.call_hir_function(cf_target_hit.unwrap(), args, ctx)
-                else:
-                    Err(BackendError.runtime_error("function '{f_t.name}' not found", Some(span)))
+                    return self.call_hir_function(cf_target_hit.unwrap(), args, ctx)
+                # Imported function: run it in its defining module's context
+                # so its own locals, calls and types resolve there.
+                if val owner_ctx = self.provider_context_for(f_t.name, ctx):
+                    if val owner_fn = self.resolve_function_by_name(f_t.name, owner_ctx):
+                        return self.call_hir_function(owner_fn, args, owner_ctx)
+                Err(BackendError.runtime_error("function '{f_t.name}' not found", Some(span)))
 
             case Value.Closure(c):
                 itrace("[CF] Closure arm")

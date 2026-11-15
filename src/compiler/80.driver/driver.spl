@@ -143,20 +143,17 @@ impl CompilerDriver:
         # stage4_codegen_compact_form_hazards_2026-07-02.md (Iteration 13/14).
         val interp = InterpreterBackendImpl.with_program_args(self.ctx.options.program_args)
 
-        var src_idx = 0
-        while src_idx < self.ctx.sources.len():
-            val source = self.ctx.sources[src_idx]
-            val name = source.module_name
-            val hir_module = self.ctx.hir_modules[name]
-            if hir_module == nil:
-                src_idx = src_idx + 1
-                continue
-
-            match interp.interpret_hir_module_with_live_providers(hir_module, providers.modules):
-                case Ok(_): pass
-                case Err(e):
-                    return CompileResult.RuntimeError("Interpret error in {name}: {e.message}")
-            src_idx = src_idx + 1
+        # Only the entry module (sources[0], loaded first) runs; every other
+        # retained module is a provider whose functions the entry calls. Running
+        # each module failed on the first import with "module has no main".
+        val name = self.ctx.sources[0].module_name
+        val hir_module = self.ctx.hir_modules[name]
+        if hir_module == nil:
+            return CompileResult.RuntimeError("Interpret error: entry module {name} has no HIR")
+        match interp.interpret_hir_module_with_live_providers(hir_module, providers.modules, self.ctx.hir_modules):
+            case Ok(_): pass
+            case Err(e):
+                return CompileResult.RuntimeError("Interpret error in {name}: {e.message}")
 
         CompileResult.Success(None)
 

@@ -137,8 +137,14 @@ impl InterpreterBackendImpl:
         self.process_direct_owned_module(module)
 
     # Only the live driver closure preflight may supply this verified index.
-    pub(package) fn interpret_hir_module_with_live_providers(module: HirModule, providers: Dict<text, HirModule>) -> Result<BackendResult, BackendError>:
-        self.process_module_with_ownership_context(module, providers)
+    # `program_modules` is every retained module the entry may call into. It is
+    # wider than `providers`, which holds only the nogc-strict modules the
+    # ownership check verified.
+    pub(package) fn interpret_hir_module_with_live_providers(module: HirModule, providers: Dict<text, HirModule>, program_modules: Dict<text, HirModule>) -> Result<BackendResult, BackendError>:
+        val ownership_errors = check_hir_ownership_with_live_providers_v1(module, 1000000, providers)
+        if ownership_errors.len() > 0:
+            return Err(BackendError.compile_error(ownership_errors.join("\n"), nil))
+        self.process_verified_module_with_providers(module, program_modules, true)
 
     fn process_module(module: HirModule) -> Result<BackendResult, BackendError>:
         self.process_direct_owned_module(module)
@@ -149,13 +155,12 @@ impl InterpreterBackendImpl:
             return Err(BackendError.compile_error(ownership_errors.join("\n"), nil))
         self.process_verified_module(module)
 
-    fn process_module_with_ownership_context(module: HirModule, providers: Dict<text, HirModule>) -> Result<BackendResult, BackendError>:
-        val ownership_errors = check_hir_ownership_with_live_providers_v1(module, 1000000, providers)
-        if ownership_errors.len() > 0:
-            return Err(BackendError.compile_error(ownership_errors.join("\n"), nil))
-        self.process_verified_module(module)
 
     fn process_verified_module(module: HirModule) -> Result<BackendResult, BackendError>:
+        val no_providers: Dict<text, HirModule> = {}
+        self.process_verified_module_with_providers(module, no_providers, false)
+
+    fn process_verified_module_with_providers(module: HirModule, providers: Dict<text, HirModule>, has_providers: bool) -> Result<BackendResult, BackendError>:
         # Create evaluation context
         val env = Environment.new()
         # Build the id -> name map (bug doc iteration 21, target (a)). The
@@ -180,7 +185,18 @@ impl InterpreterBackendImpl:
             val fidx_f: HirFunction = fidx_fn_
             fn_index[fidx_f.name] = fidx_f
         val strict_mem_on = interp_strict_mem_enabled()
-        val ctx = EvalContext(env: env, module: module, backend: self, names: names_map, fn_by_name: fn_index, has_fn_index: true, strict_mem: strict_mem_on)
+        # Imported functions: the first provider defining a name owns it; the
+        # entry module's own definitions always win (they are never indexed).
+        var fn_owner: Dict<text, HirModule> = {}
+        if has_providers:
+            for pm_ in providers.values():
+                val pm: HirModule = pm_
+                if pm.name != module.name:
+                    for pf_ in pm.functions.values():
+                        val pf: HirFunction = pf_
+                        if not fn_index.has(pf.name) and not fn_owner.has(pf.name):
+                            fn_owner[pf.name] = pm
+        val ctx = EvalContext(env: env, module: module, backend: self, names: names_map, fn_by_name: fn_index, has_fn_index: true, fn_owner: fn_owner, has_fn_owner: has_providers, strict_mem: strict_mem_on)
 
         # Locate `main` by symbol name via the symbol table. The cranelift seed
         # miscompiles two things on the single-file / synthetic-main HIR module:
