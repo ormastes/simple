@@ -53,6 +53,9 @@ use .main_lazy_telemetry.{tok_record, tok_rollup, tok_load_events, TOK_FEATURE_C
 use .main_lazy_log_opt.{log_opt_optimize, log_opt_optimize_recorded, log_opt_plugins_text, LOG_OPT_FEATURE}
 
 use .ctx_index_cache.{CtxStorePath, CtxStoreLength, CtxStoreDigest, CtxGenerationKey, CtxCacheDecision, CtxCacheRebuildCount, ctx_generation_key_missing, ctx_generation_key_present, ctx_cache_decide, ctx_cache_rebuild_count_next}
+use .ctx_postings.{CtxPostings, CtxTerm, CtxNormBodies, CtxBodyLengths, CtxAvgLength, CtxScoreBoard, ctx_postings_build, ctx_scores_by_scan, ctx_scores_by_postings, CtxGenerationHits, CtxPostingsBuildCount, CtxPostingsDecision, ctx_generation_hits_zero, ctx_generation_hits_next, ctx_postings_build_count_next, ctx_postings_decide}
+use .ctx_redaction.{CtxRawContent, ctx_redact}
+use .ctx_retention.{CtxChunkId, CtxSourceLabel, CtxUnixSecs, CtxAgeLimit, CtxByteCount, CtxRetentionRow, CtxRetentionPolicy, CtxPolicyCheck, CtxPurgeMode, CtxRetentionPlan, ctx_retention_row, ctx_retention_policy, ctx_retention_check, ctx_retention_decide, ctx_policy_check_label}
 use std.io_runtime.{env_get, file_read, file_write, file_append_text, file_exists, file_delete, dir_create, time_now_unix_micros, file_size_signed, file_hash_sha256_or_empty}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read_text_at}
 use std.database.core.{parse_sdn_table}
@@ -315,7 +318,9 @@ fn ctx_chunk_text(content: text, chunk_chars: i64) -> [text]:
     chunks
 
 # Index `content` under `source`; returns number of chunks written.
-fn ctx_index_text(content: text, source: text) -> i64:
+fn ctx_index_text(raw_content: text, source: text) -> i64:
+    # Secrets are masked BEFORE chunking: the raw value is never stored.
+    val content = ctx_redact(CtxRawContent(body: raw_content)).body
     if content.trim() == "":
         return 0
     val pieces = ctx_chunk_text(content, _CTX_CHUNK_CHARS)
@@ -449,6 +454,7 @@ struct CtxIndex:
     docs: [CtxChunk]
     norm: [text]
     avg_bytes: f64
+    postings: CtxPostings?   # built once per cache generation; None for one-shot callers
 
 # Raw substring needles for the zero-hit fallback: whitespace-separated
 # pieces of the query (>= 3 chars), lowercased — keeps `_`, `.`, `-`, `(`
@@ -498,7 +504,7 @@ fn ctx_prepare_index(chunks: [CtxChunk], source_prefix: text) -> CtxIndex:
             bodies.push(c.body)
             total_bytes = total_bytes + c.body.len()
     if docs.len() == 0:
-        return CtxIndex(docs: [], norm: [], avg_bytes: 1.0)
+        return CtxIndex(docs: [], norm: [], avg_bytes: 1.0, postings: None)
     var norm = ctx_normalize(bodies.join(" " + _CTX_DOC_SENTINEL + " ")).split(_CTX_DOC_SENTINEL)
     if norm.len() != docs.len():
         # A body contained the sentinel text itself; fall back to per-doc.
@@ -508,7 +514,7 @@ fn ctx_prepare_index(chunks: [CtxChunk], source_prefix: text) -> CtxIndex:
     var avg = total_bytes.to_float() / docs.len().to_float()
     if avg < 1.0:
         avg = 1.0
-    CtxIndex(docs: docs, norm: norm, avg_bytes: avg)
+    CtxIndex(docs: docs, norm: norm, avg_bytes: avg, postings: None)
 
 # ---------------------------------------------------------------------------
 # Per-process generation cache (see ctx_index_cache.spl)
@@ -524,6 +530,8 @@ var _CTX_CACHE_CHUNKS: [CtxChunk] = []
 var _CTX_CACHE_INDEX: CtxIndex? = None
 var _CTX_CACHE_PREFIX: text = ""
 var _CTX_CACHE_REBUILDS: CtxCacheRebuildCount = CtxCacheRebuildCount(count: 0)
+var _CTX_CACHE_HITS: CtxGenerationHits = ctx_generation_hits_zero()
+var _CTX_POSTINGS_BUILDS: CtxPostingsBuildCount = CtxPostingsBuildCount(count: 0)
 
 fn _ctx_store_generation_key() -> CtxGenerationKey:
     val path = _ctx_chunks_path()
@@ -539,11 +547,29 @@ fn _ctx_store_generation_key() -> CtxGenerationKey:
 pub fn ctx_index_cache_rebuilds() -> CtxCacheRebuildCount:
     _CTX_CACHE_REBUILDS
 
+# Postings are built only once the generation has served enough hits to repay
+# the build (ctx_postings_decide); a fresh or short-lived generation scans.
+fn _ctx_index_with_postings_when_due(idx: CtxIndex) -> CtxIndex:
+    if idx.postings.?:
+        return idx
+    match ctx_postings_decide(_CTX_CACHE_HITS):
+        case CtxPostingsDecision.UseScan:
+            return idx
+        case CtxPostingsDecision.BuildPostings:
+            val built = CtxIndex(docs: idx.docs, norm: idx.norm, avg_bytes: idx.avg_bytes, postings: Some(ctx_postings_build(CtxNormBodies(bodies: idx.norm))))
+            _CTX_CACHE_INDEX = Some(built)
+            _CTX_POSTINGS_BUILDS = ctx_postings_build_count_next(_CTX_POSTINGS_BUILDS)
+            built
+
+# Postings builds performed by this process (spec / perf probe).
+pub fn ctx_index_postings_builds() -> CtxPostingsBuildCount:
+    _CTX_POSTINGS_BUILDS
+
 fn _ctx_cached_index(source_prefix: text) -> CtxIndex:
     val key = _ctx_store_generation_key()
     match ctx_cache_decide(_CTX_CACHE_KEY, key):
         case CtxCacheDecision.Hit:
-            pass
+            _CTX_CACHE_HITS = ctx_generation_hits_next(_CTX_CACHE_HITS)
         case CtxCacheDecision.DigestUnavailable:
             # Unverifiable store: never cached, read fresh every time.
             _CTX_CACHE_KEY = None
@@ -556,9 +582,10 @@ fn _ctx_cached_index(source_prefix: text) -> CtxIndex:
             _CTX_CACHE_KEY = Some(key)
             _CTX_CACHE_INDEX = None
             _CTX_CACHE_REBUILDS = ctx_cache_rebuild_count_next(_CTX_CACHE_REBUILDS)
+            _CTX_CACHE_HITS = ctx_generation_hits_zero()
     if val cached = _CTX_CACHE_INDEX:
         if _CTX_CACHE_PREFIX == source_prefix:
-            return cached
+            return _ctx_index_with_postings_when_due(cached)
     val idx = ctx_prepare_index(_CTX_CACHE_CHUNKS, source_prefix)
     _CTX_CACHE_INDEX = Some(idx)
     _CTX_CACHE_PREFIX = source_prefix
@@ -574,52 +601,37 @@ fn _ctx_dedupe(terms: [text]) -> [text]:
     out
 
 # BM25 over a prepared index. Term frequency per document is an exact
-# whole-word occurrence count over the normalized body (native `contains`
-# gate + `split`), document length is the body's byte length.
-fn ctx_bm25_search_index(idx: CtxIndex, query: text, limit: i64) -> [CtxHit]:
+# whole-word occurrence count over the normalized body, document length is the
+# body's byte length. When the index carries postings (cached generation) only
+# chunks containing a query term are scored; otherwise every body is scanned.
+# Both scorers live in ctx_postings.spl and yield bit-equal scores.
+fn _ctx_body_lengths(idx: CtxIndex) -> CtxBodyLengths:
+    var lens: [i64] = []
+    for d in idx.docs:
+        lens.push(d.body.len())
+    CtxBodyLengths(bytes: lens)
+
+fn _ctx_score_board(idx: CtxIndex, lengths: CtxBodyLengths, terms: [CtxTerm], avg: CtxAvgLength, force_scan: bool) -> CtxScoreBoard:
+    if not force_scan and idx.postings.?:
+        return ctx_scores_by_postings(idx.postings.unwrap(), lengths, terms, avg)
+    ctx_scores_by_scan(CtxNormBodies(bodies: idx.norm), lengths, terms, avg)
+
+fn _ctx_search_index_with(idx: CtxIndex, query: text, limit: i64, force_scan: bool) -> [CtxHit]:
     val q_terms = _ctx_dedupe(ctx_query_terms(query))
     val n_docs = idx.docs.len()
     if q_terms.len() == 0 or n_docs == 0:
         return []
-    val k1 = 1.2
-    val b = 0.75
-    var scores: [f64] = []
-    var matched: [i64] = []
+    var terms: [CtxTerm] = []
+    for t in q_terms:
+        terms.push(CtxTerm(word: t))
+    val lengths = _ctx_body_lengths(idx)
+    val avg = CtxAvgLength(bytes: idx.avg_bytes)
+    val board = _ctx_score_board(idx, lengths, terms, avg, force_scan)
+    var scored: [CtxHit] = []
     var i = 0
     while i < n_docs:
-        scores.push(0.0)
-        matched.push(0)
-        i = i + 1
-    for qt in q_terms:
-        val needle = " " + qt + " "
-        var counts: [i64] = []
-        var df: i64 = 0
-        i = 0
-        while i < n_docs:
-            var f: i64 = 0
-            if idx.norm[i].contains(needle):
-                f = idx.norm[i].split(needle).len() - 1
-            if f > 0:
-                df = df + 1
-            counts.push(f)
-            i = i + 1
-        if df == 0:
-            continue
-        val idf = ln_f64(1.0 + (n_docs.to_float() - df.to_float() + 0.5) / (df.to_float() + 0.5))
-        i = 0
-        while i < n_docs:
-            if counts[i] > 0:
-                val f = counts[i].to_float()
-                val dl = idx.docs[i].body.len().to_float()
-                val denom = f + k1 * (1.0 - b + b * dl / idx.avg_bytes)
-                scores[i] = scores[i] + idf * (f * (k1 + 1.0)) / denom
-                matched[i] = matched[i] + 1
-            i = i + 1
-    var scored: [CtxHit] = []
-    i = 0
-    while i < n_docs:
-        if matched[i] > 0:
-            scored.push(CtxHit(chunk: idx.docs[i], score: scores[i], matched: matched[i], mode: "bm25"))
+        if board.matched[i] > 0:
+            scored.push(CtxHit(chunk: idx.docs[i], score: board.scores[i], matched: board.matched[i], mode: "bm25"))
         i = i + 1
     if scored.len() > 0:
         return _ctx_top_k(scored, limit)
@@ -641,6 +653,13 @@ fn ctx_bm25_search_index(idx: CtxIndex, query: text, limit: i64) -> [CtxHit]:
             scored.push(CtxHit(chunk: idx.docs[i], score: hits.to_float(), matched: 0, mode: "substring"))
         i = i + 1
     _ctx_top_k(scored, limit)
+
+fn ctx_bm25_search_index(idx: CtxIndex, query: text, limit: i64) -> [CtxHit]:
+    _ctx_search_index_with(idx, query, limit, false)
+
+# Full-scan reference path (parity oracle for the postings path).
+fn ctx_bm25_search_index_scan(idx: CtxIndex, query: text, limit: CtxResultLimit) -> [CtxHit]:
+    _ctx_search_index_with(idx, query, limit.count, true)
 
 # One-query convenience over ctx_prepare_index + ctx_bm25_search_index.
 fn ctx_bm25_search(chunks: [CtxChunk], query: text, source_prefix: text, limit: i64) -> [CtxHit]:
@@ -1375,12 +1394,95 @@ fn handle_simple_ctx_upgrade(id: text, body: text) -> text:
     _ctx_stats_bump("upgrade_calls", 1)
     make_tool_result(id, msg)
 
+# ---------------------------------------------------------------------------
+# Purge (retention) — explicit, dry-run by default, never implicit
+# ---------------------------------------------------------------------------
+
+struct CtxPurgeReport:
+    check: CtxPolicyCheck
+    mode: CtxPurgeMode
+    plan: CtxRetentionPlan
+    rewritten: bool
+
+fn _ctx_retention_rows(chunks: [CtxChunk]) -> [CtxRetentionRow]:
+    var rows: [CtxRetentionRow] = []
+    for c in chunks:
+        rows.push(ctx_retention_row(CtxChunkId(value: c.id), CtxSourceLabel(value: c.source), CtxUnixSecs(secs: c.ts), CtxByteCount(bytes: c.bytes)))
+    rows
+
+# Apply `policy` to the store. `DryRun` never writes. `Apply` rewrites the
+# store atomically with only the kept chunks; the next search sees a new
+# generation key and rebuilds its index. Chunk ids are never reused (the
+# next_id high-water mark lives in stats.sdn).
+pub fn ctx_purge_store(policy: CtxRetentionPolicy, mode: CtxPurgeMode) -> CtxPurgeReport:
+    val chunks = _ctx_load_chunks()
+    val plan = ctx_retention_decide(_ctx_retention_rows(chunks), policy, CtxUnixSecs(secs: _ctx_now_secs()))
+    val check = ctx_retention_check(policy)
+    var rewritten = false
+    match mode:
+        case CtxPurgeMode.DryRun:
+            rewritten = false
+        case CtxPurgeMode.Apply:
+            if plan.drop.len() > 0:
+                var dropped_ids: Dict<i64, bool> = {}
+                for d in plan.drop:
+                    dropped_ids[d.value] = true
+                var lines: [text] = [_ctx_store_header()]
+                for c in chunks:
+                    if not dropped_ids.contains_key(c.id):
+                        lines.push(_ctx_chunk_line(c))
+                rewritten = _ctx_write_atomic(_ctx_chunks_path(), lines.join(""))
+    CtxPurgeReport(check: check, mode: mode, plan: plan, rewritten: rewritten)
+
+fn _ctx_opt_int(body: text, key: text) -> i64?:
+    val raw = extract_field(body, key)
+    if raw == "":
+        return None
+    val n = raw.trim().parse_int() ?? 0
+    Some(n)
+
+fn handle_simple_ctx_purge(id: text, body: text) -> text:
+    var source: CtxSourceLabel? = None
+    val src_raw = extract_field(body, "source")
+    if src_raw != "":
+        source = Some(CtxSourceLabel(value: src_raw))
+    var age: CtxAgeLimit? = None
+    val age_raw = _ctx_opt_int(body, "older_than_secs")
+    if age_raw.?:
+        age = Some(CtxAgeLimit(secs: age_raw.unwrap()))
+    var cap: CtxByteCount? = None
+    val cap_raw = _ctx_opt_int(body, "max_bytes")
+    if cap_raw.?:
+        cap = Some(CtxByteCount(bytes: cap_raw.unwrap()))
+    val policy = ctx_retention_policy(source, age, cap)
+    val check_label = ctx_policy_check_label(ctx_retention_check(policy))
+    if check_label != "valid":
+        return make_tool_error(id, -32602, "simple_ctx_purge: refused (" + check_label + "). Name what to purge: source (label prefix), older_than_secs (>0) and/or max_bytes (>0). Nothing was deleted.")
+    var mode = CtxPurgeMode.DryRun
+    if extract_field(body, "apply") == "true":
+        mode = CtxPurgeMode.Apply
+    val report = ctx_purge_store(policy, mode)
+    val n_drop = report.plan.drop.len()
+    var msg = ""
+    match report.mode:
+        case CtxPurgeMode.DryRun:
+            msg = "ctx purge DRY RUN: would drop " + str(n_drop) + " chunk(s) (" + str(report.plan.dropped.bytes) + " bytes), keep " + str(report.plan.keep.len()) + ". Pass apply:true to delete."
+        case CtxPurgeMode.Apply:
+            if n_drop == 0:
+                msg = "ctx purge: nothing matched; store unchanged (" + str(report.plan.keep.len()) + " chunk(s))"
+            elif report.rewritten:
+                msg = "ctx purge: dropped " + str(n_drop) + " chunk(s) (" + str(report.plan.dropped.bytes) + " bytes), kept " + str(report.plan.keep.len())
+                _ctx_stats_bump("purge_calls", 1)
+            else:
+                return make_tool_error(id, -32603, "simple_ctx_purge: cannot rewrite " + _ctx_chunks_path() + "; nothing was deleted")
+    make_tool_result(id, msg)
+
 export handle_simple_ctx_index, handle_simple_ctx_search, handle_simple_ctx_execute
 export handle_simple_ctx_execute_file, handle_simple_ctx_batch_execute
 export handle_simple_ctx_fetch_and_index, handle_simple_ctx_stats
-export handle_simple_ctx_doctor, handle_simple_ctx_upgrade, handle_simple_log_optimize
+export handle_simple_ctx_doctor, handle_simple_ctx_upgrade, handle_simple_log_optimize, handle_simple_ctx_purge, ctx_purge_store
 export ctx_store_dir, ctx_index_text, ctx_bm25_search, ctx_tokenize, ctx_chunk_text
-export ctx_normalize, ctx_prepare_index, ctx_bm25_search_index, ctx_capture_max_bytes, ctx_run_bounded
+export ctx_normalize, ctx_prepare_index, ctx_bm25_search_index, ctx_bm25_search_index_scan, ctx_capture_max_bytes, ctx_run_bounded
 export ctx_escape_cell, ctx_unescape_cell, ctx_parse_string_array, ctx_unescape_json
 export ctx_execute_code, ctx_html_to_text, ctx_cap_bytes, ctx_fetch_allowed_url, ctx_stats_text
 export ctx_query_terms, ctx_smart_truncate, ctx_cap_exec_stdout
