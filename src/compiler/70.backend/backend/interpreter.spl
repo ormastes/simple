@@ -240,6 +240,17 @@ impl InterpreterBackendImpl:
             # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
             ctx.env.define_global(f.name, backend_value_function_v1(g_fv2))
 
+        # Module-level `val`/`var` (imported providers first, then the entry
+        # module): without a binding a NamedVar read fell back to a Function
+        # value, so `_aggregate_ledger_paths.len()` in std.spec failed with
+        # "unresolved method call: len (receiver kind function)".
+        if has_providers:
+            for pm2_ in providers.values():
+                val pm2: HirModule = pm2_
+                if pm2.name != module.name:
+                    self.bind_module_constants(pm2, ctx)?
+        self.bind_module_constants(module, ctx)?
+
         for fn_ in module.functions.values():
             val f: HirFunction = fn_
             # Match main by the function's own name. Requiring a duplicate symbol
@@ -249,6 +260,13 @@ impl InterpreterBackendImpl:
                 val result: Value = self.call_hir_function(f, [], ctx)?
                 return Ok(BackendResult.Value(result))
         Err(BackendError.runtime_error("module has no main function", nil))
+
+    fn bind_module_constants(m: HirModule, ctx: EvalContext) -> Result<(), BackendError>:
+        for c_ in m.constants.values():
+            val c: HirConst = c_
+            val cv: Value = self.eval_expr(c.value, ctx)?
+            ctx.env.define_global(c.name, cv)
+        Ok(())
 
     fn process_function(fn_: HirFunction) -> Result<BackendResult, BackendError>:
         Ok(BackendResult.Unit)
