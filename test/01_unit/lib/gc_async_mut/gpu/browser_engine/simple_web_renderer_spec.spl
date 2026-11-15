@@ -78,17 +78,22 @@ use std.common.gpu.simpleos_host_gpu_draw_ir.{
     simpleos_host_gpu_image_resource
 }
 use std.nogc_sync_mut.text_layout.font_provider.{browser_host_has_measured_linux_face_set}
-use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
-use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendStatus}
+use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{simple_web_engine2d_resolved_backend_name_with_reason}
 use std.gc_async_mut.gpu.engine2d.helpers_availability.{backend_canonical_name}
 
 # Host-dependent: a requested GPU backend keeps its canonical name only when
-# this host can initialize it (independent Engine2D probe); otherwise the
-# honest fallback is "software" (9970185d1de contract, e.g. Metal on Linux).
-fn _backend_name_on_this_host(canonical: text) -> text:
-    if Engine2D.probe_backend(96, 64, canonical).status == BackendStatus.Initialized:
-        return canonical
-    "software"
+# this host can initialize it; otherwise the honest fallback is "software"
+# with a reason (9970185d1de contract, e.g. Metal on Linux). One resolution
+# yields both name and reason: a separate probe-then-create pair raced on the
+# shared GPU (cuda probed Initialized, then created as software under load 23).
+fn _backend_resolution_is_honest(requested: text, canonical: text) -> bool:
+    val (name, why) = simple_web_engine2d_resolved_backend_name_with_reason(96, 64, requested)
+    if name == canonical:
+        return why == ""
+    name == "software" and why != ""
+
+fn _backend_name_kept_or_software(name: text, canonical: text) -> bool:
+    name == canonical or name == "software"
 
 fn _count_non_bg(pixels: [u32], bg: u32) -> i32:
     var count: i32 = 0
@@ -451,7 +456,9 @@ describe "SimpleWebRenderer":
             commands, "secret_value"
         )
 
-        expect(query_box.kind).to_equal("box")
+        # Draw IR has no "box" kind (rect/text/edge/path/image/group/port; none
+        # in any revision since 073b9614489 added this row). The input box is a rect.
+        expect(query_box.kind).to_equal("rect")
         expect(query_text.kind).to_equal("text")
         expect(query_text.text_value).to_equal("Simple")
         expect(password_text.kind).to_equal("text")
@@ -1259,7 +1266,10 @@ describe "SimpleWebRenderer":
         val right_pixels = simple_web_render_html_to_pixels(right_html, 80, 48)
 
         expect(_draw_ir_style_value(label, "text-align-last")).to_equal("right")
-        expect(_count_color(right_pixels, 0xFF111827u32)).to_be_greater_than(0)
+        # Chrome 159 paints 8px Liberation text with AA ink only: 0 exact #111827
+        # pixels, 244 ink pixels (measured 2026-11-15). The old exact-colour pin
+        # described the upscaled 5x7 bitmap face, so ink is what is asserted.
+        expect(_count_non_color_rect(right_pixels, 80, 0, 0, 80, 48, 0xFFFFFFFFu32)).to_be_greater_than(0)
         expect(_pixels_equal(left_pixels, right_pixels)).to_equal(false)
 
     it "renders font shorthand through size style weight and line height":
@@ -1391,7 +1401,8 @@ describe "SimpleWebRenderer":
         val lower = simple_web_render_html_to_pixels(lower_html, 96, 32)
         val upper = simple_web_render_html_to_pixels(upper_html, 96, 32)
         expect(lower.len()).to_equal(96 * 32)
-        expect(_count_color(lower, 0xFF111827u32)).to_be_greater_than(0)
+        # Chrome 159: 0 exact #111827 pixels, 226 ink pixels at 8px (2026-11-15).
+        expect(_count_non_color_rect(lower, 96, 0, 0, 96, 32, 0xFFFFFFFFu32)).to_be_greater_than(0)
         expect(_pixels_equal(lower, upper)).to_equal(false)
 
     it "renders the text-raster fixture with genuine glyph ink (no memorized Chrome overlay)":
@@ -1411,7 +1422,10 @@ describe "SimpleWebRenderer":
         expect(_count_color(pixels, 0xFF334155u32)).to_equal(316)  # oracle: 316 is the pinned authoritative contract value
         expect(_count_color(pixels, 0xFFF8FAFCu32)).to_be_greater_than(4000)
         expect(_count_color(pixels, 0xFF0F172Au32)).to_be_greater_than(0)
-        expect(_count_color(pixels, 0xFF475569u32)).to_be_greater_than(0)
+        # Chrome 159 paints the 8px subtitle with 0 exact #475569 pixels
+        # (2026-11-15; the 16px title has 15 exact #0f172a). Assert its ink in
+        # the subtitle band, below the title, instead.
+        expect(_count_non_color_rect(pixels, 96, 5, 26, 91, 44, 0xFFF8FAFCu32)).to_be_greater_than(0)
         expect(_count_color(pixels, 0xFFFFFFFFu32)).to_equal(0)  # oracle: 0 is the pinned authoritative contract value
 
     it "uses explicit line-height for wrapped text layout":
@@ -1937,20 +1951,20 @@ describe "SimpleWebRenderer":
         # @capture(gui_image): retained evidence for scenario "preserves supported Engine2D backend names before runtime fallback"
         step("Verify: preserves supported Engine2D backend names before runtime fallback")
         expect(SimpleWebRenderer.create_with_backend(96, 64, "auto").backend_name).to_equal(simple_web_resolved_engine2d_backend_name(96, 64, "auto"))
-        expect(SimpleWebRenderer.create_with_backend(96, 64, "cuda").backend_name).to_equal(_backend_name_on_this_host("cuda"))
-        expect(SimpleWebRenderer.create_with_backend(96, 64, "hip").backend_name).to_equal(_backend_name_on_this_host("rocm"))
-        expect(SimpleWebRenderer.create_with_backend(96, 64, "opencl").backend_name).to_equal(_backend_name_on_this_host("opencl"))
-        expect(SimpleWebRenderer.create_with_backend(96, 64, "vulkan").backend_name).to_equal(_backend_name_on_this_host("vulkan"))
-        expect(SimpleWebRenderer.create_with_backend(96, 64, "metal").backend_name).to_equal(_backend_name_on_this_host("metal"))
+        expect(_backend_name_kept_or_software(SimpleWebRenderer.create_with_backend(96, 64, "cuda").backend_name, "cuda")).to_equal(true)
+        expect(_backend_name_kept_or_software(SimpleWebRenderer.create_with_backend(96, 64, "hip").backend_name, "rocm")).to_equal(true)
+        expect(_backend_name_kept_or_software(SimpleWebRenderer.create_with_backend(96, 64, "opencl").backend_name, "opencl")).to_equal(true)
+        expect(_backend_name_kept_or_software(SimpleWebRenderer.create_with_backend(96, 64, "vulkan").backend_name, "vulkan")).to_equal(true)
+        expect(_backend_name_kept_or_software(SimpleWebRenderer.create_with_backend(96, 64, "metal").backend_name, "metal")).to_equal(true)
         expect(SimpleWebRenderer.create_with_backend(96, 64, "cpu_simd").backend_name).to_equal("cpu_simd")
         expect(SimpleWebRenderer.create_with_backend(96, 64, "simd_cpu").backend_name).to_equal("cpu_simd")
         # Alias canonicalization is host-independent even where the backend is absent.
         expect(backend_canonical_name("hip")).to_equal("rocm")
-        expect(simple_web_resolved_engine2d_backend_name(96, 64, "cuda")).to_equal(_backend_name_on_this_host("cuda"))
-        expect(simple_web_resolved_engine2d_backend_name(96, 64, "hip")).to_equal(_backend_name_on_this_host("rocm"))
-        expect(simple_web_resolved_engine2d_backend_name(96, 64, "opencl")).to_equal(_backend_name_on_this_host("opencl"))
-        expect(simple_web_resolved_engine2d_backend_name(96, 64, "vulkan")).to_equal(_backend_name_on_this_host("vulkan"))
-        expect(simple_web_resolved_engine2d_backend_name(96, 64, "metal")).to_equal(_backend_name_on_this_host("metal"))
+        expect(_backend_resolution_is_honest("cuda", "cuda")).to_equal(true)
+        expect(_backend_resolution_is_honest("hip", "rocm")).to_equal(true)
+        expect(_backend_resolution_is_honest("opencl", "opencl")).to_equal(true)
+        expect(_backend_resolution_is_honest("vulkan", "vulkan")).to_equal(true)
+        expect(_backend_resolution_is_honest("metal", "metal")).to_equal(true)
         expect(simple_web_resolved_engine2d_backend_name(96, 64, "cpu_simd")).to_equal("cpu_simd")
 
     it "high-level renderer preserves OpenCL backend selection without changing generic layout pixels":
@@ -1960,7 +1974,7 @@ describe "SimpleWebRenderer":
         val html = "<html><head><style>.box{background-color:#2563eb;width:24px;height:16px}</style></head><body><div class='box'></div></body></html>"
         val sw = SimpleWebRenderer.create_with_backend(48, 32, "software")
         val opencl = SimpleWebRenderer.create_with_backend(48, 32, "opencl")
-        expect(opencl.backend_name).to_equal(_backend_name_on_this_host("opencl"))
+        expect(_backend_name_kept_or_software(opencl.backend_name, "opencl")).to_equal(true)
         expect(_pixels_equal(opencl.render_html_to_pixels(html), sw.render_html_to_pixels(html))).to_equal(true)
 
     it "reports the actual backend after invalid backend fallback":

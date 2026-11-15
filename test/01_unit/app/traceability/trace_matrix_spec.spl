@@ -1,0 +1,100 @@
+"""`trace matrix`: requirement status counts per layer x feature cell.
+
+Purpose: prove the matrix keeps a structural link (Linked) apart from passing
+evidence (Verified), reports an empty axis membership as unassigned rather than
+green, and turns an incomplete graph or an uncertified profile into exit 2.
+Audience: traceability maintainers and reviewers of the `simple trace` family.
+"""
+# @req REQ-TRC-021
+use std.spec.*
+use std.spec.step
+use std.common.traceability.model.*
+use std.common.traceability.profile_v1.{TraceProfile}
+use std.common.traceability.query_missing_v1.{TraceRequirementIdV1, TraceGraphCompletenessV1}
+use std.common.traceability.query_status_v1.{TraceNodeIdV1, TracePassingEvidenceV1, TraceCommandVerdictV1}
+use std.common.traceability.query_matrix_v1.{TraceMatrixAxisV1, TraceMatrixCellV1, trace_matrix_v1, trace_matrix_axis_parse_v1}
+
+fn matrix_graph() -> TraceGraph:
+    TraceGraph(subject: SnapshotSubject(repository_id: "repo:test", snapshot_id: "snapshot:one",
+        kind: "git_commit", revision_id: "commit:one", tree_id: "tree:one", object_format: "sha256"),
+        input_manifest_id: "inputs:one", generation_id: "generation:one", complete: true,
+        nodes: [TraceNode(id: "layer:hir", kind: TraceNodeKind.Layer, title: "HIR"),
+            TraceNode(id: "layer:mir", kind: TraceNodeKind.Layer, title: "MIR"),
+            TraceNode(id: "feature:a", kind: TraceNodeKind.Feature, title: "A"),
+            TraceNode(id: "req:ok", kind: TraceNodeKind.Requirement, title: "Linked both"),
+            TraceNode(id: "req:gap", kind: TraceNodeKind.Requirement, title: "Nothing linked"),
+            TraceNode(id: "req:loose", kind: TraceNodeKind.Requirement, title: "No axis"),
+            TraceNode(id: "src:a", kind: TraceNodeKind.SourceFile, title: "a.spl"),
+            TraceNode(id: "case:a", kind: TraceNodeKind.TestCase, title: "case a")],
+        test_definitions: [], claims: [], origins: [], edge_origins: [], locators: [], diagnostics: [],
+        edges: [TraceEdge(id: "e1", from_id: "feature:a", relation: TraceRelation.Specifies, to_id: "req:ok"),
+            TraceEdge(id: "e2", from_id: "feature:a", relation: TraceRelation.Specifies, to_id: "req:gap"),
+            TraceEdge(id: "e3", from_id: "req:ok", relation: TraceRelation.BelongsTo, to_id: "layer:hir"),
+            TraceEdge(id: "e4", from_id: "req:gap", relation: TraceRelation.BelongsTo, to_id: "layer:hir"),
+            TraceEdge(id: "e5", from_id: "req:ok", relation: TraceRelation.ImplementedBy, to_id: "src:a"),
+            TraceEdge(id: "e6", from_id: "req:ok", relation: TraceRelation.VerifiedBy, to_id: "case:a")])
+
+fn cell_for(cells: [TraceMatrixCellV1], row: text, col: text) -> TraceMatrixCellV1?:
+    for cell in cells:
+        if cell.row.value == row and cell.col.value == col: return Some(cell)
+    None
+
+describe "trace matrix":
+    it "counts a structural link as linked, never verified":
+        # @req REQ-TRC-021
+        step("Build the layer x feature matrix with no passing evidence")
+        val result = trace_matrix_v1(matrix_graph(), [], [], TraceMatrixAxisV1.Layer, TraceMatrixAxisV1.Feature, TraceProfile.Worktree)
+        val cell = cell_for(result.cells, "layer:hir", "feature:a").unwrap()
+        step("One requirement is linked, one is missing, none verified")
+        expect(cell.linked.value).to_equal(1)
+        expect(cell.verified.value).to_equal(0)
+        expect(cell.missing.value).to_equal(1)
+        expect(cell.unknown.value).to_equal(0)
+
+    it "promotes to verified only with passing evidence for that requirement":
+        # @req REQ-TRC-021
+        step("Supply passing evidence for req:ok")
+        val evidence = [TracePassingEvidenceV1(requirement_id: TraceRequirementIdV1(value: "req:ok"))]
+        val result = trace_matrix_v1(matrix_graph(), [], evidence, TraceMatrixAxisV1.Layer, TraceMatrixAxisV1.Feature, TraceProfile.Worktree)
+        val cell = cell_for(result.cells, "layer:hir", "feature:a").unwrap()
+        expect(cell.verified.value).to_equal(1)
+        expect(cell.linked.value).to_equal(0)
+        step("Evidence for an unlinked requirement does not verify it")
+        val stray = [TracePassingEvidenceV1(requirement_id: TraceRequirementIdV1(value: "req:gap"))]
+        val strayed = trace_matrix_v1(matrix_graph(), [], stray, TraceMatrixAxisV1.Layer, TraceMatrixAxisV1.Feature, TraceProfile.Worktree)
+        expect(cell_for(strayed.cells, "layer:hir", "feature:a").unwrap().verified.value).to_equal(0)
+
+    it "keeps an empty cell and an unassigned requirement visible, not green":
+        # @req REQ-TRC-021
+        step("layer:mir has no requirements; req:loose has no layer or feature")
+        val result = trace_matrix_v1(matrix_graph(), [], [], TraceMatrixAxisV1.Layer, TraceMatrixAxisV1.Feature, TraceProfile.Worktree)
+        expect(result.rows.len()).to_equal(2)
+        expect(cell_for(result.cells, "layer:mir", "feature:a").is_none()).to_be(true)
+        expect(result.unassigned.value).to_equal(1)
+
+    it "exits 2 semantics on an incomplete graph and reports unknown, not missing":
+        # @req REQ-TRC-021
+        step("Mark the graph incomplete")
+        var graph = matrix_graph()
+        graph.complete = false
+        val result = trace_matrix_v1(graph, [], [], TraceMatrixAxisV1.Layer, TraceMatrixAxisV1.Feature, TraceProfile.Worktree)
+        expect(result.completeness).to_equal(TraceGraphCompletenessV1.Incomplete)
+        expect(result.verdict).to_equal(TraceCommandVerdictV1.Incomplete)
+        val cell = cell_for(result.cells, "layer:hir", "feature:a").unwrap()
+        expect(cell.missing.value).to_equal(0)
+        expect(cell.unknown.value).to_equal(1)
+
+    it "is complete on a complete graph and incomplete under an uncertified profile":
+        # @req REQ-TRC-021
+        step("Worktree profile on a complete graph")
+        val ok = trace_matrix_v1(matrix_graph(), [], [], TraceMatrixAxisV1.Layer, TraceMatrixAxisV1.Feature, TraceProfile.Worktree)
+        expect(ok.verdict).to_equal(TraceCommandVerdictV1.Complete)
+        step("Commit profile is not certified here")
+        val commit = trace_matrix_v1(matrix_graph(), [], [], TraceMatrixAxisV1.Layer, TraceMatrixAxisV1.Feature, TraceProfile.Commit)
+        expect(commit.verdict).to_equal(TraceCommandVerdictV1.Incomplete)
+
+    it "rejects an unknown axis name":
+        # @req REQ-TRC-021
+        step("Parse valid and invalid axes")
+        expect(trace_matrix_axis_parse_v1("layer").is_ok()).to_be(true)
+        expect(trace_matrix_axis_parse_v1("stage").is_err()).to_be(true)

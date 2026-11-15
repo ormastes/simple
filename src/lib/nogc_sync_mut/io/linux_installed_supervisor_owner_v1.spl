@@ -7,6 +7,11 @@ use std.nogc_sync_mut.io.linux_installed_supervisor_bus_v1.*
 use std.nogc_sync_mut.io.file_lock_owned_v2.*
 use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
 use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+use std.nogc_sync_mut.io.linux_installed_supervisor_process_codec_v1.{
+    linux_supervisor_process_decimal_v1 as supervisor_exclusion_decimal_v1,
+    linux_supervisor_process_status_uid_v1 as supervisor_exclusion_status_uid_v1,
+    linux_supervisor_process_start_ticks_v1}
+use std.nogc_sync_mut.io.linux_installed_provider_main_observation_v1.*
 
 pub struct LinuxSupervisorExclusionDiagnosticV1:
     owner_generation: i64
@@ -33,6 +38,20 @@ pub class LinuxInstalledSupervisorOwnerV1:
     # retains inhibition and returns pending; no blanket unmask/restart exists.
     pub fn close_v1() -> text: supervisor_exclusion_close_v1(self.slot, self.generation)
     pub fn close_diagnostic_v1() -> text: supervisor_exclusion_close_diagnostic_v1(self.slot, self.generation)
+    pub fn begin_provider_cutoff_v1() -> LinuxInstalledProviderCutoffBeginV1:
+        supervisor_exclusion_begin_cutoff_v1(self.slot, self.generation)
+
+pub class LinuxInstalledProviderCutoffOwnerV1:
+    slot: i64
+    generation: i64
+    pub fn current_v1() -> Result<LinuxProviderCutoffObservationV1, text>:
+        supervisor_exclusion_cutoff_current_v1(self.slot, self.generation)
+    pub fn close_v1() -> text: supervisor_exclusion_cutoff_close_v1(self.slot, self.generation)
+    pub fn close_diagnostic_v1() -> text: supervisor_exclusion_close_diagnostic_v1(self.slot, self.generation)
+
+pub enum LinuxInstalledProviderCutoffBeginV1:
+    Rejected(owner: LinuxInstalledSupervisorOwnerV1, reason: text)
+    Retained(owner: LinuxInstalledProviderCutoffOwnerV1, phase: LinuxInstalledProviderCutoffPhaseV1, reason: text)
 
 pub enum LinuxInstalledSupervisorOpenV1:
     Rejected(reason: text)
@@ -97,6 +116,8 @@ struct SupervisorExclusionStateV1:
     profile_close_retryable: bool = true
     bus_close_retryable: bool = true
     lock_close_retryable: bool = true
+    main_observation: Option<LinuxInstalledProviderMainObservationV1> = None
+    cutoff_reason: text = ""
 
 var supervisor_exclusion_slots_v1: [SupervisorExclusionStateV1] = []
 
@@ -281,18 +302,7 @@ fn supervisor_exclusion_process_incarnation_v1(slot: i64, pid: i64, uid: i64) ->
     val stat = supervisor_exclusion_open_fd_v1(slot, supervisor_exclusion_fd_v1(slot, process), "stat", false, 40864, false)?
     val status = supervisor_exclusion_open_fd_v1(slot, supervisor_exclusion_fd_v1(slot, process), "status", false, 40864, false)?
     val source = supervisor_exclusion_read_v1(slot, stat, 65536)?
-    if not source.starts_with(str(pid) + " (") or not source.ends_with("\n"):
-        return Err("supervisor-exclusion-provider-native-stat")
-    var end = -1
-    for at in 0..source.byte_len():
-        if source.byte_at(at) == 41: end = at
-    if end < 0 or end + 2 >= source.byte_len(): return Err("supervisor-exclusion-provider-native-stat")
-    val tail = source.substring(end + 2, source.byte_len())
-    val normalized = tail.trim()
-    val fields = normalized.split(" ")
-    if fields.len() < 20: return Err("supervisor-exclusion-provider-native-stat")
-    val ticks = fields[19].to_int() ?? 0
-    if ticks <= 0 or str(ticks) != fields[19]: return Err("supervisor-exclusion-provider-native-start-time")
+    val ticks = linux_supervisor_process_start_ticks_v1(source, pid)?
     val status_source = supervisor_exclusion_read_v1(slot, status, 65536)?
     if not supervisor_exclusion_status_uid_v1(status_source, uid, true)?:
         return Err("supervisor-exclusion-provider-dedicated-uid-required")
@@ -381,35 +391,6 @@ fn supervisor_exclusion_units_current_v1(slot: i64) -> Result<(), text>:
                 return Err("supervisor-exclusion-current-cgroup-changed")
             supervisor_exclusion_cgroup_empty_v1(slot, unit)?
     Ok(())
-
-fn supervisor_exclusion_decimal_v1(value: text) -> Result<i64, text>:
-    if value == "" or value.byte_len() > 10: return Err("supervisor-exclusion-proc-decimal")
-    var number = 0
-    for byte in value.bytes():
-        if byte < 48 or byte > 57: return Err("supervisor-exclusion-proc-decimal")
-        number = number * 10 + byte - 48
-        if number > 4294967295: return Err("supervisor-exclusion-proc-decimal")
-    Ok(number)
-
-fn supervisor_exclusion_status_uid_v1(source: text, uid: i64, all_uid: bool = false) -> Result<bool, text>:
-    var seen = false
-    var matches = false
-    for line in source.split("\n"):
-        if line.starts_with("Uid:"):
-            if seen: return Err("supervisor-exclusion-proc-uid-duplicate")
-            seen = true
-            var parts: [text] = []
-            val uid_tail = line.substring(4, line.byte_len())
-            val uid_normalized = uid_tail.replace("\t", " ")
-            for part in uid_normalized.split(" "):
-                if part != "": parts.push(part)
-            if parts.len() != 4: return Err("supervisor-exclusion-proc-uid-shape")
-            for part in parts:
-                val observed = supervisor_exclusion_decimal_v1(part)?
-                if all_uid and observed != uid: return Err("supervisor-exclusion-provider-unambiguous-uid-required")
-                if observed == uid: matches = true
-    if not seen: return Err("supervisor-exclusion-proc-uid-missing")
-    Ok(matches)
 
 @unsafe(reason: "full bounded genuine procfs enumeration; unknown UID processes are refused, never killed", capabilities: [ffi, raw_ptr])
 fn supervisor_exclusion_processes_v1(slot: i64) -> Result<(), text>:
@@ -608,6 +589,66 @@ fn supervisor_exclusion_profile_v1(slot: i64, generation: i64) -> Result<LinuxSu
     if state.phase != "exclusion-component-only": return Err("supervisor-exclusion-incomplete")
     state.profile.current_v1()
 
+fn supervisor_exclusion_begin_cutoff_v1(slot: i64, generation: i64) -> LinuxInstalledProviderCutoffBeginV1:
+    val original = LinuxInstalledSupervisorOwnerV1(slot: slot, generation: generation)
+    val origin = supervisor_exclusion_entry_v1()
+    if origin.is_err(): return LinuxInstalledProviderCutoffBeginV1.Rejected(original, origin.unwrap_err())
+    val began = time_sample_monotonic_nanos_or_failure()
+    if began <= 0 or began > 9223372006854775807:
+        return LinuxInstalledProviderCutoffBeginV1.Rejected(original, "provider-main-observation-clock")
+    val before = supervisor_exclusion_current_v1(slot, generation)
+    if before.is_err(): return LinuxInstalledProviderCutoffBeginV1.Rejected(original, before.unwrap_err())
+    val state = supervisor_exclusion_slots_v1[slot]
+    # Canonical alias invalidation precedes even read-only native acquisition.
+    # There is deliberately no provider StopUnit/signal branch: a property
+    # whitelist cannot own its complete transaction and automatic teardown.
+    supervisor_exclusion_slots_v1[slot].phase = "provider-cutoff-retained"
+    supervisor_exclusion_slots_v1[slot].cutoff_reason = "provider-stop-transaction-ownership-unavailable"
+    match linux_provider_main_observation_open_v1(state.profile, state.bus.unwrap(), began + 30000000000):
+        case LinuxProviderMainObservationOpenV1.Rejected(reason):
+            supervisor_exclusion_slots_v1[slot].cutoff_reason = reason
+        case LinuxProviderMainObservationOpenV1.CleanupRequired(owner, reason):
+            supervisor_exclusion_slots_v1[slot].main_observation = Some(owner)
+            supervisor_exclusion_slots_v1[slot].cutoff_reason = reason
+        case LinuxProviderMainObservationOpenV1.Observing(owner):
+            supervisor_exclusion_slots_v1[slot].main_observation = Some(owner)
+    val retained = LinuxInstalledProviderCutoffOwnerV1(slot: slot, generation: generation)
+    val current = supervisor_exclusion_cutoff_current_v1(slot, generation)
+    if current.is_err():
+        return LinuxInstalledProviderCutoffBeginV1.Retained(retained, LinuxInstalledProviderCutoffPhaseV1.RetainedUnknown, current.unwrap_err())
+    val observed = current.unwrap()
+    LinuxInstalledProviderCutoffBeginV1.Retained(retained, observed.phase, observed.reason)
+
+fn supervisor_exclusion_cutoff_current_v1(slot: i64, generation: i64) -> Result<LinuxProviderCutoffObservationV1, text>:
+    val state = supervisor_exclusion_state_v1(slot, generation)?
+    if state.phase != "provider-cutoff-retained": return Err("provider-cutoff-owner-phase")
+    if state.main_observation != None:
+        val native = state.main_observation.unwrap()
+        match native.current_v1():
+            case Ok(observed):
+                if observed.provider_process_id != state.provider_pid or observed.provider_incarnation != state.provider_incarnation:
+                    return Ok(LinuxProviderCutoffObservationV1(LinuxInstalledProviderCutoffPhaseV1.RetainedUnknown,
+                        "provider-main-observation-original-incarnation-mismatch", None))
+                val phase = if observed.original_process_exited: LinuxInstalledProviderCutoffPhaseV1.MainExitedClosureUnknown else:
+                    LinuxInstalledProviderCutoffPhaseV1.RetainedUnknown
+                return Ok(LinuxProviderCutoffObservationV1(phase, state.cutoff_reason, Some(observed)))
+            case Err(reason): return Ok(LinuxProviderCutoffObservationV1(LinuxInstalledProviderCutoffPhaseV1.RetainedUnknown, reason, None))
+    Ok(LinuxProviderCutoffObservationV1(LinuxInstalledProviderCutoffPhaseV1.RetainedUnknown, state.cutoff_reason, None))
+
+fn supervisor_exclusion_cutoff_close_v1(slot: i64, generation: i64) -> text:
+    val loaded = supervisor_exclusion_state_v1(slot, generation)
+    if loaded.is_err(): return loaded.unwrap_err()
+    val state = loaded.unwrap()
+    if state.phase != "provider-cutoff-retained": return "provider-cutoff-owner-phase"
+    if state.main_observation != None:
+        val native = state.main_observation.unwrap()
+        val result = native.close_v1()
+        if result != "released": supervisor_exclusion_note_close_v1(slot, native.close_diagnostic_v1())
+        if result == "released" or result == "consumed-error":
+            supervisor_exclusion_slots_v1[slot].main_observation = None
+            supervisor_exclusion_slots_v1[slot].cutoff_reason = "provider-main-observation-closed"
+    supervisor_exclusion_close_v1(slot, generation)
+
 @unsafe(reason: "consume each native descriptor before close; never remove masks or restart producers", capabilities: [ffi])
 fn supervisor_exclusion_close_v1(slot: i64, generation: i64) -> text:
     val entered = supervisor_exclusion_entry_v1()
@@ -706,6 +747,11 @@ fn supervisor_exclusion_current_v1(slot: i64, generation: i64) -> Result<LinuxSu
     Err("supervisor-exclusion-linux-required")
 fn supervisor_exclusion_profile_v1(slot: i64, generation: i64) -> Result<LinuxSupervisorInstalledSnapshotV1, text>:
     Err("supervisor-exclusion-linux-required")
+fn supervisor_exclusion_begin_cutoff_v1(slot: i64, generation: i64) -> LinuxInstalledProviderCutoffBeginV1:
+    LinuxInstalledProviderCutoffBeginV1.Rejected(LinuxInstalledSupervisorOwnerV1(slot: slot, generation: generation), "supervisor-exclusion-linux-required")
+fn supervisor_exclusion_cutoff_current_v1(slot: i64, generation: i64) -> Result<LinuxProviderCutoffObservationV1, text>:
+    Err("supervisor-exclusion-linux-required")
+fn supervisor_exclusion_cutoff_close_v1(slot: i64, generation: i64) -> text: "stale"
 fn supervisor_exclusion_close_v1(slot: i64, generation: i64) -> text: "stale"
 fn supervisor_exclusion_close_diagnostic_v1(slot: i64, generation: i64) -> text: "stale"
 @end

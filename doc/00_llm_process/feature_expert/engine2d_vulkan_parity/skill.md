@@ -107,14 +107,24 @@ of a comparison use the same font at the same size.
   `#####` / `#...#` x3, identical on `cpu` and `software`, with no in-between
   values. The old "per-pixel AA" row asserted the bilinear blur that only
   scale 2 produces.
+- AA coverage lives in the vector-face high-dpi row: Liberation Sans, "Ab" at
+  50 px (16 CSS px x 3.125) on a 96x64 surface, fg white / bg black -> 333
+  intermediate-red pixels, cpu == software == vulkan (llvmpipe) byte for byte
+  (`draw_text_bg_spec`, 2026-11-15).
 - Scale-1 atlas numbers: `"Vulkan Text 42"` is 70x7, 145 ink pixels (atlas
   composite == CPU raster); atlas 475x7 (95 cells x 5 px); identity
   `engine2d-bitmap-5x7-scale1`; `'A'` at `atlas_x` 165.
-- Still enlarged, listed for follow-up (not changed): perf
-  `simple_2d_vector_fonts_perf_spec` + `simple_2d_bitmap_text_baseline_probe`
-  (bitmap at 24 = scale 3; baseline env values must be re-captured together),
-  `bench/vulkan_2d_c/feature_showcase.spl` text tier at 16 (feeds
-  `check-engine2d-backend-parity.shs`). Product defaults that scale the
+- Moved to scale 1 (2026-11-15): the perf spec + bitmap probe bitmap rows (size 7;
+  probe p50 3,143,803 ns, checksum 772523490; pass both as
+  `SIMPLE_2D_BITMAP_BASELINE_NS`/`_CHECKSUM`) and the `feature_showcase` text
+  tier (parity gate PASS, 38 primitives, cpu == vulkan). The gate hardcodes the
+  seed at `src/compiler_rust/target/vulkan/release/simple` and reads
+  `VK_ICD_FILENAMES` (default MoltenVK); on Linux, symlink the seed and pass lvp.
+- Perf-spec trap: `load_font_bytes` is the registry (provenance) lane and
+  rejects any non-registry blob with identity "", so a fixture must be written to
+  disk and loaded with `load_font` (unmanaged lane). Since 11-09 that rejection
+  had zeroed every row of the perf spec.
+- Product defaults that scale the
   bitmap face up: `src/os/compositor/compositor_engine2d.spl:1179`
   (`draw_text_bg(..., 16)`), Draw IR text with no advances at CSS sizes >= 14
   when no TTF is loaded. Vector-face rows at 1x (Draw IR, clip parity) are

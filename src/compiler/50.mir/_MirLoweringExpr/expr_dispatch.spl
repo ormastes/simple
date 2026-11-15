@@ -2387,14 +2387,18 @@ impl MirLowering:
         # lookup-time key copy is introduced for an existing text handle.
         if self.nil_locals.contains(local.id) or self.is_runtime_value_local(local.id) or self.is_tagged_text_local(local.id) or not self.local_is_str(local):
             return self.box_runtime_value(local)
+        # Every word read below is a REINTERPRET, so it is a Bitcast (as in
+        # ensure_tagged_str). A text -> i64 Cast means `int(text)` to
+        # Cranelift (cl_translate_cast parses through rt_string_new), which
+        # SIGSEGVed on a bare char* `[text]` element key (stage-2 class A).
         var probe = self.builder
-        val word = probe.emit_cast(mir_operand_copy(local), MirType.i64())
+        val word = probe.emit_bitcast(mir_operand_copy(local), MirType.i64())
         val data_function = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_string_data"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()],
                 return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))), call_origin: MirCallOrigin.Runtime)
         val data = probe.emit_call(data_function, [mir_operand_copy(word)], MirType(kind: MirTypeKind.Opaque("str")))
-        val data_word = probe.emit_cast(mir_operand_copy(data ?? local), MirType.i64())
+        val data_word = probe.emit_bitcast(mir_operand_copy(data ?? local), MirType.i64())
         val is_borrowed = probe.emit_binop(MirBinOp.Eq, mir_operand_copy(word), mir_operand_copy(data_word), MirType.bool())
         val borrowed_block = probe.new_block(Some("dict_key_borrowed_text"))
         val tagged_block = probe.new_block(Some("dict_key_tagged_text"))
@@ -2405,7 +2409,7 @@ impl MirLowering:
         self.builder = probe
         val boxed = self.box_runtime_value(local)
         var borrowed = self.builder
-        val boxed_word = borrowed.emit_cast(mir_operand_copy(boxed), MirType.i64())
+        val boxed_word = borrowed.emit_bitcast(mir_operand_copy(boxed), MirType.i64())
         borrowed.emit_copy(result, boxed_word)
         borrowed.terminate_goto(merge_block)
         borrowed.switch_to_block(tagged_block)
@@ -5140,6 +5144,22 @@ impl MirLowering:
                 elif op_is_eq_or_neq and left_is_nil_lit and not right_is_nil_lit:
                     if self.nil_compare_operand_is_declared_optional(right, right_local) or self.option_value_locals.contains(right_local.id) or self.nil_compare_operand_is_struct(right_local):
                         nil_check_operand = right_local
+                # The built-in `None` VALUE (option_none_locals: a fresh
+                # rt_enum_new(1, None, 0)) against a statically Optional
+                # operand is the same presence test as `nil`. A raw word Eq
+                # against that fresh box missed every other None: the dict
+                # miss box (payload = nil word), and the raw nil word of an
+                # `.first()` / `?.` miss or a `nil` bound to `T?`. Plain
+                # scalars never get here (no nil acceptance is widened).
+                # Stage-2 class: mir_verify.spl check_call `callee_opt == None`.
+                if nil_check_operand.id < 0 and op_is_eq_or_neq and not left_is_nil_lit and not right_is_nil_lit:
+                    val left_is_none_value = self.option_none_locals.contains(left_local.id)
+                    val right_is_none_value = self.option_none_locals.contains(right_local.id)
+                    if left_is_none_value != right_is_none_value:
+                        val none_peer_expr = if right_is_none_value: left else: right
+                        val none_peer_local = if right_is_none_value: left_local else: right_local
+                        if self.nil_compare_operand_is_declared_optional(none_peer_expr, none_peer_local) or self.option_value_locals.contains(none_peer_local.id):
+                            nil_check_operand = none_peer_local
                 # A nil literal tests presence, not user struct equality.
                 # Keep raw nil/Option recognition in the existing runtime path.
                 if nil_check_operand.id < 0 and op_is_eq_or_neq and left_is_nil_lit != right_is_nil_lit:
@@ -5148,6 +5168,22 @@ impl MirLowering:
                         match struct_nil_type.kind:
                             case MirTypeKind.Struct(_): nil_check_operand = struct_nil_local
                             case _: ()
+                # The built-in `None` VALUE (NamedVar arm, option_none_locals)
+                # against a record operand is the same presence test. Without
+                # this it reached the struct `==` dispatch below as a peer
+                # record: lower_struct_structural_eq compared `m.name` with
+                # field@8 of the None enum handle through rt_text_eq_any
+                # (stage-2 native class B, `if provider == None`). Option-typed
+                # and type-parameter operands keep their existing arms.
+                if nil_check_operand.id < 0 and op_is_eq_or_neq and not left_is_nil_lit and not right_is_nil_lit:
+                    val left_is_none_value = self.option_none_locals.contains(left_local.id)
+                    val right_is_none_value = self.option_none_locals.contains(right_local.id)
+                    if left_is_none_value != right_is_none_value:
+                        val record_expr = if right_is_none_value: left else: right
+                        val record_local = if right_is_none_value: left_local else: right_local
+                        if not self.local_is_type_param_value(record_local):
+                            if self.nil_compare_operand_is_struct(record_local) or self.binary_struct_owner(record_expr, record_local, "") != "":
+                                nil_check_operand = record_local
                 if nil_check_operand.id >= 0:
                     val nil_check_func_name = match op:
                         case Eq: "rt_is_none"
@@ -7379,7 +7415,9 @@ impl MirLowering:
                     # erased `T` and is decoded on use, and a raw i64 word
                     # cannot be told from the nil sentinel 3. Re-tag the
                     # integer payload decode_erased_scalar_call_payload decoded.
-                    if self.static_optional_payload_is_type_param(base):
+                    # A substituted generic trait dispatch carries the impl's
+                    # raw payload, not an erased-T tagged one: leave it raw.
+                    if self.static_optional_payload_is_type_param(base) and not self.native_trait_concrete_option_locals.contains(base_local.id):
                         if val erased_inner = self.option_inner_hir_type_for_local(base, base_local):
                             match erased_inner.kind:
                                 case HirTypeKind.Int(_, _): some_value = self.box_runtime_value(some_value)

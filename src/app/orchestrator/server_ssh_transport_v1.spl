@@ -1,0 +1,136 @@
+# One authenticated SSH transport over the generic host IO command owner.
+# Private keys remain inside the protected store/OpenSSH, never frame payloads.
+use app.orchestrator.server_ssh_types_v1.*
+use app.orchestrator.server_ssh_profile_v1.server_ssh_profile_validate_v1
+use app.orchestrator.server_ssh_relay_v1.{server_gateway_frame_encode_v1, server_gateway_response_decode_v1}
+use app.orchestrator.host_identity_public_v1.host_identity_known_hosts_validate_v1
+use std.common.config_core.server_context_types_v1.{ServerRecordV1, server_record_validate_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.nogc_sync_mut.io.stdin_command_v1.{StdinCommandRequestV1, stdin_command_begin_v1,
+    stdin_command_step_v1, stdin_command_files_admit_v1}
+use std.nogc_sync_mut.io.host_identity_store_v1.{host_identity_store_open_v1,
+    host_identity_store_read_v1, host_identity_store_path_v1, host_identity_store_close_v1}
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
+use std.nogc_sync_mut.daemon_sdk.local_gateway_protocol_v1.LocalGatewayHeaderV1
+
+pub fn server_ssh_argv_v1(record: ServerRecordV1, profile: ServerSshProfileV1) -> Result<[text], text>:
+    server_record_validate_v1(record)?
+    if record.transport != "ssh": return Err("server-ssh-transport-required")
+    server_ssh_profile_validate_v1(profile)?
+    if profile.auth_ref != record.auth_ref: return Err("server-ssh-auth-reference-mismatch")
+    if profile.trust_ref != record.tls_ref: return Err("server-ssh-trust-reference-mismatch")
+    Ok(["-F", "none", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+        "-o", "UserKnownHostsFile=" + profile.known_hosts_path, "-o", "GlobalKnownHostsFile=none",
+        "-o", "UpdateHostKeys=no", "-o", "IdentityAgent=none", "-o", "IdentitiesOnly=yes",
+        "-o", "HostKeyAlias=" + profile.host_key_alias, "-o", "ClearAllForwardings=yes",
+        "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ConnectTimeout=5",
+        "-p", record.port.to_text(), "-i", profile.identity_path, "-l", profile.user,
+        "-T", "--", record.host, record.remote_executable + " gateway-stdio-v1"])
+
+pub fn server_ssh_start_v1(record: ServerRecordV1, profile: ServerSshProfileV1,
+        header: LocalGatewayHeaderV1, payload: text) -> Result<ServerSshTurnV1, text>:
+    # Pure failures precede resource acquisition. There is no Err return after
+    # opening the protected store: every later path returns its retained owner.
+    val args = server_ssh_argv_v1(record, profile)?
+    if header.response: return Err("server-ssh-request-required")
+    val bytes = server_gateway_frame_encode_v1(header, payload)?
+    var turn = ServerSshTurnV1(lease: nil, store_cleanup: nil, request_id: header.request_id,
+        input_bytes: bytes.len(), stdout: [], stderr: [], stdout_received: 0,
+        stderr_received: 0, response_header: nil, response_payload: "",
+        cancel_requested: false, complete: false, error: "")
+    if profile.store_root != "":
+        val opened = host_identity_store_open_v1(profile.store_root)
+        turn.store_cleanup = opened.owner
+        if not opened.ready or opened.cleanup_pending or opened.error != "" or opened.owner == nil:
+            turn.error = "server-ssh-protected-store-open"
+            return Ok(turn)
+        val owner = opened.owner.unwrap()
+        val key_path = host_identity_store_path_v1(owner, sha256_text(record.auth_ref) + ".key")
+        if key_path.is_err() or key_path.unwrap() != profile.identity_path:
+            turn.error = "server-ssh-protected-key-path"
+            return Ok(turn)
+        val hosts_leaf = sha256_text(record.tls_ref) + ".hosts"
+        val pins = host_identity_store_read_v1(owner, hosts_leaf, 65536)
+        turn.store_cleanup = Some(pins.owner)
+        if pins.error != "" or pins.cleanup_pending or pins.absent or pins.bytes == nil:
+            turn.error = "server-ssh-protected-pin-read"
+            return Ok(turn)
+        val pin_bytes = pins.bytes.unwrap()
+        if not utf8_bytes_valid(pin_bytes):
+            turn.error = "server-ssh-protected-pin-utf8"
+            return Ok(turn)
+        if host_identity_known_hosts_validate_v1(bytes_to_text(pin_bytes), profile.host_key_alias).is_err():
+            turn.error = "server-ssh-protected-pin-invalid"
+            return Ok(turn)
+        val hosts_path = host_identity_store_path_v1(pins.owner, hosts_leaf)
+        if hosts_path.is_err() or hosts_path.unwrap() != profile.known_hosts_path:
+            turn.error = "server-ssh-protected-pin-path"
+            return Ok(turn)
+    val admitted = stdin_command_files_admit_v1(profile.ssh_executable, profile.identity_path,
+        profile.known_hosts_path, profile.ssh_digest, turn.store_cleanup != nil)
+    if admitted.is_err():
+        turn.error = "server-ssh-local-files-admission"
+        return Ok(turn)
+    val now = time_sample_unix_micros_or_failure()
+    if now < 0:
+        turn.error = "server-ssh-clock-unavailable"
+        return Ok(turn)
+    val timeout_ms = if ["dispatch", "resume-execution"].contains(header.action): 120000 else: 30000
+    val started = stdin_command_begin_v1(StdinCommandRequestV1(program: profile.ssh_executable,
+        expected_digest: profile.ssh_digest, args: args, environment: [], directory: "", input: bytes,
+        timeout_ms: timeout_ms, max_stdout_bytes: SERVER_SSH_STDOUT_LIMIT_V1,
+        max_stderr_bytes: SERVER_SSH_STDERR_LIMIT_V1, expires_at_unix_ms: now / 1000 + timeout_ms))
+    turn.lease = started.owner
+    if started.error != "": turn.error = "server-ssh-start-failed"
+    if started.owner == nil and turn.error == "": turn.error = "server-ssh-start-owner-missing"
+    Ok(turn)
+
+fn server_ssh_advance_v1(turn: ServerSshTurnV1, cancel: bool) -> ServerSshTurnV1:
+    var current = turn
+    if current.complete: return current
+    if val owner = current.lease:
+        val stepped = stdin_command_step_v1(owner, cancel)
+        current.lease = stepped.owner
+        if stepped.error != "" and current.error == "": current.error = "server-ssh-process-failed"
+        if val result = stepped.result:
+            current.stdout = result.stdout
+            current.stderr = result.stderr
+            current.stdout_received = result.stdout.len()
+            current.stderr_received = result.stderr.len()
+            if (result.exit_code != 0 or not result.reaped or not result.cleanup_confirmed or
+                    result.input_written != current.input_bytes or not result.stdin_closed or
+                    not result.stdout_eof or not result.stderr_eof or result.stdout_truncated or
+                    result.stderr_truncated or result.stdout.len() > SERVER_SSH_STDOUT_LIMIT_V1 or
+                    result.stderr.len() > SERVER_SSH_STDERR_LIMIT_V1) and current.error == "":
+                current.error = "server-ssh-process-receipt-rejected"
+        elif stepped.owner == nil and current.error == "":
+            current.error = "server-ssh-process-result-missing"
+    if current.lease != nil: return current
+    # The protected store closes only after the child owner confirms release.
+    if val store = current.store_cleanup:
+        val closed = host_identity_store_close_v1(store)
+        current.store_cleanup = closed.owner
+        if (not closed.completed or closed.error != "") and current.error == "":
+            current.error = "server-ssh-store-close-unconfirmed"
+    if current.store_cleanup != nil: return current
+    current.complete = true
+    if current.error != "": return current
+    match server_gateway_response_decode_v1(current.stdout, current.request_id):
+        case Ok(response):
+            current.response_header = Some(response.header)
+            current.response_payload = response.payload
+        case Err(reason): current.error = reason
+    current
+
+pub fn server_ssh_poll_v1(turn: ServerSshTurnV1) -> ServerSshTurnV1:
+    server_ssh_advance_v1(turn, false)
+
+pub fn server_ssh_cancel_v1(turn: ServerSshTurnV1) -> ServerSshTurnV1:
+    var current = turn
+    if current.complete: return current
+    current.cancel_requested = true
+    if current.error == "": current.error = "server-ssh-cancelled"
+    server_ssh_advance_v1(current, true)
+
+export server_ssh_argv_v1, server_ssh_start_v1, server_ssh_poll_v1, server_ssh_cancel_v1

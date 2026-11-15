@@ -42,9 +42,6 @@ pub fn workload_store_operation_v1(state: ControllerWorkloadFenceV1) -> Result<O
         operation: "controller_workload_revision_v1", environment_digest: authority, policy_revision: 1,
         revocation_epoch: 0, session_generation: state.controller_epoch, memory_bytes: 1, duration_ms: 1))
 
-fn workload_payload_path_v1(journal: DistributedOperationJournalV2, digest: text) -> text:
-    journal.root + "/workload-payloads/" + digest + ".sdn"
-
 fn workload_store_current_v1(owner: ControllerWorkloadStoreV1) -> Result<bool, text>:
     val authority = controller_assignment_authority_v1(owner.controller_id)?
     if owner.journal.authority_digest != authority: return Err("workload-store-authority-mismatch")
@@ -85,7 +82,7 @@ fn workload_store_replay_v1(journal: DistributedOperationJournalV2, controller_i
                 return Err("policy-snapshot-terminal-invalid")
             continue
         if operation.operation == "controller_desired_input_v1" or operation.operation == "controller_desired_cancel_v1":
-            val input = controller_desired_objects_read_v1(journal.root, operation, controller_id)?
+            val input = controller_desired_objects_read_owned_v3(journal, operation, controller_id)?
             if operation.operation == "controller_desired_cancel_v1":
                 val parent = controller_desired_cancel_parent_v1(journal, input.input)?
                 cancelled_inputs.push(input.input.workload_uid)
@@ -100,7 +97,10 @@ fn workload_store_replay_v1(journal: DistributedOperationJournalV2, controller_i
             if operation.host_id != controller_id: return Err("workload-store-scope-invalid")
             continue
         if operation.operation != "controller_workload_revision_v1": return Err("workload-store-foreign-operation")
-        val bytes = file_read_regular_no_follow_bounded(workload_payload_path_v1(journal, operation.payload_digest), 8192)?
+        val bytes = if journal.windows_store.is_none():
+            file_read_regular_no_follow_bounded(journal.root + "/workload-payloads/" + operation.payload_digest + ".sdn", 8192)?
+        else:
+            distributed_operation_journal_read_required_v3(journal, "workload-payloads/" + operation.payload_digest + ".sdn", 8192)?
         val state = workload_fence_decode_v1(bytes)?
         if state.controller_id != controller_id or state.revision > 4096: return Err("workload-store-scope-invalid")
         val expected = workload_store_operation_v1(state)?
@@ -108,7 +108,7 @@ fn workload_store_replay_v1(journal: DistributedOperationJournalV2, controller_i
         if envelope != record.envelope: return Err("workload-store-payload-mismatch")
         if state.assignment_digest != "":
             if not bindings.contains_key(state.assignment_digest):
-                bindings[state.assignment_digest] = assignment_objects_read_v1(journal.root, state.assignment_digest)?
+                bindings[state.assignment_digest] = assignment_objects_read_owned_v3(journal, state.assignment_digest)?
             val matched = controller_workload_matches_v1(state, bindings[state.assignment_digest])?
         if record.state == "completed":
             if record.outcome_digest != sha256_text(bytes): return Err("workload-store-outcome-mismatch")
@@ -171,6 +171,16 @@ fn workload_store_project_v2(journal_owner: DistributedOperationJournalV2,
         journal = controller_desired_complete_v1(journal, operation)?
     Ok(ControllerWorkloadStoreV1(controller_id: controller_id, journal: journal, rows: rows))
 
+# Adopt an already-open actual journal from the protected Controller owner.
+# No new journal/store/lease is acquired. On Err the caller retains the same
+# native owner; pending replay may advance WAL but never transfers its lease.
+pub fn controller_workload_store_project_owned_v3(journal: DistributedOperationJournalV2,
+        controller_id: text) -> Result<ControllerWorkloadStoreV1, text>:
+    val authority = controller_assignment_authority_v1(controller_id)?
+    if journal.authority_digest != authority: return Err("workload-store-authority-mismatch")
+    val current = workload_store_current_v1(ControllerWorkloadStoreV1(controller_id: controller_id, journal: journal, rows: {}))?
+    workload_store_project_v2(journal, controller_id)
+
 pub enum ControllerWorkloadStoreOpenV2:
     Ready(ControllerWorkloadStoreV1)
     Rejected(text)
@@ -232,15 +242,23 @@ pub fn workload_store_publish_v1(owner: ControllerWorkloadStoreV1,
         return Err("workload-store-initial-invalid")
     if owner.journal.operations.len() >= 4096: return Err("workload-store-history-bound")
     val operation = workload_store_operation_v1(next)?
-    val path = workload_payload_path_v1(owner.journal, operation.payload_digest)
-    if file_exists(path):
-        val retained = file_read_regular_no_follow_bounded(path, 8192)?
-        if retained != bytes: return Err("workload-store-payload-mismatch")
+    val relative = "workload-payloads/" + operation.payload_digest + ".sdn"
+    if not distributed_operation_journal_relative_v3(relative): return Err("workload-store-record-path-bounds")
+    if owner.journal.windows_store.is_none():
+        val path = owner.journal.root + "/" + relative
+        if file_exists(path):
+            val retained = file_read_regular_no_follow_bounded(path, 8192)?
+            if retained != bytes: return Err("workload-store-payload-mismatch")
+        else:
+            dir_create(owner.journal.root + "/workload-payloads", true)
+            if not file_atomic_write(path, bytes): return Err("workload-store-publication-failed")
+            val retained = file_read_regular_no_follow_bounded(path, 8192)?
+            if retained != bytes: return Err("workload-store-publication-mismatch")
     else:
-        dir_create(owner.journal.root + "/workload-payloads", true)
-        if not file_atomic_write(path, bytes): return Err("workload-store-publication-failed")
-        val retained = file_read_regular_no_follow_bounded(path, 8192)?
-        if retained != bytes: return Err("workload-store-publication-mismatch")
+        val published = distributed_operation_journal_publish_v3(owner.journal, relative, bytes)?
+        val retained = distributed_operation_journal_read_required_v3(owner.journal, relative, 8192)?
+        if retained != bytes:
+            return Err(if published: "workload-store-publication-mismatch" else: "workload-store-payload-mismatch")
     val admitted = daemon_operation_admit_v2(owner.journal, operation)?
     val committed = workload_store_complete_metadata_v1(admitted.journal, next)?
     var rows = owner.rows
@@ -267,7 +285,7 @@ pub fn controller_workload_store_submit_agent_v1(owner: ControllerWorkloadStoreV
     if existing.is_ok():
         val prior = existing.unwrap()
         if prior.envelope != distributed_encode_operation_v2(operation)?: return Err("desired-input-identity-reused")
-        val retained = controller_desired_objects_read_v1(owner.journal.root, operation, owner.controller_id)?
+        val retained = controller_desired_objects_read_owned_v3(owner.journal, operation, owner.controller_id)?
         if prior.state != "completed": return Err("desired-input-recovery-required")
         if prior.outcome_digest != operation.payload_digest: return Err("desired-input-outcome-mismatch")
         if controller_workload_store_agent_cancelled_v1(owner, uid)?: return Err("desired-input-cancelled")
@@ -275,7 +293,7 @@ pub fn controller_workload_store_submit_agent_v1(owner: ControllerWorkloadStoreV
     if existing.unwrap_err() != "OPERATION_NOT_FOUND": return Err(existing.unwrap_err())
     if owner.rows.contains_key(uid): return Err("desired-input-workload-already-exists")
     if owner.journal.operations.len() >= 4096: return Err("workload-store-history-bound")
-    val saved = controller_desired_objects_retain_v1(owner.journal.root, input, source)?
+    val saved = controller_desired_objects_retain_owned_v3(owner.journal, input, source)?
     val admitted = daemon_operation_admit_v2(owner.journal, operation)?
     val committed = controller_desired_complete_v1(admitted.journal, operation)?
     Ok(ControllerWorkloadStoreV1(controller_id: owner.controller_id, journal: committed, rows: owner.rows))
@@ -288,7 +306,7 @@ pub fn controller_workload_store_agent_source_v1(owner: ControllerWorkloadStoreV
     val operation = distributed_decode_operation_v2(record.envelope)?
     if record.state != "completed" or record.outcome_digest != operation.payload_digest:
         return Err("desired-input-not-committed")
-    val retained = controller_desired_objects_read_v1(owner.journal.root, operation, owner.controller_id)?
+    val retained = controller_desired_objects_read_owned_v3(owner.journal, operation, owner.controller_id)?
     Ok(retained.source)
 
 # Read-only policy resolution. No plan is admitted or assigned by this call.
@@ -325,7 +343,7 @@ pub fn controller_workload_store_pin_policy_v1(owner: ControllerWorkloadStoreV1,
         return Ok(owner)
     if existing.unwrap_err() != "OPERATION_NOT_FOUND": return Err(existing.unwrap_err())
     if owner.journal.operations.len() >= 4096: return Err("workload-store-history-bound")
-    val saved = controller_agent_policy_retain_v1(owner.journal.root, input, catalog)?
+    val saved = controller_agent_policy_retain_owned_v3(owner.journal, input, catalog)?
     val admitted = daemon_operation_admit_v2(owner.journal, operation)?
     val completed = controller_desired_complete_v1(admitted.journal, operation)?
     Ok(ControllerWorkloadStoreV1(controller_id: owner.controller_id, journal: completed, rows: owner.rows))
@@ -364,7 +382,7 @@ pub fn controller_workload_store_preflight_v1(owner: ControllerWorkloadStoreV1,
     if desired_probe.is_ok(): return Err("agent-preflight-workload-is-agent-session")
     if desired_probe.unwrap_err() != "OPERATION_NOT_FOUND": return Err(desired_probe.unwrap_err())
     if owner.journal.operations.len() >= 4096: return Err("workload-store-history-bound")
-    val saved = agent_preflight_objects_retain_v1(owner.journal.root, binding)?
+    val saved = agent_preflight_objects_retain_owned_v3(owner.journal, binding)?
     val admitted = daemon_operation_admit_v2(owner.journal, operation)?
     val committed = controller_desired_complete_v1(admitted.journal, operation)?
     Ok(ControllerWorkloadStoreV1(controller_id: owner.controller_id, journal: committed, rows: owner.rows))
@@ -392,7 +410,7 @@ pub fn controller_workload_store_agent_cancelled_v1(owner: ControllerWorkloadSto
     val id = controller_desired_operation_id_v1(owner.controller_id, uid)?
     val original = distributed_operation_journal_lookup_v2(owner.journal, id)?
     val operation = distributed_decode_operation_v2(original.envelope)?
-    val retained = controller_desired_objects_read_v1(owner.journal.root, operation, owner.controller_id)?
+    val retained = controller_desired_objects_read_owned_v3(owner.journal, operation, owner.controller_id)?
     val parent = controller_desired_cancel_parent_v1(owner.journal, retained.input)?
     val cancellation = controller_desired_cancel_operation_v1(retained.input)?
     val result = distributed_operation_journal_lookup_v2(owner.journal, cancellation.id)
@@ -413,7 +431,7 @@ pub fn controller_workload_store_cancel_agent_v1(owner: ControllerWorkloadStoreV
     val id = controller_desired_operation_id_v1(owner.controller_id, uid)?
     val record = distributed_operation_journal_lookup_v2(owner.journal, id)?
     val original = distributed_decode_operation_v2(record.envelope)?
-    val retained = controller_desired_objects_read_v1(owner.journal.root, original, owner.controller_id)?
+    val retained = controller_desired_objects_read_owned_v3(owner.journal, original, owner.controller_id)?
     val parent = controller_desired_cancel_parent_v1(owner.journal, retained.input)?
     if retained.input.source_digest != expected_source_digest: return Err("desired-cancel-source-mismatch")
     # Publish the exact child's sticky cancellation first. A crash before the
@@ -457,12 +475,12 @@ pub fn workload_store_bind_checked_v1(owner: ControllerWorkloadStoreV1, uid: tex
     val prior = controller_workload_store_lookup_v1(owner, uid)?
     val next = controller_workload_bind_v1(prior, expected_revision, binding)?
     if prior.assignment_digest == "":
-        val retained = assignment_objects_retain_v1(owner.journal.root, binding)?
+        val retained = assignment_objects_retain_owned_v3(owner.journal, binding)?
         if retained != next.assignment_digest: return Err("workload-assignment-object-mismatch")
     else:
         # Missing/corrupt committed objects are evidence loss, not permission
         # to silently repair them from a caller-provided request.
-        val retained = assignment_objects_read_v1(owner.journal.root, prior.assignment_digest)?
+        val retained = assignment_objects_read_owned_v3(owner.journal, prior.assignment_digest)?
         val matching = controller_workload_matches_v1(prior, retained)?
     workload_store_publish_v1(owner, next)
 
@@ -470,7 +488,7 @@ pub fn controller_workload_store_assignment_v1(owner: ControllerWorkloadStoreV1,
         uid: text) -> Result<ControllerAssignmentBindingV1, text>:
     val state = controller_workload_store_lookup_v1(owner, uid)?
     if state.assignment_digest == "": return Err("workload-not-assigned")
-    val binding = assignment_objects_read_v1(owner.journal.root, state.assignment_digest)?
+    val binding = assignment_objects_read_owned_v3(owner.journal, state.assignment_digest)?
     val matching = controller_workload_matches_v1(state, binding)?
     Ok(binding)
 

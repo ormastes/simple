@@ -5,6 +5,11 @@ use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.*
 use std.nogc_sync_mut.database.wal.WalEntry
 use std.nogc_sync_mut.database.wal_segmented.DatabaseWalRevisionV1
 use std.common.contracts.container.local_principal_v1.MachineLocalPrincipalSnapshotV1
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_owner_v1.LinuxInstalledFreshEpochOwnerV1
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.*
+use std.common.contracts.container.machine_policy_v1.machine_container_policy_decode_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
 
 enum MachinePolicyBackendV1:
     Linux(LinuxMachinePolicyOwnerV1)
@@ -106,9 +111,26 @@ pub class MachineStorageOwnerV1:
             case MachineStorageBackendV1.Linux(owner): owner.wal_commit_v1(expected_parent, entries)
             case MachineStorageBackendV1.Windows(owner): owner.wal_commit_v1(expected_parent, entries)
 
-    # released/stale mean no live native owner remains. retained keeps the
-    # exact capsule. Linux consumed-error has consumed every descriptor once;
-    # report that distinct result, never retry old numeric descriptors.
+    # Only this typed proof-bearing port can request fresh schema publication.
+    # The platform mechanism returns data; neither it nor this revision mints
+    # an admission/launch owner. Generic missing-CURRENT refusal is unchanged.
+    pub fn fresh_epoch_head_v1(epoch: LinuxInstalledFreshEpochOwnerV1,
+            record: MachineFreshEpochRecordV1) -> Result<text, text>:
+        val checked = machine_storage_fresh_check_v1(self, epoch, record)?
+        match self.backend:
+            case MachineStorageBackendV1.Linux(owner): owner.fresh_epoch_head_v1(record)
+            case MachineStorageBackendV1.Windows(_): Err("machine-fresh-epoch-linux-required")
+
+    pub fn fresh_epoch_commit_v1(epoch: LinuxInstalledFreshEpochOwnerV1,
+            record: MachineFreshEpochRecordV1) -> Result<DatabaseWalRevisionV1, text>:
+        val checked = machine_storage_fresh_check_v1(self, epoch, record)?
+        match self.backend:
+            case MachineStorageBackendV1.Linux(owner): owner.fresh_epoch_commit_v1(record)
+            case MachineStorageBackendV1.Windows(_): Err("machine-fresh-epoch-linux-required")
+
+    # Only released/consumed-error positively confirm consumption. A generic
+    # stale/unknown result is not proof of closure; the upper owner retains the
+    # exact capsule. Never retry already confirmed-consumed descriptors.
     pub fn close_v1() -> text:
         match self.backend:
             case MachineStorageBackendV1.Linux(owner): owner.close_v1()
@@ -118,6 +140,44 @@ pub enum MachineStorageOpenV1:
     Rejected(reason: text)
     CleanupRequired(owner: MachineStorageOwnerV1, reason: text)
     Ready(owner: MachineStorageOwnerV1)
+
+fn machine_storage_fresh_check_v1(storage: MachineStorageOwnerV1, epoch: LinuxInstalledFreshEpochOwnerV1,
+        record: MachineFreshEpochRecordV1) -> Result<(), text>:
+    val valid = machine_fresh_epoch_record_validate_v1(record)?
+    val actual = epoch.current_v1()?
+    if (actual.owner_generation != record.epoch_generation or actual.epoch_id != record.epoch_id or
+            actual.profile_digest != record.profile_digest or actual.machine_policy_digest != record.machine_policy_digest or
+            actual.process_identity_digest != record.process_identity_digest or actual.manager_unique_name != record.manager_unique_name or
+            actual.service_uid != record.service_uid or actual.service_gid != record.service_gid or
+            actual.partition_identity_digest != record.partition_identity_digest or actual.store_identity_digest != record.store_identity_digest or
+            actual.provider_policy_digest != record.provider_policy_digest or actual.observed_cpu_millis != record.observed_cpu_millis or
+            actual.observed_memory_bytes != record.observed_memory_bytes or actual.reserved_cpu_millis != record.reserved_cpu_millis or
+            actual.reserved_memory_bytes != record.reserved_memory_bytes or actual.outside_cpu_millis != record.outside_cpu_millis or
+            actual.outside_memory_bytes != record.outside_memory_bytes or actual.usable_cpu_millis != record.usable_cpu_millis or
+            actual.usable_memory_bytes != record.usable_memory_bytes):
+        return Err("machine-fresh-epoch-actual-preparation-mismatch")
+    val bytes = storage.policy_bytes_v1()?
+    if not utf8_bytes_valid(bytes): return Err("machine-fresh-epoch-policy-utf8")
+    val source = bytes_to_text(bytes)
+    if sha256_text(source) != record.machine_policy_digest: return Err("machine-fresh-epoch-policy-binding")
+    val policy = machine_container_policy_decode_v1(source)?
+    if (policy.mode != "standalone" or policy.authority_id != record.authority_id or
+            policy.physical_host_id != record.physical_host_id or policy.native_machine_id != record.native_machine_id or
+            record.principal_id != "linux:uid:" + str(actual.service_uid) or not policy.local_principals.contains(record.principal_id)):
+        return Err("machine-fresh-epoch-policy-scope")
+    var providers = 0
+    for provider in policy.providers:
+        if provider.backend == "linux-podman":
+            providers = providers + 1
+            if provider.identity_digest != record.provider_identity_digest or sha256_text(provider.policy_bytes) != record.provider_policy_digest:
+                return Err("machine-fresh-epoch-provider-policy-binding")
+    if providers != 1: return Err("machine-fresh-epoch-provider-selection")
+    val physical = storage.physical_capacity_v1()?
+    val cpu = if physical.0 < policy.cpu_millis: physical.0 else: policy.cpu_millis
+    val memory = if physical.1 < policy.memory_bytes: physical.1 else: policy.memory_bytes
+    if record.capacity_cpu_millis != cpu or record.capacity_memory_bytes != memory:
+        return Err("machine-fresh-epoch-actual-physical-capacity")
+    Ok(())
 
 pub fn machine_policy_open_v1() -> MachinePolicyOpenV1:
     @when(os="linux"):

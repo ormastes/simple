@@ -1,0 +1,61 @@
+# Native oracle, class B of doc/07_guide/compiler/robustness/stage2_native_miscompile_classes.md:
+# a non-Option struct/class compared with the built-in `None`. `None` lowers
+# through the NamedVar arm (option_none_locals), not NilLit, so lower_binop's
+# nil-compare intercept missed it and the struct `==` dispatch compared
+# `m.name` with field@8 of the None enum handle via rt_text_eq_any (SIGSEGV in
+# strlen; Stage 3 `if provider == None` in exact_extern_provenance.spl).
+# `record == None` is a presence test, like `record == nil`.
+# Build: SIMPLE_BOOTSTRAP=1 native-build main.spl --entry-closure (cranelift, llvm).
+# Expected stdout (seed `simple run main.spl`):
+# r1 false
+# r2 true
+# r3 2
+# r4 a
+# r5 false
+# r6 false
+# r7 true
+#
+# r1/r2 struct param ==/!=; r3 for-in element; r4 indexed element `!=`;
+# r5 `None == record`; r6/r7 class ==/!=.
+
+struct M:
+    name: text
+    path: text
+
+class C:
+    v: i64
+
+fn param_eq(m: M) -> bool:
+    m == None
+
+fn param_ne(m: M) -> bool:
+    m != None
+
+fn count(ms: [M]) -> i64:
+    var n = 0
+    for m in ms:
+        if m == None:
+            continue
+        n = n + 1
+    n
+
+fn first_present(ms: [M]) -> text:
+    var i = 0
+    while i < ms.len():
+        val m = ms[i]
+        if m != None:
+            return m.name
+        i = i + 1
+    "none"
+
+fn main():
+    val a = M(name: "a", path: "x.spl")
+    val ms = [a, M(name: "b", path: "y.spl")]
+    print "r1 {param_eq(a)}"
+    print "r2 {param_ne(a)}"
+    print "r3 {count(ms)}"
+    print "r4 {first_present(ms)}"
+    print "r5 {None == a}"
+    val c = C(v: 1)
+    print "r6 {c == None}"
+    print "r7 {c != None}"

@@ -1,0 +1,91 @@
+"""Option parsing and rendering for `simple trace matrix|links|explain|diff|report`.
+
+Purpose: prove the command family is recognised without disturbing `trace missing`
+and friends, that command-specific options are validated, and that rendered output
+carries the unverified/non-admission qualification and the Linked-not-Verified words.
+Audience: traceability maintainers and reviewers of the `simple trace` family.
+"""
+# @req REQ-TRC-021
+use std.spec.*
+use std.spec.step
+use std.common.traceability.profile_v1.{TraceProfile}
+use std.common.traceability.query_missing_v1.{TraceRequirementIdV1, TraceRequirementCountV1}
+use std.common.traceability.model.*
+use std.common.traceability.query_matrix_v1.{TraceMatrixAxisV1, trace_matrix_v1}
+use std.common.traceability.query_report_v1.{trace_report_v1}
+use app.traceability.query_cmds_options_v1.{TraceCmdKindV1, trace_cmd_kind_of_v1, trace_cmd_options_parse_v1}
+use app.traceability.query_cmds_render_v1.{trace_cmd_render_matrix_v1, trace_cmd_render_report_v1}
+
+fn render_graph() -> TraceGraph:
+    TraceGraph(subject: SnapshotSubject(repository_id: "repo:test", snapshot_id: "snapshot:one",
+        kind: "git_commit", revision_id: "commit:one", tree_id: "tree:one", object_format: "sha256"),
+        input_manifest_id: "inputs:one", generation_id: "generation:one", complete: true,
+        nodes: [TraceNode(id: "layer:hir", kind: TraceNodeKind.Layer, title: "HIR"),
+            TraceNode(id: "feature:a", kind: TraceNodeKind.Feature, title: "A"),
+            TraceNode(id: "req:ok", kind: TraceNodeKind.Requirement, title: "Linked both"),
+            TraceNode(id: "src:a", kind: TraceNodeKind.SourceFile, title: "a.spl"),
+            TraceNode(id: "case:a", kind: TraceNodeKind.TestCase, title: "case a")],
+        test_definitions: [], claims: [], origins: [], edge_origins: [], locators: [], diagnostics: [],
+        edges: [TraceEdge(id: "e1", from_id: "feature:a", relation: TraceRelation.Specifies, to_id: "req:ok"),
+            TraceEdge(id: "e2", from_id: "req:ok", relation: TraceRelation.BelongsTo, to_id: "layer:hir"),
+            TraceEdge(id: "e3", from_id: "req:ok", relation: TraceRelation.ImplementedBy, to_id: "src:a"),
+            TraceEdge(id: "e4", from_id: "req:ok", relation: TraceRelation.VerifiedBy, to_id: "case:a")])
+
+describe "trace command options":
+    it "recognises the five new commands and leaves the existing operations alone":
+        # @req REQ-TRC-021
+        step("New commands are requested; list, show, refs and missing are not")
+        expect(trace_cmd_kind_of_v1(["matrix"]).is_some()).to_be(true)
+        expect(trace_cmd_kind_of_v1(["report", "--format=sdn"]).is_some()).to_be(true)
+        expect(trace_cmd_kind_of_v1(["missing"]).is_some()).to_be(false)
+        expect(trace_cmd_kind_of_v1(["list", "features"]).is_some()).to_be(false)
+        expect(trace_cmd_kind_of_v1([]).is_some()).to_be(false)
+
+    it "parses axes, profile and the explain id, in both option forms":
+        # @req REQ-TRC-021
+        step("matrix with equals and separate-value forms")
+        val matrix = trace_cmd_options_parse_v1(["matrix", "--rows=component", "--cols", "layer", "--profile=commit", "--format=sdn"]).unwrap()
+        expect(matrix.command).to_equal(TraceCmdKindV1.Matrix)
+        expect(matrix.rows).to_equal(TraceMatrixAxisV1.Component)
+        expect(matrix.cols).to_equal(TraceMatrixAxisV1.Layer)
+        expect(matrix.profile).to_equal(TraceProfile.Commit)
+        expect(matrix.query.format).to_equal("sdn")
+        step("explain takes one requirement id")
+        val explain = trace_cmd_options_parse_v1(["explain", "REQ-TRC-016", "--why-incomplete"]).unwrap()
+        expect(explain.requirement.unwrap().value).to_equal("req:REQ-TRC-016")
+
+    it "rejects an unknown axis, profile or format, a missing explain id and a missing diff base":
+        # @req REQ-TRC-021
+        step("Each invalid request is an error, never a silent default")
+        expect(trace_cmd_options_parse_v1(["matrix", "--rows=stage"]).is_err()).to_be(true)
+        expect(trace_cmd_options_parse_v1(["report", "--profile=bogus"]).is_err()).to_be(true)
+        expect(trace_cmd_options_parse_v1(["links", "--format=json"]).is_err()).to_be(true)
+        expect(trace_cmd_options_parse_v1(["explain"]).is_err()).to_be(true)
+        expect(trace_cmd_options_parse_v1(["explain", "a", "b"]).is_err()).to_be(true)
+        expect(trace_cmd_options_parse_v1(["diff"]).is_err()).to_be(true)
+        expect(trace_cmd_options_parse_v1(["matrix", "--base=git:abc"]).is_err()).to_be(true)
+
+    it "binds diff base and head snapshots":
+        # @req REQ-TRC-021
+        step("Base is required; head defaults to the worktree")
+        val diff = trace_cmd_options_parse_v1(["diff", "--base=git:abc", "--head=index"]).unwrap()
+        expect(diff.base.unwrap().snapshot).to_equal("git:abc")
+        expect(diff.query.snapshot).to_equal("index")
+        expect(trace_cmd_options_parse_v1(["diff", "--base=git:abc"]).unwrap().query.snapshot).to_equal("worktree")
+
+describe "trace command rendering":
+    it "renders linked, not verified, and states the output is unverified":
+        # @req REQ-TRC-021
+        val options = trace_cmd_options_parse_v1(["matrix"]).unwrap()
+        step("Matrix table for a structurally linked requirement")
+        val matrix = trace_matrix_v1(render_graph(), [], [], TraceMatrixAxisV1.Layer, TraceMatrixAxisV1.Feature, TraceProfile.Worktree)
+        val text = trace_cmd_render_matrix_v1(matrix, options)
+        expect(text.contains("layer:hir\tfeature:a\tlinked=1 verified=0")).to_be(true)
+        expect(text.contains("admission eligible: false")).to_be(true)
+        step("SDN report carries the same counts and the incomplete flag")
+        val sdn_options = trace_cmd_options_parse_v1(["report", "--format=sdn"]).unwrap()
+        val report = trace_report_v1(render_graph(), [], [], TraceProfile.Worktree, TraceRequirementCountV1(value: 5))
+        val sdn = trace_cmd_render_report_v1(report, sdn_options)
+        expect(sdn.contains("simple.trace.report/v1")).to_be(true)
+        expect(sdn.contains("verified")).to_be(true)
+        expect(sdn.contains("admission_eligible")).to_be(true)
