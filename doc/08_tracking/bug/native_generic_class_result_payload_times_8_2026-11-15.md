@@ -2,8 +2,9 @@
 
 **Status:** both were introduced on branch `work/p3-generic-method-match-20261115`
 (x8 by a13439c4680, ÷8 by its gated follow-up 34907e7ec8c) and are removed
-there: the method symbol is no longer typed at all (approach A below). Needs a
-new Stage 2 to confirm natively. The `.ok` + `if val`, f64, let-bound text and
+there: the method symbol is no longer typed at all (approach A below). Confirmed
+natively with a Stage 2 built from 20762e84620 (both fixtures equal the seed on
+cranelift and llvm). The `.ok` + `if val`, f64, let-bound text and
 array-stored rows are pre-existing and still open.
 
 ## Repro
