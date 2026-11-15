@@ -1669,7 +1669,7 @@ never cache an answer computed while exhausted) —
   `gradient_corner_dir_q16`. Interpolation is premultiplied; stop positions
   never decrease. Emit a ramp a ROW at a time (`draw_image`): one
   `draw_rect_filled` per colour run cost the catalog `html` page 120 s.
-  Test with hex stops: `parse_color("red")` is #dc3232. The corner codes
+  (`parse_color("red")` was #dc3232 until 2026-11-15.) The corner codes
   (>= 1000) share the angle slot, so every real angle must be reduced to
   0..359 first (`3turn` painted as "to top left" until it was). Ramp
   positions multiply by 1000: keep them in i64 past ~1073 px.
@@ -1695,3 +1695,21 @@ never cache an answer computed while exhausted) —
   </span>cd`), or the start of the next (`inline_subtree_edge_is_space`).
   Text controls are clamped by min/max-width (`constrained_outer_width`)
   and atomic inline boxes carry their horizontal margins.
+- **Trap — one colour parser, CSS Color 4 values.** `parse_color` and
+  `parse_color_alpha` hand `rgb()` / `hsl()` and keywords to dom_color's
+  `parse_color_value_checked`, alpha kept in every syntax. 0 means
+  "transparent or invalid" to every caller, so an invalid value must be
+  rejected (never read as 0 = black), and a colour longhand OR shorthand
+  (`background`, `border*`, `outline`) holding a malformed colour function
+  is dropped whole in `_decl_table_build_inner`. A shortcut keyword above the table (`red` = #dc3232 survived
+  for months) silently repaints every page; pin new forms in
+  `css_color_parse_chrome159_spec.spl` against `getComputedStyle`.
+- **Trap — a collapsed cell's box overlaps its neighbour.** In
+  `border-collapse: collapse` the tracks hold half of each shared border, so
+  the cell box is laid out from `cell_x - (b+1)/2` to `cell_right + b/2`
+  (layout_engine table loop) and paints its full border with the ordinary
+  paint path. Moving the border paint instead of the box leaves the content
+  one pixel off (seen and reverted). Column edges round half up in both
+  `table_distribute_auto_columns` and the fixed split; probe a fraction
+  >= .5 when pinning one, or floor passes too
+  (`table_collapsed_border_paint_chrome159_spec.spl`).
