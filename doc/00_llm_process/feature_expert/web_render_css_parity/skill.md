@@ -2032,3 +2032,9 @@ never cache an answer computed while exhausted) —
 ## 2026-11-16 — :first/last/only-of-type
 
 - **A new structural pseudo-class needs SIX touch points** in `..._core_selectors.spl`: the `PSEUDO_*` code, `_pseudo_code_for`, the text-path allow-list in `simple_match` (the `pseudo != ...` chain), the text-path ctx branch, the parsed-path ctx branch, and `_option_needs_ctx` (without it, `:not(X)` is evaluated with no siblings). Miss the allow-list and the text path returns false while the parsed path matches; `web_selector_parsed_equivalence_spec` catches that.
+
+## 2026-11-16 — absolute height stretch and margins
+
+- **`absolute_containing_h` is the PADDING-box height** (`content_height_limit + pad_t + pad_b` at every call site), while `containing_w` is the CONTENT width and callers add the padding back. Mixing the two up gives the wrong stretch only when the parent has padding, so the spec includes a padded parent.
+- Absolute boxes now take their margins in `absolute_child_x/y` and in the width stretch. Before this an abs box with `margin:1px` sat at the inset with no offset, which no catalog page exercised.
+- **Trap — per-call-site variable names:** the five `absolute_child_style` call sites name the child `c`, `fc`, `fc_wrap` and `flex_c`. A blanket `nodes[c]` replace only fails with `variable c not found` when a flex absolute child is actually laid out. `layout_renderer_box_geometry_chrome159_spec` ("flex row/col abs child") caught it, and nothing at load time did.
