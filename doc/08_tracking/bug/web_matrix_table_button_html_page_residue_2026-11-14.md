@@ -152,21 +152,30 @@ max-content of mixed inline content, control UA font reset, `h6` margins
   being typed. Spec rows AC-4..6 of the gradient spec.
 - **Gradients, open:**
   - px stop positions (`red 20px`) are not parsed; the stop takes the
-    evenly spaced default.
-  - The engine2d ramp (`emu_draw_linear_gradient_stops`) spans the line
-    between the pixel centres of the extreme corners, not the CSS gradient
-    line length `|w sin a| + |h cos a|` the fb raster uses, so the two lanes
-    disagree by up to a pixel's worth of ramp at the ends.
-  - The two lanes round a mixed stop's alpha differently (fb raster:
-    rounded Q16 weights; engine2d ramp: truncated permille), so a
-    translucent ramp can differ by 1 between them.
-  - The new gradient spec rows render through `cpu_simd` only; the engine2d
-    ramp `emu_draw_linear_gradient_stops` as used by the Vulkan / Draw IR
-    backends has no Chrome-numbered row of its own.
+    evenly spaced default. Chrome numbers for both lanes:
+    `web_gradient_px_stop_position_unresolved_2026-11-15.md`.
+  - **Fixed 2026-11-15 (engine2d lane parity):** the engine2d ramp
+    (`emu_draw_linear_gradient_stops`) now uses the fb raster's mapping
+    exactly -- Q16 angle, line `|w sin a| + |h cos a|` through the box
+    edges, 1025-entry LUT, rounded premultiplied alpha. Opaque angled /
+    multi-stop gradients are bit-identical between the Draw IR lane and `cpu_simd` (was 16
+    levels on a 12x6 `to bottom right` box, 13 on a 10x10 45deg box).
+    Translucent stops still differ by up to 2: the fb raster quantises
+    each pixel's alpha to 0..100 % (`background_gradient_pixel_opacity`);
+    the Draw IR lane is the closer of the two to Chrome there. Pinned by
+    `linear_gradient_angle_draw_ir_chrome159_spec.spl` (AC-1..11, AC-10
+    and AC-11 red -> green). The fb raster keeps its own copy of the Q16
+    helpers (`gradient_angle_sin_cos_q16`, `linear_gradient_color_at`);
+    folding it onto the engine2d twins is a browser_engine edit left
+    for when that tree is not being edited by another lane.
+  - **Open (fb raster):** the default top-to-bottom two-stop ramp
+    (`mix_color_vertical_centered`) puts the exact stop colours on the first
+    and last rows; Chrome 159 samples row centres (10x10 `#000 -> #fff` row
+    0: Chrome #0d0d0d, Draw IR #0d0d0d, fb raster #000000; 12x6 red -> blue
+    up to 21 off). Pinned on the Draw IR side by AC-12 of
+    `linear_gradient_angle_draw_ir_chrome159_spec.spl`.
   - `flex:1 1 100px;max-width:25%` (a growing item with a definite basis)
     is not frozen at its max-width; only zero-basis items are.
-  - `parse_color` maps the keyword `red` to #dc3232 (CSS: #ff0000), so every
-    `red` in a page paints the wrong colour, gradients included.
 - **Fixed from the 5066a3eeae1 / 5ffa5564085 review:** an angle token is
   reduced to 0..359 (`gradient_angle_token_deg`), so `3turn` / `1080deg`
   no longer collide with the `to <corner>` codes (gradient spec AC-7, red
@@ -174,3 +183,86 @@ max-content of mixed inline content, control UA font reset, `h6` margins
   i64: `(t - t_min) * 1000` is about `2 * w * 1000 * 1000` at 90deg and
   passed i32 for a box wider than ~1073 px (a 3840 px 4K header). Found by
   arithmetic, not by a 4K render.
+- **Colour parsing fixed (2026-11-15, paint-page lane).** `parse_color`
+  hard-coded `red` as #dc3232 ahead of the named-colour table (a themed
+  value from `81d9241e755`, mirrored in `examples/06_io/ui/mini_html_render.spl`,
+  which is a separate example and keeps its own palette); it is the CSS
+  #ff0000 now. `rgb()` / `rgba()` / `hsl()` / `hsla()` go through
+  dom_color's parser (`parse_color_value_checked`: comma and space syntax,
+  `/ alpha`, channels validated and rounded half up, hue units), which fixes
+  `rgb(100%,0%,0%)` (was rgb(100,0,0)), `rgb(100% 50% 0%)` (green 127),
+  the alpha of `rgb(r,g,b,a)` and `hsl(120deg ...)` (was no colour). A
+  `box-shadow` colour accepted only `black` / `white` / `red` as keywords
+  and now takes any CSS colour. Spec: `css_color_parse_chrome159_spec.spl`.
+- **Colour review follow-up (2026-11-15).** The first cut of the colour fix
+  added a second parser that read a non-number as 0 (`hsl(foo, bar, baz)`
+  painted opaque black) and made every function form opaque in `parse_color`
+  (`hsla(...)`, `/ alpha` lost their alpha). Now: the duplicate is deleted
+  and dom_color's parser rejects any non-number channel, hue or percentage
+  (`css_rgb_channel_checked`, `css_hue_degrees_checked`,
+  `css_percent_number_checked`); `parse_color` keeps alpha for every form
+  except legacy comma `rgb()`/`rgba()`, which stays opaque as before; a
+  colour longhand whose value is a malformed `rgb()`/`hsl()` is dropped from
+  the declaration table so the earlier value wins (Chrome); a translucent
+  border blends instead of being stored raw. Spec rows AC-7..AC-9 of
+  `css_color_parse_chrome159_spec.spl`.
+- **Colour review round 2 (2026-11-15).** A shorthand holding a malformed
+  colour function (`background: rgb(1,2)`, `border: 3px solid hsl(foo,1%,2%)`,
+  `border-top`, `outline`) is now dropped whole, like the longhands (it used
+  to win as last and reset the earlier colour). Legacy comma `rgba()` keeps
+  its alpha in `parse_color` like `hsla()`; `color` with an alpha-0 colour
+  paints no text; `parse_color_any` finds `hsl()` inside a shorthand
+  (`border-left: 4px solid hsl(...)` painted no border); a translucent side
+  next to an unpainted side fills its corner. Spec rows AC-10..AC-13; 3px
+  collapsed borders pinned by the table spec's AC-8 (already Chrome-exact).
+- **Open: alpha 0 is "not a colour".** `_parse_color_delegated` answers 0
+  for any alpha-0 colour, the same value as invalid input, and the
+  appliers read 0 as "keep the earlier value": `border-color: transparent`
+  or `hsla(0,0%,0%,0)` keeps the earlier border colour, and
+  `background: rgba(255,0,0,0)` goes down the raw-layers path. `color` is
+  special-cased (`_color_alpha_zero`). Needs a distinct transparent value
+  through every applier; pre-existing, unchanged at `00dd0a5da9d`.
+- **Open: partial text alpha.** `color: rgba(0,0,0,.5)` now carries its
+  alpha into `fg`; whether every text paint path blends by it is not
+  verified (alpha 0 is handled above).
+- **Open: an unclosed function at the end of a style attribute.**
+  `style="background:rgb(0,255,0"` paints green in Chrome (CSS closes open
+  blocks at end of input) and nothing in Simple, for the longhand too. The
+  declaration table would accept it; the value is lost before it, where the
+  inline style is merged with the rule declarations
+  (`simple_web_html_layout_renderer_core.spl` compute_styles).
+- **Open: exponents in colour channels.** `rgb(1e2, 0, 0)` reads its channel
+  as 1 (the exponent is consumed and dropped); Chrome reads 100. The value is
+  pinned by `dom_color_alpha_normalization_spec.spl`
+  (`rgba(1e2,2,3,.5)` = `0x01020380`), so fixing it means re-pinning that
+  row to Chrome's number.
+- **Collapsed table geometry fixed (2026-11-15, paint-page lane).** A
+  `border-collapse: collapse` cell box sat inside its whole border, so every
+  shared edge painted as two lines one pixel apart and the outer edges and
+  the content sat one pixel right of / below Chrome's; the grid filled the
+  whole table width instead of 0.5px in from each side, and the column
+  distributor handed the integer leftover to the first column (Chrome's
+  170.38px edge painted at 171). Cell boxes now reach over the outer half
+  of their own borders ((b+1)/2 before, b/2 after) so neighbours overlap on
+  one line, the grid is `iw - (b+1)/2 - b/2` wide, and auto and fixed
+  column edges round half up. Spec:
+  `table_collapsed_border_paint_chrome159_spec.spl` (5 ACs, red at
+  b8af2f7b53e). In-development `table_fractional_column_width_spec.spl`
+  gained its `width:200px` 99/95 row (the 3x2 67px row still fails).
+- **Open: a collapsed table with a `colspan` cell (or a min/max-width cell)
+  takes no table geometry at all.** `explicit_auto_table_column_offsets`
+  returns `[]` for those without authored spacing, and a collapsed table
+  has no spacing, so the rows lay out as plain blocks: Chrome paints
+  `<tr><td colspan=2>`+`<tr><td><td>` in a 400px table with lines at
+  y = 0, 41, 82 and x = 0, 170, 399; Simple at y = 0, 41, 42, 83, 84, 125
+  and no middle column line (unchanged by this lane).
+- **Collapsed table follow-up (2026-11-15).** A 2px collapsed border left
+  the last row's bottom half-border outside the table (the next block one
+  pixel early); the table now adds it. Round-half-up column edges apply to
+  separate-border tables too and are pinned there (AC-6).
+- **Open: collapsed borders of different widths or styles.** Only the
+  uniform-border case is modelled: the outer half-borders are read from the
+  first cell of the first row, and the CSS 2.2 §17.6.2.1 conflict resolution
+  (wider wins, then style, then cell over row over table) is applied only by
+  `simple_web_resolve_collapsed_table_borders` for one-row, two-cell
+  tables. Rowspan/colspan collapsed tables are the item above.

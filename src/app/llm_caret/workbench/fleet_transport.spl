@@ -1,0 +1,204 @@
+#![allow(REQC004)]
+# Caret workbench -- multi-host fleet transport (CU-001, CU-010).
+#
+# A peer host exports its local roster as a line-oriented wire snapshot; this
+# host polls each declared host by running its transport command (e.g.
+# `ssh -o BatchMode=yes user@host cat <snapshot>`; a loopback second host is
+# plain `cat <snapshot>`) and folds the rows into the roster. A host whose
+# command fails keeps its LAST KNOWN rows, marked Transport.Disconnected /
+# ProcessLifecycle.Lost: the remote children may still be alive, so neither
+# "gone" nor "exited" is honest. State is module-level with a single writer
+# (the workbench owner publishing each frame); no locks.
+
+use app.io.mod.{process_run_bounded}
+use app.llm_caret.workbench.session_contract.{SessionView, SessionId,
+    ProcessLifecycle, AgentTurn, Transport, CapabilityEvidence}
+
+val FLEET_POLL_TIMEOUT_MS: i64 = 5000
+val FLEET_MAX_BYTES: i64 = 262144
+
+struct FleetHost:
+    host_id: text
+    command: text
+    args: [text]
+
+struct FleetRows:
+    host_id: text
+    views: [SessionView]
+
+var _fleet_hosts: [FleetHost] = []
+var _fleet_last: [FleetRows] = []
+
+fn _clean(s: text) -> text:
+    s.replace("\t", " ").replace("\n", " ")
+
+fn _lifecycle_name(l: ProcessLifecycle) -> text:
+    match l:
+        case ProcessLifecycle.NotStarted: "not_started"
+        case ProcessLifecycle.Starting: "starting"
+        case ProcessLifecycle.Running: "running"
+        case ProcessLifecycle.Stopping: "stopping"
+        case ProcessLifecycle.Exited: "exited"
+        case ProcessLifecycle.Failed: "failed"
+        case ProcessLifecycle.Lost: "lost"
+
+# Unknown names are ownership-uncertain, never Running.
+fn _lifecycle_of(name: text) -> ProcessLifecycle:
+    if name == "not_started": return ProcessLifecycle.NotStarted
+    if name == "starting": return ProcessLifecycle.Starting
+    if name == "running": return ProcessLifecycle.Running
+    if name == "stopping": return ProcessLifecycle.Stopping
+    if name == "exited": return ProcessLifecycle.Exited
+    if name == "failed": return ProcessLifecycle.Failed
+    ProcessLifecycle.Lost
+
+fn _turn_name(t: AgentTurn) -> text:
+    match t:
+        case AgentTurn.Idle: "idle"
+        case AgentTurn.Queued: "queued"
+        case AgentTurn.Working: "working"
+        case AgentTurn.WaitingApproval: "waiting_approval"
+        case AgentTurn.WaitingAnswer: "waiting_answer"
+        case AgentTurn.Completed: "completed"
+        case AgentTurn.Cancelled: "cancelled"
+        case AgentTurn.Failed: "failed"
+        case AgentTurn.Unknown: "unknown"
+
+fn _turn_of(name: text) -> AgentTurn:
+    if name == "idle": return AgentTurn.Idle
+    if name == "queued": return AgentTurn.Queued
+    if name == "working": return AgentTurn.Working
+    if name == "waiting_approval": return AgentTurn.WaitingApproval
+    if name == "waiting_answer": return AgentTurn.WaitingAnswer
+    if name == "completed": return AgentTurn.Completed
+    if name == "cancelled": return AgentTurn.Cancelled
+    if name == "failed": return AgentTurn.Failed
+    AgentTurn.Unknown
+
+# One row per session: v1 TAB id TAB generation TAB provider TAB lifecycle
+# TAB turn TAB attention. The label is derived from host + id on decode.
+pub fn fleet_encode_snapshot(views: [SessionView]) -> text:
+    var out = ""
+    for v in views:
+        var attn = "0"
+        if v.needs_attention:
+            attn = "1"
+        out = out + "v1\t{_clean(v.id.value)}\t{v.id.generation}\t{_clean(v.provider)}\t{_lifecycle_name(v.lifecycle)}\t{_turn_name(v.turn)}\t{attn}\n"
+    out
+
+# Rows are namespaced `<host>/<id>`; the transport is Ready because the row was
+# just received. Capability evidence stays Declared: a peer's claim proves
+# nothing about behaviour on this host.
+pub fn fleet_decode_snapshot(host_id: text, wire: text) -> Result<[SessionView], text>:
+    var views: [SessionView] = []
+    for line in wire.split("\n"):
+        if line.trim() == "":
+            continue
+        val cols = line.split("\t")
+        if cols.len() != 7 or cols[0] != "v1" or cols[1] == "":
+            return Err("FLEET_SNAPSHOT_MALFORMED")
+        val gen = cols[2].to_i64() ?? 0
+        if gen <= 0:
+            return Err("FLEET_SNAPSHOT_MALFORMED")
+        views.push(SessionView(
+            id: SessionId(value: "{host_id}/{cols[1]}", generation: gen),
+            label: "{host_id}:{cols[1]}",
+            provider: cols[3],
+            lifecycle: _lifecycle_of(cols[4]),
+            turn: _turn_of(cols[5]),
+            transport: Transport.Ready,
+            evidence: CapabilityEvidence.Declared,
+            needs_attention: cols[6] == "1"))
+    Ok(views)
+
+fn _disconnected(v: SessionView) -> SessionView:
+    SessionView(id: v.id, label: v.label, provider: v.provider,
+        lifecycle: ProcessLifecycle.Lost, turn: v.turn,
+        transport: Transport.Disconnected, evidence: v.evidence,
+        needs_attention: true)
+
+fn _last_for(host_id: text) -> [SessionView]:
+    for r in _fleet_last:
+        if r.host_id == host_id:
+            return r.views
+    []
+
+# True when `id` is a row received from a peer host (local ids may contain "/",
+# e.g. agent file paths, so the namespace alone cannot tell them apart).
+pub fn fleet_is_remote(id: text) -> bool:
+    for r in _fleet_last:
+        for v in r.views:
+            if v.id.value == id:
+                return true
+    false
+
+fn _remember(host_id: text, views: [SessionView]):
+    var kept: [FleetRows] = []
+    for r in _fleet_last:
+        if r.host_id != host_id:
+            kept.push(r)
+    kept.push(FleetRows(host_id: host_id, views: views))
+    _fleet_last = kept
+
+pub fn fleet_declare_host(host_id: text, command: text, args: [text]):
+    var kept: [FleetHost] = []
+    for h in _fleet_hosts:
+        if h.host_id != host_id:
+            kept.push(h)
+    kept.push(FleetHost(host_id: host_id, command: command, args: args))
+    _fleet_hosts = kept
+
+pub fn fleet_clear():
+    var no_hosts: [FleetHost] = []
+    var no_rows: [FleetRows] = []
+    _fleet_hosts = no_hosts
+    _fleet_last = no_rows
+
+# Spec `id=target:path[,id=target:path...]`: target `local` reads the snapshot
+# with `cat path` (loopback host); anything else is an ssh target.
+# Returns the number of hosts declared; malformed entries are skipped.
+pub fn fleet_declare_from_spec(spec: text) -> i64:
+    var n = 0
+    for entry in spec.split(","):
+        val eq = entry.index_of("=")
+        if eq <= 0:
+            continue
+        val host_id = entry.substring(0, eq)
+        val rest = entry.substring(eq + 1)
+        val colon = rest.index_of(":")
+        if colon <= 0 or colon + 1 >= rest.byte_len():
+            continue
+        val target = rest.substring(0, colon)
+        val path = rest.substring(colon + 1)
+        if target == "local":
+            fleet_declare_host(host_id, "cat", [path])
+        else:
+            fleet_declare_host(host_id, "ssh", ["-o", "BatchMode=yes", target, "cat", path])
+        n = n + 1
+    n
+
+fn _poll_host(host: FleetHost) -> [SessionView]:
+    val (stdout, _stderr, code) = process_run_bounded(host.command, host.args,
+        FLEET_POLL_TIMEOUT_MS, FLEET_MAX_BYTES)
+    if code == 0:
+        val decoded = fleet_decode_snapshot(host.host_id, stdout)
+        if decoded.is_ok():
+            val views = decoded.unwrap()
+            _remember(host.host_id, views)
+            return views
+    var down: [SessionView] = []
+    for v in _last_for(host.host_id):
+        down.push(_disconnected(v))
+    _remember(host.host_id, down)
+    down
+
+# Polls every declared host once; rows from unreachable hosts come back
+# Disconnected rather than being dropped.
+pub fn fleet_poll_all() -> [SessionView]:
+    var out: [SessionView] = []
+    for h in _fleet_hosts:
+        out = out + _poll_host(h)
+    out
+
+export FleetHost, fleet_encode_snapshot, fleet_decode_snapshot, fleet_declare_host,
+    fleet_clear, fleet_poll_all, fleet_declare_from_spec, fleet_is_remote

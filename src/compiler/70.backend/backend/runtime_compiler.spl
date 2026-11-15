@@ -232,6 +232,19 @@ fn hosted_c_target_os_matches(target: text, host_os_name: text) -> bool:
 fn hosted_c_target_is_mingw(target: text) -> bool:
     target.ends_with("-pc-windows-gnu") or target.ends_with("-w64-mingw32") or target.ends_with("-w64-windows-gnu")
 
+pub fn hosted_mingw_clang_target(target: text) -> text:
+    """llvm-mingw clang driver triple for a Windows GNU compile or link.
+
+    The target's own architecture; x86_64 for an empty, host or unknown one.
+    A hardcoded x86_64 triple sent an aarch64-pc-windows-gnu cross link to the
+    x86_64 sysroot."""
+    val lower = target.trim().lower()
+    if lower.starts_with("aarch64-") or lower.starts_with("arm64-"):
+        return "aarch64-w64-windows-gnu"
+    if lower.starts_with("i686-"):
+        return "i686-w64-windows-gnu"
+    "x86_64-w64-windows-gnu"
+
 pub fn hosted_c_compiler_plan(target: text, host_os_name: text, host_arch_name: text) -> HostedCCompilerPlan:
     """Classify hosted C compilation without enabling unsupported cross targets."""
     if target == "" or target == "host" or target == "native":
@@ -283,6 +296,11 @@ pub fn c_compiler_override(windows_gnu: bool, requires_cross: bool, target: text
         val gnu_cc = env_get_nullable("CC")
         if gnu_cc != "" and gnu_cc != nil:
             simple_cc = gnu_cc
+    elif windows_gnu and hosted_c_target_is_mingw(target) and (simple_cc == "" or simple_cc == nil):
+        # llvm-mingw clang is multi-target: reuse CC for a mingw cross arch.
+        val cross_cc = env_get_nullable("CC")
+        if cross_cc != "" and cross_cc != nil:
+            simple_cc = cross_cc
     if simple_cc != "" and simple_cc != nil:
         if ((windows_gnu and not requires_cross) or hosted_c_target_is_mingw(target)) and not simple_cc.lower().contains("clang"):
             return ""
@@ -1165,7 +1183,7 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
             # section so the linker's --gc-sections can strip unreferenced code.
             comp_args = ["-c"]
             if target.ends_with("-pc-windows-gnu"):
-                comp_args.push("--target=x86_64-w64-windows-gnu")
+                comp_args.push("--target=" + hosted_mingw_clang_target(target))
             for target_arg in hosted_cross_c_target_args(target, host_os(), host_arch()):
                 comp_args.push(target_arg)
             for abi_define in abi_defines:

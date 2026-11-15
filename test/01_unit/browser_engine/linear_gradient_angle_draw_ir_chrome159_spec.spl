@@ -1,0 +1,323 @@
+"""
+## Purpose and audience
+Purpose: Pin the Draw IR lane's angled / N-stop `linear-gradient` against the
+same Chrome 159 pixels the CPU raster is pinned to
+(`linear_gradient_angle_cpu_raster_chrome159_spec.spl`), and pin the two lanes
+to each other. The Draw IR lane paints a typed gradient with
+`Engine2D.draw_gradient_rect_stops` -> `emu_draw_linear_gradient_stops`
+(`src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl`), which used to map the
+corner pixel CENTRES to the end stops instead of using the CSS gradient line
+`|w sin a| + |h cos a|` through the box EDGES, and truncated the interpolated
+alpha where the CPU raster rounds it. On a 200x100 box that is 1-2 levels; on a
+10x10 box it is 13 (`(w-1)` vs `w`).
+Audience: Engine2D / browser-engine paint maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 `chrome-headless-shell`, `--hide-scrollbars
+--force-device-scale-factor=1`, `body{margin:0}`, screenshot pixels). PAGE,
+PAGE2 and PAGE3 and their numbers are the CPU raster spec's, unchanged.
+
+PAGE4 (`--window-size=200,400`, `body{background:#fff}`, four 200x100 boxes):
+| box                                                      | (x, y)     | Chrome  |
+|----------------------------------------------------------|------------|---------|
+| `linear-gradient(45deg, #000000, #ffffff)`               | (0, 0)     | #555555 |
+|                                                          | (199, 0)   | #ffffff |
+|                                                          | (0, 99)    | #010101 |
+|                                                          | (199, 99)  | #aaaaaa |
+|                                                          | (50, 25)   | #6a6a6a |
+|                                                          | (150, 75)  | #959595 |
+| `linear-gradient(135deg, #ff0000, #0000ff)`              | (0, 100)   | #fe0000 |
+|                                                          | (199, 100) | #5500aa |
+|                                                          | (0, 199)   | #aa0055 |
+|                                                          | (199, 199) | #0100fe |
+|                                                          | (100, 150) | #7e0080 |
+| `linear-gradient(to right, rgba(255,0,0,0.5), #0000ff)`  | (0, 350)   | #fe7f7f |
+| over white                                               | (50, 350)  | #be5f9f |
+|                                                          | (100, 350) | #7f3fbf |
+|                                                          | (150, 350) | #3f1fdf |
+|                                                          | (199, 350) | #0101ff |
+(The third box, `#ff0000 20px, #0000ff 180px`, is not asserted: neither lane
+resolves a px stop position yet -- see
+`doc/08_tracking/bug/web_gradient_px_stop_position_unresolved_2026-11-15.md`.)
+
+PAGE5 (`--window-size=200,100`, small boxes, where the span error is largest):
+| box                                                      | (x, y)     | Chrome  |
+|----------------------------------------------------------|------------|---------|
+| 10x10 `linear-gradient(45deg, #000000, #ffffff)`         | (0, 0)     | #7f7f7f |
+|                                                          | (9, 0)     | #f3f3f3 |
+|                                                          | (0, 9)     | #0d0d0d |
+|                                                          | (2, 7)     | #404040 |
+|                                                          | (7, 2)     | #c0c0c0 |
+| 12x6 `linear-gradient(135deg, #ff0000, #0000ff)`         | (0, 10)    | #f0000e |
+|                                                          | (11, 10)   | #5500aa |
+|                                                          | (0, 15)    | #aa0055 |
+|                                                          | (11, 15)   | #0e00f1 |
+|                                                          | (5, 12)    | #8e0072 |
+| 12x6 `linear-gradient(to bottom right, #000000, #ffffff)`| (0, 16)    | #0f0f0f |
+|                                                          | (11, 16)   | #858585 |
+|                                                          | (0, 21)    | #7a7a7a |
+|                                                          | (11, 21)   | #efefef |
+| 10x10 `linear-gradient(to right, rgba(255,0,0,0.5), #0000ff)` over white | (0, 26) | #f27985 |
+|                                                          | (3, 26)    | #a653ac |
+|                                                          | (6, 26)    | #592cd2 |
+|                                                          | (9, 26)    | #0d07f9 |
+Each Chrome channel is asserted within 6, as in the CPU raster spec. The lane
+parity rows assert every opaque angled / multi-stop box within 1 per channel
+between the Draw IR lane and the CPU raster; the default top-to-bottom
+two-stop box within 2 (the CPU raster paints it with its own endpoint-exact
+dithered painter, which AC-12 shows is the one off from Chrome on small
+boxes: 10x10 #000 -> #fff row 0 is Chrome #0d0d0d, Draw IR #0d0d0d, CPU
+raster #000000). AC-13 runs the primitive on a real Vulkan device.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-LINEAR-GRADIENT-ANGLE-RASTER-001 — the Draw IR lane paints angled and multi-stop linear gradients as Chrome 159 and the CPU raster do.
+"""
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d.backend_emu.{emu_draw_linear_gradient_stops}
+use std.io_runtime.{file_exists}
+
+val PAGE: text = "<!doctype html><html><head><style>body{{margin:0}}</style></head><body><div style=\"width:200px;height:100px;background:linear-gradient(120deg, #173b7a, #6d28d9)\"></div><div style=\"width:200px;height:100px;background-image:linear-gradient(to right, #ff0000, #00ff00 50%, #0000ff)\"></div><div style=\"width:200px;height:100px;background:linear-gradient(#000000, #ffffff)\"></div></body></html>"
+
+val PAGE2: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}div{{width:200px;height:100px}}</style></head><body><div style=\"background:linear-gradient(#ff0000, #0000ff, transparent)\"></div><div style=\"background:linear-gradient(to right, #ff0000, #00ff00 60%, #0000ff 30%, #ffffff)\"></div><div style=\"background:linear-gradient(0.25turn, #000, #fff)\"></div><div style=\"background:linear-gradient(to bottom right, #000, #fff)\"></div><div style=\"background:linear-gradient(1.5708rad, #000, #fff)\"></div><div style=\"background:linear-gradient(100grad, #000, #fff)\"></div></body></html>"
+
+val PAGE3: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}div{{width:200px;height:100px}}</style></head><body><div style=\"background:linear-gradient(3turn, #000000, #ffffff)\"></div><div style=\"background:linear-gradient(1170deg, #000000, #ffffff)\"></div><div style=\"background:linear-gradient(-90deg, #000000, #ffffff)\"></div></body></html>"
+
+val PAGE4: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}div{{width:200px;height:100px}}</style></head><body><div style=\"background:linear-gradient(45deg, #000000, #ffffff)\"></div><div style=\"background:linear-gradient(135deg, #ff0000, #0000ff)\"></div><div style=\"background:linear-gradient(to right, #ff0000 20px, #0000ff 180px)\"></div><div style=\"background:linear-gradient(to right, rgba(255,0,0,0.5), #0000ff)\"></div></body></html>"
+
+val PAGE5: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}div{{width:10px;height:10px}}.s{{width:12px;height:6px}}</style></head><body><div style=\"background:linear-gradient(45deg, #000000, #ffffff)\"></div><div class=\"s\" style=\"background:linear-gradient(135deg, #ff0000, #0000ff)\"></div><div class=\"s\" style=\"background:linear-gradient(to bottom right, #000000, #ffffff)\"></div><div style=\"background:linear-gradient(to right, rgba(255,0,0,0.5), #0000ff)\"></div></body></html>"
+
+val PAGE7: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}</style></head><body><div style=\"width:10px;height:10px;background:linear-gradient(#000000, #ffffff)\"></div><div style=\"width:12px;height:6px;background:linear-gradient(180deg, #ff0000, #0000ff)\"></div></body></html>"
+
+fn draw_ir(html: text, h: i32) -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d(html, 200, h, "software")
+
+fn channel_off(a: u32, b: u32, shift: u32) -> i32:
+    val ca = ((a >> shift) & 255u32) as i32
+    val cb = ((b >> shift) & 255u32) as i32
+    if ca > cb: ca - cb else: cb - ca
+
+fn pixel_off(p: u32, q: u32) -> i32:
+    var m = channel_off(p, q, 16u32)
+    val g = channel_off(p, q, 8u32)
+    if g > m:
+        m = g
+    val b = channel_off(p, q, 0u32)
+    if b > m:
+        m = b
+    m
+
+# Largest per-channel difference between Simple's pixel and Chrome's.
+fn worst(pixels: [u32], x: i32, y: i32, chrome: u32) -> i32:
+    pixel_off(pixels[x + y * 200], chrome)
+
+# Largest per-channel difference between two lanes over rows y0..y1, x0..x1.
+fn lane_worst(a: [u32], b: [u32], x0: i32, x1: i32, y0: i32, y1: i32) -> i32:
+    var m = 0
+    var y = y0
+    while y < y1:
+        var x = x0
+        while x < x1:
+            val d = pixel_off(a[x + y * 200], b[x + y * 200])
+            if d > m:
+                m = d
+            x = x + 1
+        y = y + 1
+    m
+
+describe "Draw IR linear-gradient vs Chrome 159":
+    it "AC-1: a 120deg shorthand gradient is a diagonal ramp, not the first stop":
+        val px = draw_ir(PAGE, 300)
+        step("Chrome 159: corners #173a7a / #6d28d9, top-right #5a2dc4, bottom-left #2a378f, centre #4231a9")
+        expect(worst(px, 0, 0, 0x173a7au32)).to_be_less_than(7)
+        expect(worst(px, 100, 50, 0x4231a9u32)).to_be_less_than(7)
+        expect(worst(px, 199, 99, 0x6d28d9u32)).to_be_less_than(7)
+        expect(worst(px, 199, 0, 0x5a2dc4u32)).to_be_less_than(7)
+        expect(worst(px, 0, 99, 0x2a378fu32)).to_be_less_than(7)
+        expect(worst(px, 50, 25, 0x2d3692u32)).to_be_less_than(7)
+        expect(worst(px, 150, 75, 0x582dc2u32)).to_be_less_than(7)
+
+    it "AC-2: a three-stop `to right` gradient passes through its middle stop":
+        val px = draw_ir(PAGE, 300)
+        step("Chrome 159: #fd0100, #7e8000, #00fd01, #007e80, #0002fe across x = 0, 50, 100, 150, 199")
+        expect(worst(px, 0, 150, 0xfd0100u32)).to_be_less_than(7)
+        expect(worst(px, 50, 150, 0x7e8000u32)).to_be_less_than(7)
+        expect(worst(px, 100, 150, 0x00fd01u32)).to_be_less_than(7)
+        expect(worst(px, 150, 150, 0x007e80u32)).to_be_less_than(7)
+        expect(worst(px, 199, 150, 0x0002feu32)).to_be_less_than(7)
+
+    it "AC-3: control -- the default top-to-bottom shorthand ramp":
+        val px = draw_ir(PAGE, 300)
+        step("Chrome 159: #010101, #808080, #fefefe at y = 200, 250, 299")
+        expect(worst(px, 100, 200, 0x010101u32)).to_be_less_than(7)
+        expect(worst(px, 100, 250, 0x808080u32)).to_be_less_than(7)
+        expect(worst(px, 100, 299, 0xfefefeu32)).to_be_less_than(7)
+
+    it "AC-4: stops interpolate in premultiplied colour":
+        val px = draw_ir(PAGE2, 600)
+        step("Chrome 159: halfway from blue to transparent over white is #8282ff, not the straight-alpha #8080bf")
+        expect(worst(px, 100, 25, 0x7d0082u32)).to_be_less_than(7)
+        expect(worst(px, 100, 75, 0x8282ffu32)).to_be_less_than(7)
+        expect(worst(px, 100, 99, 0xfdfdffu32)).to_be_less_than(7)
+
+    it "AC-5: a stop position below an earlier one is clamped up to it":
+        val px = draw_ir(PAGE2, 600)
+        step("Chrome 159: `blue 30%` after `lime 60%` sits at 60%: a hard lime -> blue edge at x = 120")
+        expect(worst(px, 60, 150, 0x7e8000u32)).to_be_less_than(7)
+        expect(worst(px, 110, 150, 0x14ea00u32)).to_be_less_than(7)
+        expect(worst(px, 121, 150, 0x0505ffu32)).to_be_less_than(7)
+        expect(worst(px, 160, 150, 0x8181ffu32)).to_be_less_than(7)
+
+    it "AC-6: turn / rad / grad angles and corner keywords":
+        val px = draw_ir(PAGE2, 600)
+        step("Chrome 159: 0.25turn = to right")
+        expect(worst(px, 0, 250, 0x000000u32)).to_be_less_than(7)
+        expect(worst(px, 100, 250, 0x808080u32)).to_be_less_than(7)
+        expect(worst(px, 199, 250, 0xffffffu32)).to_be_less_than(7)
+        step("Chrome 159: `to bottom right` in 200x100 -- the other two corners sit on the 50% line")
+        expect(worst(px, 0, 300, 0x000000u32)).to_be_less_than(7)
+        expect(worst(px, 199, 300, 0x808080u32)).to_be_less_than(7)
+        expect(worst(px, 0, 399, 0x7f7f7fu32)).to_be_less_than(7)
+        expect(worst(px, 199, 399, 0xfefefeu32)).to_be_less_than(7)
+        step("Chrome 159: 1.5708rad and 100grad = to right")
+        expect(worst(px, 0, 450, 0x000000u32)).to_be_less_than(7)
+        expect(worst(px, 199, 450, 0xffffffu32)).to_be_less_than(7)
+        expect(worst(px, 0, 550, 0x000000u32)).to_be_less_than(7)
+        expect(worst(px, 199, 550, 0xffffffu32)).to_be_less_than(7)
+
+    it "AC-7: angles outside 0..360 wrap, and never read as a corner keyword":
+        val px = draw_ir(PAGE3, 300)
+        step("Chrome 159: 3turn = to top (white at the top), 1170deg = to right, -90deg = to left")
+        expect(worst(px, 100, 0, 0xfdfdfdu32)).to_be_less_than(7)
+        expect(worst(px, 100, 50, 0x7e7e7eu32)).to_be_less_than(7)
+        expect(worst(px, 100, 99, 0x010101u32)).to_be_less_than(7)
+        expect(worst(px, 0, 150, 0x000000u32)).to_be_less_than(7)
+        expect(worst(px, 199, 150, 0xffffffu32)).to_be_less_than(7)
+        expect(worst(px, 0, 250, 0xfefefeu32)).to_be_less_than(7)
+        expect(worst(px, 199, 250, 0x010101u32)).to_be_less_than(7)
+
+    it "AC-8: 45deg and 135deg on a 200x100 box":
+        val px = draw_ir(PAGE4, 400)
+        step("Chrome 159: 45deg black -> white, the 50% line runs through the top-left/bottom-right diagonal of a square")
+        expect(worst(px, 0, 0, 0x555555u32)).to_be_less_than(7)
+        expect(worst(px, 199, 0, 0xffffffu32)).to_be_less_than(7)
+        expect(worst(px, 0, 99, 0x010101u32)).to_be_less_than(7)
+        expect(worst(px, 199, 99, 0xaaaaaau32)).to_be_less_than(7)
+        expect(worst(px, 50, 25, 0x6a6a6au32)).to_be_less_than(7)
+        expect(worst(px, 150, 75, 0x959595u32)).to_be_less_than(7)
+        step("Chrome 159: 135deg red -> blue")
+        expect(worst(px, 0, 100, 0xfe0000u32)).to_be_less_than(7)
+        expect(worst(px, 199, 100, 0x5500aau32)).to_be_less_than(7)
+        expect(worst(px, 0, 199, 0xaa0055u32)).to_be_less_than(7)
+        expect(worst(px, 199, 199, 0x0100feu32)).to_be_less_than(7)
+        expect(worst(px, 100, 150, 0x7e0080u32)).to_be_less_than(7)
+
+    it "AC-9: a translucent stop composites over the page":
+        val px = draw_ir(PAGE4, 400)
+        step("Chrome 159: rgba(255,0,0,0.5) -> #0000ff over white")
+        expect(worst(px, 0, 350, 0xfe7f7fu32)).to_be_less_than(7)
+        expect(worst(px, 50, 350, 0xbe5f9fu32)).to_be_less_than(7)
+        expect(worst(px, 100, 350, 0x7f3fbfu32)).to_be_less_than(7)
+        expect(worst(px, 150, 350, 0x3f1fdfu32)).to_be_less_than(7)
+        expect(worst(px, 199, 350, 0x0101ffu32)).to_be_less_than(7)
+
+    it "AC-10: the gradient line ends on the box edges, not the corner pixel centres":
+        val px = draw_ir(PAGE5, 100)
+        step("Chrome 159, 10x10 45deg: the corner pixels are 13 levels inside the end stops")
+        expect(worst(px, 0, 0, 0x7f7f7fu32)).to_be_less_than(7)
+        expect(worst(px, 9, 0, 0xf3f3f3u32)).to_be_less_than(7)
+        expect(worst(px, 0, 9, 0x0d0d0du32)).to_be_less_than(7)
+        expect(worst(px, 2, 7, 0x404040u32)).to_be_less_than(7)
+        expect(worst(px, 7, 2, 0xc0c0c0u32)).to_be_less_than(7)
+        step("Chrome 159, 12x6 135deg")
+        expect(worst(px, 0, 10, 0xf0000eu32)).to_be_less_than(7)
+        expect(worst(px, 11, 10, 0x5500aau32)).to_be_less_than(7)
+        expect(worst(px, 0, 15, 0xaa0055u32)).to_be_less_than(7)
+        expect(worst(px, 11, 15, 0x0e00f1u32)).to_be_less_than(7)
+        expect(worst(px, 5, 12, 0x8e0072u32)).to_be_less_than(7)
+        step("Chrome 159, 12x6 `to bottom right` (a non-square box)")
+        expect(worst(px, 0, 16, 0x0f0f0fu32)).to_be_less_than(7)
+        expect(worst(px, 11, 16, 0x858585u32)).to_be_less_than(7)
+        expect(worst(px, 0, 21, 0x7a7a7au32)).to_be_less_than(7)
+        expect(worst(px, 11, 21, 0xefefefu32)).to_be_less_than(7)
+        step("Chrome 159, 10x10 translucent stop over white")
+        expect(worst(px, 0, 26, 0xf27985u32)).to_be_less_than(7)
+        expect(worst(px, 3, 26, 0xa653acu32)).to_be_less_than(7)
+        expect(worst(px, 6, 26, 0x592cd2u32)).to_be_less_than(7)
+        expect(worst(px, 9, 26, 0x0d07f9u32)).to_be_less_than(7)
+
+describe "Draw IR linear-gradient vs the CPU raster":
+    it "AC-11: the two lanes agree within 1 per channel on opaque angled and multi-stop gradients":
+        val ir5 = draw_ir(PAGE5, 100)
+        val cpu5 = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE5, 200, 100, "cpu_simd")
+        step("small boxes: 10x10 45deg, 12x6 135deg, 12x6 to bottom right")
+        expect(lane_worst(ir5, cpu5, 0, 12, 0, 22)).to_be_less_than(2)
+        val ir4 = draw_ir(PAGE4, 400)
+        val cpu4 = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE4, 200, 400, "cpu_simd")
+        step("200x100 45deg and 135deg")
+        expect(lane_worst(ir4, cpu4, 0, 200, 0, 200)).to_be_less_than(2)
+        # Translucent stops are not in this row: the CPU raster quantises a
+        # pixel's alpha to 0..100 % (`background_gradient_pixel_opacity`) and
+        # lands up to 2 off; the Draw IR lane blends 8-bit alpha and is the
+        # closer of the two to Chrome (AC-9 / AC-10 pin both to Chrome).
+        val ir1 = draw_ir(PAGE, 300)
+        val cpu1 = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, 200, 300, "cpu_simd")
+        step("120deg, three-stop to right")
+        expect(lane_worst(ir1, cpu1, 0, 200, 0, 200)).to_be_less_than(2)
+        # The default top-to-bottom two-stop ramp: the CPU raster paints it with
+        # its own endpoint-exact dithered row painter (`mix_color_vertical_centered`),
+        # which lands up to 2 from the Draw IR lane on 200x100 and is the one
+        # that is off from Chrome on small boxes (AC-12). Bounded here so the
+        # box is compared at all; the Chrome rows are the arbiter.
+        step("200x100 default top-to-bottom ramp")
+        expect(lane_worst(ir1, cpu1, 0, 200, 200, 300)).to_be_less_than(3)
+
+    it "AC-12: the default top-to-bottom two-stop ramp samples row centres, as Chrome does":
+        val px = draw_ir(PAGE7, 100)
+        step("Chrome 159, 10x10 #000 -> #fff: rows 0, 1, 4, 5, 9")
+        expect(worst(px, 5, 0, 0x0d0d0du32)).to_be_less_than(7)
+        expect(worst(px, 5, 1, 0x262626u32)).to_be_less_than(7)
+        expect(worst(px, 5, 4, 0x737373u32)).to_be_less_than(7)
+        expect(worst(px, 5, 5, 0x8c8c8cu32)).to_be_less_than(7)
+        expect(worst(px, 5, 9, 0xf2f2f2u32)).to_be_less_than(7)
+        step("Chrome 159, 12x6 180deg red -> blue: rows 0, 2, 5")
+        expect(worst(px, 6, 10, 0xe90015u32)).to_be_less_than(7)
+        expect(worst(px, 6, 12, 0x94006au32)).to_be_less_than(7)
+        expect(worst(px, 6, 15, 0x1500eau32)).to_be_less_than(7)
+
+describe "Draw IR linear-gradient on a real Vulkan device":
+    it "AC-13: a VulkanBackend paints the same gradient pixels as the software reference":
+        # Runs where a Vulkan ICD is installed (llvmpipe on the CI hosts:
+        # VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json). Where none is,
+        # the row has nothing to drive and says so.
+        if not file_exists("/usr/share/vulkan/icd.d/lvp_icd.json"):
+            step("no llvmpipe ICD on this host: no Vulkan device to compare")
+            return
+        var e = Engine2D.create_with_backend_fast(40, 20, "vulkan")
+        step("the engine really selected Vulkan (no silent software fallback)")
+        expect(e.backend_name()).to_equal("vulkan")
+        val colors: [u32] = [0xFF000000u32, 0xFFFFFFFFu32]
+        val positions: [i32] = [0, 1000]
+        e.clear(0xFFFFFFFFu32)
+        e.draw_gradient_rect_stops(0, 0, 40, 20, colors, positions, 45)
+        e.submit_batch()
+        val rb = e.read_pixels_with_source()
+        expect(rb.source).to_equal("device_readback")
+        var b = SoftwareBackend.create()
+        expect(b.init(40, 20)).to_equal(true)
+        b.clear(0xFFFFFFFFu32)
+        emu_draw_linear_gradient_stops(b, 0, 0, 40, 20, colors, positions, 45)
+        val p = b.read_pixels()
+        var diff = 0
+        var i = 0
+        while i < 800:
+            if (rb.pixels[i] & 0xFFFFFFu32) != (p[i] & 0xFFFFFFu32):
+                diff = diff + 1
+            i = i + 1
+        step("40x20 45deg black -> white: every device pixel equals the software one")
+        expect(diff).to_equal(0)
+        b.shutdown()

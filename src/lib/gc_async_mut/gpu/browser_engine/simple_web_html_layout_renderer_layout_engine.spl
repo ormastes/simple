@@ -940,13 +940,45 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
     val table_spacing_y = if st.border_collapse == "collapse": 0 else: st.border_spacing_y_px
     val scrollbar_gutter = 15
     val content_height_limit = definite_content_height_limit(node, st)
+    # border-collapse geometry (uniform-border slice, honest limits): the
+    # grid tracks are sized with half-borders shared between neighbours
+    # (see explicit_auto_table_column_offsets); the outer half-border of
+    # the first column/row shifts the grid origin by round-half-up, the
+    # last column's outer half (rounded down) is taken off the width the
+    # columns fill -- Chrome's `width:400px` collapsed table spans its
+    # cells over 399px, 0.5px in from each side
+    # (table_collapsed_border_paint_chrome159_spec.spl) -- and each row
+    # sheds the shared half of its cells' top+bottom borders.
+    # Non-uniform per-edge winner widths and row/col spans are NOT
+    # modelled here -- they keep the plain separate-model geometry.
+    val table_collapse = st.display == "table" and st.border_collapse == "collapse"
+    var collapse_outer_x = 0
+    var collapse_outer_r = 0
+    var collapse_outer_y = 0
+    var collapse_outer_b = 0
+    var collapse_row_shave = 0
+    if table_collapse:
+        val collapse_rows = simple_web_collect_table_rows(nodes, child_index, i)
+        if collapse_rows.rows.len() > 0:
+            var probe_cell = child_index.first_child[collapse_rows.rows[0]]
+            while probe_cell >= 0 and styles[probe_cell].display != "table-cell":
+                probe_cell = child_index.next_sibling[probe_cell]
+            if probe_cell >= 0:
+                collapse_outer_x = (styles[probe_cell].border_l + 1) / 2
+                collapse_outer_r = styles[probe_cell].border_r / 2
+                collapse_outer_y = (styles[probe_cell].border_t + 1) / 2
+                collapse_outer_b = styles[probe_cell].border_b / 2
+                collapse_row_shave = (
+                    styles[probe_cell].border_t + styles[probe_cell].border_b
+                ) / 2
     val auto_column_offsets = if (
         st.display == "table" and st.table_layout == "auto"
     ):
         # width:auto tables shrink to fit: pass 0 as the available inner
         # width so no leftover space is distributed across the columns.
         explicit_auto_table_column_offsets(
-            nodes, styles, child_index, i, iw,
+            nodes, styles, child_index, i,
+            iw - collapse_outer_x - collapse_outer_r,
             table_spacing_x, table_spacing_y,
             # A table FILLS a width it states — and a PERCENTAGE width is stated
             # too. `width_px` holds a percentage as a NEGATIVE value, so the
@@ -972,34 +1004,16 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         val column_count = simple_web_fixed_table_column_count(
             nodes, child_index, table_rows
         )
-        # border-collapse geometry (uniform-border slice, honest limits): the
-        # grid tracks were sized with half-borders shared between neighbours
-        # (see explicit_auto_table_column_offsets); the outer half-border of
-        # the first column/row shifts the grid origin by round-half-up, and
-        # each row sheds the shared half of its cells' top+bottom borders.
-        # Non-uniform per-edge winner widths and row/col spans are NOT
-        # modelled here — they keep the plain separate-model geometry.
-        val table_collapse = st.border_collapse == "collapse"
-        var collapse_outer_x = 0
-        var collapse_outer_y = 0
-        var collapse_row_shave = 0
-        if table_collapse and table_rows.rows.len() > 0:
-            var probe_cell = child_index.first_child[table_rows.rows[0]]
-            while probe_cell >= 0 and styles[probe_cell].display != "table-cell":
-                probe_cell = child_index.next_sibling[probe_cell]
-            if probe_cell >= 0:
-                collapse_outer_x = (styles[probe_cell].border_l + 1) / 2
-                collapse_outer_y = (styles[probe_cell].border_t + 1) / 2
-                collapse_row_shave = (
-                    styles[probe_cell].border_t + styles[probe_cell].border_b
-                ) / 2
         var table_grid_width = if (
             st.table_layout == "auto" and
             auto_column_offsets.len() > column_count
         ):
             auto_column_offsets[column_count]
         else:
-            iw - table_spacing_x * (column_count + 1)
+            (
+                iw - collapse_outer_x - collapse_outer_r -
+                table_spacing_x * (column_count + 1)
+            )
         if table_grid_width < column_count:
             table_grid_width = column_count
         val table_inner_width = (
@@ -1078,7 +1092,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         (
                             ix + collapse_outer_x +
                             table_spacing_x * (used_columns + 1) +
-                            table_grid_width * used_columns / column_count
+                            (table_grid_width * used_columns * 2 + column_count) /
+                            (column_count * 2)
                         )
                     var next_columns = used_columns + span
                     if next_columns > column_count:
@@ -1096,9 +1111,22 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         (
                             ix + collapse_outer_x +
                             table_spacing_x * next_columns +
-                            table_grid_width * next_columns / column_count
+                            (table_grid_width * next_columns * 2 + column_count) /
+                            (column_count * 2)
                         )
-                    val allocated_cell_width = cell_right - cell_x
+                    # border-collapse: the tracks share each border half and
+                    # half, so a cell's box reaches out over the outer half of
+                    # its own borders -- (b+1)/2 before, b/2 after -- and
+                    # neighbouring boxes overlap on the one shared line, which
+                    # is where Chrome paints it and puts the content after it
+                    # (table_collapsed_border_paint_chrome159_spec.spl).
+                    val lead_x = if table_collapse: (styles[cell].border_l + 1) / 2 else: 0
+                    val lead_y = if table_collapse: (styles[cell].border_t + 1) / 2 else: 0
+                    val box_x = cell_x - lead_x
+                    val allocated_cell_width = (
+                        cell_right - box_x +
+                        (if table_collapse: styles[cell].border_r / 2 else: 0)
+                    )
                     var cell_layout_style = styles[cell]
                     if st.table_layout == "auto":
                         var cell_layout_width = allocated_cell_width
@@ -1114,7 +1142,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         )
                     val cell_result = layout_with_style(
                         nodes, styles, child_index, cell,
-                        cell_x, table_y, allocated_cell_width,
+                        box_x, table_y - lead_y, allocated_cell_width,
                         viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh,
                         out_wrap_starts, out_wrap_ends,
                         out_intrinsic_widths, cell_layout_style
@@ -1135,7 +1163,13 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             cell = child_index.first_child[table_row]
             while cell >= 0:
                 if styles[cell].display == "table-cell":
-                    out_bh[cell] = row_h
+                    out_bh[cell] = if table_collapse:
+                        (
+                            row_h + (styles[cell].border_t + 1) / 2 +
+                            styles[cell].border_b / 2
+                        )
+                    else:
+                        row_h
                 cell = child_index.next_sibling[cell]
             out_bh[table_row] = row_h
             table_y = table_y + row_h + table_spacing_y
@@ -1145,6 +1179,10 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     out_by[table_group]
                 )
             table_row_index = table_row_index + 1
+        # The last row's outer bottom half-border (rounded down) is part of
+        # the table: a 2px collapsed border otherwise overhangs it by 1px.
+        if table_rows.rows.len() > 0:
+            table_y = table_y + collapse_outer_b
         table_child = child_index.first_child[i]
         while table_child >= 0:
             if (
