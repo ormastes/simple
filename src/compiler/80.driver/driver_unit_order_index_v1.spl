@@ -1,0 +1,109 @@
+# Per-file unit order index (first object in 10 s; bug
+# unit_child_admission_scans_whole_closure_2026-11-15).
+#
+# Every unit child used to run worker_admitted_edges_v1 over the WHOLE
+# inventory -- one import resolution per source -- only to derive the
+# deps-first pick order, which is identical for every unit of one build.
+# With SIMPLE_UNIT_ORDER_INDEX=1 the first unit publishes that graph to
+# `<hir_queue>/unit_order.idx` (pid-unique temp file + atomic rename) and every
+# later unit decodes it instead: zero resolutions, one file read. The header
+# binds the index to the exact inventory (count + sha256 of the path list); any
+# mismatch or a missing/garbled file falls back to the full scan, never to a
+# guessed order. Off (default) is byte-identical to the previous behaviour.
+use compiler.driver.driver_worker_surface_closure_v1.{WorkerAdmittedGraphV1, worker_admitted_edges_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, getpid}
+
+pub const UNIT_ORDER_INDEX_ENV_V1: text = "SIMPLE_UNIT_ORDER_INDEX"
+const UNIT_ORDER_INDEX_MAGIC_V1: text = "unit-order-index/v1"
+
+pub fn unit_order_index_enabled_v1(raw: text) -> bool:
+    raw == "1"
+
+pub fn unit_order_index_path_v1(queue: text) -> text:
+    "{queue}/unit_order.idx"
+
+pub fn unit_order_index_digest_v1(paths: [text]) -> text:
+    sha256_text(paths.join("\n"))
+
+fn _uoi_header_v1(paths: [text]) -> text:
+    "{UNIT_ORDER_INDEX_MAGIC_V1} n={paths.len()} digest={unit_order_index_digest_v1(paths)}"
+
+fn _uoi_clean_v1(s: text) -> text:
+    s.replace("\n", " ").replace("\r", " ").replace("\t", " ")
+
+pub fn unit_order_index_encode_v1(paths: [text], graph: WorkerAdmittedGraphV1) -> text:
+    var lines: [text] = [_uoi_header_v1(paths)]
+    var i = 0
+    while i < paths.len():
+        var deps: [text] = []
+        if i < graph.edges.len():
+            for d in graph.edges[i]: deps.push("{d}")
+        val err = if i < graph.errors.len(): _uoi_clean_v1(graph.errors[i]) else: ""
+        lines.push("{deps.join(",")}\t{err}")
+        i = i + 1
+    lines.join("\n")
+
+pub fn unit_order_index_decode_v1(paths: [text], content: text) -> Result<WorkerAdmittedGraphV1, text>:
+    val lines = content.split("\n")
+    if lines.len() != paths.len() + 1:
+        return Err("unit order index row count mismatch")
+    if lines[0] != _uoi_header_v1(paths):
+        return Err("unit order index inventory mismatch")
+    var edges: [[i64]] = []
+    var errors: [text] = []
+    var i = 1
+    while i < lines.len():
+        val cols = lines[i].split("\t")
+        if cols.len() != 2:
+            return Err("unit order index row {i} malformed")
+        val dep_text = cols[0]
+        var deps: [i64] = []
+        if dep_text != "":
+            for part in dep_text.split(","):
+                val d = part.to_i64() ?? -1
+                if d < 0 or d >= paths.len():
+                    return Err("unit order index row {i} dep out of range")
+                deps.push(d)
+        edges.push(deps)
+        errors.push(cols[1])
+        i = i + 1
+    Ok(WorkerAdmittedGraphV1(edges: edges, errors: errors))
+
+pub fn unit_order_index_load_v1(queue: text, paths: [text]) -> Result<WorkerAdmittedGraphV1, text>:
+    val path = unit_order_index_path_v1(queue)
+    if queue == "" or not file_exists(path):
+        return Err("unit order index absent")
+    unit_order_index_decode_v1(paths, file_read(path))
+
+# Temp + atomic rename: a concurrent reader sees the old file or the whole new
+# one. A lost race publishes identical bytes, so either winner is correct.
+pub fn unit_order_index_publish_v1(queue: text, paths: [text], graph: WorkerAdmittedGraphV1) -> bool:
+    if queue == "":
+        return false
+    val target = unit_order_index_path_v1(queue)
+    val tmp = "{target}.{getpid()}.tmp"
+    if not file_write(tmp, unit_order_index_encode_v1(paths, graph)):
+        return false
+    if file_rename(tmp, target):
+        return true
+    val _dropped = file_delete(tmp)
+    file_exists(target)
+
+# Unit child entry: decode the shared index when on and valid; otherwise run
+# the full admitted-graph walk (and, when on, publish it for later units).
+pub fn unit_admitted_graph_v1(enabled: bool, queue: text, paths: [text], contents: [text], names: [text],
+        roots: [text], library_mode: text) -> Result<WorkerAdmittedGraphV1, text>:
+    if enabled:
+        val hit = unit_order_index_load_v1(queue, paths)
+        if hit.is_ok():
+            return hit
+    val computed = worker_admitted_edges_v1(paths, contents, names, roots, library_mode)
+    if enabled and computed.is_ok():
+        val _published = unit_order_index_publish_v1(queue, paths, computed.unwrap())
+    computed
+
+export unit_admitted_graph_v1
+export UNIT_ORDER_INDEX_ENV_V1, unit_order_index_enabled_v1, unit_order_index_path_v1
+export unit_order_index_digest_v1, unit_order_index_encode_v1, unit_order_index_decode_v1
+export unit_order_index_load_v1, unit_order_index_publish_v1

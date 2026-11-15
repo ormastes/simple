@@ -1,0 +1,133 @@
+# Per-unit admission must not grow with closure size (bug
+# unit_child_admission_scans_whole_closure_2026-11-15).
+#
+# Every per-file unit child ran worker_admitted_edges_v1 over the whole
+# inventory just to derive the deps-first pick order. With
+# SIMPLE_UNIT_ORDER_INDEX=1 the first unit publishes the graph once and later
+# units decode it: zero import resolutions, one file read, for any N.
+use std.spec
+use std.io_runtime.{file_exists, file_write, dir_create_all}
+use compiler.driver.driver_worker_surface_closure_v1.{WorkerAdmittedGraphV1, worker_admitted_edges_v1,
+    worker_admitted_order_v1, worker_admitted_sources_scanned_v1}
+use compiler.driver.driver_unit_order_index_v1.{unit_admitted_graph_v1, unit_order_index_encode_v1,
+    unit_order_index_decode_v1, unit_order_index_path_v1, unit_order_index_enabled_v1}
+
+fn inv_paths(n: i64) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < n:
+        out.push("C:/uoi/src/m{i}.spl")
+        i = i + 1
+    out
+
+fn inv_blank(n: i64) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < n:
+        out.push("")
+        i = i + 1
+    out
+
+fn inv_names(n: i64) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < n:
+        out.push("m{i}")
+        i = i + 1
+    out
+
+fn chain_graph(n: i64) -> WorkerAdmittedGraphV1:
+    var edges: [[i64]] = []
+    var errors: [text] = []
+    var i = 0
+    while i < n:
+        if i == 0: edges.push([]) else: edges.push([i - 1])
+        errors.push(if i == 2: "WORKER_IMPORT_MISSING: x|y" else: "")
+        i = i + 1
+    WorkerAdmittedGraphV1(edges: edges, errors: errors)
+
+fn scratch_queue(tag: text) -> text:
+    val q = "build/test_tmp/unit_order_index_{tag}"
+    val _made = dir_create_all(q)
+    q
+
+# Resolutions a unit child performs to get its order, with the index on and
+# already published by an earlier unit.
+fn scans_with_published_index(n: i64, tag: text) -> i64:
+    val q = scratch_queue(tag)
+    val paths = inv_paths(n)
+    val _w = file_write(unit_order_index_path_v1(q), unit_order_index_encode_v1(paths, chain_graph(n)))
+    val before = worker_admitted_sources_scanned_v1()
+    val got = unit_admitted_graph_v1(true, q, paths, inv_blank(n), inv_names(n), [], "")
+    if got.is_err(): return -1
+    worker_admitted_sources_scanned_v1() - before
+
+describe "per-file unit order index":
+    """
+    # @req UOI-001: per-unit admission cost is independent of closure size
+    """
+    it "a unit child with a published index resolves zero sources for N=20 and N=400":
+        step("small closure")
+        expect(scans_with_published_index(20, "n20")).to_equal(0)
+        step("20x bigger closure, same per-unit work")
+        expect(scans_with_published_index(400, "n400")).to_equal(0)
+
+    """
+    # @req UOI-002: off is the old full walk (one scan per inventory source)
+    """
+    it "with the switch off the child still walks the whole inventory":
+        val q = scratch_queue("off")
+        val before = worker_admitted_sources_scanned_v1()
+        val got = unit_admitted_graph_v1(false, q, inv_paths(30), inv_blank(30), inv_names(30), [], "")
+        assert_true(got.is_ok())
+        expect(worker_admitted_sources_scanned_v1() - before).to_equal(30)
+
+    """
+    # @req UOI-003: decoded graph is identical to the encoded one (same order)
+    """
+    it "round-trips edges, errors and the deps-first order":
+        val paths = inv_paths(6)
+        val g = chain_graph(6)
+        val back = unit_order_index_decode_v1(paths, unit_order_index_encode_v1(paths, g))
+        assert_true(back.is_ok())
+        val d = back.unwrap()
+        expect(d.edges).to_equal(g.edges)
+        expect(d.errors).to_equal(g.errors)
+        expect(worker_admitted_order_v1(d.edges)).to_equal(worker_admitted_order_v1(g.edges))
+
+    """
+    # @req UOI-004: a stale index never yields an order (fall back to the walk)
+    """
+    it "rejects an index written for another inventory":
+        val enc = unit_order_index_encode_v1(inv_paths(5), chain_graph(5))
+        assert_true(unit_order_index_decode_v1(inv_paths(6), enc).is_err())
+        var other = inv_paths(5)
+        other[3] = "C:/uoi/src/renamed.spl"
+        assert_true(unit_order_index_decode_v1(other, enc).is_err())
+        assert_true(unit_order_index_decode_v1(inv_paths(5), "garbage").is_err())
+
+    """
+    # @req UOI-005: first unit publishes; a later unit hits it
+    """
+    it "the first unit publishes the index and the computed graph matches the walk":
+        val q = scratch_queue("publish")
+        val paths = inv_paths(8)
+        val path = unit_order_index_path_v1(q)
+        val _clear = file_write(path, "stale")
+        val first = unit_admitted_graph_v1(true, q, paths, inv_blank(8), inv_names(8), [], "")
+        assert_true(first.is_ok())
+        val walk = worker_admitted_edges_v1(paths, inv_blank(8), inv_names(8), [], "")
+        expect(first.unwrap().edges).to_equal(walk.unwrap().edges)
+        val before = worker_admitted_sources_scanned_v1()
+        val second = unit_admitted_graph_v1(true, q, paths, inv_blank(8), inv_names(8), [], "")
+        assert_true(second.is_ok())
+        expect(worker_admitted_sources_scanned_v1() - before).to_equal(0)
+
+    """
+    # @req UOI-006: switch is explicit opt-in
+    """
+    it "is off unless SIMPLE_UNIT_ORDER_INDEX is exactly 1":
+        assert_true(unit_order_index_enabled_v1("1"))
+        assert_true(not unit_order_index_enabled_v1(""))
+        assert_true(not unit_order_index_enabled_v1("0"))
+        assert_true(not unit_order_index_enabled_v1("true"))
