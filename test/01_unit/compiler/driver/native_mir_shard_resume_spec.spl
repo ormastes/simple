@@ -1,0 +1,169 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/driver_build/native_mir_shard.spl 0%
+"""
+# A relaunched MIR shard pass adopts the finished claims of the killed one
+
+**Category:** Compiler / driver
+
+## Purpose and Audience
+
+A Stage 3 MIR shard pass is ~3 h over 9 claims. When a launch dies, the
+relaunch must not pay again for modules whose objects are already sealed.
+The coordinator compares a whole-run key with the prior ledger's and, only on
+equality, adopts each PASS row whose object still matches its capsule receipt
+into the new ledger before spawning any worker.
+
+## Expected Outcome
+
+The run key ignores memory/thread knobs and binds compiler, projected
+environment, guards, lane, argv and shard count, naming the first differing
+component. Adoption copies verified PASS rows (object and objectless) and
+requeues CRASH rows, unclaimed rows, and rows whose object is missing, changed,
+or was overwritten by a build with a different capsule.
+"""
+use std.spec.step
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use std.nogc_sync_mut.io_runtime.{env_set, dir_create_all, dir_remove_all, file_write, getpid, file_hash_sha256_or_empty}
+use std.io_runtime.{file_size_raw}
+use compiler.driver.driver_build.native_mir_shard.{
+    native_mir_shard_claim_v1, native_mir_shard_publish_pass_v1,
+    native_mir_shard_link_inputs_v1, native_mir_shard_smf_part_read_v1,
+    native_mir_shard_smf_part_write_v1,
+    native_mir_shard_run_key_v1, native_mir_shard_run_key_mismatch_v1,
+    native_mir_shard_resume_adopt_v1}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory,
+    hir_shard_recovery_terminal, hir_shard_recovery_unclaimed_count}
+
+fn resume_fresh_ledger(tag: text) -> text:
+    val dir = "build/test_tmp/native_mir_shard_resume_{tag}_{getpid()}"
+    val _removed = dir_remove_all(dir)
+    val _created = dir_create_all(dir)
+    dir
+
+fn resume_receipt(object_path: text, capsule: text) -> bool:
+    file_write(object_path + ".capsule-receipt",
+        "native-capsule-result-v1\n{capsule}\n{object_path}\n{file_size_raw(object_path)}\n{file_hash_sha256_or_empty(object_path)}\n")
+
+fn resume_key(args: [text], count: i64) -> text:
+    native_mir_shard_run_key_v1("compiler-a", "env-a", "guards-a", "default", args, count, 0)
+
+describe "MIR shard resume run key":
+    it "ignores the thread knob and names the first differing component":
+        # @req REQ-SSPEC-COMPILER
+        step("ignores the thread knob and names the first differing component")
+        val args = ["--backend", "cranelift", "--threads", "2", "-o", "out/simple"]
+        val base = resume_key(args, 9)
+        assert_equal(native_mir_shard_run_key_mismatch_v1(base,
+            resume_key(["--backend", "cranelift", "--threads", "8", "-o", "out/simple"], 9)), "")
+        assert_equal(native_mir_shard_run_key_mismatch_v1(base,
+            resume_key(["--backend", "cranelift", "--threads=3", "-o", "out/simple"], 9)), "")
+        assert_equal(native_mir_shard_run_key_mismatch_v1(base, resume_key(args, 8)), "shards")
+        assert_equal(native_mir_shard_run_key_mismatch_v1(base,
+            resume_key(["--backend", "llvm", "--threads", "2", "-o", "out/simple"], 9)), "argv")
+        assert_equal(native_mir_shard_run_key_mismatch_v1(base,
+            native_mir_shard_run_key_v1("compiler-b", "env-a", "guards-a", "default", args, 9, 0)), "compiler")
+        assert_equal(native_mir_shard_run_key_mismatch_v1(base,
+            native_mir_shard_run_key_v1("compiler-a", "env-b", "guards-a", "default", args, 9, 0)), "environment")
+        assert_equal(native_mir_shard_run_key_mismatch_v1(base,
+            native_mir_shard_run_key_v1("compiler-a", "env-a", "guards-b", "default", args, 9, 0)), "guards")
+        assert_equal(native_mir_shard_run_key_mismatch_v1(base,
+            native_mir_shard_run_key_v1("compiler-a", "env-a", "guards-a", "lane-x", args, 9, 0)), "lane")
+        assert_equal(native_mir_shard_run_key_mismatch_v1(base,
+            native_mir_shard_run_key_v1("compiler-a", "env-a", "guards-a", "default", args, 9, 4)), "fork-workers")
+
+    it "names an absent prior run key":
+        # @req REQ-SSPEC-COMPILER
+        step("names an absent prior run key")
+        assert_equal(native_mir_shard_run_key_mismatch_v1("", resume_key([], 2)), "run-key-absent")
+
+describe "MIR shard resume adoption":
+    it "adopts verified PASS rows and requeues crashed, missing, changed and overwritten rows":
+        # @req REQ-SSPEC-COMPILER
+        step("adopts verified PASS rows and requeues crashed, missing, changed and overwritten rows")
+        val prior = resume_fresh_ledger("prior")
+        val queue = resume_fresh_ledger("next")
+        val _owner = env_set("SIMPLE_MIR_SHARD_OWNER", "0/2@0")
+        val names = ["mod.a", "mod.b", "mod.c", "mod.d", "mod.e", "mod.f", "mod.g"]
+        assert_true(hir_shard_recovery_inventory(prior, "src-id", names))
+        # a: sealed object with a matching receipt, plus its SMF part.
+        val obj_a = "{prior}/a.o"
+        assert_true(file_write(obj_a, "object-a"))
+        assert_true(resume_receipt(obj_a, "cap-a"))
+        assert_equal(native_mir_shard_claim_v1(prior, "mod.a", "src-id"), 1)
+        # b: objectless PASS (re-export facade).
+        assert_equal(native_mir_shard_claim_v1(prior, "mod.b", "src-id"), 1)
+        assert_true(native_mir_shard_publish_pass_v1(prior, "mod.b", "", 0, 0, ""))
+        # c: its worker crashed inside it.
+        assert_equal(native_mir_shard_claim_v1(prior, "mod.c", "src-id"), 1)
+        assert_true(hir_shard_recovery_terminal(prior, "0/2@0", "mod.c", "CRASH", false))
+        # d: PASS whose object is gone.
+        assert_equal(native_mir_shard_claim_v1(prior, "mod.d", "src-id"), 1)
+        assert_true(native_mir_shard_publish_pass_v1(prior, "mod.d", "{prior}/d.o", 1, 0, "cap-d"))
+        # e: PASS whose object bytes changed after its receipt.
+        val obj_e = "{prior}/e.o"
+        assert_true(file_write(obj_e, "object-e"))
+        assert_true(resume_receipt(obj_e, "cap-e"))
+        assert_true(file_write(obj_e, "object-e-changed"))
+        assert_equal(native_mir_shard_claim_v1(prior, "mod.e", "src-id"), 1)
+        assert_true(native_mir_shard_publish_pass_v1(prior, "mod.e", obj_e, 1, 0, "cap-e"))
+        # f: a later build of other sources overwrote object + receipt at the
+        # same path (A -> B -> A); the receipt names a different capsule.
+        val obj_f = "{prior}/f.o"
+        assert_true(file_write(obj_f, "object-f-from-other-sources"))
+        assert_true(resume_receipt(obj_f, "cap-f-other"))
+        assert_equal(native_mir_shard_claim_v1(prior, "mod.f", "src-id"), 1)
+        assert_true(native_mir_shard_publish_pass_v1(prior, "mod.f", obj_f, 1, 0, "cap-f"))
+        # g: never claimed.
+        assert_true(native_mir_shard_publish_pass_v1(prior, "mod.a", obj_a, 3, 1, "cap-a"))
+        val adopted = native_mir_shard_resume_adopt_v1(prior, queue)
+        assert_equal(adopted.reason, "")
+        assert_equal(adopted.adopted, 2)
+        assert_equal(adopted.requeued, 5)
+        assert_equal(hir_shard_recovery_unclaimed_count(queue), 5)
+        assert_false(native_mir_shard_link_inputs_v1(queue, "src-id").is_ok())
+        # The relaunched workers lower exactly the requeued rows.
+        val _relaunch_owner = env_set("SIMPLE_MIR_SHARD_OWNER", "0/2@0")
+        for name in ["mod.c", "mod.d", "mod.e", "mod.f", "mod.g"]:
+            assert_equal(native_mir_shard_claim_v1(queue, name, "src-id"), 1)
+            assert_true(native_mir_shard_publish_pass_v1(queue, name, "", 0, 0, ""))
+        assert_equal(native_mir_shard_claim_v1(queue, "mod.a", "src-id"), 0)
+        val linked = native_mir_shard_link_inputs_v1(queue, "src-id")
+        assert_true(linked.is_ok())
+        val inputs = linked.unwrap()
+        assert_equal(inputs.modules.len(), 7)
+        assert_equal(inputs.object_files.len(), 1)
+        assert_equal(inputs.object_files[0], obj_a)
+        assert_equal(inputs.capsule_identities[0], "cap-a")
+        assert_equal(inputs.functions, 3)
+        val _cleanup_prior = dir_remove_all(prior)
+        val _cleanup_queue = dir_remove_all(queue)
+
+    it "copies an adopted row's SMF part beside its new ledger record":
+        # @req REQ-SSPEC-COMPILER
+        step("copies an adopted row's SMF part beside its new ledger record")
+        val prior = resume_fresh_ledger("part_prior")
+        val queue = resume_fresh_ledger("part_next")
+        val _owner = env_set("SIMPLE_MIR_SHARD_OWNER", "0/1@0")
+        assert_true(hir_shard_recovery_inventory(prior, "src-id", ["mod.a"]))
+        assert_equal(native_mir_shard_claim_v1(prior, "mod.a", "src-id"), 1)
+        assert_true(native_mir_shard_publish_pass_v1(prior, "mod.a", "", 0, 0, ""))
+        assert_true(native_mir_shard_smf_part_write_v1(prior, "mod.a", [7u8, 8u8]))
+        val adopted = native_mir_shard_resume_adopt_v1(prior, queue)
+        assert_equal(adopted.adopted, 1)
+        val part = native_mir_shard_smf_part_read_v1(queue, "mod.a")
+        assert_true(part.is_ok())
+        assert_equal(part.unwrap().len(), 2)
+        val _cleanup_prior = dir_remove_all(prior)
+        val _cleanup_queue = dir_remove_all(queue)
+
+    it "refuses a prior ledger without an inventory and claims nothing":
+        # @req REQ-SSPEC-COMPILER
+        step("refuses a prior ledger without an inventory and claims nothing")
+        val prior = resume_fresh_ledger("empty_prior")
+        val queue = resume_fresh_ledger("empty_next")
+        val adopted = native_mir_shard_resume_adopt_v1(prior, queue)
+        assert_false(adopted.reason == "")
+        assert_equal(adopted.adopted, 0)
+        val _cleanup_prior = dir_remove_all(prior)
+        val _cleanup_queue = dir_remove_all(queue)
