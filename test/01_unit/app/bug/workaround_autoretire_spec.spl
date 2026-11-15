@@ -1,0 +1,90 @@
+"""
+## Purpose and audience
+
+Purpose: pin the pure helpers behind `bug-resolve --auto-retire` and the
+`check-dbs` closure-bypass advisory. Audience: maintainers of the bug closure
+gate and workaround retirement. The helpers list live workaround sites for a
+bug (path:line), never claim a clean result from an incomplete index, and flag
+a fixed/closed bug that still has a workaround (E-BUG-WR-004). Nothing is
+applied or written.
+"""
+# @req CU-015
+# @req CU-016
+# @cover src/app/bug/workaround_autoretire.spl
+
+use std.spec.{describe, it, expect, step}
+use app.bug.workaround_index.{WorkaroundLink, WorkaroundIndex}
+use app.bug.closure_gate.{BugIdV1}
+use app.bug.workaround_autoretire.{workaround_auto_retire_report_v1, workaround_auto_retire_lines_v1,
+    workaround_closure_bypass_findings_v1, workaround_closure_bypass_message_v1, AutoRetireVerdictV1}
+use std.database.bug.{BugDatabase, bug_database_from_sdn}
+use std.database.core.{SdnDatabase, SdnTable, SdnRow}
+
+fn bug_fixture(status: text) -> BugDatabase:
+    val raw = SdnDatabase.new("unused-in-memory-fixture")
+    val active = SdnTable.new("bugs_active", ["id", "severity", "status", "title"])
+    val row = SdnRow.empty()
+    row.set("id", "bug_alpha")
+    row.set("severity", "P1")
+    row.set("status", status)
+    row.set("title", "fixture bug")
+    active.add_row(row)
+    raw.set_table("bugs_active", active)
+    bug_database_from_sdn(raw)
+
+fn link_of(bug: text, path: text, line: i64) -> WorkaroundLink:
+    WorkaroundLink(bug_id: bug, path: path, line: line, recover: "", reason: "")
+
+fn index_of(links: [WorkaroundLink], complete: bool) -> WorkaroundIndex:
+    WorkaroundIndex(revision: "abcdef0", complete: complete, links: links)
+
+describe "workaround auto-retire report":
+    it "lists only the sites linked to the bug and blocks while any remain":
+        # @req CU-016
+        step("two sites for bug_alpha, one for another bug")
+        val idx = index_of([link_of("bug_alpha", "src/a.spl", 7), link_of("other", "src/b.spl", 3),
+            link_of("bug_alpha", "src/c.spl", 9)], true)
+        val report = workaround_auto_retire_report_v1(idx, BugIdV1(value: "bug_alpha"))
+        expect(report.verdict).to_equal(AutoRetireVerdictV1.CandidatesRemain)
+        expect(report.sites.len()).to_equal(2)
+        val lines = workaround_auto_retire_lines_v1(report)
+        expect(lines.len()).to_equal(2)
+        expect(lines[0]).to_contain("src/a.spl:7")
+        expect(lines[1]).to_contain("src/c.spl:9")
+        expect(lines[0]).to_contain("not applied")
+
+    it "does not block when a complete index has no site for the bug":
+        # @req CU-016
+        step("complete index, unrelated link only")
+        val idx = index_of([link_of("other", "src/b.spl", 3)], true)
+        val report = workaround_auto_retire_report_v1(idx, BugIdV1(value: "bug_alpha"))
+        expect(report.verdict).to_equal(AutoRetireVerdictV1.NothingToRetire)
+
+    it "never reports an incomplete index as clean":
+        # @req CU-016
+        step("incomplete index with no matching site still blocks")
+        val idx = index_of([], false)
+        val report = workaround_auto_retire_report_v1(idx, BugIdV1(value: "bug_alpha"))
+        expect(report.verdict).to_equal(AutoRetireVerdictV1.IndexIncomplete)
+        expect(workaround_auto_retire_lines_v1(report)[0]).to_contain("fullscan")
+
+describe "workaround closure bypass":
+    it "flags a fixed or closed bug that still has a live workaround":
+        # @req CU-015
+        step("fixed and closed each yield one E-BUG-WR-004 finding with path:line")
+        val idx = index_of([link_of("bug_alpha", "src/a.spl", 7)], true)
+        val fixed = workaround_closure_bypass_findings_v1(idx, bug_fixture("fixed"))
+        expect(fixed.len()).to_equal(1)
+        expect(fixed[0].code.value).to_equal("E-BUG-WR-004")
+        val msg = workaround_closure_bypass_message_v1(fixed[0])
+        expect(msg).to_contain("bug_alpha")
+        expect(msg).to_contain("src/a.spl:7")
+        expect(workaround_closure_bypass_findings_v1(idx, bug_fixture("closed")).len()).to_equal(1)
+
+    it "ignores open bugs and unknown bug ids":
+        # @req CU-015
+        step("open bug is a legitimate workaround; unknown id is reported elsewhere")
+        val idx = index_of([link_of("bug_alpha", "src/a.spl", 7)], true)
+        expect(workaround_closure_bypass_findings_v1(idx, bug_fixture("open")).len()).to_equal(0)
+        val ghost = index_of([link_of("missing", "src/a.spl", 7)], true)
+        expect(workaround_closure_bypass_findings_v1(ghost, bug_fixture("fixed")).len()).to_equal(0)
