@@ -872,3 +872,51 @@ fn interpreter_unit_decl_same_unit_arithmetic() {
     assert_eq!(run("if a < b: 1 else: 0"), 0);
     assert_eq!(run("if b < a: 1 else: 0"), 1);
 }
+
+#[test]
+fn interpreter_unit_decl_method_bearing_value_class_is_not_int() {
+    // A class with a lone `value` field AND methods is an ordinary class, not a
+    // unit record: it must not silently convert to an int.
+    let code = r#"
+class Wrapper:
+    value: i64
+    fn doubled() -> i64:
+        self.value * 2
+
+val w = Wrapper(value: 5)
+val n: i64 = w.value
+main = n + (w + 1)
+"#;
+    let result = run_code(code, &[], "");
+    assert!(result.is_err(), "method-bearing single-value class must not convert to int");
+}
+
+#[test]
+fn interpreter_unit_decl_distinct_units_denied() {
+    let run = |expr: &str| {
+        let code = format!(
+            "unit ByteCount: u64\nunit BitCount: u64\n\nval a = ByteCount(value: 12)\nval b = BitCount(value: 4)\nmain = {}\n",
+            expr
+        );
+        run_code(&code, &[], "")
+    };
+    for e in ["a + b", "a - b", "a * b", "a / b", "a % b", "if a < b: 1 else: 0", "if a == b: 1 else: 0"] {
+        let err = run(e).err().unwrap_or_else(|| panic!("`{}` must be denied", e)).to_string();
+        assert!(err.contains("SPL-UNIT-002"), "`{}`: {}", e, err);
+    }
+}
+
+#[test]
+fn interpreter_unit_decl_unit_plus_scalar_denied_scaling_allowed() {
+    let run = |expr: &str| {
+        let code = format!("unit ByteCount: u64\n\nval a = ByteCount(value: 12)\nmain = {}\n", expr);
+        run_code(&code, &[], "")
+    };
+    for e in ["(a + 1).value", "(a - 1).value", "(1 + a).value"] {
+        let err = run(e).err().unwrap_or_else(|| panic!("`{}` must be denied", e)).to_string();
+        assert!(err.contains("SPL-UNIT-002"), "`{}`: {}", e, err);
+    }
+    assert_eq!(run("(a * 2).value").unwrap().exit_code, 24);
+    assert_eq!(run("(2 * a).value").unwrap().exit_code, 24);
+    assert_eq!(run("(a / 3).value").unwrap().exit_code, 4);
+}
