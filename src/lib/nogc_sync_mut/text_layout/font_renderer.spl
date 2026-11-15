@@ -344,7 +344,7 @@ use std.nogc_sync_mut.io.time_ops.{rt_time_now_micros}
 # a 3-character string 6 times and read phantom zero codepoints past the end —
 # inflating every non-ASCII advance array, width, and rendered run.
 # See doc/08_tracking/bug/live_lane_inline_text_measure_counts_utf8_bytes_2026-08-11.md
-use std.common.encoding.utf8.{text_codepoints}
+use std.common.encoding.utf8.{text_codepoints, utf8_codepoint_byte_len}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
 use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into}
 use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
@@ -1867,7 +1867,20 @@ class FontRenderer:
         # below happens INLINE in this method body (never delegated to a
         # separate free-function push helper) -- see the comment on
         # `_glyph_raster_keys` above for why that boundary matters.
-        val raster_identity = if active_rasterizer != nil: active_rasterizer.cache_identity() else: ""
+        # Without a rasterizer the glyph comes from the fallback tier chosen in
+        # "Rasterize" below (ttf handle, vector outline, or bitmap), so the tier
+        # is part of the key: an empty identity alone served the vector 'A'
+        # (7 px) to a bitmap-tier renderer (8x16).
+        val raster_identity = if active_rasterizer != nil:
+            active_rasterizer.cache_identity()
+        else if self.has_ttf():
+            "fallback=ttf:{self.ttf_handle}"
+        else if self.use_vector:
+            "fallback=vector"
+        else if self.use_bitmap:
+            "fallback=bitmap"
+        else:
+            "fallback=none"
         val raster_key = "{raster_identity};cp={codepoint};fs={font_size}"
         var raster_idx = 0
         var raster_hit: CachedGlyph? = nil
@@ -2418,7 +2431,7 @@ class FontRenderer:
                     byte_offset: fallback_byte_offset
                 ))
                 fallback_x = fallback_x + glyph.advance.to_i64()
-                fallback_byte_offset = fallback_byte_offset + 1
+                fallback_byte_offset = fallback_byte_offset + utf8_codepoint_byte_len(codepoint.to_i64())
                 ci = ci + 1
         if layout.len() == 0:
             return FontTextPayload(valid: false, width: 0, height: 0, offset_x: 0, offset_y: 0, pixels: [])
@@ -2721,6 +2734,7 @@ class FontRenderer:
         # structs whenever the fallback produced them.
         var fallback_cps: [i32] = []
         var fallback_xs: [i64] = []
+        var fallback_byte_offsets: [i64] = []
         if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
             _vec_glyph_probe_count = _vec_glyph_probe_count + 1
             print("[vec-glyph-probe] active-after-layout_text layout_len={layout.len()} use_vector={self.use_vector} use_bitmap={self.use_bitmap} content_len={content.len()}")
@@ -2766,8 +2780,10 @@ class FontRenderer:
                 ))
                 fallback_cps = fallback_cps.push(codepoint)
                 fallback_xs = fallback_xs.push(fallback_x)
+                fallback_byte_offsets = fallback_byte_offsets.push(fallback_byte_offset)
                 fallback_x = fallback_x + glyph.advance.to_i64()
-                fallback_byte_offset = fallback_byte_offset + 1
+                # UTF-8 byte offset (owner decision 2026-11-13: text offsets are bytes).
+                fallback_byte_offset = fallback_byte_offset + utf8_codepoint_byte_len(codepoint.to_i64())
                 ci = ci + 1
         self.text_phase_layout_nonempty = layout.len() > 0
         if layout.len() == 0:
@@ -2838,7 +2854,7 @@ class FontRenderer:
                     requad_cp = fallback_cps[i]
                     quad_dst_x = fallback_xs[i]
                     quad_dst_y = 0
-                    quad_byte_offset = i.to_i64()
+                    quad_byte_offset = fallback_byte_offsets[i]
                 val glyph = self.get_glyph(requad_cp, font_size)
                 if i < fallback_cps.len():
                     quad_dst_x = quad_dst_x + glyph.bearing_x.to_i64()
