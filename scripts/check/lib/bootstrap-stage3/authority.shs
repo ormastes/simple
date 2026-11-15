@@ -6037,6 +6037,22 @@ STAGE3_NATIVE
 
 # Three-argument v2 entry; its caller supplies the wrapper environment default.
 # Private temporary directory, no stdout and no destination change on refusal.
+# Host-scaled stage3 git-state budget in ms: 300s x (1 + load1/ncpu), capped at
+# 4x. Where /proc/loadavg is absent (Windows Git Bash) load is unknown, so the
+# 4x cap applies rather than the bare 300s that fails a full-checkout walk.
+bootstrap_stage3_git_budget_ms() {
+    stage3_loadavg=${STAGE3_LOADAVG_FILE:-/proc/loadavg}
+    stage3_ncpu=${STAGE3_NCPU:-$(nproc 2>/dev/null || echo 1)}
+    if [ -r "$stage3_loadavg" ]; then
+        stage3_load=$(cut -d' ' -f1 "$stage3_loadavg" 2>/dev/null | cut -d. -f1)
+        stage3_scale=$(( 1 + ${stage3_load:-0} / (stage3_ncpu > 0 ? stage3_ncpu : 1) ))
+    else
+        stage3_scale=4
+    fi
+    [ "$stage3_scale" -le 4 ] || stage3_scale=4
+    echo $((300000 * stage3_scale))
+}
+
 bootstrap_stage3_materialized_git_state() (
     [ "$#" -eq 3 ] || exit 1
     case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) exit 1 ;; esac
@@ -6061,11 +6077,7 @@ bootstrap_stage3_materialized_git_state() (
     # fixed 330s kill fired under load): unset -> 300s x (1 + load1/ncpu),
     # capped at 4x; the outer kill always derives from the same budget + 30s.
     if [ -z "${BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS:-}" ]; then
-        stage3_ncpu=$(nproc 2>/dev/null || echo 1)
-        stage3_load=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null | cut -d. -f1)
-        stage3_scale=$(( 1 + ${stage3_load:-0} / (stage3_ncpu > 0 ? stage3_ncpu : 1) ))
-        [ "$stage3_scale" -le 4 ] || stage3_scale=4
-        BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS=$((300000 * stage3_scale))
+        BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS=$(bootstrap_stage3_git_budget_ms) || exit 1
         export BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS
     fi
     case "$BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS" in ''|*[!0-9]*) exit 1 ;; esac

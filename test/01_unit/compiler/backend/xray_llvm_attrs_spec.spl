@@ -38,6 +38,12 @@ fn xray_attr_translator(target_os: text) -> MirToLlvm:
         "", false, "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
         false, "hosted")
 
+fn xray_env_translator(target_os: text, target_env: text) -> MirToLlvm:
+    MirToLlvm.create_explicit_target_with_hardening(
+        "probe.attrs", CodegenTarget.X86_64, "x86_64", "pc", target_os,
+        target_env, true, "e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
+        false, "hosted")
+
 fn xray_attr_ir(module: MirModule) -> text:
     xray_attr_translator("linux").translate_module(module)
 
@@ -68,6 +74,18 @@ describe "XRay LLVM function attributes":
         step("A.5: LLVM XRay sleds are admitted for Linux triples only")
         val ir = xray_attr_translator("darwin").translate_module(xray_attr_module([xray_attr_fn(1, "xr_tail", 2)]))
         expect(ir).to_contain("XRAY-E-UNSUPPORTED-TARGET")
+
+    # @req REQ-XRAY-V1-API-01
+    it "rejects windows-msvc (no auto-export) and admits windows-gnu":
+        step("clang-cl / --msvc: the __simple_xray_* data symbols would not be exported")
+        val module = xray_attr_module([xray_attr_fn(1, "xr_tail", 2)])
+        val msvc = xray_env_translator("windows", "msvc").translate_module(module)
+        expect(msvc).to_contain("XRAY-E-UNSUPPORTED-TARGET")
+        expect(msvc).to_contain("no auto-export")
+        step("llvm-mingw windows-gnu keeps the flag-guard route")
+        val gnu = xray_env_translator("windows", "gnu").translate_module(module)
+        expect(gnu.contains("XRAY-E-")).to_equal(false)
+        expect(gnu).to_contain("@__simple_xray_slot_xr_tail")
 
     it "admits the host-default Linux translator used by the driver":
         step("MirToLlvm.create derives target_os from the triple parser, not a literal")
@@ -233,6 +251,40 @@ describe "XRay LLVM flag-guard sleds (Windows)":
         expect(ir).to_contain("atomicrmw add ptr %xe_widx, i64 1 monotonic")
         expect(ir).to_contain("atomicrmw add ptr %xe_dropped, i64 1 monotonic")
         expect(ir).to_contain("store atomic i64 %xe_seq, ptr %xe_rseq release, align 8")
+
+    # @req REQ-XRAY-V1-API-01
+    it "emits a wrap-mode ring edge when the module selects xray_ring_wrap":
+        """Wrap keeps the most recent N edges: claim by atomicrmw add, slot =
+        claim mod capacity, seq invalidated first and release-stored last."""
+        var module = xray_attr_module([xray_attr_fn(1, "xr_tail", 2)])
+        module.xray_ring_wrap = true
+        val ir = xray_attr_translator("windows").translate_module(module)
+        step("A marker symbol tells the reader the ring wraps")
+        expect(ir).to_contain("@__simple_xray_ring_wrap_v2 = constant i64 1")
+        step("Same ring layout; claim never drops")
+        expect(ir).to_contain("@__simple_xray_ring_v2 = global { i64, i64, i64, [65536 x { i64, i32, i32, i64, i64 }] }")
+        expect(ir).to_contain("%xe_c = atomicrmw add ptr %xe_widx, i64 1 monotonic")
+        expect(ir).to_contain("%xe_i = urem i64 %xe_c, 65536")
+        expect(ir.contains("%xe_dropped")).to_equal(false)
+        step("seq := 0, fence release, payload, seq := claim + 1 release")
+        expect(ir).to_contain("store atomic i64 0, ptr %xe_rseq monotonic, align 8")
+        expect(ir).to_contain("fence release")
+        expect(ir).to_contain("%xe_rts = getelementptr inbounds { i64, i64, i64, [65536 x { i64, i32, i32, i64, i64 }] }, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 4")
+        expect(xray_count_of(ir, "declare i64 @llvm.readcyclecounter()")).to_equal(1)
+        expect(ir).to_contain("%xe_seq = add i64 %xe_c, 1")
+        expect(ir).to_contain("store atomic i64 %xe_seq, ptr %xe_rseq release, align 8")
+
+    it "keeps drop mode byte-identical when xray_ring_wrap is off":
+        step("Off identity: explicit false equals the default module")
+        val base = xray_attr_translator("windows").translate_module(xray_attr_module([xray_attr_fn(1, "xr_tail", 2)]))
+        var off = xray_attr_module([xray_attr_fn(1, "xr_tail", 2)])
+        off.xray_ring_wrap = false
+        val ir = xray_attr_translator("windows").translate_module(off)
+        expect(ir).to_equal(base)
+        step("Drop-mode edge text is the pre-wrap text")
+        expect(ir.contains("__simple_xray_ring_wrap_v2")).to_equal(false)
+        expect(ir).to_contain("  %xe_i = atomicrmw add ptr %xe_widx, i64 1 monotonic\n  %xe_full = icmp uge i64 %xe_i, 65536\n  br i1 %xe_full, label %xe_drop, label %xe_store")
+        expect(ir).to_contain("  %xe_seq = add i64 %xe_i, 1\n")
 
     # Bug xray_win_flag_guard_dllexport_disables_mingw_auto_export_2026-11-15:
     # one explicit dllexport turns MinGW lld auto-export off, so the --xray DLL

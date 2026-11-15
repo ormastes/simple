@@ -1,0 +1,162 @@
+# POSIX adapter retains OwnedProcessLease through cancellation, drain and
+# collect. File/path observations assume a trusted namespace, not atomic pinning.
+use std.nogc_sync_mut.io.stdin_command_contract_v1.*
+use std.nogc_sync_mut.io.process_ops.{OwnedProcessLease, process_owned_start_v3}
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow, file_size_raw,
+    file_read_regular_no_follow_bounded_bytes, file_hash_sha256}
+use std.nogc_sync_mut.io.dir_ops.dir_is_real_no_follow
+use std.nogc_sync_mut.file_system.metadata.file_mode_bits
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
+use std.common.text_bytes.text_byte_buffer
+
+pub class StdinCommandPlatformOwnerV1:
+    lease: OwnedProcessLease
+    request: StdinCommandRequestV1
+    var stdout: [u8]
+    var stderr: [u8]
+    var stdout_received: i64
+    var stderr_received: i64
+    var cancelled: bool
+    var consumed: bool
+    var error: text
+
+pub struct StdinCommandPlatformTurnV1:
+    owner: Option<StdinCommandPlatformOwnerV1>
+    result: Option<StdinCommandResultV1>
+    error: text
+
+pub fn stdin_command_platform_file_no_follow_v1(path: text, maximum: i64) -> bool:
+    if not path.starts_with("/") or not stdin_command_path_valid_v1(path): return false
+    val tail = path.substring(1, path.byte_len())
+    val parts = tail.split("/")
+    var parent = ""
+    for index in 0..(parts.len() - 1):
+        parent = parent + "/" + parts[index]
+        if not dir_is_real_no_follow(parent): return false
+    if not file_is_regular_no_follow(path): return false
+    val size = file_size_raw(path)
+    size > 0 and size <= maximum
+
+pub fn stdin_command_platform_profile_read_v1(path: text) -> StdinCommandProfileReadTurnV1:
+    if not stdin_command_platform_file_no_follow_v1(path, 65536):
+        return StdinCommandProfileReadTurnV1(nil, nil, "command-profile-file")
+    val mode = file_mode_bits(path)
+    if mode < 0 or (mode & 63) != 0 or (mode & 256) == 0:
+        return StdinCommandProfileReadTurnV1(nil, nil, "command-profile-permissions")
+    match file_read_regular_no_follow_bounded_bytes(path, 65536):
+        case Ok(value): StdinCommandProfileReadTurnV1(nil, Some(value), "")
+        case Err(_): StdinCommandProfileReadTurnV1(nil, nil, "command-profile-read")
+
+pub fn stdin_command_platform_files_admit_v1(program: text, private_path: text, public_path: text,
+        expected_digest: text, protected_store: bool) -> Result<(), text>:
+    if not stdin_command_platform_file_no_follow_v1(program, 67108864): return Err("command-program-file")
+    val executable_mode = file_mode_bits(program)
+    if executable_mode < 0 or (executable_mode & 18) != 0 or (executable_mode & 64) == 0:
+        return Err("command-program-permissions")
+    if expected_digest != "":
+        if not stdin_command_digest_valid_v1(expected_digest): return Err("command-program-digest")
+        val actual = file_hash_sha256(program)
+        if actual == nil or actual.unwrap() != expected_digest: return Err("command-program-digest")
+    # A protected-store path has already been validated by its retained owner.
+    if protected_store: return Ok(())
+    if not stdin_command_platform_file_no_follow_v1(private_path, 65536): return Err("command-private-file")
+    val private_mode = file_mode_bits(private_path)
+    if private_mode < 0 or (private_mode & 63) != 0 or (private_mode & 256) == 0:
+        return Err("command-private-permissions")
+    if not stdin_command_platform_file_no_follow_v1(public_path, 65536): return Err("command-public-file")
+    val public_mode = file_mode_bits(public_path)
+    if public_mode < 0 or (public_mode & 18) != 0 or (public_mode & 256) == 0:
+        return Err("command-public-permissions")
+    Ok(())
+
+pub fn stdin_command_platform_begin_v1(request: StdinCommandRequestV1) -> StdinCommandPlatformTurnV1:
+    if (not request.program.starts_with("/") or not stdin_command_path_valid_v1(request.program) or
+            request.timeout_ms <= 0 or request.timeout_ms > 120000 or
+            request.max_stdout_bytes <= 0 or request.max_stdout_bytes > 16777216 or
+            request.max_stderr_bytes <= 0 or request.max_stderr_bytes > 16777216 or
+            request.input.len() > 2105360 or
+            request.environment.len() != 0 or request.directory != ""):
+        return StdinCommandPlatformTurnV1(nil, nil, "command-request-invalid")
+    val admitted = stdin_command_platform_files_admit_v1(request.program, "", "", request.expected_digest, true)
+    if admitted.is_err(): return StdinCommandPlatformTurnV1(nil, nil, "command-program-admission")
+    val now = time_sample_unix_micros_or_failure()
+    if now < 0 or request.expires_at_unix_ms <= now / 1000:
+        return StdinCommandPlatformTurnV1(nil, nil, "command-admission-expired")
+    val stdout = match text_byte_buffer(request.max_stdout_bytes):
+        case Ok(value): value
+        case Err(_): return StdinCommandPlatformTurnV1(nil, nil, "command-output-allocation")
+    val stderr = match text_byte_buffer(request.max_stderr_bytes):
+        case Ok(value): value
+        case Err(_): return StdinCommandPlatformTurnV1(nil, nil, "command-output-allocation")
+    val started = match process_owned_start_v3(request.program, request.args, request.input,
+            request.timeout_ms, 500, request.max_stdout_bytes + request.max_stderr_bytes):
+        case Ok(value): value
+        case Err(_): return StdinCommandPlatformTurnV1(nil, nil, "command-start-failed")
+    val owner = StdinCommandPlatformOwnerV1(lease: started.lease(), request: request,
+        stdout: stdout, stderr: stderr, stdout_received: 0, stderr_received: 0,
+        cancelled: false, consumed: false,
+        error: if started.runtime_error == 0: "" else: "command-start-runtime-error")
+    StdinCommandPlatformTurnV1(Some(owner), nil, owner.error)
+
+pub fn stdin_command_platform_step_v1(owner: StdinCommandPlatformOwnerV1, cancel: bool) -> StdinCommandPlatformTurnV1:
+    var current = owner
+    if current.consumed: return StdinCommandPlatformTurnV1(nil, nil, "command-owner-consumed")
+    if cancel and not current.cancelled:
+        match current.lease.cancel():
+            case Ok(receipt):
+                if receipt.accepted: current.cancelled = true
+                if receipt.runtime_error != 0 or not receipt.accepted:
+                    if current.error == "": current.error = "command-cancel-unresolved"
+                elif current.error == "": current.error = "command-cancelled"
+            case Err(_):
+                if current.error == "": current.error = "command-cancel-unresolved"
+    val observed = match current.lease.poll(STDIN_COMMAND_POLL_WAIT_MS_V1, 65536, 16384):
+        case Ok(value): value
+        case Err(_): return StdinCommandPlatformTurnV1(Some(current), nil, "command-poll-unresolved")
+    current.stdout_received = current.stdout_received + observed.stdout.len()
+    current.stderr_received = current.stderr_received + observed.stderr.len()
+    if current.stdout.len() + observed.stdout.len() <= current.request.max_stdout_bytes:
+        val expected = current.stdout.len() + observed.stdout.len()
+        for byte in observed.stdout: current.stdout.push(byte)
+        if current.stdout.len() != expected and current.error == "": current.error = "command-output-allocation"
+    elif current.error == "": current.error = "command-stdout-limit"
+    if current.stderr.len() + observed.stderr.len() <= current.request.max_stderr_bytes:
+        val expected = current.stderr.len() + observed.stderr.len()
+        for byte in observed.stderr: current.stderr.push(byte)
+        if current.stderr.len() != expected and current.error == "": current.error = "command-output-allocation"
+    elif current.error == "": current.error = "command-stderr-limit"
+    if (observed.stdout_truncated or observed.stderr_truncated) and current.error == "":
+        current.error = "command-output-truncated"
+    if observed.runtime_error != 0 and current.error == "": current.error = "command-runtime-error"
+    if observed.timed_out and current.error == "": current.error = "command-timeout"
+    if (not observed.terminal or not observed.reaped or current.stdout_received < observed.stdout_kept or
+            current.stderr_received < observed.stderr_kept):
+        return StdinCommandPlatformTurnV1(Some(current), nil, current.error)
+    var input_written: i64 = -1
+    var stdin_closed = false
+    match current.lease.input_receipt():
+        case Ok(input):
+            input_written = input.written
+            stdin_closed = input.stdin_closed
+            if (input.runtime_error != 0 or input.accepted != current.request.input.len() or
+                    input.written != current.request.input.len() or not input.stdin_closed):
+                if current.error == "": current.error = "command-input-incomplete"
+        case Err(_):
+            if current.error == "": current.error = "command-input-receipt"
+    val result = match current.lease.collect():
+        case Ok(value): value
+        case Err(_): return StdinCommandPlatformTurnV1(Some(current), nil, "command-collection-unresolved")
+    if not result.reaped or result.runtime_error == 11 or result.runtime_error == 16:
+        return StdinCommandPlatformTurnV1(Some(current), nil, "command-collection-pending")
+    current.consumed = true
+    if (result.runtime_error != 0 or result.exit_code != 0 or result.timed_out or result.cancel_requested or
+            not result.identity_revalidated) and current.error == "": current.error = "command-process-failed"
+    if (result.stdout_truncated or result.stderr_truncated) and current.error == "": current.error = "command-output-truncated"
+    val normalized = StdinCommandResultV1(stdout: current.stdout, stderr: current.stderr, exit_code: result.exit_code,
+        input_written: input_written, stdin_closed: stdin_closed,
+        stdout_eof: not result.stdout_truncated, stderr_eof: not result.stderr_truncated,
+        stdout_truncated: result.stdout_truncated, stderr_truncated: result.stderr_truncated,
+        # POSIX preserves its legacy trusted-namespace hash observation; this
+        # field is not a claim that a pinned executable was launched.
+        executable_digest: current.request.expected_digest, reaped: result.reaped, cleanup_confirmed: true, effect_attempted: true)
+    StdinCommandPlatformTurnV1(nil, Some(normalized), current.error)
