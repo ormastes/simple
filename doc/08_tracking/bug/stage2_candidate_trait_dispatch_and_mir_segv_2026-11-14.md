@@ -75,3 +75,39 @@ verification/logs/{compiler_cli_build.log,test_runner_build.log}.
 2. CLI-row MIR segv: the crash follows retained backend AOT evidence at
    .../cache/compiler-tools/stage2/d145d236.../899d555e.../simple-aot-diagnostic-*;
    that evidence bundle should localize the faulting module.
+
+## 2026-11-15 addendum: Regression 2 ALSO reproduces at 189dabae8e3 — the "crash-free baseline" claim above is retracted
+
+Cycle 25b (receipt-authorized full run, mcp-local lane, output c25full2):
+tip 189dabae8e3 + ONLY the RSS-policy ceiling cherry-pick (9d94016901c,
+scripts-only — cannot affect compiler codegen), MSVC, cap 54525952 KiB,
+cold native cache (cached=0).
+
+`compiler_cli_build` again exited 139 (SIGSEGV), at 6,562 s into the row,
+MIR 650/3148 (20.6%), immediately after `aop_weave` completed (batch-81) at
+the transition into `native_cache`:
+
+```
+[build] phase=aop_weave state=complete done=8/8 elapsed_ms=6556184
+[build] phase=native_cache state=running done=0 total=8 ...
+-> process exits 139 (no LLVM/HIR diagnostic)
+```
+
+Row self-report at the last MIR line: rss_mib=32876 (32.8 GiB) at MIR 650.
+The watchdog did NOT report rss-cap-exceeded (exit 139, not 88), but the
+row's RSS trajectory leaves a memory-pressure-corruption hypothesis open —
+pre-ceiling cycles were killed by the watchdog at 48 GiB before any batch at
+this depth ran far enough to expose it. Cycle 24b "reached MIR 1832
+crash-free" is therefore NOT evidence that 189dabae8e3 is free of
+Regression 2: outcomes at the same tip differ (1832 vs 650), so the segv is
+either non-deterministic or cache/state-dependent (cycle 25b ran with a cold
+native cache; cycle 24b's cache state was not recorded).
+
+Consequence: every tip AT or AFTER 189dabae8e3 is blocked for the Windows
+stage2 lane by Regression 2 (tips >= b5d93e48cd8 additionally by Regression
+1). The lane's next corridor is the current release/1.0.0 tip, which carries
+candidate fixes e250454f1aa (MIR erased-generic payload decoded exactly once
+per consumer) and 10502b44377/92237f6276d (per-module AOT codegen errors
+fail their module, not the worker), plus the memory reductions
+(5f80235594b interface-only HIR + serial MIR sharding; 7074bd686e7
+essential-backend closure shrink).
