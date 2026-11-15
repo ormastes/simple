@@ -38,10 +38,21 @@ pub fn trace_query_options_parse_v1(args: [text]) -> Result<TraceQueryOptionsV1,
     if args.len() == 1 and (args[0] == "--help" or args[0] == "-h"):
         options.help = true
         return Ok(options)
-    if args.len() < 2: return Err("TRACE-QUERY-INVALID: expected list|show|refs and a kind; use trace --help")
-    options.operation = args[0]
-    options.kind = args[1]
+    if args.len() >= 1 and args[0] == "missing":
+        # `missing` takes no identity; the kind is optional and only requirements apply.
+        options.operation = "missing"
+        options.kind = "requirements"
+    elif args.len() < 2:
+        return Err("TRACE-QUERY-INVALID: expected list|show|refs|missing and a kind; use trace --help")
+    else:
+        options.operation = args[0]
+        options.kind = args[1]
     var index = 2
+    if options.operation == "missing":
+        index = 1
+        if args.len() >= 2 and not args[1].starts_with("--"):
+            if args[1] != "requirements": return Err("TRACE-QUERY-INVALID: missing applies to requirements only")
+            index = 2
     if options.operation == "show" or options.operation == "refs":
         if args.len() < 3: return Err("TRACE-QUERY-INVALID: " + options.operation + " requires a canonical identity")
         options.selected_id = args[2]
@@ -122,6 +133,11 @@ pub fn trace_query_options_parse_v1(args: [text]) -> Result<TraceQueryOptionsV1,
         return Err("TRACE-QUERY-INVALID: snapshot must be worktree, index or git:REV")
     if options.paths.len() > 128 or options.declarations.len() > 32:
         return Err("TRACE-QUERY-BUDGET: too many selected files or declarations")
+    if options.operation == "missing":
+        if options.id_prefix != "" or options.cursor != "":
+            return Err("TRACE-QUERY-INVALID: missing accepts no prefix or cursor")
+        if options.limit < 1 or options.limit > 200: return Err("TRACE-QUERY-INVALID: limit must be between 1 and 200")
+        return Ok(options)
     if options.operation == "refs":
         if options.id_prefix != "": return Err("TRACE-QUERY-INVALID: refs accepts no prefix")
         if options.kind == "file":
@@ -158,6 +174,10 @@ pub fn trace_query_help_v1() -> text:
     "       simple trace show feature|requirement|bug <canonical-id> [options]\n" +
     "       simple trace refs feature|requirement|bug <canonical-id> [options]\n" +
     "       simple trace refs file <repo-relative-path> [options]\n" +
+    "       simple trace missing [requirements] [options]\n" +
+    "  missing lists requirements with no implemented_by edge and/or no verified_by edge\n" +
+    "  (direct, via a decomposed criterion, or a --spec-root `# @req` row); in an incomplete\n" +
+    "  graph an absent link is reported unknown, not missing. --limit caps the rows shown.\n" +
     "  refs file lists claims on the captured file node, entities declared there and\n" +
     "  sidecar rows (bugs located_in/reproducible_by, @req verified_by) at that path.\n" +
     "  refs lists every authored claim from/to the identity (direction, relation,\n" +

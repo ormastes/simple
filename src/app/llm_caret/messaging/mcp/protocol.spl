@@ -1,7 +1,8 @@
 """Stdio MCP protocol adapter over the canonical messaging MCP service."""
 
 use std.mcp_sdk.core.json.{LB, RB, jp, js}
-use std.mcp_sdk.server.app.{mcp_server_init, mcp_server_tool, mcp_server_handle, mcp_server_reset}
+use std.mcp_sdk.server.app.{mcp_server_init, mcp_server_tool, mcp_serve, mcp_server_reset}
+use std.mcp_sdk.transport.transport.{Transport}
 use app.llm_caret.messaging.adapter.server.auth.{AuthPrincipal}
 use app.llm_caret.messaging.application.task_service.{TaskState}
 use app.llm_caret.messaging.domain.model.{MessageOrigin}
@@ -19,7 +20,7 @@ var PROTOCOL_SCOPES: [text] = ["room:read", "room:write", "profile:read", "dm:wr
 # database_execution.spl. Do not claim this protocol alone proves offloading.
 extern fn stdin_read_char() -> text
 
-class MessagingStdioTransport:
+class MessagingStdioTransport with Transport:
     json_lines: bool
     detected: bool
     closed: bool
@@ -268,23 +269,7 @@ fn serve_messaging_mcp(database_path: text, identity_id: text, workspace_id: tex
     PROTOCOL_WORKSPACE = workspace_id
     PROTOCOL_SCOPES = scopes
     register_messaging_tools()
-    serve_messaging_stdio(MessagingStdioTransport.new())
+    mcp_serve(MessagingStdioTransport.new())
     PROTOCOL_SERVER.close()
-
-# WORKAROUND(native_user_class_imported_trait_vtable_missing_2026-11-15): the
-# seed native build emits no vtable for an app class implementing the imported
-# std Transport trait, so std mcp_serve(t: Transport) segfaults on the first
-# dispatch. Mirror mcp_serve over the concrete transport (no trait object)
-# until the codegen defect is fixed; then restore mcp_serve.
-fn serve_messaging_stdio(transport: MessagingStdioTransport):
-    var t = transport
-    var running = true
-    while running:
-        match t.read_message():
-            case Some(msg):
-                match mcp_server_handle(msg):
-                    case Some(resp): t.write_message(resp)
-                    case None: ()
-            case None: running = false
 
 export register_messaging_tools, configure_messaging_mcp_memory, serve_messaging_mcp

@@ -412,6 +412,40 @@ fn expr_attr_nil_guard():
     if expr_attr_s_val_stores == nil:
         expr_attr_s_val_stores = []
 
+fn expr_attr_placement_of(mode: i64) -> AttrPlacementV1:
+    if mode == 1: AttrPlacementV1.Column else: AttrPlacementV1.SparseHash
+
+# Fail-closed gate: a native build can corrupt the generic store's payloads
+# (doc/08_tracking/bug/native_erased_generic_optional_return_2026-11-15.md),
+# so a non-direct placement is used only after a fresh store round-trips.
+fn expr_attr_i64_round_trips(placement: AttrPlacementV1) -> bool:
+    match attr_store_detached_v1<i64>("self_check", placement):
+        case Ok(s):
+            var store = s
+            val _a = store.set(3, 9000000000)
+            val _b = store.set(5, 7)
+            match store.get(3):
+                case Ok(v3):
+                    match store.get(5):
+                        case Ok(v5): return v3 == 9000000000 and v5 == 7 and store.len() == 2
+                        case Err(_): return false
+                case Err(_): return false
+        case Err(_): return false
+
+fn expr_attr_text_round_trips(placement: AttrPlacementV1) -> bool:
+    match attr_store_detached_v1<text>("self_check", placement):
+        case Ok(s):
+            var store = s
+            val _a = store.set(3, "round-trip")
+            match store.get(3):
+                case Ok(v): return v == "round-trip" and store.len() == 1
+                case Err(_): return false
+        case Err(_): return false
+
+fn expr_attr_self_check_failed(mode: i64):
+    val token = if mode == 1: "column" else: "sparse_hash"
+    eprint("node-attr: {token} store failed its round-trip self-check on this build; staying on direct storage (see doc/08_tracking/bug/native_erased_generic_optional_return_2026-11-15.md)")
+
 # Config text: comma list of `<attr>=<direct|column|sparse_hash>` for attr in
 # extra, s_val. Unknown attrs are ignored; an unknown token turns everything off.
 pub fn expr_attr_apply_config(spec: text) -> Result<bool, text>:
@@ -437,6 +471,12 @@ pub fn expr_attr_apply_config(spec: text) -> Result<bool, text>:
                 expr_attr_extra_stores.clear()
                 expr_attr_s_val_stores.clear()
                 return Err(e)
+    if extra_mode != 0 and not expr_attr_i64_round_trips(expr_attr_placement_of(extra_mode)):
+        expr_attr_self_check_failed(extra_mode)
+        extra_mode = 0
+    if s_mode != 0 and not expr_attr_text_round_trips(expr_attr_placement_of(s_mode)):
+        expr_attr_self_check_failed(s_mode)
+        s_mode = 0
     expr_attr_extra_mode[0] = extra_mode
     expr_attr_s_val_mode[0] = s_mode
     expr_attr_extra_stores.clear()

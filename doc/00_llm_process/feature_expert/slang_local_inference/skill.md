@@ -203,3 +203,8 @@ SLANG_LIVE=1 SLANG_GPU=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi
   (default `Qwen2.5-1.5B-Instruct-Q4_K_M`). Ungated they skip.
 - Known gap: server `usage` counts are always 0
   (`doc/08_tracking/bug/slang_openai_usage_counts_always_zero_2026-11-15.md`).
+- **Windows test-lane notes.** `check_fit_with_available` is `check_fit` against an
+  availability the caller already probed (two Windows probes drift ~270 MB, so specs
+  probe once). Shell gates on MSYS must avoid per-file `$(...)` pipelines: a spawn costs
+  seconds there. The conformance test drops `detect_leaks` on Windows (no LSan) and the
+  prefix-cache contract test uses llvm-mingw clang there, as `build-slang-ggml-shim.shs` does.

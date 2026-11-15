@@ -1,6 +1,6 @@
 # Native build: no vtable for a user class implementing an imported trait
 
-- Status: open
+- Status: verification-pending
 - Severity: P1 (silent link stub -> segfault at first dynamic dispatch)
 - Found: 2026-11-15, llm_caret `messaging/mcp_worker.spl` native exe exited 139
 - Builder: Rust seed `native-build` (`SIMPLE_NATIVE_BUILD_RUST=1`), seed-tip of 2026-11-14
@@ -76,3 +76,30 @@ Restore `mcp_serve` once the codegen fix lands.
   `__vtable__` is the signal.
 - Is the stub generator right to stub data symbols (vtables) at all? Failing
   the link would have surfaced this at build time.
+
+## Fix (2026-11-15, seed)
+
+Root cause confirmed in HIR, not MIR: `record_class_with_trait_impls`
+(`hir/lower/module_lowering/module_pass.rs`) found no declaration for the
+imported trait because the per-caller binding in `trait_declared_owners` was
+never recorded under the entry module's key (keys held only the std modules),
+so no `HirImpl` -> no `vtable_impls` entry, while `imports.rs` still attached
+the vtable symbol to `StructInit`. Fix: fall back to the unique declaring
+module of a trait this module names in its own `use` (ambiguous names still
+skip). Why the binding is missing for the entry module is not yet pinned.
+
+Spec: `test/01_unit/compiler/backend/native_imported_trait_vtable_spec.spl`
+(fixture `test/fixtures/imported_trait_vtable/main.spl`) — RED on seed-tip,
+GREEN on the fixed seed. The #9355 workaround stays until native verification.
+Simple compiler (`src/compiler/`) lowering not audited for the same gap.
+
+## Native evidence (2026-11-15, workaround removed)
+
+The #9355 workaround in `src/app/llm_caret/messaging/mcp/protocol.spl` has been
+reverted: `MessagingStdioTransport with Transport` is back and the worker now
+calls the std `mcp_serve`. Built `mcp_worker.spl` with the fixed seed
+(`seed-vtable.exe`): `Build complete: 168 compiled, 0 cached, 0 failed`. The
+link log contains no `__vtable__` stub. The native spec
+`test/03_system/app/devhub/messenger/native_binary_messaging_mcp_worker_spec.spl`
+gives `Results: 3 total, 3 passed, 0 failed`. The status stays
+verification-pending until a deployed compiler includes the fix.
