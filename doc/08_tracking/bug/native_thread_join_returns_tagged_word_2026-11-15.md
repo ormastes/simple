@@ -38,3 +38,4 @@ Spec: `test/01_unit/lib/concurrent/thread_join_native_value_spec.spl` with
 ## Not covered
 `ThreadHandle.join()` is typed `i64?`; text/struct worker results have no typed join API
 in `std.concurrent.thread`, so they are not probed here.
+`rt_thread_join_limited`: defined only in the Rust runtime (tagged RuntimeValue); its sole Simple decl is the legacy `src/compiler_rust/lib/std/src/concurrency/threads.spl` as `-> Any` (decoded, not the raw `-> i64` bug). `src/lib` has no decl or caller, so no fix or probe case applies.
