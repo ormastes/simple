@@ -41,7 +41,7 @@ zero-slot guarantee for nodes with no pending field. Specs:
 every gate mode; implemented in the `RequiredInitCollectorV1` visitor of
 `required_field_init_v1.spl`, spec `test/01_unit/compiler/hir/attr_not_ready_v1_spec.spl`.
 Open (see `doc/08_tracking/bug/immutable_async_open_questions_2026-11-15.md`):
-`E_INIT_CAPABILITY_ESCAPE` (region PROVISIONAL, owner to ratify; section "Revision hooks"), non-await readiness
+non-await readiness
 proofs, alias flow, scheduler waiters, Rust seed parser.
 ## Immutable<T> read-only view (P2a, 2026-11-14)
 `Immutable<T>` lowers to `T`; the declaring param/local symbol is recorded in
@@ -67,7 +67,9 @@ pinned by `test/01_unit/compiler/cache/rev02_frozen_file_ast_codec_spec.spl`
 lease (`scv_compile_snapshot_lease_*`); `test/01_unit/lib/scv/rev01_pinned_revision_lease_spec.spl`
 is 1 GREEN, 1 RED (a process holds one lease, so several pinned revisions are
 not protected; bug `rev01_one_lease_per_process_blocks_multi_revision_pin_2026-11-15`).
-`E_INIT_CAPABILITY_ESCAPE`: PROVISIONAL region = constructing function's
-short-borrow boundary (borrow checker `record_loan_escape`); default off,
-`SIMPLE_INIT_CAPABILITY_ESCAPE=on` flags a `var` local passed directly to an
-`async_init(...)` producer (`init_capability_escape_v1_spec`, 4/4).
+`E_INIT_CAPABILITY_ESCAPE` (owner rule 2026-11-15): the `async_init(...)` producer
+may only receive IMMUTABLE input. Default off, `SIMPLE_INIT_CAPABILITY_ESCAPE=on`
+rejects any `var` binding, `mut T` parameter, `me`-method `self`, `Ref`/`Ptr`-typed
+binding or closure capture of those, nested anywhere in the argument
+(`InitCapabilityScanV1`; `init_capability_escape_v1_spec`, 12/12). `val x = counter`
+then `async_init(x)` is accepted.
