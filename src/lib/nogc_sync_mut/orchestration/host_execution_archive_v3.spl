@@ -1,0 +1,37 @@
+# Shared execution packet storage. The journal capability selects Windows IO;
+# legacy Linux retains its existing fsync publication contract.
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_publish_v3, distributed_operation_journal_read_required_v3}
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_regular_no_follow_bounded, file_fsync, directory_fsync}
+use std.nogc_sync_mut.io_runtime.dir_create
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+
+pub fn host_execution_archive_relative_v3(directory: text, operation_id: text) -> Result<text, text>:
+    if not ["host-execution-plans", "host-execution-requests", "host-execute-packets",
+            "host-execution-intents", "host-execution-observations-v2"].contains(directory):
+        return Err("host-execution-archive-kind")
+    if not builder_identifier_valid_v1(operation_id): return Err("host-execution-archive-operation")
+    Ok(directory + "/" + sha256_text(operation_id) + ".sdn")
+
+pub fn host_execution_archive_publish_v3(journal: DistributedOperationJournalV2,
+        directory_name: text, operation_id: text, bytes: text, maximum: i64) -> Result<text, text>:
+    if maximum < 1 or maximum > 2097152 or bytes.byte_len() < 1 or bytes.byte_len() > maximum:
+        return Err("host-execution-archive-size")
+    val relative = host_execution_archive_relative_v3(directory_name, operation_id)?
+    if journal.windows_store.is_some():
+        val published = distributed_operation_journal_publish_v3(journal, relative, bytes)?
+        if distributed_operation_journal_read_required_v3(journal, relative, maximum)? != bytes:
+            return Err("host-execution-retained-archive-mismatch")
+        return Ok(relative)
+    val directory = journal.root + "/" + directory_name
+    if not file_exists(directory) and not dir_create(directory, true): return Err("host-execution-archive-directory-unavailable")
+    val path = journal.root + "/" + relative
+    if file_exists(path):
+        if file_read_regular_no_follow_bounded(path, maximum)? != bytes: return Err("host-execution-retained-archive-mismatch")
+    elif not file_atomic_write_mode(path, bytes, 0o600): return Err("host-execution-archive-publication-failed")
+    if file_read_regular_no_follow_bounded(path, maximum)? != bytes: return Err("host-execution-archive-readback-mismatch")
+    if not file_fsync(path) or not directory_fsync(directory) or not directory_fsync(journal.root):
+        return Err("host-execution-archive-sync-failed")
+    Ok(relative)

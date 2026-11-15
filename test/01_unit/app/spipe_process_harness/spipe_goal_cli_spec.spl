@@ -1,0 +1,170 @@
+"""
+## Purpose and audience
+Purpose: Verify the pure decisions behind `spipe-process-harness goal
+start|skills|status|resume`: provider mapping, selection per provider, rejection
+without a receipt, receipt round-trip and stale-registry detection on resume.
+Audience: SPipe/tooling engineers who maintain goal-start skill routing.
+## Operator workflow
+Run this spec with the test runner; a failing scenario names the SKILL-00x
+contract that regressed. All disk I/O stays in the CLI and is not touched here.
+## Compatibility and limitations
+Fixture registry text is local to this spec. The real registry is checked by
+`test/02_integration/app/llm_process/knowledge_routing_process_spec.spl`.
+Troubleshooting: a red scenario means the goal CLI contract changed; read
+`doc/00_llm_process/feature_expert/goal_skill_routing/skill.md` first.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.common.llm.task_skill_selector.{SkillProvider, GoalTaskClass}
+use std.nogc_async_mut.spipe_process_harness.types.{Provider}
+use std.nogc_async_mut.spipe_process_harness.core.{normalize_provider}
+use std.nogc_async_mut.spipe_process_harness.goal.*
+
+fn row(id: text, task: text, claude: text, codex: text, gemini: text, kimi: text) -> text:
+    "  - skill_id: " + id + "\n" +
+    "    task_class: " + task + "\n" +
+    "    version: 1\n" +
+    "    canonical_path: .agents/skills/" + id + "/SKILL.md\n" +
+    "    claude: " + claude + "\n" +
+    "    codex: " + codex + "\n" +
+    "    gemini: " + gemini + "\n" +
+    "    kimi: " + kimi + "\n" +
+    "    aliases: none\n" +
+    "    depends_on: none\n" +
+    "    fallback: ask\n"
+
+fn registry() -> text:
+    "knowledge_registry:\n  version: 2\ntask_skills:\n" +
+    row("verify", "verify", ".claude/skills/verify.md", ".codex/skills/verify/SKILL.md",
+        ".gemini/commands/verify.toml", "disabled")
+
+fn registry_changed() -> text:
+    registry() + "  # edited after the receipt was written\n"
+
+fn request_for(task: text, provider: text) -> GoalSkillsRequest:
+    match parse_goal_skills_request(task, provider).request:
+        case Some(request): request
+        case None: GoalSkillsRequest(task_class: GoalTaskClass.Other, provider: Provider.Unknown)
+
+fn receipt_of(plan: GoalSkillsPlan) -> text:
+    match plan.receipt:
+        case Some(receipt): receipt.value
+        case None: ""
+
+fn has_receipt(plan: GoalSkillsPlan) -> bool:
+    match plan.receipt:
+        case Some(_): true
+        case None: false
+
+fn parsed_ok(parsed: GoalSkillsRequestParse) -> bool:
+    match parsed.request:
+        case Some(_): true
+        case None: false
+
+fn parse_error_text(parsed: GoalSkillsRequestParse) -> text:
+    match parsed.error:
+        case Some(message): message.value
+        case None: ""
+
+fn goal_id_ok(raw: text) -> bool:
+    match parse_goal_id(raw):
+        case Some(_): true
+        case None: false
+
+fn goal_path_for(raw: text) -> text:
+    match parse_goal_id(raw):
+        case Some(goal): goal_receipt_path(goal).value
+        case None: ""
+
+fn digest_ok(receipt: text) -> bool:
+    match goal_receipt_digest(receipt):
+        case Some(_): true
+        case None: false
+
+describe "goal-start CLI decisions":
+    it "maps every harness provider onto the selector provider with one parser":
+        # @req SKILL-002
+        step("Parse provider text only through the harness normalizer")
+        expect(skill_provider_of(normalize_provider("Claude")) == SkillProvider.Claude).to_equal(true)
+        expect(skill_provider_of(normalize_provider("openai")) == SkillProvider.Codex).to_equal(true)
+        expect(skill_provider_of(normalize_provider("gemini")) == SkillProvider.Gemini).to_equal(true)
+        expect(skill_provider_of(normalize_provider("kimi")) == SkillProvider.Kimi).to_equal(true)
+        step("Anything unrecognised maps to Unknown, never a silent default")
+        expect(skill_provider_of(normalize_provider("llama")) == SkillProvider.Unknown).to_equal(true)
+
+    it "selects the provider specific adapter path and offers a receipt":
+        # @req SKILL-002
+        step("Plan verify for claude, codex and gemini")
+        val claude = plan_goal_skills(registry(), request_for("verify", "claude"))
+        val codex = plan_goal_skills(registry(), request_for("verify", "codex"))
+        val gemini = plan_goal_skills(registry(), request_for("verify", "gemini"))
+        step("Each is Selected with exit 0 and its own adapter in the output")
+        expect(goal_exit_code(claude.exit).value).to_equal(0)
+        expect(claude.output.value.contains("primary=verify|.claude/skills/verify.md")).to_equal(true)
+        expect(codex.output.value.contains("primary=verify|.codex/skills/verify/SKILL.md")).to_equal(true)
+        expect(gemini.output.value.contains("primary=verify|.gemini/commands/verify.toml")).to_equal(true)
+        expect(has_receipt(gemini)).to_equal(true)
+
+    it "rejects a provider-disabled row with typed error text and no receipt":
+        # @req SKILL-004
+        step("Kimi has no adapter for verify")
+        val plan = plan_goal_skills(registry(), request_for("verify", "kimi"))
+        step("Exit is non-zero, the typed error is printed, nothing is persisted")
+        expect(goal_exit_code(plan.exit).value).to_equal(1)
+        expect(plan.output.value.contains("error=not-enabled-for-provider:verify")).to_equal(true)
+        expect(has_receipt(plan)).to_equal(false)
+
+    it "rejects an unknown task class before selection":
+        # @req SKILL-004
+        step("Parse a task class that is not in the closed set")
+        val parsed = parse_goal_skills_request("frobnicate", "claude")
+        expect(parsed_ok(parsed)).to_equal(false)
+        expect(parse_error_text(parsed)).to_equal("error=unknown-task-class:frobnicate")
+        step("A task class with no registry row is rejected with nothing written")
+        val missing = plan_goal_skills(registry(), request_for("setup", "claude"))
+        expect(goal_exit_code(missing.exit).value).to_equal(1)
+        expect(missing.output.value.contains("error=skill-missing:setup")).to_equal(true)
+        expect(has_receipt(missing)).to_equal(false)
+
+    it "asks instead of defaulting when the provider is unknown":
+        # @req SKILL-005
+        step("Plan with blank and unrecognised provider text")
+        val blank = plan_goal_skills(registry(), request_for("verify", ""))
+        val other = plan_goal_skills(registry(), request_for("verify", "llama"))
+        step("Both fall back to ask (exit 3), list candidates and persist nothing")
+        expect(goal_exit_code(blank.exit).value).to_equal(3)
+        expect(goal_exit_code(other.exit).value).to_equal(3)
+        expect(blank.output.value.contains("outcome=fallback-ask")).to_equal(true)
+        expect(blank.output.value.contains("fallback_candidate=verify|")).to_equal(true)
+        expect(has_receipt(blank)).to_equal(false)
+
+    it "validates goal ids and derives the receipt path":
+        # @req SKILL-010
+        step("A plain id maps under .spipe")
+        expect(goal_path_for(" goal-1 ")).to_equal(".spipe/goal-1/skill_selection.sdn")
+        step("Empty ids and path escapes are refused")
+        expect(goal_id_ok("")).to_equal(false)
+        expect(goal_id_ok("../x")).to_equal(false)
+        expect(goal_id_ok("a/b")).to_equal(false)
+
+    it "round-trips the stored receipt digest and resumes fresh":
+        # @req SKILL-010
+        step("Plan, then read the digest back from the persisted text")
+        val stored = receipt_of(plan_goal_skills(registry(), request_for("verify", "claude")))
+        expect(digest_ok(stored)).to_equal(true)
+        step("Resume against the same registry is fresh and exits 0")
+        val verdict = evaluate_goal_resume(stored, registry())
+        expect(verdict == GoalResumeVerdict.Fresh).to_equal(true)
+        expect(goal_exit_code(resume_exit(verdict)).value).to_equal(0)
+
+    it "reports stale when the registry digest changed since the receipt":
+        # @req SKILL-011
+        step("Resume the stored receipt against an edited registry")
+        val stored = receipt_of(plan_goal_skills(registry(), request_for("verify", "claude")))
+        val verdict = evaluate_goal_resume(stored, registry_changed())
+        expect(verdict == GoalResumeVerdict.Stale).to_equal(true)
+        expect(goal_exit_code(resume_exit(verdict)).value).to_equal(4)
+        step("A file that is not a selection receipt is unreadable, not fresh")
+        val garbage = evaluate_goal_resume("hello", registry())
+        expect(garbage == GoalResumeVerdict.Unreadable).to_equal(true)
+        expect(goal_exit_code(resume_exit(garbage)).value).to_equal(6)

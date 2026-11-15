@@ -32,6 +32,8 @@ fn _setup():
     file_write(ROOT + "/src/lib/common/alpha/shapes.spl", "pub struct Point:\n    x: i64\n\npub fn area(w: i64, h: i64) -> i64:\n    w * h\n\nfn unused_helper() -> i64:\n    0\n")
     file_write(ROOT + "/src/lib/common/beta/shapes2.spl", "pub fn area(w: i64, h: i64) -> i64:\n    w + h\n\npub fn perimeter(w: i64) -> i64:\n    4 * w\n")
     file_write(ROOT + "/src/lib/common/facade/__init__.spl", "export alpha.shapes.*\n")
+    mkdir_p(ROOT + "/src/compiler/20.hir")
+    file_write(ROOT + "/src/compiler/20.hir/hir_shapes.spl", "pub fn hir_area(w: i64) -> i64:\n    w * w\n")
 
 fn _app(name: text) -> text:
     ROOT + "/src/app/demo/" + name
@@ -66,6 +68,19 @@ describe "W0406 star import fixer":
         expect(fixes[0].replacements[0].new_text).to_equal("use std.alpha.shapes.{Point, area}")  # oracle: used names only, sorted; unused_helper dropped
         expect(fixes[0].is_safe()).to_equal(true)  # oracle: unique resolution, no star re-export
         expect(_identity_count(fixes, lines)).to_equal(0)  # oracle: never a no-op edit
+
+    it "narrows a compiler star import through a numbered layer dir":
+        # @capture(statistics): replacement text for `use compiler.X.*` resolved via NN.seg dirs
+        # Regression: lint of every src/compiler file died with "method 'rfind'
+        # not found on value of type str in nested call context" from the
+        # numbered-layer walk (seed_nested_call_rfind_missing_2026-11-15).
+        step("Lint a file that uses hir_area from compiler.hir.hir_shapes (20.hir on disk)")
+        _setup()
+        val lines = ["use compiler.hir.hir_shapes.*", "fn f() -> i64:", "    hir_area(3)"]
+        val fixes = check_star_import_text_with_lines(_app("numbered.spl"), lines)
+        expect(fixes.len()).to_equal(1)  # oracle: one star import line
+        expect(_edit_count(fixes)).to_equal(1)  # oracle: 20.hir resolved as layer `hir`
+        expect(fixes[0].replacements[0].new_text).to_equal("use compiler.hir.hir_shapes.{" + "hir_area}")  # oracle: used name only
 
     it "keeps indentation, lazy and trailing comment":
         # @capture(statistics): replacement text preserving line decorations

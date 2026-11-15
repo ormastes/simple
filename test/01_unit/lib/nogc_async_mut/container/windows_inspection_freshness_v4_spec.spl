@@ -1,0 +1,27 @@
+# AUTHORED_NOT_RUN. Production freshness predicate and actual clock-domain
+# sample; delayed completion is modeled, not executed native cleanup injection.
+use std.spec.*
+use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
+use std.nogc_async_mut.container.providers.windows.docker_inspection_freshness_v4.windows_primary_inspection_fresh_v4
+
+describe "Retained primary inspection observation age":
+    it "does not renew an actual inspection-start sample when completion is delayed":
+        step("Retain a real monotonic sample and model cleanup completing beyond the maximum freshness window")
+        val observed = time_sample_monotonic_nanos_or_failure()
+        assert(observed >= 0 and observed <= 9223372035854775806)
+        val delayed_completion = observed + 1000000001
+        expect(windows_primary_inspection_fresh_v4(observed, delayed_completion, 5000)).to_equal(false)
+        expect(windows_primary_inspection_fresh_v4(observed, observed, 5000)).to_equal(true)
+
+    it "narrows freshness to installed timeout without overflowing a large timeout":
+        step("Check the installed bound and the fixed one-second ceiling in the same nanosecond domain")
+        expect(windows_primary_inspection_fresh_v4(10, 50000010, 50)).to_equal(true)
+        expect(windows_primary_inspection_fresh_v4(10, 50000011, 50)).to_equal(false)
+        expect(windows_primary_inspection_fresh_v4(10, 1000000011, 9223372036854775807)).to_equal(false)
+
+    it "rejects unavailable or regressed clocks and nonpositive installed bounds":
+        step("Refuse clocks that cannot prove monotonic observation age")
+        expect(windows_primary_inspection_fresh_v4(-1, 10, 1000)).to_equal(false)
+        expect(windows_primary_inspection_fresh_v4(10, -1, 1000)).to_equal(false)
+        expect(windows_primary_inspection_fresh_v4(10, 9, 1000)).to_equal(false)
+        expect(windows_primary_inspection_fresh_v4(10, 10, 0)).to_equal(false)

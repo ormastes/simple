@@ -60,6 +60,11 @@ use std.sosix.process.{PipedProcessRefV1, PipedProcessOwnedTransferV2}
 use os.apps.smux.terminal_adoption_service_v2.{terminal_transport_adopt_ref_v2, terminal_transport_adopt_owned_v2}
 use os.apps.smux.terminal_primary_service_v4.{terminal_primary_adopt_v4, terminal_primary_progress_v4, terminal_primary_settle_v4, terminal_primary_cleanup_v4}
 use std.sosix.host.{ContainerPrimaryAttachSessionV1}
+use std.nogc_async_mut.container.terminal_session_v2.ContainerOwnedTerminalSessionV2
+use std.common.contracts.mux.session_runtime_control_v1.SessionRuntimeControlTargetV1
+use os.apps.smux.terminal_primary_service_v5.{SmuxPrimaryAdoptionTurnV5, terminal_primary_adopt_v5,
+    terminal_primary_cleanup_v5, terminal_primary_settle_v5}
+use std.nogc_sync_mut.orchestration.host_primary_connection_settlement_v2.HostPrimaryConnectionSettlementAckV2
 use os.apps.smux.pane_lifecycle.{PaneClosePending, close_pane_state,
     pane_close_window_pending, pane_close_poll_windows, pane_close_forget}
 use os.apps.smux.split_checkpoint.{SplitCheckpoint, split_checkpoint_capture, split_checkpoint_restore}
@@ -582,10 +587,32 @@ pub fn smux_pane_primary_progress_v4(pane_id: text, expected_identity: text,
     _svc = _publish(updated)
     Ok(true)
 
+# The pane becomes the sole native consumer only after successful publication.
+# A refused publication returns the updated owner, including any native bind.
+pub fn smux_pane_adopt_primary_v5(target: SessionRuntimeControlTargetV1,
+        expected_revision: u64, session: ContainerOwnedTerminalSessionV2) -> SmuxPrimaryAdoptionTurnV5:
+    val turn = terminal_primary_adopt_v5(_svc, _revisions,
+        smux_window_closing(target.session_id, target.window_id), target, expected_revision, session)
+    if not turn.adopted: return SmuxPrimaryAdoptionTurnV5(Some(turn.session), false, turn.error)
+    _svc = _publish(turn.state)
+    SmuxPrimaryAdoptionTurnV5(nil, true, "")
+
 pub fn smux_pane_primary_settlement_v4(pane_id: text, expected_identity: text,
         native_identity: text, ack: HostHelperSettlementAckV1) -> Result<bool, text>:
     val updated = terminal_primary_settle_v4(_svc, _revisions, pane_id, expected_identity, native_identity, ack)?
     _svc = _publish(updated)
+    Ok(true)
+
+pub fn smux_pane_cleanup_primary_v5(pane_id: text, expected_identity: text) -> Result<bool, text>:
+    val turn = terminal_primary_cleanup_v5(_svc, pane_id, expected_identity)
+    _svc = _publish(turn.state)
+    if turn.error != "": return Err(turn.error)
+    Ok(turn.cleaned)
+
+pub fn smux_pane_primary_settlement_v5(pane_id: text, expected_identity: text,
+        ack: HostPrimaryConnectionSettlementAckV2) -> Result<bool, text>:
+    val state = terminal_primary_settle_v5(_svc, _revisions, pane_id, expected_identity, ack)?
+    _svc = _publish(state)
     Ok(true)
 
 # Explicit cleanup stays with the sole pane owner and retains Host release state.

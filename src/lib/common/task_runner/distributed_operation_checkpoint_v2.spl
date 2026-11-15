@@ -1,0 +1,328 @@
+# Pure bounded checkpoint objects for the existing journal owner. No disk I/O.
+# The caller authenticates the protected root and the manifest's digest; this
+# codec verifies canonical bytes, page hashes, authority and complete histories.
+use std.common.contracts.distributed_operation_retention_v2.*
+use std.common.contracts.distributed_operation_history_v2.*
+use std.common.contracts.distributed_operation_state_v2.DistributedOperationStateV2
+use std.common.task_runner.distributed_operation_checkpoint_schema_v2.*
+use std.common.sdn.value.SdnValue
+use std.common.crypto.sha256.sha256_text
+use std.common.build_manager.contracts.builder_digest_valid_v1
+
+pub struct OperationCheckpointSnapshotV2:
+    authority_digest: text
+    base_commit: text
+    base_sequence: i64
+    retention_profile: DistributedOperationRetentionProfileV2
+    rows: Dict<text, DistributedOperationStateV2>
+    history: DistributedOperationJournalHistoryBatchV2
+
+pub struct OperationCheckpointObjectV2:
+    digest: text
+    payload: text
+
+pub struct OperationCheckpointObjectsV2:
+    manifest_digest: text
+    objects: [OperationCheckpointObjectV2]
+
+struct OperationCheckpointPageV2:
+    kind: text
+    ordinal: i64
+    digest: text
+    byte_count: i64
+    entry_count: i64
+
+fn checkpoint_binding_validate_v2(authority: text, base: text,
+        sequence: i64, profile: DistributedOperationRetentionProfileV2) -> Result<bool, text>:
+    val checked = distributed_operation_retention_profile_validate_v2(profile, profile.maximum_lifetime_events)?
+    if not builder_digest_valid_v1(authority) or not builder_digest_valid_v1(base):
+        return Err("OPERATION_CHECKPOINT_BINDING_INVALID")
+    if sequence < 1 or sequence > profile.maximum_lifetime_events:
+        return Err("OPERATION_CHECKPOINT_SEQUENCE_INVALID")
+    Ok(true)
+
+fn checkpoint_snapshot_validate_v2(snapshot: OperationCheckpointSnapshotV2) -> Result<bool, text>:
+    val bound = checkpoint_binding_validate_v2(snapshot.authority_digest, snapshot.base_commit,
+        snapshot.base_sequence, snapshot.retention_profile)?
+    val history = snapshot.history
+    if (history.authority_digest != snapshot.authority_digest or
+            history.head_commit_digest != snapshot.base_commit or history.head_sequence != snapshot.base_sequence):
+        return Err("OPERATION_CHECKPOINT_BINDING_INVALID")
+    if (snapshot.rows.len() < 1 or snapshot.rows.len() > 100000 or
+            snapshot.rows.len() > snapshot.base_sequence or history.operations.len() != snapshot.rows.len()):
+        return Err("OPERATION_CHECKPOINT_COUNT_INVALID")
+    # Reserve the prospective control revision, which cannot hash itself into
+    # its own manifest. Its endpoint is added only by the journal owner.
+    if history.revision_endpoints.len() < 1 or history.revision_endpoints.len() >= 100000:
+        return Err("OPERATION_CHECKPOINT_ENDPOINT_LIMIT")
+    if not history.revision_endpoints.contains_key(snapshot.base_commit):
+        return Err("OPERATION_CHECKPOINT_BASE_MISSING")
+    if history.revision_endpoints[snapshot.base_commit] != snapshot.base_sequence:
+        return Err("OPERATION_CHECKPOINT_SEQUENCE_INVALID")
+    for digest in history.revision_endpoints.keys():
+        val sequence = history.revision_endpoints[digest]
+        if not builder_digest_valid_v1(digest) or sequence < 1 or sequence > snapshot.base_sequence:
+            return Err("OPERATION_CHECKPOINT_ENDPOINT_INVALID")
+    var event_owners: Dict<i64, text> = {}
+    for id in snapshot.rows.keys():
+        if not history.operations.contains_key(id): return Err("OPERATION_CHECKPOINT_HISTORY_INVALID")
+        val row = snapshot.rows[id]
+        val edge = history.operations[id]
+        if row.operation_id != id: return Err("OPERATION_CHECKPOINT_IDENTITY_INVALID")
+        # Check output bounds before decoding possibly oversized envelopes.
+        val entry_size = checkpoint_value_size_v2(checkpoint_operation_value_v2(row, edge))?
+        val validated = checkpoint_operation_validate_v2(row, edge, snapshot.base_sequence)?
+        if not history.revision_endpoints.contains_key(edge.last_commit_digest):
+            return Err("OPERATION_CHECKPOINT_ENDPOINT_MISSING")
+        if history.revision_endpoints[edge.last_commit_digest] < edge.last_sequence:
+            return Err("OPERATION_CHECKPOINT_ENDPOINT_INVALID")
+        for sequence in [edge.admitted_sequence, edge.last_sequence]:
+            if event_owners.contains_key(sequence):
+                if event_owners[sequence] != id: return Err("OPERATION_CHECKPOINT_HISTORY_INVALID")
+            else:
+                event_owners[sequence] = id
+    Ok(true)
+
+fn checkpoint_endpoint_value_v2(digest: text, sequence: i64) -> SdnValue:
+    SdnValue.Dict({"commit_digest": SdnValue.String(digest), "last_sequence": SdnValue.Int(sequence)})
+
+fn checkpoint_page_value_v2(authority: text, base: text, sequence: i64,
+        kind: text, ordinal: i64, entries: [SdnValue]) -> SdnValue:
+    val wire_kind = if kind == "operations": "DistributedOperationPageV2" else: "DistributedOperationEndpointsV2"
+    SdnValue.Dict({"version": SdnValue.Int(1), "kind": SdnValue.String(wire_kind),
+        "authority_digest": SdnValue.String(authority), "base_commit": SdnValue.String(base),
+        "base_sequence": SdnValue.Int(sequence), "ordinal": SdnValue.Int(ordinal),
+        "entries": SdnValue.Array(entries)})
+
+fn checkpoint_descriptor_value_v2(page: OperationCheckpointPageV2) -> SdnValue:
+    SdnValue.Dict({"kind": SdnValue.String(page.kind), "ordinal": SdnValue.Int(page.ordinal),
+        "digest": SdnValue.String(page.digest), "byte_count": SdnValue.Int(page.byte_count),
+        "entry_count": SdnValue.Int(page.entry_count)})
+
+# Count the actual control bytes, including canonical digest quoting and LF.
+# A hex digest consisting only of decimal digits is encoded as a quoted string.
+fn checkpoint_control_size_v2(authority: text, base: text, sequence: i64,
+        manifest_digest: text) -> Result<i64, text>:
+    val control = SdnValue.Dict({"version": SdnValue.Int(1),
+        "kind": SdnValue.String("SimpleDatabaseWalCheckpoint"),
+        "database_identity": SdnValue.String(authority), "base_commit": SdnValue.String(base),
+        "base_sequence": SdnValue.Int(sequence), "checkpoint_digest": SdnValue.String(manifest_digest)})
+    Ok(checkpoint_value_size_v2(control)? + 1)
+
+struct OperationCheckpointPageSetV2:
+    objects: [OperationCheckpointObjectV2]
+    pages: [OperationCheckpointPageV2]
+    byte_count: i64
+
+fn checkpoint_flush_page_v2(set: OperationCheckpointPageSetV2, authority: text,
+        base: text, sequence: i64, kind: text, ordinal: i64,
+        entries: [SdnValue]) -> Result<OperationCheckpointPageSetV2, text>:
+    if set.pages.len() >= 256: return Err("OPERATION_CHECKPOINT_PAGE_LIMIT")
+    if entries.len() < 1: return Err("OPERATION_CHECKPOINT_COUNT_INVALID")
+    val value = checkpoint_page_value_v2(authority, base, sequence, kind, ordinal, entries)
+    val size = checkpoint_value_size_v2(value)? + 1
+    if size > OPERATION_CHECKPOINT_AGGREGATE_LIMIT_V2 - set.byte_count:
+        return Err("OPERATION_CHECKPOINT_AGGREGATE_LIMIT")
+    val payload = checkpoint_payload_v2(value)?
+    val digest = sha256_text(payload)
+    var objects = set.objects
+    var pages = set.pages
+    objects.push(OperationCheckpointObjectV2(digest, payload))
+    pages.push(OperationCheckpointPageV2(kind, ordinal, digest, size, entries.len()))
+    Ok(OperationCheckpointPageSetV2(objects, pages, set.byte_count + size))
+
+fn checkpoint_encode_kind_v2(snapshot: OperationCheckpointSnapshotV2, kind: text,
+        initial: OperationCheckpointPageSetV2) -> Result<OperationCheckpointPageSetV2, text>:
+    val keys = if kind == "operations": snapshot.rows.keys() else: snapshot.history.revision_endpoints.keys()
+    val ordered = checkpoint_sorted_keys_v2(keys)
+    var set = initial
+    var entries: [SdnValue] = []
+    var ordinal: i64 = 0
+    var page_size = checkpoint_value_size_v2(checkpoint_page_value_v2(snapshot.authority_digest,
+        snapshot.base_commit, snapshot.base_sequence, kind, ordinal, entries))? + 1
+    for key in ordered:
+        val entry = if kind == "operations":
+            checkpoint_operation_value_v2(snapshot.rows[key], snapshot.history.operations[key])
+        else:
+            checkpoint_endpoint_value_v2(key, snapshot.history.revision_endpoints[key])
+        val entry_size = checkpoint_value_size_v2(entry)?
+        var separator = if entries.len() == 0: 0 else: 2
+        if entry_size + separator > OPERATION_CHECKPOINT_OBJECT_LIMIT_V2 - page_size:
+            if entries.len() == 0: return Err("OPERATION_CHECKPOINT_OBJECT_TOO_LARGE")
+            set = checkpoint_flush_page_v2(set, snapshot.authority_digest, snapshot.base_commit,
+                snapshot.base_sequence, kind, ordinal, entries)?
+            ordinal = ordinal + 1
+            entries = []
+            separator = 0
+            page_size = checkpoint_value_size_v2(checkpoint_page_value_v2(snapshot.authority_digest,
+                snapshot.base_commit, snapshot.base_sequence, kind, ordinal, entries))? + 1
+            if entry_size > OPERATION_CHECKPOINT_OBJECT_LIMIT_V2 - page_size:
+                return Err("OPERATION_CHECKPOINT_OBJECT_TOO_LARGE")
+        # Check aggregate before growing a candidate page, including prior pages.
+        # Manifest and exact control bytes are charged before any publication.
+        if page_size + entry_size + separator > OPERATION_CHECKPOINT_AGGREGATE_LIMIT_V2 - set.byte_count:
+            return Err("OPERATION_CHECKPOINT_AGGREGATE_LIMIT")
+        if set.pages.len() >= 256: return Err("OPERATION_CHECKPOINT_PAGE_LIMIT")
+        entries.push(entry)
+        page_size = page_size + entry_size + separator
+    if entries.len() > 0:
+        set = checkpoint_flush_page_v2(set, snapshot.authority_digest, snapshot.base_commit,
+            snapshot.base_sequence, kind, ordinal, entries)?
+    Ok(set)
+
+pub fn distributed_operation_checkpoint_encode_v2(
+        snapshot: OperationCheckpointSnapshotV2) -> Result<OperationCheckpointObjectsV2, text>:
+    val checked = checkpoint_snapshot_validate_v2(snapshot)?
+    val empty = OperationCheckpointPageSetV2([], [], 0)
+    val operation_pages = checkpoint_encode_kind_v2(snapshot, "operations", empty)?
+    val all_pages = checkpoint_encode_kind_v2(snapshot, "endpoints", operation_pages)?
+    var descriptors: [SdnValue] = []
+    for page in all_pages.pages:
+        descriptors.push(checkpoint_descriptor_value_v2(page))
+    val manifest = SdnValue.Dict({"version": SdnValue.Int(1),
+        "kind": SdnValue.String("DistributedOperationCheckpointV2"),
+        "authority_digest": SdnValue.String(snapshot.authority_digest),
+        "base_commit": SdnValue.String(snapshot.base_commit), "base_sequence": SdnValue.Int(snapshot.base_sequence),
+        "retention_profile": checkpoint_profile_value_v2(snapshot.retention_profile),
+        "operation_count": SdnValue.Int(snapshot.rows.len()),
+        "endpoint_count": SdnValue.Int(snapshot.history.revision_endpoints.len()),
+        "pages": SdnValue.Array(descriptors)})
+    val size = checkpoint_value_size_v2(manifest)? + 1
+    val payload = checkpoint_payload_v2(manifest)?
+    val digest = sha256_text(payload)
+    val control_size = checkpoint_control_size_v2(snapshot.authority_digest,
+        snapshot.base_commit, snapshot.base_sequence, digest)?
+    if control_size > OPERATION_CHECKPOINT_AGGREGATE_LIMIT_V2 - all_pages.byte_count:
+        return Err("OPERATION_CHECKPOINT_AGGREGATE_LIMIT")
+    if size > OPERATION_CHECKPOINT_AGGREGATE_LIMIT_V2 - all_pages.byte_count - control_size:
+        return Err("OPERATION_CHECKPOINT_AGGREGATE_LIMIT")
+    var objects = all_pages.objects
+    objects.push(OperationCheckpointObjectV2(digest, payload))
+    Ok(OperationCheckpointObjectsV2(digest, objects))
+
+fn checkpoint_descriptors_decode_v2(values: [SdnValue], operation_count: i64,
+        endpoint_count: i64, initial_bytes: i64) -> Result<[OperationCheckpointPageV2], text>:
+    if values.len() < 2 or values.len() > 256: return Err("OPERATION_CHECKPOINT_PAGE_LIMIT")
+    var pages: [OperationCheckpointPageV2] = []
+    var seen: Dict<text, bool> = {}
+    var operation_ordinal: i64 = 0
+    var endpoint_ordinal: i64 = 0
+    var operations: i64 = 0
+    var endpoints: i64 = 0
+    var byte_count = initial_bytes
+    var in_endpoints = false
+    for value in values:
+        val record = checkpoint_record_v2(value, ["kind", "ordinal", "digest", "byte_count", "entry_count"])?
+        val page = OperationCheckpointPageV2(checkpoint_text_v2(record["kind"])?,
+            checkpoint_integer_v2(record["ordinal"])?, checkpoint_text_v2(record["digest"])?,
+            checkpoint_integer_v2(record["byte_count"])?, checkpoint_integer_v2(record["entry_count"])?)
+        if not builder_digest_valid_v1(page.digest) or seen.contains_key(page.digest):
+            return Err("OPERATION_CHECKPOINT_PAGE_INVALID")
+        seen[page.digest] = true
+        if page.byte_count < 1 or page.byte_count > OPERATION_CHECKPOINT_OBJECT_LIMIT_V2:
+            return Err("OPERATION_CHECKPOINT_SIZE_INVALID")
+        if page.entry_count < 1 or page.entry_count > 100000:
+            return Err("OPERATION_CHECKPOINT_COUNT_INVALID")
+        if page.byte_count > OPERATION_CHECKPOINT_AGGREGATE_LIMIT_V2 - byte_count:
+            return Err("OPERATION_CHECKPOINT_AGGREGATE_LIMIT")
+        byte_count = byte_count + page.byte_count
+        if page.kind == "operations":
+            if in_endpoints or page.ordinal != operation_ordinal:
+                return Err("OPERATION_CHECKPOINT_PAGE_ORDER_INVALID")
+            if page.entry_count > operation_count - operations:
+                return Err("OPERATION_CHECKPOINT_COUNT_INVALID")
+            operations = operations + page.entry_count
+            operation_ordinal = operation_ordinal + 1
+        elif page.kind == "endpoints":
+            in_endpoints = true
+            if page.ordinal != endpoint_ordinal: return Err("OPERATION_CHECKPOINT_PAGE_ORDER_INVALID")
+            if page.entry_count > endpoint_count - endpoints:
+                return Err("OPERATION_CHECKPOINT_COUNT_INVALID")
+            endpoints = endpoints + page.entry_count
+            endpoint_ordinal = endpoint_ordinal + 1
+        else:
+            return Err("OPERATION_CHECKPOINT_PAGE_INVALID")
+        pages.push(page)
+    if operations != operation_count or endpoints != endpoint_count:
+        return Err("OPERATION_CHECKPOINT_COUNT_INVALID")
+    Ok(pages)
+
+pub fn distributed_operation_checkpoint_decode_v2(manifest: text,
+        read_object: fn(text) -> Result<text, text>) -> Result<OperationCheckpointSnapshotV2, text>:
+    val value = checkpoint_parse_v2(manifest)?
+    val record = checkpoint_record_v2(value, ["version", "kind", "authority_digest", "base_commit",
+        "base_sequence", "retention_profile", "operation_count", "endpoint_count", "pages"])?
+    if (checkpoint_integer_v2(record["version"])? != 1 or
+            checkpoint_text_v2(record["kind"])? != "DistributedOperationCheckpointV2"):
+        return Err("OPERATION_CHECKPOINT_VERSION_UNSUPPORTED")
+    val authority = checkpoint_text_v2(record["authority_digest"])?
+    val base = checkpoint_text_v2(record["base_commit"])?
+    val sequence = checkpoint_integer_v2(record["base_sequence"])?
+    val profile = checkpoint_profile_decode_v2(record["retention_profile"])?
+    val checked = checkpoint_binding_validate_v2(authority, base, sequence, profile)?
+    val operation_count = checkpoint_integer_v2(record["operation_count"])?
+    val endpoint_count = checkpoint_integer_v2(record["endpoint_count"])?
+    if operation_count < 1 or operation_count > 100000 or operation_count > sequence:
+        return Err("OPERATION_CHECKPOINT_COUNT_INVALID")
+    if endpoint_count < 1 or endpoint_count >= 100000:
+        return Err("OPERATION_CHECKPOINT_ENDPOINT_LIMIT")
+    val control_size = checkpoint_control_size_v2(authority, base, sequence, sha256_text(manifest))?
+    val pages = checkpoint_descriptors_decode_v2(checkpoint_array_v2(record["pages"])?,
+        operation_count, endpoint_count, manifest.byte_len() + control_size)?
+    var rows: Dict<text, DistributedOperationStateV2> = {}
+    var histories: Dict<text, DistributedOperationHistoryV2> = {}
+    var endpoints: Dict<text, i64> = {}
+    var previous_operation = ""
+    var previous_endpoint = ""
+    # Greedy page filling is checked across boundaries, without re-encoding or
+    # retaining all decoded pages. Keep only the preceding same-kind size.
+    var previous_kind = ""
+    var previous_page_size: i64 = 0
+    for page in pages:
+        val payload = read_object(page.digest)?
+        if payload.byte_len() != page.byte_count: return Err("OPERATION_CHECKPOINT_SIZE_INVALID")
+        if sha256_text(payload) != page.digest: return Err("OPERATION_CHECKPOINT_PAGE_DIGEST_INVALID")
+        val page_record = checkpoint_record_v2(checkpoint_parse_v2(payload)?, ["version", "kind",
+            "authority_digest", "base_commit", "base_sequence", "ordinal", "entries"])?
+        val expected_kind = if page.kind == "operations": "DistributedOperationPageV2" else: "DistributedOperationEndpointsV2"
+        if (checkpoint_integer_v2(page_record["version"])? != 1 or
+                checkpoint_text_v2(page_record["kind"])? != expected_kind or
+                checkpoint_text_v2(page_record["authority_digest"])? != authority or
+                checkpoint_text_v2(page_record["base_commit"])? != base or
+                checkpoint_integer_v2(page_record["base_sequence"])? != sequence or
+                checkpoint_integer_v2(page_record["ordinal"])? != page.ordinal):
+            return Err("OPERATION_CHECKPOINT_BINDING_INVALID")
+        val entries = checkpoint_array_v2(page_record["entries"])?
+        if entries.len() != page.entry_count: return Err("OPERATION_CHECKPOINT_COUNT_INVALID")
+        if previous_kind == page.kind:
+            val next_size = checkpoint_value_size_v2(entries[0])? + 2
+            if next_size <= OPERATION_CHECKPOINT_OBJECT_LIMIT_V2 - previous_page_size:
+                return Err("OPERATION_CHECKPOINT_PAGE_FILL_INVALID")
+        for entry in entries:
+            if page.kind == "operations":
+                val pair = checkpoint_operation_decode_v2(entry)?
+                val id = pair.row.operation_id
+                if not checkpoint_text_before_v2(previous_operation, id):
+                    return Err("OPERATION_CHECKPOINT_ENTRY_ORDER_INVALID")
+                val valid = checkpoint_operation_validate_v2(pair.row, pair.history, sequence)?
+                rows[id] = pair.row
+                histories[id] = pair.history
+                previous_operation = id
+            else:
+                val endpoint = checkpoint_record_v2(entry, ["commit_digest", "last_sequence"])?
+                val digest = checkpoint_text_v2(endpoint["commit_digest"])?
+                val last = checkpoint_integer_v2(endpoint["last_sequence"])?
+                if not builder_digest_valid_v1(digest) or last < 1 or last > sequence:
+                    return Err("OPERATION_CHECKPOINT_ENDPOINT_INVALID")
+                if not checkpoint_text_before_v2(previous_endpoint, digest):
+                    return Err("OPERATION_CHECKPOINT_ENTRY_ORDER_INVALID")
+                endpoints[digest] = last
+                previous_endpoint = digest
+        previous_kind = page.kind
+        previous_page_size = page.byte_count
+    if rows.len() != operation_count or endpoints.len() != endpoint_count:
+        return Err("OPERATION_CHECKPOINT_COUNT_INVALID")
+    val history = DistributedOperationJournalHistoryBatchV2(authority, base, sequence, endpoints, histories)
+    val snapshot = OperationCheckpointSnapshotV2(authority, base, sequence, profile, rows, history)
+    val valid = checkpoint_snapshot_validate_v2(snapshot)?
+    Ok(snapshot)

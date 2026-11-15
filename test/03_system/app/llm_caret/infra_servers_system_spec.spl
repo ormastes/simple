@@ -13,13 +13,14 @@ through run_tool (the permission gate) - nothing is fabricated from the request.
 Audience: llm_caret maintainers and infra operators validating a deployment.
 
 ## Live gates (honest blocking)
-The repository ships no in-process or child SMTP, IMAP, S3-compatible or FTP
-server (`std.nogc_sync_mut.imap` / `smtp` are protocol builders only; the
-`ftp_sffi` externs are unbacked), and this host has no minio/aiosmtpd/pyftpdlib.
-An example therefore runs only when the operator points it at a real server:
+Mail runs by default against the in-repo loopback SMTP+IMAP fixture
+(fixtures/caret_mail_server.spl, started by $SIMPLE_BINARY). The repository
+ships no S3-compatible or FTP server (the `ftp_sffi` externs are unbacked), so
+those examples run only when the operator points them at a real server:
 
-- mail:    LLM_CARET_MAIL_LIVE=1 plus LLM_CARET_CONFIG=<llm_caret.sdn with [mail]>
-           and the env var named by `secret_env` exported.
+- mail:    default = loopback fixture. Real server: LLM_CARET_MAIL_LIVE=1 plus
+           LLM_CARET_CONFIG=<llm_caret.sdn with [mail]>, LLM_CARET_MAIL_TO and
+           the env var named by `secret_env` exported.
 - storage: LLM_CARET_STORAGE_LIVE=1 plus LLM_CARET_CONFIG=<llm_caret.sdn with
            [storage]> and the env vars named by access_key_env / secret_key_env.
 - wiki:    LLM_CARET_WIKI_LIVE=1 plus LLM_CARET_CONFIG=<llm_caret.sdn with [wiki]
@@ -37,7 +38,7 @@ use std.spec.step
 use std.spec.*
 use app.llm_caret.tools.{run_tool, allow_all_policy, new_tool_call}
 use app.llm_caret.config.{load_config, reset_config, config_mail_imap_host, config_storage_endpoint, config_wiki_base_url}
-use app.io.mod.{env_get}
+use app.io.mod.{env_get, env_set, file_exists, file_read_text, file_write, dir_create_all, getpid, process_spawn_async, sleep_ms}
 use std.io_runtime.{time_now_unix_micros}
 
 val WS = "build/tmp/llm_caret_infra_servers_system"
@@ -51,6 +52,38 @@ fn _load_live_config() -> text:
     if path == "":
         return "LLM_CARET_CONFIG is not set"
     load_config(path)
+
+val MAIL_FIXTURE = "test/03_system/app/llm_caret/fixtures/caret_mail_server.spl"
+val MAIL_SECRET_ENV = "LLM_CARET_LOOPBACK_MAIL_SECRET"
+
+# Starts the in-repo loopback SMTP+IMAP fixture via $SIMPLE_BINARY and writes
+# an llm_caret.sdn pointing at it. Returns the config path, "" when blocked.
+fn _start_loopback_mail() -> text:
+    val runtime = env_get("SIMPLE_BINARY") ?? ""
+    if runtime == "":
+        return ""
+    val dir = WS + "/mail_" + getpid().to_text()
+    if not file_exists(dir) and not dir_create_all(dir):
+        return ""
+    val secret = "s" + _nonce()
+    env_set(MAIL_SECRET_ENV, secret)
+    if process_spawn_async(runtime, ["run", MAIL_FIXTURE, dir, "caret", secret]) <= 0:
+        return ""
+    val ports_file = dir + "/ports"
+    var waited = 0
+    while not file_exists(ports_file) and waited < 60000:
+        sleep_ms(100)
+        waited = waited + 100
+    if not file_exists(ports_file):
+        return ""
+    sleep_ms(100)
+    val ports = file_read_text(ports_file).trim().split(" ")
+    if ports.len() != 2:
+        return ""
+    val cfg = dir + "/llm_caret.sdn"
+    file_write(cfg, "mail:\n  imap_host: 127.0.0.1\n  imap_port: " + ports[1] + "\n  smtp_host: 127.0.0.1\n  smtp_port: " + ports[0] +
+        "\n  user: caret\n  secret_env: " + MAIL_SECRET_ENV + "\n")
+    cfg
 
 fn _json(pairs: [text]) -> text:
     "{" + pairs.join(", ") + "}"
@@ -66,16 +99,22 @@ describe "infra servers: mail round trip (SMTP send -> IMAP list -> IMAP read)":
     it "sends a mail, sees it in mail_list and reads its body back":
         # @req REQ-SSPEC-SYSTEM
         step("sends a mail, sees it in mail_list and reads its body back")
-        if not _live("LLM_CARET_MAIL_LIVE"):
-            pending("BLOCKED: no local SMTP/IMAP server on this host — set LLM_CARET_MAIL_LIVE=1 with credentials (LLM_CARET_CONFIG + secret_env) to run")
-            return
-        val cfg_err = _load_live_config()
-        expect(cfg_err).to_equal("")
+        var to = ""
+        if _live("LLM_CARET_MAIL_LIVE"):
+            expect(_load_live_config()).to_equal("")
+            to = env_get("LLM_CARET_MAIL_TO") ?? ""
+        else:
+            val cfg = _start_loopback_mail()
+            if cfg == "":
+                pending("BLOCKED: SIMPLE_BINARY is unset or the loopback mail fixture " + MAIL_FIXTURE + " did not publish its ports within 60 s; or set LLM_CARET_MAIL_LIVE=1 with LLM_CARET_CONFIG + secret_env for a real server")
+                return
+            reset_config()
+            expect(load_config(cfg)).to_equal("")
+            to = "inbox@loopback.test"
         assert_not_equal(config_mail_imap_host(), "")
         val nonce = _nonce()
         val subject = "llm-caret-live-" + nonce
         val body = "round-trip body " + nonce
-        val to = env_get("LLM_CARET_MAIL_TO") ?? ""
         assert_not_equal(to, "")
 
         step("mail_send goes through the gate with an explicit allow")

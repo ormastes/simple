@@ -1,0 +1,46 @@
+use std.spec
+use app.cli.file_worker_pool_refusal.{file_worker_pool_mir_default_price_kb_v1,
+    file_worker_pool_mir_price_kb_v1, file_worker_pool_usable_kb_v1,
+    FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1}
+use app.cli.shard_mem_clamp.{SHARD_HIR_WORKER_KB_V1, SHARD_MIR_WORKER_KB_V1}
+
+"""
+# Per-file pool MIR price
+
+The per-file worker pool used to admit each worker at the closure-scaled MIR
+SHARD price (26 GiB at the ceiling, a worker that holds the whole-program HIR).
+A per-file worker runs HIR+MIR for one file and peaked at 5.04-5.65 GiB
+(2026-10-27). On a 72 GB-free host only one 26 GiB worker fit and the pool
+(needs 2) was refused.
+
+Bug: doc/08_tracking/bug/native_build_default_worker_budget_26gib_refuses_pool_at_49gb_free_2026-11-09.md
+"""
+describe "per-file pool MIR price":
+    # @req NB-POOL-PRICE-001
+    it "prices a per-file worker at the measured per-file figure, not the shard ceiling":
+        step("large closure, per-file pool")
+        expect(file_worker_pool_mir_default_price_kb_v1(3134, true)).to_equal(FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1)
+        expect(FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1).to_equal(SHARD_HIR_WORKER_KB_V1)
+        expect(FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1 < SHARD_MIR_WORKER_KB_V1).to_equal(true)
+
+    # @req NB-POOL-PRICE-002
+    it "admits >= 2 workers at 72 GB free":
+        step("60% of 72 GB divided by the larger phase price")
+        val usable = file_worker_pool_usable_kb_v1(72000000, 0)
+        val price = file_worker_pool_mir_default_price_kb_v1(3134, true)
+        expect(usable / price >= 2).to_equal(true)
+        step("the old two-pass price fits only one")
+        expect(usable / file_worker_pool_mir_default_price_kb_v1(3134, false)).to_equal(1)
+
+describe "per-file price generalisation":
+    # @req NB-POOL-PRICE-003
+    it "per-file price is flat over closure size and never above the shard price":
+        for m in [-1, 0, 50, 600, 1649, 1650, 3134]:
+            val per_file = file_worker_pool_mir_default_price_kb_v1(m, true)
+            expect(per_file).to_equal(FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1)
+            expect(per_file <= file_worker_pool_mir_price_kb_v1(m)).to_equal(true)
+
+    # @req NB-POOL-PRICE-004
+    it "the MIR shard path keeps the closure-scaled price unchanged":
+        for m in [-1, 0, 50, 600, 1649, 1650, 3134]:
+            expect(file_worker_pool_mir_default_price_kb_v1(m, false)).to_equal(file_worker_pool_mir_price_kb_v1(m))

@@ -1,0 +1,96 @@
+# Shared pure Docker inspection codec. Both finite and cooperative owners use
+# these exact request/isolation/managed-scope checks; this module grants no IO.
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.*
+use std.nogc_async_mut.container.providers.windows.docker_scope_v2.{windows_docker_scope_values_v2, WINDOWS_DOCKER_SCOPED_INSPECT_FORMAT_V2}
+use std.common.contracts.container.execution_v2.ContainerHostScopeV2
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeStateV1}
+
+pub fn windows_docker_observed_identity_v2(policy: WindowsDockerPolicyV1, request: WindowsDockerRequestV1, native_id: text) -> RuntimeIdentityV1:
+    RuntimeIdentityV1(pod_uid: request.pod_uid, attempt: request.attempt,
+        provider_generation: policy.provider_generation, operation_id: request.operation_id,
+        engine: WINDOWS_DOCKER_NATIVE_ENGINE_V1, native_id: native_id, node_boot_id: policy.node_boot_id)
+
+pub fn windows_docker_inspect_format_v2(request: WindowsDockerRequestV1, scope: ContainerHostScopeV2?) -> text:
+    var format = match scope:
+        case Some(_): WINDOWS_DOCKER_SCOPED_INSPECT_FORMAT_V2
+        case nil: WINDOWS_DOCKER_INSPECT_FORMAT_V1
+    val inspect_terminal = request.terminal_tty or request.stdin_open
+    var inspect_mounts = request.mounts.len() > 0 or request.working_directory != "" or inspect_terminal
+    match scope:
+        case Some(_): inspect_mounts = true
+        case nil: ()
+    if request.working_directory != "": format = format + "|{{{{.Config.WorkingDir}}}}"
+    if inspect_mounts: format = format + WINDOWS_DOCKER_MOUNTS_FORMAT_V3
+    if inspect_terminal: format = format + WINDOWS_DOCKER_TERMINAL_FORMAT_V4
+    format
+
+pub fn windows_docker_inspect_decode_v2(policy: WindowsDockerPolicyV1, request: WindowsDockerRequestV1,
+        scope: ContainerHostScopeV2?, native_id: text, stdout: text) -> Result<RuntimeStateV1, text>:
+    if not windows_docker_id_v1(native_id): return Err("docker-exact-native-id-required")
+    val digest = windows_docker_request_digest_v1(policy, request)?
+    val inspect_terminal = request.terminal_tty or request.stdin_open
+    val terminal_fields = if inspect_terminal: 4 else: 0
+    var inspect_mounts = request.mounts.len() > 0 or request.working_directory != "" or inspect_terminal
+    match scope:
+        case Some(_): inspect_mounts = true
+        case nil: ()
+    val output = stdout.trim()
+    val fields = output.split("|")
+    var expected = [native_id, policy.expected_image_id, request.image, "process", "ContainerUser",
+        "none", request.cpu_count.to_text(), request.memory_limit_bytes.to_text(), WINDOWS_DOCKER_ENGINE_V1,
+        request.pod_uid, request.attempt.to_text(), request.operation_id, policy.node_boot_id,
+        policy.provider_generation.to_text(), digest]
+    var count = 17
+    match scope:
+        case Some(scope):
+            expected[12] = scope.boot_id
+            val scoped = windows_docker_scope_values_v2(scope)?
+            count = 23
+            if fields.len() < count: return Err("docker-inspect-field-count")
+            var field = 0
+            while field < scoped.len():
+                if fields[17 + field] != scoped[field]: return Err("docker-inspect-managed-scope-mismatch")
+                field = field + 1
+        case nil: ()
+    if request.working_directory != "":
+        if fields.len() < count + 1: return Err("docker-inspect-field-count")
+        if fields[count] != request.working_directory: return Err("docker-inspect-working-directory-mismatch")
+        count = count + 1
+    if inspect_mounts:
+        if request.mounts.len() == 0:
+            if fields.len() != count + 2 + terminal_fields: return Err("docker-inspect-mount-field-count")
+            if fields[count] != "0" or fields[count + 1] != "": return Err("docker-inspect-mount-mismatch")
+            count = count + 2
+        else:
+            if fields.len() != count + 5 + terminal_fields: return Err("docker-inspect-mount-field-count")
+            val mount = request.mounts[0]
+            val expected_rw = if mount.read_only: "false" else: "true"
+            if fields[count] != "1" or fields[count + 1] != "bind" or fields[count + 2] != mount.host_root or
+                    fields[count + 3] != mount.guest_root or fields[count + 4] != expected_rw:
+                return Err("docker-inspect-mount-mismatch")
+            count = count + 5
+    if inspect_terminal:
+        if fields.len() != count + 4: return Err("docker-inspect-terminal-field-count")
+        val tty = if request.terminal_tty: "true" else: "false"
+        val stdin = if request.stdin_open: "true" else: "false"
+        # Official CLI opts.go sets AttachStdin for --interactive and then
+        # StdinOnce when OpenStdin && AttachStdin. No -a override is emitted.
+        if fields[count] != tty or fields[count + 1] != stdin or fields[count + 2] != stdin or fields[count + 3] != stdin:
+            return Err("docker-inspect-terminal-binding-mismatch")
+        count = count + 4
+    if fields.len() != count: return Err("docker-inspect-field-count")
+    var index = 0
+    while index < expected.len():
+        if fields[index] != expected[index]: return Err("docker-inspect-ownership-or-isolation-mismatch")
+        index = index + 1
+    var phase = fields[15]
+    if phase != "created" and phase != "running" and phase != "exited":
+        return Err("docker-inspect-state-unsupported")
+    val raw_exit = fields[16]
+    if raw_exit == "" or raw_exit.len() > 10: return Err("docker-exit-code-invalid")
+    for ch in raw_exit.chars():
+        if ch < "0" or ch > "9": return Err("docker-exit-code-invalid")
+    val exit = raw_exit.to_i64() ?? -1
+    if exit < 0 or exit.to_text() != raw_exit or exit > 4294967295: return Err("docker-exit-code-invalid")
+    Ok(RuntimeStateV1(phase: phase, identity: windows_docker_observed_identity_v2(policy, request, native_id),
+        exit_code: if phase == "exited": exit else: -1, reason: "docker-owned-observation"))

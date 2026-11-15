@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Starts http_sffi_server_fixture on a loopback port and drives it with
+# http_sffi_client_fixture. Usage: http_sffi_loopback_probe.shs interp|native
+# interp: SIMPLE_BIN runs both fixtures from source.
+# native: HTTP_SFFI_SERVER_EXE / HTTP_SFFI_CLIENT_EXE are native-built fixtures.
+set -uo pipefail
+mode=${1:-interp}
+root=$(cd "$(dirname "$0")/../../../../../.." && pwd)
+fx="$root/test/01_unit/lib/nogc_sync_mut/io/fixtures"
+work=$(mktemp -d)
+server_pid=
+cleanup() { [ -n "$server_pid" ] && kill "$server_pid" 2>/dev/null; rm -rf "$work"; }
+trap cleanup EXIT
+port=$((40100 + $$ % 800))
+mkdir -p "$work/static"
+printf 'static-page-content' > "$work/static/page.txt"
+printf 'upload-payload-xyz' > "$work/note.txt"
+case "$mode" in
+  interp)
+    simple_bin=${SIMPLE_BIN:-$root/bin/simple}
+    server=("$simple_bin" run "$fx/http_sffi_server_fixture.spl")
+    client=("$simple_bin" run "$fx/http_sffi_client_fixture.spl") ;;
+  native)
+    [ -x "${HTTP_SFFI_SERVER_EXE:-}" ] && [ -x "${HTTP_SFFI_CLIENT_EXE:-}" ] || { echo "native fixture exes missing"; exit 2; }
+    server=("$HTTP_SFFI_SERVER_EXE")
+    client=("$HTTP_SFFI_CLIENT_EXE") ;;
+  *) echo "unknown mode: $mode"; exit 2 ;;
+esac
+"${server[@]}" "$port" "$work/static" > "$work/server.out" 2>&1 &
+server_pid=$!
+for _ in $(seq 1 120); do grep -q '^listening' "$work/server.out" && break; sleep 1; done
+grep -q '^listening' "$work/server.out" || { echo "server did not start"; tail -3 "$work/server.out"; exit 2; }
+sleep 1
+"${client[@]}" "$port" "$work/note.txt" "$mode" > "$work/client.out" 2>&1
+rc=$?
+grep -E '^(hello|static|missing|client_valid|set_header|header|upload):' "$work/client.out"
+[ "$rc" -eq 0 ] || { echo "client exit $rc"; tail -5 "$work/client.out"; }
+exit "$rc"
