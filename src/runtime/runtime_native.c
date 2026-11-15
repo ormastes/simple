@@ -8903,10 +8903,9 @@ void rt_memory_barrier(void) {
  * round-trip cannot be elided or constant-folded, so it is a genuine
  * barrier here. MinGW is deliberately NOT routed here -- it has the GNU
  * asm and takes the branch below, exactly like Linux/macOS/FreeBSD. */
-static volatile int64_t rt_black_box_sink;
 int64_t rt_black_box(int64_t value) {
-    rt_black_box_sink = value;
-    return rt_black_box_sink;
+    volatile int64_t sink = value;
+    return sink;
 }
 #elif defined(__GNUC__) || defined(__clang__)
 SPL_WEAK int64_t rt_black_box(int64_t value) {
@@ -8914,10 +8913,9 @@ SPL_WEAK int64_t rt_black_box(int64_t value) {
     return value;
 }
 #else
-static volatile int64_t rt_black_box_sink;
 int64_t rt_black_box(int64_t value) {
-    rt_black_box_sink = value;
-    return rt_black_box_sink;
+    volatile int64_t sink = value;
+    return sink;
 }
 #endif
 
