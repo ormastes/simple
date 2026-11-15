@@ -26,6 +26,7 @@ when it drives cuBLAS/FlashAttention rather than writing GEMMs.
 
 Caret side: providers `slang` (HTTP) and `slang_local` (in-process) in
 `src/app/llm_caret/provider.spl`; model root config in `config.spl`
+`slang_local` sends the conversation as chat frames (`slang_generate_chat`, the model's own chat template, stops at its end-of-turn token); the old raw transcript made the model role-play "Assistant:" turns to the token cap. Admission (`llm_engine.spl` `_runtime_overhead_bytes`, flat 6 GiB) still refuses loads when <10 GiB is free.
 (`SLANG_MODEL_ROOT`).
 
 ## Things that will bite you
