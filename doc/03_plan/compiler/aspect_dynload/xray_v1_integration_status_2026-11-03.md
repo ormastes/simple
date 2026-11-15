@@ -519,3 +519,18 @@ real run, on-vs-off timing — decisions listed in
 `doc/08_tracking/bug/xray_llvm_windows_flag_guard_leaf_and_admission_decisions_2026-11-14.md`.
 The release/1.0.0 tip needs a seed workaround to compile at all
 (`seed_bare_list_literal_after_match_parsed_as_index_2026-11-14.md`).
+
+**Windows system-spec re-run (2026-11-15, lane xraysys, seed-attr2, Windows 11, after #9376).**
+Re-run to check whether the ring/export fix unblocks the BLOCKED system specs. It does not:
+every blocker is an ELF/Linux lane gate or a missing Windows lane script, unrelated to the
+handler/dllexport problem, so no spec was converted to the ring path.
+
+| spec | passed/failed | blocker |
+|---|---|---|
+| `test/03_system/xray/xray_spy_program_out_spec.spl` | 0/10 | ELF lanes `check-xray-native-program-e2e.shs`, `check-xray-llvm-adapter-e2e.shs` need Linux + clang + compiler-rt |
+| `test/03_system/xray/xray_backend_differential_out_spec.spl` | 1/3 failed (4 total) | ELF lanes `check-xray-llvm-adapter-e2e.shs`, `check-xray-native-inprocess-e2e.shs`; `check-xray-native-win64-inprocess-e2e.shs` does not exist (win64 execution lane never written) |
+| `test/01_unit/lib/xray/xray_win_flag_leaf_v1_spec.spl` | 9/0 | green |
+| `test/01_unit/compiler/backend/xray_llvm_attrs_spec.spl` | 27/0 | green |
+
+The Windows ring path is covered by `xray_win_ring_e2e_host.spl` (fixture run, not an SSpec).
+A Windows system spec wrapping it needs a new lane script and is not part of this change.
