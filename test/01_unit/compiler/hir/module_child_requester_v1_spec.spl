@@ -1,0 +1,150 @@
+# TDD consumer regression checkpoint. Authored before consumer implementation.
+# Uses actual parser, frozen registry, source import writes and HIR references.
+# Runtime RED/GREEN remains BLOCKED: no admitted general SSpec runner.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.driver_source_file.{SourceFile, source_file_with_manifest_evidence_v1}
+use compiler.common.cache.visibility_manifest_read_v1.{VisibilityManifestEvidenceV1, visibility_manifest_reads_v1}
+use compiler.common.cache.visibility_manifest_policy_v1.{VisibilityManifestPolicyV1}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirTypeKind}
+use compiler.hir.hir_definitions.{HirExprKind}
+use compiler.frontend.parser_types_expr.{Expr, ExprKind}
+use compiler.hir.hir_lowering._Expressions.expression_core.*
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.context_helpers.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_lowering._Items.module_import_resolution.*
+
+fn requester_evidence_v1(path: text, inventory: Dict<text, text>, policies: [VisibilityManifestPolicyV1]) -> VisibilityManifestEvidenceV1:
+    val evidence = visibility_manifest_reads_v1(path, "/snapshot", ["/snapshot/test"],
+        "requester-snapshot", inventory, inventory).unwrap()
+    for policy in policies:
+        for read in evidence.reads:
+            if read.exists and read.manifest_path == policy.source_path:
+                evidence.policies.push(policy)
+    evidence
+
+fn requester_policy_v1(path: text, body: text) -> VisibilityManifestPolicyV1:
+    val slash = path.last_index_of("/")
+    VisibilityManifestPolicyV1(source_path: path, directory_path: path.substring(0, slash),
+        coverage_root: "/snapshot/test", content_sha256: sha256_text(body), snapshot_id: "requester-snapshot",
+        valid: true, frontend_identity: "fixture-frontend", parser_provider_id: "parser.simple.legacy-reference",
+        frontend_route: "advisory-selected", advisory_policy: "reference", preprocessed_source_sha256: sha256_text(body))
+
+fn requester_fixture_v1(body: text, declaration: text = "pub struct Target:\n    value: i64\n",
+        requester: text = "/snapshot/test/caller.spl", closed_ancestor: bool = false) -> HirLowering:
+    val manifest = "/snapshot/test/pkg/__init__.spl"
+    val target = "/snapshot/test/pkg/body.spl"
+    val facade = "/snapshot/test/pkg/facade.spl"
+    val manifest_body = "# explicitly supplied frozen policy\n"
+    val facade_body = "use physical.body.\{Target\}\nexport Target\n"
+    var inventory = {manifest: sha256_text(manifest_body), target: sha256_text(declaration),
+        facade: sha256_text(facade_body), requester: sha256_text(body)}
+    val policy = requester_policy_v1(manifest, manifest_body)
+    policy.child_names = ["open", "hidden", "facade"]
+    policy.child_modifiers = ["pub", "pri", "pub"]
+    policy.child_visibilities = ["public", "private", "public"]
+    policy.child_target_paths = [target, target, facade]
+    policy.child_target_sha256 = [inventory[target], inventory[target], inventory[facade]]
+    policy.child_target_kinds = ["source-file", "source-file", "source-file"]
+    policy.child_resolution_outcomes = ["snapshot-selected", "snapshot-selected", "snapshot-selected"]
+    var policies = [policy]
+    if closed_ancestor:
+        val ancestor = "/snapshot/test/__init__.spl"
+        inventory[ancestor] = sha256_text("# closed ancestor\n")
+        policies.push(requester_policy_v1(ancestor, "# closed ancestor\n"))
+    val root_module = parse_and_build_module(manifest_body, manifest)
+    val target_module = parse_and_build_module(declaration, target)
+    val facade_module = parse_and_build_module(facade_body, facade)
+    val caller_module = parse_and_build_module(body, requester)
+    val sources = [
+        source_file_with_manifest_evidence_v1(SourceFile(path: manifest, content: manifest_body, module_name: "physical.pkg"), requester_evidence_v1(manifest, inventory, policies)),
+        SourceFile(path: manifest, content: manifest_body, module_name: "configured"),
+        source_file_with_manifest_evidence_v1(SourceFile(path: target, content: declaration, module_name: "physical.body"), requester_evidence_v1(target, inventory, policies)),
+        SourceFile(path: target, content: declaration, module_name: "configured.open"),
+        SourceFile(path: target, content: declaration, module_name: "configured.hidden"),
+        source_file_with_manifest_evidence_v1(SourceFile(path: facade, content: facade_body, module_name: "physical.facade"), requester_evidence_v1(facade, inventory, policies)),
+        SourceFile(path: facade, content: facade_body, module_name: "configured.facade"),
+        source_file_with_manifest_evidence_v1(SourceFile(path: requester, content: body, module_name: "caller"), requester_evidence_v1(requester, inventory, policies))]
+    val registry = module_surfaces_from_modules({"physical.pkg": root_module, "configured": root_module,
+        "physical.body": target_module, "configured.open": target_module, "configured.hidden": target_module,
+        "physical.facade": facade_module, "configured.facade": facade_module, "caller": caller_module}, sources).unwrap()
+    val lowering = HirLowering.with_filename(requester)
+    lowering.module_surfaces = registry
+    lowering.resolve_import_symbols(caller_module)
+    lowering
+
+fn requester_denial_v1(lowering: HirLowering, reason: text) -> bool:
+    for diagnostic in lowering.errors:
+        if diagnostic.message.contains("E-HIR-REQUESTER-ROUTE") and diagnostic.message.contains(reason): return true
+    false
+
+describe "configured child requester checks at actual type references":
+    it "accepts the public route and rejects the private route to the same target":
+        val lowering = requester_fixture_v1("use configured.open.\{Target\}\nuse configured.hidden.\{Target as Hidden\}\n")
+        val public_kind = lowering.lower_named_kind("Target", [], Span.empty())
+        expect(public_kind == HirTypeKind.Error).to_equal(false)
+        val private_kind = lowering.lower_named_kind("Hidden", [], Span.empty())
+        expect(private_kind == HirTypeKind.Error).to_equal(true)
+        expect(requester_denial_v1(lowering, "private-child")).to_equal(true)
+
+    it "allows a retained named-export facade without granting the private implementation route":
+        val lowering = requester_fixture_v1("use configured.facade.\{Target as Exposed\}\nuse configured.hidden.\{Target as Direct\}\n")
+        expect(lowering.lower_named_kind("Exposed", [], Span.empty()) == HirTypeKind.Error).to_equal(false)
+        expect(lowering.lower_named_kind("Direct", [], Span.empty()) == HirTypeKind.Error).to_equal(true)
+        expect(requester_denial_v1(lowering, "private-child")).to_equal(true)
+
+    it "promotes a folder-local declaration only through the retained explicit facade export":
+        val lowering = requester_fixture_v1("use configured.facade.\{Target as Exposed\}\nuse configured.open.\{Target as Direct\}\n",
+            "struct Target:\n    value: i64\n")
+        expect(lowering.lower_named_kind("Exposed", [], Span.empty()) == HirTypeKind.Error).to_equal(false)
+        expect(lowering.lower_named_kind("Direct", [], Span.empty()) == HirTypeKind.Error).to_equal(true)
+        expect(requester_denial_v1(lowering, "folder-local")).to_equal(true)
+
+    it "rejects stale policy and same-ID rebind instead of treating them as legacy absence":
+        val lowering = requester_fixture_v1("use configured.open.\{Target\}\n")
+        val id = lowering.symbols.lookup_or_invalid("Target")
+        lowering.symbols.rebind_local_type("Target", id)
+        expect(lowering.lower_named_kind("Target", [], Span.empty()) == HirTypeKind.Error).to_equal(true)
+        expect(requester_denial_v1(lowering, "stale-binding")).to_equal(true)
+        val stale = requester_fixture_v1("use configured.open.\{Target\}\n")
+        val receipt = stale.module_child_binding_receipts_v1[0]
+        stale.module_surfaces.surfaces[receipt.manifest_surface].visibility_manifest_evidence_v1.policies[0].child_modifiers[0] = "pri"
+        expect(stale.lower_named_kind("Target", [], Span.empty()) == HirTypeKind.Error).to_equal(true)
+        expect(requester_denial_v1(stale, "policy")).to_equal(true)
+
+    it "retains immediate-folder defaults while keeping explicit pri file-private":
+        val local = requester_fixture_v1("use configured.open.\{Target\}\n", "struct Target:\n    value: i64\n", "/snapshot/test/pkg/caller.spl")
+        expect(local.lower_named_kind("Target", [], Span.empty()) == HirTypeKind.Error).to_equal(false)
+        val private = requester_fixture_v1("use configured.open.\{Target\}\n", "pri struct Target:\n    value: i64\n", "/snapshot/test/pkg/caller.spl")
+        expect(private.lower_named_kind("Target", [], Span.empty()) == HirTypeKind.Error).to_equal(true)
+        expect(requester_denial_v1(private, "explicit-pri")).to_equal(true)
+
+    it "does not let a public child bypass a closed ancestor":
+        val lowering = requester_fixture_v1("use configured.open.\{Target\}\n", "pub struct Target:\n    value: i64\n", "/snapshot/src/caller.spl", true)
+        expect(lowering.lower_named_kind("Target", [], Span.empty()) == HirTypeKind.Error).to_equal(true)
+        expect(requester_denial_v1(lowering, "closed-ancestor")).to_equal(true)
+
+    it "rejects namespace and containing-type expressions before public member lowering":
+        val lowering = requester_fixture_v1("use configured.hidden as hidden\n")
+        val namespace = Expr(kind: ExprKind.Ident("hidden"), span: Span.empty())
+        expect(lowering.lower_hir_expr(namespace).kind == HirExprKind.Error).to_equal(true)
+        val constructor = Expr(kind: ExprKind.Ident("hidden.Target"), span: Span.empty())
+        expect(lowering.lower_hir_expr(constructor).kind == HirExprKind.Error).to_equal(true)
+        expect(requester_denial_v1(lowering, "private-child")).to_equal(true)
+
+    it "does not let a local alias elaboration skip a tracked private route":
+        val lowering = requester_fixture_v1("use configured.hidden.\{Target\}\n")
+        lowering.type_alias_current_owner = lowering.module_filename
+        expect(lowering.lower_named_kind("Target", [], Span.empty()) == HirTypeKind.Error).to_equal(true)
+        expect(requester_denial_v1(lowering, "private-child")).to_equal(true)
+
+    it "preserves legacy flat imports outside the selected-child consumer":
+        val lowering = requester_fixture_v1("use physical.body.\{Target\}\n")
+        expect(lowering.module_child_binding_keys_v1.len()).to_equal(0)
+        expect(lowering.lower_named_kind("Target", [], Span.empty()) == HirTypeKind.Error).to_equal(false)
+        expect(requester_denial_v1(lowering, "")).to_equal(false)

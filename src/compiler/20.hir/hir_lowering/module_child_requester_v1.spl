@@ -1,0 +1,176 @@
+# Bounded requester enforcement for actual source bindings with selected-child
+# provenance. Legacy absence is not a grant; it stays with existing enforcement.
+use compiler.common.cache.module_child_selection_receipt_v1.{ModuleChildSelectionReceiptV1}
+use compiler.common.cache.visibility_manifest_read_v1.{visibility_manifest_parent_v1}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.module_child_binding_v1.*
+use compiler.hir.hir_lowering.module_child_selection_v1.{module_child_selection_validate_v1}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName, ModuleSurfaceExportCategoryV1, ModuleSurfaceExportSelectionStateV1, ModuleSurfaceExportBindingRoleV1, ModuleSurfaceExportHopKindV1, module_surface_declaration_authority_lookup_typed_v1}
+use compiler.hir.hir_lowering.module_surface_selected_exports_v1.{module_surface_selected_export_lookup_v1, module_surface_selected_declaration_lookup_v1, module_surface_selected_export_hop_v1, module_surface_export_category_name_v1}
+use compiler.hir.hir_lowering.module_surface_manifest_evidence_v1.{module_surface_manifest_ready_reason_v1}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path}
+
+class RequesterExportBudgetV1:
+    remaining: i64
+
+fn requester_category_v1(category: text) -> ModuleSurfaceExportCategoryV1:
+    match category:
+        "class": ModuleSurfaceExportCategoryV1.Class
+        "struct": ModuleSurfaceExportCategoryV1.Struct
+        "enum": ModuleSurfaceExportCategoryV1.Enum
+        "trait": ModuleSurfaceExportCategoryV1.Trait
+        "type_alias": ModuleSurfaceExportCategoryV1.TypeAlias
+        "constant": ModuleSurfaceExportCategoryV1.Constant
+        "bitfield": ModuleSurfaceExportCategoryV1.Bitfield
+        _: ModuleSurfaceExportCategoryV1.Function
+
+fn requester_declaration_reason_v1(modifier: text, owner: text, requester: text, exporting: bool) -> text:
+    if modifier == "pri":
+        if exporting or owner != requester: return "explicit-pri"
+        return ""
+    if modifier == "omitted":
+        if visibility_manifest_parent_v1(owner) != visibility_manifest_parent_v1(requester):
+            return "folder-local"
+        return ""
+    if modifier == "public": return ""
+    # Scoped modifiers require their own peer/package/friend owner. Unknown
+    # private is never silently reclassified as omitted syntax.
+    "declaration-policy-unavailable"
+
+fn requester_child_route_reason_v1(registry: ModuleSurfacesByName,
+        receipt: ModuleChildSelectionReceiptV1, requester: text) -> text:
+    val invalid = module_child_selection_validate_v1(registry, receipt)
+    if invalid != "": return invalid
+    if requester == "": return "requester-source-unavailable"
+    val manifest_dir = visibility_manifest_parent_v1(receipt.manifest_path)
+    if receipt.child_modifier == "pri":
+        if requester != receipt.manifest_path: return "private-child"
+    elif receipt.child_modifier == "omitted":
+        if visibility_manifest_parent_v1(requester) != manifest_dir: return "folder-local-child"
+    elif receipt.child_modifier != "pub" and receipt.child_modifier != "public":
+        return "child-policy-unavailable"
+    val target = registry.surfaces[receipt.target_surface]
+    val evidence = target.visibility_manifest_evidence_v1
+    if module_surface_manifest_ready_reason_v1(target.canonical_path, evidence) != "":
+        return "ancestor-evidence-unavailable"
+    for read in evidence.reads:
+        # No boundary crossing if the requester is already inside this subtree.
+        if requester.starts_with(read.directory_path + "/"): continue
+        if not read.exists: continue
+        if read.manifest_path != receipt.manifest_path: return "closed-ancestor"
+        if receipt.child_modifier != "pub" and receipt.child_modifier != "public":
+            return "closed-child-boundary"
+    ""
+
+# Follow only actual retained typed predecessor edges. The directory comparison
+# is an eligibility limit after edge selection, never a source of alias routes.
+# Cross-directory export chains require additional route receipts and are not
+# admitted by this first consumer slice.
+fn requester_export_reason_v1(registry: ModuleSurfacesByName, surface_index: i64,
+        category: ModuleSurfaceExportCategoryV1, name: text, role: ModuleSurfaceExportBindingRoleV1,
+        requester: text, depth: i64, visited: [i64], budget: RequesterExportBudgetV1) -> text:
+    if budget.remaining <= 0: return "export-budget-unavailable"
+    budget.remaining = budget.remaining - 1
+    if depth >= 32: return "export-depth-unavailable"
+    val selected = if role == ModuleSurfaceExportBindingRoleV1.Declaration:
+        module_surface_selected_declaration_lookup_v1(registry, surface_index, category, name)
+    else: module_surface_selected_export_lookup_v1(registry, surface_index, category, name)
+    if selected.state != ModuleSurfaceExportSelectionStateV1.Selected:
+        return "export-origin-unavailable:" + selected.reason
+    if visited.contains(selected.binding_row): return "export-cycle-unavailable"
+    val surface = registry.surfaces[surface_index]
+    if role == ModuleSurfaceExportBindingRoleV1.Declaration:
+        val authority = module_surface_declaration_authority_lookup_typed_v1(
+            surface.declaration_authority_index, name, module_surface_export_category_name_v1(category))
+        if not authority.found or authority.projection_key != selected.terminal_projection:
+            return "export-declaration-unavailable"
+        val marker = module_surface_selected_export_hop_v1(registry, selected, 0)
+        if marker.is_err(): return "export-direct-marker-unavailable"
+        return requester_declaration_reason_v1(authority.source_modifier, authority.source_path, requester, true)
+    var next_visited = visited.copy()
+    next_visited.push(selected.binding_row)
+    var last_reason = "export-route-unavailable"
+    for offset in 0..selected.hop_count:
+        if budget.remaining <= 0: return "export-budget-unavailable"
+        budget.remaining = budget.remaining - 1
+        val edge_result = module_surface_selected_export_hop_v1(registry, selected, offset)
+        if edge_result.is_err(): return "export-hop-unavailable:" + edge_result.unwrap_err()
+        val edge = edge_result.unwrap()
+        val target = registry.surfaces[edge.target_surface]
+        # Qualified/glob export route rows do not yet carry selected-child
+        # receipts. Admit only explicit named-import or direct predecessor
+        # edges; their actual configured selection is checked above.
+        if edge.kind != ModuleSurfaceExportHopKindV1.Direct and edge.kind != ModuleSurfaceExportHopKindV1.NamedImport:
+            last_reason = "export-hop-kind-unavailable"
+            continue
+        if edge.kind == ModuleSurfaceExportHopKindV1.NamedImport:
+            if edge.import_row < 0 or edge.import_row >= surface.import_child_selections_v1.len():
+                last_reason = "export-import-receipt-unavailable"
+                continue
+            val hop_receipt = surface.import_child_selections_v1[edge.import_row]
+            if hop_receipt.selected:
+                val hop_reason = requester_child_route_reason_v1(registry, hop_receipt, surface.canonical_path)
+                if hop_reason != "":
+                    last_reason = hop_reason
+                    continue
+        if visibility_manifest_parent_v1(surface.canonical_path) != visibility_manifest_parent_v1(target.canonical_path):
+            last_reason = "export-cross-boundary-unavailable"
+            continue
+        # Intermediate hops must remain in this frozen snapshot, even when
+        # their physical directory and nominal declaration happen to agree.
+        if (target.visibility_manifest_evidence_v1.snapshot_id != surface.visibility_manifest_evidence_v1.snapshot_id or
+                module_surface_manifest_ready_reason_v1(target.canonical_path, target.visibility_manifest_evidence_v1) != ""):
+            last_reason = "export-snapshot-unavailable"
+            continue
+        val reason = requester_export_reason_v1(registry, edge.target_surface, edge.target_category,
+            edge.target_name, edge.target_role, surface.canonical_path, depth + 1, next_visited, budget)
+        if reason == "": return ""
+        last_reason = reason
+    last_reason
+
+impl HirLowering:
+    me check_selected_child_requester_v1(name: text, span: Span) -> bool:
+        # Internal declaration elaboration is not a source-written requester.
+        # The outer alias selection is checked before switching owner scope.
+        if self.module_child_binding_subjects_v1.len() == 0 and self.module_child_binding_keys_v1.len() == 0: return false
+        if self.registering_import_symbols: return false
+        if self.type_alias_current_owner != "" and self.type_alias_current_owner != self.module_filename:
+            return false
+        val row = self.module_child_binding_subject_row_v1(name)
+        if row < 0: return false
+        var reason = ""
+        if (row >= self.module_child_binding_keys_v1.len() or row >= self.module_child_binding_receipts_v1.len() or
+                row >= self.module_child_binding_source_names_v1.len() or row >= self.module_child_binding_categories_v1.len()):
+            reason = "binding-provenance-unavailable"
+        elif self.module_child_binding_keys_v1[row] != self.module_child_binding_key_v1(name):
+            reason = "stale-binding"
+        else:
+            val receipt = self.module_child_binding_receipts_v1[row]
+            val requester = module_surface_canonical_path(self.module_filename)
+            reason = requester_child_route_reason_v1(self.module_surfaces, receipt, requester)
+            if reason == "":
+                val source_name = self.module_child_binding_source_names_v1[row]
+                val category_name = self.module_child_binding_categories_v1[row]
+                if source_name != "":
+                    if not ["function", "class", "struct", "enum", "trait", "type_alias", "constant", "bitfield"].contains(category_name):
+                        reason = "selected-category-unavailable"
+                    else:
+                        val source = self.module_surfaces.surfaces[receipt.target_surface]
+                        val direct = module_surface_declaration_authority_lookup_typed_v1(
+                            source.declaration_authority_index, source_name, category_name)
+                        if direct.found:
+                            reason = requester_declaration_reason_v1(direct.source_modifier, direct.source_path, requester, false)
+                        else:
+                            reason = requester_export_reason_v1(self.module_surfaces, receipt.target_surface,
+                                requester_category_v1(category_name), source_name, ModuleSurfaceExportBindingRoleV1.Export,
+                                requester, 0, [], RequesterExportBudgetV1(remaining: 256))
+        if reason == "": return false
+        self.error("[E-HIR-REQUESTER-ROUTE] `" + name + "`: " + reason, span)
+        true
+
+pub fn requester_route_error_expr_v1(span: Span) -> HirExpr:
+    HirExpr(kind: HirExprKind.Error, has_type_: false,
+        type_: HirType(kind: HirTypeKind.Error, span: span), span: span)
