@@ -18,6 +18,7 @@ test/fixtures/native_trait_object_tail_refused/main.spl.
 
 use std.spec.*
 use std.io_runtime.{env_set}
+use std.nogc_sync_mut.io.file_ops.{file_read}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
@@ -69,6 +70,9 @@ fn mir_of(l: Lowered, suffix: text) -> text:
         i = i + 1
     ""
 
+fn casts(m: text) -> i64:
+    m.split(CAST).len() - 1
+
 fn any_mir_has(l: Lowered, needle: text) -> bool:
     for m in l.mirs:
         if m.contains(needle): return true
@@ -94,6 +98,34 @@ describe "trait-object conversion at implicit tails (bootstrap HIR)":
         val l = lower_bootstrap(DECLS + "fn pick_match(n: i64) -> Tag:\n    match n:\n        case 0: Alpha(k: 10)\n        case _: Beta(k: 20)\n")
         expect(l.errors).to_equal("")
         expect(mir_of(l, "pick_match").split(CAST).len() >= 3).to_equal(true)
+
+    # Every conditional dispatcher must thread the trait type into its arms:
+    # the joined result is typed as the trait without a second conversion,
+    # so a dispatcher that dropped it would hand back a bare data pointer.
+    it "converts every concrete arm of other conditional tail shapes":
+        val opt = lower_bootstrap(DECLS + "fn by_opt(o: i64?) -> Tag:\n    match o:\n        case Some(v): Alpha(k: v)\n        case None: Beta(k: 0)\n")
+        expect(opt.errors).to_equal("")
+        expect(casts(mir_of(opt, "by_opt"))).to_equal(2)
+        val en = lower_bootstrap("enum Color:\n    Red\n    Green\n    Blue\n\n" + DECLS + "fn by_enum(c: Color) -> Tag:\n    match c:\n        case Red: Alpha(k: 1)\n        case Green: Beta(k: 2)\n        case Blue: Alpha(k: 3)\n")
+        expect(en.errors).to_equal("")
+        expect(casts(mir_of(en, "by_enum"))).to_equal(3)
+        val gd = lower_bootstrap(DECLS + "fn by_guard(n: i64) -> Tag:\n    match n:\n        case x if x > 5: Alpha(k: x)\n        case _: Beta(k: n)\n")
+        expect(gd.errors).to_equal("")
+        expect(casts(mir_of(gd, "by_guard"))).to_equal(2)
+        val el = lower_bootstrap(DECLS + "fn by_elif(n: i64) -> Tag:\n    if n == 0:\n        Alpha(k: 0)\n    elif n == 1:\n        Beta(k: 1)\n    else:\n        Alpha(k: 2)\n")
+        expect(el.errors).to_equal("")
+        expect(casts(mir_of(el, "by_elif"))).to_equal(3)
+        val ns = lower_bootstrap(DECLS + "fn nested(a: bool, b: bool) -> Tag:\n    if a:\n        if b: Alpha(k: 1) else: Beta(k: 2)\n    else:\n        Beta(k: 3)\n")
+        expect(ns.errors).to_equal("")
+        expect(casts(mir_of(ns, "nested"))).to_equal(3)
+        val mx = lower_bootstrap(DECLS + "fn pass_through(t: Tag, b: bool) -> Tag:\n    if b: t else: Alpha(k: 1)\n")
+        expect(mx.errors).to_equal("")
+        expect(casts(mir_of(mx, "pass_through"))).to_equal(1)
+
+    it "converts every arm of a desugared text match tail":
+        val tx = lower_bootstrap(DECLS + "fn by_text(s: text) -> Tag:\n    match s:\n        case \"a\": Alpha(k: 1)\n        case _: Beta(k: 2)\n")
+        expect(tx.errors).to_equal("")
+        expect(casts(mir_of(tx, "by_text"))).to_equal(2)
 
     it "converts a method's implicit trait tail":
         val l = lower_bootstrap(DECLS + "class Factory:\n    base: i64\n\nimpl Factory:\n    fn build() -> Tag:\n        Alpha(k: self.base)\n")
@@ -124,6 +156,20 @@ describe "trait-object conversion at module-level typed vals (bootstrap HIR)":
 
     it "refuses `val r: Reader<i32> = JCell(..)` like the in-function form":
         expect(lower_bootstrap(DECLS + "val module_reader: Reader<i32> = JCell(cell: Some(3))\n").errors).to_contain("method read: return type argument T=optional[int:32:true] is not supported")
+
+    it "dispatches a converted module val through its table":
+        val l = lower_bootstrap(DECLS + "val module_tag: Tag = Alpha(k: 5)\n\nfn read_tag() -> i64:\n    module_tag.tag()\n")
+        expect(l.errors).to_equal("")
+        expect(mir_of(l, "read_tag")).to_contain("CallIndirect")
+
+describe "native oracle fixtures (exact source, bootstrap HIR)":
+    it "lowers the tail/module-val fixture with no errors":
+        expect(lower_bootstrap(file_read("test/fixtures/native_trait_object_tail_and_module_val/main.spl")).errors).to_equal("")
+
+    it "refuses both shapes of the refusal fixture in one build":
+        val errors = lower_bootstrap(file_read("test/fixtures/native_trait_object_tail_refused/main.spl")).errors
+        expect(errors).to_contain("Reader for tail_probe::RCell: method read: return type expected=T? actual=int:64:true")
+        expect(errors).to_contain("Reader for tail_probe::ICell: method read: return type argument T=optional[int:32:true] is not supported")
 
 describe "controls that already converted":
     it "explicit return":
