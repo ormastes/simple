@@ -27,3 +27,11 @@ The authored folder-local facade-promotion case covers this distinction.
 
 Working and staged direct-env guards and staged whitespace checks passed for
 the implementation checkpoint. These checks do not qualify runtime semantics.
+
+Independent review identified unproven imported-template closure and unavailable
+legacy NamedImport-hop promotion. The safety repair requires an exact selected
+hop receipt and blocks unproven alias/default/bound elaboration at the outer
+binding. Added two negative regressions and preserved three legal positive
+requirements with success oracles. Those positive cases are known unsupported,
+so this checkpoint is neither a green suite nor feature completion. The next
+required proof producers are specified in the consumer design document.

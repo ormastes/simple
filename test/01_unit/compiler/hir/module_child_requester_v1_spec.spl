@@ -36,12 +36,12 @@ fn requester_policy_v1(path: text, body: text) -> VisibilityManifestPolicyV1:
         frontend_route: "advisory-selected", advisory_policy: "reference", preprocessed_source_sha256: sha256_text(body))
 
 fn requester_fixture_v1(body: text, declaration: text = "pub struct Target:\n    value: i64\n",
-        requester: text = "/snapshot/test/caller.spl", closed_ancestor: bool = false) -> HirLowering:
+        requester: text = "/snapshot/test/caller.spl", closed_ancestor: bool = false,
+        facade_body: text = "use configured.open.\{Target\}\nexport Target\n") -> HirLowering:
     val manifest = "/snapshot/test/pkg/__init__.spl"
     val target = "/snapshot/test/pkg/body.spl"
     val facade = "/snapshot/test/pkg/facade.spl"
     val manifest_body = "# explicitly supplied frozen policy\n"
-    val facade_body = "use physical.body.\{Target\}\nexport Target\n"
     var inventory = {manifest: sha256_text(manifest_body), target: sha256_text(declaration),
         facade: sha256_text(facade_body), requester: sha256_text(body)}
     val policy = requester_policy_v1(manifest, manifest_body)
@@ -148,3 +148,33 @@ describe "configured child requester checks at actual type references":
         expect(lowering.module_child_binding_keys_v1.len()).to_equal(0)
         expect(lowering.lower_named_kind("Target", [], Span.empty()) == HirTypeKind.Error).to_equal(false)
         expect(requester_denial_v1(lowering, "")).to_equal(false)
+
+    it "does not authorize an imported public alias whose target route is unproven":
+        val lowering = requester_fixture_v1("use configured.facade.\{Alias\}\n", "pub struct Target:\n    value: i64\n",
+            "/snapshot/test/caller.spl", false, "use configured.hidden.\{Target\}\npub type Alias = Target\n")
+        expect(lowering.lower_named_kind("Alias", [], Span.empty()) == HirTypeKind.Error).to_equal(true)
+        expect(requester_denial_v1(lowering, "alias-route-closure-unavailable")).to_equal(true)
+
+    it "does not authorize imported generic defaults without target route closure":
+        val lowering = requester_fixture_v1("use configured.facade.\{Box\}\n", "pub struct Target:\n    value: i64\n",
+            "/snapshot/test/caller.spl", false, "use configured.hidden.\{Target\}\npub struct Box<T = Target>:\n    value: T\n")
+        expect(lowering.lower_named_kind("Box", [], Span.empty()) == HirTypeKind.Error).to_equal(true)
+        expect(requester_denial_v1(lowering, "generic-route-closure-unavailable")).to_equal(true)
+
+    # Required positive behavior, known NOT-YET-SUPPORTED by this safety
+    # checkpoint. Keep the success oracle; do not convert missing capability
+    # into intended denial or a placeholder passing test.
+    it "supports a valid imported public alias with a public target":
+        val lowering = requester_fixture_v1("use configured.open.\{Alias\}\n",
+            "pub struct Target:\n    value: i64\npub type Alias = Target\n")
+        expect(lowering.lower_named_kind("Alias", [], Span.empty()) == HirTypeKind.Error).to_equal(false)
+
+    it "supports an explicit sibling facade export without requiring a public implementation child":
+        val lowering = requester_fixture_v1("use configured.facade.\{Target\}\n", "struct Target:\n    value: i64\n",
+            "/snapshot/test/caller.spl", false, "use physical.body.\{Target\}\nexport Target\n")
+        expect(lowering.lower_named_kind("Target", [], Span.empty()) == HirTypeKind.Error).to_equal(false)
+
+    it "supports valid imported generic defaults with proved public dependencies":
+        val lowering = requester_fixture_v1("use configured.open.\{Box\}\n",
+            "pub struct Target:\n    value: i64\npub struct Box<T = Target>:\n    value: T\n")
+        expect(lowering.lower_named_kind("Box", [], Span.empty()) == HirTypeKind.Error).to_equal(false)

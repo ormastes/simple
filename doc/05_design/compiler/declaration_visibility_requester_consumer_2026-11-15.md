@@ -31,8 +31,9 @@ is closed. No path-match search chooses another child.
 
 A direct declaration retains its exact source intent. For a named-export facade,
 the typed selected-export API supplies actual predecessor edges. Only Direct and
-NamedImport hops in the same immediate folder are supported. Each admitted named
-import's child receipt is checked when present. Terminal `pri` cannot be promoted;
+NamedImport hops in the same immediate folder are supported. Every admitted named
+import must have a current child receipt joined to the exact import row target
+and selected configured name; unavailable legacy hops are not grants. Terminal `pri` cannot be promoted;
 omitted intent is eligible from the exporting folder and the explicit export
 may expose it externally. An unavailable chain is denied, not guessed. Qualified
 and glob export hops and cross-directory chains await their own route receipts.
@@ -54,3 +55,22 @@ contract and indexed subject lookup, plus warm compiler/MCP startup, request
 latency and max RSS evidence. No performance acceptance is claimed. General
 compiler/core and MCP/LSP smoke checks remain blocked by the unavailable admitted
 general runner. Do not publish or call this full visibility qualification.
+
+## Safety repair and incomplete positive requirements
+
+Imported aliases and generic default/bound dependencies do not yet retain their
+actual declaration-owner binding selections. The outer consumer now reports
+`alias-route-closure-unavailable` or `generic-route-closure-unavailable` before
+owner-switch elaboration can skip checks. This is missing capability, not a
+language rule declaring otherwise-valid aliases or defaults inaccessible.
+
+Three required positive executable cases deliberately retain success oracles:
+a public alias to a public target, a valid generic default, and an explicit
+folder-local sibling facade export without a public implementation child. They
+are known unsupported by this checkpoint and must not be rewritten to expect
+denial. Full implementation requires selected alias target/default/bound binding
+receipts under the declaring lexical scope (including neutral formals), and an
+authenticated direct-folder/sibling import selection receipt from the configured
+resolver. Parser spelling, matching physical target or matching folder alone
+cannot mint that authority. Their traversal must join actual typed predecessor
+edges and the same snapshot/configuration/generation before permitting access.

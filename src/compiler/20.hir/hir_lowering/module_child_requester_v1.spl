@@ -3,12 +3,13 @@
 use compiler.common.cache.module_child_selection_receipt_v1.{ModuleChildSelectionReceiptV1}
 use compiler.common.cache.visibility_manifest_read_v1.{visibility_manifest_parent_v1}
 use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.parser_types.{ParserTypeParam}
 use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
 use compiler.hir.hir_types.{HirType, HirTypeKind}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.module_child_binding_v1.*
 use compiler.hir.hir_lowering.module_child_selection_v1.{module_child_selection_validate_v1}
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName, ModuleSurfaceExportCategoryV1, ModuleSurfaceExportSelectionStateV1, ModuleSurfaceExportBindingRoleV1, ModuleSurfaceExportHopKindV1, module_surface_declaration_authority_lookup_typed_v1}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName, ModuleSurfaceExportCategoryV1, ModuleSurfaceExportSelectionStateV1, ModuleSurfaceExportBindingRoleV1, ModuleSurfaceExportHopKindV1, module_surface_declaration_authority_lookup_typed_v1}
 use compiler.hir.hir_lowering.module_surface_selected_exports_v1.{module_surface_selected_export_lookup_v1, module_surface_selected_declaration_lookup_v1, module_surface_selected_export_hop_v1, module_surface_export_category_name_v1}
 use compiler.hir.hir_lowering.module_surface_manifest_evidence_v1.{module_surface_manifest_ready_reason_v1}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path}
@@ -26,6 +27,34 @@ fn requester_category_v1(category: text) -> ModuleSurfaceExportCategoryV1:
         "constant": ModuleSurfaceExportCategoryV1.Constant
         "bitfield": ModuleSurfaceExportCategoryV1.Bitfield
         _: ModuleSurfaceExportCategoryV1.Function
+
+fn requester_parameters_need_closure_v1(parameters: [ParserTypeParam]) -> bool:
+    for parameter in parameters:
+        if parameter.has_default or parameter.bounds.len() > 0: return true
+    false
+
+fn requester_template_reason_v1(surface: ModuleSurface, category: text, name: text) -> text:
+    # Outer authorization must not bless unproven nominal dependencies that
+    # will be selected only after imported template elaboration changes owner.
+    if category == "type_alias": return "alias-route-closure-unavailable"
+    if category == "class" or category == "struct":
+        for declaration in surface.composite_values:
+            if declaration.name == name and requester_parameters_need_closure_v1(declaration.type_params):
+                return "generic-route-closure-unavailable"
+    elif category == "enum":
+        for declaration in surface.enum_values:
+            if declaration.name == name and requester_parameters_need_closure_v1(declaration.type_params):
+                return "generic-route-closure-unavailable"
+    elif category == "trait":
+        for declaration in surface.trait_values:
+            if declaration.name == name and (requester_parameters_need_closure_v1(declaration.type_params) or
+                    declaration.super_traits.len() > 0 or declaration.where_clause.len() > 0):
+                return "generic-route-closure-unavailable"
+    elif category == "function":
+        for declaration in surface.callable_values:
+            if declaration.name == name and requester_parameters_need_closure_v1(declaration.type_params):
+                return "generic-route-closure-unavailable"
+    ""
 
 fn requester_declaration_reason_v1(modifier: text, owner: text, requester: text, exporting: bool) -> text:
     if modifier == "pri":
@@ -89,7 +118,9 @@ fn requester_export_reason_v1(registry: ModuleSurfacesByName, surface_index: i64
             return "export-declaration-unavailable"
         val marker = module_surface_selected_export_hop_v1(registry, selected, 0)
         if marker.is_err(): return "export-direct-marker-unavailable"
-        return requester_declaration_reason_v1(authority.source_modifier, authority.source_path, requester, true)
+        val intent_reason = requester_declaration_reason_v1(authority.source_modifier, authority.source_path, requester, true)
+        if intent_reason != "": return intent_reason
+        return requester_template_reason_v1(surface, module_surface_export_category_name_v1(category), name)
     var next_visited = visited.copy()
     next_visited.push(selected.binding_row)
     var last_reason = "export-route-unavailable"
@@ -111,11 +142,18 @@ fn requester_export_reason_v1(registry: ModuleSurfacesByName, surface_index: i64
                 last_reason = "export-import-receipt-unavailable"
                 continue
             val hop_receipt = surface.import_child_selections_v1[edge.import_row]
-            if hop_receipt.selected:
-                val hop_reason = requester_child_route_reason_v1(registry, hop_receipt, surface.canonical_path)
-                if hop_reason != "":
-                    last_reason = hop_reason
-                    continue
+            if not hop_receipt.selected:
+                last_reason = "export-import-route-unavailable"
+                continue
+            if (hop_receipt.target_surface != edge.target_surface or
+                    edge.import_row >= surface.import_target_names.len() or
+                    hop_receipt.selected_name != surface.import_target_names[edge.import_row]):
+                last_reason = "export-import-route-mismatch"
+                continue
+            val hop_reason = requester_child_route_reason_v1(registry, hop_receipt, surface.canonical_path)
+            if hop_reason != "":
+                last_reason = hop_reason
+                continue
         if visibility_manifest_parent_v1(surface.canonical_path) != visibility_manifest_parent_v1(target.canonical_path):
             last_reason = "export-cross-boundary-unavailable"
             continue
@@ -172,6 +210,7 @@ impl HirLowering:
                                 reason = "declaration-origin-unavailable"
                             else:
                                 reason = requester_declaration_reason_v1(direct.source_modifier, direct.source_path, requester, false)
+                                if reason == "": reason = requester_template_reason_v1(source, category_name, source_name)
                         elif direct_selection.state != ModuleSurfaceExportSelectionStateV1.Missing:
                             reason = "declaration-origin-unavailable:" + direct_selection.reason
                         else:
