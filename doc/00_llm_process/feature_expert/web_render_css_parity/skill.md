@@ -2296,3 +2296,42 @@ Gates and remaining gaps:
 - **Trap:** in the interpreter a read method (`slice`, `min`, `max`) interleaved with `write_span` on the same array re-decodes its whole backing store (11-13 ms at 3.66 M px). Keep one read-only `src` and one write-only `outp`. Bug record: `doc/08_tracking/bug/interpreter_array_read_after_write_redecodes_backing_2026-11-17.md`.
 - **Trap:** the shadow was NOT the dominant cost of the box command (about 30 s of 113 s); do not extrapolate a per-phase share from a command total.
 - **Open / not investigated:** glyph raster on an atlas miss (item 2) and full-frame fills (item 4); remaining page time not attributed per phase. Details: `doc/08_tracking/bug/web_render_dpr4_residual_per_pixel_cost_2026-11-16.md`.
+
+## 2026-11-17 — selectors round 4 (adopted from abandoned `28dff1927c4`)
+
+- **Two compound fixes now coexist.** Upstream `_compound_base_tokens` reads
+  the base (tag/#id/.class) in any order. `_canonical_compound` (run on every
+  part `selector_group_parts` returns) also moves a pseudo-class written
+  BEFORE a class or id behind it, so `:is(p, div).k` and
+  `div:first-of-type.k` match. Both matcher paths consume
+  `selector_group_parts`, so one fix reaches the text and the pre-parsed path.
+- **Of-type codes:** upstream's `PSEUDO_FIRST_OF_TYPE` (16), `PSEUDO_LAST_OF_TYPE`
+  (17) and `PSEUDO_ONLY_OF_TYPE` (18) won the merge; the abandoned lane's
+  "map first-of-type to nth-of-type(1)" variant was dropped. A new
+  pseudo-class must still be added to both `simple_match`/`_pseudo_ctx_matches`
+  and `_pseudo_code_for`/`_pseudo_ctx_matches_parsed`, or
+  `web_selector_parsed_equivalence_spec` diverges.
+- **Invalid vs unsatisfied.** `_pseudo_code_for` returns -1 for both an unknown
+  name and a valid-but-static-false one (`:hover`). Only an unknown name drops
+  the whole rule: `selector_list_has_unknown_pseudo`, called once per rule in
+  `_extract_css_vw_with_rule_limit` (the only rule-admission site). It
+  recurses into `:not()`, `:has()` and the `of S` of `:nth-child()` /
+  `:nth-last-child()`, NOT into `:is()`/`:where()` (forgiving in Chrome), and
+  checks `::` names against `CSS_KNOWN_PSEUDO_ELEMENTS` (`::-webkit-*` always
+  accepted).
+- **Validate the name tables against Chrome, not memory.** A `<style>` probe
+  (`st.sheet.cssRules.length` after `div:NAME{}`) found `:first`, `:left`,
+  `:right` and `:blank` rejected in style rules (@page-only) and
+  `:active-view-transition` missing. A name missing from a table drops valid
+  rules on real pages, so add before you remove.
+- **Still permissive (keeps a rule Chrome drops):** any `:-webkit-*`
+  pseudo-class (Chrome rejects `:-webkit-frob`), a pseudo-class after a
+  pseudo-element (`::before:hover` is invalid, `::part(x):hover` valid), a
+  pseudo-element inside `:not()`, and `:nth-of-type(1 of p)` (`of S` is
+  nth-child only).
+- **Gates at the fix (2026-11-17, Chrome 159.0.8154.6, seed `cargo-target-webrender-vk`):**
+  matrix 979 cells, 88 mismatching (base 88, no change). Selector structural spec
+  base 62/71 -> head 71/71. 25 nearby specs, no new failing names.
+  `simple_web_html_layout_renderer_module_split_spec` "keeps every parser input
+  below 128 KiB" was already red at base (`..._core_selectors.spl` 138,390 B),
+  and this change grows the file to 147,903 B. Split the file before adding more.
