@@ -1,0 +1,195 @@
+# Source-only NOT_RUN. Pure reply metadata is not native completion/cleanup.
+use std.common.contracts.orchestration.host_service_operation_v6.*
+use std.common.contracts.orchestration.host_service_operation_reply_v6.*
+use std.common.contracts.orchestration.host_service_auth_v6.*
+use std.common.contracts.orchestration.host_service_auth_frame_v6.*
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+fn reply_request_fixture_v6(action: text = "execute") -> HostServiceOperationRequestV6:
+    val payload = "version: 1\nkind: workload\n"
+    if action == "status":
+        return HostServiceOperationRequestV6(action: action, service_incarnation: "c".repeat(32),
+            operation_id: "", scope_digest: "", request_digest: "", payload: "")
+    if action == "service-stop":
+        return HostServiceOperationRequestV6(action: action, service_incarnation: "c".repeat(32),
+            operation_id: "", scope_digest: "a".repeat(64), request_digest: "", payload: "")
+    HostServiceOperationRequestV6(action: action, service_incarnation: "c".repeat(32), operation_id: "operation",
+        scope_digest: "a".repeat(64), request_digest: host_service_operation_request_digest_v6("operation", payload).unwrap(),
+        payload: if ["validate", "prepare", "execute"].contains(action): payload else: "")
+
+fn reply_fixture_v6(action: text = "execute") -> HostServiceOperationReplyV6:
+    val request = reply_request_fixture_v6(action)
+    HostServiceOperationReplyV6(action: request.action, service_incarnation: request.service_incarnation,
+        operation_id: request.operation_id, scope_digest: request.scope_digest, request_digest: request.request_digest,
+        pending: false, exit_code: 0, payload: "version: 2\nkind: host-observation\n", error: "")
+
+fn reply_fields_fixture_v6(source: text) -> Dict<text, SdnValue>:
+    val limits = SdnStrictLimitsV1(max_source_bytes: 1048576, max_depth: 2, max_nodes: 32,
+        max_rows: 0, max_cells: 0, max_columns: 11)
+    match sdn_parse_strict_v1(source, limits).unwrap().value:
+        case SdnValue.Dict(fields): fields
+        case _: fail("expected canonical operation reply object")
+
+describe "strict V6 operation reply schema and request correlation":
+    it "round trips all actions as exact eleven field replies and matches the original request":
+        step("Preserve every identity field and leave actual typed Host payload checks to consumers")
+        for action in ["status", "validate", "prepare", "execute", "inspect", "progress", "cancel", "service-stop"]:
+            val reply = reply_fixture_v6(action)
+            val source = host_service_operation_reply_encode_v6(reply).unwrap()
+            expect(reply_fields_fixture_v6(source).len()).to_equal(11)
+            val decoded = host_service_operation_reply_decode_v6(source).unwrap()
+            expect(host_service_operation_reply_match_v6(decoded, reply_request_fixture_v6(action)).unwrap()).to_equal(true)
+            expect(host_service_operation_reply_encode_v6(decoded).unwrap()).to_equal(source)
+            expect(decoded.payload).to_equal(reply.payload)
+
+    it "permits pending only for execute inspect progress and cancel":
+        step("Refuse pending status validation or preparation metadata")
+        for action in ["execute", "inspect", "progress", "cancel"]:
+            var reply = reply_fixture_v6(action)
+            reply.pending = true
+            expect(host_service_operation_reply_validate_v6(reply).unwrap()).to_equal(true)
+        for action in ["status", "validate", "prepare", "service-stop"]:
+            var reply = reply_fixture_v6(action)
+            reply.pending = true
+            expect(host_service_operation_reply_validate_v6(reply).unwrap_err()).to_equal("host-operation-reply-pending-action")
+
+    it "preserves nonzero errors when pending clears and never promotes identity match to success":
+        step("A metadata completion flag cannot erase an earlier failure or prove cleanup")
+        var reply = reply_fixture_v6()
+        reply.pending = true
+        reply.exit_code = 7
+        reply.error = "retained cleanup failure"
+        val pending = host_service_operation_reply_decode_v6(host_service_operation_reply_encode_v6(reply).unwrap()).unwrap()
+        expect(pending.exit_code).to_equal(7)
+        expect(pending.error).to_equal(reply.error)
+        reply.pending = false
+        val completed = host_service_operation_reply_decode_v6(host_service_operation_reply_encode_v6(reply).unwrap()).unwrap()
+        expect(completed.pending).to_equal(false)
+        expect(completed.exit_code).to_equal(7)
+        expect(completed.error).to_equal("retained cleanup failure")
+        expect(host_service_operation_reply_match_v6(completed, reply_request_fixture_v6()).unwrap()).to_equal(true)
+
+    it "rejects error with zero exit and exit codes outside the fixed outer Host range":
+        step("Bound outer command status without coercing inner process payload values")
+        var reply = reply_fixture_v6()
+        reply.error = "failure"
+        expect(host_service_operation_reply_validate_v6(reply).unwrap_err()).to_equal("host-operation-reply-error-requires-failure")
+        reply.error = ""
+        reply.exit_code = -1
+        expect(host_service_operation_reply_validate_v6(reply).unwrap_err()).to_equal("host-operation-reply-exit-code")
+        reply.exit_code = 256
+        expect(host_service_operation_reply_validate_v6(reply).unwrap_err()).to_equal("host-operation-reply-exit-code")
+        reply.exit_code = 255
+        expect(host_service_operation_reply_validate_v6(reply).unwrap()).to_equal(true)
+
+    it "rejects unknown duplicate missing mistyped and noncanonical reply fields":
+        step("Require exact version kind names boolean and integer types without coercion")
+        val canonical = host_service_operation_reply_encode_v6(reply_fixture_v6()).unwrap()
+        var fields = reply_fields_fixture_v6(canonical)
+        fields["authenticated"] = SdnValue.Bool(true)
+        expect(host_service_operation_reply_decode_v6(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n").is_err()).to_equal(true)
+        expect(host_service_operation_reply_decode_v6("version: 6\nversion: 6\n").unwrap_err()).to_start_with("host-operation-reply-sdn:")
+        fields = reply_fields_fixture_v6(canonical)
+        fields["pending"] = SdnValue.String("false")
+        expect(host_service_operation_reply_decode_v6(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n").is_err()).to_equal(true)
+        fields = reply_fields_fixture_v6(canonical)
+        fields["exitCode"] = SdnValue.String("0")
+        expect(host_service_operation_reply_decode_v6(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n").is_err()).to_equal(true)
+        var missing: Dict<text, SdnValue> = {}
+        for key in fields.keys():
+            if key != "error": missing[key] = fields[key]
+        expect(host_service_operation_reply_decode_v6(sdn_encode_canonical(SdnValue.Dict(missing)) + "\n").is_err()).to_equal(true)
+        expect(host_service_operation_reply_decode_v6(canonical + "\n").unwrap_err()).to_equal("host-operation-reply-noncanonical")
+
+    it "binds every reply identity field and rejects operation metadata on status":
+        step("Correlate action incarnation operation scope and original request digest exactly")
+        val request = reply_request_fixture_v6()
+        var reply = reply_fixture_v6()
+        reply.action = "inspect"
+        expect(host_service_operation_reply_match_v6(reply, request).unwrap_err()).to_equal("host-operation-reply-request-mismatch")
+        reply = reply_fixture_v6()
+        reply.service_incarnation = "d".repeat(32)
+        expect(host_service_operation_reply_match_v6(reply, request).unwrap_err()).to_equal("host-operation-reply-request-mismatch")
+        reply = reply_fixture_v6()
+        reply.operation_id = "different-operation"
+        expect(host_service_operation_reply_match_v6(reply, request).unwrap_err()).to_equal("host-operation-reply-request-mismatch")
+        reply = reply_fixture_v6()
+        reply.scope_digest = "d".repeat(64)
+        expect(host_service_operation_reply_match_v6(reply, request).unwrap_err()).to_equal("host-operation-reply-request-mismatch")
+        reply = reply_fixture_v6()
+        reply.request_digest = "d".repeat(64)
+        expect(host_service_operation_reply_match_v6(reply, request).unwrap_err()).to_equal("host-operation-reply-request-mismatch")
+        reply = reply_fixture_v6("status")
+        reply.operation_id = "forbidden"
+        expect(host_service_operation_reply_validate_v6(reply).unwrap_err()).to_equal("host-operation-reply-status-fields")
+
+    it "enforces the inclusive escaped one MiB reply cap and preserves exact Unicode bytes":
+        step("Bound payload plus error syntax metadata and final LF before allocation")
+        var reply = reply_fixture_v6()
+        reply.payload = "x".repeat(1047000)
+        expect(host_service_operation_reply_encode_v6(reply).unwrap().byte_len() <= 1048576).to_equal(true)
+        reply.payload = "\\".repeat(524288)
+        expect(host_service_operation_reply_encode_v6(reply).unwrap_err()).to_equal("host-operation-reply-encoded-size")
+        reply = reply_fixture_v6()
+        reply.exit_code = 1
+        reply.error = "\\".repeat(524288)
+        expect(host_service_operation_reply_encode_v6(reply).unwrap_err()).to_equal("host-operation-reply-encoded-size")
+        reply = reply_fixture_v6()
+        reply.payload = "é\nexact reply\n"
+        expect(host_service_operation_reply_decode_v6(host_service_operation_reply_encode_v6(reply).unwrap()).unwrap().payload).to_equal(reply.payload)
+        expect(host_service_operation_reply_decode_v6("x".repeat(1048577)).unwrap_err()).to_equal("host-operation-reply-source-size")
+
+    it "keeps the authenticated frame inclusive cap independent from a valid operation reply":
+        step("An inner reply that fits does not bypass outer authentication frame metadata overhead")
+        var reply = reply_fixture_v6()
+        reply.payload = "x".repeat(1048000)
+        val body = host_service_operation_reply_encode_v6(reply).unwrap()
+        val request = reply_request_fixture_v6()
+        val context = HostServiceAuthContextV6(service_incarnation: request.service_incarnation,
+            client_nonce: "a".repeat(64), server_nonce: "b".repeat(64), command_digest: host_service_operation_command_digest_v6(request).unwrap())
+        val tag = host_service_auth_tag_v6("1a".repeat(32), "reply", context, body).unwrap()
+        val frame = HostServiceAuthFrameV6(role: "reply", service_incarnation: context.service_incarnation,
+            client_nonce: context.client_nonce, server_nonce: context.server_nonce, command_digest: context.command_digest,
+            payload: body, tag: tag)
+        expect(host_service_auth_frame_encode_v6(frame).unwrap_err()).to_equal("host-auth-frame-encoded-size")
+
+    it "matches service stop exact identity while preserving late Host close failure metadata":
+        step("A nonpending stop reply certifies no socket listener credential cleanup or native success by itself")
+        val request = reply_request_fixture_v6("service-stop")
+        var reply = reply_fixture_v6("service-stop")
+        expect(host_service_operation_reply_match_v6(reply, request).unwrap()).to_equal(true)
+        reply.exit_code = 2
+        reply.error = "late Host close failure"
+        val decoded = host_service_operation_reply_decode_v6(host_service_operation_reply_encode_v6(reply).unwrap()).unwrap()
+        expect(decoded.pending).to_equal(false)
+        expect(decoded.exit_code).to_equal(2)
+        expect(decoded.error).to_equal("late Host close failure")
+        expect(decoded.operation_id).to_equal("")
+        expect(decoded.request_digest).to_equal("")
+        expect(decoded.scope_digest).to_equal(request.scope_digest)
+        expect(host_service_operation_reply_match_v6(decoded, request).unwrap()).to_equal(true)
+
+    it "refuses pending mismatched scope or operation identities for service stop replies":
+        step("Keep service stop separate from operation cancellation or a permissive legacy stop alias")
+        val request = reply_request_fixture_v6("service-stop")
+        var changed = reply_fixture_v6("service-stop")
+        changed.pending = true
+        expect(host_service_operation_reply_validate_v6(changed).unwrap_err()).to_equal("host-operation-reply-pending-action")
+        changed = reply_fixture_v6("service-stop")
+        changed.scope_digest = "b".repeat(64)
+        expect(host_service_operation_reply_match_v6(changed, request).unwrap_err()).to_equal("host-operation-reply-request-mismatch")
+        changed = reply_fixture_v6("service-stop")
+        changed.operation_id = "forbidden"
+        expect(host_service_operation_reply_validate_v6(changed).unwrap_err()).to_equal("host-operation-reply-service-stop-fields")
+        changed = reply_fixture_v6("service-stop")
+        changed.request_digest = "d".repeat(64)
+        expect(host_service_operation_reply_validate_v6(changed).unwrap_err()).to_equal("host-operation-reply-service-stop-fields")
+        changed = reply_fixture_v6("service-stop")
+        changed.service_incarnation = "d".repeat(32)
+        expect(host_service_operation_reply_match_v6(changed, request).unwrap_err()).to_equal("host-operation-reply-request-mismatch")
+        changed = reply_fixture_v6("service-stop")
+        changed.action = "stop"
+        expect(host_service_operation_reply_validate_v6(changed).unwrap_err()).to_equal("host-operation-reply-action-unsupported")

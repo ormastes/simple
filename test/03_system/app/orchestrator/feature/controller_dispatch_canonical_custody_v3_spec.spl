@@ -1,0 +1,132 @@
+# AUTHORED_NOT_RUN. Requires actual installed local Windows Controller root and
+# live authenticated Host. No fabricated root, reader, socket or exchange proof.
+use std.spec.{describe, it, expect, step, fail}
+use std.sosix.host.sosix_file_read
+use std.nogc_sync_mut.sosix.time.{sosix_time_now_monotonic_ms, sosix_sleep_ms}
+use std.nogc_sync_mut.orchestration.controller_local_root_v3.*
+use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v3.*
+use std.common.contracts.orchestration.host_controller_status_v3.host_controller_status_decode_v3
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict}
+use std.common.sdn.value.SdnValue
+
+# Actual whole returned carriers remain retained even when a qualification
+# assertion fails; these are not native capabilities serialized to disk.
+var _custody_root_v3: Option<ControllerLocalRootV3> = nil
+var _custody_turn_v3: Option<ControllerDispatchOwnedTurnV3> = nil
+var _custody_refusal_v3: Option<ControllerDispatchOwnedTurnV3> = nil
+
+fn custody_fixture_text_v3(fields: Dict<text, SdnValue>, name: text) -> text:
+    if not fields.contains_key(name): fail("missing genuine custody fixture field")
+    match fields[name]:
+        case SdnValue.String(value): value
+        case _: fail("genuine custody fixture field must be text")
+
+fn custody_adopt_v3(turn: ControllerDispatchOwnedTurnV3):
+    _custody_turn_v3 = Some(turn)
+    _custody_root_v3 = turn.root_cleanup
+
+fn custody_deadline_v3() -> i64:
+    val now = sosix_time_now_monotonic_ms()
+    if now <= 0 or now > 9223372036854775807 - 10000: fail("actual monotonic fixture clock unavailable")
+    now + 10000
+
+fn custody_drain_v3():
+    val deadline = custody_deadline_v3()
+    var steps: i64 = 0
+    while (_custody_turn_v3.is_some() and _custody_turn_v3.unwrap().owner.is_some() and
+            steps < 256 and sosix_time_now_monotonic_ms() < deadline):
+        custody_adopt_v3(controller_dispatch_close_v3(_custody_turn_v3.unwrap().owner.unwrap()))
+        steps = steps + 1
+        sosix_sleep_ms(5)
+    if val root = _custody_root_v3:
+        val closed = controller_local_root_close_v3(root)
+        _custody_root_v3 = closed.owner
+
+describe "actual canonical Controller custody rejects copied older phases":
+    it "refuses stale E1 close while E2 is live then retires identity before slot reuse":
+        step("Open a genuine installed Controller root against its pinned real configuration")
+        if (_custody_turn_v3.is_some() or _custody_root_v3.is_some() or
+                _custody_refusal_v3.is_some()): fail("actual custody fixture is single-use")
+        val source = sosix_file_read("C:\\SimpleQualification\\controller-custody-v3.sdn")
+        if source == "": fail("missing actual installed custody fixture")
+        val parsed = parse_resource_document(source)
+        if parsed.is_err(): fail("invalid actual custody fixture SDN")
+        val fields = as_dict(parsed.unwrap().0, "", parsed.unwrap().1).unwrap()
+        expect(fields.len()).to_equal(3)
+        val path = custody_fixture_text_v3(fields, "controllerRoot")
+        val pin = custody_fixture_text_v3(fields, "controllerConfigDigest")
+        val enrollment = custody_fixture_text_v3(fields, "expectedEnrollmentDigest")
+        val opened = controller_local_root_open_v3(path, pin)
+        _custody_root_v3 = opened.owner
+        if not opened.ready or opened.error != "" or opened.owner.is_none(): fail("actual installed Controller root refused")
+        custody_adopt_v3(controller_dispatch_service_begin_v3(opened.owner.unwrap(), "service-stop"))
+        expect(_custody_turn_v3.unwrap().phase).to_equal("status")
+        val old_e1 = _custody_turn_v3.unwrap().owner.unwrap()
+        step("A copied actual input root cannot acquire a second custody slot or bare cleanup escape")
+        val duplicate = controller_dispatch_service_begin_v3(opened.owner.unwrap(), "status")
+        _custody_refusal_v3 = Some(duplicate)
+        expect(duplicate.error).to_equal("controller-dispatch-root-already-retained")
+        expect(duplicate.root_cleanup.is_none()).to_equal(true)
+        expect(duplicate.phase).to_equal("status")
+        expect(duplicate.owner.is_some()).to_equal(true)
+        expect(duplicate.owner.unwrap().same_handle_v3(_custody_turn_v3.unwrap().owner.unwrap()).unwrap()).to_equal(true)
+        custody_adopt_v3(duplicate)
+        _custody_refusal_v3 = nil
+        val deadline = custody_deadline_v3()
+        var phase_steps: i64 = 0
+        step("Observe the real authenticated E1 status proof consumed and new E2 stop exchange begun")
+        while (_custody_turn_v3.unwrap().phase == "status" and
+                _custody_turn_v3.unwrap().owner.is_some() and phase_steps < 512 and sosix_time_now_monotonic_ms() < deadline):
+            custody_adopt_v3(controller_dispatch_step_v3(_custody_turn_v3.unwrap().owner.unwrap()))
+            phase_steps = phase_steps + 1
+            sosix_sleep_ms(5)
+        expect(_custody_turn_v3.unwrap().error).to_equal("")
+        expect(_custody_turn_v3.unwrap().phase).to_equal("service-stop")
+        val latest = _custody_turn_v3.unwrap().owner.unwrap()
+        val prior_outcome = _custody_turn_v3.unwrap().outcome
+        step("A stale E1 close must refuse before touching E2 socket reader or Controller root")
+        val stale = controller_dispatch_close_v3(old_e1)
+        _custody_refusal_v3 = Some(stale)
+        expect(stale.error).to_equal("controller-dispatch-owner-stale")
+        expect(stale.phase).to_equal("service-stop")
+        expect(stale.outcome).to_equal(prior_outcome)
+        expect(stale.owner.is_some()).to_equal(true)
+        expect(stale.owner.unwrap().same_handle_v3(latest).unwrap()).to_equal(true)
+        expect(stale.root_cleanup.is_none()).to_equal(true)
+        # Deliberately adopt the latest returned handle. Lower exchange begin
+        # only connects/queues hello; NO E2 step/request-write has occurred.
+        custody_adopt_v3(stale)
+        _custody_refusal_v3 = nil
+        step("Close the canonical latest E2 before any stop request is written")
+        custody_drain_v3()
+        expect(_custody_turn_v3.unwrap().owner.is_none()).to_equal(true)
+        expect(_custody_turn_v3.unwrap().completed).to_equal(true)
+        expect(_custody_turn_v3.unwrap().error == "").to_equal(false)
+        expect(_custody_root_v3.is_none()).to_equal(true)
+        step("Reopen actual Controller custody and authenticate Host status after retired slot reuse")
+        val reopened = controller_local_root_open_v3(path, pin)
+        _custody_root_v3 = reopened.owner
+        if not reopened.ready or reopened.error != "" or reopened.owner.is_none(): fail("actual Controller root reopen refused")
+        custody_adopt_v3(controller_dispatch_service_begin_v3(reopened.owner.unwrap(), "status"))
+        val retired = controller_dispatch_close_v3(latest)
+        _custody_refusal_v3 = Some(retired)
+        expect(retired.error).to_equal("controller-dispatch-owner-retired")
+        expect(retired.owner.is_none()).to_equal(true)
+        expect(retired.root_cleanup.is_none()).to_equal(true)
+        _custody_refusal_v3 = nil
+        val status_deadline = custody_deadline_v3()
+        var status_steps: i64 = 0
+        while (_custody_turn_v3.unwrap().phase == "status" and _custody_turn_v3.unwrap().error == "" and
+                _custody_turn_v3.unwrap().owner.is_some() and status_steps < 512 and sosix_time_now_monotonic_ms() < status_deadline):
+            custody_adopt_v3(controller_dispatch_step_v3(_custody_turn_v3.unwrap().owner.unwrap()))
+            status_steps = status_steps + 1
+            sosix_sleep_ms(5)
+        val response = _custody_turn_v3.unwrap().response
+        val status_error = _custody_turn_v3.unwrap().error
+        custody_drain_v3()
+        expect(status_error).to_equal("")
+        expect(_custody_turn_v3.unwrap().error).to_equal("")
+        expect(_custody_turn_v3.unwrap().completed).to_equal(true)
+        val status = host_controller_status_decode_v3(response).unwrap()
+        expect(status.ready).to_equal(true)
+        expect(status.enrollment_digest).to_equal(enrollment)

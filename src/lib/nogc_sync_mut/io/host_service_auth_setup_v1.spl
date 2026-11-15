@@ -1,0 +1,568 @@
+# V6-only private setup in its existing credential parent; public ready
+# publication through the supplied actual Host journal ONLY.
+# SOURCE_AUTHORED_NOT_RUN. No live provisioning/native execution performed.
+use std.nogc_sync_mut.io.windows_private_file_v1.{WindowsPrivateRootV1, WindowsPrivateFileV1,
+    windows_private_root_open_v1}
+use std.nogc_sync_mut.io.windows_private_read_v2.{WindowsPrivateReadRootV2, WindowsPrivateReadFileV2,
+    windows_private_read_root_open_v2, windows_private_roots_same_directory_v2, windows_private_adopt_published_read_v2}
+use std.nogc_sync_mut.io.windows_private_stage_discard_v2.windows_private_stage_discard_v2
+use std.nogc_sync_mut.io.host_service_ready_protocol_v1.{HostServiceReadyPathV1, host_service_auth_setup_path_v1,
+    host_service_auth_setup_record_v1, host_service_auth_setup_validate_v1,
+    host_service_auth_ready_record_v1, host_service_auth_endpoint_valid_v1,
+    HostServiceAuthLeaseV1, host_service_auth_lease_validate_v1, host_service_auth_ready_relative_v1}
+use std.nogc_sync_mut.io.retained_private_credential_protocol_v2.retained_credential_bytes_equal_v2
+use std.nogc_sync_mut.io.process_ops.process_capture_native_mode_check_v1
+use std.nogc_sync_mut.io.windows_command_owner_v2.windows_command_thread_check_v2
+use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
+use std.common.contracts.orchestration.host_service_operation_v6.host_service_hex_shape_v6
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes}
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_read_required_v3, distributed_operation_journal_publish_v3}
+@when(os="windows"):
+use std.nogc_sync_mut.io.windows_pty_abi.GetCurrentProcessId
+@end
+
+pub class HostServiceAuthSetupOwnerV1:
+    slot: i64
+    generation: i64
+
+pub class HostServiceAuthReadyPublishOwnerV1:
+    slot: i64
+    generation: i64
+
+pub struct HostServiceAuthSetupTurnV1:
+    owner: Option<HostServiceAuthSetupOwnerV1>
+    phase: text
+    setup_publication: text
+    completed: bool
+    cleanup_pending: bool
+    publication_uid: text
+    setup_digest: text
+    error: text
+
+pub struct HostServiceAuthReadyPublishTurnV1:
+    journal: DistributedOperationJournalV2
+    owner: Option<HostServiceAuthReadyPublishOwnerV1>
+    phase: text
+    ready_publication: text
+    ready_digest: text
+    completed: bool
+    cleanup_pending: bool
+    publication_uid: text
+    setup_digest: text
+    error: text
+
+struct AuthPublicationStateV1:
+    generation: i64
+    mode: i64
+    names: HostServiceReadyPathV1
+    endpoint: text
+    incarnation: text
+    expected_digest: text
+    journal_binding: text = ""
+    journal_authority: text = ""
+    journal_lease: text = ""
+    ready_relative: text = ""
+    ready_digest: text = ""
+    phase: text = "root"
+    publication: text = "not-attempted"
+    writer: Option<WindowsPrivateRootV1> = nil
+    reader_root: Option<WindowsPrivateReadRootV2> = nil
+    original_setup: Option<WindowsPrivateReadFileV2> = nil
+    stage: Option<WindowsPrivateFileV1> = nil
+    published: Option<WindowsPrivateReadFileV2> = nil
+    extra_writer: Option<WindowsPrivateRootV1> = nil
+    extra_file: Option<WindowsPrivateFileV1> = nil
+    extra_reader_root: Option<WindowsPrivateReadRootV2> = nil
+    content: [u8] = []
+    original_bytes: [u8] = []
+    uid: text = ""
+    digest: text = ""
+    error: text = ""
+    chain_valid: bool = false
+    closing: bool = false
+    closed: bool = false
+    busy: bool = false
+
+var auth_publications_v1: [AuthPublicationStateV1] = []
+var auth_publications_active_v1: i64 = 0
+
+fn auth_publication_entry_v1() -> Result<(), text>:
+    process_capture_native_mode_check_v1()?
+    windows_command_thread_check_v2()
+
+fn auth_publication_fail_v1(before: AuthPublicationStateV1, reason: text) -> AuthPublicationStateV1:
+    var state = before
+    if state.error == "": state.error = reason
+    state.closing = true
+    state.phase = "cleanup"
+    state
+
+fn auth_publication_load_v1(slot: i64, generation: i64, mode: i64) -> Result<AuthPublicationStateV1, text>:
+    auth_publication_entry_v1()?
+    if slot < 0 or slot >= auth_publications_v1.len(): return Err("host-auth-publication-owner-unknown")
+    val state = auth_publications_v1[slot]
+    if state.generation != generation or state.mode != mode: return Err("host-auth-publication-owner-domain")
+    if state.busy: return Err("host-auth-publication-owner-busy")
+    Ok(state)
+
+fn auth_publication_open_v1(path: text, mode: i64, digest: text,
+        endpoint: text, incarnation: text) -> Result<i64, text>:
+    auth_publication_entry_v1()?
+    # Derived setup/ready/stage leaf lengths checked before root/entropy effects.
+    val names = host_service_auth_setup_path_v1(path)?
+    if mode == 1:
+        if (not host_service_hex_shape_v6(digest, 64) or not host_service_hex_shape_v6(incarnation, 32) or
+                not host_service_auth_endpoint_valid_v1(endpoint)): return Err("host-auth-ready-admission-shape")
+    if auth_publications_active_v1 >= 32 or auth_publications_v1.len() >= 100000:
+        return Err("host-auth-publication-owner-bound")
+    val slot = auth_publications_v1.len()
+    auth_publications_v1.push(AuthPublicationStateV1(generation: slot + 1, mode: mode,
+        names: names, endpoint: endpoint, incarnation: incarnation, expected_digest: digest,
+        phase: if mode == 0: "root" else: "read-root"))
+    auth_publications_active_v1 = auth_publications_active_v1 + 1
+    Ok(slot)
+
+fn auth_publication_current_v1(state: AuthPublicationStateV1) -> bool:
+    if state.mode == 1: return state.reader_root.is_some() and state.reader_root.unwrap().security_current()
+    if state.writer.is_none() or state.reader_root.is_none(): return false
+    if not state.writer.unwrap().security_current() or not state.reader_root.unwrap().security_current(): return false
+    val same = windows_private_roots_same_directory_v2(state.writer.unwrap(), state.reader_root.unwrap())
+    same.is_ok() and same.unwrap()
+
+fn auth_publication_setup_current_v1(slot: i64) -> Result<(), text>:
+    var state = auth_publications_v1[slot]
+    if not auth_publication_current_v1(state): return Err("host-auth-publication-root-changed")
+    if state.mode == 0: return Ok(())
+    if state.original_setup.is_none() or not state.original_setup.unwrap().security_current():
+        return Err("host-auth-publication-setup-changed")
+    var file = state.original_setup.unwrap()
+    val read = file.read_all_bounded(512)
+    state.original_setup = Some(file)
+    auth_publications_v1[slot] = state
+    if read.is_err() or not retained_credential_bytes_equal_v2(read.unwrap(), state.original_bytes):
+        return Err("host-auth-publication-setup-bytes-changed")
+    val validated = host_service_auth_setup_validate_v1(read.unwrap(), state.expected_digest, state.uid)
+    if validated.is_err() or not auth_publication_current_v1(state): return Err("host-auth-publication-setup-rejected")
+    Ok(())
+
+fn auth_publication_read_setup_v1(slot: i64) -> Result<(), text>:
+    var state = auth_publications_v1[slot]
+    val opened = state.reader_root.unwrap().open_file(state.names.setup_leaf, 512u64)
+    if opened.is_err():
+        val failure = opened.unwrap_err()
+        state.original_setup = failure.cleanup_file
+        state.extra_reader_root = failure.cleanup_root
+        auth_publications_v1[slot] = state
+        return Err("host-auth-publication-setup-open")
+    var file = opened.unwrap()
+    state.original_setup = Some(file)
+    auth_publications_v1[slot] = state
+    val bytes = file.read_all_bounded(512)
+    state.original_setup = Some(file)
+    auth_publications_v1[slot] = state
+    if bytes.is_err(): return Err("host-auth-publication-setup-read")
+    val actual = host_service_auth_setup_validate_v1(bytes.unwrap(), state.expected_digest)?
+    state.original_bytes = bytes.unwrap()
+    state.uid = actual.publication_uid
+    state.digest = actual.setup_digest
+    auth_publications_v1[slot] = state
+    auth_publication_setup_current_v1(slot)
+
+# One exact held capability is released per cleanup turn. Only a known
+# unpublished stage may use discard; published/unknown targets are preserved.
+fn auth_publication_cleanup_v1(slot: i64):
+    var state = auth_publications_v1[slot]
+    var attempted = false
+    var failed = false
+    if state.published.is_some():
+        var file = state.published.unwrap()
+        if file.close(): state.published = nil
+        else:
+            state.published = Some(file)
+            failed = true
+        attempted = true
+    elif state.original_setup.is_some():
+        var file = state.original_setup.unwrap()
+        if file.close(): state.original_setup = nil
+        else:
+            state.original_setup = Some(file)
+            failed = true
+        attempted = true
+    elif state.stage.is_some():
+        var file = state.stage.unwrap()
+        if ["not-attempted", "conflict"].contains(state.publication) and state.writer.is_some():
+            val discarded = windows_private_stage_discard_v2(state.writer.unwrap(), file)
+            if discarded.completed and discarded.consumed:
+                state.stage = discarded.stage
+                if discarded.state == "published-preserved":
+                    state.publication = "unknown"
+                    if state.error == "": state.error = "host-auth-stage-publication-unknown"
+            else:
+                state.stage = if discarded.stage.is_some(): discarded.stage else: Some(file)
+                failed = true
+        elif file.close(): state.stage = nil
+        else:
+            state.stage = Some(file)
+            failed = true
+        attempted = true
+    elif state.extra_file.is_some():
+        var file = state.extra_file.unwrap()
+        if file.close(): state.extra_file = nil
+        else:
+            state.extra_file = Some(file)
+            failed = true
+        attempted = true
+    elif state.extra_reader_root.is_some():
+        var root = state.extra_reader_root.unwrap()
+        if root.close(): state.extra_reader_root = nil
+        else:
+            state.extra_reader_root = Some(root)
+            failed = true
+        attempted = true
+    elif state.reader_root.is_some():
+        var root = state.reader_root.unwrap()
+        if root.close(): state.reader_root = nil
+        else:
+            state.reader_root = Some(root)
+            failed = true
+        attempted = true
+    elif state.extra_writer.is_some():
+        var root = state.extra_writer.unwrap()
+        if root.close(): state.extra_writer = nil
+        else:
+            state.extra_writer = Some(root)
+            failed = true
+        attempted = true
+    elif state.writer.is_some():
+        var root = state.writer.unwrap()
+        if root.close(): state.writer = nil
+        else:
+            state.writer = Some(root)
+            failed = true
+        attempted = true
+    if failed and state.error == "": state.error = "host-auth-publication-cleanup-retained"
+    if not attempted:
+        state.closed = true
+        state.content = []
+        state.original_bytes = []
+        state.endpoint = ""
+        state.incarnation = ""
+        state.expected_digest = ""
+        state.names = HostServiceReadyPathV1(parent: "", setup_leaf: "")
+        state.journal_authority = ""
+        state.journal_lease = ""
+        state.ready_relative = ""
+        state.phase = if state.chain_valid and state.error == "": "completed" else: "closed-with-recovery"
+        auth_publications_active_v1 = auth_publications_active_v1 - 1
+    auth_publications_v1[slot] = state
+
+fn auth_publication_advance_v1(slot: i64):
+    var state = auth_publications_v1[slot]
+    if state.closing:
+        auth_publication_cleanup_v1(slot)
+        return
+    match state.phase:
+        case "root":
+            val opened = windows_private_root_open_v1(state.names.parent)
+            if opened.is_err():
+                val failure = opened.unwrap_err()
+                state.writer = failure.cleanup_root
+                state.extra_file = failure.cleanup_file
+                state = auth_publication_fail_v1(state, "host-auth-publication-root-open")
+            else:
+                state.writer = Some(opened.unwrap())
+                state.phase = "read-root"
+            auth_publications_v1[slot] = state
+        case "read-root":
+            val opened = windows_private_read_root_open_v2(state.names.parent)
+            if opened.is_err():
+                val failure = opened.unwrap_err()
+                state.reader_root = failure.cleanup_root
+                # Root opens normally return no file, but preserve all fields.
+                state.original_setup = failure.cleanup_file
+                state = auth_publication_fail_v1(state, "host-auth-publication-read-root-open")
+            else: state.reader_root = Some(opened.unwrap())
+            auth_publications_v1[slot] = state
+            if not state.closing:
+                if not auth_publication_current_v1(state): state = auth_publication_fail_v1(state, "host-auth-publication-root-pair")
+                else: state.phase = "entropy"
+                auth_publications_v1[slot] = state
+        case "entropy":
+            if not auth_publication_current_v1(state):
+                auth_publications_v1[slot] = auth_publication_fail_v1(state, "host-auth-entropy-root-not-current")
+                return
+            # Both actual protected roots precede OS CSPRNG calls; no caller
+            # entropy assertion, converted V5 bearer or SSH key is accepted.
+            val uid = sosix_random_hex(16)
+            val secret = sosix_random_hex(32)
+            if uid.is_none() or secret.is_none(): state = auth_publication_fail_v1(state, "host-auth-os-entropy-unavailable")
+            else:
+                state.uid = uid.unwrap()
+                val record = host_service_auth_setup_record_v1(uid.unwrap(), secret.unwrap())
+                if record.is_err(): state = auth_publication_fail_v1(state, "host-auth-setup-encoding")
+                else:
+                    state.content = record.unwrap()
+                    state.digest = sha256_text(bytes_to_text(state.content))
+                    state.phase = "stage"
+            auth_publications_v1[slot] = state
+        case "stage":
+            val current = auth_publication_setup_current_v1(slot)
+            state = auth_publications_v1[slot]
+            if current.is_err(): state = auth_publication_fail_v1(state, current.unwrap_err())
+            else:
+                val prefix = ".host-auth-setup-"
+                val opened = state.writer.unwrap().create_private_stage(prefix + state.uid, 512u64)
+                if opened.is_err():
+                    val failure = opened.unwrap_err()
+                    state.stage = failure.cleanup_file
+                    state.extra_writer = failure.cleanup_root
+                    state = auth_publication_fail_v1(state, "host-auth-publication-stage-open")
+                else:
+                    state.stage = Some(opened.unwrap())
+                    state.phase = "write"
+            auth_publications_v1[slot] = state
+        case "write":
+            var stage = state.stage.unwrap()
+            val written = stage.write(state.content)
+            state.stage = Some(stage)
+            if written.is_err() or not written.unwrap(): state = auth_publication_fail_v1(state, "host-auth-publication-stage-write")
+            else: state.phase = "seal"
+            auth_publications_v1[slot] = state
+        case "seal":
+            var stage = state.stage.unwrap()
+            val sealed = stage.seal()
+            state.stage = Some(stage)
+            if sealed.is_err() or not sealed.unwrap(): state = auth_publication_fail_v1(state, "host-auth-publication-stage-seal")
+            else: state.phase = "publish"
+            auth_publications_v1[slot] = state
+        case "publish":
+            val current = auth_publication_setup_current_v1(slot)
+            state = auth_publications_v1[slot]
+            if current.is_err():
+                auth_publications_v1[slot] = auth_publication_fail_v1(state, current.unwrap_err())
+                return
+            state.publication = "unknown"
+            auth_publications_v1[slot] = state
+            val leaf = state.names.setup_leaf
+            val published = state.writer.unwrap().publish_no_replace(state.stage.unwrap(), leaf)
+            if published.is_err(): state = auth_publication_fail_v1(state, "host-auth-publication-uncertain")
+            elif not published.unwrap():
+                state.publication = "conflict"
+                state = auth_publication_fail_v1(state, "host-auth-publication-conflict")
+            else:
+                state.publication = "published"
+                state.phase = "adopt"
+            auth_publications_v1[slot] = state
+        case "adopt":
+            val leaf = state.names.setup_leaf
+            val adopted = windows_private_adopt_published_read_v2(state.writer.unwrap(), state.stage.unwrap(), leaf)
+            state.stage = adopted.stage
+            state.published = adopted.reader
+            auth_publications_v1[slot] = state
+            if adopted.error != "" or adopted.reader.is_none(): state = auth_publication_fail_v1(state, "host-auth-publication-adoption-retained")
+            else: state.phase = "verify"
+            auth_publications_v1[slot] = state
+        case "verify":
+            var file = state.published.unwrap()
+            val read = file.read_all_bounded(512)
+            state.published = Some(file)
+            auth_publications_v1[slot] = state
+            val current = auth_publication_setup_current_v1(slot)
+            state = auth_publications_v1[slot]
+            if (read.is_err() or not retained_credential_bytes_equal_v2(read.unwrap(), state.content) or
+                    not file.security_current() or current.is_err()):
+                state = auth_publication_fail_v1(state, "host-auth-publication-readback-rejected")
+            else:
+                state.chain_valid = true
+                state.closing = true
+                state.phase = "cleanup"
+            auth_publications_v1[slot] = state
+        case _:
+            auth_publications_v1[slot] = auth_publication_fail_v1(state, "host-auth-publication-phase")
+
+fn auth_publication_step_v1(slot: i64, generation: i64, cancel: bool) -> Result<(), text>:
+    var state = auth_publication_load_v1(slot, generation, 0)?
+    if state.closed: return Ok(())
+    state.busy = true
+    if cancel and not state.closing: state = auth_publication_fail_v1(state, "host-auth-publication-cancelled")
+    auth_publications_v1[slot] = state
+    auth_publication_advance_v1(slot)
+    state = auth_publications_v1[slot]
+    state.busy = false
+    auth_publications_v1[slot] = state
+    Ok(())
+
+fn setup_turn_v1(owner: HostServiceAuthSetupOwnerV1) -> HostServiceAuthSetupTurnV1:
+    val state = auth_publications_v1[owner.slot]
+    HostServiceAuthSetupTurnV1(if state.closed: nil else: Some(owner), state.phase, state.publication,
+        state.closed and state.chain_valid and state.error == "", not state.closed, state.uid, state.digest, state.error)
+
+pub fn host_service_auth_setup_open_v1(setup_path: text) -> HostServiceAuthSetupTurnV1:
+    val opened = auth_publication_open_v1(setup_path, 0, "", "", "")
+    if opened.is_err(): return HostServiceAuthSetupTurnV1(nil, "rejected", "not-attempted", false, false, "", "", opened.unwrap_err())
+    val slot = opened.unwrap()
+    setup_turn_v1(HostServiceAuthSetupOwnerV1(slot: slot, generation: slot + 1))
+
+pub fn host_service_auth_setup_step_v1(owner: HostServiceAuthSetupOwnerV1, cancel: bool = false) -> HostServiceAuthSetupTurnV1:
+    val stepped = auth_publication_step_v1(owner.slot, owner.generation, cancel)
+    if stepped.is_err(): return HostServiceAuthSetupTurnV1(Some(owner), "retained", "unknown", false, true, "", "", stepped.unwrap_err())
+    setup_turn_v1(owner)
+
+pub fn host_service_auth_setup_close_v1(owner: HostServiceAuthSetupOwnerV1) -> HostServiceAuthSetupTurnV1:
+    host_service_auth_setup_step_v1(owner, true)
+
+# Read the EXISTING actual journal's selector through its genuine owner. The
+# journal remains with the caller/Host domain, including native publish pending.
+fn auth_ready_snapshot_v1(journal: DistributedOperationJournalV2) -> Result<HostServiceAuthLeaseV1, text>:
+    val bytes = distributed_operation_journal_read_required_v3(journal, "parent.lease", 512)?
+    val selected = host_service_auth_lease_validate_v1(text_to_utf8_bytes(bytes), journal.authority_digest)?
+    if selected.lease_digest != journal.lease_digest: return Err("host-ready-journal-selector-mismatch")
+    Ok(selected)
+
+fn auth_ready_binding_digest_v1(journal: DistributedOperationJournalV2) -> text:
+    val fields: Dict<text, SdnValue> = {"root": SdnValue.String(journal.root),
+        "authority": SdnValue.String(journal.authority_digest), "lease": SdnValue.String(journal.lease_digest),
+        "health": SdnValue.Int(journal.health_id)}
+    sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+fn auth_ready_binding_v1(state: AuthPublicationStateV1, journal: DistributedOperationJournalV2) -> bool:
+    state.journal_binding == auth_ready_binding_digest_v1(journal)
+
+fn auth_ready_advance_v1(slot: i64, journal: DistributedOperationJournalV2):
+    var state = auth_publications_v1[slot]
+    if state.closing:
+        auth_publication_cleanup_v1(slot)
+        return
+    val selected = auth_ready_snapshot_v1(journal)
+    if selected.is_err() or selected.unwrap().lease_digest != state.journal_lease:
+        auth_publications_v1[slot] = auth_publication_fail_v1(state, "host-ready-journal-no-longer-current")
+        return
+    match state.phase:
+        case "read-root":
+            val opened = windows_private_read_root_open_v2(state.names.parent)
+            if opened.is_err():
+                val failure = opened.unwrap_err()
+                state.reader_root = failure.cleanup_root
+                state.original_setup = failure.cleanup_file
+                state = auth_publication_fail_v1(state, "host-ready-setup-root-open")
+            else:
+                state.reader_root = Some(opened.unwrap())
+                state.phase = "read-setup"
+            auth_publications_v1[slot] = state
+        case "read-setup":
+            val actual = auth_publication_read_setup_v1(slot)
+            state = auth_publications_v1[slot]
+            if actual.is_err(): state = auth_publication_fail_v1(state, actual.unwrap_err())
+            else:
+                @when(os="windows"):
+                val pid = GetCurrentProcessId() as i64
+                @else:
+                val pid: i64 = 0
+                @end
+                val record = host_service_auth_ready_record_v1(state.uid, state.digest, state.endpoint, pid,
+                    state.incarnation, state.journal_lease, state.journal_authority)
+                val relative = host_service_auth_ready_relative_v1(state.journal_lease)
+                if record.is_err() or relative.is_err(): state = auth_publication_fail_v1(state, "host-ready-journal-record-encoding")
+                else:
+                    state.content = record.unwrap()
+                    state.ready_relative = relative.unwrap()
+                    state.ready_digest = sha256_text(bytes_to_text(state.content))
+                    state.phase = "journal-publish"
+            auth_publications_v1[slot] = state
+        case "journal-publish":
+            val setup_current = auth_publication_setup_current_v1(slot)
+            state = auth_publications_v1[slot]
+            if setup_current.is_err():
+                auth_publications_v1[slot] = auth_publication_fail_v1(state, setup_current.unwrap_err())
+                return
+            state.publication = "unknown"
+            auth_publications_v1[slot] = state
+            # Sole writer is the provided actual Host journal. No second open,
+            # writer/store capture, journal close or publication retry exists.
+            val published = distributed_operation_journal_publish_v3(journal, state.ready_relative, bytes_to_text(state.content))
+            if published.is_err(): state = auth_publication_fail_v1(state, "host-ready-journal-publication-unknown")
+            elif not published.unwrap():
+                state.publication = "conflict"
+                state = auth_publication_fail_v1(state, "host-ready-journal-publication-conflict")
+            else:
+                state.publication = "published"
+                state.phase = "journal-verify"
+            auth_publications_v1[slot] = state
+        case "journal-verify":
+            val read = distributed_operation_journal_read_required_v3(journal, state.ready_relative, 512)
+            val after = auth_ready_snapshot_v1(journal)
+            val setup_current = auth_publication_setup_current_v1(slot)
+            state = auth_publications_v1[slot]
+            if (read.is_err() or read.unwrap() != bytes_to_text(state.content) or after.is_err() or
+                    after.unwrap().lease_digest != state.journal_lease or setup_current.is_err()):
+                state = auth_publication_fail_v1(state, "host-ready-journal-readback-rejected")
+            else:
+                state.chain_valid = true
+                state.closing = true
+                state.phase = "cleanup"
+            auth_publications_v1[slot] = state
+        case _:
+            auth_publications_v1[slot] = auth_publication_fail_v1(state, "host-ready-journal-publication-phase")
+
+fn ready_turn_v1(owner: HostServiceAuthReadyPublishOwnerV1,
+        journal: DistributedOperationJournalV2) -> HostServiceAuthReadyPublishTurnV1:
+    val state = auth_publications_v1[owner.slot]
+    HostServiceAuthReadyPublishTurnV1(journal: journal, owner: if state.closed: nil else: Some(owner),
+        phase: state.phase, ready_publication: state.publication, ready_digest: state.ready_digest,
+        completed: state.closed and state.chain_valid and state.error == "", cleanup_pending: not state.closed,
+        publication_uid: state.uid, setup_digest: state.digest, error: state.error)
+
+fn ready_error_v1(owner: Option<HostServiceAuthReadyPublishOwnerV1>,
+        journal: DistributedOperationJournalV2, error: text, publication: text = "unknown") -> HostServiceAuthReadyPublishTurnV1:
+    HostServiceAuthReadyPublishTurnV1(journal: journal, owner: owner, phase: "retained-or-rejected",
+        ready_publication: publication, ready_digest: "", completed: false, cleanup_pending: owner.is_some(),
+        publication_uid: "", setup_digest: "", error: error)
+
+# Trusted server IO only. The listener bridge supplies actual bound endpoint
+# and retained service incarnation. The passed journal remains the ONE writer.
+pub(package) fn host_service_auth_ready_publish_open_v1(journal: DistributedOperationJournalV2,
+        setup_path: text, expected_setup_digest: text, actual_bound_endpoint: text,
+        actual_service_incarnation: text) -> HostServiceAuthReadyPublishTurnV1:
+    val entry = auth_publication_entry_v1()
+    if entry.is_err(): return ready_error_v1(nil, journal, entry.unwrap_err(), "not-attempted")
+    val names = host_service_auth_setup_path_v1(setup_path)
+    if (names.is_err() or not host_service_hex_shape_v6(expected_setup_digest, 64) or
+            not host_service_hex_shape_v6(actual_service_incarnation, 32) or not host_service_auth_endpoint_valid_v1(actual_bound_endpoint)):
+        return ready_error_v1(nil, journal, "host-ready-journal-admission-shape", "not-attempted")
+    val selected = auth_ready_snapshot_v1(journal)
+    if selected.is_err(): return ready_error_v1(nil, journal, "host-ready-journal-admission-current", "not-attempted")
+    val opened = auth_publication_open_v1(setup_path, 1, expected_setup_digest, actual_bound_endpoint, actual_service_incarnation)
+    if opened.is_err(): return ready_error_v1(nil, journal, opened.unwrap_err(), "not-attempted")
+    val slot = opened.unwrap()
+    var state = auth_publications_v1[slot]
+    state.journal_binding = auth_ready_binding_digest_v1(journal)
+    state.journal_authority = journal.authority_digest
+    state.journal_lease = selected.unwrap().lease_digest
+    auth_publications_v1[slot] = state
+    ready_turn_v1(HostServiceAuthReadyPublishOwnerV1(slot: slot, generation: slot + 1), journal)
+
+pub(package) fn host_service_auth_ready_publish_step_v1(owner: HostServiceAuthReadyPublishOwnerV1,
+        journal: DistributedOperationJournalV2, cancel: bool = false) -> HostServiceAuthReadyPublishTurnV1:
+    val loaded = auth_publication_load_v1(owner.slot, owner.generation, 1)
+    if loaded.is_err(): return ready_error_v1(Some(owner), journal, loaded.unwrap_err())
+    var state = loaded.unwrap()
+    if not auth_ready_binding_v1(state, journal): return ready_error_v1(Some(owner), journal, "host-ready-journal-owner-domain")
+    if state.closed: return ready_turn_v1(owner, journal)
+    state.busy = true
+    if cancel and not state.closing: state = auth_publication_fail_v1(state, "host-ready-journal-publication-cancelled")
+    auth_publications_v1[owner.slot] = state
+    auth_ready_advance_v1(owner.slot, journal)
+    state = auth_publications_v1[owner.slot]
+    state.busy = false
+    auth_publications_v1[owner.slot] = state
+    ready_turn_v1(owner, journal)
+
+# Cleanup works with the original binding even after Host close. It never
+# reads/publishes/closes the journal during this resource-only path.
+pub fn host_service_auth_ready_publish_close_v1(owner: HostServiceAuthReadyPublishOwnerV1,
+        journal: DistributedOperationJournalV2) -> HostServiceAuthReadyPublishTurnV1:
+    host_service_auth_ready_publish_step_v1(owner, journal, true)

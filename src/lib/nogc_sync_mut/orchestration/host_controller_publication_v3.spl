@@ -1,0 +1,94 @@
+# Host-domain leaf over the existing protected listener publisher. The listener
+# remains borrowed; its canonical server is the sole listener closer.
+use std.io.tcp.TcpListener
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.HostServiceDomainV3
+use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
+use std.nogc_sync_mut.orchestration.host_windows_local_root_v3.HostWindowsLocalRootV3
+use std.nogc_sync_mut.io.host_service_auth_listener_publication_v6.{HostServiceAuthListenerPublicationV6,
+    HostServiceAuthListenerPublicationTurnV6, host_service_auth_listener_publication_begin_v6,
+    host_service_auth_listener_publication_step_v6, host_service_auth_listener_publication_close_v6}
+
+# Reopening DATA only, derived from an actual current retained deployment.
+# The reader independently verifies protected ancestry and exact publication,
+# lease, authority and incarnation. This locator is never pathname authority.
+pub struct HostControllerJournalBindingV3:
+    deployment_root: text
+    lease_digest: text
+    authority_digest: text
+
+pub struct HostControllerPublicationTurnV3:
+    domain: HostServiceDomainV3
+    publication: Option<HostServiceAuthListenerPublicationV6>
+    ready_digest: text
+    lease_digest: text
+    authority_digest: text
+    publication_state: text
+    completed: bool
+    cleanup_pending: bool
+    error: text
+
+pub fn host_controller_journal_binding_v3(domain: HostServiceDomainV3) -> Result<HostControllerJournalBindingV3, text>:
+    val local = match domain.local:
+        case HostLocalRootV3.Windows(value): value
+        case _: return Err("controller-host-publication-backend")
+    val checked = local.current_v3()?
+    val journal = local.capacity_v3().journal
+    # diagnostic_root_v3 derives from the retained installed anchor/root child.
+    # Normalize separators only: preserve the literal native GLOBAL prefix.
+    val root = local.deployment_authority_v3().diagnostic_root_v3().replace("/", "\\")
+    Ok(HostControllerJournalBindingV3(root, journal.lease_digest, journal.authority_digest))
+
+fn controller_publication_refused_v3(domain: HostServiceDomainV3,
+        publication: Option<HostServiceAuthListenerPublicationV6>, error: text) -> HostControllerPublicationTurnV3:
+    val state = if publication.is_some(): "retained-or-rejected" else: "not-attempted"
+    HostControllerPublicationTurnV3(domain, publication, "", "", "", state,
+        false, publication.is_some(), error)
+
+fn controller_publication_accept_v3(local: HostWindowsLocalRootV3,
+        turn: HostServiceAuthListenerPublicationTurnV6) -> HostControllerPublicationTurnV3:
+    # The existing IO bridge borrows/returns this SAME actual journal, never
+    # opens a writer or independently advances the capacity ledger. Replace it
+    # in the actual root BEFORE inspecting publication or post-effect errors.
+    var retained = local
+    var capacity = retained.capacity_v3()
+    capacity.journal = turn.journal
+    val accepted = retained.retain_v3(capacity, retained.container_v3())
+    val domain = HostServiceDomainV3(HostLocalRootV3.Windows(retained))
+    var error = turn.error
+    if error == "" and accepted.is_err(): error = accepted.unwrap_err()
+    HostControllerPublicationTurnV3(domain, turn.owner, turn.ready_digest, turn.host_lease_digest,
+        turn.host_authority_digest, turn.publication,
+        turn.completed and error == "" and not turn.cleanup_pending, turn.cleanup_pending, error)
+
+pub fn host_controller_publication_begin_v3(domain: HostServiceDomainV3, listener: TcpListener,
+        setup_path: text, pin: text, incarnation: text) -> HostControllerPublicationTurnV3:
+    val local = match domain.local:
+        case HostLocalRootV3.Windows(value): value
+        case _: return controller_publication_refused_v3(domain, nil, "controller-host-publication-backend")
+    val checked = local.current_v3()
+    if checked.is_err(): return controller_publication_refused_v3(domain, nil, checked.unwrap_err())
+    val turn = host_service_auth_listener_publication_begin_v6(listener, local.capacity_v3().journal,
+        setup_path, pin, incarnation)
+    controller_publication_accept_v3(local, turn)
+
+pub fn host_controller_publication_step_v3(domain: HostServiceDomainV3, listener: TcpListener,
+        publication: HostServiceAuthListenerPublicationV6, cancel: bool = false) -> HostControllerPublicationTurnV3:
+    val local = match domain.local:
+        case HostLocalRootV3.Windows(value): value
+        case _: return controller_publication_refused_v3(domain, Some(publication), "controller-host-publication-backend")
+    # No renewed launch-policy preflight may prevent draining retained setup
+    # capabilities. The IO owner validates the borrowed journal binding itself.
+    val turn = host_service_auth_listener_publication_step_v6(listener, publication, local.capacity_v3().journal, cancel)
+    controller_publication_accept_v3(local, turn)
+
+pub fn host_controller_publication_close_v3(domain: HostServiceDomainV3,
+        publication: HostServiceAuthListenerPublicationV6) -> HostControllerPublicationTurnV3:
+    val local = match domain.local:
+        case HostLocalRootV3.Windows(value): value
+        case _: return controller_publication_refused_v3(domain, Some(publication), "controller-host-publication-backend")
+    val turn = host_service_auth_listener_publication_close_v6(publication, local.capacity_v3().journal)
+    controller_publication_accept_v3(local, turn)
+
+export HostControllerJournalBindingV3, HostControllerPublicationTurnV3
+export host_controller_journal_binding_v3, host_controller_publication_begin_v3
+export host_controller_publication_step_v3, host_controller_publication_close_v3
