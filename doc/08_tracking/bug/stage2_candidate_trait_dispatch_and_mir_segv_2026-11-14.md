@@ -169,3 +169,49 @@ Windows stage2 lane is this codegen SIGSEGV (plus Regression 1's AttrOwnerV1
 object-safety at >= b5d93e48cd8, absent at 189dabae8e3, untested at
 43d32352d40's test_runner row — which PASSED in cycle 26, so Regression 1
 appears fixed by the native-trait lanes landing near #9563).
+
+## 2026-11-16 addendum 3: cycle 28 — the correlation is NATIVE-BATCH COUNT, not module offset; and the tree watchdog under-counts the row
+
+Cycle 28 (receipt-authorized full run, clean tip 35cc470d245 — carries the
+parse-parity fix #9597, native-trait tail conversion #9563, and the
+copy-thunk dispatch-record fix): `compiler_cli_build` STILL SIGSEGVs
+(status 139) at 7,416 s — `phase=native_staged ... done=616 total=3797
+current=batch-79`, immediately after `[NATIVE] codegen: 8 uncached
+module(s), concurrency=1 (serial lane in this process)`.
+
+Cross-crash table (all receipt-authorized MSVC stage2 rows):
+
+| cycle | tip       | crash point        | batch |
+|-------|-----------|--------------------|-------|
+| 24d   | b5d93e48cd8 | done=672/3157    | 85    |
+| 25b   | 189dabae8e3 | done=650/3148    | 81    |
+| 26    | 43d32352d40 | done=672/3186    | 85    |
+| 28    | 35cc470d245 | done=616/3797    | 79    |
+
+Addendum 2's "constant closure offset 672" was an artifact of similar
+closure sizes: the true correlation is the SERIAL IN-PROCESS CODEGEN BATCH
+COUNT (~79-85 batches of 8 modules). The crashing batch's FIRST module
+differs per tip (lib.common.ui.ios.builder at 25b/26, lib.common.crypto.hmac
+at 28), so no single source module is at fault — the lane dies after a
+roughly fixed number of codegen batches regardless of WHICH modules they
+contain. This is accumulation-shaped (leak/exhaustion in the serial codegen
+lane's per-batch state), not content-shaped.
+
+Row self-reported RSS at crash VARIES: 33.5 GiB (25b) vs 51.3 GiB (28) — so
+it is not a fixed RSS threshold either. Host commit limit during cycle 28
+(64 GiB RAM + 12.5 GiB pagefile ≈ 76 GiB; system ~11 GiB) was probably not
+exceeded.
+
+MONITORING GAP (separate owner ask): the tree watchdog under-counts the row.
+Cycle 28 progress samples showed tree_rss_kb ~30 GiB while the row's own log
+reported rss_mib=51329 (50.1 GiB) in the same window (tree_scan_misses>0
+samples present). The 56 GiB cap (intended to kill the tree before the OS
+does) therefore never sees the real consumer and would not have fired even
+at 56 GiB of actual row RSS. The row self-report (rss_mib in the row log) is
+the reliable signal; the watchdog's sampling should be reconciled with it.
+
+Not cured by any of: e250454f1aa, 10502b44377/92237f6276d, #9563,
+copy-thunk fix, #9597. Next routes to try: SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1
+(single-process whole-program build, bypasses the batch lane per upstream
+workaround doc stage2_sanity_mir_workers_zero_pool_refusal_2026-11-15.md),
+and a debugger attached to the row process for the stack at crash.
