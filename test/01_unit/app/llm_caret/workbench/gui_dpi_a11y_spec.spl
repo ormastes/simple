@@ -1,0 +1,94 @@
+"""
+## Purpose and audience
+Purpose: the caret GUI workbench honours a DPI scale factor when choosing its
+responsive mode, and every workbench widget carries an accessible role + name
+that a screen reader can announce (acceptance row CU-017).
+Audience: caret-suite workbench and accessibility engineers.
+## Operator workflow
+Run `bin/simple test test/01_unit/app/llm_caret/workbench/gui_dpi_a11y_spec.spl`.
+"""
+use std.spec.*
+use app.llm_caret.workbench.session_contract.{SessionId, new_session_id, new_session_view}
+use app.llm_caret.workbench.gui_layout.{WorkbenchMode, workbench_mode_name,
+    workbench_mode_for_scaled_width, scale_px, normalize_scale_permille}
+use app.llm_caret.workbench.gui_a11y.{A11yNode, a11y_attrs, workbench_a11y_nodes,
+    a11y_unnamed_nodes}
+use app.llm_caret.workbench.gui_page.{render_workbench_page_scaled}
+use app.llm_caret.gui.{caret_gui_html_for_path}
+
+fn _two_sessions() -> [SessionId]:
+    [new_session_id("a1"), new_session_id("a2")]
+
+describe "GUI workbench DPI scaling":
+    it "keeps unscaled behaviour at 1000 permille":
+        # @req REQ-CARET-CU-017
+        step("1200 device px at 1.0x is the full layout")
+        expect(workbench_mode_name(workbench_mode_for_scaled_width(1200, 1000))).to_equal("full")
+    it "maps device pixels to logical pixels before picking the mode":
+        # @req REQ-CARET-CU-017
+        step("1200 device px at 2.0x is 600 logical px, so compact")
+        expect(workbench_mode_name(workbench_mode_for_scaled_width(1200, 2000))).to_equal("compact")
+        step("1600 device px at 1.5x is ~1066 logical px, so collapsed")
+        expect(workbench_mode_name(workbench_mode_for_scaled_width(1600, 1500))).to_equal("collapsed")
+    it "rejects a non-positive scale and falls back to identity":
+        # @req REQ-CARET-CU-017
+        expect(normalize_scale_permille(0)).to_equal(1000)
+        expect(normalize_scale_permille(-5)).to_equal(1000)
+        expect(normalize_scale_permille(1250)).to_equal(1250)
+    it "scales pixel values by permille":
+        # @req REQ-CARET-CU-017
+        expect(scale_px(320, 1000)).to_equal(320)
+        expect(scale_px(320, 2000)).to_equal(640)
+    it "emits the scale into the rendered page":
+        # @req REQ-CARET-CU-017
+        val html = render_workbench_page_scaled([], new_session_id("x"), [], 1200, 2000, "", [])
+        assert_contains(html, "data-scale-permille='2000'")
+        assert_contains(html, "--ui-scale: 2")
+        assert_contains(html, "data-workbench-mode='compact'")
+    it "reads width and scale from the served request path":
+        # @req REQ-CARET-CU-017
+        val html = caret_gui_html_for_path("/?w=1200&scale=2000")
+        assert_contains(html, "data-scale-permille='2000'")
+        assert_contains(html, "data-workbench-mode='compact'")
+        val plain = caret_gui_html_for_path("/")
+        assert_contains(plain, "data-scale-permille='1000'")
+
+describe "GUI workbench accessible names and roles":
+    it "gives every workbench node a non-empty role and name":
+        # @req REQ-CARET-CU-017
+        val ids = _two_sessions()
+        val views = [new_session_view(ids[0], "alpha", "claude"), new_session_view(ids[1], "beta", "codex")]
+        val nodes = workbench_a11y_nodes(views, ids[0], WorkbenchMode.Full)
+        expect(a11y_unnamed_nodes(nodes).len()).to_equal(0)
+        assert_true(nodes.len() >= 8)
+    it "names each roster option after its agent":
+        # @req REQ-CARET-CU-017
+        val ids = _two_sessions()
+        val views = [new_session_view(ids[0], "alpha", "claude"), new_session_view(ids[1], "beta", "codex")]
+        val nodes = workbench_a11y_nodes(views, ids[0], WorkbenchMode.Full)
+        var options = 0
+        for n in nodes:
+            if n.role == "option":
+                options = options + 1
+                assert_true(n.name.contains("alpha") or n.name.contains("beta"))
+        expect(options).to_equal(2)
+    it "flags a node with an empty name":
+        # @req REQ-CARET-CU-017
+        val bad = [A11yNode(id: "x", role: "button", name: ""), A11yNode(id: "y", role: "", name: "n")]
+        expect(a11y_unnamed_nodes(bad).len()).to_equal(2)
+    it "renders each node's role and name into the page markup":
+        # @req REQ-CARET-CU-017
+        val ids = _two_sessions()
+        val views = [new_session_view(ids[0], "alpha", "claude"), new_session_view(ids[1], "beta", "codex")]
+        val html = render_workbench_page_scaled(views, ids[0], [], 1400, 1000, "", [])
+        val nodes = workbench_a11y_nodes(views, ids[0], WorkbenchMode.Full)
+        for n in nodes:
+            assert_contains(html, a11y_attrs(n.role, n.name))
+    it "announces the status footer as a live status region":
+        # @req REQ-CARET-CU-017
+        val html = render_workbench_page_scaled([], new_session_id("x"), [], 1400, 1000, "", [])
+        assert_contains(html, "role='status'")
+        assert_contains(html, "aria-live='polite'")
+    it "escapes quotes in accessible names":
+        # @req REQ-CARET-CU-017
+        expect(a11y_attrs("option", "a'b")).to_equal(" role='option' aria-label='a&#39;b'")
