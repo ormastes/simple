@@ -64,3 +64,5 @@ Chrome page: `<div style="display:flex;width:240px">` with `a` `flex-grow:1.4` a
 `test/01_unit/lib/gc_async_mut/gpu/browser_engine/layout_renderer_box_geometry_chrome159_spec.spl`
 asserts the 129 box values of the same harness where the renderer agrees
 with Chrome; every row above is kept out of it until fixed.
+
+Re-verified still OPEN 2026-11-15 at `ba2663afde6` (after the upstream border/abspos/whitespace fixes): every row above reproduces unchanged.

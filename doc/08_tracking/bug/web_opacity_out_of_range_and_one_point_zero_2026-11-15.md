@@ -49,3 +49,5 @@ has a separate integer-part path and should be checked against the same table.
 `test/01_unit/lib/gc_async_mut/gpu/browser_engine/layout_renderer_style_value_parsers_spec.spl`
 pins only the in-range rows (`0`, `1`, `0.5`, `.25`, `50%`, `150%`); the
 wrong rows above are kept out of the spec until the fix lands.
+
+Re-verified still OPEN 2026-11-15 at `ba2663afde6` (after the upstream border/abspos/whitespace fixes): every row above reproduces unchanged.

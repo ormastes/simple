@@ -30,3 +30,5 @@ Classify on the lowercased token but take the URL from the original
 
 `test/01_unit/lib/gc_async_mut/gpu/browser_engine/layout_renderer_background_and_grid_decls_spec.spl`
 uses an all-lowercase URL; the mixed-case row is kept out until the fix lands.
+
+Re-verified still OPEN 2026-11-15 at `ba2663afde6` (after the upstream border/abspos/whitespace fixes): every row above reproduces unchanged.

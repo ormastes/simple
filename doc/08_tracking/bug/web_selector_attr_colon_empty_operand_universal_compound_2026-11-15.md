@@ -37,3 +37,5 @@ Page: `body{margin:0} section,div,p,span,b,i,h1{display:block;width:10px;height:
 `test/01_unit/lib/gc_async_mut/gpu/browser_engine/layout_renderer_selector_matching_chrome159_spec.spl`
 asserts the 58 rows of the same table where the renderer agrees with Chrome;
 these three rows are kept out until the fixes land.
+
+Re-verified still OPEN 2026-11-15 at `ba2663afde6` (after the upstream border/abspos/whitespace fixes): every row above reproduces unchanged.
