@@ -1,0 +1,83 @@
+"""
+## Purpose and audience
+Purpose: a second host's sessions appear in the local workbench roster over a
+real transport (process-run command printing a wire snapshot), and a host that
+stops answering is shown Disconnected instead of vanishing (CU-001, CU-010).
+Audience: caret-suite workbench engineers.
+## Operator workflow
+Run `bin/simple test test/01_unit/app/llm_caret/workbench/fleet_transport_spec.spl`.
+"""
+use std.spec.*
+use app.io.mod.{file_write}
+use app.llm_caret.workbench.session_contract.{SessionView, SessionId,
+    new_session_view, ProcessLifecycle, AgentTurn, Transport}
+use app.llm_caret.workbench.session_source.{live_sessions, clear_live_sessions,
+    declare_fleet_host, publish_fleet_sessions, export_fleet_snapshot}
+use app.llm_caret.workbench.fleet_transport.{fleet_encode_snapshot, fleet_decode_snapshot}
+
+fn _running(id: text, provider: text, gen: i64) -> SessionView:
+    val base = new_session_view(SessionId(value: id, generation: gen), id, provider)
+    SessionView(id: base.id, label: base.label, provider: base.provider,
+        lifecycle: ProcessLifecycle.Running, turn: AgentTurn.Working,
+        transport: Transport.Ready, evidence: base.evidence, needs_attention: true)
+
+fn _find(views: [SessionView], id: text) -> [SessionView]:
+    var out: [SessionView] = []
+    for v in views:
+        if v.id.value == id:
+            out.push(v)
+    out
+
+describe "fleet transport":
+    it "round-trips a snapshot over the wire codec":  # @req CU-001
+        step("encode two sessions and decode them as host hostb")
+        val wire = fleet_encode_snapshot([_running("a1", "claude", 3), _running("a2", "codex", 1)])
+        val got = fleet_decode_snapshot("hostb", wire)
+        expect(got.is_ok()).to_equal(true)
+        val views = got.unwrap()
+        expect(views.len()).to_equal(2)
+        expect(views[0].id.value).to_equal("hostb/a1")
+        expect(views[0].id.generation).to_equal(3)
+        expect(views[0].needs_attention).to_equal(true)
+        expect(views[1].provider).to_equal("codex")
+
+    it "rejects a malformed snapshot":  # @req CU-010
+        expect(fleet_decode_snapshot("hostb", "garbage line").is_ok()).to_equal(false)
+
+    it "shows a loopback second host's sessions in the live roster":  # @req CU-001
+        step("host B exports its snapshot; host A polls it with a real process")
+        clear_live_sessions()
+        val path = "build/fleet_spec_hostb.snap"
+        file_write(path, fleet_encode_snapshot([_running("a1", "claude", 2), _running("a2", "codex", 1)]))
+        declare_fleet_host("hostb", "cat", [path])
+        publish_fleet_sessions()
+        publish_fleet_sessions()
+        val rows = live_sessions()
+        expect(rows.len()).to_equal(2)
+        val a1 = _find(rows, "hostb/a1")
+        expect(a1.len()).to_equal(1)
+        expect(a1[0].label).to_equal("hostb:a1")
+        expect(a1[0].transport).to_equal(Transport.Ready)
+
+    it "marks a host that stops answering Disconnected, keeping its rows":  # @req CU-010
+        step("same host id, command now fails")
+        declare_fleet_host("hostb", "cat", ["build/fleet_spec_missing_nonexistent.snap"])
+        publish_fleet_sessions()
+        val a1 = _find(live_sessions(), "hostb/a1")
+        expect(a1.len()).to_equal(1)
+        expect(a1[0].transport).to_equal(Transport.Disconnected)
+        expect(a1[0].lifecycle).to_equal(ProcessLifecycle.Lost)
+
+    it "exports the local roster so a peer host decodes the same rows":  # @req CU-001
+        step("export writes the wire a peer polls back")
+        clear_live_sessions()
+        val src = "build/fleet_spec_src.snap"
+        file_write(src, fleet_encode_snapshot([_running("z1", "claude", 5)]))
+        declare_fleet_host("hostz", "cat", [src])
+        publish_fleet_sessions()
+        val path = "build/fleet_spec_export.snap"
+        expect(export_fleet_snapshot(path)).to_equal(true)
+        clear_live_sessions()
+        declare_fleet_host("hostd", "cat", [path])
+        publish_fleet_sessions()
+        expect(_find(live_sessions(), "hostd/hostz/z1").len()).to_equal(1)
