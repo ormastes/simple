@@ -18,3 +18,12 @@ unsupported check/test/run/SPipe/docgen commands were not invoked. No seed
 fallback or full build was used. No runtime or performance PASS is claimed.
 
 Source hygiene and independent exact-head review are recorded at the handoff.
+
+Self-review repaired an explicit import for the expression spelling helper and
+changed direct-vs-facade classification to the typed Declaration-role lookup.
+Compatibility authority maps contain projected facade terminal rows; their
+lookup success alone cannot classify a source binding as a direct declaration.
+The authored folder-local facade-promotion case covers this distinction.
+
+Working and staged direct-env guards and staged whitespace checks passed for
+the implementation checkpoint. These checks do not qualify runtime semantics.

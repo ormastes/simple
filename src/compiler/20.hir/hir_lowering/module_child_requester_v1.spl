@@ -159,13 +159,24 @@ impl HirLowering:
                         reason = "selected-category-unavailable"
                     else:
                         val source = self.module_surfaces.surfaces[receipt.target_surface]
-                        val direct = module_surface_declaration_authority_lookup_typed_v1(
-                            source.declaration_authority_index, source_name, category_name)
-                        if direct.found:
-                            reason = requester_declaration_reason_v1(direct.source_modifier, direct.source_path, requester, false)
+                        val category = requester_category_v1(category_name)
+                        # Compatibility authority maps also contain projected
+                        # facade origins. Only the typed Declaration role proves
+                        # this spelling is a direct declaration on this surface.
+                        val direct_selection = module_surface_selected_declaration_lookup_v1(
+                            self.module_surfaces, receipt.target_surface, category, source_name)
+                        if direct_selection.state == ModuleSurfaceExportSelectionStateV1.Selected:
+                            val direct = module_surface_declaration_authority_lookup_typed_v1(
+                                source.declaration_authority_index, source_name, category_name)
+                            if not direct.found or direct.projection_key != direct_selection.terminal_projection:
+                                reason = "declaration-origin-unavailable"
+                            else:
+                                reason = requester_declaration_reason_v1(direct.source_modifier, direct.source_path, requester, false)
+                        elif direct_selection.state != ModuleSurfaceExportSelectionStateV1.Missing:
+                            reason = "declaration-origin-unavailable:" + direct_selection.reason
                         else:
                             reason = requester_export_reason_v1(self.module_surfaces, receipt.target_surface,
-                                requester_category_v1(category_name), source_name, ModuleSurfaceExportBindingRoleV1.Export,
+                                category, source_name, ModuleSurfaceExportBindingRoleV1.Export,
                                 requester, 0, [], RequesterExportBudgetV1(remaining: 256))
         if reason == "": return false
         self.error("[E-HIR-REQUESTER-ROUTE] `" + name + "`: " + reason, span)
