@@ -1,0 +1,45 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Unit TLDR summary surfaces carry their source's physical content identity
+
+Regression for "Module surface extraction error: conflicting physical source:
+.../src/lib/common/string_core.spl" on every cross build (2026-11-16). One
+`src/lib` file is admitted under two rows (`lib.X` and its `std.X` twin). The
+first row registers the TLDR summary surface; the second row takes the alias
+lane, which requires the registered surface's content length/hash to equal the
+row's source content. Summary surfaces were built with length 0 / hash 0, so
+the alias check always failed once #9542 bound summaries across the alias rows.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:driver
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use compiler.driver.driver_unit_tldr_imports_v1.{unit_tldr_plan_v1, unit_tldr_module_paths_v1,
+    unit_tldr_surface_for_row_v1}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path,
+    module_surface_content_hash}
+
+val FXC = "test/fixtures/unit_tldr_alias/"
+
+describe "unit_tldr_plan_v1 summary surface content identity":
+    it "binds the source byte length and content hash, so the std./lib. alias row admits":
+        val inv = unit_tldr_module_paths_v1(["lib.fxalias.cyc_a", "lib.fxalias.cyc_b"],
+            [FXC + "cyc_a.spl", FXC + "cyc_b.spl"])
+        val plan = unit_tldr_plan_v1("u", "build/unit_tldr_content_spec", [FXC + "cyc_a.spl"], inv)
+        val b_path = FXC + "cyc_b.spl"
+        val content = file_read(b_path)
+        if plan.fallbacks == 0:
+            val s = unit_tldr_surface_for_row_v1(plan, "lib.fxalias.cyc_b",
+                module_surface_canonical_path(b_path)).unwrap()
+            expect(s.content_length).to_equal(content.byte_len())
+            expect(s.content_hash).to_equal(module_surface_content_hash(content))
+        else:
+            expect(plan.parse_paths.contains(b_path)).to_equal(true)
+
+    it "the streaming row binds the summary surface to the row's own source bytes":
+        val stream = file_read("src/compiler/80.driver/driver_source_parse_streaming.spl")
+        expect(stream).to_contain("tldr_surface.content_length = source_contents[source_index].byte_len()")
+        expect(stream).to_contain("tldr_surface.content_hash = module_surface_content_hash(source_contents[source_index])")

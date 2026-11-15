@@ -14,7 +14,8 @@ use app.traceability.query_options_v1.{TraceQueryFormatV1, trace_query_format_pa
 use app.traceability.cli_options_v1.{TraceCliOptionsV1, trace_cli_options_validate_v1}
 use app.traceability.structural_report_v1.{TraceSnapshotCompletenessV1, TraceDiagnosticLimitV1,
     trace_qualification_infrastructure_v1}
-use app.traceability.query_main.{TraceExitCodeV1, trace_query_error_exit_v1, run_trace_query_v1}
+use app.traceability.query_main.{TraceExitCodeV1, trace_query_error_exit_v1, trace_query_completion_exit_v1, run_trace_query_v1}
+use std.common.traceability.model.{TraceGraph, SnapshotSubject}
 
 describe "Traceability app domain types":
     it "parses the closed query format set and names it back":
@@ -76,3 +77,19 @@ describe "Traceability app domain types":
         step("Help is exit 0")
         expect(run_trace_query_v1(["--help"]).value).to_equal(0)
         expect(TraceExitCodeV1(value: 1).value).to_equal(1)
+
+    it "exits 2 for an incomplete graph, 1 for not found, 0 for a complete graph":
+        # @req REQ-TRC-007
+        val subject = SnapshotSubject(repository_id: "repo:test", snapshot_id: "snapshot:one",
+            kind: "git_commit", revision_id: "commit:one", tree_id: "tree:one", object_format: "sha256")
+        val complete = TraceGraph(subject: subject, input_manifest_id: "inputs:one", generation_id: "generation:one",
+            complete: true, nodes: [], test_definitions: [], claims: [], edges: [], edge_origins: [],
+            origins: [], locators: [], diagnostics: [])
+        var incomplete = complete
+        incomplete.complete = false
+        step("Adverse: an incomplete graph exits 2, never 1 (plan section 6)")
+        expect(trace_query_completion_exit_v1(incomplete).value).to_equal(2)
+        step("A complete graph exits 0")
+        expect(trace_query_completion_exit_v1(complete).value).to_equal(0)
+        step("Adverse: a missing item still exits 1, distinct from incomplete")
+        expect(trace_query_error_exit_v1("TRACE-QUERY-NOT-FOUND: x").value).to_equal(1)
