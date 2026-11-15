@@ -1,4 +1,8 @@
-# SPL-BOUND-002: late primitive-to-unit cast of a foreign-origin value.
+# SPL-BOUND-002: late primitive-to-unit cast of a foreign-origin value
+# (`Unit(x)` and `x as Unit`).
+# SPL-BOUND-001: a raw extern result (bare call or plain copy) returned
+# unconverted (`return raw` / final bare `raw`) from a non-boundary function
+# with a declared non-Nil return type.
 #
 # A foreign value acquires unit semantics at its SFFI/HAL boundary adapter
 # (a function carrying @unsafe(... capabilities: [ffi])), never in an
@@ -197,6 +201,81 @@ fn _blc_cast_args(expr: text, unit_name: text) -> [text]:
             i = i + 1
     args
 
+fn _blc_as_operands(expr: text, unit_name: text) -> [text]:
+    # Operand of every `<operand> as Unit` cast on the line (whole-identifier
+    # `Unit` after `as`). The operand is the trailing atom before ` as `:
+    # an optional balanced `(...)` preceded by an identifier/field path.
+    var ops: [text] = []
+    val needle = " as " + unit_name
+    var from = 0
+    while from < expr.byte_len():
+        val k = expr.substring(from, expr.byte_len()).find(needle)
+        if k < 0:
+            return ops
+        val at = from + k
+        from = at + needle.byte_len()
+        if from < expr.byte_len() and _blc_ident_char(expr.substring(from, from + 1)):
+            continue
+        var start = at
+        if start > 0 and expr.substring(start - 1, start) == ")":
+            var depth = 0
+            while start > 0:
+                val c = expr.substring(start - 1, start)
+                if c == ")":
+                    depth = depth + 1
+                elif c == "(":
+                    depth = depth - 1
+                start = start - 1
+                if depth == 0:
+                    break
+        while start > 0:
+            val c = expr.substring(start - 1, start)
+            if _blc_ident_char(c) or c == ".":
+                start = start - 1
+            else:
+                break
+        ops.push(expr.substring(start, at))
+    ops
+
+fn _blc_bare_extern_call(expr: text, externs: [text]) -> bool:
+    # The whole expression is exactly one `extern_name(...)` call.
+    for name in externs:
+        val needle = name + "("
+        if not expr.starts_with(needle) or not expr.ends_with(")"):
+            continue
+        var depth = 0
+        var i = name.byte_len()
+        var closed_at = -1
+        while i < expr.byte_len():
+            val c = expr.substring(i, i + 1)
+            if c == "(":
+                depth = depth + 1
+            elif c == ")":
+                depth = depth - 1
+                if depth == 0:
+                    closed_at = i
+                    break
+            i = i + 1
+        if closed_at == expr.byte_len() - 1:
+            return true
+    false
+
+fn _blc_raw_value(expr: text, externs: [text], raw: [text]) -> bool:
+    # The expression IS an unconverted raw extern result: a bare extern call or
+    # a plain copy of one (no cast, no call, no arithmetic).
+    val e = expr.trim()
+    raw.contains(e) or _blc_bare_extern_call(e, externs)
+
+fn _blc_return_primitive(header: text) -> bool:
+    # A declared, non-unit-type return (`-> Nil` / `-> ()` / none returns no value).
+    val arrow = header.find(" -> ")
+    if arrow < 0:
+        return false
+    var rt = header.substring(arrow + 4, header.byte_len()).trim()
+    if rt.ends_with(":"):
+        rt = rt.substring(0, rt.byte_len() - 1).trim()
+    rt != "" and rt != "Nil" and rt != "()" and rt != "nil"
+
 fn _blc_foreign(expr: text, externs: [text], tainted: [text]) -> bool:
     for name in externs:
         if _blc_calls(expr, name):
@@ -205,6 +284,14 @@ fn _blc_foreign(expr: text, externs: [text], tainted: [text]) -> bool:
         if _blc_mentions(expr, name):
             return true
     false
+
+fn _blc_escape_finding(line_num: i64) -> BoundLateCastFinding:
+    BoundLateCastFinding(
+        code: "SPL-BOUND-001",
+        message: "raw extern result escapes unconverted from a non-boundary function",
+        note: "convert the foreign value at an @unsafe(reason: ..., capabilities: [ffi]) boundary adapter (typed unit, enum, or Result<T, ConstraintError>) and return that instead of the raw primitive",
+        line_num: line_num
+    )
 
 pub fn check_bound_late_casts(source: text, file_path: text) -> [BoundLateCastFinding]:
     var findings: [BoundLateCastFinding] = []
@@ -221,7 +308,7 @@ pub fn check_bound_late_casts(source: text, file_path: text) -> [BoundLateCastFi
         if u != "" and not units.contains(u):
             units.push(u)
         units = _blc_unit_imports(line.trimmed, units)
-    if externs.len() == 0 or units.len() == 0:
+    if externs.len() == 0:
         return findings
 
     var i = 0
@@ -232,7 +319,11 @@ pub fn check_bound_late_casts(source: text, file_path: text) -> [BoundLateCastFi
             continue
         val boundary = _blc_boundary(lines, i)
         val header_indent = _blc_indent(header.raw)
+        val returns_value = _blc_return_primitive(header.trimmed)
         var tainted: [text] = []
+        var raw_vals: [text] = []
+        var body_indent = -1
+        var last_line = -1
         var j = i + 1
         while j < lines.len():
             val body = lines[j]
@@ -241,13 +332,23 @@ pub fn check_bound_late_casts(source: text, file_path: text) -> [BoundLateCastFi
                 continue
             if _blc_indent(body.raw) <= header_indent:
                 break
+            if body_indent < 0:
+                body_indent = _blc_indent(body.raw)
+            last_line = j
             if not boundary:
                 val bound = _blc_binding(body.trimmed)
+                if returns_value and body.trimmed.starts_with("return "):
+                    val value = body.trimmed.substring(7, body.trimmed.byte_len())
+                    if _blc_raw_value(value, externs, raw_vals):
+                        findings.push(_blc_escape_finding(body.line_num))
                 var reported = false
                 for unit_name in units:
                     if reported:
                         break
-                    for arg in _blc_cast_args(body.trimmed, unit_name):
+                    var operands = _blc_cast_args(body.trimmed, unit_name)
+                    for op in _blc_as_operands(body.trimmed, unit_name):
+                        operands.push(op)
+                    for arg in operands:
                         if _blc_foreign(arg, externs, tainted):
                             findings.push(BoundLateCastFinding(
                                 code: "SPL-BOUND-002",
@@ -264,6 +365,16 @@ pub fn check_bound_late_casts(source: text, file_path: text) -> [BoundLateCastFi
                         tainted.push(bound)
                     elif not foreign_rhs and tainted.contains(bound):
                         tainted = [t for t in tainted if t != bound]
+                    # SPL-BOUND-001 origin: only bare extern results / plain copies.
+                    val raw_rhs = _blc_raw_value(_blc_rhs(body.trimmed), externs, raw_vals)
+                    if raw_rhs and not raw_vals.contains(bound):
+                        raw_vals.push(bound)
+                    elif not raw_rhs and raw_vals.contains(bound):
+                        raw_vals = [t for t in raw_vals if t != bound]
             j = j + 1
+        if not boundary and returns_value and last_line >= 0:
+            val tail = lines[last_line]
+            if _blc_indent(tail.raw) == body_indent and not tail.trimmed.starts_with("return ") and _blc_binding(tail.trimmed) == "" and _blc_raw_value(tail.trimmed, externs, raw_vals):
+                findings.push(_blc_escape_finding(tail.line_num))
         i = j
     findings

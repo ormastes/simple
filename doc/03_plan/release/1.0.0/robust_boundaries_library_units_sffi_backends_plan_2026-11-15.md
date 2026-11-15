@@ -10,6 +10,7 @@
 | Date | Slice | What landed | Evidence |
 |---|---|---|---|
 | 2026-11-15 | D (policy scaffold) | `SPL-BOUND-001..003` (warn, no ratified error date), `SPL-SFFI-ABI-001`, `SPL-SFFI-RANGE-001` (deny now via the `security` stage, `exception_policy: forbidden`) registered in `config/policy/diagnostic_policy.sdn`. Policy only: no detector emits these codes yet (slices B/C) | `test/01_unit/compiler/diagnostics/diagnostic_rule_policy_spec.spl` |
+| 2026-11-15 | B (bound001) | `SPL-BOUND-001` (raw extern result returned unconverted from a non-boundary fn: `return raw` / final bare `raw`, declared non-Nil return) and `x as Unit` form for `SPL-BOUND-002`, in `bound_late_cast.spl`; same lint row and code mapping. Function-local only. The old no-leak spec fixture now returns `text` via `format_num(raw)` because a bare `raw` return is exactly what 001 flags | `test/01_unit/compiler/lint/bound_late_cast_spec.spl` |
 | 2026-11-15 | B1 (SPL-BOUND-002 detector) | `src/compiler/35.semantics/lint/bound_late_cast.spl` + lint row `bound_late_cast` (warn): function-local foreign origin (raw extern result + `val` copies) cast to a file-declared or `use unit.`-imported unit outside an `@unsafe(capabilities: [ffi])` adapter. Limits: no cross-function/cross-file return summaries (needs typed HIR, slice B2); `x as Unit` form not yet matched | `test/01_unit/compiler/lint/bound_late_cast_spec.spl` 19/19, `static_rule_dispatch_identity_spec.spl` 5/5 |
 
 Reconcile with (do not fork): `unit_primitive_api_lane_plan_2026-11-12.md`,
