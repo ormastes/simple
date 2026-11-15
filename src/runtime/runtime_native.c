@@ -13471,16 +13471,85 @@ static int64_t rt_core_dict_canon_key(int64_t k) {
     return rt_value_int(rt_core_numeric_arg(k));
 }
 
-static uint64_t rt_core_dict_hash(int64_t k) {
-    RtCoreString* s = rt_core_as_string(k);
-    if (s) {
-        uint64_t h = 1469598103934665603ULL; /* FNV-1a offset basis */
-        for (uint64_t i = 0; i < s->len; i++) {
-            h ^= (uint8_t)s->data[i];
-            h *= 1099511628211ULL;
-        }
-        return h;
+static uint64_t rt_core_dict_mix(uint64_t x) {
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    return x;
+}
+
+static uint64_t rt_core_dict_text_hash(RtCoreString* s) {
+    uint64_t h = 1469598103934665603ULL; /* FNV-1a offset basis */
+    for (uint64_t i = 0; i < s->len; i++) {
+        h ^= (uint8_t)s->data[i];
+        h *= 1099511628211ULL;
     }
+    return h;
+}
+
+/* Structural hash of a registered array/tuple, agreeing with rt_core_array_eq
+ * (and the rt_core_value_eq_inner it recurses into) for every pair those call
+ * equal: same length, element-wise equal. The TUPLE flag is not compared there,
+ * so it is not hashed either: [1, 2] and (1, 2) are one dict key. Integers hash
+ * by numeric value whatever their storage (tagged immediate, wide/u64 box, or
+ * a raw u64/byte-packed element) because rt_core_generic_int_eq and
+ * spl_core_heap_int_eq compare values; floats by their folded bits (IEEE `==`
+ * makes -0.0 == +0.0; NaN never compares equal, so its bucket is irrelevant);
+ * text by content; enums by id and discriminant (payload equality only
+ * narrows equal pairs further). Anything else compares by identity, so its
+ * word is hashed. Beyond the depth cap only the length is hashed, which equal
+ * arrays share, so the cap can only add collisions. */
+#define RT_CORE_DICT_HASH_MAX_DEPTH 8
+
+static uint64_t rt_core_dict_array_hash(RtCoreArray* a, int depth);
+
+static uint64_t rt_core_dict_int_hash(uint64_t value) {
+    return rt_core_dict_mix(value ^ UINT64_C(0x55494e545f553634));
+}
+
+static uint64_t rt_core_dict_element_hash(int64_t v, int depth) {
+    if (rt_core_is_float(v)) return rt_core_dict_mix(rt_core_dict_float_bits(v));
+    uint32_t int_kind = spl_core_heap_int_kind(v);
+    uint64_t bits = 0;
+    int is_u64 = 0;
+    if (int_kind && spl_core_int_operand(v, int_kind, &bits, &is_u64)) return rt_core_dict_int_hash(bits);
+    if (rt_core_is_special(v)) return rt_core_dict_mix((uint64_t)v);
+    RtCoreString* s = rt_core_as_string(v);
+    if (s) return rt_core_dict_text_hash(s);
+    RtCoreArray* a = rt_core_as_registered_array(v);
+    if (a) return rt_core_dict_array_hash(a, depth + 1);
+    RtCoreEnum* e = rt_core_as_registered_enum(v);
+    if (e) return rt_core_dict_mix(((uint64_t)e->enum_id << 32) ^ e->discriminant ^ UINT64_C(0x454e554d));
+    /* A tagged immediate integer, or a word compared by identity. */
+    if (rt_core_is_int(v)) return rt_core_dict_int_hash((uint64_t)rt_core_as_int(v));
+    return rt_core_dict_mix((uint64_t)v);
+}
+
+static uint64_t rt_core_dict_array_hash(RtCoreArray* a, int depth) {
+    uint64_t h = rt_core_dict_mix((uint64_t)a->len ^ UINT64_C(0x5455504c45));
+    if (depth > RT_CORE_DICT_HASH_MAX_DEPTH) return h;
+    int bytes = (a->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
+    int u64 = (a->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) != 0;
+    for (int64_t i = 0; i < a->len; i++) {
+        uint64_t element = bytes ? rt_core_dict_int_hash((uint64_t)((uint8_t*)a->data)[i])
+            : u64 ? rt_core_dict_int_hash(((uint64_t*)a->data)[i])
+            : rt_core_dict_element_hash(((int64_t*)a->data)[i], depth);
+        h = (h * 1099511628211ULL) ^ element;
+    }
+    return h;
+}
+
+/* Set on a dict the first time an array/tuple key is inserted. Telling an
+ * array from an immediate integer takes a registry probe, so lookups in a dict
+ * that never held one skip it: an array probe key cannot equal any key there,
+ * so hashing it by address cannot hide a hit. Only an insert can add an array
+ * key, and every insert (resize included) goes through core_dict_put_seq, so
+ * the flag is never missing when needed; a spuriously set flag costs a probe. */
+#define RT_CORE_DICT_FLAG_ARRAY_KEYS 0x01U
+
+static uint64_t rt_core_dict_hash(RtCoreDict* d, int64_t k, int inserting) {
+    RtCoreString* s = rt_core_as_string(k);
+    if (s) return rt_core_dict_text_hash(s);
     /* Float keys hash by VALUE, so two independent boxes of the same double --
      * and the legacy inline form of that same double -- share a bucket. */
     /* Integer boxes hash by VALUE too, and a wide box hashes like the u64 box
@@ -13489,13 +13558,20 @@ static uint64_t rt_core_dict_hash(int64_t k) {
     uint32_t int_kind = spl_core_heap_int_kind(k);
     uint64_t bits = 0;
     int is_u64 = 0;
-    uint64_t x = (int_kind && spl_core_int_operand(k, int_kind, &bits, &is_u64))
-        ? (bits ^ UINT64_C(0x55494e545f553634))
-        : (rt_core_is_float(k) ? rt_core_dict_float_bits(k) : (uint64_t)k);
-    x ^= x >> 33;
-    x *= 0xff51afd7ed558ccdULL;
-    x ^= x >> 33;
-    return x;
+    if (int_kind && spl_core_int_operand(k, int_kind, &bits, &is_u64)) {
+        return rt_core_dict_mix(bits ^ UINT64_C(0x55494e545f553634));
+    }
+    if (rt_core_is_float(k)) return rt_core_dict_mix(rt_core_dict_float_bits(k));
+    /* Registered arrays and runtime tuples hash by VALUE, matching the
+     * structural equality rt_core_dict_key_eq already applies to them. */
+    if (inserting || (d->flags & RT_CORE_DICT_FLAG_ARRAY_KEYS)) {
+        RtCoreArray* a = rt_core_as_registered_array(k);
+        if (a) {
+            d->flags |= RT_CORE_DICT_FLAG_ARRAY_KEYS;
+            return rt_core_dict_array_hash(a, 0);
+        }
+    }
+    return rt_core_dict_mix((uint64_t)k);
 }
 
 /* Key equality for the slot scan. rt_native_eq everywhere EXCEPT float keys,
@@ -13576,7 +13652,7 @@ static int core_dict_put_seq(RtCoreDict* d, int64_t key, int64_t value, int64_t 
         rt_core_dict_resize(d, next_cap);
     }
     int64_t ck = rt_core_dict_canon_key(key);
-    uint64_t h = rt_core_dict_hash(ck);
+    uint64_t h = rt_core_dict_hash(d, ck, 1);
     int64_t mask = d->cap - 1;
     int64_t idx = (int64_t)(h & (uint64_t)mask);
     int64_t first_tomb = -1;
@@ -13616,7 +13692,7 @@ static int core_dict_put_seq(RtCoreDict* d, int64_t key, int64_t value, int64_t 
 static int64_t rt_core_dict_lookup(RtCoreDict* d, int64_t key) {
     if (!d || !d->entries || d->len == 0) return rt_core_nil();
     int64_t ck = rt_core_dict_canon_key(key);
-    uint64_t h = rt_core_dict_hash(ck);
+    uint64_t h = rt_core_dict_hash(d, ck, 0);
     int64_t mask = d->cap - 1;
     int64_t idx = (int64_t)(h & (uint64_t)mask);
     for (;;) {
@@ -13630,7 +13706,7 @@ static int64_t rt_core_dict_lookup(RtCoreDict* d, int64_t key) {
 static int rt_core_dict_has(RtCoreDict* d, int64_t key) {
     if (!d || !d->entries || d->len == 0) return 0;
     int64_t ck = rt_core_dict_canon_key(key);
-    uint64_t h = rt_core_dict_hash(ck);
+    uint64_t h = rt_core_dict_hash(d, ck, 0);
     int64_t mask = d->cap - 1;
     int64_t idx = (int64_t)(h & (uint64_t)mask);
     for (;;) {
@@ -13644,7 +13720,7 @@ static int rt_core_dict_has(RtCoreDict* d, int64_t key) {
 static int rt_core_dict_del(RtCoreDict* d, int64_t key, int64_t* removed) {
     if (!d || !d->entries || d->len == 0) return 0;
     int64_t ck = rt_core_dict_canon_key(key);
-    uint64_t h = rt_core_dict_hash(ck);
+    uint64_t h = rt_core_dict_hash(d, ck, 0);
     int64_t mask = d->cap - 1;
     int64_t idx = (int64_t)(h & (uint64_t)mask);
     for (;;) {
