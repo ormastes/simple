@@ -1,0 +1,26 @@
+# MIR-shard worker peak (2026-11-15): with OutputFormat.Both,
+# smf_record_module_parts_v1 recompiles every claimed module for the SMF
+# half after compile_to_native. Unscoped, that recompile was never reclaimed:
+# Stage 2 e45e89468d3e shard worker 0 (test_runner closure, 171 modules,
+# 401,064 MIR instructions) went 3.35 -> 6.63 GiB in exactly the 17 s SMF
+# spool-write window. It must use the per-module transient scope the native
+# lane already uses (same arguments as before, so objects are unchanged).
+# Source contract only; the RSS half is measured natively by
+# test/fixtures/mir_shard_worker_peak/run_probe.shs (needs a built Stage 2).
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+
+fn smf_record_body() -> text:
+    val src = file_read("src/compiler/80.driver/driver_aot_smf_output.spl")
+    val start = src.index_of("me smf_record_module_parts_v1(") ?? -1
+    val stop = src.index_of("me collect_smf_bytes(") ?? -1
+    if start < 0 or stop <= start:
+        return ""
+    src.slice(start, stop)
+
+describe "smf_record_module_parts_v1 codegen scope":
+    it "compiles each SMF part in the scoped codegen helper":
+        val body = smf_record_body()
+        expect(body.len() > 0).to_equal(true)
+        expect(body.contains("compile_module_with_backend_scoped_v1(")).to_equal(true)
+        expect(body.contains("compile_module_with_backend(")).to_equal(false)
