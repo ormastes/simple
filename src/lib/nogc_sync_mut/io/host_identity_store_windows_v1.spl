@@ -1,0 +1,229 @@
+# Existing Windows retained private-root/journal adapter; no native additions.
+# Published means native stage flush and no-replace rename succeeded. The
+# provider does not flush directories: namespace_synced is always false.
+use std.nogc_sync_mut.io.host_identity_store_abi_v1.*
+use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text}
+use std.nogc_sync_mut.io.windows_private_file_v1.{WindowsPrivateRootV1, WindowsPrivateFileV1,
+    WindowsPrivateErrorV1, WindowsJournalStoreV1, WindowsJournalStoreOpenV1, windows_private_root_open_v1}
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new_gate, mutex_lock_gate, mutex_unlock_gate}
+
+pub class HostIdentityPlatformV1:
+    slot: i64
+    generation: i64
+
+    pub fn read_v1(leaf: text, maximum: i64) -> HostIdentityPlatformReadV1:
+        if mutex_lock_gate(identity_windows_gate_v1) == None:
+            return HostIdentityPlatformReadV1(cleanup_pending: true, error: "identity-store-gate")
+        val result = identity_windows_read_v1(self.slot, self.generation, leaf, maximum)
+        val unlocked = mutex_unlock_gate(identity_windows_gate_v1, 0)
+        result
+
+    pub fn publish_v1(leaf: text, bytes: [u8]) -> HostIdentityPlatformPublishV1:
+        if mutex_lock_gate(identity_windows_gate_v1) == None:
+            return HostIdentityPlatformPublishV1(cleanup_pending: true, error: "identity-store-gate")
+        val result = identity_windows_publish_v1(self.slot, self.generation, leaf, bytes)
+        val unlocked = mutex_unlock_gate(identity_windows_gate_v1, 0)
+        result
+
+    pub fn close_v1() -> HostIdentityPlatformCloseV1:
+        if mutex_lock_gate(identity_windows_gate_v1) == None:
+            return HostIdentityPlatformCloseV1(false, false, "identity-store-gate")
+        val result = identity_windows_close_v1(self.slot, self.generation)
+        val unlocked = mutex_unlock_gate(identity_windows_gate_v1, 0)
+        result
+
+    pub fn path_v1(leaf: text) -> Result<text, text>:
+        if mutex_lock_gate(identity_windows_gate_v1) == None: return Err("identity-store-gate")
+        val observed = identity_windows_read_v1(self.slot, self.generation, leaf, 65536)
+        val result: Result<text, text> = if observed.error != "":
+            Err(observed.error)
+        elif observed.bytes == None:
+            Err("identity-store-path-file-absent")
+        else:
+            # Native GLOBAL??/GLOBALROOT spellings must not be reinterpreted
+            # as Win32 or slash-prefixed SSH paths. No resolved-path port is
+            # exposed by this opaque provider, so transport support refuses.
+            Err("identity-store-transport-projection-unavailable")
+        val unlocked = mutex_unlock_gate(identity_windows_gate_v1, 0)
+        result
+
+    pub fn transport_preflight_v1() -> Result<(), text>:
+        if mutex_lock_gate(identity_windows_gate_v1) == None: return Err("identity-store-gate")
+        val checked = identity_windows_current_v1(self.slot, self.generation)
+        val result: Result<(), text> = if checked.is_err():
+            Err(checked.unwrap_err())
+        else:
+            Err("identity-store-transport-projection-unavailable")
+        val unlocked = mutex_unlock_gate(identity_windows_gate_v1, 0)
+        result
+
+pub struct HostIdentityPlatformOpenV1:
+    owner: Option<HostIdentityPlatformV1>
+    ready: bool
+    cleanup_pending: bool
+    error: text
+
+struct IdentityWindowsStateV1:
+    generation: i64
+    root_path: text
+    parent: Option<WindowsPrivateRootV1> = None
+    root: Option<WindowsPrivateRootV1> = None
+    journal: Option<WindowsJournalStoreV1> = None
+    cleanup_files: [WindowsPrivateFileV1] = []
+    ready: bool = false
+    closing: bool = false
+    closed: bool = false
+
+var identity_windows_gate_v1: Mutex = mutex_new_gate(0)
+var identity_windows_slots_v1: [IdentityWindowsStateV1] = []
+
+fn identity_windows_slot_v1(slot: i64, generation: i64) -> Result<IdentityWindowsStateV1, text>:
+    if slot < 0 or slot >= identity_windows_slots_v1.len(): return Err("identity-store-stale")
+    val state = identity_windows_slots_v1[slot]
+    if state.generation != generation or state.closed: return Err("identity-store-stale")
+    Ok(state)
+
+fn identity_windows_pending_v1(slot: i64, generation: i64) -> bool:
+    val loaded = identity_windows_slot_v1(slot, generation)
+    if loaded.is_err(): return false
+    val state = loaded.unwrap()
+    state.closing or not state.ready
+
+fn identity_windows_fail_v1(slot: i64, reason: text) -> HostIdentityPlatformOpenV1:
+    var state = identity_windows_slots_v1[slot]
+    state.closing = true
+    state.ready = false
+    identity_windows_slots_v1[slot] = state
+    HostIdentityPlatformOpenV1(Some(HostIdentityPlatformV1(slot: slot, generation: state.generation)), false, true, reason)
+
+fn identity_windows_error_owner_v1(slot: i64, error: WindowsPrivateErrorV1, parent: bool):
+    var state = identity_windows_slots_v1[slot]
+    if parent: state.parent = error.cleanup_root
+    else: state.root = error.cleanup_root
+    if val file = error.cleanup_file: state.cleanup_files.push(file)
+    identity_windows_slots_v1[slot] = state
+
+fn identity_windows_open_v1(path: text) -> HostIdentityPlatformOpenV1:
+    val root_path = path.replace("/", "\\")
+    if root_path.byte_len() < 4 or root_path.byte_len() > 32760 or root_path.contains("\u0000") or root_path.ends_with("\\"):
+        return HostIdentityPlatformOpenV1(None, false, false, "identity-store-root")
+    var split = -1
+    for index in 0..root_path.byte_len():
+        if root_path.byte_at(index) == 92: split = index
+    if split < 3 or split + 1 >= root_path.byte_len():
+        return HostIdentityPlatformOpenV1(None, false, false, "identity-store-root-parent")
+    if identity_windows_slots_v1.len() >= 100000:
+        return HostIdentityPlatformOpenV1(None, false, false, "identity-store-owner-bound")
+    val slot = identity_windows_slots_v1.len()
+    var state = IdentityWindowsStateV1(generation: slot + 1, root_path: root_path)
+    identity_windows_slots_v1.push(state)
+    match windows_private_root_open_v1(root_path.substring(0, split)):
+        case Ok(parent): state.parent = Some(parent)
+        case Err(error):
+            identity_windows_error_owner_v1(slot, error, true)
+            return identity_windows_fail_v1(slot, "identity-store-parent-open")
+    identity_windows_slots_v1[slot] = state
+    val parent = state.parent.unwrap()
+    match parent.child_directory(root_path.substring(split + 1, root_path.byte_len()), true):
+        case Ok(root): state.root = Some(root)
+        case Err(error):
+            identity_windows_error_owner_v1(slot, error, false)
+            return identity_windows_fail_v1(slot, "identity-store-root-open")
+    identity_windows_slots_v1[slot] = state
+    val root = state.root.unwrap()
+    match root.open_journal_store_v1():
+        case WindowsJournalStoreOpenV1.Ready(journal): state.journal = Some(journal)
+        case WindowsJournalStoreOpenV1.CleanupRequired(journal, reason):
+            state.journal = Some(journal)
+            identity_windows_slots_v1[slot] = state
+            return identity_windows_fail_v1(slot, "identity-store-journal-cleanup")
+        case WindowsJournalStoreOpenV1.Rejected(reason):
+            return identity_windows_fail_v1(slot, "identity-store-journal-open")
+    identity_windows_slots_v1[slot] = state
+    val journal = state.journal.unwrap()
+    if not parent.security_current() or not journal.belongs_to(root):
+        return identity_windows_fail_v1(slot, "identity-store-root-not-current")
+    state.ready = true
+    identity_windows_slots_v1[slot] = state
+    HostIdentityPlatformOpenV1(Some(HostIdentityPlatformV1(slot: slot, generation: state.generation)), true, false, "")
+
+pub fn host_identity_platform_open_v1(root: text) -> HostIdentityPlatformOpenV1:
+    if mutex_lock_gate(identity_windows_gate_v1) == None:
+        return HostIdentityPlatformOpenV1(None, false, false, "identity-store-gate")
+    val result = identity_windows_open_v1(root)
+    val unlocked = mutex_unlock_gate(identity_windows_gate_v1, 0)
+    result
+
+fn identity_windows_current_v1(slot: i64, generation: i64) -> Result<IdentityWindowsStateV1, text>:
+    val state = identity_windows_slot_v1(slot, generation)?
+    if not state.ready or state.closing: return Err("identity-store-not-ready")
+    if state.parent == None or state.root == None or state.journal == None:
+        return Err("identity-store-capability-missing")
+    val parent = state.parent.unwrap()
+    val journal = state.journal.unwrap()
+    val root = state.root.unwrap()
+    if not parent.security_current() or not journal.belongs_to(root):
+        val failed = identity_windows_fail_v1(slot, "identity-store-not-current")
+        return Err("identity-store-not-current")
+    Ok(state)
+
+fn identity_windows_read_v1(slot: i64, generation: i64, leaf: text, maximum: i64) -> HostIdentityPlatformReadV1:
+    if not host_identity_leaf_valid_v1(leaf) or maximum < 1 or maximum > 65536:
+        return HostIdentityPlatformReadV1(cleanup_pending: identity_windows_pending_v1(slot, generation), error: "identity-store-read-argument")
+    val current = identity_windows_current_v1(slot, generation)
+    if current.is_err(): return HostIdentityPlatformReadV1(cleanup_pending: identity_windows_pending_v1(slot, generation), error: current.unwrap_err())
+    val state = current.unwrap()
+    val journal = state.journal.unwrap()
+    match journal.read(leaf, maximum):
+        case Ok(None): HostIdentityPlatformReadV1(absent: true)
+        case Ok(Some(value)): HostIdentityPlatformReadV1(bytes: Some(text_to_utf8_bytes(value)))
+        case Err(reason):
+            val failed = identity_windows_fail_v1(slot, "identity-store-read")
+            HostIdentityPlatformReadV1(cleanup_pending: true, error: "identity-store-read")
+
+fn identity_windows_publish_v1(slot: i64, generation: i64, leaf: text, bytes: [u8]) -> HostIdentityPlatformPublishV1:
+    if not host_identity_leaf_valid_v1(leaf) or not host_identity_payload_valid_v1(bytes):
+        return HostIdentityPlatformPublishV1(cleanup_pending: identity_windows_pending_v1(slot, generation), error: "identity-store-publish-argument")
+    val current = identity_windows_current_v1(slot, generation)
+    if current.is_err(): return HostIdentityPlatformPublishV1(cleanup_pending: identity_windows_pending_v1(slot, generation), error: current.unwrap_err())
+    # The journal independently revalidates UTF8 before any native publication.
+    val state = current.unwrap()
+    val journal = state.journal.unwrap()
+    match journal.publish(leaf, bytes_to_text(bytes)):
+        case Ok(true): HostIdentityPlatformPublishV1(publication: HostIdentityStorePublicationV1.Published, file_synced: true)
+        case Ok(false): HostIdentityPlatformPublishV1(publication: HostIdentityStorePublicationV1.Existing)
+        case Err(reason):
+            val failed = identity_windows_fail_v1(slot, "identity-store-publication-uncertain")
+            HostIdentityPlatformPublishV1(publication: HostIdentityStorePublicationV1.Uncertain,
+                cleanup_pending: true, error: "identity-store-publication-uncertain")
+
+fn identity_windows_close_v1(slot: i64, generation: i64) -> HostIdentityPlatformCloseV1:
+    val loaded = identity_windows_slot_v1(slot, generation)
+    if loaded.is_err(): return HostIdentityPlatformCloseV1(true, false, "identity-store-stale")
+    var state = loaded.unwrap()
+    state.ready = false
+    state.closing = true
+    identity_windows_slots_v1[slot] = state
+    if val journal_owner = state.journal:
+        var journal = journal_owner
+        if journal.close_state() != "released": return HostIdentityPlatformCloseV1(false, false, "identity-store-journal-close-retained")
+        state.journal = None
+        identity_windows_slots_v1[slot] = state
+    while state.cleanup_files.len() > 0:
+        var file = state.cleanup_files[state.cleanup_files.len() - 1]
+        if not file.close(): return HostIdentityPlatformCloseV1(false, false, "identity-store-file-close-retained")
+        state.cleanup_files = state.cleanup_files[0:state.cleanup_files.len() - 1]
+        identity_windows_slots_v1[slot] = state
+    if val root_owner = state.root:
+        var root = root_owner
+        if not root.close(): return HostIdentityPlatformCloseV1(false, false, "identity-store-root-close-retained")
+        state.root = None
+        identity_windows_slots_v1[slot] = state
+    if val parent_owner = state.parent:
+        var parent = parent_owner
+        if not parent.close(): return HostIdentityPlatformCloseV1(false, false, "identity-store-parent-close-retained")
+        state.parent = None
+        identity_windows_slots_v1[slot] = state
+    state.closed = true
+    identity_windows_slots_v1[slot] = state
+    HostIdentityPlatformCloseV1(true, true, "")

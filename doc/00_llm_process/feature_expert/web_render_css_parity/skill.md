@@ -1935,3 +1935,27 @@ never cache an answer computed while exhausted) —
 - Batch 1 (`71ff31154d5`) catalog 900 px: every page equal to its row
   (worst css-paint 6.80); `html` 216.2 s vs 226.6 s at base, `css-layout`
   266.0 s vs 274.3 s, same seed.
+
+### Batch 3a (2026-11-15): host-dependent renderer rows, numeric Playwright pick
+
+- **Playwright build is picked by number, not by glob order.** Both the
+  matrix gate (`full_chrome_in`) and the catalog gate
+  (`newest_playwright_chrome`) parse the `chromium-<n>` build and keep the
+  largest, so `chromium-999` can no longer shadow `chromium-1255`. Each gate's
+  selftest has a 999/1255/1200 fixture expecting 1255.
+- **A backend-name row is host-dependent, not a regression.** The resolver
+  probes the real device and honestly falls back to `software`
+  (`9970185d1de` surfaced the reason). Expect the canonical name only where an
+  independent `Engine2D.probe_backend` initializes; check aliases with
+  `backend_canonical_name`. On this aarch64 host: cuda/vulkan/cpu_simd
+  initialize; hip, opencl and metal ("Metal requires macOS") do not.
+- **Chrome pixel probe without ImageMagick:** screenshot with full Chrome,
+  then load the PNG into a canvas in a second headless page
+  (`--allow-file-access-from-files --disable-web-security`) and print
+  `getImageData` through `--dump-dom`.
+- **Chrome samples a vertical 2-stop ramp at row centres.** Measured
+  2026-11-15, Chrome 159: a 4 px `#000 -> #fff` ramp gives 1F/60/9F/DF, and a
+  16 px one gives 08 at the top row and F7 at the bottom. The CPU raster's
+  endpoint-exact `mix_channel_gradient_centered` (t = pos/(span-1)) is wrong
+  against this; Draw IR already samples centres (AC-12 in
+  `linear_gradient_angle_draw_ir_chrome159_spec`).

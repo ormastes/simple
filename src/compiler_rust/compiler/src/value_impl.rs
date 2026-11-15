@@ -98,6 +98,9 @@ impl Value {
             Value::Object { fields, .. } if fields.len() == 1 && fields.contains_key("value") => {
                 fields.get("value").unwrap().as_int()
             }
+            Value::ClassInstance(inst) if inst.with_fields(|f| f.len() == 1 && f.contains_key("value")) => {
+                inst.field("value").unwrap().as_int()
+            }
             Value::Str(_) => {
                 let ctx = ErrorContext::new()
                     .with_code(codes::TYPE_MISMATCH)

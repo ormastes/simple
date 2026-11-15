@@ -1,0 +1,525 @@
+# Linux x86_64/aarch64 retained identity store. No raw descriptor escapes.
+# Canonical slots are serialized by the existing mutex owner; slots never reuse.
+use std.nogc_sync_mut.io.host_identity_store_abi_v1.*
+use std.common.text_bytes.{text_to_utf8_bytes, utf8_bytes_valid}
+@when(os="linux"):
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new_gate, mutex_lock_gate, mutex_unlock_gate}
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32,
+    volatile_read_u64, volatile_write_u8}
+@end
+
+pub class HostIdentityPlatformV1:
+    slot: i64
+    generation: i64
+
+    pub fn read_v1(leaf: text, maximum: i64) -> HostIdentityPlatformReadV1:
+        @when(os="linux"):
+        val entered = identity_linux_enter_v1()
+        if entered.is_err(): return HostIdentityPlatformReadV1(cleanup_pending: true, error: entered.unwrap_err())
+        val result = identity_linux_read_v1(self.slot, self.generation, leaf, maximum)
+        identity_linux_leave_v1()
+        result
+        @else:
+        HostIdentityPlatformReadV1(error: "identity-store-host-unsupported")
+        @end
+
+    pub fn publish_v1(leaf: text, bytes: [u8]) -> HostIdentityPlatformPublishV1:
+        @when(os="linux"):
+        val entered = identity_linux_enter_v1()
+        if entered.is_err(): return HostIdentityPlatformPublishV1(cleanup_pending: true, error: entered.unwrap_err())
+        val result = identity_linux_publish_v1(self.slot, self.generation, leaf, bytes)
+        identity_linux_leave_v1()
+        result
+        @else:
+        HostIdentityPlatformPublishV1(error: "identity-store-host-unsupported")
+        @end
+
+    pub fn close_v1() -> HostIdentityPlatformCloseV1:
+        @when(os="linux"):
+        val entered = identity_linux_enter_v1()
+        if entered.is_err(): return HostIdentityPlatformCloseV1(false, false, entered.unwrap_err())
+        val result = identity_linux_close_v1(self.slot, self.generation)
+        identity_linux_leave_v1()
+        result
+        @else:
+        HostIdentityPlatformCloseV1(true, false, "identity-store-host-unsupported")
+        @end
+
+    pub fn path_v1(leaf: text) -> Result<text, text>:
+        @when(os="linux"):
+        val entered = identity_linux_enter_v1()
+        if entered.is_err(): return Err(entered.unwrap_err())
+        # Validate the actual target, not merely the lexical leaf or root.
+        val observed = identity_linux_read_v1(self.slot, self.generation, leaf, 65536)
+        val result: Result<text, text> = if observed.error != "" or observed.bytes == None:
+            Err("identity-store-path-file-unavailable")
+        else:
+            Ok(identity_linux_slots_v1[self.slot].root_path + "/journal/" + leaf)
+        identity_linux_leave_v1()
+        result
+        @else:
+        Err("identity-store-host-unsupported")
+        @end
+
+    pub fn transport_preflight_v1() -> Result<(), text>:
+        @when(os="linux"):
+        val entered = identity_linux_enter_v1()
+        if entered.is_err(): return Err(entered.unwrap_err())
+        val checked = identity_linux_current_v1(self.slot, self.generation)
+        val result: Result<(), text> = if checked.is_err(): Err(checked.unwrap_err()) else: Ok(())
+        identity_linux_leave_v1()
+        result
+        @else:
+        Err("identity-store-host-unsupported")
+        @end
+
+pub struct HostIdentityPlatformOpenV1:
+    owner: Option<HostIdentityPlatformV1>
+    ready: bool
+    cleanup_pending: bool
+    error: text
+
+pub fn host_identity_platform_open_v1(root: text) -> HostIdentityPlatformOpenV1:
+    @when(os="linux"):
+    val entered = identity_linux_enter_v1()
+    if entered.is_err(): return HostIdentityPlatformOpenV1(None, false, false, entered.unwrap_err())
+    val result = identity_linux_open_v1(root)
+    identity_linux_leave_v1()
+    result
+    @else:
+    HostIdentityPlatformOpenV1(None, false, false, "identity-store-host-unsupported")
+    @end
+
+@when(os="linux"):
+struct IdentityLinuxMetaV1:
+    identity: [u8]
+    revision: [u8]
+    uid: u32
+    mode: u32
+    links: i64
+    size: i64
+
+struct IdentityLinuxStateV1:
+    generation: i64
+    root_path: text
+    uid: u32
+    root_index: i64
+    fds: [i64] = []
+    names: [text] = []
+    identities: [[u8]] = []
+    file_fd: i64 = -1
+    stage_name: text = ""
+    stage_identity: [u8] = []
+    serial: i64 = 0
+    ready: bool = false
+    closing: bool = false
+    closed: bool = false
+    close_error: bool = false
+
+var identity_linux_gate_v1: Option<Mutex> = None
+val identity_linux_pid_v1: i32 = unsafe(capabilities: [ffi]): getpid()
+var identity_linux_slots_v1: [IdentityLinuxStateV1] = []
+
+@unsafe(reason: "genuine retained procfs and main-thread proof precedes all mutex initialization and canonical registry access", capabilities: [ffi])
+fn identity_linux_enter_v1() -> Result<(), text>:
+    # Numeric PID equality alone fails when an inherited PID1 owner is used
+    # by PID1 in a nested namespace. Reuse the existing actual procfs proof.
+    linux_machine_process_origin_check_v1()?
+    if getpid() != identity_linux_pid_v1: return Err("identity-store-foreign-process")
+    if identity_linux_gate_v1 == None: identity_linux_gate_v1 = Some(mutex_new_gate(0))
+    val gate = identity_linux_gate_v1.unwrap()
+    if mutex_lock_gate(gate) == None: return Err("identity-store-gate")
+    Ok(())
+
+fn identity_linux_leave_v1():
+    val gate = identity_linux_gate_v1.unwrap()
+    val unlocked = mutex_unlock_gate(gate, 0)
+
+fn identity_linux_directory_flags_v1() -> i32:
+    @when(arch="x86_64"):
+    720896
+    @elif(arch="aarch64"):
+    573440
+    @else:
+    0
+    @end
+
+fn identity_linux_file_flags_v1() -> i32:
+    @when(arch="x86_64"):
+    657408
+    @elif(arch="aarch64"):
+    559104
+    @else:
+    0
+    @end
+
+@unsafe(reason: "copy only bounded native pathname data, never secret payloads, into NUL-terminated memory", capabilities: [ffi, raw_ptr])
+fn identity_linux_name_v1(name: text) -> i64:
+    if name.byte_len() > 4095 or name.contains("\u0000"): return 0
+    val bytes: [u8] = text_to_utf8_bytes(name)
+    if bytes.len() != name.byte_len(): return 0
+    val memory = malloc((bytes.len() + 1) as u64)
+    if memory == 0: return 0
+    for index in 0..bytes.len(): volatile_write_u8(memory + index, bytes[index] as i64)
+    volatile_write_u8(memory + bytes.len(), 0)
+    memory
+
+@unsafe(reason: "snapshot Linux statx stable UAPI fields for exact retained descriptor or nofollow name", capabilities: [ffi, raw_ptr])
+fn identity_linux_metadata_v1(fd: i64, name: text, by_handle: bool) -> Result<IdentityLinuxMetaV1, text>:
+    val memory = malloc(256u64)
+    if memory == 0: return Err("identity-store-memory")
+    val path = identity_linux_name_v1(name)
+    if path == 0:
+        free(memory)
+        return Err("identity-store-memory")
+    val status = statx(fd as i32, path, if by_handle: 4096 else: 256, 2047u32, memory)
+    val native_error = if status != 0: volatile_read_u32(__errno_location()) else: 0
+    free(path)
+    # TYPE|MODE|NLINK|UID|INO|SIZE|MTIME|CTIME must all be genuinely returned.
+    if status != 0 or (volatile_read_u32(memory) & 975) != 975:
+        free(memory)
+        return Err(if native_error == 2: "identity-store-absent" else: "identity-store-metadata")
+    var identity: [u8] = []
+    var revision: [u8] = []
+    for index in 32..40: identity.push(volatile_read_u8(memory + index) as u8)
+    for index in 136..144: identity.push(volatile_read_u8(memory + index) as u8)
+    for index in 32..48: revision.push(volatile_read_u8(memory + index) as u8)
+    for index in 96..128: revision.push(volatile_read_u8(memory + index) as u8)
+    val result = IdentityLinuxMetaV1(identity, revision, volatile_read_u32(memory + 20) as u32,
+        volatile_read_u16(memory + 28) as u32, volatile_read_u32(memory + 16), volatile_read_u64(memory + 40))
+    free(memory)
+    Ok(result)
+
+fn identity_linux_slot_v1(slot: i64, generation: i64) -> Result<IdentityLinuxStateV1, text>:
+    if slot < 0 or slot >= identity_linux_slots_v1.len(): return Err("identity-store-stale")
+    val state = identity_linux_slots_v1[slot]
+    if state.generation != generation or state.closed: return Err("identity-store-stale")
+    Ok(state)
+
+fn identity_linux_pending_v1(slot: i64, generation: i64) -> bool:
+    val loaded = identity_linux_slot_v1(slot, generation)
+    if loaded.is_err(): return false
+    val state = loaded.unwrap()
+    state.closing or not state.ready
+
+fn identity_linux_quarantine_v1(slot: i64):
+    var state = identity_linux_slots_v1[slot]
+    state.ready = false
+    state.closing = true
+    identity_linux_slots_v1[slot] = state
+
+fn identity_linux_directory_valid_v1(meta: IdentityLinuxMetaV1, uid: u32, require_private: bool) -> bool:
+    if (meta.mode & 61440u32) != 16384u32: return false
+    if require_private: return meta.uid == uid and (meta.mode & 4095u32) == 448u32
+    (meta.uid == uid or meta.uid == 0u32) and (meta.mode & 18u32) == 0u32
+
+fn identity_linux_file_valid_v1(meta: IdentityLinuxMetaV1, uid: u32, linked_stage: bool = false) -> bool:
+    ((meta.mode & 61440u32) == 32768u32 and meta.uid == uid and
+        (meta.mode & 4095u32) == 384u32 and meta.size >= 0 and meta.size <= 65536 and
+        (meta.links == 1 or (linked_stage and meta.links == 2)))
+
+@unsafe(reason: "recheck every retained ancestor's owner/mode/inode and its nofollow parent-name binding", capabilities: [ffi, raw_ptr])
+fn identity_linux_current_v1(slot: i64, generation: i64) -> Result<IdentityLinuxStateV1, text>:
+    val state = identity_linux_slot_v1(slot, generation)?
+    if not state.ready or state.closing: return Err("identity-store-not-ready")
+    if geteuid() != state.uid: return Err("identity-store-principal-changed")
+    for index in 0..state.fds.len():
+        val held = identity_linux_metadata_v1(state.fds[index], "", true)?
+        if (not identity_linux_directory_valid_v1(held, state.uid, index >= state.root_index) or
+                not host_identity_bytes_equal_v1(held.identity, state.identities[index])):
+            return Err("identity-store-directory-changed")
+        val named = if index == 0:
+            identity_linux_metadata_v1(-100, "/", false)?
+        else:
+            identity_linux_metadata_v1(state.fds[index - 1], state.names[index], false)?
+        if not host_identity_bytes_equal_v1(named.identity, held.identity): return Err("identity-store-directory-binding")
+    Ok(state)
+
+fn identity_linux_open_failure_v1(slot: i64, error: text) -> HostIdentityPlatformOpenV1:
+    identity_linux_quarantine_v1(slot)
+    val state = identity_linux_slots_v1[slot]
+    HostIdentityPlatformOpenV1(Some(HostIdentityPlatformV1(slot: slot, generation: state.generation)), false, true, error)
+
+@unsafe(reason: "open trusted nofollow chain; create only final private root and journal before any private bytes", capabilities: [ffi, raw_ptr])
+fn identity_linux_open_v1(path: text) -> HostIdentityPlatformOpenV1:
+    if (path.byte_len() < 2 or path.byte_len() > 4095 or not path.starts_with("/") or path.ends_with("/") or
+            path.contains("\u0000") or path.contains("//") or identity_linux_directory_flags_v1() == 0):
+        return HostIdentityPlatformOpenV1(None, false, false, "identity-store-root")
+    val components = path.substring(1, path.byte_len()).split("/")
+    for component in components:
+        if component == "" or component == "." or component == ".." or component.byte_len() > 255:
+            return HostIdentityPlatformOpenV1(None, false, false, "identity-store-root-component")
+    if components.len() > 128 or identity_linux_slots_v1.len() >= 100000:
+        return HostIdentityPlatformOpenV1(None, false, false, "identity-store-owner-bound")
+    val slot = identity_linux_slots_v1.len()
+    var state = IdentityLinuxStateV1(generation: slot + 1, root_path: path, uid: geteuid(), root_index: components.len())
+    identity_linux_slots_v1.push(state)
+    var names: [text] = ["/"]
+    names = names + components + ["journal"]
+    for index in 0..names.len():
+        val name = identity_linux_name_v1(names[index])
+        if name == 0: return identity_linux_open_failure_v1(slot, "identity-store-memory")
+        val parent = if index == 0: -100 else: state.fds[index - 1]
+        var fd = openat(parent as i32, name, identity_linux_directory_flags_v1(), 0u32) as i64
+        val opened_error = if fd < 0: volatile_read_u32(__errno_location()) else: 0
+        if fd < 0 and opened_error == 2 and index >= state.root_index:
+            val made = mkdirat(parent as i32, name, 448u32)
+            val made_error = if made != 0: volatile_read_u32(__errno_location()) else: 0
+            if made != 0 and made_error != 17:
+                free(name)
+                return identity_linux_open_failure_v1(slot, "identity-store-directory-create")
+            fd = openat(parent as i32, name, identity_linux_directory_flags_v1(), 0u32) as i64
+        free(name)
+        if fd < 0: return identity_linux_open_failure_v1(slot, "identity-store-directory-open")
+        state.fds.push(fd)
+        state.names.push(names[index])
+        # Record the actual acquired fd before its first fallible observation.
+        identity_linux_slots_v1[slot] = state
+        val metadata = identity_linux_metadata_v1(fd, "", true)
+        if metadata.is_err(): return identity_linux_open_failure_v1(slot, metadata.unwrap_err())
+        val meta = metadata.unwrap()
+        if not identity_linux_directory_valid_v1(meta, state.uid, index >= state.root_index):
+            return identity_linux_open_failure_v1(slot, "identity-store-directory-privacy")
+        state.identities.push(meta.identity)
+        identity_linux_slots_v1[slot] = state
+        if index >= state.root_index and fsync(parent as i32) != 0:
+            return identity_linux_open_failure_v1(slot, "identity-store-directory-namespace-sync")
+    state.ready = true
+    identity_linux_slots_v1[slot] = state
+    val checked = identity_linux_current_v1(slot, state.generation)
+    if checked.is_err(): return identity_linux_open_failure_v1(slot, checked.unwrap_err())
+    HostIdentityPlatformOpenV1(Some(HostIdentityPlatformV1(slot: slot, generation: state.generation)), true, false, "")
+
+@unsafe(reason: "clear canonical fd before Linux close; never retry a descriptor consumed by an uncertain close", capabilities: [ffi])
+fn identity_linux_file_close_v1(slot: i64) -> bool:
+    var state = identity_linux_slots_v1[slot]
+    if state.file_fd < 0: return true
+    val fd = state.file_fd
+    state.file_fd = -1
+    identity_linux_slots_v1[slot] = state
+    val completed = close(fd as i32) == 0
+    if not completed:
+        state.close_error = true
+        state.closing = true
+        state.ready = false
+        identity_linux_slots_v1[slot] = state
+    completed
+
+fn identity_linux_read_error_v1(slot: i64, error: text) -> HostIdentityPlatformReadV1:
+    val closed = identity_linux_file_close_v1(slot)
+    identity_linux_quarantine_v1(slot)
+    HostIdentityPlatformReadV1(cleanup_pending: true, error: error)
+
+@unsafe(reason: "read exact private regular inode with pread and complete metadata/name revalidation", capabilities: [ffi, raw_ptr])
+fn identity_linux_read_v1(slot: i64, generation: i64, leaf: text, maximum: i64) -> HostIdentityPlatformReadV1:
+    if not host_identity_leaf_valid_v1(leaf) or maximum < 1 or maximum > 65536:
+        return HostIdentityPlatformReadV1(cleanup_pending: identity_linux_pending_v1(slot, generation), error: "identity-store-read-argument")
+    val current = identity_linux_current_v1(slot, generation)
+    if current.is_err():
+        if identity_linux_slot_v1(slot, generation).is_ok(): identity_linux_quarantine_v1(slot)
+        return HostIdentityPlatformReadV1(cleanup_pending: identity_linux_pending_v1(slot, generation), error: current.unwrap_err())
+    var state = current.unwrap()
+    val parent = state.fds[state.fds.len() - 1]
+    val name = identity_linux_name_v1(leaf)
+    if name == 0: return HostIdentityPlatformReadV1(error: "identity-store-memory")
+    val fd = openat(parent as i32, name, identity_linux_file_flags_v1(), 0u32) as i64
+    val native_error = if fd < 0: volatile_read_u32(__errno_location()) else: 0
+    free(name)
+    if fd < 0:
+        if native_error == 2:
+            val rechecked = identity_linux_current_v1(slot, generation)
+            if rechecked.is_ok(): return HostIdentityPlatformReadV1(absent: true)
+        return identity_linux_read_error_v1(slot, "identity-store-read-open")
+    state.file_fd = fd
+    identity_linux_slots_v1[slot] = state
+    val before = identity_linux_metadata_v1(fd, "", true)
+    if before.is_err(): return identity_linux_read_error_v1(slot, before.unwrap_err())
+    val meta = before.unwrap()
+    if not identity_linux_file_valid_v1(meta, state.uid) or meta.size > maximum:
+        return identity_linux_read_error_v1(slot, "identity-store-file-privacy-or-quota")
+    val memory = malloc((meta.size + 1) as u64)
+    if memory == 0: return identity_linux_read_error_v1(slot, "identity-store-memory")
+    var offset = 0
+    while offset < meta.size:
+        val count = pread(fd as i32, memory + offset, (meta.size - offset) as u64, offset)
+        if count <= 0 or count > meta.size - offset:
+            free(memory)
+            return identity_linux_read_error_v1(slot, "identity-store-read-incomplete")
+        offset = offset + count
+    var bytes: [u8] = []
+    for index in 0..meta.size: bytes.push(volatile_read_u8(memory + index) as u8)
+    free(memory)
+    val after = identity_linux_metadata_v1(fd, "", true)
+    val named = identity_linux_metadata_v1(parent, leaf, false)
+    val checked = identity_linux_current_v1(slot, generation)
+    if after.is_err() or named.is_err() or checked.is_err(): return identity_linux_read_error_v1(slot, "identity-store-read-changed")
+    val after_meta = after.unwrap()
+    val named_meta = named.unwrap()
+    if (not identity_linux_file_valid_v1(after_meta, state.uid) or not identity_linux_file_valid_v1(named_meta, state.uid) or
+            not host_identity_bytes_equal_v1(after_meta.revision, meta.revision) or
+            not host_identity_bytes_equal_v1(after_meta.identity, meta.identity) or
+            not host_identity_bytes_equal_v1(named_meta.identity, meta.identity)):
+        return identity_linux_read_error_v1(slot, "identity-store-read-changed")
+    if not utf8_bytes_valid(bytes): return identity_linux_read_error_v1(slot, "identity-store-file-encoding")
+    for byte in bytes:
+        if byte == 0u8: return identity_linux_read_error_v1(slot, "identity-store-file-encoding")
+    if not identity_linux_file_close_v1(slot): return HostIdentityPlatformReadV1(cleanup_pending: true, error: "identity-store-close-consumed-unconfirmed")
+    HostIdentityPlatformReadV1(bytes: Some(bytes))
+
+@unsafe(reason: "unlink only retained stage's exact current name binding; never touch destination or substituted object", capabilities: [ffi, raw_ptr])
+fn identity_linux_stage_cleanup_v1(slot: i64) -> bool:
+    var state = identity_linux_slots_v1[slot]
+    if state.stage_name != "":
+        val parent = state.fds[state.fds.len() - 1]
+        if state.stage_identity.len() == 0:
+            if state.file_fd < 0: return false
+            val held = identity_linux_metadata_v1(state.file_fd, "", true)
+            if held.is_err(): return false
+            val held_meta = held.unwrap()
+            if held_meta.uid != state.uid or (held_meta.mode & 61440u32) != 32768u32: return false
+            state.stage_identity = held_meta.identity
+            identity_linux_slots_v1[slot] = state
+        val named = identity_linux_metadata_v1(parent, state.stage_name, false)
+        if named.is_err():
+            if named.unwrap_err() != "identity-store-absent": return false
+        else:
+            val meta = named.unwrap()
+            if not host_identity_bytes_equal_v1(meta.identity, state.stage_identity): return false
+            val name = identity_linux_name_v1(state.stage_name)
+            if name == 0: return false
+            val removed = unlinkat(parent as i32, name, 0) == 0
+            free(name)
+            if not removed: return false
+        state.stage_name = ""
+        state.stage_identity = []
+        identity_linux_slots_v1[slot] = state
+    identity_linux_file_close_v1(slot)
+
+fn identity_linux_publish_error_v1(slot: i64, attempted: bool, file_synced: bool, error: text) -> HostIdentityPlatformPublishV1:
+    identity_linux_quarantine_v1(slot)
+    # Preserve the stage fd/name and directory chain for exact cleanup. A
+    # failed publication is never resolved by deleting the destination.
+    HostIdentityPlatformPublishV1(publication: if attempted: HostIdentityStorePublicationV1.Uncertain else: HostIdentityStorePublicationV1.NotAttempted,
+        cleanup_pending: true, error: error)
+
+@unsafe(reason: "write verified private stage, fsync, atomically link without replacement, verify target identity and fsync journal", capabilities: [ffi, raw_ptr])
+fn identity_linux_publish_v1(slot: i64, generation: i64, leaf: text, bytes: [u8]) -> HostIdentityPlatformPublishV1:
+    if not host_identity_leaf_valid_v1(leaf) or not host_identity_payload_valid_v1(bytes):
+        return HostIdentityPlatformPublishV1(cleanup_pending: identity_linux_pending_v1(slot, generation), error: "identity-store-publish-argument")
+    val current = identity_linux_current_v1(slot, generation)
+    if current.is_err():
+        if identity_linux_slot_v1(slot, generation).is_ok(): identity_linux_quarantine_v1(slot)
+        return HostIdentityPlatformPublishV1(cleanup_pending: identity_linux_pending_v1(slot, generation), error: current.unwrap_err())
+    var state = current.unwrap()
+    if state.file_fd >= 0 or state.stage_name != "" or state.serial >= 1000000:
+        return identity_linux_publish_error_v1(slot, false, false, "identity-store-stage-not-ready")
+    val parent = state.fds[state.fds.len() - 1]
+    state.serial = state.serial + 1
+    val stage = ".host-identity-" + str(identity_linux_pid_v1) + "-" + str(slot) + "-" + str(state.serial) + ".stage"
+    identity_linux_slots_v1[slot] = state
+    val stage_path = identity_linux_name_v1(stage)
+    if stage_path == 0: return HostIdentityPlatformPublishV1(error: "identity-store-memory")
+    # O_WRONLY|O_CREAT|O_EXCL atop NONBLOCK|NOFOLLOW|CLOEXEC. Mode cannot
+    # initially grant group/other access, regardless of umask/default ACL.
+    val fd = openat(parent as i32, stage_path, identity_linux_file_flags_v1() + 193, 384u32) as i64
+    free(stage_path)
+    if fd < 0: return identity_linux_publish_error_v1(slot, false, false, "identity-store-stage-open")
+    state.file_fd = fd
+    state.stage_name = stage
+    identity_linux_slots_v1[slot] = state
+    val created = identity_linux_metadata_v1(fd, "", true)
+    if created.is_err(): return identity_linux_publish_error_v1(slot, false, false, "identity-store-stage-metadata")
+    val created_meta = created.unwrap()
+    state.stage_identity = created_meta.identity
+    identity_linux_slots_v1[slot] = state
+    if created_meta.uid != state.uid or (created_meta.mode & 61440u32) != 32768u32 or created_meta.links != 1 or created_meta.size != 0:
+        return identity_linux_publish_error_v1(slot, false, false, "identity-store-stage-identity")
+    if fchmod(fd as i32, 384u32) != 0: return identity_linux_publish_error_v1(slot, false, false, "identity-store-stage-mode")
+    val privacy_checked = identity_linux_metadata_v1(fd, "", true)
+    if privacy_checked.is_err(): return identity_linux_publish_error_v1(slot, false, false, "identity-store-stage-metadata")
+    val private_meta = privacy_checked.unwrap()
+    if not identity_linux_file_valid_v1(private_meta, state.uid) or not host_identity_bytes_equal_v1(private_meta.identity, state.stage_identity):
+        return identity_linux_publish_error_v1(slot, false, false, "identity-store-stage-privacy")
+    val memory = malloc(bytes.len() as u64)
+    if memory == 0: return identity_linux_publish_error_v1(slot, false, false, "identity-store-memory")
+    for index in 0..bytes.len(): volatile_write_u8(memory + index, bytes[index] as i64)
+    var offset = 0
+    while offset < bytes.len():
+        val count = write(fd as i32, memory + offset, (bytes.len() - offset) as u64)
+        if count <= 0 or count > bytes.len() - offset:
+            free(memory)
+            return identity_linux_publish_error_v1(slot, false, false, "identity-store-stage-write")
+        offset = offset + count
+    free(memory)
+    if fsync(fd as i32) != 0: return identity_linux_publish_error_v1(slot, false, false, "identity-store-stage-sync")
+    val final_stage = identity_linux_metadata_v1(fd, "", true)
+    val stage_named = identity_linux_metadata_v1(parent, stage, false)
+    val checked = identity_linux_current_v1(slot, generation)
+    if final_stage.is_err() or stage_named.is_err() or checked.is_err():
+        return identity_linux_publish_error_v1(slot, false, true, "identity-store-stage-changed")
+    val staged = final_stage.unwrap()
+    val stage_binding = stage_named.unwrap()
+    if (not identity_linux_file_valid_v1(staged, state.uid) or staged.size != bytes.len() or
+            not host_identity_bytes_equal_v1(staged.identity, state.stage_identity) or
+            not host_identity_bytes_equal_v1(stage_binding.identity, state.stage_identity)):
+        return identity_linux_publish_error_v1(slot, false, true, "identity-store-stage-changed")
+    val source = identity_linux_name_v1(stage)
+    val target = identity_linux_name_v1(leaf)
+    if source == 0 or target == 0:
+        if source != 0: free(source)
+        if target != 0: free(target)
+        return identity_linux_publish_error_v1(slot, false, true, "identity-store-memory")
+    val linked = linkat(parent as i32, source, parent as i32, target, 0)
+    val link_error = if linked != 0: volatile_read_u32(__errno_location()) else: 0
+    free(source)
+    free(target)
+    val destination = identity_linux_metadata_v1(parent, leaf, false)
+    val still_current = identity_linux_current_v1(slot, generation)
+    if linked != 0:
+        if link_error == 17 and destination.is_ok() and still_current.is_ok():
+            val existing = destination.unwrap()
+            if identity_linux_file_valid_v1(existing, state.uid):
+                if not identity_linux_stage_cleanup_v1(slot):
+                    return identity_linux_publish_error_v1(slot, false, false, "identity-store-existing-stage-cleanup")
+                return HostIdentityPlatformPublishV1(publication: HostIdentityStorePublicationV1.Existing)
+        return identity_linux_publish_error_v1(slot, true, true, "identity-store-publication-uncertain")
+    if destination.is_err() or still_current.is_err(): return identity_linux_publish_error_v1(slot, true, true, "identity-store-publication-uncertain")
+    val published = destination.unwrap()
+    if (not identity_linux_file_valid_v1(published, state.uid, true) or published.size != bytes.len() or
+            not host_identity_bytes_equal_v1(published.identity, state.stage_identity)):
+        return identity_linux_publish_error_v1(slot, true, true, "identity-store-publication-uncertain")
+    if not identity_linux_stage_cleanup_v1(slot):
+        return identity_linux_publish_error_v1(slot, true, true, "identity-store-published-stage-cleanup")
+    if fsync(parent as i32) != 0:
+        identity_linux_quarantine_v1(slot)
+        return HostIdentityPlatformPublishV1(publication: HostIdentityStorePublicationV1.Published,
+            file_synced: true, cleanup_pending: true, error: "identity-store-namespace-sync")
+    HostIdentityPlatformPublishV1(publication: HostIdentityStorePublicationV1.Published, file_synced: true, namespace_synced: true)
+
+@unsafe(reason: "retire only exact stage binding, then consume each descriptor slot before close, without raw-fd retries", capabilities: [ffi])
+fn identity_linux_close_v1(slot: i64, generation: i64) -> HostIdentityPlatformCloseV1:
+    val loaded = identity_linux_slot_v1(slot, generation)
+    if loaded.is_err(): return HostIdentityPlatformCloseV1(true, false, "identity-store-stale")
+    identity_linux_quarantine_v1(slot)
+    if not identity_linux_stage_cleanup_v1(slot):
+        # A consumed stage-fd close failure is recorded; its name was already
+        # safely removed, so continue consuming directories instead of retrying.
+        val pending = identity_linux_slots_v1[slot]
+        if pending.stage_name != "": return HostIdentityPlatformCloseV1(false, false, "identity-store-stage-cleanup-retained")
+    var state = identity_linux_slots_v1[slot]
+    var index = state.fds.len() - 1
+    while index >= 0:
+        if state.fds[index] >= 0:
+            val fd = state.fds[index]
+            state.fds[index] = -1
+            identity_linux_slots_v1[slot] = state
+            if close(fd as i32) != 0:
+                state.close_error = true
+                identity_linux_slots_v1[slot] = state
+        index = index - 1
+    state.closed = true
+    identity_linux_slots_v1[slot] = state
+    HostIdentityPlatformCloseV1(true, not state.close_error,
+        if state.close_error: "identity-store-close-consumed-unconfirmed" else: "")
+@end

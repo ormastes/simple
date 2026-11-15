@@ -47,3 +47,24 @@ restored rows pass, except the three that now show real values (below).
 | glyph ink | lowercase vs uppercase glyphs; text-raster fixture ink; text-align-last | `0 > 0` ink counts; must not be made green by forcing the upscaled 5x7 bitmap lane |
 | one colour level | Aetheric gradient over translucent base; shorthand hex alpha on white | `0xFF787878` vs `0xFF777777`; measure Chrome 159 before choosing |
 | paint geometry | object-fit contain; object-position; positioned absolute paint order; leaf background opacity; WM material request bounds; generated widget chrome text | placeholder colour 0 px; 240 vs 600 / 504 vs 144; 0 vs 5776; 800 vs 200 |
+
+## Batch 3a (2026-11-15): 3 rows gated as host-dependent, 19 left
+
+Class (c), environment-dependent — gated, no assertion removed:
+
+- **Backend names (2 rows).** `cuda`/`rocm`/`opencl`/`metal` returned
+  `software` because `simple_web_engine2d_resolved_backend_name_with_reason`
+  probes the real device and falls back honestly (contract made explicit in
+  `9970185d1de`, which only surfaced the reason; the `"software"` fallback is
+  older). Measured on this host (aarch64, seed 59635056 bytes): `cuda -> cuda`,
+  `vulkan -> vulkan`, `cpu_simd -> cpu_simd`; `hip -> software` ("ROCm/HIP
+  runtime, device, or module unavailable"), `opencl -> software`
+  (`opencl-context-create-failed`), `metal -> software` ("Metal requires
+  macOS"). The rows now expect the canonical name where an independent
+  `Engine2D.probe_backend` initializes and `software` otherwise; the alias
+  `hip -> rocm` is asserted host-independently through `backend_canonical_name`.
+- **Host face (1 row).** Gated on `browser_host_has_measured_linux_face_set()`
+  like the other face-dependent rows: with the Liberation set the identity is
+  `LiberationSans-Regular.ttf` at 17 px; elsewhere the old `""`/`0` pin stands.
+
+Run: `95 passed, 19 failed` of 114 (was 92/22).
