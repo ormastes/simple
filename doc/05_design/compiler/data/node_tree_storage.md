@@ -449,7 +449,8 @@ leaves the switch off. Default stays OFF.
 
 Applied (real `ExprStore` owner arrays `expr_extra`, `expr_s_val`; `inferred_type` has no
 owner in the real AST pool, so the 0.4%-dense `extra` is the sparse-hash candidate and
-69%-dense `s_val` the dense-column candidate). `op` was NOT applied (7.9% dense).
+69%-dense `s_val` the dense-column candidate). `op` was NOT applied in that step
+(7.9% dense); it is applied below (2026-11-15, lane nodeattr-op).
 Writes go through `expr_*_put`, reads through `expr_*_get`; the flat snapshot codec
 uses `*_dense()` / `*_load()`.
 
