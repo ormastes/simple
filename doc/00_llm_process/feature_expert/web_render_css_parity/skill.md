@@ -2019,3 +2019,8 @@ never cache an answer computed while exhausted) —
 
 - **Root font is cascade state:** `css_cascade_root_font_set` is set to 16 at the start of `compute_styles_with_material`, set to the `html` node's computed `font_size` once that node is stored, and reset at pass end. Every `rem` reads it (`css_cascade_root_font_px()` in `..._decl_apply.spl`, `_css_cascade_root_font_px` in `..._declarations.spl`). The root's own `font-size:Nrem` still uses 16, which is the initial value.
 - **Trap — two dispatchers:** `margin-left` is parsed in BOTH `_apply_decls_dispatch` (`..._declarations.spl`, fast path) and `_apply_decls_without_grid_inner` (`..._decl_apply.spl`). Fixing one leaves the spec red; grep both for any longhand you touch.
+
+## 2026-11-16 — box-sizing:inherit
+
+- **`inherit` on a non-inherited property** needs the parent's value carried on the child Style, as `inherit_font_size` is. `inherit_border_box` is set in `inherit_from`, copied in `copy_from`, and added to `inherited_digest`. Skip the digest and the cascade memo can hand a child the style computed under a different parent.
+- **Trap — CSS braces in spec literals:** write `body{{margin:0}}`. A bare `{margin:0}` inside a `"..."` literal is interpolation and fails with `variable margin not found`; `{margin:0;font:...}` only happens to survive.
