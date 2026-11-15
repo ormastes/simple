@@ -87,6 +87,7 @@ extern int errno;
 #define EHOSTUNREACH 113 /* No route to host */
 #define EALREADY    114  /* Operation already in progress */
 #define EINPROGRESS 115  /* Operation now in progress */
+#define ESTALE      116  /* Stale file handle (runtime_workspace_storage_v1.c) */
 
 /* Alias */
 #define EWOULDBLOCK EAGAIN
