@@ -68,9 +68,11 @@ pub fn unit_tldr_plan_v1(unit_id: text, root: text, picked: [text], module_paths
     while pos < frontier.len():
         val module_id = frontier[pos]
         pos = pos + 1
-        if seen.contains(module_id) or not module_paths.contains_key(module_id):
+        if seen.contains(module_id):
             continue
-        val src_path = module_paths[module_id]
+        val src_path = unit_tldr_module_path_for_v1(module_paths, module_id)
+        if src_path == "":
+            continue
         if not file_exists(src_path):
             continue
         seen.push(module_id)
@@ -177,6 +179,33 @@ pub fn unit_tldr_surface_for_v1(plan: UnitTldrPlanV1, module_name: text) -> Modu
             return Some(s)
     nil
 
+# Inventory path of an import spelling. The closure loader admits a src/lib
+# file under its canonical `lib.*` name and adds the `std.*` twin only on
+# demand, so a `use std.X` import must also find the `lib.X` row.
+pub fn unit_tldr_module_path_for_v1(module_paths: Dict<text, text>, module_id: text) -> text:
+    if module_paths.contains_key(module_id):
+        return module_paths[module_id]
+    if module_id.starts_with("std."):
+        val lib_id = "lib." + module_id.substring(4)
+        if module_paths.contains_key(lib_id):
+            return module_paths[lib_id]
+    ""
+
+# Summary surface for an inventory row. The plan names a surface by the import
+# spelling (e.g. `std.common.string_core`) while the row the streaming loop
+# meets first may carry another alias (`lib.common.string_core`); the plan
+# binds every surface's canonical_path to its admitted source, so fall back to
+# that key. Missing this left the row a placeholder -> CLOSURE-INCOMPLETE.
+pub fn unit_tldr_surface_for_row_v1(plan: UnitTldrPlanV1, module_name: text, canonical_path: text) -> ModuleSurface?:
+    for s in plan.surfaces:
+        if s.module_name == module_name:
+            return Some(s)
+    for s in plan.surfaces:
+        if s.canonical_path == canonical_path:
+            return Some(s)
+    nil
+
 export UnitTldrPlanV1, UnitLowerResultV1
 export unit_tldr_log_line_v1, unit_tldr_plan_v1, unit_lower_v1
 export unit_tldr_empty_plan_v1, unit_tldr_module_paths_v1, unit_tldr_needed_flags_v1, unit_tldr_surface_for_v1
+export unit_tldr_module_path_for_v1, unit_tldr_surface_for_row_v1
