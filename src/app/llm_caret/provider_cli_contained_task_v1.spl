@@ -1,6 +1,10 @@
 # AUTHORED_NOT_RUN. Restrictive composition over existing signed Host execution;
 # no bare-host task, grant/deadline factory, copied-runtime-ID or new executor.
 use app.llm_caret.provider_cli_adapter_types_v1.*
+use app.llm_caret.provider_cli_codex_prompt_mode_v1.{ProviderCliCodexPromptModeV1,
+    plan_provider_cli_codex_prompt_mode_v1}
+use std.common.contracts.container.pre_start_input_constraint_v1.{ContainerPreStartInputConstraintV1,
+    ContainerPreStartInputProfileV1}
 use app.llm_caret.provider_cli_container_probe_v1.{ProviderCliContainedSelectionV1,
     ProviderCliContainedProbeReceiptV1}
 use std.nogc_sync_mut.orchestration.host_service_domain_v3.{HostServiceDomainV3, HostServiceTurnV3,
@@ -13,6 +17,10 @@ use std.nogc_sync_mut.orchestration.host_service_execution_v4.{HostServiceExecut
 use std.nogc_sync_mut.orchestration.host_execution_envelope_v2.host_execution_decode_v2
 use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_host_scope_bytes_v2}
 use std.common.contracts.container.pre_start_constraint_v1.ContainerPreStartConstraintV1
+
+enum ContainedTaskPlanModeV1:
+    Existing
+    CodexArgv
 
 fn contained_task_scope_v1(domain: HostServiceDomainV3) -> ContainerHostScopeV2:
     match domain.local:
@@ -29,6 +37,21 @@ fn contained_task_constraint_v1(domain: HostServiceDomainV3, selection: Provider
 pub fn provider_cli_contained_task_constraint_data_v1(scope: ContainerHostScopeV2,
         selection: ProviderCliContainedSelectionV1, version_receipt: ProviderCliContainedProbeReceiptV1,
         request: HostServiceRequestV2, action: ProviderCliRequestDataV1) -> Result<ContainerPreStartConstraintV1, text>:
+    contained_task_constraint_mode_v1(scope, selection, version_receipt, request, action, ContainedTaskPlanModeV1.Existing)
+
+# Explicit argument mode remains a restriction over the SAME actual domain.
+# Callers cannot provide an alternate PlanData or a closed-stdin proof boolean.
+pub fn provider_cli_contained_task_argv_constraint_v1(domain: HostServiceDomainV3,
+        selection: ProviderCliContainedSelectionV1, version_receipt: ProviderCliContainedProbeReceiptV1,
+        request: HostServiceRequestV2, action: ProviderCliRequestDataV1) -> Result<ContainerPreStartInputConstraintV1, text>:
+    val base = contained_task_constraint_mode_v1(contained_task_scope_v1(domain), selection, version_receipt,
+        request, action, ContainedTaskPlanModeV1.CodexArgv)?
+    Ok(ContainerPreStartInputConstraintV1(base: base, profile: ContainerPreStartInputProfileV1.ClosedStdinNonTty))
+
+fn contained_task_constraint_mode_v1(scope: ContainerHostScopeV2,
+        selection: ProviderCliContainedSelectionV1, version_receipt: ProviderCliContainedProbeReceiptV1,
+        request: HostServiceRequestV2, action: ProviderCliRequestDataV1,
+        mode: ContainedTaskPlanModeV1) -> Result<ContainerPreStartConstraintV1, text>:
     val invalid = host_service_request_error_v2(request)
     if invalid != "": return Err(invalid)
     if request.action != "host-execute": return Err("provider-contained-signed-host-execute-required")
@@ -42,7 +65,13 @@ pub fn provider_cli_contained_task_constraint_data_v1(scope: ContainerHostScopeV
         return Err("provider-contained-selection-version-receipt-mismatch")
     if container_host_scope_bytes_v2(scope)? != container_host_scope_bytes_v2(observed.configuration.scope)?:
         return Err("provider-contained-selection-host-generation-mismatch")
-    val planned = selection.plan_data_v1(action)?
+    val planned = if mode == ContainedTaskPlanModeV1.CodexArgv:
+        if version.provider != ProviderCliProviderV1.Codex or action.action != ProviderCliActionV1.Start:
+            return Err("provider-contained-codex-argv-start-required")
+        val explicit = plan_provider_cli_codex_prompt_mode_v1(version, action, ProviderCliCodexPromptModeV1.Argv)?
+        explicit.plan
+    else:
+        selection.plan_data_v1(action)?
     if planned.control != ProviderCliControlDataV1.Argv:
         return Err("provider-contained-action-has-no-executable-argv")
     # A stdin payload cannot be supplied by killing/writing an engine transport.
@@ -51,6 +80,11 @@ pub fn provider_cli_contained_task_constraint_data_v1(scope: ContainerHostScopeV
     var argv: [text] = []
     for part in observed.program_prefix: argv.push(part)
     for part in planned.argv: argv.push(part)
+    if mode == ContainedTaskPlanModeV1.CodexArgv:
+        var bytes = 0
+        for argument in argv:
+            bytes = bytes + argument.byte_len()
+            if bytes > 8192: return Err("provider-contained-codex-final-argv-byte-bound")
     val envelope = host_execution_decode_v2(request.payload, scope)?
     if envelope.operation.id != request.operation_id:
         return Err("provider-contained-signed-operation-mismatch")

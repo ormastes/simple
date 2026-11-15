@@ -1,5 +1,7 @@
 pub use std.nogc_async_mut.container.observation_v2.simple_container_observe_v2
 pub use std.common.contracts.container.execution_configuration_v1.{ContainerExecutionConfigurationObservationV1, ContainerExecutionMountObservationV1}
+pub use std.common.contracts.container.execution_input_configuration_v1.ContainerExecutionInputConfigurationObservationV1
+use std.common.contracts.container.execution_input_configuration_v1.container_execution_input_configuration_decode_v1
 use std.common.contracts.container.execution_configuration_v1.container_execution_configuration_decode_v1
 use std.nogc_sync_mut.io.process_capture_evidence_v1.{ProcessCaptureOwnerV1, ProcessCaptureEvidenceV1, ProcessCaptureTurnV1, process_capture_step_v1}
 use std.nogc_async_mut.container.observation_v2.container_observation_validate_v2
@@ -27,6 +29,11 @@ pub struct ContainerOperationTurnV2:
 pub struct ContainerExecutionConfigurationTurnV1:
     owner: SimpleContainerOwnerV2
     observation: ContainerExecutionConfigurationObservationV1?
+    error: text
+
+pub struct ContainerExecutionInputConfigurationTurnV1:
+    owner: SimpleContainerOwnerV2
+    observation: ContainerExecutionInputConfigurationObservationV1?
     error: text
 
 pub class ContainerExecutionLogsCaptureOwnerV1:
@@ -141,6 +148,32 @@ pub fn simple_container_configuration_observe_v1(owner: SimpleContainerOwnerV2,
     if expected_scope.is_err() or found_scope.is_err() or expected_scope.unwrap() != found_scope.unwrap():
         return ContainerExecutionConfigurationTurnV1(owner: turn.owner, observation: nil, error: "container-configuration-scope-mismatch")
     ContainerExecutionConfigurationTurnV1(owner: turn.owner, observation: Some(observed), error: "")
+
+# Separate versioned wrapper. The existing V1 producer/wire stays unchanged;
+# these mandatory facts come from the same retained native query sequence.
+pub fn simple_container_input_configuration_observe_v1(owner: SimpleContainerOwnerV2,
+        original_request: ContainerExecutionRequestV2) -> ContainerExecutionInputConfigurationTurnV1:
+    val turn = simple_container_read_v2(owner, "input-configuration", original_request)
+    if turn.operation.status != "ok" or turn.operation.exit_code != 0:
+        return ContainerExecutionInputConfigurationTurnV1(owner: turn.owner, observation: nil, error: turn.operation.reason)
+    val observed = match container_execution_input_configuration_decode_v1(turn.operation.stdout):
+        case Ok(value): value
+        case Err(reason): return ContainerExecutionInputConfigurationTurnV1(owner: turn.owner, observation: nil, error: reason)
+    val core = observed.configuration
+    val actual = core.runtime
+    val plan = original_request.plan
+    if (core.request_digest != plan.request_digest or actual.pod_uid != plan.workload_uid or
+            actual.attempt != plan.attempt or actual.operation_id != plan.operation_id or
+            actual.provider_generation != plan.provider_generation or actual.native_id == "" or
+            not container_logs_identity_equal_v1(actual, turn.operation.state.identity)):
+        return ContainerExecutionInputConfigurationTurnV1(owner: turn.owner, observation: nil,
+            error: "container-input-configuration-request-runtime-mismatch")
+    val expected_scope = container_host_scope_bytes_v2(simple_container_scope_v2(turn.owner))
+    val found_scope = container_host_scope_bytes_v2(core.scope)
+    if expected_scope.is_err() or found_scope.is_err() or expected_scope.unwrap() != found_scope.unwrap():
+        return ContainerExecutionInputConfigurationTurnV1(owner: turn.owner, observation: nil,
+            error: "container-input-configuration-scope-mismatch")
+    ContainerExecutionInputConfigurationTurnV1(owner: turn.owner, observation: Some(observed), error: "")
 
 pub struct ContainerAbsenceTurnV2:
     owner: SimpleContainerOwnerV2
@@ -288,7 +321,7 @@ fn container_api_rejected_v2(owner: SimpleContainerOwnerV2, action: text, reason
 
 pub fn simple_container_read_v2(owner: SimpleContainerOwnerV2, action: text,
         request: ContainerExecutionRequestV2) -> ContainerOperationTurnV2:
-    if action != "inspect" and action != "logs" and action != "wait" and action != "configuration":
+    if action != "inspect" and action != "logs" and action != "wait" and action != "configuration" and action != "input-configuration":
         return container_api_rejected_v2(owner, action, "container-api-read-action-unsupported")
     val projected = simple_container_project_v2(owner, request)
     if projected.is_err(): return container_api_rejected_v2(owner, action, projected.unwrap_err())
@@ -304,7 +337,7 @@ pub fn simple_container_read_v2(owner: SimpleContainerOwnerV2, action: text,
 
 pub fn simple_container_apply_v2(owner: SimpleContainerOwnerV2, action: text,
         request: ContainerExecutionRequestV2, deadline: ContainerEffectDeadlineV1) -> ContainerOperationTurnV2:
-    if action == "inspect" or action == "logs" or action == "wait" or action == "configuration":
+    if action == "inspect" or action == "logs" or action == "wait" or action == "configuration" or action == "input-configuration":
         return simple_container_read_v2(owner, action, request)
     if not ["prepare", "create", "start", "stop", "destroy"].contains(action):
         return container_api_rejected_v2(owner, action, "container-api-action-unsupported")

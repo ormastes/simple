@@ -1,3 +1,5 @@
+use std.common.contracts.container.pre_start_input_constraint_v1.{ContainerPreStartInputConstraintV1,
+    container_pre_start_input_constraint_copy_v1}
 use std.common.contracts.container.pre_start_constraint_v1.ContainerPreStartConstraintV1
 # One service request vocabulary and one retained Host writer. Platform startup
 # differs; Linux V2 dispatch and Windows signed preparation share their owners.
@@ -9,7 +11,7 @@ use std.nogc_sync_mut.orchestration.host_service_domain_v2.*
 use std.nogc_sync_mut.orchestration.host_local_command_v1.host_local_validate_payload_v2
 use std.nogc_sync_mut.orchestration.host_local_root_v1.{host_local_context_v1, host_local_refresh_context_v1}
 use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostReservationAuthorizationContextV1
-use std.nogc_sync_mut.orchestration.host_authorized_execution_v2.host_authorized_execute_constrained_v2
+use std.nogc_sync_mut.orchestration.host_authorized_execution_v2.{host_authorized_execute_constrained_v2, host_authorized_execute_input_constrained_v2}
 use std.nogc_sync_mut.orchestration.host_execution_envelope_v2.host_execution_decode_v2
 use std.nogc_sync_mut.orchestration.host_execution_observation_v2.{HostExecutionObservationV2, host_execution_observation_encode_v2}
 use std.nogc_sync_mut.orchestration.host_parent_budget_v1.host_parent_budget_record_decode_v1
@@ -174,6 +176,15 @@ pub fn host_service_domain_effect_turn_v3(owner: HostServiceDomainV3,
 
 pub fn host_service_domain_effect_constrained_turn_v3(owner: HostServiceDomainV3,
         request: HostServiceRequestV2, constraint: Option<ContainerPreStartConstraintV1>) -> HostServiceTurnV3:
+    host_service_domain_effect_restricted_turn_v3(owner, request, constraint, nil)
+
+pub fn host_service_domain_effect_input_constrained_turn_v3(owner: HostServiceDomainV3,
+        request: HostServiceRequestV2, input: ContainerPreStartInputConstraintV1) -> HostServiceTurnV3:
+    host_service_domain_effect_restricted_turn_v3(owner, request, nil, Some(container_pre_start_input_constraint_copy_v1(input)))
+
+fn host_service_domain_effect_restricted_turn_v3(owner: HostServiceDomainV3,
+        request: HostServiceRequestV2, constraint: Option<ContainerPreStartConstraintV1>,
+        input: Option<ContainerPreStartInputConstraintV1>) -> HostServiceTurnV3:
     val invalid = host_service_request_error_v2(request)
     if invalid != "" or request.action != "host-execute":
         return HostServiceTurnV3(owner, 1, host_service_error_payload_v2(request,
@@ -188,8 +199,12 @@ pub fn host_service_domain_effect_constrained_turn_v3(owner: HostServiceDomainV3
             val binding = local.binding
             val refresh = fn() -> HostReservationAuthorizationContextV1:
                 host_local_refresh_context_v1(root, binding)
-            val turn = host_authorized_execute_constrained_v2(local.capacity, local.container, request.payload, local.policy,
-                binding.provider_identity_digest, local.config.service_scope_id, host_local_context_v1(local.policy), refresh, constraint)
+            val turn = if input.is_some():
+                host_authorized_execute_input_constrained_v2(local.capacity, local.container, request.payload, local.policy,
+                    binding.provider_identity_digest, local.config.service_scope_id, host_local_context_v1(local.policy), refresh, input.unwrap())
+            else:
+                host_authorized_execute_constrained_v2(local.capacity, local.container, request.payload, local.policy,
+                    binding.provider_identity_digest, local.config.service_scope_id, host_local_context_v1(local.policy), refresh, constraint)
             local.capacity = turn.owner
             local.container = turn.container
             service_execution_reply_v3(HostServiceDomainV3(HostLocalRootV3.Linux(local)), request,
@@ -199,6 +214,9 @@ pub fn host_service_domain_effect_constrained_turn_v3(owner: HostServiceDomainV3
             val decoded = host_execution_decode_v2(request.payload, local.scope_v3())
             if decoded.is_err() or decoded.unwrap().operation.id != request.operation_id:
                 return HostServiceTurnV3(owner, 1, host_service_error_payload_v2(request, "host-service-execute-envelope", false))
-            val turn = local.execute_constrained_v3(request.payload, constraint)
+            val turn = if input.is_some():
+                local.execute_input_constrained_v3(request.payload, input.unwrap())
+            else:
+                local.execute_constrained_v3(request.payload, constraint)
             service_execution_reply_v3(HostServiceDomainV3(HostLocalRootV3.Windows(local)), request,
                 turn.observation, turn.recovery_required, turn.error)

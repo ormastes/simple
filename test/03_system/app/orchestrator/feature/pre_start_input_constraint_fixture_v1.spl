@@ -1,0 +1,73 @@
+# AUTHORED_NOT_RUN. Caller supplies actual signed Host domain/request and real
+# provider fixture. Public configuration DTOs are never substituted for owners.
+use std.spec.{expect, step, fail}
+use std.common.contracts.container.pre_start_input_constraint_v1.ContainerPreStartInputConstraintV1
+use std.common.contracts.orchestration.host_capacity_v1.HostReservationStateV1
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.{HostServiceDomainV3, HostServiceTurnV3,
+    host_service_domain_effect_input_constrained_turn_v3}
+use std.nogc_sync_mut.orchestration.host_service_execution_v4.{HostServiceExecutionTurnV4,
+    host_service_execution_begin_input_constrained_v4}
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.HostServiceRequestV2
+use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostCapacityOwnerV1
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.host_execution_observation_decode_v2
+use std.nogc_sync_mut.orchestration.host_authorized_execution_v2.HostExecutionProgressTurnV4
+
+fn input_fixture_capacity_v1(domain: HostServiceDomainV3) -> HostCapacityOwnerV1:
+    match domain.local:
+        case HostLocalRootV3.Linux(local): local.capacity
+        case HostLocalRootV3.Windows(local): local.capacity_v3()
+
+fn check_actual_input_turn_v1(turn: HostServiceTurnV3, expected_lease: text,
+        reservation_id: text, request_digest: text, expected_start: text) -> HostServiceTurnV3:
+    val observed = host_execution_observation_decode_v2(turn.response)
+    if observed.is_err():
+        fail("actual post-create input-profile Host observation required")
+        return turn
+    expect(turn.exit_code).to_equal(if expected_start == "ok": 0 else: 2)
+    expect(observed.unwrap().request_digest).to_equal(request_digest)
+    expect(observed.unwrap().create_status).to_equal("ok")
+    expect(observed.unwrap().start_status).to_equal(expected_start)
+    val retained = input_fixture_capacity_v1(turn.owner)
+    expect(retained.journal.lease_digest).to_equal(expected_lease)
+    var found = false
+    for reservation in retained.ledger.reservations:
+        if reservation.id == reservation_id:
+            found = true
+            expect(reservation.state != HostReservationStateV1.Released).to_equal(true)
+    expect(found).to_equal(true)
+    turn
+
+pub fn run_real_closed_input_success_fixture_v1(domain: HostServiceDomainV3,
+        request: HostServiceRequestV2, input: ContainerPreStartInputConstraintV1,
+        reservation_id: text) -> HostServiceTurnV3:
+    step("Use actual signed create and provider-observed closed stdin/non-TTY before start")
+    val lease = input_fixture_capacity_v1(domain).journal.lease_digest
+    val turn = host_service_domain_effect_input_constrained_turn_v3(domain, request, input)
+    check_actual_input_turn_v1(turn, lease, reservation_id, input.base.request_digest, "ok")
+
+pub fn run_real_open_input_refusal_fixture_v1(domain: HostServiceDomainV3,
+        request: HostServiceRequestV2, input: ContainerPreStartInputConstraintV1,
+        reservation_id: text) -> HostServiceTurnV3:
+    step("Refuse actual open stdin, TTY or unknown input configuration without releasing its charge")
+    val lease = input_fixture_capacity_v1(domain).journal.lease_digest
+    val turn = host_service_domain_effect_input_constrained_turn_v3(domain, request, input)
+    check_actual_input_turn_v1(turn, lease, reservation_id, input.base.request_digest, "not-attempted")
+
+pub fn begin_real_closed_input_cooperative_fixture_v1(domain: HostServiceDomainV3,
+        request: HostServiceRequestV2, input: ContainerPreStartInputConstraintV1) -> HostServiceExecutionTurnV4:
+    step("Retain the existing Windows canonical continuation with its copied input restriction")
+    val lease = input_fixture_capacity_v1(domain).journal.lease_digest
+    val turn = host_service_execution_begin_input_constrained_v4(domain, request, input)
+    expect(turn.continuation.is_some()).to_equal(true)
+    expect(turn.response.is_none()).to_equal(true)
+    expect(input_fixture_capacity_v1(turn.domain).journal.lease_digest).to_equal(lease)
+    turn
+
+pub fn check_real_input_profile_pending_cleanup_v1(turn: HostExecutionProgressTurnV4,
+        expected_lease: text) -> HostExecutionProgressTurnV4:
+    step("Keep the actual native cleanup continuation and Host writer on pending cancellation")
+    expect(turn.owner.journal.lease_digest).to_equal(expected_lease)
+    expect(turn.continuation.is_some()).to_equal(true)
+    expect(turn.observation.is_none()).to_equal(true)
+    turn

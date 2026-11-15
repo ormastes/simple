@@ -456,7 +456,9 @@ fn should_keep_selective_export(item: &Node, requested_names: &[String]) -> bool
 // repo-wide and must be staged separately.
 //
 // Warning only, never fatal. Silenced by `SIMPLE_NO_DEPRECATED_WARNINGS`, the
-// same switch the sibling `[gc-warning]` check honours.
+// same switch the sibling `[gc-warning]` check honours. The baselined
+// `[visibility-warning]` is silenced only by the tool-closure quiet switch
+// (`simple_common::tool_closure_quiet`, set by the driver for `lint|fix|fmt`).
 
 /// Names a resolved module was observed to provide, keyed by resolved path, so
 /// the check also runs on module-cache hits (where the AST is long gone).
@@ -702,7 +704,8 @@ fn check_private_use_names(
         if private_import_is_baselined(module_path, &name) {
             // Legacy pair frozen in scripts/check/private_import_baseline.txt:
             // warn only, so the baseline can ratchet down.
-            if !use_warning_seen(format!("priv\u{1}{}\u{1}{}\u{1}{}", module_path.display(), name, importer.display())) {
+            if !simple_common::tool_closure_quiet::tool_closure_quiet()
+                && !use_warning_seen(format!("priv\u{1}{}\u{1}{}\u{1}{}", module_path.display(), name, importer.display())) {
                 eprintln!(
                     "[visibility-warning] '{name}' is a private fn of module '{module_label}' ({}); mark it `pub` or `export` it (imported from {})",
                     module_path.display(),

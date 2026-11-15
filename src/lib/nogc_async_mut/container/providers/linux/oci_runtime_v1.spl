@@ -1,3 +1,4 @@
+use std.nogc_async_mut.container.shared.input_configuration_query_v1.*
 use std.nogc_async_mut.container.shared.logs_capture_v1.*
 use std.nogc_sync_mut.io.process_capture_evidence_v1.{ProcessCaptureRequestV1, process_capture_begin_v1}
 use std.nogc_async_mut.container.shared.configuration_query_v1.*
@@ -1103,39 +1104,46 @@ impl LinuxOciRuntimeProviderV1:
         ContainerRuntimeLogsCaptureTurnV1(runtime: current.state.identity, capture: capture)
 
     me configuration_v1(request: LinuxOciRequestV1, scope: ContainerHostScopeV2) -> RuntimeOperationV1:
-        val current = self._current_for(request, "configuration")
+        self._configuration_observe_input_v1(request, scope, false)
+
+    me input_configuration_v1(request: LinuxOciRequestV1, scope: ContainerHostScopeV2) -> RuntimeOperationV1:
+        self._configuration_observe_input_v1(request, scope, true)
+
+    me _configuration_observe_input_v1(request: LinuxOciRequestV1, scope: ContainerHostScopeV2, include_input: bool) -> RuntimeOperationV1:
+        val action = if include_input: "input-configuration" else: "configuration"
+        val current = self._current_for(request, action)
         if current.status != RUNTIME_STATUS_OK: return current
         if self.engine != "podman" or not self.live_enabled:
-            return self._blocked("configuration", "configuration-provider-unavailable", runtime_command_empty())
+            return self._blocked(action, "configuration-provider-unavailable", runtime_command_empty())
         val state = current.state
-        val query = match configuration_container_command_v1(state.identity, false):
+        val query = match configuration_selected_command_v2(state.identity, false, include_input):
             case Ok(value): value
-            case Err(reason): return self._rejected("configuration", reason, runtime_command_empty())
+            case Err(reason): return self._rejected(action, reason, runtime_command_empty())
         val first_run = self._execute(query, request)
         if not first_run.matched or first_run.exit_code != 0:
-            return self._rejected("configuration", "configuration-container-capture-failed", query)
-        val first = match configuration_container_parse_v1(first_run.stdout, state.identity, scope, false):
+            return self._rejected(action, "configuration-container-capture-failed", query)
+        val first = match configuration_selected_parse_v2(first_run.stdout, state.identity, scope, false, include_input):
             case Ok(value): value
-            case Err(reason): return self._rejected("configuration", reason, query)
-        val image_query = match configuration_image_command_v1(self.engine, first.image_id):
+            case Err(reason): return self._rejected(action, reason, query)
+        val image_query = match configuration_image_command_v1(self.engine, first.configuration.image_id):
             case Ok(value): value
-            case Err(reason): return self._rejected("configuration", reason, query)
+            case Err(reason): return self._rejected(action, reason, query)
         val image_run = self._execute(image_query, request)
         if not image_run.matched or image_run.exit_code != 0:
-            return self._rejected("configuration", "configuration-image-capture-failed", image_query)
+            return self._rejected(action, "configuration-image-capture-failed", image_query)
         val last_run = self._execute(query, request)
         if not last_run.matched or last_run.exit_code != 0:
-            return self._rejected("configuration", "configuration-container-recheck-failed", query)
-        val last = match configuration_container_parse_v1(last_run.stdout, state.identity, scope, false):
+            return self._rejected(action, "configuration-container-recheck-failed", query)
+        val last = match configuration_selected_parse_v2(last_run.stdout, state.identity, scope, false, include_input):
             case Ok(value): value
-            case Err(reason): return self._rejected("configuration", reason, query)
+            case Err(reason): return self._rejected(action, reason, query)
         val digest = match linux_oci_request_digest_v1(request):
             case Ok(value): value
-            case Err(reason): return self._rejected("configuration", reason, query)
-        val output = match configuration_observation_v1(first, image_run.stdout, last, scope, state.identity, digest, request.image):
+            case Err(reason): return self._rejected(action, reason, query)
+        val output = match configuration_selected_observation_v2(first, image_run.stdout, last, scope, state.identity, digest, request.image, include_input):
             case Ok(value): value
-            case Err(reason): return self._rejected("configuration", reason, query)
-        RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: "configuration", state: state,
+            case Err(reason): return self._rejected(action, reason, query)
+        RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: action, state: state,
             command: self._receipt_command_v1(query), exit_code: 0, stdout: output, stderr: "", reason: "engine-configuration-data")
 
     me inspect(request: LinuxOciRequestV1) -> RuntimeOperationV1:

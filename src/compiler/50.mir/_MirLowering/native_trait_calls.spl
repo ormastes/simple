@@ -84,7 +84,14 @@ impl MirLowering:
             # declared_result differs from result only for a bootstrap-erased
             # `-> X?` (an i64 Option handle word either way): mark it as the
             # Option it is, or `if val v = o.m()` tests a scalar.
-            val marked = slot.declared_result
+            # A generic slot's `T?` takes the receiver instance's argument, so
+            # a `match` binder decodes the payload as i64/text/f64, not as T.
+            var marked = slot.declared_result
+            val result_param = self.native_trait_optional_param_payload(marked)
+            if result_param != "":
+                if val instance_arg = self.native_trait_receiver_type_arg(receiver, receiver_local, layout, result_param):
+                    marked = HirType(kind: HirTypeKind.Optional(instance_arg), span: marked.span)
+                    self.native_trait_concrete_option_locals[local.id] = true
             self.remember_local_hir_type(local.id, marked, 2, 0)
             match marked.kind:
                 case HirTypeKind.Optional(_):
@@ -99,3 +106,24 @@ impl MirLowering:
         val unit_local = builder.new_temp(MirType.unit())
         self.builder = builder
         unit_local
+
+    fn native_trait_receiver_type_arg(receiver: HirExpr, receiver_local: LocalId,
+            layout: NativeTraitLayout, name: text) -> HirType?:
+        """The receiver instance's argument for trait parameter `name`
+        (`Reader<i64>` gives i64), else None and the declared `T` stays."""
+        var position = -1
+        var index = 0
+        while index < layout.type_params.len():
+            if layout.type_params[index] == name: position = index
+            index = index + 1
+        if position < 0: return None
+        var candidates: [HirType] = [receiver.type_]
+        if val remembered = self.find_local_hir_type(receiver_local.id):
+            candidates.push(remembered)
+        for candidate in candidates:
+            if self.native_trait_owner_for_kind(candidate.kind) != layout.owner: continue
+            match candidate.kind:
+                case HirTypeKind.Named(_, args):
+                    if position < args.len(): return Some(args[position])
+                case _: ()
+        None

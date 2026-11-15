@@ -10,8 +10,11 @@ use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
 use std.nogc_sync_mut.orchestration.host_execution_observation_v2.*
 use std.nogc_sync_mut.orchestration.host_execution_intent_v1.*
 use std.nogc_sync_mut.orchestration.local_authority_policy_v1.LocalAuthorityPolicyV1
-use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_project_v2, simple_container_apply_v2, simple_container_read_v2, simple_container_intent_v2, simple_container_scope_v2, simple_container_observation_v2, simple_container_backend_v2, simple_container_configuration_observe_v1}
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_project_v2, simple_container_apply_v2, simple_container_read_v2, simple_container_intent_v2, simple_container_scope_v2, simple_container_observation_v2, simple_container_backend_v2, simple_container_configuration_observe_v1, simple_container_input_configuration_observe_v1}
 use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, ContainerHostScopeV2, container_execution_request_encode_v2, container_execution_plan_bytes_v2, container_scope_fence_id_v2}
+use std.common.contracts.container.pre_start_input_constraint_v1.{ContainerPreStartInputConstraintV1,
+    container_pre_start_input_constraint_copy_v1, container_pre_start_input_constraint_validate_v1,
+    container_pre_start_input_constraint_check_v1}
 use std.common.contracts.container.pre_start_constraint_v1.{ContainerPreStartConstraintV1, container_pre_start_constraint_copy_v1, container_pre_start_constraint_validate_v1, container_pre_start_constraint_check_v1}
 use std.common.contracts.container.effect_deadline_v1.{ContainerEffectDeadlineV1, container_effect_deadline_v1}
 use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeIntentV1, RUNTIME_STATUS_OK}
@@ -41,6 +44,46 @@ struct HostExecutionPreparedV2:
     runtime_engine: text
     scope: ContainerHostScopeV2
     runtime_fence_id: text
+
+# Private sum type prevents independently supplied inconsistent base/input pairs.
+enum HostExecutionRestrictionV1:
+    Unrestricted
+    Base(value: ContainerPreStartConstraintV1)
+    Input(value: ContainerPreStartInputConstraintV1)
+
+fn host_execution_input_restriction_v1(value: HostExecutionRestrictionV1) -> Option<ContainerPreStartInputConstraintV1>:
+    match value:
+        case HostExecutionRestrictionV1.Input(input): Some(container_pre_start_input_constraint_copy_v1(input))
+        case _: nil
+
+fn host_execution_base_restriction_v1(value: HostExecutionRestrictionV1,
+        input: Option<ContainerPreStartInputConstraintV1>) -> Option<ContainerPreStartConstraintV1>:
+    if input.is_some(): return Some(container_pre_start_constraint_copy_v1(input.unwrap().base))
+    match value:
+        case HostExecutionRestrictionV1.Base(base): Some(container_pre_start_constraint_copy_v1(base))
+        case _: nil
+
+struct HostPreStartConfigurationTurnV1:
+    container: SimpleContainerOwnerV2
+    error: text
+
+# Exactly one actual producer is chosen. No caller observation DTO enters here.
+fn host_execution_pre_start_configuration_v1(container: SimpleContainerOwnerV2, prepared: HostExecutionPreparedV2,
+        created: RuntimeIdentityV1, base: ContainerPreStartConstraintV1,
+        input: Option<ContainerPreStartInputConstraintV1>) -> HostPreStartConfigurationTurnV1:
+    if input.is_some():
+        val configured = simple_container_input_configuration_observe_v1(container, prepared.envelope.execution)
+        if configured.error != "" or configured.observation.is_none():
+            return HostPreStartConfigurationTurnV1(configured.owner, "host-execution-pre-start-input-observation:" + configured.error)
+        val restricted = container_pre_start_input_constraint_check_v1(input.unwrap(), prepared.envelope.execution,
+            prepared.scope, created, configured.observation.unwrap())
+        return HostPreStartConfigurationTurnV1(configured.owner, if restricted.is_err(): restricted.unwrap_err() else: "")
+    val configured = simple_container_configuration_observe_v1(container, prepared.envelope.execution)
+    if configured.error != "" or configured.observation.is_none():
+        return HostPreStartConfigurationTurnV1(configured.owner, "host-execution-pre-start-observation:" + configured.error)
+    val restricted = container_pre_start_constraint_check_v1(base, prepared.envelope.execution,
+        prepared.scope, created, configured.observation.unwrap())
+    HostPreStartConfigurationTurnV1(configured.owner, if restricted.is_err(): restricted.unwrap_err() else: "")
 
 fn host_execution_current_v2(owner: HostCapacityOwnerV1) -> bool:
     val checked = distributed_operation_journal_lookup_v2(owner.journal, "")
@@ -187,14 +230,33 @@ pub fn host_authorized_execute_constrained_v2(owner: HostCapacityOwnerV1, contai
         context: HostReservationAuthorizationContextV1,
         refresh_context: fn() -> HostReservationAuthorizationContextV1,
         requested_constraint: Option<ContainerPreStartConstraintV1>) -> HostExecutionTurnV2:
-    val constraint = if requested_constraint.is_some(): Some(container_pre_start_constraint_copy_v1(requested_constraint.unwrap())) else: nil
+    val restriction = if requested_constraint.is_some(): HostExecutionRestrictionV1.Base(requested_constraint.unwrap()) else: HostExecutionRestrictionV1.Unrestricted
+    host_execution_restricted_execute_v2(owner, container, payload, policy, expected_provider_identity_digest,
+        service_scope_id, context, refresh_context, restriction)
+
+pub fn host_authorized_execute_input_constrained_v2(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2,
+        payload: text, policy: LocalAuthorityPolicyV1, expected_provider_identity_digest: text, service_scope_id: text,
+        context: HostReservationAuthorizationContextV1, refresh_context: fn() -> HostReservationAuthorizationContextV1,
+        requested_input: ContainerPreStartInputConstraintV1) -> HostExecutionTurnV2:
+    host_execution_restricted_execute_v2(owner, container, payload, policy, expected_provider_identity_digest,
+        service_scope_id, context, refresh_context, HostExecutionRestrictionV1.Input(requested_input))
+
+fn host_execution_restricted_execute_v2(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2,
+        payload: text, policy: LocalAuthorityPolicyV1, expected_provider_identity_digest: text, service_scope_id: text,
+        context: HostReservationAuthorizationContextV1, refresh_context: fn() -> HostReservationAuthorizationContextV1,
+        restriction: HostExecutionRestrictionV1) -> HostExecutionTurnV2:
+    val input_constraint = host_execution_input_restriction_v1(restriction)
+    val constraint = host_execution_base_restriction_v1(restriction, input_constraint)
     if not host_execution_current_v2(owner): return HostExecutionTurnV2(owner, container, nil, true, "host-execution-owner-stale")
     val checked = host_execution_prepare_v2(owner, container, payload, policy, expected_provider_identity_digest, service_scope_id, context)
     if checked.is_err():
         val reason = checked.unwrap_err()
         return HostExecutionTurnV2(owner, container, nil, reason == "host-reconciliation-required" or reason == "execution-reconciliation-required", reason)
     val prepared = checked.unwrap()
-    if constraint.is_some():
+    if input_constraint.is_some():
+        val restricted = container_pre_start_input_constraint_validate_v1(input_constraint.unwrap(), prepared.envelope.execution, prepared.scope)
+        if restricted.is_err(): return HostExecutionTurnV2(owner, container, nil, false, restricted.unwrap_err())
+    elif constraint.is_some():
         val restricted = container_pre_start_constraint_validate_v1(constraint.unwrap(), prepared.envelope.execution, prepared.scope)
         if restricted.is_err(): return HostExecutionTurnV2(owner, container, nil, false, restricted.unwrap_err())
     val retained = host_execution_retain_v2(owner, prepared, payload)
@@ -246,14 +308,10 @@ pub fn host_authorized_execute_constrained_v2(owner: HostCapacityOwnerV1, contai
         if stored_intent.is_err(): error = stored_intent.unwrap_err()
         else:
             if constraint.is_some():
-                val configured = simple_container_configuration_observe_v1(current_container, prepared.envelope.execution)
-                current_container = configured.owner
-                if configured.error != "" or configured.observation.is_none():
-                    error = "host-execution-pre-start-observation:" + configured.error
-                else:
-                    val restricted = container_pre_start_constraint_check_v1(constraint.unwrap(), prepared.envelope.execution,
-                        prepared.scope, created.state.identity, configured.observation.unwrap())
-                    if restricted.is_err(): error = restricted.unwrap_err()
+                val configured = host_execution_pre_start_configuration_v1(current_container, prepared,
+                    created.state.identity, constraint.unwrap(), input_constraint)
+                current_container = configured.container
+                error = configured.error
             val start_context = refresh_context()
             if error == "": error = host_execution_context_error_v2(latest_context, start_context, policy)
             if error == "":
@@ -315,6 +373,7 @@ struct HostExecutionProgressStateV4:
     created_id: text = ""
     created_runtime: Option<RuntimeIdentityV1> = nil
     constraint: Option<ContainerPreStartConstraintV1> = nil
+    input_constraint: Option<ContainerPreStartInputConstraintV1> = nil
     create_status: text = "not-attempted"
     start_status: text = "not-attempted"
     inspect_status: text = "not-attempted"
@@ -334,7 +393,23 @@ pub fn host_authorized_execution_begin_constrained_v4(owner: HostCapacityOwnerV1
         context: HostReservationAuthorizationContextV1,
         refresh: fn() -> HostReservationAuthorizationContextV1,
         requested_constraint: Option<ContainerPreStartConstraintV1>) -> HostExecutionProgressTurnV4:
-    val constraint = if requested_constraint.is_some(): Some(container_pre_start_constraint_copy_v1(requested_constraint.unwrap())) else: nil
+    val restriction = if requested_constraint.is_some(): HostExecutionRestrictionV1.Base(requested_constraint.unwrap()) else: HostExecutionRestrictionV1.Unrestricted
+    host_execution_restricted_begin_v4(owner, container, payload, policy, provider_digest,
+        service_scope_id, context, refresh, restriction)
+
+pub fn host_authorized_execution_begin_input_constrained_v4(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2,
+        payload: text, policy: LocalAuthorityPolicyV1, provider_digest: text, service_scope_id: text,
+        context: HostReservationAuthorizationContextV1, refresh: fn() -> HostReservationAuthorizationContextV1,
+        requested_input: ContainerPreStartInputConstraintV1) -> HostExecutionProgressTurnV4:
+    host_execution_restricted_begin_v4(owner, container, payload, policy, provider_digest,
+        service_scope_id, context, refresh, HostExecutionRestrictionV1.Input(requested_input))
+
+fn host_execution_restricted_begin_v4(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2,
+        payload: text, policy: LocalAuthorityPolicyV1, provider_digest: text, service_scope_id: text,
+        context: HostReservationAuthorizationContextV1, refresh: fn() -> HostReservationAuthorizationContextV1,
+        restriction: HostExecutionRestrictionV1) -> HostExecutionProgressTurnV4:
+    val input_constraint = host_execution_input_restriction_v1(restriction)
+    val constraint = host_execution_base_restriction_v1(restriction, input_constraint)
     if simple_container_backend_v2(container) != "windows-docker-process":
         return HostExecutionProgressTurnV4(owner, container, nil, nil, false, "host-cooperative-backend-unavailable")
     val thread = simple_container_execution_thread_check_v4(container)
@@ -346,7 +421,10 @@ pub fn host_authorized_execution_begin_constrained_v4(owner: HostCapacityOwnerV1
     val checked = host_execution_prepare_v2(owner, container, payload, policy, provider_digest, service_scope_id, context)
     if checked.is_err(): return HostExecutionProgressTurnV4(owner, container, nil, nil, false, checked.unwrap_err())
     val prepared = checked.unwrap()
-    if constraint.is_some():
+    if input_constraint.is_some():
+        val restricted = container_pre_start_input_constraint_validate_v1(input_constraint.unwrap(), prepared.envelope.execution, prepared.scope)
+        if restricted.is_err(): return HostExecutionProgressTurnV4(owner, container, nil, nil, false, restricted.unwrap_err())
+    elif constraint.is_some():
         val restricted = container_pre_start_constraint_validate_v1(constraint.unwrap(), prepared.envelope.execution, prepared.scope)
         if restricted.is_err(): return HostExecutionProgressTurnV4(owner, container, nil, nil, false, restricted.unwrap_err())
     val retained = host_execution_retain_v2(owner, prepared, payload)
@@ -365,7 +443,7 @@ pub fn host_authorized_execution_begin_constrained_v4(owner: HostCapacityOwnerV1
     host_execution_progress_slots_v4.push(Some(HostExecutionProgressStateV4(prepared: prepared, policy: policy,
         provider_digest: provider_digest, context: latest, journal_root: executing.journal.root,
         journal_lease: executing.journal.lease_digest, journal_authority: executing.journal.authority_digest,
-        journal_sequence: executing.journal.sequence, constraint: constraint)))
+        journal_sequence: executing.journal.sequence, constraint: constraint, input_constraint: input_constraint)))
     HostExecutionProgressTurnV4(executing, container, Some(HostExecutionContinuationV4(slot,
         simple_container_execution_scripted_v4(container).unwrap(), prepared.scope,
         executing.journal.root, executing.journal.lease_digest, executing.journal.authority_digest)), nil, false, "")
@@ -439,14 +517,10 @@ pub fn host_authorized_execution_step_v4(owner: HostCapacityOwnerV1, container: 
         if state.constraint.is_none() or state.created_runtime.is_none():
             state.error = "host-execution-pre-start-created-owner-missing"
         else:
-            val configured = simple_container_configuration_observe_v1(container, state.prepared.envelope.execution)
-            current_container = configured.owner
-            if configured.error != "" or configured.observation.is_none():
-                state.error = "host-execution-pre-start-observation:" + configured.error
-            else:
-                val restricted = container_pre_start_constraint_check_v1(state.constraint.unwrap(), state.prepared.envelope.execution,
-                    state.prepared.scope, state.created_runtime.unwrap(), configured.observation.unwrap())
-                if restricted.is_err(): state.error = restricted.unwrap_err()
+            val configured = host_execution_pre_start_configuration_v1(container, state.prepared,
+                state.created_runtime.unwrap(), state.constraint.unwrap(), state.input_constraint)
+            current_container = configured.container
+            state.error = configured.error
         state.stage = if state.error == "": "start" else: "inspect"
         host_execution_progress_slots_v4[continuation.slot] = Some(state)
         return HostExecutionProgressTurnV4(owner, current_container, Some(continuation), nil, state.error != "", state.error)
