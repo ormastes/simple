@@ -31,6 +31,7 @@ use compiler.driver.driver_build.native_mir_shard.{
     native_mir_shard_link_inputs_v1, native_mir_shard_smf_part_read_v1,
     native_mir_shard_smf_part_write_v1,
     native_mir_shard_run_key_v1, native_mir_shard_run_key_mismatch_v1,
+    native_mir_shard_run_key_selection_v1, native_mir_shard_resume_full_pass_line_v1,
     native_mir_shard_resume_adopt_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory,
     hir_shard_recovery_terminal, hir_shard_recovery_unclaimed_count}
@@ -45,8 +46,15 @@ fn resume_receipt(object_path: text, capsule: text) -> bool:
     file_write(object_path + ".capsule-receipt",
         "native-capsule-result-v1\n{capsule}\n{object_path}\n{file_size_raw(object_path)}\n{file_hash_sha256_or_empty(object_path)}\n")
 
+fn resume_selection(ice_skip: text, go_to_end: text, only_paths: text) -> text:
+    native_mir_shard_run_key_selection_v1(ice_skip, go_to_end, only_paths)
+
 fn resume_key(args: [text], count: i64) -> text:
-    native_mir_shard_run_key_v1("compiler-a", "env-a", "guards-a", "default", args, count, 0)
+    native_mir_shard_run_key_v1("compiler-a", "env-a", "guards-a", "default", args, count, 0,
+        resume_selection("", "1", ""))
+
+fn resume_selected_key(selection: text) -> text:
+    native_mir_shard_run_key_v1("compiler-a", "env-a", "guards-a", "default", [], 2, 0, selection)
 
 describe "MIR shard resume run key":
     it "ignores the --threads argument and names the first differing component":
@@ -62,20 +70,55 @@ describe "MIR shard resume run key":
         assert_equal(native_mir_shard_run_key_mismatch_v1(base,
             resume_key(["--backend", "llvm", "--threads", "2", "-o", "out/simple"], 9)), "argv")
         assert_equal(native_mir_shard_run_key_mismatch_v1(base,
-            native_mir_shard_run_key_v1("compiler-b", "env-a", "guards-a", "default", args, 9, 0)), "compiler")
+            native_mir_shard_run_key_v1("compiler-b", "env-a", "guards-a", "default", args, 9, 0, resume_selection("", "1", ""))), "compiler")
         assert_equal(native_mir_shard_run_key_mismatch_v1(base,
-            native_mir_shard_run_key_v1("compiler-a", "env-b", "guards-a", "default", args, 9, 0)), "environment")
+            native_mir_shard_run_key_v1("compiler-a", "env-b", "guards-a", "default", args, 9, 0, resume_selection("", "1", ""))), "environment")
         assert_equal(native_mir_shard_run_key_mismatch_v1(base,
-            native_mir_shard_run_key_v1("compiler-a", "env-a", "guards-b", "default", args, 9, 0)), "guards")
+            native_mir_shard_run_key_v1("compiler-a", "env-a", "guards-b", "default", args, 9, 0, resume_selection("", "1", ""))), "guards")
         assert_equal(native_mir_shard_run_key_mismatch_v1(base,
-            native_mir_shard_run_key_v1("compiler-a", "env-a", "guards-a", "lane-x", args, 9, 0)), "lane")
+            native_mir_shard_run_key_v1("compiler-a", "env-a", "guards-a", "lane-x", args, 9, 0, resume_selection("", "1", ""))), "lane")
         assert_equal(native_mir_shard_run_key_mismatch_v1(base,
-            native_mir_shard_run_key_v1("compiler-a", "env-a", "guards-a", "default", args, 9, 4)), "fork-workers")
+            native_mir_shard_run_key_v1("compiler-a", "env-a", "guards-a", "default", args, 9, 4, resume_selection("", "1", ""))), "fork-workers")
 
     it "names an absent prior run key":
         # @req REQ-SSPEC-COMPILER
         step("names an absent prior run key")
         assert_equal(native_mir_shard_run_key_mismatch_v1("", resume_key([], 2)), "run-key-absent")
+
+    it "ignores --jobs and -j like --threads":
+        # @req REQ-SSPEC-COMPILER
+        step("ignores --jobs and -j like --threads (one shard-thread reader)")
+        val base = resume_key(["--backend", "cranelift", "-o", "out/simple"], 9)
+        assert_equal(native_mir_shard_run_key_mismatch_v1(base,
+            resume_key(["--backend", "cranelift", "--jobs", "4", "-o", "out/simple"], 9)), "")
+        assert_equal(native_mir_shard_run_key_mismatch_v1(base,
+            resume_key(["--backend", "cranelift", "--jobs=6", "-o", "out/simple"], 9)), "")
+        assert_equal(native_mir_shard_run_key_mismatch_v1(base,
+            resume_key(["--backend", "cranelift", "-j", "3", "-o", "out/simple"], 9)), "")
+
+    it "binds the ICE skip list, go-to-end and the only-paths filter":
+        # @req REQ-SSPEC-COMPILER
+        step("a changed ICE skip list is a full pass naming ice-skip")
+        val base = resume_selected_key(resume_selection("", "1", ""))
+        assert_equal(native_mir_shard_run_key_mismatch_v1(base,
+            resume_selected_key(resume_selection("", "1", ""))), "")
+        assert_equal(native_mir_shard_run_key_mismatch_v1(base,
+            resume_selected_key(resume_selection("gamma", "1", ""))), "ice-skip")
+        assert_equal(native_mir_shard_run_key_mismatch_v1(base,
+            resume_selected_key(resume_selection("", "", ""))), "go-to-end")
+        assert_equal(native_mir_shard_run_key_mismatch_v1(base,
+            resume_selected_key(resume_selection("", "1", "src/alpha.spl"))), "only-paths")
+        val prior = resume_selected_key(resume_selection("", "1", ""))
+        val relaunch = resume_selected_key(resume_selection("gamma", "1", ""))
+        assert_equal(native_mir_shard_resume_full_pass_line_v1(
+            native_mir_shard_run_key_mismatch_v1(prior, relaunch), "/c/hir/mir-queue-7-0"),
+            "[mir-shard] resume: full pass; run key component ice-skip differs from prior ledger /c/hir/mir-queue-7-0")
+
+    it "says plainly when there is no prior ledger":
+        # @req REQ-SSPEC-COMPILER
+        step("first launch: no prior ledger, no empty path")
+        assert_equal(native_mir_shard_resume_full_pass_line_v1("no-prior-ledger", ""),
+            "[mir-shard] resume: no prior ledger; full pass")
 
 describe "MIR shard resume adoption":
     it "adopts verified PASS rows and requeues crashed, missing, changed and overwritten rows":
