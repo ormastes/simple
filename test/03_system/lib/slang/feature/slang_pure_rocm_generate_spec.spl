@@ -1,0 +1,152 @@
+# @cover src/lib/gc_async_mut/slang/model_executor/pure/llama_forward_rocm.spl 80%
+# @cover src/lib/gc_async_mut/slang/model_executor/pure/tensor_ops_rocm.spl 80%
+# Purpose and audience: executable evidence that the pure-Simple Llama runner
+# executes its forward pass on the AMD Radeon GPU through ROCm (slang -> pure
+# runner -> GPU API -> ROCm): same greedy token ids as the CPU runner for
+# stories15M, the llama.cpp reference text, and prefix reuse that changes cost
+# only. Prints a CPU-vs-GPU perf table to the log.
+# Gate: runs only when the ROCm DLLs exist and the stories15M model directory
+# exists (SLANG_PURE_MODEL, default C:/dev/model/llama2c-stories15M). The CPU
+# leg is slow on the seed interpreter (minutes).
+
+use std.spec.{describe, it, expect, skip}
+use std.io_runtime.{env_get, is_dir}
+use std.nogc_sync_mut.io.time_ops.{time_now_nanos}
+use std.gc_async_mut.gpu.rocm.hip_compute.{rocm_available_at, rocm_bin_default}
+use std.gc_async_mut.slang.model_executor.pure.llama_forward.{llama_load}
+use std.gc_async_mut.slang.model_executor.pure.kv_cache.{kv_session_new, kv_generate_greedy}
+use std.gc_async_mut.slang.model_executor.pure.tokenizer.{pure_tokenizer_load, pure_tokenizer_encode, pure_tokenizer_decode}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops_rocm.{rocm_ops_open, rocm_ops_device_name, rocm_tensor_download}
+use std.gc_async_mut.slang.model_executor.pure.llama_forward_rocm.{rocm_llama_load, rocm_llama_free, rocm_kv_session_new, rocm_kv_session_free, rocm_generate_greedy, llama_logits_rocm}
+
+# llama.cpp greedy continuation of "Once upon a time" for this model.
+val REFERENCE = ", there was a little girl named Lily. She loved to play outside in the sun"
+val N_GPU = 18
+val N_CPU = 12
+
+fn _model_dir() -> text:
+    # env_get returns "" (not None) when unset.
+    val env_dir = env_get("SLANG_PURE_MODEL")
+    val d = if env_dir != "": env_dir else: "C:/dev/model/llama2c-stories15M"
+    if is_dir(d):
+        return d
+    ""
+
+fn _ms_since(t0: i64) -> i64:
+    (time_now_nanos() - t0) / 1000000
+
+fn _slice(xs: [i64], from: i64, to: i64) -> [i64]:
+    var out: [i64] = []
+    var i = from
+    while i < to:
+        out.push(xs[i])
+        i = i + 1
+    out
+
+fn _first_diff(a: [i64], b: [i64]) -> i64:
+    var i: i64 = 0
+    while i < a.len() and i < b.len():
+        if a[i] != b[i]:
+            return i
+        i = i + 1
+    -1
+
+# Divergence diagnostic: GPU argmax and top-2 logit margin after `ids`.
+fn _gpu_margin(ops, m, ids: [i64]) -> text:
+    val s = rocm_kv_session_new(ops, m).unwrap()
+    val r = rocm_generate_greedy(ops, m, s, ids, 0).unwrap()
+    val logits = rocm_tensor_download(ops, llama_logits_rocm(ops, m, r.session.hidden).unwrap()).unwrap()
+    var b1: i64 = 0
+    var i: i64 = 1
+    while i < logits.data.len():
+        if logits.data[i] > logits.data[b1]:
+            b1 = i
+        i = i + 1
+    var b2: i64 = if b1 == 0: 1 else: 0
+    i = 0
+    while i < logits.data.len():
+        if i != b1 and logits.data[i] > logits.data[b2]:
+            b2 = i
+        i = i + 1
+    "top1={b1} ({logits.data[b1]}) top2={b2} ({logits.data[b2]}) margin={logits.data[b1] - logits.data[b2]}"
+
+fn _tps(n: i64, ms: i64) -> f64:
+    if ms <= 0:
+        return 0.0
+    (n * 1000) as f64 / (ms as f64)
+
+describe "slang pure runner forward pass on the AMD GPU via ROCm":
+    it "generates the same greedy ids as the CPU runner and reuses a shared prefix":
+        val dir = _model_dir()
+        print "GATE: rocm={rocm_available_at(rocm_bin_default())} model_dir=[{dir}]"
+        val name = "generates the same greedy ids as the CPU runner and reuses a shared prefix"
+        if not rocm_available_at(rocm_bin_default()):
+            print "SKIP: ROCm DLLs not found in {rocm_bin_default()}"
+            skip(name, "ROCm DLLs not found in {rocm_bin_default()}")
+        elif dir == "":
+            print "SKIP: stories15M model directory not present"
+            skip(name, "stories15M model directory not present")
+        else:
+            val ops = rocm_ops_open().unwrap()
+            val dev = rocm_ops_device_name(ops)
+            print "DEVICE: {dev}"
+            expect(dev).to_contain("Radeon")
+
+            val tok = pure_tokenizer_load(dir).unwrap()
+            val prompt = pure_tokenizer_encode(tok, "Once upon a time", true)
+
+            # GPU: weights once, then greedy generation (first run includes kernel compile).
+            var t0 = time_now_nanos()
+            val gm = rocm_llama_load(ops, dir).unwrap()
+            val upload_ms = _ms_since(t0)
+            t0 = time_now_nanos()
+            val g1 = rocm_generate_greedy(ops, gm, rocm_kv_session_new(ops, gm).unwrap(), prompt, N_GPU).unwrap()
+            val gpu_ms = _ms_since(t0)
+            val gpu_text = pure_tokenizer_decode(tok, g1.generated)
+            print "gpu_ids={g1.generated}"
+            print "gpu_text=[{gpu_text}]"
+
+            # CPU reference over the same prompt (N_CPU new tokens).
+            val cm = llama_load(dir).unwrap()
+            t0 = time_now_nanos()
+            val c1 = kv_generate_greedy(cm, kv_session_new(cm), prompt, N_CPU)
+            val cpu_ms = _ms_since(t0)
+            print "cpu_ids={c1.generated}"
+
+            val gpu_head = _slice(g1.generated, 0, N_CPU)
+            val d = _first_diff(gpu_head, c1.generated)
+            if d >= 0:
+                print "DIVERGENCE at new-token index {d}: cpu={c1.generated[d]} gpu={gpu_head[d]}"
+                print "GPU logits there: {_gpu_margin(ops, gm, prompt + _slice(c1.generated, 0, d))}"
+
+            # Request 2: shared prefix (prompt + first 3 generated), warm vs fresh session.
+            val req2 = prompt + _slice(g1.generated, 0, 3)
+            t0 = time_now_nanos()
+            val before = g1.session.positions_evaluated
+            val r2 = rocm_generate_greedy(ops, gm, g1.session, req2, 3).unwrap()
+            val reuse_ms = _ms_since(t0)
+            val reuse_positions = r2.session.positions_evaluated - before
+            t0 = time_now_nanos()
+            val r2f = rocm_generate_greedy(ops, gm, rocm_kv_session_new(ops, gm).unwrap(), req2, 3).unwrap()
+            val fresh_ms = _ms_since(t0)
+            val fresh_positions = r2f.session.positions_evaluated
+
+            var tbl = "| run | new tokens | positions | ms | tokens/s |\n"
+            tbl = tbl + "| model upload (F32 bytes, once) | - | - | {upload_ms} | - |\n"
+            tbl = tbl + "| CPU greedy (incl. cache) | {c1.generated.len()} | {c1.session.positions_evaluated} | {cpu_ms} | {_tps(c1.generated.len(), cpu_ms)} |\n"
+            tbl = tbl + "| GPU greedy, first run (incl. kernel compile) | {g1.generated.len()} | {g1.session.positions_evaluated} | {gpu_ms} | {_tps(g1.generated.len(), gpu_ms)} |\n"
+            tbl = tbl + "| GPU request 2, prefix reuse ({r2.reused_positions} cached) | {r2.generated.len()} | {reuse_positions} | {reuse_ms} | {_tps(r2.generated.len(), reuse_ms)} |\n"
+            tbl = tbl + "| GPU request 2, fresh session | {r2f.generated.len()} | {fresh_positions} | {fresh_ms} | {_tps(r2f.generated.len(), fresh_ms)} |"
+            print tbl
+
+            # (b) GPU ids == CPU ids, and the text is the llama.cpp reference.
+            expect(gpu_head).to_equal(c1.generated)
+            expect(gpu_text).to_equal(REFERENCE)
+            # (c) prefix reuse changes cost, not output.
+            expect(r2.generated).to_equal(r2f.generated)
+            expect(r2.generated).to_equal(_slice(g1.generated, 3, 6))
+            expect(reuse_positions < fresh_positions).to_equal(true)
+
+            rocm_kv_session_free(ops, r2.session).unwrap()
+            rocm_kv_session_free(ops, r2f.session).unwrap()
+            rocm_llama_free(ops, gm).unwrap()
