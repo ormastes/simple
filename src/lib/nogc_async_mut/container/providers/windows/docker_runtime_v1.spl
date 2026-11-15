@@ -1,3 +1,4 @@
+use std.nogc_async_mut.container.shared.input_configuration_query_v1.*
 use std.nogc_async_mut.container.shared.logs_capture_v1.*
 use std.nogc_sync_mut.io.process_capture_evidence_v1.process_capture_windows_begin_v1
 use std.nogc_async_mut.container.providers.windows.runtime_operation_projection_v1.*
@@ -162,25 +163,32 @@ impl WindowsDockerRuntimeProviderV1:
         ContainerRuntimeLogsCaptureTurnV1(runtime: state.identity, capture: process_capture_windows_begin_v1(native))
 
     pub me fn configuration_v1(request: WindowsDockerRequestV1, scope: ContainerHostScopeV2) -> RuntimeOperationV1:
+        self._configuration_observe_input_v1(request, scope, false)
+
+    pub me fn input_configuration_v1(request: WindowsDockerRequestV1, scope: ContainerHostScopeV2) -> RuntimeOperationV1:
+        self._configuration_observe_input_v1(request, scope, true)
+
+    me fn _configuration_observe_input_v1(request: WindowsDockerRequestV1, scope: ContainerHostScopeV2, include_input: bool) -> RuntimeOperationV1:
+        val action = if include_input: "input-configuration" else: "configuration"
         val state = match self._guard(request):
             case Ok(value): value
-            case Err(reason): return self._failure(request, "configuration", reason)
-        val output = self._configuration_capture_v1(request, scope, state.identity)
+            case Err(reason): return self._failure(request, action, reason)
+        val output = self._configuration_capture_v1(request, scope, state.identity, include_input)
         match output:
-            case Err(reason): self._failure(request, "configuration", reason)
-            case Ok(source): RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: "configuration", state: state,
+            case Err(reason): self._failure(request, action, reason)
+            case Ok(source): RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: action, state: state,
                 command: runtime_command_empty(), exit_code: 0, stdout: source, stderr: "", reason: "engine-configuration-data")
 
     me fn _configuration_capture_v1(request: WindowsDockerRequestV1, scope: ContainerHostScopeV2,
-            identity: RuntimeIdentityV1) -> Result<text, text>:
-        val query = configuration_container_command_v1(identity, true)?
+            identity: RuntimeIdentityV1, include_input: bool) -> Result<text, text>:
+        val query = configuration_selected_command_v2(identity, true, include_input)?
         val routed = windows_docker_command_v1(self.policy, query.operation, query.args)
         val first_run = match self._execute(routed):
             case Ok(value): value
             case Err(_): return Err("configuration-container-capture-failed")
         if first_run.2 != 0: return Err("configuration-container-capture-failed")
-        val first = configuration_container_parse_v1(first_run.0, identity, scope, true)?
-        val image_query = configuration_image_command_v1("docker", first.image_id)?
+        val first = configuration_selected_parse_v2(first_run.0, identity, scope, true, include_input)?
+        val image_query = configuration_image_command_v1("docker", first.configuration.image_id)?
         val image_run = match self._execute(windows_docker_command_v1(self.policy, image_query.operation, image_query.args)):
             case Ok(value): value
             case Err(_): return Err("configuration-image-capture-failed")
@@ -189,9 +197,9 @@ impl WindowsDockerRuntimeProviderV1:
             case Ok(value): value
             case Err(_): return Err("configuration-container-recheck-failed")
         if last_run.2 != 0: return Err("configuration-container-recheck-failed")
-        val last = configuration_container_parse_v1(last_run.0, identity, scope, true)?
-        configuration_observation_v1(first, image_run.0, last, scope, identity,
-            windows_docker_request_digest_v1(self.policy, request)?, request.image)
+        val last = configuration_selected_parse_v2(last_run.0, identity, scope, true, include_input)?
+        configuration_selected_observation_v2(first, image_run.0, last, scope, identity,
+            windows_docker_request_digest_v1(self.policy, request)?, request.image, include_input)
 
     fn _state(request: WindowsDockerRequestV1) -> RuntimeStateV1:
         windows_runtime_record_state_v1(self.records, request)
