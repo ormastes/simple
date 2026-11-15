@@ -1,7 +1,7 @@
 # `unit Name: T` is not a constructible type on the Rust seed
 
 Date: 2026-11-15
-Status: partly fixed (construction + suffix-less form); operators on one-field records still open
+Status: fixed on the seed (construction, suffix-less form, same-unit operators)
 
 ## Fixed (seed, this change)
 1. `unit ByteCount: u64 as Bc` then `ByteCount(value: 7)` failed with
@@ -15,17 +15,15 @@ Status: partly fixed (construction + suffix-less form); operators on one-field r
 Tests: `parser/tests/type_tests.rs` (`test_unit_without_suffix*`),
 `driver/tests/interpreter_unit_types.rs` (`interpreter_unit_decl_*`),
 `test/01_unit/compiler/frontend/unit_decl_e2e_spec.spl` (3/3 on the built seed:
-construct + `.value`, pass to function, struct field).
+8/8 on the built seed incl. operators).
 
-## Remaining (not parser; out of this PR)
-Operators on any one-field record fail on the seed, `newtype` included:
-`newtype B = i64; val a = B(value: 10); (a + a)` => `semantic: type mismatch: cannot
-convert object to int` (also `<`, `*`, `3 * a`; `==` works). JIT first demotes with
-`HIR lowering error: ... cannot infer field type ... struct 'ANY' field 'value'`.
-The interpreter has newtype-wrap code in `interpreter/expr/ops.rs` (~693) but the
-failure happens before it is reached (reported as `compile failed`). The removed spec
-examples (same-unit +/-, scale by int, compare, `b * 2`, `buf.size + by`) must return
-once this is fixed.
+3. Operators on one-field records failed on the seed (`newtype` included): `(a + a)` =>
+   `semantic: type mismatch: cannot convert object to int`. Cause: class instances are
+   `Value::ClassInstance`, but the newtype-wrap code in `interpreter/expr/ops.rs` and
+   `Value::as_int` only knew `Value::Object`. Both now accept a method-less class
+   instance whose only field is `value`. Result types: U+U, U-U, U%U, U*n, n*U, U/n give U;
+   U*U and U/U give the bare scalar; comparisons work. No cross-unit deny check on the
+   seed (the pure-Simple compiler enforces that).
 
-Still blocked: migrating `nvme_ct.spl` to `unit` needs a deployed seed containing this
-change, and operator use on units needs the operator fix above.
+## Remaining
+Migrating `nvme_ct.spl` to `unit` needs a deployed seed containing this change.
