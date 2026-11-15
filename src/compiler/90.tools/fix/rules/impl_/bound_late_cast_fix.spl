@@ -1,0 +1,257 @@
+# SPL-BOUND-002 boundary-return autofix (plan section 7.3, single-file case).
+#
+# Detection is owned by check_bound_late_casts (35.semantics/lint/bound_late_cast.spl).
+# For a finding whose cast argument is exactly one raw extern call with literal
+# (or no) arguments, `Unit(ext(args))`, this proposes ONE review-required
+# FixCandidate that (a) creates or reuses the boundary adapter
+# `<extern>_as_<unit>` annotated @unsafe(... capabilities: [ffi]) returning
+# `Unit(ext(...))`, and (b) rewrites the late cast sites to call the adapter.
+#
+# Never Safe (confidence Uncertain -> ReviewRequired) and never a no-op edit.
+# It aborts with NO fix when the cast argument is not a plain extern call, when
+# the extern's arguments are anything but literals (locals make the origin
+# ambiguous), or when the line is not ASCII (byte spans are not trusted).
+# Edits carry preconditions, so they only apply through the revision/hash
+# checked EditTransaction (std.common.diagnostics.fix_transaction).
+
+use compiler.semantics.lint.bound_late_cast.{check_bound_late_casts, BoundLateCastFinding}
+use std.common.diagnostics.diagnostic_v1.{DiagnosticFixConfidence}
+use std.common.diagnostics.diagnostic_batch.{FixCandidate}
+use std.common.diagnostics.span.{Span}
+
+struct BoundSite:
+    adapter: text
+    extern_name: text
+    unit_name: text
+    call_args: text
+    line: i64
+    col: i64
+    start: i64
+    end: i64
+    old_text: text
+
+fn _bf_unit_of(f: BoundLateCastFinding) -> text:
+    val a = f.message.find("`")
+    if a < 0:
+        return ""
+    val rest = f.message.substring(a + 1, f.message.byte_len())
+    val b = rest.find("`")
+    if b < 0:
+        return ""
+    rest.substring(0, b)
+
+fn _bf_ident_char(c: text) -> bool:
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+
+# Index of the `)` closing the `(` at `open`, or -1.
+fn _bf_close(s: text, open: i64) -> i64:
+    var depth = 0
+    var i = open
+    while i < s.byte_len():
+        val c = s.substring(i, i + 1)
+        if c == "(":
+            depth = depth + 1
+        elif c == ")":
+            depth = depth - 1
+            if depth == 0:
+                return i
+        i = i + 1
+    -1
+
+fn _bf_literal(part: text) -> bool:
+    val p = part.trim()
+    if p == "":
+        return false
+    if p == "true" or p == "false":
+        return true
+    var i = 0
+    while i < p.byte_len():
+        val c = p.substring(i, i + 1)
+        if not ((c >= "0" and c <= "9") or c == "-" or c == "." or c == "_" or c == "x"):
+            return false
+        i = i + 1
+    true
+
+# Literal-only argument list; empty is fine. Anything else (a local, a nested
+# call, text) makes the origin ambiguous.
+fn _bf_args_literal(args: text) -> bool:
+    if args.trim() == "":
+        return true
+    for part in args.split(","):
+        if not _bf_literal(part):
+            return false
+    true
+
+fn _bf_arg_count(args: text) -> i64:
+    if args.trim() == "":
+        return 0
+    args.split(",").len()
+
+fn _bf_strip_extern(line: text) -> text:
+    var t = line.trim()
+    if t.starts_with("pub "):
+        t = t.substring(4, t.byte_len())
+    if t.starts_with("unsafe "):
+        t = t.substring(7, t.byte_len())
+    t
+
+fn _bf_extern_names(lines: [text]) -> [text]:
+    var out: [text] = []
+    for line in lines:
+        val t = _bf_strip_extern(line)
+        if t.starts_with("extern fn "):
+            val rest = t.substring(10, t.byte_len())
+            var i = 0
+            while i < rest.byte_len() and _bf_ident_char(rest.substring(i, i + 1)):
+                i = i + 1
+            if i > 0 and not out.contains(rest.substring(0, i)):
+                out.push(rest.substring(0, i))
+    out
+
+fn _bf_extern_line(lines: [text], name: text) -> i64:
+    val needle = "extern fn " + name + "("
+    var i = 0
+    while i < lines.len():
+        if _bf_strip_extern(lines[i]).starts_with(needle):
+            return i
+        i = i + 1
+    -1
+
+# Declared parameter list text ("a: i32, b: i32") of a simple extern, or None
+# when the declaration is not simple (generics, nested parens, unnamed params).
+fn _bf_extern_params(lines: [text], name: text) -> text?:
+    val idx = _bf_extern_line(lines, name)
+    if idx < 0:
+        return None
+    val t = _bf_strip_extern(lines[idx])
+    val open = ("extern fn " + name + "(").byte_len() - 1
+    val close = _bf_close(t, open)
+    if close < 0:
+        return None
+    val inner = t.substring(open + 1, close)
+    if inner.contains("<") or inner.contains("("):
+        return None
+    if inner.trim() == "":
+        return Some("")
+    for part in inner.split(","):
+        if not part.contains(":"):
+            return None
+    Some(inner.trim())
+
+fn _bf_param_names(decl: text) -> text:
+    if decl == "":
+        return ""
+    var names: [text] = []
+    for part in decl.split(","):
+        names.push(part.substring(0, part.find(":")).trim())
+    names.join(", ")
+
+fn _bf_line_offset(lines: [text], index: i64) -> i64:
+    var off = 0
+    var i = 0
+    while i < index:
+        off = off + lines[i].byte_len() + 1
+        i = i + 1
+    off
+
+# One rewritable site for the finding, or None when the case is ambiguous.
+fn _bf_site(lines: [text], externs: [text], f: BoundLateCastFinding) -> BoundSite?:
+    val unit_name = _bf_unit_of(f)
+    if unit_name == "" or f.line_num < 1 or f.line_num > lines.len():
+        return None
+    val line = lines[f.line_num - 1]
+    if line.byte_len() != line.len():
+        return None
+    val needle = unit_name + "("
+    var from = 0
+    while from < line.byte_len():
+        val k = line.substring(from, line.byte_len()).find(needle)
+        if k < 0:
+            return None
+        val at = from + k
+        from = at + needle.byte_len()
+        if at > 0:
+            val before = line.substring(at - 1, at)
+            if _bf_ident_char(before) or before == ".":
+                continue
+        val open = at + unit_name.byte_len()
+        val close = _bf_close(line, open)
+        if close < 0:
+            return None
+        val arg = line.substring(open + 1, close).trim()
+        for e in externs:
+            if not arg.starts_with(e + "(") or not arg.ends_with(")"):
+                continue
+            if _bf_close(arg, e.byte_len()) != arg.byte_len() - 1:
+                continue
+            val call_args = arg.substring(e.byte_len() + 1, arg.byte_len() - 1)
+            if not _bf_args_literal(call_args):
+                return None
+            val base = _bf_line_offset(lines, f.line_num - 1)
+            return Some(BoundSite(
+                adapter: e + "_as_" + unit_name,
+                extern_name: e,
+                unit_name: unit_name,
+                call_args: call_args.trim(),
+                line: f.line_num,
+                col: at + 1,
+                start: base + at,
+                end: base + close + 1,
+                old_text: line.substring(at, close + 1)
+            ))
+        return None
+    None
+
+fn _bf_has_adapter(lines: [text], adapter: text) -> bool:
+    for line in lines:
+        var t = line.trim()
+        if t.starts_with("pub "):
+            t = t.substring(4, t.byte_len())
+        if t.starts_with("fn " + adapter + "("):
+            return true
+    false
+
+fn _bf_adapter_text(site: BoundSite, decl: text) -> text:
+    val names = _bf_param_names(decl)
+    "@unsafe(reason: \"TODO verify C ABI\", capabilities: [ffi])\nfn " + site.adapter + "(" + decl + ") -> " + site.unit_name + ":\n    " + site.unit_name + "(" + site.extern_name + "(" + names + "))"
+
+# Fix candidates for SPL-BOUND-002 in one file: at most one per adapter name,
+# each grouping every rewritable cast site of that adapter. `version` is the
+# document version the candidate is computed against.
+pub fn bound_late_cast_fix_candidates(source: text, file: text, version: i64) -> [FixCandidate]:
+    var out: [FixCandidate] = []
+    val findings = check_bound_late_casts(source, file)
+    if findings.len() == 0:
+        return out
+    val lines = source.split("\n")
+    val externs = _bf_extern_names(lines)
+    var sites: [BoundSite] = []
+    for f in findings:
+        match _bf_site(lines, externs, f):
+            Some(s):
+                sites.push(s)
+            None:
+                pass
+    var done: [text] = []
+    for first in sites:
+        if done.contains(first.adapter):
+            continue
+        done.push(first.adapter)
+        val decl = _bf_extern_params(lines, first.extern_name) ?? "?"
+        if decl == "?" or _bf_arg_count(first.call_args) != _bf_arg_count(decl):
+            continue
+        var c = FixCandidate.new(
+            "SPL-BOUND-002:" + first.adapter,
+            "Return " + first.unit_name + " from boundary adapter " + first.adapter,
+            "Review required. Creates (or reuses) @unsafe(reason: \"TODO verify C ABI\", capabilities: [ffi]) fn " + first.adapter + " returning " + first.unit_name + "(" + first.extern_name + "(...)), and rewrites the late cast to " + first.adapter + "(" + first.call_args + "). Verify the C ABI and the unit range before accepting.",
+            DiagnosticFixConfidence.Uncertain,
+            version)
+        if not _bf_has_adapter(lines, first.adapter):
+            val el = _bf_extern_line(lines, first.extern_name)
+            val at = _bf_line_offset(lines, el) + lines[el].byte_len()
+            c = c.with_replacement(file, Span.new(at, at, el + 1, lines[el].byte_len() + 1), "\n" + _bf_adapter_text(first, decl), "")
+        for s in sites:
+            if s.adapter == first.adapter and _bf_arg_count(s.call_args) == _bf_arg_count(decl):
+                c = c.with_replacement(file, Span.new(s.start, s.end, s.line, s.col), s.adapter + "(" + s.call_args + ")", s.old_text)
+        out.push(c)
+    out

@@ -1,0 +1,111 @@
+"""
+## Purpose and audience
+Purpose: Prove the SPL-BOUND-002 boundary-return autofix proposes a
+review-required candidate that creates or reuses an @unsafe ffi adapter and
+rewrites the late cast site, aborts on ambiguous (local-derived) cases, and
+applies only through the revision/hash checked fix transaction.
+Audience: compiler and tooling engineers maintaining robust-boundary fixes.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Single-file case only; the cast must wrap one raw extern call with literal
+arguments. Cross-file adapters are a later slice of the robust-boundary plan.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use compiler.tools.fix.rules.impl_.bound_late_cast_fix.{bound_late_cast_fix_candidates}
+use std.common.diagnostics.fix_transaction.{ApplyStatus, DocumentSnapshot, EditTransaction}
+
+val FILE = "/w/client.spl"
+val HASH = "xxh3:b0"
+
+fn direct_src() -> text:
+    "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    DistanceKm(c_read_distance())\n"
+
+fn tx_for(version: i64, hash: text, body: text) -> EditTransaction:
+    EditTransaction.new("/w", HASH).with_document(DocumentSnapshot.new(FILE, version, hash, body))
+
+describe "SPL-BOUND-002 boundary-return autofix":
+    """A late cast of a raw extern call becomes a call to an @unsafe ffi adapter
+    that returns the unit."""
+
+    it "proposes one review-required candidate with an adapter preview":
+        # @req: REQ-DIAG-POLICY-001
+        step("Compute candidates for a direct extern cast")
+        val cs = bound_late_cast_fix_candidates(direct_src(), FILE, 3)
+        expect(cs.len()).to_equal(1)
+        expect(cs[0].id).to_equal("SPL-BOUND-002:c_read_distance_as_DistanceKm")
+        expect(cs[0].explanation).to_contain("@unsafe(reason: \"TODO verify C ABI\", capabilities: [ffi])")
+        expect(cs[0].explanation).to_contain("c_read_distance_as_DistanceKm")
+        expect(cs[0].explanation).to_contain("Review required")
+        expect(cs[0].required_document_version).to_equal(3)
+
+    it "is never Safe and never offers a no-op edit":
+        # @req: REQ-DIAG-POLICY-001
+        step("Check confidence, applicability and every replacement")
+        val cs = bound_late_cast_fix_candidates(direct_src(), FILE, 3)
+        expect(cs[0].confidence.name()).to_equal("uncertain")
+        expect(cs[0].to_ranked_fix(1).applicability.name()).to_equal("review_required")
+        expect(cs[0].replacements.len()).to_equal(cs[0].preconditions.len())
+        var i = 0
+        while i < cs[0].replacements.len():
+            expect(cs[0].replacements[i].new_text != cs[0].preconditions[i].expected_text).to_equal(true)
+            i = i + 1
+
+    it "applies through the transaction: adds the adapter and rewrites the site":
+        # @req: REQ-DIAG-POLICY-001
+        step("Apply the candidate to the matching snapshot")
+        val cs = bound_late_cast_fix_candidates(direct_src(), FILE, 3)
+        val r = tx_for(3, HASH, direct_src()).apply(cs[0])
+        expect(r.status.name()).to_equal("applied")
+        val out = r.text_of(FILE)
+        expect(out).to_contain("@unsafe(reason: \"TODO verify C ABI\", capabilities: [ffi])\nfn c_read_distance_as_DistanceKm() -> DistanceKm:\n    DistanceKm(c_read_distance())")
+        expect(out).to_contain("    c_read_distance_as_DistanceKm()\n")
+        expect(out.contains("    DistanceKm(c_read_distance())\n")).to_equal(true)
+
+    it "reuses an existing adapter and only rewrites the site":
+        # @req: REQ-DIAG-POLICY-001
+        step("Source already declares the adapter")
+        val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\n@unsafe(reason: \"x\", capabilities: [ffi])\nfn c_read_distance_as_DistanceKm() -> DistanceKm:\n    DistanceKm(c_read_distance())\nfn get_distance() -> DistanceKm:\n    DistanceKm(c_read_distance())\n"
+        val cs = bound_late_cast_fix_candidates(src, FILE, 1)
+        expect(cs.len()).to_equal(1)
+        expect(cs[0].replacements.len()).to_equal(1)
+        expect(cs[0].replacements[0].new_text).to_equal("c_read_distance_as_DistanceKm()")
+
+    it "aborts with no fix when the extern argument is derived from a local":
+        # @req: REQ-DIAG-POLICY-001
+        step("Cast an extern call that takes a local")
+        val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance(ch: i32) -> i32\nfn get_distance(n: i32) -> DistanceKm:\n    val ch = n + 1\n    DistanceKm(c_read_distance(ch))\n"
+        expect(bound_late_cast_fix_candidates(src, FILE, 1).len()).to_equal(0)
+        step("Cast a local copy of the extern result")
+        val src2 = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    val raw = c_read_distance()\n    DistanceKm(raw)\n"
+        expect(bound_late_cast_fix_candidates(src2, FILE, 1).len()).to_equal(0)
+
+    it "carries literal extern arguments into the adapter and the call":
+        # @req: REQ-DIAG-POLICY-001
+        step("Cast an extern call with a literal argument")
+        val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance(ch: i32) -> i32\nfn get_distance() -> DistanceKm:\n    DistanceKm(c_read_distance(2))\n"
+        val cs = bound_late_cast_fix_candidates(src, FILE, 1)
+        expect(cs.len()).to_equal(1)
+        val r = tx_for(1, HASH, src).apply(cs[0])
+        expect(r.status.name()).to_equal("applied")
+        expect(r.text_of(FILE)).to_contain("fn c_read_distance_as_DistanceKm(ch: i32) -> DistanceKm:\n    DistanceKm(c_read_distance(ch))")
+        expect(r.text_of(FILE)).to_contain("    c_read_distance_as_DistanceKm(2)\n")
+
+    it "rejects a stale document version and a stale hash with no edit":
+        # @req: REQ-DIAG-POLICY-001
+        step("Apply against a newer document version")
+        val cs = bound_late_cast_fix_candidates(direct_src(), FILE, 3)
+        val stale = tx_for(4, HASH, direct_src()).apply(cs[0])
+        expect(stale.status.name()).to_equal("stale_version")
+        expect(stale.text_of(FILE)).to_equal(direct_src())
+        step("Apply against a different source hash")
+        val hashed = tx_for(3, "xxh3:other", direct_src()).apply(cs[0])
+        expect(hashed.status.name()).to_equal("stale_hash")
+        expect(hashed.text_of(FILE)).to_equal(direct_src())
+        step("Apply after the cast text changed under the same version")
+        val edited = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    DistanceKm(c_read_distanzz())\n"
+        val pre = tx_for(3, HASH, edited).apply(cs[0])
+        expect(pre.status.name()).to_equal("precondition_mismatch")
