@@ -1,0 +1,71 @@
+# @cover src/lib/gc_async_mut/slang/model_executor/pure/sampler.spl 80%
+# @cover src/lib/gc_async_mut/slang/model_executor/pure/stop.spl 80%
+# @cover src/lib/gc_async_mut/slang/model_executor/pure/generate.spl 80%
+# Purpose and audience: executable evidence that the pure-Simple runner's
+# sampler + stop loop works on real stories15M weights: temperature 0 equals the
+# greedy reference, a seeded run is reproducible and seed-sensitive, and a stop
+# string spanning tokens ends generation with the text truncated before it.
+# Gate: runs only when the stories15M model directory exists
+# (SLANG_PURE_MODEL, default C:/dev/model/llama2c-stories15M). Slow on the seed
+# interpreter (~0.1 tok/s): token counts are kept small and one session is
+# threaded through every run, so the shared "Once upon a time" prompt is reused.
+
+use std.spec.{describe, it, expect, skip}
+use std.io_runtime.{env_get, is_dir}
+use std.gc_async_mut.slang.model_executor.pure.llama_forward.{llama_load}
+use std.gc_async_mut.slang.model_executor.pure.kv_cache.{kv_session_new}
+use std.gc_async_mut.slang.model_executor.pure.tokenizer.{pure_tokenizer_load, pure_tokenizer_encode}
+use std.gc_async_mut.slang.model_executor.pure.sampler.{SamplerConfig, sampler_config_greedy}
+use std.gc_async_mut.slang.model_executor.pure.stop.{StopConfig}
+use std.gc_async_mut.slang.model_executor.pure.generate.{GenConfig, generate}
+
+# llama.cpp greedy continuation of "Once upon a time" for this model.
+val REFERENCE = ", there was a little girl named Lily"
+
+fn _model_dir() -> text:
+    val d = env_get("SLANG_PURE_MODEL") ?? "C:/dev/model/llama2c-stories15M"
+    if is_dir(d):
+        return d
+    ""
+
+fn _cfg(sampler: SamplerConfig, seed: i64, max_new: i64, stops: [text]) -> GenConfig:
+    GenConfig(sampler: sampler, seed: seed, stop: StopConfig(eos_ids: [2], max_new_tokens: max_new, stop_strings: stops))
+
+describe "slang pure sampling on stories15M":
+    it "reproduces greedy at temperature 0, is seeded, and honours stop strings":
+        val dir = _model_dir()
+        if dir == "":
+            skip("reproduces greedy at temperature 0, is seeded, and honours stop strings", "stories15M model directory not present")
+        else:
+            val m = llama_load(dir).unwrap()
+            val tok = pure_tokenizer_load(dir).unwrap()
+            val prompt = pure_tokenizer_encode(tok, "Once upon a time", true)
+
+            val g = generate(m, tok, kv_session_new(m), prompt, _cfg(sampler_config_greedy(), 0, 8, [])).unwrap()
+            print "greedy=[{g.text}] finish={g.finish_reason} prompt={g.prompt_tokens} completion={g.completion_tokens} evaluated={g.positions_evaluated} reused={g.reused_positions}"
+            expect(g.text).to_equal(REFERENCE)
+            expect(g.finish_reason).to_equal("length")
+            expect(g.completion_tokens).to_equal(8)
+            expect(g.prompt_tokens).to_equal(5)
+            expect(g.reused_positions).to_equal(0)
+
+            val warm = SamplerConfig(temperature: 0.8, top_k: 0, top_p: 0.9, repetition_penalty: 1.0, penalty_window: 0)
+            val a = generate(m, tok, g.session, prompt, _cfg(warm, 1, 5, [])).unwrap()
+            val b = generate(m, tok, a.session, prompt, _cfg(warm, 1, 5, [])).unwrap()
+            val c = generate(m, tok, b.session, prompt, _cfg(warm, 2, 5, [])).unwrap()
+            print "seed1=[{a.text}] seed1again=[{b.text}] seed2=[{c.text}] reused={a.reused_positions}"
+            expect(a.reused_positions).to_equal(4)
+            expect(b.text).to_equal(a.text)
+            expect(b.ids).to_equal(a.ids)
+            expect(c.text == a.text).to_equal(false)
+
+            # "girl named" spans the tokens " girl" and " named".
+            val s = generate(m, tok, c.session, prompt, _cfg(sampler_config_greedy(), 0, 8, ["girl named"])).unwrap()
+            print "stop=[{s.text}] finish={s.finish_reason} completion={s.completion_tokens} pieces={s.pieces}"
+            expect(s.finish_reason).to_equal("stop")
+            expect(s.text).to_equal(", there was a little ")
+            expect(s.completion_tokens).to_equal(7)
+            var streamed = ""
+            for p in s.pieces:
+                streamed = streamed + p
+            expect(streamed).to_equal(s.text)
