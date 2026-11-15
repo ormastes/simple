@@ -5144,6 +5144,22 @@ impl MirLowering:
                 elif op_is_eq_or_neq and left_is_nil_lit and not right_is_nil_lit:
                     if self.nil_compare_operand_is_declared_optional(right, right_local) or self.option_value_locals.contains(right_local.id) or self.nil_compare_operand_is_struct(right_local):
                         nil_check_operand = right_local
+                # The built-in `None` VALUE (option_none_locals: a fresh
+                # rt_enum_new(1, None, 0)) against a statically Optional
+                # operand is the same presence test as `nil`. A raw word Eq
+                # against that fresh box missed every other None: the dict
+                # miss box (payload = nil word), and the raw nil word of an
+                # `.first()` / `?.` miss or a `nil` bound to `T?`. Plain
+                # scalars never get here (no nil acceptance is widened).
+                # Stage-2 class: mir_verify.spl check_call `callee_opt == None`.
+                if nil_check_operand.id < 0 and op_is_eq_or_neq and not left_is_nil_lit and not right_is_nil_lit:
+                    val left_is_none_value = self.option_none_locals.contains(left_local.id)
+                    val right_is_none_value = self.option_none_locals.contains(right_local.id)
+                    if left_is_none_value != right_is_none_value:
+                        val none_peer_expr = if right_is_none_value: left else: right
+                        val none_peer_local = if right_is_none_value: left_local else: right_local
+                        if self.nil_compare_operand_is_declared_optional(none_peer_expr, none_peer_local) or self.option_value_locals.contains(none_peer_local.id):
+                            nil_check_operand = none_peer_local
                 # A nil literal tests presence, not user struct equality.
                 # Keep raw nil/Option recognition in the existing runtime path.
                 if nil_check_operand.id < 0 and op_is_eq_or_neq and left_is_nil_lit != right_is_nil_lit:
