@@ -39,6 +39,23 @@ fn _has_intermediate_red(pixels: [u32], width: i32, x: i32, y: i32, w: i32, h: i
         row = row + 1
     false
 
+# 'A' on the 5x7 bitmap face at scale 1 ('#' = fg, '.' = bg), read back from
+# the cpu and software backends (identical) on 2026-11-15.
+val A_CELL: [text] = [".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"]
+
+fn _cell_mismatches(pixels: [u32], width: i32, fg: u32, bg: u32) -> i32:
+    var bad = 0
+    var row = 0
+    while row < 7:
+        var col = 0
+        while col < 5:
+            val want = if A_CELL[row][col:col + 1] == "#": fg else: bg
+            if pixels[row * width + col] != want:
+                bad = bad + 1
+            col = col + 1
+        row = row + 1
+    bad
+
 # ============================================================================
 # Tests
 # ============================================================================
@@ -57,11 +74,12 @@ describe "Engine2DExtended.draw_text_bg (CPU backend)":
             var engine = Engine2D.create_with_backend(32, 16, "cpu")
             engine.clear(GREEN)
 
-            # Paint a single 'A' glyph at the origin with 16pt font. The
-            # draw_text_bg contract says the glyph cell fills with BLACK
+            # Paint a single 'A' glyph at the origin on the 7 px face at
+            # scale 1 (pixel-sharp rule: one font pixel = one device pixel).
+            # The draw_text_bg contract says the glyph cell fills with BLACK
             # and glyph foreground pixels are WHITE. Pixels outside the
-            # cell must stay GREEN.
-            engine.draw_text_bg(0, 0, "A", WHITE, BLACK, 16)
+            # 5x7 cell must stay GREEN.
+            engine.draw_text_bg(0, 0, "A", WHITE, BLACK, 7)
             engine.present()
 
             val pixels = engine.read_pixels()
@@ -72,39 +90,33 @@ describe "Engine2DExtended.draw_text_bg (CPU backend)":
             val outside_idx = 8 * 32 + 30
             expect(pixels[outside_idx]).to_equal(GREEN)
 
-            # Cell-inside pixel (column 0 bottom row of the glyph cell)
-            # must have been overwritten by the background/text path, but
-            # may be BLACK, WHITE, or antialiased text coverage depending
-            # on the active shared font renderer.
-            val inside_idx = 15 * 32 + 0
-            val inside = pixels[inside_idx]
-            expect(inside != GREEN).to_be(true)
+            # Every pixel of the 5x7 cell is exactly fg or bg.
+            expect(_cell_mismatches(pixels, 32, WHITE, BLACK)).to_equal(0)
+            # Just past the cell (right column, first row below) stays clear.
+            expect(pixels[0 * 32 + 5]).to_equal(GREEN)
+            expect(pixels[7 * 32 + 0]).to_equal(GREEN)
 
             engine.shutdown()
 
-        it "blends glyph edge coverage between bg and fg (per-pixel AA)":
+        it "paints the scale-1 glyph cell pixel-sharp, with no in-between value":
             # @req REQ-SSPEC-LIB
-            step("blends glyph edge coverage between bg and fg (per-pixel AA)")
-            # Per-pixel AA-preserving contract: output pixels that straddle
-            # an on/off boundary of the 5x7 binary font must take on a
-            # value strictly between pure bg and pure fg, not snap to one
-            # or the other. This proves draw_text_bg is blending glyph
-            # coverage instead of doing a bg-rect + opaque-glyph overlay.
+            step("paints the scale-1 glyph cell pixel-sharp, with no in-between value")
+            # Owner rule 2026-11-15: render checks run pixel-sharp. The old
+            # row drew at font_size 16 (scale 2) and asserted the bilinear
+            # blur that enlargement produces; at scale 1 one font pixel is
+            # one device pixel, so the contract is the opposite: every cell
+            # pixel is exactly fg or bg.
             val BLACK: u32 = 0xFF000000
             val WHITE: u32 = 0xFFFFFFFF
 
             var engine = Engine2D.create_with_backend(32, 16, "cpu")
             engine.clear(BLACK)
-            # font_size=16 -> scale = 16/7 = 2, glyph cell = 10x14.
-            # For 'A' row 0 = 0b01110, the top-edge sub-pixel at output
-            # coord (3, 0) bilinearly samples neighbors spanning the
-            # off-above / on-below boundary, so coverage is ~0.75 and
-            # the red channel lands near 191 — clearly not 0 or 255.
-            engine.draw_text_bg(0, 0, "A", WHITE, BLACK, 16)
+            engine.draw_text_bg(0, 0, "A", WHITE, BLACK, 7)
             engine.present()
 
             val pixels = engine.read_pixels()
-            expect(_has_intermediate_red(pixels, 32, 0, 0, 16, 16)).to_be(true)
+            expect(_has_intermediate_red(pixels, 32, 0, 0, 16, 16)).to_be(false)
+            expect(_cell_mismatches(pixels, 32, WHITE, BLACK)).to_equal(0)
 
             engine.shutdown()
 
@@ -114,7 +126,7 @@ describe "Engine2DExtended.draw_text_bg (CPU backend)":
             val GREEN: u32 = 0xFF00FF00
             var engine = Engine2D.create_with_backend(16, 16, "cpu")
             engine.clear(GREEN)
-            engine.draw_text_bg(2, 2, "", 0xFFFFFFFF, 0xFF000000, 16)
+            engine.draw_text_bg(2, 2, "", 0xFFFFFFFF, 0xFF000000, 7)
             engine.present()
             val pixels = engine.read_pixels()
             # Empty string must touch no pixels — whole scene still GREEN.
