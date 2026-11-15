@@ -1,0 +1,91 @@
+# Baremetal native link: ld.lld + linker script, never the hosted cc driver.
+#
+# `native-build --target <arch>-unknown-none[-elf]` without --emit-object used
+# to fall into the hosted link (host clang driver, host crt, host runtime), so
+# a RISC-V object either failed to link or came out as a host-arch image. A
+# freestanding target has no OS, crt or libc to link against: the image is the
+# user objects placed by a linker script. The caller may pass its own script
+# (`-T x.ld` or `-Wl,-T,x.ld` in the native linker flags); otherwise a default
+# per-arch script is written next to the output.
+#
+# The default load bases match the real-firmware handoff used by the board
+# proxies (.claude/rules/board-runnable.md): riscv = OpenSBI next stage
+# (0x80200000), aarch64 = arm64 Image load (0x40080000), x86 = 1 MiB.
+
+use std.nogc_sync_mut.io_runtime.{env_get, file_write, process_run}
+
+fn _baremetal_arch_of(field: text) -> text:
+    if field.starts_with("riscv64"): return "riscv64"
+    if field.starts_with("riscv32"): return "riscv32"
+    match field:
+        case "x86_64" | "amd64" | "x64": "x86_64"
+        case "aarch64" | "arm64": "aarch64"
+        case "i386" | "i486" | "i586" | "i686" | "x86": "x86"
+        case "arm" | "armv7" | "thumbv7em" | "thumbv7m" | "thumbv6m" | "thumbv8m.main" | "thumbv8m.base": "arm"
+        case _: ""
+
+pub fn baremetal_link_arch_v1(target: text, host_arch: text) -> text:
+    """Architecture of a freestanding link target, or "" for a hosted one."""
+    if target == "" or target == "host" or target == "native": return ""
+    val parts = target.split("-")
+    val arch = _baremetal_arch_of(parts[0])
+    if arch == "": return ""
+    if parts.len() == 1:
+        # A bare cross architecture names no OS to host the image.
+        if arch == _baremetal_arch_of(host_arch): return ""
+        return arch
+    for part in parts:
+        if part == "none": return arch
+    if parts.len() == 3 and parts[2] == "elf": return arch
+    ""
+
+pub fn baremetal_default_linker_script_v1(arch: text) -> text:
+    val base = match arch:
+        case "riscv64" | "riscv32": "0x80200000"
+        case "aarch64": "0x40080000"
+        case "arm": "0x40008000"
+        case _: "0x100000"
+    "ENTRY(_start)\nSECTIONS {\n  . = " + base + ";\n" +
+        "  .text : { *(.text.boot) *(.text*) }\n" +
+        "  .rodata : { *(.rodata*) *(.srodata*) }\n" +
+        "  .data : { *(.data*) *(.sdata*) }\n" +
+        "  .bss : { *(.bss*) *(.sbss*) *(COMMON) }\n}\n"
+
+pub fn baremetal_link_argv_v1(objects: [text], output: text, default_script: text,
+        linker_flags: [text]) -> [text]:
+    """ld.lld argv. A caller -T script replaces the default one."""
+    var flags: [text] = []
+    var has_script = false
+    for flag in linker_flags:
+        if flag.starts_with("-Wl,"):
+            for piece in flag.substring(4).split(","):
+                if piece == "-T": has_script = true
+                flags.push(piece)
+        else:
+            if flag.starts_with("-T"): has_script = true
+            flags.push(flag)
+    var argv: [text] = []
+    if not has_script:
+        argv.push("-T")
+        argv.push(default_script)
+    argv.push("-o")
+    argv.push(output)
+    for obj in objects: argv.push(obj)
+    for flag in flags: argv.push(flag)
+    argv
+
+pub fn link_baremetal_native_v1(objects: [text], output: text, arch: text,
+        linker_flags: [text]) -> Result<text, text>:
+    val script = output + ".baremetal.ld"
+    if not file_write(script, baremetal_default_linker_script_v1(arch)):
+        return Err("baremetal link: cannot write linker script {script}")
+    val lld = env_get("SIMPLE_BAREMETAL_LD") ?? "ld.lld"
+    val argv = baremetal_link_argv_v1(objects, output, script, linker_flags)
+    val (_out, err, code) = process_run(lld, argv)
+    val cmd = argv.join(" ")
+    if code != 0:
+        return Err("baremetal link ({arch}) failed: {lld} {cmd}: {err}")
+    Ok(output)
+
+export baremetal_link_arch_v1, baremetal_default_linker_script_v1
+export baremetal_link_argv_v1, link_baremetal_native_v1
