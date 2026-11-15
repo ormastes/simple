@@ -1,4 +1,4 @@
-# Layout divergences from Chrome 159: column flex-grow, two-value `gap`, grid self-alignment / spans / auto rows, table collapse / fixed / colspan, canvas ratio (2026-11-15)
+# Layout divergences from Chrome 159: fractional and column flex-grow, two-value `gap`, grid self-alignment / spans / auto rows, table collapse / fixed / colspan, canvas ratio (2026-11-15)
 
 Status: OPEN. Severity: medium for Simple web layout (each row is a common
 authoring pattern and moves boxes by tens of pixels).
@@ -45,6 +45,19 @@ Values are `x,y,w,h`.
 | case | markup | id | Chrome | actual |
 |---|---|---|---|---|
 | a `<canvas>` with only a CSS height keeps the 300 px default width instead of following its 2:1 intrinsic ratio | `<canvas id=a style="display:block;height:40px;padding:2px"></canvas>` | a | 0,0,84,44 | 0,0,304,44 |
+
+### Value parsers (found by review of the coverage specs)
+
+Chrome page: `<div style="display:flex;width:240px">` with `a` `flex-grow:1.4` and
+`b` `flex-grow:1`; a grid `grid-template-columns:10px 20px 30px` with an item
+`grid-column:3 / 2`; three blocks with `line-height:0`, `0px`, `0%`.
+
+| case | helper | Chrome (x,w,h) | renderer |
+|---|---|---|---|
+| fractional `flex-grow` is rounded to an integer | `_decl_flex_factor("1.4")` = 1, `"1.5"` = 2, `".3"` = 1 | a = 0,140,5 / b = 140,100,5 (1.4 : 1 kept) | factor 1 : 1 |
+| reversed grid lines are dropped instead of swapped (CSS Grid 8.3.1) | `normalized_grid_placement("3 / 2")` = `""` | g = 10,20,5 (column 2) | auto placement |
+| `line-height: 0`, `0px`, `0%` read as "normal" | `parse_line_height_value` = 0 (the "normal/unusable" code) | height 0 for all three | normal line height |
+| `max-width: 0%` reads as "no constraint" | `_decl_percent_sentinel_or_length_px("0%", 16)` = 0 | a 0 px max width | unconstrained (already noted in the min/max residue) |
 
 ## Test status
 
