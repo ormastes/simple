@@ -5,6 +5,8 @@ use std.common.contracts.distributed_operation_history_v2.*
 use std.common.contracts.distributed_operation_retention_v2.*
 use std.common.task_runner.distributed_operation_checkpoint_v2.*
 use std.common.task_runner.distributed_operation_owner_health_v2.*
+use std.common.contracts.distributed_operation_assessment_v3.*
+use std.common.task_runner.distributed_operation_assessment_io_v3.*
 use std.common.contracts.distributed_control_codec_v2.distributed_decode_operation_v2
 use std.common.task_runner.index.{task_runner_storage_escape_v1, task_runner_storage_unescape_v1}
 use std.common.crypto.sha256.sha256_text
@@ -274,6 +276,38 @@ fn operation_replay_snapshot_v2(root: text, authority_digest: text,
 pub fn distributed_operation_journal_history_batch_v2(owner: DistributedOperationJournalV2) -> Result<DistributedOperationJournalHistoryBatchV2, text>:
     val turn = operation_turn_begin_v2(owner)?
     operation_turn_finish_v2(turn, operation_history_batch_held_v2(owner, turn))
+
+# Bounded owner-scoped observations; no caller paths, release proof or effects.
+pub fn distributed_operation_journal_assessment_v3(owner: DistributedOperationJournalV2,
+        request: DistributedOperationAssessmentRequestV3) -> Result<DistributedOperationAssessmentSnapshotV3, text>:
+    val bounded = operation_assessment_request_validate_v3(request)?
+    if owner.owned_lock.is_none() and owner.windows_store.is_none(): return Err("OPERATION_ASSESSMENT_OWNED_REQUIRED")
+    val plan = operation_assessment_plan_v3(owner.operations, request)
+    if plan.is_ok():
+        for reference in plan.unwrap().references:
+            if not distributed_operation_journal_relative_v3(reference.relative): return Err("OPERATION_ASSESSMENT_PATH_INVALID")
+    val turn = operation_turn_begin_v2(owner)?
+    operation_turn_finish_v2(turn, operation_assessment_held_v3(owner, plan, turn))
+
+fn operation_assessment_held_v3(owner: DistributedOperationJournalV2,
+        planned: Result<OperationAssessmentPlanV3, text>, turn: Option<OperationJournalHealthTurnV2>) -> Result<DistributedOperationAssessmentSnapshotV3, text>:
+    val checked = operation_owner_check_v2(owner, turn)?
+    val before = operation_current_for_owner_v2(owner, turn)?
+    if before != owner.revision: return Err("OPERATION_JOURNAL_REVISION_STALE")
+    val plan = operation_stored_result_v2(planned, turn, owner.revision)?
+    var records: [DistributedOperationAssessmentRecordV3] = []
+    for reference in plan.references:
+        val payload = operation_stored_result_v2(operation_assessment_read_v3(owner.root,
+            owner.windows_store, reference), turn, reference.digest)?
+        val qualified = operation_stored_result_v2(operation_assessment_payload_validate_v3(
+            plan.operations[reference.operation_id], payload), turn, reference.digest)?
+        records.push(DistributedOperationAssessmentRecordV3(reference.relative,
+            reference.operation_id, "found", payload, ""))
+    val still_held = operation_owner_check_v2(owner, turn)?
+    val after = operation_current_for_owner_v2(owner, turn)?
+    if after != before: return Err("OPERATION_JOURNAL_HISTORY_MOVED")
+    Ok(DistributedOperationAssessmentSnapshotV3(owner.authority_digest, before, owner.sequence,
+        plan.operations, plan.missing_operation_ids, records))
 
 fn operation_history_batch_held_v2(owner: DistributedOperationJournalV2,
         turn: Option<OperationJournalHealthTurnV2>) -> Result<DistributedOperationJournalHistoryBatchV2, text>:
