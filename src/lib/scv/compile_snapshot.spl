@@ -29,7 +29,7 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io_runtime.{
     dir_list_or_empty, dir_remove, file_rename, file_copy, file_hash_sha256_or_empty, file_size
 }
-use std.nogc_sync_mut.sffi.fs.{file_create_excl}
+use std.nogc_sync_mut.sffi.fs.{file_create_excl, file_canonicalize}
 use std.scv.core.{scv_rel_path, scv_worktree_path_safe}
 use std.scv.store.{
     scv_content_id_for_u8, scv_write_text
@@ -394,6 +394,17 @@ fn scv_compile_snapshot_write_chunk_v1(
 fn scv_compile_snapshot_plain_path_v1(path: text) -> text:
     compile_source_inventory_plain_checkout_v1(path)
 
+# Realpath of a source: symlinks resolved when the path exists, otherwise the
+# absolute spelling. rt_path_absolute alone is not enough: the native runtime's
+# Windows build is a lexical _fullpath, so a tracked symlink resolved to itself
+# and the in-root target fallback never ran (`snapshot-read-failed`).
+fn scv_compile_snapshot_real_path_v1(path: text) -> text:
+    val native = host_path_native(path)
+    val real = file_canonicalize(native)
+    if real == nil:
+        return scv_compile_snapshot_plain_path_v1(path_absolute(native))
+    scv_compile_snapshot_plain_path_v1(real!)
+
 # Only these compact values survive one file's materialization. In particular,
 # neither its contents nor its byte buffers belong to the snapshot lifetime.
 struct ScvCompileMaterializedSourceV1:
@@ -415,7 +426,7 @@ fn scv_compile_snapshot_materialize_source_unscoped_cost_v1(
     if not scv_worktree_path_safe(rel):
         return ScvCompileMaterializedSourceV1("snapshot-path-unsafe:{rel}", "", false)
     val path = "{canonical_root}/{rel}"
-    val resolved = scv_compile_snapshot_plain_path_v1(path_absolute(host_path_native(path)))
+    val resolved = scv_compile_snapshot_real_path_v1(path)
     if not scv_compile_snapshot_physical_source_owned_v1(canonical_root, resolved):
         return ScvCompileMaterializedSourceV1("snapshot-source-outside-owner:{rel}", "", false)
     var content = scv_compile_snapshot_read_source_v1(path)
