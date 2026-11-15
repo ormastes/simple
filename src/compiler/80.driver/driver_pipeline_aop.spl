@@ -1,3 +1,5 @@
+use compiler.driver.driver_accessor_publication_v1.{driver_accessor_validate_batch_expected_v1}
+use compiler.frontend.core.aop_predicate_parser.{aop_predicate_has_field_selector_v1}
 use compiler.mir.mir_compiler_private_validate_v1.{mir_function_is_compiler_private_v1}
 # CompilerDriver AOP weaving and debug trace instrumentation.
 
@@ -43,9 +45,14 @@ impl CompilerDriver:
         self.weave_aop_with_policy(false)
 
     me weave_aop_with_policy(allow_ambient_log_rules: bool):
-        self.weave_aop_with_params(allow_ambient_log_rules, self.ctx.options.aspect_params)
+        self.weave_aop_with_expected_batch(allow_ambient_log_rules,
+            self.ctx.options.aspect_params, self.ctx.mir_modules.keys())
 
-    me weave_aop_with_params(allow_ambient_log_rules: bool, aspect_params: AspectParamsV1):
+    me weave_aop_for_scheduled_batch_v1(expected_modules: [text]):
+        self.weave_aop_with_expected_batch(true, self.ctx.options.aspect_params, expected_modules)
+
+    me weave_aop_with_expected_batch(allow_ambient_log_rules: bool,
+            aspect_params: AspectParamsV1, expected_modules: [text]):
         var all_advices: [HirAopAdvice] = []
         for saved_advice in self.ctx.hir_aop_advices_saved:
             all_advices.push(saved_advice)
@@ -55,6 +62,20 @@ impl CompilerDriver:
                 all_advices.push(advice)
 
         log_build_progress("aop_weave", "modules", 0, self.ctx.mir_modules.len(), "all", 0, 1, 0, 0, "running")
+
+        var field_advice_present = false
+        for advice in all_advices:
+            if aop_predicate_has_field_selector_v1(advice.predicate_text): field_advice_present = true
+        if field_advice_present or self.ctx.accessor_plan_sets_v1.len() > 0:
+            val consumed = driver_accessor_validate_batch_expected_v1(self.ctx, expected_modules)
+            if consumed.is_err():
+                self.ctx.add_error(consumed.unwrap_err())
+                return
+            var execution_advices: [HirAopAdvice] = []
+            for advice in all_advices:
+                if not aop_predicate_has_field_selector_v1(advice.predicate_text):
+                    execution_advices.push(advice)
+            all_advices = execution_advices
 
         aop_weave_accounting_reset(all_advices.len())
         for advice in all_advices:

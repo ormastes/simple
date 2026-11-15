@@ -62,8 +62,14 @@ fn accessor_pattern_matches_v1(pattern: text, target: text) -> bool:
 pub fn accessor_has_field_selector_v1(advice: HirAopAdvice) -> bool:
     aop_predicate_has_field_selector_v1(advice.predicate_text)
 
-fn accessor_atom_v1(selector: text, body: [text], target: AccessorFieldTargetV1) -> Result<bool, text>:
+fn accessor_atom_v1(selector: text, body: [text], target_opt: AccessorFieldTargetV1?) -> Result<bool, text>:
     val pattern = accessor_pattern_v1(body)?
+    if target_opt == nil:
+        if selector == "get" or selector == "set" or selector == "within": return Ok(false)
+        if selector == "attr":
+            return Err("E-AOP-FIELD-SELECT: attr requires a qualified declaration metadata provider")
+        return Err("E-AOP-FIELD-SELECT: unsupported field selector '" + selector + "'")
+    val target = target_opt.unwrap()
     if selector == "get" or selector == "set":
         val same_operation = if selector == "get": target.operation == MirAccessorOperationV1.Read else: target.operation == MirAccessorOperationV1.Write
         val qualified = target.owner_module + "." + target.owner_type + "." + target.field_name
@@ -85,48 +91,60 @@ fn accessor_atom_v1(selector: text, body: [text], target: AccessorFieldTargetV1)
         return Ok(false)
     Err("E-AOP-FIELD-SELECT: unsupported field selector '" + selector + "'")
 
+fn accessor_project_advice_v1(advice: HirAopAdvice, target: AccessorFieldTargetV1?) -> Result<text, text>:
+    if advice.aspect_module == "" or advice.aspect_name == "":
+        return Err("E-AOP-FIELD-SELECT: field advice requires resolved named aspect ownership")
+    val tokens = aop_predicate_tokens(advice.predicate_text)
+    var projected: [text] = []
+    var index = 0
+    while index < tokens.len():
+        val token = tokens[index]
+        if token == "!" or token == "&" or token == "|" or token == "(" or token == ")":
+            projected.push(token)
+            index = index + 1
+            continue
+        if index + 1 >= tokens.len() or tokens[index + 1] != "(":
+            return Err("E-AOP-FIELD-SELECT: expected selector atom; trailing text is invalid")
+        var body: [text] = []
+        index = index + 2
+        while index < tokens.len() and tokens[index] != ")":
+            if tokens[index] == "(":
+                return Err("E-AOP-FIELD-SELECT: nested/typed field signatures are unsupported")
+            body.push(tokens[index])
+            index = index + 1
+        if index >= tokens.len(): return Err("E-AOP-FIELD-SELECT: unterminated selector")
+        index = index + 1
+        # Validate all atoms, including logically dead and globally unmatched rules.
+        val matched = accessor_atom_v1(token, body, target)?
+        val name = if matched: "__accessor_true" else: "__accessor_false"
+        for part in aop_predicate_tokens("execution(* " + name + "(..))"):
+            projected.push(part)
+    val error = validate_predicate_tokens(projected)
+    if error != "": return Err(error)
+    Ok(projected.join(" "))
+
+pub fn accessor_declared_advice_v1(advice: HirAopAdvice, ordinal: i64) -> Result<AccessorAdviceSelectionV1, text>:
+    if not accessor_has_field_selector_v1(advice):
+        return Err("E-AOP-FIELD-SELECT: declaration is not a field rule")
+    val checked = accessor_project_advice_v1(advice, None)?
+    val tokens = aop_predicate_tokens(advice.predicate_text)
+    val framed = [for token in tokens: canon_str(token)]
+    val digest = sha256_text(canon_seq([
+        canon_field("domain", canon_str("simple/accessor-selector/v1")),
+        canon_field("tokens", canon_seq(framed))]))
+    Ok(AccessorAdviceSelectionV1(advice: advice, source_ordinal: ordinal, selector_digest: digest))
+
 pub fn accessor_select_advices_v1(advices: [HirAopAdvice], target: AccessorFieldTargetV1) -> Result<[AccessorAdviceSelectionV1], text>:
     if target.owner_module == "" or target.owner_type == "" or target.field_name == "":
         return Err("E-AOP-FIELD-SELECT: incomplete canonical field identity")
     var selected: [AccessorAdviceSelectionV1] = []
     for ordinal in 0..advices.len():
         val advice = advices[ordinal]
-        # Execution-only advice belongs to the existing execution owner.
         if not accessor_has_field_selector_v1(advice): continue
-        if advice.aspect_module == "" or advice.aspect_name == "":
-            return Err("E-AOP-FIELD-SELECT: field advice requires resolved named aspect ownership")
-        val tokens = aop_predicate_tokens(advice.predicate_text)
-        var projected: [text] = []
-        var framed: [text] = []
-        for token in tokens: framed.push(canon_str(token))
-        var index = 0
-        while index < tokens.len():
-            val token = tokens[index]
-            if token == "!" or token == "&" or token == "|" or token == "(" or token == ")":
-                projected.push(token)
-                index = index + 1
-                continue
-            if index + 1 >= tokens.len() or tokens[index + 1] != "(":
-                return Err("E-AOP-FIELD-SELECT: expected selector atom; trailing text is invalid")
-            var body: [text] = []
-            index = index + 2
-            while index < tokens.len() and tokens[index] != ")":
-                if tokens[index] == "(":
-                    return Err("E-AOP-FIELD-SELECT: nested/typed field signatures are unsupported")
-                body.push(tokens[index])
-                index = index + 1
-            if index >= tokens.len(): return Err("E-AOP-FIELD-SELECT: unterminated selector")
-            index = index + 1
-            # Resolve every atom, even in logically dead branches: unknown is not false.
-            val matched = accessor_atom_v1(token, body, target)?
-            val name = if matched: "__accessor_true" else: "__accessor_false"
-            for part in aop_predicate_tokens("execution(* " + name + "(..))"):
-                projected.push(part)
-        val error = validate_predicate_tokens(projected)
-        if error != "": return Err(error)
-        var expression = ""
-        for part in projected: expression = expression + " " + part
+        val expression = accessor_project_advice_v1(advice, Some(target))?
         if aop_pointcut_matches(expression, "__accessor_true"):
+            val tokens = aop_predicate_tokens(advice.predicate_text)
+            val framed = [for token in tokens: canon_str(token)]
             val digest = sha256_text(canon_seq([
                 canon_field("domain", canon_str("simple/accessor-selector/v1")),
                 canon_field("tokens", canon_seq(framed))]))

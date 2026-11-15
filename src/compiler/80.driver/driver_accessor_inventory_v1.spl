@@ -1,0 +1,64 @@
+# Complete field-rule inventory: validate unmatched rules before publication.
+use compiler.driver.driver_types.{CompileContext}
+use compiler.hir.hir_definitions.{HirAopAdvice}
+use compiler.driver.driver_accessor_selection_v1.{accessor_has_field_selector_v1, accessor_declared_advice_v1}
+use compiler.driver.driver_accessor_advice_v1.{driver_accessor_advice_v1}
+use compiler.driver.driver_accessor_source_v1.{driver_accessor_source_identity_v1}
+use compiler.driver.cache.action_key.{canon_str, canon_nat, canon_seq, canon_field, action_key_sort_texts}
+use std.common.crypto.sha256.{sha256_text}
+
+struct AccessorInventoryIdentityV1:
+    declarations_digest: text
+    resolved_digest: text
+    resolved_rows: [text]
+
+pub fn driver_accessor_order_inventory_v1(input: [HirAopAdvice]) -> [HirAopAdvice]:
+    var by_key: Dict<text, HirAopAdvice> = {}
+    for advice in input:
+        val key = canon_seq([canon_str(advice.aspect_module), canon_str(advice.aspect_name),
+            canon_nat(advice.span.start), canon_nat(advice.span.end),
+            canon_str(advice.predicate_text), canon_str(advice.advice_function),
+            canon_str(advice.form), canon_str("{advice.priority}")])
+        # Same original declaration in retained and streaming inventories is
+        # one rule. Different source positions remain distinct occurrences.
+        by_key[key] = advice
+    var result: [HirAopAdvice] = []
+    for key in action_key_sort_texts(by_key.keys()): result.push(by_key[key])
+    result
+
+pub fn driver_accessor_collect_inventory_v1(ctx: CompileContext) -> [HirAopAdvice]:
+    var rows: [HirAopAdvice] = []
+    for advice in ctx.hir_aop_advices_saved:
+        if accessor_has_field_selector_v1(advice): rows.push(advice)
+    for name in ctx.hir_modules.keys():
+        for advice in ctx.hir_modules[name].aop_advices:
+            if accessor_has_field_selector_v1(advice): rows.push(advice)
+    driver_accessor_order_inventory_v1(rows)
+
+pub fn driver_accessor_declarations_digest_v1(ctx: CompileContext, rows: [HirAopAdvice]) -> Result<text, text>:
+    var keys: [text] = []
+    for advice in driver_accessor_order_inventory_v1(rows):
+        val source = driver_accessor_source_identity_v1(ctx, advice.aspect_module)?
+        keys.push(canon_seq([canon_str(advice.aspect_module), canon_str(advice.aspect_name),
+            canon_nat(advice.span.start), canon_nat(advice.span.end), canon_str(advice.predicate_text),
+            canon_str(advice.advice_function), canon_str(advice.form), canon_str("{advice.priority}"), canon_str(source)]))
+    Ok(sha256_text(canon_field("simple/accessor-declarations/v1", canon_seq(keys))))
+
+pub fn driver_accessor_validate_inventory_v1(ctx: CompileContext, rows: [HirAopAdvice], entry_module: text) -> Result<AccessorInventoryIdentityV1, text>:
+    if rows.len() == 0: return Err("E-AOP-FIELD-INVENTORY: requested field inventory is empty")
+    val declarations = driver_accessor_declarations_digest_v1(ctx, rows)?
+    var resolved: [text] = []
+    for index in 0..rows.len():
+        val selected = accessor_declared_advice_v1(rows[index], index)?
+        # Validate ABI/form/owner even if no source field matches this rule.
+        val handler = driver_accessor_advice_v1(ctx, selected, entry_module, declarations)?
+        resolved.push(canon_seq([canon_str(handler.aspect_module), canon_str(handler.aspect_name),
+            canon_nat(handler.symbol.id), canon_str(handler.function_name),
+            canon_str(handler.interface_digest), canon_str(handler.body_digest),
+            canon_str(handler.effects_digest), canon_str(handler.selector_digest)]))
+    Ok(AccessorInventoryIdentityV1(declarations_digest: declarations, resolved_rows: resolved,
+        resolved_digest: driver_accessor_resolved_inventory_digest_v1(declarations, resolved)))
+
+pub fn driver_accessor_resolved_inventory_digest_v1(declarations: text, resolved: [text]) -> text:
+    sha256_text(canon_field("simple/accessor-inventory/v1",
+        canon_seq([canon_str(declarations), canon_seq(resolved)])))

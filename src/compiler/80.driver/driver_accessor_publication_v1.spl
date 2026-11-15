@@ -1,4 +1,12 @@
-use compiler.common.driver_core_modes.{driver_output_format_native}
+use compiler.driver.driver_accessor_physical_v1.{driver_accessor_target_key_v1}
+use compiler.driver.driver_accessor_receipt_types_v1.{AccessorConsumptionReceiptV1}
+use compiler.driver.driver_accessor_inventory_v1.{driver_accessor_collect_inventory_v1,
+    driver_accessor_inventory_has_requests_v1, driver_accessor_declarations_digest_v1,
+    driver_accessor_resolved_inventory_digest_v1}
+use compiler.mir.mir_compiler_private_encoding_v1.{serialize_mir_compiler_private_module_v1}
+use compiler.mir.mir_compiler_private_validate_v1.{mir_compiler_private_validate_v1}
+use compiler.mir.mir_lowering_types.{MirError, mir_error_is_fatal}
+use compiler.common.driver_core_modes.{CompileMode, driver_output_format_native}
 # The driver is the sole publication/allocator owner. Workers only receive
 # validated snapshots; no helper identity is invented by a field consumer.
 use compiler.driver.driver_types.{CompileContext}
@@ -31,6 +39,10 @@ pub fn driver_refresh_accessor_inventory_v1(ctx: CompileContext) -> bool:
     # Reused compilation contexts cannot retain advice from an earlier source
     # epoch. Empty/no-aspect contexts take no replacement-allocation path.
     if ctx.accessor_plan_sets_v1.len() > 0: ctx.accessor_plan_sets_v1 = {}
+    if ctx.accessor_receipts_v1.len() > 0: ctx.accessor_receipts_v1 = {}
+    ctx.accessor_advice_declarations_digest_v1 = ""
+    ctx.accessor_advice_inventory_digest_v1 = ""
+    if ctx.accessor_advice_resolved_rows_v1.len() > 0: ctx.accessor_advice_resolved_rows_v1 = []
     ctx.accessor_no_field_aspects_v1 = not requested
     ctx.accessor_inventory_checked_v1 = true
     requested
@@ -53,18 +65,7 @@ pub fn driver_reserve_accessor_symbols_v1(ctx: CompileContext, count: i64) -> Re
         module.symbols.next_symbol_id = limit
     Ok(first)
 
-fn driver_accessor_source_identity_v1(ctx: CompileContext, name: text) -> Result<text, text>:
-    var identity = ""
-    for index in 0..ctx.source_module_names_owner.len():
-        if ctx.source_module_names_owner[index] == name:
-            if index >= ctx.source_identities_owner.len() or ctx.source_identities_owner[index] == "":
-                return Err("E-AOP-FIELD-SNAPSHOT: source identity is unavailable")
-            val found = ctx.source_identities_owner[index]
-            if identity != "" and identity != found:
-                return Err("E-AOP-FIELD-SNAPSHOT: module has ambiguous source identity")
-            identity = found
-    if identity == "": return Err("E-AOP-FIELD-SNAPSHOT: no admitted source owns the plan module")
-    Ok(identity)
+export use compiler.driver.driver_accessor_source_v1.{driver_accessor_source_identity_v1}
 
 pub fn driver_accessor_plan_digest_v1(plan: AccessorPlanSetV1) -> text:
     var functions: [text] = []
@@ -109,18 +110,27 @@ pub fn driver_accessor_plan_digest_v1(plan: AccessorPlanSetV1) -> text:
         canon_seq(action_key_sort_texts(type_bindings)),
         canon_seq(action_key_sort_texts(sites))])))
 
+fn driver_accessor_transport_key_v1(ctx: CompileContext) -> Result<text, text>:
+    if ctx.options.mode != CompileMode.Aot or ctx.options.output_format != driver_output_format_native() or
+            ctx.runtime_std_full_inventory_selection != nil:
+        return Err("E-AOP-FIELD-TRANSPORT: field plans require native AOT; JIT, SMF and runtime-std are not admitted")
+    driver_accessor_target_key_v1(ctx)
+
 pub fn driver_publish_accessor_plans_v1(ctx: CompileContext, plans: [AccessorPlanSetV1]) -> Result<bool, text>:
     ctx.accessor_plan_sets_v1 = {}
+    ctx.accessor_receipts_v1 = {}
+    ctx.accessor_advice_declarations_digest_v1 = ""
+    ctx.accessor_advice_inventory_digest_v1 = ""
+    if ctx.accessor_advice_resolved_rows_v1.len() > 0: ctx.accessor_advice_resolved_rows_v1 = []
+    if ctx.accessor_publication_epoch_v1 == 9223372036854775807:
+        return Err("E-AOP-FIELD-RECEIPT: publication epoch exhausted")
+    ctx.accessor_publication_epoch_v1 = ctx.accessor_publication_epoch_v1 + 1
     ctx.accessor_inventory_checked_v1 = false
     ctx.accessor_no_field_aspects_v1 = false
     # Conservative explicit admission; auto/default backend resolution is not
     # evidence that an arbitrary serializer preserves private MIR bindings.
     if plans.len() > 0:
-        if ctx.options.output_format != driver_output_format_native() or ctx.runtime_std_full_inventory_selection != nil:
-            return Err("E-AOP-FIELD-TRANSPORT: SMF, combined, self-contained and runtime-std private linkage transport is not admitted")
-        val target = driver_mir_target_context(ctx.options)
-        if ctx.options.backend != "llvm" or target.backend != "llvm" or target.os != "linux" or not mir_collection_target_is_supported(target):
-            return Err("E-AOP-FIELD-TRANSPORT: accessor plans require admitted LLVM Linux target context")
+        val target_key = driver_accessor_transport_key_v1(ctx)?
     var published: Dict<text, AccessorPlanSetV1> = {}
     var helpers_by_name: Dict<text, AccessorPreparedHelperV1> = {}
     var definition_counts: Dict<text, i64> = {}
@@ -169,6 +179,38 @@ pub fn driver_publish_accessor_plans_v1(ctx: CompileContext, plans: [AccessorPla
     ctx.accessor_plan_sets_v1 = published
     Ok(true)
 
+# Commit inventory readiness only after plan publication has completed. This
+# is the sole transition from frozen-but-unready to consumable field advice.
+pub fn driver_commit_accessor_inventory_v1(ctx: CompileContext,
+        declarations_digest: text, resolved_rows: [text]) -> Result<bool, text>:
+    if declarations_digest == "" or resolved_rows.len() == 0 or
+            not driver_accessor_inventory_has_requests_v1(ctx) or ctx.accessor_publication_epoch_v1 <= 0 or
+            ctx.accessor_plan_sets_v1.len() != ctx.hir_modules.len():
+        return Err("E-AOP-FIELD-RECEIPT: inventory cannot commit before complete plan publication")
+    val current = driver_accessor_collect_inventory_v1(ctx)
+    if driver_accessor_declarations_digest_v1(ctx, current)? != declarations_digest:
+        return Err("E-AOP-FIELD-RECEIPT: field advice declarations changed before inventory commit")
+    val resolved_digest = driver_accessor_resolved_inventory_digest_v1(declarations_digest, resolved_rows)
+    if resolved_digest == "":
+        return Err("E-AOP-FIELD-RECEIPT: resolved field advice inventory is empty")
+    for name in ctx.hir_modules.keys():
+        if not ctx.accessor_plan_sets_v1.has(name):
+            return Err("E-AOP-FIELD-RECEIPT: inventory commit lacks a module plan")
+        val plan = ctx.accessor_plan_sets_v1[name]
+        if plan.module_identity != name or plan.plan_digest != driver_accessor_plan_digest_v1(plan):
+            return Err("E-AOP-FIELD-RECEIPT: inventory commit found a stale module plan")
+        if driver_accessor_source_identity_v1(ctx, name)? != plan.source_snapshot:
+            return Err("E-AOP-FIELD-RECEIPT: source identity changed before inventory commit")
+        val encoded = hir_module_encode_canonical(ctx.hir_modules[name])
+        if encoded.is_err() or sha256_text(encoded.unwrap()) != plan.hir_snapshot:
+            return Err("E-AOP-FIELD-RECEIPT: HIR identity changed before inventory commit")
+    ctx.accessor_advice_declarations_digest_v1 = declarations_digest
+    ctx.accessor_advice_inventory_digest_v1 = resolved_digest
+    ctx.accessor_advice_resolved_rows_v1 = resolved_rows
+    ctx.accessor_no_field_aspects_v1 = false
+    ctx.accessor_inventory_checked_v1 = true
+    Ok(true)
+
 pub fn driver_lower_module_with_accessors_v1(ctx: CompileContext, mut lowering: MirLowering,
     module: HirModule, providers: [HirModule], is_entry: bool, module_name: text) -> Result<MirModule, text>:
     if ctx.accessor_plan_sets_v1.has(module_name):
@@ -194,4 +236,160 @@ pub fn driver_lower_module_with_accessors_v1(ctx: CompileContext, mut lowering: 
         if not ctx.accessor_inventory_checked_v1 or not ctx.accessor_no_field_aspects_v1:
             return Err("E1507: field accessor selection has no qualified frozen plan")
         val cleared = lowering.install_accessor_plan_v1(None, module.name, "", "", true)?
-    lowering.lower_module_transient_scoped(module, providers, is_entry)
+    val errors_before = lowering.errors.len()
+    val retained = lowering.lower_module_transient_scoped(module, providers, is_entry)?
+    if driver_accessor_has_new_fatal_v1(lowering.errors, errors_before):
+        return Err("E-AOP-FIELD-RECEIPT: lowering recorded a fatal diagnostic")
+    if ctx.accessor_plan_sets_v1.has(module_name):
+        val plan = ctx.accessor_plan_sets_v1[module_name]
+        if not lowering.finish_accessor_coverage_v1():
+            return Err("E-AOP-FIELD-RECEIPT: prepared source coverage did not finish")
+        val exact = driver_accessor_publication_matches_v1(plan, retained)?
+        if ctx.accessor_advice_inventory_digest_v1 == "" or ctx.accessor_publication_epoch_v1 <= 0:
+            return Err("E-AOP-FIELD-RECEIPT: no validated complete advice inventory")
+        if ctx.accessor_receipts_v1.has(module_name):
+            return Err("E-AOP-FIELD-RECEIPT: module was consumed twice in one publication")
+        ctx.accessor_receipts_v1[module_name] = AccessorConsumptionReceiptV1(
+            epoch: ctx.accessor_publication_epoch_v1, module_identity: module_name,
+            source_snapshot: plan.source_snapshot, hir_snapshot: plan.hir_snapshot,
+            plan_digest: plan.plan_digest, advice_inventory_digest: ctx.accessor_advice_inventory_digest_v1,
+            private_metadata_digest: sha256_text(serialize_mir_compiler_private_module_v1(retained)))
+    Ok(retained)
+
+pub fn driver_accessor_has_new_fatal_v1(errors: [MirError], baseline: i64) -> bool:
+    if baseline < 0 or baseline > errors.len(): return true
+    for index in baseline..errors.len():
+        if mir_error_is_fatal(errors[index]): return true
+    false
+
+pub fn driver_accessor_publication_matches_v1(plan: AccessorPlanSetV1, module: MirModule) -> Result<bool, text>:
+    val valid = mir_compiler_private_validate_v1(module)?
+    if module.compiler_private_module_identity_v1 != plan.module_identity or
+            module.compiler_private_functions_v1.len() != plan.helpers.len():
+        return Err("E-AOP-FIELD-RECEIPT: incomplete private helper publication")
+    for helper in plan.helpers:
+        var found = false
+        for binding in module.compiler_private_functions_v1:
+            if binding.name == helper.helper_name:
+                if binding.symbol.id != helper.helper_symbol.id or binding.canonical_key != helper.canonical_key or
+                        binding.key_digest != helper.content_digest or binding.emission_owner != helper.emission_owner or
+                        binding.signature != helper.plan.signature or
+                        binding.defines_here != (helper.emission_owner == plan.module_identity):
+                    return Err("E-AOP-FIELD-RECEIPT: helper publication differs from its prepared plan")
+                found = true
+        if not found: return Err("E-AOP-FIELD-RECEIPT: prepared helper is absent")
+    Ok(true)
+
+pub fn driver_accessor_validate_batch_v1(ctx: CompileContext) -> Result<bool, text>:
+    driver_accessor_validate_batch_expected_v1(ctx, ctx.mir_modules.keys())
+
+# The lowering scheduler records its admitted roster before invoking MIR
+# lowering. go-to-end may exclude modules only after an explicit failure row;
+# those rows are the sole reason a scheduled name is removed from this batch.
+pub fn driver_accessor_successful_batch_roster_v1(scheduled_modules: [text],
+        failed_modules: [text]) -> Result<[text], text>:
+    for index in 0..scheduled_modules.len():
+        if scheduled_modules[index] == "":
+            return Err("E-AOP-FIELD-RECEIPT: scheduled module identity is empty")
+        for earlier in 0..index:
+            if scheduled_modules[earlier] == scheduled_modules[index]:
+                return Err("E-AOP-FIELD-RECEIPT: scheduled batch contains a duplicate module")
+    for index in 0..failed_modules.len():
+        if not scheduled_modules.contains(failed_modules[index]):
+            return Err("E-AOP-FIELD-RECEIPT: failed module was not in the scheduled batch")
+        for earlier in 0..index:
+            if failed_modules[earlier] == failed_modules[index]:
+                return Err("E-AOP-FIELD-RECEIPT: failed batch roster contains a duplicate module")
+    var successful: [text] = []
+    for name in scheduled_modules:
+        if not failed_modules.contains(name): successful = successful.push(name)
+    Ok(successful)
+
+# The staged scheduler passes the intended current batch independently from
+# the MIR map. That lets receipt validation detect a module dropped between
+# scheduling/consumption and the map handed to weave/codegen.
+pub fn driver_accessor_validate_batch_expected_v1(ctx: CompileContext,
+        expected_modules: [text]) -> Result<bool, text>:
+    val target_key = driver_accessor_transport_key_v1(ctx)?
+    if not ctx.accessor_inventory_checked_v1 or ctx.accessor_no_field_aspects_v1 or
+            ctx.accessor_advice_inventory_digest_v1 == "" or ctx.accessor_advice_declarations_digest_v1 == "":
+        return Err("E1507: field advice has no complete prepared inventory")
+    val current = driver_accessor_collect_inventory_v1(ctx)
+    if driver_accessor_declarations_digest_v1(ctx, current)? != ctx.accessor_advice_declarations_digest_v1:
+        return Err("E-AOP-FIELD-RECEIPT: field advice inventory changed after publication")
+    if driver_accessor_resolved_inventory_digest_v1(ctx.accessor_advice_declarations_digest_v1,
+            ctx.accessor_advice_resolved_rows_v1) != ctx.accessor_advice_inventory_digest_v1:
+        return Err("E-AOP-FIELD-RECEIPT: resolved handler inventory changed after publication")
+    if expected_modules.len() != ctx.mir_modules.len():
+        return Err("E-AOP-FIELD-RECEIPT: current MIR batch differs from scheduled roster")
+    for index in 0..expected_modules.len():
+        val expected = expected_modules[index]
+        if expected == "" or not ctx.mir_modules.has(expected):
+            return Err("E-AOP-FIELD-RECEIPT: scheduled module is absent from current MIR batch")
+        for earlier in 0..index:
+            if expected_modules[earlier] == expected:
+                return Err("E-AOP-FIELD-RECEIPT: scheduled batch roster contains a duplicate module")
+    var batch_modules: [text] = []
+    for key in ctx.mir_modules.keys():
+        val module = ctx.mir_modules[key]
+        val name = module.compiler_private_module_identity_v1
+        if key != name or name == "" or not expected_modules.contains(name) or batch_modules.contains(name) or
+                not ctx.accessor_plan_sets_v1.has(name) or
+                not ctx.accessor_receipts_v1.has(name):
+            return Err("E-AOP-FIELD-RECEIPT: current MIR batch lacks unique module consumption")
+        batch_modules.push(name)
+        val plan = ctx.accessor_plan_sets_v1[name]
+        val receipt = ctx.accessor_receipts_v1[name]
+        if receipt.epoch != ctx.accessor_publication_epoch_v1 or receipt.module_identity != name or
+                receipt.source_snapshot != plan.source_snapshot or receipt.hir_snapshot != plan.hir_snapshot or
+                receipt.plan_digest != plan.plan_digest or driver_accessor_plan_digest_v1(plan) != plan.plan_digest or
+                receipt.advice_inventory_digest != ctx.accessor_advice_inventory_digest_v1 or
+                driver_accessor_source_identity_v1(ctx, name)? != receipt.source_snapshot:
+            return Err("E-AOP-FIELD-RECEIPT: current module receipt is stale")
+        if ctx.hir_modules.has(name):
+            val encoded = hir_module_encode_canonical(ctx.hir_modules[name])
+            if encoded.is_err() or sha256_text(encoded.unwrap()) != receipt.hir_snapshot:
+                return Err("E-AOP-FIELD-RECEIPT: retained HIR changed after consumption")
+        for helper in plan.helpers:
+            if helper.plan.physical.target_abi != target_key:
+                return Err("E-AOP-FIELD-RECEIPT: target ABI changed after publication")
+        val exact = driver_accessor_publication_matches_v1(plan, module)?
+        if receipt.private_metadata_digest != sha256_text(serialize_mir_compiler_private_module_v1(module)):
+            return Err("E-AOP-FIELD-RECEIPT: private linkage changed after consumption")
+    if batch_modules.len() != expected_modules.len():
+        return Err("E-AOP-FIELD-RECEIPT: current MIR batch did not consume every scheduled module")
+    Ok(true)
+
+pub fn driver_accessor_validate_final_v1(ctx: CompileContext) -> Result<bool, text>:
+    if ctx.accessor_plan_sets_v1.len() == 0:
+        if ctx.accessor_inventory_checked_v1 and ctx.accessor_no_field_aspects_v1: return Ok(true)
+        if (ctx.accessor_inventory_checked_v1 and not ctx.accessor_no_field_aspects_v1) or driver_accessor_inventory_has_requests_v1(ctx):
+            return Err("E1507: final output has unconsumed field advice")
+        return Ok(true)
+    val current_batch = driver_accessor_validate_batch_v1(ctx)?
+    # Staged batches may already have released MIR. Receipts survive that
+    # release, but every prepared owner still has to finish before final link.
+    for name in ctx.accessor_plan_sets_v1.keys():
+        val plan = ctx.accessor_plan_sets_v1[name]
+        if not ctx.accessor_receipts_v1.has(name):
+            return Err("E-AOP-FIELD-RECEIPT: final output lacks a prepared module")
+        val receipt = ctx.accessor_receipts_v1[name]
+        if receipt.epoch != ctx.accessor_publication_epoch_v1 or receipt.module_identity != name or
+                receipt.plan_digest != driver_accessor_plan_digest_v1(plan) or receipt.plan_digest != plan.plan_digest or
+                receipt.source_snapshot != plan.source_snapshot or receipt.hir_snapshot != plan.hir_snapshot or
+                receipt.advice_inventory_digest != ctx.accessor_advice_inventory_digest_v1 or
+                driver_accessor_source_identity_v1(ctx, name)? != receipt.source_snapshot:
+            return Err("E-AOP-FIELD-RECEIPT: final output contains a stale module")
+        for helper in plan.helpers:
+            if not ctx.accessor_plan_sets_v1.has(helper.emission_owner) or
+                    not ctx.accessor_receipts_v1.has(helper.emission_owner):
+                return Err("E-AOP-FIELD-RECEIPT: reference has no completed helper definition owner")
+            var definitions = 0
+            for defined in ctx.accessor_plan_sets_v1[helper.emission_owner].helpers:
+                if defined.emission_owner == helper.emission_owner and defined.canonical_key == helper.canonical_key and
+                        defined.helper_name == helper.helper_name and defined.helper_symbol.id == helper.helper_symbol.id and
+                        defined.plan.signature == helper.plan.signature:
+                    definitions = definitions + 1
+            if definitions != 1:
+                return Err("E-AOP-FIELD-RECEIPT: helper reference lacks exactly one matching definition")
+    Ok(true)

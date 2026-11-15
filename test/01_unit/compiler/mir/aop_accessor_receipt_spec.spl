@@ -1,0 +1,279 @@
+use compiler.common.driver_core_modes.{CompileMode}
+# Authored control-plane tests, not proof of native source-to-binary accessors.
+use std.spec
+use compiler.driver.driver_types.{CompileContext}
+use compiler.common.driver_core_types.{CompileOptions, driver_core_compile_options_default}
+use compiler.driver.driver_accessor_receipt_types_v1.{AccessorConsumptionReceiptV1}
+use compiler.driver.driver_accessor_publication_v1.{driver_accessor_plan_digest_v1,
+    driver_accessor_validate_batch_v1, driver_accessor_validate_batch_expected_v1,
+    driver_accessor_validate_final_v1, driver_accessor_publication_matches_v1,
+    driver_accessor_successful_batch_roster_v1,
+    driver_accessor_has_new_fatal_v1, driver_refresh_accessor_inventory_v1,
+    driver_publish_accessor_plans_v1, driver_commit_accessor_inventory_v1}
+use compiler.driver.driver_accessor_inventory_v1.{driver_accessor_declarations_digest_v1,
+    driver_accessor_resolved_inventory_digest_v1, driver_accessor_collect_inventory_v1}
+use compiler.driver.driver_accessor_selection_v1.{accessor_declared_advice_v1}
+use compiler.mir.mir_lowering_types.{MirError}
+use compiler.mir.mir_instructions.{MirModule}
+use compiler.mir.mir_accessor_plan_set_v1.{AccessorPlanSetV1, AccessorPreparedHelperV1}
+use compiler.mir.mir_compiler_private_encoding_v1.{serialize_mir_compiler_private_module_v1}
+use compiler.mir.mir_compiler_private_function_v1.{MirCompilerPrivateFunctionV1}
+use compiler.hir.hir_accessor_field_v1.{HirAccessorFieldV1}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_types.{HirModule, SymbolTable}
+use compiler.hir.hir_codec.{hir_module_encode_canonical}
+use compiler.mir.mir_types.{MirType, MirTypeKind}
+use compiler.mir.mir_accessor_plan_v1.{MirAccessorPhysicalV1,
+    MirAccessorMemoryProfileV1, MirAccessorPlaceV1, MirAccessorOperationV1, mir_accessor_prepare_v1}
+use compiler.mir.mir_accessor_emit_v1.{mir_accessor_emit_v1}
+use compiler.driver.driver_accessor_freeze_v1.{accessor_helper_key_v1}
+use compiler.driver.driver_accessor_physical_v1.{driver_accessor_target_key_v1}
+use compiler.hir.hir_definitions.{HirAopAdvice}
+use compiler.common.diagnostics.span.{Span}
+use std.common.crypto.sha256.{sha256_text}
+
+fn receipt_advice(predicate: text) -> HirAopAdvice:
+    HirAopAdvice(predicate_text: predicate, advice_function: "observe", form: "before",
+        priority: 0, span: Span(start: 10, end: 20, line: 1, col: 1, file: "", length: 10),
+        aspect_module: "app.trace", aspect_name: "Trace")
+
+fn receipt_module(name: text) -> MirModule:
+    MirModule(name: name, functions: {}, statics: {}, constants: {}, types: {},
+        compiler_private_module_identity_v1: name)
+
+fn receipt_plan(name: text) -> AccessorPlanSetV1:
+    val draft = AccessorPlanSetV1(source_snapshot: "source-" + name, hir_snapshot: "hir-" + name,
+        plan_digest: "pending", module_identity: name, covered_functions: [], sites: [], helpers: [])
+    AccessorPlanSetV1(..draft, plan_digest: driver_accessor_plan_digest_v1(draft))
+
+fn receipt_selected_field() -> HirAccessorFieldV1:
+    HirAccessorFieldV1(owner_module: "app.box", owner_name: "Box",
+        owner_symbol: SymbolId.new(10), field_name: "count", field_symbol: SymbolId.new(11),
+        field_index: 1,
+        receiver_type: HirType(kind: HirTypeKind.Named(SymbolId.new(10), []), span: Span.empty()),
+        field_type: HirType(kind: HirTypeKind.Int(32, false), span: Span.empty()))
+
+fn receipt_prepared_helper(context: CompileContext, operation: MirAccessorOperationV1,
+        owner: text) -> AccessorPreparedHelperV1:
+    val physical = MirAccessorPhysicalV1(owner_module: "app.box", owner_name: "Box",
+        receiver_type: MirType(kind: MirTypeKind.Struct(SymbolId.new(10))),
+        field_type: MirType(kind: MirTypeKind.U32), field_order: ["flag", "count"],
+        layout_identity: "layout-v1", provider_identity: "provider-a",
+        target_abi: driver_accessor_target_key_v1(context).unwrap(), emission_owner: owner,
+        place: MirAccessorPlaceV1.DirectReference, writable: true,
+        nullable: false, atomic: false, volatile: false,
+        memory_profile: MirAccessorMemoryProfileV1.NoGcSynchronous,
+        receiver_identity_key: "app.box.Box")
+    val plan = mir_accessor_prepare_v1(receipt_selected_field(), physical, operation, []).unwrap()
+    val key = accessor_helper_key_v1(plan).unwrap()
+    val digest = sha256_text(key)
+    AccessorPreparedHelperV1(canonical_key: key, content_digest: digest,
+        helper_name: "__simple_accessor_" + digest, helper_symbol: SymbolId.new(80),
+        emission_owner: owner, plan: plan)
+
+fn receipt_plan_with_helper(name: text, helper: AccessorPreparedHelperV1) -> AccessorPlanSetV1:
+    val draft = AccessorPlanSetV1(source_snapshot: "source-" + name, hir_snapshot: "hir-" + name,
+        plan_digest: "pending", module_identity: name, covered_functions: [], sites: [], helpers: [helper])
+    AccessorPlanSetV1(..draft, plan_digest: driver_accessor_plan_digest_v1(draft))
+
+fn receipt_module_with_helper(name: text, helper: AccessorPreparedHelperV1) -> MirModule:
+    val function = mir_accessor_emit_v1(helper.plan, helper.helper_symbol, helper.helper_name, Span.empty()).unwrap()
+    val binding = MirCompilerPrivateFunctionV1(schema_version: 1,
+        symbol: helper.helper_symbol, name: helper.helper_name, signature: helper.plan.signature,
+        emission_owner: helper.emission_owner, canonical_key: helper.canonical_key,
+        key_digest: helper.content_digest, defines_here: helper.emission_owner == name)
+    MirModule(name: name, functions: {helper.helper_symbol: function}, statics: {}, constants: {}, types: {},
+        compiler_private_functions_v1: [binding], compiler_private_module_identity_v1: name)
+
+fn receipt_for(context: CompileContext, plan: AccessorPlanSetV1) -> AccessorConsumptionReceiptV1:
+    AccessorConsumptionReceiptV1(epoch: 1, module_identity: plan.module_identity,
+        source_snapshot: plan.source_snapshot, hir_snapshot: plan.hir_snapshot,
+        plan_digest: plan.plan_digest, advice_inventory_digest: context.accessor_advice_inventory_digest_v1,
+        private_metadata_digest: sha256_text(serialize_mir_compiler_private_module_v1(receipt_module(plan.module_identity))))
+
+fn receipt_for_module(context: CompileContext, plan: AccessorPlanSetV1,
+        module: MirModule) -> AccessorConsumptionReceiptV1:
+    AccessorConsumptionReceiptV1(epoch: context.accessor_publication_epoch_v1,
+        module_identity: plan.module_identity, source_snapshot: plan.source_snapshot,
+        hir_snapshot: plan.hir_snapshot, plan_digest: plan.plan_digest,
+        advice_inventory_digest: context.accessor_advice_inventory_digest_v1,
+        private_metadata_digest: sha256_text(serialize_mir_compiler_private_module_v1(module)))
+
+fn receipt_context() -> CompileContext:
+    # Unit fixture of trusted already-published coordinator inputs. Actual
+    # receipt issuance still needs the separate real lowering/native oracle.
+    val options = CompileOptions(..driver_core_compile_options_default(), mode: CompileMode.Aot,
+        backend: "llvm", native_target: "x86_64-unknown-linux-gnu", gc_off: true)
+    val context = CompileContext.create(options)
+    context.source_module_names_owner = ["app.trace", "app.one", "app.two"]
+    context.source_identities_owner = ["source-trace", "source-app.one", "source-app.two"]
+    context.hir_aop_advices_saved = [receipt_advice("get(app.Box.unmatched)")]
+    context.accessor_inventory_checked_v1 = true
+    context.accessor_no_field_aspects_v1 = false
+    context.accessor_publication_epoch_v1 = 1
+    context.accessor_advice_declarations_digest_v1 = driver_accessor_declarations_digest_v1(context,
+        context.hir_aop_advices_saved).unwrap()
+    context.accessor_advice_resolved_rows_v1 = ["trusted-unit-handler-snapshot"]
+    context.accessor_advice_inventory_digest_v1 = driver_accessor_resolved_inventory_digest_v1(
+        context.accessor_advice_declarations_digest_v1, context.accessor_advice_resolved_rows_v1)
+    context.accessor_plan_sets_v1["app.one"] = receipt_plan("app.one")
+    context.accessor_plan_sets_v1["app.two"] = receipt_plan("app.two")
+    context
+
+fn publication_hir(name: text) -> HirModule:
+    HirModule(name: name, path: name + ".spl", imports: [], exports: [], domain_blocks: [],
+        symbols: SymbolTable.new(), functions: {}, gpu_function_targets: {},
+        gpu_function_backend_orders: {}, classes: {}, structs: {}, enums: {}, bitfields: {},
+        traits: {}, impls: [], constants: {}, static_asserts: [], aop_advices: [],
+        di_bindings: [], arch_rules: [], mock_decls: [], types: [], extend_enums: [])
+
+fn publication_context(names: [text]) -> CompileContext:
+    val options = CompileOptions(..driver_core_compile_options_default(), mode: CompileMode.Aot,
+        backend: "llvm", native_target: "x86_64-unknown-linux-gnu", gc_off: true)
+    val context = CompileContext.create(options)
+    for name in names:
+        context.hir_modules[name] = publication_hir(name)
+        context.source_module_names_owner = context.source_module_names_owner.push(name)
+        context.source_identities_owner = context.source_identities_owner.push("source-" + name)
+    context.source_module_names_owner = context.source_module_names_owner.push("app.trace")
+    context.source_identities_owner = context.source_identities_owner.push("source-app.trace")
+    context.hir_aop_advices_saved = [receipt_advice("get(app.Box.unmatched)")]
+    context
+
+fn publication_plan(context: CompileContext, name: text) -> AccessorPlanSetV1:
+    val encoded = hir_module_encode_canonical(context.hir_modules[name]).unwrap()
+    val draft = AccessorPlanSetV1(source_snapshot: "source-" + name,
+        hir_snapshot: sha256_text(encoded), plan_digest: "pending", module_identity: name,
+        covered_functions: [], sites: [], helpers: [])
+    AccessorPlanSetV1(..draft, plan_digest: driver_accessor_plan_digest_v1(draft))
+
+describe "accessor module consumption receipts":
+    it "commits inventory readiness only after complete plan publication":
+        val context = publication_context(["app.one"])
+        val plan = publication_plan(context, "app.one")
+        expect(driver_publish_accessor_plans_v1(context, [plan]).is_ok()).to_equal(true)
+        expect(context.accessor_inventory_checked_v1).to_equal(false)
+        val declarations = driver_accessor_declarations_digest_v1(context,
+            driver_accessor_collect_inventory_v1(context)).unwrap()
+        expect(driver_commit_accessor_inventory_v1(context, declarations,
+            ["resolved-handler-row"]).is_ok()).to_equal(true)
+        expect(context.accessor_inventory_checked_v1).to_equal(true)
+
+        val partial = publication_context(["app.one", "app.two"])
+        val partial_plan = publication_plan(partial, "app.one")
+        expect(driver_publish_accessor_plans_v1(partial, [partial_plan]).is_ok()).to_equal(true)
+        val partial_declarations = driver_accessor_declarations_digest_v1(partial,
+            driver_accessor_collect_inventory_v1(partial)).unwrap()
+        expect(driver_commit_accessor_inventory_v1(partial, partial_declarations,
+            ["resolved-handler-row"]).is_err()).to_equal(true)
+        expect(partial.accessor_inventory_checked_v1).to_equal(false)
+
+    it "admits batch one before batch two but blocks final output until both finish":
+        val context = receipt_context()
+        val scheduled = driver_accessor_successful_batch_roster_v1(["app.one", "app.two"], []).unwrap()
+        context.mir_modules["app.one"] = receipt_module("app.one")
+        context.accessor_receipts_v1["app.one"] = receipt_for(context, context.accessor_plan_sets_v1["app.one"])
+        expect(driver_accessor_validate_batch_v1(context).is_ok()).to_equal(true)
+        # The staged scheduler supplies this roster before lowering. A missing
+        # second module must fail even though it is absent from the MIR map;
+        # deriving expected modules from that map would pass here.
+        expect(driver_accessor_validate_batch_expected_v1(context, scheduled).is_err()).to_equal(true)
+        expect(driver_accessor_validate_final_v1(context).is_err()).to_equal(true)
+        context.mir_modules = {}
+        context.mir_modules["app.two"] = receipt_module("app.two")
+        expect(driver_accessor_validate_batch_expected_v1(context, scheduled).is_err()).to_equal(true)
+        expect(driver_accessor_validate_batch_v1(context).is_err()).to_equal(true)
+        context.accessor_receipts_v1["app.two"] = receipt_for(context, context.accessor_plan_sets_v1["app.two"])
+        expect(driver_accessor_validate_batch_expected_v1(context, ["app.two"]).is_ok()).to_equal(true)
+        expect(driver_accessor_validate_batch_v1(context).is_ok()).to_equal(true)
+
+    it "omits only explicitly failed scheduled modules from go-to-end receipt coverage":
+        expect(driver_accessor_successful_batch_roster_v1(["app.one", "app.two"], ["app.two"]).unwrap())
+            .to_equal(["app.one"])
+        expect(driver_accessor_successful_batch_roster_v1(["app.one", "app.one"], []).is_err()).to_equal(true)
+        expect(driver_accessor_successful_batch_roster_v1(["app.one"], ["app.two"]).is_err()).to_equal(true)
+
+    it "rejects a swapped MIR map key and private module identity":
+        val context = receipt_context()
+        context.mir_modules["app.one"] = receipt_module("app.two")
+        context.mir_modules["app.two"] = receipt_module("app.one")
+        context.accessor_receipts_v1["app.two"] = receipt_for(context,
+            context.accessor_plan_sets_v1["app.two"])
+        context.accessor_receipts_v1["app.one"] = receipt_for(context,
+            context.accessor_plan_sets_v1["app.one"])
+        expect(driver_accessor_validate_batch_expected_v1(context, ["app.one", "app.two"]).is_err()).to_equal(true)
+
+    it "accepts real emitted getter and setter bodies only with current receipts":
+        for operation in [MirAccessorOperationV1.Read, MirAccessorOperationV1.Write]:
+            val context = receipt_context()
+            context.accessor_plan_sets_v1.remove("app.two")
+            val helper = receipt_prepared_helper(context, operation, "app.one")
+            val plan = receipt_plan_with_helper("app.one", helper)
+            # Helper bodies come from the production MIR emitter; surrounding
+            # coordinator receipt values remain a unit fixture, not a native
+            # source-to-binary qualification claim.
+            val module = receipt_module_with_helper("app.one", helper)
+            expect(driver_accessor_publication_matches_v1(plan, module).is_ok()).to_equal(true)
+            context.accessor_plan_sets_v1["app.one"] = plan
+            context.mir_modules["app.one"] = module
+            val receipt = receipt_for_module(context, plan, module)
+            context.accessor_receipts_v1["app.one"] = receipt
+            expect(driver_accessor_validate_batch_expected_v1(context, ["app.one"]).is_ok()).to_equal(true)
+            context.accessor_receipts_v1.remove("app.one")
+            expect(driver_accessor_validate_batch_expected_v1(context, ["app.one"]).is_err()).to_equal(true)
+            context.accessor_receipts_v1["app.one"] = AccessorConsumptionReceiptV1(..receipt, epoch: 0)
+            expect(driver_accessor_validate_batch_expected_v1(context, ["app.one"]).is_err()).to_equal(true)
+            context.accessor_receipts_v1["app.one"] = receipt
+            expect(driver_accessor_validate_final_v1(context).is_ok()).to_equal(true)
+
+    it "rejects stale epochs and private metadata changes even for zero-match plans":
+        val context = receipt_context()
+        context.mir_modules["app.one"] = receipt_module("app.one")
+        val receipt = receipt_for(context, context.accessor_plan_sets_v1["app.one"])
+        context.accessor_receipts_v1["app.one"] = AccessorConsumptionReceiptV1(..receipt, epoch: 0)
+        expect(driver_accessor_validate_batch_v1(context).is_err()).to_equal(true)
+        context.accessor_receipts_v1["app.one"] = receipt
+        context.mir_modules["app.one"] = MirModule(..receipt_module("app.one"), compiler_private_module_identity_v1: "wrong")
+        expect(driver_accessor_validate_batch_v1(context).is_err()).to_equal(true)
+
+    it "invalidates reused context receipts and inventory instead of retaining an old success":
+        val context = receipt_context()
+        context.accessor_receipts_v1["app.one"] = receipt_for(context, context.accessor_plan_sets_v1["app.one"])
+        context.hir_aop_advices_saved = []
+        expect(driver_refresh_accessor_inventory_v1(context)).to_equal(false)
+        expect(context.accessor_receipts_v1.len()).to_equal(0)
+        expect(context.accessor_advice_inventory_digest_v1).to_equal("")
+        expect(context.accessor_plan_sets_v1.len()).to_equal(0)
+
+    it "treats new fatal diagnostics as failure even when lowering returned an object":
+        val old = MirError(message: "old fatal", span: None, fatal: true)
+        val advisory = MirError(message: "advisory", span: None, fatal: false)
+        val explicit = MirError(message: "new failure", span: None, fatal: true)
+        val legacy = MirError(message: "undefined variable missing", span: None, fatal: false)
+        expect(driver_accessor_has_new_fatal_v1([old, advisory], 1)).to_equal(false)
+        expect(driver_accessor_has_new_fatal_v1([old, explicit], 1)).to_equal(true)
+        expect(driver_accessor_has_new_fatal_v1([old, legacy], 1)).to_equal(true)
+        expect(driver_accessor_has_new_fatal_v1([], 1)).to_equal(true)
+
+    it "validates unmatched selector grammar and rejects unsupported mixed selectors":
+        expect(accessor_declared_advice_v1(receipt_advice("get(app.Box.absent)"), 0).is_ok()).to_equal(true)
+        expect(accessor_declared_advice_v1(receipt_advice("get(app.Box.absent) garbage"), 0).is_err()).to_equal(true)
+        expect(accessor_declared_advice_v1(receipt_advice("get(app.Box.absent) | execution(* run(..))"), 0).is_err()).to_equal(true)
+        expect(accessor_declared_advice_v1(receipt_advice("get(app.Box.absent) & attr(unknown)"), 0).is_err()).to_equal(true)
+
+    it "rejects declaration and resolved inventory drift after a valid batch receipt":
+        val context = receipt_context()
+        context.mir_modules["app.one"] = receipt_module("app.one")
+        context.accessor_receipts_v1["app.one"] = receipt_for(context, context.accessor_plan_sets_v1["app.one"])
+        context.accessor_advice_resolved_rows_v1 = ["changed-handler-snapshot"]
+        expect(driver_accessor_validate_batch_v1(context).is_err()).to_equal(true)
+        context.accessor_advice_resolved_rows_v1 = ["trusted-unit-handler-snapshot"]
+        context.hir_aop_advices_saved = [receipt_advice("set(app.Box.unmatched)")]
+        expect(driver_accessor_validate_batch_v1(context).is_err()).to_equal(true)
+
+    it "refuses a JIT dispatch even when a caller presents a valid native receipt":
+        val context = receipt_context()
+        context.mir_modules["app.one"] = receipt_module("app.one")
+        context.accessor_receipts_v1["app.one"] = receipt_for(context, context.accessor_plan_sets_v1["app.one"])
+        context.options = CompileOptions(..context.options, mode: CompileMode.Jit)
+        expect(driver_accessor_validate_batch_v1(context).is_err()).to_equal(true)

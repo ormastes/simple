@@ -1,5 +1,6 @@
 use compiler.driver.driver_accessor_producer_v1.{driver_prepare_accessor_plans_v1}
-use compiler.driver.driver_accessor_publication_v1.{driver_refresh_accessor_inventory_v1, driver_lower_module_with_accessors_v1}
+use compiler.driver.driver_accessor_publication_v1.{driver_refresh_accessor_inventory_v1,
+    driver_lower_module_with_accessors_v1, driver_accessor_successful_batch_roster_v1}
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 # CompilerDriver MIR lowering and diagnostic methods.
 #
@@ -1409,8 +1410,13 @@ impl CompilerDriver:
             # retaining the entire closure's MIR until compile_to_native.
             var staged_pending = 0
             var staged_batch_mir_failed = false
+            var staged_batch_scheduled_names: [text] = []
+            var staged_batch_failed_names: [text] = []
             var staged_source_names: [text] = []
             if self.native_staged_codegen.active:
+                if accessor_requested and self.ctx.mir_modules.len() > 0:
+                    self.ctx.add_error("E-AOP-FIELD-RECEIPT: accessor staging does not admit preheld MIR without a scheduler receipt roster")
+                    return false
                 var staged_schedule: [text] = []
                 for held_name in self.ctx.mir_modules.keys():
                     staged_schedule = staged_schedule.push(held_name)
@@ -1434,6 +1440,9 @@ impl CompilerDriver:
             # MIR shard worker (driver_build/native_mir_shard.spl): publish the
             # schedule as the ledger inventory, then lower only claimed modules.
             val mir_shard_queue = self.native_staged_codegen.shard_queue
+            if accessor_requested and mir_shard_queue != "":
+                self.ctx.add_error("E-AOP-FIELD-TRANSPORT: cross-process consumption receipts are not admitted")
+                return false
             # File-worker P4 (SIMPLE_MIR_SHARD_ONLY_PATHS): claim only the modules
             # the worker admitted (HIR of F and its imports PASS). Empty = all.
             val mir_shard_only_paths: [text] = if mir_shard_queue != "": native_file_worker_only_paths_from_env_v1() else: []
@@ -1632,6 +1641,11 @@ impl CompilerDriver:
                         else:
                             print "[mir-shard] hir-residency body reload refused module={name_direct} path={src_direct.path}; this module fails closed"
                             self.ctx.hir_modules.remove(source_lookup_name)
+                # This comes from the admitted scheduler/claim path, before
+                # MIR lowering and independently of the output map. Explicit
+                # go-to-end failures are filtered through their own ledger.
+                if accessor_requested and self.native_staged_codegen.active:
+                    staged_batch_scheduled_names = staged_batch_scheduled_names.push(name_direct)
                 var mir_direct = if native_entry_closure_mir or driver_source_matches_entry(self.ctx, src_direct.path, name_direct) or (sosix_env_get_nullable("SIMPLE_UNSTUB_HIR") ?? "") == "1":
                     log_phase("aot:lower_to_mir:module:start idx={direct_idx} module={name_direct} path={src_direct.path}")
                     val direct_hir: HirModule? = self.ctx.hir_modules[source_lookup_name]
@@ -1724,6 +1738,8 @@ impl CompilerDriver:
                     self.go_to_end_record_mir_failure_v1(name_direct, src_direct.path,
                         direct_lowering.errors, module_lowering_errors_before,
                         module_context_errors_before)
+                    if accessor_requested and self.native_staged_codegen.active:
+                        staged_batch_failed_names = staged_batch_failed_names.push(name_direct)
                 else:
                     self.ctx.mir_modules[name_direct] = mir_direct
                     if name_direct == "app.cli.bootstrap_main":
@@ -1743,14 +1759,33 @@ impl CompilerDriver:
                 if self.native_staged_codegen.active and native_staged_codegen_flush_due_v1(
                         staged_pending, self.native_staged_codegen.batch_size,
                         direct_pos, mir_source_indices.len()):
-                    if not self.native_staged_codegen_flush_v1(staged_batch_mir_failed and not go_to_end_active):
+                    val expected_batch_result = if accessor_requested:
+                        driver_accessor_successful_batch_roster_v1(
+                            staged_batch_scheduled_names, staged_batch_failed_names)
+                    else: Ok([])
+                    if expected_batch_result.is_err():
+                        self.ctx.add_error(expected_batch_result.unwrap_err())
+                        return false
+                    if not self.native_staged_codegen_flush_v1(
+                            staged_batch_mir_failed and not go_to_end_active,
+                            expected_batch_result.unwrap()):
                         return false
                     staged_pending = 0
                     staged_batch_mir_failed = false
+                    staged_batch_scheduled_names = []
+                    staged_batch_failed_names = []
             if native_staged_codegen_recovery_flush_due_v1(
                     self.native_staged_codegen.active, go_to_end_active,
                     staged_pending, mir_failed_modules):
-                if not self.native_staged_codegen_flush_v1(staged_batch_mir_failed):
+                val expected_batch_result = if accessor_requested:
+                    driver_accessor_successful_batch_roster_v1(
+                        staged_batch_scheduled_names, staged_batch_failed_names)
+                else: Ok([])
+                if expected_batch_result.is_err():
+                    self.ctx.add_error(expected_batch_result.unwrap_err())
+                    return false
+                if not self.native_staged_codegen_flush_v1(
+                        staged_batch_mir_failed, expected_batch_result.unwrap()):
                     return false
             # go-to-end: the whole schedule was attempted (no early return).
             self.go_to_end.mir_scan_complete = true

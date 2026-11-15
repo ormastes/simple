@@ -1,3 +1,4 @@
+use compiler.driver.driver_accessor_inventory_v1.{driver_accessor_collect_inventory_v1, driver_accessor_validate_inventory_v1}
 # Cold source coordinator. Called only for actual field-selector requests.
 # Public grammar admission remains separately gated until native qualification.
 use compiler.driver.driver_types.{CompileContext}
@@ -9,7 +10,8 @@ use compiler.driver.driver_accessor_provider_v1.*
 use compiler.driver.driver_accessor_advice_v1.{driver_accessor_ordered_advice_v1}
 use compiler.driver.driver_accessor_physical_v1.*
 use compiler.driver.driver_accessor_freeze_v1.{accessor_helper_key_v1, freeze_accessor_helpers_v1}
-use compiler.driver.driver_accessor_publication_v1.{driver_reserve_accessor_symbols_v1, driver_publish_accessor_plans_v1, driver_accessor_source_identity_v1}
+use compiler.driver.driver_accessor_publication_v1.{driver_reserve_accessor_symbols_v1,
+    driver_publish_accessor_plans_v1, driver_commit_accessor_inventory_v1, driver_accessor_source_identity_v1}
 use compiler.driver.cache.action_key.{canon_str, canon_nat, canon_seq, action_key_sort_texts}
 use compiler.hir.hir_types.{HirModule, HirTypeKind}
 use compiler.hir.hir_definitions.{HirAopAdvice, HirExprKind}
@@ -36,19 +38,7 @@ pub fn driver_accessor_is_builtin_field_v1(source: AccessorSourceSiteV1) -> bool
                 (field_name == "len" or field_name == "length")
         case _: false
 
-pub fn driver_accessor_order_inventory_v1(input: [HirAopAdvice]) -> [HirAopAdvice]:
-    var by_key: Dict<text, HirAopAdvice> = {}
-    for advice in input:
-        val key = canon_seq([canon_str(advice.aspect_module), canon_str(advice.aspect_name),
-            canon_nat(advice.span.start), canon_nat(advice.span.end),
-            canon_str(advice.predicate_text), canon_str(advice.advice_function),
-            canon_str(advice.form), canon_str("{advice.priority}")])
-        # Same original declaration in retained and streaming inventories is
-        # one rule. Different source positions remain distinct occurrences.
-        by_key[key] = advice
-    var result: [HirAopAdvice] = []
-    for key in action_key_sort_texts(by_key.keys()): result.push(by_key[key])
-    result
+export use compiler.driver.driver_accessor_inventory_v1.{driver_accessor_order_inventory_v1}
 
 fn accessor_target_from_source_v1(module: HirModule, canonical_module: text,
     source: AccessorSourceSiteV1) -> Result<AccessorFieldTargetV1, text>:
@@ -89,13 +79,8 @@ pub fn driver_prepare_accessor_plans_v1(ctx: CompileContext, entry_module: text,
         return Err("E-AOP-FIELD-ACCESS: original semantic diagnostics must pass before selection")
     val layout_mode = mir_target_hir_mode_from_env()?
     val module_names = action_key_sort_texts(ctx.hir_modules.keys())
-    var advices: [HirAopAdvice] = []
-    for advice in ctx.hir_aop_advices_saved:
-        if accessor_has_field_selector_v1(advice): advices.push(advice)
-    for name in module_names:
-        for advice in ctx.hir_modules[name].aop_advices:
-            if accessor_has_field_selector_v1(advice) and not advices.contains(advice): advices.push(advice)
-    advices = driver_accessor_order_inventory_v1(advices)
+    val advices = driver_accessor_collect_inventory_v1(ctx)
+    val inventory = driver_accessor_validate_inventory_v1(ctx, advices, entry_module)?
     var coverage: Dict<text, [AccessorFunctionIdentityV1]> = {}
     var rows: Dict<text, [AccessorSitePlanV1]> = {}
     var candidates: [AccessorCandidateV1] = []
@@ -172,4 +157,9 @@ pub fn driver_prepare_accessor_plans_v1(ctx: CompileContext, entry_module: text,
             hir_snapshot: sha256_text(encoded), plan_digest: "pending", module_identity: name,
             covered_functions: coverage[name], sites: decisions, helpers: local_helpers,
             type_bindings: bindings, layout_mode: layout_mode))
-    driver_publish_accessor_plans_v1(ctx, plans)
+    val published = driver_publish_accessor_plans_v1(ctx, plans)?
+    val ready = driver_commit_accessor_inventory_v1(ctx,
+        inventory.declarations_digest, inventory.resolved_rows)?
+    if not ready:
+        return Err("E-AOP-FIELD-RECEIPT: complete accessor inventory publication was not admitted")
+    Ok(published)
