@@ -56,13 +56,13 @@ describe "SPL-BOUND-002: late foreign-origin unit cast":
     it "accepts Simple-origin domain construction and ordinary text":
         # @req: REQ-DIAG-POLICY-001
         step("Lint a unit built from a parsed literal and a plain text function")
-        val src = "unit DistanceKm: i32 as km\nfn parse(n: i32) -> DistanceKm:\n    val v = n + 1\n    DistanceKm(v)\nfn echo(message: text) -> text:\n    message\n"
+        val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn parse(n: i32) -> DistanceKm:\n    val v = n + 1\n    DistanceKm(v)\nfn echo(message: text) -> text:\n    message\n"
         expect(check_bound_late_casts(src, "app/domain.spl").len()).to_equal(0)
 
     it "does not treat a non-unit call of a foreign value as a cast":
         # @req: REQ-DIAG-POLICY-001
         step("Lint a foreign value passed to an ordinary function")
-        val src = "extern fn c_read_distance() -> i32\nfn show() -> text:\n    val raw = c_read_distance()\n    format_num(raw)\n"
+        val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn show() -> text:\n    val raw = c_read_distance()\n    format_num(raw)\n"
         expect(check_bound_late_casts(src, "app/show.spl").len()).to_equal(0)
 
     it "does not leak foreign origin from one function into the next":
@@ -76,3 +76,55 @@ describe "SPL-BOUND-002: late foreign-origin unit cast":
         step("Lint a cast to a unit imported via use unit.length")
         val src = "use unit.length.{{Meter}\nextern fn c_read_len() -> f64\nfn len() -> Meter:\n    Meter(c_read_len())\n"
         expect(check_bound_late_casts(src, "app/len.spl").len()).to_equal(1)
+
+# Review regressions (2026-11-15): each pins one false positive / negative.
+describe "SPL-BOUND-002 precision regressions":
+    it "accepts an adapter whose @unsafe annotation spans several lines":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a boundary adapter with a two-line @unsafe annotation")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\n@unsafe(reason: \"x\",\n        capabilities: [ffi])\nfn hal() -> Km:\n    Km(c_read())\n"
+        expect(check_bound_late_casts(src, "hal/km.spl").len()).to_equal(0)
+
+    it "does not inherit an annotation from the previous function's body":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a safe function placed directly after a boundary adapter")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\n@unsafe(reason: \"x\", capabilities: [ffi])\nfn hal() -> Km:\n    Km(c_read())\nfn late() -> Km:\n    Km(c_read())\n"
+        val fs = check_bound_late_casts(src, "app/km.spl")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].line_num).to_equal(7)
+
+    it "clears foreign origin when the name is rebound to a Simple value":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a shadowed binding before the cast")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn f() -> Km:\n    val raw = c_read()\n    val raw = 5\n    Km(raw)\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(0)
+
+    it "does not match a field that shares a foreign value's name":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a cast of cfg.raw while a local raw is foreign")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn f(cfg: Cfg) -> Km:\n    val raw = c_read()\n    Km(cfg.raw)\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(0)
+
+    it "checks every unit cast on a line, not only the first":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a line with a literal cast followed by a foreign cast")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn f() -> Pair:\n    pair(Km(1), Km(c_read()))\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(1)
+
+    it "recognises the local alias of an imported unit":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a cast through an aliased unit import (Meter as M)")
+        val src = "use unit.length.{{Meter as M}\nextern fn c_read_len() -> f64\nfn len() -> M:\n    M(c_read_len())\n"
+        expect(check_bound_late_casts(src, "app/len.spl").len()).to_equal(1)
+
+    it "scans async and unsafe function bodies":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint late casts inside async fn and pub unsafe fn")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nasync fn a() -> Km:\n    Km(c_read())\npub unsafe fn b() -> Km:\n    Km(c_read())\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(2)
+
+    it "does not match a unit name that is a suffix of another call":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint MyKm(...) where only Km is a unit")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn f() -> i32:\n    MyKm(c_read())\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(0)

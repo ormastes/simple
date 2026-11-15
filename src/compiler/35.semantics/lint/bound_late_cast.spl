@@ -22,9 +22,11 @@ fn _blc_indent(raw: text) -> i64:
     i
 
 fn _blc_fn_header(line: text) -> bool:
-    line.starts_with("fn ") or line.starts_with("pub fn ") or
-        line.starts_with("static fn ") or line.starts_with("pub static fn ") or
-        line.starts_with("me ")
+    var rest = line
+    for prefix in ["pub ", "static ", "async ", "unsafe "]:
+        if rest.starts_with(prefix):
+            rest = rest.substring(prefix.byte_len(), rest.byte_len())
+    rest.starts_with("fn ") or rest.starts_with("me ")
 
 fn _blc_ident_char(c: text) -> bool:
     (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
@@ -66,7 +68,11 @@ fn _blc_unit_imports(line: text, existing: [text]) -> [text]:
     if open < 0 or close <= open:
         return units
     for part in line.substring(open + 1, close).split(","):
-        val name = part.trim()
+        # `{Meter as M}` binds the local name M.
+        var name = part.trim()
+        val alias_at = name.find(" as ")
+        if alias_at >= 0:
+            name = name.substring(alias_at + 4, name.byte_len()).trim()
         if name != "" and not units.contains(name):
             units.push(name)
     units
@@ -86,21 +92,25 @@ fn _blc_has_ffi_capability(line: text) -> bool:
     false
 
 fn _blc_boundary(lines: [CodeLine], header_index: i64) -> bool:
-    # Contiguous annotation lines directly above the header only.
+    # Contiguous annotation block directly above the header. An annotation may
+    # span lines (`@unsafe(reason: "...",` / `capabilities: [ffi])`), so join
+    # the lines from its `@unsafe(` start down to the header. A line ending in
+    # `:` belongs to a preceding header/body and ends the block. Bounded.
     var i = header_index - 1
     var remaining = 32
+    var joined = ""
     while i >= 0 and remaining > 0:
         val prev = lines[i].trimmed
         remaining = remaining - 1
         if prev == "":
             i = i - 1
             continue
+        if prev.ends_with(":"):
+            return false
+        joined = prev + " " + joined
         if prev.starts_with("@unsafe("):
-            return _blc_has_ffi_capability(prev)
-        if prev.starts_with("@"):
-            i = i - 1
-            continue
-        return false
+            return _blc_has_ffi_capability(joined)
+        i = i - 1
     false
 
 fn _blc_calls(expr: text, name: text) -> bool:
@@ -122,7 +132,10 @@ fn _blc_mentions(expr: text, name: text) -> bool:
             return false
         val start = from + at
         val end = start + name.byte_len()
-        val before_ok = start == 0 or not _blc_ident_char(expr.substring(start - 1, start))
+        # A preceding `.` means a field/method of another value, not this name.
+        val before_ok = start == 0 or
+            (not _blc_ident_char(expr.substring(start - 1, start)) and
+                expr.substring(start - 1, start) != ".")
         val after_ok = end >= expr.byte_len() or not _blc_ident_char(expr.substring(end, end + 1))
         if before_ok and after_ok:
             return true
@@ -145,33 +158,34 @@ fn _blc_rhs(line: text) -> text:
         return ""
     line.substring(eq + 1, line.byte_len()).trim()
 
-fn _blc_cast_arg(expr: text, unit_name: text) -> text:
-    # Text between `Unit(` and its matching `)`, or "" when absent.
+fn _blc_cast_args(expr: text, unit_name: text) -> [text]:
+    # Every `Unit(...)` argument on the line (whole-identifier `Unit` only).
+    var args: [text] = []
     val needle = unit_name + "("
-    var at = -1
-    if expr.starts_with(needle):
-        at = 0
-    else:
-        for lead in [" ", "(", "[", ",", "=", ":"]:
-            val k = expr.find(lead + needle)
-            if k >= 0:
-                at = k + 1
-                break
-    if at < 0:
-        return ""
-    var depth = 0
-    var i = at + needle.byte_len()
-    val start = i
-    while i < expr.byte_len():
-        val c = expr.substring(i, i + 1)
-        if c == "(":
-            depth = depth + 1
-        elif c == ")":
-            if depth == 0:
-                return expr.substring(start, i)
-            depth = depth - 1
-        i = i + 1
-    ""
+    var from = 0
+    while from < expr.byte_len():
+        val k = expr.substring(from, expr.byte_len()).find(needle)
+        if k < 0:
+            return args
+        val at = from + k
+        from = at + needle.byte_len()
+        if at > 0:
+            val before = expr.substring(at - 1, at)
+            if _blc_ident_char(before) or before == ".":
+                continue
+        var depth = 0
+        var i = from
+        while i < expr.byte_len():
+            val c = expr.substring(i, i + 1)
+            if c == "(":
+                depth = depth + 1
+            elif c == ")":
+                if depth == 0:
+                    args.push(expr.substring(from, i))
+                    break
+                depth = depth - 1
+            i = i + 1
+    args
 
 fn _blc_foreign(expr: text, externs: [text], tainted: [text]) -> bool:
     for name in externs:
@@ -219,19 +233,27 @@ pub fn check_bound_late_casts(source: text, file_path: text) -> [BoundLateCastFi
                 break
             if not boundary:
                 val bound = _blc_binding(body.trimmed)
+                var reported = false
                 for unit_name in units:
-                    val arg = _blc_cast_arg(body.trimmed, unit_name)
-                    if arg != "" and _blc_foreign(arg, externs, tainted):
-                        findings.push(BoundLateCastFinding(
-                            code: "SPL-BOUND-002",
-                            message: "late cast of a foreign-origin value to unit `{unit_name}`",
-                            note: "establish `{unit_name}` at the SFFI/HAL boundary: return it from an @unsafe(reason: ..., capabilities: [ffi]) adapter (or a Result<{unit_name}, ConstraintError> when the unit is constrained) and call that adapter here",
-                            line_num: body.line_num
-                        ))
+                    if reported:
                         break
-                if bound != "" and _blc_foreign(_blc_rhs(body.trimmed), externs, tainted) and
-                    not tainted.contains(bound):
-                    tainted.push(bound)
+                    for arg in _blc_cast_args(body.trimmed, unit_name):
+                        if _blc_foreign(arg, externs, tainted):
+                            findings.push(BoundLateCastFinding(
+                                code: "SPL-BOUND-002",
+                                message: "late cast of a foreign-origin value to unit `{unit_name}`",
+                                note: "establish `{unit_name}` at the SFFI/HAL boundary: return it from an @unsafe(reason: ..., capabilities: [ffi]) adapter (or a Result<{unit_name}, ConstraintError> when the unit is constrained) and call that adapter here",
+                                line_num: body.line_num
+                            ))
+                            reported = true
+                            break
+                if bound != "":
+                    # A rebinding/shadowing replaces the origin of `bound`.
+                    val foreign_rhs = _blc_foreign(_blc_rhs(body.trimmed), externs, tainted)
+                    if foreign_rhs and not tainted.contains(bound):
+                        tainted.push(bound)
+                    elif not foreign_rhs and tainted.contains(bound):
+                        tainted = [t for t in tainted if t != bound]
             j = j + 1
         i = j
     findings
