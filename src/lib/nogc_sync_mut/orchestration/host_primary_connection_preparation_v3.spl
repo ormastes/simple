@@ -1,0 +1,27 @@
+# Actual prepared-only expiry through the shared physical ledger; never a
+# cancellation of an executing helper or inferred native connection absence.
+use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.host_helper_request_load_owned_v2
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.host_capacity_owner_expire_prepared_owned_v3
+
+pub struct HostPrimaryConnectionPreparationReleaseV3:
+    local: HostLocalRootV3
+    released: bool
+    error: text
+
+pub fn host_primary_connection_expire_prepared_v3(local: HostLocalRootV3,
+        operation_id: text) -> HostPrimaryConnectionPreparationReleaseV3:
+    match local:
+        case HostLocalRootV3.Windows(original):
+            var root = original
+            val metadata = root.current_v3()
+            if metadata.is_err(): return HostPrimaryConnectionPreparationReleaseV3(local, false, metadata.unwrap_err())
+            val request = host_helper_request_load_owned_v2(root.capacity_v3().journal, operation_id)
+            if request.is_err(): return HostPrimaryConnectionPreparationReleaseV3(local, false, request.unwrap_err())
+            if request.unwrap().plan.helper_kind != "primary-connection":
+                return HostPrimaryConnectionPreparationReleaseV3(local, false, "connection-helper-kind")
+            val expired = host_capacity_owner_expire_prepared_owned_v3(root.capacity_v3(), operation_id, root.context_v3().monotonic_ms)
+            val saved = root.retain_v3(expired.owner, root.container_v3())
+            if saved.is_err(): return HostPrimaryConnectionPreparationReleaseV3(HostLocalRootV3.Windows(root), false, saved.unwrap_err())
+            HostPrimaryConnectionPreparationReleaseV3(HostLocalRootV3.Windows(root), expired.settled, expired.error)
+        case _: HostPrimaryConnectionPreparationReleaseV3(local, false, "host-primary-connection-provider-unsupported")

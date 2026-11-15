@@ -78,6 +78,7 @@ use compiler.driver.compile_failure_policy.{compile_fail_fast_requested}
 use compiler.driver.driver_log_helpers.{build_trace_enabled, log_build_trace,
     build_trace_list, build_trace_detail}
 use compiler.driver.driver_tldr_import_route_v1.{tldr_imports_enabled_v1, tldr_closure_walk_check_v1}
+use compiler.driver.driver_mir_shard_hir_residency_v1.{mir_shard_pool_parallel_v1}
 use app.cli.native_build_streaming_request_owner.{native_build_streaming_surfaces}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_can_replace, hir_shard_recovery_unclaimed_count, hir_shard_aggregate_exit, hir_shard_recovery_seal, hir_shard_reap_state_v1, hir_shard_reap_deadline_hit_v1, hir_shard_recovery_owner_tree_progress_v1, hir_shard_recovery_failure_count, hir_shard_recovery_finished, hir_shard_recovery_block, hir_shard_recovery_blocked, hir_shard_recovery_reap_blocks_ledger_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_close_inventory,
@@ -97,7 +98,8 @@ use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_
     native_file_worker_hir_ledger_progress_v1, native_file_worker_seal_state_v1,
     native_file_worker_object_path_v1, file_worker_overlap_proven_v1,
     NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1, file_worker_module_scoped_selected_v1,
-    NativeFileUnitInvokerV1, NATIVE_FILE_WORKER_UNIT_ENV_V1}
+    NativeFileUnitInvokerV1, NATIVE_FILE_WORKER_UNIT_ENV_V1,
+    NATIVE_FILE_UNIT_TLDR_ROOT_ENV_V1, native_file_unit_spawn_tldr_root_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_complete, HIR_SHARD_FORK_OWNER_MARK_V1,
     hir_shard_recovery_crashed_rows_v1}
 use compiler.driver.driver_build.native_file_unit_loop_v1.{native_file_unit_worker_loop_v1}
@@ -1721,13 +1723,14 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
     val mir_flag = env_get("SIMPLE_MIR_SHARDING") ?? ""
     if allow_mir and hir_ok and mir_flag != "0":
         val parallel = native_build_shard_threads(args, native_build_mir_worker_budget_kb_v1())
-        if parallel > 1:
+        val pool_parallel = mir_shard_pool_parallel_v1(parallel, env_get("SIMPLE_MIR_SHARD_INTERFACE_HIR") ?? "")
+        if pool_parallel > 0:
             val mir_queue = shard_ledger_queue_dir(args, "mir-queue", "mir-shard")
             if mir_queue != "":
-                val count = native_build_mir_shard_count(parallel)
-                print "[capsule-shard] mir shards={count} parallel={parallel} ledger={mir_queue}"
+                val count = native_build_mir_shard_count(pool_parallel)
+                print "[capsule-shard] mir shards={count} parallel={pool_parallel} ledger={mir_queue}"
                 val mir_run = run_ledger_shards("mir-shard", "--mir-shard", "SIMPLE_MIR_SHARD_QUEUE",
-                    "SIMPLE_MIR_SHARD_OWNER", base, mir_queue, args, count, parallel,
+                    "SIMPLE_MIR_SHARD_OWNER", base, mir_queue, args, count, pool_parallel,
                     simple_bin, timeout_ms)
                 val outcome = native_build_mir_outcome_after_hir_failures_v1(
                     native_mir_shard_outcome_after_hir_errors_v1(
@@ -2907,6 +2910,10 @@ struct NativeFileUnitProcessInvokerV1:
 impl NativeFileUnitInvokerV1 for NativeFileUnitProcessInvokerV1:
     fn run_unit(hir_owner: text, mir_owner: text) -> i64:
         env_set(NATIVE_FILE_WORKER_UNIT_ENV_V1, "1")
+        # File-scoped front end: the unit parses only its pick and resolves
+        # imports through TLDR summaries under this root, even without --cache-dir.
+        env_set(NATIVE_FILE_UNIT_TLDR_ROOT_ENV_V1,
+            native_file_unit_spawn_tldr_root_v1(env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? "", self.hir_queue))
         env_set("SIMPLE_HIR_SHARD_QUEUE", self.hir_queue)
         env_set("SIMPLE_HIR_SHARD_OWNER", hir_owner)
         env_set("SIMPLE_HIR_SHARD_CLAIM_LIMIT", "{self.batch}")
@@ -2916,6 +2923,7 @@ impl NativeFileUnitInvokerV1 for NativeFileUnitProcessInvokerV1:
         val pid = process_spawn_async(self.simple_bin, native_file_worker_child_args_v1(self.args, "--hir-shard={self.spec}"))
         val code = native_build_normalize_exit_code(shard_child_wait_bounded_v1("file-worker unit", pid, native_build_timeout_ms(self.args)))
         env_set(NATIVE_FILE_WORKER_UNIT_ENV_V1, "")
+        env_set(NATIVE_FILE_UNIT_TLDR_ROOT_ENV_V1, "")
         env_set("SIMPLE_HIR_SHARD_QUEUE", "")
         env_set("SIMPLE_HIR_SHARD_OWNER", "")
         env_set("SIMPLE_HIR_SHARD_CLAIM_LIMIT", "")

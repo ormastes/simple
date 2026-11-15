@@ -790,8 +790,28 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
     // Holds the value of the last direct top-level `main()` call.
     let mut top_level_main_result: Option<Value> = None;
 
-    // Second pass: apply decorators and register other items
-    for item in items {
+    // Second pass: apply decorators and register other items.
+    //
+    // Type declarations written AFTER the first top-level expression are
+    // registered before that expression runs: a `describe` block may call a
+    // method whose `impl` block (or class) is declared further down, and the
+    // first pass above registers constructors but not impl-block methods.
+    // Everything up to the first top-level expression keeps source order.
+    let first_expr = items
+        .iter()
+        .position(|n| matches!(n, Node::Expression(_)))
+        .unwrap_or(items.len());
+    let is_type_decl = |n: &&Node| {
+        matches!(
+            n,
+            Node::Struct(_) | Node::Enum(_) | Node::Class(_) | Node::Impl(_) | Node::Trait(_) | Node::Mixin(_)
+        )
+    };
+    let ordered = items[..first_expr]
+        .iter()
+        .chain(items[first_expr..].iter().filter(is_type_decl))
+        .chain(items[first_expr..].iter().filter(|n| !is_type_decl(n)));
+    for item in ordered {
         super::interpreter_state::set_current_node_span(item.span().map(Into::into));
         match item {
             Node::Function(f) => {

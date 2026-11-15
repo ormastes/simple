@@ -14,6 +14,7 @@
 #     process/child exit nor a confirmed tool timeout.
 
 use app.llm_caret.observer.observation_builder.*
+use app.llm_caret.json_helpers.{extract_json_string}
 
 fn claude_hook_events(session: text, generation: i64, op: text, seq: i64, at_ms: i64, hook_name: text) -> [ObserverEvent]:
     match hook_name:
@@ -32,6 +33,16 @@ fn codex_notification_events(session: text, generation: i64, op: text, seq: i64,
         "turn/waiting_input": [observer_event(session, generation, op, seq, at_ms, ObserverEventKind.StructuredApproval, "Codex waiting for input")]
         _: []
 
+# Claude loads a skill through its `Skill` tool, so the PreToolUse payload
+# (tool_name "Skill", tool_input.skill) is the structured loaded-skill signal.
+# SessionStart carries none. Returns "" when the hook is not a Skill call.
+fn claude_loaded_skill(hook_name: text, payload: text) -> text:
+    if hook_name != "PreToolUse":
+        return ""
+    if extract_json_string(payload, "tool_name") != "Skill":
+        return ""
+    extract_json_string(payload, "skill")
+
 fn provider_events(provider: text, session: text, generation: i64, op: text, seq: i64, at_ms: i64, event_name: text) -> [ObserverEvent]:
     if provider == "claude":
         return claude_hook_events(session, generation, op, seq, at_ms, event_name)
@@ -39,4 +50,4 @@ fn provider_events(provider: text, session: text, generation: i64, op: text, seq
         return codex_notification_events(session, generation, op, seq, at_ms, event_name)
     []
 
-export claude_hook_events, codex_notification_events, provider_events
+export claude_hook_events, claude_loaded_skill, codex_notification_events, provider_events

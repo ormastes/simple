@@ -1,0 +1,136 @@
+"""
+# MCP Progressive Hint Tools Specification
+
+**Requirements:** HINT-001..HINT-009 (plan 2026-11-14 section 7)
+
+## Overview
+
+Guards `simple_help`, `simple_capabilities` and `simple_hint_status`, routed by
+`dispatch_tool` and backed by the per-session hint map in
+`app.mcp.main_session_state`, which stores `HintState` values keyed by session
+and typed capability and calls the pure `decide_hint` with the clock passed in
+at the MCP boundary.
+
+Audience: MCP server maintainers and agents that depend on hint text naming
+only real tools.
+
+## Behavior
+
+- First capability use returns full guidance, the second a brief tip, the
+  third and later are quiet.
+- `simple_help` is an explicit help request: always full, even when quiet.
+- `simple_hint_status` reports the stored state and never changes it.
+- Two session ids never share hint state.
+- Every tool a hint names exists in the tool manifest; a fabricated name is
+  detected.
+- The three tools appear in the tool list and are read-only.
+"""
+
+# @feature mcp_progressive_hints
+# tag: unit
+
+use std.spec
+use app.mcp.main_lazy_json.{LB, RB, Q}
+use app.mcp.main_dispatch.{dispatch_tool}
+use app.mcp.main_session_state.{HintCapability, mcp_hint_reset}
+use app.mcp.main_lazy_hint_tools.{hint_capability_tool_names, hint_missing_tools, hint_all_capabilities}
+use app.mcp.main_static_tools.{_mcp_static_tools_result}
+
+fn _call(name: text, session: text, topic: text) -> text:
+    val q = Q()
+    val body = LB() + q + "session_id" + q + ":" + q + session + q + "," + q + "topic" + q + ":" + q + topic + q + RB()
+    dispatch_tool("1", name, body)
+
+fn _has(haystack: text, needle: text) -> bool:
+    haystack.contains(needle)
+
+describe "MCP progressive hint tools":
+    it "returns full, then brief, then quiet on repeated capability use":
+        # @req HINT-001
+        # @req HINT-002
+        # @req HINT-003
+        step("reset the hint map")
+        mcp_hint_reset()
+        step("first call is full")
+        val first = _call("simple_capabilities", "s1", "testing")
+        expect(_has(first, "hint_level: full")).to_equal(true)
+        expect(_has(first, "simple_test")).to_equal(true)
+        step("second call is brief")
+        val second = _call("simple_capabilities", "s1", "testing")
+        expect(_has(second, "hint_level: brief")).to_equal(true)
+        step("third call is quiet and carries no tool guidance")
+        val third = _call("simple_capabilities", "s1", "testing")
+        expect(_has(third, "hint_level: quiet")).to_equal(true)
+        expect(_has(third, "simple_test")).to_equal(false)
+
+    it "simple_help is always full even after the capability went quiet":
+        # @req HINT-008
+        step("drive the capability to quiet")
+        mcp_hint_reset()
+        val a = _call("simple_capabilities", "s2", "debug")
+        val b = _call("simple_capabilities", "s2", "debug")
+        val c = _call("simple_capabilities", "s2", "debug")
+        expect(_has(c, "hint_level: quiet")).to_equal(true)
+        step("explicit help overrides suppression")
+        val help = _call("simple_help", "s2", "debug")
+        expect(_has(help, "hint_level: full")).to_equal(true)
+        expect(_has(help, "debug_create_session")).to_equal(true)
+
+    it "simple_hint_status reports stored state without mutating it":
+        # @req HINT-004
+        step("use the capability twice")
+        mcp_hint_reset()
+        val a = _call("simple_capabilities", "s3", "traceability")
+        val b = _call("simple_capabilities", "s3", "traceability")
+        step("status shows two uses, and repeated status calls do not advance it")
+        val s1 = _call("simple_hint_status", "s3", "traceability")
+        val s2 = _call("simple_hint_status", "s3", "traceability")
+        expect(_has(s1, "seen_count: 2")).to_equal(true)
+        expect(_has(s2, "seen_count: 2")).to_equal(true)
+        step("the next real use is still the third (quiet)")
+        val third = _call("simple_capabilities", "s3", "traceability")
+        expect(_has(third, "hint_level: quiet")).to_equal(true)
+
+    it "does not share state between two session ids":
+        # @req HINT-005
+        step("session A uses testing twice")
+        mcp_hint_reset()
+        val a1 = _call("simple_capabilities", "sess-a", "testing")
+        val a2 = _call("simple_capabilities", "sess-a", "testing")
+        step("session B still gets a full first hint")
+        val b1 = _call("simple_capabilities", "sess-b", "testing")
+        expect(_has(b1, "hint_level: full")).to_equal(true)
+        val status_b = _call("simple_hint_status", "sess-b", "testing")
+        expect(_has(status_b, "seen_count: 1")).to_equal(true)
+
+    it "rejects an unknown capability topic without storing state":
+        # @req HINT-006
+        step("unknown topic is a tool error")
+        mcp_hint_reset()
+        val bad = _call("simple_capabilities", "s4", "no_such_capability")
+        expect(_has(bad, "\"isError\":true")).to_equal(true)
+        step("nothing was stored for the session")
+        val status = _call("simple_hint_status", "s4", "testing")
+        expect(_has(status, "seen_count: 0")).to_equal(true)
+
+    it "names only tools that exist in the tool manifest":
+        # @req HINT-009
+        step("every capability's tool names resolve")
+        for cap in hint_all_capabilities():
+            val missing = hint_missing_tools(hint_capability_tool_names(cap))
+            expect(missing.len()).to_equal(0)
+        step("a fabricated name is detected (adverse)")
+        val missing = hint_missing_tools(["simple_test", "simple_fabricated_zzz"])
+        expect(missing.len()).to_equal(1)
+        expect(missing[0]).to_equal("simple_fabricated_zzz")
+
+    it "lists the three tools in the tool list as read-only":
+        # @req HINT-001
+        step("tools/list manifest carries all three")
+        val listing = _mcp_static_tools_result()
+        expect(_has(listing, "\"name\":\"simple_help\"")).to_equal(true)
+        expect(_has(listing, "\"name\":\"simple_capabilities\"")).to_equal(true)
+        expect(_has(listing, "\"name\":\"simple_hint_status\"")).to_equal(true)
+        step("each is annotated read-only")
+        val after_help = listing.split("\"name\":\"simple_help\"")[1]
+        expect(_has(after_help.slice(0, 600), "\"readOnlyHint\":true")).to_equal(true)

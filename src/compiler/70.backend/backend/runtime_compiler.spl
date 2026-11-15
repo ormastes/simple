@@ -232,6 +232,19 @@ fn hosted_c_target_os_matches(target: text, host_os_name: text) -> bool:
 fn hosted_c_target_is_mingw(target: text) -> bool:
     target.ends_with("-pc-windows-gnu") or target.ends_with("-w64-mingw32") or target.ends_with("-w64-windows-gnu")
 
+pub fn hosted_mingw_clang_target(target: text) -> text:
+    """llvm-mingw clang driver triple for a Windows GNU compile or link.
+
+    The target's own architecture; x86_64 for an empty, host or unknown one.
+    A hardcoded x86_64 triple sent an aarch64-pc-windows-gnu cross link to the
+    x86_64 sysroot."""
+    val lower = target.trim().lower()
+    if lower.starts_with("aarch64-") or lower.starts_with("arm64-"):
+        return "aarch64-w64-windows-gnu"
+    if lower.starts_with("i686-"):
+        return "i686-w64-windows-gnu"
+    "x86_64-w64-windows-gnu"
+
 pub fn hosted_c_compiler_plan(target: text, host_os_name: text, host_arch_name: text) -> HostedCCompilerPlan:
     """Classify hosted C compilation without enabling unsupported cross targets."""
     if target == "" or target == "host" or target == "native":
@@ -283,6 +296,11 @@ pub fn c_compiler_override(windows_gnu: bool, requires_cross: bool, target: text
         val gnu_cc = env_get_nullable("CC")
         if gnu_cc != "" and gnu_cc != nil:
             simple_cc = gnu_cc
+    elif windows_gnu and hosted_c_target_is_mingw(target) and (simple_cc == "" or simple_cc == nil):
+        # llvm-mingw clang is multi-target: reuse CC for a mingw cross arch.
+        val cross_cc = env_get_nullable("CC")
+        if cross_cc != "" and cross_cc != nil:
+            simple_cc = cross_cc
     if simple_cc != "" and simple_cc != nil:
         if ((windows_gnu and not requires_cross) or hosted_c_target_is_mingw(target)) and not simple_cc.lower().contains("clang"):
             return ""
@@ -854,17 +872,36 @@ pub fn runtime_core_c_sources_v1() -> [text]:
     """
     ["runtime_native", "runtime_alloc_observer", "runtime_core_intrinsics", "runtime_file_view", "runtime_disk_headroom", "runtime_memory_headroom", "runtime_cache_host_authority_v1", "runtime_framebuffer", "runtime_directx_core", "runtime_legacy_core", "runtime_core_io_exports", "runtime_core_host_services", "runtime_fork", "runtime_memtrack", "runtime_process", "runtime_process_tree", "runtime_memory", "runtime_process_owned", "runtime_coverage_core", "runtime_contracts", "runtime_font", "runtime_thread", "runtime_simd_utf8", "runtime_simd_case", "runtime_simd_search", "runtime_simd_dispatch", "runtime_packed_span", "runtime_terminal", "runtime_prof_sample", "runtime_core_exports", "runtime_backend_plugin", "runtime_rocm", "runtime_renderdoc", "runtime_timestamp", "runtime_glfw", "runtime_sdl2", "runtime_sdl3", "runtime_audio", "runtime_image", "runtime_socket_nonblock", "counterpart_abi_runtime", "runtime_cranelift_bridge_stub"]
 
-pub fn runtime_core_c_platform_sources_v1(windows_target: bool) -> [text]:
+pub fn runtime_core_c_target_os_v1(target: text, host_windows: bool, host_os_name: text) -> text:
+    """Which core-C platform owner set a native target takes: windows, linux or other.
+
+    Android triples (`*-linux-android`) stay `other`: its async backend has
+    not been compiled or linked through this list.
+    """
+    if target.contains("-windows") or (target == "host" and host_windows):
+        return "windows"
+    if target.contains("-linux-gnu") or target.contains("-linux-musl") or (target == "host" and host_os_name == "linux"):
+        return "linux"
+    "other"
+
+pub fn runtime_core_c_platform_sources_v1(target_os: text) -> [text]:
     """Per-OS async driver owners for the core-C composition.
 
-    platform/async_driver.c owns the 14 rt_driver_* exports and dispatches to
+    platform/async_driver.c owns the rt_driver_* exports and dispatches to
     one OS backend; on Windows that is platform/async_windows.c
     (spl_driver_create_iocp). The phase-3 stage3 link needed both and the
     baked list omitted them (bug stage2_runtime_missing_rt_heap_aux_live_bytes
-    _2026-11-02 sibling). Other OS backends are not yet admitted here.
+    _2026-11-02 sibling). On Linux the dispatch probes io_uring and falls back
+    to epoll, so both owners are linked; without SPL_HAS_IO_URING (never set
+    here, no liburing) async_linux_uring.c is its stub that returns NULL. The
+    aarch64 Stage 3 core-C link (2026-11-15) failed on 10 rt_driver_* symbols
+    without them. FreeBSD/macOS kqueue owners are not yet admitted: they have
+    not been compiled or linked through this list.
     """
-    if windows_target:
+    if target_os == "windows":
         return ["platform/async_driver", "platform/async_windows"]
+    if target_os == "linux":
+        return ["platform/async_driver", "platform/async_linux_epoll", "platform/async_linux_uring"]
     []
 
 pub fn runtime_object_basename_v1(name: text) -> text:
@@ -1054,8 +1091,8 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
     val compile_pid = getpid()
     val target = env_get_nullable("SIMPLE_NATIVE_BUILD_TARGET") ?? "host"
     if core_c_profile:
-        val windows_target = target.contains("-windows") or (target == "host" and _is_windows())
-        for platform_source in runtime_core_c_platform_sources_v1(windows_target):
+        val target_os = runtime_core_c_target_os_v1(target, _is_windows(), host_os())
+        for platform_source in runtime_core_c_platform_sources_v1(target_os):
             sources = sources.push(platform_source)
     if alloc_observer and target != "host":
         return Err("allocation observer v1 requires startup-linked native host target")
@@ -1165,7 +1202,7 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
             # section so the linker's --gc-sections can strip unreferenced code.
             comp_args = ["-c"]
             if target.ends_with("-pc-windows-gnu"):
-                comp_args.push("--target=x86_64-w64-windows-gnu")
+                comp_args.push("--target=" + hosted_mingw_clang_target(target))
             for target_arg in hosted_cross_c_target_args(target, host_os(), host_arch()):
                 comp_args.push(target_arg)
             for abi_define in abi_defines:

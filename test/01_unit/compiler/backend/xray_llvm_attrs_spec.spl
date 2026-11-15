@@ -179,7 +179,7 @@ describe "XRay LLVM flag-guard sleds (Windows)":
         val ir = xray_attr_translator("windows").translate_module(xray_attr_module([xray_attr_fn(1, "xr_tail", 2)]))
         expect(ir).to_contain("@__simple_xray_slot_xr_tail = internal global i8 0")
         step("The edge hook is DLL-local and calls through an exported pointer, so a Windows DLL links with no undefined host symbol")
-        expect(ir).to_contain("@__simple_xray_hook_v1 = dllexport global ptr null")
+        expect(ir).to_contain("@__simple_xray_hook_v1 = global ptr null")
         expect(ir).to_contain("define internal void @__simple_xray_edge_v1(i64 %site, i32 %kind)")
         expect(ir.contains("declare void @__simple_xray_edge_v1")).to_equal(false)
         expect(ir).to_contain("call void @__simple_xray_edge_v1(i64 0, i32 0)")
@@ -193,7 +193,7 @@ describe "XRay LLVM flag-guard sleds (Windows)":
         val ir = xray_attr_translator("windows").translate_module(
             xray_attr_module([xray_attr_fn(1, "xr_a", 2), xray_attr_fn(2, "xr_b", 2), xray_attr_fn(3, "xr_never", 0)]))
         expect(xray_count_of(ir, "@__simple_xray_descriptor_v1 =")).to_equal(1)
-        expect(ir).to_contain("@__simple_xray_descriptor_v1 = dllexport constant { i64, [2 x ptr] }")
+        expect(ir).to_contain("@__simple_xray_descriptor_v1 = constant { i64, [2 x ptr] }")
         expect(ir.contains("@__simple_xray_slot_xr_never")).to_equal(false)
 
     # @req REQ-XRAY-V1-API-01
@@ -204,7 +204,7 @@ describe "XRay LLVM flag-guard sleds (Windows)":
         val ir = xray_attr_translator("windows").translate_module(
             xray_attr_module([xray_attr_fn(1, "xr_a", 2), xray_attr_fn(2, "xr_b", 2), xray_attr_fn(3, "xr_never", 0)]))
         expect(xray_count_of(ir, "@__simple_xray_names_v1 =")).to_equal(1)
-        expect(ir).to_contain("@__simple_xray_names_v1 = dllexport constant { i64, [2 x ptr] } { i64 2, [2 x ptr] [ptr @__simple_xray_name_0, ptr @__simple_xray_name_1] }")
+        expect(ir).to_contain("@__simple_xray_names_v1 = constant { i64, [2 x ptr] } { i64 2, [2 x ptr] [ptr @__simple_xray_name_0, ptr @__simple_xray_name_1] }")
         step("Each entry is a private NUL-terminated C string holding the Simple name")
         expect(ir).to_contain("@__simple_xray_name_0 = private unnamed_addr constant [5 x i8] c\"xr_a\\00\"")
         expect(ir).to_contain("@__simple_xray_name_1 = private unnamed_addr constant [5 x i8] c\"xr_b\\00\"")
@@ -213,6 +213,39 @@ describe "XRay LLVM flag-guard sleds (Windows)":
     it "escapes quote and backslash bytes in a names-table entry":
         val ir = xray_attr_translator("windows").translate_module(xray_attr_module([xray_attr_fn(1, "a\"b\\c", 2)]))
         expect(ir).to_contain("@__simple_xray_name_0 = private unnamed_addr constant [6 x i8] c\"a\\22b\\5Cc\\00\"")
+
+    # @req REQ-XRAY-V1-API-01
+    it "exports a fixed-size in-DLL ring the edge appends to when no hook is set":
+        """Ring mode (PROVISIONAL): with a null hook, `__simple_xray_edge_v1` claims
+        a record index by `atomicrmw add` on the write index (lockless), drops and
+        counts when full, and publishes the record by a release store of seq."""
+        val ir = xray_attr_translator("windows").translate_module(xray_attr_module([xray_attr_fn(1, "xr_tail", 2)]))
+        step("Header {capacity, write index, dropped} then capacity x {site, kind, pad, seq, ts} (ABI v2)")
+        expect(xray_count_of(ir, "@__simple_xray_ring_v2 =")).to_equal(1)
+        expect(xray_count_of(ir, "@__simple_xray_ring_v1")).to_equal(0)
+        expect(ir).to_contain("@__simple_xray_ring_v2 = global { i64, i64, i64, [65536 x { i64, i32, i32, i64, i64 }] } { i64 65536, i64 0, i64 0, [65536 x { i64, i32, i32, i64, i64 }] zeroinitializer }")
+        step("The edge stamps ts from llvm.readcyclecounter before the release seq store")
+        expect(xray_count_of(ir, "declare i64 @llvm.readcyclecounter()")).to_equal(1)
+        expect(ir).to_contain("%xe_ts = call i64 @llvm.readcyclecounter()\n  %xe_rts = getelementptr inbounds { i64, i64, i64, [65536 x { i64, i32, i32, i64, i64 }] }, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 4\n  store i64 %xe_ts, ptr %xe_rts, align 8\n  %xe_seq = add i64 %xe_i, 1")
+        step("The null-hook branch appends to the ring; the hook branch is unchanged")
+        expect(ir).to_contain("br i1 %set, label %xe_call, label %xe_ring")
+        expect(ir).to_contain("call void %h(i64 %site, i32 %kind)")
+        expect(ir).to_contain("atomicrmw add ptr %xe_widx, i64 1 monotonic")
+        expect(ir).to_contain("atomicrmw add ptr %xe_dropped, i64 1 monotonic")
+        expect(ir).to_contain("store atomic i64 %xe_seq, ptr %xe_rseq release, align 8")
+
+    # Bug xray_win_flag_guard_dllexport_disables_mingw_auto_export_2026-11-15:
+    # one explicit dllexport turns MinGW lld auto-export off, so the --xray DLL
+    # lost every function export. The xray symbols use the same auto-export.
+    it "emits no dllexport in a windows xray module (repro)":
+        val ir = xray_attr_translator("windows").translate_module(xray_attr_module([xray_attr_fn(1, "xr_tail", 2)]))
+        expect(ir.contains("dllexport")).to_equal(false)
+
+    it "emits no dllexport with several sled and never-listed functions":
+        val ir = xray_attr_translator("windows").translate_module(
+            xray_attr_module([xray_attr_fn(1, "xr_a", 2), xray_attr_fn(2, "xr_b", 2), xray_attr_fn(3, "xr_never", 0)]))
+        expect(ir.contains("dllexport")).to_equal(false)
+        expect(ir).to_contain("@__simple_xray_descriptor_v1 = constant")
 
     it "still rejects entry+exit-only mode 1 on windows":
         val ir = xray_attr_translator("windows").translate_module(xray_attr_module([xray_attr_fn(1, "xr_exit", 1)]))

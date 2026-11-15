@@ -8,7 +8,7 @@
 use app.llm_caret.observer.observation_builder.*
 use app.llm_caret.observer.attention_inbox.*
 use app.llm_caret.observer.stall_classifier.{policy_default}
-use app.llm_caret.observer.provider_adapters.{provider_events}
+use app.llm_caret.observer.provider_adapters.{provider_events, claude_loaded_skill}
 
 # Ponytail: 256 events per session is far beyond what the classifier folds
 # (it only needs the latest tool/approval/heartbeat facts) and bounds memory
@@ -19,8 +19,11 @@ val OBSERVER_HOOK_GENERATION: i64 = 1
 var _events: [ObserverEvent] = []
 var _inbox: AttentionInbox = attention_inbox_new()
 var _seq: i64 = 0
+# Provider-reported loaded skills as "session<TAB>skill", first report wins.
+var _skills: [text] = []
 
 fn observer_reset():
+    _skills = []
     _events = []
     _inbox = attention_inbox_new()
     _seq = 0
@@ -74,4 +77,32 @@ fn observer_record_hook(provider: text, session: text, generation: i64, event_id
     if added:
         _inbox = observe_session(_inbox, _events, session, generation, at_ms, policy_default()).inbox
 
-export OBSERVER_RING_CAP, OBSERVER_HOOK_GENERATION, observer_reset, observer_events, observer_inbox, observer_record_hook
+# Receive point for the loaded-skill fact: only a provider Skill call records one.
+fn observer_record_skill(provider: text, session: text, hook_name: text, payload: text):
+    if provider != "claude":
+        return
+    val skill = claude_loaded_skill(hook_name, payload)
+    if skill == "":
+        return
+    val key = session + "\t" + skill
+    if not _skills.contains(key):
+        _skills = _skills + [key]
+
+fn observer_loaded_skills(session: text) -> [text]:
+    var out: [text] = []
+    for k in _skills:
+        val parts = k.split("\t")
+        if parts[0] == session:
+            out = out + [parts[1]]
+    out
+
+# Distinct skill names reported by any session.
+fn observer_all_loaded_skills() -> [text]:
+    var out: [text] = []
+    for k in _skills:
+        val name = k.split("\t")[1]
+        if not out.contains(name):
+            out = out + [name]
+    out
+
+export OBSERVER_RING_CAP, OBSERVER_HOOK_GENERATION, observer_reset, observer_events, observer_inbox, observer_record_hook, observer_record_skill, observer_loaded_skills, observer_all_loaded_skills

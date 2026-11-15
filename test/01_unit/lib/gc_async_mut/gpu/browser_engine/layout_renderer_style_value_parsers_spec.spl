@@ -1,0 +1,213 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_foundation.spl 1%
+# @tag: unit, browser_engine, css, animation, gradient
+#
+# Style-value parsers of the layout renderer: percentages in thousandths,
+# opacity, gradient colour stops (CSS Images 3 section 3.4.3: an unpositioned
+# first/last stop is 0%/100%, unpositioned middle stops are spaced evenly, and
+# a stop below an earlier position is raised to it) and the animation /
+# transition declaration validators.
+#
+# Validity oracle: Chrome 159.0.8154.6 headless shell,
+# `d.style.setProperty(prop, value); d.style.getPropertyValue(prop) !== ""`
+# for every validator row below (run 2026-11-15). Rows where this renderer
+# disagrees with Chrome are filed, not asserted:
+# doc/08_tracking/bug/web_opacity_out_of_range_and_one_point_zero_2026-11-15.md,
+# doc/08_tracking/bug/web_animation_shorthand_negative_lone_time_rejected_2026-11-15.md.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
+    parse_percent_permille, parse_opacity_pct, parse_gradient_stops, parse_color_any,
+    animation_shorthand_is_valid, animation_declaration_value_is_valid,
+    transition_shorthand_is_valid, transition_declaration_value_is_valid,
+    parse_animation_name, parse_animation_iteration_count, parse_animation_direction,
+    parse_animation_fill_mode, parse_animation_play_state, css_timing_shorthand_tokens
+}
+
+describe "Percentages in thousandths":
+
+    it "reads whole and fractional percentages":
+        expect(parse_percent_permille("50%")).to_equal(500)
+        expect(parse_percent_permille("12.5%")).to_equal(125)
+        expect(parse_percent_permille("100%")).to_equal(1000)
+
+    it "encodes in thousandths by design, truncating further digits":
+        expect(parse_percent_permille("33.33%")).to_equal(333)
+
+    it "rejects a value without a percent sign or digits":
+        expect(parse_percent_permille("50")).to_equal(-1)
+        expect(parse_percent_permille("%")).to_equal(-1)
+        expect(parse_percent_permille("abc%")).to_equal(-1)
+        expect(parse_percent_permille("")).to_equal(-1)
+
+describe "Opacity in percent":
+
+    it "maps the 0 and 1 endpoints and an empty value":
+        expect(parse_opacity_pct("0")).to_equal(0)
+        expect(parse_opacity_pct("1")).to_equal(100)
+        expect(parse_opacity_pct("")).to_equal(100)
+
+    it "encodes a fraction in whole percent by design":
+        expect(parse_opacity_pct("0.5")).to_equal(50)
+        expect(parse_opacity_pct(".25")).to_equal(25)
+        expect(parse_opacity_pct(" 0.75 ")).to_equal(75)
+
+    it "reads a percentage and clamps it to 100":
+        expect(parse_opacity_pct("50%")).to_equal(50)
+        expect(parse_opacity_pct("150%")).to_equal(100)
+
+describe "Gradient colour stops":
+
+    it "spaces unpositioned stops evenly from 0% to 100%":
+        val s = parse_gradient_stops("linear-gradient(red, lime, blue)")
+        expect(s.len()).to_equal(3)
+        expect(s[0].pos_permille).to_equal(0)
+        expect(s[1].pos_permille).to_equal(500)
+        expect(s[2].pos_permille).to_equal(1000)
+        expect(s[0].color).to_equal(parse_color_any("red"))
+        expect(s[1].color).to_equal(parse_color_any("lime"))
+        expect(s[2].color).to_equal(parse_color_any("blue"))
+
+    it "skips the direction argument and honours an explicit position":
+        val s = parse_gradient_stops("linear-gradient(90deg, red 20%, blue)")
+        expect(s.len()).to_equal(2)
+        expect(s[0].pos_permille).to_equal(200)
+        expect(s[1].pos_permille).to_equal(1000)
+        val t = parse_gradient_stops("linear-gradient(to right, rgba(0,0,0,0.5) 25%, blue)")
+        expect(t.len()).to_equal(2)
+        expect(t[0].pos_permille).to_equal(250)
+        expect(t[0].color).to_equal(parse_color_any("rgba(0,0,0,0.5)"))
+
+    it "raises a stop positioned below an earlier one":
+        val s = parse_gradient_stops("linear-gradient(red 50%, lime 10%, blue)")
+        expect(s[1].pos_permille).to_equal(500)
+        expect(s[2].pos_permille).to_equal(1000)
+
+    it "interpolates a run of unpositioned stops toward the next positioned one":
+        val s = parse_gradient_stops("linear-gradient(red, lime, yellow, blue 90%)")
+        expect(s.len()).to_equal(4)
+        expect(s[1].pos_permille).to_equal(300)
+        expect(s[2].pos_permille).to_equal(600)
+        expect(s[3].pos_permille).to_equal(900)
+
+    it "returns no stops for a value that is not a gradient":
+        expect(parse_gradient_stops("red").len()).to_equal(0)
+
+describe "Animation shorthand validity":
+
+    context "valid shorthands (Chrome accepts)":
+
+        it "accepts name, duration, timing and iteration count":
+            expect(animation_shorthand_is_valid("spin 1s linear infinite")).to_equal(true)
+
+        it "accepts one of every component":
+            expect(animation_shorthand_is_valid("spin 1s 2s ease-in 3 alternate both paused")).to_equal(true)
+
+        it "accepts a negative delay after the duration and a fractional count":
+            expect(animation_shorthand_is_valid("spin 1s -1s")).to_equal(true)
+            expect(animation_shorthand_is_valid("spin 2.5")).to_equal(true)
+
+    context "invalid shorthands (Chrome rejects)":
+
+        it "rejects a third time":
+            expect(animation_shorthand_is_valid("spin 1s 2s 3s")).to_equal(false)
+
+        it "rejects a repeated component":
+            expect(animation_shorthand_is_valid("spin ease linear")).to_equal(false)
+            expect(animation_shorthand_is_valid("spin 2 3")).to_equal(false)
+            expect(animation_shorthand_is_valid("spin normal reverse")).to_equal(false)
+            expect(animation_shorthand_is_valid("spin none both")).to_equal(false)
+            expect(animation_shorthand_is_valid("spin running paused")).to_equal(false)
+            expect(animation_shorthand_is_valid("spin fade")).to_equal(false)
+
+        it "rejects a negative iteration count":
+            expect(animation_shorthand_is_valid("spin -2")).to_equal(false)
+
+        it "rejects an empty value and an unknown function":
+            expect(animation_shorthand_is_valid("")).to_equal(false)
+            expect(animation_shorthand_is_valid("spin wobble(2)")).to_equal(false)
+
+describe "Animation longhand validity":
+
+    it "accepts one non-numeric name":
+        expect(animation_declaration_value_is_valid("animation-name", "spin")).to_equal(true)
+        expect(animation_declaration_value_is_valid("animation-name", "2")).to_equal(false)
+        expect(animation_declaration_value_is_valid("animation-name", "a b")).to_equal(false)
+
+    it "allows a negative delay but not a negative duration":
+        expect(animation_declaration_value_is_valid("animation-duration", "-1s")).to_equal(false)
+        expect(animation_declaration_value_is_valid("animation-delay", "-1s")).to_equal(true)
+
+    it "validates timing, count, direction, fill mode and play state keywords":
+        expect(animation_declaration_value_is_valid("animation-timing-function", "ease-in-out")).to_equal(true)
+        expect(animation_declaration_value_is_valid("animation-timing-function", "wobble")).to_equal(false)
+        expect(animation_declaration_value_is_valid("animation-iteration-count", "infinite")).to_equal(true)
+        expect(animation_declaration_value_is_valid("animation-iteration-count", "1.5")).to_equal(true)
+        expect(animation_declaration_value_is_valid("animation-iteration-count", "-1")).to_equal(false)
+        expect(animation_declaration_value_is_valid("animation-direction", "alternate-reverse")).to_equal(true)
+        expect(animation_declaration_value_is_valid("animation-direction", "sideways")).to_equal(false)
+        expect(animation_declaration_value_is_valid("animation-fill-mode", "backwards")).to_equal(true)
+        expect(animation_declaration_value_is_valid("animation-play-state", "paused")).to_equal(true)
+        expect(animation_declaration_value_is_valid("animation-play-state", "stopped")).to_equal(false)
+
+    it "routes the shorthand and rejects empty or unknown properties":
+        expect(animation_declaration_value_is_valid("animation", "spin 1s")).to_equal(true)
+        expect(animation_declaration_value_is_valid("animation", "  ")).to_equal(false)
+        expect(animation_declaration_value_is_valid("animation-foo", "spin")).to_equal(false)
+
+describe "Transition validity":
+
+    it "accepts property, duration, timing and delay":
+        expect(transition_shorthand_is_valid("opacity 1s ease-in 0.5s")).to_equal(true)
+
+    it "rejects a third time, two timings, a bare number and two properties":
+        expect(transition_shorthand_is_valid("opacity 1s 2s 3s")).to_equal(false)
+        expect(transition_shorthand_is_valid("opacity ease linear")).to_equal(false)
+        expect(transition_shorthand_is_valid("opacity 5")).to_equal(false)
+        expect(transition_shorthand_is_valid("opacity width 1s")).to_equal(false)
+
+    it "validates each longhand":
+        expect(transition_declaration_value_is_valid("transition", "opacity 1s")).to_equal(true)
+        expect(transition_declaration_value_is_valid("transition-property", "opacity")).to_equal(true)
+        expect(transition_declaration_value_is_valid("transition-property", "5px")).to_equal(false)
+        expect(transition_declaration_value_is_valid("transition-property", "a b")).to_equal(false)
+        expect(transition_declaration_value_is_valid("transition-duration", "-1s")).to_equal(false)
+        expect(transition_declaration_value_is_valid("transition-duration", "250ms")).to_equal(true)
+        expect(transition_declaration_value_is_valid("transition-delay", "-1s")).to_equal(true)
+        expect(transition_declaration_value_is_valid("transition-timing-function", "linear")).to_equal(true)
+        expect(transition_declaration_value_is_valid("transition-timing-function", "bogus")).to_equal(false)
+        expect(transition_declaration_value_is_valid("transition-foo", "x")).to_equal(false)
+        expect(transition_declaration_value_is_valid("transition", "")).to_equal(false)
+
+describe "Animation shorthand component extraction":
+
+    it "finds the name and falls back to none":
+        expect(parse_animation_name("spin 1s")).to_equal("spin")
+        expect(parse_animation_name("1s linear")).to_equal("none")
+
+    it "finds the iteration count and falls back to 1":
+        expect(parse_animation_iteration_count("spin 3 1s")).to_equal("3")
+        expect(parse_animation_iteration_count("spin infinite")).to_equal("infinite")
+        expect(parse_animation_iteration_count("spin 1s")).to_equal("1")
+
+    it "finds direction, fill mode and play state with their initial values as fallback":
+        expect(parse_animation_direction("spin Alternate")).to_equal("alternate")
+        expect(parse_animation_direction("spin")).to_equal("normal")
+        expect(parse_animation_fill_mode("spin forwards")).to_equal("forwards")
+        expect(parse_animation_fill_mode("spin")).to_equal("none")
+        expect(parse_animation_play_state("spin paused")).to_equal("paused")
+        expect(parse_animation_play_state("spin")).to_equal("running")
+
+describe "Timing shorthand tokens":
+
+    it "splits on top-level whitespace and keeps function arguments together":
+        val t = css_timing_shorthand_tokens("spin cubic-bezier(0.1, 0.2, 0.3, 0.4) 1s")
+        expect(t.len()).to_equal(3)
+        expect(t[1]).to_equal("cubic-bezier(0.1, 0.2, 0.3, 0.4)")
+
+    it "fails closed on a list, an unbalanced parenthesis or an empty value":
+        expect(css_timing_shorthand_tokens("spin 1s, fade 2s").len()).to_equal(0)
+        expect(css_timing_shorthand_tokens("steps(2").len()).to_equal(0)
+        expect(css_timing_shorthand_tokens("a) b").len()).to_equal(0)
+        expect(css_timing_shorthand_tokens("").len()).to_equal(0)

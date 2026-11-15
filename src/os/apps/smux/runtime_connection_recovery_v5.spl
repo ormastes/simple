@@ -1,0 +1,50 @@
+# Process-local recovery carrier only. No owner/token is encoded in CLI replies.
+use os.apps.smux.runtime_connection_owner_v5.{SmuxRuntimeConnectionOwnerV5,
+    smux_runtime_connection_recover_v5, smux_runtime_connection_close_v5,
+    smux_runtime_connection_stop_allowed_v5}
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.{HostServiceDomainV3, HostServiceCleanupV3,
+    host_service_domain_close_v3, host_service_cleanup_v3}
+use std.sosix.host.{RetainedPrivateCredentialV2, retained_private_credential_close_v2}
+
+pub struct SmuxRuntimeServerTurnV5:
+    exit_code: i64
+    owner: SmuxRuntimeConnectionOwnerV5?
+    domain: HostServiceDomainV3?
+    cleanup: HostServiceCleanupV3?
+    credential: RetainedPrivateCredentialV2?
+    error: text = ""
+
+pub fn smux_runtime_server_recovery_pending_v5(turn: SmuxRuntimeServerTurnV5) -> bool:
+    turn.owner != nil or turn.domain != nil or turn.cleanup != nil or turn.credential != nil
+
+# One bounded retained-owner step per invocation; no detached cleanup worker,
+# wait loop or retry against a copied native generation. Earlier error persists.
+pub fn smux_runtime_server_recover_v5(original: SmuxRuntimeServerTurnV5) -> SmuxRuntimeServerTurnV5:
+    var turn = original
+    if val owner = turn.owner:
+        val progressed = smux_runtime_connection_recover_v5(owner)
+        turn.owner = Some(progressed)
+        if smux_runtime_connection_stop_allowed_v5(progressed):
+            val closed = smux_runtime_connection_close_v5(progressed)
+            turn.owner = closed.owner
+            turn.cleanup = closed.cleanup
+            if not closed.closed or closed.error != "": turn.error = "primary-service-host-cleanup:" + closed.error
+    elif val domain = turn.domain:
+        val closed = host_service_domain_close_v3(domain)
+        turn.domain = nil
+        turn.cleanup = closed.cleanup
+        if not closed.closed or closed.error != "": turn.error = "primary-service-host-cleanup:" + closed.error
+    elif val cleanup = turn.cleanup:
+        val closed = host_service_cleanup_v3(cleanup)
+        turn.cleanup = closed.cleanup
+        if not closed.closed or closed.error != "": turn.error = "primary-service-host-cleanup:" + closed.error
+    # Credential remains until Host ownership is actually absent. No cleanup
+    # completion is allowed to stand in for a successful ready publication.
+    if turn.owner == nil and turn.domain == nil and turn.cleanup == nil:
+        if val credential = turn.credential:
+            val closed = retained_private_credential_close_v2(credential)
+            turn.credential = Some(closed.owner)
+            if closed.completed and closed.consumed and closed.error == "": turn.credential = nil
+            else: turn.error = "primary-service-credential-cleanup:" + closed.error
+    if smux_runtime_server_recovery_pending_v5(turn) or turn.error != "": turn.exit_code = 2
+    turn
