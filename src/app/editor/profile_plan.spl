@@ -7,6 +7,8 @@
 # wildcard. Any other name is an explicit error with no steps.
 
 use app.editor.editor_controller.{EditorController}
+use app.llm_caret.workbench.key_resolver.{KeyFocus}
+use app.llm_caret.workbench.session_source.{live_focus, live_selected_provider}
 
 struct ProfilePlan:
     ok: bool
@@ -31,8 +33,30 @@ fn profile_apply(ctrl: EditorController, profile: text):
         elif step.starts_with("language:"):
             ctrl.extension_host.activate_language(step.slice(9, step.byte_len()))
 
+# Context keys the caret profile exposes to `when` clauses: the focused pane
+# kind plus (when a session is selected) its provider.
+fn caret_context_keys(focus: KeyFocus, provider: text) -> [text]:
+    var keys: [text] = []
+    match focus:
+        case KeyFocus.TerminalSurface: keys = ["caret.focus.terminal"]
+        case KeyFocus.NativeView: keys = ["caret.focus.native"]
+        case KeyFocus.Overlay: keys = ["caret.focus.overlay"]
+    if provider != "":
+        keys = keys + ["caret.session." + provider]
+    keys
+
+fn profile_sync_context_with(ctrl: EditorController, profile: text, focus: KeyFocus, provider: text):
+    if profile != "caret":
+        return
+    ctrl.extension_host.set_context_keys(caret_context_keys(focus, provider))
+
+# Production caller of ExtensionHost.set_context_keys: shells call this each
+# frame so keybinding/view `when` clauses see the live focus and session kind.
+fn profile_sync_context(ctrl: EditorController, profile: text):
+    profile_sync_context_with(ctrl, profile, live_focus(), live_selected_provider())
+
 # The one view list both shells render: contributed views whose `when` holds.
 fn shell_view_ids(ctrl: EditorController) -> [text]:
     ctrl.extension_host.visible_view_ids()
 
-export ProfilePlan, profile_activation_plan, profile_apply, shell_view_ids
+export ProfilePlan, profile_activation_plan, profile_apply, shell_view_ids, caret_context_keys, profile_sync_context_with, profile_sync_context
