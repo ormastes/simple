@@ -1,0 +1,478 @@
+# Installed machine-policy + actual global-state writer composition.
+# This factory accepts no caller root, policy, budget, principal or observation.
+# SOURCE_ONLY: native journal export admission and Windows execution pending.
+use std.common.contracts.container.machine_policy_v1.*
+use std.common.contracts.container.execution_v2.ContainerHostObservationV2
+use std.common.crypto.sha256.sha256_text
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.nogc_sync_mut.io.machine_storage_owner_v1.*
+use std.nogc_sync_mut.io.machine_local_process_principal_v1.*
+use std.common.contracts.container.local_principal_v1.MachineLocalPrincipalSnapshotV1
+use std.common.contracts.container.cleanup_progress_v1.*
+use std.io_runtime.getpid
+use std.nogc_sync_mut.io.thread.thread_native_current_id
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+@elif(os="windows"):
+use std.nogc_sync_mut.io.windows_job_stream_abi_v2.rt_windows_pty_owner_thread_guard_v1
+@end
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.linux_oci_engine_policy_decode_v1
+use std.nogc_async_mut.container.observation_v2.simple_container_observe_v2
+use std.common.contracts.orchestration.host_capacity_v1.HostCapacityV1
+use std.nogc_sync_mut.container.machine_claim_record_v1.*
+# Narrow typed-capability dependency approved for this composition: the leaf
+# verifies held native enrollment evidence and imports no Container owner.
+# Host policy, deployment and service rules remain outside this module.
+use std.nogc_sync_mut.orchestration.host_service_enrollment_proof_v3.{VerifiedHostServiceEnrollmentV3,
+    VerifiedHostServiceEnrollmentSnapshotV3}
+
+# Diagnostic projection only. Construction cannot mint the private claim owner.
+pub struct MachineManagedClaimSnapshotV1:
+    policy_digest: text
+    commit_digest: text
+    issuer_id: text
+    authority_policy_digest: text
+    enrollment_digest: text
+    credential_digest: text
+    physical_host_id: text
+    native_machine_id: text
+    service_scope_id: text
+    backend: text
+    provider_identity_digest: text
+    provider_generation: i64
+    cpu_millis: i64
+    memory_bytes: i64
+
+pub class MachineManagedClaimV1:
+    authority: MachineContainerAuthorityV1
+    record: MachineManagedScopeRecordV1
+    commit_digest: text
+
+    pub fn current_v1(proof: VerifiedHostServiceEnrollmentV3) -> Result<MachineManagedClaimSnapshotV1, text>:
+        val checked = machine_managed_record_from_proof_v1(self.authority, proof)?
+        if machine_managed_scope_record_bytes_v1(checked.0)? != machine_managed_scope_record_bytes_v1(self.record)?:
+            return Err("machine-managed-claim-proof-changed")
+        val retained = machine_managed_commit_current_v1(self.authority, self.record, self.commit_digest)?
+        Ok(machine_managed_claim_snapshot_v1(self.record, self.commit_digest))
+
+    # Stop claim/proof use; close Host journal first, this writer next, borrowed
+    # proof files/roots last. Retained writer close keeps those backing owners.
+    # This releases only the machine writer, never the durable charge.
+    pub fn close_v1() -> text:
+        self.authority.close_v1()
+
+    pub fn close_diagnostic_v1() -> text:
+        self.authority.close_diagnostic_v1()
+
+# Canonical pair progress is shared by value-copy aliases. It owns no second
+# journal or native resource; only the original typed caps may be closed.
+struct MachineAuthorityPairStateV1:
+    generation: i64
+    process_id: i64
+    thread_id: i64
+    progress: MachineCleanupProgressV1
+
+class MachineAuthorityPairedCleanupV1:
+    slot: i64
+    generation: i64
+
+class MachineAuthorityLocalProcessV1:
+    principal: MachineLocalProcessPrincipalV1
+    cleanup: MachineAuthorityPairedCleanupV1
+
+enum MachineAuthorityClosingOwnerV1:
+    Reader(MachinePolicyOwnerV1)
+    Storage(MachineStorageOwnerV1)
+
+var machine_authority_pairs_v1: [MachineAuthorityPairStateV1] = []
+var machine_authority_pair_origin_v1: i64 = 0
+
+pub enum MachineContainerAuthorityCleanupV1:
+    Reader(MachinePolicyOwnerV1)
+    Storage(MachineStorageOwnerV1)
+    ReaderPrincipal(reader: MachinePolicyOwnerV1, local: MachineAuthorityLocalProcessV1)
+    StoragePrincipal(storage: MachineStorageOwnerV1, local: MachineAuthorityLocalProcessV1)
+
+pub enum MachineContainerAuthorityOpenV1:
+    Rejected(reason: text)
+    CleanupRequired(owner: MachineContainerAuthorityCleanupV1, reason: text)
+    Ready(owner: MachineContainerAuthorityV1)
+
+pub class MachineContainerAuthorityV1:
+    storage: MachineStorageOwnerV1
+    policy_digest: text
+    selected_backend: text
+    selected_provider_digest: text
+    selected_linux_uid: i64
+    local_principal: Option<MachineAuthorityLocalProcessV1>
+
+    # Metadata only. Every call re-reads the actual held policy and checks its
+    # immutable binding; the returned struct cannot construct another owner.
+    pub fn current_policy_v1() -> Result<MachineContainerPolicyV1, text>:
+        val bytes = self.storage.policy_bytes_v1()?
+        val source = machine_authority_policy_text_v1(bytes)?
+        if sha256_text(source) != self.policy_digest:
+            return Err("machine-container-authority-policy-changed")
+        val policy = machine_container_policy_decode_v1(source)?
+        val capacity = self.storage.physical_capacity_v1()?
+        if policy.cpu_millis > capacity.0 or policy.memory_bytes > capacity.1:
+            return Err("machine-container-authority-physical-capacity-exceeded")
+        if self.selected_backend == "linux-podman":
+            val selected = machine_policy_provider_v1(policy, self.selected_backend)?
+            val engine = linux_oci_engine_policy_decode_v1(selected.policy_bytes)?
+            if self.selected_linux_uid <= 0 or engine.expected_uid != self.selected_linux_uid:
+                return Err("machine-container-authority-linux-service-uid-mismatch")
+        if policy.mode == "standalone":
+            if self.local_principal == None: return Err("machine-container-authority-local-principal-required")
+            val local = self.local_principal.unwrap()
+            val current = machine_policy_local_principal_v1(policy, self.selected_backend, local.principal)?
+        Ok(policy)
+
+    # The policy codec fixes wire schema V2; exact policy bytes bind by
+    # digest. WAL commit revisions are separate from this immutable binding.
+    pub fn policy_binding_v1() -> Result<text, text>:
+        val policy = self.current_policy_v1()?
+        Ok(self.policy_digest)
+
+    pub fn observe_provider_v1() -> Result<ContainerHostObservationV2, text>:
+        val policy = self.current_policy_v1()?
+        val selected = machine_policy_provider_v1(policy, self.selected_backend)?
+        if selected.identity_digest != self.selected_provider_digest:
+            return Err("machine-container-authority-provider-changed")
+        machine_policy_observe_v1(policy, selected)
+
+    # A commit identifier is an observation, not an execution/delegation grant.
+    # The real store stays private inside its native-thread storage capsule.
+    pub fn journal_head_v1() -> Result<text, text>:
+        val current = self.current_policy_v1()?
+        self.storage.wal_head_v1()
+
+    # Direct in-process authorization only. A daemon must pass a separate real
+    # peer capability; its self principal cannot authenticate a remote client.
+    pub fn validate_local_process_v1(principal: MachineLocalProcessPrincipalV1) -> Result<MachineLocalPrincipalSnapshotV1, text>:
+        val policy = self.current_policy_v1()?
+        if policy.mode != "standalone": return Err("local-container-managed-authority-required")
+        if self.local_principal == None: return Err("machine-container-authority-local-principal-required")
+        val local = self.local_principal.unwrap()
+        val retained = machine_policy_local_principal_v1(policy, self.selected_backend, local.principal)?
+        val actual = machine_policy_local_principal_v1(policy, self.selected_backend, principal)?
+        # Distinct genuine owner generations/digests may represent the same
+        # process. Compare actual logical identity fields, never a data tag.
+        if (actual.platform != retained.platform or actual.principal_id != retained.principal_id or
+                actual.process_id != retained.process_id or actual.thread_id != retained.thread_id or
+                actual.authority_namespace_id != retained.authority_namespace_id):
+            return Err("machine-container-authority-local-process-mismatch")
+        Ok(actual)
+
+    # Caller retains this original authority in cleanup BEFORE invoking this
+    # method. Every Err preserves that cleanup obligation, including ambiguous
+    # publication; the canonical storage owner quarantines failed mutations.
+    pub fn managed_claim_v1(proof: VerifiedHostServiceEnrollmentV3) -> Result<MachineManagedClaimV1, text>:
+        val checked = machine_managed_record_from_proof_v1(self, proof)?
+        val record = checked.0
+        val verified = checked.1
+        val head = self.storage.wal_head_v1()?
+        if head == "":
+            if verified.recover_only: return Err("machine-managed-claim-recovery-without-charge")
+            # A new machine WAL cannot establish absence of legacy per-Host
+            # journals or live workloads. No existing whole-provider writer
+            # fence/adoption proof is available; missing state never grants
+            # fresh capacity. Caller retains this actual writer for cleanup.
+            return Err("machine-managed-claim-migration-fence-unavailable")
+        # Only one immutable whole-scope transaction is supported. A different
+        # binding or unknown history never resets the scope or frees capacity.
+        val retained = machine_managed_commit_current_v1(self, record, head)?
+        val claim = MachineManagedClaimV1(authority: self, record: record, commit_digest: head)
+        val current = claim.current_v1(proof)?
+        Ok(claim)
+
+    pub fn close_v1() -> text:
+        machine_authority_close_principal_v1(MachineAuthorityClosingOwnerV1.Storage(self.storage), self.local_principal)
+
+    pub fn close_diagnostic_v1() -> text:
+        machine_authority_pair_diagnostic_v1(self.local_principal)
+
+fn machine_authority_policy_text_v1(bytes: [u8]) -> Result<text, text>:
+    if bytes.len() == 0 or bytes.len() > 1048576 or not utf8_bytes_valid(bytes):
+        return Err("machine-container-authority-policy-utf8")
+    Ok(bytes_to_text(bytes))
+
+fn machine_policy_provider_v1(policy: MachineContainerPolicyV1,
+        backend: text) -> Result<MachineContainerProviderPolicyV1, text>:
+    var selected: Option<MachineContainerProviderPolicyV1> = None
+    for provider in policy.providers:
+        if provider.backend == backend:
+            if selected != None: return Err("machine-container-authority-provider-ambiguous")
+            selected = Some(provider)
+    if selected == None: return Err("machine-container-authority-provider-unconfigured")
+    Ok(selected.unwrap())
+
+fn machine_policy_local_principal_v1(policy: MachineContainerPolicyV1, backend: text,
+        principal: MachineLocalProcessPrincipalV1) -> Result<MachineLocalPrincipalSnapshotV1, text>:
+    if policy.mode != "standalone": return Err("local-container-managed-authority-required")
+    val actual = principal.current_v1()?
+    val expected = if backend == "linux-podman": "linux" else: "windows"
+    if actual.platform != expected: return Err("machine-container-authority-local-principal-platform")
+    if not policy.local_principals.contains(actual.principal_id):
+        return Err("machine-container-authority-local-principal-unconfigured")
+    Ok(actual)
+
+fn machine_policy_observe_v1(policy: MachineContainerPolicyV1,
+        provider: MachineContainerProviderPolicyV1) -> Result<ContainerHostObservationV2, text>:
+    # Execute the actual common provider observer; no decoded observation is
+    # accepted from an app, remote request, policy document or this caller.
+    val observed = simple_container_observe_v2(provider.backend, provider.policy_bytes)?
+    if (observed.native_machine_id != policy.native_machine_id or
+            observed.provider_identity_digest != provider.identity_digest):
+        return Err("machine-container-authority-native-provider-mismatch")
+    Ok(observed)
+
+fn machine_managed_record_from_proof_v1(authority: MachineContainerAuthorityV1,
+        proof: VerifiedHostServiceEnrollmentV3) -> Result<(MachineManagedScopeRecordV1, VerifiedHostServiceEnrollmentSnapshotV3), text>:
+    val policy = authority.current_policy_v1()?
+    if policy.mode != "managed": return Err("machine-managed-claim-policy-mode")
+    val verified = proof.current_v3()?
+    val binding = verified.binding
+    # The protected machine policy supplies the trust pin. A valid signature
+    # under caller-selected keys or the same issuer spelling is insufficient.
+    if verified.issuer_id != policy.managed_authority_id:
+        return Err("machine-managed-claim-controller-mismatch")
+    if verified.authority_policy_digest != policy.managed_authority_policy_digest:
+        return Err("machine-managed-claim-authority-policy-mismatch")
+    if (binding.physical_host_id != policy.physical_host_id or binding.native_machine_id != policy.native_machine_id or
+            binding.backend != authority.selected_backend or binding.provider_identity_digest != authority.selected_provider_digest):
+        return Err("machine-managed-claim-machine-provider-mismatch")
+    val selected = machine_policy_provider_v1(policy, authority.selected_backend)?
+    if sha256_text(selected.policy_bytes) != binding.engine_policy_digest:
+        return Err("machine-managed-claim-engine-policy-mismatch")
+    val observed = authority.observe_provider_v1()?
+    val record = MachineManagedScopeRecordV1(policy_digest: authority.policy_digest,
+        authority_policy_digest: verified.authority_policy_digest, issuer_id: verified.issuer_id,
+        enrollment_digest: verified.enrollment_digest, credential_digest: verified.credential_digest,
+        physical_host_id: binding.physical_host_id, native_machine_id: binding.native_machine_id,
+        service_scope_id: binding.service_scope_id, backend: binding.backend,
+        provider_identity_digest: binding.provider_identity_digest, provider_generation: verified.provider_generation,
+        cpu_millis: binding.physical_cpu_millis, memory_bytes: binding.physical_memory_bytes, expires_at: verified.expires_at)
+    # The complete signed ceiling includes the broker partition. Only nested
+    # Host accounting may subdivide it; another provider gets no parallel pool.
+    # This fence hashes actual observation; it asserts no native continuity.
+    val observed_fence = sha256_text(machine_observation_fence_v1(observed))
+    val available = machine_managed_scope_capacity_v1(HostCapacityV1(physical_host_id: policy.physical_host_id,
+        authority_id: policy.authority_id, boot_id: observed_fence, provider_generation: verified.provider_generation,
+        cpu_millis: policy.cpu_millis, memory_bytes: policy.memory_bytes, exclusive_devices: []), record)?
+    Ok((record, verified))
+
+fn machine_observation_fence_v1(observed: ContainerHostObservationV2) -> text:
+    # Length-prefix each actual observed component to avoid delimiter aliases.
+    var parts: [text] = []
+    for value in [observed.native_machine_id, observed.native_boot_id,
+            observed.boot_observation, observed.continuity_assurance]:
+        parts.push("{value.byte_len()}:{value}")
+    parts.join("")
+
+fn machine_managed_commit_current_v1(authority: MachineContainerAuthorityV1,
+        record: MachineManagedScopeRecordV1, commit: text) -> Result<bool, text>:
+    val head = authority.storage.wal_head_v1()?
+    if commit == "" or head != commit: return Err("machine-managed-claim-commit-changed")
+    val revision = authority.storage.wal_revision_v1(commit)?
+    if revision.digest != commit or revision.parent != "" or revision.first_sequence != 1 or revision.last_sequence != 2:
+        return Err("machine-managed-claim-unknown-history")
+    val entries = authority.storage.wal_segment_v1(revision)?
+    machine_managed_scope_replay_v1(entries, record)
+
+fn machine_managed_claim_snapshot_v1(record: MachineManagedScopeRecordV1, commit: text) -> MachineManagedClaimSnapshotV1:
+    MachineManagedClaimSnapshotV1(policy_digest: record.policy_digest, commit_digest: commit,
+        issuer_id: record.issuer_id, authority_policy_digest: record.authority_policy_digest,
+        enrollment_digest: record.enrollment_digest, credential_digest: record.credential_digest,
+        physical_host_id: record.physical_host_id, native_machine_id: record.native_machine_id,
+        service_scope_id: record.service_scope_id, backend: record.backend,
+        provider_identity_digest: record.provider_identity_digest, provider_generation: record.provider_generation,
+        cpu_millis: record.cpu_millis, memory_bytes: record.memory_bytes)
+
+fn machine_reader_failure_v1(reader: MachinePolicyOwnerV1,
+        reason: text, principal: Option<MachineAuthorityLocalProcessV1> = None) -> MachineContainerAuthorityOpenV1:
+    if val owner = principal:
+        return MachineContainerAuthorityOpenV1.CleanupRequired(MachineContainerAuthorityCleanupV1.ReaderPrincipal(reader, owner), reason)
+    MachineContainerAuthorityOpenV1.CleanupRequired(MachineContainerAuthorityCleanupV1.Reader(reader), reason)
+
+fn machine_storage_failure_v1(storage: MachineStorageOwnerV1,
+        reason: text, principal: Option<MachineAuthorityLocalProcessV1> = None) -> MachineContainerAuthorityOpenV1:
+    if val owner = principal:
+        return MachineContainerAuthorityOpenV1.CleanupRequired(MachineContainerAuthorityCleanupV1.StoragePrincipal(storage, owner), reason)
+    MachineContainerAuthorityOpenV1.CleanupRequired(MachineContainerAuthorityCleanupV1.Storage(storage), reason)
+
+fn machine_authority_pair_entry_v1() -> Result<(), text>:
+    # Enter the genuine native origin guard before touching inherited registry
+    # state. Numeric PID/TID can collide in a forked PID namespace.
+    @when(os="linux"):
+    linux_machine_process_origin_check_v1()
+    @elif(os="windows"):
+    val status = unsafe(capabilities: [ffi]): rt_windows_pty_owner_thread_guard_v1()
+    if status != 1: return Err("machine-authority-cleanup-native-context-required")
+    Ok(())
+    @else:
+    Err("machine-authority-cleanup-host-unsupported")
+    @end
+
+fn machine_authority_pair_open_v1() -> Result<MachineAuthorityPairedCleanupV1, text>:
+    val entered = machine_authority_pair_entry_v1()?
+    val pid = getpid()
+    val tid = thread_native_current_id()
+    if pid <= 0 or tid <= 0: return Err("machine-authority-cleanup-context-unavailable")
+    if machine_authority_pair_origin_v1 != 0 and machine_authority_pair_origin_v1 != pid:
+        return Err("machine-authority-cleanup-foreign-process")
+    if machine_authority_pairs_v1.len() >= 100000: return Err("machine-authority-cleanup-owner-bound")
+    machine_authority_pair_origin_v1 = pid
+    val slot = machine_authority_pairs_v1.len()
+    machine_authority_pairs_v1.push(MachineAuthorityPairStateV1(generation: slot + 1,
+        process_id: pid, thread_id: tid, progress: machine_cleanup_progress_initial_v1()))
+    Ok(MachineAuthorityPairedCleanupV1(slot: slot, generation: slot + 1))
+
+fn machine_authority_pair_current_v1(owner: MachineAuthorityPairedCleanupV1) -> Result<MachineAuthorityPairStateV1, text>:
+    val entered = machine_authority_pair_entry_v1()?
+    val pid = getpid()
+    val tid = thread_native_current_id()
+    if pid != machine_authority_pair_origin_v1: return Err("machine-authority-cleanup-foreign-process")
+    if owner.slot < 0 or owner.slot >= machine_authority_pairs_v1.len(): return Err("machine-authority-cleanup-stale")
+    val state = machine_authority_pairs_v1[owner.slot]
+    if state.generation != owner.generation: return Err("machine-authority-cleanup-stale")
+    if state.process_id != pid or state.thread_id != tid: return Err("machine-authority-cleanup-foreign-thread")
+    Ok(state)
+
+fn machine_authority_close_native_v1(owner: MachineAuthorityClosingOwnerV1) -> text:
+    match owner:
+        case MachineAuthorityClosingOwnerV1.Reader(reader): reader.close_v1()
+        case MachineAuthorityClosingOwnerV1.Storage(storage): storage.close_v1()
+
+fn machine_authority_close_principal_v1(owner: MachineAuthorityClosingOwnerV1,
+        principal: Option<MachineAuthorityLocalProcessV1>) -> text:
+    if principal == None: return machine_authority_close_native_v1(owner)
+    val local = principal.unwrap()
+    val current = machine_authority_pair_current_v1(local.cleanup)
+    if current.is_err(): return "retained"
+    var state = current.unwrap()
+    if not state.progress.machine_consumed:
+        # Only positive consumption clears this originally held component.
+        # Unknown/stale stays live; prior canonical closed state skips this call.
+        val closed = machine_authority_close_native_v1(owner)
+        state.progress = machine_cleanup_progress_record_v1(state.progress, MachineCleanupComponentV1.Machine, closed)
+        machine_authority_pairs_v1[local.cleanup.slot] = state
+    if not state.progress.machine_consumed: return "retained"
+    if not state.progress.principal_consumed:
+        val closed = local.principal.close_v1()
+        state.progress = machine_cleanup_progress_record_v1(state.progress, MachineCleanupComponentV1.Principal, closed)
+        machine_authority_pairs_v1[local.cleanup.slot] = state
+    machine_cleanup_progress_status_v1(state.progress)
+
+fn machine_authority_pair_diagnostic_v1(principal: Option<MachineAuthorityLocalProcessV1>) -> text:
+    if principal == None: return ""
+    val local = principal.unwrap()
+    val state = machine_authority_pair_current_v1(local.cleanup)
+    if state.is_err(): return ""
+    val current = state.unwrap()
+    current.progress.first_diagnostic
+
+pub fn machine_container_authority_cleanup_v1(owner: MachineContainerAuthorityCleanupV1) -> text:
+    match owner:
+        case MachineContainerAuthorityCleanupV1.Reader(reader): reader.close_v1()
+        case MachineContainerAuthorityCleanupV1.Storage(storage): storage.close_v1()
+        case MachineContainerAuthorityCleanupV1.ReaderPrincipal(reader, principal):
+            machine_authority_close_principal_v1(MachineAuthorityClosingOwnerV1.Reader(reader), Some(principal))
+        case MachineContainerAuthorityCleanupV1.StoragePrincipal(storage, principal):
+            machine_authority_close_principal_v1(MachineAuthorityClosingOwnerV1.Storage(storage), Some(principal))
+
+pub fn machine_container_authority_cleanup_diagnostic_v1(owner: MachineContainerAuthorityCleanupV1) -> text:
+    match owner:
+        case MachineContainerAuthorityCleanupV1.Reader(_): ""
+        case MachineContainerAuthorityCleanupV1.Storage(_): ""
+        case MachineContainerAuthorityCleanupV1.ReaderPrincipal(_, local): machine_authority_pair_diagnostic_v1(Some(local))
+        case MachineContainerAuthorityCleanupV1.StoragePrincipal(_, local): machine_authority_pair_diagnostic_v1(Some(local))
+
+pub fn machine_container_authority_open_v1() -> MachineContainerAuthorityOpenV1:
+    machine_authority_open_internal_v1(false)
+
+pub fn machine_container_authority_open_local_v1() -> MachineContainerAuthorityOpenV1:
+    machine_authority_open_internal_v1(true)
+
+# This private selector can only restrict mode. It never supplies authority,
+# principal identity, namespace provenance or a capacity grant.
+fn machine_authority_open_internal_v1(standalone_only: bool) -> MachineContainerAuthorityOpenV1:
+    # The library selects the actual installed OS owner. No app/request picks
+    # the backend, policy path, service UID or machine-state root.
+    val reader = match machine_policy_open_v1():
+        case MachinePolicyOpenV1.Rejected(reason):
+            return MachineContainerAuthorityOpenV1.Rejected(reason)
+        case MachinePolicyOpenV1.CleanupRequired(owner, reason):
+            return machine_reader_failure_v1(owner, reason)
+        case MachinePolicyOpenV1.Ready(owner): owner
+    val bytes = reader.read_policy_v1()
+    if bytes.is_err(): return machine_reader_failure_v1(reader, bytes.unwrap_err())
+    val text_result = machine_authority_policy_text_v1(bytes.unwrap())
+    if text_result.is_err(): return machine_reader_failure_v1(reader, text_result.unwrap_err())
+    val source = text_result.unwrap()
+    val decoded = machine_container_policy_decode_v1(source)
+    if decoded.is_err(): return machine_reader_failure_v1(reader, decoded.unwrap_err())
+    val policy = decoded.unwrap()
+    if standalone_only and policy.mode != "standalone":
+        return machine_reader_failure_v1(reader, "local-container-managed-authority-required")
+    # Platform selection belongs here in the library, never in the app request.
+    val backend = reader.selected_backend_v1()
+    val selected = machine_policy_provider_v1(policy, backend)
+    if selected.is_err(): return machine_reader_failure_v1(reader, selected.unwrap_err())
+    val provider = selected.unwrap()
+    var selected_linux_uid: i64 = -1
+    if backend == "linux-podman":
+        val context = reader.actual_linux_process_context_v1()
+        if context.is_err(): return machine_reader_failure_v1(reader, context.unwrap_err())
+        val engine = linux_oci_engine_policy_decode_v1(provider.policy_bytes)
+        if engine.is_err(): return machine_reader_failure_v1(reader, engine.unwrap_err())
+        val actual = context.unwrap()
+        val configured = engine.unwrap()
+        if actual.real_uid != actual.effective_uid or actual.effective_uid <= 0 or configured.expected_uid != actual.effective_uid:
+            return machine_reader_failure_v1(reader, "machine-container-authority-linux-service-uid-mismatch")
+        selected_linux_uid = actual.effective_uid
+    var principal: Option<MachineAuthorityLocalProcessV1> = None
+    if policy.mode == "standalone":
+        val paired = machine_authority_pair_open_v1()
+        if paired.is_err(): return machine_reader_failure_v1(reader, paired.unwrap_err())
+        val cleanup = paired.unwrap()
+        match machine_local_process_principal_open_v1():
+            case MachineLocalProcessPrincipalOpenV1.Rejected(reason): return machine_reader_failure_v1(reader, reason)
+            case MachineLocalProcessPrincipalOpenV1.CleanupRequired(owner, reason):
+                return machine_reader_failure_v1(reader, reason, Some(MachineAuthorityLocalProcessV1(principal: owner, cleanup: cleanup)))
+            case MachineLocalProcessPrincipalOpenV1.Ready(owner):
+                principal = Some(MachineAuthorityLocalProcessV1(principal: owner, cleanup: cleanup))
+        # Native membership is established before any provider observer runs.
+        val local = principal.unwrap()
+        val member = machine_policy_local_principal_v1(policy, backend, local.principal)
+        if member.is_err(): return machine_reader_failure_v1(reader, member.unwrap_err(), principal)
+    val observed = machine_policy_observe_v1(policy, provider)
+    if observed.is_err(): return machine_reader_failure_v1(reader, observed.unwrap_err(), principal)
+    val storage = match reader.open_storage_v1():
+        case MachineStorageOpenV1.Rejected(reason):
+            return machine_reader_failure_v1(reader, reason, principal)
+        case MachineStorageOpenV1.CleanupRequired(owner, reason):
+            return machine_storage_failure_v1(owner, reason, principal)
+        case MachineStorageOpenV1.Ready(owner): owner
+    if val owner = principal:
+        val member = machine_policy_local_principal_v1(policy, backend, owner.principal)
+        if member.is_err(): return machine_storage_failure_v1(storage, member.unwrap_err(), principal)
+    # Observe again after acquiring the shared writer. A pre-lock observation
+    # never authorizes state publication or a later provider effect by itself.
+    val current = machine_policy_observe_v1(policy, provider)
+    if current.is_err(): return machine_storage_failure_v1(storage, current.unwrap_err(), principal)
+    val capacity = storage.physical_capacity_v1()
+    if capacity.is_err(): return machine_storage_failure_v1(storage, capacity.unwrap_err(), principal)
+    if policy.cpu_millis > capacity.unwrap().0 or policy.memory_bytes > capacity.unwrap().1:
+        return machine_storage_failure_v1(storage, "machine-container-authority-physical-capacity-exceeded", principal)
+    # Bind exact actual protected policy under the actual exclusive writer.
+    # Existing different mode/policy wins; no automatic reset discards charges.
+    val bound = storage.bind_policy_v1(source)
+    if bound.is_err(): return machine_storage_failure_v1(storage, bound.unwrap_err(), principal)
+    if bound.unwrap() != sha256_text(source):
+        return machine_storage_failure_v1(storage, "machine-container-authority-policy-binding-mismatch", principal)
+    val head = storage.wal_head_v1()
+    if head.is_err(): return machine_storage_failure_v1(storage, head.unwrap_err(), principal)
+    MachineContainerAuthorityOpenV1.Ready(MachineContainerAuthorityV1(storage: storage,
+        policy_digest: bound.unwrap(), selected_backend: provider.backend,
+        selected_provider_digest: provider.identity_digest, selected_linux_uid: selected_linux_uid, local_principal: principal))
