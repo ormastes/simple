@@ -1003,7 +1003,9 @@ stage3_streaming_surfaces=0 stage3_mir_interface_hir_env= stage3_mir_shard_count
 if [ "${SIMPLE_MIR_SHARD_INTERFACE_HIR:-}" = 1 ]; then
   stage3_streaming_surfaces=1
   stage3_mir_interface_hir_env=SIMPLE_MIR_SHARD_INTERFACE_HIR=1
-  stage3_mir_shard_count_env="SIMPLE_MIR_SHARD_COUNT=${SIMPLE_MIR_SHARD_COUNT:-8}"
+  if [ "$stage3_lowering_lane" = whole-program ]; then
+    stage3_mir_shard_count_env="SIMPLE_MIR_SHARD_COUNT=${SIMPLE_MIR_SHARD_COUNT:-8}"
+  fi
 fi
 stage3_cold_init_env=
 case "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" in
