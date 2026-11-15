@@ -1,0 +1,46 @@
+"""
+## Purpose and audience
+Purpose: Pin the collapsible space that a newline between two inline
+elements leaves in the line. The HTML projection kept a whitespace-only text
+node only when it was exactly " ", so `<span></span>\\n<span>` put the
+two boxes edge to edge: the animation catalog page's canvas / svg / audio
+probes sat 4 and 9 px left of Chrome's.
+Audience: browser-engine HTML projection and inline layout maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless shell, `--window-size=420,200`,
+screenshot of WS_PAGE): the blue inline-block span covers x 0..19 and the red one x 24..43
+on rows 6..15 (`getBoundingClientRect().x` 24.45: one 16px sans-serif
+space). Simple's measured space advance on this lane is checked to land the
+red box within 24..26.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-INLINE-WHITESPACE-001 — whitespace between inline elements, newline included, collapses to one space as in Chrome 159.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
+
+val WS_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}span{{display:inline-block;width:20px;height:10px}}</style></head><body><div style=\"font:16px/20px sans-serif\"><span style=\"background:#0000ff\"></span>\n<span style=\"background:#ff0000\"></span></div></body></html>"
+
+describe "Whitespace between inline elements":
+    it "AC-1: a newline between two inline-blocks leaves one space":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(WS_PAGE, 420, 200, "cpu_simd")
+        var row = -1
+        var y = 0
+        while y < 40 and row < 0:
+            if (px[10 + y * 420] & 0xFFFFFFu32) == 0x0000FFu32:
+                row = y
+            y = y + 1
+        step("Chrome 159: the blue box is painted")
+        expect(row >= 0).to_equal(true)
+        val r = if row >= 0: row else: 0
+        var red_x = -1
+        var x = 0
+        while x < 60 and red_x < 0:
+            if (px[x + r * 420] & 0xFFFFFFu32) == 0xFF0000u32:
+                red_x = x
+            x = x + 1
+        step("Chrome 159: white gap at x 20..23, red box from x 24")
+        expect(px[21 + r * 420] & 0xFFFFFFu32).to_equal(0xFFFFFFu32)
+        expect(red_x >= 24 and red_x <= 26).to_equal(true)

@@ -1313,6 +1313,18 @@ fn _parse_html_with_node_limit(html: text, requested_node_limit: i32) -> [HNode]
         html, requested_node_limit, SIMPLE_WEB_MAX_HTML_BYTES
     )
 
+# Elements that are inline-level by default (HTML UA style), atomic or not.
+fn _html_inline_level_tag(tag: text) -> bool:
+    tag == "a" or tag == "abbr" or tag == "b" or tag == "bdi" or tag == "bdo" or
+    tag == "button" or tag == "canvas" or tag == "cite" or tag == "code" or
+    tag == "data" or tag == "dfn" or tag == "em" or tag == "i" or tag == "img" or
+    tag == "input" or tag == "kbd" or tag == "label" or tag == "mark" or
+    tag == "meter" or tag == "output" or tag == "progress" or tag == "q" or
+    tag == "s" or tag == "samp" or tag == "select" or tag == "small" or
+    tag == "span" or tag == "strong" or tag == "sub" or tag == "sup" or
+    tag == "svg" or tag == "textarea" or tag == "time" or tag == "u" or
+    tag == "var" or tag == "video" or tag == "audio" or tag == "iframe"
+
 fn _parse_html_with_limits(
     html: text, requested_node_limit: i32, requested_byte_limit: i64
 ) -> [HNode]:
@@ -1336,6 +1348,9 @@ fn _parse_html_with_limits(
     var flat_to_hnode: [i32] = [-1; projected.nodes.len()]
     var skip_subtree: [bool] = [false; projected.nodes.len()]
     var details_has_summary: [bool] = [false; node_limit]
+    # Tag of the latest kept child of each flat parent, so whitespace after an
+    # inline element is known to sit between inline content.
+    var prev_child_tag: [text] = [""; projected.nodes.len()]
     var nodes: [HNode] = []
     var i = 0
     while i < projected.nodes.len() and nodes.len() < node_limit:
@@ -1356,20 +1371,28 @@ fn _parse_html_with_limits(
             -1
         else:
             flat_to_hnode[flat.parent]
+        val prev_child_tag_before = if flat.parent >= 0: prev_child_tag[flat.parent] else: ""
+        if flat.parent >= 0:
+            prev_child_tag[flat.parent] = flat.tag
         if flat.tag == "#text":
             val trimmed = flat.text_data.trim()
-            if trimmed.len() > 0 or flat.text_data == " ":
+            # Whitespace after an inline element is a collapsible space, a
+            # newline included: `<canvas></canvas>\n<svg>` puts 4.45px
+            # between them in Chrome. Only a lone " " survived here.
+            val inline_gap = trimmed.len() == 0 and _html_inline_level_tag(prev_child_tag_before)
+            val text_data = if inline_gap: " " else: flat.text_data
+            if trimmed.len() > 0 or text_data == " ":
                 if (nodes.len() > 0 and nodes[nodes.len() - 1].tag == "#text" and
                     nodes[nodes.len() - 1].parent == parent):
                     val previous_index = nodes.len() - 1
                     var previous = nodes[previous_index]
-                    previous.text_data = previous.text_data + flat.text_data
+                    previous.text_data = previous.text_data + text_data
                     previous.text_trimmed = previous.text_data.trim()
                     nodes[previous_index] = previous
                     flat_to_hnode[i] = previous_index
                 else:
                     var text_node = mk_node("#text", parent)
-                    text_node.text_data = flat.text_data
+                    text_node.text_data = text_data
                     text_node.text_trimmed = trimmed
                     flat_to_hnode[i] = nodes.len() as i32
                     nodes.push(text_node)
