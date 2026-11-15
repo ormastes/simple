@@ -94,8 +94,10 @@ fn _blc_has_ffi_capability(line: text) -> bool:
 fn _blc_boundary(lines: [CodeLine], header_index: i64) -> bool:
     # Contiguous annotation block directly above the header. An annotation may
     # span lines (`@unsafe(reason: "...",` / `capabilities: [ffi])`), so join
-    # the lines from its `@unsafe(` start down to the header. A line ending in
-    # `:` belongs to a preceding header/body and ends the block. Bounded.
+    # the lines from its `@unsafe(` start down to the header. Only `@...` lines
+    # and annotation continuations (ending in `,` or `)`, not a declaration)
+    # belong to the block; anything else (an `extern fn`, a body line) ends it,
+    # so a preceding declaration's @unsafe is never inherited. Bounded.
     var i = header_index - 1
     var remaining = 32
     var joined = ""
@@ -105,8 +107,11 @@ fn _blc_boundary(lines: [CodeLine], header_index: i64) -> bool:
         if prev == "":
             i = i - 1
             continue
-        if prev.ends_with(":"):
-            return false
+        if not prev.starts_with("@"):
+            val continuation = (prev.ends_with(",") or prev.ends_with(")")) and
+                not prev.contains("fn ") and not prev.ends_with(":")
+            if not continuation:
+                return false
         joined = prev + " " + joined
         if prev.starts_with("@unsafe("):
             return _blc_has_ffi_capability(joined)
@@ -149,6 +154,11 @@ fn _blc_binding(line: text) -> text:
     elif line.starts_with("var "):
         rest = line.substring(4, line.byte_len())
     else:
+        # Plain reassignment `x = expr` (not `==`, not a compound/field target).
+        val name = _blc_leading_ident(line)
+        val after = line.substring(name.byte_len(), line.byte_len())
+        if name != "" and after.starts_with(" = "):
+            return name
         return ""
     _blc_leading_ident(rest)
 
