@@ -2,6 +2,7 @@
 # Canonical slots are serialized by the existing mutex owner; slots never reuse.
 use std.nogc_sync_mut.io.host_identity_store_abi_v1.*
 use std.common.text_bytes.{text_to_utf8_bytes, utf8_bytes_valid}
+use std.nogc_sync_mut.io.host_identity_ssh_projection_types_v1.{HostIdentitySshPathsV1, host_identity_ssh_projection_roles_valid_v1}
 @when(os="linux"):
 use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new_gate, mutex_lock_gate, mutex_unlock_gate}
 use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
@@ -80,6 +81,70 @@ pub struct HostIdentityPlatformOpenV1:
     cleanup_pending: bool
     error: text
 
+pub class HostIdentityPlatformProjectionV1:
+    store_slot: i64
+    store_generation: i64
+    child_slot: i64
+    child_generation: i64
+
+pub struct HostIdentityPlatformProjectionTurnV1:
+    owner: Option<HostIdentityPlatformProjectionV1>
+    ready: bool
+    cleanup_pending: bool
+    error: text
+
+pub fn host_identity_platform_projection_begin_v1(store: HostIdentityPlatformV1, key: text, hosts: text) -> HostIdentityPlatformProjectionTurnV1:
+    @when(os="linux"):
+    val entered = identity_linux_enter_v1()
+    if entered.is_err(): return HostIdentityPlatformProjectionTurnV1(None, false, false, entered.unwrap_err())
+    val turn = identity_linux_projection_begin_v1(store, key, hosts)
+    identity_linux_leave_v1()
+    turn
+    @else:
+    HostIdentityPlatformProjectionTurnV1(None, false, false, "identity-store-host-unsupported")
+    @end
+
+pub fn host_identity_platform_projection_step_v1(owner: HostIdentityPlatformProjectionV1, store: HostIdentityPlatformV1, cancel: bool) -> HostIdentityPlatformProjectionTurnV1:
+    @when(os="linux"):
+    val entered = identity_linux_enter_v1()
+    if entered.is_err(): return HostIdentityPlatformProjectionTurnV1(Some(owner), false, true, entered.unwrap_err())
+    val turn = identity_linux_projection_step_v1(owner, store, cancel)
+    identity_linux_leave_v1()
+    turn
+    @else:
+    HostIdentityPlatformProjectionTurnV1(Some(owner), false, true, "identity-store-host-unsupported")
+    @end
+
+pub fn host_identity_platform_projection_paths_v1(owner: HostIdentityPlatformProjectionV1, store: HostIdentityPlatformV1) -> Result<HostIdentitySshPathsV1, text>:
+    @when(os="linux"):
+    val entered = identity_linux_enter_v1()
+    if entered.is_err(): return Err(entered.unwrap_err())
+    val checked = identity_linux_projection_current_v1(owner, store)
+    var result: Result<HostIdentitySshPathsV1, text> = Err("identity-ssh-projection-not-ready")
+    if checked.is_err():
+        val retained = identity_linux_projection_failure_v1(owner, checked.unwrap_err())
+        result = Err(checked.unwrap_err())
+    else:
+        val child = checked.unwrap()
+        val prefix = identity_linux_slots_v1[owner.store_slot].root_path + "/journal/"
+        result = Ok(HostIdentitySshPathsV1(prefix + child.leaves[0], prefix + child.leaves[1]))
+    identity_linux_leave_v1()
+    result
+    @else:
+    Err("identity-store-host-unsupported")
+    @end
+
+pub fn host_identity_platform_projection_close_v1(owner: HostIdentityPlatformProjectionV1) -> HostIdentityPlatformCloseV1:
+    @when(os="linux"):
+    val entered = identity_linux_enter_v1()
+    if entered.is_err(): return HostIdentityPlatformCloseV1(false, false, entered.unwrap_err())
+    val turn = identity_linux_projection_close_v1(owner)
+    identity_linux_leave_v1()
+    turn
+    @else:
+    HostIdentityPlatformCloseV1(false, false, "identity-store-host-unsupported")
+    @end
+
 pub fn host_identity_platform_open_v1(root: text) -> HostIdentityPlatformOpenV1:
     @when(os="linux"):
     val entered = identity_linux_enter_v1()
@@ -115,6 +180,17 @@ struct IdentityLinuxStateV1:
     ready: bool = false
     closing: bool = false
     closed: bool = false
+    close_error: bool = false
+    projections: [IdentityLinuxProjectionV1] = []
+    projection_generation: i64 = 0
+
+struct IdentityLinuxProjectionV1:
+    generation: i64
+    leaves: [text]
+    # 0/1 acquire key/hosts; 2 ready; 3 closing; 4 released; 5 consumed-error.
+    phase: i64 = 0
+    fds: [i64] = [-1, -1]
+    metadata: [Option<IdentityLinuxMetaV1>] = [None, None]
     close_error: bool = false
 
 var identity_linux_gate_v1: Option<Mutex> = None
@@ -502,6 +578,9 @@ fn identity_linux_close_v1(slot: i64, generation: i64) -> HostIdentityPlatformCl
     val loaded = identity_linux_slot_v1(slot, generation)
     if loaded.is_err(): return HostIdentityPlatformCloseV1(true, false, "identity-store-stale")
     identity_linux_quarantine_v1(slot)
+    val drained = identity_linux_projection_drain_v1(slot)
+    if drained.is_err(): return HostIdentityPlatformCloseV1(false, false, drained.unwrap_err())
+    if not drained.unwrap(): return HostIdentityPlatformCloseV1(false, false, "identity-store-projection-cleanup-pending")
     if not identity_linux_stage_cleanup_v1(slot):
         # A consumed stage-fd close failure is recorded; its name was already
         # safely removed, so continue consuming directories instead of retrying.
@@ -522,4 +601,133 @@ fn identity_linux_close_v1(slot: i64, generation: i64) -> HostIdentityPlatformCl
     identity_linux_slots_v1[slot] = state
     HostIdentityPlatformCloseV1(true, not state.close_error,
         if state.close_error: "identity-store-close-consumed-unconfirmed" else: "")
+
+fn identity_linux_projection_load_v1(owner: HostIdentityPlatformProjectionV1) -> Result<IdentityLinuxProjectionV1, text>:
+    val state = identity_linux_slot_v1(owner.store_slot, owner.store_generation)?
+    if owner.child_slot < 0 or owner.child_slot >= state.projections.len(): return Err("identity-ssh-projection-stale")
+    val child = state.projections[owner.child_slot]
+    if child.generation != owner.child_generation: return Err("identity-ssh-projection-stale")
+    Ok(child)
+
+fn identity_linux_projection_save_v1(owner: HostIdentityPlatformProjectionV1, child: IdentityLinuxProjectionV1):
+    var state = identity_linux_slots_v1[owner.store_slot]
+    state.projections[owner.child_slot] = child
+    identity_linux_slots_v1[owner.store_slot] = state
+
+fn identity_linux_projection_failure_v1(owner: HostIdentityPlatformProjectionV1, error: text) -> HostIdentityPlatformProjectionTurnV1:
+    val loaded = identity_linux_projection_load_v1(owner)
+    if loaded.is_err(): return HostIdentityPlatformProjectionTurnV1(None, false, false, loaded.unwrap_err())
+    var child = loaded.unwrap()
+    if child.phase >= 4: return HostIdentityPlatformProjectionTurnV1(None, false, false, error)
+    child.phase = 3
+    identity_linux_projection_save_v1(owner, child)
+    HostIdentityPlatformProjectionTurnV1(Some(owner), false, true, error)
+
+fn identity_linux_projection_begin_v1(store: HostIdentityPlatformV1, key: text, hosts: text) -> HostIdentityPlatformProjectionTurnV1:
+    if not host_identity_ssh_projection_roles_valid_v1(key, hosts): return HostIdentityPlatformProjectionTurnV1(None, false, false, "identity-ssh-projection-leaf-role")
+    val current = identity_linux_current_v1(store.slot, store.generation)
+    if current.is_err(): return HostIdentityPlatformProjectionTurnV1(None, false, false, current.unwrap_err())
+    var state = current.unwrap()
+    if state.projection_generation >= 9223372036854775807: return HostIdentityPlatformProjectionTurnV1(None, false, false, "identity-ssh-projection-generation-bound")
+    var index = -1
+    for at in 0..state.projections.len():
+        if index < 0 and state.projections[at].phase == 4: index = at
+    if index < 0:
+        if state.projections.len() >= 8: return HostIdentityPlatformProjectionTurnV1(None, false, false, "identity-ssh-projection-owner-bound")
+        index = state.projections.len()
+    state.projection_generation = state.projection_generation + 1
+    val child = IdentityLinuxProjectionV1(generation: state.projection_generation, leaves: [key, hosts])
+    if index == state.projections.len(): state.projections.push(child)
+    else: state.projections[index] = child
+    identity_linux_slots_v1[store.slot] = state
+    val owner = HostIdentityPlatformProjectionV1(store_slot: store.slot, store_generation: store.generation, child_slot: index, child_generation: child.generation)
+    HostIdentityPlatformProjectionTurnV1(Some(owner), false, false, "")
+
+fn identity_linux_projection_current_v1(owner: HostIdentityPlatformProjectionV1, store: HostIdentityPlatformV1) -> Result<IdentityLinuxProjectionV1, text>:
+    if owner.store_slot != store.slot or owner.store_generation != store.generation: return Err("identity-ssh-projection-foreign-store")
+    val child = identity_linux_projection_load_v1(owner)?
+    if child.phase != 2: return Err("identity-ssh-projection-not-ready")
+    val state = identity_linux_current_v1(store.slot, store.generation)?
+    val parent = state.fds[state.fds.len() - 1]
+    for at in 0..2:
+        if child.fds[at] < 0 or child.metadata[at] == None: return Err("identity-ssh-projection-file-missing")
+        val held = identity_linux_metadata_v1(child.fds[at], "", true)?
+        val named = identity_linux_metadata_v1(parent, child.leaves[at], false)?
+        val original = child.metadata[at].unwrap()
+        if (not identity_linux_file_valid_v1(held, state.uid) or not identity_linux_file_valid_v1(named, state.uid) or
+                not host_identity_bytes_equal_v1(held.identity, original.identity) or
+                not host_identity_bytes_equal_v1(held.revision, original.revision) or
+                not host_identity_bytes_equal_v1(named.identity, original.identity)):
+            return Err("identity-ssh-projection-file-changed")
+    Ok(child)
+
+@unsafe(reason: "acquire exactly one real nofollow readonly target per step and retain its fd before validation", capabilities: [ffi, raw_ptr])
+fn identity_linux_projection_step_v1(owner: HostIdentityPlatformProjectionV1, store: HostIdentityPlatformV1, cancel: bool) -> HostIdentityPlatformProjectionTurnV1:
+    if owner.store_slot != store.slot or owner.store_generation != store.generation: return identity_linux_projection_failure_v1(owner, "identity-ssh-projection-foreign-store")
+    val loaded = identity_linux_projection_load_v1(owner)
+    if loaded.is_err(): return HostIdentityPlatformProjectionTurnV1(None, false, false, loaded.unwrap_err())
+    var child = loaded.unwrap()
+    val state = identity_linux_slots_v1[owner.store_slot]
+    if cancel or state.closing or child.phase >= 3:
+        val closed = identity_linux_projection_close_v1(owner)
+        return HostIdentityPlatformProjectionTurnV1(if closed.consumed: None else: Some(owner), false, not closed.consumed, closed.error)
+    val current = identity_linux_current_v1(store.slot, store.generation)
+    if current.is_err(): return identity_linux_projection_failure_v1(owner, current.unwrap_err())
+    if child.phase < 2:
+        val at = child.phase
+        val name = identity_linux_name_v1(child.leaves[at])
+        if name == 0: return identity_linux_projection_failure_v1(owner, "identity-store-memory")
+        val parent = state.fds[state.fds.len() - 1]
+        child.fds[at] = openat(parent as i32, name, identity_linux_file_flags_v1(), 0u32) as i64
+        free(name)
+        identity_linux_projection_save_v1(owner, child)
+        if child.fds[at] < 0: return identity_linux_projection_failure_v1(owner, "identity-ssh-projection-file-open")
+        val observed = identity_linux_metadata_v1(child.fds[at], "", true)
+        if observed.is_err(): return identity_linux_projection_failure_v1(owner, observed.unwrap_err())
+        val meta = observed.unwrap()
+        if not identity_linux_file_valid_v1(meta, state.uid): return identity_linux_projection_failure_v1(owner, "identity-ssh-projection-file-privacy")
+        child.metadata[at] = Some(meta)
+        child.phase = child.phase + 1
+        identity_linux_projection_save_v1(owner, child)
+    if child.phase == 2:
+        val checked = identity_linux_projection_current_v1(owner, store)
+        if checked.is_err(): return identity_linux_projection_failure_v1(owner, checked.unwrap_err())
+    HostIdentityPlatformProjectionTurnV1(Some(owner), child.phase == 2, false, "")
+
+@unsafe(reason: "invalidate projection first; consume one exact retained fd per close phase and never retry consumed fd", capabilities: [ffi])
+fn identity_linux_projection_close_v1(owner: HostIdentityPlatformProjectionV1) -> HostIdentityPlatformCloseV1:
+    val loaded = identity_linux_projection_load_v1(owner)
+    if loaded.is_err(): return HostIdentityPlatformCloseV1(true, false, loaded.unwrap_err())
+    var child = loaded.unwrap()
+    if child.phase >= 4: return HostIdentityPlatformCloseV1(true, child.phase == 4, if child.phase == 4: "" else: "identity-store-close-consumed-unconfirmed")
+    child.phase = 3
+    identity_linux_projection_save_v1(owner, child)
+    var at = 1
+    while at >= 0:
+        if child.fds[at] >= 0:
+            val fd = child.fds[at]
+            child.fds[at] = -1
+            identity_linux_projection_save_v1(owner, child)
+            if close(fd as i32) != 0:
+                child.close_error = true
+                var parent = identity_linux_slots_v1[owner.store_slot]
+                parent.close_error = true
+                identity_linux_slots_v1[owner.store_slot] = parent
+            break
+        at = at - 1
+    if child.fds[0] < 0 and child.fds[1] < 0: child.phase = if child.close_error: 5 else: 4
+    identity_linux_projection_save_v1(owner, child)
+    HostIdentityPlatformCloseV1(child.phase >= 4, child.phase == 4,
+        if child.close_error: "identity-store-close-consumed-unconfirmed" elif child.phase < 4: "identity-ssh-projection-cleanup-pending" else: "")
+
+fn identity_linux_projection_drain_v1(slot: i64) -> Result<bool, text>:
+    val state = identity_linux_slots_v1[slot]
+    for at in 0..state.projections.len():
+        val child = state.projections[at]
+        if child.phase < 4:
+            val owner = HostIdentityPlatformProjectionV1(store_slot: slot, store_generation: state.generation, child_slot: at, child_generation: child.generation)
+            val closed = identity_linux_projection_close_v1(owner)
+            if closed.error != "" and closed.error != "identity-ssh-projection-cleanup-pending": return Err(closed.error)
+            return Ok(false)
+    Ok(true)
 @end
