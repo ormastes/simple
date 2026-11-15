@@ -1,0 +1,318 @@
+# AUTHORED SOURCE-ONLY NOT_RUN. Public metadata constructors, no native owner.
+use std.spec.*
+use std.common.contracts.container.primary_connection_v2.*
+use std.common.contracts.container.execution_v2.{ContainerExecutionPlanV2,
+    container_host_scope_bytes_v2, container_scope_fence_id_v2}
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.stream_v2.{ContainerOutputIdentityV2, ContainerOutputResourcesV2}
+use std.common.contracts.mux.session_runtime_control_v1.{SessionRuntimeControlTargetV1,
+    session_runtime_control_target_validate_v1, session_runtime_control_target_digest_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+fn connection_plan_fixture_v2() -> ContainerPrimaryConnectionPlanV2:
+    val workload = ContainerExecutionPlanV2(backend: "windows-docker-process", workload_uid: "pod-a",
+        attempt: 1, operation_id: "workload-a", request_digest: "a".repeat(64),
+        physical_host_id: "host-a", service_scope_id: "scope-a", boot_id: "",
+        provider_generation: 1, native_machine_id: "machine-a",
+        continuity_mode: "service-incarnation-v1", continuity_id: "service-a")
+    var plan = ContainerPrimaryConnectionPlanV2(workload: workload,
+        runtime: RuntimeIdentityV1(pod_uid: workload.workload_uid, attempt: workload.attempt,
+            provider_generation: workload.provider_generation, operation_id: workload.operation_id,
+            engine: "docker", native_id: "4".repeat(64), node_boot_id: ""),
+        identity: ContainerOutputIdentityV2(operation_id: "connection-a", parent_operation_id: workload.operation_id,
+            parent_operation_digest: "b".repeat(64), parent_assignment_digest: "c".repeat(64),
+            parent_budget_digest: "d".repeat(64), binding_digest: "e".repeat(64)),
+        resources: ContainerOutputResourcesV2(cpu_millis: 100, memory_bytes: 67108864),
+        provider_identity_digest: "1".repeat(64), installation_digest: "2".repeat(64),
+        policy_digest: "3".repeat(64), journal_lease_digest: "5".repeat(64),
+        terminal_mode: "stdin", timeout_ms: 30000, request_digest: "")
+    plan.runtime.node_boot_id = container_scope_fence_id_v2(container_primary_connection_scope_v2(plan)).unwrap()
+    plan.request_digest = container_primary_connection_plan_digest_v2(plan).unwrap()
+    plan
+
+fn connection_target_fixture_v2() -> SessionRuntimeControlTargetV1:
+    val plan = connection_plan_fixture_v2()
+    SessionRuntimeControlTargetV1(scope: container_primary_connection_scope_v2(plan), runtime: plan.runtime,
+        workload_request_digest: plan.workload.request_digest, binding_uid: "binding-a",
+        binding_digest: plan.identity.binding_digest, service_incarnation: "f".repeat(32),
+        session_id: "session-a", window_id: "window-a", pane_id: "pane-a", service_epoch: 1,
+        child_incarnation: 1, client_id: "client-a", attachment_generation: 1,
+        execution_kind: "primary", native_exec_id: "", exec_request_digest: "")
+
+fn connection_target_refence_v2(target: SessionRuntimeControlTargetV1) -> SessionRuntimeControlTargetV1:
+    var retained = target
+    retained.runtime.provider_generation = retained.scope.provider_generation
+    retained.runtime.node_boot_id = container_scope_fence_id_v2(retained.scope).unwrap()
+    retained
+
+describe "Direct Windows primary connection planning metadata":
+    it "hashes canonical SDN with fixed attach semantics and excludes only the self digest":
+        step("Parse actual plan bytes and verify canonical form, digest and fixed transport flags")
+        val plan = connection_plan_fixture_v2()
+        val bytes = container_primary_connection_plan_bytes_v2(plan).unwrap()
+        val parsed = sdn_parse_strict_v1(bytes, SdnStrictLimitsV1(max_source_bytes: 16384,
+            max_depth: 2, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 32)).unwrap()
+        val fields = match parsed.value:
+            case SdnValue.Dict(value): value
+            case _: fail("connection plan must encode an SDN dictionary")
+        expect(sdn_encode_canonical(parsed.value) + "\n").to_equal(bytes)
+        expect(fields["kind"]).to_equal(SdnValue.String("container-primary-connection-plan-v2"))
+        expect(fields["version"]).to_equal(SdnValue.Int(2))
+        expect(fields["journalLeaseDigest"]).to_equal(SdnValue.String(plan.journal_lease_digest))
+        expect(fields["stdinEnabled"]).to_equal(SdnValue.Bool(true))
+        expect(fields["signalProxy"]).to_equal(SdnValue.Bool(false))
+        expect(fields["detachKeys"]).to_equal(SdnValue.String(""))
+        expect(builder_digest_valid_v1(plan.request_digest)).to_equal(true)
+        expect(sha256_text(bytes)).to_equal(plan.request_digest)
+        var changed = plan
+        changed.request_digest = "9".repeat(64)
+        expect(container_primary_connection_plan_bytes_v2(changed).unwrap()).to_equal(bytes)
+        expect(container_primary_connection_plan_digest_v2(changed).unwrap()).to_equal(plan.request_digest)
+
+    it "rejects every nonWindows backend and nonDocker runtime engine":
+        step("Refuse known foreign backends and engines as well as unknown identities")
+        for backend in ["linux-podman", "macos-seatbelt-process", "unknown", ""]:
+            var plan = connection_plan_fixture_v2()
+            plan.workload.backend = backend
+            expect(container_primary_connection_plan_bytes_v2(plan).is_err()).to_equal(true)
+        for engine in ["podman", "macos-seatbelt-process-v1", "unknown", ""]:
+            var plan = connection_plan_fixture_v2()
+            plan.runtime.engine = engine
+            expect(container_primary_connection_plan_bytes_v2(plan).is_err()).to_equal(true)
+
+    it "requires actual Windows service continuity and refuses a fictitious native boot":
+        step("Use an empty boot ID with service incarnation and reject otherwise valid native-boot metadata")
+        val original = connection_plan_fixture_v2()
+        expect(original.workload.boot_id).to_equal("")
+        expect(original.workload.continuity_mode).to_equal("service-incarnation-v1")
+        expect(original.workload.continuity_id.len()).to_be_greater_than(0)
+        expect(container_primary_connection_plan_bytes_v2(original).is_ok()).to_equal(true)
+        var native_boot = original
+        native_boot.workload.continuity_mode = "native-boot-incarnation-v1"
+        native_boot.workload.boot_id = "boot-a"
+        native_boot.workload.continuity_id = "boot-a"
+        val native_scope = container_primary_connection_scope_v2(native_boot)
+        expect(container_host_scope_bytes_v2(native_scope).is_ok()).to_equal(true)
+        native_boot.runtime.node_boot_id = container_scope_fence_id_v2(native_scope).unwrap()
+        expect(container_primary_connection_plan_bytes_v2(native_boot).is_err()).to_equal(true)
+        var populated_boot = original
+        populated_boot.workload.boot_id = "boot-a"
+        expect(container_primary_connection_plan_bytes_v2(populated_boot).is_err()).to_equal(true)
+        var empty_continuity = original
+        empty_continuity.workload.continuity_id = ""
+        expect(container_primary_connection_plan_bytes_v2(empty_continuity).is_err()).to_equal(true)
+
+    it "permits only stdin and tty modes and binds the selected mode in the digest":
+        step("Reject unsupported terminal modes and distinguish the two admitted modes")
+        val original = connection_plan_fixture_v2()
+        var tty = original
+        tty.terminal_mode = "tty"
+        expect(container_primary_connection_plan_digest_v2(tty).unwrap() == original.request_digest).to_equal(false)
+        for mode in ["", "stdout", "raw", "TTY"]:
+            var changed = original
+            changed.terminal_mode = mode
+            expect(container_primary_connection_plan_bytes_v2(changed).is_err()).to_equal(true)
+
+    it "checks inclusive resource and timeout limits before producing a digest":
+        step("Accept exact minimum and maximum values while refusing zero negative and above-cap resources")
+        var minimum = connection_plan_fixture_v2()
+        minimum.resources.cpu_millis = 1
+        minimum.resources.memory_bytes = 1
+        minimum.timeout_ms = 1
+        expect(builder_digest_valid_v1(container_primary_connection_plan_digest_v2(minimum).unwrap())).to_equal(true)
+        var maximum = minimum
+        maximum.resources.cpu_millis = 64000
+        maximum.resources.memory_bytes = 1125899906842624
+        maximum.timeout_ms = 300000
+        expect(builder_digest_valid_v1(container_primary_connection_plan_digest_v2(maximum).unwrap())).to_equal(true)
+        for field in ["cpu", "memory", "timeout"]:
+            for invalid in [-1, 0, 1]:
+                var changed = connection_plan_fixture_v2()
+                if field == "cpu": changed.resources.cpu_millis = if invalid == 1: 64001 else: invalid
+                elif field == "memory": changed.resources.memory_bytes = if invalid == 1: 1125899906842625 else: invalid
+                else: changed.timeout_ms = if invalid == 1: 300001 else: invalid
+                expect(container_primary_connection_plan_digest_v2(changed).is_err()).to_equal(true)
+
+    it "requires exact workload runtime operation generation scope fence and parent identity":
+        step("Refuse individually valid but mismatched runtime and parent-operation metadata")
+        for field in ["pod", "attempt", "operation", "generation", "fence", "parent"]:
+            var changed = connection_plan_fixture_v2()
+            if field == "pod": changed.runtime.pod_uid = "pod-b"
+            elif field == "attempt": changed.runtime.attempt = 2
+            elif field == "operation": changed.runtime.operation_id = "workload-b"
+            elif field == "generation": changed.runtime.provider_generation = 2
+            elif field == "fence": changed.runtime.node_boot_id = "8".repeat(64)
+            else: changed.identity.parent_operation_id = "workload-b"
+            expect(container_primary_connection_plan_bytes_v2(changed).unwrap_err()).to_equal("primary-connection-runtime-workload")
+
+    it "validates scope continuity and strict lowercase digest pins":
+        step("Reject invalid scope metadata and malformed provider installation policy journal-writer or runtime pins")
+        for field in ["host", "service", "machine", "boot", "generation", "continuity"]:
+            var changed = connection_plan_fixture_v2()
+            if field == "host": changed.workload.physical_host_id = ""
+            elif field == "service": changed.workload.service_scope_id = ""
+            elif field == "machine": changed.workload.native_machine_id = ""
+            elif field == "boot": changed.workload.boot_id = "boot-b"
+            elif field == "generation": changed.workload.provider_generation = 0
+            else: changed.workload.continuity_mode = "unknown"
+            expect(container_primary_connection_plan_bytes_v2(changed).is_err()).to_equal(true)
+        for field in ["runtime", "provider", "installation", "policy", "journal", "binding", "workload"]:
+            for invalid in ["", "abc", "A".repeat(64), "g".repeat(64)]:
+                var changed = connection_plan_fixture_v2()
+                if field == "runtime": changed.runtime.native_id = invalid
+                elif field == "provider": changed.provider_identity_digest = invalid
+                elif field == "installation": changed.installation_digest = invalid
+                elif field == "policy": changed.policy_digest = invalid
+                elif field == "journal": changed.journal_lease_digest = invalid
+                elif field == "binding": changed.identity.binding_digest = invalid
+                else: changed.workload.request_digest = invalid
+                expect(container_primary_connection_plan_digest_v2(changed).is_err()).to_equal(true)
+
+    it "includes every mutable plan pin demand and identity field in its digest":
+        step("Change valid plan material without changing the request-digest field")
+        val original = connection_plan_fixture_v2()
+        for field in ["runtime", "provider", "installation", "policy", "journal", "cpu", "memory", "timeout",
+                "binding", "operation", "parentDigest", "assignment", "budget", "workload"]:
+            var changed = original
+            if field == "runtime": changed.runtime.native_id = "8".repeat(64)
+            elif field == "provider": changed.provider_identity_digest = "8".repeat(64)
+            elif field == "installation": changed.installation_digest = "8".repeat(64)
+            elif field == "policy": changed.policy_digest = "8".repeat(64)
+            elif field == "journal": changed.journal_lease_digest = "8".repeat(64)
+            elif field == "cpu": changed.resources.cpu_millis = 101
+            elif field == "memory": changed.resources.memory_bytes = 67108865
+            elif field == "timeout": changed.timeout_ms = 30001
+            elif field == "binding": changed.identity.binding_digest = "8".repeat(64)
+            elif field == "operation": changed.identity.operation_id = "connection-b"
+            elif field == "parentDigest": changed.identity.parent_operation_digest = "8".repeat(64)
+            elif field == "assignment": changed.identity.parent_assignment_digest = "8".repeat(64)
+            elif field == "budget": changed.identity.parent_budget_digest = "8".repeat(64)
+            else: changed.workload.request_digest = "8".repeat(64)
+            expect(container_primary_connection_plan_digest_v2(changed).unwrap() == original.request_digest).to_equal(false)
+
+    it "matches only the pinned primary target and rejects a stale plan request digest":
+        step("Validate the target independently before refusing valid but foreign plan correlations")
+        val plan = connection_plan_fixture_v2()
+        val target = connection_target_fixture_v2()
+        expect(container_primary_connection_target_match_v2(plan, target).is_ok()).to_equal(true)
+        var stale = plan
+        stale.request_digest = "9".repeat(64)
+        expect(container_primary_connection_target_match_v2(stale, target).unwrap_err()).to_equal("primary-connection-plan-digest")
+        for field in ["runtime", "request", "binding", "scope", "exec"]:
+            var changed = target
+            if field == "runtime": changed.runtime.native_id = "8".repeat(64)
+            elif field == "request": changed.workload_request_digest = "8".repeat(64)
+            elif field == "binding": changed.binding_digest = "8".repeat(64)
+            elif field == "scope":
+                changed.scope.physical_host_id = "host-b"
+                changed = connection_target_refence_v2(changed)
+            else:
+                changed.execution_kind = "exec"
+                changed.native_exec_id = "8".repeat(64)
+                changed.exec_request_digest = "9".repeat(64)
+            expect(session_runtime_control_target_validate_v1(changed).is_ok()).to_equal(true)
+            expect(container_primary_connection_target_match_v2(plan, changed).is_err()).to_equal(true)
+
+describe "Stable direct primary connection binding digest":
+    it "excludes valid client and attachment generation changes while the full target digest changes":
+        step("Rotate each attachment-only field independently and together")
+        val original = connection_target_fixture_v2()
+        val stable = container_primary_connection_binding_digest_v2(original).unwrap()
+        val full = session_runtime_control_target_digest_v1(original).unwrap()
+        expect(builder_digest_valid_v1(stable)).to_equal(true)
+        for field in ["client", "attachment", "both"]:
+            var changed = original
+            if field != "attachment": changed.client_id = "client-b"
+            if field != "client": changed.attachment_generation = 2
+            expect(container_primary_connection_binding_digest_v2(changed).unwrap()).to_equal(stable)
+            expect(session_runtime_control_target_digest_v1(changed).unwrap() == full).to_equal(false)
+            expect(container_primary_connection_target_match_v2(connection_plan_fixture_v2(), changed).is_ok()).to_equal(true)
+
+    it "retains all adopted service pane workload and runtime identity fields":
+        step("Change valid adopted and runtime metadata one field at a time")
+        val original = connection_target_fixture_v2()
+        val stable = container_primary_connection_binding_digest_v2(original).unwrap()
+        for field in ["request", "bindingUid", "bindingDigest", "serviceIncarnation", "session", "window",
+                "pane", "epoch", "child", "pod", "attempt", "operation", "engine", "native"]:
+            var changed = original
+            if field == "request": changed.workload_request_digest = "8".repeat(64)
+            elif field == "bindingUid": changed.binding_uid = "binding-b"
+            elif field == "bindingDigest": changed.binding_digest = "8".repeat(64)
+            elif field == "serviceIncarnation": changed.service_incarnation = "0".repeat(32)
+            elif field == "session": changed.session_id = "session-b"
+            elif field == "window": changed.window_id = "window-b"
+            elif field == "pane": changed.pane_id = "pane-b"
+            elif field == "epoch": changed.service_epoch = 2
+            elif field == "child": changed.child_incarnation = 2
+            elif field == "pod": changed.runtime.pod_uid = "pod-b"
+            elif field == "attempt": changed.runtime.attempt = 2
+            elif field == "operation": changed.runtime.operation_id = "workload-b"
+            elif field == "engine": changed.runtime.engine = "podman"
+            else: changed.runtime.native_id = "8".repeat(64)
+            expect(session_runtime_control_target_validate_v1(changed).is_ok()).to_equal(true)
+            expect(container_primary_connection_binding_digest_v2(changed).unwrap() == stable).to_equal(false)
+
+    it "retains every scope component with a recomputed valid runtime fence":
+        step("Change host scope metadata while preserving the target's required internal scope correlation")
+        val original = connection_target_fixture_v2()
+        val stable = container_primary_connection_binding_digest_v2(original).unwrap()
+        for field in ["host", "service", "continuity", "generation", "machine", "nativeMode"]:
+            var changed = original
+            if field == "host": changed.scope.physical_host_id = "host-b"
+            elif field == "service": changed.scope.service_scope_id = "scope-b"
+            elif field == "continuity": changed.scope.continuity_id = "service-b"
+            elif field == "generation": changed.scope.provider_generation = 2
+            elif field == "machine": changed.scope.native_machine_id = "machine-b"
+            else:
+                changed.scope.continuity_mode = "native-boot-incarnation-v1"
+                changed.scope.boot_id = "boot-a"
+                changed.scope.continuity_id = "boot-a"
+            changed = connection_target_refence_v2(changed)
+            expect(session_runtime_control_target_validate_v1(changed).is_ok()).to_equal(true)
+            expect(container_primary_connection_binding_digest_v2(changed).unwrap() == stable).to_equal(false)
+        # This generic target hash still represents valid native-boot targets;
+        # they are independently refused by the direct Windows plan validator.
+        var native = original
+        native.scope.continuity_mode = "native-boot-incarnation-v1"
+        native.scope.boot_id = "boot-a"
+        native.scope.continuity_id = "boot-a"
+        native = connection_target_refence_v2(native)
+        val native_digest = container_primary_connection_binding_digest_v2(native).unwrap()
+        native.scope.boot_id = "boot-b"
+        native.scope.continuity_id = "boot-b"
+        native = connection_target_refence_v2(native)
+        expect(container_primary_connection_binding_digest_v2(native).unwrap() == native_digest).to_equal(false)
+
+    it "retains execution kind and both exec identity fields for valid generic control targets":
+        step("Do not collapse primary and exec namespaces or distinct native exec births")
+        val primary = connection_target_fixture_v2()
+        val stable = container_primary_connection_binding_digest_v2(primary).unwrap()
+        var exec = primary
+        exec.execution_kind = "exec"
+        exec.native_exec_id = "8".repeat(64)
+        exec.exec_request_digest = "9".repeat(64)
+        val exec_digest = container_primary_connection_binding_digest_v2(exec).unwrap()
+        expect(exec_digest == stable).to_equal(false)
+        var changed = exec
+        changed.native_exec_id = "7".repeat(64)
+        expect(container_primary_connection_binding_digest_v2(changed).unwrap() == exec_digest).to_equal(false)
+        changed = exec
+        changed.exec_request_digest = "7".repeat(64)
+        expect(container_primary_connection_binding_digest_v2(changed).unwrap() == exec_digest).to_equal(false)
+
+    it "validates even excluded attachment fields and refuses malformed target metadata":
+        step("Exclusion from the stable hash never skips target validation")
+        for field in ["client", "attachment", "incarnation", "fence", "binding", "exec"]:
+            var changed = connection_target_fixture_v2()
+            if field == "client": changed.client_id = ""
+            elif field == "attachment": changed.attachment_generation = 0
+            elif field == "incarnation": changed.service_incarnation = "invalid"
+            elif field == "fence": changed.runtime.node_boot_id = "8".repeat(64)
+            elif field == "binding": changed.binding_digest = "A".repeat(64)
+            else: changed.native_exec_id = "8".repeat(64)
+            expect(container_primary_connection_binding_digest_v2(changed).is_err()).to_equal(true)
