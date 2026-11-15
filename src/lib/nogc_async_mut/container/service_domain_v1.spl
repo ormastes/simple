@@ -1,0 +1,70 @@
+# Actual local machine-domain foundation; no wire constructor or remote-grant
+# relabeling. Server integration must consume this owner, not a textual tag.
+use std.common.contracts.container.machine_policy_v1.MachineContainerPolicyV1
+use std.common.contracts.container.execution_v2.ContainerHostObservationV2
+use std.nogc_sync_mut.container.machine_authority_v1.*
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.HostServiceDomainV3
+use std.nogc_sync_mut.io.machine_local_process_principal_v1.MachineLocalProcessPrincipalV1
+use std.common.contracts.container.local_session_v1.{LocalContainerRequestV1, local_container_request_bytes_v1}
+
+pub class LocalContainerServiceDomainV1:
+    authority: MachineContainerAuthorityV1
+
+    pub fn current_policy_v1() -> Result<MachineContainerPolicyV1, text>:
+        val policy = self.authority.current_policy_v1()?
+        if policy.mode != "standalone": return Err("local-container-managed-authority-required")
+        Ok(policy)
+
+    pub fn observe_provider_v1() -> Result<ContainerHostObservationV2, text>:
+        val policy = self.current_policy_v1()?
+        self.authority.observe_provider_v1()
+
+    pub fn journal_head_v1() -> Result<text, text>:
+        val policy = self.current_policy_v1()?
+        self.authority.journal_head_v1()
+
+    # Actual direct-process authentication precedes the missing migration fence.
+    # The owned foundation remains with the caller on every refusal; no fake
+    # reservation, distributed grant, provider create or release is produced.
+    pub fn process_admit_v1(request: LocalContainerRequestV1,
+            principal: MachineLocalProcessPrincipalV1) -> Result<bool, text>:
+        val actual = self.authority.validate_local_process_v1(principal)?
+        val canonical = local_container_request_bytes_v1(request)?
+        val policy = self.current_policy_v1()?
+        if request.cpu_millis > policy.cpu_millis or request.memory_bytes > policy.memory_bytes:
+            return Err("local-container-request-capacity-exceeded")
+        val head = self.authority.journal_head_v1()?
+        if head == "": return Err("local-container-migration-fence-unavailable")
+        # Unknown retained history cannot be relabelled into a local grant.
+        # No native termination/absence settlement capability exists here yet.
+        Err("local-container-retained-admission-unavailable")
+
+    pub fn close_v1() -> text:
+        self.authority.close_v1()
+
+pub enum LocalContainerServiceOpenV1:
+    Rejected(reason: text)
+    CleanupRequired(owner: MachineContainerAuthorityCleanupV1, reason: text)
+    DomainCleanupRequired(owner: LocalContainerServiceDomainV1, reason: text)
+    Ready(owner: LocalContainerServiceDomainV1)
+
+pub enum ContainerServiceDomainV1:
+    Managed(HostServiceDomainV3)
+    Local(LocalContainerServiceDomainV1)
+
+pub fn local_container_service_open_v1() -> LocalContainerServiceOpenV1:
+    val authority = match machine_container_authority_open_local_v1():
+        case MachineContainerAuthorityOpenV1.Rejected(reason):
+            return LocalContainerServiceOpenV1.Rejected(reason)
+        case MachineContainerAuthorityOpenV1.CleanupRequired(owner, reason):
+            return LocalContainerServiceOpenV1.CleanupRequired(owner, reason)
+        case MachineContainerAuthorityOpenV1.Ready(owner): owner
+    val domain = LocalContainerServiceDomainV1(authority: authority)
+    val policy = domain.current_policy_v1()
+    if policy.is_err(): return LocalContainerServiceOpenV1.DomainCleanupRequired(domain, policy.unwrap_err())
+    val observed = domain.observe_provider_v1()
+    if observed.is_err(): return LocalContainerServiceOpenV1.DomainCleanupRequired(domain, observed.unwrap_err())
+    # Ready means retained installed policy/provider/shared-writer foundation.
+    # Reservation/delegation, workload execution and terminal adoption are not
+    # exposed until their real admission and settlement ports are implemented.
+    LocalContainerServiceOpenV1.Ready(domain)

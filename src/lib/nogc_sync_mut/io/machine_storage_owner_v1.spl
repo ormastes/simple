@@ -1,0 +1,139 @@
+# Platform selection inside library-owned opaque storage. No caller chooses a
+# platform, native root, UID, policy, provider, budget or backend store.
+use std.nogc_sync_mut.io.windows_machine_policy_owner_v1.*
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.*
+use std.nogc_sync_mut.database.wal.WalEntry
+use std.nogc_sync_mut.database.wal_segmented.DatabaseWalRevisionV1
+use std.common.contracts.container.local_principal_v1.MachineLocalPrincipalSnapshotV1
+
+enum MachinePolicyBackendV1:
+    Linux(LinuxMachinePolicyOwnerV1)
+    Windows(WindowsMachinePolicyOwnerV1)
+
+enum MachineStorageBackendV1:
+    Linux(LinuxMachineStorageV1)
+    Windows(WindowsMachineStorageV1)
+
+pub class MachinePolicyOwnerV1:
+    backend: MachinePolicyBackendV1
+
+    pub fn selected_backend_v1() -> text:
+        match self.backend:
+            case MachinePolicyBackendV1.Linux(_): "linux-podman"
+            case MachinePolicyBackendV1.Windows(_): "windows-docker-process"
+
+    pub fn read_policy_v1() -> Result<[u8], text>:
+        match self.backend:
+            case MachinePolicyBackendV1.Linux(owner): owner.read_policy_v1()
+            case MachinePolicyBackendV1.Windows(owner): owner.read_policy_v1()
+
+    # Metadata only, revalidated by the actual Linux owner. The caller must
+    # compare selected installed provider expected_uid to this actual UID.
+    pub fn actual_linux_process_context_v1() -> Result<LinuxMachineProcessContextV1, text>:
+        match self.backend:
+            case MachinePolicyBackendV1.Linux(owner): owner.actual_process_context_v1()
+            case MachinePolicyBackendV1.Windows(_): Err("machine-policy-linux-process-context-unsupported")
+
+    pub fn actual_process_principal_v1() -> Result<MachineLocalPrincipalSnapshotV1, text>:
+        match self.backend:
+            case MachinePolicyBackendV1.Linux(owner): owner.actual_process_principal_v1()
+            case MachinePolicyBackendV1.Windows(_): Err("machine-policy-windows-principal-requires-native-token-owner")
+
+    # Rejected leaves this reader owned by the caller. Both other outcomes
+    # transfer the entire reader into the returned storage cleanup capsule.
+    pub fn open_storage_v1() -> MachineStorageOpenV1:
+        match self.backend:
+            case MachinePolicyBackendV1.Linux(owner):
+                match owner.open_storage_v1():
+                    case LinuxMachineStorageOpenV1.Rejected(reason): MachineStorageOpenV1.Rejected(reason)
+                    case LinuxMachineStorageOpenV1.CleanupRequired(storage, reason):
+                        MachineStorageOpenV1.CleanupRequired(MachineStorageOwnerV1(backend: MachineStorageBackendV1.Linux(storage)), reason)
+                    case LinuxMachineStorageOpenV1.Ready(storage):
+                        MachineStorageOpenV1.Ready(MachineStorageOwnerV1(backend: MachineStorageBackendV1.Linux(storage)))
+            case MachinePolicyBackendV1.Windows(owner):
+                match owner.open_storage_v1():
+                    case WindowsMachineStorageOpenV1.Rejected(reason): MachineStorageOpenV1.Rejected(reason)
+                    case WindowsMachineStorageOpenV1.CleanupRequired(storage, reason):
+                        MachineStorageOpenV1.CleanupRequired(MachineStorageOwnerV1(backend: MachineStorageBackendV1.Windows(storage)), reason)
+                    case WindowsMachineStorageOpenV1.Ready(storage):
+                        MachineStorageOpenV1.Ready(MachineStorageOwnerV1(backend: MachineStorageBackendV1.Windows(storage)))
+
+    pub fn close_v1() -> text:
+        match self.backend:
+            case MachinePolicyBackendV1.Linux(owner): owner.close_v1()
+            case MachinePolicyBackendV1.Windows(owner): owner.close_v1()
+
+pub enum MachinePolicyOpenV1:
+    Rejected(reason: text)
+    CleanupRequired(owner: MachinePolicyOwnerV1, reason: text)
+    Ready(owner: MachinePolicyOwnerV1)
+
+pub class MachineStorageOwnerV1:
+    backend: MachineStorageBackendV1
+
+    pub fn policy_bytes_v1() -> Result<[u8], text>:
+        match self.backend:
+            case MachineStorageBackendV1.Linux(owner): owner.policy_bytes_v1()
+            case MachineStorageBackendV1.Windows(owner): owner.policy_bytes_v1()
+
+    pub fn physical_capacity_v1() -> Result<(i64, i64), text>:
+        match self.backend:
+            case MachineStorageBackendV1.Linux(owner): owner.physical_capacity_v1()
+            case MachineStorageBackendV1.Windows(owner): owner.physical_capacity_v1()
+
+    pub fn bind_policy_v1(expected_bytes: text) -> Result<text, text>:
+        match self.backend:
+            case MachineStorageBackendV1.Linux(owner): owner.bind_policy_v1(expected_bytes)
+            case MachineStorageBackendV1.Windows(owner): owner.bind_policy_v1(expected_bytes)
+
+    pub fn wal_head_v1() -> Result<text, text>:
+        match self.backend:
+            case MachineStorageBackendV1.Linux(owner): owner.wal_head_v1()
+            case MachineStorageBackendV1.Windows(owner): owner.wal_head_v1()
+
+    pub fn wal_revision_v1(digest: text) -> Result<DatabaseWalRevisionV1, text>:
+        match self.backend:
+            case MachineStorageBackendV1.Linux(owner): owner.wal_revision_v1(digest)
+            case MachineStorageBackendV1.Windows(owner): owner.wal_revision_v1(digest)
+
+    pub fn wal_segment_v1(revision: DatabaseWalRevisionV1) -> Result<[WalEntry], text>:
+        match self.backend:
+            case MachineStorageBackendV1.Linux(owner): owner.wal_segment_v1(revision)
+            case MachineStorageBackendV1.Windows(owner): owner.wal_segment_v1(revision)
+
+    pub fn wal_commit_v1(expected_parent: text, entries: [WalEntry]) -> Result<DatabaseWalRevisionV1, text>:
+        match self.backend:
+            case MachineStorageBackendV1.Linux(owner): owner.wal_commit_v1(expected_parent, entries)
+            case MachineStorageBackendV1.Windows(owner): owner.wal_commit_v1(expected_parent, entries)
+
+    # released/stale mean no live native owner remains. retained keeps the
+    # exact capsule. Linux consumed-error has consumed every descriptor once;
+    # report that distinct result, never retry old numeric descriptors.
+    pub fn close_v1() -> text:
+        match self.backend:
+            case MachineStorageBackendV1.Linux(owner): owner.close_v1()
+            case MachineStorageBackendV1.Windows(owner): owner.close_v1()
+
+pub enum MachineStorageOpenV1:
+    Rejected(reason: text)
+    CleanupRequired(owner: MachineStorageOwnerV1, reason: text)
+    Ready(owner: MachineStorageOwnerV1)
+
+pub fn machine_policy_open_v1() -> MachinePolicyOpenV1:
+    @when(os="linux"):
+    match linux_machine_policy_open_v1():
+        case LinuxMachinePolicyOpenV1.Rejected(reason): MachinePolicyOpenV1.Rejected(reason)
+        case LinuxMachinePolicyOpenV1.CleanupRequired(owner, reason):
+            MachinePolicyOpenV1.CleanupRequired(MachinePolicyOwnerV1(backend: MachinePolicyBackendV1.Linux(owner)), reason)
+        case LinuxMachinePolicyOpenV1.Ready(owner):
+            MachinePolicyOpenV1.Ready(MachinePolicyOwnerV1(backend: MachinePolicyBackendV1.Linux(owner)))
+    @elif(os="windows"):
+    match windows_machine_policy_open_v1():
+        case WindowsMachinePolicyOpenV1.Rejected(reason): MachinePolicyOpenV1.Rejected(reason)
+        case WindowsMachinePolicyOpenV1.CleanupRequired(owner, reason):
+            MachinePolicyOpenV1.CleanupRequired(MachinePolicyOwnerV1(backend: MachinePolicyBackendV1.Windows(owner)), reason)
+        case WindowsMachinePolicyOpenV1.Ready(owner):
+            MachinePolicyOpenV1.Ready(MachinePolicyOwnerV1(backend: MachinePolicyBackendV1.Windows(owner)))
+    @else:
+    MachinePolicyOpenV1.Rejected("machine-policy-host-unsupported")
+    @end
