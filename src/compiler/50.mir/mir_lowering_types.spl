@@ -447,6 +447,13 @@ struct MirLowering:
     # Only these may be nil despite a scalar HIR type; nil compares on them
     # must stay runtime compares.
     exists_scalar_word_locals: Dict<i64, bool>
+    # Payload-or-nil WORD local -> the Bool local that proves its presence
+    # (`rt_is_some` on the `.?` subject, the Result tag of `.ok`/`.err`, the
+    # dict-miss test of `d.get(k)`), and the if-val binders copied from them.
+    # A scalar payload word cannot answer presence by value (a present 3 is
+    # the nil word), so `x != nil` on such a word reads this bit instead.
+    # doc/08_tracking/bug/native_if_val_presence_test_dropped_2026-11-15.md
+    presence_word_locals: Dict<i64, i64>
     # Value-position builtin `None` constructions: an absence witness for
     # the T? join of value-position match/if arms (bug
     # enum_payload_type_mismatch_untyped_option_match_2026-10-24).
@@ -991,6 +998,10 @@ impl MirLowering:
             return
         # @workaround bug=stage2_local_symbol_index_bucket_tagged_id_2026-11-03 reason=stage2-compiled code round-trips the id through the [i64] index inconsistently (symbol 8 was hashed into bucket 1 of 16 while the lookup probed bucket 8, dump veh_13196); mirror every binding into the runtime-canonicalized Dict so find_local can resolve on an index miss
         self.local_map[symbol_id] = local
+        # A `var` bound straight to its initializer's local (struct/array
+        # paths) must not keep that local's presence bit.
+        if self.presence_word_locals.contains(local.id) and self.symbol_is_reassignable(symbol_id):
+            self.presence_word_locals[local.id] = -1
         if mir_nominal_profile_take_receipt():
             val binding_name = self.symbols.symbol_name_scalar_raw(symbol_id)
             val binding_owner = self.struct_value_syms.get(local.id) ?? ""
@@ -1272,6 +1283,21 @@ impl MirLowering:
 
     fn is_decoded_text_option_local(local_id: i64) -> bool:
         self.decoded_text_option_locals.contains(local_id)
+
+    fn presence_word_bit(local_id: i64) -> i64:
+        """Bool local proving `local_id`'s payload-or-nil word present, or -1."""
+        if self.presence_word_locals.contains(local_id):
+            return self.presence_word_locals[local_id]
+        -1
+
+    fn symbol_is_reassignable(symbol_id: i64) -> bool:
+        """A `var` binding. Its presence bit would be copied once, at the
+        binding, but a test lowered before a reassignment in a loop body runs
+        again after it, so a `var` never carries one (closures capture by
+        value and cannot assign it)."""
+        if val info = self.symbols.get_symbol_raw(symbol_id):
+            return info.is_mutable
+        false
 
     fn is_runtime_value_local(local_id: i64) -> bool:
         var i = self.runtime_value_local_ids.len() - 1
