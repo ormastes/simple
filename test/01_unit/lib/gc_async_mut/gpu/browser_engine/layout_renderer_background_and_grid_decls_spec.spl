@@ -1,0 +1,216 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_declarations.spl 1%
+# @tag: unit, browser_engine, css, background, grid
+#
+# Declaration-level parsers of the layout renderer, called directly:
+#
+# - the single-layer `background` shorthand (CSS Backgrounds 3 section 3.10:
+#   at most one colour, image, repeat style, attachment and position[/size],
+#   and up to two <box> values -- the first sets background-origin, a second
+#   sets background-clip, a lone one sets both). The renderer has one typed
+#   image layer, so gradients, image-set(), multiple layers and fixed/local
+#   attachment are refused (`valid: false`) and left to the raw-witness path.
+#   Positions use the renderer encoding documented beside
+#   `_background_position_value`: -1000 - <percent> for keywords and
+#   percentages (left/top = -1000, center = -1050, right/bottom = -1100), a
+#   plain px value otherwise, -1000 when no position is given;
+# - the grid normalisers that turn `grid-template-columns/rows`,
+#   `grid-column/row`, `grid-area`, `grid-auto-flow` and
+#   `grid-template-areas` into the compact strings the layout pass reads
+#   (`repeat(N, x)` expands to N copies, `minmax(a, b)` keeps the growth
+#   limit `b`, areas rows join with `|`, a ragged template is rejected).
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_declarations.{
+    _parse_background_shorthand, _background_shorthand_tokens, _background_has_image_syntax,
+    _background_position_value, _background_position_pair, _background_box_token,
+    _background_size_token, normalized_grid_track_list, normalized_grid_placement,
+    normalized_grid_area, normalized_grid_auto_flow, normalized_grid_template_areas,
+    normalized_grid_positive_int, grid_expand_track_functions
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_color_alpha}
+
+describe "Background shorthand tokens":
+
+    it "splits on top-level whitespace and keeps function arguments together":
+        val t = _background_shorthand_tokens("url(a b.png) no-repeat  red")
+        expect(t.len()).to_equal(3)
+        expect(t[0]).to_equal("url(a b.png)")
+        expect(t[2]).to_equal("red")
+
+    it "emits the position/size slash as its own token":
+        val t = _background_shorthand_tokens("center/10px 20px")
+        expect(t.len()).to_equal(4)
+        expect(t[1]).to_equal("/")
+        expect(t[3]).to_equal("20px")
+
+describe "Background value classifiers":
+
+    it "recognises every image function":
+        expect(_background_has_image_syntax("linear-gradient(red, blue)")).to_equal(true)
+        expect(_background_has_image_syntax(" URL(a.png)")).to_equal(true)
+        expect(_background_has_image_syntax("image-set(a.png 1x)")).to_equal(true)
+        expect(_background_has_image_syntax("cross-fade(a.png, b.png)")).to_equal(true)
+        expect(_background_has_image_syntax("element(#x)")).to_equal(true)
+        expect(_background_has_image_syntax("paint(worklet)")).to_equal(true)
+        expect(_background_has_image_syntax("red")).to_equal(false)
+
+    it "recognises box and size tokens":
+        expect(_background_box_token("Content-Box")).to_equal(true)
+        expect(_background_box_token("margin-box")).to_equal(false)
+        expect(_background_size_token("auto")).to_equal(true)
+        expect(_background_size_token("12px")).to_equal(true)
+        expect(_background_size_token("px")).to_equal(false)
+        expect(_background_size_token("cover")).to_equal(false)
+
+    it "encodes position keywords, percentages and lengths":
+        expect(_background_position_value("left", true)).to_equal(-1000)
+        expect(_background_position_value("top", false)).to_equal(-1000)
+        expect(_background_position_value("center", true)).to_equal(-1050)
+        expect(_background_position_value("right", true)).to_equal(-1100)
+        expect(_background_position_value("bottom", false)).to_equal(-1100)
+        expect(_background_position_value("25%", true)).to_equal(-1025)
+        expect(_background_position_value("150%", true)).to_equal(0)
+        expect(_background_position_value("12px", true)).to_equal(12)
+
+    it "orders a vertical-first keyword pair as horizontal then vertical":
+        val p = _background_position_pair("top", "right")
+        expect(p[0]).to_equal(-1100)
+        expect(p[1]).to_equal(-1000)
+        val q = _background_position_pair("center", "left")
+        expect(q[0]).to_equal(-1000)
+        expect(q[1]).to_equal(-1050)
+        val r = _background_position_pair("10px", "20px")
+        expect(r[0]).to_equal(10)
+        expect(r[1]).to_equal(20)
+
+describe "Single-layer background shorthand":
+
+    context "accepted values":
+
+        it "reads a colour alone with initial values elsewhere":
+            val b = _parse_background_shorthand("red")
+            expect(b.valid).to_equal(true)
+            expect(b.color).to_equal(parse_color_alpha("red"))
+            expect(b.repeat).to_equal("repeat")
+            expect(b.position_x).to_equal(-1000)
+            expect(b.position_y).to_equal(-1000)
+            expect(b.origin).to_equal("padding-box")
+            expect(b.clip).to_equal("border-box")
+
+        it "reads image, repeat, position and size":
+            val b = _parse_background_shorthand("url(a.png) no-repeat right 10px / 30px auto")
+            expect(b.valid).to_equal(true)
+            expect(b.image_uri).to_equal("a.png")
+            expect(b.repeat).to_equal("no-repeat")
+            expect(b.position_x).to_equal(-1100)
+            expect(b.position_y).to_equal(10)
+            expect(b.size_w).to_equal(30)
+            expect(b.size_h).to_equal(0)
+
+        it "centres the other axis when one keyword is given":
+            val v = _parse_background_shorthand("bottom")
+            expect(v.position_x).to_equal(-1050)
+            expect(v.position_y).to_equal(-1100)
+            val h = _parse_background_shorthand("25%")
+            expect(h.position_x).to_equal(-1025)
+            expect(h.position_y).to_equal(-1050)
+
+        it "sets origin and clip from one box, origin then clip from two":
+            val one = _parse_background_shorthand("content-box blue")
+            expect(one.origin).to_equal("content-box")
+            expect(one.clip).to_equal("content-box")
+            val two = _parse_background_shorthand("border-box padding-box blue")
+            expect(two.origin).to_equal("border-box")
+            expect(two.clip).to_equal("padding-box")
+
+        it "accepts scroll attachment and transparent":
+            val b = _parse_background_shorthand("transparent scroll")
+            expect(b.valid).to_equal(true)
+
+    context "refused values":
+
+        it "refuses what the single typed layer cannot hold":
+            expect(_parse_background_shorthand("").valid).to_equal(false)
+            expect(_parse_background_shorthand("url(a.png), url(b.png)").valid).to_equal(false)
+            expect(_parse_background_shorthand("linear-gradient(red, blue)").valid).to_equal(false)
+            expect(_parse_background_shorthand("red fixed").valid).to_equal(false)
+            expect(_parse_background_shorthand("red local").valid).to_equal(false)
+
+        it "refuses a repeated component":
+            expect(_parse_background_shorthand("red blue").valid).to_equal(false)
+            expect(_parse_background_shorthand("repeat no-repeat").valid).to_equal(false)
+            expect(_parse_background_shorthand("scroll scroll").valid).to_equal(false)
+            expect(_parse_background_shorthand("url(a.png) url(b.png)").valid).to_equal(false)
+            expect(_parse_background_shorthand("border-box padding-box content-box").valid).to_equal(false)
+            expect(_parse_background_shorthand("left top center").valid).to_equal(false)
+
+        it "refuses a malformed position/size slash":
+            expect(_parse_background_shorthand("/ 10px").valid).to_equal(false)
+            expect(_parse_background_shorthand("center / 10px / 20px").valid).to_equal(false)
+            expect(_parse_background_shorthand("center /").valid).to_equal(false)
+            expect(_parse_background_shorthand("center / cover").valid).to_equal(false)
+            expect(_parse_background_shorthand("center / 1px 2px 3px").valid).to_equal(false)
+
+        it "refuses an unknown token":
+            expect(_parse_background_shorthand("red wobble").valid).to_equal(false)
+
+describe "Grid track lists":
+
+    it "keeps px and fr tracks in order":
+        expect(normalized_grid_track_list("100px 1fr  2FR")).to_equal("100px 1fr 2fr")
+
+    it "expands repeat() and keeps the growth limit of minmax()":
+        expect(normalized_grid_track_list("repeat(3, 20px)")).to_equal("20px 20px 20px")
+        expect(normalized_grid_track_list("minmax(10px, 1fr) 40px")).to_equal("1fr 40px")
+        expect(grid_expand_track_functions("repeat(2, 1fr 10px)")).to_equal("1fr 10px 1fr 10px")
+
+    it "leaves repeat() alone when the count is out of range or malformed":
+        expect(grid_expand_track_functions("repeat(0, 10px)")).to_equal("repeat(0, 10px)")
+        expect(grid_expand_track_functions("repeat(3 10px)")).to_equal("repeat(3 10px)")
+        expect(grid_expand_track_functions("repeat(3, )")).to_equal("repeat(3, )")
+
+    it "rejects the whole list on an unsupported track":
+        expect(normalized_grid_track_list("auto 10px")).to_equal("")
+        expect(normalized_grid_track_list("0px")).to_equal("")
+        expect(normalized_grid_track_list("0fr")).to_equal("")
+        expect(normalized_grid_track_list("10%")).to_equal("")
+
+describe "Grid line placement":
+
+    it "reads a start line, a start/end pair and a start/span pair":
+        expect(normalized_grid_placement("2")).to_equal("2")
+        expect(normalized_grid_placement("1 / 3")).to_equal("1 / 3")
+        expect(normalized_grid_placement(" 2 / span 2 ")).to_equal("2 / span 2")
+
+    it "rejects an end at or before the start and non-positive lines":
+        expect(normalized_grid_placement("3 / 2")).to_equal("")
+        expect(normalized_grid_placement("0")).to_equal("")
+        expect(normalized_grid_placement("2 / span 0")).to_equal("")
+        expect(normalized_grid_placement("auto")).to_equal("")
+
+    it "reads only unsigned digits as a positive integer":
+        expect(normalized_grid_positive_int("12")).to_equal(12)
+        expect(normalized_grid_positive_int("-1")).to_equal(0)
+        expect(normalized_grid_positive_int("")).to_equal(0)
+
+describe "Grid areas and auto-flow":
+
+    it "keeps a named area case-sensitively and drops auto and numeric forms":
+        expect(normalized_grid_area(" Main ")).to_equal("Main")
+        expect(normalized_grid_area("AUTO")).to_equal("")
+        expect(normalized_grid_area("1 / 2 / 3 / 4")).to_equal("")
+
+    it "recognises the column flow keyword":
+        expect(normalized_grid_auto_flow("column dense")).to_equal(true)
+        expect(normalized_grid_auto_flow("row")).to_equal(false)
+
+    it "joins template rows with a bar and collapses spaces":
+        expect(normalized_grid_template_areas("\"a  a\" 'b c'")).to_equal("a a|b c")
+
+    it "rejects a ragged, unterminated or empty template":
+        expect(normalized_grid_template_areas("\"a a\" \"b\"")).to_equal("")
+        expect(normalized_grid_template_areas("\"a a")).to_equal("")
+        expect(normalized_grid_template_areas("\"  \"")).to_equal("")
+        expect(normalized_grid_template_areas("")).to_equal("")
