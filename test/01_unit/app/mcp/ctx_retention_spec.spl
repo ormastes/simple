@@ -1,0 +1,162 @@
+"""
+# Context Store Retention Specification
+
+**Requirements:** CTX-008 (explicit purge / retention, dry-run by default, never implicit) — plan §3.4 / §9
+
+## Purpose
+
+Audience: maintainers of `app.mcp.ctx_retention` (pure decision) and of the
+`simple_ctx_purge` tool in `app.mcp.main_lazy_ctx_tools`.
+
+Deleting from `.simple/ctx/chunks.sdn` is destructive. The decision is pure and
+conservative: a policy must name a selector (source prefix, age limit, byte
+cap), limits must be positive, the tool reports a dry run unless `apply:true`
+is passed, and neither indexing nor searching ever purges.
+
+## Behavior
+
+- A source selector drops only that source's chunks; an age limit drops only
+  strictly older chunks; a byte cap trims the oldest chunks of the scope.
+- An empty policy or a non-positive limit is refused and deletes nothing.
+- The tool defaults to a dry run that leaves the store byte-identical; `apply`
+  rewrites it and a following search no longer finds the dropped chunk.
+- Search and index never remove anything.
+"""
+
+# @feature mcp_ctx_retention
+# tag: unit
+
+use std.spec
+use std.io_runtime.{env_set, env_get, dir_create, dir_remove_all, file_read, time_now_unix_micros}
+use app.mcp.ctx_retention.{CtxChunkId, CtxSourceLabel, CtxUnixSecs, CtxAgeLimit, CtxByteCount, CtxRetentionRow, CtxRetentionPolicy, ctx_retention_row, ctx_retention_policy, ctx_retention_check, ctx_retention_decide, ctx_policy_check_label}
+use app.mcp.main_lazy_ctx_tools.{ctx_index_text, ctx_store_dir, handle_simple_ctx_purge, handle_simple_ctx_search}
+
+fn _row(id: i64, source: text, ts: i64, size: i64) -> CtxRetentionRow:
+    ctx_retention_row(CtxChunkId(value: id), CtxSourceLabel(value: source), CtxUnixSecs(secs: ts), CtxByteCount(bytes: size))
+
+fn _ids(ids: [CtxChunkId]) -> [i64]:
+    var out: [i64] = []
+    for i in ids:
+        out.push(i.value)
+    out
+
+# now = 1000. ages: 1 -> 900s old, 2 -> 500, 3 -> 100, 4 -> 900 (other source)
+fn _rows() -> [CtxRetentionRow]:
+    [_row(1, "cmd:a", 100, 10), _row(2, "cmd:a", 500, 20), _row(3, "cmd:a", 900, 30), _row(4, "doc:b", 100, 40)]
+
+fn _now() -> CtxUnixSecs:
+    CtxUnixSecs(secs: 1000)
+
+fn _fresh_store() -> text:
+    var base = env_get("SIMPLE_TEST_TMP") ?? ""
+    if base == "":
+        base = "build/tmp"
+    val dir = base + "/simple_ctx_retention_spec_" + str(time_now_unix_micros())
+    dir_remove_all(dir)
+    dir_create(dir, true)
+    env_set("SIMPLE_CTX_DIR", dir)
+    dir
+
+fn _store_text() -> text:
+    file_read(ctx_store_dir() + "/chunks.sdn")
+
+describe "ctx retention decision (pure)":
+    it "drops only the named source":
+        # @req CTX-008
+        val policy = ctx_retention_policy(Some(CtxSourceLabel(value: "cmd:")), None, None)
+        val plan = ctx_retention_decide(_rows(), policy, _now())
+        step("every cmd: chunk is dropped, the doc: chunk is kept")
+        assert_equal(_ids(plan.drop), [1, 2, 3])
+        assert_equal(_ids(plan.keep), [4])
+        assert_equal(plan.dropped.bytes, 60)
+        assert_equal(plan.kept.bytes, 40)
+
+    it "drops strictly older chunks across sources, and combines with a source":
+        # @req CTX-008
+        step("older than 400s: chunks 1, 2 and 4")
+        val aged = ctx_retention_decide(_rows(), ctx_retention_policy(None, Some(CtxAgeLimit(secs: 400)), None), _now())
+        assert_equal(_ids(aged.drop), [1, 2, 4])
+        step("the age boundary is strict: exactly 500s old is kept at limit 500")
+        val edge = ctx_retention_decide(_rows(), ctx_retention_policy(None, Some(CtxAgeLimit(secs: 500)), None), _now())
+        assert_equal(_ids(edge.drop), [1, 4])
+        step("source AND age: only old cmd: chunks")
+        val both = ctx_retention_decide(_rows(), ctx_retention_policy(Some(CtxSourceLabel(value: "cmd:")), Some(CtxAgeLimit(secs: 400)), None), _now())
+        assert_equal(_ids(both.drop), [1, 2])
+        assert_equal(_ids(both.keep), [3, 4])
+
+    it "trims the oldest chunks until the byte cap holds":
+        # @req CTX-008
+        step("cap 95 over 100 bytes: drops the oldest (ts 100, lowest id first) until it fits")
+        val plan = ctx_retention_decide(_rows(), ctx_retention_policy(None, None, Some(CtxByteCount(bytes: 95))), _now())
+        assert_equal(_ids(plan.drop), [1])
+        assert_equal(plan.kept.bytes, 90)
+        step("a tighter cap of 80 also drops the next oldest")
+        val tight = ctx_retention_decide(_rows(), ctx_retention_policy(None, None, Some(CtxByteCount(bytes: 80))), _now())
+        assert_equal(_ids(tight.drop), [1, 4])
+        step("a cap that already holds drops nothing")
+        val none = ctx_retention_decide(_rows(), ctx_retention_policy(None, None, Some(CtxByteCount(bytes: 1000))), _now())
+        assert_equal(none.drop.len(), 0)
+        step("a source-scoped cap never touches other sources")
+        val scoped = ctx_retention_decide(_rows(), ctx_retention_policy(Some(CtxSourceLabel(value: "cmd:")), None, Some(CtxByteCount(bytes: 30))), _now())
+        assert_equal(_ids(scoped.drop), [1, 2])
+        assert_equal(_ids(scoped.keep), [3, 4])
+
+    it "adverse: an empty policy or a non-positive limit is refused and selects nothing":
+        # @req CTX-008
+        step("no selector")
+        val empty = ctx_retention_policy(None, None, None)
+        assert_equal(ctx_policy_check_label(ctx_retention_check(empty)), "no_selector")
+        assert_equal(ctx_retention_decide(_rows(), empty, _now()).drop.len(), 0)
+        step("zero age limit would purge everything: refused")
+        val zero = ctx_retention_policy(None, Some(CtxAgeLimit(secs: 0)), None)
+        assert_equal(ctx_policy_check_label(ctx_retention_check(zero)), "non_positive_limit")
+        assert_equal(ctx_retention_decide(_rows(), zero, _now()).drop.len(), 0)
+        step("negative cap and empty source label are refused too")
+        assert_equal(ctx_policy_check_label(ctx_retention_check(ctx_retention_policy(None, None, Some(CtxByteCount(bytes: -5))))), "non_positive_limit")
+        assert_equal(ctx_policy_check_label(ctx_retention_check(ctx_retention_policy(Some(CtxSourceLabel(value: "")), None, None))), "non_positive_limit")
+
+describe "simple_ctx_purge tool":
+    it "is a dry run by default and apply deletes only the named source":
+        # @req CTX-008
+        _fresh_store()
+        assert_equal(ctx_index_text("alpha linker notes", "cmd:old"), 1)
+        assert_equal(ctx_index_text("beta parser notes", "doc:keep"), 1)
+        val before = _store_text()
+        step("default call reports the plan and leaves the store byte-identical")
+        val dry = handle_simple_ctx_purge("1", "{\"source\":\"cmd:\"}")
+        assert_contains(dry, "DRY RUN")
+        assert_contains(dry, "would drop 1 chunk(s)")
+        assert_equal(_store_text(), before)
+        step("apply:true removes the chunk")
+        val done = handle_simple_ctx_purge("2", "{\"source\":\"cmd:\",\"apply\":\"true\"}")
+        assert_contains(done, "dropped 1 chunk(s)")
+        step("search no longer finds the purged chunk but still finds the kept one")
+        assert_false(handle_simple_ctx_search("3", "{\"query\":\"linker\"}").contains("source=cmd:old"))
+        assert_contains(handle_simple_ctx_search("4", "{\"query\":\"parser\"}"), "source=doc:keep")
+
+    it "adverse: refuses an empty selector and a zero limit without deleting":
+        # @req CTX-008
+        _fresh_store()
+        assert_equal(ctx_index_text("gamma digest notes", "cmd:x"), 1)
+        val before = _store_text()
+        step("empty body is refused even with apply")
+        val r1 = handle_simple_ctx_purge("1", "{\"apply\":\"true\"}")
+        assert_contains(r1, "refused")
+        step("zero older_than_secs is refused even with apply")
+        val r2 = handle_simple_ctx_purge("2", "{\"older_than_secs\":\"0\",\"apply\":\"true\"}")
+        assert_contains(r2, "refused")
+        step("an unparsable limit fails closed")
+        val r3 = handle_simple_ctx_purge("3", "{\"max_bytes\":\"lots\",\"apply\":\"true\"}")
+        assert_contains(r3, "refused")
+        assert_equal(_store_text(), before)
+
+    it "indexing and searching never purge":
+        # @req CTX-008
+        _fresh_store()
+        assert_equal(ctx_index_text("delta cache notes", "cmd:z"), 1)
+        for i in [0, 1, 2]:
+            handle_simple_ctx_search("1", "{\"query\":\"cache\"}")
+            ctx_index_text("epsilon token " + str(i), "cmd:z")
+        step("all four chunks still searchable")
+        assert_contains(handle_simple_ctx_search("2", "{\"query\":\"delta\"}"), "source=cmd:z")
+        assert_contains(handle_simple_ctx_search("3", "{\"query\":\"epsilon\"}"), "source=cmd:z")
