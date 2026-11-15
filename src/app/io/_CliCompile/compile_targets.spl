@@ -23,12 +23,12 @@ use std.nogc_sync_mut.shell.file (rename)
 
 # Pure Simple compiler driver (use desugared static methods for interpreter compatibility)
 use compiler.driver.driver (
-    compiler_driver_create_with_traversal_plugin_v1,
-    compiler_driver_create_with_environment_variant_policy_v1,
     compiler_driver_run_compile, aot_file, aot_c_file, aot_cuda_file,
     aot_opencl_file, aot_vhdl_file, compile_to_smf)
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.common.cache_contract.traversal_plugin_selection_v1.{TraversalPluginSelectionV1}
+use app.io._CliCompile.traversal_plugin_composition_v1.{cli_traversal_plugin_acquire_v1,
+    cli_traversal_plugin_cache_dir_v1, cli_traversal_plugin_create_driver_v1}
 use compiler.common.structural_contracts.environment_variant_policy_collection_v1.{
     EnvironmentVariantPolicyCollectionV1}
 use app.io._CliCompile.native_build_closure.{_native_build_entry_closure, _nb_scv_snapshot_path_v1, native_build_closure_snapshot_root_v1, native_build_closure_source_roots_v1}
@@ -761,12 +761,7 @@ fn _cli_native_build_create_driver_with_environment_variant_policy_v1(
     collection: EnvironmentVariantPolicyCollectionV1?,
     traversal_selection: TraversalPluginSelectionV1? = nil
 ) -> Result<CompilerDriver, text>:
-    match collection:
-        case Some(value):
-            compiler_driver_create_with_environment_variant_policy_v1(
-                options, value, traversal_selection)
-        case None:
-            compiler_driver_create_with_traversal_plugin_v1(options, traversal_selection)
+    cli_traversal_plugin_create_driver_v1(options, collection, traversal_selection)
 
 # This phase-local record is not optional and does not change public CLI entrypoints.
 # @workaround bug=ssa_write_count_quadratic_scan_2026_10_25 reason=split_large_cli_function_for_fixed_producer_ssa_write_counter
@@ -1478,6 +1473,29 @@ fn _cli_native_build(
             _cli_eprint("Usage: simple native-build --backend=llvm --entry <file.spl> -o <output> [--source <dir>]...")
             return 1
 
+        # Acquire before output/cache effects. A selected native provider is
+        # never implicitly converted to a builtin in a child compilation.
+        var traversal_worker_route = (native_group_requested or driver_admitted_epoch_active_v1() or
+            parse_shard != "" or hir_shard != "" or mir_shard != "")
+        if parsed.traversal_plugin_request_v1 != nil:
+            for key in ["SIMPLE_PARSE_SHARD", "SIMPLE_PARSE_SHARD_QUEUE", "SIMPLE_HIR_SHARD",
+                    "SIMPLE_HIR_SHARD_QUEUE", "SIMPLE_HIR_SHARD_OWNER", "SIMPLE_MIR_SHARD",
+                    "SIMPLE_MIR_SHARD_QUEUE", "SIMPLE_MIR_SHARD_OWNER", "SIMPLE_MIR_SHARD_LINK",
+                    "SIMPLE_MIR_FORK_WORKERS"]:
+                if (env_get(key) ?? "") != "": traversal_worker_route = true
+        val traversal_selection = match cli_traversal_plugin_acquire_v1(
+                parsed.traversal_plugin_request_v1, traversal_worker_route):
+            case Ok(value): value
+            case Err(reason):
+                _cli_eprint("Error: traversal provider acquisition failed: {reason}")
+                return 1
+        cache_dir = match cli_traversal_plugin_cache_dir_v1(cache_dir,
+                parsed.traversal_plugin_request_v1, traversal_selection):
+            case Ok(value): value
+            case Err(reason):
+                _cli_eprint("Error: traversal provider cache admission failed: {reason}")
+                return 1
+
         if collection_planner.specified:
             cache_dir = cache_dir + "/planner-" + sha256_text(collection_planner_fingerprint(collection_planner))
         if collection_profile_path == "":
@@ -1748,7 +1766,7 @@ fn _cli_native_build(
             options.low_memory = low_memory
             options = compileoptions_normalize_mir_optimization(options)
             val driver = match _cli_native_build_create_driver_with_environment_variant_policy_v1(
-                options, collection):
+                options, collection, traversal_selection):
                 case Ok(value): value
                 case Err(reason):
                     _cli_eprint("Error: native-build compiler admission failed: {reason}")
@@ -1806,7 +1824,7 @@ fn _cli_native_build(
             options.low_memory = low_memory
             options = compileoptions_normalize_mir_optimization(options)
             val driver = match _cli_native_build_create_driver_with_environment_variant_policy_v1(
-                options, collection):
+                options, collection, traversal_selection):
                 case Ok(value): value
                 case Err(reason):
                     _cli_eprint("Error: native-build compiler admission failed: {reason}")

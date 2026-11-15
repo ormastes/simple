@@ -110,3 +110,20 @@ The source-only inventory tool and retained SDN are tracked beside the full
 fixture under `tools/codec_closure_inventory.py` and `codec_closure_inventory.sdn`.
 They include function-value references, retain whole declarations, and explicitly
 do not claim the non-codec support closure is ready or compiled.
+
+
+## H5 application acceptance extension — 2026-11-15
+
+Source checkpoint wires fixed signed acquisition before native-build cache/output
+authority, then request-bound validation into both checked driver branches.
+The actual provider fixture now calls the application composer and asserts concrete
+context/options/config binding; generic-token forgery, changed request, absent
+selection and worker-route refusal are negative controls. All remain UNRUN.
+
+Next execution must build the real dependency-free provider and fixture with an
+admitted self-hosted compiler, isolate host user trust configuration, and retain
+source/binary provenance and actual exit diagnostics. Capacity and concurrent modes
+are separate process runs (128 total mapping attempts per process, including failed
+effects). No successful native invocation/delta, Windows-off build, warm-cache
+performance or authenticated worker transport is established by this checkpoint.
+Do not retry the earlier six projected qualification cycles as this acceptance.

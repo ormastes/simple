@@ -387,9 +387,29 @@ identity, which binds signed bytes and the host trust root. This is an intention
 source/API change: production callers propagate or map failure before using a
 context, and ordinary test setup explicitly unwraps valid options. No error
 context or panic substitutes for rejection. The context config, options hash
-and production native no-op invocation include the canonical identity. H5 CLI
-early action keys and the host-owned trust-root/admission composition remain
-separate integration work. The new structural tests
+and production native no-op invocation include the canonical identity. H5 CLI acquisition now invokes the fixed host-owned trust-root/admission owner
+before cache namespace selection and checked context construction. Both native-build
+output branches pass the same admitted selection. Managed/sharded provider requests
+explicitly refuse until authenticated worker transport exists. The new structural tests
 and real coordinator forged-token refusal fixture are authored/unrun and do not qualify
 native loading, signature policy, ABI transport, full imports, warm runtime or
 performance. Per-directory normalization and validation costs remain unmeasured.
+
+
+### H5 application composition checkpoint (2026-11-15)
+
+The application composer revalidates request-bound private approval before deriving
+the cache namespace and before creating a driver. It rejects missing, forged,
+stale-request and unsolicited selections; a prepopulated conflicting resolved identity
+is also an error. No caller-supplied key or callback grants admission. The full
+semantic descriptor identity namespaces the invocation cache once; acquisition paths
+remain provenance checks, not semantic identity. The absent-provider cache path is
+unchanged. Fixed host mapping remains capability-gated; Windows dependency isolation
+and the actual CLI/full-import runtime are not qualified.
+
+The real-provider fixture now enters through application acquisition and inspects
+the resulting driver's options, context selection and config identity. It also
+exercises a real generic lifetime token that private approval must reject, changed
+requests, missing selections and unsupported worker transport. These are authored,
+unrun assertions, not native acceptance. Successful delta dispatch, warm/reuse/removal
+execution, worker transport and measured cost remain pending.

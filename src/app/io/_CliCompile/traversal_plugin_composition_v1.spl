@@ -1,0 +1,53 @@
+# The application acquisition owner. No trust key, callback or resolved-identity
+# setter is accepted from CLI/project input. All selected-provider authority is
+# issued and revalidated by the fixed compiler loader before cache/context work.
+use compiler.common.driver_compile_options.{CompileOptions, TraversalPluginProviderRequestV1}
+use compiler.common.cache_contract.traversal_plugin_selection_v1.{TraversalPluginSelectionV1,
+    traversal_descriptor_identity_v1}
+use compiler.common.structural_contracts.environment_variant_policy_collection_v1.{EnvironmentVariantPolicyCollectionV1}
+use compiler.loader.traversal_plugin_admission_v1.{traversal_plugin_selection_load_v1}
+use compiler.loader.traversal_plugin_selection_owner_v1.{traversal_plugin_selection_validate_request_v1}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver.{compiler_driver_create_with_traversal_plugin_v1,
+    compiler_driver_create_with_environment_variant_policy_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+pub fn cli_traversal_plugin_acquire_v1(request: TraversalPluginProviderRequestV1?,
+        worker_route: bool = false) -> Result<TraversalPluginSelectionV1?, text>:
+    if request == nil: return Ok(nil)
+    if worker_route: return Err("traversal-provider-worker-policy-transport-unavailable")
+    Ok(Some(traversal_plugin_selection_load_v1(request.unwrap())?))
+
+fn _cli_traversal_identity_v1(request: TraversalPluginProviderRequestV1?,
+        selection: TraversalPluginSelectionV1?) -> Result<text, text>:
+    if request == nil:
+        if selection != nil: return Err("traversal-provider-selection-without-request")
+        return Ok("")
+    if selection == nil: return Err("traversal-provider-acquisition-required")
+    val descriptor = traversal_plugin_selection_validate_request_v1(selection.unwrap(), request.unwrap())?
+    if descriptor.provider_id != request.unwrap().provider_id:
+        return Err("traversal-provider-request-identity-mismatch")
+    traversal_descriptor_identity_v1(descriptor)
+
+pub fn cli_traversal_plugin_cache_dir_v1(cache_dir: text,
+        request: TraversalPluginProviderRequestV1?, selection: TraversalPluginSelectionV1?
+        ) -> Result<text, text>:
+    val identity = _cli_traversal_identity_v1(request, selection)?
+    if identity == "": return Ok(cache_dir)
+    # Once per invocation. Paths authorize acquisition, not semantic reuse.
+    Ok(cache_dir + "/traversal-" + sha256_text(identity))
+
+pub fn cli_traversal_plugin_create_driver_v1(options: CompileOptions,
+        collection: EnvironmentVariantPolicyCollectionV1?, selection: TraversalPluginSelectionV1?
+        ) -> Result<CompilerDriver, text>:
+    val identity = _cli_traversal_identity_v1(options.traversal_plugin_request_v1, selection)?
+    if (options.traversal_plugin_resolved_identity_v1 != "" and
+            options.traversal_plugin_resolved_identity_v1 != identity):
+        return Err("traversal-provider-resolved-identity-mismatch")
+    var admitted_options = options
+    admitted_options.traversal_plugin_resolved_identity_v1 = identity
+    match collection:
+        case Some(value):
+            compiler_driver_create_with_environment_variant_policy_v1(admitted_options, value, selection)
+        case None:
+            compiler_driver_create_with_traversal_plugin_v1(admitted_options, selection)
