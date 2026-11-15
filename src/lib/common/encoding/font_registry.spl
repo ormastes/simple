@@ -13,7 +13,7 @@
 # recommendation catalog.
 
 use std.common.encoding.sfnt.{validate_glyf_font_instance, sfnt_manifest_tables_match, sfnt_manifest_names_match}
-use std.common.crypto.sha256.{sha256_bytes, sha256_u8_hex}
+use std.common.crypto.sha256.{sha256_bytes, sha256_u8_hex, sha256_u8_native_hex_or_empty}
 use std.common.crypto.types.{bytes_to_hex}
 use std.io_runtime.{env_get}
 
@@ -545,6 +545,18 @@ var _font_digest_native_route_forced: bool = false
 pub fn font_registry_force_native_digest_route():
     _font_digest_native_route_forced = true
 
+# Interpreter-lane digest. rt_tls13_sha256 returns the correct 32 bytes when
+# interpreted (sha256.spl, 0dc896b1907), so hash the blob natively instead of
+# in interpreted sha256_bytes (~22 KB/s: 77 s for the 1.7 MB NotoSansMono).
+# "" (provider absent, or a non-32-byte sentinel) keeps the pure-Simple
+# sha256_bytes route, so a missing accelerator is slower, never a different
+# verdict.
+fn _font_interp_digest_hex(blob: [u8]) -> text:
+    val native_hex = sha256_u8_native_hex_or_empty(blob)
+    if native_hex != "":
+        return native_hex
+    bytes_to_hex(sha256_bytes(_u8_blob_to_i64_array(blob)))
+
 fn _validate_selected_font_asset(path: text, blob: [u8]) -> FontAssetRuntimeValidation:
     _validate_selected_font_asset_with_digest(path, blob, "")
 
@@ -591,7 +603,7 @@ fn _validate_selected_font_asset_with_digest(path: text, blob: [u8],
     val actual_sha256 = if _font_sha256_hex_valid(precomputed_sha256_hex):
         precomputed_sha256_hex
     else if digest_route_interp:
-        bytes_to_hex(sha256_bytes(_u8_blob_to_i64_array(blob)))
+        _font_interp_digest_hex(blob)
     else:
         sha256_u8_hex(blob)
     if not _font_sha256_hex_valid(candidate.sha256) or actual_sha256 != candidate.sha256:

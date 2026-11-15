@@ -258,10 +258,19 @@ impl InterpreterBackendImpl:
                                     Ok(ae[iv])
                             case _:
                                 Err(BackendError.type_error("array index must be an integer", Some(expr.span)))
-                    # ponytail: only Array indexing is needed for the #112
-                    # class-in-array repro. Dict/Tuple/string indexing and
-                    # Index-as-assignment-target (`arr[i] = v`) are intentionally
-                    # left out until a concrete case needs them.
+                    case Value.Dict(dict_entries):
+                        val de: Dict<text, Value> = dict_entries
+                        match idx_key_v:
+                            case Value.String(dk):
+                                if de.has(dk):
+                                    val dv: Value = de[dk]
+                                    Ok(dv)
+                                else:
+                                    Err(BackendError.runtime_error("dict key not found: {dk}", Some(expr.span)))
+                            case _:
+                                Err(BackendError.type_error("dict key must be text", Some(expr.span)))
+                    # Tuple/string indexing and Index-as-assignment-target
+                    # (`arr[i] = v`) are left out until a concrete case needs them.
                     case _:
                         Err(BackendError.type_error("indexing requires an array", Some(expr.span)))
 
@@ -460,7 +469,7 @@ impl InterpreterBackendImpl:
                         Err(BackendError.not_implemented("trait method calls not yet supported"))
 
                     case MethodResolution.Unresolved:
-                        Err(BackendError.runtime_error("unresolved method call: {method_name}", Some(expr.span)))
+                        self.eval_builtin_method(receiver, method_name, args, ctx, expr.span)
 
             case HirExprKind.StaticCall(type_, method_name, args, resolution):
                 # Static call: Type.method(args) - similar to StaticMethod variant
@@ -493,6 +502,30 @@ impl InterpreterBackendImpl:
                 val _ = payload_size
                 self.eval_block(body, ctx)?
                 Ok(Value.Nil)
+
+            case HirExprKind.While(cond, body, _):
+                self.eval_while(Some(cond), body, ctx)
+
+            case HirExprKind.Loop(body, _):
+                self.eval_while(None, body, ctx)
+
+            case HirExprKind.For(var_, iter, body, _):
+                self.eval_for(var_, iter, body, ctx)
+
+            case HirExprKind.Range(start, end, inclusive, step):
+                self.eval_range(start, end, inclusive, step, expr.span, ctx)
+
+            case HirExprKind.MatchCase(scrutinee, arms):
+                self.eval_match(scrutinee, arms, ctx, expr.span)
+
+            case HirExprKind.Return(value):
+                self.eval_return(value, ctx)
+
+            case HirExprKind.Break(_, _):
+                Err(BackendError.control_flow("break", None))
+
+            case HirExprKind.Continue(_):
+                Err(BackendError.control_flow("continue", None))
 
             # Seed treats these no-payload patterns as irrefutable, so they must
             # remain after every payload-bearing expression arm.

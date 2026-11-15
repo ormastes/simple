@@ -235,6 +235,7 @@ impl InterpreterBackendImpl:
                     return result
         # AOP hook (task #31): weave declarative `on pc{...} use ... before`
         # advice for interpreted calls. See interpreter_aop_weave.spl.
+        val frame_depth = ctx.env.scope_depth()
         ctx.env.push_scope()
 
         # Bind parameters
@@ -252,8 +253,17 @@ impl InterpreterBackendImpl:
             ctx.env.define(param.name, value)
 
         # Execute body
-        val result = self.eval_block(fn_.body, ctx)?
+        # A `return` arrives as a ControlFlow error carrying its value on the env.
+        var result: Value = Value.Nil
+        match self.eval_block(fn_.body, ctx):
+            case Ok(v): result = v
+            case Err(e):
+                if e.kind == BackendErrorKind.ControlFlow and e.message == "return":
+                    result = e.ctl_value ?? Value.Nil
+                else:
+                    return Err(e)
 
+        ctx.env.truncate_scopes(frame_depth + 1)
         ctx.env.pop_scope()
         # AOP hook (task #31): weave after_success/after_error advice.
         self.interp_aop_run_after(fn_, ctx, result)
