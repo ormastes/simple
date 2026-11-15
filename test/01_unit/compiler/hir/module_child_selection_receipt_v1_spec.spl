@@ -3,7 +3,7 @@
 use std.spec.*
 use std.common.crypto.sha256.{sha256_text}
 use compiler.common.driver_source_file.{SourceFile, source_file_with_manifest_evidence_v1}
-use compiler.common.cache.visibility_manifest_read_v1.{visibility_manifest_reads_v1}
+use compiler.common.cache.visibility_manifest_read_v1.{VisibilityManifestEvidenceV1, visibility_manifest_reads_v1}
 use compiler.common.cache.visibility_manifest_policy_v1.{VisibilityManifestPolicyV1}
 use compiler.common.diagnostics.span.{Span}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
@@ -17,6 +17,10 @@ use compiler.hir.hir_lowering._Items.module_import_resolution.*
 use compiler.hir.hir_symbol_table_methods.*
 
 fn child_receipt_registry_v1(caller_body: text = "use configured.open.{Target}\nuse configured.hidden.{Target as Hidden}\n") -> ModuleSurfacesByName:
+    val (registry, producer_evidence) = child_receipt_inputs_v1(caller_body)
+    registry
+
+fn child_receipt_inputs_v1(caller_body: text) -> (ModuleSurfacesByName, VisibilityManifestEvidenceV1):
     val root = "/snapshot/test/pkg/__init__.spl"
     val target = "/snapshot/test/pkg/body.spl"
     val caller = "/snapshot/test/caller.spl"
@@ -44,7 +48,7 @@ fn child_receipt_registry_v1(caller_body: text = "use configured.open.{Target}\n
     target_evidence.policies = evidence.policies.copy()
     val target_source = source_file_with_manifest_evidence_v1(
         SourceFile(path: target, content: target_body, module_name: "physical.body"), target_evidence)
-    module_surfaces_from_modules({"physical.pkg": root_parsed,
+    val registry = module_surfaces_from_modules({"physical.pkg": root_parsed,
         "configured": root_parsed, "configured.open": target_parsed, "configured.hidden": target_parsed,
         "physical.body": parse_and_build_module(target_body, target),
         "caller": parse_and_build_module(caller_body, caller)},
@@ -53,6 +57,7 @@ fn child_receipt_registry_v1(caller_body: text = "use configured.open.{Target}\n
          SourceFile(path: target, content: target_body, module_name: "configured.open"),
          SourceFile(path: target, content: target_body, module_name: "configured.hidden"),
          SourceFile(path: caller, content: caller_body, module_name: "caller")]).unwrap()
+    (registry, evidence)
 
 fn child_receipt_lowering_v1(registry: ModuleSurfacesByName, caller_body: text = "use configured.open.{Target}\nuse configured.hidden.{Target as Hidden}\n") -> HirLowering:
     val lowering = HirLowering.with_filename("/snapshot/test/caller.spl")
@@ -120,6 +125,14 @@ describe "selected configured module-child provenance":
         expect(lowering.module_child_binding_keys_v1.len()).to_equal(0)
         expect(lowering.selected_module_child_binding_v1("Hidden").selected).to_equal(false)
 
+    it "retains provenance after the complete namespace binding write":
+        val body = "use configured.open as branch\n"
+        val registry = child_receipt_registry_v1(body)
+        val lowering = child_receipt_lowering_v1(registry, body)
+        expect(lowering.selected_module_child_binding_v1("branch").selected).to_equal(true)
+        expect(lowering.selected_module_child_binding_v1("branch").child_ordinal).to_equal(0)
+        expect(lowering.selected_module_child_binding_v1("branch.Target").child_ordinal).to_equal(0)
+
     it "does not replace a private selected binding with a public same-ID no-op import":
         val body = "use configured.hidden.{Target}\nuse configured.open.{Target}\n"
         val registry = child_receipt_registry_v1(body)
@@ -132,6 +145,15 @@ describe "selected configured module-child provenance":
         val selected = registry.surfaces[registry.index_by_name["caller"]].import_child_selections_v1[0]
         registry.surfaces[selected.manifest_surface].visibility_manifest_evidence_v1.policies[0].frontend_identity = "different frontend"
         expect(module_child_selection_validate_v1(registry, selected)).to_contain("policy")
+
+    it "owns frozen policy inputs independently of later producer mutation":
+        val (registry, producer_evidence) = child_receipt_inputs_v1("use configured.open.{Target}\n")
+        val selected = registry.surfaces[registry.index_by_name["caller"]].import_child_selections_v1[0]
+        producer_evidence.policies[0].child_modifiers[0] = "pri"
+        producer_evidence.policies[0].frontend_identity = "changed producer"
+        producer_evidence.snapshot_id = "changed snapshot"
+        expect(selected.child_modifier).to_equal("pub")
+        expect(module_child_selection_validate_v1(registry, selected)).to_equal("")
 
     it "leaves a flat legacy import unavailable when no selected parent manifest exists":
         val source = "use legacy.{Target}\n"

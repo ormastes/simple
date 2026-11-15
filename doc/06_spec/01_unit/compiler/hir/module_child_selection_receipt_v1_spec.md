@@ -14,8 +14,10 @@ end-to-end inventory authentication or filesystem manifest parsing.
 | Corrupted ordinal, policy, snapshot or generation | Validator returns an explicit unavailable/mismatch reason |
 | Current target content differs | SHA-bound receipt is rejected |
 | Actual import binding, same-ID rebind, module reset | Initial binding has provenance; rebind/reset cannot reuse it |
+| Namespace alias and qualified declaration binding | Capture follows the complete namespace write; both retain the selected child |
 | Private route followed by public no-op import | Existing binding retains its private route |
 | Frontend policy changes in the same snapshot | Semantic policy mismatch rejects the receipt |
+| Producer mutates policy after freeze | Retained policy and receipt remain independent and valid |
 | Legacy flat import has no selected manifest parent | Import behavior remains unchanged; receipt is unavailable |
 
 A selected receipt is provenance, not permission. Explicit `pri` remains

@@ -58,3 +58,11 @@ hot paths; a future full requester consumer needs indexed lookup/cache design
 and warm latency/RSS evidence. Freeze selection reads retained registry/policy
 arrays only, without filesystem rescans. Performance, transient-lifetime,
 compiler/core, MCP/LSP and full positive permission integration remain UNQUALIFIED.
+
+## Independent review repair
+
+Review of initial commit `50baea71276` found a namespace capture statement inside
+a multiline `define` argument list. The repair moves capture after the complete
+write and adds an actual namespace-alias/qualified-member fixture. A second
+fixture mutates producer evidence after freeze to check retained ownership. These
+additional regressions remain UNRUN under the same runner limitation.
