@@ -1540,7 +1540,7 @@ fn _apply_decls_without_grid_inner(
             if shadow_x != -1000000 and shadow_y != -1000000:
                 text_shadow_x_px_v = shadow_x
                 text_shadow_y_px_v = shadow_y
-                text_shadow_color_v = if shadow_color != 0u32: shadow_color else: st.fg
+                text_shadow_color_v = if shadow_color != 0u32: shadow_color elif _decl_transparent_color(text_shadow_norm): 0u32 else: st.fg
     val text_decoration_decl = decl_tbl_get_p(decl_tbl, decl_present, "text-decoration")
     if text_decoration_decl.len() > 0:
         val text_decoration_norm = text_decoration_decl.trim().lower()
@@ -1984,13 +1984,29 @@ fn _apply_decls_without_grid_inner(
                 border_l_v = bw3
     val border_color = decl_tbl_get_p(decl_tbl, decl_present, "border-color")
     if border_color.len() > 0:
-        val bcv = parse_color_any(border_color)
-        if bcv != 0u32 or _decl_transparent_color(border_color):
-            border_color_v = bcv
-            border_color_l_v = bcv
-            border_color_t_v = bcv
-            border_color_r_v = bcv
-            border_color_b_v = bcv
+        # 1-4 values: top, right, bottom, left (`red transparent transparent
+        # transparent` is the other CSS-triangle idiom).
+        val bc_toks = _decl_top_level_tokens(border_color)
+        if bc_toks.len() >= 1 and bc_toks.len() <= 4:
+            val n = bc_toks.len()
+            val t_tok = bc_toks[0]
+            val r_tok = if n >= 2: bc_toks[1] else: t_tok
+            val b_tok = if n >= 3: bc_toks[2] else: t_tok
+            val l_tok = if n >= 4: bc_toks[3] else: r_tok
+            val tc = parse_color_any(t_tok)
+            if tc != 0u32 or _decl_transparent_color(t_tok):
+                border_color_t_v = tc
+                if n == 1:
+                    border_color_v = tc
+            val rc = parse_color_any(r_tok)
+            if rc != 0u32 or _decl_transparent_color(r_tok):
+                border_color_r_v = rc
+            val bc2 = parse_color_any(b_tok)
+            if bc2 != 0u32 or _decl_transparent_color(b_tok):
+                border_color_b_v = bc2
+            val lc = parse_color_any(l_tok)
+            if lc != 0u32 or _decl_transparent_color(l_tok):
+                border_color_l_v = lc
     val border_left = decl_tbl_get_p(decl_tbl, decl_present, "border-left")
     if border_left.len() > 0:
         val style = css_border_style_token(border_left)
@@ -2324,7 +2340,7 @@ fn _apply_decls_without_grid_inner(
                     box_shadow_y_px_v = shadow_y
                     box_shadow_blur_px_v = 0
                     box_shadow_alpha_v = 255
-                    box_shadow_color_v = if shadow_color != 0u32: shadow_color else: web_argb(0, 0, 0)
+                    box_shadow_color_v = if shadow_color != 0u32: shadow_color elif _decl_transparent_color(box_shadow_norm): 0u32 else: web_argb(0, 0, 0)
     val backdrop_filter_decl = decl_tbl_get_p(decl_tbl, decl_present, "backdrop-filter")
     val webkit_backdrop_filter_decl = decl_tbl_get_p(decl_tbl, decl_present, "-webkit-backdrop-filter")
     if backdrop_filter_decl.len() > 0:
@@ -2662,6 +2678,17 @@ fn _decl_transparent_color(raw: text) -> bool:
     `#0000`). The colour parsers answer 0 for it -- the same 0 as "no colour
     in this value" -- so an applier asks this to tell "set to transparent"
     from "unset" and override the earlier colour, as Chrome does."""
+    for tok in _decl_top_level_tokens(raw):
+        # A length (`20px`, `0`) is never a colour; the delegate would read
+        # its digits as one.
+        if not "0123456789.-+".contains(tok.substring(0, 1)) and _color_alpha_zero(tok):
+            return true
+    false
+
+# Whitespace-separated tokens of a value, a function (`rgb(0 0 0 / 0)`)
+# kept whole.
+fn _decl_top_level_tokens(raw: text) -> [text]:
+    var out: [text] = []
     val s = raw.trim()
     val n = s.byte_len()
     var depth = 0
@@ -2675,13 +2702,7 @@ fn _decl_transparent_color(raw: text) -> bool:
             depth = depth - 1
         elif depth == 0 and (ch == " " or ch == "\t" or ch == "\n"):
             if i > start:
-                val tok = s.substring(start, i)
-                val first = tok.substring(0, 1)
-                # A length (`20px`, `0`) is never a colour; the delegate
-                # would read its digits as one.
-                val numeric = "0123456789.-+".contains(first)
-                if not numeric and _color_alpha_zero(tok):
-                    return true
+                out.push(s.substring(start, i))
             start = i + 1
         i = i + 1
-    false
+    out

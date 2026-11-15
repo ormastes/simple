@@ -28,6 +28,14 @@ screenshot pixels of TRANSPARENT_PAGE):
   transparent, painted as nothing.
 - `#k` (y 124..133) `style="background:rgb(0,255,0"` (unclosed at the end of
   the attribute) is #00ff00.
+- `#m` (y 138..177) `border-color:red transparent transparent transparent`
+  on a 0x0 box with 20px solid sides: the same triangle as `#c`, 110 px
+  lower.
+- `#n` (y 182..197) `color:rgba(0,0,0,0)` with no earlier colour paints no
+  text.
+Every painted row is checked in the 5x7 framebuffer lane and the Draw IR CPU
+lane: the Draw IR border painter drew rectangles, so its triangle was a red
+40x20 block.
 
 Text alpha page (TEXT_ALPHA_PAGE, `--window-size=420,200`, 40px bands):
 `color:rgba(0,0,0,.5)` at 12px and 32px never paints darker than #7f7f7f
@@ -45,7 +53,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_h
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_color, parse_color_any}
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_cpu.{simple_web_render_html_to_pixels_with_cpu_draw_ir_backend}
 
-val TRANSPARENT_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}div{{width:20px;height:10px;margin:0 0 4px 0}}#a{{background:red;background:transparent}}#b{{background-color:red;background:transparent}}#c{{width:0;height:0;border:20px solid transparent;border-top-color:red}}#d{{color:red;color:transparent;font:16px/16px sans-serif;height:16px}}#e{{border:4px solid blue;border-color:transparent;height:4px;width:12px}}#g{{border:4px solid blue;height:4px;width:12px}}#g{{border-top-color:transparent}}#k{{width:420px;height:10px}}</style></head><body><div id=a></div><div id=b></div><div id=c></div><div id=d>MMMM</div><div id=e></div><div id=g></div><div id=k style=\"background:rgb(0,255,0\"></div></body></html>"
+val TRANSPARENT_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}div{{width:20px;height:10px;margin:0 0 4px 0}}#a{{background:red;background:transparent}}#b{{background-color:red;background:transparent}}#c{{width:0;height:0;border:20px solid transparent;border-top-color:red}}#d{{color:red;color:transparent;font:16px/16px sans-serif;height:16px}}#e{{border:4px solid blue;border-color:transparent;height:4px;width:12px}}#g{{border:4px solid blue;height:4px;width:12px}}#g{{border-top-color:transparent}}#k{{width:420px;height:10px}}#m{{width:0;height:0;border-style:solid;border-width:20px;border-color:red transparent transparent transparent}}#n{{color:rgba(0,0,0,0);font:16px/16px sans-serif;height:16px}}</style></head><body><div id=a></div><div id=b></div><div id=c></div><div id=d>MMMM</div><div id=e></div><div id=g></div><div id=k style=\"background:rgb(0,255,0\"></div><div id=m></div><div id=n>MMMM</div></body></html>"
 
 val TEXT_ALPHA_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}div{{margin:0;height:40px}}#a{{color:rgba(0,0,0,.5);font:12px/40px sans-serif}}#b{{color:rgba(0,0,0,.5);font:32px/40px sans-serif}}#c{{color:rgba(255,0,0,.5);font:32px/40px sans-serif}}</style></head><body><div id=a>MMMM</div><div id=b>MMMM</div><div id=c>MMMM</div></body></html>"
 
@@ -83,6 +91,25 @@ fn off(px: [u32], x: i32, y: i32, chrome: u32) -> i32:
 fn render() -> [u32]:
     simple_web_render_html_to_pixels_with_engine2d_backend(TRANSPARENT_PAGE, 420, 200, "cpu_simd")
 
+fn render_lane(lane: i32) -> [u32]:
+    if lane == 0:
+        return render()
+    simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(TRANSPARENT_PAGE, 420, 200, "cpu_simd")
+
+# Mismatching pixels of a 40x40 CSS triangle whose top edge is at `top`.
+fn triangle_bad(px: [u32], top: i32) -> i32:
+    var bad = 0
+    var r = 0
+    while r < 20:
+        var x = 0
+        while x < 42:
+            val want = if x > r and x < 39 - r: 0xff0000u32 elif x == r or x == 39 - r: 0xff7f7fu32 else: 0xffffffu32
+            if off(px, x, top + r, want) > 1:
+                bad = bad + 1
+            x = x + 1
+        r = r + 1
+    bad
+
 describe "CSS transparent as a value":
     it "AC-1: `background:transparent` overrides an earlier background colour":
         val px = render()
@@ -91,49 +118,45 @@ describe "CSS transparent as a value":
         expect(off(px, 5, 18, 0xffffffu32)).to_equal(0)
 
     it "AC-2: a CSS triangle -- transparent sides and a mitred red top":
-        val px = render()
-        step("Chrome 159: row 28+r is red for x r+1..38-r, half red at x r and 39-r, white outside")
-        var bad = 0
-        var r = 0
-        while r < 20:
-            var x = 0
-            while x < 42:
-                val want = if x > r and x < 39 - r: 0xff0000u32 elif x == r or x == 39 - r: 0xff7f7fu32 else: 0xffffffu32
-                if off(px, x, 28 + r, want) > 1:
-                    bad = bad + 1
-                x = x + 1
-            r = r + 1
-        expect(bad).to_equal(0)
-        step("Chrome 159: rows 48..67 (the transparent bottom half) are white")
-        expect(off(px, 20, 50, 0xffffffu32)).to_equal(0)
-        expect(off(px, 2, 60, 0xffffffu32)).to_equal(0)
-        expect(off(px, 37, 60, 0xffffffu32)).to_equal(0)
+        for lane in [0, 1]:
+            val px = render_lane(lane)
+            step("Chrome 159: row 28+r is red for x r+1..38-r, half red at x r and 39-r, white outside")
+            expect(triangle_bad(px, 28)).to_equal(0)
+            step("Chrome 159: rows 48..67 (the transparent bottom half) are white")
+            expect(off(px, 20, 50, 0xffffffu32)).to_equal(0)
+            expect(off(px, 2, 60, 0xffffffu32)).to_equal(0)
+            expect(off(px, 37, 60, 0xffffffu32)).to_equal(0)
+            step("Chrome 159: `border-color:red transparent transparent transparent` is the same triangle at y 138")
+            expect(triangle_bad(px, 138)).to_equal(0)
+            expect(off(px, 20, 165, 0xffffffu32)).to_equal(0)
 
     it "AC-3: `color:transparent` paints no text":
         val px = render()
-        step("Chrome 159: rows 72..87 are white across the text")
+        step("Chrome 159: rows 72..87 (#d) and 182..197 (#n, rgba(0,0,0,0)) are white across the text")
         var dark = 0
-        var y = 72
-        while y < 88:
-            var x = 0
-            while x < 80:
-                if off(px, x, y, 0xffffffu32) > 0:
-                    dark = dark + 1
-                x = x + 1
-            y = y + 1
+        for y0 in [72, 182]:
+            var y = y0
+            while y < y0 + 16:
+                var x = 0
+                while x < 80:
+                    if off(px, x, y, 0xffffffu32) > 0:
+                        dark = dark + 1
+                    x = x + 1
+                y = y + 1
         expect(dark).to_equal(0)
 
     it "AC-4: `border-color:transparent` and a later `border-top-color:transparent` clear the earlier colour":
-        val px = render()
-        step("Chrome 159: #e (y 92..103) is white on every side")
-        expect(off(px, 1, 97, 0xffffffu32)).to_equal(0)
-        expect(off(px, 10, 93, 0xffffffu32)).to_equal(0)
-        expect(off(px, 18, 97, 0xffffffu32)).to_equal(0)
-        expect(off(px, 10, 102, 0xffffffu32)).to_equal(0)
-        step("Chrome 159: #g x = 10 is white for y 108..115 and blue for 116..119; x = 0 is blue from y 109")
-        expect(off(px, 10, 109, 0xffffffu32)).to_equal(0)
-        expect(off(px, 10, 117, 0x0000ffu32)).to_equal(0)
-        expect(off(px, 0, 112, 0x0000ffu32)).to_equal(0)
+        for lane in [0, 1]:
+            val px = render_lane(lane)
+            step("Chrome 159: #e (y 92..103) is white on every side")
+            expect(off(px, 1, 97, 0xffffffu32)).to_equal(0)
+            expect(off(px, 10, 93, 0xffffffu32)).to_equal(0)
+            expect(off(px, 18, 97, 0xffffffu32)).to_equal(0)
+            expect(off(px, 10, 102, 0xffffffu32)).to_equal(0)
+            step("Chrome 159: #g x = 10 is white for y 108..115 and blue for 116..119; x = 0 is blue from y 109")
+            expect(off(px, 10, 109, 0xffffffu32)).to_equal(0)
+            expect(off(px, 10, 117, 0x0000ffu32)).to_equal(0)
+            expect(off(px, 0, 112, 0x0000ffu32)).to_equal(0)
 
     it "AC-5: an unclosed colour function at the end of an inline style still applies":
         val px = render()

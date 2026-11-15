@@ -641,6 +641,12 @@ fn _engine2d_draw_ir_render_borders(engine: Engine2D, style: [DrawIrStyleProp], 
     if radius > 0 and uniform and _engine2d_draw_ir_has_visible_alpha(top_c):
         eng.draw_rounded_rect_outline(x, y, w, h, radius, top_c, top_w)
         return eng
+    val tl = top_w > 0 and left_w > 0 and top_c != left_c
+    val tr = top_w > 0 and right_w > 0 and top_c != right_c
+    val bl = bottom_w > 0 and left_w > 0 and bottom_c != left_c
+    val br = bottom_w > 0 and right_w > 0 and bottom_c != right_c
+    if tl or tr or bl or br:
+        return _engine2d_draw_ir_render_borders_mitred(eng, x, y, w, h, left_w, top_w, right_w, bottom_w, left_c, top_c, right_c, bottom_c)
     if top_w > 0 and _engine2d_draw_ir_has_visible_alpha(top_c):
         eng.draw_rect_filled(x, y, w, top_w, top_c)
     if bottom_w > 0 and _engine2d_draw_ir_has_visible_alpha(bottom_c):
@@ -649,6 +655,74 @@ fn _engine2d_draw_ir_render_borders(engine: Engine2D, style: [DrawIrStyleProp], 
         eng.draw_rect_filled(x, y, left_w, h, left_c)
     if right_w > 0 and _engine2d_draw_ir_has_visible_alpha(right_c):
         eng.draw_rect_filled(x + w - right_w, y, right_w, h, right_c)
+    eng
+
+# Adjacent sides of different colours (`transparent` included) meet on the
+# diagonal from the outer to the inner corner, as Chrome paints them -- a CSS
+# triangle is a triangle. Twin of the framebuffer lane's
+# `_fb_border_sides_mitred` (browser_engine paint_primitives); keep the two in
+# step. A pixel belongs to a side when its centre lies past the diagonal; the
+# pixel the diagonal halves gets half of each side's alpha.
+fn _engine2d_draw_ir_mitre_cut(r: i32, side_w: i32, cross_w: i32) -> i32:
+    val num = (2 * r + 1) * cross_w
+    var c = 0
+    while (2 * c + 1) * side_w <= num:
+        c = c + 1
+    if c > 0 and (2 * c - 1) * side_w == num:
+        return c * 2 + 1
+    c * 2
+
+fn _engine2d_draw_ir_half_alpha(color: u32) -> u32:
+    (color & 0xFFFFFFu32) | ((((color >> 24) & 0xFFu32) / 2u32) << 24)
+
+fn _engine2d_draw_ir_render_borders_mitred(engine: Engine2D, x: i32, y: i32, w: i32, h: i32, bl: i32, bt: i32, br: i32, bb: i32, cl: u32, ct: u32, cr: u32, cb: u32) -> Engine2D:
+    var eng = engine
+    for side in [0, 1]:
+        val thick = if side == 0: bt else: bb
+        val c = if side == 0: ct else: cb
+        val visible = _engine2d_draw_ir_has_visible_alpha(c)
+        var r = 0
+        while r < thick:
+            val py = if side == 0: y + r else: y + h - 1 - r
+            var l_full = 0
+            var r_full = 0
+            if bl > 0 and cl != c:
+                val cut = _engine2d_draw_ir_mitre_cut(r, thick, bl)
+                l_full = cut / 2
+                if cut % 2 == 1:
+                    for hc in [c, cl]:
+                        if _engine2d_draw_ir_has_visible_alpha(hc):
+                            eng.draw_rect_filled(x + l_full - 1, py, 1, 1, _engine2d_draw_ir_half_alpha(hc))
+            if br > 0 and cr != c:
+                val cut = _engine2d_draw_ir_mitre_cut(r, thick, br)
+                r_full = cut / 2
+                if cut % 2 == 1:
+                    for hc in [c, cr]:
+                        if _engine2d_draw_ir_has_visible_alpha(hc):
+                            eng.draw_rect_filled(x + w - r_full, py, 1, 1, _engine2d_draw_ir_half_alpha(hc))
+            if visible and w - l_full - r_full > 0:
+                eng.draw_rect_filled(x + l_full, py, w - l_full - r_full, 1, c)
+            r = r + 1
+    for side in [0, 1]:
+        val thick = if side == 0: bl else: br
+        val c = if side == 0: cl else: cr
+        if thick > 0 and _engine2d_draw_ir_has_visible_alpha(c):
+            val px0 = if side == 0: x else: x + w - thick
+            if h - bt - bb > 0:
+                eng.draw_rect_filled(px0, y + bt, thick, h - bt - bb, c)
+            for end in [0, 1]:
+                val cross = if end == 0: bt else: bb
+                val cc = if end == 0: ct else: cb
+                if cross > 0 and cc != c:
+                    var r = 0
+                    while r < cross:
+                        val cut = _engine2d_draw_ir_mitre_cut(r, cross, thick)
+                        val own = cut / 2 - cut % 2
+                        if own > 0:
+                            val py = if end == 0: y + r else: y + h - 1 - r
+                            val ox = if side == 0: x else: x + w - own
+                            eng.draw_rect_filled(ox, py, own, 1, c)
+                        r = r + 1
     eng
 
 fn _engine2d_draw_ir_render_glass_material(engine: Engine2D, command: DrawIrCommand, x: i32, y: i32, w: i32, h: i32, radius: i32, fb_w: i32, fb_h: i32) -> Engine2dDrawIrGlassOutcome:
