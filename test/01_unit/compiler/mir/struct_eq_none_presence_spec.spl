@@ -1,0 +1,83 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+"""
+`record == None` / `record != None` is a presence test, never struct equality.
+
+Class B of doc/07_guide/compiler/robustness/stage2_native_miscompile_classes.md.
+
+The built-in `None` value lowers through the NamedVar arm (rt_enum_new, noted in
+option_none_locals), not as HirExprKind.NilLit, so the nil-compare intercept in
+lower_binop missed it and a non-Option struct/class operand reached the struct
+`==` dispatch, which assumed both operands are records:
+lower_struct_structural_eq compared `m.name` with field@8 of the None enum
+handle through rt_text_eq_any, and strlen ran on a small integer (SIGSEGV in
+exact_extern_provenance.spl `if provider == None`, ~107 Stage 3 sites).
+
+The seed interpreter answers false (`==`) / true (`!=`) for a present record.
+`record == nil` already lowers to rt_is_none / rt_is_some (presence, which also
+answers a bootstrap-erased slot that really holds nil); `None` now takes the
+same arm. Option-typed operands are unchanged.
+
+Native oracle: test/fixtures/native_struct_eq_none/{record,controls}/main.spl.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+fn lower_module_json(src: text) -> Dict<text, text>:
+    val module = parse_full_frontend(src, "struct_none.spl", "struct_none.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("struct_none.spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var out: Dict<text, text> = {}
+    for function in mir.functions.values():
+        val dot = function.name.rfind(".")
+        val short = if dot >= 0: function.name.substring(dot + 1, function.name.len()) else: function.name
+        out[short] = serialize_mir_function(function)
+    out
+
+val SOURCE: text = "struct M:\n    name: text\n    path: text\n\n" +
+    "class C:\n    v: i64\n\n" +
+    "fn param_eq(m: M) -> bool:\n    m == None\n\n" +
+    "fn param_ne(m: M) -> bool:\n    m != None\n\n" +
+    "fn none_first(m: M) -> bool:\n    None == m\n\n" +
+    "fn class_eq(c: C) -> bool:\n    c == None\n\n" +
+    "fn loop_eq(ms: [M]) -> i64:\n    var n = 0\n    for m in ms:\n        if m == None:\n            continue\n        n = n + 1\n    n\n\n" +
+    "fn opt_eq(o: M?) -> bool:\n    o == None\n\n" +
+    "fn nil_eq(m: M) -> bool:\n    m == nil\n\n" +
+    "fn rec_eq(a: M, b: M) -> bool:\n    a == b\n"
+
+fn expect_presence(fns: Dict<text, text>, name: text, runtime_fn: text):
+    val mir = fns[name] ?? ""
+    expect(mir.len() > 0).to_equal(true)
+    expect(mir).to_contain(runtime_fn)
+    expect(mir.contains("rt_text_eq_any")).to_equal(false)
+
+describe "record compared with None is a presence test":
+    it "struct == None lowers to rt_is_none, not struct field equality":
+        val fns = lower_module_json(SOURCE)
+        expect_presence(fns, "param_eq", "rt_is_none")
+        expect_presence(fns, "none_first", "rt_is_none")
+        expect_presence(fns, "loop_eq", "rt_is_none")
+
+    it "struct != None lowers to rt_is_some":
+        expect_presence(lower_module_json(SOURCE), "param_ne", "rt_is_some")
+
+    it "class == None lowers to rt_is_none":
+        expect_presence(lower_module_json(SOURCE), "class_eq", "rt_is_none")
+
+    it "controls: `== nil` keeps rt_is_none, record == record keeps field equality, Option keeps its arm":
+        val fns = lower_module_json(SOURCE)
+        expect(fns["nil_eq"] ?? "").to_contain("rt_is_none")
+        expect(fns["rec_eq"] ?? "").to_contain("rt_text_eq_any")
+        val opt = fns["opt_eq"] ?? ""
+        expect(opt.len() > 0).to_equal(true)
+        expect(opt.contains("rt_is_none")).to_equal(false)
+        expect(opt.contains("rt_text_eq_any")).to_equal(false)
