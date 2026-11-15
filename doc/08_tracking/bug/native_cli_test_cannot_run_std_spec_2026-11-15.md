@@ -73,11 +73,27 @@ values in i64 slots with placeholder `rt_array_*` stubs (lines 1114-1137) and
 no text/dict model, so it is not a drop-in for std.spec either.
 
 ## Open (plan): remaining walker gaps
-`TraitMethod` calls; expression kinds `Try`, `OptionalChain`, `NullCoalesce`,
-`ExistsCheck`, `Unwrap`, `StructLit`, `EnumLit`, `Cast`, `As`,
-`Comprehension`, `TupleIndex`, `With`, `TryCatch`, `TypeTest`; enum/struct/
-tuple match patterns; open ranges; module-level `val`/`var` of a provider;
+Expression kinds `As`, `ConvertCall`, `Comprehension`, `With`, `TryCatch`,
+`TypeTest`; array/range match patterns; open ranges; `return`/`?` inside a
+closure body (`call_closure` does not catch the ControlFlow error);
 interpolation `:format` specs. Each is its own slice.
+
+## Slice 2 (2026-11-16): option/result idioms, enums, patterns, casts, traits
+`interpreter_optional.spl` adds `??`, `.?` (presence; a `val v = e.?` binder
+from `if val`/`?.` holds payload-or-nil, MIR rule), `!`, `?` (Err/None return
+from the function), `?.`, `StructLit`, `EnumLit`, `Cast` (int<->float),
+`TupleIndex`/tuple indexing, enum (incl. Some/None/Ok/Err), struct and tuple
+patterns, and `TraitMethod` dispatch on the receiver type. Some/Ok/Err calls
+build `Value.Option`/`Value.Result`; `None` is tested before the env lookup
+(the env answered it with a Function value). `call_function_by_id` falls back
+to the numeric id: a trait-impl method's SymbolId did not match as a dict key.
+Spec `interpreter_backend_walker_slice2_spec.spl`: seed RED
+`Results: 11 total, 1 passed, 10 failed`, GREEN `11 total, 11 passed, 0 failed`.
+Native fixture `test/fixtures/native_interp_walker_slice2/main.spl`: old
+`cli_tip.exe` RED `Interpret error ...: function 'Some' not found`; rebuilt
+(`Build complete: 3786 compiled, 0 cached, 0 failed`) GREEN, same 10 lines as
+the seed (`coalesce=17` ... `trait=cat2`). Not covered by a spec: the
+`TraitMethod` resolution arm (the spec's call resolves as InstanceMethod).
 
 ## Perf (recorded, not fixed here)
 `cli_tip.exe run` of a two-file program takes 48 s wall, while the HIR phase
@@ -99,3 +115,10 @@ keeps xs. Native repro: `test/fixtures/native_interp_module_var/main.spl`
 Next blocker: `expression kind not implemented (disc 1572658204) at
 src/lib/nogc_sync_mut/spec.spl:1244:21` (`env_get(...) ?? ""`). Status stays
 verification-pending.
+Next native blocker (`cli_tip.exe test test/01_unit/lib/nogc_sync_mut/fs/flat_file_metadata_spec.spl`,
+75 s): the `?? ""` gap at `spec.spl:1244` is gone; the run now stops at
+`Interpret error in test.01_unit.lib.nogc_sync_mut.fs.flat_file_metadata_spec: function not found by symbol ID`
+(also `app.test_runner_new.test_db_lane_main`), `Results: 1 total, 0 passed, 1 failed`.
+Likely a method resolved to a SymbolId owned by an imported module:
+`call_function_by_id` only searches the entry module (slice 3).
+Status stays verification-pending.
