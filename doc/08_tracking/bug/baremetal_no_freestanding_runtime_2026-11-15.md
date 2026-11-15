@@ -35,3 +35,7 @@ and `undefined symbol: rt_interp_cstr`.
 
 Related: `baremetal_link_drops_target_hosted_path_2026_11_15` (link route,
 fix-implemented-verification-pending, PR #9521).
+
+## Also missing even for the MMIO-only example
+
+The ld.lld route from #9521 links `rv64_os_boot/main.o` with the default script and still fails on `undefined symbol: rt_mmio_write8`. There is also no `_start` entry (the program exports `__simple_main`). Those come from board shims today, as `scripts/check/check-baremetal-efi-boot.shs` does, so they belong in the same freestanding runtime/crt0.
