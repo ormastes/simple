@@ -95,3 +95,46 @@ Run: `95 passed, 19 failed` of 114 (was 92/22).
   Chrome. Open: fix the ramp and re-pin to Chrome in its own change.
 
 Run: `99 passed, 15 failed` of 114.
+
+## Batch 3c (2026-11-15): 3 more rows, plus a race fix; 12 left
+
+- **Leaf opacity (real defect, class b; introducing commit `ece10b378c8`,
+  2026-08-16).** That commit replaced "scale the child's per-pixel alpha by the
+  group opacity, then source-over" with `engine2d_composite_region_milli`,
+  which blends the child at a constant `a8` and ignores the child pixel's own
+  alpha. A single opacity root gets a full-viewport embedding, so every
+  transparent child pixel darkened the parent: `#f8fafc` became `0x807c7d7e`
+  across the frame (Chrome 159: 5776 `#f8fafc`, 240 `#8ba4ea`, 128 `#22c55e`,
+  0 `#ef4444` — the pins). Fix: `ea = src_alpha * a8 / 255`, so an opaque
+  source keeps `ea == a8` and the oracle values that commit pinned.
+  `fractional_subtree_opacity_spec` 1/2 -> 2/2; `engine2d_embedded_surface_spec`
+  and `browser_chrome_embedded_rendering_spec` unchanged vs base (8/10, 6/6).
+  Older trees cannot be bisected with this seed (they fail HIR lowering), so
+  the commit was found from the code, not by bisection.
+- **Absolute paint order (real defect).** Chrome 159 equals every pin. The
+  Draw IR paint order lifted only `position:absolute` with `z-index > 0`; a
+  positioned box with `z-index:auto/0` painted in tree order under later
+  in-flow siblings. Positioned boxes (absolute/fixed/relative) with
+  `z-index >= 0` now paint after the in-flow content of their context
+  (CSS 2.1 Appendix E). Known ceiling (`# ponytail:` in source): a z-auto box
+  is grouped like a context, so a positive-z descendant sorts inside it.
+  Negative z-index is unchanged.
+- **Input box kind (stale pin, class a).** The row pinned `kind == "box"`;
+  Draw IR has never had a `box` kind (rect/text/edge/path/image/group/port).
+  Corrected to `rect`.
+- **Backend-name rows made race-free.** The 3a gate compared against a
+  separate `Engine2D.probe_backend`; on the shared GPU cuda probed
+  Initialized and then resolved to `software` (load 23). The rows now take
+  name and reason from one `simple_web_engine2d_resolved_backend_name_with_reason`
+  call: canonical name with no reason, or `software` with a reason. The
+  `create_with_backend` name must be the canonical name or `software`.
+- **Font-family row is not culling.** At 160 px the shorthand span starts at
+  x=163 and is correctly culled. Chrome 159 with the same bundled
+  `PixelifySans[wght].ttf` measures "Override" at 56.86 px (per glyph at
+  16 px: O 11.55, v 8.00, e 7.10, r 5.33, i 4.45, d 8.00); Simple resolves the
+  same face (sha256 `9ba86cd0...`, wght=400) and measures 69 px. Open: the
+  Pixelify advance widths. Noto Sans Mono (77) and Liberation Sans (61) match.
+
+Run: `102 passed, 12 failed` of 114 after the race fix (101/13 before it: the
+cuda race flipped a green row red). The opacity-zero row (`path:0` vs
+`id:invisible-button`) is still open, separate from the composite fix.

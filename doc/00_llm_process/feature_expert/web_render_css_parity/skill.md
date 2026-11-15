@@ -1974,3 +1974,24 @@ never cache an answer computed while exhausted) —
   endpoint-exact `mix_channel_gradient_centered` (t = pos/(span-1)) is wrong
   against this; Draw IR already samples centres (AC-12 in
   `linear_gradient_angle_draw_ir_chrome159_spec`).
+
+### Batch 3b/3c (2026-11-15): opacity composite, paint order, ink rows
+
+- **A group-opacity composite must honour the child's own alpha.**
+  `engine2d_composite_region_milli` (`engine.spl`) blended the child at a
+  constant alpha since `ece10b378c8`; with a full-viewport opacity layer every
+  transparent pixel darkened the page (`0x807c7d7e`). Effective alpha is now
+  `src_a * a8 / 255`.
+- **Positioned z-auto boxes paint after in-flow content.** The Draw IR paint
+  order (`_html_draw_ir_node_paint_order`) groups positioned boxes with
+  `z-index >= 0` after their context's in-flow members.
+- **8 px text has no exact-colour pixels in Chrome.** Assert ink, not the
+  text colour, for small text; exact-colour counts only describe the 5x7
+  bitmap face.
+- **Never pair a probe with a create to gate a GPU row.** The GPU is shared;
+  take name and reason from one `..._resolved_backend_name_with_reason` call.
+- **Put a seed probe inside the worktree it tests** (e.g. an ignored
+  `build/wr_probe/`): from a scratch dir, `std.*` can fail to resolve
+  root ("resolves from the project stdlib roots only").
+- **Old trees do not run on the current seed** (HIR lowering errors before
+  ~2026-11-14), so find introducing commits from the code and `git log -S`.
