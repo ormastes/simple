@@ -12,7 +12,10 @@
 # "Reaches" is recursive through generics, arrays, dicts, tuples, fn types
 # and in-file `type X = ...` / `alias X = ...` aliases. One pass collects
 # aliases and `export` names, one pass walks declarations; nothing rescans.
-# Not covered here (P2+): return types and locals (ROB-OPT-003), explicit
+#   ROB-OPT-003  a public fn / method whose RETURN type reaches a raw optional,
+#                or a top-level `pub type X = ...` alias that does (span = the type)
+#
+# Not covered here (P2+): locals (the rest of ROB-OPT-003), explicit
 # accessor methods, enum payloads, cross-file `__init__.spl` export closure,
 # reviewed HAL/interpreter capabilities. `extern fn` is skipped. Warning
 # severity only; the level is `allow` by default and `warn` in the Robust and
@@ -24,6 +27,12 @@ struct RosOwner:
     indent: i64
     is_pub: bool
     has_fields: bool
+
+struct RosAlias:
+    name: text
+    line: i64
+    col: i64
+    ty: text
 
 fn ros_split_top(s: text, sep: text) -> [text]:
     # Split at bracket depth 0 (wrt <> [] () {}); `->` is not a closer.
@@ -101,9 +110,8 @@ fn ros_name_of(entry: text) -> text:
     if name.starts_with("mut "): name = name.substring(4, name.byte_len()).trim()
     name
 
-fn ros_params(header: text) -> [text]:
-    val lp = header.index_of("(", 0)
-    if lp < 0: return []
+fn ros_params_end(header: text, lp: i64) -> i64:
+    # Index of the `)` that closes the parameter list opened at `lp`.
     var depth = 0
     var i = lp
     while i < header.len():
@@ -113,12 +121,27 @@ fn ros_params(header: text) -> [text]:
         if ch == ">" and not (i > 0 and header.substring(i - 1, i) == "-"): depth = depth - 1
         if depth == 0: break
         i = i + 1
-    val inner = header.substring(lp + 1, i).trim()
+    i
+
+fn ros_params(header: text) -> [text]:
+    val lp = header.index_of("(", 0)
+    if lp < 0: return []
+    val inner = header.substring(lp + 1, ros_params_end(header, lp)).trim()
     if inner == "": return []
     ros_split_top(inner, ",")
 
+fn ros_return_type(header: text) -> text:
+    # `fn f(..) -> Type:` -> `Type`; "" when there is no return arrow.
+    val lp = header.index_of("(", 0)
+    if lp < 0: return ""
+    val rest = header.substring(ros_params_end(header, lp) + 1, header.byte_len()).trim()
+    if not rest.starts_with("->"): return ""
+    ros_split_top(rest.substring(2, rest.byte_len()), ":")[0].trim()
+
 fn ros_finding(code: text, line_num: i64, col: i64, what: text, name: text, ty: text) -> StaticLintFinding:
-    val hint = if code == "ROB-OPT-001": "use a concrete type, a proved default, a domain enum, or split the API" else: "use a payload enum or a state-specific type with a non-optional field"
+    var hint = "use a payload enum or a state-specific type with a non-optional field"
+    if code == "ROB-OPT-001": hint = "use a concrete type, a proved default, a domain enum, or split the API"
+    if code == "ROB-OPT-003": hint = "use a domain enum or a recoverable Result instead of a raw optional"
     val tail = if code == "ROB-OPT-002": " (constructor input and generated accessor)" else: ""
     StaticLintFinding(code, StaticLintLevel.Warn, StaticLintCategory.Safety,
         "public {what} `{name}` exposes raw optional `{ty}`{tail}", hint, line_num, col)
@@ -130,6 +153,7 @@ pub fn check_robust_option_surface(content: text) -> [StaticLintFinding]:
     var aliases: Dict<text, text> = {}
     var exported: [text] = []
     var pub_types: [text] = []
+    var pub_aliases: [RosAlias] = []
     var in_doc = false
     for line in content.split("\n"):
         val quotes = if line.contains("\""): nrl_triple_quote_count(line) else: 0
@@ -148,7 +172,12 @@ pub fn check_robust_option_surface(content: text) -> [StaticLintFinding]:
             val eq = s.index_of("=", 0)
             val lhs = s.substring(s.index_of(" ", 0), eq).trim()
             val lt = lhs.index_of("<", 0)
-            aliases[if lt >= 0: lhs.substring(0, lt).trim() else: lhs] = s.substring(eq + 1, s.byte_len()).trim()
+            val alias_name = if lt >= 0: lhs.substring(0, lt).trim() else: lhs
+            val alias_ty = s.substring(eq + 1, s.byte_len()).trim()
+            aliases[alias_name] = alias_ty
+            if ros_is_pub(code.trim()) and nrl_indent_of(code) == 0:
+                val ty_at = code.index_of(alias_ty, code.index_of("=", 0) + 1)
+                pub_aliases.push(RosAlias(alias_name, codes.len(), if ty_at >= 0: ty_at + 1 else: 1, alias_ty))
         elif code.trim().starts_with("export ") and not code.trim().starts_with("export use "):
             for name in code.trim().substring(7, code.trim().byte_len()).split(","):
                 exported.push(name.trim())
@@ -197,6 +226,15 @@ pub fn check_robust_option_surface(content: text) -> [StaticLintFinding]:
                     if ty != "" and ros_reaches_optional(ty, aliases, 0):
                         val col = code.index_of(name + ":", 0)
                         findings.push(ros_finding("ROB-OPT-001", i + 1, if col >= 0: col + 1 else: 1, "input", name, ty))
+                val ret = ros_return_type(header)
+                if ret != "" and ros_reaches_optional(ret, aliases, 0):
+                    # The return arrow is the last `->` of the header; the type follows it.
+                    var k = j
+                    while k > i and not codes[k].contains("->"):
+                        k = k - 1
+                    val arrow = codes[k].last_index_of("->")
+                    val at = if arrow >= 0: codes[k].index_of(ret, arrow + 2) else: -1
+                    findings.push(ros_finding("ROB-OPT-003", k + 1, if at >= 0: at + 1 else: 1, "return", fn_name, ret))
             body_indent = indent
             i = j + 1
             continue
@@ -209,6 +247,9 @@ pub fn check_robust_option_surface(content: text) -> [StaticLintFinding]:
             if is_field and ros_reaches_optional(ty, aliases, 0):
                 findings.push(ros_finding("ROB-OPT-002", i + 1, indent + 1, "field", name, ty))
         i = i + 1
+    for a in pub_aliases:
+        if ros_reaches_optional(a.ty, aliases, 0):
+            findings.push(ros_finding("ROB-OPT-003", a.line, a.col, "alias", a.name, a.ty))
     findings
 
 # Uniquely named on purpose: a private `check_rule` here collides with the
