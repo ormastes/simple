@@ -1,0 +1,196 @@
+# Opaque installed provenance, never a bytes/list -> authority constructor.
+# The closed installation model is an administrator obligation, not a runtime
+# observation. Missing actual process exclusion still refuses in the supervisor.
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.*
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+
+pub struct LinuxSupervisorInstalledSnapshotV1:
+    digest: text
+    machine_policy_digest: text
+    service_uid: i64
+    supervisor_unit: text
+    provider_unit: text
+    activation_units: [text]
+    provider_policy: text
+    closed_provider_model: text
+    process: LinuxMachineProcessContextV1
+
+pub class LinuxInstalledSupervisorProfileV1:
+    slot: i64
+    generation: i64
+    pub fn current_v1() -> Result<LinuxSupervisorInstalledSnapshotV1, text>:
+        supervisor_profile_current_v1(self.slot, self.generation)
+    pub fn close_v1() -> text: supervisor_profile_close_v1(self.slot, self.generation)
+    pub fn close_diagnostic_v1() -> text: supervisor_profile_close_diagnostic_v1(self.slot, self.generation)
+
+pub enum LinuxInstalledSupervisorProfileOpenV1:
+    Rejected(reason: text)
+    CleanupRequired(owner: LinuxInstalledSupervisorProfileV1, reason: text)
+    Ready(owner: LinuxInstalledSupervisorProfileV1)
+
+struct SupervisorProfileStateV1:
+    generation: i64
+    reader: LinuxMachinePolicyOwnerV1
+    snapshot: Option<LinuxSupervisorInstalledSnapshotV1> = None
+    closed: bool = false
+    reader_close_state: text = "live"
+    close_diagnostic: text = ""
+
+var supervisor_profile_slots_v1: [SupervisorProfileStateV1] = []
+
+fn supervisor_profile_entry_v1() -> Result<(), text>:
+    linux_machine_process_origin_check_v1()
+
+fn supervisor_profile_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("supervisor-profile-field-type:" + key)
+
+fn supervisor_unit_name_v1(value: text) -> bool:
+    if value.byte_len() < 2 or value.byte_len() > 255: return false
+    if not (value.ends_with(".service") or value.ends_with(".socket") or value.ends_with(".timer") or value.ends_with(".path")):
+        return false
+    for byte in value.bytes():
+        if not ((byte >= 97 and byte <= 122) or (byte >= 65 and byte <= 90) or
+                (byte >= 48 and byte <= 57) or byte == 45 or byte == 95 or byte == 46 or byte == 64):
+            return false
+    not value.starts_with(".") and not value.contains("..") and not value.contains("@.")
+
+fn supervisor_profile_decode_v1(source: text, machine_digest: text,
+        process: LinuxMachineProcessContextV1) -> Result<LinuxSupervisorInstalledSnapshotV1, text>:
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 1048576,
+            max_depth: 3, max_nodes: 512, max_rows: 0, max_cells: 0, max_columns: 16)):
+        case Ok(value): value
+        case Err(_): return Err("supervisor-profile-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("supervisor-profile-object-required")
+    val keys = ["kind", "version", "machinePolicyDigest", "serviceUid", "supervisorUnit",
+        "providerUnit", "activationUnits", "providerPolicy", "closedActivationModel", "closedProviderModel"]
+    if fields.len() != keys.len(): return Err("supervisor-profile-fields")
+    for key in keys:
+        if not fields.contains_key(key): return Err("supervisor-profile-fields")
+    if supervisor_profile_text_v1(fields, "kind")? != "linux-installed-supervisor":
+        return Err("supervisor-profile-kind")
+    match fields["version"]:
+        case SdnValue.Int(1): pass
+        case _: return Err("supervisor-profile-version")
+    if supervisor_profile_text_v1(fields, "machinePolicyDigest")? != machine_digest:
+        return Err("supervisor-profile-machine-policy-mismatch")
+    # This is a required installed policy model with explicit external setup
+    # obligations. It is NOT accepted as observed producer-exclusion evidence.
+    if supervisor_profile_text_v1(fields, "closedActivationModel")? != "dedicated-uid-system-units-no-login-user-manager-cron-v1":
+        return Err("supervisor-profile-closed-installation-model-required")
+    val provider_model = supervisor_profile_text_v1(fields, "closedProviderModel")?
+    if provider_model != "single-rootless-uid-all-stores-pinned-v1":
+        return Err("supervisor-profile-closed-single-provider-model-required")
+    val uid = match fields["serviceUid"]:
+        case SdnValue.Int(value): value
+        case _: return Err("supervisor-profile-service-uid-type")
+    if uid <= 0 or uid > 4294967294 or uid != process.effective_uid or uid != process.real_uid:
+        return Err("supervisor-profile-dedicated-actual-uid-required")
+    val supervisor = supervisor_profile_text_v1(fields, "supervisorUnit")?
+    val provider = supervisor_profile_text_v1(fields, "providerUnit")?
+    if not supervisor_unit_name_v1(supervisor) or not supervisor.ends_with(".service") or
+            not supervisor_unit_name_v1(provider) or not provider.ends_with(".service") or provider == supervisor:
+        return Err("supervisor-profile-current-provider-units-invalid")
+    val rows = match fields["activationUnits"]:
+        case SdnValue.Array(values): values
+        case _: return Err("supervisor-profile-activation-units-type")
+    if rows.len() < 1 or rows.len() > 128: return Err("supervisor-profile-activation-bound")
+    var units: [text] = []
+    for row in rows:
+        val unit = match row:
+            case SdnValue.String(value): value
+            case _: return Err("supervisor-profile-activation-unit-type")
+        if not supervisor_unit_name_v1(unit) or units.contains(unit) or unit == supervisor or unit == provider:
+            return Err("supervisor-profile-activation-unit-invalid-or-self-stop")
+        units.push(unit)
+    # A dedicated UID must not gain a second, ungoverned systemd user manager.
+    if not units.contains("user@" + str(uid) + ".service"):
+        return Err("supervisor-profile-user-manager-inhibition-required")
+    val provider_policy = supervisor_profile_text_v1(fields, "providerPolicy")?
+    if provider_policy.byte_len() < 1 or provider_policy.byte_len() > 262144:
+        return Err("supervisor-profile-provider-policy-bound")
+    Ok(LinuxSupervisorInstalledSnapshotV1(digest: sha256_text(source), machine_policy_digest: machine_digest,
+        service_uid: uid, supervisor_unit: supervisor, provider_unit: provider,
+        activation_units: units, provider_policy: provider_policy, closed_provider_model: provider_model, process: process))
+
+pub fn linux_installed_supervisor_profile_open_v1() -> LinuxInstalledSupervisorProfileOpenV1:
+    val entered = supervisor_profile_entry_v1()
+    if entered.is_err(): return LinuxInstalledSupervisorProfileOpenV1.Rejected(entered.unwrap_err())
+    if supervisor_profile_slots_v1.len() >= 256: return LinuxInstalledSupervisorProfileOpenV1.Rejected("supervisor-profile-owner-bound")
+    val reader = match linux_machine_policy_open_v1():
+        case LinuxMachinePolicyOpenV1.Rejected(reason): return LinuxInstalledSupervisorProfileOpenV1.Rejected(reason)
+        case LinuxMachinePolicyOpenV1.CleanupRequired(owner, reason):
+            val slot = supervisor_profile_slots_v1.len()
+            supervisor_profile_slots_v1.push(SupervisorProfileStateV1(generation: slot + 1, reader: owner))
+            return LinuxInstalledSupervisorProfileOpenV1.CleanupRequired(
+                LinuxInstalledSupervisorProfileV1(slot: slot, generation: slot + 1), reason)
+        case LinuxMachinePolicyOpenV1.Ready(owner): owner
+    val slot = supervisor_profile_slots_v1.len()
+    supervisor_profile_slots_v1.push(SupervisorProfileStateV1(generation: slot + 1, reader: reader))
+    val owner = LinuxInstalledSupervisorProfileV1(slot: slot, generation: slot + 1)
+    val observed = supervisor_profile_load_v1(slot)
+    if observed.is_err(): return LinuxInstalledSupervisorProfileOpenV1.CleanupRequired(owner, observed.unwrap_err())
+    supervisor_profile_slots_v1[slot].snapshot = Some(observed.unwrap())
+    LinuxInstalledSupervisorProfileOpenV1.Ready(owner)
+
+fn supervisor_profile_load_v1(slot: i64) -> Result<LinuxSupervisorInstalledSnapshotV1, text>:
+    val reader = supervisor_profile_slots_v1[slot].reader
+    val process = reader.actual_process_context_v1()?
+    val machine = reader.read_policy_v1()?
+    val bytes = reader.read_supervisor_profile_v1()?
+    if not utf8_bytes_valid(bytes): return Err("supervisor-profile-utf8")
+    val snapshot = supervisor_profile_decode_v1(bytes_to_text(bytes), sha256_u8_hex(machine), process)?
+    val after = reader.actual_process_context_v1()?
+    if after.identity_digest != process.identity_digest or after.generation != process.generation:
+        return Err("supervisor-profile-process-changed")
+    Ok(snapshot)
+
+fn supervisor_profile_current_v1(slot: i64, generation: i64) -> Result<LinuxSupervisorInstalledSnapshotV1, text>:
+    supervisor_profile_entry_v1()?
+    if slot < 0 or slot >= supervisor_profile_slots_v1.len(): return Err("supervisor-profile-stale")
+    val state = supervisor_profile_slots_v1[slot]
+    if state.closed or state.generation != generation or state.snapshot == None: return Err("supervisor-profile-stale")
+    val actual = supervisor_profile_load_v1(slot)?
+    val prior = state.snapshot.unwrap()
+    if actual.digest != prior.digest or actual.machine_policy_digest != prior.machine_policy_digest or
+            actual.process.identity_digest != prior.process.identity_digest or actual.process.generation != prior.process.generation:
+        return Err("supervisor-profile-installed-context-changed")
+    Ok(actual)
+
+fn supervisor_profile_close_v1(slot: i64, generation: i64) -> text:
+    val entered = supervisor_profile_entry_v1()
+    if entered.is_err(): return entered.unwrap_err()
+    if slot < 0 or slot >= supervisor_profile_slots_v1.len(): return "stale"
+    val state = supervisor_profile_slots_v1[slot]
+    if state.generation != generation: return "stale"
+    if state.closed:
+        return if state.close_diagnostic == "": "released" else: "consumed-error"
+    if state.reader_close_state == "unknown" or state.reader_close_state == "stale":
+        return state.reader_close_state
+    # Reader performs its native same-process/thread check before cleanup.
+    val result = state.reader.close_v1()
+    if result != "released" and state.close_diagnostic == "":
+        supervisor_profile_slots_v1[slot].close_diagnostic = "supervisor-profile-reader-close:" + result
+    if result == "released" or result == "consumed-error":
+        supervisor_profile_slots_v1[slot].reader_close_state = "consumed"
+        supervisor_profile_slots_v1[slot].closed = true
+        return if supervisor_profile_slots_v1[slot].close_diagnostic == "": "released" else: "consumed-error"
+    supervisor_profile_slots_v1[slot].reader_close_state = if result == "retained": "retained" else:
+        if result == "stale": "stale" else: "unknown"
+    supervisor_profile_slots_v1[slot].reader_close_state
+
+fn supervisor_profile_close_diagnostic_v1(slot: i64, generation: i64) -> text:
+    val entered = supervisor_profile_entry_v1()
+    if entered.is_err(): return entered.unwrap_err()
+    if slot < 0 or slot >= supervisor_profile_slots_v1.len(): return "stale"
+    val state = supervisor_profile_slots_v1[slot]
+    if state.generation != generation: return "stale"
+    state.close_diagnostic
