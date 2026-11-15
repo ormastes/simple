@@ -21,6 +21,41 @@ pub struct WindowsCommandTurnV2:
     result: WindowsCommandResultV2?
     error: text
 
+# Only the canonical reducer can mint this receipt. No caller DTO constructor,
+# no process image/digest claim, and no invented bytes-seen/truncation facts.
+pub class WindowsCommandCaptureEvidenceV1:
+    stdout: [u8]
+    stderr: [u8]
+    stdout_eof: bool
+    stderr_eof: bool
+    terminal: bool
+    cleanup_confirmed: bool
+    attempted: bool
+
+    pub fn stdout_bytes_v1() -> [u8]: command_capture_copy_v1(self.stdout)
+    pub fn stderr_bytes_v1() -> [u8]: command_capture_copy_v1(self.stderr)
+    pub fn stdout_eof_v1() -> bool: self.stdout_eof
+    pub fn stderr_eof_v1() -> bool: self.stderr_eof
+    pub fn terminal_v1() -> bool: self.terminal
+    pub fn cleanup_confirmed_v1() -> bool: self.cleanup_confirmed
+    pub fn effect_attempted_v1() -> bool: self.attempted
+
+pub struct WindowsCommandCaptureTurnV1:
+    owner: Option<WindowsCommandOwnerV2>
+    result: Option<WindowsCommandResultV2>
+    evidence: Option<WindowsCommandCaptureEvidenceV1>
+    error: text
+    retirement_confirmed: bool
+
+fn command_capture_copy_v1(bytes: [u8]) -> [u8]:
+    var copied: [u8] = []
+    for byte in bytes: copied.push(byte)
+    copied
+
+pub fn windows_command_capture_begin_v1(request: WindowsCommandRequestV2) -> WindowsCommandCaptureTurnV1:
+    val turn = windows_command_begin_v2(request)
+    WindowsCommandCaptureTurnV1(turn.owner, turn.result, nil, turn.error, false)
+
 struct CommandState:
     request: WindowsCommandRequestV2
     stage: text = "prepare"
@@ -278,13 +313,20 @@ fn cleanup(state: CommandState) -> CommandState:
 
 @unsafe(reason: "canonical same-thread stage transition, retained owner on all unfinished or uncertain effects", capabilities: [ffi, raw_ptr])
 pub fn windows_command_step_v2(owner: WindowsCommandOwnerV2, cancel: bool = false) -> WindowsCommandTurnV2:
+    val turn = command_capture_step_v1(owner, cancel, false)
+    WindowsCommandTurnV2(turn.owner, turn.result, turn.error)
+
+pub fn windows_command_capture_step_v1(owner: WindowsCommandOwnerV2, cancel: bool = false) -> WindowsCommandCaptureTurnV1:
+    command_capture_step_v1(owner, cancel, true)
+
+fn command_capture_step_v1(owner: WindowsCommandOwnerV2, cancel: bool, capture: bool) -> WindowsCommandCaptureTurnV1:
     match windows_command_thread_check_v2():
-        case Err(reason): return WindowsCommandTurnV2(Some(owner), None, reason)
+        case Err(reason): return WindowsCommandCaptureTurnV1(Some(owner), None, nil, reason, false)
         case Ok(_): pass
-    if owner.slot < 0 or owner.slot >= commands.len(): return WindowsCommandTurnV2(Some(owner), None, "windows-command-owner-invalid")
+    if owner.slot < 0 or owner.slot >= commands.len(): return WindowsCommandCaptureTurnV1(Some(owner), None, nil, "windows-command-owner-invalid", false)
     var state = match commands[owner.slot]:
         case Some(value): value
-        case None: return WindowsCommandTurnV2(None, None, "windows-command-owner-retired")
+        case None: return WindowsCommandCaptureTurnV1(None, None, nil, "windows-command-owner-retired", true)
     if cancel and state.stage != "cleanup" and not state.termination_requested:
         state = fail(state, "windows-command-cancelled")
     match state.stage:
@@ -330,7 +372,7 @@ pub fn windows_command_step_v2(owner: WindowsCommandOwnerV2, cancel: bool = fals
         case "cleanup": state = cleanup(state)
         case _: state = fail(state, "windows-command-stage-invalid")
     commands[owner.slot] = Some(state)
-    if not state.closed: return WindowsCommandTurnV2(Some(owner), None, state.error)
+    if not state.closed: return WindowsCommandCaptureTurnV1(Some(owner), None, nil, state.error, false)
     val stdout = windows_command_output_decode_v2(state.stdout)
     val stderr = windows_command_output_decode_v2(state.stderr)
     if stdout.is_err() and state.error == "": state.error = stdout.unwrap_err()
@@ -339,7 +381,12 @@ pub fn windows_command_step_v2(owner: WindowsCommandOwnerV2, cancel: bool = fals
     val result = WindowsCommandResultV2(stdout: if stdout.is_ok(): stdout.unwrap() else: "",
         stderr: if stderr.is_ok(): stderr.unwrap() else: "", exit_code: state.exit_code,
         limit_type: state.limit_type, effect_attempted: state.attempted)
+    val evidence = if capture:
+        Some(WindowsCommandCaptureEvidenceV1(stdout: state.stdout, stderr: state.stderr,
+            stdout_eof: state.stdout_eof, stderr_eof: state.stderr_eof,
+            terminal: state.terminal, cleanup_confirmed: state.closed, attempted: state.attempted))
+        else: nil
     # The nonreused empty slot rejects aliases without retaining capture bytes
     # or environment secrets for every historical command.
     commands[owner.slot] = None
-    WindowsCommandTurnV2(None, Some(result), state.error)
+    WindowsCommandCaptureTurnV1(None, Some(result), evidence, state.error, true)
