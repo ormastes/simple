@@ -65,8 +65,8 @@ REMAINS:
 - Collisions: on a 30-bit slot clash the later key in visit order re-hashes
   (attempt >= 1), so those rare keys are still order dependent. Closing it needs
   a per-unit sorted pre-pass or a recorded id table in `receipt.sdn`.
-- `next_canonical_type_symbol` is no longer used to mint; its field and the
-  nested-lowerer sync copies remain (dead state, remove in a follow-up).
+- `next_canonical_type_symbol` (dead field and nested-lowerer sync copies) was
+  removed 2026-11-15 (slice E cleanup).
 - MC/DC: `mcdc_runtime_decision_id_v1` is already a digest of (path, span
   start), so it is order independent, but it is 31-bit with NO collision
   handling, and `mcdc_next_runtime_id` is still an ordered counter for
