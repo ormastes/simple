@@ -1,0 +1,78 @@
+use std.spec.{describe, it, expect}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.frontend.core.aop.{AdviceCallInfo, AdviceForm, JoinPointKind, WeavingResult}
+use compiler.mir.mir_instructions.{BlockId, MirBlock, MirFunction, MirInst, MirInstKind, MirOperandKind, MirTerminator}
+use compiler.mir.mir_types.{MirSignature, MirType, MirConstValue}
+use compiler.mir.mir_aop_injection.{apply_weaving_result_checked_v1}
+
+fn placement_fixture() -> MirFunction:
+    MirFunction(symbol: SymbolId(id: 1), name: "target",
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [], blocks: [
+            MirBlock(BlockId(id: 9), nil, [], MirTerminator.Abort("failed")),
+            MirBlock(BlockId(id: 4), nil, [MirInst(MirInstKind.Nop, nil), MirInst(MirInstKind.Nop, nil)], MirTerminator.Ret(None))],
+        entry_block: BlockId(id: 4), span: Span.default(), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {}, layout_phase: nil,
+        is_kernel: false, gpu_target: "", gpu_backend_order: "", is_export_c: false, export_name: "",
+        has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false,
+        unroll_factor: 0, pipeline_ii: 0, memory_banks: 0, verification_contract: nil)
+
+fn placement_names(block: MirBlock) -> [text]:
+    var names: [text] = []
+    for inst in block.instructions:
+        match inst.kind:
+            case MirInstKind.Call(_, callee, _):
+                match callee.kind:
+                    case MirOperandKind.Const(MirConstValue.Str(name), _): names.push(name)
+                    case _: names.push("unexpected-callee")
+            case _: names.push("original")
+    names
+
+describe "checked static MIR placement":
+    it "honors entry block and distinct success/error exits":
+        val result = WeavingResult(3, 3, [
+            AdviceCallInfo(JoinPointKind.Execution, "before", AdviceForm.Before, 0, 0),
+            AdviceCallInfo(JoinPointKind.Execution, "success", AdviceForm.AfterSuccess, 0, 0),
+            AdviceCallInfo(JoinPointKind.Execution, "error", AdviceForm.AfterError, 0, 0)], [])
+        val woven = apply_weaving_result_checked_v1(placement_fixture(), result).unwrap()
+        expect(placement_names(woven.blocks[0])).to_equal(["error"])
+        expect(placement_names(woven.blocks[1])).to_equal(["before", "original", "original", "success"])
+
+    it "preserves original instruction anchors and same-slot advice order":
+        val result = WeavingResult(6, 6, [
+            AdviceCallInfo(JoinPointKind.Execution, "entry", AdviceForm.Before, 0, 0),
+            AdviceCallInfo(JoinPointKind.FunctionCall, "first", AdviceForm.Before, 4, 0),
+            AdviceCallInfo(JoinPointKind.FunctionCall, "second", AdviceForm.Before, 4, 0),
+            AdviceCallInfo(JoinPointKind.FunctionCall, "after", AdviceForm.AfterSuccess, 4, 0),
+            AdviceCallInfo(JoinPointKind.FunctionCall, "later", AdviceForm.Before, 4, 1),
+            AdviceCallInfo(JoinPointKind.Execution, "exit", AdviceForm.AfterSuccess, 0, 0)], [])
+        val woven = apply_weaving_result_checked_v1(placement_fixture(), result).unwrap()
+        expect(placement_names(woven.blocks[1])).to_equal(["entry", "first", "second", "original", "after", "later", "original", "exit"])
+
+    it "rejects unsupported forms and invalid coordinates before rewriting":
+        for call in [
+            AdviceCallInfo(JoinPointKind.Execution, "around", AdviceForm.Around, 0, 0),
+            AdviceCallInfo(JoinPointKind.Error, "error", AdviceForm.AfterError, 9, 0),
+            AdviceCallInfo(JoinPointKind.FunctionCall, "bad", AdviceForm.Before, 4, 2),
+            AdviceCallInfo(JoinPointKind.FunctionCall, "bad", AdviceForm.AfterError, 4, 0)]:
+            val original = placement_fixture()
+            expect(apply_weaving_result_checked_v1(original, WeavingResult(1, 1, [call], [])).is_err()).to_equal(true)
+            expect(placement_names(original.blocks[1])).to_equal(["original", "original"])
+
+use compiler.frontend.core.aop.{WeavingConfig, WeavingRule, MirBlockInfo, InstructionInfo, weave_function}
+
+describe "actual advice producer preserves placement":
+    it "keeps function selectors on execution and preserves advice form":
+        for selector in ["*", "target", "execution(* target(..))"]:
+            val config = WeavingConfig.from_rules([
+                WeavingRule(selector, "success", AdviceForm.AfterSuccess, 0)])
+            val produced = weave_function(config, "target", "app", [], [], [
+                MirBlockInfo(4, [InstructionInfo(0, "comparison"), InstructionInfo(1, "call")])])
+            expect(produced.advice_calls.len()).to_equal(1)
+            expect(produced.advice_calls[0].form).to_equal(AdviceForm.AfterSuccess)
+            expect(produced.advice_calls[0].join_point_kind).to_equal(JoinPointKind.Execution)
+            val woven = apply_weaving_result_checked_v1(placement_fixture(), produced).unwrap()
+            expect(placement_names(woven.blocks[1])).to_equal(["original", "original", "success"])

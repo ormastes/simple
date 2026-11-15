@@ -132,6 +132,14 @@ impl<'a> Parser<'a> {
         site
     }
 
+    /// `@attr_storage(..)` is a node-attribute storage tag. The seed accepts it on a
+    /// field and ignores it; the pure-Simple compiler owns the storage mechanism.
+    pub(crate) fn is_at_field_annotation(&mut self) -> bool {
+        self.is_at_collection_algorithm()
+            || (self.check(&TokenKind::At)
+                && matches!(&self.peek_next().kind, TokenKind::Identifier { name, .. } if name == "attr_storage"))
+    }
+
     pub(crate) fn is_at_collection_algorithm(&mut self) -> bool {
         self.check(&TokenKind::At)
             && matches!(&self.peek_next().kind, TokenKind::Identifier { name, .. } if name == "collection_algorithm")

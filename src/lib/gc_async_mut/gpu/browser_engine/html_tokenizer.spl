@@ -307,7 +307,8 @@ pub fn html_tokenizer_tokenize_with_limits(
                         pos = pos + 1
                     else:
                         val self_closing = (
-                            gt4 > 0 and hb[gt4 - 1] == 47
+                            gt4 > 0 and hb[gt4 - 1] == 47 and
+                            _trailing_slash_self_closes(hb, pos + 1, gt4 - 1)
                         )
                         val inner = bytes_to_text(hb.slice(pos + 1, if self_closing: gt4 - 1 else: gt4)).trim()
                         val parsed = _parse_start_tag(
@@ -406,7 +407,9 @@ fn _parse_start_tag(inner: text, attr_limit: i32) -> _ParsedTag:
     )
 
 fn _is_ws(c: text) -> bool:
-    c == " " or c == "\t" or c == "\n" or c == "\r"
+    """HTML whitespace: space, tab, LF, CR and form feed -- the same set as
+    `_is_ws_byte`, which the self-closing scan uses."""
+    c == " " or c == "\t" or c == "\n" or c == "\r" or (c.byte_len() == 1 and c.bytes()[0] == 12)
 
 fn _skip_ws(s: text, start: i32) -> i32:
     """Return the first index >= start that is not whitespace."""
@@ -744,6 +747,54 @@ fn _find_tag_close_b(hb: [u8], n: i32, start: i32) -> i32:
             return i
         i = i + 1
     -1
+
+fn _is_ws_byte(c: u8) -> bool:
+    c == 32 or c == 9 or c == 10 or c == 13 or c == 12
+
+fn _trailing_slash_self_closes(hb: [u8], start: i32, slash: i32) -> bool:
+    """True when the `/` at `slash` (the byte before the tag's `>`) is the
+    self-closing flag. An UNQUOTED attribute value runs to whitespace or `>`
+    (HTML 13.2.5.37), so in `<a href=/x/>` and `<a href= />` the slash is part
+    of the value; after a quoted value, an attribute name or the tag name it
+    is the flag. Walks the tag the way `_parse_attrs` reads it."""
+    var i = start
+    while i < slash and not _is_ws_byte(hb[i]):
+        i = i + 1
+    while i < slash:
+        while i < slash and _is_ws_byte(hb[i]):
+            i = i + 1
+        while i < slash and hb[i] != 61 and not _is_ws_byte(hb[i]):
+            i = i + 1
+        while i < slash and _is_ws_byte(hb[i]):
+            i = i + 1
+        if i < slash and hb[i] == 61:
+            i = i + 1
+            while i < slash and _is_ws_byte(hb[i]):
+                i = i + 1
+            if i >= slash:
+                return false
+            val quote = hb[i]
+            if quote == 34 or quote == 39:
+                i = i + 1
+                while i < slash and hb[i] != quote:
+                    i = i + 1
+                i = i + 1
+            else:
+                while i < slash and not _is_ws_byte(hb[i]):
+                    i = i + 1
+                if i >= slash:
+                    return false
+    true
+
+fn html_start_tag_content_self_closes(content: text) -> bool:
+    """The tokenizer's self-closing rule for the text between `<` and `>` of
+    a start tag: a trailing `/` that is not the tail of an unquoted attribute
+    value. Shared with scanners that walk raw markup."""
+    val hb = content.bytes()
+    val n = hb.len() as i32
+    if n == 0 or hb[n - 1] != 47:
+        return false
+    _trailing_slash_self_closes(hb, 0, n - 1)
 
 fn _is_alpha_byte(c: u8) -> bool:
     """True if byte c is an ASCII letter a-z or A-Z."""

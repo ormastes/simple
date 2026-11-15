@@ -1,0 +1,267 @@
+# @cover src/lib/gc_async_mut/slang/engine/llm_engine.spl 80%
+# @cover src/lib/gc_async_mut/slang/model_executor/backend.spl 80%
+# @cover src/runtime/slang_ggml_shim.c 60%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# design: doc/05_design/ml/slang_serial_exact_prefix_cache.md ; doc/05_design/ml/slang_bounded_multi_prefix_cache.md
+
+"""
+## Purpose and audience
+Purpose: prove on a real model, in one process with the weights resident, that
+slang's snapshot exact-prefix KV cache (the stock-llama.cpp lane, S1-S3) is
+correct and actually saves prompt work. The same deterministic request
+sequence runs twice -- cache disabled, then cache enabled -- and the spec
+compares the two lanes request by request.
+Audience: engineers changing the slang engine, the backend seam, or the ggml
+shim's prefix-cache code, and operators who want a perf receipt for it.
+
+## What is checked
+For the workloads `exact_repeat` (same prompt twice), `prefix_extension`
+(prompt B = prompt A + more text) and `disjoint` (an unrelated prompt):
+- greedy output is byte-identical between cache-off and cache-on wherever
+  both lanes prefill the whole prompt (cold, disjoint), and cache-off is
+  deterministic across a repeat. On a hit the recomputed suffix is a smaller
+  ggml batch, which llama.cpp does not keep bit-identical (its server README
+  says so for `cache_prompt`); the strict hit-path identity is the
+  in-development slang_kv_cache_live_exact_output_spec.spl, tracked by
+  doc/08_tracking/bug/slang_prefix_cache_hit_output_drift_2026-11-14.md;
+- the backend's own counters (not anything this spec computes) report a hit
+  for repeat/extension and a miss for disjoint;
+- cache-on evaluated FEWER prompt tokens than cache-off on the hit workloads
+  (the deterministic perf diff, and the gate);
+- resident request wall time per lane is measured with a monotonic clock and
+  printed as a perf-diff table. It covers prefill plus the identical small
+  decode budget (the backend exposes no prefill-only timestamp). Only
+  `exact_repeat` on_ms < off_ms is gated (39-48x on five runs); the rest is
+  printed, never asserted, because this runs on shared hosts.
+
+## Compatibility and limitations
+Runs when SLANG_MODEL_ROOT names a model directory and SLANG_LIVE=1, with a
+built ggml shim (SLANG_GGML_LIB or the per-OS default under build/sffi/).
+SLANG_KV_MODEL_ID picks the model; otherwise the smallest runnable model in
+the root is used, so a root holding a large checkout never loads it by
+accident. The physical paged-KV lane is out of scope here; it needs a
+llama.cpp carrying include/llama-slang-paged.h (see
+test/05_perf/slang_kv_cache/README.md).
+"""
+
+use std.spec.{describe, it, expect, step, skip, fail}
+use std.gc_async_mut.slang.entrypoints.llm.{slang_models, engine_backend_available}
+use std.gc_async_mut.slang.engine.llm_engine.{EngineGenerationRequest, engine_set_n_ctx_text, engine_set_prefix_cache_limits, engine_ensure_loaded, engine_generate_observed_request, engine_prefix_cache_stats, engine_unload}
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel}
+use std.io_runtime.{env_get, is_dir, time_now_monotonic_ms}
+
+val KV_LIVE_MAX_TOKENS = "12"
+val KV_LIVE_ON_ENTRIES: i64 = 4
+val KV_LIVE_ON_BYTES: i64 = 2147483648
+
+# One request as the backend observed it: deltas of the process-global prefix
+# counters taken around exactly this request.
+struct KvLiveRequest:
+    output: text
+    elapsed_ms: i64
+    prefilled: i64
+    hits: i64
+    misses: i64
+    evictions: i64
+
+struct KvCounters:
+    prefilled: i64
+    hits: i64
+    misses: i64
+    evictions: i64
+    resident_entries: i64
+
+fn _model_root() -> text:
+    val root = env_get("SLANG_MODEL_ROOT") ?? ""
+    if root == "" or not is_dir(root):
+        return ""
+    root
+
+fn _live_enabled() -> bool:
+    (env_get("SLANG_LIVE") ?? "") == "1" and _model_root() != "" and engine_backend_available()
+
+# Smallest runnable model unless SLANG_KV_MODEL_ID names one.
+fn _pick_model(root: text) -> Result<NativeModel, text>:
+    val wanted = env_get("SLANG_KV_MODEL_ID") ?? ""
+    var best: [NativeModel] = []
+    for m in slang_models(root):
+        if not m.runnable:
+            continue
+        if wanted != "":
+            if m.id == wanted:
+                return Ok(m)
+        elif best.len() == 0 or m.bytes < best[0].bytes:
+            best = [m]
+    if best.len() == 0:
+        return Err("no runnable model (SLANG_KV_MODEL_ID='" + wanted + "') under " + root)
+    Ok(best[0])
+
+# Several hundred tokens of deterministic shared prefix. It ends on an
+# alphabetic word so the extension below (" and ...") tokenizes as an exact
+# token-level extension; an exact-prefix cache needs the whole cached token
+# list to be a prefix of the new prompt.
+fn _shared_prompt() -> text:
+    val owners = ["alpha", "bravo", "charlie", "delta", "echo"]
+    var doc = "The following ledger records which serving request owns each KV cache page"
+    var i = 1
+    while i <= 48:
+        doc = doc + ". Page " + i.to_text() + " belongs to request " + owners[i % 5] +
+            " and holds " + (i * 16).to_text() + " tokens of sealed attention state"
+        i = i + 1
+    doc + ". Answer briefly. Question: which request owns page seven"
+
+fn _extended_prompt() -> text:
+    _shared_prompt() + " and which request owns page twelve"
+
+fn _disjoint_prompt() -> text:
+    var doc = "A bakery notebook lists bread recipes"
+    var i = 1
+    while i <= 12:
+        doc = doc + ". Loaf " + i.to_text() + " uses " + (300 + i * 10).to_text() +
+            " grams of flour and rises for " + (40 + i).to_text() + " minutes"
+        i = i + 1
+    doc + ". Question: how much flour does loaf three use"
+
+fn _counters() -> Result<KvCounters, text>:
+    if val s = engine_prefix_cache_stats():
+        return Ok(KvCounters(prefilled: s.tokens_prefilled, hits: s.hits,
+            misses: s.misses, evictions: s.evictions,
+            resident_entries: s.resident_entries))
+    Err("prefix-cache telemetry unavailable")
+
+fn _observe(prompt: text) -> Result<KvLiveRequest, text>:
+    val before = _counters()?
+    val started = time_now_monotonic_ms()
+    val generated = engine_generate_observed_request(EngineGenerationRequest(
+        prompt: prompt, max_tokens: KV_LIVE_MAX_TOKENS))?
+    val elapsed = time_now_monotonic_ms() - started
+    val after = _counters()?
+    Ok(KvLiveRequest(output: generated.output, elapsed_ms: elapsed,
+        prefilled: after.prefilled - before.prefilled,
+        hits: after.hits - before.hits,
+        misses: after.misses - before.misses,
+        evictions: after.evictions - before.evictions))
+
+# Request order shared by both lanes: cold A, exact_repeat A, prefix_extension
+# A+ext, disjoint D. Three distinct prompts fit the 4-entry cache, so the
+# cache-on lane must not evict.
+fn _run_sequence() -> Result<[KvLiveRequest], text>:
+    var out: [KvLiveRequest] = []
+    for prompt in [_shared_prompt(), _shared_prompt(), _extended_prompt(), _disjoint_prompt()]:
+        out.push(_observe(prompt)?)
+    Ok(out)
+
+fn _speedup_text(off_ms: i64, on_ms: i64) -> text:
+    if on_ms <= 0:
+        return "n/a"
+    val hundredths = off_ms * 100 / on_ms
+    val frac = hundredths % 100
+    (hundredths / 100).to_text() + "." + (if frac < 10: "0" else: "") + frac.to_text() + "x"
+
+# Byte offset of the first difference, -1 when the texts are identical.
+fn _first_difference(a: text, b: text) -> i64:
+    var i = 0
+    while i < a.len() and i < b.len():
+        if a[i:i + 1] != b[i:i + 1]:
+            return i
+        i = i + 1
+    if a.len() == b.len():
+        return -1
+    i
+
+fn _print_table(off: [KvLiveRequest], on: [KvLiveRequest]):
+    val names = ["cold", "exact_repeat", "prefix_extension", "disjoint"]
+    print "SLANG_KV_LIVE_TABLE | workload | off_ms | on_ms | speedup | prompt_tokens_off | prompt_tokens_on | hits |"
+    var i = 0
+    while i < 4:
+        print "SLANG_KV_LIVE_TABLE | " + names[i] + " | " + off[i].elapsed_ms.to_text() +
+            " | " + on[i].elapsed_ms.to_text() + " | " +
+            _speedup_text(off[i].elapsed_ms, on[i].elapsed_ms) + " | " +
+            off[i].prefilled.to_text() + " | " + on[i].prefilled.to_text() + " | " +
+            on[i].hits.to_text() + " |"
+        print "SLANG_KV_LIVE_ROW workload=" + names[i] + " off_misses=" + off[i].misses.to_text() +
+            " on_misses=" + on[i].misses.to_text() + " off_hits=" + off[i].hits.to_text() +
+            " on_evictions=" + on[i].evictions.to_text() +
+            " first_diff_byte=" + _first_difference(off[i].output, on[i].output).to_text() +
+            " output_bytes=" + on[i].output.len().to_text()
+        i = i + 1
+
+describe "slang snapshot KV prefix cache on a real model":
+
+    it "reuses prefix KV without changing greedy output":
+        if not _live_enabled():
+            skip("reuses prefix KV without changing greedy output", "needs SLANG_LIVE=1, SLANG_MODEL_ROOT, and a built ggml backend")
+        else:
+            step("Load the smallest runnable model once with n_ctx 2048")
+            expect(engine_set_n_ctx_text("2048")).to_equal(true)
+            val picked = _pick_model(_model_root())
+            if picked.is_err():
+                fail(picked.unwrap_err())
+            val model = picked.unwrap()
+            val loaded = engine_ensure_loaded(model)
+            if loaded.is_err():
+                fail("load failed: " + loaded.unwrap_err())
+            print "SLANG_KV_LIVE_MODEL id=" + model.id + " bytes=" + model.bytes.to_text() + " n_ctx=2048 max_tokens=" + KV_LIVE_MAX_TOKENS
+
+            step("Warm the resident model with a short unrelated request")
+            val warm = engine_generate_observed_request(EngineGenerationRequest(
+                prompt: "Say hi.", max_tokens: "1"))
+            if warm.is_err():
+                fail("warmup failed: " + warm.unwrap_err())
+
+            step("Cache-off lane: zero entries and zero bytes, so nothing is admitted")
+            expect(engine_set_prefix_cache_limits(0, 0)).to_equal(true)
+            expect(_counters().unwrap().resident_entries).to_equal(0)
+            val off_run = _run_sequence()
+            if off_run.is_err():
+                fail("cache-off lane failed: " + off_run.unwrap_err())
+            val off = off_run.unwrap()
+
+            step("Cache-on lane: the engine default bound, starting empty")
+            expect(engine_set_prefix_cache_limits(KV_LIVE_ON_ENTRIES, KV_LIVE_ON_BYTES)).to_equal(true)
+            expect(_counters().unwrap().resident_entries).to_equal(0)
+            val on_run = _run_sequence()
+            if on_run.is_err():
+                fail("cache-on lane failed: " + on_run.unwrap_err())
+            val on = on_run.unwrap()
+            _print_table(off, on)
+            engine_unload()
+
+            step("Without the cache the same prompt decodes to the same bytes")
+            expect(off[1].output).to_equal(off[0].output)
+
+            step("Where both lanes run the same computation, output is byte-identical")
+            # cold and disjoint prefill the whole prompt in both lanes. On a hit
+            # the restored suffix is evaluated as a smaller batch, which ggml
+            # does not keep bit-identical; strict hit-path identity is pinned by
+            # slang_kv_cache_live_exact_output_spec.spl (@tag:in-development).
+            expect(on[0].output).to_equal(off[0].output)
+            expect(on[3].output).to_equal(off[3].output)
+            # Equality of two empty strings would prove nothing.
+            expect(off[0].output.len()).to_be_greater_than(0)
+            expect(off[3].output.len()).to_be_greater_than(0)
+            var i = 0
+            while i < 4:
+                expect(off[i].hits).to_equal(0)
+                expect(on[i].evictions).to_equal(0)
+                i = i + 1
+
+            step("The backend counts a hit for exact_repeat and prefix_extension")
+            expect(on[1].hits).to_equal(1)
+            expect(on[2].hits).to_equal(1)
+
+            step("The disjoint prompt is a miss and prefills exactly what cache-off does")
+            expect(on[3].hits).to_equal(0)
+            expect(on[3].misses).to_equal(1)
+            expect(on[3].prefilled).to_equal(off[3].prefilled)
+
+            step("Cache-on evaluates fewer prompt tokens on every hit workload")
+            expect(on[1].prefilled).to_be_less_than(off[1].prefilled)
+            expect(on[2].prefilled).to_be_less_than(off[2].prefilled)
+            expect(off[1].prefilled).to_be_greater_than(300)
+
+            step("A restored exact repeat is faster than prefilling it")
+            # The only wall-time gate: 39-48x on five consecutive 2026-11-14
+            # runs, so a shared host cannot plausibly invert it. Every other
+            # timing is printed, never asserted.
+            expect(on[1].elapsed_ms).to_be_less_than(off[1].elapsed_ms)

@@ -1,0 +1,201 @@
+# Execution NOT_RUN. Pure saved-request, native-state metadata, and plan guards;
+# no native session, lease issuance, input delivery, retry, or cleanup success.
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.runtime_primary_input_state_v4.*
+use os.apps.smux.runtime_primary_input_sync_v4.smux_primary_input_installed_v4
+use os.apps.smux.runtime_primary_control_request_v4.*
+use os.apps.smux.runtime_control_request_v1.SmuxRuntimeControlRequestV1
+use std.common.process.input_control_v1.*
+use std.common.contracts.mux.session_runtime_control_v1.*
+use std.common.contracts.container.primary_input_v1.*
+use std.common.contracts.container.execution_v2.ContainerHostScopeV2
+use std.common.crypto.sha256.sha256_text
+use test.fixtures.orchestration.container_primary_attach_fixture_v1.container_primary_attach_fixture_v1
+
+fn primary_input_guard_target_v4() -> SessionRuntimeControlTargetV1:
+    val plan = container_primary_attach_fixture_v1()
+    val work = plan.workload
+    val scope = ContainerHostScopeV2(physical_host_id: work.physical_host_id, service_scope_id: work.service_scope_id,
+        boot_id: work.boot_id, provider_generation: work.provider_generation, native_machine_id: work.native_machine_id,
+        continuity_mode: work.continuity_mode, continuity_id: work.continuity_id)
+    SessionRuntimeControlTargetV1(scope: scope, runtime: plan.runtime, workload_request_digest: work.request_digest,
+        binding_uid: "primary-a", binding_digest: plan.identity.binding_digest, service_incarnation: "a".repeat(32),
+        session_id: "s", window_id: "w", pane_id: "p", service_epoch: 1, child_incarnation: 2,
+        client_id: "client-a", attachment_generation: 3, execution_kind: "primary", native_exec_id: "", exec_request_digest: "")
+
+fn primary_input_guard_lease_v4() -> SessionRuntimeControlLeaseV1:
+    SessionRuntimeControlLeaseV1(target: primary_input_guard_target_v4(), kind: SessionRuntimeControlKindV1.Input,
+        principal_id: "local-owner", nonce_digest: sha256_text("b".repeat(64)), revision: 4,
+        issued_monotonic_ms: 10, expires_monotonic_ms: 50)
+
+fn primary_input_guard_request_v4() -> SmuxPrimaryControlRequestV4:
+    SmuxPrimaryControlRequestV4(control: SmuxRuntimeControlRequestV1(action: "input", binding_uid: "primary-a",
+        control_kind: SessionRuntimeControlKindV1.Input, client_id: "", attachment_token: "",
+        expected_revision: 4, nonce: "b".repeat(64), payload: "hello", columns: 0, rows: 0),
+        attempt_sequence: 7, offset: 0, maximum: 5)
+
+fn primary_input_guard_saved_v4() -> SmuxPrimaryInputAttemptV4:
+    val request = primary_input_guard_request_v4()
+    val lease = primary_input_guard_lease_v4()
+    SmuxPrimaryInputAttemptV4(binding_uid: "primary-a", session_identity: "retained-session-a", revision: 4,
+        sequence: 7, request_digest: smux_primary_control_request_digest_v4(request).unwrap(),
+        target_digest: session_runtime_control_target_digest_v1(lease.target).unwrap(), nonce_digest: lease.nonce_digest,
+        expires_ns: container_primary_input_deadline_v1(lease).unwrap(), requested_bytes: 5,
+        disposition: ProcessInputWriteDispositionV1.Unknown, accepted_bytes: 0, error: "unconfirmed-native-result")
+
+fn primary_input_guard_state_v4() -> ProcessInputControlStateV1:
+    val saved = primary_input_guard_saved_v4()
+    ProcessInputControlStateV1(controlled: true, active: true, revision: saved.revision,
+        expires_monotonic_ns: saved.expires_ns, current_attempt_sequence: saved.sequence,
+        last_attempt_sequence: saved.sequence, last_accepted_bytes: 3, last_status: 0,
+        last_disposition: ProcessInputWriteDispositionV1.Recorded, last_revision: saved.revision,
+        last_expires_monotonic_ns: saved.expires_ns, target_digest: saved.target_digest,
+        nonce_digest: saved.nonce_digest, last_target_digest: saved.target_digest, last_nonce_digest: saved.nonce_digest)
+
+describe "smux primary input pure prevention guards V4":
+    it "answers an identical attempt from the saved full request and refuses changed payload or old sequence":
+        step("answers an identical attempt from the saved full request and refuses changed payload or old sequence")
+        val saved = primary_input_guard_saved_v4()
+        expect(smux_primary_attempt_replay_v4(saved, saved.session_identity, saved.revision, saved.sequence, saved.request_digest).unwrap()).to_equal(true)
+        var request = primary_input_guard_request_v4()
+        request.control.payload = "other"
+        val changed_digest = smux_primary_control_request_digest_v4(request).unwrap()
+        expect(smux_primary_attempt_replay_v4(saved, saved.session_identity, saved.revision, saved.sequence, changed_digest).unwrap_err()).to_equal("primary-input-attempt-payload-changed")
+        expect(smux_primary_attempt_replay_v4(saved, saved.session_identity, saved.revision, saved.sequence - 1, saved.request_digest).unwrap_err()).to_equal("primary-input-old-attempt")
+
+    it "keeps an unknown attempt blocking new sequences lease revisions and session rotations":
+        step("keeps an unknown attempt blocking new sequences lease revisions and session rotations")
+        val saved = primary_input_guard_saved_v4()
+        expect(smux_primary_attempt_replay_v4(saved, saved.session_identity, saved.revision, saved.sequence + 1, saved.request_digest).unwrap_err()).to_equal("primary-input-prior-outcome-unknown")
+        expect(smux_primary_attempt_replay_v4(saved, saved.session_identity, saved.revision + 1, saved.sequence, saved.request_digest).unwrap_err()).to_equal("primary-input-prior-outcome-unknown")
+        expect(smux_primary_attempt_replay_v4(saved, "rotated-session", saved.revision, saved.sequence, saved.request_digest).unwrap_err()).to_equal("primary-input-prior-outcome-unknown")
+        expect(smux_primary_attempt_replay_v4(saved, "rotated-session", saved.revision + 1, 1, saved.request_digest).unwrap_err()).to_equal("primary-input-prior-outcome-unknown")
+        var recorded = saved
+        recorded.disposition = ProcessInputWriteDispositionV1.Recorded
+        expect(smux_primary_attempt_replay_v4(recorded, recorded.session_identity, recorded.revision, recorded.sequence + 1, recorded.request_digest).unwrap()).to_equal(false)
+        expect(smux_primary_attempt_replay_v4(recorded, "rotated-session", recorded.revision + 1, 1, recorded.request_digest).unwrap()).to_equal(false)
+
+    it "reconciles only the exact recorded native last tuple including zero and partial prefixes":
+        step("reconciles only the exact recorded native last tuple including zero and partial prefixes")
+        val saved = primary_input_guard_saved_v4()
+        for accepted in [0, 3, 5]:
+            var state = primary_input_guard_state_v4()
+            state.last_accepted_bytes = accepted
+            val reconciled = smux_primary_attempt_reconcile_v4(saved, state)
+            expect(reconciled.disposition).to_equal(ProcessInputWriteDispositionV1.Recorded)
+            expect(reconciled.accepted_bytes).to_equal(accepted)
+            expect(reconciled.request_digest).to_equal(saved.request_digest)
+            expect(reconciled.error).to_equal("")
+            expect(smux_primary_attempt_replay_v4(reconciled, saved.session_identity, saved.revision, saved.sequence, saved.request_digest).unwrap()).to_equal(true)
+        var failed_prefix = primary_input_guard_state_v4()
+        failed_prefix.last_status = 11
+        val with_status = smux_primary_attempt_reconcile_v4(saved, failed_prefix)
+        expect(with_status.disposition).to_equal(ProcessInputWriteDispositionV1.Recorded)
+        expect(with_status.accepted_bytes).to_equal(3)
+        expect(with_status.error).to_equal("primary-input-native-status:11")
+
+    it "preserves uncertainty for each mismatched missing unknown and out of bounds native tuple":
+        step("preserves uncertainty for each mismatched missing unknown and out of bounds native tuple")
+        val saved = primary_input_guard_saved_v4()
+        for field in ["revision", "sequence", "target", "nonce", "deadline", "missing", "unknown", "rejected", "negative", "oversized"]:
+            var changed = primary_input_guard_state_v4()
+            if field == "revision": changed.last_revision = saved.revision + 1
+            if field == "sequence": changed.last_attempt_sequence = saved.sequence + 1
+            if field == "target": changed.last_target_digest = "c".repeat(64)
+            if field == "nonce": changed.last_nonce_digest = "c".repeat(64)
+            if field == "deadline": changed.last_expires_monotonic_ns = saved.expires_ns + 1
+            if field == "missing":
+                changed.last_revision = 0
+                changed.last_attempt_sequence = 0
+                changed.last_target_digest = ""
+                changed.last_nonce_digest = ""
+                changed.last_expires_monotonic_ns = 0
+            if field == "unknown": changed.last_disposition = ProcessInputWriteDispositionV1.Unknown
+            if field == "rejected": changed.last_disposition = ProcessInputWriteDispositionV1.Rejected
+            if field == "negative": changed.last_accepted_bytes = -1
+            if field == "oversized": changed.last_accepted_bytes = saved.requested_bytes + 1
+            expect(smux_primary_attempt_reconcile_v4(saved, changed)).to_equal(saved)
+        var recorded = saved
+        recorded.disposition = ProcessInputWriteDispositionV1.Recorded
+        recorded.accepted_bytes = 1
+        recorded.error = "retained-original-result"
+        expect(smux_primary_attempt_reconcile_v4(recorded, primary_input_guard_state_v4())).to_equal(recorded)
+
+    it "bounds native lease revision and converts the monotonic deadline without overflow":
+        step("bounds native lease revision and converts the monotonic deadline without overflow")
+        val original = primary_input_guard_lease_v4()
+        expect(container_primary_input_deadline_v1(original).unwrap()).to_equal(50000000)
+        var limit = original
+        limit.revision = 1152921504606846975
+        limit.expires_monotonic_ms = 1152921504606
+        expect(container_primary_input_deadline_v1(limit).unwrap()).to_equal(1152921504606000000)
+        for field in ["kind", "revisionZero", "revisionNegative", "revisionOverflow", "expiryZero", "expiryNegative", "expiryOverflow"]:
+            var changed = original
+            if field == "kind": changed.kind = SessionRuntimeControlKindV1.Geometry
+            if field == "revisionZero": changed.revision = 0
+            if field == "revisionNegative": changed.revision = -1
+            if field == "revisionOverflow": changed.revision = 1152921504606846976
+            if field == "expiryZero": changed.expires_monotonic_ms = 0
+            if field == "expiryNegative": changed.expires_monotonic_ms = -1
+            if field == "expiryOverflow": changed.expires_monotonic_ms = 1152921504607
+            expect(container_primary_input_deadline_v1(changed).unwrap_err()).to_equal("primary-input-native-bound")
+
+    it "recognizes installed state only with active exact target nonce revision and native deadline":
+        step("recognizes installed state only with active exact target nonce revision and native deadline")
+        val lease = primary_input_guard_lease_v4()
+        val state = primary_input_guard_state_v4()
+        expect(smux_primary_input_installed_v4(state, lease)).to_equal(true)
+        for field in ["controlled", "active", "revision", "target", "nonce", "deadline"]:
+            var changed = state
+            if field == "controlled": changed.controlled = false
+            if field == "active": changed.active = false
+            if field == "revision": changed.revision = state.revision + 1
+            if field == "target": changed.target_digest = "c".repeat(64)
+            if field == "nonce": changed.nonce_digest = "c".repeat(64)
+            if field == "deadline": changed.expires_monotonic_ns = state.expires_monotonic_ns + 1
+            expect(smux_primary_input_installed_v4(changed, lease)).to_equal(false)
+        for field in ["scope", "runtime", "workload", "bindingUid", "bindingDigest", "service", "session", "window", "pane", "epoch", "child", "client", "attachment", "exec"]:
+            var changed = lease
+            if field == "scope": changed.target.scope.physical_host_id = "another-host"
+            if field == "runtime": changed.target.runtime.native_id = "c".repeat(64)
+            if field == "workload": changed.target.workload_request_digest = "c".repeat(64)
+            if field == "bindingUid": changed.target.binding_uid = "another-binding"
+            if field == "bindingDigest": changed.target.binding_digest = "c".repeat(64)
+            if field == "service": changed.target.service_incarnation = "c".repeat(32)
+            if field == "session": changed.target.session_id = "another-session"
+            if field == "window": changed.target.window_id = "another-window"
+            if field == "pane": changed.target.pane_id = "another-pane"
+            if field == "epoch": changed.target.service_epoch = lease.target.service_epoch + 1
+            if field == "child": changed.target.child_incarnation = lease.target.child_incarnation + 1
+            if field == "client": changed.target.client_id = "another-client"
+            if field == "attachment": changed.target.attachment_generation = lease.target.attachment_generation + 1
+            if field == "exec":
+                changed.target.execution_kind = "exec"
+                changed.target.native_exec_id = "c".repeat(64)
+                changed.target.exec_request_digest = "d".repeat(64)
+            expect(smux_primary_input_installed_v4(state, changed)).to_equal(false)
+        var invalid = lease
+        invalid.revision = 1152921504606846976
+        expect(smux_primary_input_installed_v4(state, invalid)).to_equal(false)
+
+    it "correlates the primary plan runtime scope workload and binding without granting input rights":
+        step("correlates the primary plan runtime scope workload and binding without granting input rights")
+        val plan = container_primary_attach_fixture_v1()
+        val target = primary_input_guard_target_v4()
+        expect(container_primary_input_plan_match_v1(plan, target).is_ok()).to_equal(true)
+        var stale_plan = plan
+        stale_plan.request_digest = "0".repeat(64)
+        expect(container_primary_input_plan_match_v1(stale_plan, target).unwrap_err()).to_equal("primary-input-plan-digest")
+        for field in ["scope", "runtime", "workload", "binding", "exec", "nativeExec", "execDigest"]:
+            var changed = target
+            if field == "scope": changed.scope.physical_host_id = "another-host"
+            if field == "runtime": changed.runtime.native_id = "c".repeat(64)
+            if field == "workload": changed.workload_request_digest = "c".repeat(64)
+            if field == "binding": changed.binding_digest = "c".repeat(64)
+            if field == "exec":
+                changed.execution_kind = "exec"
+                changed.native_exec_id = "c".repeat(64)
+                changed.exec_request_digest = "d".repeat(64)
+            if field == "nativeExec": changed.native_exec_id = "c".repeat(64)
+            if field == "execDigest": changed.exec_request_digest = "d".repeat(64)
+            expect(container_primary_input_plan_match_v1(plan, changed).is_err()).to_equal(true)

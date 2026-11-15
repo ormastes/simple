@@ -1,0 +1,131 @@
+"""Editor trace view: controller-held snapshot parity with the canonical service (CU-011)
+and snapshot safety (CU-014: missing blob / graph delta mismatch / stale never show another revision)."""
+# @req REQ-CARET-TRC-001 REQ-CARET-TRC-002 REQ-CARET-TRC-003
+use std.spec.*
+use std.editor.core.session.{EditSession}
+use std.editor.extensions.host.{ExtensionHost, extension_host_with_builtin_handlers}
+use std.common.traceability.model.*
+use std.common.traceability.query_nodes_v1.{TraceNodeQueryV1, query_trace_nodes_v1}
+use std.common.traceability.query_refs_v1.{TraceReferenceQueryV1, query_trace_references_v1}
+use app.editor.editor_controller.{EditorController}
+use app.editor.tui_shell.{editor_tui_apply_profile}
+use app.editor.trace_view_host.{TraceViewInput, view_host_render}
+use app.traceability.ide_view_provider.{view_rows}
+use app.traceability.ide_view_render.{render_rows, refs_view_lines}
+
+fn graph() -> TraceGraph:
+    val subject = SnapshotSubject(repository_id: "simple", snapshot_id: "snapshot:r", kind: "git_tree", revision_id: "commit:r", tree_id: "tree:r", object_format: "sha256")
+    val nodes = [TraceNode(id: "feature:f", kind: TraceNodeKind.Feature, title: "F"),
+        TraceNode(id: "req:R-1", kind: TraceNodeKind.Requirement, title: "R one"),
+        TraceNode(id: "req:R-2", kind: TraceNodeKind.Requirement, title: "R two")]
+    val claims = [
+        TraceClaim(id: "claim:c-1", from_id: "feature:f", relation: TraceRelation.Specifies, to_id: "req:R-1", origin_id: "intent:f", operation: TraceClaimOperation.Add, rule_id: "authoring-v1", scope_id: "feature:f"),
+        TraceClaim(id: "claim:c-2", from_id: "req:R-1", relation: TraceRelation.DecomposesTo, to_id: "req:R-2", origin_id: "intent:f", operation: TraceClaimOperation.Add, rule_id: "authoring-v1", scope_id: "feature:f")]
+    val edges = [TraceEdge(id: "edge:e-1", from_id: "feature:f", relation: TraceRelation.Specifies, to_id: "req:R-1"),
+        TraceEdge(id: "edge:e-2", from_id: "req:R-1", relation: TraceRelation.DecomposesTo, to_id: "req:R-2")]
+    TraceGraph(subject: subject, input_manifest_id: "inputs:r", nodes: nodes, test_definitions: [], claims: claims,
+        edges: edges, edge_origins: [], origins: [], locators: [], diagnostics: [], generation_id: "generation:r", complete: false)
+
+fn nq(op: text, id: text) -> TraceNodeQueryV1:
+    TraceNodeQueryV1(snapshot_id: "snapshot:r", operation: op, kind: "requirements", selected_id: id, limit: 10)
+
+fn input_for(op: text, id: text) -> TraceViewInput:
+    TraceViewInput(graph: graph(), query: nq(op, id), quals: [], snapshot: "snapshot:r")
+
+fn caret_host() -> ExtensionHost:
+    val host = extension_host_with_builtin_handlers()
+    host.activate_event("onProfile:caret")
+    host
+
+fn has(lines: [text], needle: text) -> bool:
+    for l in lines:
+        if l.contains(needle): return true
+    false
+
+fn caret_ctrl() -> EditorController:
+    var session = EditSession.new()
+    session.open_empty()
+    val ctrl = EditorController.new(session)
+    editor_tui_apply_profile(ctrl, "caret")
+    ctrl
+
+describe "editor trace view parity (CU-011)":
+    it "list rows equal the canonical service rows for the same snapshot":
+        step("list through the view host")
+        val i = input_for("list", "")
+        val lines = view_host_render(caret_host(), "trace.explorer", Some(i))
+        val result = query_trace_nodes_v1(graph(), nq("list", "")).unwrap()
+        val body = render_rows(view_rows(result, []))
+        expect(lines[0]).to_equal("snapshot: snapshot:r")
+        expect(lines.len()).to_equal(body.len() + 2)
+        var k = 0
+        while k < body.len():
+            expect(lines[k + 2]).to_equal(body[k])
+            k = k + 1
+
+    it "show renders only the selected node":
+        step("show req:R-2")
+        val lines = view_host_render(caret_host(), "trace.explorer", Some(input_for("show", "req:R-2")))
+        expect(has(lines, "req:R-2")).to_equal(true)
+        expect(has(lines, "req:R-1")).to_equal(false)
+
+    it "refs rows equal the canonical reference page for the same snapshot":
+        step("refs of req:R-1")
+        val rq = TraceReferenceQueryV1(snapshot_id: "snapshot:r", kind: "requirements", selected_id: "req:R-1", limit: 10)
+        val i = TraceViewInput(graph: graph(), query: nq("list", ""), quals: [], snapshot: "snapshot:r", refs: Some(rq))
+        val lines = view_host_render(caret_host(), "trace.explorer", Some(i))
+        expect(lines).to_equal(refs_view_lines(graph(), rq, [], "snapshot:r"))
+        val page = query_trace_references_v1(graph(), rq).unwrap()
+        expect(page.references.len() > 0).to_equal(true)
+        for r in page.references:
+            expect(has(lines, r.other_id)).to_equal(true)
+
+    it "view.show on the controller renders its held snapshot":
+        step("controller holds a snapshot, view.show trace.explorer")
+        val ctrl = caret_ctrl()
+        ctrl.trace_view_input = Some(input_for("list", ""))
+        val action = ctrl._execute_palette_command("view.show", "trace.explorer")
+        expect(action.status_msg.contains("snapshot: snapshot:r")).to_equal(true)
+        expect(action.status_msg.contains("R one")).to_equal(true)
+
+describe "editor trace view snapshot safety (CU-014)":
+    it "a missing source blob shows an explicit line and no content":
+        step("source_present false")
+        val i = TraceViewInput(graph: graph(), query: nq("list", ""), quals: [], snapshot: "snapshot:r", source_present: false)
+        val lines = view_host_render(caret_host(), "trace.explorer", Some(i))
+        expect(lines.len()).to_equal(1)
+        expect(lines[0].contains("source blob is missing")).to_equal(true)
+        expect(has(lines, "R one")).to_equal(false)
+
+    it "a graph-delta mismatch shows an explicit stale line and no content":
+        step("expected generation differs from graph generation")
+        val i = TraceViewInput(graph: graph(), query: nq("list", ""), quals: [], snapshot: "snapshot:r", expected_generation: "generation:old")
+        val lines = view_host_render(caret_host(), "trace.explorer", Some(i))
+        expect(lines.len()).to_equal(1)
+        expect(lines[0].starts_with("stale:")).to_equal(true)
+        expect(lines[0].contains("graph delta")).to_equal(true)
+        expect(has(lines, "R one")).to_equal(false)
+
+    it "a request for an older revision never renders the held revision":
+        step("selected snapshot is older than the held graph")
+        val i = TraceViewInput(graph: graph(), query: nq("list", ""), quals: [], snapshot: "snapshot:old")
+        val lines = view_host_render(caret_host(), "trace.explorer", Some(i))
+        expect(lines.len()).to_equal(1)
+        expect(lines[0].starts_with("stale:")).to_equal(true)
+        expect(has(lines, "R one")).to_equal(false)
+
+    it "a stale refs request never renders the held revision":
+        step("refs with older selected snapshot")
+        val rq = TraceReferenceQueryV1(snapshot_id: "snapshot:old", kind: "requirements", selected_id: "req:R-1", limit: 10)
+        val i = TraceViewInput(graph: graph(), query: nq("list", ""), quals: [], snapshot: "snapshot:old", refs: Some(rq))
+        val lines = view_host_render(caret_host(), "trace.explorer", Some(i))
+        expect(lines[0].starts_with("stale:")).to_equal(true)
+        expect(has(lines, "R one")).to_equal(false)
+        expect(has(lines, "req:R-2")).to_equal(false)
+
+    it "a controller with no snapshot and a failed load reports unavailable, never other content":
+        step("no snapshot held")
+        val ctrl = caret_ctrl()
+        ctrl.trace_load_error = "TRACE-SNAPSHOT-UNAVAILABLE: test"
+        val action = ctrl._execute_palette_command("view.show", "trace.explorer")
+        expect(action.status_msg.contains("unavailable: TRACE-SNAPSHOT-UNAVAILABLE: test")).to_equal(true)

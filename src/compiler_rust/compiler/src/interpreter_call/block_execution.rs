@@ -193,8 +193,12 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
         Value::Dict(map) => {
             // Iterate over dict returns (key, value) tuples; a layered module
             // value iterates its whole visible surface.
+            let is_namespace = crate::interpreter::is_module_namespace_dict(map);
             let flat = crate::interpreter::module_dict_flat(map);
             let map = flat.as_ref().unwrap_or(map);
+            if is_namespace {
+                super::gate_namespace_private_entries(map)?;
+            }
             let entries: Vec<Value> = crate::value::dict_entries_ordered(map)
                 .into_iter()
                 .map(|(k, v)| {
@@ -417,6 +421,9 @@ pub(super) fn exec_block_closure_into(
 
     for node in nodes {
         crate::interpreter::set_current_node_span(node.span().map(Into::into));
+        // COVERAGE: this executor interprets every statement kind itself and
+        // never reaches exec_node, the only other place a line is recorded.
+        crate::interpreter::coverage_helpers::record_node_coverage_lexical(node);
         match node {
             Node::Expression(expr) => {
                 // Handle functional update (e.g., list->append(3))
@@ -1565,6 +1572,9 @@ fn exec_block_closure_mut_inner(
 
     for node in nodes {
         crate::interpreter::set_current_node_span(node.span().map(Into::into));
+        // COVERAGE: this executor interprets every statement kind itself and
+        // never reaches exec_node, the only other place a line is recorded.
+        crate::interpreter::coverage_helpers::record_node_coverage_lexical(node);
         match node {
             Node::Expression(expr) => {
                 // Handle self-updating method calls (e.g., arr.append(3))

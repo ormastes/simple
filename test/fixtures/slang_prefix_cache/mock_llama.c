@@ -60,6 +60,9 @@ void mock_llama_set_n_ubatch(uint32_t n) { n_ubatch = n; }
 int64_t mock_llama_short_first_decodes(void) { return short_first_decodes; }
 int64_t mock_llama_decode_calls(void) { return decode_calls; }
 uint32_t llama_n_ubatch(const struct llama_context *c) { (void)c; return n_ubatch; }
+static int gpu_offload = 1;
+void mock_llama_set_gpu_offload(int on) { gpu_offload = on; }
+bool llama_supports_gpu_offload(void) { return gpu_offload != 0; }
 const char * llama_model_chat_template(const struct llama_model *m, const char *name) { (void)m; (void)name; return NULL; }
 int32_t llama_chat_apply_template(const char *t, const struct llama_chat_message *msgs, size_t n, bool add, char *buf, int32_t len) { (void)t; (void)msgs; (void)n; (void)add; (void)buf; (void)len; return -1; }
 llama_pos llama_memory_seq_pos_min(llama_memory_t m, llama_seq_id id) { (void)id; return ((struct llama_context *)m)->n_tokens > 0 ? 0 : -1; }

@@ -1,0 +1,250 @@
+# @gc — module uses GC runtime
+#
+# tensor_ops — the single compute seam of the pure-Simple inference backend.
+#
+# Every heavy tensor operation used by the forward pass and the KV cache
+# (decode, matvec, rmsnorm, softmax, silu, add/mul, RoPE, embedding row read,
+# argmax, KV write/attention read) lives here as a plain function over
+# `PureTensor`. Callers never touch `PureTensor.data` directly, so a
+# device-resident provider can replace this module later without changing
+# llama_forward.spl or kv_cache.spl. This file is the CPU `[f64]` provider.
+#
+# All ops are value-returning: they never rely on argument aliasing to
+# publish a result, so the semantics are the same on the seed interpreter and
+# on native codegen.
+
+use std.common.binary_io.{f32_from_bits}
+use std.common.math.math.{math_sin, math_cos, math_exp, math_sqrt, math_pow}
+
+pub struct PureTensor:
+    data: [f64]
+    shape: [i64]
+
+fn _numel_of(shape: [i64]) -> i64:
+    var n: i64 = 1
+    for d in shape:
+        n = n * d
+    n
+
+pub fn tensor_from_values(values: [f64], shape: [i64]) -> PureTensor:
+    PureTensor(data: values, shape: shape)
+
+pub fn tensor_zeros(shape: [i64]) -> PureTensor:
+    val n = _numel_of(shape)
+    var out: [f64] = []
+    var i: i64 = 0
+    while i < n:
+        out.push(0.0)
+        i = i + 1
+    PureTensor(data: out, shape: shape)
+
+pub fn tensor_numel(t: PureTensor) -> i64:
+    t.data.len()
+
+pub fn tensor_shape(t: PureTensor) -> [i64]:
+    t.shape
+
+pub fn tensor_value_at(t: PureTensor, i: i64) -> f64:
+    t.data[i]
+
+# Decode `count` little-endian F32 values starting at byte `offset`.
+pub fn tensor_decode_f32_le(bytes: [u8], offset: i64, count: i64, shape: [i64]) -> PureTensor:
+    var out: [f64] = []
+    var i: i64 = 0
+    var o = offset
+    while i < count:
+        val bits = (bytes[o] as u32) | ((bytes[o + 1] as u32) << 8) | ((bytes[o + 2] as u32) << 16) | ((bytes[o + 3] as u32) << 24)
+        out.push(f32_from_bits(bits) as f64)
+        o = o + 4
+        i = i + 1
+    PureTensor(data: out, shape: shape)
+
+# Decode `count` little-endian BF16 values: a BF16 is the high half of an F32.
+pub fn tensor_decode_bf16_le(bytes: [u8], offset: i64, count: i64, shape: [i64]) -> PureTensor:
+    var out: [f64] = []
+    var i: i64 = 0
+    var o = offset
+    while i < count:
+        val bits = ((bytes[o] as u32) << 16) | ((bytes[o + 1] as u32) << 24)
+        out.push(f32_from_bits(bits) as f64)
+        o = o + 2
+        i = i + 1
+    PureTensor(data: out, shape: shape)
+
+# Row `row` of a 2-D [rows, cols] tensor (embedding lookup).
+pub fn tensor_row(t: PureTensor, row: i64) -> PureTensor:
+    val cols = t.shape[1]
+    var out: [f64] = []
+    var c: i64 = 0
+    val base = row * cols
+    while c < cols:
+        out.push(t.data[base + c])
+        c = c + 1
+    PureTensor(data: out, shape: [cols])
+
+# y = W x for W stored [out, in] (HF Linear layout, no bias).
+pub fn tensor_matvec(w: PureTensor, x: PureTensor) -> PureTensor:
+    val rows = w.shape[0]
+    val cols = w.shape[1]
+    val wd = w.data
+    val xd = x.data
+    var out: [f64] = []
+    var r: i64 = 0
+    while r < rows:
+        var acc = 0.0
+        var c: i64 = 0
+        val base = r * cols
+        while c < cols:
+            acc = acc + wd[base + c] * xd[c]
+            c = c + 1
+        out.push(acc)
+        r = r + 1
+    PureTensor(data: out, shape: [rows])
+
+# RMSNorm: x * rsqrt(mean(x^2) + eps) * w.
+pub fn tensor_rmsnorm(x: PureTensor, w: PureTensor, eps: f64) -> PureTensor:
+    val n = x.data.len()
+    var ss = 0.0
+    var i: i64 = 0
+    while i < n:
+        ss = ss + x.data[i] * x.data[i]
+        i = i + 1
+    val scale = 1.0 / math_sqrt(ss / (n as f64) + eps)
+    var out: [f64] = []
+    i = 0
+    while i < n:
+        out.push(x.data[i] * scale * w.data[i])
+        i = i + 1
+    PureTensor(data: out, shape: x.shape)
+
+pub fn tensor_add(a: PureTensor, b: PureTensor) -> PureTensor:
+    var out: [f64] = []
+    var i: i64 = 0
+    while i < a.data.len():
+        out.push(a.data[i] + b.data[i])
+        i = i + 1
+    PureTensor(data: out, shape: a.shape)
+
+pub fn tensor_mul(a: PureTensor, b: PureTensor) -> PureTensor:
+    var out: [f64] = []
+    var i: i64 = 0
+    while i < a.data.len():
+        out.push(a.data[i] * b.data[i])
+        i = i + 1
+    PureTensor(data: out, shape: a.shape)
+
+# SiLU: x * sigmoid(x).
+pub fn tensor_silu(x: PureTensor) -> PureTensor:
+    var out: [f64] = []
+    var i: i64 = 0
+    while i < x.data.len():
+        val v = x.data[i]
+        out.push(v / (1.0 + math_exp(-v)))
+        i = i + 1
+    PureTensor(data: out, shape: x.shape)
+
+pub fn tensor_softmax(x: PureTensor) -> PureTensor:
+    val n = x.data.len()
+    var mx = x.data[0]
+    var i: i64 = 1
+    while i < n:
+        if x.data[i] > mx:
+            mx = x.data[i]
+        i = i + 1
+    var es: [f64] = []
+    var sum = 0.0
+    i = 0
+    while i < n:
+        val e = math_exp(x.data[i] - mx)
+        es.push(e)
+        sum = sum + e
+        i = i + 1
+    var out: [f64] = []
+    i = 0
+    while i < n:
+        out.push(es[i] / sum)
+        i = i + 1
+    PureTensor(data: out, shape: x.shape)
+
+# Rotary embedding, HF LlamaForCausalLM convention ("rotate_half"): within each
+# head of width head_dim, element i pairs with element i + head_dim/2 and is
+# rotated by angle pos * theta^(-2i/head_dim).
+pub fn tensor_rope(x: PureTensor, pos: i64, n_heads: i64, head_dim: i64, theta: f64) -> PureTensor:
+    val half = head_dim / 2
+    var cosv: [f64] = []
+    var sinv: [f64] = []
+    var i: i64 = 0
+    while i < half:
+        val inv_freq = 1.0 / math_pow(theta, ((2 * i) as f64) / (head_dim as f64))
+        val ang = (pos as f64) * inv_freq
+        cosv.push(math_cos(ang))
+        sinv.push(math_sin(ang))
+        i = i + 1
+    var out = x.data
+    var h: i64 = 0
+    while h < n_heads:
+        val base = h * head_dim
+        i = 0
+        while i < half:
+            val x0 = x.data[base + i]
+            val x1 = x.data[base + i + half]
+            out[base + i] = x0 * cosv[i] - x1 * sinv[i]
+            out[base + i + half] = x1 * cosv[i] + x0 * sinv[i]
+            i = i + 1
+        h = h + 1
+    PureTensor(data: out, shape: x.shape)
+
+pub fn tensor_argmax(x: PureTensor) -> i64:
+    var best: i64 = 0
+    var i: i64 = 1
+    while i < x.data.len():
+        if x.data[i] > x.data[best]:
+            best = i
+        i = i + 1
+    best
+
+# KV storage: a [max_pos, dim] tensor; write row `pos` and return the tensor.
+pub fn tensor_kv_write(buf: PureTensor, pos: i64, row: PureTensor) -> PureTensor:
+    val dim = buf.shape[1]
+    var out = buf.data
+    var i: i64 = 0
+    val base = pos * dim
+    while i < dim:
+        out[base + i] = row.data[i]
+        i = i + 1
+    PureTensor(data: out, shape: buf.shape)
+
+# Causal multi-head attention for one query against KV rows [0, n_pos):
+# per head softmax(q.k / sqrt(head_dim)) weighted sum of v.
+pub fn tensor_attention(q: PureTensor, k_buf: PureTensor, v_buf: PureTensor, n_pos: i64, n_heads: i64, head_dim: i64) -> PureTensor:
+    val dim = n_heads * head_dim
+    val scale = 1.0 / math_sqrt(head_dim as f64)
+    val kd = k_buf.data
+    val vd = v_buf.data
+    var out: [f64] = []
+    var h: i64 = 0
+    while h < n_heads:
+        val hb = h * head_dim
+        var scores: [f64] = []
+        var t: i64 = 0
+        while t < n_pos:
+            val kb = t * dim + hb
+            var dot = 0.0
+            var i: i64 = 0
+            while i < head_dim:
+                dot = dot + q.data[hb + i] * kd[kb + i]
+                i = i + 1
+            scores.push(dot * scale)
+            t = t + 1
+        val probs = tensor_softmax(PureTensor(data: scores, shape: [n_pos])).data
+        var i: i64 = 0
+        while i < head_dim:
+            var acc = 0.0
+            t = 0
+            while t < n_pos:
+                acc = acc + probs[t] * vd[t * dim + hb + i]
+                t = t + 1
+            out.push(acc)
+            i = i + 1
+        h = h + 1
+    PureTensor(data: out, shape: [dim])

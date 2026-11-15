@@ -84,3 +84,9 @@ release/1.0.0-tip seed: BOTH examples pass, spec verdict 2/2 GREEN. The
 receiver type is no longer erased to `object` in nested call context —
 presumably fixed with the nested-call/method-resolution work now at HEAD.
 Closing as verified non-repro.
+## Addendum 2026-11-14 (lane p3-batch-c) — pinned
+
+Re-verified on the Rust seed built from `release/1.0.0` @ `c541817df822`
+(Linux aarch64). The record's exact repro passes 2/2. It is now pinned by
+`test/01_unit/bugs/static_factory_method_chain_spec.spl` (3/3), which covers the
+bound and chained forms and a second input where they must agree.

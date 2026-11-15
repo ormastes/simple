@@ -60,6 +60,7 @@ mod coverage_metadata_tests;
 mod conditional_empty_array_tests;
 mod trait_builtin_named_method_tests;
 mod enum_import_scope_tests;
+mod fn_alias_import_scope_tests;
 mod same_named_trait_default_tests;
 mod callable_assert_tests;
 mod trait_field_receiver_tests;

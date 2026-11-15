@@ -47,13 +47,15 @@
 # classification there, and these examples assert nothing on it.
 use std.spec.*
 use std.nogc_sync_mut.sffi.io.{file_exists}
+use std.io_runtime.{env_get, env_set}
 use std.nogc_sync_mut.text_layout.font_provider.{
     browser_font_candidates_for_family, browser_sans_font_candidates,
     browser_serif_font_candidates, browser_mono_font_candidates,
     browser_font_family_for_weight, browser_font_family_for_style,
     browser_platform_sans_bold_faces, browser_platform_sans_italic_faces,
     browser_bundled_font_path_for_family, browser_family_has_host_face,
-    browser_platform_sans_faces, browser_resolved_family_memo_len
+    browser_platform_sans_faces, browser_resolved_family_memo_len,
+    browser_host_has_measured_linux_face_set
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_debug_layout_by_id
@@ -73,14 +75,9 @@ fn _head(family: text) -> text:
 fn _first(list: [text]) -> text:
     if list.len() > 0: list[0] else: ""
 
-# The host the table was measured on. The provider applies the per-name walk
-# only there (`browser_host_has_measured_linux_face_set`); every other host
-# keeps the previous substring classification, which this spec does not pin.
+# The host the table was measured on: the provider's own gate, not a copy.
 fn _linux_faces() -> bool:
-    (
-        file_exists(LIBERATION_SANS) and file_exists(LIBERATION_SERIF) and
-        file_exists(LIBERATION_MONO) and not file_exists(MACOS_HELVETICA)
-    )
+    browser_host_has_measured_linux_face_set()
 
 fn _width(family: text) -> text:
     val html = (
@@ -241,4 +238,22 @@ describe "font-family list resolution":
             i = i + 1
         expect(browser_resolved_family_memo_len() <= 512).to_equal(true)
         expect(browser_resolved_family_memo_len() > 0).to_equal(true)
+
+    it "resolves a memoised bundled family beneath the CURRENT asset root":
+        # The memo holds the asset's logical path; the root is applied at use.
+        # A process can change SIMPLE_ASSET_ROOT (platform_system_face_metrics_spec
+        # does), and a memoised physical path would then be stale.
+        val previous = env_get("SIMPLE_ASSET_ROOT")
+        val before = browser_bundled_font_path_for_family("Bungee")
+        expect(env_set("SIMPLE_ASSET_ROOT", "/nonexistent-asset-root-a")).to_equal(true)
+        val under_a = browser_bundled_font_path_for_family("Bungee")
+        val list_a = browser_font_candidates_for_family("Bungee")
+        expect(env_set("SIMPLE_ASSET_ROOT", "/nonexistent-asset-root-b")).to_equal(true)
+        val under_b = browser_bundled_font_path_for_family("Bungee")
+        expect(env_set("SIMPLE_ASSET_ROOT", previous)).to_equal(true)
+        val after = browser_bundled_font_path_for_family("Bungee")
+        expect(under_a.starts_with("/nonexistent-asset-root-a/")).to_equal(true)
+        expect(list_a[0]).to_equal(under_a)
+        expect(under_b.starts_with("/nonexistent-asset-root-b/")).to_equal(true)
+        expect(after).to_equal(before)
 

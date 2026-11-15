@@ -3,6 +3,9 @@
 use std.spec.*
 use std.common.traceability.model.*
 use std.common.traceability.query_nodes_v1.{TraceNodeQueryV1, query_trace_nodes_v1}
+use std.common.traceability.query_missing_v1.{TraceLinkStatus, TraceGraphCompletenessV1, TraceMissingEntryV1, TraceMissingResultV1, trace_link_status_name_v1, trace_missing_requirements_v1}
+use std.common.traceability.sidecar_v1.{TraceSidecarReferenceV1}
+use std.spec.step
 use app.traceability.query_options_v1.{trace_query_options_parse_v1, TraceQueryOptionsV1, trace_query_sdn_requested_v1}
 use app.traceability.query_render_v1.{trace_query_render_v1, trace_query_table_diagnostics_v1}
 use app.traceability.extract.snapshot_pipeline.{TraceSnapshotScope, TraceSnapshotBuild}
@@ -146,3 +149,106 @@ describe "P0 options and registry":
         expect(trace_query_sdn_requested_v1(separate)).to_be(true)
         expect(trace_query_sdn_requested_v1(["list", "features", "--format", "table", "--limit", "0"])).to_be(false)
         expect(trace_query_sdn_requested_v1(["list", "features", "--format"])).to_be(false)
+
+fn missing_graph() -> TraceGraph:
+    var graph = node_query_graph()
+    graph.nodes = [
+        TraceNode(id: "req:linked", kind: TraceNodeKind.Requirement, title: "Fully linked"),
+        TraceNode(id: "req:unlinked", kind: TraceNodeKind.Requirement, title: "Nothing links here"),
+        TraceNode(id: "req:impl-only", kind: TraceNodeKind.Requirement, title: "Implemented, untested"),
+        TraceNode(id: "req:via-criterion", kind: TraceNodeKind.Requirement, title: "Verified through criterion"),
+        TraceNode(id: "ac:one", kind: TraceNodeKind.AcceptanceCriterion, title: "Criterion"),
+        TraceNode(id: "src:a", kind: TraceNodeKind.SourceFile, title: "a.spl"),
+        TraceNode(id: "case:a", kind: TraceNodeKind.TestCase, title: "case a")]
+    graph.edges = [
+        TraceEdge(id: "e1", from_id: "req:linked", relation: TraceRelation.ImplementedBy, to_id: "src:a"),
+        TraceEdge(id: "e2", from_id: "req:linked", relation: TraceRelation.VerifiedBy, to_id: "case:a"),
+        TraceEdge(id: "e3", from_id: "req:impl-only", relation: TraceRelation.ImplementedBy, to_id: "src:a"),
+        TraceEdge(id: "e4", from_id: "req:via-criterion", relation: TraceRelation.ImplementedBy, to_id: "src:a"),
+        TraceEdge(id: "e5", from_id: "req:via-criterion", relation: TraceRelation.DecomposesTo, to_id: "ac:one"),
+        TraceEdge(id: "e6", from_id: "ac:one", relation: TraceRelation.AcceptedBy, to_id: "case:a")]
+    graph
+
+fn missing_ids(result: TraceMissingResultV1) -> [text]:
+    var ids: [text] = []
+    for entry in result.entries: ids.push(entry.requirement_id.value)
+    ids
+
+describe "trace missing":
+    it "lists a requirement with no implementing or verifying edge and omits a linked one":
+        # @req TRACE-005
+        step("Evaluate the fixture graph with no sidecar rows")
+        val result = trace_missing_requirements_v1(missing_graph(), [])
+        val ids = missing_ids(result)
+        step("The unlinked and the implemented-only requirements are reported")
+        expect(ids.contains("req:unlinked")).to_be(true)
+        expect(ids.contains("req:impl-only")).to_be(true)
+        step("A requirement with both edges, and one verified through its criterion, are omitted")
+        expect(ids.contains("req:linked")).to_be(false)
+        expect(ids.contains("req:via-criterion")).to_be(false)
+        expect(result.total_requirements.value).to_equal(4)
+        expect(result.entries.len()).to_equal(2)
+
+    it "reports which half is missing with a typed status":
+        # @req TRACE-005
+        step("Inspect the per-half statuses")
+        val result = trace_missing_requirements_v1(missing_graph(), [])
+        var by_id: Dict<text, TraceMissingEntryV1> = {}
+        for entry in result.entries: by_id[entry.requirement_id.value] = entry
+        expect(by_id["req:unlinked"].implementation).to_equal(TraceLinkStatus.Missing)
+        expect(by_id["req:unlinked"].verification).to_equal(TraceLinkStatus.Missing)
+        expect(by_id["req:impl-only"].implementation).to_equal(TraceLinkStatus.Linked)
+        expect(by_id["req:impl-only"].verification).to_equal(TraceLinkStatus.Missing)
+
+    it "does not treat a link whose requirement is the target end as the requirement's own":
+        # @req TRACE-005
+        step("Point an implemented_by edge from a source file at the requirement")
+        var graph = missing_graph()
+        graph.edges.push(TraceEdge(id: "e7", from_id: "src:a", relation: TraceRelation.ImplementedBy, to_id: "req:unlinked"))
+        expect(missing_ids(trace_missing_requirements_v1(graph, [])).contains("req:unlinked")).to_be(true)
+
+    it "counts a spec-header verified_by sidecar row as verification":
+        # @req TRACE-005
+        step("Supply a sidecar row for the implemented-only requirement")
+        val row = TraceSidecarReferenceV1(source_kind: "spec-annotations/v1", from_id: "req:impl-only",
+            relation: "verified_by", path: "test/x_spec.spl", locator: "1", authority: "sidecar")
+        val ids = missing_ids(trace_missing_requirements_v1(missing_graph(), [row]))
+        expect(ids.contains("req:impl-only")).to_be(false)
+        expect(ids.contains("req:unlinked")).to_be(true)
+
+    it "reports unknown rather than missing when the graph is incomplete":
+        # @req TRACE-005
+        step("Mark the snapshot graph incomplete")
+        var graph = missing_graph()
+        graph.complete = false
+        val result = trace_missing_requirements_v1(graph, [])
+        expect(result.completeness).to_equal(TraceGraphCompletenessV1.Incomplete)
+        var unlinked = TraceLinkStatus.Linked
+        for entry in result.entries:
+            if entry.requirement_id.value == "req:unlinked": unlinked = entry.implementation
+        expect(unlinked).to_equal(TraceLinkStatus.Unknown)
+
+    it "parses the missing operation and rejects other kinds and paging":
+        # @req TRACE-005
+        step("Accept bare and explicit requirements forms")
+        expect(trace_query_options_parse_v1(["missing"]).unwrap().operation).to_equal("missing")
+        expect(trace_query_options_parse_v1(["missing", "requirements", "--format=sdn"]).unwrap().kind).to_equal("requirements")
+        step("Reject a non-requirement kind, a cursor and a prefix")
+        expect(trace_query_options_parse_v1(["missing", "bugs"]).is_err()).to_be(true)
+        expect(trace_query_options_parse_v1(["missing", "--cursor=x"]).is_err()).to_be(true)
+        expect(trace_query_options_parse_v1(["missing", "--prefix=req:"]).is_err()).to_be(true)
+
+describe "trace missing verification honesty":
+    it "reports a verified_by edge as linked, never verified or tested":
+        # @req TRACE-005
+        step("Add a verified_by edge to a requirement with no implementation")
+        var graph = missing_graph()
+        graph.edges.push(TraceEdge(id: "e8", from_id: "req:unlinked", relation: TraceRelation.VerifiedBy, to_id: "case:a"))
+        val result = trace_missing_requirements_v1(graph, [])
+        var verification = TraceLinkStatus.Missing
+        for entry in result.entries:
+            if entry.requirement_id.value == "req:unlinked": verification = entry.verification
+        step("The structural link is Linked and renders as the word linked")
+        expect(verification).to_equal(TraceLinkStatus.Linked)
+        expect(trace_link_status_name_v1(verification)).to_equal("linked")
+        expect(trace_link_status_name_v1(verification) == "verified").to_be(false)

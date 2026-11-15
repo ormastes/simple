@@ -1,31 +1,44 @@
 """
 ## Purpose and audience
 Purpose: Pin the line advance Chrome uses for wrapped text under
-`line-height: normal`. Expected to FAIL until wrapped lines advance by the
-face's normal line height instead of the font size.
+`line-height: normal`: the face's own ascent + descent + line gap, each
+rounded, not the font size.
 Audience: browser-engine layout maintainers.
 
 Chrome oracle (Chrome 159.0.8154.6, Linux, device scale 1):
   160x120 screenshot of the famous-site corpus page below: the fifth wrapped
-  line ("fixture") has ink at rows 82-93, so pixel (32,93) is 0xFF000000.
-  Simple paints that line at rows 74-85 and (32,93) is 0xFFFFFFFF.
-  getBoundingClientRect of the same text in an auto-height 120px block:
-    sans-serif / Arial   5 lines   120x90   (Simple: 120x80)
-    serif                4 lines   120x72   (Simple: 120x64)
-  i.e. 18px per line in Chrome, 16px (the font size) in Simple.
+  line ("fixture") has ink at rows 82-93; the five lines occupy rows 10-21,
+  31-39, 46-57, 64-78 and 82-93. Pixel (32,93) is 0xFF000000 in Chrome; here
+  it is glyph ink of a different antialiased value (0xFF808080), which is a
+  rasterizer difference pinned separately in
+  corpus_fifth_line_exact_pixel_spec.spl, not a line-advance one.
+  Height of a one-line block (`<div style="font-family:F;font-size:Npx">`):
+    font-size        12  16  24  32
+    sans-serif       14  18  28  37   (Liberation Sans)
+    serif            15  18  27  37   (Liberation Serif)
+    monospace        14  19  28  38   (DejaVu Sans Mono)
+  The same text in an auto-height 120px block at 16px:
+    sans-serif   5 lines   120x90        serif   4 lines   120x72
+Before the fix every line advanced by the font size (80 and 64 above).
 
 The pixel probe was part of "paints famous-site corpus block geometry with
 Chrome default body margin" in
 test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl,
 where ff2dc6ed375 had pinned it to white ("no text painted").
+Bug record: doc/08_tracking/bug/web_wrapped_line_advance_16px_vs_chrome_18px_2026-11-14.md
+
+Host: the face files below are Linux ones; a host without them asserts nothing.
 """
-# @tag:in-development
-# Tracks: doc/08_tracking/bug/web_wrapped_line_advance_16px_vs_chrome_18px_2026-11-14.md
-# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_debug_layout_by_id
+}
+use std.nogc_sync_mut.text_layout.font_provider.{browser_host_has_measured_linux_face_set}
+use std.nogc_sync_mut.sffi.io.{file_exists}
+use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
+    parse_line_height_value, line_height_value_is_normal, line_height_after_normal_keyword
 }
 
 val CORPUS_TEXT: text = "Twitch commerce deterministic compatibility fixture"
@@ -37,15 +50,172 @@ fn _block_height(family: text) -> text:
     )
     simple_web_layout_debug_layout_by_id(html, 800, 900, "probe", "h")
 
+fn _ink_bands(pixels: [u32], width: i32, height: i32) -> text:
+    var out = ""
+    var band_start = -1
+    var y = 0
+    while y < height:
+        var ink = false
+        var x = 0
+        while x < width:
+            val px = pixels[x + y * width]
+            if px != 0xFFFFFFFFu32 and px != 0xFF7C3AEDu32:
+                ink = true
+            x = x + 1
+        if ink and band_start < 0:
+            band_start = y
+        if not ink and band_start >= 0:
+            if out != "":
+                out = out + " "
+            out = out + band_start.to_string() + "-" + (y - 1).to_string()
+            band_start = -1
+        y = y + 1
+    out
+
+fn _line(family: text, size: i32) -> text:
+    val html = (
+        "<html><body style='margin:0'><div id='probe' style='font-family:" + family +
+        ";font-size:" + size.to_string() + "px'>Hxg</div></body></html>"
+    )
+    simple_web_layout_debug_layout_by_id(html, 800, 900, "probe", "h")
+
 describe "wrapped line advance under line-height: normal":
-    it "paints the fifth corpus line where Chrome does":
-        val html = "<html><body><div data-font-corpus=\"known-site-fonts\" style='width: 120px; height: 40px; background-color: #7c3aed; font-family: \"IBM Plex Sans\", Arial, sans-serif'>" + CORPUS_TEXT + "</div></body></html>"
-        val pixels = simple_web_render_html_to_pixels(html, 160, 120)
-        expect(pixels.len()).to_equal(160 * 120)
-        expect(pixels[32 + 93 * 160]).to_equal(0xFF000000u32)
+    it "paints the five corpus lines on the rows Chrome does":
+        if browser_host_has_measured_linux_face_set():
+            val html = "<html><body><div data-font-corpus=\"known-site-fonts\" style='width: 120px; height: 40px; background-color: #7c3aed; font-family: \"IBM Plex Sans\", Arial, sans-serif'>" + CORPUS_TEXT + "</div></body></html>"
+            val pixels = simple_web_render_html_to_pixels(html, 160, 120)
+            expect(pixels.len()).to_equal(160 * 120)
+            # Rows with any glyph ink, as first/last row of each band. Chrome
+            # 159 screenshot: 10-21, 31-39, 46-57, 64-78, 82-93 (the bands
+            # differ in height because the lines differ in ascenders and
+            # descenders; the baselines are 18px apart). Before the fix the
+            # bands were 10-21, 29-37, 42-53, 58-72, 74-85.
+            expect(_ink_bands(pixels, 160, 120)).to_equal("10-21 31-39 46-57 64-78 82-93")
+            # The probe ff2dc6ed375 had pinned to white: it is glyph ink.
+            expect(pixels[32 + 93 * 160] != 0xFFFFFFFFu32).to_equal(true)
+            expect(pixels[32 + 93 * 160] != 0xFF7C3AEDu32).to_equal(true)
 
     it "advances wrapped sans lines by 18px":
-        expect(_block_height("sans-serif")).to_equal("90")
+        if browser_host_has_measured_linux_face_set():
+            expect(_block_height("sans-serif")).to_equal("90")
 
     it "advances wrapped serif lines by 18px":
-        expect(_block_height("serif")).to_equal("72")
+        if browser_host_has_measured_linux_face_set():
+            expect(_block_height("serif")).to_equal("72")
+
+    it "uses each face's own normal line height at every size":
+        if browser_host_has_measured_linux_face_set():
+            expect(_line("sans-serif", 12)).to_equal("14")
+            expect(_line("sans-serif", 16)).to_equal("18")
+            expect(_line("sans-serif", 24)).to_equal("28")
+            expect(_line("sans-serif", 32)).to_equal("37")
+            expect(_line("serif", 12)).to_equal("15")
+            expect(_line("serif", 16)).to_equal("18")
+            expect(_line("serif", 24)).to_equal("27")
+            expect(_line("serif", 32)).to_equal("37")
+            if file_exists("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"):
+                expect(_line("monospace", 12)).to_equal("14")
+                expect(_line("monospace", 16)).to_equal("19")
+                expect(_line("monospace", 24)).to_equal("28")
+                expect(_line("monospace", 32)).to_equal("38")
+
+fn _h(inner: text, id: text) -> text:
+    simple_web_layout_debug_layout_by_id(
+        "<html><body style='margin:0;font-family:sans-serif'>" + inner + "</body></html>",
+        800, 900, id, "h"
+    )
+
+# Element styles (not only #text) take the same normal line height. Before
+# 2026-11-14 an element used 9 * (font_size / 8): 9/18/27/36 at 12/16/24/32px.
+# Chrome 159.0.8154.6, `body{margin:0;font-family:sans-serif}`.
+describe "normal line height on element styles":
+    it "sizes a <br> line from the face metric":
+        if browser_host_has_measured_linux_face_set():
+            # Chrome 28 (was 21), 56 (was 54), 36, 28 (was 18).
+            expect(_h("<div id='x' style='font-size:12px'><br>b</div>", "x")).to_equal("28")
+            expect(_h("<div id='x' style='font-size:24px'><br>b</div>", "x")).to_equal("56")
+            expect(_h("<div id='x'><br><br></div>", "x")).to_equal("36")
+            expect(_h("<div id='x' style='font-size:12px'><br><br></div>", "x")).to_equal("28")
+
+    it "sizes a list item line from the face metric":
+        if browser_host_has_measured_linux_face_set():
+            # Chrome 14 (was 12) and 28 (was 27).
+            expect(_h("<ul style='font-size:12px;margin:0'><li id='x'>x</li></ul>", "x")).to_equal("14")
+            expect(_h("<ul style='font-size:24px;margin:0'><li id='x'>x</li></ul>", "x")).to_equal("28")
+
+    it "sizes a heading and a wrapped paragraph from the face metric":
+        if browser_host_has_measured_linux_face_set():
+            # Chrome 37 (was 36) and 54 = 3 x 18 (was 48).
+            expect(_h("<h1 id='x' style='margin:0'>x</h1>", "x")).to_equal("37")
+            expect(_h("<p id='x' style='margin:0;width:60px'>aa aa aa aa aa</p>", "x")).to_equal("54")
+
+# Host-independent: these do not depend on any face. Chrome 159.0.8154.6.
+describe "line-height value forms":
+    it "parses a number, a length, a percentage and em":
+        expect(parse_line_height_value("1.5")).to_equal(-15)
+        expect(parse_line_height_value("2")).to_equal(-20)
+        expect(parse_line_height_value("24px")).to_equal(24)
+        # 150% is 1.5x. It parsed as 150x.
+        expect(parse_line_height_value("150%")).to_equal(-15)
+        expect(parse_line_height_value("1.5em")).to_equal(-15)
+
+    it "recognises the normal keyword in any case":
+        expect(line_height_value_is_normal("normal")).to_equal(true)
+        expect(line_height_value_is_normal("NORMAL")).to_equal(true)
+        expect(line_height_value_is_normal(" Normal ")).to_equal(true)
+        expect(line_height_value_is_normal("1.5")).to_equal(false)
+        expect(line_height_value_is_normal("")).to_equal(false)
+
+    it "lets normal replace an inherited factor on the measured host only":
+        # Measured host: 0, the encoding the face metric is read for.
+        expect(line_height_after_normal_keyword(-20, true)).to_equal(0)
+        expect(line_height_after_normal_keyword(30, true)).to_equal(0)
+        # Any other host: exactly the value the element had before `normal`
+        # was honoured. -12 is the form-control UA factor: an
+        # `<input style="line-height:normal">` must keep it there.
+        expect(line_height_after_normal_keyword(-12, false)).to_equal(-12)
+        expect(line_height_after_normal_keyword(-20, false)).to_equal(-20)
+        expect(line_height_after_normal_keyword(0, false)).to_equal(0)
+
+    it "lays an explicit line height out at its own value":
+        expect(_h("<div id='x' style='line-height:2'>x</div>", "x")).to_equal("32")
+        expect(_h("<div id='x' style='line-height:30px'>x</div>", "x")).to_equal("30")
+        # This block was 2400px tall.
+        expect(_h("<div id='x' style='line-height:150%'>x</div>", "x")).to_equal("24")
+        expect(_h("<div id='x' style='font-size:24px;line-height:150%'>x</div>", "x")).to_equal("36")
+        expect(_h("<div id='x' style='line-height:1.5em'>x</div>", "x")).to_equal("24")
+        expect(_h("<div style='line-height:2'><p id='x' style='margin:0'>x</p></div>", "x")).to_equal("32")
+        expect(_h("<div style='line-height:2'><p id='x' style='margin:0;font:24px/1.5 sans-serif'>x</p></div>", "x")).to_equal("36")
+        expect(_h("<div style='line-height:2'><p id='x' style='margin:0;font:inherit'>x</p></div>", "x")).to_equal("32")
+
+    it "keeps a form control's line on every host":
+        # Chrome 159: 21px for both. Off the measured host `normal` keeps the
+        # UA control factor (see the helper example above).
+        expect(_h("<div><input id='x'></div>", "x")).to_equal("21")
+        expect(_h("<div><input id='x' style='line-height:normal'></div>", "x")).to_equal("21")
+
+# Face-metric numbers: measured host only.
+describe "normal replaces an inherited line height":
+    it "from the line-height property":
+        if browser_host_has_measured_linux_face_set():
+            expect(_h("<div id='x' style='line-height:normal'>x</div>", "x")).to_equal("18")
+            # Was 32: `normal` parsed to "no value" and the parent's 2x stayed.
+            expect(_h("<div style='line-height:2'><p id='x' style='margin:0;line-height:normal'>x</p></div>", "x")).to_equal("18")
+
+    it "from a font shorthand, with or without a line-height part":
+        if browser_host_has_measured_linux_face_set():
+            # Chrome 18, 18, 15, 24. The first and third were 32 and 24.
+            expect(_h("<div style='line-height:2'><p id='x' style='margin:0;font:16px sans-serif'>x</p></div>", "x")).to_equal("18")
+            expect(_h("<div style='line-height:2'><p id='x' style='margin:0;font:16px/normal sans-serif'>x</p></div>", "x")).to_equal("18")
+            expect(_h("<div style='line-height:2'><p id='x' style='margin:0;font:italic bold 12px serif'>x</p></div>", "x")).to_equal("15")
+            expect(_h("<div><input id='x' style='font:16px sans-serif'></div>", "x")).to_equal("24")
+
+# The resolved-metrics line height feeds NON-web text (common/ui/draw_ir.spl,
+# widget and window-scene text). It is deliberately not changed by the web
+# fix: this pins the previous value so it cannot drift with it.
+describe "non-web resolved line height":
+    it "is unchanged by the web normal-line-height fix":
+        if browser_host_has_measured_linux_face_set():
+            expect(resolve_font_metrics_with_language("sans-serif", "Hxg", 16, "").line_height).to_equal(16)
+            expect(resolve_font_metrics_with_language("sans-serif", "Hxg", 24, "").line_height).to_equal(24)
+

@@ -1,0 +1,152 @@
+# @cover src/lib/gc_async_mut/slang/engine/llm_engine.spl 80%
+# @cover src/lib/gc_async_mut/slang/model_executor/backend.spl 80%
+# @cover src/runtime/slang_ggml_shim.c 60%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# design: doc/05_design/ml/slang_serial_exact_prefix_cache.md
+
+"""
+## Purpose and audience
+Purpose: prove that slang really runs inference on a GPU through its llama.cpp
+wrapper runner. The same model is loaded twice in one process -- all layers
+requested on the GPU, then n_gpu_layers = 0 -- and the shim's own offload
+flags and a perf-diff table are reported.
+Audience: engineers changing the engine, the backend seam or the ggml shim, and
+operators validating a GPU host (AMD Radeon via the llama.cpp Vulkan backend).
+
+## What is checked
+- the shim reports GPU offload supported (llama_supports_gpu_offload) and the
+  GPU-lane model as loaded with offload; the CPU lane reports not offloaded;
+- both lanes generate a non-empty completion for the same prompt;
+- prompt-dominated wall time (prompt of several hundred tokens, one decoded
+  token, prefix cache disabled) is measured over 3 runs per lane and printed.
+  GPU < CPU is asserted only when it holds on every run.
+
+## Compatibility and limitations
+Runs when SLANG_LIVE=1, SLANG_GPU=1, SLANG_MODEL_ROOT names a model directory
+and SLANG_GGML_LIB names a shim built against a GPU llama.cpp, e.g.
+build/sffi-vulkan/slang_ggml.dll (see the slang skill, "GPU (Vulkan, AMD)").
+SLANG_KV_MODEL_ID picks the model (default Qwen2.5-1.5B-Instruct-Q4_K_M).
+"""
+
+use std.spec.{describe, it, expect, step, skip, fail}
+use std.gc_async_mut.slang.entrypoints.llm.{slang_models, engine_backend_available}
+use std.gc_async_mut.slang.engine.llm_engine.{EngineGenerationRequest, engine_set_n_ctx_text, engine_set_gpu_layers_text, engine_set_prefix_cache_limits, engine_ensure_loaded, engine_generate_observed_request, engine_gpu_offload_status, engine_unload}
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel}
+use std.io_runtime.{env_get, is_dir, time_now_monotonic_ms}
+
+val GPU_LIVE_RUNS = 3
+
+struct GpuLaneResult:
+    supported: bool
+    offloaded: bool
+    output: text
+    runs_ms: [i64]
+    prompt_tokens: i64
+
+fn _model_root() -> text:
+    val root = env_get("SLANG_MODEL_ROOT") ?? ""
+    if root == "" or not is_dir(root):
+        return ""
+    root
+
+fn _live_enabled() -> bool:
+    (env_get("SLANG_LIVE") ?? "") == "1" and (env_get("SLANG_GPU") ?? "") == "1" and _model_root() != "" and engine_backend_available()
+
+fn _pick_model(root: text) -> Result<NativeModel, text>:
+    val requested = env_get("SLANG_KV_MODEL_ID") ?? ""
+    val wanted = if requested == "": "Qwen2.5-1.5B-Instruct-Q4_K_M" else: requested
+    for m in slang_models(root):
+        if m.runnable and m.id == wanted:
+            return Ok(m)
+    Err("no runnable model '" + wanted + "' under " + root)
+
+# Roughly 500 prompt tokens of deterministic text.
+fn _prompt() -> text:
+    val owners = ["alpha", "bravo", "charlie", "delta", "echo"]
+    var doc = "The following ledger records which serving request owns each KV cache page"
+    var i = 1
+    while i <= 22:
+        doc = doc + ". Page " + i.to_text() + " belongs to request " + owners[i % 5] +
+            " and holds " + (i * 16).to_text() + " tokens of sealed attention state"
+        i = i + 1
+    doc + ". Answer briefly. Question: which request owns page seven"
+
+# Loads the model with the given layer count and times GPU_LIVE_RUNS prompt-heavy requests.
+fn _lane(model: NativeModel, layers: text) -> Result<GpuLaneResult, text>:
+    if not engine_set_gpu_layers_text(layers):
+        return Err("engine_set_gpu_layers_text(" + layers + ") refused")
+    engine_ensure_loaded(model)?
+    val status = engine_gpu_offload_status()
+    if status == nil:
+        return Err("no resident backend after load")
+    val flags = status!
+    if not engine_set_prefix_cache_limits(0, 0):
+        return Err("could not disable the prefix cache")
+    # Warm-up: shader/pipeline compilation and first-touch costs stay out of the timings.
+    engine_generate_observed_request(EngineGenerationRequest(prompt: "Say hi.", max_tokens: "1"))?
+    var runs: [i64] = []
+    var output = ""
+    var i = 0
+    while i < GPU_LIVE_RUNS:
+        val started = time_now_monotonic_ms()
+        engine_generate_observed_request(EngineGenerationRequest(prompt: _prompt(), max_tokens: "1"))?
+        runs.push(time_now_monotonic_ms() - started)
+        i = i + 1
+    val full = engine_generate_observed_request(EngineGenerationRequest(prompt: _prompt(), max_tokens: "24"))?
+    output = full.output
+    engine_unload()?
+    Ok(GpuLaneResult(supported: flags.0, offloaded: flags.1, output: output,
+        runs_ms: runs, prompt_tokens: 0))
+
+fn _runs_text(runs: [i64]) -> text:
+    var s = ""
+    for r in runs:
+        s = s + (if s == "": "" else: "/") + r.to_text()
+    s
+
+describe "slang GPU offload through the llama.cpp wrapper runner":
+
+    it "offloads to the GPU and beats the CPU lane on prompt time":
+        if not _live_enabled():
+            skip("offloads to the GPU and beats the CPU lane on prompt time", "needs SLANG_LIVE=1, SLANG_GPU=1, SLANG_MODEL_ROOT and a GPU-built ggml shim")
+        else:
+            expect(engine_set_n_ctx_text("2048")).to_equal(true)
+            val picked = _pick_model(_model_root())
+            if picked.is_err():
+                fail(picked.unwrap_err())
+            val model = picked.unwrap()
+
+            step("GPU lane: all layers requested on the GPU")
+            val gpu_run = _lane(model, "-1")
+            if gpu_run.is_err():
+                fail("GPU lane failed: " + gpu_run.unwrap_err())
+            val gpu = gpu_run.unwrap()
+
+            step("CPU lane: n_gpu_layers = 0 on the same shim")
+            val cpu_run = _lane(model, "0")
+            if cpu_run.is_err():
+                fail("CPU lane failed: " + cpu_run.unwrap_err())
+            val cpu = cpu_run.unwrap()
+
+            print "SLANG_GPU_LIVE_TABLE | lane | offload_supported | model_offloaded | ms_per_run (3) | output_bytes |"
+            print "SLANG_GPU_LIVE_TABLE | gpu | " + gpu.supported.to_text() + " | " + gpu.offloaded.to_text() +
+                " | " + _runs_text(gpu.runs_ms) + " | " + gpu.output.len().to_text() + " |"
+            print "SLANG_GPU_LIVE_TABLE | cpu | " + cpu.supported.to_text() + " | " + cpu.offloaded.to_text() +
+                " | " + _runs_text(cpu.runs_ms) + " | " + cpu.output.len().to_text() + " |"
+            print "SLANG_GPU_LIVE_OUTPUT gpu=" + gpu.output
+            print "SLANG_GPU_LIVE_OUTPUT cpu=" + cpu.output
+
+            step("The shim reports real GPU offload for the GPU lane only")
+            expect(gpu.supported).to_equal(true)
+            expect(gpu.offloaded).to_equal(true)
+            expect(cpu.offloaded).to_equal(false)
+
+            step("Both lanes produce a non-empty completion")
+            expect(gpu.output.len()).to_be_greater_than(0)
+            expect(cpu.output.len()).to_be_greater_than(0)
+
+            step("GPU prompt time beats CPU on every one of the runs")
+            var i = 0
+            while i < GPU_LIVE_RUNS:
+                expect(gpu.runs_ms[i]).to_be_less_than(cpu.runs_ms[i])
+                i = i + 1

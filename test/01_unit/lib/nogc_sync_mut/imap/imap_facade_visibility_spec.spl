@@ -1,0 +1,40 @@
+"""
+Purpose and audience: stdlib maintainers. Functions re-exported by a package
+facade (`std.nogc_sync_mut.imap`) or imported across modules
+(`text_layout.font_provider`) must be `pub`: the interpreter lane rejects a
+private fn reached through an import as a FATAL semantic error, which the JIT
+lane never checked. Bug:
+doc/08_tracking/bug/interpreter_lane_private_fn_imports_imap_font_2026-11-14.md
+"""
+# @req REQ-SSPEC-UNIT
+
+use std.spec.*
+use std.nogc_sync_mut.imap.{
+    ImapTag, imap_tag_to_text, imap_build_capability, imap_build_starttls,
+    imap_build_noop, imap_build_logout, imap_parse_capability_tokens,
+    imap_parse_tagged_response, imap_status_is_ok, imap_strip_crlf
+}
+use std.nogc_sync_mut.text_layout.font_provider.{
+    browser_font_family_for_style, browser_font_family_is_monospace
+}
+
+describe "imap facade re-exports are visible":
+    it "builds tagged CAPABILITY / STARTTLS / NOOP / LOGOUT commands":
+        val tag = ImapTag(seq: 1)
+        expect(imap_tag_to_text(tag)).to_equal("A1")
+        expect(imap_build_capability(tag)).to_start_with("A1 CAPABILITY")
+        expect(imap_build_starttls(tag)).to_start_with("A1 STARTTLS")
+        expect(imap_build_noop(tag)).to_start_with("A1 NOOP")
+        expect(imap_build_logout(tag)).to_start_with("A1 LOGOUT")
+
+    it "parses capability tokens and a tagged OK":
+        val toks = imap_parse_capability_tokens("IMAP4rev1 STARTTLS")
+        expect(toks).to_contain("STARTTLS")
+        val r = imap_parse_tagged_response("a1 OK done")
+        assert_true(imap_status_is_ok(r.status))
+        expect(imap_strip_crlf("x\r\n")).to_equal("x")
+
+describe "font_provider helpers imported by the web renderer are visible":
+    it "resolves style families and monospace classification":
+        expect(browser_font_family_for_style("serif", false, false)).to_contain("serif")
+        assert_true(browser_font_family_is_monospace("monospace"))

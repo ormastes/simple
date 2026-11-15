@@ -1,0 +1,232 @@
+# Pure local-container request metadata. Validation/digest/decoding confer no
+# host authority, backend selection, filesystem containment or resource grant.
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct LocalContainerMountV1:
+    host_path: text
+    guest_path: text
+    read_only: bool
+
+pub struct LocalContainerRequestV1:
+    image: text
+    executable: text
+    argv: [text]
+    working_directory: text
+    mounts: [LocalContainerMountV1]
+    environment: [text]
+    network: text
+    cpu_millis: i64
+    memory_bytes: i64
+    terminal_mode: text
+    cols: i64
+    rows: i64
+
+fn local_text_v1(value: text) -> bool:
+    value.byte_len() <= 16384 and not value.contains("\0")
+
+fn local_control_v1(value: text) -> bool:
+    for ch in value.chars():
+        val scalar = ch.char_code_at(0)
+        if scalar < 32 or (scalar >= 127 and scalar <= 159): return true
+    false
+
+fn local_windows_component_v1(part: text) -> bool:
+    if part == "": return true
+    if part.ends_with(".") or part.ends_with(" "): return false
+    for forbidden in ["<", ">", "\"", "|", "?", "*"]:
+        if part.contains(forbidden): return false
+    # Device spellings remain reserved with extensions and regardless of case.
+    # Trim the stem conservatively so device aliases cannot hide before a dot.
+    val pieces = part.split(".")
+    val trimmed = pieces[0].trim()
+    val stem = trimmed.to_upper()
+    if ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"].contains(stem): return false
+    if stem.starts_with("COM") or stem.starts_with("LPT"):
+        val suffix = stem.substring(3, stem.byte_len())
+        if ["1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³"].contains(suffix): return false
+    true
+
+# Lexical validation only. The host owner must resolve symlinks, reparse points,
+# volumes and containment before effects. Treat both separator styles alike,
+# even for POSIX spellings, to refuse ambiguous cross-platform parent paths.
+fn local_path_identity_v1(value: text) -> Result<text, text>:
+    if not local_text_v1(value) or value == "" or local_control_v1(value):
+        return Err("local-container-path-invalid")
+    var start = 1
+    var root = "/"
+    var windows = false
+    # Classify the authored root before folding separators: a Windows rooted
+    # path such as '\\work' is drive-dependent, not a POSIX absolute path.
+    if not value.starts_with("/"):
+        if value.byte_len() < 3: return Err("local-container-path-invalid")
+        val drive = value.byte_at(0)
+        if (not ((drive >= 65 and drive <= 90) or (drive >= 97 and drive <= 122)) or
+                value.byte_at(1) != 58 or (value.byte_at(2) != 47 and value.byte_at(2) != 92)):
+            return Err("local-container-path-invalid")
+        val drive_name = value.substring(0, 2)
+        root = drive_name.to_lower() + "/"
+        start = 3
+        windows = true
+    val normalized = value.replace("\\", "/")
+    if normalized.starts_with("//"): return Err("local-container-path-invalid")
+    val tail = normalized.substring(start, normalized.byte_len())
+    if tail.contains(":"): return Err("local-container-path-invalid")
+    var components: [text] = []
+    for part in tail.split("/"):
+        if part == "..": return Err("local-container-path-invalid")
+        if windows and not local_windows_component_v1(part): return Err("local-container-path-invalid")
+        if part != "" and part != ".": components.push(part.to_lower())
+    Ok(root + components.join("/"))
+
+fn local_environment_name_v1(name: text) -> bool:
+    if name == "": return false
+    var index = 0
+    while index < name.byte_len():
+        val ch = name.byte_at(index)
+        val letter = (ch >= 65 and ch <= 90) or (ch >= 97 and ch <= 122) or ch == 95
+        if not letter and not (index > 0 and ch >= 48 and ch <= 57): return false
+        index = index + 1
+    true
+
+fn local_container_fields_validate_v1(request: LocalContainerRequestV1) -> Result<(), text>:
+    if (not local_text_v1(request.image) or request.image == "" or
+            request.image.starts_with("-") or local_control_v1(request.image)):
+        return Err("local-container-image-invalid")
+    if not local_text_v1(request.executable) or request.executable == "":
+        return Err("local-container-executable-invalid")
+    val directory = local_path_identity_v1(request.working_directory)?
+    if request.argv.len() > 128 or request.environment.len() > 128 or request.mounts.len() > 64:
+        return Err("local-container-field-count")
+    for argument in request.argv:
+        if not local_text_v1(argument): return Err("local-container-argument-invalid")
+    var destinations: [text] = []
+    for mount in request.mounts:
+        val host = local_path_identity_v1(mount.host_path)?
+        val guest = local_path_identity_v1(mount.guest_path)?
+        if destinations.contains(guest): return Err("local-container-mount-duplicate")
+        destinations.push(guest)
+    var names: [text] = []
+    for assignment in request.environment:
+        if not local_text_v1(assignment): return Err("local-container-environment-invalid")
+        val separator = assignment.index_of("=")
+        if separator <= 0: return Err("local-container-environment-invalid")
+        val name = assignment.substring(0, separator)
+        if not local_environment_name_v1(name): return Err("local-container-environment-invalid")
+        # Conservative portable policy: do not admit two Windows-equivalent keys.
+        val folded = name.to_lower()
+        if names.contains(folded): return Err("local-container-environment-duplicate")
+        names.push(folded)
+    if not ["host", "private", "none"].contains(request.network):
+        return Err("local-container-network-invalid")
+    if not ["tty", "stdin"].contains(request.terminal_mode):
+        return Err("local-container-terminal-invalid")
+    if (request.cpu_millis < 1 or request.cpu_millis > 64000 or
+            request.memory_bytes < 1 or request.memory_bytes > 1125899906842624 or
+            request.cols < 1 or request.cols > 1000 or request.rows < 1 or request.rows > 1000):
+        return Err("local-container-bounds")
+    Ok(())
+
+# Canonical SDN dictionary, explicit version/kind, exactly one final LF.
+# Arrays retain order, empty argv entries and environment values containing '='.
+pub fn local_container_request_bytes_v1(request: LocalContainerRequestV1) -> Result<text, text>:
+    val checked = local_container_fields_validate_v1(request)?
+    var arguments: [SdnValue] = []
+    for argument in request.argv: arguments.push(SdnValue.String(argument))
+    var environment: [SdnValue] = []
+    for assignment in request.environment: environment.push(SdnValue.String(assignment))
+    var mounts: [SdnValue] = []
+    for mount in request.mounts:
+        val fields: Dict<text, SdnValue> = {"hostPath": SdnValue.String(mount.host_path),
+            "guestPath": SdnValue.String(mount.guest_path), "readOnly": SdnValue.Bool(mount.read_only)}
+        mounts.push(SdnValue.Dict(fields))
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("local-container-request"),
+        "image": SdnValue.String(request.image), "executable": SdnValue.String(request.executable),
+        "argv": SdnValue.Array(arguments), "workingDirectory": SdnValue.String(request.working_directory),
+        "mounts": SdnValue.Array(mounts), "environment": SdnValue.Array(environment),
+        "network": SdnValue.String(request.network), "cpuMillis": SdnValue.Int(request.cpu_millis),
+        "memoryBytes": SdnValue.Int(request.memory_bytes), "terminalMode": SdnValue.String(request.terminal_mode),
+        "cols": SdnValue.Int(request.cols), "rows": SdnValue.Int(request.rows)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if source.byte_len() > 1048576: return Err("local-container-source-size")
+    Ok(source)
+
+pub fn local_container_request_validate_v1(request: LocalContainerRequestV1) -> Result<(), text>:
+    val source = local_container_request_bytes_v1(request)?
+    Ok(())
+
+pub fn local_container_request_digest_v1(request: LocalContainerRequestV1) -> Result<text, text>:
+    val source = local_container_request_bytes_v1(request)?
+    Ok(sha256_text(source))
+
+fn local_keys_v1(fields: Dict<text, SdnValue>, names: [text]) -> Result<(), text>:
+    for key in fields.keys():
+        if not names.contains(key): return Err("local-container-unknown-field:" + key)
+    for key in names:
+        if not fields.contains_key(key): return Err("local-container-missing-field:" + key)
+    Ok(())
+
+fn local_string_field_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("local-container-text-required:" + key)
+
+fn local_integer_field_v1(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("local-container-integer-required:" + key)
+
+fn local_text_array_v1(fields: Dict<text, SdnValue>, key: text) -> Result<[text], text>:
+    val items = match fields[key]:
+        case SdnValue.Array(value): value
+        case _: return Err("local-container-array-required:" + key)
+    if items.len() > 128: return Err("local-container-field-count")
+    var result: [text] = []
+    for item in items:
+        match item:
+            case SdnValue.String(value): result.push(value)
+            case _: return Err("local-container-text-required:" + key)
+    Ok(result)
+
+# Strict bounded decoder. Byte equality with re-encoding refuses alternate
+# spellings, comments, discarded tokens and schema changes. Still no authority.
+pub fn local_container_request_decode_v1(source: text) -> Result<LocalContainerRequestV1, text>:
+    if source.byte_len() == 0 or source.byte_len() > 1048576: return Err("local-container-source-size")
+    val document = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 1048576,
+            max_depth: 4, max_nodes: 1024, max_rows: 0, max_cells: 0, max_columns: 16)):
+        case Ok(value): value
+        case Err(_): return Err("local-container-syntax")
+    val fields = match document.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("local-container-object-required")
+    val keys = local_keys_v1(fields, ["version", "kind", "image", "executable", "argv", "workingDirectory",
+        "mounts", "environment", "network", "cpuMillis", "memoryBytes", "terminalMode", "cols", "rows"])?
+    if local_integer_field_v1(fields, "version")? != 1: return Err("local-container-version")
+    if local_string_field_v1(fields, "kind")? != "local-container-request": return Err("local-container-kind")
+    val items = match fields["mounts"]:
+        case SdnValue.Array(value): value
+        case _: return Err("local-container-array-required:mounts")
+    if items.len() > 64: return Err("local-container-field-count")
+    var mounts: [LocalContainerMountV1] = []
+    for item in items:
+        val mount = match item:
+            case SdnValue.Dict(value): value
+            case _: return Err("local-container-mount-object-required")
+        val mount_keys = local_keys_v1(mount, ["hostPath", "guestPath", "readOnly"])?
+        val read_only = match mount["readOnly"]:
+            case SdnValue.Bool(value): value
+            case _: return Err("local-container-bool-required:readOnly")
+        mounts.push(LocalContainerMountV1(host_path: local_string_field_v1(mount, "hostPath")?,
+            guest_path: local_string_field_v1(mount, "guestPath")?, read_only: read_only))
+    val request = LocalContainerRequestV1(image: local_string_field_v1(fields, "image")?,
+        executable: local_string_field_v1(fields, "executable")?, argv: local_text_array_v1(fields, "argv")?,
+        working_directory: local_string_field_v1(fields, "workingDirectory")?, mounts: mounts,
+        environment: local_text_array_v1(fields, "environment")?, network: local_string_field_v1(fields, "network")?,
+        cpu_millis: local_integer_field_v1(fields, "cpuMillis")?, memory_bytes: local_integer_field_v1(fields, "memoryBytes")?,
+        terminal_mode: local_string_field_v1(fields, "terminalMode")?, cols: local_integer_field_v1(fields, "cols")?,
+        rows: local_integer_field_v1(fields, "rows")?)
+    if local_container_request_bytes_v1(request)? != source: return Err("local-container-noncanonical")
+    Ok(request)

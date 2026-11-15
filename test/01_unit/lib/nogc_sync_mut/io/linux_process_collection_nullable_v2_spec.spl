@@ -1,0 +1,50 @@
+# Source-only regression: NOT_RUN; no admitted runtime for this session.
+# @req REQ-COLLECTION-NULL-001
+# @req REQ-COLLECTION-NULL-002
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.linux_process_owner.linux_process_observation_decode_v2
+
+describe "nullable native Linux collection receipts":
+    it "reports absent allocation without inventing completion":
+        step("Decode an absent native receipt and retain collection uncertainty")
+        val decoded = linux_process_observation_decode_v2(None)
+        expect(decoded.is_err()).to_equal(true)
+        expect(decoded.unwrap_err()).to_equal("Linux process observation receipt unavailable; lease retained")
+
+    it "rejects malformed receipt lengths including empty arrays":
+        step("Reject present receipts that cannot describe the native owner")
+        expect(linux_process_observation_decode_v2(Some([])).unwrap_err()).to_equal("Linux process observation layout differs")
+        expect(linux_process_observation_decode_v2(Some([0, 1, 1])).unwrap_err()).to_equal("Linux process observation layout differs")
+
+    it "preserves unsupported and invalid native status as errors":
+        step("Keep unsupported and invalid observations distinct from missing allocation")
+        expect(linux_process_observation_decode_v2(Some([95, 0, 0, 0, 0, 0, 0, 0, 0, 0])).unwrap_err()).to_equal("Linux process owner error: 95")
+        expect(linux_process_observation_decode_v2(Some([22, 0, 0, 0, 0, 0, 0, 0, 0, 0])).unwrap_err()).to_equal("Linux process owner error: 22")
+
+    it "rejects terminal evidence without complete tree reap":
+        step("Reject a claimed terminal observation with an unreaped leader")
+        expect(linux_process_observation_decode_v2(Some([0, 1, 0, 1, 0, 7, 0, 0, 12, 0])).unwrap_err()).to_equal("Linux terminal observation lacks complete tree reap")
+
+    it "retains existing memory bounds":
+        step("Reject current memory exceeding peak memory")
+        expect(linux_process_observation_decode_v2(Some([0, 0, 0, 0, 1, 0, 0, 0, 12, 13])).unwrap_err()).to_equal("Linux process observation outside bound")
+
+    it "preserves the complete observed receipt":
+        step("Decode actual receipt fields without replacing exit and charge facts")
+        val observed = linux_process_observation_decode_v2(Some([0, 1, 1, 1, 0, 7, 1, 1, 4096, 0])).unwrap()
+        expect(observed.terminal).to_equal(true)
+        expect(observed.leader_reaped).to_equal(true)
+        expect(observed.tree_empty).to_equal(true)
+        expect(observed.active_processes).to_equal(0)
+        expect(observed.exit_code).to_equal(7)
+        expect(observed.timed_out).to_equal(true)
+        expect(observed.cancelled).to_equal(true)
+        expect(observed.memory_peak_bytes).to_equal(4096)
+        expect(observed.memory_current_bytes).to_equal(0)
+
+    it "does not promote a nonterminal observation to cleanup":
+        step("Preserve a present nonterminal observation as nonterminal")
+        val observed = linux_process_observation_decode_v2(Some([0, 0, 0, 0, 1, 0, 0, 0, 4096, 1024])).unwrap()
+        expect(observed.terminal).to_equal(false)
+        expect(observed.active_processes).to_equal(1)
+        expect(observed.memory_current_bytes).to_equal(1024)

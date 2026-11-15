@@ -1,6 +1,8 @@
 # Layout renderer selector matcher has no `+` / `~` sibling combinators (2026-11-14)
 
-Status: OPEN. Severity: medium (a rule using them never applies; nothing over-matches).
+Status: FIXED 2026-11-14 on `work/webrender-selector-combinators-20261114` — `+` and `~` are tokenised and matched on both the text and pre-parsed paths; the three rows below are asserted in `structural_pseudo_class_chrome_parity_spec.spl`. Original report follows.
+
+Severity was: medium (a rule using them never applies; nothing over-matches).
 
 ## Defect
 

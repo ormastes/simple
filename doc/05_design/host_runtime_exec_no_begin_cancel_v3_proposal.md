@@ -5,6 +5,13 @@ state transition, positive cleanup guard or native operation is implemented by
 this document. Root must acknowledge ownership of the shared journal seam;
 Host must freeze receipt/recovery semantics before implementation.
 
+2026-11-08 decision: root/Host froze the additive canonical history seam and
+receipt/producer names. Actual source design is now
+`host_runtime_exec_no_begin_cancel_v3.md`. Conservative identical/fresh proof
+resume is retained; no renewal overwrite is enabled. Landed BEGIN interlock
+bcbc602 uses the typed fixed final path; orphan stages alone are not accepted
+cancellation evidence. The original proposal below records the pre-freeze audit.
+
 ## Concrete source findings
 
 Audit anchor: immutable release `df369ceddbb3e5fb1118bd41d4c7744d06220f2a`.

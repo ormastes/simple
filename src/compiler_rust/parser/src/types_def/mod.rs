@@ -376,8 +376,14 @@ impl<'a> Parser<'a> {
 
     pub(crate) fn parse_field(&mut self) -> Result<Field, ParseError> {
         let start_span = self.current.span;
-        let collection_algorithm = if self.check(&TokenKind::At) {
+        let mut collection_algorithm = None;
+        while self.check(&TokenKind::At) {
             let attribute = self.parse_at_as_attribute()?;
+            if attribute.name == "attr_storage" {
+                // Node-attribute storage tag: accepted and ignored by the seed.
+                self.skip_newlines();
+                continue;
+            }
             if attribute.name != "collection_algorithm" {
                 return Err(ParseError::contextual_error(
                     "field attribute",
@@ -385,12 +391,9 @@ impl<'a> Parser<'a> {
                     attribute.span,
                 ));
             }
-            let algorithm = self.collection_algorithm_attribute(&[attribute])?;
+            collection_algorithm = self.collection_algorithm_attribute(&[attribute])?;
             self.skip_newlines();
-            algorithm
-        } else {
-            None
-        };
+        }
         let visibility = self.parse_optional_visibility()?;
         // The site hash covers the declaration after its visibility, matching
         // the pure-Simple parser's field span.
@@ -699,7 +702,7 @@ impl<'a> Parser<'a> {
             } else if self.check(&TokenKind::Fn)
                 || self.check(&TokenKind::Me)  // Mutable method keyword
                 || self.check(&TokenKind::Async)
-                || (self.check(&TokenKind::At) && !self.is_at_collection_algorithm())
+                || (self.check(&TokenKind::At) && !self.is_at_field_annotation())
                 || self.check(&TokenKind::Hash)
                 || self.check(&TokenKind::Static)
                 || self.peek_visibility_target_is(&[TokenKind::Fn, TokenKind::Async, TokenKind::Me])
@@ -903,7 +906,7 @@ impl<'a> Parser<'a> {
             } else if self.check(&TokenKind::Fn)
                 || self.check(&TokenKind::Me)  // Mutable method keyword
                 || self.check(&TokenKind::Async)
-                || (self.check(&TokenKind::At) && !self.is_at_collection_algorithm())
+                || (self.check(&TokenKind::At) && !self.is_at_field_annotation())
                 || self.check(&TokenKind::Hash)
                 || self.check(&TokenKind::Static)
                 || self.peek_visibility_target_is(&[TokenKind::Fn, TokenKind::Async, TokenKind::Me, TokenKind::Static])

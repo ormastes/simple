@@ -13,6 +13,7 @@ use common.ui.draw_ir.{
     draw_ir_style_prop
 }
 use std.nogc_async_mut.gpu.engine2d.simd_kernels.{engine2d_simd_fill_rows_u32, engine2d_simd_fill_row_u32, blit_rect}
+use std.gc_async_mut.gpu.engine2d.backend_emu.{gradient_corner_dir_q16}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.*
 
 fn web_glyph_scale(fs: i32) -> i32:
@@ -930,6 +931,8 @@ fn fb_style_background_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i3
     val image_base_x = if fixed_no_repeat: image_x else: image_origin_x + image_x
     val image_base_y = if fixed_no_repeat: image_y else: image_origin_y + image_y
     val image_clip = if fixed_no_repeat: clip_intersect(clip, bg_x, bg_y, bg_x + bg_w, bg_y + bg_h) else: clip
+    if linear_gradient_needs_general_raster(st):
+        return fb_linear_gradient_general_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st, tile_w, tile_h, max_x, max_y, image_base_x, image_base_y, image_clip)
     var py = 0
     val small_no_repeat_gradient_tile = st.background_repeat == "no-repeat" and tile_w <= 64 and tile_h <= 64
     while py < max_y:
@@ -947,6 +950,171 @@ fn fb_style_background_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i3
             val opacity = background_gradient_pixel_opacity(color, st.opacity_pct)
             if opacity > 0:
                 out = fb_rounded_rect_row_span_opacity_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, image_base_y + py, image_base_x, max_x, color | 0xFF000000u32, opacity, image_clip)
+        py = py + 1
+    out
+
+# True when a typed linear gradient is more than the two-stop top-to-bottom
+# ramp the row painter above handles: an angle other than 180deg, a third
+# stop, or a stop position other than 0% / 100%.
+fn linear_gradient_needs_general_raster(st: Style) -> bool:
+    if st.background_gradient_is_radial:
+        return false
+    val n = st.background_gradient_stop_colors.len()
+    if n < 2 or st.background_gradient_stop_positions.len() != n:
+        return false
+    if n > 2 or st.background_gradient_angle_deg % 360 != 180:
+        return true
+    st.background_gradient_stop_positions[0] != 0 or st.background_gradient_stop_positions[1] != 1000
+
+# sin and cos of a whole-degree angle, scaled by 65536 (Q16). A short Taylor
+# series on [0, 90] degrees plus quadrant symmetry: the gradient direction is
+# computed once per box, so per-pixel work stays integer.
+fn gradient_angle_sin_cos_q16(deg: i32) -> [i64]:
+    var d = deg % 360
+    if d < 0:
+        d = d + 360
+    val quadrant = d / 90
+    val r = (d % 90) as f64
+    val x = r * 3.141592653589793 / 180.0
+    val x2 = x * x
+    val sin_r = x * (1.0 - x2 / 6.0 * (1.0 - x2 / 20.0 * (1.0 - x2 / 42.0 * (1.0 - x2 / 72.0))))
+    val cos_r = 1.0 - x2 / 2.0 * (1.0 - x2 / 12.0 * (1.0 - x2 / 30.0 * (1.0 - x2 / 56.0 * (1.0 - x2 / 90.0))))
+    val s = (sin_r * 65536.0 + 0.5) as i64
+    val c = (cos_r * 65536.0 + 0.5) as i64
+    if quadrant == 0:
+        return [s, c]
+    if quadrant == 1:
+        return [c, 0 - s]
+    if quadrant == 2:
+        return [0 - s, 0 - c]
+    [0 - c, s]
+
+# One colour channel mixed in PREMULTIPLIED space (CSS Images 4 §3.4.1):
+# weights are each stop's alpha times its share, so a transparent stop
+# contributes no colour (blue -> transparent stays blue while it fades).
+# With equal alphas this is the plain straight-alpha mix, bit for bit.
+fn _gradient_mix_channel(a: u32, b: u32, shift: u32, wa: i64, wb: i64) -> u32:
+    val ca = ((a >> shift) & 255u32) as i64
+    val cb = ((b >> shift) & 255u32) as i64
+    val ws = wa + wb
+    if ws <= 0:
+        return 0u32
+    val v = (ca * wa + cb * wb + ws / 2) / ws
+    (v as u32) << shift
+
+# Color of the gradient line at `t16` (0..65536 from start to end) through
+# the stop list (positions in permille; `parse_gradient_stops` clamps each
+# one up to the largest before it, so they never decrease).
+fn linear_gradient_color_at(colors: [u32], positions: [i32], t16: i64) -> u32:
+    val n = colors.len()
+    val first = (positions[0] as i64) * 65536 / 1000
+    if t16 <= first:
+        return colors[0]
+    var i = 0
+    while i + 1 < n:
+        val p0 = (positions[i] as i64) * 65536 / 1000
+        val p1 = (positions[i + 1] as i64) * 65536 / 1000
+        if t16 <= p1:
+            if p1 <= p0:
+                return colors[i + 1]
+            val f16 = (t16 - p0) * 65536 / (p1 - p0)
+            val a = colors[i]
+            val b = colors[i + 1]
+            val wa = ((a >> 24) & 255u32) as i64 * (65536 - f16)
+            val wb = ((b >> 24) & 255u32) as i64 * f16
+            val alpha = ((wa + wb + 32768) / 65536) as u32
+            return (alpha << 24) | _gradient_mix_channel(a, b, 16u32, wa, wb) | _gradient_mix_channel(a, b, 8u32, wa, wb) | _gradient_mix_channel(a, b, 0u32, wa, wb)
+        i = i + 1
+    colors[n - 1]
+
+# CSS Images 3 §3.1 linear gradient over each `tile_w` x `tile_h` tile: the
+# gradient line passes through the tile centre at `angle` (0deg = to top,
+# clockwise) and is |w sin| + |h cos| long, so the corners hit the end
+# stops. Each row is painted as spans of equal color.
+fn fb_linear_gradient_general_clip(fb: [u32], fbw: i32, fbh: i32, bg_x: i32, bg_y: i32, bg_w: i32, bg_h: i32, st: Style, tile_w: i32, tile_h: i32, max_x: i32, max_y: i32, image_base_x: i32, image_base_y: i32, image_clip: ClipRect) -> [u32]:
+    var out = fb
+    if tile_w <= 0 or tile_h <= 0:
+        return out
+    val sc = if st.background_gradient_angle_deg >= 1000:
+        gradient_corner_dir_q16(st.background_gradient_angle_deg, tile_w, tile_h)
+    else:
+        gradient_angle_sin_cos_q16(st.background_gradient_angle_deg)
+    val s = sc[0]
+    val c = sc[1]
+    val sw = if s < 0: 0 - s else: s
+    val cw = if c < 0: 0 - c else: c
+    var len_q16 = (tile_w as i64) * sw + (tile_h as i64) * cw
+    if len_q16 < 1:
+        len_q16 = 1
+    # The ramp is sampled once per box into 1025 entries (t16 >> 6): the
+    # per-pixel work is then one multiply-add and a lookup. A per-pixel stop
+    # walk made the catalog `html` page render 55% slower.
+    val colors = st.background_gradient_stop_colors
+    val positions = st.background_gradient_stop_positions
+    var lut: [u32] = []
+    var li = 0
+    while li <= 1024:
+        lut.push(linear_gradient_color_at(colors, positions, (li as i64) * 64))
+        li = li + 1
+    var py = 0
+    val square = st.border_radius_tl_px <= 0 and st.border_radius_tr_px <= 0 and st.border_radius_br_px <= 0 and st.border_radius_bl_px <= 0
+    while py < max_y:
+        val dy2 = (2 * (py % tile_h) + 1 - tile_h) as i64
+        if square:
+            # Square corners: write the clipped row pixel by pixel. A span
+            # call per color change (every few pixels on a diagonal ramp)
+            # made the catalog `html` page render 55% slower.
+            val fy = image_base_y + py
+            if fy >= 0 and fy < fbh and fy >= image_clip.y0 and fy < image_clip.y1:
+                var x0 = image_base_x
+                var x1 = image_base_x + max_x
+                if x0 < 0:
+                    x0 = 0
+                if x1 > fbw:
+                    x1 = fbw
+                if x0 < image_clip.x0:
+                    x0 = image_clip.x0
+                if x1 > image_clip.x1:
+                    x1 = image_clip.x1
+                val row = fy * fbw
+                var fx = x0
+                while fx < x1:
+                    val gx = fx - image_base_x
+                    val dx2 = (2 * (gx % tile_w) + 1 - tile_w) as i64
+                    var t16 = 32768 + (dx2 * s - dy2 * c) * 32768 / len_q16
+                    if t16 < 0:
+                        t16 = 0
+                    if t16 > 65536:
+                        t16 = 65536
+                    val color = lut[(t16 / 64) as i32]
+                    val opacity = background_gradient_pixel_opacity(color, st.opacity_pct)
+                    if opacity >= 100:
+                        out[row + fx] = color | 0xFF000000u32
+                    elif opacity > 0:
+                        out[row + fx] = blend_opacity(color | 0xFF000000u32, out[row + fx], opacity)
+                    fx = fx + 1
+            py = py + 1
+            continue
+        var span_start = 0
+        var span_color = 0u32
+        var px = 0
+        while px <= max_x:
+            var color = 0u32
+            if px < max_x:
+                val dx2 = (2 * (px % tile_w) + 1 - tile_w) as i64
+                var t16 = 32768 + (dx2 * s - dy2 * c) * 32768 / len_q16
+                if t16 < 0:
+                    t16 = 0
+                if t16 > 65536:
+                    t16 = 65536
+                color = lut[(t16 / 64) as i32]
+            if px == max_x or (px > span_start and color != span_color):
+                val opacity = background_gradient_pixel_opacity(span_color, st.opacity_pct)
+                if opacity > 0 and px > span_start:
+                    out = fb_rounded_rect_row_span_opacity_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, image_base_y + py, image_base_x + span_start, px - span_start, span_color | 0xFF000000u32, opacity, image_clip)
+                span_start = px
+            span_color = color
+            px = px + 1
         py = py + 1
     out
 
@@ -1129,15 +1297,41 @@ fn fb_background_radial_stack_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32
 
 fn fb_border_sides_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, bl: i32, bt: i32, br: i32, bb: i32, cl: u32, ct: u32, cr: u32, cb: u32, clip: ClipRect) -> [u32]:
     var out = fb
+    if _fb_border_mitred(bl, bt, br, bb, cl, ct, cr, cb):
+        return _fb_border_sides_mitred(fb, fbw, fbh, x, y, w, h, bl, bt, br, bb, cl, ct, cr, cb, clip)
     if bt > 0 and ct != 0u32:
-        out = fb_rect_clip(out, fbw, fbh, x, y, w, bt, ct, clip)
+        out = _fb_border_side_clip(out, fbw, fbh, x, y, w, bt, ct, clip)
     if bb > 0 and cb != 0u32:
-        out = fb_rect_clip(out, fbw, fbh, x, y + h - bb, w, bb, cb, clip)
+        out = _fb_border_side_clip(out, fbw, fbh, x, y + h - bb, w, bb, cb, clip)
+    # A translucent left/right side skips the rows a painted top/bottom side
+    # already covered, so a corner is blended once, not twice -- and keeps
+    # the rows of an unpainted side, so the corner is not left empty.
+    val top_rows = if ct != 0u32: bt else: 0
+    val bottom_rows = if cb != 0u32: bb else: 0
     if bl > 0 and cl != 0u32:
-        out = fb_rect_clip(out, fbw, fbh, x, y, bl, h, cl, clip)
+        if _fb_border_translucent(cl):
+            out = _fb_border_side_clip(out, fbw, fbh, x, y + top_rows, bl, h - top_rows - bottom_rows, cl, clip)
+        else:
+            out = _fb_border_side_clip(out, fbw, fbh, x, y, bl, h, cl, clip)
     if br > 0 and cr != 0u32:
-        out = fb_rect_clip(out, fbw, fbh, x + w - br, y, br, h, cr, clip)
+        if _fb_border_translucent(cr):
+            out = _fb_border_side_clip(out, fbw, fbh, x + w - br, y + top_rows, br, h - top_rows - bottom_rows, cr, clip)
+        else:
+            out = _fb_border_side_clip(out, fbw, fbh, x + w - br, y, br, h, cr, clip)
     out
+
+fn _fb_border_translucent(color: u32) -> bool:
+    val alpha = ((color >> 24) & 255u32) as i32
+    alpha > 0 and alpha < 255
+
+# A translucent border colour (`hsl(0 100% 50% / .5)`) blends over what is
+# under it, as Chrome does; it used to be stored raw, alpha byte and all. An
+# alpha byte of 0 is a colour packed without one and stays opaque.
+fn _fb_border_side_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, color: u32, clip: ClipRect) -> [u32]:
+    if not _fb_border_translucent(color):
+        return fb_rect_clip(fb, fbw, fbh, x, y, w, h, color, clip)
+    val alpha = ((color >> 24) & 255u32) as i32
+    fb_rect_opacity_clip(fb, fbw, fbh, x, y, w, h, color | 0xFF000000u32, (alpha * 100 + 127) / 255, clip)
 
 fn fb_outline_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, outline_w: i32, outline_offset: i32, color: u32, clip: ClipRect) -> [u32]:
     if outline_w <= 0 or color == 0u32:
@@ -1215,7 +1409,7 @@ fn fb_glyph_thin_scaled_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: 
                         while dx < block_w:
                             val xx = bx0 + dx
                             if xx >= 0 and xx < fbw and xx >= clip.x0 and xx < clip.x1:
-                                out[row + xx] = color
+                                out[row + xx] = _fb_text_px(color, out[row + xx])
                             dx = dx + 1
                     dy = dy + 1
             rx = rx + 1
@@ -1348,7 +1542,7 @@ fn fb_glyph_sparse(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color
                 val xx = x + italic_shift + rx
                 val yy = y + ry
                 if xx >= 0 and xx < fbw and yy >= 0 and yy < fbh:
-                    out[yy * fbw + xx] = color
+                    out[yy * fbw + xx] = _fb_text_px(color, out[yy * fbw + xx])
             rx = rx + 1
         ry = ry + 1
     out
@@ -1673,3 +1867,118 @@ fn fb_text_flow_chrome_overlay(fb: [u32], fbw: i32, fbh: i32) -> [u32]:
             out[idx] = text_flow_correction_colors[i]
         i = i + 1
     out
+
+# Two adjacent sides of different colours (`transparent` counts) meet on the
+# diagonal from the outer to the inner corner, as Chrome paints them: a CSS
+# triangle (`border:20px solid transparent; border-top-color:red`) is a
+# triangle, not a red rectangle. Same-coloured neighbours keep the plain
+# rectangles of fb_border_sides_clip, so a uniform border is unchanged.
+fn _fb_border_mitred(bl: i32, bt: i32, br: i32, bb: i32, cl: u32, ct: u32, cr: u32, cb: u32) -> bool:
+    val tl = bt > 0 and bl > 0 and ct != cl
+    val tr = bt > 0 and br > 0 and ct != cr
+    val bl_corner = bb > 0 and bl > 0 and cb != cl
+    val br_corner = bb > 0 and br > 0 and cb != cr
+    tl or tr or bl_corner or br_corner
+
+# Row `r` (0 at the outer edge) of a side `side_w` thick, against a neighbour
+# `cross_w` thick: the first column (from the outer corner) the side owns
+# whole, times 2, plus 1 when the column before it is cut in half by the
+# diagonal. A pixel belongs to the side when its centre lies past the
+# diagonal, (2c+1) * side_w > (2r+1) * cross_w.
+fn _fb_mitre_cut(r: i32, side_w: i32, cross_w: i32) -> i32:
+    val num = (2 * r + 1) * cross_w
+    var c = 0
+    while (2 * c + 1) * side_w <= num:
+        c = c + 1
+    if c > 0 and (2 * c - 1) * side_w == num:
+        return c * 2 + 1
+    c * 2
+
+# The half-covered diagonal pixel: half of each side, painted ONCE as the
+# 50/50 mix (two sequential half blends weighted the first side 25%). A
+# transparent side (0) contributes nothing.
+fn _fb_mitre_pixel(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, ca: u32, cb: u32, clip: ClipRect) -> [u32]:
+    if ca == 0u32 and cb == 0u32:
+        return fb
+    val mix = mitre_mix_color(ca, cb)
+    val a = ((mix >> 24) & 255u32) as i32
+    fb_rect_opacity_clip(fb, fbw, fbh, x, y, 1, 1, mix | 0xFF000000u32, (a * 100 + 127) / 255, clip)
+
+# 50/50 mix of two side colours as one colour with its own alpha (the alpha
+# byte 0 of a non-zero colour means opaque here). Premultiplied average.
+fn mitre_mix_color(ca: u32, cb: u32) -> u32:
+    var r = 0
+    var g = 0
+    var b = 0
+    var a_sum = 0
+    for c in [ca, cb]:
+        if c != 0u32:
+            val a0 = ((c >> 24) & 255u32) as i32
+            val ea = if a0 == 0: 255 else: a0
+            r = r + (((c >> 16) & 255u32) as i32) * ea
+            g = g + (((c >> 8) & 255u32) as i32) * ea
+            b = b + ((c & 255u32) as i32) * ea
+            a_sum = a_sum + ea
+    if a_sum == 0:
+        return 0u32
+    val a = a_sum / 2
+    ((a as u32) << 24) | (((r / a_sum) as u32) << 16) | (((g / a_sum) as u32) << 8) | ((b / a_sum) as u32)
+
+fn _fb_border_sides_mitred(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, bl: i32, bt: i32, br: i32, bb: i32, cl: u32, ct: u32, cr: u32, cb: u32, clip: ClipRect) -> [u32]:
+    var out = fb
+    # Horizontal sides, one row at a time: row r of the top side and row r
+    # (counted up from the bottom edge) of the bottom side.
+    for side in [0, 1]:
+        val thick = if side == 0: bt else: bb
+        val c = if side == 0: ct else: cb
+        var r = 0
+        while r < thick:
+            val py = if side == 0: y + r else: y + h - 1 - r
+            var l_full = 0
+            var r_full = 0
+            if bl > 0 and cl != c:
+                val cut = _fb_mitre_cut(r, thick, bl)
+                l_full = cut / 2
+                if cut % 2 == 1:
+                    out = _fb_mitre_pixel(out, fbw, fbh, x + l_full - 1, py, c, cl, clip)
+            if br > 0 and cr != c:
+                val cut = _fb_mitre_cut(r, thick, br)
+                r_full = cut / 2
+                if cut % 2 == 1:
+                    out = _fb_mitre_pixel(out, fbw, fbh, x + w - r_full, py, c, cr, clip)
+            if c != 0u32 and w - l_full - r_full > 0:
+                out = _fb_border_side_clip(out, fbw, fbh, x + l_full, py, w - l_full - r_full, 1, c, clip)
+            r = r + 1
+    # Vertical sides: the rows between the horizontal sides whole, and inside
+    # a mitred corner only the columns before the diagonal. A same-coloured
+    # corner was already painted by the horizontal side.
+    for side in [0, 1]:
+        val thick = if side == 0: bl else: br
+        val c = if side == 0: cl else: cr
+        if thick > 0 and c != 0u32:
+            val px0 = if side == 0: x else: x + w - thick
+            if h - bt - bb > 0:
+                out = _fb_border_side_clip(out, fbw, fbh, px0, y + bt, thick, h - bt - bb, c, clip)
+            for end in [0, 1]:
+                val cross = if end == 0: bt else: bb
+                val cc = if end == 0: ct else: cb
+                if cross > 0 and cc != c:
+                    var r = 0
+                    while r < cross:
+                        val cut = _fb_mitre_cut(r, cross, thick)
+                        val own = cut / 2 - cut % 2
+                        if own > 0:
+                            val py = if end == 0: y + r else: y + h - 1 - r
+                            val ox = if side == 0: x else: x + w - own
+                            out = _fb_border_side_clip(out, fbw, fbh, ox, py, own, 1, c, clip)
+                        r = r + 1
+    out
+
+# A glyph pixel: `color: rgba(0,0,0,.5)` blends over what is under it, as
+# Chrome does (the 5x7 lane wrote it opaque). An alpha byte of 0 is a colour
+# packed without one and stays opaque.
+fn _fb_text_px(color: u32, dst: u32) -> u32:
+    val a = ((color >> 24) & 255u32) as i32
+    if a > 0 and a < 255:
+        return composite_over_base(color | 0xFF000000u32, a, dst)
+    color

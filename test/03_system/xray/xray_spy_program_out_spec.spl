@@ -40,7 +40,7 @@ One lane run per spec process (cached under /tmp by pid).
 # doc/04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md ;
 # doc/04_architecture/compiler/mdsoc_architecture_tobe.md
 use std.spec.*
-use std.nogc_sync_mut.io_runtime.{process_run_timeout, env_get, read_file_text, file_write, file_exists, getpid}
+use std.nogc_sync_mut.io_runtime.{process_run_timeout, env_get, read_file_text, file_write, file_exists, getpid, host_os}
 
 fn lane_timeout_ms() -> i64:
     val knob = env_get("XRAY_OUT_LANE_TIMEOUT_MS")
@@ -68,7 +68,15 @@ fn llvm_cache() -> text:
 fn drop_cache(path: text):
     process_run_timeout("rm", ["-f", path], 60000)
 
+fn elf_host_blocked(lane: text) -> bool:
+    # BLOCKED, never a hang or a silent pass: ELF lanes need a Linux host + compiler-rt.
+    if host_os() != "linux":
+        fail("BLOCKED: {lane} is an ELF/Linux lane (needs a Linux host with clang + compiler-rt); host is " + host_os() + "; resume on Linux: sh {lane}")
+        return true
+    false
+
 fn program_run() -> text:
+    if elf_host_blocked("scripts/check/check-xray-native-program-e2e.shs"): return ""
     val cache = program_cache()
     if file_exists(cache): return read_file_text(cache)
     var args: [text] = ["scripts/check/check-xray-native-program-e2e.shs", "--simple", simple_binary(), "--keep"]
@@ -241,6 +249,7 @@ describe "XRay spy OUT — simple (compiled program, native Simple sleds)":
 # The LLVM column on a real binary today: the compiler-rt C harness
 # (check-xray-llvm-adapter-e2e.shs). Same expectation functions.
 fn llvm_run() -> text:
+    if elf_host_blocked("scripts/check/check-xray-llvm-adapter-e2e.shs"): return ""
     val cache = llvm_cache()
     if file_exists(cache): return read_file_text(cache)
     val (stdout, _, _) = process_run_timeout("sh", ["scripts/check/check-xray-llvm-adapter-e2e.shs"], lane_timeout_ms())

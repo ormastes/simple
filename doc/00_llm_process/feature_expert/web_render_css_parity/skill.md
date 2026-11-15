@@ -1065,7 +1065,7 @@ painted and over-tall), `html`, `forms-media`, `css-paint`, `css-layout`.
 ## 2026-11-14 — combination matrix vs Chrome 159 (tag x tag, tag x CSS, CSS x CSS)
 
 `sh scripts/check/check-web-combo-matrix-chrome.shs` (about 45 s; set
-`SIMPLE_BIN`): 849 generated cells / 3415 element ids in
+`SIMPLE_BIN`): 979 generated cells / 3880 element ids (849 / 3415 before the `lh_normal` page) in
 `test/fixtures/browser/combo_matrix/` (generator:
 `scripts/generate/generate-web-combo-matrix.shs`), each cell in its own 400x140
 slot and compared slot-relative at 1 px. It is a RATCHET on
@@ -1076,7 +1076,7 @@ turns green in the same change, or the check FAILs as stale.
 - Open clusters, largest first (cells): form-control UA size, i.e. `button`
   and `input` have no UA border and `input` a different content width (78);
   table-cell residue: max-content width drops the spaces around an inline child (9), a `td` whose `display` is not `table-cell` is not laid out (8);
-  `sub`/`sup` (36); floats (34); `fieldset`/`legend` (24); `flex-grow` on an
+  `sub`/`sup` (36, CLOSED -- see the sub/sup section below); floats (34, CLOSED -- see the float section below); `fieldset`/`legend` (24); `flex-grow` on an (row/wrap CLOSED, see below)
   item with a definite width (17); monospace metrics for `code` (16); width /
   height / vertical padding applied to non-replaced inline boxes (15).
 - **`parse_int` drops the sign.** Any signed CSS integer read through it is
@@ -1170,6 +1170,27 @@ turns green in the same change, or the check FAILs as stale.
   `apply_authored_style_metadata` only sees INLINE styles: stylesheet rules
   are applied without display, so set display-derived flags beside
   `_final_authored_display` in `core.spl`.
+- **Self-closing flag:** a `/` before `>` is the flag only when it is not
+  the tail of an UNQUOTED attribute value (`<a href=/x/>` has `href="/x/"`);
+  `_trailing_slash_self_closes` in `html_tokenizer.spl`. HTML integration
+  points (`foreignObject`, `desc`, `mi/mo/mn/ms/mtext`, `annotation-xml` with
+  an HTML encoding) end foreign content in `_TreeStack.in_foreign_content`.
+- **Span holding a ratio-only svg:** `inline_box_ratio_only_svg_fill_w` adds
+  the svg's constrained fill width to the span's intrinsic width; it skips
+  out-of-flow svgs and is scanned once per inline subtree. Derived viewBox
+  sizes saturate at 33554432 px (`svg_ratio_scaled_px`).
+- **Out-of-flow child of a span:** `iw` inside a span is the span's own
+  width, so a float / absolute REPLACED child is sized through
+  `inline_parent_containing_block` (nearest block container; for an absolute
+  box the nearest positioned ancestor, tested on EVERY ancestor including
+  inline ones, with insets and percentages resolved against it), and `intrinsic_text_width` skips out-of-flow children
+  of an inline box. `svg_ratio_view_box_milli` is the viewBox for SIZING (it
+  drops Chrome's unusable sub-unit-wide ratios); the painter keeps
+  `svg_view_box_milli`.
+- `style_rule_index.spl` scans raw markup on its own; its self-closing test
+  is the tokenizer's `html_start_tag_content_self_closes`, not `ends_with("/")`.
+- Open from follow-up 2: residues 12-14 (non-replaced absolute box in a span;
+  svg `title` dropped; the exact-10^7 ratio boundary).
 - Still open: residues 6-11 (9: a rule `em` is resolved before an inline
   `font-size`; 11: the 1 px floor, inline-flex, percentage width in a
   shrink-to-fit container) in
@@ -1218,10 +1239,618 @@ Traps:
   (panel2d, widget_draw_ir, window_scene_draw_ir) are not CSS lists and keep
   the stack they had. Chrome resolves bare `Sans` to DejaVu Sans; Simple does
   not follow it for that reason.
-- Wrapped lines advance 16px where Chrome advances 18px. Separate defect:
-  `doc/08_tracking/bug/web_wrapped_line_advance_16px_vs_chrome_18px_2026-11-14.md`,
-  pinned by the in-development
-  `test/01_unit/browser_engine/wrapped_line_advance_normal_line_height_spec.spl`.
+- **`line-height: normal` is the face's own metric, for text AND elements.**
+  A #text style used the resolved metric (`font_size` on the pure-Simple
+  outline lane) and an element style used `9 * (font_size / 8)`; `style_line_h`
+  now asks one source, `browser_normal_line_height_px` (font_renderer.spl):
+  ascent, descent and line gap, each scaled and rounded ON ITS OWN, then
+  summed (rounding the sum gives Liberation Serif 14 at 12px; Chrome says 15).
+  Chrome 159 at 12/16/24/32px: Liberation Sans 14/18/28/37, Liberation Serif
+  15/18/27/37, DejaVu Sans Mono 14/19/28/38. Source is the `OS/2` typo metrics
+  when USE_TYPO_METRICS is set (Chrome honours it: Pagul 17/34/68), else `hhea`.
+  Measured-Linux-host only; `ResolvedFontMetrics.line_height` (non-web text) is
+  untouched everywhere.
+- **Gates that do not move are not evidence.** The combo matrix and the 8-page
+  catalog all declare `font: 16px/1.5`, so neither exercises `line-height:
+  normal`; prove a line-height change with a page that uses it
+  (`wrapped_line_advance_normal_line_height_spec.spl`).
+- **A test page with no `font-family` is SERIF in Chrome and sans in Simple**
+  (Style default). Set the family in every oracle page or the numbers compare
+  two faces.
+- `line-height: 150%` was 150x and `line-height: normal` could not override an
+  inherited factor; both fixed with the above. Residuals are listed in
+  `doc/08_tracking/bug/web_wrapped_line_advance_16px_vs_chrome_18px_2026-11-14.md`.
+- The legacy (unmeasured-host) classification is pinned on every host by
+  `font_family_legacy_classification_spec.spl`, which calls
+  `_browser_resolve_family_legacy` directly.
 
 Specs: `test/01_unit/browser_engine/font_family_list_resolution_spec.spl`,
 `font_family_generic_classification_spec.spl`.
+## Looking at a comparison yourself (2026-11-14)
+
+`SIMPLE_COMPARE_VIEW=stay|auto` (default off) makes Chrome-vs-Simple and
+Skia-vs-Simple-2D comparison sites write both buffers to
+`build/compare_view/<name>/` and open a viewer sized to the host screen
+(side by side -> tabs -> fit/scrollbars). New comparison code should call
+`compare_view_inspect` from `std.nogc_sync_mut.ui.compare_view_host`.
+Design and migrated sites: `doc/05_design/ui/web_diff/compare_view_inspection.md`.
+
+## 2026-11-14 — selector combinators, `:has()` with context, and the step budget
+The layout matcher (`simple_web_html_layout_renderer_core_selectors.spl`) has
+ONE An+B evaluator (`css_nth.spl`), `+` / `~` combinators, `:nth-*` (incl.
+`An+B of S`), contextual `:has()` and a backtracking right-to-left walk, on
+both the text and pre-parsed paths; every row is pinned against Chrome 159 in
+`test/01_unit/browser_engine/{structural_pseudo_class,nth_child_of_selector,selector_hardening}_chrome_parity_spec.spl`.
+Trap: CSS is untrusted, so one match is capped at 100,000 compound steps and
+exhaustion must fail CLOSED everywhere (never negate an exhausted `:has()`,
+never cache an answer computed while exhausted) —
+`selector_sibling_complexity_spec.spl`. Known residual limits:
+`doc/08_tracking/bug/web_selector_budget_residual_limits_2026-11-14.md`.
+
+
+
+## 2026-11-14 — floats and `clear` (matrix 241 -> 205 mismatching cells)
+
+- **Model.** `simple_web_html_layout_renderer_layout_engine.spl` keeps a float
+  context: every placed float's MARGIN box in page coordinates
+  (`g_float_side/x0/x1/y0/y1`), queried by `float_ctx_left_edge` /
+  `float_ctx_right_edge` / `float_ctx_next_bottom` / `float_ctx_clear_bottom`.
+  `layout_with_style` is now a thin wrapper over `layout_with_style_flow`: a
+  box that establishes a block formatting context (`float_ctx_establishes_bfc`)
+  gets its own slice of the list (`g_float_base`) and drops it on exit, and its
+  auto height grows to enclose its floats.
+- **Placement** (`float_ctx_place_y`): not above the previous float's top,
+  below the floats `clear` names, then down past float bottoms until the
+  margin box fits. A cleared FLOAT keeps its top margin below the clearance; a
+  cleared BLOCK's border top sits at the clearance and its margin is absorbed.
+- **Line boxes.** The inline run loop refreshes `inline_start_x` / `line_iw`
+  from the float context at every line start (`inline_base_x` is the float-free
+  start). A float met inside an open run joins the line if it fits and moves
+  the boxes already on it (`line_nodes`) right.
+- **Trap — the old band narrowed by the RUN's width.** `node_w` in the `#text`
+  branch is the run's own box, so `node_w - indent` went to 1 px and `bb` beside
+  any left float wrapped to two lines (every `…-b` cell was 48 px tall). The
+  narrowed width comes from the run loop (now as per-line boxes, see the
+  "per-line text boxes" entry below).
+- **Trap — a `%` width float was resolved twice** (50% of 400 gave 100): pass
+  `style_with_width(cst, resolved)` like the inline-block arm does.
+- **Trap — page coordinates go stale when a subtree is translated.** The
+  margin-collapse re-top calls `float_ctx_shift`; any NEW
+  `offset_layout_subtree` on a non-BFC block that can hold floats must too.
+- **Not modelled:** a FLOAT is fitted at its top row only, not over its whole
+  height; a run that starts mid-line beside a float; `td` floats; the
+  collapsed space after an inline float is counted twice (`aa <float> bb`,
+  about 5 px). The full list is in the residue bug record.
+- **Found, not float-related:** a 100 px block wraps
+  `one two three four …` into 9 lines against Chrome's 7 (`one two three` is
+  96.95 px but does not fit 100); `<span>bb</span> cc <b>dd</b>` puts `dd` 6 px
+  right of Chrome.
+- Spec: `test/01_unit/browser_engine/float_clear_chrome159_geometry_spec.spl`.
+
+## 2026-11-14 — `<sub>` / `<sup>` join the line box (matrix 205 -> 167 cells)
+
+- **Cause.** A `vertical-align: sub | super` box was laid out at line top
+  +- font-size/4 and never entered `inline_baseline_nodes`, so the line box
+  could not grow (every block 3 px short, 5-6 px in a heading). `<sub>`/`<sup>`
+  also reset `line-height` to normal; html.css sets only `vertical-align` and
+  `font-size: smaller`.
+- **Model (Blink).** Baseline lowered by parent-font/5 + 1 (sub) or raised by
+  parent-font/3 + 1 (super): `vertical_align_baseline_shift`. In
+  `align_inline_line_baselines` a plain inline element's ascent/descent are
+  `inline_box_shifted_ascent/descent` -+ its own shift, which also walks the
+  sub/super boxes NESTED in it (`<b>x<sup>2</sup></b>` grows the line and
+  lowers `<b>`). The shifted box's top is `baseline + shift -
+  inline_content_area_ascent`.
+- **Two placements.** On a block's line the aligner places the box. Inside an
+  inline parent (`st.display == "inline"`) the run loop places it from the
+  parent's content-area top, because that parent's box must stay its content
+  area. Inline-block / replaced boxes with sub/super keep the flat nudge.
+- **Trap — integer metrics drift 1 px per term.** Deriving the top from
+  `strut offset` and `half-leading` separately lost 2 px; go through
+  `inline_content_area_ascent` once.
+- **Found, not fixed:** `line-height: normal` on a block does not override an
+  inherited unitless factor (block stays 24 px, Chrome 18-21); the
+  `td`/sub cells are the table-cell max-content residue, not sub/sup.
+- Spec: `test/01_unit/browser_engine/sub_sup_baseline_shift_chrome159_spec.spl`.
+
+## 2026-11-14 — `flex-grow` on an item with a definite width or basis (matrix 167 -> 152 cells)
+
+- **Cause.** The nowrap row pass split items into "explicit" (width or basis:
+  never grows) and "auto" (shares the remainder by weight). `flex-grow` on an
+  explicit item was ignored and the free space went to `justify-content`; a
+  basis + grow item with no auto sibling took the WHOLE remainder and pushed
+  its siblings out. The wrapping pass did compute a grown width but laid the
+  item out with its authored `width`, which won.
+- **Fix.** `grow_definite_total` collects flex-grow of definite-base items
+  (`flex_item_definite_base_w`); positive free space is split
+  `definite : auto` by grow weight (`definite_grow_space`), each definite item
+  gets `base + share` (cumulative rounding) and is laid out through
+  `style_with_width` so percentages inside it resolve against the used width.
+  `justify-content` gets no space when anything grows.
+- **Not fixed:** `flex-direction: column` ignores flex-grow (`.i flex-grow:1`
+  in a 90 px column stays 24, Chrome 42) and `column-reverse` is laid out as a
+  row; a wrapped line's items are not stretched to the line height
+  (`align-content: stretch`, 24 vs 45); a growing item with AUTO width still
+  starts from base 0 instead of its content width (`flex-grow:1` on two text
+  items gives 141/141, Chrome 111.73/170.47), because `flex-basis: 0` and
+  `auto` share the `flex_basis_px == 0` encoding.
+- Spec: `test/01_unit/browser_engine/flex_grow_definite_size_chrome159_spec.spl`.
+
+## 2026-11-14 — follow-ups to the float / sub-sup / flex-grow fixes
+
+- **Trap — `layout_selected` bypasses `layout()`.** The `contain: layout`
+  boundary is re-laid-out through `layout_with_style` directly, so any state
+  `layout()` resets must be scoped another way. Floats: a `contain: layout`
+  box is a formatting-context root in `float_ctx_establishes_bfc`; without
+  that, a second partial pass placed each float beside its own stale copy
+  (AC-14 of the float spec: 3 boxes differed from the full pass).
+- **Not modelled, sub/sup:** when `<sup>` follows a WRAPPED text run, the
+  reopened last line lowers its baseline for the sup but the run's own last
+  line (part of the tall text box) does not move, so words before and after a
+  footnote marker can differ by 2-3 px in paint. Element geometry matches
+  (`sup` at y=26 in a 200 px `<p>`, Chrome 26).
+- **Not modelled, flex:** `flex: 1` on an item that also has a `width` now
+  grows from that width; Chrome grows from basis 0. Equal widths give the
+  same result, unequal ones do not (`flex-basis: 0` and `auto` share one
+  encoding).
+- **Bitmap lane.** `check-simple-web-engine2d-js-bitmap-evidence.shs` refuses
+  the Rust seed (`simple_bin_status=forbidden`) and needs a self-hosted
+  `bin/simple`; on a host without one it reports `unavailable`, not a verdict.
+
+## 2026-11-14 — paint follows the float inset; an explicit zero flex-basis overrides width
+
+- **Per-line text boxes.** `LayoutResult.first_line_dx` is the mid-line inset
+  of line 0 and nothing else (never negative). A run whose lines floats
+  shorten has `LayoutResult.line_boxes[node]`: flat `(dx, width)` pairs, one
+  per line; lines past the list span the box. A node has one form or the
+  other. Read BOTH only through `text_line_box_dx` / `text_line_box_w`
+  (`..._layout_foundation.spl`); the readers are both raster loops, the Draw
+  IR first-line command and its `_line{n}` loop, the `text_line_x0` probe,
+  and the CPU layout execution port (`browser_cpu_line_box`, with
+  `browser_cpu_line_insets_from_boxes` recovering both forms). Any new
+  `LayoutResult(` / `TextWrapCache(` that feeds a painter must copy
+  `line_boxes` as well as `first_line_dx`. Specs:
+  `test/01_unit/browser_engine/float_band_text_paint_inset_spec.spl`,
+  `float_line_fit_chrome159_spec.spl`,
+  `test/01_unit/lib/gc_async_mut/gpu/browser_engine/cpu_execution_port_line_boxes_spec.spl`.
+- **Trap — do not pack a second meaning into an existing integer table.** A
+  first version encoded the float inset as a negative `first_line_dx` entry;
+  a reader outside the renderer files (the CPU execution port) read the table
+  raw and would have put line 0 about 65,000 px left. Grep `src/` for every
+  reader before changing what a shared field means.
+- **`Style.flex_basis_zero`.** `flex: <n>` / `flex: <n> <m>` / `flex-basis: 0`
+  / `0%` set it; `flex_basis_px` stays 0. EVERY such item, with or without a
+  `width`, has base size padding + border (`flex_item_zero_basis`), joins the
+  definite-grow share and is laid out via `style_with_width`.
+- **Automatic minimum size.** A zero-basis item never ends below
+  `flex_zero_basis_floor_w`: its min-content width (`flex_item_min_content_w`,
+  longest word from the RESOLVED advances), capped by a specified `width`;
+  no floor when `min-width` is declared (`Style.min_width_set`, true even for
+  `min-width: 0`) or the item clips. Nowrap rows freeze too-small shares at
+  the floor and redistribute (`zero_fixed_w`); with no free space every one
+  sits at its floor and takes no part in shrinking.
+- **Trap — `_table_text_min_content_width` is a flat cell estimate** (11 px
+  per character at 16 px): `Label` measured 55 against Chrome's 39.16. Use
+  the resolved per-byte advances for anything compared with Chrome.
+- **Trap — the old shorthand parser read numbers positionally**
+  (`parse_nth_int`): `flex: auto` set nothing, `flex: 1 200px` made shrink 200.
+  It is token-based now: unitless = grow, shrink; length or `auto` = basis.
+- This supersedes the "`flex: 1` on an item that also has a `width`" item in
+  the follow-ups section above.
+- Open residue (one record):
+  `doc/08_tracking/bug/web_combo_matrix_float_subsup_flex_residue_2026-11-14.md`.
+- Catalog pixel ratchet, 900x760 `cpu_simd`, measured at the tip of this
+  change: overview 2.88, html 15.98, css-layout 5.85 (row 6.11), css-paint
+  7.44 (row 9.28), forms-media 6.38, animation 7.09 (row 7.36), evidence 1.72,
+  tab-bar 0.68 (row 0.63, inside the tolerance, not raised). The three lower
+  rows were lowered. The same three values were measured before the paint and
+  zero-basis commits, so those two moved no catalog pixel.
+- `check-text-len-unit-mix.shs` at this tip: 0 new rows; it still FAILs on two
+  STALE baseline rows outside the renderer (`src/app/spipe/model/canonical.spl
+  _json_escape`, `src/compiler/80.driver/driver_compile_vhdl_source_map.spl
+  _json_escape`), present on the release tip as well.
+- Base comparison (release tip `c1099bb7897` vs this change, same seed
+  `sha256 08aba9746a813ee7…`, 59,635,056 bytes, 2026-11-14 09:32, `--simple-only`
+  over overview + evidence + css-layout): mismatch identical on all three
+  (2.88 / 1.72 / 5.85), so the float, sub/sup and flex changes move NO catalog
+  pixel and the lowered rows record improvements that were already on the
+  release tip. Render time 54.1 / 32.1 / 260.4 s base vs 54.5 / 32.7 / 259.2 s;
+  max RSS 814 MB vs 820 MB. The text-len check FAILs identically on the base
+  (0 new, the same 2 stale rows).
+- A float's auto width takes the wider of `flex_item_max_content_width` and
+  `intrinsic_text_width`: only the second sizes a replaced child
+  (`svg_viewbox_percent_sizing_spec` AC-13 went 1 px wide without it).
+
+## 2026-11-14 — review round: lines and blocks fit beside floats over their own extent
+
+- **Line start.** The run loop probes the floats over `[cy, cy +
+  line_probe_h)` (the block's line height), not one pixel row. An EMPTY line
+  that cannot take its first piece (`inline_first_fit_w`: first word, whole
+  nowrap run, or atomic box) moves to `float_ctx_next_bottom_span` and tries
+  again -- two half-width float columns followed by `<p>` no longer stack one
+  word per line. `<br>` with `clear` moves `cy` below the named floats.
+- **Wrapped run.** `float_ctx_line_boxes(y, line_h, left, right)` gives one
+  `(dx, width)` pair per line for as long as a float reaches below the line
+  top; `compute_style_wrap_ranges_float_band` wraps into them and leaves a
+  shortened line EMPTY when the next word does not fit it. The Draw IR text
+  command's y is the line top + 3 at 16px/1.5 (half-leading), the same number
+  Chrome's `Range.getClientRects()` reports.
+- **Formatting-context block.** Placed where the room over `[top, top +
+  height)` holds it; auto height comes from a trial `layout_with_style`
+  whose result is discarded (safe because the box scopes its own floats and
+  the text tables are re-recorded by the real pass).
+- **Alignment.** `block_sole_inflow_child` replaces `child_count == 1` for
+  the centred/right sole-text widening: a float sibling is not in flow. An
+  RTL box with no declared `text-align` gets `start`.
+- **Cost.** `g_float_max_y1` (lowest float bottom of the current context
+  slice, saved and restored by the `layout_with_style` wrapper) lets every
+  float query return at once for a row at or below it.
+- **Baseline arithmetic.** The ratchet lists element IDS, the gate table
+  counts CELLS; a cell has a slot id plus 1-3 element ids and is green only
+  when all of them match. 463 -> 263 ids (200 removed) is 241 -> 152 cells
+  (89 fixed). The gate FAILs on a mismatching id that is not baselined and on
+  a baselined id that matches, so its PASS line is the proof that no
+  still-mismatching id was dropped.
+- Residue: `doc/08_tracking/bug/web_combo_matrix_float_subsup_flex_residue_2026-11-14.md`.
+
+## 2026-11-14 — second review round: fallbacks, long words, wrap freeze, trial reuse
+
+- **Trap — a "whole run" fallback is a floor of the whole paragraph.**
+  `text_longest_word_advance` returned the run's advance when the style had
+  no per-byte table (`compute_styles(..., vector_fonts: false)`), so every
+  `flex:1` paragraph froze at its full width. A minimum must fall back to a
+  WORD in the unit that lane wraps with (`style_char_w` cells), never to the
+  run. Spec row AC-30 lays out with `vector_fonts: false`; keep a no-face row
+  for any measurement that feeds a floor.
+- **Trap — a specialised wrap must keep the general wrap's arms.**
+  `compute_style_wrap_ranges_float_band` lacked the `word_end_byte` arm
+  (long word overflows whole) and was entered whenever a float existed below
+  the line, shortened or not (`line_boxes_shorten` is the precondition now).
+- **Wrapping flex lines** freeze per line after measuring
+  (`wrap_frozen` / `wrap_line_of`): a frozen item leaves
+  `line_grow_totals` and `line_zero_excess`, the rest share the line.
+- **Trial reuse.** The formatting-context fit stashes its trial layout into
+  `out_*` and the scalars (`trial_height`, margins); the real layout is
+  skipped when `(x, y, w)` are unchanged. Without it nested
+  `overflow:hidden` + float cost 2^depth (22 levels did not finish).
+- **`Style.text_align_set`** (inherited with `text_align`) separates an
+  authored `left` from the initial value for the RTL `start` default.
+- **Rounding.** Definite grow shares round to the NEAREST pixel
+  cumulatively, which reproduces Chrome's rounded item edges (400 / 3 ->
+  0, 133, 267).
+- Still open (residue record): the exact float bottom for a word moved
+  down inside a run, integer flex factors, the eager `float_ctx_line_boxes`
+  list, `align="left"` under RTL, cell-estimate minimum without a face.
+- Filed after the third review (residue items 25-27, and 6): the faceless
+  float-aware wrap still chops long words (as the normal faceless wrap
+  does); one twice-layout case remains when the room over a
+  formatting-context box's height is narrower than at its top row;
+  `<td align="left" style="direction:rtl">` probably still aligns `start`;
+  the faceless cell wrap gives 6 lines where Chrome has 3 for the AC-30
+  paragraph.
+
+## 2026-11-14 — combined tip check (floats + line-height normal + selector combinators) and the `lh_normal` matrix page
+
+- **No interaction regression.** At `2d9344c6eae` (three separately gated
+  lanes merged) the matrix is 152 / 849 cells with 263 ids, 0 new and 0
+  stale; the 8 catalog pages measure exactly their rows (tab-bar 0.68 against
+  0.63, inside the tolerance). Nothing to tighten in either baseline.
+- **Spec sweep.** 118 specs in `test/01_unit/browser_engine` plus the CPU
+  port spec: 107 green. The 11 red ones fail the SAME cases at the pre-lane
+  base `00afc10545b` (browser_renderer_utils closure 21/22, dom_identity_index
+  5/6, fractional_advance_accumulation 4/11, html5lib_tokenizer 7/11,
+  html_tree_builder_hardening 11/13, html_tree_builder 8/37, js_integration
+  0/12, kern_pair_advance_accumulation 1/9, platform_system_face_metrics
+  15/25, declarations closure 52/54, table_fractional_column_width 0/2).
+  `corpus_fifth_line_exact_pixel_spec` (0/1) is `@tag:in-development` and
+  documents its own expected failure.
+- **`lh_normal.html`** (generator `page_begin` takes the body font as a third
+  argument): 130 cells / 465 ids under `font: 16px sans-serif`, i.e. the
+  initial `line-height: normal`, which no fixture covered -- every other page
+  sets `16px/1.5`. Groups: tag-tag (7 parents x 10 children), font,
+  font-inline, line-height, line-height-inherit, line-height-reset, wrap,
+  box. Matrix is now 979 cells / 3880 ids.
+- **Found and fixed through it:** a percentage or `em` `line-height` was
+  stored as a factor, so a 24 px child of `line-height:150%` got 36 px
+  (Chrome 24). It computes to a LENGTH against the declaring element's own
+  font-size and is inherited as that length; only a unitless number stays a
+  factor. Spec:
+  `test/01_unit/browser_engine/line_height_percent_em_inherits_length_spec.spl`.
+- **Trap — the length needs the element's FINAL font-size.** Declarations
+  are applied once per matching rule, so `.a{line-height:1.5em}` plus an
+  inline `font-size:32px` saw the stale 16 px when the length was computed
+  at parse time (24 where Chrome has 48). The factor is kept on the Style as
+  `line_height_em_milli` (thousandths, so `112.5%` survives), converted to
+  `line_height_px` at the end of EVERY declaration application, reset by
+  `inherit_from` / never passed by `inherit_style`, so children get only the
+  length. Any other value that depends on a property which can cascade in
+  later needs the same pending form.
+- **Baselined clusters on the new page (17 cells, 27 ids):** `td` parents
+  (10 cells: the known table-cell max-content residue, the cell wraps to two
+  lines); inline button / small in `h1` / `h3` (3: baseline alignment of a
+  smaller or atomic inline in a heading, same as the 1.5 page); `pre` with
+  button / input (2: monospace form-control width, same as the 1.5 page);
+  `<span style="font-size:10px">` sits 2 px high (1: a smaller inline font's
+  baseline under the normal line height); `position:absolute` without
+  offsets is placed at the container top instead of its static position
+  (1: y 0 where Chrome has 18).
+- **Trap — `rem` is not `em`.** `_decl_line_height_own_font_milli` tests
+  `ends_with("em")` and must exclude `rem`, which still goes through the old
+  factor parse.
+- **4K lane (3840x2160, Vulkan on llvmpipe) fits in 8 GB:** 16 min 52 s,
+  max RSS 4.5 GB for all 8 pages. Measured at this tip: overview 0.24, html
+  2.77, css-layout 2.09, css-paint 2.47 (row 2.50), forms-media 1.96,
+  animation 2.23 (row 2.63), evidence 0.15, tab-bar 0.05. The two lower rows
+  were lowered. Run it with
+  `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json … --width 3840
+  --height 2160 --backend vulkan`.
+
+## 2026-11-14 — matrix clusters: inline button baseline, max-content of mixed inline content, control UA font (169 -> 106 cells)
+
+- **Cluster census at 169 cells / 290 ids (by root cause, largest first):**
+  inline `<button>` position (about 44 cells: every `*/button` child cell and
+  most `button/*` cells); non-replaced inline boxes taking `width` / `height`
+  / `min-*` and vertical padding/border growing the line (about 20: `span/*`,
+  `display:inline` cells); `td` parents (24 cells on two pages); controls
+  inheriting the parent font (9); `td` with a non-`table-cell` display or
+  out-of-flow position (9); flex column / column-reverse / wrapped-line
+  stretch (18); `display:inline-flex` (10); `width: min-content |
+  max-content` and `white-space: pre-wrap` (8); percentage / negative
+  offsets (5).
+- **Inline button.** A `<button>` is an inline-block WITH a text child, so the
+  run loop's baseline-set test (`display == "inline" or child_count == 0`)
+  skipped it and it stayed at the line top. It is now in the set and
+  `inline_widget_baseline_from_top` gives its baseline: the LAST label
+  line's (Chrome: a three-line 51 px button sits at the top of a 52 px
+  line), the label block centred in the content box; an empty button aligns
+  on its content-box bottom. Margins take part through the existing
+  `margin_ts` / `margin_bs`.
+- **Max-content.** `flex_item_max_content_width` (auto table columns,
+  absolute / float / flex shrink-to-fit) now mirrors `intrinsic_text_width`
+  for inline content: a collapsible space between pieces counts, `<br>` ends
+  the measured line, replaced inline children use
+  `inline_replaced_predicted_width`, text controls
+  `text_control_auto_outer_w`.
+- **Control font.** `font: -webkit-small-control` is a whole shorthand: the
+  tag defaults for `button` / `input` / `select` reset family
+  (`sans-serif`), weight and style, not only size and line height.
+- **Trap — whole-pixel pieces drift.** `ab <button>cd</button> ef` in a `td`
+  is 78 px where Chrome has 76.13: five pieces each rounded to a pixel. The
+  matrix keeps `tt-td-button-w/-p` baselined for it.
+- **Heading margins.** `h6` carried 26 px margins; 2.33em of its 10.72 px
+  font is 24.98. The others were already right.
+- **`html` catalog page (15.98%) by area, 900x760:** rows 124-219 are 10.8
+  of the 15.98 points -- the article's `<header>` has
+  `background: linear-gradient(120deg, #173b7a, #6d28d9)` and the CPU raster
+  lane paints it FLAT (`#173b7a`): `fb_style_background_opacity_clip` only
+  knows the two-colour vertical form (`background_gradient_from/to`), while
+  an angled or N-stop gradient is carried as stop lists for the Draw IR
+  lane. A paint defect, not geometry. Text rows 240-760 are about 4.6
+  points (glyph raster differences); the rest 0.6. Element geometry inside
+  the viewport matches Chrome; the first geometry delta on the page is the
+  `h6` example at y = 4534 (fixed above), then `<q>` without quotation marks
+  (10 px narrower) and a `tbody` 2 px low.
+- **Trap — the geometry differ's default Chrome run has a 15 px scrollbar.**
+  Without `GEOM_DIFF_CHROME_EXTRA_FLAGS="--hide-scrollbars
+  --force-device-scale-factor=1"` every block on a page taller than the
+  viewport reports `dw = 15` and the real deltas drown (357 "mismatches"
+  against 162 with the flag).
+- Specs: `inline_button_baseline_chrome159_spec`,
+  `table_cell_max_content_inline_chrome159_spec`,
+  `form_control_ua_font_reset_chrome159_spec`,
+  `heading_ua_margins_chrome159_spec` (all in `test/01_unit/browser_engine`).
+- Residue: `doc/08_tracking/bug/web_matrix_table_button_html_page_residue_2026-11-14.md`.
+- **Trap — an atomic inline box keeps its edge spaces inside.**
+  `inline_subtree_edge_is_space` follows an inline element's first / last
+  text to find a space on the line; it must not be asked about an
+  inline-block, button or replaced child (`ab<button> cd </button>ef` is as
+  wide as `ab<button>cd</button>ef`). The call sites gate on
+  `display == "inline"` and not replaced. `white-space: nowrap` still
+  collapses (only `pre` keeps spaces), so a nowrap cell keeps the
+  inter-inline space in max-content.
+- **Trap — `max-width: <percent>` used to be N px.** Percentage min-/max-
+  sizes are now the negative sentinel (like `width`) and resolve in
+  `style_with_resolved_percent_min_max`; every clamp reader tests `> 0`, so an
+  unresolved sentinel is `none`, which is what max-content needs. Resolve at
+  EACH call site against that site's containing block (normal flow, inline
+  atomic, float, abspos padding box, flex container); `layout_with_style`
+  only maps a leftover sentinel to `none`. Resolving there against the box's
+  own width was wrong everywhere it mattered: an inline input came out 16 px,
+  a float 193 instead of 200, an abspos 193 instead of 210, and
+  `td{max-width:10%}` (ignored by Chrome) shrank the cell to 13 px. A flex
+  item also needs the clamp INSIDE distribution (`flex:1;max-width:25%` of
+  400 is 100 / 300), not only on the final width.
+- **Trap — a gradient row has two painters.** The CPU raster paints a typed
+  `linear-gradient` in `fb_style_background_opacity_clip` (fb lane) AND the
+  Draw IR engine2d ramp (`emu_draw_linear_gradient_stops`); a fix in one
+  lane only is invisible or half-visible, so run each new spec row red first
+  to learn which lane it hits. Corner keywords are box-dependent: the parser
+  stores 1000 + the square angle and both lanes resolve it with
+  `gradient_corner_dir_q16`. Interpolation is premultiplied; stop positions
+  never decrease. Emit a ramp a ROW at a time (`draw_image`): one
+  `draw_rect_filled` per colour run cost the catalog `html` page 120 s.
+  (`parse_color("red")` was #dc3232 until 2026-11-15.) The corner codes
+  (>= 1000) share the angle slot, so every real angle must be reduced to
+  0..359 first (`3turn` painted as "to top left" until it was). Ramp
+  positions multiply by 1000: keep them in i64 past ~1073 px.
+- **Trap — a UA reset needs `inherit` to exist.** Resetting the control
+  font exposed that NO font property resolved the `inherit` keyword
+  (`font-family: inherit` stored the literal text; `font: inherit` cleared
+  weight and style). It only looked right while controls inherited by
+  default; `button, input { font: inherit }` (normalize, Tailwind preflight)
+  would have rendered every control in the UA font. `Style.inherit_font_*`
+  / `inherit_bold` / `inherit_italic` / `inherit_line_height_px` capture the
+  PARENT's computed values in `inherit_from` and `inherit_style`; `font`,
+  `font-family`, `font-size`, `font-weight`, `font-style` and `line-height`
+  read them for `inherit`. Before adding any tag default that replaces an
+  inherited value, check that `inherit` restores it.
+- **Button baseline, any content.** With auto height the content fills the
+  content box, so the last line's baseline is `h - border_b - pad_b -
+  descent` whatever the content is (a label in `<b>`, `ab<br>cd`, an image).
+  Only an explicit height needs the centring lead, and that path still looks
+  for a direct text child.
+- **Max-content, spaces.** One collapsible space counts between inline
+  pieces wherever it sits: a whitespace-only text node (`<a>Edit</a>
+  <a>Del</a>`), the end of the previous element's text (`<span>ab
+  </span>cd`), or the start of the next (`inline_subtree_edge_is_space`).
+  Text controls are clamped by min/max-width (`constrained_outer_width`)
+  and atomic inline boxes carry their horizontal margins.
+- **Trap — one colour parser, CSS Color 4 values.** `parse_color` and
+  `parse_color_alpha` hand `rgb()` / `hsl()` and keywords to dom_color's
+  `parse_color_value_checked`, alpha kept in every syntax. 0 means
+  "transparent or invalid" to every caller, so an invalid value must be
+  rejected (never read as 0 = black), and a colour longhand OR shorthand
+  (`background`, `border*`, `outline`) holding a malformed colour function
+  is dropped whole in `_decl_table_build_inner`. A shortcut keyword above the table (`red` = #dc3232 survived
+  for months) silently repaints every page; pin new forms in
+  `css_color_parse_chrome159_spec.spl` against `getComputedStyle`.
+- **Trap — a collapsed cell's box overlaps its neighbour.** In
+  `border-collapse: collapse` the tracks hold half of each shared border, so
+  the cell box is laid out from `cell_x - (b+1)/2` to `cell_right + b/2`
+  (layout_engine table loop) and paints its full border with the ordinary
+  paint path. Moving the border paint instead of the box leaves the content
+  one pixel off (seen and reverted). Column edges round half up in both
+  `table_distribute_auto_columns` and the fixed split; probe a fraction
+  >= .5 when pinning one, or floor passes too
+  (`table_collapsed_border_paint_chrome159_spec.spl`).
+
+## 2026-11-15 — lane parity: Draw IR gradients, cpu_simd vs Vulkan census, hardware Vulkan 4K
+
+- **Draw IR angled / multi-stop linear gradients now match the fb raster
+  bit for bit (opaque).**
+  `emu_draw_linear_gradient_stops` (`engine2d/backend_emu.spl`) used the
+  corner pixel CENTRES as the line ends (`(w-1)` span) and truncated alpha;
+  it now uses the fb raster's mapping (integer Q16 sin/cos tables generated
+  from `gradient_angle_sin_cos_q16`'s series -- this file is also the
+  baremetal raster, so no `f64` -- line `|w sin a| + |h cos a|`, `t16 / 64`
+  quantisation, rounded premultiplied alpha). Was 13-16 levels off on 10x10 /
+  12x6 boxes. Spec: `test/01_unit/browser_engine/linear_gradient_angle_draw_ir_chrome159_spec.spl`
+  (Chrome 159 rows for 45/135deg, `to bottom right` on 12x6, translucent
+  stops, and a whole-box lane-parity row; 9/11 -> 11/11). Translucent stops
+  stay up to 2 apart: the fb raster quantises alpha to 0..100 %.
+- **The default top-to-bottom two-stop ramp changed on the Draw IR lane
+  too** (it goes through the same primitive): row centres along the line
+  instead of exact stops on the first/last row. That is what Chrome does --
+  10x10 `#000 -> #fff` row 0: Chrome #0d0d0d, Draw IR #0d0d0d (was #000000).
+  The fb raster keeps its endpoint-exact dithered painter
+  (`mix_color_vertical_centered`), which is now the outlier: #000000 there,
+  up to 21 off on 12x6, within 2 on 200x100 (AC-11 bounds it at 2, AC-12
+  pins Chrome). AC-13 runs the primitive on a real `VulkanBackend`
+  (llvmpipe): device readback equals the software reference pixel for pixel.
+- **Trap: the catalog gate's `vulkan` lane never calls that function.**
+  `simple_web_render_html_to_pixels_with_engine2d_backend` paints non-"text
+  document" pages through the fb raster and presents them; only the Draw IR
+  entry `simple_web_layout_render_html_pixels_engine2d` reaches
+  `draw_gradient_rect_stops`. And that entry with `"vulkan"` resolved to
+  `selected=cpu` in a probe -- read `Engine2dDrawIrAdvResult.selected_backend`
+  before claiming a GPU ran. `feature_showcase.spl` is the place where the
+  primitive runs on a real `VulkanBackend` (byte-identical, 38 primitives).
+- **cpu_simd vs Vulkan (llvmpipe), 900x760: 62 pixels over all 8 pages**,
+  all text ink: some glyphs one row lower on Vulkan (per glyph, root cause
+  not found); Chrome mismatch identical per page. Record + 25 px repro:
+  `doc/08_tracking/bug/web_vulkan_lane_control_text_one_row_past_clip_2026-11-15.md`.
+- **Hardware Vulkan 4K (NVIDIA GB10, driver 580.173.02,
+  `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json`, strict
+  backend):** runs. overview 0.24, html 1.67, css-layout 2.09, css-paint
+  2.41, forms-media 1.96, animation 2.23, evidence 0.15, tab-bar 0.05 --
+  identical to the llvmpipe rows. 932 s for 8 pages (llvmpipe 1012 s), max
+  RSS 4.5 GB: the interpreted page pipeline dominates, not the device. Run
+  with `--baseline <nonexistent>` so it is compared, not judged against the
+  llvmpipe file. The RenderDoc layer still cannot load on this driver.
+- **Perf note (not fixed):** on llvmpipe at 900x760 `font_atlas_pack_u32_to_u8`
+  is 54 s of forms-media's 76 s render (byte-lane atlas repack; the typed
+  `SIMPLE_VK_FONT_UPLOAD=u32` lane is opt-in).
+- Gradient paint cost, same seed: 300 x 900x100 120deg boxes 1.02 s -> 0.39 s
+  wall (startup 0.24 s), RSS +4 MB; 6000 12x6 boxes 0.25 s -> 0.25 s, +5 MB
+  (boxes under 1025 px skip the table; a table per box cost +87 MB).
+
+## 2026-11-15 — transparent is a value, mitred border corners, `width:0`, column-reverse, border cascade, whitespace by computed display
+
+- **Trap — 0 still means "unset" to the parsers; transparency is decided at
+  the applier.** `_parse_color_delegated` keeps returning 0 for both
+  `transparent` and garbage. Every applier that must *override* an earlier
+  colour asks `_decl_transparent_color(raw)` (any top-level token with alpha
+  0, functions kept whole by `_decl_top_level_tokens`), so
+  `background:red;background:transparent`, `color:transparent` and
+  `border-*-color:transparent` clear the earlier value instead of being
+  ignored. Both paths need it: the declaration table appliers
+  (`_decl_apply`) AND the dispatch fast path in `..._declarations.spl`
+  (`color`, `outline`) — the review caught the fast path missing it.
+  Alpha-0 hex (`#f000`, `#ff000000`) returns 0 too.
+- **Trap — named colours inside shorthands never parsed.** `border:4px solid
+  blue` painted nothing until `_shorthand_color_token` ran before the
+  rgb/hsl/hash fallback in `parse_color_any`. Multi-value `border-color`
+  takes 1-4 values (top right bottom left); a first-token-only parse
+  painted a square instead of a triangle.
+- **Mitre.** A corner pixel belongs to a side when
+  `(2c+1)*side_w > (2r+1)*cross_w`; the exact diagonal pixel gets ONE
+  premultiplied 50/50 mix (`mitre_mix_color`; Chrome #7f0080 for red/blue,
+  #ff7f7f for red/transparent). Blending it once per side double-blends.
+  Framebuffer twin `_fb_border_sides_mitred`, Draw IR twin
+  `_engine2d_draw_ir_render_borders_mitred`; only taken when adjacent sides
+  differ.
+- **`width:0` is a set width.** `node_w == 0` used to mean auto, so a CSS
+  triangle was full width and `width:0;white-space:nowrap` grew. The
+  `width_zero` style flag (copied in `copy_from`, `style_with_width`,
+  `style_with_height_without_grid_fields`; false whenever the final width is
+  not 0, so `width:0;inline-size:50%` is 150) is honoured by the "is width
+  set" tests in layout_engine, `constrained_outer_width` (its `< 1 -> 1`
+  clamp made every zero box 1px -- the first cut missed it), floats, abspos
+  and the flex sizing branches. `height:0` is still auto (48 sites; filed).
+- **Text alpha.** `_fb_text_px` blends glyph pixels with alpha 1..254 in the
+  5x7 bitmap lane; engine2d `SoftwareBackend.draw_text` blends via
+  `sw_blend_const_raw_span`. TTF and other backends: open.
+- **Unclosed function at the end of an inline style** (`color:rgb(0,255,0`)
+  is closed by `_inline_style_closed` before the priority split (CSS
+  Syntax: EOF closes open blocks).
+- **Trap — whitespace is judged by COMPUTED display, never by tag.** The
+  parser keeps a whitespace-only text node after any element as one space
+  (never inside `<pre>`), and `compute_styles_with_material` hides it
+  (display:none) inside flex/grid/table containers and beside a block-level
+  sibling. The first cut kept it after "inline tags" and broke two catalog
+  pages: forms-media (`label{display:block}` -> an extra line per control,
+  6.37 -> 9.46) and tab-bar (a space flex item + two gaps between every
+  button, 0.68 -> 2.00). Flex row/column and grid loops now skip
+  display:none children (no item, no gap). Kept whitespace fixed the
+  animation page's 4-9px shifts. Simple's space advance is 6px vs Chrome
+  4.45 — open.
+- **Trap — a shorthand must store its longhands at its own source
+  position.** The appliers run in a fixed order, so
+  `border-top-color:red;border-color:blue` stayed red until
+  `_border_shorthand_longhands` (foundation, `_decl_table_build_inner`)
+  started writing `border-*-color/width/style` entries right after the
+  shorthand; the last-wins lookup then sees source order. A `border-color`
+  with a non-colour token returns `["!"]` and drops the whole declaration.
+  A shorthand also stores what it omits (width 3px, style none, color
+  `currentcolor` -> the element colour): `border-top-style:dashed;border:2px
+  red` paints nothing in Chrome. Logical properties (shorthands AND
+  longhands) are stored as their physical longhands only (horizontal-tb
+  ltr), so the fixed-order logical appliers never re-apply them; only a
+  `var()` value still reaches them. Trap: the table used to be allocated at
+  26 slots per declaration whenever the text held "border" (even
+  `box-sizing:border-box`) and was never trimmed -- every lookup scanned
+  the empty slots. It is cut to the used length now.
+- **Trap -- abspos stretch tests must read "is set", not "> 0".**
+  `left:0` and `inset:0` were never stretched because the test was
+  `left_px > 0`; use `left_auto`. The rtl over-constraint rule applies only
+  with a definite width and uses the containing block's direction.
+- **Trap -- outline `auto` is not a border style.** `css_border_style_token`
+  does not know it; `outline_shorthand_paint_width_px` is the one resolver
+  for both appliers (omitted width = 3px, omitted style = no paint).
+- **Trap -- `white_space_pre` means nowrap too.** It cannot carry
+  `pre-wrap`/`pre-line`; a kept newline between elements uses
+  `Style.white_space_newline` + `HNode.ws_raw` (`html_kept_newlines` counts
+  them; extra newlines add line heights) and is laid out by the `<br>`
+  branches (layout_engine, layout_foundation measure). A multi-space
+  whitespace node is NOT collapsed by normal-mode layout, so the parser
+  stores the space count only inside preformatted tags.
+- **`flex-direction: column-reverse`** restacks bottom-up from the content
+  bottom in DOM order with physical margins (reflecting the column result
+  got asymmetric margins wrong: t=38 vs Chrome 42). Chrome 159:
+  flex-start/normal/`end` pack at the bottom, flex-end and `start` (the
+  physical top) at the top, center/space-* keep the reversed order. Move
+  items with `offset_layout_subtree` by (target - flow y): `out_by` already
+  holds the `position:relative` offset, so subtracting it from the box y
+  instead dropped `top:10px`. Auto main margins and `order` are not
+  modelled (filed). Next cluster: flex-wrap line stretch under a definite
+  height (align-content stretch; Chrome items 45 tall, Simple 24).

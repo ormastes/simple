@@ -20,6 +20,29 @@ different provider. Record admitted runtime lineage and source-matched execution
 The source audit and test matrix explicitly distinguish existing components from
 missing integrated behavior and unexecuted acceptance tests.
 
+## Status 2026-11-14 (lane nodeattr)
+Placement API: `AttributeStoreV1<T>` in `src/compiler/00.common/data/attribute_schema_v1.spl`
+(embedded owner delegate / dense column / sparse hash; token resolved once via
+`data_attr_storage_resolve_v1`; default `direct` = owner behaviour; nothing in the
+compiler builds one yet). Measured AST column census: `doc/05_design/compiler/data/node_tree_storage.md`
+7.4 (note: `op` is only 7.9% dense over global node ids). Seed accepts field-level
+`@attr_storage` after the parser fix in `types_def/mod.rs` (`is_at_field_annotation`).
+Seed interpreter defect: `continue` in a `val x = match` arm yields nil; use statement-level match.
+## Async registered initialization (P3, 2026-11-14)
+`async <expr>` in value position parses (self-hosted `primary_expr.spl`) as
+`async_init(<expr>)`, the producer binding the required-init verifier already
+reads. `00.common/data/async_init_registry_v1.spl` wraps the existing
+`phase_cell_*_v1` write-once cells (no second state machine) with a producer
+type check (`E_ASYNC_INIT_TYPE`), an epoch fence (`E_ASYNC_INIT_STALE`) and a
+zero-slot guarantee for nodes with no pending field. Specs:
+`test/01_unit/compiler/data/async_init_registry_v1_spec.spl`,
+`test/01_unit/compiler/hir/async_ctor_arg_parse_spec.spl`. `E_ATTR_NOT_READY` (2026-11-15): an unawaited read `n.f` of a field bound with
+`f: async <expr>` at a construction of local `n` in the same function; error in
+every gate mode; implemented in the `RequiredInitCollectorV1` visitor of
+`required_field_init_v1.spl`, spec `test/01_unit/compiler/hir/attr_not_ready_v1_spec.spl`.
+Open (see `doc/08_tracking/bug/immutable_async_open_questions_2026-11-15.md`):
+`E_INIT_CAPABILITY_ESCAPE` (region PROVISIONAL, owner to ratify; section "Revision hooks"), non-await readiness
+proofs, alias flow, scheduler waiters, Rust seed parser.
 ## Immutable<T> read-only view (P2a, 2026-11-14)
 `Immutable<T>` lowers to `T`; the declaring param/local symbol is recorded in
 `HirLowering.immutable_view_symbols` and a field/index write rooted at it is
@@ -35,3 +58,16 @@ directly from a revision/frozen handle is `E_FROZEN_ALIAS`. Spec:
 `test/01_unit/compiler/semantics/revision_frozen_immutable_spec.spl`. W8 still
 owns revision lease/cache identity, class detached-copy producers and the frozen
 codec kind.
+
+## Revision hooks and capability escape (2026-11-15)
+REV-02: the pointer-free frozen payload is `FileAstV1` via
+`canonical_file_ast_encode_v1`/`decode_v1`; round-trip, determinism and rejection
+pinned by `test/01_unit/compiler/cache/rev02_frozen_file_ast_codec_spec.spl`
+(5/5; the codec had no spec before). REV-01: reclamation hook is the SCV reader
+lease (`scv_compile_snapshot_lease_*`); `test/01_unit/lib/scv/rev01_pinned_revision_lease_spec.spl`
+is 1 GREEN, 1 RED (a process holds one lease, so several pinned revisions are
+not protected; bug `rev01_one_lease_per_process_blocks_multi_revision_pin_2026-11-15`).
+`E_INIT_CAPABILITY_ESCAPE`: PROVISIONAL region = constructing function's
+short-borrow boundary (borrow checker `record_loan_escape`); default off,
+`SIMPLE_INIT_CAPABILITY_ESCAPE=on` flags a `var` local passed directly to an
+`async_init(...)` producer (`init_capability_escape_v1_spec`, 4/4).

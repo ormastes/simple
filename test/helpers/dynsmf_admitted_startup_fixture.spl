@@ -23,6 +23,7 @@ use os.smf.aspect_pack_directory.{
 }
 use std.common.aspect_pack.{AspectCatalog}
 use os.smf.dynsmf_manifest_contract.{DynSmfManifestEntry}
+use os.smf.host_target.{smf_host_platform_id}
 
 class DynSmfAdmittedStartupFixture:
     artifact_bytes: [u8]
@@ -116,6 +117,11 @@ fn _dynsmf_fixture_nested_smf_sections(
                 bytes.push(word as u8)
         case Err(_):
             return []
+    # SmfWriter.create hard-codes Platform.Linux; the admitted loader rejects
+    # that on other hosts, so stamp the host platform into the v1.3 trailer.
+    val nested_header = bytes.len() - 96
+    if nested_header >= 0:
+        bytes[nested_header + 6] = smf_host_platform_id()
     bytes
 
 fn _dynsmf_admitted_startup_fixture_sections(library_id: text, path: text,
@@ -144,13 +150,17 @@ fn _dynsmf_admitted_startup_fixture_sections(library_id: text, path: text,
     match artifact_built:
         case Ok(bytes): artifact_bytes = bytes
         case Err(_): return _dynsmf_fixture_empty()
-    # smf_build_aspect_pack_image currently carries an x86-64 default header.
+    # smf_build_aspect_pack_image currently carries a Linux x86-64 default header
+    # (SmfWriter.create hard-codes Platform.Linux), which the admitted loader
+    # rejects on any other host: patch the platform byte too.
     # The nested writer already emits host arch; make this provider header
     # target-correct too without changing production writer behavior in this
     # test-only fixture.
-    val header_offset = artifact_bytes.len() - 128
+    # v1.3 writers emit the 96-byte repr(C) header as the EOF trailer.
+    val header_offset = artifact_bytes.len() - 96
     if header_offset < 0 or header_offset + 7 >= artifact_bytes.len():
         return _dynsmf_fixture_empty()
+    artifact_bytes[header_offset + 6] = smf_host_platform_id()
     artifact_bytes[header_offset + 7] = _dynsmf_fixture_host_arch_byte()
     val parsed = aspect_pack_directory_parse_from_outer_smf_bytes(artifact_bytes)
     if not parsed.ok:

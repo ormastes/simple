@@ -1329,12 +1329,16 @@ impl ExecCore {
             std::collections::HashMap::new()
         };
         let _ = hir::take_dropped_unsupported_exprs();
-        let hir_module = match hir::lower_with_context_lenient_project_hint_and_duplicate_structs(
+        let lowered = hir::lower_with_context_lenient_project_hint_and_duplicate_structs(
             &ast,
             path,
             project_hint.as_deref(),
             duplicate_structs,
-        ) {
+        );
+        // References to a private fn of another directory found in the
+        // lowered unit; judged below, once it is known the JIT will run it.
+        let private_refs = hir::take_private_ref_violations();
+        let hir_module = match lowered {
             Ok(m) => m,
             Err(e) => return Err(jit_strict_fallback_error_for("HIR lowering error", &e, Some(path))),
         };
@@ -1370,6 +1374,22 @@ impl ExecCore {
         // missed edge would leave a call to a dropped function, so every name
         // spelling codegen can bind is kept. SIMPLE_JIT_NO_REACH_PRUNE=1
         // disables the pruning for A/B comparison.
+        // A private-fn reference counts when the JIT can execute it: module
+        // level code, or a function `main` reaches. One held by a function
+        // the lowering emitted under no known name is kept (fail closed).
+        let live_private_refs: Vec<String> = if private_refs.is_empty() {
+            Vec::new()
+        } else {
+            let reachable = simple_compiler::mir::reachable_function_names(&mir_module);
+            private_refs
+                .into_iter()
+                .filter(|found| match &found.function {
+                    None => true,
+                    Some(name) => reachable.contains(name) || !mir_module.functions.iter().any(|f| &f.name == name),
+                })
+                .map(|found| found.message)
+                .collect()
+        };
         if std::env::var_os("SIMPLE_JIT_NO_REACH_PRUNE").map_or(true, |v| v == "0") {
             let (before, after) = simple_compiler::mir::retain_reachable_functions(&mut mir_module);
             if trace {
@@ -1530,6 +1550,17 @@ impl ExecCore {
             eprintln!("[rust-jit] compile start");
         }
         em.compile_module(&mir_module)?;
+        // The JIT is about to run this program (every demotion to the
+        // interpreter, which applies the same rule per call, is behind us).
+        // Product code reaching a private fn of another directory is rejected
+        // here as there; the error is never demoted (see
+        // `is_private_fn_visibility_error`).
+        if !live_private_refs.is_empty() {
+            let mut distinct = live_private_refs;
+            distinct.sort();
+            distinct.dedup();
+            return Err(distinct.join("\n"));
+        }
         if trace {
             eprintln!("[rust-jit] execute main start");
         }

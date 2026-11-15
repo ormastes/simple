@@ -1,0 +1,58 @@
+# Shared journal settlement/ACK mechanics. Domain-specific owners publish exact
+# canonical evidence first; the capacity owner independently validates it again.
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{HostCapacityOwnerV1, host_capacity_owner_settle_v1,
+    host_capacity_completion_evidence_owned_v2}
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.{host_helper_stream_fields_v1, host_helper_stream_text_v1}
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.crypto.sha256.sha256_text
+
+pub struct HostHelperSettlementAckV1:
+    operation_id: text
+    request_digest: text
+    prepared_receipt_digest: text
+    native_identity_digest: text
+    tree_receipt_digest: text
+    outcome_digest: text
+    journal_revision: text
+    journal_sequence: i64
+
+pub struct HostHelperSettlementCommitTurnV1:
+    owner: HostCapacityOwnerV1
+    ack: HostHelperSettlementAckV1?
+    error: text
+
+pub fn host_helper_settlement_commit_v1(owner: HostCapacityOwnerV1, operation: OperationEnvelopeV2,
+        kind: text, outcome: text) -> HostHelperSettlementCommitTurnV1:
+    if not ["host-helper-stream-settlement", "host-primary-attach-settlement"].contains(kind):
+        return HostHelperSettlementCommitTurnV1(owner, nil, "helper-settlement-domain-invalid")
+    # Derive ACK facts from independently validated evidence, not caller facts.
+    val checked = host_capacity_completion_evidence_owned_v2(owner.journal, owner.ledger.capacity, operation)
+    if checked.is_err(): return HostHelperSettlementCommitTurnV1(owner, nil, checked.unwrap_err())
+    if checked.unwrap() != outcome: return HostHelperSettlementCommitTurnV1(owner, nil, "helper-settlement-evidence-mismatch")
+    val decoded = host_helper_stream_fields_v1(outcome, kind, ["version", "kind", "operationId", "operationDigest",
+        "requestDigest", "preparedReceiptDigest", "consumptionDigest", "nativeIdentityDigest", "treeReceiptDigest"])
+    if decoded.is_err(): return HostHelperSettlementCommitTurnV1(owner, nil, decoded.unwrap_err())
+    val fields = decoded.unwrap()
+    var facts: [text] = []
+    for key in ["operationId", "operationDigest", "requestDigest", "preparedReceiptDigest", "nativeIdentityDigest", "treeReceiptDigest"]:
+        val fact = host_helper_stream_text_v1(fields, key)
+        if fact.is_err(): return HostHelperSettlementCommitTurnV1(owner, nil, fact.unwrap_err())
+        facts.push(fact.unwrap())
+    val operation_bytes = distributed_encode_operation_v2(operation)
+    if operation_bytes.is_err(): return HostHelperSettlementCommitTurnV1(owner, nil, operation_bytes.unwrap_err())
+    if facts[0] != operation.id or facts[1] != sha256_text(operation_bytes.unwrap()):
+        return HostHelperSettlementCommitTurnV1(owner, nil, "helper-settlement-operation-mismatch")
+    val committed = host_capacity_owner_settle_v1(owner, operation)
+    if not committed.settled: return HostHelperSettlementCommitTurnV1(committed.owner, nil, committed.error)
+    val state = daemon_operation_exact_v2(committed.owner.journal, operation)
+    if state.is_err(): return HostHelperSettlementCommitTurnV1(committed.owner, nil, state.unwrap_err())
+    val outcome_digest = sha256_text(outcome)
+    if state.unwrap().state != "completed" or state.unwrap().outcome_digest != outcome_digest:
+        return HostHelperSettlementCommitTurnV1(committed.owner, nil, "helper-stream-journal-settlement-mismatch")
+    val ack = HostHelperSettlementAckV1(operation_id: operation.id, request_digest: facts[2],
+        prepared_receipt_digest: facts[3], native_identity_digest: facts[4], tree_receipt_digest: facts[5],
+        outcome_digest: outcome_digest, journal_revision: committed.owner.journal.revision,
+        journal_sequence: committed.owner.journal.sequence)
+    HostHelperSettlementCommitTurnV1(committed.owner, Some(ack), "")

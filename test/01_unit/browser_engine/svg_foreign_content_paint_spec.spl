@@ -55,6 +55,7 @@ use std.common.ui.draw_ir.{DrawIrCommand, DRAW_IR_COMMAND_RECT}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_draw_ir, simple_web_layout_debug_layout_by_id
 }
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_html, HNode}
 
 val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}</style></head><body><div>"
 
@@ -167,3 +168,100 @@ describe "inline svg foreign content is parsed and painted like Chrome":
         step("Chrome: <div id=x/> stays open -- 900x24 with the span inside it at y=3")
         expect(probe(HTML_SELF_CLOSING, "x", "w") + "x" + probe(HTML_SELF_CLOSING, "x", "h")).to_equal("900x24")
         expect(probe(HTML_SELF_CLOSING, "y", "y")).to_equal("3")
+
+# Tree-shape oracle (Chrome 159 `--dump-dom` of `<!doctype html><body>` + input):
+#
+# | input                                              | Chrome DOM                                         |
+# |----------------------------------------------------|----------------------------------------------------|
+# | `<svg><a href=/x/>t</a><rect id=r /></svg>`        | `<a href="/x/">t</a><rect id="r"></rect>`          |
+# | `<svg><a href="/x"/>t<rect/></svg>`                | `<a href="/x"></a>t<rect></rect>`                  |
+# | `<svg><a href= />t</a></svg>`                      | `<a href="/">t</a>`                                |
+# | `<svg><a b/>t</svg>`                               | `<a b=""></a>t`                                    |
+# | `<div><a href=/x/>t</a><span>s</span></div>`       | unchanged shape, `href="/x/"`                      |
+# | `<svg><desc><div/>x</desc></svg>`                  | `<desc><div>x..</div></desc>`                      |
+# | `<math><mtext><span/>x</mtext></math>`             | `<mtext><span>x..</span></mtext>`                  |
+# | `<math><mi><b/>y</mi></math>`                      | `<mi><b>y</b></mi>`                                |
+# | `<math><annotation-xml encoding="text/html"><div/>x</annotation-xml></math>` | `<div>x</div>` inside it |
+# | `<svg><desc><svg/><rect/>x</desc></svg>`           | `<desc><svg></svg><rect>x</rect></desc>`           |
+# | `<svg><foreignObject><div/>x</foreignObject></svg>`| `<foreignObject><div>x</div></foreignObject>`      |
+#
+# An unquoted attribute value runs to whitespace or `>`, so a `/` inside it is
+# part of the value and not the self-closing flag. `desc`, the MathML text
+# integration points and `annotation-xml` with an HTML encoding hold HTML
+# content, where the flag is ignored on HTML elements.
+
+# "<tag of the text node's parent>" for the first text node equal to `txt`.
+fn text_parent(html: text, txt: text) -> text:
+    val nodes = parse_html(html)
+    var i = 0
+    while i < nodes.len():
+        if nodes[i].tag == "#text" and nodes[i].text_data == txt and nodes[i].parent >= 0:
+            return nodes[nodes[i].parent].tag
+        i = i + 1
+    "(no such text)"
+
+# "<parent tag>" of the LAST element with tag `tag`.
+fn element_parent(html: text, tag: text) -> text:
+    val nodes = parse_html(html)
+    var found = "(no such element)"
+    var i = 0
+    while i < nodes.len():
+        if nodes[i].tag == tag and nodes[i].parent >= 0:
+            found = nodes[nodes[i].parent].tag
+        i = i + 1
+    found
+
+fn element_attrs(html: text, tag: text) -> text:
+    val nodes = parse_html(html)
+    var i = 0
+    while i < nodes.len():
+        if nodes[i].tag == tag:
+            return nodes[i].attrs_raw
+        i = i + 1
+    "(no such element)"
+
+describe "the self-closing flag follows the HTML tokenizer and integration points":
+    it "AC-7: a slash ending an unquoted attribute value is part of the value":
+        step("Chrome: <a href=/x/>t</a> in svg keeps t inside a, href=/x/, and rect is a sibling in svg")
+        expect(text_parent("<svg><a href=/x/>t</a><rect id=r /></svg><p>after</p>", "t")).to_equal("a")
+        expect(element_attrs("<svg><a href=/x/>t</a><rect id=r /></svg><p>after</p>", "a")).to_contain("href=\"/x/\"")
+        expect(element_parent("<svg><a href=/x/>t</a><rect id=r /></svg><p>after</p>", "rect")).to_equal("svg")
+        expect(element_parent("<svg><a href=/x/>t</a><rect id=r /></svg><p>after</p>", "p")).to_equal("body")
+        step("Chrome: <a href= />t</a> has href=/ and is not self-closing")
+        expect(text_parent("<svg><a href= />t</a></svg>", "t")).to_equal("a")
+        expect(element_attrs("<svg><a href= />t</a></svg>", "a")).to_contain("href=\"/\"")
+
+    it "AC-8: a slash after a quoted value or an attribute name still self-closes":
+        step("Chrome: <a href=\"/x\"/>t and <a b/>t leave t as a child of svg")
+        expect(text_parent("<svg><a href=\"/x\"/>t<rect/></svg>", "t")).to_equal("svg")
+        expect(element_attrs("<svg><a href=\"/x\"/>t<rect/></svg>", "a")).to_contain("href=\"/x\"")
+        expect(text_parent("<svg><a b/>t</svg>", "t")).to_equal("svg")
+
+    it "AC-9 (control): plain HTML keeps its shape and gets the full unquoted value":
+        step("Chrome: <div><a href=/x/>t</a><span>s</span></div> -- t in a, s in span, span in div, href=/x/")
+        expect(text_parent("<div><a href=/x/>t</a><span>s</span></div>", "t")).to_equal("a")
+        expect(text_parent("<div><a href=/x/>t</a><span>s</span></div>", "s")).to_equal("span")
+        expect(element_parent("<div><a href=/x/>t</a><span>s</span></div>", "span")).to_equal("div")
+        expect(element_attrs("<div><a href=/x/>t</a><span>s</span></div>", "a")).to_contain("href=\"/x/\"")
+        expect(element_parent("<br/><img src=/a/><p>z</p>", "p")).to_equal("body")
+        expect(element_attrs("<br/><img src=/a/><p>z</p>", "img")).to_contain("src=\"/a/\"")
+
+    it "AC-10: HTML elements inside svg desc ignore the flag":
+        step("Chrome: <svg><desc><div/>x</desc></svg> puts x inside the div")
+        expect(text_parent("<svg><desc><div/>x</desc></svg>", "x")).to_equal("div")
+        step("Chrome: inside desc a nested <svg/> root still self-closes, an HTML <rect/> does not")
+        expect(element_parent("<svg><desc><svg/><rect/>x</desc></svg>", "rect")).to_equal("desc")
+        expect(text_parent("<svg><desc><svg/><rect/>x</desc></svg>", "x")).to_equal("rect")
+
+    it "AC-11: HTML elements inside MathML text integration points ignore the flag":
+        step("Chrome: <mtext><span/>x</mtext> puts x in span; <mi><b/>y</mi> puts y in b")
+        expect(text_parent("<math><mtext><span/>x</mtext></math>", "x")).to_equal("span")
+        expect(text_parent("<math><mi><b/>y</mi></math>", "y")).to_equal("b")
+        step("Chrome: annotation-xml encoding=text/html holds HTML; x is inside the div")
+        expect(text_parent("<math><annotation-xml encoding=\"text/html\"><div/>x</annotation-xml></math>", "x")).to_equal("div")
+        step("Control: a MathML element outside an integration point still self-closes")
+        expect(text_parent("<math><mrow/>z</math>", "z")).to_equal("math")
+
+    it "AC-12 (control): foreignObject still holds HTML":
+        step("Chrome: <svg><foreignObject><div/>x</foreignObject></svg> puts x in the div")
+        expect(text_parent("<svg><foreignObject><div/>x</foreignObject></svg>", "x")).to_equal("div")

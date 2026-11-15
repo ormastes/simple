@@ -188,11 +188,28 @@ fn _edge_row_index_v1(profile: TraceEdgeProfileV1, from: text, to: text) -> i64:
 # Fold the raw edges into one row per (caller class, callee class) pair of
 # `selector`'s dimension, same-class calls excluded. Timing follows
 # trace_profile_fold_v1: exclusive = inclusive minus time in traced children.
+# A loss/reset marker or generation change invalidates every pending frame.
+# Marker scope is not guaranteed by this input contract, so reset conservatively
+# across contexts. Count discarded frames as open_entries; never time an edge
+# across a partial observation interval. Completed rows remain valid.
+# The class table belongs to one admitted module: callers must provide only
+# that module's events. Sequence-only gaps are not inferred by this fold yet.
 pub fn trace_edge_fold_v1(events: [TraceEventV1], table: [TraceEdgeClassRowV1],
         selector: TraceEdgeSelectorV1) -> TraceEdgeProfileV1:
     var profile = TraceEdgeProfileV1(rows: [], unmatched_exits: 0, open_entries: 0)
     var open: [_TraceEdgeFrameV1] = []
+    var have_generation = false
+    var generation = 0u64
     for event in events:
+        if have_generation and event.generation != generation:
+            profile.open_entries = profile.open_entries + (open.len() as u64)
+            open = []
+        generation = event.generation
+        have_generation = true
+        if event.kind == TraceEventKindV1.Loss or event.kind == TraceEventKindV1.Transition or event.kind == TraceEventKindV1.UnmatchedEdge or event.kind == TraceEventKindV1.TruncatedSpan:
+            profile.open_entries = profile.open_entries + (open.len() as u64)
+            open = []
+            continue
         if event.kind == TraceEventKindV1.Entry:
             var has_edge = false
             var edge_from = ""

@@ -1,0 +1,105 @@
+# Historical no-Host-BEGIN cancellation data only. No native absence/teardown,
+# effect permission, journal writer or parent budget release is decoded here.
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_authority_codec_v2.*
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_host_scope_bytes_v2, container_host_scope_decode_v2}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct HostRuntimeExecNoBeginCancelReceiptV3:
+    parent_operation: OperationEnvelopeV2
+    child_operation: OperationEnvelopeV2
+    child_packet_digest: text
+    scope: ContainerHostScopeV2
+    journal_authority_digest: text
+    before_commit_digest: text
+    before_sequence: i64
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+    policy_bytes: text
+    policy_digest: text
+    authorized_unix_ms: i64
+    monotonic_ms: i64
+    policy_revision: i64
+    revocation_epoch: i64
+    session_generation: i64
+
+pub fn host_runtime_exec_no_begin_cancel_receipt_encode_v3(value: HostRuntimeExecNoBeginCancelReceiptV3) -> Result<text, text>:
+    val parent = distributed_encode_operation_v2(value.parent_operation)?
+    val child = distributed_encode_operation_v2(value.child_operation)?
+    if (value.parent_operation.operation != "host_reservation_v1" or value.child_operation.operation != "host_runtime_exec_v3" or
+            value.parent_operation.id == value.child_operation.id or value.parent_operation.host_id != value.scope.physical_host_id or
+            value.child_operation.host_id != value.parent_operation.host_id or value.child_operation.principal != value.parent_operation.principal or
+            value.child_operation.project != value.parent_operation.project or value.child_operation.environment_digest != value.parent_operation.environment_digest or
+            value.child_operation.memory_bytes != value.parent_operation.memory_bytes): return Err("host-exec-no-begin-original-mismatch")
+    for digest in [value.child_packet_digest, value.journal_authority_digest, value.before_commit_digest, value.policy_digest]:
+        if str_len(digest) != 64 or not builder_digest_valid_v1(digest): return Err("host-exec-no-begin-digest-invalid")
+    if (value.before_sequence <= 0 or value.authorized_unix_ms <= 0 or value.monotonic_ms < 0 or
+            value.policy_revision <= 0 or value.revocation_epoch < 0 or value.session_generation <= 0):
+        return Err("host-exec-no-begin-context-invalid")
+    if str_len(value.policy_bytes) == 0 or str_len(value.policy_bytes) > 1048576 or sha256_text(value.policy_bytes) != value.policy_digest:
+        return Err("host-exec-no-begin-policy-digest")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("host-runtime-exec-no-begin-cancellation"),
+        "parentOperation": SdnValue.String(parent), "childOperation": SdnValue.String(child),
+        "childPacketDigest": SdnValue.String(value.child_packet_digest), "scope": SdnValue.String(container_host_scope_bytes_v2(value.scope)?),
+        "journalAuthorityDigest": SdnValue.String(value.journal_authority_digest), "beforeCommitDigest": SdnValue.String(value.before_commit_digest),
+        "beforeSequence": SdnValue.Int(value.before_sequence), "signedGrant": SdnValue.String(distributed_encode_signed_grant_v2(value.signed)?),
+        "signedApproval": SdnValue.String(distributed_encode_signed_approval_v2(value.approval)?), "policy": SdnValue.String(value.policy_bytes),
+        "policyDigest": SdnValue.String(value.policy_digest), "authorizedUnixMs": SdnValue.Int(value.authorized_unix_ms),
+        "monotonicMs": SdnValue.Int(value.monotonic_ms), "policyRevision": SdnValue.Int(value.policy_revision),
+        "revocationEpoch": SdnValue.Int(value.revocation_epoch), "sessionGeneration": SdnValue.Int(value.session_generation)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(source) > 4194304: return Err("host-exec-no-begin-source-size")
+    Ok(source)
+
+fn no_begin_text_v3(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("host-exec-no-begin-text-required:" + key)
+
+fn no_begin_int_v3(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("host-exec-no-begin-int-required:" + key)
+
+pub fn host_runtime_exec_no_begin_cancel_receipt_decode_v3(source: text) -> Result<HostRuntimeExecNoBeginCancelReceiptV3, text>:
+    if str_len(source) == 0 or str_len(source) > 4194304: return Err("host-exec-no-begin-source-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 4194304,
+            max_depth: 2, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 24)):
+        case Ok(value): value
+        case Err(issue): return Err("host-exec-no-begin-syntax:" + issue.code)
+    val fields = match parsed.value:
+        case SdnValue.Dict(items): items
+        case _: return Err("host-exec-no-begin-object-required")
+    val names = ["version", "kind", "parentOperation", "childOperation", "childPacketDigest", "scope", "journalAuthorityDigest",
+        "beforeCommitDigest", "beforeSequence", "signedGrant", "signedApproval", "policy", "policyDigest", "authorizedUnixMs",
+        "monotonicMs", "policyRevision", "revocationEpoch", "sessionGeneration"]
+    for key in fields.keys():
+        if not names.contains(key): return Err("host-exec-no-begin-unknown-field:" + key)
+    for key in names:
+        if not fields.contains_key(key): return Err("host-exec-no-begin-missing-field:" + key)
+    if no_begin_int_v3(fields, "version")? != 3 or no_begin_text_v3(fields, "kind")? != "host-runtime-exec-no-begin-cancellation":
+        return Err("host-exec-no-begin-version")
+    val value = HostRuntimeExecNoBeginCancelReceiptV3(
+        parent_operation: distributed_decode_operation_v2(no_begin_text_v3(fields, "parentOperation")?)?,
+        child_operation: distributed_decode_operation_v2(no_begin_text_v3(fields, "childOperation")?)?,
+        child_packet_digest: no_begin_text_v3(fields, "childPacketDigest")?, scope: container_host_scope_decode_v2(no_begin_text_v3(fields, "scope")?)?,
+        journal_authority_digest: no_begin_text_v3(fields, "journalAuthorityDigest")?, before_commit_digest: no_begin_text_v3(fields, "beforeCommitDigest")?,
+        before_sequence: no_begin_int_v3(fields, "beforeSequence")?, signed: distributed_decode_signed_grant_v2(no_begin_text_v3(fields, "signedGrant")?)?,
+        approval: distributed_decode_signed_approval_v2(no_begin_text_v3(fields, "signedApproval")?)?, policy_bytes: no_begin_text_v3(fields, "policy")?,
+        policy_digest: no_begin_text_v3(fields, "policyDigest")?, authorized_unix_ms: no_begin_int_v3(fields, "authorizedUnixMs")?,
+        monotonic_ms: no_begin_int_v3(fields, "monotonicMs")?, policy_revision: no_begin_int_v3(fields, "policyRevision")?,
+        revocation_epoch: no_begin_int_v3(fields, "revocationEpoch")?, session_generation: no_begin_int_v3(fields, "sessionGeneration")?)
+    if host_runtime_exec_no_begin_cancel_receipt_encode_v3(value)? != source: return Err("host-exec-no-begin-noncanonical")
+    Ok(value)
+
+pub fn host_runtime_exec_no_begin_cancel_receipt_digest_v3(value: HostRuntimeExecNoBeginCancelReceiptV3) -> Result<text, text>:
+    val source = host_runtime_exec_no_begin_cancel_receipt_encode_v3(value)?
+    Ok(sha256_text(source))

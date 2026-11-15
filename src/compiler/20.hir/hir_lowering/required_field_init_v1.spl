@@ -9,6 +9,8 @@
 #   omitted, or written as a source `nil`             -> E_ATTR_REQUIRED_UNINIT
 #   omitted, class authorizes it for async init       -> E_ASYNC_INIT_MISSING
 #   bound to `async_init(...)` without authorization  -> E_ASYNC_INIT_UNSUPPORTED
+#   field bound to an async producer, read without `await`  -> E_ATTR_NOT_READY
+#     (direct reads through a local constructed in the same function only)
 # and, across the classes of one `@node_tree("t")`, one attribute name with two
 # declared types                                      -> E_ATTR_TYPE_CONFLICT.
 #
@@ -37,6 +39,14 @@ pub val E_ATTR_REQUIRED_UNINIT = "E_ATTR_REQUIRED_UNINIT"
 pub val E_ASYNC_INIT_MISSING = "E_ASYNC_INIT_MISSING"
 pub val E_ASYNC_INIT_UNSUPPORTED = "E_ASYNC_INIT_UNSUPPORTED"
 pub val E_ATTR_TYPE_CONFLICT = "E_ATTR_TYPE_CONFLICT"
+pub val E_ATTR_NOT_READY = "E_ATTR_NOT_READY"
+pub val E_INIT_CAPABILITY_ESCAPE = "E_INIT_CAPABILITY_ESCAPE"
+
+# PROVISIONAL, default off: E_INIT_CAPABILITY_ESCAPE runs only when this is "on".
+pub val INIT_CAPABILITY_ESCAPE_ENV = "SIMPLE_INIT_CAPABILITY_ESCAPE"
+
+fn init_capability_escape_enabled_v1() -> bool:
+    (env_get_opt(INIT_CAPABILITY_ESCAPE_ENV) ?? "") == "on"
 
 # Library-level async producer binding (plan section 3.1 fallback): the
 # construction argument is a call to this name. P3 replaces the name with the
@@ -182,6 +192,17 @@ fn required_init_is_spread_arg_v1(e: HirExpr) -> bool:
         case HirExprKind.Range(start, end, _, _): start == None and end != None
         case _: false
 
+fn required_init_is_field_read_v1(e: HirExpr) -> bool:
+    match e.kind:
+        case HirExprKind.Field(_, _, _): true
+        case _: false
+
+fn required_init_args_have_spread_v1(args: [HirCallArg]) -> bool:
+    for arg in args:
+        if (not arg.has_name) and required_init_is_spread_arg_v1(arg.value):
+            return true
+    false
+
 fn required_init_fix_v1(id: text, description: text) -> DiagnosticFix:
     DiagnosticFix.new(id, description, FixConfidence.Uncertain)
 
@@ -192,6 +213,12 @@ class RequiredInitCollectorV1:
     rows: [RequiredInitDiagnosticV1]
     sites_judged: i64
     sites_unjudged: i64
+    # Locals bound by `val/var x = T(f: async ...)`: class and pending field
+    # names, for E_ATTR_NOT_READY. awaited_operand_next: the next visited
+    # expression is the operand of an `await`.
+    pending_class: Dict<i64, RequiredInitClassV1> = {}
+    pending_names: Dict<i64, [text]> = {}
+    awaited_operand_next: bool = false
 
     fn is_async_binding(e: HirExpr) -> bool:
         match e.kind:
@@ -207,6 +234,22 @@ class RequiredInitCollectorV1:
                     return sym.name == REQUIRED_INIT_ASYNC_BINDING_NAME
                 false
             case _: false
+
+    # Names of `var` locals that are direct arguments of an `async_init(...)`
+    # producer call (PROVISIONAL region definition, see the open-questions doc).
+    fn producer_mutable_locals(producer: HirExpr) -> [text]:
+        var names: [text] = []
+        match producer.kind:
+            case HirExprKind.Call(_, args, _):
+                for arg in args:
+                    val id = self.local_symbol_of(arg.value)
+                    if id >= 0:
+                        if val present = self.symbols.get_symbol_raw(id):
+                            val sym: HirSymbol = present
+                            if sym.is_mutable:
+                                names.push(sym.name)
+            case _: ()
+        names
 
     fn is_source_nil(e: HirExpr) -> bool:
         match e.kind:
@@ -238,6 +281,16 @@ class RequiredInitCollectorV1:
                         "declare `@support_async_immutable(\"{entry.0}\")` on `{cls.name}` to authorize deferred initialization"),
                      required_init_fix_v1("required_init:sync:{entry.0}",
                         "initialize `{entry.0}` synchronously with a value of its declared type")])
+        if init_capability_escape_enabled_v1():
+            for entry in supplied:
+                if self.is_async_binding(entry.1) and self.async_authorized(cls, entry.0):
+                    for captured in self.producer_mutable_locals(entry.1):
+                        self.report(E_INIT_CAPABILITY_ESCAPE, cls, entry.0, entry.1.span,
+                            "mutable local `{captured}` is passed to the async producer of `{cls.name}.{entry.0}`; the producer runs after this function's borrow region ends",
+                            [required_init_fix_v1("required_init:immutable:{captured}",
+                                "pass an immutable copy: `val {captured}_snapshot = {captured}` and give the producer that"),
+                             required_init_fix_v1("required_init:sync:{entry.0}",
+                                "initialize `{entry.0}` synchronously with a value of its declared type")])
         for f in cls.fields:
             if not f.required:
                 continue
@@ -273,6 +326,58 @@ class RequiredInitCollectorV1:
             case HirExprKind.NamedVar(symbol, _): symbol.id
             case _: -1
 
+    # Same mapping as MIR lower_struct_construct: walk the fields in order; a
+    # named argument wins, otherwise the next positional one. A spread is not
+    # a positional slot.
+    fn supplied_from_args(cls: RequiredInitClassV1, args: [HirCallArg]) -> [(text, HirExpr)]:
+        var named_names: [text] = []
+        var named_values: [HirExpr] = []
+        var positionals: [HirExpr] = []
+        for arg in args:
+            if arg.has_name:
+                named_names.push(arg.name)
+                named_values.push(arg.value)
+            elif not required_init_is_spread_arg_v1(arg.value):
+                positionals.push(arg.value)
+        var supplied: [(text, HirExpr)] = []
+        var pos_i = 0
+        for f in cls.fields:
+            var named_at = -1
+            var ni = 0
+            while ni < named_names.len():
+                if named_names[ni] == f.name:
+                    named_at = ni
+                ni = ni + 1
+            if named_at >= 0:
+                supplied.push((f.name, named_values[named_at]))
+            elif pos_i < positionals.len():
+                supplied.push((f.name, positionals[pos_i]))
+                pos_i = pos_i + 1
+        supplied
+
+    # Fields of `cls` that a construction binds to an async producer: pending
+    # until awaited. Empty for a class without `@support_async_immutable`
+    # authorization of the field (that is E_ASYNC_INIT_UNSUPPORTED instead).
+    fn pending_fields_of_call(init: HirExpr) -> (RequiredInitClassV1?, [text]):
+        match init.kind:
+            case HirExprKind.Call(callee, args, _):
+                val callee_id = self.class_for_callee(callee)
+                if callee_id < 0 or not self.class_of_symbol.contains_key(callee_id):
+                    return (None, [])
+                val cls = self.class_of_symbol[callee_id]
+                var pending: [text] = []
+                for entry in self.supplied_from_args(cls, args):
+                    if self.is_async_binding(entry.1) and self.async_authorized(cls, entry.0):
+                        pending.push(entry.0)
+                (Some(cls), pending)
+            case _: (None, [])
+
+    fn local_symbol_of(e: HirExpr) -> i64:
+        match e.kind:
+            case HirExprKind.Var(symbol): symbol.id
+            case HirExprKind.NamedVar(symbol, _): symbol.id
+            case _: -1
+
     me on_expr(node: HirExpr):
         match node.kind:
             case HirExprKind.StructLit(type_, fields):
@@ -289,44 +394,49 @@ class RequiredInitCollectorV1:
                     return
                 if self.class_of_symbol.contains_key(callee_id):
                     val cls = self.class_of_symbol[callee_id]
-                    # Same mapping as MIR lower_struct_construct: walk the
-                    # fields in order; a named argument wins, otherwise the
-                    # next positional one. A spread is not a positional slot.
-                    var named_names: [text] = []
-                    var named_values: [HirExpr] = []
-                    var positionals: [HirExpr] = []
-                    var has_spread = false
-                    for arg in args:
-                        if arg.has_name:
-                            named_names.push(arg.name)
-                            named_values.push(arg.value)
-                        elif required_init_is_spread_arg_v1(arg.value):
-                            has_spread = true
-                        else:
-                            positionals.push(arg.value)
-                    var supplied: [(text, HirExpr)] = []
-                    var pos_i = 0
-                    for f in cls.fields:
-                        var named_at = -1
-                        var ni = 0
-                        while ni < named_names.len():
-                            if named_names[ni] == f.name:
-                                named_at = ni
-                            ni = ni + 1
-                        if named_at >= 0:
-                            supplied.push((f.name, named_values[named_at]))
-                        elif pos_i < positionals.len():
-                            supplied.push((f.name, positionals[pos_i]))
-                            pos_i = pos_i + 1
+                    val supplied = self.supplied_from_args(cls, args)
+                    val has_spread = required_init_args_have_spread_v1(args)
                     self.check_site(cls, supplied, has_spread, node.span)
                 elif val present = self.symbols.get_symbol_raw(callee_id):
                     val sym: HirSymbol = present
                     if sym.kind == SymbolKind.Class or sym.kind == SymbolKind.Struct:
                         self.sites_unjudged = self.sites_unjudged + 1
+            case HirExprKind.Await(inner):
+                # The operand is visited next (pre-order): `await n.f` is the
+                # explicit suspension that proves `f` ready.
+                if required_init_is_field_read_v1(inner):
+                    self.awaited_operand_next = true
+            case HirExprKind.Field(base, field_name, _):
+                if self.awaited_operand_next:
+                    self.awaited_operand_next = false
+                    return
+                val local_id = self.local_symbol_of(base)
+                if local_id >= 0 and self.pending_class.contains_key(local_id) and
+                        required_init_contains_v1(self.pending_names[local_id], field_name):
+                    val cls = self.pending_class[local_id]
+                    self.report(E_ATTR_NOT_READY, cls, field_name, node.span,
+                        "`{cls.name}.{field_name}` is bound to an async producer and is read here without `await`; it is not proven ready",
+                        [required_init_fix_v1("required_init:await:{field_name}",
+                            "suspend explicitly: `await <node>.{field_name}`"),
+                         required_init_fix_v1("required_init:sync-bind:{field_name}",
+                            "initialize `{field_name}` synchronously at the construction")])
             case _: ()
 
     me on_stmt(node: HirStmt):
-        ()
+        match node.kind:
+            case HirStmtKind.Let(symbol, _, init):
+                val found = self.pending_fields_of_call(init)
+                self.pending_class.remove(symbol.id)
+                if val cls = found.0:
+                    if found.1.len() > 0:
+                        self.pending_class[symbol.id] = cls
+                        self.pending_names[symbol.id] = found.1
+            case HirStmtKind.Assign(target, _, _):
+                # Rebinding the local replaces the pending value.
+                val target_id = self.local_symbol_of(target)
+                if target_id >= 0:
+                    self.pending_class.remove(target_id)
+            case _: ()
 
     me on_type(node: HirType):
         ()

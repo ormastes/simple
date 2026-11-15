@@ -4239,27 +4239,16 @@ const char* rt_hex_to_wire(const char* hex_str) {
 
 #include "runtime_utf8_lossy_private.h"
 #if !defined(_WIN32) || !defined(SIMPLE_CORE_C_STANDALONE)
-/* Standalone core-C instead selects runtime_native.c's tagged text/array ABI.
- * Keep these legacy hosted byte-buffer helpers out of that composition. */
-/* ---- Byte array handle for [u8] FFI ----
- * The [u8] type in Simple FFI maps to an opaque int64_t handle.
- * Internally: pointer to { uint8_t* data; int64_t len; int64_t cap; } */
-typedef struct {
-    uint8_t* data;
-    int64_t  len;
-    int64_t  cap;
-} rt_byte_buf;
-
-/* rt_text_to_bytes: create byte array handle from text string */
-SPL_RUNTIME_NATIVE_TWIN int64_t rt_text_to_bytes(const char* text) {
-    if (!text) text = "";
-    size_t len = strlen(text);
-    rt_byte_buf* bb = (rt_byte_buf*)SPL_MALLOC(sizeof(rt_byte_buf), "bytes");
-    bb->len = (int64_t)len;
-    bb->cap = (int64_t)len;
-    bb->data = (uint8_t*)SPL_MALLOC(len > 0 ? len : 1, "bytes");
-    if (len > 0) memcpy(bb->data, text, len);
-    return (int64_t)(uintptr_t)bb;
+/* Standalone Windows core-C selects runtime_native.c's text/array providers.
+ * Preserve that composition while keeping the hosted twins ABI-compatible. */
+/* Both hosted compositions use the tagged text/array ABI declared by
+ * std.common.text_bytes and the Rust runtime. Reuse the native packed-byte
+ * provider so either duplicate-symbol link order preserves embedded NUL and
+ * returns an array handle understood by rt_array_len/get. */
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_text_to_bytes(int64_t text_value) {
+    const uint8_t* bytes = rt_string_data(text_value);
+    int64_t len = rt_string_len(text_value);
+    return rt_bytes_from_raw((int64_t)(uintptr_t)bytes, len);
 }
 
 /* rt_bytes_to_text: byte-array RuntimeValue -> text RuntimeValue.
@@ -4274,10 +4263,8 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_text_to_bytes(const char* text) {
  * dereferenced as an rt_byte_buf and the process SIGSEGV'd, and any survivor
  * came back as an untagged address that reads as an empty string.
  *
- * The `rt_byte_buf` world below is reachable only through rt_text_to_bytes,
- * which has no RuntimeFuncSpec (the compiler never calls it) and no C-internal
- * caller of rt_bytes_to_text exists, so nothing was relying on the old
- * interpretation. */
+ * The hosted twin now shares that canonical tagged ABI in both directions;
+ * no private byte-buffer representation crosses the Simple extern boundary. */
 SPL_RUNTIME_NATIVE_TWIN int64_t rt_bytes_to_text(int64_t bytes_value) {
     int64_t len = rt_array_len_safe(bytes_value);
     if (bytes_value == 0 || len <= 0) return rt_string_new(NULL, 0);

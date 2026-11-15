@@ -66,6 +66,8 @@ fn _artifact() -> text:
 
 
 val TAIL_FIXTURE: text = "test/fixtures/coverage/covtail_fixture.spl"
+val EXPR_FIXTURE: text = "test/fixtures/coverage/covexpr_fixture.spl"
+val EXPR_HELPER: text = "test/fixtures/coverage/covexpr_helper.spl"
 
 fn _tmp_path(name: text) -> text:
     get_temp_dir().replace("\\", "/") + "/" + name
@@ -78,10 +80,10 @@ fn _digested_artifact(name: text, digest: text) -> text:
     expect(file_write_text(path, src + "\nsources |file, crc32|\n    /repo/{FIXTURE}, {digest}\n")).to_equal(true)
     path
 
-# Runs TAIL_FIXTURE under the interpreter collector; returns the artifact path.
-fn _collect_tail_artifact() -> text:
+# Runs `fixture` under the interpreter collector; returns the artifact path.
+fn _collect_fixture_artifact(fixture: text, artifact_name: text, expected_out: text) -> text:
     val repo = cwd().replace("\\", "/")
-    val out_path = _tmp_path("spl_coverage_module_spec_tail.sdn")
+    val out_path = _tmp_path(artifact_name)
     val env: [(text, text)] = [("SIMPLE_COVERAGE", "1"), ("SIMPLE_COVERAGE_OUTPUT", out_path),
         ("SIMPLE_RUNTIME_MODE", "interpreter"), ("SIMPLE_EXECUTION_MODE", "interpret"), ("SIMPLE_LIB", repo + "/src")]
     var result = ("", "", 1)
@@ -89,18 +91,41 @@ fn _collect_tail_artifact() -> text:
         var cmd = "set \"SIMPLE_COVERAGE=\" && set \"SIMPLE_COVERAGE_OUTPUT=\" && "
         for (key, value) in env:
             cmd = cmd + "set \"" + key + "=" + value + "\" && "
-        cmd = cmd + repo + "/bin/simple.exe run " + TAIL_FIXTURE
+        cmd = cmd + repo + "/bin/simple.exe run " + fixture
         result = process_run_bounded(env_get("ComSpec") ?? "cmd.exe", ["/d", "/c", cmd], CLI_RUN_TIMEOUT_MS, CLI_RUN_MAX_OUT)
     else:
         var prefix = ""
         for (key, value) in env:
             prefix = prefix + key + "=\"" + value + "\" "
-        result = process_run_bounded("/bin/sh", ["-c", prefix + "\"" + repo + "/bin/simple\" run " + TAIL_FIXTURE],
+        result = process_run_bounded("/bin/sh", ["-c", prefix + "\"" + repo + "/bin/simple\" run " + fixture],
             CLI_RUN_TIMEOUT_MS, CLI_RUN_MAX_OUT)
     val (out, err, code) = result
     expect(code).to_equal(0)
-    expect(out).to_contain("one\n2\n2\n2")
+    expect(out).to_contain(expected_out)
     out_path
+
+fn _collect_tail_artifact() -> text:
+    _collect_fixture_artifact(TAIL_FIXTURE, "spl_coverage_module_spec_tail.sdn", "one\n2\n2\n2")
+
+# The line numbers the artifact's `lines |file, line, hit_count|` table
+# records for `fixture`, ascending, each preceded by a space.
+fn _recorded_lines(artifact: text, fixture: text, last_line: i64) -> text:
+    var cells: [text] = []
+    var in_lines = false
+    for raw in (read_to_string(artifact) ?? "").split("\n"):
+        if not raw.starts_with("    "):
+            in_lines = raw.starts_with("lines |")
+            continue
+        val row = raw.trim().split(", ")
+        if in_lines and row.len() == 3 and row[0].ends_with(fixture):
+            cells.push(row[1])
+    var out = ""
+    var n = 1
+    while n <= last_line:
+        if cells.contains("{n}"):
+            out = out + " {n}"
+        n = n + 1
+    out
 
 describe "spl-coverage module":
     # @manual scenario evidence
@@ -157,6 +182,34 @@ describe "spl-coverage module":
         val (out, err, code) = _run_spl_coverage("tail", ["module", "--file", artifact, TAIL_FIXTURE])
         expect(code).to_equal(0)
         expect(out).to_contain("lines=100.0% (9/9)")
+        expect(out).to_contain("source=verified")
+
+    # Statements whose executor bypasses exec_node (bug
+    # coverage_value_match_arm_tail_and_lambda_body_unrecorded_2026-11-14): the
+    # tail `if` / `match` of an arm of a value-position `match` (21, 28, 42,
+    # 47, 110) and the whole body of a multi-line lambda (77-80, 89, 91, 108)
+    # ran unrecorded, so this fixture read 14/31. The five lines main() never
+    # reaches -- an untaken `else` (25, 83), an untaken arm's header (32), an
+    # untaken arm (94) and an uncalled lambda's body (100) -- must stay missed.
+    # covexpr_cross's lambda is invoked from covexpr_helper.spl: its lines are
+    # the fixture's, and the helper records only its own two statements.
+    it "records arm-tail and lambda-body lines of value-position if and match":
+        val artifact = _collect_fixture_artifact(EXPR_FIXTURE, "spl_coverage_module_spec_expr.sdn",
+            "10\n30\n2\n50\n20\n71\n6\n2\n4\n100\n7\n20\n3")
+        expect(_recorded_lines(artifact, EXPR_FIXTURE, 131)).to_equal(
+            " 19 21 22 28 39 41 42 47 52 53 54 58 65 72 76 77 78 79 80 88 89 91 99 107 108 110")
+        expect(_recorded_lines(artifact, EXPR_HELPER, 131)).to_equal(" 5 6")
+        # covexpr_tail_let: a value-match arm ending in `val` inside a lambda the
+        # helper invokes (147) is recorded under exactly ONE file. Which one is
+        # the open invoker-filing bug
+        # (coverage_closure_body_hits_filed_under_invoker_2026-11-14).
+        val tail_in_fixture = _recorded_lines(artifact, EXPR_FIXTURE, 150).contains(" 147")
+        val tail_in_helper = _recorded_lines(artifact, EXPR_HELPER, 150).contains(" 147")
+        expect(tail_in_fixture != tail_in_helper).to_equal(true)
+        expect(_recorded_lines(artifact, EXPR_FIXTURE, 150).contains(" 143")).to_equal(false)
+        val (out, err, code) = _run_spl_coverage("expr", ["module", "--file", artifact, EXPR_FIXTURE])
+        expect(code).to_equal(0)
+        expect(out).to_contain("lines=78.9% (30/38)")
         expect(out).to_contain("source=verified")
 
     it "refuses to merge artifacts recorded against different source versions":

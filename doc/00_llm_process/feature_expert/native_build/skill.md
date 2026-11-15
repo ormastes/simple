@@ -305,3 +305,33 @@ admit Stage 4, build the render carrier, or prove 8K execution.
 ## Default build mode (2026-11-04)
 
 - Default build mode (user policy 2026-11-04): unset `SIMPLE_FILE_WORKERS` resolves to `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "1"` (`native_file_worker_v1.spl`): file-based src → obj, one process per file (parse → HIR → MIR → obj), then link. Supersedes the 2026-10-26 opt-in. Opt-outs are per invocation only: `SIMPLE_FILE_WORKERS=0` (two-pass shard route), `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` (whole-program route), `SIMPLE_MIR_SHARDING=0`. Never flip a shared default (config, script-global env, constant) to suit one build; pass the option at the call site with a why-comment. Gap: per-package library archives are not yet the default link input. Runtime proof pending a stage3 binary: `sh scripts/check/check-per-file-overlap-receipt.shs <receipt dir>`. See `doc/07_guide/tooling/bootstrap_options.md` § Default build mode.
+
+## Single-file `compile` is an AOT input (2026-11-14)
+
+`cli_compile_pure_simple` sets `cli_mode_text` through
+`cli_compile_pure_simple_mode_text(output_format)`: `"aot"` for native output
+on every backend and host. Without it `driver_pipeline_lowering.spl`
+(`native_entry_closure_mir`) stubs the positional source to an empty MIR
+module and the library exports only `simple_empty_module_<name>` with rc=0.
+Spec: `test/03_system/native/pure_simple_compile_library_functions_spec.spl`
+(compiles, dlopens and calls). Record:
+`doc/08_tracking/bug/xray_llvm_simple_compiled_module_emits_zero_functions_2026-11-13.md`.
+
+## HIR residency is import replicas, not bodies (2026-11-14)
+
+Run 32 full CLI (3145 modules, one process, cold): 1.46 MB per module before
+HIR, +5.9 MB per module in HIR, 23.2 GiB at MIR start. By encoded field count
+(31-entry sample of the HIR cache) a module's HIR is 33 % imported symbol
+rows, 30 % `imported_layouts` field copies, 15.5 % its own functions, 8 %
+symbol indexes, 7 % locals. Body stripping (`SIMPLE_MIR_SHARD_INTERFACE_HIR`)
+therefore saves little. `imported_layouts` rows are identity-only since
+`imported_layout_row_v1.spl` (the lint reads key membership); do not put field
+payload back without a reader. A cache-hit decode un-shares spans and types,
+so warm residency follows encoded size. Traps: `rt_heap_live_bytes` counts
+object headers only; the seed refuses `hc_enc_*` on decoded modules, so
+attribute by walking the cache with `hc_dec_*` and `FlatPoolReader.pos`.
+Design: `doc/05_design/compiler/perf/hir_import_replica_residency_v1.md`.
+
+## Per-file unit child TLDR root (2026-11-15)
+
+A unit child (`SIMPLE_FILE_WORKER_UNIT=1`) parses only its pick and resolves imports through TLDR summaries. Its root comes from `SIMPLE_FRONTEND_CACHE_DIR`; when that is unset (no `--cache-dir`), it falls back to `SIMPLE_UNIT_TLDR_ROOT`, which `run_unit` sets to `<hir_queue>/frontend`. If the root is empty, the child fails closed with `FILE-UNIT-E-NO-TLDR-ROOT`; it never falls back to the whole closure. Spec: `test/01_unit/compiler/driver/native_file_unit_frontend_root_spec.spl`. Bug: `windows_phase3_baseline_zero_objects_two_pass_forced_2026-11-15`.
