@@ -22,6 +22,6 @@ NOT_COVERED. No fabricated native owners, compatibility receipts or grants.
    cancellation/cleanup and actual workload settlement. Existing lower component
    fixture checkers cover the corresponding source assertions separately.
 
-The app main route, genuine CoreMux/input composition consuming the existing
-Windows adopted-connection input leaf,
+The app main route activating the existing V5 tagged issuer/input chain, actual
+controlled stdin EOF,
 Resume store/source custody and workload-control interruption remain required.
