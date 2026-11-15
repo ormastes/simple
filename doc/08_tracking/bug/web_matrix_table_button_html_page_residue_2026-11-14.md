@@ -277,22 +277,18 @@ max-content of mixed inline content, control UA font reset, `h6` margins
     at the same y; Simple makes it 24 tall. 48 "is height set" tests
     (`height_px > 0` / `== 0`) in layout_engine/layout_foundation would need
     a `height_zero` flag like `width_zero`.
-  - A newline between inline boxes inside `<pre>` does not break the line:
-    Chrome `<pre><span>a</span>\n<span>b</span></pre>` puts b at x 0, 24px
-    lower; Simple drops the newline (b at x 10 on the same line). The inline
-    run has no forced-break text item.
-  - `white-space: pre-line` / `pre-wrap` / `break-spaces` are not modelled
-    (only `pre` sets `white_space_pre`); Chrome breaks at the newline.
+  - `white-space: pre-wrap` / `pre-line` / `break-spaces` keep only the
+    newline between elements (round 3); spaces are still collapsed or
+    wrapped as `normal`, and newlines inside a text run are not modelled
+    for them (`white_space_pre` also means nowrap, so it cannot carry them).
   - Authored `display: table` / `table-row` / `table-cell` is not a
     supported display keyword (`is_supported_display_keyword`); such divs
     lay out as blocks/inline, and only `<table>` tag markup is a table.
-  - Logical border shorthands (`border-block[-start|-end]`,
-    `border-inline[-start|-end]`) now store physical longhands at their
-    source position (horizontal-tb ltr only), but the logical LONGHANDS
-    (`border-block-start-width` ...) still apply after the physical ones in
-    a fixed order, and a multi-token logical value does not store its style
-    (`border-block:4px none #123` keeps 4px; Chrome computes 0 because
-    style none zeroes the width) -- the existing applier pins that 4px.
+  - Logical border properties map to physical sides as horizontal-tb ltr
+    only (`_border_logical_sides`, foundation): `direction:rtl` should swap
+    inline-start/end and a vertical writing mode should rotate block/inline.
+    The fixed-order logical appliers in decl_apply now run only for a value
+    the table cannot expand (`var()`).
   - Draw IR mitre (`_engine2d_draw_ir_render_borders_mitred`) ignores a
     radius: differently coloured sides with `border-radius > 0` are drawn
     square-mitred.
@@ -303,6 +299,38 @@ max-content of mixed inline content, control UA font reset, `h6` margins
     the largest remaining mismatching region after the whitespace fix
     (geometry now within a few px; the widget painting differs). Not
     investigated in this lane.
+- **Review round 3, fixed (2026-11-15):**
+  - The declaration table is cut to its used length
+    (`_decl_table_build_inner`): any `border`/`outline` substring (even
+    `box-sizing:border-box`) sized it at 26 slots per declaration, and
+    `decl_tbl_get` / `decl_tbl_last_index` / `decl_tbl_presence` scanned the
+    spare empty slots.
+  - A border or outline shorthand resets what it omits (width `medium` =
+    3px, style `none`, color `currentcolor`, which the side/outline colour
+    appliers now resolve to the element colour); `thin`/`medium`/`thick` are
+    1/3/5px; a five-token `border-color` is dropped. Logical longhands and
+    shorthands are stored as physical longhands at their source position.
+    `border-block:4px none #112233` is now 0 wide (Chrome), re-pinned in
+    `decl_apply_coverage_closure_spec`. `outline:2px red` (no style) paints
+    nothing. Spec: `css_border_cascade_chrome159_spec.spl` AC-4, AC-5.
+  - Over-constrained abspos keeps `right` (drops `left`) when the parent is
+    `direction:rtl` (`css_abspos_overconstrained_chrome159_spec.spl`).
+  - A newline in whitespace between elements is a forced break where the
+    computed white-space keeps newlines (`<pre>`, `pre`, `pre-wrap`,
+    `pre-line`, `break-spaces`): `HNode.ws_newline` +
+    `Style.white_space_newline`; between two blocks it is an empty line
+    (`inline_whitespace_between_elements_chrome159_spec.spl` AC-5).
+- **Review round 3, open (filed):**
+  - An out-of-flow sibling hides a real space: `<span>a</span> <div
+    style=position:absolute></div><span>b</span>` renders "ab" -- the
+    whitespace pass (core.spl, after the `::marker` pass) treats the abspos
+    div as block-level by its computed display.
+  - `display:contents` inside a flex container: whitespace children of the
+    contents box are kept (the pass only looks at the direct parent's
+    display).
+  - The inline-run abspos placement in layout_engine (replaced box inside a
+    span, `if cst.left_auto and cst.right_px >= 0`) is still left-wins in an
+    rtl containing block.
 - **Open: exponents in colour channels.** `rgb(1e2, 0, 0)` reads its channel
   as 1 (the exponent is consumed and dropped); Chrome reads 100. The value is
   pinned by `dom_color_alpha_normalization_spec.spl`

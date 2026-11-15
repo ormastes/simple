@@ -721,6 +721,10 @@ class HNode:
     attrs_raw: text    # raw tag inner text for attribute selectors
     parent: i64        # index of parent in the arena (-1 for root)
     is_details_summary: bool # first direct summary owned by details
+    # Whitespace-only text after an element whose source held a newline:
+    # stored as one space, laid out as a forced break where the computed
+    # white-space keeps newlines (`white_space_newline`).
+    ws_newline: bool = false
 
 class HtmlChildIndex:
     first_child: [i32]
@@ -1315,15 +1319,6 @@ fn _parse_html_with_node_limit(html: text, requested_node_limit: i32) -> [HNode]
 
 # True when `node` sits inside an element whose UA style preserves
 # newlines (`white-space: pre`).
-fn _html_in_preformatted(nodes: [HNode], parent: i32) -> bool:
-    var p = parent
-    while p >= 0:
-        val tag = nodes[p].tag
-        if tag == "pre" or tag == "textarea" or tag == "listing" or tag == "plaintext":
-            return true
-        p = nodes[p].parent
-    false
-
 fn _parse_html_with_limits(
     html: text, requested_node_limit: i32, requested_byte_limit: i64
 ) -> [HNode]:
@@ -1379,11 +1374,11 @@ fn _parse_html_with_limits(
             # between inline-level boxes it is one (`<canvas></canvas>\n<svg>`
             # puts 4.45px between them in Chrome). Whether it renders at all
             # depends on computed display, so compute_styles hides it beside
-            # block-level boxes and inside flex/grid/table containers. Inside
-            # `<pre>` a newline must break the line, which the inline run
-            # cannot do yet (residue record), so it is never turned into a
-            # space there. Only a lone " " survived here before.
-            val after_element = trimmed.len() == 0 and prev_child_tag_before != "" and prev_child_tag_before != "#text" and not _html_in_preformatted(nodes, parent)
+            # block-level boxes and inside flex/grid/table containers. A
+            # newline in it is remembered (`ws_newline`): where the computed
+            # white-space keeps newlines the layout breaks the line there.
+            # Only a lone " " survived here before.
+            val after_element = trimmed.len() == 0 and prev_child_tag_before != "" and prev_child_tag_before != "#text"
             val text_data = if after_element: " " else: flat.text_data
             if trimmed.len() > 0 or text_data == " ":
                 if (nodes.len() > 0 and nodes[nodes.len() - 1].tag == "#text" and
@@ -1398,6 +1393,7 @@ fn _parse_html_with_limits(
                     var text_node = mk_node("#text", parent)
                     text_node.text_data = text_data
                     text_node.text_trimmed = trimmed
+                    text_node.ws_newline = after_element and flat.text_data.contains("\n")
                     flat_to_hnode[i] = nodes.len() as i32
                     nodes.push(text_node)
         else:
@@ -3068,8 +3064,13 @@ fn _decl_table_build_inner(decls: text) -> [text]:
         val empty: [text] = []
         return empty
     # Preallocated + indexed store: `.push` in a loop clones the array (O(N^2)).
-    # A border shorthand also stores up to 12 longhands (below).
-    val per_decl = if text_index_of(decls, "border") >= 0: 26 else: 2
+    # A border/outline shorthand also stores up to 12 longhands (below); the
+    # table is cut to the used length at the end, so the lookups that scan it
+    # whole never see the spare slots.
+    val per_decl = if text_index_of(decls, "border") >= 0 or text_index_of(decls, "outline") >= 0: 26 else: 2
+    # `outline` is dispatch-handled alone; its longhands (not dispatch props)
+    # are only needed when an outline longhand can be overridden.
+    val expand_outline = text_index_of(decls, "outline-") >= 0
     var tbl: [text] = [""; n * per_decl]
     var pos = 0
     var idx = 0
@@ -3081,11 +3082,17 @@ fn _decl_table_build_inner(decls: text) -> [text]:
         if colon >= 0 and colon < end:
             val prop = decls.substring(pos, colon).trim().lower()
             val value = decls.substring(colon + 1, end).trim()
-            val longhands = _border_shorthand_longhands(prop, value)
+            var longhands: [text] = []
+            if prop != "outline" or expand_outline:
+                longhands = _border_shorthand_longhands(prop, value)
             if not _decl_invalid_color_function(prop, value) and not (longhands.len() == 1 and longhands[0] == "!"):
-                tbl[idx] = prop
-                tbl[idx + 1] = value
-                idx = idx + 2
+                # A logical property that expanded is stored as its physical
+                # longhands only, so its fixed-order applier cannot re-apply
+                # it over a later physical declaration.
+                if longhands.len() == 0 or not _border_logical_prop(prop):
+                    tbl[idx] = prop
+                    tbl[idx + 1] = value
+                    idx = idx + 2
                 # The shorthand's longhands at its own source position, so the
                 # last-wins lookup of a longhand sees a shorthand authored
                 # after it (`border-top-color:red;border-color:blue` -> blue).
@@ -3095,28 +3102,69 @@ fn _decl_table_build_inner(decls: text) -> [text]:
         if semi < 0:
             break
         pos = semi + 1
-    tbl
+    if idx == tbl.len():
+        return tbl
+    var used: [text] = [""; idx]
+    var k = 0
+    while k < idx:
+        used[k] = tbl[k]
+        k = k + 1
+    used
 
-# The physical side longhands a border shorthand sets, as flat
-# (property, value) pairs. ["!"] marks a `border-color` with a token that is
-# not a colour: CSS drops the whole declaration, so the earlier value stays
-# (`border-color:red foo`). Only the parts the shorthand states are listed;
-# a value with `var()` is left to the appliers.
+fn _border_logical_prop(prop: text) -> bool:
+    prop.starts_with("border-block") or prop.starts_with("border-inline")
+
+# Physical sides of a logical border property name (horizontal-tb, ltr --
+# the mapping the logical appliers use), or [] when it is not one.
+fn _border_logical_sides(name: text) -> [text]:
+    if name == "border-block": return ["top", "bottom"]
+    if name == "border-block-start": return ["top"]
+    if name == "border-block-end": return ["bottom"]
+    if name == "border-inline": return ["left", "right"]
+    if name == "border-inline-start": return ["left"]
+    if name == "border-inline-end": return ["right"]
+    []
+
+fn _border_kind_ok(kind: text, tok: text) -> bool:
+    if kind == "color": return _border_color_token(tok)
+    if kind == "width": return _border_width_token(tok)
+    css_border_style_token(tok) != ""
+
+# `thin`/`medium`/`thick` as the px the width appliers parse (Chrome 159:
+# 1, 3, 5).
+fn _border_width_px(tok: text) -> text:
+    val t = tok.lower()
+    if t == "thin": return "1px"
+    if t == "medium": return "3px"
+    if t == "thick": return "5px"
+    tok
+
+# The physical side longhands a border (or outline) property sets, as flat
+# (property, value) pairs. ["!"] marks a declaration CSS drops whole: a
+# `border-color` with a token that is not a colour or more than four values,
+# so the earlier value stays. A shorthand also resets the parts it omits
+# (width medium, style none, color currentcolor). A value with `var()`, or
+# a width/style list the appliers must judge, is left to the appliers.
 fn _border_shorthand_longhands(prop: text, value: text) -> [text]:
     var out: [text] = []
-    if not prop.starts_with("border") or text_index_of(value, "var(") >= 0:
+    if text_index_of(value, "var(") >= 0:
+        return out
+    val toks = _decl_top_level_tokens(value)
+    if prop == "outline":
+        return _border_parts_longhands(toks, ["outline"])
+    if not prop.starts_with("border"):
         return out
     val sides = ["top", "right", "bottom", "left"]
-    val toks = _decl_top_level_tokens(value)
     if prop == "border-color" or prop == "border-width" or prop == "border-style":
         val n = toks.len()
-        if n < 1 or n > 4:
-            return out
         val kind = prop.substring(7, prop.byte_len())
+        if n < 1 or n > 4:
+            if kind == "color" and n > 4:
+                return ["!"]
+            return out
         var k = 0
         while k < n:
-            val ok = if kind == "color": _border_color_token(toks[k]) elif kind == "width": _border_width_token(toks[k]) else: css_border_style_token(toks[k]) != ""
-            if not ok:
+            if not _border_kind_ok(kind, toks[k]):
                 if kind == "color":
                     return ["!"]
                 return out
@@ -3127,49 +3175,86 @@ fn _border_shorthand_longhands(prop: text, value: text) -> [text]:
         val per_side = [toks[0], r_tok, b_tok, l_tok]
         var s = 0
         while s < 4:
+            val v = if kind == "width": _border_width_px(per_side[s]) else: per_side[s]
             out.push("border-" + sides[s] + "-" + kind)
-            out.push(per_side[s])
+            out.push(v)
             s = s + 1
         return out
-    # Logical sides map as the appliers already map them (horizontal-tb,
-    # ltr): block = top/bottom, inline = left/right.
+    # Logical longhands: `border-inline-start-color` -> `border-left-color`;
+    # `border-block-width: 1px 2px` -> top 1px, bottom 2px.
+    for kind in ["width", "style", "color"]:
+        val suffix = "-" + kind
+        if prop.ends_with(suffix) and _border_logical_prop(prop):
+            val lsides = _border_logical_sides(prop.substring(0, prop.byte_len() - suffix.byte_len()))
+            if lsides.len() == 0 or toks.len() < 1 or toks.len() > lsides.len():
+                return out
+            for tok in toks:
+                if not _border_kind_ok(kind, tok):
+                    if kind == "color":
+                        return ["!"]
+                    return out
+            var si = 0
+            while si < lsides.len():
+                val tok = if si < toks.len(): toks[si] else: toks[0]
+                val v = if kind == "width": _border_width_px(tok) else: tok
+                out.push("border-" + lsides[si] + "-" + kind)
+                out.push(v)
+                si = si + 1
+            return out
     var targets: [text] = []
     if prop == "border":
         targets = sides
     elif prop == "border-top" or prop == "border-right" or prop == "border-bottom" or prop == "border-left":
         targets = [prop.substring(7, prop.byte_len())]
-    elif prop == "border-block":
-        targets = ["top", "bottom"]
-    elif prop == "border-block-start":
-        targets = ["top"]
-    elif prop == "border-block-end":
-        targets = ["bottom"]
-    elif prop == "border-inline":
-        targets = ["left", "right"]
-    elif prop == "border-inline-start":
-        targets = ["left"]
-    elif prop == "border-inline-end":
-        targets = ["right"]
     else:
+        targets = _border_logical_sides(prop)
+    if targets.len() == 0:
         return out
-    # The first token of each kind only, so a malformed value cannot outgrow
-    # the 12 longhand slots `_decl_table_build_inner` reserves.
-    var seen = ""
+    var names: [text] = []
+    for side in targets:
+        names.push("border-" + side)
+    _border_parts_longhands(toks, names)
+
+# Longhands `<name>-width/-style/-color` for every name in `names` from a
+# width/style/color shorthand value; a part it omits is reset to its
+# initial value. A token of no kind, a kind given twice or a CSS-wide
+# keyword leaves it unexpanded, so the appliers keep their old reading.
+fn _border_parts_longhands(toks: [text], names: [text]) -> [text]:
+    var out: [text] = []
     for tok in toks:
-        # A logical style is stored only from a bare keyword
-        # (`border-block:none`): its applier disables a side only for a bare
-        # none/hidden, and `border-block:4px none #123` keeps its 4px there.
-        val style_ok = css_border_style_token(tok) != "" and (toks.len() == 1 or (not prop.starts_with("border-block") and not prop.starts_with("border-inline")))
-        val kind = if _border_width_token(tok): "width" elif style_ok: "style" elif css_border_style_token(tok) != "": "" elif _border_color_token(tok): "color" else: ""
-        if kind != "" and not seen.contains(kind):
-            seen = seen + kind
-            for side in targets:
-                out.push("border-" + side + "-" + kind)
-                out.push(tok)
+        val t = tok.lower()
+        if t == "inherit" or t == "initial" or t == "unset" or t == "revert":
+            return out
+    var width = ""
+    var style = ""
+    var color = ""
+    for tok in toks:
+        if _border_width_token(tok) and width == "":
+            width = _border_width_px(tok)
+        elif css_border_style_token(tok) != "" and style == "":
+            style = tok
+        elif _border_color_token(tok) and color == "":
+            color = tok
+        else:
+            return out
+    if width == "":
+        width = "3px"
+    if style == "":
+        style = "none"
+    if color == "":
+        color = "currentcolor"
+    for name in names:
+        out.push(name + "-width")
+        out.push(width)
+        out.push(name + "-style")
+        out.push(style)
+        out.push(name + "-color")
+        out.push(color)
     out
 
 fn _border_width_token(tok: text) -> bool:
-    "0123456789.".contains(tok.substring(0, 1))
+    val t = tok.lower()
+    t == "thin" or t == "medium" or t == "thick" or "0123456789.".contains(tok.substring(0, 1))
 
 fn _border_color_token(tok: text) -> bool:
     val t = tok.lower()

@@ -20,6 +20,14 @@ flex column `#fc2` 34 below `#fc1`; grid columns `50px 50px 50px` gap 10 put
 `#gr2` at x 60; `<table>` cells `#tc2` at x 30 and the next row 24 below;
 `display:block` spans `#bb2` 24 below `#bb1`; `img{display:block}` 20x20
 `#im2` 20 below `#im1`.
+
+Where the computed white-space keeps newlines the newline is a forced break
+(same capture, PRE_PAGE / PRE_BLOCK_PAGE, 16px/24px sans-serif): in `<pre>`
+and under `white-space: pre`, `pre-wrap` and `pre-line`, `<b>b</b>` is at
+x 0, 24 below `<b>a</b>`; with normal white-space it stays on a's line at
+x 13.36. Between two blocks the newline is an empty line (b 48 below a in
+`<pre>` and `pre-line`); a trailing one after an inline adds no line (the
+`pre-wrap` container stays 24 tall).
 """
 
 """
@@ -33,6 +41,16 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_geometry
 val WS_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}span{{display:inline-block;width:20px;height:10px}}</style></head><body><div style=\"font:16px/20px sans-serif\"><span style=\"background:#0000ff\"></span>\n<span style=\"background:#ff0000\"></span></div></body></html>"
 
 val BLOCK_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;font:16px/24px sans-serif}}.r{{position:absolute;left:0;width:300px}}</style></head><body><div class=r style=\"top:0;display:flex;gap:10px\"><span id=fr1>x</span>\n<span id=fr2>y</span>\n</div><div class=r style=\"top:40px;display:flex;flex-direction:column;gap:10px\"><span id=fc1>x</span>\n<span id=fc2>y</span>\n</div><div class=r style=\"top:120px;display:grid;grid-template-columns:50px 50px 50px;gap:10px\"><span id=gr1>x</span>\n<span id=gr2>y</span>\n</div><table class=r style=\"top:160px;width:auto;border-spacing:0\">\n<tr>\n<td id=tc1 style=\"width:30px;padding:0\">x</td>\n<td id=tc2 style=\"width:30px;padding:0\">y</td>\n</tr>\n<tr><td id=tc3 style=\"padding:0\">z</td></tr>\n</table><div class=r style=\"top:240px\"><span id=bb1 style=\"display:block\">a</span>\n<span id=bb2 style=\"display:block\">b</span>\n</div><div class=r style=\"top:320px\"><img id=im1 style=\"display:block;width:20px;height:20px\">\n<img id=im2 style=\"display:block;width:20px;height:20px\">\n</div></body></html>"
+
+val PRE_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;font:16px/24px sans-serif}}pre{{margin:0;font:16px/24px sans-serif}}.r{{position:absolute;left:0;width:300px}}</style></head><body><pre class=r style=\"top:0\"><b id=pa>a</b>\n<b id=pb>b</b></pre><div class=r style=\"top:60px;white-space:pre\"><b id=wa>a</b>\n<b id=wb>b</b></div><div class=r style=\"top:120px;white-space:pre-wrap\"><b id=xa>a</b>\n<b id=xb>b</b></div><div class=r style=\"top:180px;white-space:pre-line\"><b id=la>a</b>\n<b id=lb>b</b></div><div class=r style=\"top:240px\"><b id=na>a</b>\n<b id=nb>b</b></div></body></html>"
+
+val PRE_BLOCK_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;font:16px/24px sans-serif}}pre{{margin:0;font:16px/24px sans-serif}}.r{{position:absolute;left:0;width:300px}}</style></head><body><pre class=r style=\"top:0\"><div id=a>a</div>\n<div id=b>b</div></pre><div class=r style=\"top:100px;white-space:pre-line\"><div id=c>a</div>\n<div id=d>b</div></div><div class=r id=f style=\"top:300px;white-space:pre-wrap\"><b>a</b>\n</div></body></html>"
+
+fn preb_at(id: text, field: text) -> i32:
+    simple_web_layout_debug_layout_by_id(PRE_BLOCK_PAGE, 900, 400, id, field).to_int()
+
+fn pre_at(id: text, field: text) -> i32:
+    simple_web_layout_debug_layout_by_id(PRE_PAGE, 900, 400, id, field).to_int()
 
 fn at(id: text, field: text) -> i32:
     simple_web_layout_debug_layout_by_id(BLOCK_PAGE, 900, 600, id, field).to_int()
@@ -74,3 +92,16 @@ describe "Whitespace between inline elements":
         step("Chrome 159: display:block spans 24 apart; display:block imgs 20 apart")
         expect(at("bb2", "y") - at("bb1", "y")).to_equal(24)
         expect(at("im2", "y") - at("im1", "y")).to_equal(20)
+
+    it "AC-5: a preserved newline between inline elements breaks the line":
+        step("Chrome 159: in <pre>, white-space:pre, pre-wrap and pre-line, b is at x 0, 24 below a")
+        for pair in [["pa", "pb"], ["wa", "wb"], ["xa", "xb"], ["la", "lb"]]:
+            expect(pre_at(pair[1], "x")).to_equal(0)
+            expect(pre_at(pair[1], "y") - pre_at(pair[0], "y")).to_equal(24)
+        step("Chrome 159 guard: normal white-space keeps b on a's line (x 13.4)")
+        expect(pre_at("nb", "y")).to_equal(pre_at("na", "y"))
+        expect(pre_at("nb", "x") > pre_at("na", "x") + pre_at("na", "w")).to_equal(true)
+        step("Chrome 159: a preserved newline between blocks is an empty line (b 48 below a in <pre> and pre-line); a trailing one adds none (f 24 tall)")
+        expect(preb_at("b", "y") - preb_at("a", "y")).to_equal(48)
+        expect(preb_at("d", "y") - preb_at("c", "y")).to_equal(48)
+        expect(preb_at("f", "h")).to_equal(24)

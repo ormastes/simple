@@ -1821,10 +1821,19 @@ never cache an answer computed while exhausted) —
   started writing `border-*-color/width/style` entries right after the
   shorthand; the last-wins lookup then sees source order. A `border-color`
   with a non-colour token returns `["!"]` and drops the whole declaration.
-  Logical shorthands (`border-block*`/`border-inline*`) expand the same
-  way (horizontal-tb: block = top/bottom); their style is stored only from
-  a bare keyword, matching the applier. Logical longhands still apply in
-  fixed order (filed).
+  A shorthand also stores what it omits (width 3px, style none, color
+  `currentcolor` -> the element colour): `border-top-style:dashed;border:2px
+  red` paints nothing in Chrome. Logical properties (shorthands AND
+  longhands) are stored as their physical longhands only (horizontal-tb
+  ltr), so the fixed-order logical appliers never re-apply them; only a
+  `var()` value still reaches them. Trap: the table used to be allocated at
+  26 slots per declaration whenever the text held "border" (even
+  `box-sizing:border-box`) and was never trimmed -- every lookup scanned
+  the empty slots. It is cut to the used length now.
+- **Trap -- `white_space_pre` means nowrap too.** It cannot carry
+  `pre-wrap`/`pre-line`; a kept newline between elements uses
+  `Style.white_space_newline` + `HNode.ws_newline` and is laid out by the
+  `<br>` branches (layout_engine, layout_foundation measure).
 - **`flex-direction: column-reverse`** restacks bottom-up from the content
   bottom in DOM order with physical margins (reflecting the column result
   got asymmetric margins wrong: t=38 vs Chrome 42). Chrome 159:

@@ -17,6 +17,28 @@ Chrome oracle (Chrome 159.0.8154.6 headless shell, `getComputedStyle` /
   reverse order is 24 tall.
 - `#w1` `border-top-width:10px;border-width:1px` is 22 tall; `#w2` the
   reverse order is 31 tall.
+
+RESET_PAGE / RESET_GEOM (same capture; `color:rgb(0,128,0)`, 20x20 boxes,
+no stylesheet border) -- a shorthand resets the parts it omits, and logical
+properties cascade in source order with the physical ones:
+- `#r1` `border-top-color:red;border:4px solid` -- all four currentColor.
+- `#r2` `border:4px solid;border-inline-start-color:red;border-color:blue`
+  -- all blue; `#r3` `...;border-left-color:red;border-inline-start-color:blue`
+  -- left blue, the rest currentColor.
+- `#r4` a five-token `border-color` is dropped -- all red.
+- `#r5` `border-inline-start-color:red;border-inline:4px solid blue` --
+  left and right blue.
+- `#o1` `outline-color:red;outline:2px solid` -- currentColor outline;
+  `#o2` `outline-style:dashed;outline:2px red` and `#o3` `outline:0 solid
+  red` paint no outline.
+- `#g1` `border-top-style:dashed;border:2px red` 20x20 (style none);
+  `#g2` the same with `border-top` 20 tall; `#g3` `border-inline:blue`
+  after `border:2px solid` 20 wide, 24 tall; `#g4`
+  `border-block:4px solid red;border-top-width:1px` 25 tall; `#g5`
+  `border-block:4px none #112233` 20 tall.
+- `#g6` `border:thin solid` 22; `#g7` `border-width:medium` 26; `#g8`
+  `border-width:thick thin` 22 wide, 30 tall; `#g9`
+  `border-inline-start-width:7px;border:2px solid` 24 wide.
 """
 
 """
@@ -31,6 +53,10 @@ val COLOR_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;backgro
 
 val GEOM_PAGE: text = "<!doctype html><html><head><style>body{{margin:0}}div{{position:absolute;left:0;width:20px;height:20px;border:4px solid green}}</style></head><body><div id=s1 style=\"top:0;border-top-style:none;border-style:solid\"></div><div id=s2 style=\"top:40px;border-style:solid;border-top-style:none\"></div><div id=w1 style=\"top:80px;border-top-width:10px;border-width:1px\"></div><div id=w2 style=\"top:120px;border-width:1px;border-top-width:10px\"></div></body></html>"
 
+val RESET_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff;color:rgb(0,128,0)}}div{{position:absolute;left:0;width:20px;height:20px}}</style></head><body><div id=r1 style=\"top:0;border-top-color:red;border:4px solid\"></div><div id=r2 style=\"top:40px;border:4px solid;border-inline-start-color:red;border-color:blue\"></div><div id=r3 style=\"top:80px;border:4px solid;border-left-color:red;border-inline-start-color:blue\"></div><div id=r4 style=\"top:120px;border:4px solid red;border-color:red blue green yellow pink\"></div><div id=r5 style=\"top:160px;border:4px solid;border-inline-start-color:red;border-inline:4px solid blue\"></div><div id=o1 style=\"top:200px;left:10px;outline-color:red;outline:2px solid\"></div><div id=o2 style=\"top:240px;left:10px;outline-style:dashed;outline:2px red\"></div><div id=o3 style=\"top:280px;left:10px;outline:0 solid red\"></div></body></html>"
+
+val RESET_GEOM: text = "<!doctype html><html><head><style>body{{margin:0}}div{{position:absolute;left:0;width:20px;height:20px}}</style></head><body><div id=g1 style=\"top:0;border-top-style:dashed;border:2px red\"></div><div id=g2 style=\"top:40px;border-top-style:dashed;border-top:2px red\"></div><div id=g3 style=\"top:80px;border:2px solid;border-inline-start-color:red;border-inline:blue\"></div><div id=g4 style=\"top:120px;border-block:4px solid red;border-top-width:1px\"></div><div id=g5 style=\"top:160px;border-block:4px none #112233\"></div><div id=g6 style=\"top:200px;border:thin solid\"></div><div id=g7 style=\"top:240px;border:2px solid;border-width:medium\"></div><div id=g8 style=\"top:280px;border:2px solid;border-width:thick thin\"></div><div id=g9 style=\"top:320px;border-inline-start-width:7px;border:2px solid\"></div></body></html>"
+
 # Colours of the top, right, bottom and left border middles of the 28x28
 # box whose top edge is at `y`.
 fn sides(px: [u32], y: i32) -> text:
@@ -43,7 +69,15 @@ fn sides(px: [u32], y: i32) -> text:
 fn height(id: text) -> text:
     simple_web_layout_debug_layout_by_id(GEOM_PAGE, 900, 400, id, "h")
 
+fn rg(id: text, field: text) -> text:
+    simple_web_layout_debug_layout_by_id(RESET_GEOM, 900, 400, id, field)
+
 val BLUE: text = "255"
+val WHITE: text = "16777215"
+
+fn pxc(px: [u32], x: i32, y: i32) -> text:
+    val c = px[x + y * 100] & 0xFFFFFFu32
+    "{c}"
 val GREEN: text = "32768"
 val RED: text = "16711680"
 
@@ -67,3 +101,32 @@ describe "border property family cascade":
         expect(height("s2")).to_equal("24")
         expect(height("w1")).to_equal("22")
         expect(height("w2")).to_equal("31")
+
+    it "AC-4: a shorthand resets the parts it omits; logical properties keep source order":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(RESET_PAGE, 100, 320, "cpu_simd")
+        step("Chrome 159: r1 all currentColor; r2 all blue; r3 left blue; r4 all red; r5 left/right blue")
+        expect(sides(px, 0)).to_equal("{GREEN} {GREEN} {GREEN} {GREEN}")
+        expect(sides(px, 40)).to_equal("{BLUE} {BLUE} {BLUE} {BLUE}")
+        expect(sides(px, 80)).to_equal("{GREEN} {GREEN} {GREEN} {BLUE}")
+        expect(sides(px, 120)).to_equal("{RED} {RED} {RED} {RED}")
+        expect(sides(px, 160)).to_equal("{GREEN} {BLUE} {GREEN} {BLUE}")
+        step("Chrome 159: o1 currentColor outline; o2 and o3 no outline")
+        expect(pxc(px, 9, 210)).to_equal(GREEN)
+        expect(pxc(px, 9, 250)).to_equal(WHITE)
+        expect(pxc(px, 9, 290)).to_equal(WHITE)
+
+    it "AC-5: omitted style is none, keywords widths resolve, logical widths keep source order":
+        step("Chrome 159: g1 20x20, g2 20 tall, g3 20x24, g4 25 tall, g5 20 tall")
+        expect(rg("g1", "w")).to_equal("20")
+        expect(rg("g1", "h")).to_equal("20")
+        expect(rg("g2", "h")).to_equal("20")
+        expect(rg("g3", "w")).to_equal("20")
+        expect(rg("g3", "h")).to_equal("24")
+        expect(rg("g4", "h")).to_equal("25")
+        expect(rg("g5", "h")).to_equal("20")
+        step("Chrome 159: g6 22, g7 26, g8 22x30, g9 24 wide")
+        expect(rg("g6", "w")).to_equal("22")
+        expect(rg("g7", "w")).to_equal("26")
+        expect(rg("g8", "w")).to_equal("22")
+        expect(rg("g8", "h")).to_equal("30")
+        expect(rg("g9", "w")).to_equal("24")

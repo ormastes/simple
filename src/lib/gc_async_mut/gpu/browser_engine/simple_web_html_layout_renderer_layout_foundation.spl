@@ -1323,6 +1323,7 @@ fn style_with_height(st: Style, height_px: i32) -> Style:
     out.height_auto = false
     out.left_auto = st.left_auto
     out.top_auto = st.top_auto
+    out.white_space_newline = st.white_space_newline
     out.align_items_authored = st.align_items_authored
     out.scrollbar_width_none = st.scrollbar_width_none
     out.display_inline_flex_authored = st.display_inline_flex_authored
@@ -1342,6 +1343,7 @@ fn style_with_width(st: Style, width_px: i32) -> Style:
     out.height_auto = st.height_auto
     out.left_auto = st.left_auto
     out.top_auto = st.top_auto
+    out.white_space_newline = st.white_space_newline
     out.align_items_authored = st.align_items_authored
     out.scrollbar_width_none = st.scrollbar_width_none
     out.display_inline_flex_authored = st.display_inline_flex_authored
@@ -1524,7 +1526,7 @@ fn _lay_flex_item_max_content_width_inner(nodes: [HNode], styles: [Style], child
     while c >= 0:  # cpu-lane-loop-ok: one pass over this item's children during flex base sizing, bounded by the child list, not on any paint path
         val cst = styles[c]
         val ctag = nodes[c].tag
-        if ctag == "#text":
+        if ctag == "#text" and not (nodes[c].ws_newline and cst.white_space_newline):
             val txt: text = nodes[c].text_trimmed
             if txt.len() > 0:
                 if inline_run > 0 and (gap_pending or text_starts_with_collapsible_space(nodes[c].text_data)) and not cst.white_space_pre:
@@ -1541,7 +1543,7 @@ fn _lay_flex_item_max_content_width_inner(nodes: [HNode], styles: [Style], child
                 # A whitespace-only text node between two inline boxes
                 # (`<a>Edit</a> <a>Del</a>`) is one collapsible space.
                 gap_pending = true
-        elif ctag == "br" and cst.display == "inline":
+        elif (ctag == "br" or (nodes[c].ws_newline and cst.white_space_newline)) and cst.display == "inline":
             # A forced break ends the line being measured.
             if inline_run > widest:
                 widest = inline_run
@@ -2660,9 +2662,10 @@ fn absolute_child_x(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex
     # parent-relative static-position approximation below.
     if not child.left_auto and not absolute_has_positioned_ancestor(nodes, styles, child_i):
         return child.left_px
-    # Both insets with a definite width over-constrain the box; in ltr
-    # `right` is ignored (CSS 2.2 10.3.7).
-    if child.right_px >= 0 and child.left_auto:
+    # Both insets with a definite width over-constrain the box; `right` is
+    # ignored in an ltr containing block and `left` in an rtl one (CSS 2.2
+    # 10.3.7).
+    if child.right_px >= 0 and (child.left_auto or parent.direction_rtl):
         val padding_box_w = containing_w + parent.pad_l + parent.pad_r
         return parent_x + parent.border_l + padding_box_w - absolute_outer_width(nodes, styles, child_index, child_i, parent, child_node, child, containing_w) - child.right_px
     parent_x + parent.border_l + child.left_px
