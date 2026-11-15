@@ -90,6 +90,11 @@ describe "trait-object conversion at implicit tails (bootstrap HIR)":
         expect(l.errors).to_equal("")
         expect(mir_of(l, "pick").split(CAST).len() >= 3).to_equal(true)
 
+    it "converts every arm of a match tail":
+        val l = lower_bootstrap(DECLS + "fn pick_match(n: i64) -> Tag:\n    match n:\n        case 0: Alpha(k: 10)\n        case _: Beta(k: 20)\n")
+        expect(l.errors).to_equal("")
+        expect(mir_of(l, "pick_match").split(CAST).len() >= 3).to_equal(true)
+
     it "converts a method's implicit trait tail":
         val l = lower_bootstrap(DECLS + "class Factory:\n    base: i64\n\nimpl Factory:\n    fn build() -> Tag:\n        Alpha(k: self.base)\n")
         expect(l.errors).to_equal("")
@@ -102,7 +107,9 @@ describe "trait-object conversion at implicit tails (bootstrap HIR)":
 
     it "refuses a disallowed instantiation reached through an implicit tail":
         val src = "type Flag = bool\n\n" + DECLS + "class RCell:\n    cell: Flag?\n\nimpl Reader<Flag> for RCell:\n    fn read(node: i64) -> Flag?:\n        self.cell\n\nfn make() -> Reader<Flag>:\n    RCell(cell: Some(false))\n"
-        expect(lower_bootstrap(src).errors).to_contain("method read: return type argument T=optional[bool] is not supported through a generic trait slot natively")
+        # The alias-typed `-> Flag?` result is not recoverable in bootstrap HIR,
+        # so admission refuses on its fail-closed branch.
+        expect(lower_bootstrap(src).errors).to_contain("incompatible native trait object signature: tail_probe::Reader for tail_probe::RCell: method read: return type expected=T? actual=int:64:true")
 
 describe "trait-object conversion at module-level typed vals (bootstrap HIR)":
     it "converts `val t: Tag = Alpha(..)`":
