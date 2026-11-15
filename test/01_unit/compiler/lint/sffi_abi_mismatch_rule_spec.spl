@@ -15,7 +15,7 @@ field yet.
 use std.spec.*
 use std.spec.step
 use compiler.tools.lint.static_rules.{LintParamsV1, LintUnit, StaticLintLevel, static_lint_rule_table, run_static_lint_rule_table}
-use compiler.tools.lint.rules.sffi_abi_mismatch_rule.{sffi_abi_mismatch_lint_rule, sffi_abi_lint_triple, sffi_abi_check_with_triple}
+use compiler.tools.lint.rules.sffi_abi_mismatch_rule.{sffi_abi_lint_triple, sffi_abi_check_with_triple, sffi_abi_row_findings}
 
 describe "sffi_abi_mismatch lint row":
     """The row runs SPL-SFFI-ABI-001 at deny level against an explicit or host triple."""
@@ -53,13 +53,6 @@ describe "sffi_abi_mismatch lint row":
         expect(sffi_abi_lint_triple("", "x86_64", "")).to_equal("")
         expect(sffi_abi_lint_triple("", "sparc", "plan9")).to_equal("")
 
-    it "reports an unknown target when the triple is empty":
-        # @req: REQ-DIAG-POLICY-001
-        step("Check a matching declaration with no resolvable triple")
-        val src = "unit Ticks: i64 as tk\n@c_abi(Ticks: \"int64_t\")\nextern fn c_ticks() -> Ticks\n"
-        val fs = sffi_abi_check_with_triple(LintUnit("app/x.spl", src), "")
-        expect(fs.len()).to_equal(1)
-        expect(fs[0].message).to_contain("unknown target")
 
     it "stays silent on files without @c_abi":
         # @req: REQ-DIAG-POLICY-001
@@ -70,3 +63,32 @@ describe "sffi_abi_mismatch lint row":
             if f.code == "SPL-SFFI-ABI-001":
                 hits = hits + 1
         expect(hits).to_equal(0)
+
+    it "builds FreeBSD and arm linux host triples":
+        # @req: REQ-DIAG-POLICY-001
+        step("Resolve host triples for FreeBSD and arm linux")
+        expect(sffi_abi_lint_triple("", "x86_64", "freebsd")).to_equal("x86_64-unknown-freebsd")
+        expect(sffi_abi_lint_triple("", "aarch64", "freebsd")).to_equal("aarch64-unknown-freebsd")
+        expect(sffi_abi_lint_triple("", "riscv64", "freebsd")).to_equal("riscv64-unknown-freebsd")
+        expect(sffi_abi_lint_triple("", "armv7l", "linux")).to_equal("armv7-unknown-linux-gnueabihf")
+        expect(sffi_abi_lint_triple("", "arm", "linux")).to_equal("armv7-unknown-linux-gnueabihf")
+
+    it "emits no deny when the host is unresolvable and no target is set":
+        # @req: REQ-DIAG-POLICY-001
+        step("Run the row logic with an unknown host and no explicit target")
+        val src = "unit Ticks: i64 as tk\n@c_abi(Ticks: \"int64_t\")\nextern fn c_ticks() -> Ticks\n"
+        val fs = sffi_abi_row_findings(LintUnit("app/x.spl", src), "", "sparc", "plan9")
+        var denies = 0
+        for f in fs:
+            if f.level == StaticLintLevel.Deny:
+                denies = denies + 1
+        expect(denies).to_equal(0)
+
+    it "keeps the unknown-target deny for an explicit unknown triple":
+        # @req: REQ-DIAG-POLICY-001
+        step("Run the row logic with SIMPLE_TARGET_TRIPLE set to a mystery target")
+        val src = "unit Ticks: i64 as tk\n@c_abi(Ticks: \"int64_t\")\nextern fn c_ticks() -> Ticks\n"
+        val fs = sffi_abi_row_findings(LintUnit("app/x.spl", src), "mystery-os", "x86_64", "linux")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].level).to_equal(StaticLintLevel.Deny)
+        expect(fs[0].message).to_contain("unknown target")
