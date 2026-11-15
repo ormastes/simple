@@ -8903,10 +8903,9 @@ void rt_memory_barrier(void) {
  * round-trip cannot be elided or constant-folded, so it is a genuine
  * barrier here. MinGW is deliberately NOT routed here -- it has the GNU
  * asm and takes the branch below, exactly like Linux/macOS/FreeBSD. */
-static volatile int64_t rt_black_box_sink;
 int64_t rt_black_box(int64_t value) {
-    rt_black_box_sink = value;
-    return rt_black_box_sink;
+    volatile int64_t sink = value;
+    return sink;
 }
 #elif defined(__GNUC__) || defined(__clang__)
 SPL_WEAK int64_t rt_black_box(int64_t value) {
@@ -8914,10 +8913,9 @@ SPL_WEAK int64_t rt_black_box(int64_t value) {
     return value;
 }
 #else
-static volatile int64_t rt_black_box_sink;
 int64_t rt_black_box(int64_t value) {
-    rt_black_box_sink = value;
-    return rt_black_box_sink;
+    volatile int64_t sink = value;
+    return sink;
 }
 #endif
 
@@ -22252,3 +22250,22 @@ int64_t rt_collection_set(int64_t receiver, int64_t key, int64_t value) {
 
 /* Single hosted owner for read-back workspace storage capabilities. */
 #include "runtime_workspace_storage_v1.c"
+
+/* Kernel object identity for the Windows service-logon namespace owner.
+ * CompareObjectHandles lives only in kernelbase.dll (not in llvm-mingw's
+ * kernel32/advapi32/ntdll import libraries), so a direct Simple extern leaves
+ * it unresolved at link. Resolve it at run time; report "not identical" (0)
+ * when the entry point is unavailable so callers fail closed. */
+int32_t rt_win_compare_object_handles(int64_t first, int64_t second) {
+#if defined(_WIN32)
+    typedef BOOL (WINAPI *compare_fn)(HANDLE, HANDLE);
+    HMODULE kb = GetModuleHandleW(L"kernelbase.dll");
+    compare_fn fn = kb ? (compare_fn)(void *)GetProcAddress(kb, "CompareObjectHandles") : NULL;
+    if (!fn) return 0;
+    return fn((HANDLE)(intptr_t)first, (HANDLE)(intptr_t)second) ? 1 : 0;
+#else
+    (void)first;
+    (void)second;
+    return 0;
+#endif
+}

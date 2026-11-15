@@ -98,6 +98,10 @@ backend does — that is what the seam is for.
 
 ### Operational traps confirmed today
 
+- **Gate signals**: `check-slang-ggml-inference.shs` runs each model in the
+  background and `wait`s, so HUP/INT/TERM exit 129/130/143 at once, kill the
+  model run and remove the work dir (a foreground child deferred the trap and
+  orphaned the run; verified TERM -> 143, no child left, 2026-11-15).
 - **Shim symbol drift**: `backend.spl` at origin/main dlsyms 17 symbols
   including `slang_ggml_capabilities`; a shim built from older source exports
   14 and the TUI dies with `spl_dlsym: unresolved symbol`. Rebuild with

@@ -407,6 +407,19 @@ int unlink(const char *path) {
     return remove(path);
 }
 
+/* link(): the SimpleOS kernel has no link syscall -- its table
+ * (src/os/kernel/ipc/syscall.spl) has unlink (39) and rename (44) only --
+ * and its mutable filesystem is FAT32, which cannot represent hard links
+ * (stat reports nlink == 1). Fail honestly with ENOSYS and issue no syscall;
+ * callers (runtime_native.c staged publish / copy fast path) treat -1 as
+ * failure and fall back. Replace with a real syscall if the kernel gains one. */
+int link(const char *oldpath, const char *newpath) {
+    (void)oldpath;
+    (void)newpath;
+    errno = ENOSYS;
+    return -1;
+}
+
 /* ====================================================================
  * 5. Low-level POSIX file operations
  * ==================================================================== */

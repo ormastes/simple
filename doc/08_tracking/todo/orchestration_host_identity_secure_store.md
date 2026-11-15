@@ -4,8 +4,12 @@ Status: OPEN. Public parsing, fingerprint comparison, public registration
 request export, generation and persistent pin installation are source
 implemented. Authenticated public-key send/receive through the fixed SSH gateway
 is source implemented; uploads remain pending administrative grant. The retained
-platform-store adapter is assembled in its separate implementation lane.
-Runtime verification: NOT_RUN.
+platform-store implementation is merged in [PR #9485](https://github.com/ormastes/simple/pull/9485).
+Shared server/key commands and protected profile installation are merged in
+[PR #9502](https://github.com/ormastes/simple/pull/9502) and
+[PR #9515](https://github.com/ormastes/simple/pull/9515).
+Runtime verification: NOT_RUN. Live setup: NOT_APPLIED. These source merges do
+not close the qualification, administrative enrollment or stronger storage work below.
 
 Protected SSH profile installation is source implemented with canonical-content
 `.profile` references and transport preflight. Windows external SSH transport
