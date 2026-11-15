@@ -69,22 +69,37 @@ pub class XraySpyV1:
     backend: XrayBackendV1
     adapter: XrayLlvmAdapterV1
     capacity: i64
+    # One channel arena per spy, re-initialized for each generation: enable
+    # only runs from Idle, when no sled is patched, so reuse is quiescent.
+    arena_raw: i64
     arena: i64
+    # One 96-byte poll buffer per spy (0 when the allocation failed).
+    poll_raw: i64
     session: TraceSessionV1
     events: [TraceEventV1]
+
+fn _xray_align8_v1(raw: i64) -> i64:
+    raw + ((8 - (raw % 8)) % 8)
 
 impl XraySpyV1:
     static fn create(backend: XrayBackendV1, module_instance: u64, capacity: i64) -> XraySpyV1:
         XraySpyV1(backend: backend, adapter: XrayLlvmAdapterV1.create(module_instance),
-            capacity: capacity, arena: 0,
+            capacity: capacity, arena_raw: 0, arena: 0, poll_raw: rt_alloc(96 + 8),
             session: TraceSessionV1(slot: 0, incarnation: 0u64, generation: 0u64), events: [])
 
-    # prepare -> fresh channel for this generation -> start. Events reset.
+    # prepare -> (re)initialize the channel for this generation -> start.
+    # Events reset. Allocation happens before prepare, so an allocation
+    # failure leaves the adapter untouched.
     me enable(config: TraceConfigV1, selection: TraceSelectionV1) -> Result<TraceSessionV1, TraceFailureV1>:
-        val prepared = self.adapter.prepare(self.backend.leaf, config, selection)?
+        if self.adapter.state_code() != XRAY_LLVM_STATE_IDLE_V1: return Err(TraceFailureV1.Busy)
         val bytes = trace_native_channel_bytes_v1(self.capacity)
-        val raw = rt_alloc(bytes + 8)
-        val arena = raw + ((8 - (raw % 8)) % 8)
+        if self.arena_raw == 0:
+            self.arena_raw = rt_alloc(bytes + 8)
+            if self.arena_raw == 0: return Err(TraceFailureV1.ResourceExhausted)
+        if self.poll_raw == 0: return Err(TraceFailureV1.ResourceExhausted)
+        val prepared = self.adapter.prepare(self.backend.leaf, config, selection)?
+        val arena = _xray_align8_v1(self.arena_raw)
+        self.arena = 0
         val status = unsafe(capabilities: [ffi]):
             trace_native_channel_initialize_v1(arena, bytes, self.capacity, prepared.incarnation, 1)
         if status != TRACE_NATIVE_CHANNEL_OK_V1: return Err(TraceFailureV1.ResourceExhausted)
@@ -95,10 +110,9 @@ impl XraySpyV1:
 
     # Drain the backend, then poll + decode every channel record. Count added.
     me collect() -> i64:
-        if self.arena == 0: return 0
+        if self.arena == 0 or self.poll_raw == 0: return 0
         self.backend.edges.drain()
-        val raw = rt_alloc(96 + 8)
-        val output = raw + ((8 - (raw % 8)) % 8)
+        val output = _xray_align8_v1(self.poll_raw)
         var n = 0
         unsafe(capabilities: [ffi]):
             while trace_native_channel_poll_into_v1(self.arena, output, 96) == TRACE_NATIVE_CHANNEL_OK_V1:
