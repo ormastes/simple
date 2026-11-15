@@ -172,3 +172,10 @@ publication. Current bootstrap callsites default to nil; caller configuration,
 group-preparation/manifests and subsequent compile-worker receipts are not yet
 connected. Thus this slice does not enable native-build grouped requests or claim
 an end-to-end managed build. No native resource/performance claim is made.
+
+Review correction: publication retains only the process-local selection, never
+mutable derived options/variant authority. It rederives the complete profile from
+current config, checks every supplied variant field/digest and scope, then validates
+the retained token against those fresh options before semantic/cache effects.
+Malformed or mutated config refuses without another map. Config backend/digest
+mutation regressions target that actual publication revalidation owner (UNRUN).

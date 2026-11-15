@@ -5,13 +5,14 @@ use app.bootstrap_builder.native_group_index_contract.{NativeGroupIndexConfigV1,
     NativeGroupIndexReceiptV1, native_group_index_config_decode_v1,
     native_group_index_receipt_encode_v1, native_group_index_receipt_decode_v1,
     native_group_index_absolute_v1, native_group_index_private_template_v1}
+use compiler.common.cache_contract.traversal_plugin_selection_v1.{TraversalPluginSelectionV1}
 use app.io.env_ops.{cwd}
 use app.io.file_ops.{path_absolute}
 use app.bootstrap_builder.codec.{
     builder_decode_task_v1, builder_encode_task_v1
 }
 use app.bootstrap_builder.native_group_index_variant.{
-    native_group_index_variant_admit_v1, NativeGroupIndexVariantOptionsV1
+    native_group_index_variant_admit_v1, native_group_index_variant_revalidate_v1
 }
 use compiler.driver.driver_cold_full_index_semantics.{
     NativeFullIndexSemanticRequestV1,
@@ -50,7 +51,7 @@ struct NativeGroupIndexAdmissionV1:
     prior_index_digest: text
     artifact_root: text
     budget: RuntimeStdNativeActionBudgetV2
-    admitted_variant: NativeGroupIndexVariantOptionsV1? = nil
+    traversal_selection: TraversalPluginSelectionV1? = nil
 
 fn native_group_index_normalize_v1(path: text) -> text:
     val normalized = path.replace("\\", "/")
@@ -202,7 +203,7 @@ fn native_group_source_admit_v1(config: NativeGroupIndexConfigV1,
             sources.source_identities.len() != config.expected_spl_count:
         return Err("index full SCV source selection differs")
     Ok(NativeGroupIndexAdmissionV1(config, sources, snapshot,
-        source_inventory.inventory!, "", artifact_root, budget, Some(typed_variant)))
+        source_inventory.inventory!, "", artifact_root, budget, typed_variant.traversal_selection))
 
 fn native_group_index_admit_v1(config: NativeGroupIndexConfigV1,
         artifact_root: text, budget: RuntimeStdNativeActionBudgetV2
@@ -217,7 +218,7 @@ fn native_group_index_admit_v1(config: NativeGroupIndexConfigV1,
         if file_exists(pointer) or current.valid:
             return Err("index cache has an unpinned CURRENT generation")
         return Ok(NativeGroupIndexAdmissionV1(config, sources, snapshot,
-            inventory, "", artifact_root, budget, admitted.admitted_variant))
+            inventory, "", artifact_root, budget, admitted.traversal_selection))
     if not builder_digest_valid_v1(config.expected_current_digest) or
             not current.valid or current.generation == nil or
             current.digest != config.expected_current_digest:
@@ -228,15 +229,14 @@ fn native_group_index_admit_v1(config: NativeGroupIndexConfigV1,
             generation.scope_entry_source_identity != "":
         return Err("index expected CURRENT is absent, different, or not a complete graph")
     Ok(NativeGroupIndexAdmissionV1(config, sources, snapshot,
-        inventory, current.digest, artifact_root, budget, admitted.admitted_variant))
+        inventory, current.digest, artifact_root, budget, admitted.traversal_selection))
 
 fn native_group_index_compiler_publish_v1(admitted: NativeGroupIndexAdmissionV1
         ) -> Result<NativeGroupIndexReceiptV1, text>:
     if admitted.sources.source_count != admitted.config.expected_spl_count:
         return Err("index producer admission source count differs")
     val config = admitted.config
-    if admitted.admitted_variant == nil: return Err("index selected variant admission absent")
-    val typed_variant = admitted.admitted_variant.unwrap()
+    val typed_variant = native_group_index_variant_revalidate_v1(config, admitted.traversal_selection)?
     if typed_variant.variant.backend != "llvm" and
             typed_variant.variant.backend != "cranelift":
         return Err("index runtime/std native object backend unsupported")
