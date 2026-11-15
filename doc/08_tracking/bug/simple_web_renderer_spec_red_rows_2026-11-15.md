@@ -138,3 +138,20 @@ Run: `99 passed, 15 failed` of 114.
 Run: `102 passed, 12 failed` of 114 after the race fix (101/13 before it: the
 cuda race flipped a green row red). The opacity-zero row (`path:0` vs
 `id:invisible-button`) is still open, separate from the composite fix.
+
+## Ramp PR (2026-11-15): Aetheric row fixed, gradient pins moved to Chrome
+
+- **Vertical ramp sampling.** Chrome 159 samples a vertical two-stop ramp at
+  row centres, `t = (2*row+1)/(2*h)`, and dithers every device pixel with
+  Skia's 8x8 ordered matrix: `M` from the low 3 bits of `x` and `x^y`, stored
+  `floor(v + (2M+1)/128)`. `92b33870986` had made the CPU raster
+  endpoint-exact (`t = pos/(span-1)`) with a fitted 4x4 table at
+  tile-relative coordinates, which satisfied pins that Chrome never painted.
+  Before porting, the model was replayed against 42 Chrome pixels (4/16/100/2/1
+  px black-white ramps, colour ramps, tiles at offsets): 42/42 exact.
+- **Aetheric row** (`software-composites Aetheric gradient stops`): re-pinned
+  `#595959` -> Chrome `#575758`, and it passes with the fix.
+- Rows still open: the CSS background lowering rows, font families (Pixelify
+  advance widths), WM material bounds, object-fit/position placeholders,
+  transformed themed input text, the opacity-zero subtree, generated widget
+  chrome text.

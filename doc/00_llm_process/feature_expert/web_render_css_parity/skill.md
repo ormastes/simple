@@ -1995,3 +1995,16 @@ never cache an answer computed while exhausted) —
   root ("resolves from the project stdlib roots only").
 - **Old trees do not run on the current seed** (HIR lowering errors before
   ~2026-11-14), so find introducing commits from the code and `git log -S`.
+
+## Gradient ramps (2026-11-15)
+
+- **Chrome never paints a stop colour exactly on a vertical ramp.** It samples
+  row centres, `t = (2*row+1)/(2*h)`, then dithers per device pixel with Skia's
+  8x8 ordered matrix: `X = x`, `Y = y ^ x`, `M` interleaves the low 3 bits
+  (`Y&1<<5 | X&1<<4 | Y&2<<2 | X&2<<1 | Y&4>>1 | X&4>>2`), stored
+  `floor(v + (2M+1)/128)`. `gradient_dither_threshold` returns `M`.
+- **Fit before porting.** Replay a candidate model in a scratch awk script
+  against every Chrome pixel you have (`cpixel.shs`) and port only on an exact
+  match. Pins that hit stop colours exactly were never Chrome values.
+- Dither uses DEVICE coordinates; within one row only `x & 7` matters, so the
+  painter computes 8 phase colours per row and merges equal runs.
