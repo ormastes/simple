@@ -689,9 +689,77 @@ pub(super) fn eval_op_expr(
 
             let mut left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
             let mut right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
+            // Cross-unit / unit-vs-bare-scalar deny (mirrors the pure-Simple matrix in
+            // `compiler/30.types/units/unit_ops.spl`, code SPL-UNIT-002). Only
+            // `unit`/numeric-`newtype` record classes take part; ordinary classes and
+            // structs are untouched.
+            {
+                let unit_class_of = |v: &Value| -> Option<String> {
+                    let name = match v {
+                        Value::Object { class, fields } if fields.len() == 1 && fields.contains_key("value") => {
+                            class.as_str()
+                        }
+                        Value::ClassInstance(inst) => inst.class(),
+                        _ => return None,
+                    };
+                    crate::interpreter_unit::is_record_unit_class(name).then(|| name.to_string())
+                };
+                let is_scalar = |v: &Value| matches!(v, Value::Int(_) | Value::UInt { .. } | Value::Float(_));
+                let cmp = matches!(
+                    op,
+                    BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq
+                );
+                let arith = matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod);
+                let op_sym = match op {
+                    BinOp::Add => "+",
+                    BinOp::Sub => "-",
+                    BinOp::Mul => "*",
+                    BinOp::Div => "/",
+                    BinOp::Mod => "%",
+                    BinOp::Eq => "==",
+                    BinOp::NotEq => "!=",
+                    BinOp::Lt => "<",
+                    BinOp::Gt => ">",
+                    BinOp::LtEq => "<=",
+                    BinOp::GtEq => ">=",
+                    _ => "?",
+                };
+                if arith || cmp {
+                    let lu = unit_class_of(&left_val);
+                    let ru = unit_class_of(&right_val);
+                    let deny = match (&lu, &ru) {
+                        (Some(l), Some(r)) if l != r => {
+                            Some(format!("`{} {} {}`: distinct units never mix implicitly", l, op_sym, r))
+                        }
+                        (Some(l), None) if is_scalar(&right_val) && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mod) => {
+                            Some(format!(
+                                "`{} {} <scalar>`: no implicit arithmetic between a unit and a raw scalar; convert explicitly",
+                                l, op_sym
+                            ))
+                        }
+                        (None, Some(r)) if is_scalar(&left_val) && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mod) => {
+                            Some(format!(
+                                "`<scalar> {} {}`: no implicit arithmetic between a unit and a raw scalar; convert explicitly",
+                                op_sym, r
+                            ))
+                        }
+                        _ => None,
+                    };
+                    if let Some(why) = deny {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INVALID_OPERATION)
+                            .with_help("convert explicitly through `.value`, or construct the intended unit");
+                        return Err(CompileError::semantic_with_context(
+                            format!("SPL-UNIT-002: {} is not an approved unit operation", why),
+                            ctx,
+                        ));
+                    }
+                }
+            }
 
-            // Newtype/`unit` shape: a method-less class instance (or struct object) whose
-            // only field is `value`. Rules (the seed is lenient: no cross-unit deny check):
+
+            // Newtype/`unit` shape: a registered unit/newtype record class instance (or struct object) whose
+            // only field is `value` (cross-unit mixes were already denied above). Rules:
             //   U (+|-|%) U -> U        U * U, U / U -> the bare scalar
             //   U * n, n * U, U / n -> U      comparisons unwrap through `as_int`.
             let newtype_wrap_class: Option<String>;
@@ -703,7 +771,7 @@ pub(super) fn eval_op_expr(
                             fields.get("value").map(|x| (class.clone(), x.clone(), false))
                         }
                         Value::ClassInstance(inst)
-                            if classes.get(inst.class()).is_some_and(|c| c.methods.is_empty()) =>
+                            if crate::interpreter_unit::is_record_unit_class(inst.class()) =>
                         {
                             inst.with_fields(|f| {
                                 if f.len() == 1 {
