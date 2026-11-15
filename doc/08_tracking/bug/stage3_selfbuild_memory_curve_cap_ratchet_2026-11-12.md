@@ -141,3 +141,18 @@ guarantees the base system never OOMs (worst case: 48 cap + 8 reserve + all
 other usage <= 121.7), while admitting the build on this box.
 Recorded so future lanes do not re-derive this; if the host becomes exclusive
 again, restore the default reserve.
+
+## Strategic pivot (2026-11-15 ~19:30 KST): re-pin to the MIR-shard fix tip
+
+After ~3 days of K-lane stage3 attempts dying on the shared-host memory wall
+(admission needs MemAvailable >= 64 GiB for the 48 GiB transcript ceiling;
+the box held 40-62 under other lanes), the K lane re-pinned from
+80de9b9d66f4 to 70d542b8ab3, which carries the project's own fix for exactly
+this wall: 9cfdcb0c195 (stage3 forwards a MIR shard count so one worker never
+claims the whole closure), 5f80235594b (serial low-memory MIR sharding via
+SIMPLE_MIR_SHARD_INTERFACE_HIR=1 + SIMPLE_MIR_SHARD_COUNT=8),
+d1acc111b99/4f532c82f21 (serial low-memory file workers). Sharded workers
+hold ~1/8 of the closure instead of all 1650 modules, cutting the per-process
+peak from ~36 GiB to an estimated ~5-8 GiB -- under any plausible admission
+floor. Stage2 rebuild required (the stage2 binary must carry the shard
+machinery). The old pin's admitted stage2 remains on disk as evidence.
