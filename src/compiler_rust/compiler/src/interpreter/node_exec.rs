@@ -942,7 +942,17 @@ pub(crate) fn exec_node(
         // literals silently fall back to the preloaded on-disk unit tree.
         Node::Unit(u) => {
             register_standalone_unit_locals(u);
-            env.insert(u.name.clone(), Value::Nil);
+            if let Some(class) = crate::interpreter_unit::unit_constructor_class(u) {
+                classes.insert(u.name.clone(), Arc::new(class));
+                env.insert(
+                    u.name.clone(),
+                    Value::Constructor {
+                        class_name: u.name.clone(),
+                    },
+                );
+            } else {
+                env.insert(u.name.clone(), Value::Nil);
+            }
             Ok(Control::Next)
         }
         Node::UnitFamily(uf) => {
@@ -1151,7 +1161,7 @@ fn try_assign_module_global_index(
             Value::Dict(dict) => {
                 let key = index_val.to_key_string();
                 let stored = Value::wrap_dict_entry(index_val, value);
-                crate::interpreter::module_dict_make_mut(dict).insert(key, stored);
+                crate::interpreter::interpreter_call::namespace_make_mut_for_write(dict)?.insert(key, stored);
                 Ok(None)
             }
             Value::Tuple(tuple) => {
@@ -2197,7 +2207,7 @@ pub(crate) fn exec_assignment(
                     Value::Dict(mut dict) => {
                         let key = index_val.to_key_string();
                         let stored = Value::wrap_dict_entry(&index_val, value);
-                        crate::interpreter::module_dict_make_mut(&mut dict).insert(key, stored);
+                        crate::interpreter::interpreter_call::namespace_make_mut_for_write(&mut dict)?.insert(key, stored);
                         Value::Dict(dict)
                     }
                     Value::Tuple(mut tup) => {
@@ -2446,7 +2456,7 @@ pub(crate) fn exec_assignment(
                                     }
                                     Value::Dict(dict) => {
                                         let stored = Value::wrap_dict_entry(&index_val, value.clone());
-                                        crate::interpreter::module_dict_make_mut(dict).insert(pre_key.clone(), stored);
+                                        crate::interpreter::interpreter_call::namespace_make_mut_for_write(dict)?.insert(pre_key.clone(), stored);
                                         Ok(())
                                     }
                                     Value::Tuple(tup) => {
@@ -2554,7 +2564,7 @@ pub(crate) fn exec_assignment(
                                     Value::Dict(mut dict) => {
                                         let key = index_val.to_key_string();
                                         let stored = Value::wrap_dict_entry(&index_val, value);
-                                        crate::interpreter::module_dict_make_mut(&mut dict).insert(key, stored);
+                                        crate::interpreter::interpreter_call::namespace_make_mut_for_write(&mut dict)?.insert(key, stored);
                                         Value::Dict(dict)
                                     }
                                     Value::Tuple(mut tup) => {
@@ -2704,7 +2714,7 @@ pub(crate) fn exec_assignment(
                             Value::Dict(dict) => {
                                 let key = index_val.to_key_string();
                                 let stored = Value::wrap_dict_entry(&index_val, value);
-                                crate::interpreter::module_dict_make_mut(dict).insert(key, stored);
+                                crate::interpreter::interpreter_call::namespace_make_mut_for_write(dict)?.insert(key, stored);
                             }
                             other => {
                                 let ctx = ErrorContext::new()

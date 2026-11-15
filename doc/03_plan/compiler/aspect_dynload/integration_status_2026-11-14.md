@@ -178,3 +178,44 @@ descriptor code identity alone is not an admitted plugin allowlist.
 No item above is considered complete merely because a unit probe, source
 review, or server check is green. Acceptance must cover the production path
 and the scope of the requirement.
+
+## Continuation evidence — 2026-11-15
+
+This addendum supersedes earlier checkpoint status where stated; it does not
+change the selected requirements or mark the feature complete.
+
+- Release synchronization inspected `80fdf9ff49f3adb37d43e38bea2039ed05923270`
+  (PR #9255). Its new terminal runtime leaf and smux fixture provisioning do
+  not overlap the XRay or directory-cache owners. The shared checkout's
+  unrelated untracked files were preserved.
+- XRay draft PR #9240 was rebased and pushed as
+  `a2b070ede9e2a964b9311afa60d8b4f765166a26`; all 37 patches remained
+  equivalent. Native evidence remains tied to its tested pre-rebase commits.
+- [Run 43607885896](https://github.com/ormastes/simple/actions/runs/43607885896)
+  retained passing artifacts for 40 legacy and 26 resident native assertions,
+  locator checks (33 present, 3 absent), 39 worker assertions and four startup
+  ledger scenarios. Independent review matched all 21 source hashes and the
+  enforced 2 GiB/no-swap resource limits. The adapter's aggregate 69 checks
+  include structural checks; they are not 69 native runtime assertions.
+- [Run 43608328154](https://github.com/ormastes/simple/actions/runs/43608328154)
+  passed the subsequent native startup-window ownership change. Neither run
+  establishes actual Simple-generated public-facade startup qualification.
+  Recording-only stop retains armed hooks; source acceptance does not by
+  itself qualify the Simple session consumer.
+- The RC graph text ABI repair `1a79866412c70348e4a9fb88d035ebb270495f99`
+  is source-reviewed, with authored tests unrun. The old producer reboxes text
+  before RC graph calls, so its output cannot qualify the repaired lowering.
+  The earlier digest probe establishes only that its measured count differed
+  from one, not that the original cached object was freed.
+- The fixed-width Unicode string escape repair passed independent source
+  review; seven specifications and its native fixture remain unrun at this
+  checkpoint. A bounded projection of actual lexer functions is the next
+  execution gate, separate from rebuilding and qualifying the compiler.
+- H5 synchronized 32 equivalent patches and pushed
+  `0a39d0485f85b684cd94d4e427d944c3c503a210`. Configured host trust is
+  user/launcher-owned policy; source review is not filesystem, plugin-loader,
+  or signed-admission execution evidence.
+
+Phase 3 remains unachieved. Public tracing qualification, complete directory
+producer/caller integration, accessor execution, traversal admission and
+caching, visibility tooling parity, and performance gates remain required.

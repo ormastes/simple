@@ -1,0 +1,147 @@
+# Purpose and audience: executable evidence that the Caret workbench projects a real provider and a restart-bumped generation, and never delivers input to a wrong (id, generation).
+
+"""
+Caret workbench session identity (CU-003, CU-019, CU-002 unit oracle).
+"""
+
+use std.spec.*
+use app.llm_caret.multi_caret_manager.{ManagedAgent}
+use app.llm_caret.workbench.session_contract.{SessionId, SessionView, ComposerDraft,
+    InputMode, Delivery, ProcessLifecycle, AgentTurn, Transport, CapabilityEvidence,
+    new_session_id, new_draft}
+use app.llm_caret.workbench.pane_binding.{PaneBinding, resolve_pane_binding}
+use app.llm_caret.workbench.session_source.{AgentProviderHint, SessionLedgerEntry,
+    provider_for_agent, hints_declare, ledger_observe, ledger_generation, session_view_for_agent_at,
+    send_draft_guarded}
+use app.llm_caret.workbench.tui_view.{new_render_input_with_binding, render_workbench}
+use app.llm_caret.workbench.tui_layout.{CompactView, compute_layout}
+
+fn _agent(id: text, pid: i64) -> ManagedAgent:
+    ManagedAgent(agent_id: id, pid: pid, status: "running", reason: "", alive: pid > 0)
+
+fn _delivered(d: ComposerDraft) -> bool:
+    d.delivery == Delivery.Queued
+
+fn _active_text(binding_list: [PaneBinding], pane_gen: i64) -> text:
+    val s = SessionView(id: new_session_id("a1"), label: "A1", provider: "claude",
+        lifecycle: ProcessLifecycle.Running, turn: AgentTurn.Working,
+        transport: Transport.Ready, evidence: CapabilityEvidence.Verified,
+        needs_attention: false)
+    val input = new_render_input_with_binding([s], s.id, new_draft(s.id, InputMode.Message),
+        "Composer", "p1", ["out"], binding_list, pane_gen)
+    val layout = compute_layout(120, 40, CompactView.Agents, 3)
+    val lines = render_workbench(layout, input)
+    lines[layout.active.y + 4]
+
+describe "session identity projection":
+    it "projects the declared provider, not a constant":
+        # @req REQ-CARET-UI-001
+        step("declare claude for a1 and codex for a2")
+        val hints = [AgentProviderHint(agent_id: "a1", provider: "claude"),
+            AgentProviderHint(agent_id: "a2", provider: "codex")]
+        val v1 = session_view_for_agent_at(_agent("a1", 10), provider_for_agent(hints, "a1"), 1)
+        val v2 = session_view_for_agent_at(_agent("a2", 11), provider_for_agent(hints, "a2"), 1)
+        expect(v1.provider).to_equal("claude")
+        expect(v2.provider).to_equal("codex")
+
+    it "re-declaring a slot's provider replaces the old one":
+        # @req REQ-CARET-UI-001
+        step("declare a1 as claude, then relaunch it as codex")
+        var hints: [AgentProviderHint] = []
+        hints = hints_declare(hints, "a1", "claude")
+        hints = hints_declare(hints, "a2", "kimi")
+        hints = hints_declare(hints, "a1", "codex")
+        expect(provider_for_agent(hints, "a1")).to_equal("codex")
+        expect(provider_for_agent(hints, "a2")).to_equal("kimi")
+        step("one entry per agent")
+        expect(hints.len()).to_equal(2)
+
+    it "says unknown when the provider is not declared":
+        # @req REQ-CARET-UI-001
+        step("no hint for a3")
+        val hints = [AgentProviderHint(agent_id: "a1", provider: "claude")]
+        val v = session_view_for_agent_at(_agent("a3", 12), provider_for_agent(hints, "a3"), 1)
+        expect(v.provider).to_equal("unknown")
+
+    it "bumps generation when the slot is restarted with a new pid":
+        # @req REQ-CARET-UI-001
+        step("observe pid 10, then a dead slot, then pid 20")
+        var ledger: [SessionLedgerEntry] = []
+        ledger = ledger_observe(ledger, _agent("a1", 10))
+        expect(ledger_generation(ledger, "a1")).to_equal(1)
+        ledger = ledger_observe(ledger, _agent("a1", 10))
+        expect(ledger_generation(ledger, "a1")).to_equal(1)
+        ledger = ledger_observe(ledger, _agent("a1", -1))
+        expect(ledger_generation(ledger, "a1")).to_equal(1)
+        ledger = ledger_observe(ledger, _agent("a1", 20))
+        expect(ledger_generation(ledger, "a1")).to_equal(2)
+
+    it "refuses a draft captured at generation N after restart to N+1":
+        # @req REQ-CARET-UI-002
+        step("capture a draft at a1@1, restart, send")
+        val old_id = SessionId(value: "a1", generation: 1)
+        val new_id = SessionId(value: "a1", generation: 2)
+        val draft = new_draft(old_id, InputMode.Message)
+        val bound = resolve_pane_binding([PaneBinding(session: new_id, pane_id: "p1", pane_generation: 1)], new_id, 1)
+        val refused = send_draft_guarded(draft, new_id, bound)
+        expect(_delivered(refused)).to_equal(false)
+        expect(refused.delivery == Delivery.Rejected).to_equal(true)
+        step("a draft captured at the live generation with a binding is delivered")
+        val fresh = new_draft(new_id, InputMode.Message)
+        expect(_delivered(send_draft_guarded(fresh, new_id, bound))).to_equal(true)
+
+    it "labels an unmatched pane as unbound terminal":
+        # @req REQ-CARET-UI-001
+        step("no binding")
+        val none: [PaneBinding] = []
+        expect(_active_text(none, 1)).to_contain("unbound terminal")
+        step("explicit binding")
+        val b = [PaneBinding(session: new_session_id("a1"), pane_id: "p1", pane_generation: 1)]
+        expect(_active_text(b, 1)).to_contain("terminal p1")
+        step("pane generation mismatch")
+        expect(_active_text(b, 2)).to_contain("unbound terminal")
+
+describe "deterministic select/switch/draft/send loop":
+    it "never delivers to a wrong (id, generation) over 1000 operations":
+        # @req REQ-CARET-UI-002
+        step("10 sessions, interleaved restarts, LCG-driven ops")
+        var gens: [i64] = []
+        var drafts: [ComposerDraft] = []
+        var i = 0
+        while i < 10:
+            gens.push(1)
+            drafts.push(new_draft(SessionId(value: "s" + i.to_text(), generation: 1), InputMode.Message))
+            i = i + 1
+        var seed: i64 = 12345
+        var selected = 0
+        var wrong = 0
+        var delivered = 0
+        var refused = 0
+        var op = 0
+        while op < 1000:
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            val kind = seed % 4
+            val pick = (seed / 7) % 10
+            if kind == 0:
+                selected = pick
+            elif kind == 1:
+                gens[pick] = gens[pick] + 1
+            elif kind == 2:
+                drafts[selected] = new_draft(SessionId(value: "s" + selected.to_text(), generation: gens[selected]), InputMode.Message)
+            else:
+                val d = drafts[pick]
+                val live = SessionId(value: "s" + pick.to_text(), generation: gens[pick])
+                val binding = resolve_pane_binding(
+                    [PaneBinding(session: live, pane_id: "p" + pick.to_text(), pane_generation: 1)], live, 1)
+                val sent = send_draft_guarded(d, live, binding)
+                if sent.delivery == Delivery.Queued:
+                    delivered = delivered + 1
+                    if d.target.value != live.value or d.target.generation != live.generation:
+                        wrong = wrong + 1
+                else:
+                    refused = refused + 1
+            op = op + 1
+        expect(wrong).to_equal(0)
+        step("the loop exercised both outcomes")
+        expect(delivered > 0).to_equal(true)
+        expect(refused > 0).to_equal(true)

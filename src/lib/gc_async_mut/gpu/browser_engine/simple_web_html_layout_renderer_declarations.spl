@@ -5,6 +5,7 @@ export use std.gc_async_mut.gpu.browser_engine.simple_web_css_property_id.{CSS_P
 use std.gc_async_mut.gpu.browser_engine.simple_web_box_geometry_provenance.{
     web_box_geometry_capture_tokens, web_box_geometry_tokens_reason,
     web_fractional_capture_authored_decls}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
 
 fn sticky_top_inset_value(
     raw: text, parsed: i32, position_sticky: bool
@@ -645,10 +646,10 @@ fn _apply_decls_dispatch(
             val cv = parse_color(col)
             if cv != 0u32:
                 st.fg = cv
-            elif col.trim().lower() == "transparent":
-                # parse_color returns 0 both for "transparent" and for an
-                # unparsable value; only the keyword sets the fully
-                # transparent color (alpha 0), which paint then skips.
+            elif _decl_transparent_color(col):
+                # parse_color returns 0 both for a transparent colour and for
+                # an unparsable value; only a transparent one (`transparent`,
+                # `rgba(0,0,0,0)`, `#0000`) sets fg 0, which paint skips.
                 st.fg = 0u32
     if css_prop_mask_has(mask, CSS_PROP_WIDTH):
         css_probe_note()
@@ -656,9 +657,9 @@ fn _apply_decls_dispatch(
         val width = css_math_primary(width_raw)
         val implied_max = css_math_implied_max_px(width_raw)
         val implied_min = css_math_implied_min_px(width_raw)
-        if implied_max > 0 and st.max_width_px <= 0:
+        if implied_max > 0 and st.max_width_px == 0:
             st.max_width_px = implied_max
-        if implied_min > 0 and st.min_width_px <= 0:
+        if implied_min > 0 and st.min_width_px == 0:
             st.min_width_px = implied_min
         if width.len() > 0:
             if width.ends_with("%"):
@@ -669,6 +670,7 @@ fn _apply_decls_dispatch(
                 st.width_px = if wv > 0: 0 - wv else: 0
             else:
                 st.width_px = _decl_font_relative_length_px(width, st.font_size)
+            st.width_zero = st.width_px == 0 and "0123456789.".contains(width.substring(0, 1))
     if css_prop_mask_has(mask, CSS_PROP_HEIGHT):
         css_probe_note()
         val height = decl_tbl_get(decl_tbl, "height")
@@ -686,7 +688,10 @@ fn _apply_decls_dispatch(
                 st.min_height_vh = true
             else:
                 st.min_height_vh = false
-                st.min_height_px = parse_int(min_height)
+                # A percentage is the negative sentinel, resolved at layout
+                # time against a definite containing height (else `none`).
+                val min_height_n = parse_int(min_height)
+                st.min_height_px = if min_height.trim().ends_with("%"): (if min_height_n > 0: 0 - min_height_n else: 0) else: min_height_n
     # Cascade order for the margin family mirrors the full-probe body:
     # decl_tbl is source-ordered, so the margin-left longhand only applies
     # when it was declared AFTER the last `margin` shorthand (last-declared
@@ -801,6 +806,8 @@ fn _apply_decls_dispatch(
         val font_style_decl = decl_tbl_get(decl_tbl, "font-style").trim().lower()
         if font_style_decl == "normal":
             st.font_style_italic = false
+        elif font_style_decl == "inherit":
+            st.font_style_italic = st.inherit_italic
         elif font_style_decl == "italic" or font_style_decl == "oblique":
             st.font_style_italic = true
     if css_prop_mask_has(mask, CSS_PROP_CURSOR):
@@ -814,14 +821,12 @@ fn _apply_decls_dispatch(
         css_probe_note()
         val outline = decl_tbl_get(decl_tbl, "outline")
         if outline.len() > 0:
-            val ow = parse_supported_outline_shorthand_width_px(outline)
-            if ow >= 0:
-                st.outline_w = ow
+            st.outline_w = outline_shorthand_paint_width_px(outline)
             val oc = parse_color_any(outline)
-            if oc != 0u32:
+            if oc != 0u32 or _decl_transparent_color(outline):
                 st.outline_color = oc
-            if border_style_disables_paint(outline):
-                st.outline_w = 0
+            else:
+                st.outline_color = st.fg
     if css_prop_mask_has(mask, CSS_PROP_OVERFLOW):
         css_probe_note()
         val overflow_decl = decl_tbl_get(decl_tbl, "overflow")
@@ -1257,6 +1262,10 @@ fn apply_authored_style_metadata(
         previous.left_auto, table, "left", 3, "inset-inline", "inset-inline-start")
     st.top_auto = _authored_inset_auto(
         previous.top_auto, table, "top", 0, "inset-block", "inset-block-start")
+    st.white_space_newline = previous.white_space_newline
+    val white_space = decl_tbl_get(table, "white-space").trim().lower()
+    if white_space.len() > 0:
+        st.white_space_newline = white_space == "pre" or white_space == "pre-wrap" or white_space == "pre-line" or white_space == "break-spaces"
     # Same normal form as web_fractional_capture_authored_decls, which the
     # fractional resolver compares these against.
     st.transform_raw = _decl_tbl_raw_or(table, "transform", previous.transform_raw)
@@ -1459,8 +1468,9 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
     elif tag == "h6":
         font_size_v = 11
         bold_v = true
-        margin_t_v = 26
-        margin_b_v = 26
+        # 2.33em of the 10.72 px h6 font is 24.98 (Chrome 159), not 26.
+        margin_t_v = 25
+        margin_b_v = 25
     elif tag == "b" or tag == "strong":
         # Chrome UA sheet: b/strong are font-weight:bold with no size change.
         bold_v = true
@@ -1565,6 +1575,13 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         line_height_v = FORM_CONTROL_UA_LINE_HEIGHT_RATIO
         if tag == "textarea":
             font_family_v = "monospace"
+        else:
+            font_family_v = "sans-serif"
+        # `font: -webkit-small-control` is a whole shorthand: it resets weight
+        # and style too, so a control in a heading or an <em> is not bold or
+        # italic unless the author says so.
+        bold_v = false
+        st.font_style_italic = false
         if tag == "input":
             pad_l_v = 2
             pad_r_v = 2
@@ -1587,6 +1604,9 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         # Form controls do not inherit `font` from their ancestors.
         font_size_v = FORM_CONTROL_UA_FONT_SIZE_PX
         line_height_v = FORM_CONTROL_UA_LINE_HEIGHT_RATIO
+        font_family_v = "sans-serif"
+        bold_v = false
+        st.font_style_italic = false
     elif tag == "a":
         fg_v = web_argb(0, 0, 238)
         underline_v = true
@@ -1668,6 +1688,7 @@ fn tag_defaults(st: Style, tag: text) -> Style:
     out.height_auto = st.height_auto
     out.left_auto = st.left_auto
     out.top_auto = st.top_auto
+    out.white_space_newline = st.white_space_newline or tag == "pre" or tag == "textarea" or tag == "listing" or tag == "plaintext"
     out.align_items_authored = st.align_items_authored
     out.scrollbar_width_none = st.scrollbar_width_none
     out.display_inline_flex_authored = st.display_inline_flex_authored

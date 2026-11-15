@@ -1009,56 +1009,56 @@ impl MountTable:
         while i < self.mounts.len() as i32:
             if self.mounts[i].id.id == resolved.mount_id.id:
                 val entry = self.mounts[i]
-                val kind = driver_positioned_kind(entry.driver)?
-                val inner = _driver_open_path(entry.driver, resolved.relpath, OpenFlags.read_only())?
-                val generation_before_result = _driver_file_generation_v1(entry.driver, inner)
+                val kind = driver_positioned_kind(self.mounts[i].driver)?
+                val inner = self._wb_open_path(i, resolved.relpath, OpenFlags.read_only())?
+                val generation_before_result = _driver_file_generation_v1(self.mounts[i].driver, inner)
                 val generation_before = match generation_before_result:
                     case Err(fs_err):
-                        val _ = _driver_close_handle(entry.driver, inner)
+                        val _ = self._wb_close_handle(i, inner)
                         return Err(fs_err)
                     case Ok(value):
                         if value == 0u64:
-                            val _ = _driver_close_handle(entry.driver, inner)
+                            val _ = self._wb_close_handle(i, inner)
                             return Err(FsError.Corrupt)
                         value
-                val stat_result = _driver_fstat(entry.driver, inner)
+                val stat_result = _driver_fstat(self.mounts[i].driver, inner)
                 val stat = match stat_result:
                     case Err(fs_err):
-                        val _ = _driver_close_handle(entry.driver, inner)
+                        val _ = self._wb_close_handle(i, inner)
                         return Err(fs_err)
                     case Ok(value): value
                 if _file_stat_is_directory(stat):
-                    val _ = _driver_close_handle(entry.driver, inner)
+                    val _ = self._wb_close_handle(i, inner)
                     return Err(FsError.InvalidArg)
                 if stat.size > max_size:
-                    val _ = _driver_close_handle(entry.driver, inner)
+                    val _ = self._wb_close_handle(i, inner)
                     return Err(FsError.TooLarge)
-                val generation_after_result = _driver_file_generation_v1(entry.driver, inner)
+                val generation_after_result = _driver_file_generation_v1(self.mounts[i].driver, inner)
                 val file_generation = match generation_after_result:
                     case Err(fs_err):
-                        val _ = _driver_close_handle(entry.driver, inner)
+                        val _ = self._wb_close_handle(i, inner)
                         return Err(fs_err)
                     case Ok(value):
                         if value == 0u64:
-                            val _ = _driver_close_handle(entry.driver, inner)
+                            val _ = self._wb_close_handle(i, inner)
                             return Err(FsError.Corrupt)
                         value
                 if file_generation != generation_before:
-                    val _ = _driver_close_handle(entry.driver, inner)
+                    val _ = self._wb_close_handle(i, inner)
                     return Err(FsError.StaleHandle)
-                val execute_observation = match _driver_execute_observation_v1(entry.driver, inner):
+                val execute_observation = match _driver_execute_observation_v1(self.mounts[i].driver, inner):
                     case Err(fs_err):
-                        val _ = _driver_close_handle(entry.driver, inner)
+                        val _ = self._wb_close_handle(i, inner)
                         return Err(fs_err)
                     case Ok(value): value
                 if execute_observation.size != stat.size or
                    not _driver_execute_observation_current_v1(
-                       entry.driver, inner, execute_observation):
-                    val _ = _driver_close_handle(entry.driver, inner)
+                       self.mounts[i].driver, inner, execute_observation):
+                    val _ = self._wb_close_handle(i, inner)
                     return Err(FsError.StaleHandle)
                 val virtual_result = self._bind_file(i, entry.id, inner)
                 if virtual_result.is_err():
-                    val _ = _driver_close_handle(entry.driver, inner)
+                    val _ = self._wb_close_handle(i, inner)
                     return Err(virtual_result.unwrap_err())
                 val virtual_handle = virtual_result.unwrap()
                 if not self._seal_file_source_path(virtual_handle, path):
@@ -1275,9 +1275,15 @@ impl MountTable:
         val result = match open_binding:
             case None: Err(FsError.StaleHandle)
             case Some(file):
-                val close_result = match self._mount_entry_for_file(file):
-                    case None: Err(FsError.StaleHandle)
-                    case Some(entry): _driver_close_handle(entry.driver, file.inner_handle)
+                # Close on the mounted driver itself, never a MountEntry copy:
+                # drivers are value structs and a copy's fd table is discarded.
+                var close_result: Result<(), FsError> = Err(FsError.StaleHandle)
+                var m: i32 = 0
+                while m < self.mounts.len() as i32:
+                    if self.mounts[m].id.id == file.mount_id.id:
+                        close_result = self._wb_close_handle(m, file.inner_handle)
+                        m = self.mounts.len() as i32
+                    m = m + 1
                 self._unbind_file_handle(snapshot.file_handle)
                 close_result
         if not self._retire_stable_snapshot(lease):
@@ -1357,7 +1363,7 @@ impl MountTable:
                             self._generation_available_at(i, true)?
                         if (flags.bits & 512) != 0:
                             self._generation_available_at(i, false)?
-                        val opened = _driver_open_path(self.mounts[i].driver, relpath, flags)
+                        val opened = self._wb_open_path(i, relpath, flags)
                         # O_CREAT/O_TRUNC backends may mutate before returning an
                         # error.  Each requested mutation class is invalidated
                         # exactly once after the single backend call.
@@ -1371,7 +1377,7 @@ impl MountTable:
                             case Ok(inner):
                                 val bound = self._bind_file(i, mount_id, inner)
                                 if bound.is_err():
-                                    val _ = _driver_close_handle(self.mounts[i].driver, inner)
+                                    val _ = self._wb_close_handle(i, inner)
                                     return Err(bound.unwrap_err())
                                 val virtual_handle = bound.unwrap().id
                                 return Ok(FileHandle(id: virtual_handle))
@@ -1390,38 +1396,38 @@ impl MountTable:
                     return Err(FsError.Permission)
                 if trust == ExecuteTrust.Untrusted and not entry.opts.allow_untrusted_exec:
                     return Err(FsError.Permission)
-                val opened_result = _driver_open_path(entry.driver, resolved.relpath, OpenFlags.read_only())
+                val opened_result = self._wb_open_path(i, resolved.relpath, OpenFlags.read_only())
                 val opened = match opened_result:
                     case Err(fs_err): return Err(fs_err)
                     case Ok(handle): handle
                 # Backends must reject directory handles from fstat or mark them
                 # with the POSIX directory type bits; either result is denied.
-                val stat_result = _driver_fstat(entry.driver, opened)
+                val stat_result = _driver_fstat(self.mounts[i].driver, opened)
                 val stat = match stat_result:
                     case Err(fs_err):
-                        _driver_close_handle(entry.driver, opened)
+                        self._wb_close_handle(i, opened)
                         return Err(fs_err)
                     case Ok(value): value
                 if _file_stat_is_directory(stat):
-                    _driver_close_handle(entry.driver, opened)
+                    self._wb_close_handle(i, opened)
                     return Err(FsError.InvalidArg)
                 if stat.size < 1u64 or stat.size > MOUNT_TABLE_MAX_EXECUTABLE_BYTES:
-                    _driver_close_handle(entry.driver, opened)
+                    self._wb_close_handle(i, opened)
                     return Err(FsError.TooLarge)
-                val execute_observation = match _driver_execute_observation_v1(entry.driver, opened):
+                val execute_observation = match _driver_execute_observation_v1(self.mounts[i].driver, opened):
                     case Err(fs_err):
-                        _driver_close_handle(entry.driver, opened)
+                        self._wb_close_handle(i, opened)
                         return Err(fs_err)
                     case Ok(value): value
                 if execute_observation.size != stat.size or
                    not _driver_execute_observation_current_v1(
-                       entry.driver, opened, execute_observation):
-                    _driver_close_handle(entry.driver, opened)
+                       self.mounts[i].driver, opened, execute_observation):
+                    self._wb_close_handle(i, opened)
                     return Err(FsError.StaleHandle)
-                val backend_kind = _driver_kind_name(entry.driver)
+                val backend_kind = _driver_kind_name(self.mounts[i].driver)
                 if execute_observation.content_generation == 0u64 and
                    backend_kind != "ramfs":
-                    _driver_close_handle(entry.driver, opened)
+                    self._wb_close_handle(i, opened)
                     return Err(FsError.Corrupt)
                 # RamFS has no per-file epoch yet. Preserve its prior,
                 # conservative mount-wide invalidation rather than exporting
@@ -1434,7 +1440,7 @@ impl MountTable:
                         execute_observation.content_generation
                 val bound = self._bind_file(i, entry.id, opened)
                 if bound.is_err():
-                    _driver_close_handle(entry.driver, opened)
+                    self._wb_close_handle(i, opened)
                     return Err(bound.unwrap_err())
                 val virtual_handle = bound.unwrap().id
                 if not self._seal_file_source_path(FileHandle(id: virtual_handle), path):
@@ -1445,7 +1451,7 @@ impl MountTable:
                     return Err(FsError.StaleHandle)
                 return Ok(ExecuteOpenBinding(
                     mount_id: entry.id,
-                    backend_name: _driver_name(entry.driver),
+                    backend_name: _driver_name(self.mounts[i].driver),
                     backend_kind: backend_kind,
                     canonical_source_path: path,
                     file_handle: FileHandle(id: virtual_handle),
@@ -1667,7 +1673,7 @@ impl MountTable:
                     if self.mounts[i].id.id == mount_id.id:
                         if not self._dir_admission_available():
                             return Err(FsError.TooLarge)
-                        val opened = _driver_opendir_path(self.mounts[i].driver, relpath)
+                        val opened = self._wb_opendir_path(i, relpath)
                         match opened:
                             case Err(e):
                                 return Err(e)
@@ -1687,7 +1693,7 @@ impl MountTable:
                 var i: i32 = 0
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id.id == binding.mount_id.id:
-                        return _driver_readdir_handle(self.mounts[i].driver, binding.inner_handle)
+                        return self._wb_readdir_handle(i, binding.inner_handle)
                     i = i + 1
             case None: Err(FsError.StaleHandle)
         Err(FsError.StaleHandle)
@@ -1702,7 +1708,7 @@ impl MountTable:
                 var i: i32 = 0
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id.id == binding.mount_id.id:
-                        return _driver_read_handle(self.mounts[i].driver, binding.inner_handle, length)
+                        return self._wb_read_handle(i, binding.inner_handle, length)
                     i = i + 1
             case None: Err(FsError.StaleHandle)
         Err(FsError.StaleHandle)
@@ -1720,7 +1726,7 @@ impl MountTable:
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id.id == mount_id.id:
                         self._generation_available_at(i, true)?
-                        val result = _driver_mkdir_path(self.mounts[i].driver, relpath.raw, mode)
+                        val result = self._wb_mkdir_path(i, relpath.raw, mode)
                         self._advance_generation_at(i, true)?
                         return result
                     i = i + 1
@@ -1746,7 +1752,7 @@ impl MountTable:
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id.id == binding.mount_id.id:
                         self._generation_available_at(i, false)?
-                        val result = _driver_write_text_handle(self.mounts[i].driver, binding.inner_handle, content)
+                        val result = self._wb_write_text_handle(i, binding.inner_handle, content)
                         self._advance_generation_at(i, false)?
                         return result
                     i = i + 1
@@ -1764,7 +1770,7 @@ impl MountTable:
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id.id == binding.mount_id.id:
                         self._generation_available_at(i, false)?
-                        val result = _driver_pwrite_text_handle(self.mounts[i].driver, binding.inner_handle, patch, offset)
+                        val result = self._wb_pwrite_text_handle(i, binding.inner_handle, patch, offset)
                         self._advance_generation_at(i, false)?
                         return result
                     i = i + 1
@@ -1786,6 +1792,78 @@ impl MountTable:
             case None: Err(FsError.StaleHandle)
         Err(FsError.StaleHandle)
 
+    # Mutating driver calls go through these so the updated value-struct
+    # driver is stored back into its mount slot.
+    me fn _wb_open_path(index: i32, path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
+        val out = _driver_open_path(self.mounts[index].driver, path, flags)
+        self.mounts[index].driver = out.0
+        out.1
+
+    me fn _wb_opendir_path(index: i32, path: Path) -> Result<DirHandle, FsError>:
+        val out = _driver_opendir_path(self.mounts[index].driver, path)
+        self.mounts[index].driver = out.0
+        out.1
+
+    me fn _wb_readdir_handle(index: i32, handle: DirHandle) -> Result<[DirEntry], FsError>:
+        val out = _driver_readdir_handle(self.mounts[index].driver, handle)
+        self.mounts[index].driver = out.0
+        out.1
+
+    me fn _wb_read_handle(index: i32, handle: FileHandle, length: i64) -> Result<text, FsError>:
+        val out = _driver_read_handle(self.mounts[index].driver, handle, length)
+        self.mounts[index].driver = out.0
+        out.1
+
+    me fn _wb_mkdir_path(index: i32, path: text, mode: u32) -> Result<(), FsError>:
+        val out = _driver_mkdir_path(self.mounts[index].driver, path, mode)
+        self.mounts[index].driver = out.0
+        out.1
+
+    me fn _wb_fsync(index: i32, handle: FileHandle) -> Result<(), FsError>:
+        val out = _driver_fsync(self.mounts[index].driver, handle)
+        self.mounts[index].driver = out.0
+        out.1
+
+    me fn _wb_fdatasync(index: i32, handle: FileHandle) -> Result<(), FsError>:
+        val out = _driver_fdatasync(self.mounts[index].driver, handle)
+        self.mounts[index].driver = out.0
+        out.1
+
+    me fn _wb_write_text_handle(index: i32, handle: FileHandle, content: text) -> Result<(), FsError>:
+        val out = _driver_write_text_handle(self.mounts[index].driver, handle, content)
+        self.mounts[index].driver = out.0
+        out.1
+
+    me fn _wb_pwrite_text_handle(index: i32, handle: FileHandle, patch: text, offset: i64) -> Result<(), FsError>:
+        val out = _driver_pwrite_text_handle(self.mounts[index].driver, handle, patch, offset)
+        self.mounts[index].driver = out.0
+        out.1
+
+    me fn _wb_close_handle(index: i32, handle: FileHandle) -> Result<(), FsError>:
+        val out = _driver_close_handle(self.mounts[index].driver, handle)
+        self.mounts[index].driver = out.0
+        out.1
+
+    me fn _wb_unlink_path_text(index: i32, path: text) -> Result<(), FsError>:
+        val out = _driver_unlink_path_text(self.mounts[index].driver, path)
+        self.mounts[index].driver = out.0
+        out.1
+
+    me fn _wb_rename_path_text(index: i32, old_path: text, new_path: text) -> Result<(), FsError>:
+        val out = _driver_rename_path_text(self.mounts[index].driver, old_path, new_path)
+        self.mounts[index].driver = out.0
+        out.1
+
+    me fn _wb_ftruncate_handle(index: i32, handle: FileHandle, new_size: i64) -> Result<(), FsError>:
+        val out = _driver_ftruncate_handle(self.mounts[index].driver, handle, new_size)
+        self.mounts[index].driver = out.0
+        out.1
+
+    me fn _wb_link_path_text(index: i32, target: text, link_path: text) -> Result<(), FsError>:
+        val out = _driver_link_path_text(self.mounts[index].driver, target, link_path)
+        self.mounts[index].driver = out.0
+        out.1
+
     me fn close(handle: FileHandle) -> Result<(), FsError>:
         """Close an open file handle through its recorded mount only."""
         val binding_opt = self._file_binding(handle)
@@ -1794,7 +1872,7 @@ impl MountTable:
                 var i: i32 = 0
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id.id == binding.mount_id.id:
-                        val r = _driver_close_handle(self.mounts[i].driver, binding.inner_handle)
+                        val r = self._wb_close_handle(i, binding.inner_handle)
                         if r.is_ok():
                             self._unbind_file_handle(handle)
                         return r
@@ -1812,7 +1890,7 @@ impl MountTable:
                         val caps = FsCapabilitySet(bits: self.mounts[i].active_caps)
                         if not caps.has(Capability.DurableSync):
                             return Err(FsError.Unsupported)
-                        return _driver_fsync(self.mounts[i].driver, binding.inner_handle)
+                        return self._wb_fsync(i, binding.inner_handle)
                     i = i + 1
                 Err(FsError.StaleHandle)
             case None: Err(FsError.StaleHandle)
@@ -1827,7 +1905,7 @@ impl MountTable:
                         val caps = FsCapabilitySet(bits: self.mounts[i].active_caps)
                         if not caps.has(Capability.DurableSync):
                             return Err(FsError.Unsupported)
-                        return _driver_fdatasync(self.mounts[i].driver, binding.inner_handle)
+                        return self._wb_fdatasync(i, binding.inner_handle)
                     i = i + 1
                 Err(FsError.StaleHandle)
             case None: Err(FsError.StaleHandle)
@@ -1845,7 +1923,7 @@ impl MountTable:
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id.id == mount_id.id:
                         self._generation_available_at(i, true)?
-                        val result = _driver_unlink_path_text(self.mounts[i].driver, relpath.raw)
+                        val result = self._wb_unlink_path_text(i, relpath.raw)
                         self._advance_generation_at(i, true)?
                         return result
                     i = i + 1
@@ -1885,7 +1963,7 @@ impl MountTable:
                                         case Err(e): return Err(e)
                                         case Ok(_): return Ok(())
                                 self._generation_available_at(i, true)?
-                                val result = _driver_rename_path_text(self.mounts[i].driver, old_pair.relpath.raw, new_pair.relpath.raw)
+                                val result = self._wb_rename_path_text(i, old_pair.relpath.raw, new_pair.relpath.raw)
                                 self._advance_generation_at(i, true)?
                                 return result
                             i = i + 1
@@ -1904,7 +1982,7 @@ impl MountTable:
                         if self.mounts[i].opts.read_only:
                             return Err(FsError.Permission)
                         self._generation_available_at(i, false)?
-                        val result = _driver_ftruncate_handle(self.mounts[i].driver, binding.inner_handle, new_size)
+                        val result = self._wb_ftruncate_handle(i, binding.inner_handle, new_size)
                         self._advance_generation_at(i, false)?
                         return result
                     i = i + 1
@@ -1942,9 +2020,7 @@ impl MountTable:
                 if not caps.has(Capability.Hardlinks):
                     return Err(FsError.Unsupported)
                 self._generation_available_at(i, true)?
-                val result = _driver_link_path_text(
-                    self.mounts[i].driver,
-                    target_resolved.relpath.raw,
+                val result = self._wb_link_path_text(i, target_resolved.relpath.raw,
                     link_resolved.relpath.raw)
                 self._advance_generation_at(i, true)?
                 return result

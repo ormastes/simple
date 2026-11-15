@@ -168,9 +168,86 @@ cd <worktree> && SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=0 \
   is needed. A missing sibling shows up only as "backend library could not be opened".
 - **Compiler trap:** a bare `clang` on PATH may target MSVC (ROCm ships one);
   the script uses `$SIMPLE_MINGW_ROOT/bin/clang.exe` and checks `-dumpmachine`.
+## Pure-Simple runner (no llama.cpp)
+
+`src/lib/gc_async_mut/slang/model_executor/pure/`: `weights.spl` (safetensors),
+`tensor_ops.spl` (the single compute seam; a GPU provider replaces only this),
+`llama_forward.spl` (Llama-2 forward), `kv_cache.spl` (KvSession: per-layer K/V
+rows, prefix reuse, `positions_evaluated` counter), `tokenizer.spl`
+(SentencePiece-BPE from tokenizer.json). Not wired into the engine/server yet.
+Measured on the seed interpreter, stories15M, "Once upon a time": generated
+text matches llama.cpp greedy; about 0.12 tokens/s. Fixture
+`test/fixtures/slang_pure/stories15m_generate.spl`; system spec
+`slang_pure_kv_cache_spec.spl`.
+Seed pitfalls found: an f64 carried through `Result` + `?` is mis-unboxed (parse
+numbers after the `?`); tokenizer.json escapes include `\r`.
 
 ## Related
 
 `doc/05_design/ml/slang/slang_master_plan.md`,
 `doc/07_guide/app/llm/local_llm_slang_caret_setup.md`,
 `doc/08_tracking/bug/caret_slang_local_inference_provider_missing_2026-08-21.md`.
+
+## GPU (Vulkan, AMD)
+
+Build and run the shim against a Vulkan llama.cpp (llvm-mingw, Radeon 8065S verified 2026-11-15):
+
+```bash
+LLAMA_ROOT=/c/dev/tools/llama.cpp LLAMA_BUILD_DIR=$LLAMA_ROOT/build-mingw-vulkan \
+  SLANG_SHIM_OUT_DIR=$PWD/build/sffi-vulkan sh scripts/check/build-slang-ggml-shim.shs
+SLANG_LIVE=1 SLANG_GPU=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi-vulkan/slang_ggml.dll \
+  bin/simple test test/03_system/lib/slang/feature/slang_gpu_offload_live_spec.spl
+```
+
+- `ggml-vulkan.dll` is copied beside the shim and preloaded by `_preload_windows_dll_siblings`.
+- Engine default is all layers on the GPU; `engine_set_gpu_layers_text("0")` (before load) keeps the CPU lane.
+- Evidence: shim `slang_ggml_gpu_offload_supported` / `slang_ggml_model_offloaded`, surfaced as `engine_gpu_offload_status()`; the llama log shows `using device Vulkan0` and `offloaded 29/29 layers to GPU`.
+- On GPU the prefix cache restores only partly (988 -> 512 re-prefilled tokens on exact repeat; first-micro-batch workaround), and wall time is noisy.
+## Live consumer system specs (2026-11-15)
+
+- `test/03_system/lib/slang/feature/slang_caret_local_usage_spec.spl` drives caret's
+  `dispatch_send("slang_local", ...)` (base_url = model root, cli_path = shim) against the
+  real 1.5B model; asserts provider `slang_local/ggml`, non-empty text, and a second request.
+- `slang_http_server_live_spec.spl` spawns `src/app/slang_server/main.spl` via
+  `process_spawn_redirected`, speaks HTTP over `TcpStream`: /v1/models, two chat
+  completions, 404 `model_not_found`, then `process_kill_tree`. ~25 s server startup.
+- Gate: `SLANG_LIVE=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi/slang_ggml.dll
+  SIMPLE_BINARY=<simple>`; model dir name from `CARET_SLANG_MODEL`
+  (default `Qwen2.5-1.5B-Instruct-Q4_K_M`). Ungated they skip.
+- Known gap: server `usage` counts are always 0
+  (`doc/08_tracking/bug/slang_openai_usage_counts_always_zero_2026-11-15.md`).
+- **Windows test-lane notes.** `check_fit_with_available` is `check_fit` against an
+  availability the caller already probed (two Windows probes drift ~270 MB, so specs
+  probe once). Shell gates on MSYS must avoid per-file `$(...)` pipelines: a spawn costs
+  seconds there. The conformance test drops `detect_leaks` on Windows (no LSan) and the
+  prefix-cache contract test uses llvm-mingw clang there, as `build-slang-ggml-shim.shs` does.
+## ROCm GPU ops provider (pure runner)
+- Layering: pure runner -> GPU API -> ROCm. Backend: `src/lib/gc_async_mut/gpu/rocm/hip_compute.spl` (HIP + hipRTC via `spl_dlopen`/`spl_wffi_call_i64`; launch through `hipDrvLaunchKernelEx`, 4 int args, so no wide C shim). Ops: `pure/tensor_ops_rocm.spl` (device-resident f32 `RocmTensor`; matvec, rmsnorm, add, mul, silu, attention; all `Result<_, text>`). Weights upload once; CPU `tensor_ops.spl` is untouched.
+- Specs: `test/01_unit/lib/gc_async_mut/slang/model_executor/pure/tensor_ops_rocm_spec.spl`, `test/03_system/lib/slang/feature/slang_pure_rocm_ops_spec.spl` (skip with reason when `C:\Program Files\AMD\ROCm\7.2\bin` DLLs are absent).
+- Weights go to the device as raw F32 bytes (`rocm_tensor_upload_f32_bytes`, ranges from `pure_weights_f32_ranges`): the 32000x288 head uploads in ~23 ms (was ~330 s with per-element f64->f32 staging). Downloads are bulk bytes but decoded per element in the seed interpreter (~2 s for 32000 values), so keep reductions such as argmax on device. `hip_compute.spl` declares no `rt_*` externs (libc malloc/memcpy via `spl_wffi_*`, reads via `sffi.raw_bytes`). `SLANG_ROCM_BIN` overrides the ROCm bin dir.
+- **Windows memory probe.** `mem_available_bytes()` uses `Win32_PerfFormattedData_PerfOS_Memory.AvailableBytes` (free+standby), not `FreePhysicalMemory`, which collapses after reading big model files and falsely refuses loads (`doc/08_tracking/bug/slang_windows_mem_available_uses_free_not_available_2026-11-15.md`). Runtime overhead in admission is a flat 6 GiB (`llm_engine.spl:219`).
+## Multimodal input (image / audio / video; in progress, 2026-11-15)
+
+- **Protocol (done):** `protocol.chat_messages_parse` keeps typed `ChatPart`s
+  (`text`/`image`/`audio`/`video`); `image_url`/`input_audio`/`video_url` data
+  URLs are strict-base64 checked, `http(s)` URLs are 400 `unsupported_media_url`.
+  Media parts are never dropped: `serving_chat.media_refusal` answers 400
+  `unsupported_modality` unless the resident model can take them. Each media part
+  becomes `SLANG_MEDIA_MARKER` (`<__media__>`) in the chat frame.
+- **Video:** refused with a clear error (no decoder, no ffmpeg subprocess).
+- **Model dir:** `native_formats.gguf_is_projector` reads GGUF `general.architecture`
+  (first KV, fixed offsets) == `clip`; `mmproj` filename prefix is only the
+  fallback when the first key is another one. `gguf_entry_shard` never returns a
+  projector; `NativeModel.mmproj_path` carries it; two projectors = refused.
+- **mtmd path:** shim `mtmd group` block (end of `slang_ggml_shim.c`, bit 128,
+  `-DSLANG_WITH_MTMD`, built with `SLANG_SHIM_MTMD=1 LLAMA_BUILD_DIR=<build with
+  libmtmd>`): add_encoded (magic-sniffed jpeg/png/gif/bmp/wav/mp3/flac only, so
+  video never reaches ffmpeg) -> chat render (markers) -> mm_tokenize ->
+  mm_eval_prompt (clears KV; never touches the prefix cache). Engine loads the
+  projector after the context; `engine_media_caps()` is what actually works.
+  Media decode is C-side (stb_image/miniaudio); pure-Simple decoders are not wired.
+- **Memory gate trap:** `_runtime_overhead_bytes` is a flat 6 GiB, so a 0.3 GB
+  VLM needs 10 GiB free and is refused on a busy shared host with
+  `model_not_runnable` (503) — see the live spec's `mm_answers.txt` record.
+- **Runner trap:** `skip(...)` inside an example is counted as PASSED
+  (`skipped=0`); the live spec records `SKIPPED:` lines to `build/probe/mm_answers.txt`.

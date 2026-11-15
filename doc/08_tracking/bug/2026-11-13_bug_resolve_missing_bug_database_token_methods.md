@@ -60,3 +60,26 @@ then hits an unresolved-symbol dispatch gap and hard-aborts with exit 70, so
 3. Re-run `test/02_integration/app/bug_add_resolve_log_modes_spec.spl` and the
    fixture repro above; all four currently-red scenarios
    (json resolve, knowledge gate, partial receipt, invalid tokens) must pass.
+
+## Resolution (2026-11-15)
+
+Status: RESOLVED on branch `work/bug-resolve-token-methods-20261114`.
+
+`std.nogc_sync_mut.database.bug` now defines `BugDatabase.token_category_for_bug`
+(`BugTokenCategory?`, derived from the bug's file path), `comparable_token_average`
+(`Result<BugTokenReading, text>`: mean `total_tokens` over OTHER Closed bugs of the
+same category) and `add_token_usage(id, BugTokenUsage)`, backed by the
+`bug_token_usage` table (also added to the shard-table list, sync and async copies).
+`src/app/bug_resolve/main.spl` uses `BugTokenReading` (Unavailable | Count) instead of
+the `-1`/`-2` sentinels. `resolve_bug` and `BugStatus` are unchanged.
+
+Evidence: `test/01_unit/app/bug_resolve/bug_resolve_cli_spec.spl` (see PR for RED/GREEN
+Results lines). The spec asserts the persisted `bug_token_usage` row, that a second
+resolve above 2x the cohort average without `--knowledge` exits 1 and writes nothing,
+and that an unknown id / missing receipt leave the DB byte-identical.
+
+Seed finding: on the Rust seed, a tail-position `match raw.parse_i64(): case Some(v):
+... BugTokenCount(value: v)` returned one shared count for every call (all four fields
+read 3). `_token_reading` avoids that form; the seed defect itself is not fixed here.
+Spec fixture note: an unsealed hand-written `bug_db.sdn` no longer loads on the tip
+(seal policy), so the spec lets `bug-add` create the database.

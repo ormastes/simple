@@ -82,6 +82,20 @@ fn _sffi_tuple_get_req<T>(tuple: i64, index: i64) -> T:
 
 # Unset and explicitly-empty environment values are both disabled through the
 # canonical nullable owner.
+fn hir_expr_is_scalar_literal(expression: HirExpr) -> bool:
+    """A numeric/bool literal, or a negated numeric literal (`-5`, `-1.5`):
+    its lowered scalar MIR word proves its type."""
+    match expression.kind:
+        case HirExprKind.IntLit(_, _) | HirExprKind.FloatLit(_, _) | HirExprKind.BoolLit(_): true
+        case HirExprKind.Unary(op, operand):
+            match op:
+                case HirUnaryOp.Neg:
+                    match operand.kind:
+                        case HirExprKind.IntLit(_, _) | HirExprKind.FloatLit(_, _): true
+                        case _: false
+                case _: false
+        case _: false
+
 @always_inline
 fn folded_global_scalar_type(constant: MirConstant) -> MirType:
     """Canonical scalar type shared by inline reads and address storage.
@@ -1151,9 +1165,7 @@ impl MirLowering:
         # erased generic call result (`W(v: ident("a"))`) is an I64 word too,
         # and binding T=i64 from it would mistype the instance. Unknown stays
         # unknown (the construct remembers an argumentless `W`).
-        val scalar_literal = match source.kind:
-            case HirExprKind.IntLit(_, _) | HirExprKind.FloatLit(_, _) | HirExprKind.BoolLit(_): true
-            case _: false
+        val scalar_literal = hir_expr_is_scalar_literal(source)
         if val mir_type = self.local_mir_type_of(local):
             match mir_type.kind:
                 case MirTypeKind.I64:
@@ -1172,9 +1184,8 @@ impl MirLowering:
                             scalar_literal_elements = array_elements.len() > 0
                             for array_element in array_elements:
                                 val ae: HirExpr = array_element
-                                match ae.kind:
-                                    case HirExprKind.IntLit(_, _) | HirExprKind.FloatLit(_, _) | HirExprKind.BoolLit(_): ()
-                                    case _: scalar_literal_elements = false
+                                if not hir_expr_is_scalar_literal(ae):
+                                    scalar_literal_elements = false
                         case _: ()
                     match elem.kind:
                         case MirTypeKind.Opaque(tag):
@@ -3057,6 +3068,20 @@ impl MirLowering:
                 if probe_struct_name != "" and probe_struct_name != "__runtime_array__":
                     self.struct_value_syms[get_local.id] = probe_struct_name
                 return get_local
+            # A `Dict<K, T>` read inside a FREE erased generic body keeps the
+            # stored word: concrete writers and the free body itself store `T`
+            # encoded, `T` values in that body are encoded, and the caller
+            # decodes the `T?` / `Result<T, E>` payload
+            # (decode_erased_scalar_call_payload). A generic-class METHOD takes
+            # `T` plain, so it keeps the decode below (b08); its own plain
+            # writes stay unencoded, which no read rule can fix
+            # (native_generic_payload_encoding_2026-11-15, M2).
+            # `d.get(k)` (as_option) keeps its decode + miss-sentinel guard.
+            if val erased_value_hir = dict_value_hir_type:
+                if not as_option and not self.current_fn_is_method and self.hir_type_is_bare_type_param(erased_value_hir):
+                    self.mark_runtime_value_local(get_local.id)
+                    self.remember_local_hir_type(get_local.id, erased_value_hir, 0, 0)
+                    return get_local
             var value_is_bool = false
             match dict_result_type.kind:
                 case MirTypeKind.Bool: value_is_bool = true
@@ -7350,6 +7375,15 @@ impl MirLowering:
                     some_value = self.decode_runtime_value(base_local, result_type)
                 else:
                     some_value = self.enum_payload_value(some_value, result_type)
+                    # `if val x = first([7])`: the binder keeps the declared
+                    # erased `T` and is decoded on use, and a raw i64 word
+                    # cannot be told from the nil sentinel 3. Re-tag the
+                    # integer payload decode_erased_scalar_call_payload decoded.
+                    if self.static_optional_payload_is_type_param(base):
+                        if val erased_inner = self.option_inner_hir_type_for_local(base, base_local):
+                            match erased_inner.kind:
+                                case HirTypeKind.Int(_, _): some_value = self.box_runtime_value(some_value)
+                                case _: ()
                 b_then = self.builder
                 b_then.emit_copy(result_local, some_value)
                 b_then.terminate_goto(merge_block)

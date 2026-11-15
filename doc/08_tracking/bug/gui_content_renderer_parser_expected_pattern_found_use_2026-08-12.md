@@ -106,3 +106,12 @@ No in-lane change.
 
 On release/1.0.0 35144b7f5e9, Linux aarch64 seed af717f53d6bce3e5 after 69166cadc70 put a fn between the use lines of gui_content_renderer.spl: test/01_unit/lib/gc_async_mut/ui/gui_content_renderer_spec.spl parses and executes 3 examples with no expected-pattern-found-Use error; test/02_integration/rendering/host_gui_content_frame_spec.spl 1/1. The 2 assertion failures in gui_content_renderer_spec (retained seed returns false on cpu) are a different defect, filed separately.
 
+
+## Addendum 2026-11-15 — parser defect closed; one unrelated Vulkan failure split off
+
+Both specs this doc names parse and run: `gui_content_renderer_spec.spl` 5/5,
+`draw_ir_adv_spec.spl` 69/70. The one failure is not the parser defect filed
+here: "stages retained Vulkan composition damage for a partial host refresh"
+expects `vulkan_present_readback_bytes()` to be 4 (one damaged pixel) and gets
+48 (the whole 4x3 surface) on a host with a real Vulkan backend. Filed as
+`engine2d_vulkan_damage_readback_reads_whole_surface_2026-11-15.md`.

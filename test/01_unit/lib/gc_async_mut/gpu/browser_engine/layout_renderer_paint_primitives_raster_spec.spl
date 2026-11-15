@@ -1,0 +1,259 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_primitives.spl 1%
+# @tag: unit, browser_engine, paint, gradient, raster
+#
+# Software raster primitives of the layout renderer, on tiny framebuffers of
+# ARGB pixels (0xAARRGGBB), where every expected pixel is arithmetic:
+#
+# - gradient colour at a position: CSS Images 4 section 3.5.2 interpolates in
+#   premultiplied sRGB, so a half-way mix of opaque red and opaque blue is
+#   (128, 0, 128), and transparent-to-white at 50% is white at alpha 128 (no
+#   grey fringe);
+# - the general linear-gradient raster samples the gradient line at pixel
+#   centres (CSS Images 3 section 3.1: for `90deg` the line runs left to
+#   right across the box), so in a 4 px wide box the pixels sit at t = 1/8,
+#   3/8, 5/8, 7/8;
+# - gradient direction as (sin, cos) in Q16 (0deg points up, 90deg right);
+# - radial centre keywords and percentages (`at <position>`, default 50% 50%);
+# - rounded-rectangle coverage, opacity blending against the destination
+#   (`(src * a + dst * (100 - a) + 50) / 100` per channel) and clipping.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{
+    ClipRect, linear_gradient_color_at, _gradient_mix_channel, gradient_angle_sin_cos_q16,
+    _radial_center_pct, _fb_border_translucent, _fb_border_side_clip,
+    fb_rounded_rect_opacity_clip, fb_linear_gradient_general_clip,
+    linear_gradient_needs_general_raster, blend_opacity, clamp_corner_radius,
+    background_gradient_pixel_opacity
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{renderer_default_style}
+
+val WHITE: u32 = 0xFFFFFFFFu32
+val RED: u32 = 0xFFFF0000u32
+val BLUE: u32 = 0xFF0000FFu32
+
+fn _fb(n: i32) -> [u32]:
+    var out: [u32] = []
+    var i = 0
+    while i < n:
+        out.push(WHITE)
+        i = i + 1
+    out
+
+fn _full(w: i32, h: i32) -> ClipRect:
+    ClipRect(x0: 0, y0: 0, x1: w, y1: h)
+
+describe "Gradient colour at a position":
+
+    it "returns the end colours at and beyond the ends":
+        expect(linear_gradient_color_at([RED, BLUE], [0, 1000], 0)).to_equal(RED)
+        expect(linear_gradient_color_at([RED, BLUE], [0, 1000], 65536)).to_equal(BLUE)
+        expect(linear_gradient_color_at([RED, BLUE], [200, 800], 1000)).to_equal(RED)
+
+    it "mixes opaque colours half way":
+        expect(linear_gradient_color_at([RED, BLUE], [0, 1000], 32768)).to_equal(0xFF800080u32)
+
+    it "interpolates premultiplied, so transparent to white keeps white":
+        expect(linear_gradient_color_at([0x00000000u32, WHITE], [0, 1000], 32768)).to_equal(0x80FFFFFFu32)
+
+    it "returns the last colour past the last stop":
+        expect(linear_gradient_color_at([RED, BLUE, WHITE], [0, 500, 500], 40000)).to_equal(WHITE)
+
+    it "mixes one channel by weight and refuses zero total weight":
+        expect(_gradient_mix_channel(0x00FF0000u32, 0u32, 16u32, 1, 1)).to_equal(0x00800000u32)
+        expect(_gradient_mix_channel(0x00FF0000u32, 0u32, 16u32, 0, 0)).to_equal(0u32)
+
+describe "Gradient direction in Q16":
+
+    it "maps the four axis angles":
+        val up = gradient_angle_sin_cos_q16(0)
+        expect(up[0]).to_equal(0)
+        expect(up[1]).to_equal(65536)
+        val right = gradient_angle_sin_cos_q16(90)
+        expect(right[0]).to_equal(65536)
+        expect(right[1]).to_equal(0)
+        val down = gradient_angle_sin_cos_q16(180)
+        expect(down[0]).to_equal(0)
+        expect(down[1]).to_equal(-65536)
+        val left = gradient_angle_sin_cos_q16(-90)
+        expect(left[0]).to_equal(-65536)
+        expect(left[1]).to_equal(0)
+
+    it "rounds sin and cos of 30 and 45 degrees":
+        val a = gradient_angle_sin_cos_q16(30)
+        expect(a[0]).to_equal(32768)
+        expect(a[1]).to_equal(56756)
+        val b = gradient_angle_sin_cos_q16(405)
+        expect(b[0]).to_equal(46341)
+        expect(b[1]).to_equal(46341)
+
+describe "Radial gradient centre":
+
+    it "defaults to the box centre":
+        val c = _radial_center_pct("circle")
+        expect(c[0]).to_equal(50)
+        expect(c[1]).to_equal(50)
+
+    it "reads keywords in either order":
+        val a = _radial_center_pct("circle at left top")
+        expect(a[0]).to_equal(0)
+        expect(a[1]).to_equal(0)
+        val b = _radial_center_pct("ellipse at center bottom")
+        expect(b[0]).to_equal(50)
+        expect(b[1]).to_equal(100)
+        val c = _radial_center_pct("at bottom right")
+        expect(c[0]).to_equal(100)
+        expect(c[1]).to_equal(100)
+
+    it "reads percentages as x then y":
+        val a = _radial_center_pct("circle at 10% 20%")
+        expect(a[0]).to_equal(10)
+        expect(a[1]).to_equal(20)
+        val b = _radial_center_pct("at right 25%")
+        expect(b[0]).to_equal(100)
+        expect(b[1]).to_equal(25)
+
+describe "Opacity blending":
+
+    it "blends by percent and passes the endpoints through":
+        expect(blend_opacity(RED, WHITE, 50)).to_equal(0xFFFF8080u32)
+        expect(blend_opacity(RED, WHITE, 100)).to_equal(RED)
+        expect(blend_opacity(RED, WHITE, 0)).to_equal(WHITE)
+
+    it "scales element opacity by the colour's own alpha":
+        expect(background_gradient_pixel_opacity(0xFF000000u32, 100)).to_equal(100)
+        expect(background_gradient_pixel_opacity(0x80000000u32, 100)).to_equal(50)
+        expect(background_gradient_pixel_opacity(0x00000000u32, 100)).to_equal(0)
+
+describe "Rounded rectangles":
+
+    it "clamps a radius to half the shorter side":
+        expect(clamp_corner_radius(100, 10, 20)).to_equal(5)
+        expect(clamp_corner_radius(3, 10, 20)).to_equal(3)
+        expect(clamp_corner_radius(-1, 10, 20)).to_equal(0)
+
+    it "leaves the corner outside the radius and fills the inside":
+        val out = fb_rounded_rect_opacity_clip(_fb(100), 10, 10, 0, 0, 10, 10, 5, RED, 100, _full(10, 10))
+        expect(out[0]).to_equal(WHITE)
+        expect(out[9]).to_equal(WHITE)
+        expect(out[90]).to_equal(WHITE)
+        expect(out[99]).to_equal(WHITE)
+        expect(out[11]).to_equal(RED)
+        expect(out[55]).to_equal(RED)
+        expect(out[5]).to_equal(RED)
+
+    it "treats an oversized radius as the clamped one":
+        val a = fb_rounded_rect_opacity_clip(_fb(100), 10, 10, 0, 0, 10, 10, 5, RED, 100, _full(10, 10))
+        val b = fb_rounded_rect_opacity_clip(_fb(100), 10, 10, 0, 0, 10, 10, 50, RED, 100, _full(10, 10))
+        expect(a).to_equal(b)
+
+    it "blends with opacity and respects the clip":
+        val out = fb_rounded_rect_opacity_clip(_fb(100), 10, 10, 0, 0, 10, 10, 2, RED, 50, ClipRect(x0: 0, y0: 0, x1: 5, y1: 10))
+        expect(out[54]).to_equal(0xFFFF8080u32)
+        expect(out[55]).to_equal(WHITE)
+        expect(out[44]).to_equal(0xFFFF8080u32)
+
+    it "falls back to a plain rectangle without a radius":
+        val out = fb_rounded_rect_opacity_clip(_fb(16), 4, 4, 0, 0, 4, 4, 0, RED, 100, _full(4, 4))
+        expect(out[0]).to_equal(RED)
+        expect(out[15]).to_equal(RED)
+
+describe "Border sides":
+
+    it "classifies only partial alpha as translucent":
+        expect(_fb_border_translucent(0x80FF0000u32)).to_equal(true)
+        expect(_fb_border_translucent(RED)).to_equal(false)
+        expect(_fb_border_translucent(0u32)).to_equal(false)
+
+    it "paints an opaque side and blends a translucent one":
+        val solid = _fb_border_side_clip(_fb(16), 4, 4, 0, 0, 4, 1, RED, _full(4, 4))
+        expect(solid[0]).to_equal(RED)
+        expect(solid[4]).to_equal(WHITE)
+        val half = _fb_border_side_clip(_fb(16), 4, 4, 0, 0, 4, 1, 0x80FF0000u32, _full(4, 4))
+        val g = (half[1] >> 8) & 255u32
+        expect(g < 255u32).to_equal(true)
+        expect(g > 100u32).to_equal(true)
+        expect((half[1] >> 16) & 255u32).to_equal(255u32)
+        expect(half[5]).to_equal(WHITE)
+
+describe "General linear-gradient raster":
+
+    it "needs the general raster for an angle, a third stop or moved stops":
+        var st = renderer_default_style()
+        st.background_gradient_stop_colors = [RED, BLUE]
+        st.background_gradient_stop_positions = [0, 1000]
+        st.background_gradient_angle_deg = 180
+        expect(linear_gradient_needs_general_raster(st)).to_equal(false)
+        st.background_gradient_angle_deg = 90
+        expect(linear_gradient_needs_general_raster(st)).to_equal(true)
+        st.background_gradient_angle_deg = 180
+        st.background_gradient_stop_positions = [100, 1000]
+        expect(linear_gradient_needs_general_raster(st)).to_equal(true)
+        st.background_gradient_stop_colors = [RED, BLUE, WHITE]
+        st.background_gradient_stop_positions = [0, 500, 1000]
+        expect(linear_gradient_needs_general_raster(st)).to_equal(true)
+
+    it "never takes a radial or under-specified gradient":
+        var st = renderer_default_style()
+        st.background_gradient_stop_colors = [RED]
+        st.background_gradient_stop_positions = [0]
+        expect(linear_gradient_needs_general_raster(st)).to_equal(false)
+        st.background_gradient_stop_colors = [RED, BLUE, WHITE]
+        st.background_gradient_stop_positions = [0, 1000]
+        expect(linear_gradient_needs_general_raster(st)).to_equal(false)
+        st.background_gradient_stop_positions = [0, 500, 1000]
+        st.background_gradient_is_radial = true
+        expect(linear_gradient_needs_general_raster(st)).to_equal(false)
+
+    it "samples a 90deg gradient at pixel centres":
+        var st = renderer_default_style()
+        st.background_gradient_stop_colors = [RED, BLUE]
+        st.background_gradient_stop_positions = [0, 1000]
+        st.background_gradient_angle_deg = 90
+        val out = fb_linear_gradient_general_clip(_fb(4), 4, 1, 0, 0, 4, 1, st, 4, 1, 4, 1, 0, 0, _full(4, 1))
+        # t = 1/8: R = 255 * 7/8 = 223.1, B = 255 * 1/8 = 31.9
+        expect(out[0]).to_equal(0xFFDF0020u32)
+        # t = 7/8 mirrors it
+        expect(out[3]).to_equal(0xFF2000DFu32)
+        expect((out[1] >> 16) & 255u32 > (out[2] >> 16) & 255u32).to_equal(true)
+
+    it "runs top to bottom for 180deg and clips to the image clip":
+        var st = renderer_default_style()
+        st.background_gradient_stop_colors = [RED, BLUE]
+        st.background_gradient_stop_positions = [0, 1000]
+        st.background_gradient_angle_deg = 180
+        val out = fb_linear_gradient_general_clip(_fb(8), 2, 4, 0, 0, 2, 4, st, 2, 4, 2, 4, 0, 0, ClipRect(x0: 0, y0: 0, x1: 1, y1: 4))
+        expect(out[0]).to_equal(0xFFDF0020u32)
+        expect(out[6]).to_equal(0xFF2000DFu32)
+        expect(out[1]).to_equal(WHITE)
+        expect(out[7]).to_equal(WHITE)
+
+    it "paints nothing for an empty tile":
+        var st = renderer_default_style()
+        st.background_gradient_stop_colors = [RED, BLUE]
+        st.background_gradient_stop_positions = [0, 1000]
+        val out = fb_linear_gradient_general_clip(_fb(4), 4, 1, 0, 0, 4, 1, st, 0, 1, 4, 1, 0, 0, _full(4, 1))
+        expect(out[0]).to_equal(WHITE)
+
+    it "blends with the element opacity":
+        var st = renderer_default_style()
+        st.background_gradient_stop_colors = [RED, RED]
+        st.background_gradient_stop_positions = [0, 1000]
+        st.background_gradient_angle_deg = 90
+        st.opacity_pct = 50
+        val out = fb_linear_gradient_general_clip(_fb(4), 4, 1, 0, 0, 4, 1, st, 4, 1, 4, 1, 0, 0, _full(4, 1))
+        expect(out[2]).to_equal(0xFFFF8080u32)
+
+    it "paints a rounded box through the row-span path":
+        var st = renderer_default_style()
+        st.background_gradient_stop_colors = [RED, RED]
+        st.background_gradient_stop_positions = [0, 1000]
+        st.background_gradient_angle_deg = 90
+        st.border_radius_tl_px = 5
+        st.border_radius_tr_px = 5
+        st.border_radius_br_px = 5
+        st.border_radius_bl_px = 5
+        val out = fb_linear_gradient_general_clip(_fb(100), 10, 10, 0, 0, 10, 10, st, 10, 10, 10, 10, 0, 0, _full(10, 10))
+        expect(out[55]).to_equal(RED)
+        expect(out[0]).to_equal(WHITE)

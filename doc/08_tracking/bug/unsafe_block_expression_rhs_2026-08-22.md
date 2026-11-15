@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** open parser/lowering bug, source and execution reproduced
+**Status:** FIXED 2026-11-14 (PR #9241, `129236cce579`) — parser and `run` halves were already fixed; the checker half (`UnsafeBlock` case in `inference_expr.spl`) is pinned by `test/01_unit/compiler/type_infer/unsafe_block_expr_type_spec.spl`. History below.
 
 The Rust bootstrap parser accepts lexical capability blocks as statements:
 

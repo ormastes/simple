@@ -1,0 +1,203 @@
+# @cover src/lib/nogc_sync_mut/trace/xray_win_flag_leaf_v1.spl
+# @req REQ-XRAY-V1-API-01
+"""
+# Windows XRay flag-guard leaf
+
+The leaf drives the slots of a `--xray` Windows DLL through its exported
+descriptor. The DLL is modelled in resident memory with the exact layout the
+LLVM translator emits (`{ i64 count, [count x ptr] }` descriptor and names
+table, one i8 slot per site, one hook pointer cell), and the guard each sled
+function runs is replayed in Simple: when the slot is set, the hook handler
+(xray_win_edge_record_v1) writes a raw-edge record into the resident channel.
+"""
+use std.spec.*
+use std.common.trace.observer_contract_v1.*
+use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_ptr_read_i64, rt_ptr_write_i64, rt_ptr_write_u8, rt_ptr_read_u8}
+use std.nogc_sync_mut.trace.xray_llvm_adapter_v1.*
+use std.nogc_sync_mut.trace.observer_native_channel_v1.*
+use std.nogc_sync_mut.trace.xray_win_flag_leaf_v1.*
+
+class FakeWinDll:
+    descriptor: i64
+    names: i64
+    hook: i64
+    handler: i64
+    ring: i64
+
+impl XrayWinModulePortV1 for FakeWinDll:
+    fn symbol(name: text) -> i64:
+        if name == XRAY_WIN_DESCRIPTOR_SYMBOL_V1: return self.descriptor
+        if name == XRAY_WIN_NAMES_SYMBOL_V1: return self.names
+        if name == XRAY_WIN_HOOK_SYMBOL_V1: return self.hook
+        if name == XRAY_WIN_RING_SYMBOL_V1: return self.ring
+        0
+    fn handler_address() -> i64:
+        self.handler
+
+fn c_string(value: text) -> i64:
+    val bytes = value.bytes()
+    val addr = rt_alloc(bytes.len() + 1)
+    unsafe(capabilities: [ffi]):
+        for i in 0..bytes.len():
+            rt_ptr_write_u8(addr, i, bytes[i] as i64)
+        rt_ptr_write_u8(addr, bytes.len(), 0)
+    addr
+
+fn fake_dll(names: [text], handler: i64) -> FakeWinDll:
+    val n = names.len()
+    val descriptor = rt_alloc(8 + n * 8)
+    val table = rt_alloc(8 + n * 8)
+    val hook = rt_alloc(8)
+    unsafe(capabilities: [ffi]):
+        rt_ptr_write_i64(descriptor, 0, n)
+        rt_ptr_write_i64(table, 0, n)
+        rt_ptr_write_i64(hook, 0, 0)
+        for i in 0..n:
+            val slot = rt_alloc(8)
+            rt_ptr_write_u8(slot, 0, 0)
+            rt_ptr_write_i64(descriptor, 8 + i * 8, slot)
+            rt_ptr_write_i64(table, 8 + i * 8, c_string(names[i]))
+    FakeWinDll(descriptor: descriptor, names: table, hook: hook, handler: handler, ring: 0)
+
+# The emitted ring layout: { i64 capacity, i64 write index, i64 dropped,
+# [capacity x { i64 site, i32 kind, i32 pad, i64 seq, i64 ts }] } (ring ABI v2).
+fn fake_ring(capacity: i64) -> i64:
+    val ring = rt_alloc(24 + capacity * 32)
+    unsafe(capabilities: [ffi]):
+        rt_ptr_write_i64(ring, 0, capacity)
+        for i in 0..(2 + capacity * 4):
+            rt_ptr_write_i64(ring, 8 + i * 8, 0)
+    ring
+
+# Replays the emitted null-hook edge: claim index, drop+count when full, else
+# write site/kind and publish seq = index + 1.
+fn ring_edge(ring: i64, site: i64, kind: i64):
+    unsafe(capabilities: [ffi]):
+        val i = rt_ptr_read_i64(ring, 8)
+        rt_ptr_write_i64(ring, 8, i + 1)
+        if i >= rt_ptr_read_i64(ring, 0):
+            rt_ptr_write_i64(ring, 16, rt_ptr_read_i64(ring, 16) + 1)
+        else:
+            rt_ptr_write_i64(ring, 24 + i * 32, site)
+            rt_ptr_write_i64(ring, 32 + i * 32, kind)
+            rt_ptr_write_i64(ring, 48 + i * 32, (i + 1) * 10)
+            rt_ptr_write_i64(ring, 40 + i * 32, i + 1)
+
+fn slot_of(dll: FakeWinDll, site: i64) -> i64:
+    unsafe(capabilities: [ffi]): rt_ptr_read_u8(rt_ptr_read_i64(dll.descriptor, 8 + site * 8), 0)
+
+# Replays the emitted guard: load slot; when set and the hook is set, call it.
+fn run_guard(dll: FakeWinDll, leaf: XrayWinFlagLeafV1, site: i64, kind: i32) -> i64:
+    if slot_of(dll, site) == 0: return 0
+    if unsafe(capabilities: [ffi]): rt_ptr_read_i64(dll.hook, 0) == 0: return 0
+    unsafe(capabilities: [ffi]): xray_win_edge_record_v1(leaf.sink, site, kind)
+
+fn channel(capacity: i64) -> i64:
+    val bytes = trace_native_channel_bytes_v1(capacity)
+    val arena = rt_alloc(bytes)
+    unsafe(capabilities: [ffi]):
+        expect(trace_native_channel_initialize_v1(arena, bytes, capacity, 7, 9)).to_equal(1)
+    arena
+
+describe "XRay Windows flag-guard leaf":
+    it "reads the site count from the exported descriptor and reports LLVM sleds":
+        val dll = fake_dll(["a", "b", "c"], 4096)
+        val leaf = XrayWinFlagLeafV1.bind(dll)
+        expect(leaf.max_function_id()).to_equal(3)
+        expect(leaf.sled_kind()).to_equal(TraceBackendV1.Llvm)
+
+    it "has no sites when the descriptor or hook symbol is missing":
+        var dll = fake_dll(["a"], 4096)
+        dll.hook = 0
+        expect(XrayWinFlagLeafV1.bind(dll).max_function_id()).to_equal(0)
+
+    it "maps 1-based adapter ids onto 0-based descriptor slots":
+        step("patch id 2 sets descriptor slot 1 only")
+        val dll = fake_dll(["a", "b"], 4096)
+        var leaf = XrayWinFlagLeafV1.bind(dll)
+        expect(leaf.patch_function(2)).to_equal(XRAY_LLVM_STATUS_SUCCESS_V1)
+        expect(slot_of(dll, 0)).to_equal(0)
+        expect(slot_of(dll, 1)).to_equal(1)
+        expect(leaf.unpatch_function(2)).to_equal(XRAY_LLVM_STATUS_SUCCESS_V1)
+        expect(slot_of(dll, 1)).to_equal(0)
+        step("out-of-map ids touch nothing")
+        expect(leaf.patch_function(0)).to_equal(XRAY_LLVM_STATUS_INVALID_ID_V1)
+        expect(leaf.patch_function(3)).to_equal(XRAY_LLVM_STATUS_INVALID_ID_V1)
+
+    it "resolves site names from the exported names table":
+        val dll = fake_dll(["main", "work"], 4096)
+        expect(xray_win_site_name_v1(dll, 1)).to_equal("main")
+        expect(xray_win_site_name_v1(dll, 2)).to_equal("work")
+        expect(xray_win_site_name_v1(dll, 3)).to_equal("")
+
+    it "fails install closed when no C-callable handler exists":
+        val dll = fake_dll(["a"], 0)
+        var leaf = XrayWinFlagLeafV1.bind(dll)
+        expect(leaf.install(channel(4), 7u64, 9u64, 1u64)).to_equal(0)
+        expect(unsafe(capabilities: [ffi]): rt_ptr_read_i64(dll.hook, 0)).to_equal(0)
+
+    it "the real dynlib port has no handler yet, so it can never install":
+        expect(XrayWinDynlibPortV1(handle: 0).handler_address()).to_equal(0)
+        expect(XrayWinDynlibPortV1(handle: 0).symbol(XRAY_WIN_DESCRIPTOR_SYMBOL_V1)).to_equal(0)
+
+    # @req REQ-XRAY-V1-API-01
+    it "installs in ring mode with no handler and drains ring records into raw edges":
+        """Ring mode (PROVISIONAL): the DLL's own edge appends to the exported
+        ring; drain() turns published records into raw-edge channel records."""
+        step("No handler, ring present: install succeeds and leaves the hook null")
+        var dll = fake_dll(["main", "work"], 0)
+        dll.ring = fake_ring(2)
+        var leaf = XrayWinFlagLeafV1.bind(dll)
+        val arena = channel(8)
+        expect(leaf.install(arena, 7u64, 9u64, 1u64)).to_equal(1)
+        expect(unsafe(capabilities: [ffi]): rt_ptr_read_i64(dll.hook, 0)).to_equal(0)
+        step("Three edges into a capacity-2 ring: two kept, one dropped and counted")
+        ring_edge(dll.ring, 1, 0)
+        ring_edge(dll.ring, 1, 1)
+        ring_edge(dll.ring, 0, 0)
+        expect(leaf.ring_dropped()).to_equal(1)
+        step("drain emits entry then exit for site 1 (adapter id 2, name work)")
+        expect(leaf.drain()).to_equal(2)
+        expect(xray_win_site_name_v1(dll, 2)).to_equal("work")
+        val out = rt_alloc(96)
+        unsafe(capabilities: [ffi]):
+            expect(trace_native_channel_poll_into_v1(arena, out, 96)).to_equal(1)
+            expect((rt_ptr_read_i64(out, 0) >> 32) & 65535).to_equal(1)
+            expect(rt_ptr_read_i64(out, 24)).to_equal(2 | (2 << 32))
+            expect(trace_native_channel_poll_into_v1(arena, out, 96)).to_equal(1)
+            expect((rt_ptr_read_i64(out, 0) >> 32) & 65535).to_equal(2)
+            expect(trace_native_channel_poll_into_v1(arena, out, 96)).to_equal(0)
+        step("A second drain reads nothing new")
+        expect(leaf.drain()).to_equal(0)
+
+    it "skips an unpublished ring record (seq not yet stored)":
+        var dll = fake_dll(["a"], 0)
+        dll.ring = fake_ring(4)
+        var leaf = XrayWinFlagLeafV1.bind(dll)
+        expect(leaf.install(channel(8), 7u64, 9u64, 1u64)).to_equal(1)
+        unsafe(capabilities: [ffi]): rt_ptr_write_i64(dll.ring, 8, 1)
+        expect(leaf.drain()).to_equal(0)
+
+    it "records entry and exit edges only for patched sites, through the adapter":
+        step("Adapter prepare/start patches the selected site")
+        val dll = fake_dll(["a", "b"], 4096)
+        var leaf = XrayWinFlagLeafV1.bind(dll)
+        val arena = channel(8)
+        expect(leaf.install(arena, 7u64, 9u64, 1u64)).to_equal(1)
+        expect(unsafe(capabilities: [ffi]): rt_ptr_read_i64(dll.hook, 0)).to_equal(4096)
+        expect(leaf.patch_function(1)).to_equal(XRAY_LLVM_STATUS_SUCCESS_V1)
+        step("Site 0 is patched: entry+exit record; site 1 is not: nothing")
+        expect(run_guard(dll, leaf, 0, 0)).to_equal(TRACE_NATIVE_CHANNEL_OK_V1)
+        expect(run_guard(dll, leaf, 0, 1)).to_equal(TRACE_NATIVE_CHANNEL_OK_V1)
+        expect(run_guard(dll, leaf, 1, 0)).to_equal(0)
+        val out = rt_alloc(96)
+        unsafe(capabilities: [ffi]):
+            expect(trace_native_channel_poll_into_v1(arena, out, 96)).to_equal(1)
+            expect((rt_ptr_read_i64(out, 0) >> 32) & 65535).to_equal(1)
+            expect(rt_ptr_read_i64(out, 24)).to_equal(1 | (1 << 32))
+            expect(trace_native_channel_poll_into_v1(arena, out, 96)).to_equal(1)
+            expect((rt_ptr_read_i64(out, 0) >> 32) & 65535).to_equal(2)
+            expect(trace_native_channel_poll_into_v1(arena, out, 96)).to_equal(0)
+        step("close stops admission: a still-set slot records nothing")
+        expect(leaf.close(arena)).to_equal(TRACE_NATIVE_CHANNEL_OK_V1)
+        expect(run_guard(dll, leaf, 0, 0)).to_equal(TRACE_NATIVE_CHANNEL_CLOSED_V1)

@@ -545,8 +545,12 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
         // -- `for (k, v) in dict` must visit entries in the same order those do.
         Value::Dict(map) => {
             // A layered module value iterates its whole visible surface.
+            let is_namespace = crate::interpreter::is_module_namespace_dict(map);
             let flat = crate::interpreter::module_dict_flat(map);
             let map = flat.as_ref().unwrap_or(map);
+            if is_namespace {
+                crate::interpreter::interpreter_call::gate_namespace_private_entries(map)?;
+            }
             Ok(crate::value::dict_entries_ordered(map)
             .into_iter()
             .map(|(k, v)| {

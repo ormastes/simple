@@ -1,0 +1,108 @@
+# Caret observer -- live event log. Owns the bounded per-(session, generation)
+# ring of observer events fed from the hook / notification receive point, and
+# the attention inbox those events raise. Process-local module state.
+#
+# Hook payloads carry no generation, so hook events are recorded at
+# OBSERVER_HOOK_GENERATION (the first generation).
+
+use app.llm_caret.observer.observation_builder.*
+use app.llm_caret.observer.attention_inbox.*
+use app.llm_caret.observer.stall_classifier.{policy_default}
+use app.llm_caret.observer.provider_adapters.{provider_events, claude_loaded_skill}
+
+# Ponytail: 256 events per session is far beyond what the classifier folds
+# (it only needs the latest tool/approval/heartbeat facts) and bounds memory
+# for a chatty hook stream.
+val OBSERVER_RING_CAP: i64 = 256
+val OBSERVER_HOOK_GENERATION: i64 = 1
+
+var _events: [ObserverEvent] = []
+var _inbox: AttentionInbox = attention_inbox_new()
+var _seq: i64 = 0
+# Provider-reported loaded skills as "session<TAB>skill", first report wins.
+var _skills: [text] = []
+
+fn observer_reset():
+    _skills = []
+    _events = []
+    _inbox = attention_inbox_new()
+    _seq = 0
+
+fn observer_events() -> [ObserverEvent]:
+    _events
+
+fn observer_inbox() -> AttentionInbox:
+    _inbox
+
+fn _same_key(a: ObserverEvent, b: ObserverEvent) -> bool:
+    a.session_id == b.session_id and a.generation == b.generation and a.operation_id == b.operation_id and a.kind == b.kind
+
+fn _already_recorded(e: ObserverEvent) -> bool:
+    for x in _events:
+        if _same_key(x, e):
+            return true
+    false
+
+fn _count_for(session: text, generation: i64) -> i64:
+    var n = 0
+    for x in _events:
+        if x.session_id == session and x.generation == generation:
+            n = n + 1
+    n
+
+# Drop the oldest event of this session/generation once over the cap.
+fn _trim(session: text, generation: i64):
+    if _count_for(session, generation) <= OBSERVER_RING_CAP:
+        return
+    var out: [ObserverEvent] = []
+    var dropped = false
+    for x in _events:
+        if not dropped and x.session_id == session and x.generation == generation:
+            dropped = true
+        else:
+            out = out + [x]
+    _events = out
+
+# Receive point entry: convert one provider hook/notification through the
+# provider adapters and record it. event_id is the operation id, so a replayed
+# event is a no-op for both the ring and the inbox.
+fn observer_record_hook(provider: text, session: text, generation: i64, event_id: text, at_ms: i64, event_name: text):
+    _seq = _seq + 1
+    var added = false
+    for e in provider_events(provider, session, generation, event_id, _seq, at_ms, event_name):
+        if not _already_recorded(e):
+            _events = _events + [e]
+            _trim(session, generation)
+            added = true
+    if added:
+        _inbox = observe_session(_inbox, _events, session, generation, at_ms, policy_default()).inbox
+
+# Receive point for the loaded-skill fact: only a provider Skill call records one.
+fn observer_record_skill(provider: text, session: text, hook_name: text, payload: text):
+    if provider != "claude":
+        return
+    val skill = claude_loaded_skill(hook_name, payload)
+    if skill == "":
+        return
+    val key = session + "\t" + skill
+    if not _skills.contains(key):
+        _skills = _skills + [key]
+
+fn observer_loaded_skills(session: text) -> [text]:
+    var out: [text] = []
+    for k in _skills:
+        val parts = k.split("\t")
+        if parts[0] == session:
+            out = out + [parts[1]]
+    out
+
+# Distinct skill names reported by any session.
+fn observer_all_loaded_skills() -> [text]:
+    var out: [text] = []
+    for k in _skills:
+        val name = k.split("\t")[1]
+        if not out.contains(name):
+            out = out + [name]
+    out
+
+export OBSERVER_RING_CAP, OBSERVER_HOOK_GENERATION, observer_reset, observer_events, observer_inbox, observer_record_hook, observer_record_skill, observer_loaded_skills, observer_all_loaded_skills

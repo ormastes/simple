@@ -12970,6 +12970,47 @@ static int64_t splc_utf8_array_to_bytes(int64_t value, uint8_t** out) {
     return len;
 }
 
+/* C twins of the Rust spl_fonts_call_* transports (wsffi_native.rs): pass a
+ * Simple [u8] to a dlsym'd font provider as (ptr, len). Same contract: a null
+ * function or an unreadable byte array returns 0 without calling. */
+int64_t spl_fonts_call_init_blob(int64_t fptr, int64_t blob_value, int64_t digest_value) {
+    typedef int64_t (*Fn4)(int64_t, int64_t, int64_t, int64_t);
+    if (fptr == 0) return 0;
+    uint8_t* blob = NULL;
+    uint8_t* digest = NULL;
+    int64_t blob_len = splc_utf8_array_to_bytes(blob_value, &blob);
+    if (blob_len < 0) return 0;
+    int64_t digest_len = splc_utf8_array_to_bytes(digest_value, &digest);
+    if (digest_len < 0) { free(blob); return 0; }
+    int64_t rc = ((Fn4)(uintptr_t)fptr)((int64_t)(uintptr_t)blob, blob_len,
+                                         (int64_t)(uintptr_t)digest, digest_len);
+    free(blob);
+    free(digest);
+    return rc;
+}
+
+int64_t spl_fonts_call_init_path(int64_t fptr, int64_t path_value) {
+    typedef int64_t (*Fn2)(int64_t, int64_t);
+    if (fptr == 0) return 0;
+    uint8_t* path = NULL;
+    int64_t path_len = splc_utf8_array_to_bytes(path_value, &path);
+    if (path_len < 0) return 0;
+    int64_t rc = ((Fn2)(uintptr_t)fptr)((int64_t)(uintptr_t)path, path_len);
+    free(path);
+    return rc;
+}
+
+int64_t spl_fonts_call_layout_text(int64_t fptr, int64_t text_value, int64_t size_px, int64_t max_width) {
+    typedef int64_t (*Fn4)(int64_t, int64_t, int64_t, int64_t);
+    if (fptr == 0) return 0;
+    uint8_t* bytes = NULL;
+    int64_t len = splc_utf8_array_to_bytes(text_value, &bytes);
+    if (len < 0) return 0;
+    int64_t rc = ((Fn4)(uintptr_t)fptr)((int64_t)(uintptr_t)bytes, len, size_px, max_width);
+    free(bytes);
+    return rc;
+}
+
 /* Twin of what `std::str::from_utf8` runs (core's run_utf8_validation), which
  * is what Rust's `scalar_validate` / `scalar_find_invalid` call. Returns the
  * number of leading bytes that form valid UTF-8: `len` when the whole input is

@@ -1,0 +1,63 @@
+# TRACE32 MCP over real stdio: a session opened through `t32_session_open`
+# must be visible through the `t32:///sessions` resource.
+# A fake t32rem (a program that ignores its arguments and exits 0) stands in
+# for PowerView, so the PING handshake succeeds without TRACE32 hardware.
+use std.spec.step
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive, file_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.env.platform.{get_temp_dir, is_windows}
+use std.env.variables.{env_get}
+
+val CLOSE = "}"
+
+fn fake_t32rem() -> text:
+    val configured = env_get("T32_FAKE_T32REM") ?? ""
+    if configured != "":
+        return configured
+    if is_windows():
+        return "C:/Program Files/Git/usr/bin/true.exe"
+    "/bin/true"
+
+fn run_t32_mcp(messages: text) -> text:
+    val scope = match secure_temp_dir(get_temp_dir(), "t32-mcp-sessions-"):
+        Ok(path): path
+        Err(reason): return "error: temp scope: " + reason
+    val input_path = scope + "/input.jsonl"
+    if not file_create_exclusive(input_path, messages):
+        val removed = dir_remove_all(scope)
+        return "error: input creation failed; cleanup=" + removed.to_string()
+    val windows = is_windows()
+    val default_runtime = if windows: "bin/simple.exe" else: "bin/simple"
+    val configured = env_get("SIMPLE_MCP_TEST_RUNTIME") ?? ""
+    val runtime = if configured == "": default_runtime else: configured
+    val fake = fake_t32rem()
+    val script_path = scope + "/run.cmd"
+    val command = if windows:
+        "@set T32_BACKEND_PREFERENCE=t32rem\r\n@set \"T32REM=" + fake.replace("/", "\\") + "\"\r\n@set \"T32_MCP_STATE_ROOT=" + scope.replace("/", "\\") + "\"\r\n@\"" + runtime.replace("/", "\\") + "\" run src\\app\\mcp_t32\\main.spl < \"" + input_path.replace("/", "\\") + "\"\r\n"
+    else:
+        "T32_BACKEND_PREFERENCE=t32rem T32REM='" + fake + "' T32_MCP_STATE_ROOT='" + scope + "' exec '" + runtime + "' run src/app/mcp_t32/main.spl < '" + input_path + "'"
+    if windows and not file_create_exclusive(script_path, command):
+        val removed = dir_remove_all(scope)
+        return "error: script creation failed; cleanup=" + removed.to_string()
+    val shell = if windows: env_get("ComSpec") ?? "cmd.exe" else: "/bin/sh"
+    val args = if windows: ["/d", "/c", script_path.replace("/", "\\")] else: ["-c", command]
+    val (stdout, stderr, status) = process_run_bounded(shell, args, 600000, 16777216)
+    val removed = dir_remove_all(scope)
+    if status != 0:
+        return "error: status=" + status.to_string() + "; " + stderr
+    stdout
+
+describe "TRACE32 MCP sessions resource":
+    it "lists a session opened through t32_session_open":
+        step("Use a fake t32rem so the PING handshake succeeds offline")
+        expect(file_exists(fake_t32rem())).to_equal(true)
+        step("Initialize, open a session, then read t32:///sessions over stdio")
+        val init = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{" + CLOSE + "," + "\"clientInfo\":{\"name\":\"spec\",\"version\":\"0\"" + CLOSE + CLOSE + CLOSE + "\n"
+        val open = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"t32_session_open\",\"arguments\":{\"host\":\"localhost\",\"port\":\"20000\",\"name\":\"census_icn\",\"arch\":\"arm\"" + CLOSE + CLOSE + CLOSE + "\n"
+        val read = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"resources/read\",\"params\":{\"uri\":\"t32:///sessions\"" + CLOSE + CLOSE + "\n"
+        val out = run_t32_mcp(init + open + read)
+        expect(out).to_contain("\"id\":3")
+        val tail_start = out.index_of("\"id\":3") ?? 0
+        val sessions_reply = out.substring(tail_start, out.len())
+        expect(sessions_reply).to_contain("census_icn")

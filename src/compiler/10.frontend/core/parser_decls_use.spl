@@ -34,6 +34,8 @@ use compiler.core.parser.{parser_fixed_array_elem, parser_fixed_array_size}
 use compiler.core.parser.{parser_legacy_let_decl_ahead, parser_consume_legacy_let_prefix}
 use compiler.core.parser.{par_prof_enabled}
 use compiler.frontend.core.lexer.{lex_token_start_get, lex_source_slice}
+use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_commit, lex_snapshot_rollback}
+use compiler.core.parser.{parser_tok_save, parser_tok_restore}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.frontend.core.parser_stmts.{parse_block}
 use compiler.frontend.core.parser_stmts.{struct_zero_expr_v1, fixed_array_no_init_default_expr, var_no_init_default_expr, noinit_robust_mode_v1}
@@ -43,7 +45,7 @@ use compiler.frontend.core.static_lock_level_metadata.{lock_level_pending_take, 
 use compiler.frontend.core.lock_level_parser.{lock_level_reject_non_function}
 use compiler.core.ast.{decl_get_imports, decl_get_name, module_add_decl}
 use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding}
-use compiler.core.ast.{decl_fn, decl_impl_block, decl_ce_block, decl_set_impl_trait, decl_set_type_params}
+use compiler.core.ast.{decl_fn, decl_impl_block, decl_ce_block, decl_set_impl_trait_type, decl_set_type_params}
 use compiler.frontend.core._Ast.decl_nodes.{decl_impl_block_typed}
 use compiler.core.ast.{decl_set_param_defaults, decl_set_param_muts}
 use compiler.frontend.core.parser_identifiers.{declaration_identifier_text}
@@ -882,13 +884,21 @@ fn parse_impl_decl() -> i64:
     # positionally. Methods keep the plain target as their self type.
     var impl_type_tag: i64 = -1
     var inherent_target_opaque = false
+    # Checkpoint before the leading type: when it is an applied trait
+    # (`impl Owner<i64> for X:`) it is re-read below as a full type so its
+    # arguments survive (the target walk only consumes them).
+    val head_snap = lex_snapshot_save()
+    val (head_tok_nums, head_tok_text) = parser_tok_save()
+    var head_applied = false
     if par_kind_get() == TOK_IDENT:
         head_params = parse_impl_target_type(type_params.len() > 0)
+        head_applied = impl_target_state.par_impl_target_applied
         inherent_target_opaque = not impl_target_binds_positionally(type_params)
     else:
         target_type = parser_parse_type()
         impl_type_tag = target_type
     var trait_name = ""
+    var trait_type_tag: i64 = -1
     if par_kind_get() == TOK_KW_FOR:
         # `impl Trait for Type:` — methods attach to the concrete type;
         # trait conformance is not checked at this stage. The leading name
@@ -896,6 +906,16 @@ fn parse_impl_decl() -> i64:
         # impl->trait link and un-overridden trait default methods resolve on
         # the native build path instead of failing "unresolved method call".
         trait_name = target_name
+        if head_applied:
+            # A generic trait header kept only its bare name, which HIR then
+            # rejected ("type `Owner` expects 1 type arguments, got 0").
+            lex_snapshot_rollback(head_snap)
+            parser_tok_restore(head_tok_nums, head_tok_text)
+            trait_type_tag = parser_parse_type()
+            if par_kind_get() != TOK_KW_FOR:
+                parser_error("expected 'for' after impl trait type")
+        else:
+            lex_snapshot_commit(head_snap)
         parser_advance()
         target_name = par_text_get()
         var self_params: [text] = []
@@ -909,6 +929,8 @@ fn parse_impl_decl() -> i64:
             impl_type_tag = target_type
         for p in self_params:
             head_params.push(p)
+    else:
+        lex_snapshot_commit(head_snap)
     skip_impl_where_clause()
     parser_expect(TOK_COLON)
     parser_skip_newlines()
@@ -971,7 +993,7 @@ fn parse_impl_decl() -> i64:
             all_params.push(hp)
     decl_set_type_params(impl_idx, all_params)
     if trait_name != "":
-        decl_set_impl_trait(impl_idx, trait_name)
+        decl_set_impl_trait_type(impl_idx, trait_name, trait_type_tag)
     impl_idx
 
 fn parse_ce_decl() -> i64:

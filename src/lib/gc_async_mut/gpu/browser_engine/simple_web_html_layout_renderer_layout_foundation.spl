@@ -19,6 +19,8 @@ use std.nogc_sync_mut.text_layout.font_renderer.{browser_normal_line_height_px}
 use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{svg_view_box_milli}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
 
 pub val SIMPLE_WEB_SUMMARY_MARKER_INLINE_WIDTH: i32 = 16
 
@@ -349,8 +351,8 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
         val node_index = nodes[baseline_i]
         val node_style = styles[node_index]
         val node_replaced = replaced_media_bottom_edge_tag(html_nodes[node_index].tag)
-        val widget_baseline = form_control_baseline_from_top(
-            html_nodes[node_index], node_style, bh[node_index]
+        val widget_baseline = inline_widget_baseline_from_top(
+            child_index, html_nodes, styles, node_index, bh
         )
         var node_ascent = if widget_baseline >= 0:
             margin_ts[baseline_i] + widget_baseline
@@ -382,8 +384,8 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
     baseline_i = 0
     while baseline_i < nodes.len():
         val node_index = nodes[baseline_i]
-        val node_widget_baseline = form_control_baseline_from_top(
-            html_nodes[node_index], styles[node_index], bh[node_index]
+        val node_widget_baseline = inline_widget_baseline_from_top(
+            child_index, html_nodes, styles, node_index, bh
         )
         val node_baseline_offset = if node_widget_baseline >= 0:
             node_widget_baseline
@@ -481,7 +483,7 @@ fn block_bottom_margin_collapses_through(nodes: [HNode], styles: [Style], i: i32
         return false
     if st.pad_b != 0 or st.border_b != 0:
         return false
-    if st.height_px != 0 or st.min_height_px != 0 or st.max_height_px != 0:
+    if st.height_px != 0 or st.min_height_px > 0 or st.max_height_px > 0:
         return false
     if st.min_height_vh or st.flex_fill:
         return false
@@ -522,7 +524,7 @@ fn block_top_margin_collapses_through(nodes: [HNode], styles: [Style], i: i32, s
         return false
     if st.pad_t != 0 or st.border_t != 0:
         return false
-    if st.height_px != 0 or st.min_height_px != 0 or st.max_height_px != 0:
+    if st.height_px != 0 or st.min_height_px > 0 or st.max_height_px > 0:
         return false
     if st.min_height_vh or st.flex_fill:
         return false
@@ -969,6 +971,46 @@ fn form_control_baseline_from_top(node: HNode, st: Style, h: i32) -> i32:
         lead = 0
     st.border_t + st.pad_t + lead + inline_line_strut_baseline_offset(st)
 
+fn inline_widget_baseline_from_top(child_index: HtmlChildIndex, html_nodes: [HNode], styles: [Style], node_index: i32, bh: [i32]) -> i32:
+    """Baseline of an inline widget measured from its border-box top, or -1.
+
+    A `<button>` is an inline-block: its baseline is the baseline of its LAST
+    line of label text (Chrome 159: a three-line 51 px button sits at the top
+    of a 52 px line), the label block being centred in the content box. An
+    empty button aligns on the bottom of its content box. Every other control
+    goes through `form_control_baseline_from_top`."""
+    val node = html_nodes[node_index]
+    val st = styles[node_index]
+    val h = bh[node_index]
+    if node.tag != "button":
+        return form_control_baseline_from_top(node, st, h)
+    if st.display != "inline-block" and st.display != "inline" and st.display != "inline-flex" and st.display != "inline-grid":
+        return -1
+    if child_index.first_child[node_index] < 0:
+        return h - st.border_b - st.pad_b
+    val line = style_line_h(st)
+    val descent = line - inline_line_strut_baseline_offset(st)
+    if st.height_px <= 0 and st.min_height_px <= 0 and st.max_height_px <= 0:
+        # Auto height: the content fills the content box, so the last line
+        # ends at its bottom whatever the content is -- a direct text label,
+        # a label inside `<b>`, several lines after a `<br>`, or an image
+        # (whose bottom edge is that line's baseline, with the strut's
+        # descent below it).
+        return h - st.border_b - st.pad_b - descent
+    # An explicit height (or a min- / max-height clamp) no longer equals the
+    # content: the label block is centred in the content box, or overflows
+    # it from the top.
+    var label = child_index.first_child[node_index]
+    while label >= 0 and html_nodes[label].tag != "#text":
+        label = child_index.next_sibling[label]
+    var label_h = if label >= 0: bh[label] else: line
+    if label_h < line:
+        label_h = line
+    var lead = (h - st.border_t - st.border_b - st.pad_t - st.pad_b - label_h) / 2
+    if lead < 0:
+        lead = 0
+    st.border_t + st.pad_t + lead + (label_h - line) + inline_line_strut_baseline_offset(st)
+
 fn replaced_default_is_content_size(tag: text) -> bool:
     """True when the tag's UA default box is its CONTENT size.
 
@@ -1199,6 +1241,10 @@ fn flex_ordered_children(styles: [Style], child_index: HtmlChildIndex, parent_i:
     var sorted = true
     var last_order = 0
     while c >= 0:
+        # A display:none child (whitespace-only text included) is no flex item.
+        if styles[c].display == "none":
+            c = child_index.next_sibling[c]
+            continue
         val current_order = styles[c].order
         if out_len > 0 and current_order < last_order:
             sorted = false
@@ -1206,6 +1252,8 @@ fn flex_ordered_children(styles: [Style], child_index: HtmlChildIndex, parent_i:
         out[out_len] = c
         out_len = out_len + 1
         c = child_index.next_sibling[c]
+    if out_len < child_count:
+        out = i32_list_prefix(out, out_len)
     if sorted:
         return out
     _sort_style_order_indices(out, out_len, styles)
@@ -1277,12 +1325,14 @@ fn style_with_height(st: Style, height_px: i32) -> Style:
     out.height_auto = false
     out.left_auto = st.left_auto
     out.top_auto = st.top_auto
+    out.white_space_newline = st.white_space_newline
     out.align_items_authored = st.align_items_authored
     out.scrollbar_width_none = st.scrollbar_width_none
     out.display_inline_flex_authored = st.display_inline_flex_authored
     out.contain_size = st.contain_size
     out.contain_intrinsic_w_px = st.contain_intrinsic_w_px
     out.contain_intrinsic_h_px = st.contain_intrinsic_h_px
+    out.width_zero = st.width_zero
     out
 
 fn style_with_width_without_height_metadata(
@@ -1295,12 +1345,14 @@ fn style_with_width(st: Style, width_px: i32) -> Style:
     out.height_auto = st.height_auto
     out.left_auto = st.left_auto
     out.top_auto = st.top_auto
+    out.white_space_newline = st.white_space_newline
     out.align_items_authored = st.align_items_authored
     out.scrollbar_width_none = st.scrollbar_width_none
     out.display_inline_flex_authored = st.display_inline_flex_authored
     out.contain_size = st.contain_size
     out.contain_intrinsic_w_px = st.contain_intrinsic_w_px
     out.contain_intrinsic_h_px = st.contain_intrinsic_h_px
+    out.width_zero = st.width_zero and width_px == 0
     out
 
 # Width an inline replaced box (img/svg/video/input/...) will take on its
@@ -1420,6 +1472,43 @@ fn _lay_intrinsic_text_width_inner(nodes: [HNode], styles: [Style], child_index:
     out_widths[i] = width
     IntrinsicWidthResult(width: width, widths: out_widths)
 
+# True when the inline content of `i` starts (`leading`) or ends with a
+# collapsible space: the first / last text reached through its inline
+# descendants. A block, replaced or empty descendant ends the search.
+fn inline_subtree_edge_is_space(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, leading: bool) -> bool:
+    var c = child_index.first_child[i]
+    if not leading:
+        # Last child: walk the sibling list to its end.
+        var last = c
+        while last >= 0:
+            c = last
+            last = child_index.next_sibling[last]
+    if c < 0:
+        return false
+    if nodes[c].tag == "#text":
+        if styles[c].white_space_pre:
+            return false
+        return if leading: text_starts_with_collapsible_space(nodes[c].text_data) else: text_ends_with_collapsible_space(nodes[c].text_data)
+    if styles[c].display != "inline" or grid_item_is_replaced(nodes[c]):
+        return false
+    inline_subtree_edge_is_space(nodes, styles, child_index, c, leading)
+
+# Outer width of an `<input>` / `<textarea>` whose `width` is auto, as the
+# layout sizes it: `size` / `cols` columns in the control's UA font plus its
+# padding and border, clamped by min-width / max-width; 13 px for a checkbox
+# or radio. 0 for anything else.
+fn text_control_auto_outer_w(node: HNode, st: Style) -> i32:
+    if st.width_px != 0 or (node.tag != "input" and node.tag != "textarea"):
+        return 0
+    if node.tag == "input":
+        val input_type = attr_value(node.attrs_raw, "type").trim().lower()
+        if input_type == "checkbox" or input_type == "radio":
+            return constrained_outer_width(node, st, 13)
+        if input_type == "hidden":
+            return 0
+    # min-width / max-width clamp it, as they clamp the laid-out control.
+    constrained_outer_width(node, st, form_control_intrinsic_content_w(node, st, form_control_cols(node)) + st.pad_l + st.pad_r + st.border_l + st.border_r)
+
 # Max-content width of a flex item, used as its flex base size when it has
 # neither `flex-basis` nor a `width` (CSS: `flex-basis: content`).
 #
@@ -1431,13 +1520,21 @@ fn _lay_intrinsic_text_width_inner(nodes: [HNode], styles: [Style], child_index:
 fn _lay_flex_item_max_content_width_inner(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32) -> i32:
     var inline_run = 0
     var widest = 0
+    # A collapsible space ended the previous inline piece: it is part of the
+    # line when another piece follows (`ab <span>cd</span> ef` is three pieces
+    # and two spaces), as in `intrinsic_text_width`.
+    var gap_pending = false
     var c = child_index.first_child[i]
     while c >= 0:  # cpu-lane-loop-ok: one pass over this item's children during flex base sizing, bounded by the child list, not on any paint path
         val cst = styles[c]
         val ctag = nodes[c].tag
-        if ctag == "#text":
+        val kept_breaks = html_kept_newlines(nodes[c], cst.white_space_newline)
+        if ctag == "#text" and kept_breaks == 0:
             val txt: text = nodes[c].text_trimmed
             if txt.len() > 0:
+                if inline_run > 0 and (gap_pending or text_starts_with_collapsible_space(nodes[c].text_data)) and not cst.white_space_pre:
+                    inline_run = inline_run + resolved_space_advance(cst, text_codepoints(txt))
+                gap_pending = text_ends_with_collapsible_space(nodes[c].text_data) and not cst.white_space_pre
                 val resolved = cst.resolved_font_width
                 if resolved > 0:
                     inline_run = inline_run + resolved
@@ -1445,17 +1542,56 @@ fn _lay_flex_item_max_content_width_inner(nodes: [HNode], styles: [Style], child
                     val glyph_w = style_char_w(cst)
                     val ink_w = if glyph_w > 1: glyph_w - 1 else: glyph_w
                     inline_run = inline_run + (text_cell_width(txt) as i32) * ink_w
+            elif nodes[c].text_data.byte_len() > 0 and not cst.white_space_pre and inline_run > 0:
+                # A whitespace-only text node between two inline boxes
+                # (`<a>Edit</a> <a>Del</a>`) is one collapsible space.
+                gap_pending = true
+        elif (ctag == "br" or kept_breaks > 0) and cst.display == "inline":
+            # A forced break ends the line being measured.
+            if inline_run > widest:
+                widest = inline_run
+            inline_run = 0
+            gap_pending = false
         elif cst.display != "none" and cst.display != "marker":
-            val child_w = if cst.width_px > 0:
+            var child_w = if cst.width_px > 0:
                 cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r
             else:
                 flex_item_max_content_width(nodes, styles, child_index, c)
+            # A replaced inline child (img, input, ...) has an intrinsic or
+            # default width the text walk above knows nothing about.
+            val replaced_w = inline_replaced_predicted_width(nodes[c], cst)
+            if replaced_w > child_w:
+                child_w = replaced_w
+            # A text control with no `width` is as wide as its `size` / `cols`
+            # columns in its own UA font (the layout's own rule).
+            val control_w = text_control_auto_outer_w(nodes[c], cst)
+            if control_w > child_w:
+                child_w = control_w
+            # Atomic inline boxes carry their horizontal margins on the line
+            # (the run loop's `inline_takes_margin`): a checkbox's 3 + 4 px.
+            if child_w > 0 and (cst.display == "inline-block" or ctag == "input" or ctag == "select" or ctag == "textarea"):
+                if cst.margin_l > 0:
+                    child_w = child_w + cst.margin_l
+                if cst.margin_r > 0:
+                    child_w = child_w + cst.margin_r
             if cst.display == "inline" or cst.display == "inline-block":
+                if child_w > 0:
+                    # A space may also sit INSIDE the neighbour: `<span>ab
+                    # </span>cd` ends with one, `ab<span> cd</span>` starts
+                    # with one. Either way it is one space on this line. An
+                    # atomic box (inline-block, button, replaced) is not:
+                    # `ab<button> cd </button>ef` collapses those spaces INSIDE
+                    # the button, so they add nothing to this line.
+                    val edge_open = cst.display == "inline" and not grid_item_is_replaced(nodes[c])
+                    if inline_run > 0 and (gap_pending or (edge_open and inline_subtree_edge_is_space(nodes, styles, child_index, c, true))):
+                        inline_run = inline_run + style_space_advance(styles[i])
+                    gap_pending = edge_open and inline_subtree_edge_is_space(nodes, styles, child_index, c, false)
                 inline_run = inline_run + child_w
             else:
                 if inline_run > widest:
                     widest = inline_run
                 inline_run = 0
+                gap_pending = false
                 if child_w > widest:
                     widest = child_w
         c = child_index.next_sibling[c]
@@ -2177,6 +2313,27 @@ fn definite_content_height_limit(node: HNode, st: Style) -> i32:
         return st.min_height_px
     0
 
+# `st` with its percentage `min-` / `max-` sizes (negative sentinels, see
+# `_decl_percent_sentinel_or_length_px`) resolved to px against the
+# containing block: `containing_w` for the widths, `containing_h` for the
+# heights. A height percentage against an auto height (`containing_h <= 0`)
+# is `none` (CSS 2.2 10.7). Every reader of the clamp slots tests `> 0`, so
+# an unresolved sentinel already reads as `none` -- which is what an
+# intrinsic (max-content) contribution needs.
+fn style_with_resolved_percent_min_max(st: Style, containing_w: i32, containing_h: i32) -> Style:
+    if st.min_width_px >= 0 and st.max_width_px >= 0 and st.min_height_px >= 0 and st.max_height_px >= 0:
+        return st
+    val out = style_with_width(st, st.width_px)
+    if st.min_width_px < 0:
+        out.min_width_px = if containing_w > 0: containing_w * (0 - st.min_width_px) / 100 else: 0
+    if st.max_width_px < 0:
+        out.max_width_px = if containing_w > 0: containing_w * (0 - st.max_width_px) / 100 else: 0
+    if st.min_height_px < 0:
+        out.min_height_px = if containing_h > 0: containing_h * (0 - st.min_height_px) / 100 else: 0
+    if st.max_height_px < 0:
+        out.max_height_px = if containing_h > 0: containing_h * (0 - st.max_height_px) / 100 else: 0
+    out
+
 fn constrained_outer_width(node: HNode, st: Style, candidate_width: i32) -> i32:
     var out = candidate_width
     if st.min_width_px > 0:
@@ -2188,7 +2345,8 @@ fn constrained_outer_width(node: HNode, st: Style, candidate_width: i32) -> i32:
         if out > max_outer:
             out = max_outer
     if out < 1:
-        out = 1
+        # `width:0` (no padding/border) is a definite 0-wide box.
+        out = if st.width_zero and out == 0: 0 else: 1
     out
 
 fn explicit_auto_table_column_offsets(
@@ -2414,8 +2572,12 @@ fn constrained_outer_height(node: HNode, st: Style, candidate_height: i32) -> i3
         out = 1
     out
 
-fn absolute_outer_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, node_i: i32, parent: Style, node: HNode, st: Style, containing_w: i32) -> i32:
-    if st.width_px == 0 and st.left_px > 0 and st.right_px >= 0:
+fn absolute_outer_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, node_i: i32, parent: Style, node: HNode, authored_st: Style, containing_w: i32) -> i32:
+    val st = style_with_resolved_percent_min_max(authored_st, containing_w + parent.pad_l + parent.pad_r, 0)
+    # `left` is SET (`left:0` / `inset:0` count), not merely positive; a
+    # replaced box keeps its intrinsic width (Chrome 159: `<canvas>` with
+    # `inset:0` stays 300 wide, a `<div>` or `<input>` stretches).
+    if st.width_px == 0 and not st.width_zero and not authored_st.left_auto and st.right_px >= 0 and not absolute_replaced_tag(node.tag):
         val padding_box_w = containing_w + parent.pad_l + parent.pad_r
         var stretched = padding_box_w - st.left_px - st.right_px
         if stretched < 1:
@@ -2426,7 +2588,7 @@ fn absolute_outer_width(nodes: [HNode], styles: [Style], child_index: HtmlChildI
         val percent_content_w = padding_box_w * (0 - st.width_px) / 100
         return constrained_outer_width(node, st, css_outer_width(node, st, percent_content_w))
     val explicit_node_w = css_outer_width(node, st, st.width_px)
-    if st.width_px > 0:
+    if st.width_px > 0 or st.width_zero:
         return constrained_outer_width(node, st, explicit_node_w)
     # CSS 2.1 10.3.7: `width: auto` on an absolutely positioned, non-replaced
     # box is SHRINK-TO-FIT, not "fill the containing block". The stretch case is
@@ -2506,10 +2668,32 @@ fn absolute_child_x(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex
     # parent-relative static-position approximation below.
     if not child.left_auto and not absolute_has_positioned_ancestor(nodes, styles, child_i):
         return child.left_px
-    if child.right_px >= 0:
+    # Both insets with a definite width over-constrain the box; `right` is
+    # ignored when the containing block is ltr and `left` when it is rtl
+    # (CSS 2.2 10.3.7). With `width:auto` the box stretches instead and
+    # `left` places it in either direction.
+    val definite_w = child.width_px != 0 or child.width_zero
+    if child.right_px >= 0 and (child.left_auto or (definite_w and absolute_containing_block_rtl(nodes, styles, child_i))):
         val padding_box_w = containing_w + parent.pad_l + parent.pad_r
         return parent_x + parent.border_l + padding_box_w - absolute_outer_width(nodes, styles, child_index, child_i, parent, child_node, child, containing_w) - child.right_px
     parent_x + parent.border_l + child.left_px
+
+fn absolute_replaced_tag(tag: text) -> bool:
+    tag == "canvas" or tag == "img" or tag == "video" or tag == "svg" or tag == "iframe" or tag == "embed" or tag == "object" or tag == "audio"
+
+# Direction of the containing block of the absolute box `node_i`: its
+# nearest positioned ancestor (Chrome 159: an ltr wrapper inside an rtl
+# containing block does not make it ltr).
+fn absolute_containing_block_rtl(nodes: [HNode], styles: [Style], node_i: i32) -> bool:
+    var a = nodes[node_i].parent
+    var root_rtl = false
+    while a >= 0:
+        val ast = styles[a]
+        if ast.position_relative or ast.position_absolute or ast.position_sticky or ast.position_fixed:
+            return ast.direction_rtl
+        root_rtl = ast.direction_rtl
+        a = nodes[a].parent
+    root_rtl
 
 # True when some ancestor of `node_i` establishes an absolute containing block
 # (any non-static position). Transforms/containment are not modelled here.
@@ -2532,14 +2716,17 @@ fn absolute_child_y(nodes: [HNode], styles: [Style], child_i: i32, parent_y: i32
     # Same initial-containing-block rule as absolute_child_x for `top`.
     if not child.top_auto and not absolute_has_positioned_ancestor(nodes, styles, child_i):
         return child.top_px
-    if child.bottom_px >= 0:
+    # Both insets with a definite height over-constrain the box; `bottom`
+    # is ignored (CSS 2.2 10.6.4).
+    if child.bottom_px >= 0 and child.top_auto:
         return parent_y + parent.border_t + containing_h - absolute_outer_height(child_node, child, containing_h) - child.bottom_px
     parent_y + parent.border_t + child.top_px
 
 fn absolute_child_style(parent: Style, child: Style, containing_w: i32, containing_h: i32) -> Style:
-    var resolved_child = child
+    # Percentages of an abspos box are of the containing block's padding box.
+    val padding_box_w = containing_w + parent.pad_l + parent.pad_r
+    var resolved_child = style_with_resolved_percent_min_max(child, padding_box_w, containing_h)
     if child.width_px < 0:
-        val padding_box_w = containing_w + parent.pad_l + parent.pad_r
         val child_width_px = padding_box_w * (0 - child.width_px) / 100
         resolved_child = style_with_width(resolved_child, child_width_px)
     val child_height_px = resolve_percent_height_px(child.height_px, containing_h)

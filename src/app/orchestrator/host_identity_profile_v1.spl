@@ -1,0 +1,141 @@
+# Install public SSH profile configuration through its distinct protected role.
+# No chmod/copy fallback, private-key output or local process execution.
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use app.orchestrator.server_ssh_types_v1.ServerSshProfileV1
+use app.orchestrator.server_ssh_profile_v1.{server_ssh_profile_decode_v1, server_ssh_path_valid_v1}
+use app.orchestrator.host_identity_public_v1.host_identity_known_hosts_validate_v1
+use app.orchestrator.host_identity_command_v1.{host_identity_failure_v1, host_identity_finish_v1,
+    host_identity_open_failure_v1, host_identity_projection_receipt_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.nogc_sync_mut.io.host_identity_store_v1.*
+
+pub struct HostIdentityProfilePreparedV1:
+    profile: ServerSshProfileV1
+    canonical: text
+    leaf: text
+    profile_ref: text
+
+# Canonicalize only decoded public configuration; unknown secret/password
+# fields never reach the protected store or a diagnostic.
+pub fn host_identity_profile_prepare_v1(source: text, root: text) -> Result<HostIdentityProfilePreparedV1, text>:
+    val profile = server_ssh_profile_decode_v1(source)?
+    if profile.store_root == "" or profile.store_root != root:
+        return Err("host-identity-profile-store-binding")
+    @when(os="windows"):
+    if profile.ssh_digest == "": return Err("host-identity-profile-executable-digest-required")
+    @end
+    var fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("server-ssh-profile"),
+        "authRef": SdnValue.String(profile.auth_ref), "trustRef": SdnValue.String(profile.trust_ref),
+        "user": SdnValue.String(profile.user), "sshExecutable": SdnValue.String(profile.ssh_executable),
+        "identityPath": SdnValue.String(profile.identity_path), "knownHostsPath": SdnValue.String(profile.known_hosts_path),
+        "hostKeyAlias": SdnValue.String(profile.host_key_alias), "storeRoot": SdnValue.String(profile.store_root)}
+    if profile.ssh_digest != "": fields["sshDigest"] = SdnValue.String(profile.ssh_digest)
+    val canonical = sdn_encode_canonical(SdnValue.Dict(fields))
+    val digest = sha256_text(canonical)
+    Ok(HostIdentityProfilePreparedV1(profile: profile, canonical: canonical,
+        leaf: digest + ".profile", profile_ref: "profile://" + digest))
+
+fn identity_profile_options_v1(args: [text]) -> Result<Dict<text, text>, text>:
+    if args.len() != 5 or args[0] != "key-profile-install": return Err("host-identity-profile-install-usage")
+    var options: Dict<text, text> = {}
+    var index = 1
+    while index < args.len():
+        val key = args[index]
+        if key != "--store-root" and key != "--profile-file": return Err("host-identity-profile-install-options")
+        if options.contains_key(key) or args[index + 1] == "" or args[index + 1].byte_len() > 4096:
+            return Err("host-identity-profile-install-options")
+        options[key] = args[index + 1]
+        index = index + 2
+    if options.len() != 2: return Err("host-identity-profile-install-options")
+    Ok(options)
+
+fn identity_profile_not_ready_v1(prepared: HostIdentityProfilePreparedV1, owner: HostIdentityStoreV1,
+        projection_unavailable: bool, reason: text) -> OrchestratorValidationReplyV1:
+    host_identity_finish_v1({"status": SdnValue.String("profile-not-installed"),
+        "profileRef": SdnValue.String(prepared.profile_ref), "profileInstalled": SdnValue.Bool(false),
+        "publicationObserved": SdnValue.Bool(false), "transportProjectionUnavailable": SdnValue.Bool(projection_unavailable),
+        "code": SdnValue.String(reason)}, 1, owner)
+
+pub fn host_identity_profile_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
+    val options = match identity_profile_options_v1(args):
+        case Err(reason): return host_identity_failure_v1(reason, 2)
+        case Ok(value): value
+    # Source is untrusted public SDN. Read one bounded nofollow file and then
+    # strictly decode; never copy arbitrary input bytes into a private role.
+    if not server_ssh_path_valid_v1(options["--profile-file"]):
+        return host_identity_failure_v1("host-identity-profile-source-path", 2)
+    val source = match file_read_regular_no_follow_bounded(options["--profile-file"], 65536):
+        case Err(_): return host_identity_failure_v1("host-identity-profile-source-unavailable", 1)
+        case Ok(value): value
+    val prepared = match host_identity_profile_prepare_v1(source, options["--store-root"]):
+        case Err(_): return host_identity_failure_v1("host-identity-profile-source-invalid", 2)
+        case Ok(value): value
+    val opened = host_identity_store_open_v1(options["--store-root"])
+    if not opened.ready or opened.owner == nil or opened.cleanup_pending or opened.error != "":
+        return host_identity_open_failure_v1(opened)
+    var owner = opened.owner.unwrap()
+    match host_identity_store_transport_preflight_v1(owner):
+        case Err(reason):
+            val unavailable = reason == "identity-store-transport-projection-unavailable"
+            return identity_profile_not_ready_v1(prepared, owner, unavailable,
+                if unavailable: "host-identity-profile-transport-projection-unavailable" else: "host-identity-profile-store-preflight-failed")
+        case Ok(_): ()
+    # A usable transport profile requires actual supported key/pin projections
+    # BEFORE publishing profile bytes. Missing/unsupported authority is never
+    # reconstructed by stripping GLOBAL?? or concatenating the requested root.
+    val key_path = host_identity_store_path_v1(owner, sha256_text(prepared.profile.auth_ref) + ".key")
+    val key_projection = host_identity_projection_receipt_v1({}, key_path, "identityPath")
+    if not key_projection.available:
+        return identity_profile_not_ready_v1(prepared, owner, true, "host-identity-profile-key-projection-unavailable")
+    if key_path.unwrap() != prepared.profile.identity_path:
+        return identity_profile_not_ready_v1(prepared, owner, false, "host-identity-profile-key-path-mismatch")
+    val pin_leaf = sha256_text(prepared.profile.trust_ref) + ".hosts"
+    val pin = host_identity_store_read_v1(owner, pin_leaf, 4096)
+    owner = pin.owner
+    if pin.error != "" or pin.cleanup_pending or pin.absent or pin.bytes == nil:
+        return identity_profile_not_ready_v1(prepared, owner, false, "host-identity-profile-pin-unavailable")
+    val pin_bytes = pin.bytes.unwrap()
+    if not utf8_bytes_valid(pin_bytes):
+        return identity_profile_not_ready_v1(prepared, owner, false, "host-identity-profile-pin-invalid")
+    if host_identity_known_hosts_validate_v1(bytes_to_text(pin_bytes), prepared.profile.host_key_alias).is_err():
+        return identity_profile_not_ready_v1(prepared, owner, false, "host-identity-profile-pin-invalid")
+    val hosts_path = host_identity_store_path_v1(owner, pin_leaf)
+    val hosts_projection = host_identity_projection_receipt_v1({}, hosts_path, "knownHostsPath")
+    if not hosts_projection.available:
+        return identity_profile_not_ready_v1(prepared, owner, true, "host-identity-profile-pin-projection-unavailable")
+    if hosts_path.unwrap() != prepared.profile.known_hosts_path:
+        return identity_profile_not_ready_v1(prepared, owner, false, "host-identity-profile-pin-path-mismatch")
+    val published = host_identity_store_publish_v1(owner, prepared.leaf, prepared.canonical.bytes())
+    owner = published.owner
+    var fields: Dict<text, SdnValue> = {"status": SdnValue.String("profile-publication-unconfirmed"),
+        "profileRef": SdnValue.String(prepared.profile_ref), "profileInstalled": SdnValue.Bool(false),
+        "publicationObserved": SdnValue.Bool(published.publication == HostIdentityStorePublicationV1.Published),
+        "fileSynced": SdnValue.Bool(published.file_synced), "namespaceSynced": SdnValue.Bool(published.namespace_synced)}
+    if published.error != "" or published.cleanup_pending:
+        fields["code"] = SdnValue.String("host-identity-profile-publication-unconfirmed")
+        return host_identity_finish_v1(fields, 1, owner)
+    if published.publication == HostIdentityStorePublicationV1.Existing:
+        val actual = host_identity_store_read_v1(owner, prepared.leaf, 65536)
+        owner = actual.owner
+        if actual.error != "" or actual.cleanup_pending or actual.absent or actual.bytes == nil:
+            fields["code"] = SdnValue.String("host-identity-profile-existing-unconfirmed")
+            return host_identity_finish_v1(fields, 1, owner)
+        if bytes_to_text(actual.bytes.unwrap()) != prepared.canonical:
+            fields["code"] = SdnValue.String("host-identity-profile-existing-conflict")
+            return host_identity_finish_v1(fields, 1, owner)
+        fields["status"] = SdnValue.String("profile-existing")
+    elif published.publication == HostIdentityStorePublicationV1.Published and published.file_synced:
+        fields["status"] = SdnValue.String("profile-installed")
+    else:
+        fields["code"] = SdnValue.String("host-identity-profile-publication-unconfirmed")
+        return host_identity_finish_v1(fields, 1, owner)
+    fields["profileInstalled"] = SdnValue.Bool(true)
+    val projection = host_identity_projection_receipt_v1(fields,
+        host_identity_store_path_v1(owner, prepared.leaf), "profilePath")
+    host_identity_finish_v1(projection.fields, projection.exit_code, owner)
+
+export HostIdentityProfilePreparedV1, host_identity_profile_prepare_v1, host_identity_profile_command_v1

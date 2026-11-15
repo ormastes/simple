@@ -19,6 +19,20 @@ use std.nogc_async_mut.sosix.host_facade.{sosix_platform, sosix_print_raw as pri
 use app.llm_caret.cs_dashboard.{CsDashboard, cs_dashboard_new, cs_refresh,
     cs_render, cs_handle_command, cs_apply_action, cs_frame_rows,
     cs_poll_screens, cs_resize_agents, cs_agent_area}
+use app.llm_caret.workbench.capability_checklist.{capability_rows, capability_lines,
+    capability_probes_live}
+use app.llm_caret.workbench.key_resolver.{KeyEvent, KeyFocus, KeyRoute, KeyRouteKind,
+    key_event, leader_switch_target}
+use app.llm_caret.workbench.tui_entry.{route_workbench_key, key_route_status, workbench_leader}
+use app.llm_caret.workbench.leader_keys.{new_leader_state, LeaderState, LeaderAction}
+use app.llm_caret.workbench.key_chunker.{split_complete_keys, flush_carry, terminal_key_step,
+    toggle_focus, focus_label}
+use app.llm_caret.workbench.pane_binding.{PaneBinding, PaneBindingResult, resolve_pane_binding}
+use app.llm_caret.workbench.session_contract.{SessionId, new_session_id}
+use app.llm_caret.workbench.session_source.{select_live_session, live_selected,
+    publish_pane_binding, live_pane_bindings, live_pane_generation, observe_agent_generation}
+use app.llm_caret.pane_backend.{pane_send_raw}
+use std.common.text_bytes.{bytes_to_text}
 use std.nogc_sync_mut.cli.cli_util.{get_cli_args}
 use std.io_runtime.{env_get, time_now_unix_micros, time_now_monotonic_ms}
 
@@ -63,6 +77,8 @@ fn cs_session_from_args(args: [text]) -> text:
 # One submitted line: the command reducer, then its action. Returns the next
 # dashboard, the outcome to show, and whether the operator quit.
 fn _cs_step(d: CsDashboard, line: text) -> (CsDashboard, text, bool):
+    if line.trim() == "/capabilities":
+        return (d, capability_lines(capability_rows(capability_probes_live())).join("\n"), false)
     val (after_cmd, action) = cs_handle_command(d, line)
     if action == "quit":
         return (after_cmd, "", true)
@@ -120,7 +136,7 @@ const _CS_MAX_INSTANT_EMPTY_READS: i64 = 200
 fn _with_input(d: CsDashboard, input: text, log: [text]) -> CsDashboard:
     CsDashboard(session: d.session, manager_status: d.manager_status,
         agents: d.agents, selected: d.selected, input: input, log: log,
-        screen: d.screen)
+        screen: d.screen, pins: d.pins, mru: d.mru)
 
 fn _logged_outcome(d: CsDashboard, outcome: text) -> CsDashboard:
     var log = d.log
@@ -194,6 +210,112 @@ fn _live_end():
     print_raw("\x1b[0m\x1b[?25h\x1b[?1049l")
     val _ok = terminal_exit_raw_mode()
 
+# Key name for the resolver: Ctrl+letter (except Tab/Enter/Backspace/Esc) is
+# "ctrl+<letter>"; everything else is the character itself.
+fn _cs_char_key(ch: text) -> KeyEvent:
+    val code = ch.ord()
+    val plain = code == 8 or code == 9 or code == 10 or code == 13
+    if code >= 1 and code <= 26 and not plain:
+        return key_event("ctrl+" + "abcdefghijklmnopqrstuvwxyz".slice(code - 1, code), ch.bytes())
+    key_event(ch, ch.bytes())
+
+# Applies a resolved leader route to the dashboard. The live dashboard is a
+# command line (no raw-forward pane), so only agent selection is acted on;
+# every other bound action is reported as not available yet.
+fn _cs_leader_apply(d: CsDashboard, route: KeyRoute) -> CsDashboard:
+    if route.kind != KeyRouteKind.Action:
+        return d
+    val n = leader_switch_target(route.action, route.slot, d.selected, d.agents.len())
+    if n > 0:
+        val (next, outcome, _quit) = _cs_step(d, "/switch " + n.to_text())
+        return _logged_outcome(next, outcome)
+    val status = key_route_status(route)
+    if status != "":
+        return _logged_outcome(d, status)
+    _logged_outcome(d, "leader action not available yet")
+
+# Pane id of the selected agent, "" when none or unlaunched.
+fn _cs_selected_pane(d: CsDashboard) -> text:
+    if d.selected < 0 or d.selected >= d.agents.len():
+        return ""
+    d.agents[d.selected].pane_id
+
+fn _cs_focus_text(d: CsDashboard, focus: KeyFocus) -> text:
+    focus_label(focus, _cs_selected_pane(d))
+
+# The dashboard as drawn: the focus mode rides on the header status line.
+fn _cs_show_focus(d: CsDashboard, focus: KeyFocus) -> CsDashboard:
+    CsDashboard(session: d.session, manager_status: d.manager_status + " · " + _cs_focus_text(d, focus),
+        agents: d.agents, selected: d.selected, input: d.input, log: d.log,
+        screen: d.screen)
+
+# Publishes the selected agent's (session, pane) binding through session_source
+# and resolves it back. An agent with no pane publishes nothing and selects a
+# session no binding names, so the guard sees it as unbound.
+fn _cs_terminal_target(d: CsDashboard) -> (PaneBindingResult, SessionId):
+    val pane = _cs_selected_pane(d)
+    if pane == "":
+        select_live_session(new_session_id("none"))
+    else:
+        # The live generation comes from the restart ledger fed by this
+        # agent's pid: a restarted child is generation N+1, not a fresh 1.
+        val agent = d.agents[d.selected]
+        val gen = observe_agent_generation(agent.agent_id, agent.pid)
+        val sid = SessionId(value: agent.agent_id, generation: gen)
+        select_live_session(sid)
+        publish_pane_binding(PaneBinding(session: sid, pane_id: pane, pane_generation: gen))
+    val live = _cs_live_id(d)
+    (resolve_pane_binding(live_pane_bindings(), live, live_pane_generation()), live)
+
+# The selected agent's live (id, generation); "none" when nothing is selected.
+fn _cs_live_id(d: CsDashboard) -> SessionId:
+    if _cs_selected_pane(d) == "":
+        return live_selected()
+    val agent = d.agents[d.selected]
+    SessionId(value: agent.agent_id, generation: observe_agent_generation(agent.agent_id, agent.pid))
+
+# Production send: the smux primitive takes text, so the key bytes go through
+# as UTF-8 text (escape sequences and control bytes are plain ASCII).
+fn _cs_send_raw(session: text, pane: text, bytes: [u8]) -> bool:
+    pane_send_raw(session, pane, bytes_to_text(bytes))
+
+# Runs whole keys through the terminal surface. Returns the dashboard, leader
+# state, the focus afterwards, and any bytes after a focus toggle (text), to be
+# replayed against the new focus rather than dropped.
+fn _cs_terminal_keys(d0: CsDashboard, state0: LeaderState, focus0: KeyFocus,
+        keys: [[u8]], session: text) -> (CsDashboard, LeaderState, KeyFocus, text):
+    cs_terminal_keys_via(d0, state0, focus0, keys,
+        \pane, b: _cs_send_raw(session, pane, b))
+
+# Same, with the pane send injected (production: `_cs_send_raw`).
+fn cs_terminal_keys_via(d0: CsDashboard, state0: LeaderState, focus0: KeyFocus,
+        keys: [[u8]], send: fn(text, [u8]) -> bool) -> (CsDashboard, LeaderState, KeyFocus, text):
+    var d = d0
+    var state = state0
+    var focus = focus0
+    var i = 0
+    while i < keys.len():
+        val (binding, live) = _cs_terminal_target(d)
+        val pane = _cs_selected_pane(d)
+        val step = terminal_key_step(workbench_leader(), state, keys[i], binding,
+            live.value, live.generation, \b: send(pane, b))
+        state = step.state
+        i = i + 1
+        if step.status != "":
+            d = _logged_outcome(d, step.status)
+        if step.route.kind == KeyRouteKind.Action:
+            if step.route.action == LeaderAction.ToggleComposerTerminal:
+                focus = toggle_focus(focus)
+                d = _logged_outcome(d, _cs_focus_text(d, focus))
+                var rest: [u8] = []
+                while i < keys.len():
+                    for b in keys[i]:
+                        rest.push(b)
+                    i = i + 1
+                return (d, state, focus, bytes_to_text(rest))
+            d = _cs_leader_apply(d, step.route)
+    (d, state, focus, "")
+
 # Requires raw mode to be on already; always leaves it off and the alternate
 # screen closed, whichever way the loop ends.
 fn cs_run_live(session: text) -> CaretLoopResult:
@@ -209,6 +331,10 @@ fn cs_run_live(session: text) -> CaretLoopResult:
     var instant_empty = 0
     var reason = "quit"
     var running = true
+    var leader_state = new_leader_state()
+    var focus = KeyFocus.NativeView
+    var carry: [u8] = []
+    var replay = ""
     while running:
         val size = _live_size()
         val (cols, rows) = cs_effective_size(size.cols, size.rows)
@@ -241,7 +367,7 @@ fn cs_run_live(session: text) -> CaretLoopResult:
             last_clock = clock
             dirty = true
         if dirty or full:
-            val frame = cs_frame_rows(d, cols, rows, clock, true)
+            val frame = cs_frame_rows(_cs_show_focus(d, focus), cols, rows, clock, true)
             var cursor = 3 + _char_count(d.input)
             if cursor > cols:
                 cursor = cols
@@ -251,8 +377,21 @@ fn cs_run_live(session: text) -> CaretLoopResult:
             prev = frame
             dirty = false
         val before = time_now_monotonic_ms()
-        val chunk = pty_read(0, 50)
+        var chunk = replay
+        replay = ""
         if chunk == "":
+            chunk = pty_read(0, 50)
+        if chunk == "":
+            if carry.len() > 0 and focus == KeyFocus.TerminalSurface:
+                # Idle: nothing completed the carried tail (a lone Esc).
+                val flushed = flush_carry(carry)
+                carry = []
+                val (fd, fs, ff, fr) = _cs_terminal_keys(d, leader_state, focus, flushed, session)
+                d = fd
+                leader_state = fs
+                focus = ff
+                replay = fr
+                dirty = true
             if time_now_monotonic_ms() - before < 5:
                 instant_empty = instant_empty + 1
                 if instant_empty >= _CS_MAX_INSTANT_EMPTY_READS:
@@ -261,12 +400,37 @@ fn cs_run_live(session: text) -> CaretLoopResult:
             continue
         instant_empty = 0
         dirty = true
-        # An escape sequence (arrow, function key) is not text input.
+        if focus == KeyFocus.TerminalSurface:
+            # The whole chunk is resolved byte-safely; a split escape sequence
+            # or UTF-8 character waits in `carry` for the next read.
+            val (keys, rest) = split_complete_keys(carry, chunk.bytes())
+            carry = rest
+            val (td, ts, tf, tr) = _cs_terminal_keys(d, leader_state, focus, keys, session)
+            d = td
+            leader_state = ts
+            focus = tf
+            replay = tr
+            continue
+        # An escape sequence (arrow, function key) is not text input; only an
+        # F10 leader (CARET_LEADER_KEY=f10) is routed through the resolver.
         if chunk.starts_with("\x1b") and chunk != "\x1b":
+            if chunk == "\x1b[21~":
+                val fr = route_workbench_key(leader_state, key_event("f10", chunk.bytes()), KeyFocus.NativeView)
+                leader_state = fr.state
+                d = _cs_leader_apply(d, fr.route)
             continue
         for ch in chunk.chars():
             if not running:
                 break
+            val kr = route_workbench_key(leader_state, _cs_char_key(ch), KeyFocus.NativeView)
+            leader_state = kr.state
+            if kr.route.kind != KeyRouteKind.Widget:
+                if kr.route.kind == KeyRouteKind.Action and kr.route.action == LeaderAction.ToggleComposerTerminal:
+                    focus = toggle_focus(focus)
+                    d = _logged_outcome(d, _cs_focus_text(d, focus))
+                    continue
+                d = _cs_leader_apply(d, kr.route)
+                continue
             if ch == "\x03" or ch == "\x04":
                 running = false
             elif ch == "\r" or ch == "\n":
@@ -374,4 +538,4 @@ fn main() -> i64:
         return 0
     1
 
-export cs_live_input_supported, cs_run, cs_run_live, cs_live_paint, cs_session_from_args, cs_effective_size, cs_plain_io, CS_DEFAULT_SESSION
+export cs_terminal_keys_via, cs_live_input_supported, cs_run, cs_run_live, cs_live_paint, cs_session_from_args, cs_effective_size, cs_plain_io, CS_DEFAULT_SESSION
