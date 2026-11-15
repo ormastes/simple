@@ -32,6 +32,7 @@ skipped (counted, with a reason) when its model directory is absent.
 
 use std.spec.{describe, it, expect, step, skip, fail}
 use std.gc_async_mut.slang.entrypoints.llm.{engine_backend_available}
+use std.gc_async_mut.slang.engine.llm_engine.{engine_prefix_cache_stats}
 use std.gc_async_mut.slang.entrypoints.openai.serving_chat.{serve_chat_completions}
 use std.gc_async_mut.slang.entrypoints.openai.protocol.{json_string_field}
 use std.common.base_encoding.base64.{base64_encode_bytes}
@@ -136,3 +137,46 @@ describe "media a model cannot take is refused, not faked":
         _record("MM-ANSWER text-only: HTTP " + response.status.to_text() + " " + response.body)
         expect(response.status).to_equal(400)
         expect(json_string_field(response.body, "code")).to_equal("unsupported_modality")
+
+fn _stats() -> text:
+    val s = engine_prefix_cache_stats()
+    if s == nil:
+        return "no-stats"
+    "hits=" + s!.hits.to_text() + " misses=" + s!.misses.to_text() + " admissions=" + s!.admissions.to_text() + " reused=" + s!.tokens_reused.to_text()
+
+fn _hits() -> i64:
+    val s = engine_prefix_cache_stats()
+    if s == nil:
+        return -1
+    s!.hits
+
+describe "a media request leaves the prefix cache honest":
+    it "text, text again, image, text again: no reuse is credited to the media request":
+        if not _live_enabled() or not _have("SmolVLM2-256M-Video-Instruct-GGUF") or not file_exists(_asset("test-1.jpeg")):
+            _skip("text, text again, image, text again", "needs SLANG_LIVE=1, SLANG_MODEL_ROOT, an mtmd shim, SmolVLM2 and test-1.jpeg")
+            return
+        val model = "SmolVLM2-256M-Video-Instruct-GGUF"
+        val t = _text_part("Name three colors.")
+        step("1) text cold, 2) text again (hit expected)")
+        val a1 = _answer(model, t)
+        val s1 = _stats()
+        val h1 = _hits()
+        val a2 = _answer(model, t)
+        val s2 = _stats()
+        val h2 = _hits()
+        step("3) an image request must not touch the cache counters")
+        val a3 = _answer(model, _image_part(_asset("test-1.jpeg"), "jpeg") + "," + _text_part("Describe this image in one sentence."))
+        val s3 = _stats()
+        step("4) text again: any hit must come from a snapshot that still exists")
+        val a4 = _answer(model, t)
+        val s4 = _stats()
+        _record("MM-CACHE a1=" + a1 + " | " + s1)
+        _record("MM-CACHE a2=" + a2 + " | " + s2)
+        _record("MM-CACHE a3=" + a3 + " | " + s3)
+        _record("MM-CACHE a4=" + a4 + " | " + s4)
+        expect(a1.starts_with("HTTP ")).to_equal(false)
+        expect(a4.starts_with("HTTP ")).to_equal(false)
+        expect(a4 == "").to_equal(false)
+        expect(h2 > h1).to_equal(true)
+        expect(s3).to_equal(s2)
+        expect(a4 == a2 or a4 == a1).to_equal(true)
