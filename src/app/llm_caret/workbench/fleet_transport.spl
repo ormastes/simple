@@ -17,17 +17,34 @@ use app.llm_caret.workbench.session_contract.{SessionView, SessionId,
 val FLEET_POLL_TIMEOUT_MS: i64 = 5000
 val FLEET_MAX_BYTES: i64 = 262144
 
+# `kind` is the display-safe transport kind ("ssh", "loopback", "command");
+# command/args may carry targets or secrets and are never rendered. An empty
+# send_command means the host cannot receive forwarded input.
 struct FleetHost:
     host_id: text
+    kind: text
     command: text
     args: [text]
+    send_command: text
+    send_args: [text]
 
 struct FleetRows:
     host_id: text
     views: [SessionView]
 
+# Per-host reconnect state: consecutive failures and the poll tick at which the
+# next attempt is allowed.
+struct FleetBackoff:
+    host_id: text
+    fails: i64
+    retry_at: i64
+
+val FLEET_BACKOFF_MAX_TICKS: i64 = 16
+
 var _fleet_hosts: [FleetHost] = []
 var _fleet_last: [FleetRows] = []
+var _fleet_backoff: [FleetBackoff] = []
+var _fleet_tick: i64 = 0
 
 fn _clean(s: text) -> text:
     s.replace("\t", " ").replace("\n", " ")
@@ -140,19 +157,82 @@ fn _remember(host_id: text, views: [SessionView]):
     kept.push(FleetRows(host_id: host_id, views: views))
     _fleet_last = kept
 
-pub fn fleet_declare_host(host_id: text, command: text, args: [text]):
+fn _backoff_for(host_id: text) -> FleetBackoff:
+    for b in _fleet_backoff:
+        if b.host_id == host_id:
+            return b
+    FleetBackoff(host_id: host_id, fails: 0, retry_at: 0)
+
+fn _set_backoff(host_id: text, fails: i64, retry_at: i64):
+    var kept: [FleetBackoff] = []
+    for b in _fleet_backoff:
+        if b.host_id != host_id:
+            kept.push(b)
+    kept.push(FleetBackoff(host_id: host_id, fails: fails, retry_at: retry_at))
+    _fleet_backoff = kept
+
+pub fn fleet_declare_host_with_send(host_id: text, kind: text, command: text,
+        args: [text], send_command: text, send_args: [text]):
     var kept: [FleetHost] = []
     for h in _fleet_hosts:
         if h.host_id != host_id:
             kept.push(h)
-    kept.push(FleetHost(host_id: host_id, command: command, args: args))
+    kept.push(FleetHost(host_id: host_id, kind: kind, command: command, args: args,
+        send_command: send_command, send_args: send_args))
     _fleet_hosts = kept
+    # Keep the failure count (state stays disconnected until a poll succeeds)
+    # but allow an immediate retry with the new command.
+    _set_backoff(host_id, _backoff_for(host_id).fails, 0)
+
+pub fn fleet_declare_host(host_id: text, command: text, args: [text]):
+    var no_args: [text] = []
+    fleet_declare_host_with_send(host_id, "command", command, args, "", no_args)
 
 pub fn fleet_clear():
     var no_hosts: [FleetHost] = []
     var no_rows: [FleetRows] = []
+    var no_backoff: [FleetBackoff] = []
     _fleet_hosts = no_hosts
     _fleet_last = no_rows
+    _fleet_backoff = no_backoff
+    _fleet_tick = 0
+
+# "connected" | "disconnected" | "unknown" (declared, never polled).
+pub fn fleet_host_state(host_id: text) -> text:
+    val b = _backoff_for(host_id)
+    if b.fails > 0:
+        return "disconnected"
+    for r in _fleet_last:
+        if r.host_id == host_id:
+            return "connected"
+    "unknown"
+
+# Credential-safe panel rows: host id, transport kind, state. Command, args and
+# targets are never included.
+pub fn fleet_host_panel_rows() -> [text]:
+    var rows: [text] = []
+    for h in _fleet_hosts:
+        rows.push("{h.host_id} [{h.kind}] {fleet_host_state(h.host_id)}")
+    rows
+
+# Forwards a line to a remote session (`<host>/<id>`) by running the host's
+# send command with the session's remote-local id and the line appended.
+pub fn fleet_send(session_id: text, line: text) -> bool:
+    if not fleet_is_remote(session_id):
+        return false
+    val slash = session_id.index_of("/")
+    if slash <= 0:
+        return false
+    val host_id = session_id.substring(0, slash)
+    val local_id = session_id.substring(slash + 1)
+    for h in _fleet_hosts:
+        if h.host_id == host_id:
+            if h.send_command == "":
+                return false
+            val (_out, _err, code) = process_run_bounded(h.send_command,
+                h.send_args + [local_id, line], FLEET_POLL_TIMEOUT_MS, FLEET_MAX_BYTES)
+            return code == 0
+    false
 
 # Spec `id=target:path[,id=target:path...]`: target `local` reads the snapshot
 # with `cat path` (loopback host); anything else is an ssh target.
@@ -171,13 +251,29 @@ pub fn fleet_declare_from_spec(spec: text) -> i64:
         val target = rest.substring(0, colon)
         val path = rest.substring(colon + 1)
         if target == "local":
-            fleet_declare_host(host_id, "cat", [path])
+            # Loopback input lands as `<id> <line>` rows in `<path>.in`.
+            fleet_declare_host_with_send(host_id, "loopback", "cat", [path], "sh",
+                ["-c", "printf '%s %s\\n' \"$1\" \"$2\" >> \"$0\"", path + ".in"])
         else:
-            fleet_declare_host(host_id, "ssh", ["-o", "BatchMode=yes", target, "cat", path])
+            var no_args: [text] = []
+            fleet_declare_host_with_send(host_id, "ssh", "ssh",
+                ["-o", "BatchMode=yes", target, "cat", path], "", no_args)
         n = n + 1
     n
 
+fn _down_rows(host_id: text) -> [SessionView]:
+    var down: [SessionView] = []
+    for v in _last_for(host_id):
+        down.push(_disconnected(v))
+    down
+
+# Bounded exponential backoff: after the n-th consecutive failure the host is
+# not retried for min(2^n, 16) polls; rows stay Disconnected meanwhile. The
+# first success clears the failure count (back to connected).
 fn _poll_host(host: FleetHost) -> [SessionView]:
+    val b = _backoff_for(host.host_id)
+    if b.fails > 0 and _fleet_tick < b.retry_at:
+        return _down_rows(host.host_id)
     val (stdout, _stderr, code) = process_run_bounded(host.command, host.args,
         FLEET_POLL_TIMEOUT_MS, FLEET_MAX_BYTES)
     if code == 0:
@@ -185,20 +281,29 @@ fn _poll_host(host: FleetHost) -> [SessionView]:
         if decoded.is_ok():
             val views = decoded.unwrap()
             _remember(host.host_id, views)
+            _set_backoff(host.host_id, 0, 0)
             return views
-    var down: [SessionView] = []
-    for v in _last_for(host.host_id):
-        down.push(_disconnected(v))
+    var wait = 2
+    var k = 1
+    while k < b.fails + 1 and wait < FLEET_BACKOFF_MAX_TICKS:
+        wait = wait * 2
+        k = k + 1
+    if wait > FLEET_BACKOFF_MAX_TICKS:
+        wait = FLEET_BACKOFF_MAX_TICKS
+    _set_backoff(host.host_id, b.fails + 1, _fleet_tick + wait)
+    val down = _down_rows(host.host_id)
     _remember(host.host_id, down)
     down
 
 # Polls every declared host once; rows from unreachable hosts come back
 # Disconnected rather than being dropped.
 pub fn fleet_poll_all() -> [SessionView]:
+    _fleet_tick = _fleet_tick + 1
     var out: [SessionView] = []
     for h in _fleet_hosts:
         out = out + _poll_host(h)
     out
 
 export FleetHost, fleet_encode_snapshot, fleet_decode_snapshot, fleet_declare_host,
+    fleet_declare_host_with_send, fleet_host_state, fleet_host_panel_rows, fleet_send,
     fleet_clear, fleet_poll_all, fleet_declare_from_spec, fleet_is_remote

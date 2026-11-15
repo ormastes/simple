@@ -61,5 +61,15 @@ loopback). Rows are namespaced `<host>/<id>`, labelled `<host>:<id>`; an
 unreachable host keeps its last rows as `Transport.Disconnected` +
 `ProcessLifecycle.Lost`. Production caller: `pane_team.publish_pane_team` ->
 `publish_fleet_sessions`. Spec: `test/01_unit/app/llm_caret/workbench/fleet_transport_spec.spl`.
-Gaps: no 50-agent/5-host scale run, no attention grouping, no real ssh run, no
-reconnect backoff, snapshot polling not push, remote input/send not forwarded.
+Fleet gaps closed (`fleet_gaps_spec`, 6/6, loopback + interpreter): bounded
+exponential reconnect backoff per host (`min(2^n,16)` polls, back to connected on
+first success; `fleet_host_state`); input forwarding `fleet_send` (host send
+command + `<id> <line>` appended; wired in `pane_team.send_to_agent`, which
+`main.spl` `--send` calls); credential-safe host panel row (`fleet_host_panel_rows`:
+id + kind + state, drawn by `tui_view._render_roster`); 50 agents/5 loopback
+hosts with attention-first grouping (`session_source._attention_first`); all
+lifecycle states carried over the wire.
+Remaining gaps: no real ssh run; ssh hosts have no send command (loopback only,
+`<snapshot>.in` inbox); snapshot polling not push; the GUI page does not draw the
+host row; the 50-row roster is clipped by the TUI region height (attention rows
+come first); the other CU-010 states are carried, not re-verified natively.
