@@ -55,7 +55,8 @@ is performed.
 simple orchestrator key-pin --store-root /home/user/.simple-host-identities --public-key-file /home/user/build-server.pub --trust-ref trust://build-server --server build --expected-fingerprint "SHA256:REPLACE_WITH_VERIFIED_FINGERPRINT"
 ```
 
-Save the supported `knownHostsPath` receipt. The alias is `build`. Existing pins
+Keep `knownHostsPath` when supplied; a path-free template also works when the
+receipt contains only the logical trust reference. The alias is `build`. Existing pins
 are immutable: changed keys and aliases fail, even when a caller supplies the
 changed key's correct fingerprint. Explicit verified rotation is a separate
 administrative operation.
@@ -79,49 +80,67 @@ read a private file to produce arbitrary output. No command edits remote
 
 ## 3. Install the protected SSH profile
 
-Write `/home/user/build-ssh.sdn` as public configuration, replacing the marked
-values with actual receipts and the administrator-trusted executable digest:
+For first setup, write `/home/user/build-ssh.sdn` as an installer-only template.
+It has **no** `identityPath` or `knownHostsPath`: either field is rejected even
+when empty. Replace the digest with that of the actual administrator-trusted
+SSH executable:
 
 ```sdn
 version: 1
-kind: server-ssh-profile
+kind: server-ssh-profile-template
 authRef: "secret://shared-host"
 trustRef: "trust://build-server"
 user: builder
 sshExecutable: "/usr/bin/ssh"
-identityPath: "REPLACE_WITH_IDENTITY_PATH_RECEIPT"
-knownHostsPath: "REPLACE_WITH_KNOWN_HOSTS_PATH_RECEIPT"
 hostKeyAlias: build
 storeRoot: "/home/user/.simple-host-identities"
 sshDigest: "REPLACE_WITH_64_LOWERCASE_HEX_EXECUTABLE_SHA256"
 ```
 
-`sshDigest` is required on Windows. The executable and its digest must describe
-an actual trusted installed SSH client. `storeRoot` must exactly match the
-requested retained root.
+`sshDigest` is required on Windows. `storeRoot` must exactly match the actual
+retained root used for this identity and pin. Under the supported Windows
+Service5 execution context, preserve the administrator-provided native root
+spelling, including `GLOBAL??`; do not manufacture an ordinary drive alias.
+Interactive Windows execution remains unsupported by the paired provider.
 
 ```text
 simple orchestrator key-profile-install --store-root /home/user/.simple-host-identities --profile-file /home/user/build-ssh.sdn
 ```
 
-The installer strictly decodes SDN, performs transport preflight and checks the
-actual key/pin path bindings and pinned alias **before profile publication**.
-It writes canonical public bytes to the distinct protected
-`sha256(canonical-profile).profile` role. Exact existing content is idempotent;
-changed content has a different immutable `profile://<digest>` reference.
-Use the returned `profilePath` for subsequent SSH-profile arguments. The
-installer provides this protected configuration path without chmod/copy
-fallbacks into ordinary files.
+The installer opens the actual protected store and acquires one paired owner
+for the existing `authRef` key and `trustRef` host pin. A bounded acquisition
+uses the existing service namespace/current-root/file proofs. Only the actual
+current paired-path result supplies both credential paths. The installer then
+builds the existing complete `server-ssh-profile`, applies its strict path and
+field validation, verifies the actual pinned alias, and rechecks the same pair
+immediately before publication. Unsupported SSH percent/environment expansion
+syntax is refused. A template never becomes a runtime profile by itself and
+never supplies dummy credential paths.
 
-A validated private store can lack an external transport projection. Only the
-dedicated `identity-store-transport-projection-unavailable` result permits a
-logical key/pin success with `transportProjectionUnavailable: true` and no
-fabricated path. Receipts preserve the logical reference, public fingerprint
-and `publicationObserved`. Other path errors are nonzero while retaining known
-publication facts. Native Windows `GLOBAL??` names are never stripped into an
-ordinary drive path. A safe Windows external SSH projection is not currently
-qualified, so profile preflight refuses publication in that case; previously
-stored keys/pins are neither undone nor reported absent.
+Existing complete `server-ssh-profile` input remains supported. Its supplied
+paths must exactly match the actual pair; conflicting caller paths fail before
+publication. Canonical complete-profile SDN and the existing immutable
+`sha256(canonical-profile).profile` role are unchanged. Exact existing content
+is idempotent; changed content has a different `profile://<digest>` reference.
+The pair stays retained through publication and existing-byte comparison.
+
+The returned `profilePath` is the positively validated **protected config
+locator**, not an SSH credential projection. It may retain a native Windows
+`GLOBAL??` prefix. Pass it unchanged as the SSH-profile argument after successful
+cleanup; the existing protected loader consumes it only after the prior writer
+has closed. It is not substituted into `identityPath`/`knownHostsPath`. The
+installer never chmods or copies configuration into an ordinary unprotected
+file. A successful immutable publication remains reported if later locator or
+cleanup confirmation fails; such a command returns nonzero and keeps actual
+pending owners for the existing cleanup flow.
+
+Generic key/pin `path_v1` and transport preflight behavior remain unchanged.
+Their dedicated `identity-store-transport-projection-unavailable` result may
+still return logical key/pin success without a path; first-time installation
+uses the separate actual paired proof instead. Pair invalidation, replacement,
+reference/root mismatch or namespace failure never falls back to prefix
+stripping or a newly created pair. Native/OpenSSH/Service5 qualification for
+this setup remains **NOT_RUN**; source support is not deployment evidence.
 
 ## 4. Configure one shared server row
 
@@ -203,11 +222,15 @@ Atomic no-replace publication reports `fileSynced` and `namespaceSynced`
 separately. File flush success does not prove directory metadata durability
 through a crash; Windows currently leaves namespace durability unconfirmed.
 
-Commands close retained owners once. Actual unresolved owners stay in the
-process-local reply for recovery; output is nonzero and reports
-`cleanupPending`. Consumed POSIX descriptors with unconfirmed close return
-nonzero `cleanup-unconfirmed`, without retrying stale descriptors. Publication
-facts remain visible when later projection/cleanup fails.
+The installer drains the paired owner in at most 64 normal cleanup phases,
+then closes the parent store. It advances only the explicit normal pending-phase
+marker; a retained native error stops the drain rather than retrying a consumed
+descriptor or repeatedly failing call. Actual unresolved pair children remain
+canonical in the same retained parent, which is carried in the process-local
+reply. Output is nonzero with `cleanupPending`; original operation failures and
+publication facts remain visible. The existing cleanup consumer must retire
+pending owners before another writer/loader is treated as admitted. Generic
+commands retain their prior cleanup behavior.
 
 Mutable buffers receive best-effort wiping. Immutable entropy-hex/private-PEM
 text and crypto intermediates do not have complete RAM-erasure or locked-memory
