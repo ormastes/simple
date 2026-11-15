@@ -1768,8 +1768,10 @@ never cache an answer computed while exhausted) —
   become the default until that is explained. Checked 2026-11-15: it is already
   so on base `b8b14272484`; disabling the #9435 `clipped-out` return leaves the
   u32 sum byte-identical, so that is NOT the cause; draining the deferred u32
-  upload at once moves it only to `2697952473848308`. About 15k full-ink pixels
-  of text are missing on the u32 lane; cause open.
+  upload at once moves it only to `2697952473848308`, and this branch (atlas kept
+  across sizes) gives `2697955134348331`: the lane depends on atlas layout and
+  upload order. The gap is the sum-equivalent of ~15.4k black-to-white pixels
+  (no framebuffer diff yet); cause open.
 - Gradient paint cost, same seed: 300 x 900x100 120deg boxes 1.02 s -> 0.39 s
   wall (startup 0.24 s), RSS +4 MB; 6000 12x6 boxes 0.25 s -> 0.25 s, +5 MB
   (boxes under 1025 px skip the table; a table per box cost +87 MB).

@@ -47,6 +47,10 @@ upload. Pinned by:
   Mutation check: with the reset NOT re-seeding the sequence, the one-flush row
   fails with 69 mismatched pixels (the earlier recorded run reads the rebuilt
   cell).
+- `vulkan_font_atlas_overflow_parity_spec` also asserts the engine atlas holds
+  only the 2 rebuilt cells right after the overflowing run.
+- Not covered: an overflow after earlier glyphs of the SAME run already
+  inserted (the parked cursor makes the first glyph fail).
 - Parking the cursor stands in for real fill: driving 1M atlas pixels with
   300-512 px glyphs hit the 900 s spec budget in the interpreter.
 
