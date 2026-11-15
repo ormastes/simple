@@ -40,6 +40,7 @@ use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integ
     llvm_ir_builder_push_line, llvm_codegen_error_module}
 use compiler.backend.common.mir_text_codegen.MirTextCodegen
 use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name}
+use compiler.mir.text_extern_abi.{runtime_tuple_result_facade}
 use compiler.mir.mir_coverage_probe_admission.{
     mir_coverage_probe_admission_diagnostic_module_v1
 }
@@ -2974,10 +2975,8 @@ impl MirTextCodegen for MirToLlvm:
         # the same (ptr, len, args, ...) words and return the rt_alloc'd
         # 3-word tuple block the destructure loads expect (declares
         # registered in emit_runtime_declarations, asm_constraints_helpers.spl).
-        # rt_process_run_inherit returns a plain i64 and needs no facade.
-        # Each facade is guarded by its post-split word count (cmd = ptr + len),
-        # like the MIR split and the Cranelift remap: a different-arity import
-        # of the same name (wasm `rt_process_run(cmd) -> i64`) keeps its callee.
+        # The name/word-count table is runtime_tuple_result_facade
+        # (compiler.mir.text_extern_abi), shared with the Cranelift adapter.
         # A nonlocal bare `env_get` callee (an importer's view of the @always_inline
         # config.env_get / std.env.env_get providers) carries ONE boxed text
         # word -- MIR's (ptr, len) split is keyed on `rt_env_get`, not on the
@@ -2988,9 +2987,13 @@ impl MirTextCodegen for MirToLlvm:
         val imported_env_get = bare_name_for_call == "env_get" and not self.owned_name_has_local.has("env_get")
         val imported_argv = (bare_name_for_call == "get_args" or bare_name_for_call == "get_cli_args" or bare_name_for_call == "sys_get_args") and not self.owned_name_has_local.has(bare_name_for_call)
         val imported_eprint = bare_name_for_call == "eprint" and not self.owned_name_has_local.has("eprint")
-        var call_func_name = if imported_argv: "@rt_get_args" elif imported_env_get and args.len() == 1: "@rt_env_get_value" elif imported_env_get: "@rt_env_get" elif bare_name_for_call == "rt_env_get" and args.len() == 1: "@rt_env_get_value" elif imported_eprint: "@rt_eprint" elif bare_name_for_call == "rt_dict_insert": "@rt_dict_set" elif bare_name_for_call == "rt_process_run" and args.len() == 3: "@rt_process_run_tuple" elif bare_name_for_call == "rt_process_run_bounded" and args.len() == 5: "@rt_process_run_bounded_tuple" elif bare_name_for_call == "rt_process_run_bounded_bytes" and args.len() == 5: "@rt_process_run_bounded_bytes_tuple" elif bare_name_for_call == "rt_cpuid_tuple" and args.len() == 2: "@rt_cpuid_tuple_block" elif bare_name_for_call == "rt_process_spawn_guarded": "@rt_process_spawn_guarded_value" elif bare_name_for_call == "rt_process_run_timeout" and args.len() == 4: "@rt_process_run_timeout_tuple" elif bare_name_for_call == "rt_process_run_owned_observed_bounded_value" and args.len() == 5: "@rt_process_run_owned_observed_bounded_text" elif bare_static_name == "text.from_char_code": "@rt_char_from_code" elif bare_static_name == "text.from_bytes": "@rt_bytes_to_text" else: func_name
+        var call_func_name = if imported_argv: "@rt_get_args" elif imported_env_get and args.len() == 1: "@rt_env_get_value" elif imported_env_get: "@rt_env_get" elif bare_name_for_call == "rt_env_get" and args.len() == 1: "@rt_env_get_value" elif imported_eprint: "@rt_eprint" elif bare_name_for_call == "rt_dict_insert": "@rt_dict_set" elif bare_name_for_call == "rt_process_spawn_guarded": "@rt_process_spawn_guarded_value" elif bare_static_name == "text.from_char_code": "@rt_char_from_code" elif bare_static_name == "text.from_bytes": "@rt_bytes_to_text" else: func_name
         if func.call_origin != MirCallOrigin.Runtime:
             call_func_name = func_name
+        # Tuple-result owners: runtime AND foreign (stdlib extern) origin.
+        val tuple_facade = if func.call_origin == MirCallOrigin.Source: "" else: runtime_tuple_result_facade(bare_name_for_call, args.len())
+        if tuple_facade != "":
+            call_func_name = "@" + tuple_facade
         call_func_name = self.normalize_call_callee(call_func_name)
         # Inline typed-bytes LE loads (no per-call registry lock). Only when
         # the destination is a plain i64; anything else keeps the runtime call.
