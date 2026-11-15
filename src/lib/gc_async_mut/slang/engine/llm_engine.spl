@@ -482,6 +482,14 @@ struct EngineChatResult:
     runner: text
 
 fn engine_complete_chat(model_root: text, model_id: text, framed: text, plain_prompt: text, max_tokens: i64) -> Result<EngineChatResult, text>:
+    _engine_dispatch(model_root, model_id, framed, plain_prompt, max_tokens, true)
+
+# Legacy /v1/completions: the raw prompt, no chat template, through the same
+# dispatch (and the same usage counts) as chat.
+fn engine_complete_text(model_root: text, model_id: text, prompt: text, max_tokens: i64) -> Result<EngineChatResult, text>:
+    _engine_dispatch(model_root, model_id, prompt, prompt, max_tokens, false)
+
+fn _engine_dispatch(model_root: text, model_id: text, framed: text, plain_prompt: text, max_tokens: i64, chat: bool) -> Result<EngineChatResult, text>:
     ENGINE_LAST_RUNNER = ""
     var found: NativeModel? = nil
     for m in scan_model_root(model_root, engine_backend_available()):
@@ -504,7 +512,7 @@ fn engine_complete_chat(model_root: text, model_id: text, framed: text, plain_pr
         RunnerKind.Pure:
             return _complete_pure(plain_prompt, max_tokens)
         RunnerKind.Ggml:
-            return _complete_ggml(framed, max_tokens)
+            return _complete_ggml(framed, max_tokens, chat)
 
 fn _complete_pure(prompt: text, max_tokens: i64) -> Result<EngineChatResult, text>:
     if ENGINE_PURE == nil:
@@ -518,14 +526,14 @@ fn _complete_pure(prompt: text, max_tokens: i64) -> Result<EngineChatResult, tex
             Ok(EngineChatResult(content: done.output, prompt_tokens: done.prompt_tokens,
                 completion_tokens: done.completion_tokens, runner: "pure"))
 
-fn _complete_ggml(framed: text, max_tokens: i64) -> Result<EngineChatResult, text>:
+fn _complete_ggml(framed: text, max_tokens: i64, chat: bool) -> Result<EngineChatResult, text>:
     if paged_executor_active():
-        return Err("chat templating is not available on the physical page executor")
+        return Err("chat templating and usage counts are not available on the physical page executor")
     var budget = max_tokens
     if budget <= 0:
         budget = 256
     match generate_observed_request(BackendGenerationRequest(
-          max_tokens: budget.to_text(), prompt: framed, backend: ENGINE_BACKEND!, chat: true)):
+          max_tokens: budget.to_text(), prompt: framed, backend: ENGINE_BACKEND!, chat: chat)):
         Err(e): Err(backend_error_text(e))
         Ok(observed):
             Ok(EngineChatResult(content: observed.output, prompt_tokens: observed.prompt_tokens,
@@ -564,7 +572,7 @@ fn engine_pure_stats() -> PureRunnerStats?:
         total_evaluated_positions: lane.session.positions_evaluated,
         requests: lane.requests)
 
-export EngineChatResult, engine_last_runner, engine_pure_stats, PureRunnerStats
+export engine_complete_text, EngineChatResult, engine_last_runner, engine_pure_stats, PureRunnerStats
 export engine_set_lib_path, engine_set_gpu_layers_text, engine_gpu_offload_status, engine_set_n_ctx_text, engine_set_matched_cpu_threads_text, engine_set_physical_pages_config, engine_set_prefix_cache_limits, engine_lib_path, engine_backend_available
 export engine_preload, engine_complete_chat, engine_complete_chat_observed, engine_complete_chat_media, engine_media_caps, engine_media_caps_for
 export engine_loaded_model, engine_prefix_cache_stats, engine_unload, engine_ensure_loaded, engine_generate, engine_complete
