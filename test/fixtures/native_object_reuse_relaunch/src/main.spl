@@ -33,25 +33,37 @@
 # Must NOT reuse: edit alpha_value's body (alpha rebuilt), change its
 # signature (alpha and beta rebuilt), or pass --backend=llvm (all rebuilt);
 # commit each edit before the run.
-# Claim resume (run_mir_shards, mir-run-latest + per-ledger run-key):
+# Claim resume (run_mir_shards, mir-run-latest + per-ledger run-key); case
+# names match claimresume-accept/accept.sh:
+#   R0 first launch prints `[mir-shard] resume: no prior ledger; full pass`.
+#   R0b uninterrupted relaunch on the same cache (also: kill at `phase=link`):
+#      `every row adopted; no MIR worker spawned`, then the link.
 #   R1 partial: kill run 1 by PID once `[mir-shard] done owner=0/2@0` is
 #      logged; run 2 must print `[mir-shard] resume: adopted=2 requeued=2`
 #      and spawn ONE worker (owner 0/2@0) that lowers only the 2 requeued
 #      modules, then the same link line and stdout.
 #   R2 crash: kill -ABRT the owner 1/2@0 worker mid-claim; run 2 adopts
 #      owner 0's rows and re-runs exactly the crashed claim's modules.
-#   R3 all sealed: kill at `phase=link`; run 2 prints `every row adopted;
-#      no MIR worker spawned` and links.
-#   R4 knobs: run 2 with another SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE and
-#      SIMPLE_MIR_SHARD_WORKER_KB still resumes.
-#   Full pass (`resume: full pass; run key component <c> differs`): an
-#      UNCOMMITTED edit of alpha (environment), --backend=llvm (argv),
-#      SIMPLE_MIR_SHARD_COUNT=3 (shards). A body edit of alpha committed after
-#      run 1 is a full pass too, and beta is never adopted from the old run.
-#   Stale-object guard (COMMITTED edits; a reverted UNCOMMITTED edit leaves
-#      SCV serving the edited content, see report): S killed, S' completes,
-#      back to S, relaunch:
-#      rows whose object S' overwrote are requeued (receipt capsule differs).
+#   R3 route knobs: another SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE /
+#      _FALLBACK_ROUTE, SIMPLE_MIR_SHARD_WORKER_KB, session id, --threads /
+#      --jobs / -j still resume.
+#   R4 objects: one adopted row's object removed, another overwritten; each
+#      requeues only its own row (receipt check).
+#   R5 full pass (`resume: full pass; run key component <c> differs`):
+#      --backend=llvm (argv), SIMPLE_MIR_SHARD_COUNT=3 (shards), an
+#      UNCOMMITTED edit of alpha (environment), a committed body or signature
+#      edit, SIMPLE_ICE_SKIP_MODULES=gamma (ice-skip), a go-to-end toggle
+#      (go-to-end). Rows whose object a later build overwrote are requeued
+#      (receipt capsule differs); a reverted uncommitted edit resumes
+#      correctly since #9481 (SCV re-reads a dirty path once it is clean).
+# Known limits (review, no code):
+#   - The link step checks only that an adopted row's object file exists, not
+#     its receipt (pre-existing; adoption itself checks the receipt).
+#   - Without SIMPLE_MIR_SHARD_COUNT the shard count follows memory headroom,
+#     so a relaunch can get another count and silently take a full pass
+#     (costs time, not correctness).
+#   - The worker binary is not bound when SIMPLE_BINARY differs from the
+#     coordinator's executable.
 # Expected stdout:
 # beta 23
 # gamma-7

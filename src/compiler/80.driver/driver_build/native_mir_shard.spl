@@ -280,37 +280,51 @@ pub fn native_mir_shard_smf_part_read_v1(queue: text, module_name: text) -> Resu
 # A relaunch of the same build adopts the killed launch's finished rows instead
 # of re-lowering them. Admission is whole-run equality: every input that can
 # change an object or which module lands in which claim is one named component
-# of the run key; the memory/thread knobs (worker KiB, --threads, dataset cap)
-# are not. Source edits move the projected environment (SIMPLE_SCV_* rows).
+# of the run key; the memory/thread knobs (worker KiB, --threads/--jobs/-j,
+# dataset cap) are not. Source edits move the projected environment
+# (SIMPLE_SCV_* rows).
 
+# --jobs and -j are native-build aliases of --threads: their only reader is
+# native_build_requested_shard_threads (process count, not object bytes).
 fn native_mir_shard_run_key_args_v1(args: [text]) -> [text]:
     var kept: [text] = []
     var skip_next = false
     for arg in args:
         if skip_next:
             skip_next = false
-        elif arg == "--threads":
+        elif arg == "--threads" or arg == "--jobs" or arg == "-j":
             skip_next = true
-        elif not arg.starts_with("--threads="):
+        elif not arg.starts_with("--threads=") and not arg.starts_with("--jobs="):
             kept = kept.push(arg)
     kept
 
 # Module-selection and failure-tolerance knobs the projected environment drops
 # (they do not change an object's bytes) but that change WHICH rows a pass
-# produces or whether the link is allowed.
+# produces or whether the link is allowed. Without them a relaunch with
+# SIMPLE_ICE_SKIP_MODULES=gamma adopted every row of a complete run and linked
+# what a full pass with that skip refuses. Census of the sibling knobs:
+# - SIMPLE_ICE_SKIP_MODULES, SIMPLE_NATIVE_GO_TO_END, SIMPLE_MIR_SHARD_ONLY_PATHS:
+#   here (dropped by the module-environment projection).
+# - SIMPLE_COMPILE_FAIL_FAST, SIMPLE_NO_STUB_FALLBACK, SIMPLE_ALLOW_UNLOWERED_MIR,
+#   SIMPLE_STUB_HIR, SIMPLE_UNSTUB_HIR, SIMPLE_MCDC_EXCLUDE,
+#   SIMPLE_BOOTSTRAP_SKIP_MIR_LOWER, SIMPLE_MIR_SELECTIVE: already in the
+#   environment component (every SIMPLE_* the projection keeps).
+# - --go-to-end and other flags: the argv component.
+# - Shard count / fork workers: their own components.
 pub fn native_mir_shard_run_key_selection_v1(ice_skip: text, go_to_end: text,
         only_paths: text) -> text:
     "ice-skip={sha256_text(ice_skip)}\ngo-to-end={sha256_text(go_to_end)}\nonly-paths={sha256_text(only_paths)}\n"
 
 # The resume decision line printed for a full pass.
 pub fn native_mir_shard_resume_full_pass_line_v1(mismatch: text, prior: text) -> text:
+    if mismatch == "no-prior-ledger": return "[mir-shard] resume: no prior ledger; full pass"
     "[mir-shard] resume: full pass; run key component {mismatch} differs from prior ledger {prior}"
 
 # One "<component>=<value>" row per input, in a fixed order.
 pub fn native_mir_shard_run_key_v1(compiler: text, environment: text, guards: text,
         lane: text, args: [text], count: i64, fork_workers: i64, selection: text) -> text:
     val argv = native_mir_shard_run_key_args_v1(args).join("\n")
-    "native-mir-shard-run-key-v1\ncompiler={sha256_text(compiler)}\nenvironment={sha256_text(environment)}\nguards={sha256_text(guards)}\nlane={sha256_text(lane)}\nargv={sha256_text(argv)}\nshards={count}\nfork-workers={fork_workers}\n"
+    "native-mir-shard-run-key-v1\ncompiler={sha256_text(compiler)}\nenvironment={sha256_text(environment)}\nguards={sha256_text(guards)}\nlane={sha256_text(lane)}\nargv={sha256_text(argv)}\nshards={count}\nfork-workers={fork_workers}\n{selection}"
 
 # "" when equal, else the name of the first differing component.
 pub fn native_mir_shard_run_key_mismatch_v1(prior: text, current: text) -> text:
