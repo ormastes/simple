@@ -2268,6 +2268,54 @@ fn test_native_class_with_imported_trait_records_impl_and_vtable() {
     assert_eq!(entry.3.iter().filter(|slot| slot.is_some()).count(), 3, "slots: {:?}", entry.3);
 }
 
+/// Root cause of the same bug: an entry OUTSIDE every stdlib family (here
+/// `test/xt/main.spl`) resolved `std.xt.transport.transport` through the
+/// family loop, and the earlier family's package-self match
+/// (`nogc_async_mut/xt/transport/__init__.spl`, which declares no trait) beat
+/// the later family's real `nogc_sync_mut/xt/transport/transport.spl`. The
+/// trait binding was then recorded for the wrong unit and `Buf` got no impl.
+#[test]
+fn test_native_entry_outside_src_binds_imported_trait_from_later_family_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_root = project_root.join("src");
+    let lib_root = src_root.join("lib");
+    let decoy = lib_root.join("nogc_async_mut/xt/transport/__init__.spl");
+    let owner = lib_root.join("nogc_sync_mut/xt/transport/transport.spl");
+    let consumer = project_root.join("test/xt/main.spl");
+    for path in [&decoy, &owner, &consumer] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    }
+    std::fs::write(&decoy, "fn decoy_only() -> i64:\n    0\n").unwrap();
+    std::fs::write(&owner, "trait Transport:\n    fn close()\n").unwrap();
+    std::fs::write(
+        &consumer,
+        "use std.xt.transport.transport.{Transport}\n\nclass Buf with Transport:\n    closed: bool\n    fn close():\n        print \"c\"\n",
+    )
+    .unwrap();
+
+    let mp = simple_parser::ast::ModulePath::new(vec!["std".into(), "xt".into(), "transport".into(), "transport".into()]);
+    let resolver = crate::module_resolver::ModuleResolver::new(project_root.clone(), src_root.clone())
+        .with_extra_source_roots(super::compiler::native_hir_resolver_roots(&project_root, &[src_root.clone(), lib_root]));
+    let resolved = resolver.resolve(&mp, &consumer).expect("stdlib import must resolve");
+    assert_eq!(
+        crate::interpreter::normalize_path_key(&resolved.path),
+        crate::interpreter::normalize_path_key(&owner)
+    );
+
+    let source = std::fs::read_to_string(&consumer).unwrap();
+    let ast = simple_parser::Parser::new(&source).parse().unwrap();
+    let mut lowerer = crate::hir::Lowerer::with_module_resolver(resolver, consumer);
+    lowerer.set_strict_mode(false);
+    lowerer.set_lenient_types(true);
+    let hir = lowerer.lower_module(&ast).expect("consumer must lower");
+    assert!(
+        hir.impls.iter().any(|i| i.type_name == "Buf" && i.trait_name.as_deref() == Some("Transport")),
+        "no HirImpl for Buf with imported Transport; impls={:?}",
+        hir.impls.iter().map(|i| (&i.type_name, &i.trait_name)).collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn test_incremental_cache_dir_custom() {
     let config = NativeBuildConfig {

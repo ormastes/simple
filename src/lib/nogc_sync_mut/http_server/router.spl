@@ -5,8 +5,9 @@
 # Design: doc/05_design/simple_web_server_lib_api.md
 
 use std.nogc_sync_mut.http_server.types.{
-    HttpRequest, HttpResponse, HttpMethod, HttpStatus, http_method_to_text
+    HttpRequest, HttpResponse, HttpMethod, HttpStatus, http_method_to_text, mime_type_for_extension
 }
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_text}
 # Shared protocol core — path safety and route pattern matching are common
 # to the sync and async servers.
 export use std.common.net.http_core.{path_is_safe, match_route_pattern, extract_route_params}
@@ -108,9 +109,25 @@ fn method_matches(route_method: HttpMethod, req_method: HttpMethod) -> bool:
 fn default_not_found(req: HttpRequest) -> HttpResponse:
     HttpResponse.not_found()
 
+fn static_dir_response(prefix: text, dir: text, req: HttpRequest) -> HttpResponse:
+    """Serve `<dir>/<path after prefix/>` as a GET static mount (Router.mount handler body)."""
+    if not req.path.starts_with(prefix + "/") or not path_is_safe(req.path):
+        return HttpResponse.not_found()
+    val rest = req.path.substring(prefix.len() + 1, req.path.len())
+    val file = dir + "/" + rest
+    if rest == "" or not file_exists(file):
+        return HttpResponse.not_found()
+    HttpResponse(
+        status: HttpStatus.Ok,
+        headers: [("Content-Type", mime_type_for_extension(file))],
+        body: file_read_text(file)
+    )
+
 # =============================================================================
 # Path Safety (AC-3)
 # =============================================================================
 # path_is_safe now lives in the shared protocol core
 # (src/lib/common/net/http_core.spl) and is re-exported above so existing
 # importers of this module keep working.
+
+export Route, Router, method_matches, default_not_found, static_dir_response
