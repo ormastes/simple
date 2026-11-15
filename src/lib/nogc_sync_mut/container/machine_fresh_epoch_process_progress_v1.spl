@@ -1,0 +1,40 @@
+# Pure candidate transitions only. A consumed candidate becomes canonical ONLY
+# after the actual owning native close succeeds, never from a caller outcome.
+pub struct MachineFreshEpochProcessProgressV1:
+    phase: text
+    identity: text
+    error: text
+
+pub fn machine_fresh_epoch_process_progress_v1(current: MachineFreshEpochProcessProgressV1,
+        identity: text, outcome: text, diagnostic: text = "") -> Result<MachineFreshEpochProcessProgressV1, text>:
+    if not ["unresolved", "transferred", "consumed", "no-owner"].contains(current.phase):
+        return Err("machine-fresh-epoch-process-progress-phase")
+    if current.identity != "" and current.identity != identity:
+        return Err("machine-fresh-epoch-process-progress-identity")
+    var next = current
+    if next.error == "" and diagnostic != "": next.error = diagnostic
+    if current.phase == "consumed":
+        if current.identity == "": return Err("machine-fresh-epoch-process-progress-identity")
+        return Ok(next)
+    if outcome == "no-owner":
+        if current.phase != "unresolved" or current.identity != "" or identity != "":
+            return Err("machine-fresh-epoch-process-progress-no-owner")
+        next.phase = "no-owner"
+        return Ok(next)
+    if current.phase == "no-owner": return Err("machine-fresh-epoch-process-progress-already-resolved")
+    if ["retained", "stale", "unknown"].contains(outcome):
+        if next.error == "" and outcome != "retained": next.error = "machine-fresh-epoch-process-close:" + outcome
+        return Ok(next)
+    if identity == "": return Err("machine-fresh-epoch-process-progress-identity")
+    if outcome == "bind":
+        if current.phase != "unresolved": return Err("machine-fresh-epoch-process-progress-binding")
+        next.identity = identity
+        return Ok(next)
+    if current.identity == "": return Err("machine-fresh-epoch-process-progress-unbound")
+    if outcome == "transferred" and current.phase == "unresolved":
+        next.phase = "transferred"
+        return Ok(next)
+    if outcome == "consumed":
+        next.phase = "consumed"
+        return Ok(next)
+    Err("machine-fresh-epoch-process-progress-outcome")

@@ -23,6 +23,15 @@ pub class LinuxSupervisorBusV1:
         supervisor_bus_string_property_v1(self.slot, self.generation, path, interface, name)
     pub fn number_property_v1(path: text, interface: text, name: text) -> Result<i64, text>:
         supervisor_bus_number_property_v1(self.slot, self.generation, path, interface, name)
+    pub fn boolean_property_v1(path: text, interface: text, name: text) -> Result<bool, text>:
+        val observed = supervisor_bus_scalar_property_v1(self.slot, self.generation, path, interface, name, 98u8)?
+        Ok(observed == 1)
+    pub fn unsigned_property_v1(path: text, interface: text, name: text) -> Result<i64, text>:
+        supervisor_bus_scalar_property_v1(self.slot, self.generation, path, interface, name, 116u8)
+    pub fn string_array_property_v1(path: text, interface: text, name: text) -> Result<[text], text>:
+        supervisor_bus_string_array_property_v1(self.slot, self.generation, path, interface, name)
+    pub fn empty_exec_commands_v1(path: text, name: text) -> Result<bool, text>:
+        supervisor_bus_empty_exec_commands_v1(self.slot, self.generation, path, name)
     pub fn unit_job_v1(path: text) -> Result<i64, text>: supervisor_bus_job_v1(self.slot, self.generation, path)
     pub fn ref_unit_v1(unit: text) -> Result<(), text>:
         supervisor_bus_void_v1(self.slot, self.generation, "RefUnit", unit)
@@ -309,6 +318,70 @@ fn supervisor_bus_number_property_v1(slot: i64, generation: i64, path: text, int
     supervisor_bus_end_v1(slot)?
     Ok(value)
 
+@unsafe(reason: "exact boolean or bounded unsigned64 variant; no caller assertion substitutes for the live property", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_scalar_property_v1(slot: i64, generation: i64, path: text, interface: text,
+        name: text, kind: u8) -> Result<i64, text>:
+    if kind != 98u8 and kind != 116u8: return Err("supervisor-system-bus-scalar-kind")
+    supervisor_bus_property_v1(slot, generation, path, interface, name)?
+    val state = supervisor_bus_slots_v1[slot]
+    val signature = if kind == 98u8: "b" else: "t"
+    if sd_bus_message_enter_container(state.reply, 118u8, supervisor_bus_z_v1(slot, 0, signature)) <= 0:
+        return Err("supervisor-system-bus-property-signature")
+    volatile_write_u64(state.arena + 40, 0)
+    if sd_bus_message_read_basic(state.reply, kind, state.arena + 40) <= 0:
+        return Err("supervisor-system-bus-property-scalar")
+    val value = if kind == 98u8: volatile_read_u32(state.arena + 40) else: volatile_read_u64(state.arena + 40)
+    # These admission readers intentionally support the signed-positive subset
+    # of uint64. An infinite timeout/overflow is unsupported, never truncated.
+    if value < 0 or (kind == 98u8 and value > 1): return Err("supervisor-system-bus-property-scalar-bound")
+    if sd_bus_message_exit_container(state.reply) < 0: return Err("supervisor-system-bus-property-tail")
+    supervisor_bus_end_v1(slot)?
+    Ok(value)
+
+@unsafe(reason: "bounded exact string-array variant from authenticated manager", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_string_array_property_v1(slot: i64, generation: i64, path: text,
+        interface: text, name: text) -> Result<[text], text>:
+    supervisor_bus_property_v1(slot, generation, path, interface, name)?
+    val reply = supervisor_bus_slots_v1[slot].reply
+    if (sd_bus_message_enter_container(reply, 118u8, supervisor_bus_z_v1(slot, 0, "as")) <= 0 or
+            sd_bus_message_enter_container(reply, 97u8, supervisor_bus_z_v1(slot, 1, "s")) <= 0):
+        return Err("supervisor-system-bus-property-array-signature")
+    var values: [text] = []
+    var total_bytes = 0
+    for index in 0..129:
+        val at_end = sd_bus_message_at_end(reply, 0)
+        if at_end < 0: return Err("supervisor-system-bus-property-array-shape")
+        if at_end > 0:
+            if sd_bus_message_exit_container(reply) < 0 or sd_bus_message_exit_container(reply) < 0:
+                return Err("supervisor-system-bus-property-array-tail")
+            supervisor_bus_end_v1(slot)?
+            return Ok(values)
+        if index >= 128: return Err("supervisor-system-bus-property-array-bound")
+        val value = supervisor_bus_read_text_v1(slot, 115u8)?
+        total_bytes = total_bytes + value.byte_len()
+        if total_bytes > 65536: return Err("supervisor-system-bus-property-array-byte-bound")
+        values.push(value)
+    Err("supervisor-system-bus-property-array-bound")
+
+@unsafe(reason: "actual exact service command-array type and empty body, never a parsed textual command list", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_empty_exec_commands_v1(slot: i64, generation: i64, path: text,
+        name: text) -> Result<bool, text>:
+    if name != "ExecStop" and name != "ExecStopPost": return Err("supervisor-system-bus-stop-command-property")
+    supervisor_bus_property_v1(slot, generation, path, "org.freedesktop.systemd1.Service", name)?
+    val reply = supervisor_bus_slots_v1[slot].reply
+    if (sd_bus_message_enter_container(reply, 118u8, supervisor_bus_z_v1(slot, 0, "a(sasbttttuii)")) <= 0 or
+            sd_bus_message_enter_container(reply, 97u8, supervisor_bus_z_v1(slot, 1, "(sasbttttuii)")) <= 0):
+        return Err("supervisor-system-bus-stop-command-signature")
+    val empty = sd_bus_message_at_end(reply, 0)
+    if empty < 0: return Err("supervisor-system-bus-stop-command-shape")
+    # A nonempty command list refuses immediately; its native message remains
+    # retained until normal reset/cleanup, without interpreting any command.
+    if empty == 0: return Ok(false)
+    if sd_bus_message_exit_container(reply) < 0 or sd_bus_message_exit_container(reply) < 0:
+        return Err("supervisor-system-bus-stop-command-tail")
+    supervisor_bus_end_v1(slot)?
+    Ok(true)
+
 @unsafe(reason: "decode exact current unit job tuple", capabilities: [ffi, raw_ptr])
 fn supervisor_bus_job_v1(slot: i64, generation: i64, path: text) -> Result<i64, text>:
     supervisor_bus_property_v1(slot, generation, path, "org.freedesktop.systemd1.Unit", "Job")?
@@ -539,6 +612,9 @@ fn supervisor_bus_query_text_v1(slot: i64, generation: i64, method: text, argume
 fn supervisor_bus_pid_v1(slot: i64, generation: i64, pid: i64) -> Result<text, text>: Err("supervisor-system-bus-linux-required")
 fn supervisor_bus_string_property_v1(slot: i64, generation: i64, path: text, interface: text, name: text) -> Result<text, text>: Err("supervisor-system-bus-linux-required")
 fn supervisor_bus_number_property_v1(slot: i64, generation: i64, path: text, interface: text, name: text) -> Result<i64, text>: Err("supervisor-system-bus-linux-required")
+fn supervisor_bus_scalar_property_v1(slot: i64, generation: i64, path: text, interface: text, name: text, kind: u8) -> Result<i64, text>: Err("supervisor-system-bus-linux-required")
+fn supervisor_bus_string_array_property_v1(slot: i64, generation: i64, path: text, interface: text, name: text) -> Result<[text], text>: Err("supervisor-system-bus-linux-required")
+fn supervisor_bus_empty_exec_commands_v1(slot: i64, generation: i64, path: text, name: text) -> Result<bool, text>: Err("supervisor-system-bus-linux-required")
 fn supervisor_bus_job_v1(slot: i64, generation: i64, path: text) -> Result<i64, text>: Err("supervisor-system-bus-linux-required")
 fn supervisor_bus_void_v1(slot: i64, generation: i64, method: text, argument: text) -> Result<(), text>: Err("supervisor-system-bus-linux-required")
 fn supervisor_bus_mask_v1(slot: i64, generation: i64, unit: text) -> Result<[LinuxSupervisorUnitChangeV1], text>: Err("supervisor-system-bus-linux-required")
