@@ -9,7 +9,9 @@
 # arbitrary later function. Slice B1 of
 # doc/03_plan/release/1.0.0/robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md:
 # function-local origin only (raw extern result and plain `val x = y` copies).
-# Cross-function return summaries come with the typed HIR slice.
+# Slice B2 step 1 adds same-file cross-function summaries (fixpoint over
+# non-boundary functions returning a raw foreign value). Cross-file and typed-HIR
+# summaries remain a gap.
 
 use compiler.semantics.lint.lint_text.{code_line_snapshot, CodeLine}
 
@@ -293,6 +295,30 @@ fn _blc_escape_finding(line_num: i64) -> BoundLateCastFinding:
         line_num: line_num
     )
 
+struct BlcPass:
+    findings: [BoundLateCastFinding]
+    foreign_fns: [text]
+
+fn _blc_fn_name(line: text) -> text:
+    var rest = line
+    for prefix in ["pub ", "static ", "async ", "unsafe "]:
+        if rest.starts_with(prefix):
+            rest = rest.substring(prefix.byte_len(), rest.byte_len())
+    if rest.starts_with("fn "):
+        return _blc_leading_ident(rest.substring(3, rest.byte_len()))
+    if rest.starts_with("me "):
+        return _blc_leading_ident(rest.substring(3, rest.byte_len()))
+    ""
+
+fn _blc_return_type(header: text) -> text:
+    val arrow = header.find(" -> ")
+    if arrow < 0:
+        return ""
+    var rt = header.substring(arrow + 4, header.byte_len()).trim()
+    if rt.ends_with(":"):
+        rt = rt.substring(0, rt.byte_len() - 1).trim()
+    rt
+
 pub fn check_bound_late_casts(source: text, file_path: text) -> [BoundLateCastFinding]:
     var findings: [BoundLateCastFinding] = []
     if file_path.contains("/vendor/") or file_path.contains("sffi_gen"):
@@ -310,7 +336,28 @@ pub fn check_bound_late_casts(source: text, file_path: text) -> [BoundLateCastFi
         units = _blc_unit_imports(line.trimmed, units)
     if externs.len() == 0:
         return findings
+    # Same-file cross-function origin summaries: a non-boundary function that
+    # returns a raw foreign value makes calls to it foreign. Iterate to a
+    # fixpoint; the callee set only grows and is bounded by the function count,
+    # so recursion and mutual recursion terminate.
+    var callees = [x for x in externs]
+    var pass_result = _blc_pass(lines, externs, callees, units)
+    var rounds = 0
+    while rounds <= lines.len():
+        var grown = false
+        for name in pass_result.foreign_fns:
+            if not callees.contains(name):
+                callees.push(name)
+                grown = true
+        if not grown:
+            break
+        pass_result = _blc_pass(lines, externs, callees, units)
+        rounds = rounds + 1
+    pass_result.findings
 
+fn _blc_pass(lines: [CodeLine], externs: [text], callees: [text], units: [text]) -> BlcPass:
+    var findings: [BoundLateCastFinding] = []
+    var foreign_fns: [text] = []
     var i = 0
     while i < lines.len():
         val header = lines[i]
@@ -322,6 +369,8 @@ pub fn check_bound_late_casts(source: text, file_path: text) -> [BoundLateCastFi
         val returns_value = _blc_return_primitive(header.trimmed)
         var tainted: [text] = []
         var raw_vals: [text] = []
+        var fvals: [text] = []
+        var returns_foreign = false
         var body_indent = -1
         var last_line = -1
         var j = i + 1
@@ -341,6 +390,8 @@ pub fn check_bound_late_casts(source: text, file_path: text) -> [BoundLateCastFi
                     val value = body.trimmed.substring(7, body.trimmed.byte_len())
                     if _blc_raw_value(value, externs, raw_vals):
                         findings.push(_blc_escape_finding(body.line_num))
+                if body.trimmed.starts_with("return ") and _blc_raw_value(body.trimmed.substring(7, body.trimmed.byte_len()), callees, fvals):
+                    returns_foreign = true
                 var reported = false
                 for unit_name in units:
                     if reported:
@@ -349,7 +400,7 @@ pub fn check_bound_late_casts(source: text, file_path: text) -> [BoundLateCastFi
                     for op in _blc_as_operands(body.trimmed, unit_name):
                         operands.push(op)
                     for arg in operands:
-                        if _blc_foreign(arg, externs, tainted):
+                        if _blc_foreign(arg, callees, tainted):
                             findings.push(BoundLateCastFinding(
                                 code: "SPL-BOUND-002",
                                 message: "late cast of a foreign-origin value to unit `{unit_name}`",
@@ -360,7 +411,7 @@ pub fn check_bound_late_casts(source: text, file_path: text) -> [BoundLateCastFi
                             break
                 if bound != "":
                     # A rebinding/shadowing replaces the origin of `bound`.
-                    val foreign_rhs = _blc_foreign(_blc_rhs(body.trimmed), externs, tainted)
+                    val foreign_rhs = _blc_foreign(_blc_rhs(body.trimmed), callees, tainted)
                     if foreign_rhs and not tainted.contains(bound):
                         tainted.push(bound)
                     elif not foreign_rhs and tainted.contains(bound):
@@ -371,10 +422,21 @@ pub fn check_bound_late_casts(source: text, file_path: text) -> [BoundLateCastFi
                         raw_vals.push(bound)
                     elif not raw_rhs and raw_vals.contains(bound):
                         raw_vals = [t for t in raw_vals if t != bound]
+                    # Summary origin: bare call of a foreign callee / plain copy.
+                    val fvals_rhs = _blc_raw_value(_blc_rhs(body.trimmed), callees, fvals)
+                    if fvals_rhs and not fvals.contains(bound):
+                        fvals.push(bound)
+                    elif not fvals_rhs and fvals.contains(bound):
+                        fvals = [t for t in fvals if t != bound]
             j = j + 1
         if not boundary and returns_value and last_line >= 0:
             val tail = lines[last_line]
             if _blc_indent(tail.raw) == body_indent and not tail.trimmed.starts_with("return ") and _blc_binding(tail.trimmed) == "" and _blc_raw_value(tail.trimmed, externs, raw_vals):
                 findings.push(_blc_escape_finding(tail.line_num))
+            if _blc_indent(tail.raw) == body_indent and not tail.trimmed.starts_with("return ") and _blc_binding(tail.trimmed) == "" and _blc_raw_value(tail.trimmed, callees, fvals):
+                returns_foreign = true
+        val fn_name = _blc_fn_name(header.trimmed)
+        if not boundary and returns_foreign and fn_name != "" and not units.contains(_blc_return_type(header.trimmed)) and not foreign_fns.contains(fn_name):
+            foreign_fns.push(fn_name)
         i = j
-    findings
+    BlcPass(findings: findings, foreign_fns: foreign_fns)
