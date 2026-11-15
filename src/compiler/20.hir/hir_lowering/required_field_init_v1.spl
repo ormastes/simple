@@ -25,7 +25,7 @@
 # fix suggestions; no suggestion ever inserts nil/None.
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
-use compiler.hir.generated.hir_visit.{hir_visit_block}
+use compiler.hir.generated.hir_visit.{hir_visit_block, hir_visit_expr}
 use compiler.hir.hir_lowering.attr_access_sites.{hir_node_tree_attr_v1}
 use compiler.frontend.parser_types.*
 use compiler.common.attributes.{extract_string_arg}
@@ -206,6 +206,56 @@ fn required_init_args_have_spread_v1(args: [HirCallArg]) -> bool:
 fn required_init_fix_v1(id: text, description: text) -> DiagnosticFix:
     DiagnosticFix.new(id, description, FixConfidence.Uncertain)
 
+# A type whose value is a borrow/view of other storage, not an immutable value.
+fn init_capability_type_is_view_v1(ty: HirType) -> bool:
+    match ty.kind:
+        case HirTypeKind.Ref(_, _): true
+        case HirTypeKind.Ptr(_, _): true
+        case HirTypeKind.Optional(inner): init_capability_type_is_view_v1(inner)
+        case _: false
+
+# Owner rule for E_INIT_CAPABILITY_ESCAPE: a binding read by the producer must
+# be immutable. Rejects `var` locals, mutable parameters (`mut T`, `me` self)
+# and bindings whose type is a borrow/view.
+fn init_capability_symbol_mutable_v1(sym: HirSymbol) -> bool:
+    if sym.kind != SymbolKind.Variable and sym.kind != SymbolKind.Parameter:
+        return false
+    if sym.is_mutable:
+        return true
+    if val ty = sym.type_:
+        return init_capability_type_is_view_v1(ty)
+    false
+
+class InitCapabilityScanV1:
+    symbols: SymbolTable
+    in_me_method: bool
+    names: [text]
+
+    me note(id: i64):
+        if val present = self.symbols.get_symbol_raw(id):
+            val sym: HirSymbol = present
+            val me_self = self.in_me_method and sym.kind == SymbolKind.Parameter and sym.name == "self"
+            if (me_self or init_capability_symbol_mutable_v1(sym)) and not required_init_contains_v1(self.names, sym.name):
+                self.names.push(sym.name)
+
+    me on_expr(node: HirExpr):
+        match node.kind:
+            case HirExprKind.Var(symbol): self.note(symbol.id)
+            case HirExprKind.NamedVar(symbol, _): self.note(symbol.id)
+            case HirExprKind.Lambda(_, _, captures):
+                for c in captures:
+                    self.note(c.id)
+            case _: ()
+
+    me on_stmt(node: HirStmt):
+        ()
+
+    me on_type(node: HirType):
+        ()
+
+    me on_pattern(node: HirPattern):
+        ()
+
 class RequiredInitCollectorV1:
     module_path: text
     symbols: SymbolTable
@@ -219,6 +269,8 @@ class RequiredInitCollectorV1:
     pending_class: Dict<i64, RequiredInitClassV1> = {}
     pending_names: Dict<i64, [text]> = {}
     awaited_operand_next: bool = false
+    # The function being visited is a `me` method: its `self` is mutable state.
+    in_me_method: bool = false
 
     fn is_async_binding(e: HirExpr) -> bool:
         match e.kind:
@@ -235,21 +287,17 @@ class RequiredInitCollectorV1:
                 false
             case _: false
 
-    # Names of `var` locals that are direct arguments of an `async_init(...)`
-    # producer call (PROVISIONAL region definition, see the open-questions doc).
+    # Bindings in an `async_init(...)` producer's arguments that are not
+    # immutable (owner rule, open-questions doc section 4): every nested
+    # sub-expression and closure capture is walked.
     fn producer_mutable_locals(producer: HirExpr) -> [text]:
-        var names: [text] = []
+        val scan = InitCapabilityScanV1(symbols: self.symbols, in_me_method: self.in_me_method, names: [])
         match producer.kind:
             case HirExprKind.Call(_, args, _):
                 for arg in args:
-                    val id = self.local_symbol_of(arg.value)
-                    if id >= 0:
-                        if val present = self.symbols.get_symbol_raw(id):
-                            val sym: HirSymbol = present
-                            if sym.is_mutable:
-                                names.push(sym.name)
+                    hir_visit_expr(arg.value, scan)
             case _: ()
-        names
+        scan.names
 
     fn is_source_nil(e: HirExpr) -> bool:
         match e.kind:
@@ -286,7 +334,7 @@ class RequiredInitCollectorV1:
                 if self.is_async_binding(entry.1) and self.async_authorized(cls, entry.0):
                     for captured in self.producer_mutable_locals(entry.1):
                         self.report(E_INIT_CAPABILITY_ESCAPE, cls, entry.0, entry.1.span,
-                            "mutable local `{captured}` is passed to the async producer of `{cls.name}.{entry.0}`; the producer runs after this function's borrow region ends",
+                            "`{captured}` is not immutable but reaches the async producer of `{cls.name}.{entry.0}`; a producer may only receive immutable values",
                             [required_init_fix_v1("required_init:immutable:{captured}",
                                 "pass an immutable copy: `val {captured}_snapshot = {captured}` and give the producer that"),
                              required_init_fix_v1("required_init:sync:{entry.0}",
@@ -518,6 +566,7 @@ pub fn hir_required_field_init_check_v1(module_name: text, module_path: text, sy
             order[i] = t
             i = i - 1
     for f in order:
+        collector.in_me_method = f.is_mutable
         hir_visit_block(f.body, collector)
     RequiredInitReportV1(rows: collector.rows, sites_judged: collector.sites_judged,
         sites_unjudged: collector.sites_unjudged)
