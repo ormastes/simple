@@ -1,0 +1,168 @@
+"""
+## Purpose and audience
+Purpose: fleet hardening for the caret workbench -- bounded reconnect backoff,
+input forwarded to a remote session, a credential-safe host panel row, a
+50-agent/5-host scale roster with attention grouping, and every lifecycle state
+visible over the fleet (CU-001, CU-010).
+Audience: caret-suite workbench engineers.
+## Operator workflow
+Run `bin/simple test test/01_unit/app/llm_caret/workbench/fleet_gaps_spec.spl`.
+"""
+use std.spec.*
+use std.io_runtime.{file_write, file_read}
+use app.llm_caret.workbench.session_contract.{SessionView, SessionId,
+    new_session_view, new_draft, InputMode, ProcessLifecycle, AgentTurn, Transport}
+use app.llm_caret.workbench.session_source.{live_sessions, clear_live_sessions,
+    publish_fleet_sessions}
+use app.llm_caret.workbench.fleet_transport.{fleet_encode_snapshot, fleet_declare_host,
+    fleet_declare_host_with_send, fleet_host_state, fleet_send, fleet_host_panel_rows}
+use app.llm_caret.workbench.tui_layout.{compute_layout, CompactView}
+use app.llm_caret.workbench.tui_view.{new_render_input, render_workbench}
+
+fn _view(id: text, life: ProcessLifecycle, turn: AgentTurn, attn: bool) -> SessionView:
+    val base = new_session_view(SessionId(value: id, generation: 1), id, "claude")
+    SessionView(id: base.id, label: base.label, provider: base.provider,
+        lifecycle: life, turn: turn, transport: Transport.Ready,
+        evidence: base.evidence, needs_attention: attn)
+
+fn _count_lines(path: text) -> i64:
+    val body = file_read(path)
+    var n = 0
+    for l in body.split("\n"):
+        if l.trim() != "":
+            n = n + 1
+    n
+
+describe "fleet reconnect backoff":
+    it "waits between retries of a down host and reconnects when it answers":  # @req CU-010
+        step("host command logs each attempt and prints a snapshot that does not exist yet")
+        clear_live_sessions()
+        file_write("build/fg_attempts.log", "")
+        file_write("build/fg_up.snap", fleet_encode_snapshot([_view("r1", ProcessLifecycle.Running, AgentTurn.Working, false)]))
+        fleet_declare_host("hostr", "sh", ["-c", "echo x >> build/fg_attempts.log; cat build/fg_up.snap"])
+        publish_fleet_sessions()
+        expect(fleet_host_state("hostr")).to_equal("connected")
+        step("host goes down")
+        fleet_declare_host("hostr", "sh", ["-c", "echo x >> build/fg_attempts.log; cat build/fg_missing.snap"])
+        publish_fleet_sessions()
+        expect(fleet_host_state("hostr")).to_equal("disconnected")
+        val after_first = _count_lines("build/fg_attempts.log")
+        step("immediate re-poll is skipped while backing off")
+        publish_fleet_sessions()
+        expect(_count_lines("build/fg_attempts.log")).to_equal(after_first)
+        step("backoff is bounded: 20 polls retry more than once but far fewer than 20 times")
+        var i = 0
+        while i < 20:
+            publish_fleet_sessions()
+            i = i + 1
+        val extra = _count_lines("build/fg_attempts.log") - after_first
+        expect(extra).to_be_greater_than(1)
+        expect(extra).to_be_less_than(10)
+        step("host comes back: polling returns it to connected")
+        fleet_declare_host("hostr", "sh", ["-c", "echo x >> build/fg_attempts.log; cat build/fg_up.snap"])
+        var j = 0
+        while j < 20 and fleet_host_state("hostr") != "connected":
+            publish_fleet_sessions()
+            j = j + 1
+        expect(fleet_host_state("hostr")).to_equal("connected")
+        expect(live_sessions()[0].transport).to_equal(Transport.Ready)
+
+describe "fleet input forwarding":
+    it "delivers a line to a remote session through the host send command":  # @req CU-001
+        clear_live_sessions()
+        file_write("build/fg_inbox.txt", "")
+        fleet_declare_host_with_send("hosts", "loopback", "cat", ["build/fg_up.snap"],
+            "sh", ["-c", "printf '%s %s\\n' \"$1\" \"$2\" >> build/fg_inbox.txt", "send"])
+        publish_fleet_sessions()
+        expect(fleet_send("hosts/r1", "hello remote")).to_equal(true)
+        expect(file_read("build/fg_inbox.txt")).to_contain("r1 hello remote")
+
+    it "rejects a send to a host without a send command or an unknown host":  # @req CU-001
+        fleet_declare_host("hostn", "cat", ["build/fg_up.snap"])
+        expect(fleet_send("hostn/r1", "x")).to_equal(false)
+        expect(fleet_send("nohost/r1", "x")).to_equal(false)
+
+describe "fleet host panel":
+    it "shows host id and transport kind but never command arguments":  # @req CU-001
+        clear_live_sessions()
+        fleet_declare_host_with_send("hostp", "ssh", "cat", ["build/SECRET_TOKEN_abc123.snap"],
+            "sh", ["-c", "true", "SECRET_TOKEN_abc123"])
+        publish_fleet_sessions()
+        val rows = fleet_host_panel_rows()
+        expect(rows.len()).to_equal(1)
+        expect(rows[0]).to_contain("hostp")
+        expect(rows[0]).to_contain("ssh")
+        expect(rows[0].contains("SECRET")).to_equal(false)
+        step("the workbench roster draws the row")
+        val layout = compute_layout(160, 60, CompactView.Agents, 0)
+        val none = SessionId(value: "none", generation: 1)
+        val input = new_render_input(live_sessions(), none, new_draft(none, InputMode.Message), "roster")
+        val text_out = render_workbench(layout, input).join("\n")
+        expect(text_out).to_contain("hostp")
+        expect(text_out.contains("SECRET")).to_equal(false)
+
+describe "fleet scale":
+    it "renders 50 agents over 5 loopback hosts with attention first":  # @req CU-001
+        step("5 hosts x 10 agents, every 3rd agent needs attention")
+        clear_live_sessions()
+        var h = 0
+        var expected_attention = 0
+        while h < 5:
+            var views: [SessionView] = []
+            var a = 0
+            while a < 10:
+                val attn = (a + h) % 3 == 0
+                if attn:
+                    expected_attention = expected_attention + 1
+                views.push(_view("a{a}", ProcessLifecycle.Running, AgentTurn.Working, attn))
+                a = a + 1
+            file_write("build/fg_scale_{h}.snap", fleet_encode_snapshot(views))
+            fleet_declare_host("h{h}", "cat", ["build/fg_scale_{h}.snap"])
+            h = h + 1
+        publish_fleet_sessions()
+        val rows = live_sessions()
+        expect(rows.len()).to_equal(50)
+        step("rows are grouped: every attention row precedes every quiet row")
+        var seen_quiet = false
+        var violations = 0
+        var attn_rows = 0
+        for v in rows:
+            if v.needs_attention:
+                attn_rows = attn_rows + 1
+                if seen_quiet:
+                    violations = violations + 1
+            else:
+                seen_quiet = true
+        expect(attn_rows).to_equal(expected_attention)
+        expect(violations).to_equal(0)
+        expect(fleet_host_panel_rows().len()).to_equal(5)
+
+describe "fleet lifecycle states":
+    it "carries every lifecycle state over the wire and marks a dead host Lost":  # @req CU-010
+        clear_live_sessions()
+        file_write("build/fg_life.snap", fleet_encode_snapshot([
+            _view("s0", ProcessLifecycle.NotStarted, AgentTurn.Idle, false),
+            _view("s1", ProcessLifecycle.Starting, AgentTurn.Queued, false),
+            _view("s2", ProcessLifecycle.Running, AgentTurn.WaitingApproval, true),
+            _view("s3", ProcessLifecycle.Stopping, AgentTurn.Cancelled, false),
+            _view("s4", ProcessLifecycle.Exited, AgentTurn.Completed, false),
+            _view("s5", ProcessLifecycle.Failed, AgentTurn.Failed, true)]))
+        fleet_declare_host("hostl", "cat", ["build/fg_life.snap"])
+        publish_fleet_sessions()
+        val rows = live_sessions()
+        expect(rows.len()).to_equal(6)
+        var lifes: [ProcessLifecycle] = []
+        for v in rows:
+            lifes.push(v.lifecycle)
+        expect(lifes.contains(ProcessLifecycle.NotStarted)).to_equal(true)
+        expect(lifes.contains(ProcessLifecycle.Starting)).to_equal(true)
+        expect(lifes.contains(ProcessLifecycle.Running)).to_equal(true)
+        expect(lifes.contains(ProcessLifecycle.Stopping)).to_equal(true)
+        expect(lifes.contains(ProcessLifecycle.Exited)).to_equal(true)
+        expect(lifes.contains(ProcessLifecycle.Failed)).to_equal(true)
+        step("host stops answering: the same rows become Lost/Disconnected")
+        fleet_declare_host("hostl", "cat", ["build/fg_nonexistent.snap"])
+        publish_fleet_sessions()
+        for v in live_sessions():
+            expect(v.lifecycle).to_equal(ProcessLifecycle.Lost)
+            expect(v.transport).to_equal(Transport.Disconnected)
