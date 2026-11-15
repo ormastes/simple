@@ -170,19 +170,34 @@ Wasm/Byl/IrTc/hwir-to-VHDL adapters 4. About 63 modules are removable by this
 composition (`compiler.backend.*` total 215; LLVM 21 and Cranelift stay). The seam is
 `app.cli.bootstrap_backend_installer`, imported only by `bootstrap_main.spl` and
 `compile_targets.spl`; the full variant names `plugins.backend_registry.full_static_backend_registry`,
-the essential variant (`src/compositions/backends_essential/app/cli/bootstrap_backend_installer.spl`)
-does not.
+the essential variant (`src/app/cli/bootstrap_essential_backend_installer.spl`) does not.
 
-Build: list the composition roots ahead of `src/app` (first root wins), e.g.
-`--source src/compositions/kernel_llvm_cranelift --source src/compositions/backends_essential --source src/app ...`
-(LLVM-only: `kernel_llvm` instead of `kernel_llvm_cranelift`). The default build is unchanged.
+Wiring (2026-11-15, no script change): the Stage 2/3 command passes exactly six
+`--source` roots and the focused native-build path refuses a seventh
+(`doc/08_tracking/bug/focused_bootstrap_six_source_roots_2026-10-24.md`), so there is no
+separate essential root. Each kernel root re-exports the essential installer at
+`src/compositions/kernel_llvm{,_cranelift}/app/cli/bootstrap_backend_installer.spl`; the
+kernel root precedes `src/app` (first root wins). `bootstrap-from-scratch.sh` Stage 4
+passes no kernel root and keeps the full variant; the managed Phase 4 lanes
+(`build-phase4-direct-product.shs`, `bootstrap-phase4-grouped.shs`) pass one, so the
+essential request policy returns no restriction once a full static table is installed
+(`full_static_backend_table_installed_v1`; the full CLI installs it before dispatch).
+
+VHDL is not a `BackendPort` (it lowers HIR -> HWIR inside the driver), so it has its own
+install-once slot `compiler.driver.driver_vhdl_lane` (modelled on `static_jit_lane.spl`):
+`driver_aot_pipeline` (`--backend=vhdl`), `compile_vhdl_only` and the public `aot_vhdl_file`
+dispatch through it; `driver.spl` no longer re-exports `driver_riscv_gen2_product` (its only
+callers, `vhdl_compile_entry.spl` and one spec, import it directly). The full registry and
+`vhdl_compile_entry.spl` install the lane via
+`plugins.backend_vhdl.driver.driver_vhdl_lane_install`. Static import-graph estimate for
+`bootstrap_main.spl` under the Stage 3 roots: 1,703 -> ~1,555 modules, no `plugins.*` and no
+`compiler.mir.hwir` left (about 20 MB of 147.5 MB Stage 3 objects).
+
 A request for a non-linked backend answers `PLUG-E-NOTFOUND: backend 'X' not linked ...`;
 a plugin path answers `PLUG-E-UNSUPPORTED` (no provider exports `simple_backend_plugin_v1`).
 
-NOT done: the full CLI (`_CliMain/main_and_help.spl`, `p3_groups/group_7.spl` ->
-`selected_cuda_backend`) still imports the full registry directly, so only the bootstrap
-entry shrinks; the P-static backends are not yet built as static libs / dynlib plugins
-(PR2-3 above); no native Phase 3 rebuild or memory measurement was run for this change.
+NOT done: the P-static backends are not yet built as dynlib plugins (PR2-3 above); the
+native Phase 3 module count / memory measurement awaits a Stage 2 built from this change.
 
 ## 6. Non-backend families in the full-CLI closure (owner: "link non-essential as dynload, load on first use")
 
