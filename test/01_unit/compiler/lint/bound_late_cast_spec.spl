@@ -1,0 +1,78 @@
+"""
+## Purpose and audience
+Purpose: Prove that SPL-BOUND-002 reports a late primitive-to-unit cast of a
+foreign-origin value, and stays silent on ordinary text, typed boundary
+adapters, and Simple-origin domain construction.
+Audience: compiler and tooling engineers maintaining robust-boundary lints.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Single-file, function-local origin tracking only. Units are recognised when
+declared in the file or imported from a `unit.` module. Cross-file and
+cross-function origin summaries are later slices of the robust-boundary plan
+(doc/03_plan/release/1.0.0/robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md).
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use compiler.semantics.lint.bound_late_cast.{check_bound_late_casts}
+
+# @manual_section: bound_late_cast
+describe "SPL-BOUND-002: late foreign-origin unit cast":
+    """A foreign value must become a unit at its SFFI/HAL boundary, not in an
+    arbitrary later function."""
+
+    it "reports a unit cast of a value returned by a raw extern in a safe function":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a safe function that casts a raw extern result to a declared unit")
+        val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    val raw = c_read_distance()\n    return DistanceKm(raw)\n"
+        val fs = check_bound_late_casts(src, "app/client.spl")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].code).to_equal("SPL-BOUND-002")
+        expect(fs[0].line_num).to_equal(5)
+        expect(fs[0].message).to_contain("DistanceKm")
+
+    it "reports a direct cast wrapping the raw extern call":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a cast applied directly to an extern call expression")
+        val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    DistanceKm(c_read_distance())\n"
+        val fs = check_bound_late_casts(src, "app/client.spl")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].line_num).to_equal(4)
+
+    it "follows a copy of the foreign value to the late cast":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a foreign value copied once before the cast")
+        val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    val raw = c_read_distance()\n    val copy = raw\n    DistanceKm(copy)\n"
+        expect(check_bound_late_casts(src, "app/client.spl").len()).to_equal(1)
+
+    it "accepts the cast inside an explicit ffi-unsafe boundary adapter":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint the same cast inside an @unsafe(capabilities: [ffi]) adapter")
+        val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\n@unsafe(reason: \"verified C ABI\", capabilities: [ffi])\nfn hal_read_distance() -> DistanceKm:\n    DistanceKm(c_read_distance())\n"
+        expect(check_bound_late_casts(src, "hal/distance.spl").len()).to_equal(0)
+
+    it "accepts Simple-origin domain construction and ordinary text":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a unit built from a parsed literal and a plain text function")
+        val src = "unit DistanceKm: i32 as km\nfn parse(n: i32) -> DistanceKm:\n    val v = n + 1\n    DistanceKm(v)\nfn echo(message: text) -> text:\n    message\n"
+        expect(check_bound_late_casts(src, "app/domain.spl").len()).to_equal(0)
+
+    it "does not treat a non-unit call of a foreign value as a cast":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a foreign value passed to an ordinary function")
+        val src = "extern fn c_read_distance() -> i32\nfn show() -> text:\n    val raw = c_read_distance()\n    format_num(raw)\n"
+        expect(check_bound_late_casts(src, "app/show.spl").len()).to_equal(0)
+
+    it "does not leak foreign origin from one function into the next":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint two functions that reuse the same local name")
+        val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn a() -> i32:\n    val raw = c_read_distance()\n    raw\nfn b(raw: i32) -> DistanceKm:\n    DistanceKm(raw)\n"
+        expect(check_bound_late_casts(src, "app/two.spl").len()).to_equal(0)
+
+    it "recognises a unit imported from a unit module":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a cast to a unit imported via use unit.length")
+        val src = "use unit.length.{{Meter}\nextern fn c_read_len() -> f64\nfn len() -> Meter:\n    Meter(c_read_len())\n"
+        expect(check_bound_late_casts(src, "app/len.spl").len()).to_equal(1)
