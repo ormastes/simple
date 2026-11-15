@@ -69,6 +69,23 @@ The unit child must run a file-scoped front end:
 
 The fix lives in the driver's unit-worker path. It can only be verified with a stage2 rebuilt from source that contains the fix, because driver logic is compiled into the stage binary. That is a seed native-build of the compiler, which costs one more heavy build.
 
+### Blocker 3 fix (lane p3unit-20261115, verification-pending)
+
+Root cause, narrowed: the file-scoped route already existed (PM3 TLDR surfaces in
+`driver_source_parse_streaming.spl`). The unit child took it only when
+`SIMPLE_FRONTEND_CACHE_DIR` was set, and that variable is only set from
+`--cache-dir`. The p3new runners pass no `--cache-dir`, so the root was empty.
+The child then silently body-parsed its pick's whole import closure.
+
+Fix:
+
+- `run_unit` hands the child `SIMPLE_UNIT_TLDR_ROOT`. It is the frontend cache dir when one is set, otherwise `<hir_queue>/frontend`.
+- A unit child that has the route on but no root now fails closed with `FILE-UNIT-E-NO-TLDR-ROOT`. It no longer falls back to the whole closure.
+
+Spec: `test/01_unit/compiler/driver/native_file_unit_frontend_root_spec.spl`.
+
+Still O(closure) per unit, and not fixed here: `worker_admitted_edges_v1` runs an all-seeds preprocess and import scan over the full inventory in every unit, only to order the pick, and phase 1 still reads every `--source` file.
+
 ## Tagged workaround for phase-3 runners
 
 - Leave `SIMPLE_FILE_WORKERS` unset.
