@@ -1177,9 +1177,12 @@ impl MirTextCodegen for MirToLlvm:
                 slot_names = slot_names.push("@__simple_xray_slot_{symbol}")
         self.builder.emit("")
         self.builder.emit("; XRay flag-guard sleds (Windows)")
+        # No dllexport: one explicit export turns MinGW lld auto-export off and
+        # the DLL loses every function export (bug
+        # xray_win_flag_guard_dllexport_disables_mingw_auto_export_2026-11-15).
         for slot_name in slot_names:
             self.builder.emit("{slot_name} = internal global i8 0")
-        self.builder.emit("@__simple_xray_descriptor_v1 = dllexport constant {{ i64, [{slots.len()} x ptr] }} {{ i64 {slots.len()}, [{slots.len()} x ptr] [{slots.join(", ")}] }}")
+        self.builder.emit("@__simple_xray_descriptor_v1 = constant {{ i64, [{slots.len()} x ptr] }} {{ i64 {slots.len()}, [{slots.len()} x ptr] [{slots.join(", ")}] }}")
         # Site id -> Simple function name, parallel to the descriptor.
         var name_refs: [text] = []
         var site_index = 0
@@ -1190,8 +1193,8 @@ impl MirTextCodegen for MirToLlvm:
                 self.builder.emit("@__simple_xray_name_{site_index} = private unnamed_addr constant [{name_len} x i8] c\"{name_text}\\00\"")
                 name_refs = name_refs.push("ptr @__simple_xray_name_{site_index}")
                 site_index = site_index + 1
-        self.builder.emit("@__simple_xray_names_v1 = dllexport constant {{ i64, [{name_refs.len()} x ptr] }} {{ i64 {name_refs.len()}, [{name_refs.len()} x ptr] [{name_refs.join(", ")}] }}")
-        self.builder.emit("@__simple_xray_hook_v1 = dllexport global ptr null")
+        self.builder.emit("@__simple_xray_names_v1 = constant {{ i64, [{name_refs.len()} x ptr] }} {{ i64 {name_refs.len()}, [{name_refs.len()} x ptr] [{name_refs.join(", ")}] }}")
+        self.builder.emit("@__simple_xray_hook_v1 = global ptr null")
         # Ring mode (PROVISIONAL): with a null hook the edge appends one
         # {site, kind, pad, seq} record to this exported fixed-size ring. The
         # write index is claimed by atomicrmw add (lockless); a claim past
@@ -1199,7 +1202,7 @@ impl MirTextCodegen for MirToLlvm:
         # so a reader sees only complete records.
         val cap = XRAY_RING_CAPACITY_V1
         val ring_ty = "{{ i64, i64, i64, [{cap} x {{ i64, i32, i32, i64 }}] }}"
-        self.builder.emit("@__simple_xray_ring_v1 = dllexport global {ring_ty} {{ i64 {cap}, i64 0, i64 0, [{cap} x {{ i64, i32, i32, i64 }}] zeroinitializer }}")
+        self.builder.emit("@__simple_xray_ring_v1 = global {ring_ty} {{ i64 {cap}, i64 0, i64 0, [{cap} x {{ i64, i32, i32, i64 }}] zeroinitializer }}")
         self.builder.emit("define internal void @__simple_xray_edge_v1(i64 %site, i32 %kind) nounwind {{")
         self.builder.emit("xe_entry:")
         self.builder.emit("  %h = load volatile ptr, ptr @__simple_xray_hook_v1")
