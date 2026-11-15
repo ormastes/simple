@@ -205,11 +205,24 @@ case "$platform" in
 esac
 timeout_args=
 [ -z "$timeout_seconds" ] || timeout_args="--timeout $timeout_seconds"
+stage3_streaming_surfaces=0
+mir_interface_hir_env=
+mir_shard_count_env=
+if [ "${SIMPLE_MIR_SHARD_INTERFACE_HIR:-}" = 1 ]; then
+  stage3_streaming_surfaces=1
+  mir_interface_hir_env="SIMPLE_MIR_SHARD_INTERFACE_HIR=1"
+  # Per-file lanes already carry one shard-count row. Duplicate names make
+  # the transcript writer fail closed before the compiler can start.
+  if [ -n "$whole_program_env" ]; then
+    mir_shard_count_env="SIMPLE_MIR_SHARD_COUNT=${SIMPLE_MIR_SHARD_COUNT:-8}"
+  fi
+fi
 bootstrap_stage3_run_transcribed "$transcript" "$root" "$log" \
   "$worker_home" "$worker_tmp" "$worker_path" RUST_LOG=error LIBRARY_PATH= \
   SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent SIMPLE_BOOTSTRAP="${bootstrap_flag}" ${whole_program_env} ${per_file_env} \
   SIMPLE_ABI_POLICY="$abi_policy" SIMPLE_ABI_ADMISSION_RECEIPT="$abi_receipt" \
-  SIMPLE_NO_DEPRECATED_WARNINGS=1 SIMPLE_STAGE3_STREAMING_SURFACES=0 \
+  SIMPLE_NO_DEPRECATED_WARNINGS=1 SIMPLE_STAGE3_STREAMING_SURFACES="$stage3_streaming_surfaces" \
+  ${mir_interface_hir_env} ${mir_shard_count_env} \
   SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE="$requested_route" \
   SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE="$fallback_route" \
   SIMPLE_FRONTEND_CACHE=1 SIMPLE_FRONTEND_CACHE_DIR="$cache/frontend" \

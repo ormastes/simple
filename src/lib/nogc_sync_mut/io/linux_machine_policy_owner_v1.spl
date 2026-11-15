@@ -1,0 +1,791 @@
+# Administrator-installed, single-service-UID Linux machine storage.
+# AUTHORED_NOT_RUN. Only x86_64/aarch64 Linux libc layouts are authored.
+# No installer, elevation, caller path, daemon, new journal or runtime export.
+use std.nogc_sync_mut.database.wal.WalEntry
+use std.nogc_sync_mut.database.wal_segmented.DatabaseWalRevisionV1
+use std.common.contracts.container.local_principal_v1.MachineLocalPrincipalSnapshotV1
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.{MachineFreshEpochRecordV1, machine_fresh_epoch_entries_v1, machine_fresh_epoch_replay_v1}
+
+# Diagnostic values cannot construct any policy/storage/principal capability.
+pub struct LinuxMachineProcessContextV1:
+    real_uid: i64
+    effective_uid: i64
+    process_id: i64
+    thread_id: i64
+    authority_namespace_id: text
+    identity_digest: text
+    generation: i64
+
+pub class LinuxMachinePolicyOwnerV1:
+    slot: i64
+    generation: i64
+    pub fn read_policy_v1() -> Result<[u8], text>: linux_machine_read_v1(self.slot, self.generation, false)
+    pub fn read_supervisor_profile_v1() -> Result<[u8], text>: linux_machine_fixed_child_v1(self.slot, self.generation, "supervisor-profile.sdn", false)
+    pub fn read_workspace_profile_v1() -> Result<[u8], text>: linux_machine_fixed_child_v1(self.slot, self.generation, "workspace-profile.sdn", false)
+    pub fn read_fresh_epoch_profile_v1() -> Result<[u8], text>: linux_machine_fixed_child_v1(self.slot, self.generation, "fresh-epoch-profile.sdn", false)
+    pub fn open_storage_v1() -> LinuxMachineStorageOpenV1: linux_machine_storage_open_v1(self.slot, self.generation)
+    pub fn actual_process_context_v1() -> Result<LinuxMachineProcessContextV1, text>: linux_machine_context_v1(self.slot, self.generation)
+    pub fn actual_process_principal_v1() -> Result<MachineLocalPrincipalSnapshotV1, text>:
+        val value = self.actual_process_context_v1()?
+        Ok(MachineLocalPrincipalSnapshotV1(platform: "linux", principal_id: "linux:uid:" + str(value.effective_uid),
+            process_id: value.process_id, thread_id: value.thread_id, authority_namespace_id: value.authority_namespace_id,
+            identity_digest: value.identity_digest, generation: value.generation))
+    pub fn close_v1() -> text: linux_machine_close_v1(self.slot, self.generation, false)
+
+pub enum LinuxMachinePolicyOpenV1:
+    Rejected(reason: text)
+    CleanupRequired(owner: LinuxMachinePolicyOwnerV1, reason: text)
+    Ready(owner: LinuxMachinePolicyOwnerV1)
+
+pub class LinuxMachineStorageV1:
+    slot: i64
+    generation: i64
+    pub fn policy_bytes_v1() -> Result<[u8], text>: linux_machine_read_v1(self.slot, self.generation, true)
+    pub fn physical_capacity_v1() -> Result<(i64, i64), text>: linux_machine_capacity_v1(self.slot, self.generation)
+    pub fn bind_policy_v1(expected_bytes: text) -> Result<text, text>: linux_machine_bind_v1(self.slot, self.generation, expected_bytes)
+    pub fn wal_head_v1() -> Result<text, text>: linux_machine_wal_head_v1(self.slot, self.generation)
+    pub fn wal_revision_v1(digest: text) -> Result<DatabaseWalRevisionV1, text>: linux_machine_wal_revision_v1(self.slot, self.generation, digest)
+    pub fn wal_segment_v1(revision: DatabaseWalRevisionV1) -> Result<[WalEntry], text>: linux_machine_wal_segment_v1(self.slot, self.generation, revision)
+    pub fn wal_commit_v1(expected_parent: text, entries: [WalEntry]) -> Result<DatabaseWalRevisionV1, text>: linux_machine_wal_commit_v1(self.slot, self.generation, expected_parent, entries)
+    pub fn fresh_epoch_head_v1(record: MachineFreshEpochRecordV1) -> Result<text, text>: linux_machine_fresh_head_v1(self.slot, self.generation, record)
+    pub fn fresh_epoch_commit_v1(record: MachineFreshEpochRecordV1) -> Result<DatabaseWalRevisionV1, text>: linux_machine_fresh_commit_v1(self.slot, self.generation, record)
+    pub fn close_v1() -> text: linux_machine_close_v1(self.slot, self.generation, true)
+
+pub enum LinuxMachineStorageOpenV1:
+    Rejected(reason: text)
+    CleanupRequired(owner: LinuxMachineStorageV1, reason: text)
+    Ready(owner: LinuxMachineStorageV1)
+
+pub fn linux_machine_policy_open_v1() -> LinuxMachinePolicyOpenV1:
+    @when(os="linux"):
+    linux_machine_open_v1()
+    @else:
+    LinuxMachinePolicyOpenV1.Rejected("linux-machine-policy-host-unsupported")
+    @end
+
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_machine_policy_abi_v1.*
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32, volatile_read_u64, volatile_write_u8}
+use std.nogc_sync_mut.io.retained_file.{RetainedDirectoryOwnerV1, retained_directory_open_trusted_v1}
+use std.nogc_sync_mut.io.file_lock_owned_v2.*
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive, file_read_regular_no_follow_bounded, file_exists}
+use std.nogc_sync_mut.database.wal_segmented.{database_wal_current_v1, database_wal_revision_open_v1, database_wal_segment_read_strict_v1, database_wal_commit_v1}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid, text_to_utf8_bytes}
+use std.common.string_core.char_from_code
+use std.common.contracts.container.linux_fresh_epoch_v1.linux_fresh_epoch_profile_decode_v1
+use std.nogc_sync_mut.container.linux_fresh_epoch_storage_binding_v1.linux_fresh_epoch_storage_binding_v1
+use std.nogc_sync_mut.io.linux_machine_fresh_epoch_wal_v1.*
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
+
+struct LinuxMachineMetadataV1:
+    identity: text
+    uid: i64
+    mode: i64
+    size: i64
+    mount_id: i64
+    device: text
+
+struct LinuxMachineFdV1:
+    fd: i64
+    parent: i64
+    name: text
+    identity: text
+    rule: text
+
+struct LinuxMachineStateV1:
+    generation: i64
+    pid: i64
+    tid: i64
+    uid: i64
+    gid: i64
+    arena: i64
+    var fds: [LinuxMachineFdV1] = []
+    var policy_directory: Option<RetainedDirectoryOwnerV1> = nil
+    var state_directory: Option<RetainedDirectoryOwnerV1> = nil
+    var writer: Option<FileLockOwnerV2> = nil
+    var proc_index: i64 = -1
+    var task_index: i64 = -1
+    var ns_index: i64 = -1
+    var state_index: i64 = -1
+    var policy_index: i64 = -1
+    var proc_mount: i64 = 0
+    var proc_device: text = ""
+    var process_start: text = ""
+    var thread_start: text = ""
+    var boot_id: text = ""
+    var namespace_id: text = ""
+    var policy_digest: text = ""
+    var child_digests: Dict<text, text> = {}
+    var wal_index: i64 = -1
+    var objects_index: i64 = -1
+    var fresh_roots: [i64] = []
+    var fresh_wal: Option<LinuxMachineFreshWalV1> = nil
+    var binding_created_here: bool = false
+    var bound_digest: text = ""
+    var storage: bool = false
+    var phase: text = "opening"
+    var closed: bool = false
+    var close_error: bool = false
+
+# Only the actual process leader thread may enter this synchronous capsule.
+# It cannot race a worker-thread call or revive a fork-inherited owner table.
+var linux_machine_slots_v1: [LinuxMachineStateV1] = []
+var linux_machine_active_v1: i64 = 0
+
+fn linux_machine_directory_flags_v1() -> i32:
+    @when(arch="x86_64"):
+    720896
+    @elif(arch="aarch64"):
+    573440
+    @else:
+    0
+    @end
+
+fn linux_machine_file_flags_v1() -> i32:
+    @when(arch="x86_64"):
+    657408
+    @elif(arch="aarch64"):
+    559104
+    @else:
+    0
+    @end
+
+@unsafe(reason: "checks calling process and main thread before any mutable owner state", capabilities: [ffi])
+fn linux_machine_entry_v1() -> Result<(), text>:
+    if linux_machine_directory_flags_v1() == 0: return Err("linux-machine-policy-abi-unsupported")
+    linux_machine_process_origin_check_v1()
+
+fn linux_machine_state_v1(slot: i64, generation: i64) -> Result<LinuxMachineStateV1, text>:
+    linux_machine_entry_v1()?
+    if slot < 0 or slot >= linux_machine_slots_v1.len(): return Err("linux-machine-policy-stale-owner")
+    val state = linux_machine_slots_v1[slot]
+    if state.generation != generation or state.closed: return Err("linux-machine-policy-stale-owner")
+    Ok(state)
+
+@unsafe(reason: "encodes a fixed or already-validated single path component in private arena", capabilities: [ffi, raw_ptr])
+fn linux_machine_name_v1(slot: i64, value: text) -> i64:
+    if value.byte_len() > 4095 or value.contains("\0"): return 0
+    val pointer = linux_machine_slots_v1[slot].arena + 512
+    for index in 0..value.byte_len(): volatile_write_u8(pointer + index, value.byte_at(index) as i64)
+    volatile_write_u8(pointer + value.byte_len(), 0)
+    pointer
+
+@unsafe(reason: "reads Linux statx fixed layout and requires returned mount-ID/security fields", capabilities: [ffi, raw_ptr])
+fn linux_machine_metadata_v1(slot: i64, fd: i64, name: text = "") -> Result<LinuxMachineMetadataV1, text>:
+    val buffer = linux_machine_slots_v1[slot].arena
+    for at in 0..256: volatile_write_u8(buffer + at, 0)
+    val pointer = linux_machine_name_v1(slot, name)
+    if pointer == 0: return Err("linux-machine-policy-name-bound")
+    val flags = if name == "": 4096 else: 0
+    if statx(fd as i32, pointer, flags, 6143u32, buffer) != 0 or
+            (volatile_read_u32(buffer) & 6143) != 6143:
+        return Err("linux-machine-policy-statx-mount-security-unavailable")
+    val mode = volatile_read_u16(buffer + 28)
+    val uid = volatile_read_u32(buffer + 20)
+    val mount = volatile_read_u64(buffer + 144)
+    val device = str(volatile_read_u32(buffer + 136)) + ":" + str(volatile_read_u32(buffer + 140))
+    if mount <= 0: return Err("linux-machine-policy-mount-id-unavailable")
+    val identity = device + ":" + str(volatile_read_u64(buffer + 32)) + ":" + str(mount) + ":" + str(uid) + ":" + str(mode)
+    # Mutable directory contents are not part of directory identity. Policy
+    # file content is separately hash-bound after a retained complete read.
+    Ok(LinuxMachineMetadataV1(identity: identity, uid: uid, mode: mode,
+        size: volatile_read_u64(buffer + 40), mount_id: mount, device: device))
+
+@unsafe(reason: "queries genuine filesystem kind of a retained descriptor", capabilities: [ffi, raw_ptr])
+fn linux_machine_filesystem_v1(slot: i64, fd: i64, expected: i64) -> Result<(), text>:
+    val buffer = linux_machine_slots_v1[slot].arena + 256
+    for at in 0..128: volatile_write_u8(buffer + at, 0)
+    if fstatfs(fd as i32, buffer) != 0 or volatile_read_u64(buffer) != expected:
+        return Err("linux-machine-policy-filesystem-type-unproven")
+    Ok(())
+
+fn linux_machine_security_v1(slot: i64, meta: LinuxMachineMetadataV1, rule: text) -> Result<(), text>:
+    if rule == "admin-directory":
+        if meta.uid != 0 or (meta.mode & 61440) != 16384 or (meta.mode & 18) != 0:
+            return Err("linux-machine-policy-administrator-ancestry-required")
+    elif rule == "service-directory":
+        if meta.uid != linux_machine_slots_v1[slot].uid or (meta.mode & 65535) != 16832:
+            return Err("linux-machine-policy-predelegated-private-service-directory-required")
+    elif rule == "policy":
+        if meta.uid != 0 or (meta.mode != 33188 and meta.mode != 33060) or meta.size < 1 or meta.size > 1048576:
+            return Err("linux-machine-policy-root-owned-mode0644-or0444-required")
+    elif rule == "proc-directory" or rule == "proc-file":
+        val kind = if rule == "proc-directory": 16384 else: 32768
+        if (meta.mode & 61440) != kind or meta.mount_id != linux_machine_slots_v1[slot].proc_mount or
+                meta.device != linux_machine_slots_v1[slot].proc_device:
+            return Err("linux-machine-policy-proc-child-mount-mismatch")
+    Ok(())
+
+# Publish every fd into cleanup ownership before statx/ioctl or another fallible
+# operation. All subsequent failures return the same cleanup-bearing capsule.
+@unsafe(reason: "retains descriptor before any validation that can fail", capabilities: [ffi, raw_ptr])
+fn linux_machine_open_fd_v1(slot: i64, parent: i64, name: text, rule: text, flags: i32) -> Result<i64, text>:
+    val pointer = linux_machine_name_v1(slot, name)
+    if pointer == 0: return Err("linux-machine-policy-name-bound")
+    val fd = openat(parent as i32, pointer, flags, 0u32) as i64
+    if fd < 0: return Err("linux-machine-policy-required-installation-or-proc-entry-missing")
+    var state = linux_machine_slots_v1[slot]
+    val index = state.fds.len()
+    state.fds.push(LinuxMachineFdV1(fd: fd, parent: parent, name: name, identity: "", rule: rule))
+    linux_machine_slots_v1[slot] = state
+    val meta = linux_machine_metadata_v1(slot, fd)?
+    linux_machine_security_v1(slot, meta, rule)?
+    state = linux_machine_slots_v1[slot]
+    state.fds[index].identity = meta.identity
+    linux_machine_slots_v1[slot] = state
+    Ok(index)
+
+@unsafe(reason: "reads a bounded retained procfs regular entry without path reopening", capabilities: [ffi, raw_ptr])
+fn linux_machine_read_fd_v1(slot: i64, fd: i64, maximum: i64) -> Result<text, text>:
+    if maximum < 1 or maximum > 1048576: return Err("linux-machine-policy-read-bound")
+    val buffer = linux_machine_slots_v1[slot].arena + 8192
+    var bytes: [u8] = []
+    var offset = 0
+    while offset <= maximum:
+        val count = pread(fd as i32, buffer, (maximum + 1 - offset) as u64, offset)
+        if count < 0 or count > maximum + 1 - offset: return Err("linux-machine-policy-retained-read-failed")
+        if count == 0: break
+        for at in 0..count: bytes.push(volatile_read_u8(buffer + at) as u8)
+        offset = offset + count
+    if bytes.len() > maximum or not utf8_bytes_valid(bytes): return Err("linux-machine-policy-read-bound-or-utf8")
+    Ok(bytes_to_text(bytes))
+
+fn linux_machine_full_map_v1(source: text) -> bool:
+    val lines = source.trim().split("\n")
+    if lines.len() != 1: return false
+    var cells: [text] = []
+    for piece in lines[0].replace("\t", " ").split(" "):
+        if piece != "": cells.push(piece)
+    cells.len() == 3 and cells[0] == "0" and cells[1] == "0" and cells[2] == "4294967295"
+
+fn linux_machine_start_v1(source: text, expected: i64) -> Result<text, text>:
+    if not source.starts_with(str(expected) + " (") or not source.ends_with("\n"):
+        return Err("linux-machine-policy-process-stat-invalid")
+    # comm can contain spaces and ')'; the final ')' closes comm in proc stat.
+    var end = -1
+    for at in 0..source.byte_len():
+        if source.byte_at(at) == 41: end = at
+    if end < 0 or end + 2 >= source.byte_len(): return Err("linux-machine-policy-process-stat-invalid")
+    val fields = source.substring(end + 2, source.byte_len()).trim().split(" ")
+    if fields.len() < 20: return Err("linux-machine-policy-process-stat-invalid")
+    val ticks = fields[19].to_int() ?? 0
+    if ticks <= 0 or str(ticks) != fields[19]: return Err("linux-machine-policy-process-start-unavailable")
+    Ok(fields[19])
+
+fn linux_machine_credentials_v1(source: text, uid: i64, gid: i64) -> bool:
+    var seen: [text] = []
+    for line in source.split("\n"):
+        val pair = line.split(":")
+        if pair.len() != 2: continue
+        val key = pair[0]
+        if not ["Uid", "Gid", "CapInh", "CapPrm", "CapEff", "CapAmb"].contains(key): continue
+        if seen.contains(key): return false
+        seen.push(key)
+        var cells: [text] = []
+        for piece in pair[1].trim().replace("\t", " ").split(" "):
+            if piece != "": cells.push(piece)
+        if key == "Uid" or key == "Gid":
+            if cells.len() != 4: return false
+            val expected = str(if key == "Uid": uid else: gid)
+            for cell in cells:
+                if cell != expected: return false
+        else:
+            if cells.len() != 1 or cells[0] != "0000000000000000": return false
+    seen.len() == 6
+
+fn linux_machine_uuid_v1(value: text) -> bool:
+    if value.byte_len() != 37 or not value.ends_with("\n"): return false
+    for at in 0..36:
+        val code = value.byte_at(at) as i64
+        if [8, 13, 18, 23].contains(at):
+            if code != 45: return false
+        elif not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+    true
+
+@unsafe(reason: "genuine task-scoped procfs context and pinned nsfs identities", capabilities: [ffi, raw_ptr])
+fn linux_machine_capture_process_v1(slot: i64) -> Result<(), text>:
+    val directory = linux_machine_directory_flags_v1()
+    val file_flags = linux_machine_file_flags_v1()
+    val proc_index = linux_machine_open_fd_v1(slot, -100, "/proc", "", directory)?
+    var state = linux_machine_slots_v1[slot]
+    state.proc_index = proc_index
+    val proc_fd = state.fds[proc_index].fd
+    linux_machine_filesystem_v1(slot, proc_fd, 40864)?
+    val proc_meta = linux_machine_metadata_v1(slot, proc_fd)?
+    state.proc_mount = proc_meta.mount_id
+    state.proc_device = proc_meta.device
+    linux_machine_slots_v1[slot] = state
+    linux_machine_security_v1(slot, proc_meta, "proc-directory")?
+    val name = linux_machine_name_v1(slot, "self")
+    val output = state.arena + 8192
+    val count = readlinkat(proc_fd as i32, name, output, 64u64)
+    if count <= 0 or count > 32: return Err("linux-machine-policy-proc-self-unavailable")
+    var actual_self = ""
+    for at in 0..count: actual_self = actual_self + char_from_code(volatile_read_u8(output + at) as u32)
+    if actual_self != str(state.pid): return Err("linux-machine-policy-proc-pid-namespace-mismatch")
+    val process = linux_machine_open_fd_v1(slot, proc_fd, str(state.pid), "proc-directory", directory)?
+    val process_fd = linux_machine_slots_v1[slot].fds[process].fd
+    val leader_stat = linux_machine_open_fd_v1(slot, process_fd, "stat", "proc-file", file_flags)?
+    val task = linux_machine_open_fd_v1(slot, process_fd, "task", "proc-directory", directory)?
+    val thread = linux_machine_open_fd_v1(slot, linux_machine_slots_v1[slot].fds[task].fd, str(state.tid), "proc-directory", directory)?
+    state = linux_machine_slots_v1[slot]
+    state.task_index = thread
+    linux_machine_slots_v1[slot] = state
+    val thread_fd = state.fds[thread].fd
+    val thread_stat = linux_machine_open_fd_v1(slot, thread_fd, "stat", "proc-file", file_flags)?
+    val credentials = linux_machine_open_fd_v1(slot, thread_fd, "status", "proc-file", file_flags)?
+    if not linux_machine_credentials_v1(linux_machine_read_fd_v1(slot, linux_machine_slots_v1[slot].fds[credentials].fd, 16384)?, state.uid, state.gid):
+        return Err("linux-machine-policy-saved-fs-credentials-or-capabilities-refused")
+    for map_name in ["uid_map", "gid_map"]:
+        val map_index = linux_machine_open_fd_v1(slot, thread_fd, map_name, "proc-file", file_flags)?
+        if not linux_machine_full_map_v1(linux_machine_read_fd_v1(slot, linux_machine_slots_v1[slot].fds[map_index].fd, 4096)?):
+            return Err("linux-machine-policy-unprivileged-user-namespace-refused")
+    val ns = linux_machine_open_fd_v1(slot, thread_fd, "ns", "proc-directory", directory)?
+    state = linux_machine_slots_v1[slot]
+    state.ns_index = ns
+    linux_machine_slots_v1[slot] = state
+    val ns_fd = state.fds[ns].fd
+    var namespace_ids: [text] = []
+    var user_index = -1
+    var mount_index = -1
+    for pair in [("user", 268435456), ("mnt", 131072), ("pid", 536870912)]:
+        # These genuine procfs magic links must be followed to nsfs; the
+        # containing ns directory was already NOFOLLOW/procfs/mount checked.
+        val index = linux_machine_open_fd_v1(slot, ns_fd, pair.0, "namespace", 524288)?
+        val fd = linux_machine_slots_v1[slot].fds[index].fd
+        linux_machine_filesystem_v1(slot, fd, 1853056627)?
+        if ioctl(fd as i32, 46851u64) as i64 != pair.1:
+            return Err("linux-machine-policy-namespace-kind-mismatch")
+        namespace_ids.push(linux_machine_slots_v1[slot].fds[index].identity)
+        if pair.0 == "user": user_index = index
+        if pair.0 == "mnt": mount_index = index
+    val owner_fd = ioctl(linux_machine_slots_v1[slot].fds[mount_index].fd as i32, 46849u64) as i64
+    if owner_fd < 0: return Err("linux-machine-policy-mount-owner-userns-unavailable")
+    state = linux_machine_slots_v1[slot]
+    val owner_index = state.fds.len()
+    state.fds.push(LinuxMachineFdV1(fd: owner_fd, parent: -1, name: "", identity: "", rule: "namespace-owner"))
+    linux_machine_slots_v1[slot] = state
+    linux_machine_filesystem_v1(slot, owner_fd, 1853056627)?
+    val owner_meta = linux_machine_metadata_v1(slot, owner_fd)?
+    if ioctl(owner_fd as i32, 46851u64) != 268435456 or owner_meta.identity != linux_machine_slots_v1[slot].fds[user_index].identity:
+        return Err("linux-machine-policy-mount-owner-userns-mismatch")
+    var parent = proc_fd
+    for component in ["sys", "kernel", "random"]:
+        val index = linux_machine_open_fd_v1(slot, parent, component, "proc-directory", directory)?
+        parent = linux_machine_slots_v1[slot].fds[index].fd
+    val boot = linux_machine_open_fd_v1(slot, parent, "boot_id", "proc-file", file_flags)?
+    val boot_bytes = linux_machine_read_fd_v1(slot, linux_machine_slots_v1[slot].fds[boot].fd, 64)?
+    if not linux_machine_uuid_v1(boot_bytes): return Err("linux-machine-policy-boot-incarnation-unavailable")
+    val process_start = linux_machine_start_v1(linux_machine_read_fd_v1(slot, linux_machine_slots_v1[slot].fds[leader_stat].fd, 4096)?, state.pid)?
+    val thread_start = linux_machine_start_v1(linux_machine_read_fd_v1(slot, linux_machine_slots_v1[slot].fds[thread_stat].fd, 4096)?, state.tid)?
+    state = linux_machine_slots_v1[slot]
+    state.fds[owner_index].identity = owner_meta.identity
+    state.namespace_id = sha256_text("LINUX-MACHINE-NAMESPACE-V1\n" + namespace_ids.join("\n") + "\n" + boot_bytes)
+    state.boot_id = boot_bytes
+    state.process_start = process_start
+    state.thread_start = thread_start
+    linux_machine_slots_v1[slot] = state
+    Ok(())
+
+fn linux_machine_open_chain_v1(slot: i64, components: [text], service_final: bool = false) -> Result<i64, text>:
+    val flags = linux_machine_directory_flags_v1()
+    var index = linux_machine_open_fd_v1(slot, -100, "/", "admin-directory", flags)?
+    for at in 0..components.len():
+        val parent = linux_machine_slots_v1[slot].fds[index].fd
+        val rule = if service_final and at + 1 == components.len(): "service-directory" else: "admin-directory"
+        index = linux_machine_open_fd_v1(slot, parent, components[at], rule, flags)?
+    Ok(index)
+
+fn linux_machine_fail_v1(slot: i64, reason: text) -> LinuxMachinePolicyOpenV1:
+    linux_machine_slots_v1[slot].phase = "quarantined"
+    LinuxMachinePolicyOpenV1.CleanupRequired(LinuxMachinePolicyOwnerV1(slot: slot, generation: slot + 1), reason)
+
+@unsafe(reason: "allocates private process-local state after actual process/UID admission", capabilities: [ffi, raw_ptr])
+fn linux_machine_open_v1() -> LinuxMachinePolicyOpenV1:
+    val entered = linux_machine_entry_v1()
+    if entered.is_err(): return LinuxMachinePolicyOpenV1.Rejected(entered.unwrap_err())
+    val uid = getuid() as i64
+    val gid = getgid() as i64
+    if uid <= 0 or uid != geteuid() as i64 or gid != getegid() as i64:
+        return LinuxMachinePolicyOpenV1.Rejected("linux-machine-policy-nonroot-unambiguous-service-credentials-required")
+    if linux_machine_slots_v1.len() >= 4096 or linux_machine_active_v1 >= 32:
+        return LinuxMachinePolicyOpenV1.Rejected("linux-machine-policy-owner-bound")
+    val arena = malloc(1060864u64)
+    if arena == 0: return LinuxMachinePolicyOpenV1.Rejected("linux-machine-policy-memory-unavailable")
+    val slot = linux_machine_slots_v1.len()
+    linux_machine_slots_v1.push(LinuxMachineStateV1(generation: slot + 1, pid: getpid() as i64,
+        tid: gettid() as i64, uid: uid, gid: gid, arena: arena))
+    linux_machine_active_v1 = linux_machine_active_v1 + 1
+    val process = linux_machine_capture_process_v1(slot)
+    if process.is_err(): return linux_machine_fail_v1(slot, process.unwrap_err())
+    val root = linux_machine_open_chain_v1(slot, ["etc", "simple", "container"])
+    if root.is_err(): return linux_machine_fail_v1(slot, root.unwrap_err())
+    linux_machine_slots_v1[slot].policy_index = root.unwrap()
+    val file = linux_machine_open_fd_v1(slot, linux_machine_slots_v1[slot].fds[root.unwrap()].fd,
+        "machine-policy.sdn", "policy", linux_machine_file_flags_v1())
+    if file.is_err(): return linux_machine_fail_v1(slot, file.unwrap_err())
+    match retained_directory_open_trusted_v1("/etc/simple/container"):
+        case Ok(owner): linux_machine_slots_v1[slot].policy_directory = Some(owner)
+        case Err(reason): return linux_machine_fail_v1(slot, reason)
+    linux_machine_slots_v1[slot].phase = "reader"
+    val bytes = linux_machine_read_v1(slot, slot + 1, false)
+    if bytes.is_err(): return linux_machine_fail_v1(slot, bytes.unwrap_err())
+    LinuxMachinePolicyOpenV1.Ready(LinuxMachinePolicyOwnerV1(slot: slot, generation: slot + 1))
+
+@unsafe(reason: "revalidates retained fd identity, root ownership and genuine calling-thread context", capabilities: [ffi, raw_ptr])
+fn linux_machine_recheck_body_v1(slot: i64, generation: i64) -> Result<LinuxMachineStateV1, text>:
+    var state = linux_machine_state_v1(slot, generation)?
+    if state.phase == "quarantined" or state.phase == "closing": return Err("linux-machine-policy-owner-quarantined")
+    if getpid() as i64 != state.pid or gettid() as i64 != state.tid or getuid() as i64 != state.uid or
+            geteuid() as i64 != state.uid or getgid() as i64 != state.gid or getegid() as i64 != state.gid:
+        linux_machine_slots_v1[slot].phase = "quarantined"
+        return Err("linux-machine-policy-process-context-changed")
+    for item in state.fds:
+        val meta = linux_machine_metadata_v1(slot, item.fd)?
+        if meta.identity != item.identity: return Err("linux-machine-policy-retained-identity-changed")
+        linux_machine_security_v1(slot, meta, item.rule)?
+        if item.parent >= 0 or item.parent == -100:
+            val named = linux_machine_metadata_v1(slot, item.parent, item.name)?
+            if named.identity != item.identity: return Err("linux-machine-policy-retained-ancestry-replaced")
+        if item.rule == "proc-file":
+            linux_machine_filesystem_v1(slot, item.fd, 40864)?
+            if item.name == "uid_map" or item.name == "gid_map":
+                if not linux_machine_full_map_v1(linux_machine_read_fd_v1(slot, item.fd, 4096)?):
+                    return Err("linux-machine-policy-user-namespace-map-changed")
+            elif item.name == "stat":
+                val expected = if item.parent == state.fds[state.task_index].fd: state.tid else: state.pid
+                val expected_start = if item.parent == state.fds[state.task_index].fd: state.thread_start else: state.process_start
+                if linux_machine_start_v1(linux_machine_read_fd_v1(slot, item.fd, 4096)?, expected)? != expected_start:
+                    return Err("linux-machine-policy-process-incarnation-changed")
+            elif item.name == "boot_id":
+                if linux_machine_read_fd_v1(slot, item.fd, 64)? != state.boot_id:
+                    return Err("linux-machine-policy-boot-incarnation-changed")
+            elif item.name == "status":
+                if not linux_machine_credentials_v1(linux_machine_read_fd_v1(slot, item.fd, 16384)?, state.uid, state.gid):
+                    return Err("linux-machine-policy-saved-fs-credentials-or-capabilities-changed")
+    if val writer = state.writer:
+        if not file_lock_owner_live_v2(writer): return Err("linux-machine-policy-writer-not-current")
+    Ok(state)
+
+fn linux_machine_recheck_v1(slot: i64, generation: i64) -> Result<LinuxMachineStateV1, text>:
+    val result = linux_machine_recheck_body_v1(slot, generation)
+    if result.is_err() and linux_machine_entry_v1().is_ok() and slot >= 0 and slot < linux_machine_slots_v1.len():
+        if not linux_machine_slots_v1[slot].closed:
+            linux_machine_slots_v1[slot].phase = "quarantined"
+    result
+
+fn linux_machine_context_v1(slot: i64, generation: i64) -> Result<LinuxMachineProcessContextV1, text>:
+    val state = linux_machine_recheck_v1(slot, generation)?
+    if state.storage or state.phase != "reader": return Err("linux-machine-policy-reader-transferred-or-not-ready")
+    Ok(LinuxMachineProcessContextV1(real_uid: state.uid, effective_uid: state.uid,
+        process_id: state.pid, thread_id: state.tid, authority_namespace_id: state.namespace_id,
+        identity_digest: linux_machine_process_digest_v1(state), generation: generation))
+
+fn linux_machine_process_digest_v1(state: LinuxMachineStateV1) -> text:
+    sha256_text("LINUX-MACHINE-PROCESS-V1\n" + str(state.uid) + "\n" + str(state.gid) + "\n" +
+        str(state.pid) + "\n" + state.process_start + "\n" + str(state.tid) + "\n" + state.thread_start + "\n" +
+        state.namespace_id + "\n" + str(state.proc_mount) + "\n" + state.proc_device + "\n")
+
+fn linux_machine_read_child_v1(slot: i64, name: text) -> Result<[u8], text>:
+    val directory = linux_machine_slots_v1[slot].policy_directory.unwrap()
+    var file = directory.open_file(name, 1048576u64)?
+    val metadata = file.security_metadata_v1()
+    if metadata.is_err() or metadata.unwrap().owner_uid != 0u32 or
+            (metadata.unwrap().mode != 33188u32 and metadata.unwrap().mode != 33060u32):
+        val consumed = file.close()
+        return Err("linux-machine-policy-retained-file-security-mismatch")
+    val read = file.read_all_bounded_v1(1048576)
+    val closed = file.close()
+    if not closed:
+        linux_machine_slots_v1[slot].phase = "quarantined"
+        return Err("linux-machine-policy-file-close-consumed-error")
+    val bytes = read?
+    if bytes.len() < 1: return Err("linux-machine-policy-empty")
+    Ok(bytes)
+
+fn linux_machine_read_v1(slot: i64, generation: i64, storage: bool) -> Result<[u8], text>:
+    val state = linux_machine_recheck_v1(slot, generation)?
+    if state.storage != storage or (storage and state.phase != "storage"):
+        return Err("linux-machine-policy-owner-transferred-or-not-ready")
+    val bytes = linux_machine_read_child_v1(slot, "machine-policy.sdn")?
+    val digest = sha256_u8_hex(bytes)
+    if state.policy_digest != "" and state.policy_digest != digest:
+        linux_machine_slots_v1[slot].phase = "quarantined"
+        return Err("linux-machine-policy-exact-bytes-changed")
+    val checked = linux_machine_recheck_v1(slot, generation)?
+    linux_machine_slots_v1[slot].policy_digest = digest
+    Ok(bytes)
+
+fn linux_machine_fixed_child_v1(slot: i64, generation: i64, name: text, storage: bool) -> Result<[u8], text>:
+    if not ["supervisor-profile.sdn", "workspace-profile.sdn", "fresh-epoch-profile.sdn"].contains(name):
+        return Err("linux-machine-fixed-child-unsupported")
+    val policy = linux_machine_read_v1(slot, generation, storage)?
+    var state = linux_machine_slots_v1[slot]
+    if not state.child_digests.contains_key(name):
+        val fd = linux_machine_open_fd_v1(slot, state.fds[state.policy_index].fd, name, "policy", linux_machine_file_flags_v1())
+        if fd.is_err(): return Err(linux_machine_mutation_error_v1(slot, fd.unwrap_err()))
+    val bytes = linux_machine_read_child_v1(slot, name)?
+    val digest = sha256_u8_hex(bytes)
+    state = linux_machine_slots_v1[slot]
+    if state.child_digests.contains_key(name) and state.child_digests[name] != digest:
+        return Err(linux_machine_mutation_error_v1(slot, "linux-machine-fixed-profile-bytes-changed"))
+    val checked = linux_machine_recheck_v1(slot, generation)?
+    linux_machine_slots_v1[slot].child_digests[name] = digest
+    Ok(bytes)
+
+fn linux_machine_storage_fail_v1(slot: i64, reason: text) -> LinuxMachineStorageOpenV1:
+    linux_machine_slots_v1[slot].phase = "quarantined"
+    LinuxMachineStorageOpenV1.CleanupRequired(LinuxMachineStorageV1(slot: slot, generation: slot + 1), reason)
+
+fn linux_machine_storage_open_v1(slot: i64, generation: i64) -> LinuxMachineStorageOpenV1:
+    val loaded = linux_machine_state_v1(slot, generation)
+    if loaded.is_err(): return LinuxMachineStorageOpenV1.Rejected(loaded.unwrap_err())
+    if loaded.unwrap().storage or loaded.unwrap().phase != "reader":
+        return LinuxMachineStorageOpenV1.Rejected("linux-machine-policy-reader-not-transferable")
+    # From this assignment onward every failure belongs to the storage owner.
+    linux_machine_slots_v1[slot].storage = true
+    linux_machine_slots_v1[slot].phase = "storage"
+    val actual = linux_machine_read_v1(slot, generation, true)
+    if actual.is_err(): return linux_machine_storage_fail_v1(slot, actual.unwrap_err())
+    val state_root = linux_machine_open_chain_v1(slot, ["var", "lib", "simple", "container"], true)
+    if state_root.is_err(): return linux_machine_storage_fail_v1(slot, state_root.unwrap_err())
+    linux_machine_slots_v1[slot].state_index = state_root.unwrap()
+    # The installed private WAL tree is a fixed child of this same retained
+    # root. Pre-existing symlinks or a second private ledger are not admitted.
+    val wal = linux_machine_open_fd_v1(slot, linux_machine_slots_v1[slot].fds[state_root.unwrap()].fd,
+        "database-wal", "service-directory", linux_machine_directory_flags_v1())
+    if wal.is_err(): return linux_machine_storage_fail_v1(slot, wal.unwrap_err())
+    val objects = linux_machine_open_fd_v1(slot, linux_machine_slots_v1[slot].fds[wal.unwrap()].fd,
+        "objects", "service-directory", linux_machine_directory_flags_v1())
+    if objects.is_err(): return linux_machine_storage_fail_v1(slot, objects.unwrap_err())
+    linux_machine_slots_v1[slot].wal_index = wal.unwrap()
+    linux_machine_slots_v1[slot].objects_index = objects.unwrap()
+    match retained_directory_open_trusted_v1("/var/lib/simple/container"):
+        case Ok(owner): linux_machine_slots_v1[slot].state_directory = Some(owner)
+        case Err(reason): return linux_machine_storage_fail_v1(slot, reason)
+    # Existing generation-bearing lock namespace; never a caller-chosen lock.
+    # Root-protected ancestry and trusted service UID are part of this model.
+    match file_lock_open_owned_v2("/var/lib/simple/container/machine-writer.lock", 0):
+        case FileLockOpenV2.Ready(writer): linux_machine_slots_v1[slot].writer = Some(writer)
+        case FileLockOpenV2.CleanupRequired(writer, reason):
+            linux_machine_slots_v1[slot].writer = Some(writer)
+            return linux_machine_storage_fail_v1(slot, reason)
+        case FileLockOpenV2.Rejected(reason): return linux_machine_storage_fail_v1(slot, reason)
+    val checked = linux_machine_recheck_v1(slot, generation)
+    if checked.is_err(): return linux_machine_storage_fail_v1(slot, checked.unwrap_err())
+    LinuxMachineStorageOpenV1.Ready(LinuxMachineStorageV1(slot: slot, generation: generation))
+
+@unsafe(reason: "samples actual online processors and physical pages after retained context validation", capabilities: [ffi])
+fn linux_machine_capacity_v1(slot: i64, generation: i64) -> Result<(i64, i64), text>:
+    val actual = linux_machine_read_v1(slot, generation, true)?
+    val processors = sysconf(84)
+    val pages = sysconf(85)
+    val page_bytes = sysconf(30)
+    if processors <= 0 or processors > 9223372036854775807 / 1000 or pages <= 0 or page_bytes <= 0 or pages > 9223372036854775807 / page_bytes:
+        return Err("linux-machine-policy-physical-capacity-unavailable")
+    val checked = linux_machine_recheck_v1(slot, generation)?
+    Ok((processors * 1000, pages * page_bytes))
+
+fn linux_machine_mutation_error_v1(slot: i64, reason: text) -> text:
+    linux_machine_slots_v1[slot].phase = "quarantined"
+    reason
+
+fn linux_machine_bind_v1(slot: i64, generation: i64, expected: text) -> Result<text, text>:
+    val actual = linux_machine_read_v1(slot, generation, true)?
+    if expected.byte_len() < 1 or expected.byte_len() > 1048576 or text_to_utf8_bytes(expected) != actual:
+        return Err("linux-machine-policy-binding-exact-bytes-differ")
+    val digest = sha256_text(expected)
+    val state = linux_machine_slots_v1[slot]
+    if state.bound_digest != "" and state.bound_digest != digest: return Err("linux-machine-policy-binding-reset-refused")
+    val path = "/var/lib/simple/container/machine-capacity-policy.sdn"
+    var created_here = false
+    if file_exists(path):
+        if file_read_regular_no_follow_bounded(path, 1048576)? != expected:
+            return Err("linux-machine-policy-existing-mode-or-policy-differs")
+    else:
+        # The lifetime writer protects this exclusive publication. Never
+        # replace a previous binding, including an unknown partial winner.
+        if not file_create_exclusive(path, expected):
+            return Err(linux_machine_mutation_error_v1(slot, "linux-machine-policy-binding-publication-uncertain"))
+        created_here = true
+    val winner = file_read_regular_no_follow_bounded(path, 1048576)
+    if winner.is_err() or winner.unwrap() != expected:
+        return Err(linux_machine_mutation_error_v1(slot, "linux-machine-policy-binding-winner-differs"))
+    val checked = linux_machine_read_v1(slot, generation, true)
+    if checked.is_err(): return Err(linux_machine_mutation_error_v1(slot, checked.unwrap_err()))
+    linux_machine_slots_v1[slot].bound_digest = digest
+    if created_here: linux_machine_slots_v1[slot].binding_created_here = true
+    Ok(digest)
+
+fn linux_machine_wal_state_v1(slot: i64, generation: i64) -> Result<LinuxMachineStateV1, text>:
+    val actual = linux_machine_read_v1(slot, generation, true)?
+    val state = linux_machine_slots_v1[slot]
+    if state.writer == nil or state.bound_digest == "" or state.bound_digest != state.policy_digest:
+        return Err("linux-machine-policy-writer-or-binding-missing")
+    Ok(state)
+
+fn linux_machine_wal_identity_v1(state: LinuxMachineStateV1) -> text:
+    sha256_text("MACHINE-CONTAINER-WAL-V1\n" + state.bound_digest + "\n")
+
+fn linux_machine_wal_head_v1(slot: i64, generation: i64) -> Result<text, text>:
+    val state = linux_machine_wal_state_v1(slot, generation)?
+    val result = database_wal_current_v1("/var/lib/simple/container/database-wal", linux_machine_wal_identity_v1(state))
+    val checked = linux_machine_recheck_v1(slot, generation)?
+    result
+
+fn linux_machine_wal_revision_v1(slot: i64, generation: i64, digest: text) -> Result<DatabaseWalRevisionV1, text>:
+    val state = linux_machine_wal_state_v1(slot, generation)?
+    val revision = database_wal_revision_open_v1("/var/lib/simple/container/database-wal", digest)?
+    if revision.database_identity != linux_machine_wal_identity_v1(state): return Err("linux-machine-policy-wal-identity-mismatch")
+    val checked = linux_machine_recheck_v1(slot, generation)?
+    Ok(revision)
+
+fn linux_machine_wal_segment_v1(slot: i64, generation: i64, revision: DatabaseWalRevisionV1) -> Result<[WalEntry], text>:
+    val retained = linux_machine_wal_revision_v1(slot, generation, revision.digest)?
+    val entries = database_wal_segment_read_strict_v1("/var/lib/simple/container/database-wal", revision)?
+    val checked = linux_machine_recheck_v1(slot, generation)?
+    Ok(entries)
+
+fn linux_machine_wal_commit_v1(slot: i64, generation: i64, expected_parent: text, entries: [WalEntry]) -> Result<DatabaseWalRevisionV1, text>:
+    val state = linux_machine_wal_state_v1(slot, generation)?
+    # An absent CURRENT is ambiguous after lost state. No initial or replacement
+    # machine charge may be minted until the real migration fence is supplied.
+    if expected_parent == "": return Err("machine-container-migration-fence-unavailable")
+    val result = database_wal_commit_v1("/var/lib/simple/container/database-wal", linux_machine_wal_identity_v1(state), expected_parent, entries)
+    if result.is_err(): return Err(linux_machine_mutation_error_v1(slot, result.unwrap_err()))
+    val checked = linux_machine_recheck_v1(slot, generation)
+    if checked.is_err(): return Err(linux_machine_mutation_error_v1(slot, checked.unwrap_err()))
+    result
+
+fn linux_machine_fresh_mechanism_v1(slot: i64, generation: i64, record: MachineFreshEpochRecordV1) -> Result<LinuxMachineFreshWalV1, text>:
+    val actual = linux_machine_read_v1(slot, generation, true)?
+    val state = linux_machine_wal_state_v1(slot, generation)?
+    val bytes = linux_machine_fixed_child_v1(slot, generation, "fresh-epoch-profile.sdn", true)?
+    if not utf8_bytes_valid(bytes): return Err("fresh-epoch-storage-profile-utf8")
+    val profile = linux_fresh_epoch_profile_decode_v1(bytes_to_text(bytes))?
+    if state.fresh_roots.len() == 0:
+        for pair in [(profile.text_v1("graphRoot")?, true), (profile.text_v1("runRoot")?, true),
+                ("/sys/fs/cgroup" + profile.text_v1("partitionCgroup")?, false)]:
+            val path = pair.0
+            val index = linux_machine_open_chain_v1(slot, path.substring(1, path.byte_len()).split("/"), pair.1)?
+            linux_machine_slots_v1[slot].fresh_roots.push(index)
+    if linux_machine_slots_v1[slot].fresh_roots.len() != 3: return Err("fresh-epoch-storage-native-root-capture-incomplete")
+    if linux_machine_slots_v1[slot].fresh_wal.is_none():
+        match linux_machine_fresh_wal_open_v1():
+            case LinuxMachineFreshWalOpenV1.Rejected(reason): return Err(reason)
+            case LinuxMachineFreshWalOpenV1.CleanupRequired(owner, reason):
+                linux_machine_slots_v1[slot].fresh_wal = Some(owner)
+                return Err(reason)
+            case LinuxMachineFreshWalOpenV1.Ready(owner): linux_machine_slots_v1[slot].fresh_wal = Some(owner)
+    val current = linux_machine_wal_state_v1(slot, generation)?
+    val mechanism = current.fresh_wal.unwrap()
+    val roots = mechanism.roots_v1()?
+    if roots.0 != current.fds[current.wal_index].identity or roots.1 != current.fds[current.objects_index].identity:
+        return Err("fresh-epoch-storage-same-writer-wal-roots-differ")
+    val physical = linux_machine_capacity_v1(slot, generation)?
+    linux_fresh_epoch_storage_binding_v1(record, bytes_to_text(bytes), bytes_to_text(actual), current.uid, current.gid,
+        linux_machine_process_digest_v1(current), physical, current.fds[current.state_index].identity, roots.0, roots.1,
+        current.fds[current.fresh_roots[0]].identity, current.fds[current.fresh_roots[1]].identity,
+        current.fds[current.fresh_roots[2]].identity)?
+    Ok(mechanism)
+
+fn linux_machine_fresh_head_v1(slot: i64, generation: i64, record: MachineFreshEpochRecordV1) -> Result<text, text>:
+    val mechanism = linux_machine_fresh_mechanism_v1(slot, generation, record)?
+    val state = linux_machine_wal_state_v1(slot, generation)?
+    val result = mechanism.head_v1(record, linux_machine_wal_identity_v1(state))
+    if result.is_err(): return Err(linux_machine_mutation_error_v1(slot, result.unwrap_err()))
+    if result.unwrap() == "" and not state.binding_created_here: return Err("fresh-epoch-existing-binding-without-current-repair-required")
+    val checked = linux_machine_fresh_mechanism_v1(slot, generation, record)?
+    result
+
+fn linux_machine_fresh_commit_v1(slot: i64, generation: i64, record: MachineFreshEpochRecordV1) -> Result<DatabaseWalRevisionV1, text>:
+    val head = linux_machine_fresh_head_v1(slot, generation, record)?
+    val state = linux_machine_wal_state_v1(slot, generation)?
+    if head == "":
+        if not state.binding_created_here: return Err("fresh-epoch-initial-write-not-eligible")
+        # Consume BEFORE any backend mutation. Ambiguity is never fresh retry.
+        linux_machine_slots_v1[slot].binding_created_here = false
+    if head != "": return linux_machine_wal_revision_v1(slot, generation, head)
+    val result = linux_machine_fresh_publish_v1(slot, state, record)
+    if result.is_err(): return Err(linux_machine_mutation_error_v1(slot, result.unwrap_err()))
+    val checked = linux_machine_fresh_mechanism_v1(slot, generation, record)
+    if checked.is_err(): return Err(linux_machine_mutation_error_v1(slot, checked.unwrap_err()))
+    result
+
+# Sole fresh publication site: private and reachable only after exact original
+# writer/binding checks and canonical eligibility consumption above.
+fn linux_machine_fresh_publish_v1(slot: i64, state: LinuxMachineStateV1, record: MachineFreshEpochRecordV1) -> Result<DatabaseWalRevisionV1, text>:
+    val at = time_sample_unix_micros_or_failure()
+    if at <= 0: return Err("fresh-wal-native-clock-unavailable")
+    val entries = machine_fresh_epoch_entries_v1(record, at / 1000)?
+    val root = "/var/lib/simple/container/database-wal"
+    val identity = linux_machine_wal_identity_v1(state)
+    val revision = database_wal_commit_v1(root, identity, "", entries)?
+    if database_wal_current_v1(root, identity)? != revision.digest: return Err("fresh-wal-publication-readback-uncertain")
+    val replay = database_wal_segment_read_strict_v1(root, revision)?
+    if not machine_fresh_epoch_replay_v1(replay, record)?: return Err("fresh-wal-published-record-differs")
+    Ok(revision)
+
+@unsafe(reason: "retains unknown lock owners; Linux descriptor close is consumed once, never retried", capabilities: [ffi, raw_ptr])
+fn linux_machine_close_v1(slot: i64, generation: i64, storage: bool) -> text:
+    val loaded = linux_machine_state_v1(slot, generation)
+    if loaded.is_err():
+        if linux_machine_entry_v1().is_err(): return "retained"
+        return "stale"
+    var state = loaded.unwrap()
+    if state.storage != storage: return "retained"
+    state.phase = "closing"
+    linux_machine_slots_v1[slot] = state
+    if val mechanism = state.fresh_wal:
+        val turn = mechanism.close_v1()
+        if not turn.0: return "retained"
+        linux_machine_slots_v1[slot].fresh_wal = nil
+        if turn.1 != "": linux_machine_slots_v1[slot].close_error = true
+    if val writer = state.writer:
+        val released = file_lock_release_owned_v2(writer)
+        linux_machine_slots_v1[slot].writer = released.owner
+        if released.owner.is_some(): return "retained"
+        if not released.closed:
+            linux_machine_slots_v1[slot].writer = Some(writer)
+            return "retained"
+        if released.error != "": linux_machine_slots_v1[slot].close_error = true
+    state = linux_machine_slots_v1[slot]
+    if val directory = state.state_directory:
+        linux_machine_slots_v1[slot].state_directory = nil
+        var owned = directory
+        if not owned.close(): linux_machine_slots_v1[slot].close_error = true
+    if val directory = state.policy_directory:
+        linux_machine_slots_v1[slot].policy_directory = nil
+        var owned = directory
+        if not owned.close(): linux_machine_slots_v1[slot].close_error = true
+    var at = state.fds.len() - 1
+    while at >= 0:
+        val fd = linux_machine_slots_v1[slot].fds[at].fd
+        # Consume before close. Linux close errors cannot authorize fd retries.
+        linux_machine_slots_v1[slot].fds[at].fd = -1
+        if fd >= 0 and close(fd as i32) != 0: linux_machine_slots_v1[slot].close_error = true
+        at = at - 1
+    free(state.arena)
+    linux_machine_slots_v1[slot].closed = true
+    linux_machine_slots_v1[slot].phase = "closed"
+    linux_machine_active_v1 = linux_machine_active_v1 - 1
+    if linux_machine_slots_v1[slot].close_error: return "consumed-error"
+    "released"
+@else:
+fn linux_machine_fixed_child_v1(slot: i64, generation: i64, name: text, storage: bool) -> Result<[u8], text>: Err("linux-machine-policy-host-unsupported")
+fn linux_machine_fresh_head_v1(slot: i64, generation: i64, record: MachineFreshEpochRecordV1) -> Result<text, text>: Err("linux-machine-policy-host-unsupported")
+fn linux_machine_fresh_commit_v1(slot: i64, generation: i64, record: MachineFreshEpochRecordV1) -> Result<DatabaseWalRevisionV1, text>: Err("linux-machine-policy-host-unsupported")
+fn linux_machine_read_v1(slot: i64, generation: i64, storage: bool) -> Result<[u8], text>: Err("linux-machine-policy-host-unsupported")
+fn linux_machine_context_v1(slot: i64, generation: i64) -> Result<LinuxMachineProcessContextV1, text>: Err("linux-machine-policy-host-unsupported")
+fn linux_machine_storage_open_v1(slot: i64, generation: i64) -> LinuxMachineStorageOpenV1: LinuxMachineStorageOpenV1.Rejected("linux-machine-policy-host-unsupported")
+fn linux_machine_capacity_v1(slot: i64, generation: i64) -> Result<(i64, i64), text>: Err("linux-machine-policy-host-unsupported")
+fn linux_machine_bind_v1(slot: i64, generation: i64, expected: text) -> Result<text, text>: Err("linux-machine-policy-host-unsupported")
+fn linux_machine_wal_head_v1(slot: i64, generation: i64) -> Result<text, text>: Err("linux-machine-policy-host-unsupported")
+fn linux_machine_wal_revision_v1(slot: i64, generation: i64, digest: text) -> Result<DatabaseWalRevisionV1, text>: Err("linux-machine-policy-host-unsupported")
+fn linux_machine_wal_segment_v1(slot: i64, generation: i64, revision: DatabaseWalRevisionV1) -> Result<[WalEntry], text>: Err("linux-machine-policy-host-unsupported")
+fn linux_machine_wal_commit_v1(slot: i64, generation: i64, expected_parent: text, entries: [WalEntry]) -> Result<DatabaseWalRevisionV1, text>: Err("linux-machine-policy-host-unsupported")
+fn linux_machine_close_v1(slot: i64, generation: i64, storage: bool) -> text: "stale"
+@end

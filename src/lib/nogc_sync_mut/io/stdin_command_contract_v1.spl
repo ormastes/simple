@@ -1,0 +1,90 @@
+# Common counted-input command contract. Platform owners stay opaque and never
+# enter serialized replies. Paths use forward slashes on both hosted systems.
+use std.nogc_sync_mut.io.host_identity_store_v1.HostIdentityStoreV1
+pub const STDIN_COMMAND_POLL_WAIT_MS_V1: i64 = 10
+pub struct StdinCommandRequestV1:
+    program: text
+    expected_digest: text
+    args: [text]
+    environment: [text]
+    directory: text
+    input: [u8]
+    timeout_ms: i64
+    max_stdout_bytes: i64
+    max_stderr_bytes: i64
+    expires_at_unix_ms: i64
+
+pub struct StdinCommandResultV1:
+    stdout: [u8]
+    stderr: [u8]
+    exit_code: i64
+    input_written: i64
+    stdin_closed: bool
+    stdout_eof: bool
+    stderr_eof: bool
+    stdout_truncated: bool
+    stderr_truncated: bool
+    executable_digest: text
+    reaped: bool
+    cleanup_confirmed: bool
+    effect_attempted: bool
+
+pub struct StdinCommandProfileReadTurnV1:
+    owner: Option<HostIdentityStoreV1>
+    bytes: Option<[u8]>
+    error: text
+
+pub fn stdin_command_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64: return false
+    for c in value.chars():
+        if (c >= "0" and c <= "9") or (c >= "a" and c <= "f"): continue
+        return false
+    true
+
+pub fn stdin_command_path_valid_v1(path: text) -> bool:
+    if path.len() < 2 or path.len() > 4096: return false
+    var offset = 1
+    if not path.starts_with("/"):
+        if path.len() < 4: return false
+        val drive = path.substring(0, 1)
+        if not ((drive >= "A" and drive <= "Z") or (drive >= "a" and drive <= "z")): return false
+        if path.substring(1, 3) != ":/": return false
+        offset = 3
+    elif path.starts_with("//"): return false
+    val tail = path.substring(offset, path.byte_len())
+    for part in tail.split("/"):
+        if part == "" or part == "." or part == "..": return false
+        for c in part.chars():
+            if ((c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+                    (c >= "0" and c <= "9") or c == "_" or c == "-" or c == "."):
+                continue
+            return false
+    true
+
+# Private roots may retain the native global-DOS spelling accepted by the
+# existing Windows root capability. This checks shape only and never returns
+# a projected/rebound path: the original string is passed unchanged to open.
+pub fn stdin_command_store_root_valid_v1(path: text) -> bool:
+    if path.len() < 2 or path.len() > 32760: return false
+    if path.starts_with("/"): return stdin_command_path_valid_v1(path)
+    var value = path
+    if path.starts_with("\\GLOBAL??\\"):
+        value = path.substring(10, path.byte_len())
+    elif path.starts_with("\\"): return false
+    value = value.replace("\\", "/")
+    if value.len() < 4 or value.substring(1, 3) != ":/": return false
+    val drive = value.substring(0, 1)
+    if not ((drive >= "A" and drive <= "Z") or (drive >= "a" and drive <= "z")): return false
+    val tail = value.substring(3, value.byte_len())
+    for part in tail.split("/"):
+        if (part == "" or part == "." or part == ".." or part.ends_with(".") or part.ends_with(" ")):
+            return false
+        for c in part.chars():
+            if c < " " or c == ":" or c == "?" or c == "*" or c == "\"" or c == "<" or c == ">" or c == "|":
+                return false
+    true
+
+export StdinCommandRequestV1, StdinCommandResultV1, StdinCommandProfileReadTurnV1
+export stdin_command_digest_valid_v1, stdin_command_path_valid_v1
+export STDIN_COMMAND_POLL_WAIT_MS_V1
+export stdin_command_store_root_valid_v1

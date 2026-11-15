@@ -26,7 +26,7 @@ struct WalkState:
     in_unsafe: bool
     parent_kind: text
 
-# All scanning is BYTE based (`byte_at`): offsets, `len()` and `slice` are
+# All scanning is BYTE based (`byte_at`): offsets, `byte_len()` and `slice` are
 # bytes while `s[i]` indexes chars, so a non-ASCII comment would otherwise
 # shift or overrun every position after it. Parser spans count CHARS, so the
 # walk state carries a char->byte table.
@@ -41,7 +41,7 @@ fn _is_ident_byte(b: i64) -> bool:
 
 fn _indent_at(source: text, line_start: i64) -> text:
     var i = line_start
-    while i < source.len() and (source.byte_at(i) == 32 or source.byte_at(i) == 9):
+    while i < source.byte_len() and (source.byte_at(i) == 32 or source.byte_at(i) == 9):
         i = i + 1
     source.slice(line_start, i)
 
@@ -52,7 +52,7 @@ fn _match_close(source: text, open_idx: i64, open: text, close: text) -> i64:
     var depth = 0
     var i = open_idx
     var in_str = false
-    while i < source.len():
+    while i < source.byte_len():
         val c = source.byte_at(i)
         if in_str:
             if c == 92: i = i + 1
@@ -68,16 +68,16 @@ fn _match_close(source: text, open_idx: i64, open: text, close: text) -> i64:
 fn _char_to_byte_table(source: text) -> [i64]:
     var table: [i64] = []
     var i = 0
-    while i < source.len():
+    while i < source.byte_len():
         val b = source.byte_at(i)
         if b < 128 or b >= 192: table.push(i)
         i = i + 1
-    table.push(source.len())
+    table.push(source.byte_len())
     table
 
 fn _byte_of(st: WalkState, char_offset: i64) -> i64:
     if char_offset < 0: return -1
-    if char_offset >= st.char_to_byte.len(): return st.snapshot.source.len()
+    if char_offset >= st.char_to_byte.len(): return st.char_to_byte[st.char_to_byte.len() - 1]  # last entry is the source byte length
     st.char_to_byte[char_offset]
 
 fn _span_start_b(st: WalkState, sp: i64) -> i64:
@@ -134,7 +134,7 @@ fn _fn_decl_view(st: WalkState, d: i64) -> NodeView?:
     val fn_kw = head.find("fn " + name)
     if fn_kw >= 0:
         v.name_start = start + fn_kw + 3
-        v.name_end = v.name_start + name.len()
+        v.name_end = v.name_start + name.byte_len()
         val open_after_name = head.slice(fn_kw).find("(")
         val open_rel = if open_after_name >= 0: fn_kw + open_after_name else: -1
         if open_rel >= 0:
@@ -144,7 +144,7 @@ fn _fn_decl_view(st: WalkState, d: i64) -> NodeView?:
                 v.args_end = close
                 v.args_text = source.slice(v.args_start, v.args_end)
                 var nl = source.find("\n", close)
-                if nl < 0: nl = source.len()
+                if nl < 0: nl = source.byte_len()
                 val header = source.slice(close + 1, nl)
                 val colon = header.rfind(":")
                 if colon >= 0:
@@ -202,8 +202,8 @@ fn _walk_expr(mut st: WalkState, e: i64):
                     # Receiver without a span (nested call argument): recover
                     # `<ident-chain>.<name>` textually just before the span.
                     var p = start
-                    if p >= v.name.len() and source.slice(p - v.name.len(), p) == v.name:
-                        p = p - v.name.len()
+                    if p >= v.name.byte_len() and source.slice(p - v.name.byte_len(), p) == v.name:
+                        p = p - v.name.byte_len()
                         if p > 0 and source.byte_at(p - 1) == 46:
                             p = p - 1
                             var q = p
@@ -217,7 +217,7 @@ fn _walk_expr(mut st: WalkState, e: i64):
                 val rel = source.slice(left_end, end).find(v.name)
                 if rel >= 0:
                     v.name_start = left_end + rel
-                    v.name_end = v.name_start + v.name.len()
+                    v.name_end = v.name_start + v.name.byte_len()
             if kind == "call" and left >= 0 and expr_get_tag(left) == EXPR_IDENT:
                 v.name = expr_get_str(left)
                 # Anchor the callee name so `rename` reaches plain call sites
@@ -230,9 +230,9 @@ fn _walk_expr(mut st: WalkState, e: i64):
                     # the name textually just before the span, like the
                     # method-call receiver recovery above.
                     val p = start
-                    if p >= v.name.len() and source.slice(p - v.name.len(), p) == v.name:
+                    if p >= v.name.byte_len() and source.slice(p - v.name.byte_len(), p) == v.name:
                         v.callee = v.name
-                        v.name_start = p - v.name.len()
+                        v.name_start = p - v.name.byte_len()
                         v.name_end = p
                         if v.name_start < v.start:
                             v.start = v.name_start
@@ -285,7 +285,7 @@ fn _walk_stmt(mut st: WalkState, s: i64):
             var start = _span_start_b(st, anchor)
             var end = _span_end_b(st, anchor)
             if not span_is_valid(sp):
-                val kw = st.stmt_start + st.indent.len()
+                val kw = st.stmt_start + st.indent.byte_len()
                 if source.slice(kw, kw + 6) == "return": start = kw
                 if child_end > end: end = child_end
             var v = _base(st, "return", start, end, anchor)

@@ -1,0 +1,183 @@
+# AUTHORED_NOT_RUN. Actual independently prepared disposable OS fixtures.
+# No synthetic fd/handle, subprocess, chmod-after-write, unsupported skip,
+# secret logging, or fabricated native success. All owner results are retained.
+use std.spec.{describe, it, expect, step}
+use std.common.crypto.sha256.sha256_text
+use std.common.text_bytes.text_to_utf8_bytes
+use std.nogc_sync_mut.io_runtime.env_get
+use std.nogc_sync_mut.io.host_identity_store_v1.*
+
+var identity_store_fixture_owners_v1: [HostIdentityStoreV1] = []
+
+fn identity_store_fixture_required_v1(name: text) -> text:
+    val value = env_get(name)
+    if value == "": panic("independently prepared identity-store fixture required")
+    value
+
+fn identity_store_fixture_open_v1(root: text) -> Result<HostIdentityStoreV1, text>:
+    val opened = host_identity_store_open_v1(root)
+    if val owner = opened.owner:
+        identity_store_fixture_owners_v1.push(owner)
+        if opened.ready and not opened.cleanup_pending and opened.error == "": return Ok(owner)
+        val closed = host_identity_store_close_v1(owner)
+        return Err("identity-store actual fixture open refused; cleanup-completed=" + str(closed.completed))
+    Err("identity-store actual fixture owner required")
+
+fn identity_store_fixture_bytes_equal_v1(left: [u8], right: [u8]) -> bool:
+    if left.len() != right.len(): return false
+    for index in 0..left.len():
+        if left[index] != right[index]: return false
+    true
+
+describe "Actual protected retained host identity store v1":
+    it "persists UTF8 without replacing a winner and rejects copied owners after close":
+        step("Use a fresh disposable protected root and an independently prepared public known-hosts line")
+        val root = identity_store_fixture_required_v1("SIMPLE_HOST_IDENTITY_FIXTURE_ROOT")
+        # Public known-hosts data only. A test never places a private key into
+        # environment variables, diagnostics, SDN, snapshots, or captured steps.
+        val public_line = identity_store_fixture_required_v1("SIMPLE_HOST_IDENTITY_FIXTURE_PUBLIC_LINE")
+        val payload = text_to_utf8_bytes(public_line)
+        val leaf = sha256_text(public_line) + ".hosts"
+        val profile_leaf = sha256_text(public_line) + ".profile"
+        val profile_payload = text_to_utf8_bytes("{version: 1, kind: \"identity-store-fixture\"}\n")
+        val owner = identity_store_fixture_open_v1(root).unwrap()
+        val copied = owner
+        val preflight = host_identity_store_transport_preflight_v1(owner)
+        val missing = host_identity_store_read_v1(owner, leaf, 65536)
+        val missing_path = host_identity_store_path_v1(owner, leaf)
+        step("Publish once through the actual protected staging and no-replace boundary")
+        val published = host_identity_store_publish_v1(owner, leaf, payload)
+        val read = host_identity_store_read_v1(copied, leaf, 65536)
+        val path = host_identity_store_path_v1(owner, leaf)
+        step("Attempt different UTF8 data at the same leaf and observe the untouched actual winner")
+        val other = text_to_utf8_bytes(public_line + "\n")
+        val existing = host_identity_store_publish_v1(copied, leaf, other)
+        step("Keep the same digest's profile record in a distinct no-replace role")
+        # This fixture tests opaque role separation. The consumer separately
+        # derives real .profile stems from its canonical strict profile SDN.
+        val profile_missing = host_identity_store_read_v1(owner, profile_leaf, 65536)
+        val profile_published = host_identity_store_publish_v1(owner, profile_leaf, profile_payload)
+        val profile_existing = host_identity_store_publish_v1(owner, profile_leaf, other)
+        val profile_winner = host_identity_store_read_v1(owner, profile_leaf, 65536)
+        val winner = host_identity_store_read_v1(owner, leaf, 65536)
+        val bad_leaf = host_identity_store_publish_v1(owner, "../untrusted.key", payload)
+        val bad_encoding = host_identity_store_publish_v1(owner, leaf, [255u8])
+        step("Consume canonical cleanup before asserting collected results")
+        val closed = host_identity_store_close_v1(owner)
+        val stale_read = host_identity_store_read_v1(copied, leaf, 65536)
+        val stale_path = host_identity_store_path_v1(copied, leaf)
+        val stale_close = host_identity_store_close_v1(copied)
+        expect(closed.completed).to_equal(true)
+        expect(closed.owner == None).to_equal(true)
+        expect(closed.error).to_equal("")
+        expect(missing.error).to_equal("")
+        expect(missing.absent).to_equal(true)
+        expect(missing.bytes == None).to_equal(true)
+        expect(missing_path.is_err()).to_equal(true)
+        @when(os="windows"):
+        expect(missing_path.unwrap_err()).to_equal("identity-store-path-file-absent")
+        expect(preflight.unwrap_err()).to_equal("identity-store-transport-projection-unavailable")
+        @else:
+        expect(preflight.is_ok()).to_equal(true)
+        @end
+        expect(published.publication).to_equal(HostIdentityStorePublicationV1.Published)
+        expect(published.file_synced).to_equal(true)
+        @when(os="linux"):
+        expect(published.namespace_synced).to_equal(true)
+        @else:
+        expect(published.namespace_synced).to_equal(false)
+        @end
+        expect(published.cleanup_pending).to_equal(false)
+        expect(published.error).to_equal("")
+        expect(read.error).to_equal("")
+        expect(read.absent).to_equal(false)
+        expect(read.bytes != None).to_equal(true)
+        expect(identity_store_fixture_bytes_equal_v1(read.bytes.unwrap(), payload)).to_equal(true)
+        @when(os="windows"):
+        expect(path.unwrap_err()).to_equal("identity-store-transport-projection-unavailable")
+        @else:
+        expect(path.is_ok()).to_equal(true)
+        val diagnostic_path = path.unwrap()
+        val normalized_path = diagnostic_path.replace("\\", "/")
+        expect(normalized_path.ends_with("/journal/" + leaf)).to_equal(true)
+        @end
+        expect(existing.publication).to_equal(HostIdentityStorePublicationV1.Existing)
+        expect(existing.file_synced).to_equal(false)
+        expect(existing.namespace_synced).to_equal(false)
+        expect(existing.error).to_equal("")
+        expect(winner.error).to_equal("")
+        expect(identity_store_fixture_bytes_equal_v1(winner.bytes.unwrap(), payload)).to_equal(true)
+        expect(profile_missing.absent).to_equal(true)
+        expect(profile_missing.bytes == None).to_equal(true)
+        expect(profile_published.publication).to_equal(HostIdentityStorePublicationV1.Published)
+        expect(profile_published.file_synced).to_equal(true)
+        expect(profile_existing.publication).to_equal(HostIdentityStorePublicationV1.Existing)
+        expect(profile_existing.file_synced).to_equal(false)
+        expect(profile_existing.namespace_synced).to_equal(false)
+        expect(profile_winner.error).to_equal("")
+        expect(identity_store_fixture_bytes_equal_v1(profile_winner.bytes.unwrap(), profile_payload)).to_equal(true)
+        expect(bad_leaf.publication).to_equal(HostIdentityStorePublicationV1.NotAttempted)
+        expect(bad_encoding.publication).to_equal(HostIdentityStorePublicationV1.NotAttempted)
+        expect(stale_read.bytes == None).to_equal(true)
+        expect(stale_read.absent).to_equal(false)
+        expect(stale_read.error != "").to_equal(true)
+        expect(stale_path.is_err()).to_equal(true)
+        expect(stale_close.owner == None).to_equal(true)
+        expect(stale_close.completed).to_equal(false)
+        step("Reopen the actual protected state and compare complete persisted public bytes")
+        val reopened = identity_store_fixture_open_v1(root).unwrap()
+        val persisted = host_identity_store_read_v1(reopened, leaf, 65536)
+        val persisted_profile = host_identity_store_read_v1(reopened, profile_leaf, 65536)
+        val replay = host_identity_store_publish_v1(reopened, leaf, payload)
+        val reclosed = host_identity_store_close_v1(reopened)
+        expect(reclosed.completed).to_equal(true)
+        expect(reclosed.owner == None).to_equal(true)
+        expect(persisted.error).to_equal("")
+        expect(identity_store_fixture_bytes_equal_v1(persisted.bytes.unwrap(), payload)).to_equal(true)
+        expect(persisted_profile.error).to_equal("")
+        expect(identity_store_fixture_bytes_equal_v1(persisted_profile.bytes.unwrap(), profile_payload)).to_equal(true)
+        expect(replay.publication).to_equal(HostIdentityStorePublicationV1.Existing)
+        expect(replay.file_synced).to_equal(false)
+        expect(replay.namespace_synced).to_equal(false)
+
+    it "refuses actual unsafe ancestry without inventing proved absence":
+        step("Open a separately prepared disposable unsafe directory or reparse fixture")
+        val root = identity_store_fixture_required_v1("SIMPLE_HOST_IDENTITY_UNSAFE_ROOT")
+        val opened = host_identity_store_open_v1(root)
+        var cleanup_completed = true
+        if val owner = opened.owner:
+            identity_store_fixture_owners_v1.push(owner)
+            val closed = host_identity_store_close_v1(owner)
+            cleanup_completed = closed.completed
+        expect(opened.ready).to_equal(false)
+        expect(opened.error != "").to_equal(true)
+        expect(cleanup_completed).to_equal(true)
+
+    it "retains cleanup truth when invalid arguments follow an actual unsafe target read":
+        step("Use a protected disposable root with an independently installed unsafe symlink or reparse leaf")
+        val root = identity_store_fixture_required_v1("SIMPLE_HOST_IDENTITY_UNSAFE_LEAF_ROOT")
+        val leaf = "b".repeat(64) + ".key"
+        val owner = identity_store_fixture_open_v1(root).unwrap()
+        val unsafe_read = host_identity_store_read_v1(owner, leaf, 65536)
+        val unsafe_preflight = host_identity_store_transport_preflight_v1(owner)
+        val invalid_read = host_identity_store_read_v1(owner, "../unsafe.key", 65536)
+        val invalid_publish = host_identity_store_publish_v1(owner, leaf, [255u8])
+        val invalid_path = host_identity_store_path_v1(owner, leaf)
+        val closed = host_identity_store_close_v1(owner)
+        expect(unsafe_read.bytes == None).to_equal(true)
+        expect(unsafe_read.absent).to_equal(false)
+        expect(unsafe_read.error != "").to_equal(true)
+        expect(unsafe_read.cleanup_pending).to_equal(true)
+        expect(invalid_read.cleanup_pending).to_equal(true)
+        expect(invalid_read.absent).to_equal(false)
+        expect(invalid_publish.cleanup_pending).to_equal(true)
+        expect(invalid_publish.publication).to_equal(HostIdentityStorePublicationV1.NotAttempted)
+        expect(invalid_path.is_err()).to_equal(true)
+        @when(os="windows"):
+        expect(invalid_path.unwrap_err() == "identity-store-transport-projection-unavailable").to_equal(false)
+        expect(unsafe_preflight.unwrap_err() == "identity-store-transport-projection-unavailable").to_equal(false)
+        @else:
+        expect(unsafe_preflight.is_err()).to_equal(true)
+        @end
+        expect(closed.completed).to_equal(true)
+        expect(closed.owner == None).to_equal(true)

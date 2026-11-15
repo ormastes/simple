@@ -1,0 +1,171 @@
+# Private process-local health for actual journal generations, not another WAL.
+# One process-lifetime gate; no I/O, native lifetime observation, or callbacks
+# under it. Busy tickets remain held while the journal releases this gate for I/O.
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new_gate, mutex_lock_gate, mutex_unlock_gate}
+use std.nogc_sync_mut.io.file_lock_owned_v2.FileLockOwnerV2
+use std.nogc_sync_mut.io.windows_journal_store_v1.WindowsJournalStoreV1
+use std.common.build_manager.contracts.builder_digest_valid_v1
+
+struct OperationJournalHealthTurnV2:
+    owner_id: i64
+    ticket: i64
+
+struct OperationJournalHealthSlotV2:
+    lock: Option<FileLockOwnerV2>
+    store: Option<WindowsJournalStoreV1>
+    binding: text
+    busy: i64
+    bound: bool = false
+    reason: text = ""
+    failing_digest: text = ""
+
+# The bound includes opening, quarantined and cleanup-pending registrations.
+# Logical IDs/tickets never recycle into copied values, including after close.
+val OPERATION_JOURNAL_HEALTH_LIMIT_V2: i64 = 1024
+var operation_health_gate_v2: Mutex = mutex_new_gate(0)
+var operation_health_slots_v2: Dict<i64, OperationJournalHealthSlotV2> = {}
+var operation_health_next_owner_v2: i64 = 1
+var operation_health_next_ticket_v2: i64 = 1
+
+fn operation_health_gate_finish_v2<T>(result: Result<T, text>) -> Result<T, text>:
+    if mutex_unlock_gate(operation_health_gate_v2, 0) != 1:
+        # The existing mutex contract returns zero only for an invalid handle.
+        # Future lock attempts fail; no healthy fallback or replacement gate.
+        return Err("OPERATION_JOURNAL_HEALTH_GATE_RELEASE_FAILED")
+    result
+
+fn operation_health_same_v2(slot: OperationJournalHealthSlotV2,
+        lock: Option<FileLockOwnerV2>, store: Option<WindowsJournalStoreV1>) -> bool:
+    if val windows = store:
+        if lock.is_some() or slot.lock.is_some() or slot.store.is_none(): return false
+        return windows.same_owner(slot.store.unwrap())
+    if val held = lock:
+        if store.is_some() or slot.store.is_some() or slot.lock.is_none(): return false
+        return held.token == slot.lock.unwrap().token
+    false
+
+fn operation_health_turn_valid_v2(turn: OperationJournalHealthTurnV2) -> bool:
+    if turn.owner_id <= 0 or turn.ticket <= 0: return false
+    if not operation_health_slots_v2.contains_key(turn.owner_id): return false
+    operation_health_slots_v2[turn.owner_id].busy == turn.ticket
+
+fn operation_health_reserve_held_v2(store: Option<WindowsJournalStoreV1>,
+        binding: text) -> Result<OperationJournalHealthTurnV2, text>:
+    # Windows open receives an already-retained capability. Duplicate refusal
+    # must happen before lease writes and must never close that borrowed alias.
+    if val windows = store:
+        for id in operation_health_slots_v2.keys():
+            val slot = operation_health_slots_v2[id]
+            if val prior = slot.store:
+                if windows.same_owner(prior): return Err("OPERATION_JOURNAL_NATIVE_ALREADY_REGISTERED")
+    if not builder_digest_valid_v1(binding): return Err("OPERATION_JOURNAL_HEALTH_BINDING_INVALID")
+    if operation_health_slots_v2.len() >= OPERATION_JOURNAL_HEALTH_LIMIT_V2:
+        return Err("OPERATION_JOURNAL_HEALTH_LIMIT")
+    if operation_health_next_owner_v2 >= 9223372036854775807 or operation_health_next_ticket_v2 >= 9223372036854775807:
+        return Err("OPERATION_JOURNAL_HEALTH_GENERATION_EXHAUSTED")
+    val id = operation_health_next_owner_v2
+    val ticket = operation_health_next_ticket_v2
+    operation_health_next_owner_v2 = id + 1
+    operation_health_next_ticket_v2 = ticket + 1
+    operation_health_slots_v2[id] = OperationJournalHealthSlotV2(nil, store, binding, ticket)
+    Ok(OperationJournalHealthTurnV2(id, ticket))
+
+fn operation_health_reserve_v2(store: Option<WindowsJournalStoreV1>,
+        binding: text) -> Result<OperationJournalHealthTurnV2, text>:
+    if mutex_lock_gate(operation_health_gate_v2).is_none(): return Err("OPERATION_JOURNAL_HEALTH_GATE_UNAVAILABLE")
+    operation_health_gate_finish_v2(operation_health_reserve_held_v2(store, binding))
+
+fn operation_health_bind_held_v2(turn: OperationJournalHealthTurnV2,
+        lock: Option<FileLockOwnerV2>, store: Option<WindowsJournalStoreV1>) -> Result<bool, text>:
+    if not operation_health_turn_valid_v2(turn): return Err("OPERATION_JOURNAL_HEALTH_TICKET_INVALID")
+    if lock.is_some() == store.is_some(): return Err("OPERATION_JOURNAL_HEALTH_IDENTITY_INVALID")
+    if val held = lock:
+        if held.token <= 0: return Err("OPERATION_JOURNAL_HEALTH_IDENTITY_INVALID")
+    var slot = operation_health_slots_v2[turn.owner_id]
+    if slot.bound: return Err("OPERATION_JOURNAL_HEALTH_ALREADY_BOUND")
+    if val reserved = slot.store:
+        if store.is_none() or not reserved.same_owner(store.unwrap()):
+            return Err("OPERATION_JOURNAL_HEALTH_IDENTITY_INVALID")
+    for id in operation_health_slots_v2.keys():
+        if id != turn.owner_id and operation_health_same_v2(operation_health_slots_v2[id], lock, store):
+            return Err("OPERATION_JOURNAL_NATIVE_ALREADY_REGISTERED")
+    slot.lock = lock
+    slot.store = store
+    slot.bound = true
+    operation_health_slots_v2[turn.owner_id] = slot
+    Ok(true)
+
+fn operation_health_bind_v2(turn: OperationJournalHealthTurnV2,
+        lock: Option<FileLockOwnerV2>, store: Option<WindowsJournalStoreV1>) -> Result<bool, text>:
+    if mutex_lock_gate(operation_health_gate_v2).is_none(): return Err("OPERATION_JOURNAL_HEALTH_GATE_UNAVAILABLE")
+    operation_health_gate_finish_v2(operation_health_bind_held_v2(turn, lock, store))
+
+fn operation_health_begin_held_v2(id: i64, lock: Option<FileLockOwnerV2>,
+        store: Option<WindowsJournalStoreV1>, binding: text,
+        cleanup: bool) -> Result<OperationJournalHealthTurnV2, text>:
+    if not operation_health_slots_v2.contains_key(id): return Err("OPERATION_JOURNAL_HEALTH_UNKNOWN")
+    var slot = operation_health_slots_v2[id]
+    if not slot.bound or not operation_health_same_v2(slot, lock, store) or slot.binding != binding:
+        return Err("OPERATION_JOURNAL_HEALTH_IDENTITY_INVALID")
+    if slot.busy != 0: return Err("OPERATION_JOURNAL_OWNER_BUSY")
+    if not cleanup and slot.reason != "":
+        return Err("OPERATION_JOURNAL_QUARANTINED:" + slot.reason + ":" + slot.failing_digest)
+    if operation_health_next_ticket_v2 >= 9223372036854775807:
+        return Err("OPERATION_JOURNAL_HEALTH_GENERATION_EXHAUSTED")
+    val ticket = operation_health_next_ticket_v2
+    operation_health_next_ticket_v2 = ticket + 1
+    slot.busy = ticket
+    operation_health_slots_v2[id] = slot
+    Ok(OperationJournalHealthTurnV2(id, ticket))
+
+fn operation_health_begin_v2(id: i64, lock: Option<FileLockOwnerV2>,
+        store: Option<WindowsJournalStoreV1>, binding: text,
+        cleanup: bool = false) -> Result<OperationJournalHealthTurnV2, text>:
+    if mutex_lock_gate(operation_health_gate_v2).is_none(): return Err("OPERATION_JOURNAL_HEALTH_GATE_UNAVAILABLE")
+    operation_health_gate_finish_v2(operation_health_begin_held_v2(id, lock, store, binding, cleanup))
+
+fn operation_health_poison_held_v2(turn: OperationJournalHealthTurnV2,
+        reason: text, failing_digest: text) -> Result<bool, text>:
+    if not operation_health_turn_valid_v2(turn): return Err("OPERATION_JOURNAL_HEALTH_TICKET_INVALID")
+    # Invalid CURRENT framing may have no immutable object identity at all.
+    # Keep that absence explicit instead of inventing a valid-looking digest.
+    if reason == "" or (failing_digest != "" and not builder_digest_valid_v1(failing_digest)):
+        return Err("OPERATION_JOURNAL_HEALTH_DIAGNOSTIC_INVALID")
+    var slot = operation_health_slots_v2[turn.owner_id]
+    if slot.reason == "":
+        slot.reason = if reason.byte_len() <= 256: reason else: "OPERATION_JOURNAL_STORED_INTEGRITY_FAILURE"
+        slot.failing_digest = failing_digest
+        operation_health_slots_v2[turn.owner_id] = slot
+    Ok(true)
+
+fn operation_health_poison_v2(turn: OperationJournalHealthTurnV2,
+        reason: text, failing_digest: text) -> Result<bool, text>:
+    if mutex_lock_gate(operation_health_gate_v2).is_none(): return Err("OPERATION_JOURNAL_HEALTH_GATE_UNAVAILABLE")
+    operation_health_gate_finish_v2(operation_health_poison_held_v2(turn, reason, failing_digest))
+
+fn operation_health_end_held_v2(turn: OperationJournalHealthTurnV2,
+        retire: bool) -> Result<bool, text>:
+    if not operation_health_turn_valid_v2(turn): return Err("OPERATION_JOURNAL_HEALTH_TICKET_INVALID")
+    if retire:
+        operation_health_slots_v2.remove(turn.owner_id)
+    else:
+        var slot = operation_health_slots_v2[turn.owner_id]
+        slot.busy = 0
+        operation_health_slots_v2[turn.owner_id] = slot
+    Ok(true)
+
+fn operation_health_end_v2(turn: OperationJournalHealthTurnV2,
+        retire: bool = false) -> Result<bool, text>:
+    if mutex_lock_gate(operation_health_gate_v2).is_none(): return Err("OPERATION_JOURNAL_HEALTH_GATE_UNAVAILABLE")
+    operation_health_gate_finish_v2(operation_health_end_held_v2(turn, retire))
+
+fn operation_health_cancel_held_v2(turn: OperationJournalHealthTurnV2) -> Result<bool, text>:
+    if not operation_health_turn_valid_v2(turn): return Err("OPERATION_JOURNAL_HEALTH_TICKET_INVALID")
+    val slot = operation_health_slots_v2[turn.owner_id]
+    if slot.bound or slot.lock.is_some() or slot.store.is_some():
+        return Err("OPERATION_JOURNAL_HEALTH_NATIVE_OWNER_RETAINED")
+    operation_health_end_held_v2(turn, true)
+
+fn operation_health_cancel_v2(turn: OperationJournalHealthTurnV2) -> Result<bool, text>:
+    if mutex_lock_gate(operation_health_gate_v2).is_none(): return Err("OPERATION_JOURNAL_HEALTH_GATE_UNAVAILABLE")
+    operation_health_gate_finish_v2(operation_health_cancel_held_v2(turn))

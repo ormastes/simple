@@ -1,0 +1,61 @@
+# Selection is pure. Credential dereference and transport execution belong to
+# the consumer, after it has checked support for the selected transport.
+use std.common.config_core.server_context_types_v1.*
+
+fn server_container_host_valid_v1(host: text) -> bool:
+    val folded = host.lower()
+    if (["localhost", "localhost.localdomain", "localhost6", "localhost6.localdomain6",
+            "ip6-localhost", "ip6-loopback"].contains(folded) or
+            folded.ends_with(".localhost")):
+        return false
+    if server_ipv4_valid_v1(host):
+        val parts = host.split(".")
+        val first = parts[0]
+        if first == "127" or first == "0": return false
+    true
+
+pub fn resolve_server_context_v1(config: ServerConfigV1, consumer: text,
+        explicit_server: text, explicit_context: text,
+        in_container: bool) -> Result<ResolvedServerV1, text>:
+    # Validate even programmatically constructed input, including references
+    # in contexts that are not selected by this request.
+    server_config_validate_v1(config)?
+    if not server_consumer_valid_v1(consumer): return Err("server-consumer-invalid")
+    var context_name = config.current_context
+    if explicit_context != "": context_name = explicit_context
+    var context_index: i64 = -1
+    var index: i64 = 0
+    for context in config.contexts:
+        if context.name == context_name: context_index = index
+        index = index + 1
+    # An explicit server does not mask an invalid explicit context.
+    if context_index < 0: return Err("server-selected-context-missing")
+    val context = config.contexts[context_index]
+    var server_name = context.shared_server
+    var source = "context_shared"
+    if context.consumer_refs.contains_key(consumer):
+        server_name = context.consumer_refs[consumer]
+        source = "context_consumer"
+    if explicit_server != "":
+        server_name = explicit_server
+        source = "explicit_server"
+    var server_index: i64 = -1
+    index = 0
+    for record in config.servers:
+        if record.name == server_name: server_index = index
+        index = index + 1
+    if server_index < 0: return Err("server-selected-server-missing")
+    var record = config.servers[server_index]
+    # HTTPS is representable for future consumers, but no current consumer
+    # has an admitted HTTPS transport. Never silently run locally instead.
+    if record.transport == "https": return Err("server-consumer-transport-unsupported")
+    if in_container:
+        if record.transport == "local": return Err("server-container-local-forbidden")
+        var host = record.host
+        if record.container_host != "": host = record.container_host
+        if not server_container_host_valid_v1(host): return Err("server-container-host-local")
+        record.host = host
+    Ok(ResolvedServerV1(record: record, consumer: consumer,
+        context: context.name, source: source))
+
+export resolve_server_context_v1

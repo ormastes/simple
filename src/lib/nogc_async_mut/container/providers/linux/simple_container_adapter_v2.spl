@@ -1,3 +1,4 @@
+use std.nogc_async_mut.container.shared.logs_capture_v1.*
 # Linux leaf adapter for the common container API. Its callers serialize access
 # to the retained provider; this module is not another scheduler or grant verifier.
 use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, ContainerActionProjectionV2, ContainerMountProjectionV2,
@@ -252,7 +253,7 @@ impl LinuxSimpleContainerAdapterV2:
         val projection = ContainerRequestProjectionV2(workload_uid: decoded.pod_uid, attempt: decoded.attempt,
             operation_id: decoded.operation_id, request_digest: digest, cpu_millis: decoded.cpu_limit_millis,
             memory_bytes: decoded.memory_limit_bytes, timeout_ms: decoded.timeout_ms, has_devices: false,
-            has_workspace: decoded.bundle_path != "" or decoded.build_input_root != "" or decoded.build_output_root != "")
+            has_workspace: decoded.bundle_path != "" or decoded.build_input_root != "" or decoded.build_output_root != "" or decoded.mounts.len() > 0)
         Ok((decoded, projection))
 
     pub fn project(request: ContainerExecutionRequestV2) -> Result<ContainerRequestProjectionV2, text>:
@@ -266,10 +267,15 @@ impl LinuxSimpleContainerAdapterV2:
         Ok(true)
 
     fn _exec_configuration_v3(parent: ContainerExecutionRequestV2, installed: ContainerExecInstalledV3,
-            admission: ContainerExecAdmissionV3) -> Result<bool, text>:
+            admission: ContainerExecAdmissionV3, operation: text) -> Result<bool, text>:
         if self.provider.containment_policy.?: return Err("containment-exec-control-not-installed")
         if self.provider.scripted: return Err("container-exec-scripted-owner-unsupported")
         val checked = self._checked_request_v2(parent)?
+        # This private routing selector is fixed by the two owner methods;
+        # it is not a caller-supplied mount grant. Inspect keeps its existing
+        # known-birth recovery route without allowing a new exec effect.
+        if operation == "begin" and checked.0.mounts.len() > 0:
+            return Err("linux-mount-native-admission-not-installed")
         val matched = container_exec_installed_match_v3(installed, admission)?
         if (self.provider.engine != "podman" or not self.provider.engine_policy.? or
                 not self.provider.engine_baseline.?): return Err("container-exec-managed-podman-required")
@@ -286,7 +292,7 @@ impl LinuxSimpleContainerAdapterV2:
     pub me exec_begin_v3(parent: ContainerExecutionRequestV2, installed: ContainerExecInstalledV3,
             admission: ContainerExecAdmissionV3, observed: ContainerExecControlObservationV3,
             action: text) -> LinuxOciEngineExecTurnV3:
-        match self._exec_configuration_v3(parent, installed, admission):
+        match self._exec_configuration_v3(parent, installed, admission, "begin"):
             case Err(reason):
                 return LinuxOciEngineExecTurnV3(owner: nil, birth: nil, inspection: nil, phase: "rejected", error: reason)
             case Ok(_): pass
@@ -294,7 +300,7 @@ impl LinuxSimpleContainerAdapterV2:
 
     pub me exec_inspect_v3(parent: ContainerExecutionRequestV2, installed: ContainerExecInstalledV3,
             admission: ContainerExecAdmissionV3) -> LinuxOciEngineExecTurnV3:
-        match self._exec_configuration_v3(parent, installed, admission):
+        match self._exec_configuration_v3(parent, installed, admission, "inspect"):
             case Err(reason):
                 return LinuxOciEngineExecTurnV3(owner: nil, birth: nil, inspection: nil, phase: "rejected", error: reason)
             case Ok(_): pass
@@ -326,8 +332,16 @@ impl LinuxSimpleContainerAdapterV2:
         val timeout = if request.timeout_ms < self._duration_cap_ms: request.timeout_ms else: self._duration_cap_ms
         self.provider.set_operation_timeout_v1(timeout)
 
+    pub me logs_capture_begin_v1(request: ContainerExecutionRequestV2) -> ContainerRuntimeLogsCaptureTurnV1:
+        val inspected = self.read("inspect", request)
+        if inspected.status != "ok": return container_runtime_logs_capture_refused_v1(inspected.reason)
+        val decoded = match self._checked_request_v2(request):
+            case Ok(value): value.0
+            case Err(reason): return container_runtime_logs_capture_refused_v1(reason)
+        self.provider.logs_capture_begin_v1(decoded)
+
     pub me read(action: text, request: ContainerExecutionRequestV2) -> RuntimeOperationV1:
-        if action != "inspect" and action != "logs" and action != "wait":
+        if action != "inspect" and action != "logs" and action != "wait" and action != "configuration":
             return _linux_container_adapter_refused_v2(action, "container-adapter-read-action-unsupported")
         val checked = match self._checked_request_v2(request):
             case Ok(value): value
@@ -338,13 +352,14 @@ impl LinuxSimpleContainerAdapterV2:
         match self._set_duration_v2(decoded):
             case Err(reason): return _linux_container_adapter_refused_v2(action, reason)
             case Ok(_): pass
+        if action == "configuration": return self.provider.configuration_v1(decoded, self.scope)
         if action == "inspect": return self.provider.inspect(decoded)
         if action == "logs": return self.provider.logs(decoded)
         self.provider.wait(decoded, true)
 
     pub me apply(action: text, request: ContainerExecutionRequestV2,
             deadline: ContainerEffectDeadlineV1) -> RuntimeOperationV1:
-        if action == "inspect" or action == "logs" or action == "wait": return self.read(action, request)
+        if action == "inspect" or action == "logs" or action == "wait" or action == "configuration": return self.read(action, request)
         if action != "prepare" and action != "create" and action != "start" and action != "stop" and action != "destroy":
             return _linux_container_adapter_refused_v2(action, "container-adapter-action-unsupported")
         val checked = match self._checked_request_v2(request):

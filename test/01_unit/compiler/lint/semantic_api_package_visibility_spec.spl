@@ -1,0 +1,96 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# Semantic-API package visibility (REQ-TYPE-001, REQ-TYPE-004): a package's
+# `__init__.spl` decides what the package exports. An item `pub` in its file
+# but not exported by the manifest is not public API; an item the manifest
+# exports is. Only the same-directory `__init__.spl` is read (one known path,
+# memoized per directory); nothing scans the tree.
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use compiler.core.ast.{ast_reset, module_get_decls}
+use compiler.core.parser.{parse_module_silent, parser_set_had_error}
+use compiler.semantics.lint.semantic_api.exported_graph.{
+    SemanticApiFinding, check_semantic_api_decls_for_package, semantic_api_findings_non_boundary
+}
+use compiler.semantics.lint.semantic_api.package_manifest.{
+    semantic_api_manifest_text_for, semantic_api_manifest_cache_size
+}
+use compiler.tools.lint.main.{Linter, lint_cli_source}
+
+val SRC = "pub fn open(port: i64):\n    port\n\npub fn close(code: u64):\n    code\n"
+
+fn _names(module_stem: text, manifest: text) -> [text]:
+    ast_reset()
+    parse_module_silent(SRC, "/tmp/semantic_api_pkg_fixture.spl")
+    parser_set_had_error(false)
+    val fs = semantic_api_findings_non_boundary(
+        check_semantic_api_decls_for_package(module_get_decls(), module_stem, manifest))
+    var out: [text] = []
+    for f in fs:
+        out.push("{f.item_name}/{f.leaf}")
+    out
+
+describe "semantic_api package __init__ visibility":
+    context "manifest decides what the package exports":
+        it "does not report a pub item the package does not export":
+            # @req REQ-SSPEC-COMPILER
+            step("__init__ exports only open from module net")
+            val got = _names("net", "mod net\nexport use net.open\n")
+            expect(got).to_equal(["open/i64"])
+
+        it "reports nothing when the module is private to the package":
+            # @req REQ-SSPEC-COMPILER
+            step("`mod net` with no export use from net")
+            expect(_names("net", "mod net\n").len()).to_equal(0)
+
+        it "reports a pub item the manifest exports by name list":
+            # @req REQ-SSPEC-COMPILER
+            step("export use net.{open, close:shut}")
+            val got = _names("net", "mod net\nexport use net.{open, close:shut}\n")
+            expect(got).to_equal(["open/i64", "close/u64"])
+
+        it "keeps every pub item for a glob export or a pub mod":
+            # @req REQ-SSPEC-COMPILER
+            step("glob re-export and pub mod expose the whole module")
+            expect(_names("net", "export use net.*\n").len()).to_equal(2)
+            expect(_names("net", "pub mod net\n").len()).to_equal(2)
+
+        it "leaves behavior unchanged when the manifest does not mention the module":
+            # @req REQ-SSPEC-COMPILER
+            step("unknown module and empty manifest")
+            expect(_names("net", "mod other\nexport use other.x\n").len()).to_equal(2)
+            expect(_names("net", "").len()).to_equal(2)
+
+        it "reports a non-pub item that the manifest exports":
+            # @req REQ-SSPEC-COMPILER
+            step("bare fn exported by __init__ becomes package API")
+            ast_reset()
+            parse_module_silent("fn hidden(n: i32):\n    n\n", "/tmp/semantic_api_pkg_fixture.spl")
+            parser_set_had_error(false)
+            val fs = semantic_api_findings_non_boundary(
+                check_semantic_api_decls_for_package(module_get_decls(), "net", "export use net.hidden\n"))
+            expect(fs.len()).to_equal(1)
+            expect(fs[0].leaf).to_equal("i32")
+
+    context "lint path reads the same-directory __init__.spl once":
+        it "applies the package manifest to a linted file and memoizes the read":
+            # @req REQ-SSPEC-COMPILER
+            step("write pkg/__init__.spl exporting only open, lint pkg/net.spl")
+            val dir = "build/tmp/semapi_pkg_visibility"
+            expect(dir_create_all(dir)).to_equal(true)
+            file_write("{dir}/__init__.spl", "mod net\nexport use net.open\n")
+            var linter = Linter.new(false)
+            var lines: [text] = []
+            for r in lint_cli_source(linter, "{dir}/net.spl", SRC):
+                if r.lint.code == "primitive_api" and r.lint.message.starts_with("MC-API-"):
+                    lines.push(r.lint.message)
+            step("only the exported item carries a semantic-graph finding")
+            expect(lines.len()).to_equal(1)
+            expect(lines[0]).to_contain("'open'")
+            val size = semantic_api_manifest_cache_size()
+            lint_cli_source(linter, "{dir}/net.spl", SRC)
+            expect(semantic_api_manifest_cache_size()).to_equal(size)
+            expect(semantic_api_manifest_text_for("{dir}/net.spl")).to_contain("export use net.open")

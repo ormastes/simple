@@ -10,7 +10,7 @@ use crate::error::CompileError;
 use crate::value::Value;
 use simple_parser::ast::{Expr, FStringPart, Pattern, Type};
 
-use super::{Classes, Enums, ImplMethods, BLOCK_SCOPED_ENUMS, MODULE_GLOBALS};
+use super::{Classes, Enums, ImplMethods, BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, MODULE_GLOBALS};
 
 fn pattern_enum_name_matches(pattern_name: &str, value_name: &str) -> bool {
     if pattern_name == "_" || pattern_name == value_name || matches!(pattern_name, "Option" | "Result") {
@@ -33,7 +33,10 @@ fn enum_declares_option_variant(enum_name: &str, enums: &Enums) -> bool {
     if let Some(def) = enums.get(enum_name) {
         return declares(def);
     }
-    BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).is_some_and(|def| declares(def)))
+    if BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).is_some_and(|def| declares(def))) {
+        return true;
+    }
+    GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).is_some_and(|def| declares(def)))
 }
 
 /// Number of times an Option pattern (`Some(..)` / `None` / `nil`) was tested
@@ -389,11 +392,12 @@ pub(crate) fn pattern_matches(
             } = value
             {
                 // Check if this identifier is a known variant of the enum
-                // Look in both module-level enums and block-scoped enums
+                // Look in module-level enums, block-scoped enums, and GLOBAL_ENUMS
                 let enum_def = enums
                     .get(enum_name)
                     .cloned()
-                    .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
+                    .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()))
+                    .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
                 if let Some(enum_def) = enum_def {
                     let is_variant = enum_def.variants.iter().any(|v| &v.name == name);
                     if is_variant {
@@ -980,11 +984,12 @@ pub(crate) fn check_enum_exhaustiveness(
     arm_patterns: &[&Pattern],
     enums: &Enums,
 ) -> Option<Vec<String>> {
-    // Get the enum definition from module-level or block-scoped enums
+    // Get the enum definition from module-level, block-scoped, or global enums
     let enum_def = enums
         .get(enum_name)
         .cloned()
-        .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()))?;
+        .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()))
+        .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()))?;
 
     // Get all variant names from the enum definition
     let all_variants: Vec<String> = enum_def.variants.iter().map(|v| v.name.clone()).collect();

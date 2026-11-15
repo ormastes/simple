@@ -1,0 +1,86 @@
+# AUTHORED_NOT_RUN. Actual dedicated Windows service fixture is REQUIRED.
+# @req REQ-WINDOWS-PRIMARY-GEOMETRY-001
+# @req REQ-WINDOWS-PRIMARY-GEOMETRY-002
+# @req REQ-WINDOWS-PRIMARY-GEOMETRY-003
+use std.spec.*
+use test.fixtures.orchestration.windows_primary_geometry_service_v2.*
+use std.nogc_sync_mut.orchestration.host_primary_geometry_record_v1.*
+use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
+use std.common.sdn.value.SdnValue
+
+fn completed_geometry(fixture: WindowsGeometryServiceFixtureV2) -> HostPrimaryGeometryReceiptV1:
+    val start = time_sample_monotonic_nanos_or_failure()
+    assert(start > 0)
+    for count in 0..256:
+        assert(time_sample_monotonic_nanos_or_failure() - start < 30000000000)
+        val result = windows_geometry_service_result_v2(windows_geometry_service_call_v2(fixture, "geometry-observe"))
+        if result.contains_key("receipt"):
+            val receipt = host_primary_geometry_receipt_decode_v1(windows_geometry_fixture_text_v2(result, "receipt")).unwrap()
+            assert(receipt.disposition != "unknown")
+            if receipt.disposition == "acknowledged" and not receipt.cleanup_pending: return receipt
+            assert(receipt.disposition == "pending" or receipt.disposition == "acknowledged")
+    panic("native geometry did not acknowledge and clean within bounded observations")
+
+describe "Configured Windows primary geometry through the authenticated common service":
+    it "acknowledges one exact resize, replays only evidence, and preserves independent Input authority":
+        step("Require the actual dedicated Windows service, adopted TTY and administrator fixture")
+        val fixture = windows_geometry_service_fixture_v2()
+        val attachment: Dict<text, SdnValue> = {"clientId": SdnValue.String(fixture.client_id),
+            "attachmentToken": SdnValue.String(fixture.attachment_token)}
+        val input_issue: Dict<text, SdnValue> = {"clientId": SdnValue.String(fixture.client_id),
+            "attachmentToken": SdnValue.String(fixture.attachment_token), "revision": SdnValue.Int(fixture.input_revision),
+            "targetDigest": SdnValue.String(fixture.target_digest)}
+        val input = windows_geometry_service_result_v2(windows_geometry_service_call_v2(fixture, "input-issue", input_issue))
+        val input_revision = windows_geometry_fixture_int_v2(input, "revision")
+        val input_nonce = windows_geometry_fixture_text_v2(input, "nonce")
+        assert(input_nonce != "")
+        step("Resolve the exact retained target and acquire its separate Geometry lease")
+        var resolve = attachment
+        resolve["columns"] = SdnValue.Int(100)
+        resolve["rows"] = SdnValue.Int(30)
+        val resolved = windows_geometry_service_result_v2(windows_geometry_service_call_v2(fixture, "geometry-resolve", resolve))
+        expect(windows_geometry_fixture_text_v2(resolved, "targetDigest")).to_equal(fixture.target_digest)
+        var issue = input_issue
+        issue["revision"] = SdnValue.Int(fixture.geometry_revision)
+        val granted = windows_geometry_service_result_v2(windows_geometry_service_call_v2(fixture, "geometry-issue", issue))
+        val revision = windows_geometry_fixture_int_v2(granted, "revision")
+        val nonce = windows_geometry_fixture_text_v2(granted, "nonce")
+        assert(nonce != "")
+        step("Submit one canonical primary-container resize and wait for actual acknowledgement plus cleanup")
+        var request = resolve
+        request["nonce"] = SdnValue.String(nonce)
+        request["revision"] = SdnValue.Int(revision)
+        request["attempt"] = SdnValue.Int(1)
+        request["wireDigest"] = resolved["wireDigest"]
+        val submitted = windows_geometry_service_result_v2(windows_geometry_service_call_v2(fixture, "geometry-resize", request))
+        val receipt = completed_geometry(fixture)
+        expect(receipt.columns).to_equal(100)
+        expect(receipt.rows).to_equal(30)
+        expect(receipt.sequence).to_equal(1)
+        expect(receipt.revision).to_equal(revision)
+        expect(receipt.wire_digest).to_equal(windows_geometry_fixture_text_v2(resolved, "wireDigest"))
+        step("Repeat the exact request as receipt retrieval and refuse changed dimensions under the same attempt")
+        val replay = windows_geometry_service_result_v2(windows_geometry_service_call_v2(fixture, "geometry-resize", request))
+        val replayed = host_primary_geometry_receipt_decode_v1(windows_geometry_fixture_text_v2(replay, "receipt")).unwrap()
+        expect(replayed.publication_id).to_equal(receipt.publication_id)
+        expect(host_primary_geometry_receipt_encode_v1(replayed).unwrap()).to_equal(host_primary_geometry_receipt_encode_v1(receipt).unwrap())
+        var changed = request
+        changed["columns"] = SdnValue.Int(101)
+        val denied = windows_geometry_service_call_v2(fixture, "geometry-resize", changed)
+        assert(windows_geometry_fixture_text_v2(denied, "error") != "")
+        step("Revoke Geometry and use the existing Input lease on the actual attach pipe")
+        val revoked = windows_geometry_service_result_v2(windows_geometry_service_call_v2(fixture, "geometry-revoke",
+            {"revision": SdnValue.Int(revision)}))
+        val input_write: Dict<text, SdnValue> = {"clientId": SdnValue.String(fixture.client_id),
+            "attachmentToken": SdnValue.String(fixture.attachment_token), "nonce": SdnValue.String(input_nonce),
+            "revision": SdnValue.Int(input_revision), "attempt": SdnValue.Int(1), "frameSequence": SdnValue.Int(1),
+            "data": SdnValue.String(fixture.input_probe), "offset": SdnValue.Int(0), "maxBytes": SdnValue.Int(fixture.input_probe.byte_len())}
+        var written = windows_geometry_service_result_v2(windows_geometry_service_call_v2(fixture, "input-write", input_write))
+        for count in 0..128:
+            val status = windows_geometry_fixture_text_v2(written, "disposition")
+            if status != "queued": break
+            written = windows_geometry_service_result_v2(windows_geometry_service_call_v2(fixture, "input-observe"))
+        expect(windows_geometry_fixture_text_v2(written, "disposition")).to_equal("completed")
+        expect(windows_geometry_fixture_int_v2(written, "acceptedBytes")).to_equal(fixture.input_probe.byte_len())
+        val input_revoked = windows_geometry_service_result_v2(windows_geometry_service_call_v2(fixture, "input-revoke",
+            {"revision": SdnValue.Int(input_revision)}))

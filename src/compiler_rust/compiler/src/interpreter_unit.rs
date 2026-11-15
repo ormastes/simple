@@ -659,10 +659,52 @@ pub(crate) fn register_unit_family_locals(uf: &simple_parser::ast::UnitFamilyDef
 
 /// Register a standalone `unit Name: T as sfx` declaration's suffix.
 pub(crate) fn register_standalone_unit_locals(u: &simple_parser::ast::UnitDef) {
+    if u.suffix.is_empty() {
+        return;
+    }
     UNIT_SUFFIX_TO_FAMILY.with(|cell| {
         cell.borrow_mut().insert(u.suffix.clone(), u.name.clone());
     });
     USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| {
         cell.borrow_mut().insert(u.suffix.clone(), u.name.clone());
     });
+}
+
+/// Canonical `unit Name: T [as suffix]` is also a constructible one-field
+/// record `Name { value: T }` (same lowering as numeric `newtype`). Multi-base
+/// (`str | u32`) wrappers are literal-suffix only and yield `None`.
+pub(crate) fn unit_constructor_class(u: &simple_parser::ast::UnitDef) -> Option<simple_parser::ast::ClassDef> {
+    use simple_parser::ast::{ClassDef, Field, Mutability, Visibility};
+    if u.base_types.len() != 1 {
+        return None;
+    }
+    let field = Field {
+        span: u.span,
+        name: "value".to_string(),
+        ty: u.base_types[0].clone(),
+        default: None,
+        mutability: Mutability::Immutable,
+        visibility: Visibility::Public,
+        bit_width: None,
+    };
+    Some(ClassDef {
+        span: u.span,
+        name: u.name.clone(),
+        generic_params: Vec::new(),
+        where_clause: vec![],
+        fields: vec![field],
+        methods: vec![],
+        parent: None,
+        visibility: u.visibility,
+        effects: Vec::new(),
+        attributes: Vec::new(),
+        doc_comment: None,
+        invariant: None,
+        macro_invocations: vec![],
+        mixins: vec![],
+        is_generic_template: false,
+        specialization_of: None,
+        type_bindings: HashMap::new(),
+        is_value_type: false,
+    })
 }

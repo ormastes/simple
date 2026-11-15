@@ -3230,7 +3230,6 @@ impl Lowerer {
                 && !items.iter().any(|item| matches!(item, Node::Trait(t) if &t.name == trait_name))
             {
                 self.trait_declaration_for_current_owner(trait_name)
-                    .or_else(|| self.unique_used_trait_declaration(trait_name, items))
             } else {
                 None
             };
@@ -3276,34 +3275,6 @@ impl Lowerer {
             });
         }
         Ok(())
-    }
-
-    /// Fallback for `class C with T:` when `T` was named by this module's own
-    /// `use` but no per-caller binding was recorded (native-project entry
-    /// modules: the binding is keyed by the caller's path and was observed
-    /// missing for an entry outside the source root). Accept the declaration
-    /// only when exactly one declaring module defines `T`, so an ambiguous
-    /// name never picks an arbitrary trait.
-    /// doc/08_tracking/bug/native_user_class_imported_trait_vtable_missing_2026-11-15.md
-    fn unique_used_trait_declaration(&self, trait_name: &str, items: &[Node]) -> Option<crate::hir::HirTraitDispatch> {
-        let imported_here = items.iter().any(|item| {
-            matches!(item, Node::UseStmt(u) if self.should_import_symbol(trait_name, &u.target))
-        });
-        if !imported_here {
-            return None;
-        }
-        let mut found: Vec<crate::hir::HirTraitDispatch> = Vec::new();
-        for (owner_path, traits) in &self.trait_declared_owners {
-            if let Some(decl) = traits.get(trait_name) {
-                // Only the declaring module's own entry, not re-bound copies.
-                if crate::interpreter::normalize_path_key(&decl.source_file) == *owner_path
-                    && !found.iter().any(|f| f.owner == decl.owner)
-                {
-                    found.push(decl.clone());
-                }
-            }
-        }
-        if found.len() == 1 { found.pop() } else { None }
     }
 }
 

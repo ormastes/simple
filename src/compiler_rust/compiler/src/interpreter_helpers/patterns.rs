@@ -408,6 +408,19 @@ fn eval_array_mutator_args(
 /// kernel and the class-instance field fast path.
 #[allow(clippy::type_complexity)]
 #[allow(clippy::too_many_arguments)]
+/// True when the dict stores a FUNCTION under `method` (own entry, or a layer of
+/// a module value). `m.remove(x)` on a module that defines `remove` is a call
+/// to that function, never the built-in dict mutator -- the functional path in
+/// `interpreter_method` already resolves it that way; the in-place fast paths
+/// below must not pre-empt it.
+fn dict_member_is_callable(map: &Arc<DictMap>, method: &str) -> bool {
+    let is_fn = |v: &Value| matches!(v, Value::Function { .. });
+    map.get(method).map_or(false, is_fn)
+        || crate::interpreter::module_dict_layers(map)
+            .and_then(|view| view.get(method).cloned())
+            .map_or(false, |v| is_fn(&v))
+}
+
 fn eval_dict_mutator_args(
     method: &str,
     args: &[simple_parser::ast::Argument],
@@ -991,6 +1004,11 @@ pub(crate) fn try_place_mutation_in_place(
             }
         }
         PlaceMutation::Dict => {
+            if let Some(Value::Dict(entries)) = place::place_slot_ref(env, &target) {
+                if dict_member_is_callable(entries, method) {
+                    return Ok(None);
+                }
+            }
             // Every operand is evaluated AND validated before the leaf is re-read,
             // so a rejected `merge` argument leaves the dict untouched exactly as
             // the functional path did. Behaviour mirrors
@@ -2346,9 +2364,10 @@ fn handle_method_call_with_self_update_inner(
                 }
             }
             // Handle Dict mutations for mutating methods
-            if let Some(Value::Dict(_)) = env.get(obj_name) {
+            if let Some(Value::Dict(dict_recv)) = env.get(obj_name) {
+                let member_call = dict_member_is_callable(dict_recv, method);
                 let dict_mutating = ["set", "insert", "remove", "delete", "merge", "extend", "clear"];
-                if dict_mutating.contains(&method.as_str()) {
+                if !member_call && dict_mutating.contains(&method.as_str()) {
                     let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(obj_name));
                     if is_const {
                         let ctx = ErrorContext::new()

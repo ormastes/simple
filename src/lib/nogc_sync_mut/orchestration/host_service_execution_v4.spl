@@ -1,0 +1,83 @@
+use std.common.contracts.container.pre_start_constraint_v1.ContainerPreStartConstraintV1
+# Same-thread cooperative service execution. The continuation owns stage/native
+# cleanup only; the caller retains and returns the SAME canonical Host domain.
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.{HostServiceDomainV3, HostServiceTurnV3}
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.{HostServiceRequestV2, host_service_request_error_v2, host_service_error_payload_v2}
+use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
+use std.nogc_sync_mut.orchestration.host_windows_local_root_v3.HostWindowsLocalRootV3
+use std.nogc_sync_mut.orchestration.host_authorized_execution_v2.{HostExecutionContinuationV4,
+    HostExecutionProgressTurnV4, host_authorized_execution_begin_constrained_v4, host_authorized_execution_step_v4}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostReservationAuthorizationContextV1
+use std.nogc_sync_mut.orchestration.host_execution_envelope_v2.host_execution_decode_v2
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.host_execution_observation_encode_v2
+
+pub class HostServiceExecutionV4:
+    request: HostServiceRequestV2
+    execution: HostExecutionContinuationV4
+
+pub struct HostServiceExecutionTurnV4:
+    domain: HostServiceDomainV3
+    continuation: Option<HostServiceExecutionV4>
+    response: Option<text>
+    exit_code: i64
+    error: text
+
+fn refused(domain: HostServiceDomainV3, request: HostServiceRequestV2, error: text) -> HostServiceExecutionTurnV4:
+    HostServiceExecutionTurnV4(domain, nil, Some(host_service_error_payload_v2(request, error, false)), 1, error)
+
+fn retained(original: HostWindowsLocalRootV3, request: HostServiceRequestV2,
+        turn: HostExecutionProgressTurnV4) -> HostServiceExecutionTurnV4:
+    var local = original
+    # Same-store provenance stays enforced; projection failure quarantines the
+    # updated root after retention, never discards a committed writer.
+    val accepted = local.retain_v3(turn.owner, turn.container)
+    val domain = HostServiceDomainV3(HostLocalRootV3.Windows(local))
+    val error = if accepted.is_err(): accepted.unwrap_err() else: turn.error
+    if turn.continuation.is_some():
+        return HostServiceExecutionTurnV4(domain, Some(HostServiceExecutionV4(request, turn.continuation.unwrap())),
+            nil, if error == "": 0 else: 2, error)
+    if turn.observation.is_some():
+        val encoded = host_execution_observation_encode_v2(turn.observation.unwrap())
+        if encoded.is_ok(): return HostServiceExecutionTurnV4(domain, nil, Some(encoded.unwrap()), if error == "": 0 else: 2, error)
+        return HostServiceExecutionTurnV4(domain, nil, Some(host_service_error_payload_v2(request, encoded.unwrap_err(), true)), 2, encoded.unwrap_err())
+    HostServiceExecutionTurnV4(domain, nil,
+        Some(host_service_error_payload_v2(request, error, turn.recovery_required or accepted.is_err())),
+        if turn.recovery_required or accepted.is_err(): 2 else: 1, error)
+
+pub fn host_service_execution_begin_v4(domain: HostServiceDomainV3,
+        request: HostServiceRequestV2) -> HostServiceExecutionTurnV4:
+    host_service_execution_begin_constrained_v4(domain, request, nil)
+
+pub fn host_service_execution_begin_constrained_v4(domain: HostServiceDomainV3,
+        request: HostServiceRequestV2, constraint: Option<ContainerPreStartConstraintV1>) -> HostServiceExecutionTurnV4:
+    val invalid = host_service_request_error_v2(request)
+    if invalid != "": return refused(domain, request, invalid)
+    if request.action != "host-execute": return refused(domain, request, "host-service-execution-action")
+    match domain.local:
+        case HostLocalRootV3.Linux(_): return refused(domain, request, "host-cooperative-backend-unavailable")
+        case HostLocalRootV3.Windows(local):
+            val metadata = local.current_v3()
+            if metadata.is_err(): return refused(domain, request, metadata.unwrap_err())
+            if not local.ready_v3(): return refused(domain, request, "host-windows-startup-quarantine")
+            val decoded = host_execution_decode_v2(request.payload, local.scope_v3())
+            if decoded.is_err() or decoded.unwrap().operation.id != request.operation_id:
+                return refused(domain, request, "host-service-execute-envelope")
+            # Begin calls refresh before the journal transition. No callback
+            # outlives this turn or retains a second service writer.
+            val refresh = fn() -> HostReservationAuthorizationContextV1: local.context_v3()
+            val turn = host_authorized_execution_begin_constrained_v4(local.capacity_v3(), local.container_v3(), request.payload,
+                metadata.unwrap().policy, local.binding_v3().provider_identity_digest, local.scope_v3().service_scope_id,
+                local.context_v3(), refresh, constraint)
+            retained(local, request, turn)
+
+pub fn host_service_execution_step_v4(domain: HostServiceDomainV3,
+        continuation: HostServiceExecutionV4, cancel: bool = false) -> HostServiceExecutionTurnV4:
+    match domain.local:
+        case HostLocalRootV3.Linux(_):
+            HostServiceExecutionTurnV4(domain, Some(continuation), nil, 2, "host-execution-domain-mismatch")
+        case HostLocalRootV3.Windows(local):
+            # Invalid current policy/clock triggers cancellation through the
+            # existing exact native command owner, not a new command or lease.
+            val turn = host_authorized_execution_step_v4(local.capacity_v3(), local.container_v3(),
+                continuation.execution, local.context_v3(), cancel)
+            retained(local, continuation.request, turn)

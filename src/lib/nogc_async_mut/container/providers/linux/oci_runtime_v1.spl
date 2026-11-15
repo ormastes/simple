@@ -1,3 +1,6 @@
+use std.nogc_async_mut.container.shared.logs_capture_v1.*
+use std.nogc_sync_mut.io.process_capture_evidence_v1.{ProcessCaptureRequestV1, process_capture_begin_v1}
+use std.nogc_async_mut.container.shared.configuration_query_v1.*
 # Linux OCI LinuxOciRuntimeProviderV1.
 #
 # The provider owns the Linux edge only.  It uses argv vectors through the
@@ -797,6 +800,10 @@ impl LinuxOciRuntimeProviderV1:
         RuntimeValidationV1(accepted: true, reason: "")
 
     pub fn validate(request: LinuxOciRequestV1) -> RuntimeValidationV1:
+        # CLI source pathnames are reopened by the engine. A preflight stat or
+        # no-follow fd cannot bind that reopen to an authorized object.
+        if request.mounts.len() > 0:
+            return RuntimeValidationV1(accepted: false, reason: "linux-mount-native-admission-not-installed")
         if request.containment_profile_digest != "":
             val policy = match self.containment_policy:
                 case Some(value): value
@@ -1075,6 +1082,61 @@ impl LinuxOciRuntimeProviderV1:
             identity: current.identity, exit_code: -1, reason: "running")
         self.states[index] = started
         self._ok("start", started, command.1, "started")
+
+    # Fixed queries run only through this retained provider and original request.
+    me logs_capture_begin_v1(request: LinuxOciRequestV1) -> ContainerRuntimeLogsCaptureTurnV1:
+        val current = self._current_for(request, "logs")
+        if current.status != RUNTIME_STATUS_OK: return container_runtime_logs_capture_refused_v1(current.reason)
+        if self.scripted or not self.live_enabled or self.engine != "podman" or not self.engine_policy.?:
+            return container_runtime_logs_capture_refused_v1("container-logs-native-capture-unavailable")
+        if not builder_digest_valid_v1(current.state.identity.native_id):
+            return container_runtime_logs_capture_refused_v1("container-logs-full-native-id-required")
+        if request.mounts.len() > 0: return container_runtime_logs_capture_refused_v1("linux-mount-native-admission-not-installed")
+        val observed = self.engine_observation_v1()
+        if observed.is_err(): return container_runtime_logs_capture_refused_v1("container-logs-engine-observation-failed")
+        val command = self._receipt_command_v1(RuntimeCommandV1(operation: "logs", program: self.engine,
+            args: ["logs", current.state.identity.native_id]))
+        if command.program == "": return container_runtime_logs_capture_refused_v1("container-logs-engine-route-unavailable")
+        self.executor_calls = self.executor_calls + 1
+        val capture = process_capture_begin_v1(ProcessCaptureRequestV1(command: command.program, args: command.args,
+            timeout_ms: self.timeout_ms, stdout_limit: OCI_MAX_OUTPUT_BYTES, stderr_limit: OCI_MAX_OUTPUT_BYTES, term_grace_ms: 250))
+        ContainerRuntimeLogsCaptureTurnV1(runtime: current.state.identity, capture: capture)
+
+    me configuration_v1(request: LinuxOciRequestV1, scope: ContainerHostScopeV2) -> RuntimeOperationV1:
+        val current = self._current_for(request, "configuration")
+        if current.status != RUNTIME_STATUS_OK: return current
+        if self.engine != "podman" or not self.live_enabled:
+            return self._blocked("configuration", "configuration-provider-unavailable", runtime_command_empty())
+        val state = current.state
+        val query = match configuration_container_command_v1(state.identity, false):
+            case Ok(value): value
+            case Err(reason): return self._rejected("configuration", reason, runtime_command_empty())
+        val first_run = self._execute(query, request)
+        if not first_run.matched or first_run.exit_code != 0:
+            return self._rejected("configuration", "configuration-container-capture-failed", query)
+        val first = match configuration_container_parse_v1(first_run.stdout, state.identity, scope, false):
+            case Ok(value): value
+            case Err(reason): return self._rejected("configuration", reason, query)
+        val image_query = match configuration_image_command_v1(self.engine, first.image_id):
+            case Ok(value): value
+            case Err(reason): return self._rejected("configuration", reason, query)
+        val image_run = self._execute(image_query, request)
+        if not image_run.matched or image_run.exit_code != 0:
+            return self._rejected("configuration", "configuration-image-capture-failed", image_query)
+        val last_run = self._execute(query, request)
+        if not last_run.matched or last_run.exit_code != 0:
+            return self._rejected("configuration", "configuration-container-recheck-failed", query)
+        val last = match configuration_container_parse_v1(last_run.stdout, state.identity, scope, false):
+            case Ok(value): value
+            case Err(reason): return self._rejected("configuration", reason, query)
+        val digest = match linux_oci_request_digest_v1(request):
+            case Ok(value): value
+            case Err(reason): return self._rejected("configuration", reason, query)
+        val output = match configuration_observation_v1(first, image_run.stdout, last, scope, state.identity, digest, request.image):
+            case Ok(value): value
+            case Err(reason): return self._rejected("configuration", reason, query)
+        RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: "configuration", state: state,
+            command: self._receipt_command_v1(query), exit_code: 0, stdout: output, stderr: "", reason: "engine-configuration-data")
 
     me inspect(request: LinuxOciRequestV1) -> RuntimeOperationV1:
         val current_result = self._current_for(request, "inspect")
@@ -1875,6 +1937,8 @@ impl LinuxOciRuntimeProviderV1:
 
     fn _execute(command: RuntimeCommandV1, request: LinuxOciRequestV1,
             control: ContainerControlDeadlineV1? = nil) -> RuntimeExecResultV1:
+        if request.mounts.len() > 0:
+            return RuntimeExecResultV1(stdout: "", stderr: "linux-mount-native-admission-not-installed", exit_code: -1, matched: false)
         self.executor_calls = self.executor_calls + 1
         var routed = command
         if self.engine_policy.?:
@@ -2252,6 +2316,10 @@ fn _build_create_command_profile_v1(engine: text, state_dir: text,
         request: LinuxOciRequestV1, operation_id: text,
         provider_generation: i64, node_boot_id: text,
         profile: LinuxOciContainmentProfileV1?) -> (text, RuntimeCommandV1):
+    # Also fence direct command-builder callers; no executable argv is exposed
+    # for V5 mount requests without a qualified native admission owner.
+    if request.mounts.len() > 0:
+        return ("linux-mount-native-admission-not-installed", runtime_command_empty())
     if request.containment_profile_digest != "":
         if not profile.?: return ("containment-profile-not-installed", runtime_command_empty())
         if engine != OCI_ENGINE_PODMAN: return ("containment-podman-required", runtime_command_empty())

@@ -4,6 +4,7 @@ use os.apps.smux.service_revision.ServiceRevisionState
 use os.apps.smux.terminal_adoption_service_v2.terminal_transport_admit_v2
 use os.apps.smux.child_lifecycle.close_owned_children
 use std.nogc_async_mut.container.terminal_session_v1.*
+use std.nogc_async_mut.container.terminal_session_v2.ContainerOwnedTerminalSessionV2
 use std.nogc_sync_mut.orchestration.host_helper_settlement_commit_v1.HostHelperSettlementAckV1
 use std.common.build_manager.contracts.builder_digest_valid_v1
 
@@ -13,7 +14,7 @@ pub fn terminal_primary_cleanup_v4(before: ServiceState, pane_id: text, expected
     if pi < 0: return Err("primary pane missing")
     val pane = before.get_pane(pi)
     val session = match pane.owned_terminal_session:
-        case Some(ContainerOwnedTerminalSessionV1.PrimaryAttach(value)): value
+        case Some(ContainerOwnedTerminalSessionV2.Legacy(ContainerOwnedTerminalSessionV1.PrimaryAttach(value))): value
         case _: return Err("primary pane owner missing")
     if container_primary_attach_identity_v1(session) != expected_identity: return Err("primary pane identity changed")
     Ok(close_owned_children(before, pane.pane.session_id, pane.pane.window_id, pane_id))
@@ -59,8 +60,12 @@ pub fn terminal_primary_adopt_v4(before: ServiceState, clock: ServiceRevisionSta
         window_id: window_id, pane_id: pane_id, service_epoch: expected_epoch as i64,
         child_incarnation: (expected_child_incarnation + 1) as i64))
     if adopted.error != "": return Err(adopted.error)
-    Ok(before.replace_pane(pi, before.get_pane(pi).with_owned_terminal_session(
-        ContainerOwnedTerminalSessionV1.PrimaryAttach(adopted.session), reference)))
+    val canonical = ContainerOwnedTerminalSessionV2.Legacy(ContainerOwnedTerminalSessionV1.PrimaryAttach(adopted.session))
+    val published = before.get_pane(pi).with_owned_terminal_session(
+        ContainerOwnedTerminalSessionV1.PrimaryAttach(adopted.session), reference)
+    if not published.same_owned_terminal_session(Some(canonical)):
+        return Err("primary pane owner adoption refused")
+    Ok(before.replace_pane(pi, published))
 
 # Returned session progress is published even when Host settlement later fails.
 pub fn terminal_primary_progress_v4(before: ServiceState, clock: ServiceRevisionState, pane_id: text,
@@ -69,7 +74,7 @@ pub fn terminal_primary_progress_v4(before: ServiceState, clock: ServiceRevision
     if pi < 0: return Err("primary pane missing")
     var pane = before.get_pane(pi)
     val current = match pane.owned_terminal_session:
-        case Some(ContainerOwnedTerminalSessionV1.PrimaryAttach(value)): value
+        case Some(ContainerOwnedTerminalSessionV2.Legacy(ContainerOwnedTerminalSessionV1.PrimaryAttach(value))): value
         case _: return Err("primary pane owner missing")
     if (container_primary_attach_identity_v1(current) != expected_identity or
             container_primary_attach_identity_v1(session) != expected_identity):
@@ -79,7 +84,7 @@ pub fn terminal_primary_progress_v4(before: ServiceState, clock: ServiceRevision
     terminal_primary_progress_metadata_v4(previous, incoming,
         pane.helper_cleaned_awaiting_release or container_primary_attach_native_cleaned_v1(current),
         container_primary_attach_native_cleaned_v1(session))?
-    pane.owned_terminal_session = Some(ContainerOwnedTerminalSessionV1.PrimaryAttach(session))
+    pane.owned_terminal_session = Some(ContainerOwnedTerminalSessionV2.Legacy(ContainerOwnedTerminalSessionV1.PrimaryAttach(session)))
     pane.helper_cleaned_awaiting_release = container_primary_attach_native_cleaned_v1(session)
     Ok(before.replace_pane(pi, pane))
 
@@ -89,7 +94,7 @@ pub fn terminal_primary_settle_v4(before: ServiceState, clock: ServiceRevisionSt
     if pi < 0: return Err("primary pane missing")
     var pane = before.get_pane(pi)
     val session = match pane.owned_terminal_session:
-        case Some(ContainerOwnedTerminalSessionV1.PrimaryAttach(value)): value
+        case Some(ContainerOwnedTerminalSessionV2.Legacy(ContainerOwnedTerminalSessionV1.PrimaryAttach(value))): value
         case _: return Err("primary pane owner missing")
     val plan = container_primary_attach_plan_v1(session)
     val adoption = primary_current_adoption_v4(pane, clock, session)?
