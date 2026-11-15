@@ -119,6 +119,10 @@ int main(void) {
     check("T7z -0.0 element equals +0.0 element", hits(tup2(rt_value_float(-0.0), mki(0)), tup2(rt_value_float(0.0), mki(0))));
     check("T8 wide int element boxed twice",
           hits(tup2(rt_value_int_wide((int64_t)1 << 62), mki(0)), tup2(rt_value_int_wide((int64_t)1 << 62), mki(0))));
+    check("T8i immediate int element equals wide box of the same value",
+          hits(tup2(mki(5), mki(0)), tup2(rt_value_int_wide(5), mki(0))));
+    check("T8f int element 1 and float element 1.0 are distinct keys",
+          !hits(tup2(mki(1), mki(0)), tup2(rt_value_float(1.0), mki(0))));
     check("T9 enum element built twice",
           hits(tup2(rt_enum_new(7, 2, mki(5)), mki(0)), tup2(rt_enum_new(7, 2, mki(5)), mki(0))));
     check("T9n enum payload differs misses",
@@ -127,6 +131,18 @@ int main(void) {
      * so an array key is now found by value, and [1, 2] and (1, 2) are one key. */
     check("A1 array [1, 2] built twice hits", hits(arr2(mki(1), mki(2)), arr2(mki(1), mki(2))));
     check("A1t array [1, 2] and tuple (1, 2) are one key", hits(tup2(mki(1), mki(2)), arr2(mki(1), mki(2))));
+    {   /* A2: lookups skip the array probe until a dict holds an array key;
+         * int keys stored before the first array key stay findable after it,
+         * and an array probe in an int-only dict misses. */
+        int64_t d = rt_dict_new(0);
+        for (int64_t i = 0; i < 64; i++) rt_dict_set(d, mki(i * 1000), mki(i));
+        int ok = !rt_dict_contains(d, arr2(mki(1), mki(2)));
+        rt_dict_set(d, arr2(mki(1), mki(2)), mki(-1));
+        for (int64_t i = 0; ok && i < 64; i++) ok = rt_dict_get(d, mki(i * 1000)) == mki(i);
+        for (int64_t i = 64; i < 200; i++) rt_dict_set(d, mki(i * 1000), mki(i)); /* forces resizes */
+        ok = ok && rt_dict_get(d, arr2(mki(1), mki(2))) == mki(-1) && rt_dict_len(d) == 201;
+        check("A2 array key added to an int-keyed dict, across resizes", ok);
+    }
     {   /* H1 (reported, not asserted): mutating an array after using it as a
          * key changes its hash; the entry stays in the old bucket. */
         int64_t d = rt_dict_new(0);
