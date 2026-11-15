@@ -108,6 +108,43 @@ fn _bur_erases(expr: text, name: text) -> bool:
             from = start + 1
     false
 
+fn _bur_paren_depth(s: text) -> i64:
+    var depth = 0
+    var i = 0
+    while i < s.byte_len():
+        val c = s.substring(i, i + 1)
+        if c == "(":
+            depth = depth + 1
+        elif c == ")":
+            depth = depth - 1
+        i = i + 1
+    depth
+
+# Index of the line closing a (possibly multi-line) fn header: the first line
+# at or after `start` where the parens balance.
+fn _bur_header_end(lines: [CodeLine], start: i64) -> i64:
+    var depth = 0
+    var k = start
+    while k < lines.len() and k < start + 24:
+        depth = depth + _bur_paren_depth(lines[k].trimmed)
+        if depth <= 0:
+            return k
+        k = k + 1
+    start
+
+fn _bur_join(lines: [CodeLine], first: i64, last: i64) -> text:
+    var joined = ""
+    var k = first
+    while k <= last:
+        joined = joined + " " + lines[k].trimmed
+        k = k + 1
+    joined.trim()
+
+# The byte loops below index single bytes; a multi-byte (non-ASCII) line would
+# be split mid-character, so such lines are skipped.
+fn _bur_ascii(s: text) -> bool:
+    s.len() == s.byte_len()
+
 fn _bur_binding(line: text) -> text:
     var rest = ""
     if line.starts_with("val "):
@@ -235,8 +272,9 @@ pub fn check_bound_unit_reasserts(source: text, file_path: text) -> [BoundUnitRe
         var unit_origins: [text] = []
         var erased_names: [text] = []
         var erased_origins: [text] = []
-        _bur_param_units(header.trimmed, units, unit_names, unit_origins)
-        var j = i + 1
+        val header_end = _bur_header_end(lines, i)
+        _bur_param_units(_bur_join(lines, i, header_end), units, unit_names, unit_origins)
+        var j = header_end + 1
         while j < lines.len():
             val body = lines[j]
             if body.trimmed == "":
@@ -244,6 +282,9 @@ pub fn check_bound_unit_reasserts(source: text, file_path: text) -> [BoundUnitRe
                 continue
             if _bur_indent(body.raw) <= header_indent:
                 break
+            if not _bur_ascii(body.trimmed):
+                j = j + 1
+                continue
             var reported = false
             for unit_name in units:
                 if reported:

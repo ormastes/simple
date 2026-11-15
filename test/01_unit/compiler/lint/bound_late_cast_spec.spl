@@ -235,8 +235,8 @@ describe "SPL-BOUND-001: raw extern result escapes unconverted":
 
     it "accepts a rebound raw name and a Nil function":
         # @req: REQ-DIAG-POLICY-001
-        step("Lint a shadowed raw, and a function returning Nil")
-        val src = "extern fn c_read() -> i32\nfn f() -> i32:\n    var raw = c_read()\n    raw = 0\n    raw\nfn g() -> Nil:\n    val raw = c_read()\n    return nil\n"
+        step("Lint a shadowed raw, and a Nil function that returns the raw read")
+        val src = "extern fn c_read() -> i32\nfn f() -> i32:\n    var raw = c_read()\n    raw = 0\n    raw\nfn g() -> Nil:\n    val raw = c_read()\n    return raw\n"
         expect(check_bound_late_casts(src, "app/f.spl").len()).to_equal(0)
 
 fn _blc_count(fs: [BoundLateCastFinding], code: text) -> i64:
@@ -297,3 +297,46 @@ describe "SPL-BOUND-002 same-file cross-function origin summaries":
         val fs = check_bound_late_casts(src, "app/f.spl")
         expect(_blc_count(fs, "SPL-BOUND-001")).to_equal(1)
         expect(fs[0].line_num).to_equal(3)
+
+describe "SPL-BOUND review follow-ups":
+    """Compound assignment, unit return types, multi-line headers, and wrapped
+    or branch-nested returns."""
+
+    it "keeps foreign origin through a compound assignment":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint x += foreign and foreign-then-x += 1 before a unit cast")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn f() -> Km:\n    var x = 0\n    x += c_read()\n    Km(x)\nfn g() -> Km:\n    var y = c_read()\n    y += 1\n    Km(y)\n"
+        val fs = check_bound_late_casts(src, "app/km.spl")
+        expect(fs.len()).to_equal(2)
+        expect(fs[0].code).to_equal("SPL-BOUND-002")
+
+    it "does not flag a raw return when the declared return type is a unit":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint return raw from a function declared to return a unit")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn f() -> Km:\n    val raw = c_read()\n    return raw\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(0)
+
+    it "reads the return type of a multi-line function header":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a raw return from a function whose header spans lines")
+        val src = "extern fn c_read() -> i32\nfn f(\n    a: i32,\n    b: i32\n) -> i32:\n    val raw = c_read()\n    return raw\n"
+        val fs = check_bound_late_casts(src, "app/f.spl")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].code).to_equal("SPL-BOUND-001")
+        expect(fs[0].line_num).to_equal(7)
+
+    it "reports a parenthesised or wrapped raw return":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint return (raw) and a return wrapped across lines")
+        val src = "extern fn c_read() -> i32\nfn f() -> i32:\n    val raw = c_read()\n    return (raw)\nfn g() -> i32:\n    val raw = c_read()\n    return (\n        raw\n    )\n"
+        val fs = check_bound_late_casts(src, "app/f.spl")
+        expect(fs.len()).to_equal(2)
+        expect(fs[0].code).to_equal("SPL-BOUND-001")
+
+    it "reports a raw value ending each branch of a final if/else":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a function whose final if/else yields the raw value in each branch")
+        val src = "extern fn c_read() -> i32\nfn f(c: bool) -> i32:\n    val raw = c_read()\n    if c:\n        raw\n    else:\n        raw\n"
+        val fs = check_bound_late_casts(src, "app/f.spl")
+        expect(fs.len()).to_equal(2)
+        expect(fs[0].code).to_equal("SPL-BOUND-001")
