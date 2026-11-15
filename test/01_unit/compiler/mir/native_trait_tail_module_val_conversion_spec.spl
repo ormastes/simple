@@ -1,0 +1,143 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+"""
+Concrete value -> trait object at an implicit tail and a module-level typed val.
+
+Bootstrap HIR (native-build) erases a declared `-> Tag` return to the i64
+default; the implicit tail recovered the declared type only when it was an
+Optional, so `fn make() -> Tag: Alpha(..)` returned the bare data pointer and
+the caller's dispatch read a garbage table (SIGSEGV). Module-level
+`val t: Tag = Alpha(..)` lowered its initializer with no conversion at all,
+which also skipped the generic-trait admission check. An explicit `return`,
+an argument, an assignment and a field init already converted; they are the
+controls. Every conversion references the concrete type's cast thunk
+(`__simple_trait_cast_<sha>`), which is the marker asserted here.
+Native oracles: test/fixtures/native_trait_object_tail_and_module_val/main.spl,
+test/fixtures/native_trait_object_tail_refused/main.spl.
+"""
+
+use std.spec.*
+use std.io_runtime.{env_set}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_json.{serialize_mir_function}
+
+val CAST = "__simple_trait_cast_"
+
+val DECLS = "trait Tag:\n    fn tag() -> i64\n\n" +
+    "trait Reader<T>:\n    fn read(node: i64) -> T?\n\n" +
+    "class Alpha:\n    k: i64\n\nimpl Tag for Alpha:\n    fn tag() -> i64:\n        self.k\n\n" +
+    "class Beta:\n    k: i64\n\nimpl Tag for Beta:\n    fn tag() -> i64:\n        100 + self.k\n\n" +
+    "class ICell:\n    cell: i64?\n\nimpl Reader<i64> for ICell:\n    fn read(node: i64) -> i64?:\n        self.cell\n\n" +
+    "class JCell:\n    cell: i32?\n\nimpl Reader<i32> for JCell:\n    fn read(node: i64) -> i32?:\n        self.cell\n\n"
+
+class Lowered:
+    errors: text
+    functions: [text]
+    mirs: [text]
+
+fn lower_bootstrap(src: text) -> Lowered:
+    val parsed = parse_and_build_module(src, "tail_probe.spl")
+    var hir_lowering = HirLowering.with_filename("tail_probe.spl")
+    env_set("SIMPLE_BOOTSTRAP", "1")
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+    val hir = hir_lowering.lower_module(parsed)
+    env_set("SIMPLE_BOOTSTRAP", "")
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "")
+    var errors = ""
+    for e in hir_lowering.errors:
+        errors = errors + "hir: " + e.message + "\n"
+    var lowering = MirLowering.new(hir.symbols)
+    lowering.trait_impl_closure_complete = true
+    val mir = lowering.lower_module(hir)
+    for e in lowering.errors:
+        errors = errors + "mir: " + e.message + "\n"
+    var names: [text] = []
+    var mirs: [text] = []
+    for function in mir.functions.values():
+        names.push(function.name)
+        mirs.push(serialize_mir_function(function))
+    Lowered(errors: errors, functions: names, mirs: mirs)
+
+fn mir_of(l: Lowered, suffix: text) -> text:
+    var i = 0
+    while i < l.functions.len():
+        if l.functions[i].ends_with(suffix): return l.mirs[i]
+        i = i + 1
+    ""
+
+fn any_mir_has(l: Lowered, needle: text) -> bool:
+    for m in l.mirs:
+        if m.contains(needle): return true
+    false
+
+describe "trait-object conversion at implicit tails (bootstrap HIR)":
+    it "converts a non-generic `-> Tag` implicit tail":
+        val l = lower_bootstrap(DECLS + "fn make_tag(k: i64) -> Tag:\n    Alpha(k: k)\n")
+        expect(l.errors).to_equal("")
+        expect(mir_of(l, "make_tag")).to_contain(CAST)
+
+    it "converts a generic `-> Reader<i64>` implicit tail":
+        val l = lower_bootstrap(DECLS + "fn make_reader(v: i64) -> Reader<i64>:\n    ICell(cell: Some(v))\n")
+        expect(l.errors).to_equal("")
+        expect(mir_of(l, "make_reader")).to_contain(CAST)
+
+    it "converts both arms of an if/else tail":
+        val l = lower_bootstrap(DECLS + "fn pick(b: bool) -> Tag:\n    if b: Alpha(k: 1) else: Beta(k: 2)\n")
+        expect(l.errors).to_equal("")
+        expect(mir_of(l, "pick").split(CAST).len() >= 3).to_equal(true)
+
+    it "converts a method's implicit trait tail":
+        val l = lower_bootstrap(DECLS + "class Factory:\n    base: i64\n\nimpl Factory:\n    fn build() -> Tag:\n        Alpha(k: self.base)\n")
+        expect(l.errors).to_equal("")
+        expect(mir_of(l, "build")).to_contain(CAST)
+
+    it "converts a `-> Tag?` Some tail":
+        val l = lower_bootstrap(DECLS + "fn some_tag(k: i64) -> Tag?:\n    Some(Alpha(k: k))\n")
+        expect(l.errors).to_equal("")
+        expect(mir_of(l, "some_tag")).to_contain(CAST)
+
+    it "refuses a disallowed instantiation reached through an implicit tail":
+        val src = "type Flag = bool\n\n" + DECLS + "class RCell:\n    cell: Flag?\n\nimpl Reader<Flag> for RCell:\n    fn read(node: i64) -> Flag?:\n        self.cell\n\nfn make() -> Reader<Flag>:\n    RCell(cell: Some(false))\n"
+        expect(lower_bootstrap(src).errors).to_contain("method read: return type argument T=optional[bool] is not supported through a generic trait slot natively")
+
+describe "trait-object conversion at module-level typed vals (bootstrap HIR)":
+    it "converts `val t: Tag = Alpha(..)`":
+        val l = lower_bootstrap(DECLS + "val module_tag: Tag = Alpha(k: 5)\n")
+        expect(l.errors).to_equal("")
+        expect(any_mir_has(l, CAST)).to_equal(true)
+
+    it "converts `val r: Reader<i64> = ICell(..)`":
+        val l = lower_bootstrap(DECLS + "val module_reader: Reader<i64> = ICell(cell: Some(9))\n")
+        expect(l.errors).to_equal("")
+        expect(any_mir_has(l, CAST)).to_equal(true)
+
+    it "refuses `val r: Reader<i32> = JCell(..)` like the in-function form":
+        expect(lower_bootstrap(DECLS + "val module_reader: Reader<i32> = JCell(cell: Some(3))\n").errors).to_contain("method read: return type argument T=optional[int:32:true] is not supported")
+
+describe "controls that already converted":
+    it "explicit return":
+        val l = lower_bootstrap(DECLS + "fn explicit_tag(k: i64) -> Tag:\n    return Beta(k: k)\n")
+        expect(l.errors).to_equal("")
+        expect(mir_of(l, "explicit_tag")).to_contain(CAST)
+
+    it "argument passing":
+        val l = lower_bootstrap(DECLS + "fn tag_of(t: Tag) -> i64:\n    t.tag()\n\nfn use_it() -> i64:\n    tag_of(Alpha(k: 11))\n")
+        expect(l.errors).to_equal("")
+        expect(mir_of(l, "use_it")).to_contain(CAST)
+
+    it "assignment to a typed local":
+        val l = lower_bootstrap(DECLS + "fn reassign() -> i64:\n    var t: Tag = Alpha(k: 0)\n    t = Beta(k: 12)\n    t.tag()\n")
+        expect(l.errors).to_equal("")
+        expect(mir_of(l, "reassign").split(CAST).len() >= 3).to_equal(true)
+
+    it "field init":
+        val l = lower_bootstrap(DECLS + "class Holder:\n    t: Tag\n\nfn hold() -> i64:\n    val h = Holder(t: Alpha(k: 13))\n    h.t.tag()\n")
+        expect(l.errors).to_equal("")
+        expect(mir_of(l, "hold")).to_contain(CAST)
+
+    it "in-function typed val refusal":
+        expect(lower_bootstrap(DECLS + "fn local_reader() -> i64:\n    val r: Reader<i32> = JCell(cell: Some(3))\n    0\n").errors).to_contain("method read: return type argument T=optional[int:32:true] is not supported")

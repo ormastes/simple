@@ -1,0 +1,46 @@
+# Must be REFUSED natively: the same generic-trait admission rule as an
+# explicit `return` or an in-function typed `val` (only i64, text and f64
+# instantiate a `T?` slot), reached through an IMPLICIT tail (`-> Reader<Flag>`,
+# Flag = bool) and a MODULE-LEVEL typed val (`Reader<i32>`). Before the fix
+# both built without the check (the tail crashed at dispatch).
+# Spec guard: test/01_unit/compiler/mir/native_trait_tail_module_val_conversion_spec.spl
+# Build with `native-build main.spl --backend=<cranelift|llvm> --entry-closure`
+# from a directory outside test/. Expected: build fails (rc != 0) with
+#   incompatible native trait object signature: main::Reader for main::RCell:
+#   method read: return type argument T=optional[bool] is not supported
+#   through a generic trait slot natively (only i64, text, f64)
+# and, for the module val,
+#   incompatible native trait object signature: main::Reader for main::ICell:
+#   method read: return type argument T=optional[int:32:true] is not supported
+#   through a generic trait slot natively (only i64, text, f64)
+# The seed interpreter runs it and prints `alias some false` / `i32 some 3`.
+
+type Flag = bool
+
+trait Reader<T>:
+    fn read(node: i64) -> T?
+
+class RCell:
+    cell: Flag?
+
+impl Reader<Flag> for RCell:
+    fn read(node: i64) -> Flag?:
+        self.cell
+
+class ICell:
+    cell: i32?
+
+impl Reader<i32> for ICell:
+    fn read(node: i64) -> i32?:
+        self.cell
+
+fn make() -> Reader<Flag>:
+    RCell(cell: Some(false))
+
+val module_reader: Reader<i32> = ICell(cell: Some(3))
+
+val r = make()
+if val v = r.read(1):
+    print "alias some {v}"
+if val w = module_reader.read(0):
+    print "i32 some {w}"
