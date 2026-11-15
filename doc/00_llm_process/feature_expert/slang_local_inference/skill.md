@@ -217,6 +217,12 @@ Measured on the seed interpreter, stories15M, "Once upon a time": generated
 text matches llama.cpp greedy; about 0.12 tokens/s. Fixture
 `test/fixtures/slang_pure/stories15m_generate.spl`; system spec
 `slang_pure_kv_cache_spec.spl`.
+
+### Sampling, stop, generation loop (pure runner)
+- `sampler.spl`: `sampler_sample(cfg, state, logits, recent)` -> token + next state. Order penalty -> temperature -> top-k -> top-p -> draw; temperature <= 0 is `tensor_argmax`. PRNG = minstd in `SamplerState` (seed -> same tokens, no globals). top-k = insertion selection (no vocab sort); top-p alone = log-prob bucket histogram + sort of the boundary bucket only (an earlier growing-top-K version took ~300 s/token on a flat 32000 vocab; fixed). Measured on the seed, vocab 32000: top-k 40 ~0.3 s/token, top-p 0.9 ~1.0 s, plain temperature ~0.6 s.
+- `stop.spl`: EOS ids, token budget, stop strings on decoded text; `stop_scan` truncates before the earliest match and reports `hold_back` (trailing units that may start a stop string; never stream them). Offsets are `len()/substring()/index_of()` units (code points on the current seed), stop strings assumed ASCII.
+- `generate.spl`: `gen_begin` (Err on empty/oversize prompt; prefix reuse, last prompt token always re-evaluated) + `gen_next` (one token, `delta` = text safe to stream) + `generate` (loop; returns `pieces`, `finish_reason` "stop"|"length", prompt/completion token counts, positions evaluated/reused). At temperature 0 ids equal `kv_generate_greedy` (EOS id included, no text). `kv_cache.spl` untouched.
+- Specs: unit `sampler_spec`, `stop_spec`, `generate_spec` (tiny synthetic model); system `slang_pure_sampling_spec.spl` (stories15M, gated on the model dir).
 Seed pitfalls found: an f64 carried through `Result` + `?` is mis-unboxed (parse
 numbers after the `?`); tokenizer.json escapes include `\r`.
 
