@@ -587,6 +587,23 @@ pub fn cranelift_local_slot_sizes(func: MirFunction) -> Dict<i64, i64>:
     for phi_id in phi_dest_ids.keys():
         if not sizes.has(phi_id):
             sizes[phi_id] = 8
+    # The catch-all Aggregate arm (Enum) stores one word per operand into the
+    # destination's own slot (cl_translate_instruction), so the slot must hold
+    # every word, not just the 8-byte floor. Slots are packed at 8-byte
+    # alignment, so an undersized slot overwrites its neighbour.
+    for block in func.blocks:
+        for inst in block.instructions:
+            match inst.kind:
+                case Aggregate(dest, kind, operands):
+                    match kind:
+                        case Enum(_, _):
+                            val need = operands.len() * 8
+                            if sizes.has(dest.id) and need > sizes[dest.id]:
+                                sizes[dest.id] = need
+                        case _:
+                            ()
+                case _:
+                    ()
     sizes
 
 fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, i64>, global_handles: Dict<i64, CraneliftGlobalBinding>, jit: bool) -> bool:
