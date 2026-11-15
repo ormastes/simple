@@ -1,0 +1,199 @@
+# One service request vocabulary and one retained Host writer. Platform startup
+# differs; Linux V2 dispatch and Windows signed preparation share their owners.
+use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
+use std.nogc_sync_mut.orchestration.host_windows_local_root_v3.*
+use std.nogc_sync_mut.orchestration.host_windows_deployment_v2.*
+use std.nogc_sync_mut.orchestration.host_service_enrollment_v2.*
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.*
+use std.nogc_sync_mut.orchestration.host_local_command_v1.host_local_validate_payload_v2
+use std.nogc_sync_mut.orchestration.host_local_root_v1.{host_local_context_v1, host_local_refresh_context_v1}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostReservationAuthorizationContextV1
+use std.nogc_sync_mut.orchestration.host_authorized_execution_v2.host_authorized_execute_v2
+use std.nogc_sync_mut.orchestration.host_execution_envelope_v2.host_execution_decode_v2
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.{HostExecutionObservationV2, host_execution_observation_encode_v2}
+use std.nogc_sync_mut.orchestration.host_parent_budget_v1.host_parent_budget_record_decode_v1
+use std.common.contracts.orchestration.host_capacity_v1.host_available_capacity_v1
+use std.common.contracts.orchestration.host_prepare_request_v1.host_prepare_request_decode_v1
+use std.common.task_runner.distributed_operation_journal_v2.*
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct HostServiceDomainV3:
+    local: HostLocalRootV3
+
+pub struct HostServiceTurnV3:
+    owner: HostServiceDomainV3
+    exit_code: i64
+    response: text
+
+pub enum HostServiceCleanupV3:
+    Linux(DistributedOperationJournalOpenCleanupV2)
+    Windows(HostWindowsLocalCleanupV3)
+
+pub enum HostServiceDomainOpenV3:
+    Ready(HostServiceDomainV3)
+    Pending(HostServiceDomainV3, text)
+    Rejected(text)
+    CleanupRequired(HostServiceCleanupV3, text)
+
+pub struct HostServiceCloseV3:
+    cleanup: Option<HostServiceCleanupV3>
+    closed: bool
+    error: text
+
+pub fn host_service_domain_open_linux_v3(root: text) -> HostServiceDomainOpenV3:
+    match host_service_domain_open_v2(root):
+        case HostServiceDomainOpenV2.Ready(domain):
+            HostServiceDomainOpenV3.Ready(HostServiceDomainV3(HostLocalRootV3.Linux(domain.local)))
+        case HostServiceDomainOpenV2.Rejected(error): HostServiceDomainOpenV3.Rejected(error)
+        case HostServiceDomainOpenV2.CleanupRequired(cleanup, error):
+            HostServiceDomainOpenV3.CleanupRequired(HostServiceCleanupV3.Linux(cleanup), error)
+
+# anchor is administrator-installed configuration, never a remote request field.
+# The deployment factory verifies actual ACLs, signed enrollment and pinned bytes.
+pub fn host_service_domain_open_windows_v3(anchor: HostWindowsDeploymentAnchorV2,
+        binding: HostServiceEnrollmentBindingV2) -> HostServiceDomainOpenV3:
+    var deployment: Option<HostWindowsDeploymentOwnerV2> = nil
+    match host_windows_deployment_reopen_v2(anchor, binding):
+        case HostWindowsDeploymentOpenV2.Ready(owner): deployment = Some(owner)
+        case HostWindowsDeploymentOpenV2.Rejected(error): return HostServiceDomainOpenV3.Rejected(error)
+        case HostWindowsDeploymentOpenV2.RecoveryRequired(_, error):
+            return HostServiceDomainOpenV3.Rejected("host-deployment-recovery-required:" + error)
+        case HostWindowsDeploymentOpenV2.CleanupRequired(cleanup, error):
+            return HostServiceDomainOpenV3.CleanupRequired(HostServiceCleanupV3.Windows(
+                HostWindowsLocalCleanupV3(deployment: nil, deployment_cleanup: Some(cleanup))), error)
+    match host_windows_local_open_v3(deployment.unwrap()):
+        case HostWindowsLocalOpenV3.Ready(local):
+            HostServiceDomainOpenV3.Ready(HostServiceDomainV3(HostLocalRootV3.Windows(local)))
+        case HostWindowsLocalOpenV3.Pending(local, error):
+            HostServiceDomainOpenV3.Pending(HostServiceDomainV3(HostLocalRootV3.Windows(local)), error)
+        case HostWindowsLocalOpenV3.Rejected(error): HostServiceDomainOpenV3.Rejected(error)
+        case HostWindowsLocalOpenV3.CleanupRequired(cleanup, error):
+            HostServiceDomainOpenV3.CleanupRequired(HostServiceCleanupV3.Windows(cleanup), error)
+
+pub fn host_service_cleanup_v3(cleanup: HostServiceCleanupV3) -> HostServiceCloseV3:
+    match cleanup:
+        case HostServiceCleanupV3.Linux(original):
+            val closed = distributed_operation_journal_open_cleanup_v2(original)
+            val pending = if closed.cleanup.is_some(): Some(HostServiceCleanupV3.Linux(closed.cleanup.unwrap())) else: nil
+            HostServiceCloseV3(pending, closed.closed, closed.error)
+        case HostServiceCleanupV3.Windows(original):
+            val closed = host_windows_local_cleanup_v3(original)
+            val pending = if closed.cleanup.is_some(): Some(HostServiceCleanupV3.Windows(closed.cleanup.unwrap())) else: nil
+            HostServiceCloseV3(pending, closed.closed, closed.error)
+
+pub fn host_service_domain_close_v3(owner: HostServiceDomainV3) -> HostServiceCloseV3:
+    match owner.local:
+        case HostLocalRootV3.Linux(local):
+            val closed = host_service_domain_close_v2(HostServiceDomainV2(local))
+            val pending = if closed.cleanup.is_some(): Some(HostServiceCleanupV3.Linux(closed.cleanup.unwrap())) else: nil
+            HostServiceCloseV3(pending, closed.closed, closed.error)
+        case HostLocalRootV3.Windows(local):
+            val closed = host_windows_local_close_v3(local)
+            val pending = if closed.cleanup.is_some(): Some(HostServiceCleanupV3.Windows(closed.cleanup.unwrap())) else: nil
+            HostServiceCloseV3(pending, closed.closed, closed.error)
+
+fn service_windows_status_v3(local: HostWindowsLocalRootV3) -> Result<text, text>:
+    val checked = local.current_v3()?
+    val ledger = local.capacity_v3().ledger
+    val available = host_available_capacity_v1(ledger)?
+    val binding = local.binding_v3()
+    val scope = local.scope_v3()
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("host-local-status"),
+        "backend": SdnValue.String(binding.backend), "physicalHostId": SdnValue.String(binding.physical_host_id),
+        "serviceScopeId": SdnValue.String(binding.service_scope_id), "authorityId": SdnValue.String(ledger.capacity.authority_id),
+        "continuityMode": SdnValue.String(scope.continuity_mode), "continuityId": SdnValue.String(scope.continuity_id),
+        "fenceId": SdnValue.String(ledger.capacity.boot_id), "nativeMachineId": SdnValue.String(scope.native_machine_id),
+        "providerIdentityDigest": SdnValue.String(binding.provider_identity_digest), "ready": SdnValue.Bool(local.ready_v3()),
+        "availableCpuMillis": SdnValue.Int(available.cpu_millis), "availableMemoryBytes": SdnValue.Int(available.memory_bytes),
+        "retainedReservations": SdnValue.Int(ledger.reservations.len()), "revision": SdnValue.Int(ledger.revision),
+        "durabilityProfile": SdnValue.String("process-crash-v1")}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn host_service_domain_turn_v3(owner: HostServiceDomainV3, request: HostServiceRequestV2) -> HostServiceTurnV3:
+    match owner.local:
+        case HostLocalRootV3.Linux(local):
+            val turn = host_service_domain_turn_v2(HostServiceDomainV2(local), request)
+            HostServiceTurnV3(HostServiceDomainV3(HostLocalRootV3.Linux(turn.owner.local)), turn.exit_code, turn.response)
+        case HostLocalRootV3.Windows(original):
+            var local = original
+            val invalid = host_service_request_error_v2(request)
+            if invalid != "": return HostServiceTurnV3(owner, 1, host_service_error_payload_v2(request, invalid, false))
+            val current = local.current_v3()
+            if current.is_err(): return HostServiceTurnV3(owner, 2, host_service_error_payload_v2(request, current.unwrap_err(), true))
+            var response: Result<text, text> = Err("host-service-effect-dispatch-required")
+            var mutation_attempted = false
+            if request.action == "host-status": response = service_windows_status_v3(local)
+            elif request.action == "host-validate":
+                response = host_local_validate_payload_v2(local.container_v3(), request.payload, request.operation_id)
+            elif request.action == "host-prepare":
+                val decoded = host_prepare_request_decode_v1(request.payload)
+                if decoded.is_err(): response = Err(decoded.unwrap_err())
+                elif decoded.unwrap().operation.id != request.operation_id: response = Err("host-service-operation-mismatch")
+                else:
+                    mutation_attempted = true
+                    response = local.prepare_v3(request.payload)
+            elif request.action == "host-parent-budget":
+                val decoded = host_parent_budget_record_decode_v1(request.payload)
+                if decoded.is_err(): response = Err(decoded.unwrap_err())
+                elif decoded.unwrap().parent_binding.host_operation.id != request.operation_id:
+                    response = Err("host-service-operation-mismatch")
+                else:
+                    mutation_attempted = true
+                    val stored = local.parent_budget_v3(request.payload)
+                    if stored.is_err(): response = Err(stored.unwrap_err())
+                    else:
+                        val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+                            "kind": SdnValue.String("host-parent-budget-reference"),
+                            "parentOperationId": SdnValue.String(request.operation_id),
+                            "budgetDigest": SdnValue.String(stored.unwrap())}
+                        response = Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+            val retained = HostServiceDomainV3(HostLocalRootV3.Windows(local))
+            if response.is_err():
+                return HostServiceTurnV3(retained, if mutation_attempted: 2 else: 1,
+                    host_service_error_payload_v2(request, response.unwrap_err(), mutation_attempted))
+            if response.unwrap().byte_len() > HOST_SERVICE_MAX_RESPONSE_BYTES_V2:
+                return HostServiceTurnV3(retained, 2, host_service_error_payload_v2(request, "host-service-response-size", true))
+            HostServiceTurnV3(retained, 0, response.unwrap())
+
+fn service_execution_reply_v3(owner: HostServiceDomainV3, request: HostServiceRequestV2,
+        observation: Option<HostExecutionObservationV2>, recovery: bool, error: text) -> HostServiceTurnV3:
+    if val observed = observation:
+        val encoded = host_execution_observation_encode_v2(observed)
+        if encoded.is_err(): return HostServiceTurnV3(owner, 2,
+            host_service_error_payload_v2(request, encoded.unwrap_err(), true))
+        return HostServiceTurnV3(owner, if error == "": 0 else: 2, encoded.unwrap())
+    HostServiceTurnV3(owner, if recovery: 2 else: 1, host_service_error_payload_v2(request, error, recovery))
+
+# Explicit finite effect-worker entry. Keep the retained owner in that worker
+# across signed prepare and execute; never call it on the control poll callback.
+pub fn host_service_domain_effect_turn_v3(owner: HostServiceDomainV3,
+        request: HostServiceRequestV2) -> HostServiceTurnV3:
+    val invalid = host_service_request_error_v2(request)
+    if invalid != "" or request.action != "host-execute":
+        return HostServiceTurnV3(owner, 1, host_service_error_payload_v2(request,
+            if invalid != "": invalid else: "host-service-effect-action", false))
+    match owner.local:
+        case HostLocalRootV3.Linux(original):
+            var local = original
+            val decoded = host_execution_decode_v2(request.payload, local.scope)
+            if decoded.is_err() or decoded.unwrap().operation.id != request.operation_id:
+                return HostServiceTurnV3(owner, 1, host_service_error_payload_v2(request, "host-service-execute-envelope", false))
+            val root = local.root
+            val binding = local.binding
+            val refresh = fn() -> HostReservationAuthorizationContextV1:
+                host_local_refresh_context_v1(root, binding)
+            val turn = host_authorized_execute_v2(local.capacity, local.container, request.payload, local.policy,
+                binding.provider_identity_digest, local.config.service_scope_id, host_local_context_v1(local.policy), refresh)
+            local.capacity = turn.owner
+            local.container = turn.container
+            service_execution_reply_v3(HostServiceDomainV3(HostLocalRootV3.Linux(local)), request,
+                turn.observation, turn.recovery_required, turn.error)
+        case HostLocalRootV3.Windows(original):
+            var local = original
+            val decoded = host_execution_decode_v2(request.payload, local.scope_v3())
+            if decoded.is_err() or decoded.unwrap().operation.id != request.operation_id:
+                return HostServiceTurnV3(owner, 1, host_service_error_payload_v2(request, "host-service-execute-envelope", false))
+            val turn = local.execute_v3(request.payload)
+            service_execution_reply_v3(HostServiceDomainV3(HostLocalRootV3.Windows(local)), request,
+                turn.observation, turn.recovery_required, turn.error)

@@ -2,19 +2,18 @@
 """
 ## Purpose and audience
 `E_INIT_CAPABILITY_ESCAPE` of the immutable-views sub-plan (section 3.2:
-"Producer or mutable alias illegally escapes its region"). The plan leaves
-"region" undefined; this spec pins the PROVISIONAL definition proposed in
-doc/08_tracking/bug/immutable_async_open_questions_2026-11-15.md (owner to
-ratify): the region is the constructing function's short-borrow boundary
-(the one `record_loan_escape` in the borrow checker already uses for task and
-promise capture). An async producer runs after that boundary, so a mutable
-local named directly as a producer argument escapes it.
+"Producer or mutable alias illegally escapes its region"). Region rule
+(owner decision 2026-11-15, doc/08_tracking/bug/immutable_async_open_questions_2026-11-15.md
+section 4): the async producer may only receive IMMUTABLE input. Any `var`
+binding, `mut T` parameter, `me`-method `self`, borrow-typed binding, or closure
+capturing those, nested anywhere in the argument, is rejected; `val x = counter`
+then `async_init(x)` is accepted (assignment to immutable is the gate).
 Default OFF: the check runs only when SIMPLE_INIT_CAPABILITY_ESCAPE=on.
 ## Operator workflow
 bin/simple test test/01_unit/compiler/hir/init_capability_escape_v1_spec.spl
 ## Compatibility and limitations
-Only a mutable local that is a direct argument of the producer call is judged.
-Captures nested in producer sub-expressions, aliases and closures are not.
+Judged on HIR only: bindings reached through calls inside other functions, or
+mutable data reached through a field of an immutable binding, are not traced.
 ## Verification guidance and troubleshooting
 A RED on the `val` or parameter cases means false positives; fix first.
 """
@@ -78,3 +77,51 @@ describe "Producer capability escape (E_INIT_CAPABILITY_ESCAPE, provisional, def
         # @req REQ-IMM-ASY-ESC
         val src = NODE_CLASS + ASYNC_STAND_IN + "fn build() -> HirNode:\n    var counter = 3\n    HirNode(id: counter, body: \"b\", inferred: async_init(7))\n"
         expect(codes(check(src, "sync_field_on", "on"))).to_equal("")
+
+fn producer_src(prelude: text, params: text, arg: text) -> text:
+    NODE_CLASS + ASYNC_STAND_IN + "fn build(" + params + ") -> HirNode:\n" + prelude +
+        "    HirNode(id: 1, body: \"b\", inferred: async_init(" + arg + "))\n"
+
+describe "Owner rule: the producer input must be immutable at the point of assignment":
+    it "rejects a `var` local nested inside the producer argument":
+        # @req REQ-IMM-ASY-ESC
+        step("`counter + 1` reads a mutable binding")
+        val src = producer_src("    var counter = 3\n", "", "counter + 1")
+        expect(codes(check(src, "var_nested", "on"))).to_equal("E_INIT_CAPABILITY_ESCAPE:HirNode.inferred;")
+
+    it "rejects a `mut` (mutable-borrow) parameter":
+        # @req REQ-IMM-ASY-ESC
+        val src = producer_src("", "c: mut i64", "c")
+        expect(codes(check(src, "mut_param", "on"))).to_equal("E_INIT_CAPABILITY_ESCAPE:HirNode.inferred;")
+
+    it "rejects state read through `self` of a `me` method":
+        # @req REQ-IMM-ASY-ESC
+        val src = NODE_CLASS + ASYNC_STAND_IN + "class Maker:\n    seed: i64\n    me make() -> HirNode:\n        HirNode(id: 1, body: \"b\", inferred: async_init(self.seed))\n"
+        expect(codes(check(src, "me_self", "on"))).to_equal("E_INIT_CAPABILITY_ESCAPE:HirNode.inferred;")
+
+    it "rejects a read-only borrow of mutable data":
+        # @req REQ-IMM-ASY-ESC
+        val src = producer_src("    var counter = 3\n", "", "&counter")
+        expect(codes(check(src, "ref_of_var", "on"))).to_equal("E_INIT_CAPABILITY_ESCAPE:HirNode.inferred;")
+
+    it "rejects a closure that captures mutable state":
+        # @req REQ-IMM-ASY-ESC
+        val src = producer_src("    var counter = 3\n", "", "(\: counter)()")
+        expect(codes(check(src, "closure_var", "on"))).to_equal("E_INIT_CAPABILITY_ESCAPE:HirNode.inferred;")
+
+    it "accepts a `var` copied into a `val` before assignment (assignment to immutable is the gate)":
+        # @req REQ-IMM-ASY-ESC
+        val src = producer_src("    var counter = 3\n    val x = counter\n", "", "x")
+        expect(codes(check(src, "val_copy", "on"))).to_equal("")
+
+    it "accepts nested immutable expressions, immutable parameters and closures over `val`":
+        # @req REQ-IMM-ASY-ESC
+        expect(codes(check(producer_src("    val n = 5\n", "", "n * 2 + 1"), "val_nested", "on"))).to_equal("")
+        expect(codes(check(producer_src("", "k: i64", "k"), "val_param", "on"))).to_equal("")
+        expect(codes(check(producer_src("    val k = 3\n", "", "(\: k)()"), "closure_val", "on"))).to_equal("")
+
+    it "stays off-identical for every new form when the switch is unset":
+        # @req REQ-IMM-ASY-ESC
+        expect(codes(check(producer_src("    var counter = 3\n", "", "counter + 1"), "nested_off", ""))).to_equal("")
+        expect(codes(check(producer_src("", "c: mut i64", "c"), "mut_param_off", ""))).to_equal("")
+        expect(codes(check(producer_src("    var counter = 3\n", "", "(\: counter)()"), "closure_off", ""))).to_equal("")

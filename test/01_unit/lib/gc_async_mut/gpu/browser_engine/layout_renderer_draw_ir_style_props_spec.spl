@@ -1,0 +1,151 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl 1%
+# @tag: unit, browser_engine, paint, draw_ir
+#
+# The draw-IR style properties a painted element carries: the renderer's
+# computed Style serialised as key/value pairs for the GPU/presenter
+# backends. A keyword property carries its computed value, which for a
+# keyword is the keyword itself (CSS Cascade 4 section 4.4); colours are the
+# ARGB word as an unsigned decimal (`rgba(255,0,0,0.5)` -> alpha
+# round(0.5 * 255) = 128 -> 0x80FF0000 = 2164195328); lengths are px
+# integers. Each expected value below follows from the authored declaration.
+#
+# The named-colour border shorthand rows close
+# doc/08_tracking/bug/web_border_shorthand_named_color_dropped_2026-11-15.md.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_declarations.{apply_decls}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{renderer_default_style, Style}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_html, HNode}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_layout.{_html_draw_ir_style_props}
+use common.ui.draw_ir.{DrawIrStyleProp}
+
+fn _node(html: text) -> HNode:
+    val nodes = parse_html("<html><body>" + html + "</body></html>")
+    var i = 0
+    var idx = 0
+    while i < nodes.len():
+        if nodes[i].id_attr == "x":
+            idx = i
+        i = i + 1
+    nodes[idx]
+
+fn _props(decls: text) -> [DrawIrStyleProp]:
+    _html_draw_ir_style_props(_node("<div id=\"x\" class=\"k j\">t</div>"), apply_decls(renderer_default_style(), decls, 16))
+
+fn _pv(props: [DrawIrStyleProp], key: text) -> text:
+    for p in props:
+        if p.key == key:
+            return p.value
+    "<absent>"
+
+describe "Element identity":
+
+    it "carries the tag, id and class attribute":
+        val p = _props("color:red")
+        expect(_pv(p, "tag")).to_equal("div")
+        expect(_pv(p, "id")).to_equal("x")
+        expect(_pv(p, "class")).to_equal("k j")
+
+describe "Keyword properties carry the authored keyword":
+
+    it "serialises flex container keywords":
+        val p = _props("display:flex;flex-direction:column;flex-wrap:wrap;justify-content:center;align-items:flex-end;align-self:stretch")
+        expect(_pv(p, "display")).to_equal("flex")
+        expect(_pv(p, "flex-direction")).to_equal("column")
+        expect(_pv(p, "flex-wrap")).to_equal("wrap")
+        expect(_pv(p, "justify-content")).to_equal("center")
+        expect(_pv(p, "align-items")).to_equal("flex-end")
+        expect(_pv(p, "align-self")).to_equal("stretch")
+
+    it "serialises text keywords":
+        val p = _props("direction:rtl;font-style:italic;text-decoration:underline;text-align:center;visibility:hidden")
+        expect(_pv(p, "direction")).to_equal("rtl")
+        expect(_pv(p, "font-style")).to_equal("italic")
+        expect(_pv(p, "text-decoration-line")).to_equal("underline")
+        expect(_pv(p, "text-align")).to_equal("center")
+        expect(_pv(p, "visibility")).to_equal("hidden")
+
+    it "serialises initial values when nothing is authored":
+        val p = _props("color:red")
+        expect(_pv(p, "position")).to_equal("static")
+        expect(_pv(p, "flex-direction")).to_equal("row")
+        expect(_pv(p, "background-repeat")).to_equal("repeat")
+        expect(_pv(p, "background-origin")).to_equal("padding-box")
+        expect(_pv(p, "background-clip")).to_equal("border-box")
+        expect(_pv(p, "text-decoration-line")).to_equal("none")
+        expect(_pv(p, "writing-mode")).to_equal("horizontal-tb")
+        expect(_pv(p, "backdrop-filter")).to_equal("none")
+        expect(_pv(p, "backdrop-filter-capability")).to_equal("not-requested")
+
+    it "serialises positioned offsets":
+        val p = _props("position:absolute;left:5px;top:7px;z-index:3")
+        expect(_pv(p, "position")).to_equal("absolute")
+        expect(_pv(p, "left")).to_equal("5")
+        expect(_pv(p, "top")).to_equal("7")
+        expect(_pv(p, "z-index")).to_equal("3")
+
+describe "Colours and lengths":
+
+    it "serialises colours as the ARGB word":
+        val p = _props("background-color:rgba(255,0,0,0.5);color:#00ff00")
+        expect(_pv(p, "background-color")).to_equal("2164195328")
+        expect(_pv(p, "color")).to_equal("4278255360")
+
+    it "serialises font size, radii and box lengths in px":
+        val p = _props("font-size:20px;border-radius:4px;padding:1px 2px 3px 4px;margin-top:6px;border-top:2px solid red")
+        expect(_pv(p, "font-size")).to_equal("20")
+        expect(_pv(p, "border-radius")).to_equal("4")
+        expect(_pv(p, "border-bottom-left-radius")).to_equal("4")
+        expect(_pv(p, "padding-top")).to_equal("1")
+        expect(_pv(p, "padding-right")).to_equal("2")
+        expect(_pv(p, "padding-bottom")).to_equal("3")
+        expect(_pv(p, "padding-left")).to_equal("4")
+        expect(_pv(p, "margin-top")).to_equal("6")
+        expect(_pv(p, "border-top-width")).to_equal("2")
+
+    it "serialises a per-side border colour longhand":
+        val p = _props("border-top-width:2px;border-top-style:solid;border-top-color:red")
+        expect(_pv(p, "border-top-color")).to_equal("4294901760")
+
+    it "serialises a named colour from border-top and border shorthands":
+        expect(_pv(_props("border-top:2px solid red"), "border-top-color")).to_equal("4294901760")
+        expect(_pv(_props("border:2px solid red"), "border-left-color")).to_equal("4294901760")
+
+    it "serialises a hex colour from a border-top shorthand":
+        val p = _props("border-top:2px solid #ff0000")
+        expect(_pv(p, "border-top-width")).to_equal("2")
+        expect(_pv(p, "border-top-color")).to_equal("4294901760")
+
+describe "Gradients and shadows":
+
+    it "lists linear-gradient stops as colour words and per-mille positions":
+        val p = _props("background-image:linear-gradient(90deg, red, blue)")
+        expect(_pv(p, "background-gradient-stop-count")).to_equal("2")
+        expect(_pv(p, "background-gradient-stops")).to_equal("4294901760,4278190335,0,1000")
+        expect(_pv(p, "background-gradient-angle-deg")).to_equal("90")
+        expect(_pv(p, "background-gradient-is-radial")).to_equal("0")
+
+    it "describes one outer box-shadow layer from the authored offsets and blur":
+        val p = _props("box-shadow:2px 3px 4px #000")
+        expect(_pv(p, "box-shadow-layer-count")).to_equal("1")
+        expect(_pv(p, "box-shadow-blur-radius")).to_equal("4")
+        expect(_pv(p, "box-shadow-layer-0-kind")).to_equal("outer")
+        expect(_pv(p, "box-shadow-layer-0-offset-x")).to_equal("2")
+        expect(_pv(p, "box-shadow-layer-0-offset-y")).to_equal("3")
+        expect(_pv(p, "box-shadow-layer-0-spread-radius")).to_equal("0")
+        expect(_pv(p, "box-shadow-layer-0-color")).to_equal("4278190080")
+
+describe "Animation and transition longhands":
+
+    it "serialises times in ms and keywords as authored":
+        val p = _props("transition:opacity 1s ease-in 0.5s;animation:spin 2s linear infinite alternate")
+        expect(_pv(p, "transition-property")).to_equal("opacity")
+        expect(_pv(p, "transition-duration")).to_equal("1000ms")
+        expect(_pv(p, "transition-delay")).to_equal("500ms")
+        expect(_pv(p, "transition-timing-function")).to_equal("ease-in")
+        expect(_pv(p, "animation-name")).to_equal("spin")
+        expect(_pv(p, "animation-duration")).to_equal("2000ms")
+        expect(_pv(p, "animation-iteration-count")).to_equal("infinite")
+        expect(_pv(p, "animation-direction")).to_equal("alternate")

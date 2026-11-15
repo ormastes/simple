@@ -1,0 +1,151 @@
+# Pure goal-start skill routing decisions for the SPipe process harness CLI.
+#
+# No I/O here: the CLI (`src/app/spipe_process_harness/main.spl`) reads the
+# registry and receipt files and writes the receipt; this module only parses
+# arguments and decides. Provider text is parsed by the harness
+# `normalize_provider` only; `skill_provider_of` is the single mapping onto the
+# selector's `SkillProvider`.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.llm.task_skill_selector.{
+    GoalTaskClass, SkillProvider, GoalSkillOutcome, GoalSkillReceiptText, RegistryDigest,
+    select_goal_skills, goal_skill_selection_receipt, parse_goal_task_class
+}
+use std.nogc_async_mut.spipe_process_harness.types.{Provider}
+use std.nogc_async_mut.spipe_process_harness.core.{normalize_provider}
+
+# Goal identifier selecting `.spipe/<goal>/`.
+pub struct GoalId:
+    value: text
+
+# Location of a goal's persisted `GoalSkillSelectionV1` receipt.
+pub struct GoalReceiptPath:
+    value: text
+
+# Location of the canonical knowledge registry the selection is computed from.
+pub struct RegistryPath:
+    value: text
+
+# Human-readable CLI diagnostic.
+pub struct GoalCliMessage:
+    value: text
+
+# Process exit status of a `goal` action.
+pub struct GoalExitCode:
+    value: i64
+
+# Process outcome of a `goal` action; `goal_exit_code` maps it at the boundary.
+pub enum GoalExit:
+    Selected
+    Rejected
+    Ask
+    Stale
+    ReceiptMissing
+    ReceiptUnreadable
+
+pub enum GoalResumeVerdict:
+    Fresh
+    Stale
+    Unreadable
+
+pub struct GoalSkillsRequest:
+    task_class: GoalTaskClass
+    provider: Provider
+
+pub struct GoalSkillsRequestParse:
+    request: GoalSkillsRequest?
+    error: GoalCliMessage?
+
+pub struct GoalSkillsPlan:
+    exit: GoalExit
+    output: GoalSkillReceiptText
+    receipt: GoalSkillReceiptText?
+
+pub fn default_registry_path() -> RegistryPath:
+    RegistryPath(value: "doc/00_llm_process/knowledge_registry.sdn")
+
+pub fn skill_provider_of(provider: Provider) -> SkillProvider:
+    match provider:
+        case Provider.Claude: SkillProvider.Claude
+        case Provider.Codex: SkillProvider.Codex
+        case Provider.Gemini: SkillProvider.Gemini
+        case Provider.Kimi: SkillProvider.Kimi
+        case Provider.Unknown: SkillProvider.Unknown
+
+pub fn goal_exit_code(exit: GoalExit) -> GoalExitCode:
+    match exit:
+        case GoalExit.Selected: GoalExitCode(value: 0)
+        case GoalExit.Rejected: GoalExitCode(value: 1)
+        case GoalExit.Ask: GoalExitCode(value: 3)
+        case GoalExit.Stale: GoalExitCode(value: 4)
+        case GoalExit.ReceiptMissing: GoalExitCode(value: 5)
+        case GoalExit.ReceiptUnreadable: GoalExitCode(value: 6)
+
+# A goal id becomes a directory name: reject empty, separators and `..`.
+pub fn parse_goal_id(raw: text) -> GoalId?:
+    val id = raw.trim()
+    if id == "" or id.contains("/") or id.contains("\\") or id.contains(".."):
+        return None
+    Some(GoalId(value: id))
+
+pub fn goal_receipt_path(goal: GoalId) -> GoalReceiptPath:
+    GoalReceiptPath(value: ".spipe/{goal.value}/skill_selection.sdn")
+
+# Unknown or blank provider text is not an error: it parses to
+# `Provider.Unknown`, which the selector answers with a `FallbackAsk`.
+pub fn parse_goal_skills_request(task: text, provider: text) -> GoalSkillsRequestParse:
+    match parse_goal_task_class(task.trim().lower()):
+        case Some(task_class):
+            GoalSkillsRequestParse(
+                request: Some(GoalSkillsRequest(task_class: task_class, provider: normalize_provider(provider))),
+                error: None)
+        case None:
+            GoalSkillsRequestParse(request: None,
+                error: Some(GoalCliMessage(value: "error=unknown-task-class:{task.trim()}")))
+
+# Selection decision. Only a `Selected` outcome carries a receipt to persist:
+# a rejection or an ask-fallback writes nothing.
+pub fn plan_goal_skills(registry_text: text, request: GoalSkillsRequest) -> GoalSkillsPlan:
+    val selection = select_goal_skills(registry_text, request.task_class, skill_provider_of(request.provider))
+    val receipt = goal_skill_selection_receipt(selection)
+    match selection.outcome:
+        case GoalSkillOutcome.Selected:
+            GoalSkillsPlan(exit: GoalExit.Selected, output: receipt, receipt: Some(receipt))
+        case GoalSkillOutcome.FallbackAsk:
+            GoalSkillsPlan(exit: GoalExit.Ask, output: receipt, receipt: None)
+        case GoalSkillOutcome.Rejected:
+            GoalSkillsPlan(exit: GoalExit.Rejected, output: receipt, receipt: None)
+
+# Registry digest recorded in a stored receipt; None for anything that is not a
+# `GoalSkillSelectionV1` receipt carrying one.
+pub fn goal_receipt_digest(receipt: text) -> RegistryDigest?:
+    if not receipt.starts_with("schema=GoalSkillSelectionV1\n"):
+        return None
+    for line in receipt.split("\n"):
+        if line.starts_with("registry_digest=sha256:"):
+            val hex = line.slice(23).trim()
+            if hex == "":
+                return None
+            return Some(RegistryDigest(value: hex))
+    None
+
+pub fn evaluate_goal_resume(receipt: text, registry_text: text) -> GoalResumeVerdict:
+    match goal_receipt_digest(receipt):
+        case None:
+            GoalResumeVerdict.Unreadable
+        case Some(stored):
+            if stored.value == sha256_text(registry_text):
+                GoalResumeVerdict.Fresh
+            else:
+                GoalResumeVerdict.Stale
+
+pub fn resume_exit(verdict: GoalResumeVerdict) -> GoalExit:
+    match verdict:
+        case GoalResumeVerdict.Fresh: GoalExit.Selected
+        case GoalResumeVerdict.Stale: GoalExit.Stale
+        case GoalResumeVerdict.Unreadable: GoalExit.ReceiptUnreadable
+
+export GoalExitCode, GoalId, GoalReceiptPath, RegistryPath, GoalCliMessage, GoalExit, GoalResumeVerdict
+export GoalSkillsRequest, GoalSkillsRequestParse, GoalSkillsPlan
+export default_registry_path, skill_provider_of, goal_exit_code, parse_goal_id, goal_receipt_path
+export parse_goal_skills_request, plan_goal_skills, goal_receipt_digest, evaluate_goal_resume, resume_exit

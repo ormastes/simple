@@ -1,0 +1,711 @@
+# Installed Linux producer-exclusion COMPONENT. AUTHORED_NOT_RUN.
+# Ready does not admit machine genesis: unfiltered provider inventory, exact
+# prior-charge adoption and a same-writer successor consumer are separate gates.
+# No constructor accepts caller roots, unit lists, PID receipts or completeness.
+use std.nogc_sync_mut.io.linux_installed_supervisor_profile_v1.*
+use std.nogc_sync_mut.io.linux_installed_supervisor_bus_v1.*
+use std.nogc_sync_mut.io.file_lock_owned_v2.*
+use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+
+pub struct LinuxSupervisorExclusionDiagnosticV1:
+    owner_generation: i64
+    process_identity_digest: text
+    provider_process_id: i64
+    provider_incarnation: text
+    profile_digest: text
+    machine_policy_digest: text
+    manager_unique_name: text
+    stopped_units: [text]
+    mutation_attempted: bool
+    exclusion_component_live: bool
+    phase: text
+
+pub class LinuxInstalledSupervisorOwnerV1:
+    slot: i64
+    generation: i64
+    pub fn current_v1() -> Result<LinuxSupervisorExclusionDiagnosticV1, text>:
+        supervisor_exclusion_current_v1(self.slot, self.generation)
+    pub fn installed_snapshot_v1() -> Result<LinuxSupervisorInstalledSnapshotV1, text>:
+        val checked = self.current_v1()?
+        supervisor_exclusion_profile_v1(self.slot, self.generation)
+    # This only releases before any mutation. After a possible mask/stop it
+    # retains inhibition and returns pending; no blanket unmask/restart exists.
+    pub fn close_v1() -> text: supervisor_exclusion_close_v1(self.slot, self.generation)
+    pub fn close_diagnostic_v1() -> text: supervisor_exclusion_close_diagnostic_v1(self.slot, self.generation)
+
+pub enum LinuxInstalledSupervisorOpenV1:
+    Rejected(reason: text)
+    CleanupRequired(owner: LinuxInstalledSupervisorOwnerV1, reason: text)
+    Ready(owner: LinuxInstalledSupervisorOwnerV1)
+
+pub fn linux_installed_supervisor_open_v1() -> LinuxInstalledSupervisorOpenV1:
+    @when(os="linux"):
+    supervisor_exclusion_open_v1()
+    @else:
+    LinuxInstalledSupervisorOpenV1.Rejected("supervisor-exclusion-linux-required")
+    @end
+
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_installed_supervisor_abi_v1.*
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32,
+    volatile_read_u64, volatile_write_u8, volatile_write_u32}
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.char_from_code
+
+struct SupervisorOwnedFdV1:
+    fd: i64
+    identity: text
+    filesystem: i64
+
+struct SupervisorStoppedUnitV1:
+    name: text
+    path: text
+    prior_file_state: text
+    prior_cgroup: text
+    cgroup_fd: i64 = -1
+    events_fd: i64 = -1
+    changes: [LinuxSupervisorUnitChangeV1] = []
+    stop_job: text = ""
+    done: bool = false
+
+struct SupervisorExclusionStateV1:
+    generation: i64
+    profile: LinuxInstalledSupervisorProfileV1
+    snapshot: Option<LinuxSupervisorInstalledSnapshotV1> = None
+    bus: Option<LinuxSupervisorBusV1> = None
+    lock: Option<FileLockOwnerV2> = None
+    state_directory: i64 = -1
+    lock_path_file: i64 = -1
+    arena: i64 = 0
+    descriptors: [SupervisorOwnedFdV1] = []
+    directories: [i64] = []
+    units: [SupervisorStoppedUnitV1] = []
+    phase: text = "opening"
+    mutation_attempted: bool = false
+    supervisor_path: text = ""
+    provider_path: text = ""
+    provider_pid: i64 = 0
+    provider_incarnation: text = ""
+    started: i64 = 0
+    deadline: i64 = 0
+    closed: bool = false
+    cleanup_unknown: bool = false
+    close_diagnostic: text = ""
+    profile_consumed: bool = false
+    profile_close_retryable: bool = true
+    bus_close_retryable: bool = true
+    lock_close_retryable: bool = true
+
+var supervisor_exclusion_slots_v1: [SupervisorExclusionStateV1] = []
+
+@unsafe(reason: "same-process/main-thread guard before mutable registry access", capabilities: [ffi])
+fn supervisor_exclusion_entry_v1() -> Result<(), text>:
+    linux_machine_process_origin_check_v1()
+
+fn supervisor_exclusion_state_v1(slot: i64, generation: i64) -> Result<SupervisorExclusionStateV1, text>:
+    supervisor_exclusion_entry_v1()?
+    if slot < 0 or slot >= supervisor_exclusion_slots_v1.len(): return Err("supervisor-exclusion-stale")
+    val state = supervisor_exclusion_slots_v1[slot]
+    if state.closed or state.generation != generation: return Err("supervisor-exclusion-stale")
+    Ok(state)
+
+fn supervisor_exclusion_budget_v1(slot: i64) -> Result<(), text>:
+    val state = supervisor_exclusion_slots_v1[slot]
+    val now = time_sample_monotonic_nanos_or_failure()
+    if now < state.started or now >= state.deadline: return Err("supervisor-exclusion-total-budget")
+    Ok(())
+
+fn supervisor_exclusion_directory_flags_v1() -> i32:
+    @when(arch="x86_64"):
+    720896
+    @elif(arch="aarch64"):
+    573440
+    @else:
+    0
+    @end
+
+fn supervisor_exclusion_file_flags_v1() -> i32:
+    @when(arch="x86_64"):
+    657408
+    @elif(arch="aarch64"):
+    559104
+    @else:
+    0
+    @end
+
+@unsafe(reason: "encode one bounded validated native path into private scratch", capabilities: [ffi, raw_ptr])
+fn supervisor_exclusion_z_v1(slot: i64, value: text) -> i64:
+    if value.byte_len() > 4095 or value.contains("\0"): return 0
+    val pointer = supervisor_exclusion_slots_v1[slot].arena + 512
+    for at in 0..value.byte_len(): volatile_write_u8(pointer + at, value.byte_at(at) as i64)
+    volatile_write_u8(pointer + value.byte_len(), 0)
+    pointer
+
+@unsafe(reason: "stable Linux statx layout with returned mount, identity and security mask", capabilities: [ffi, raw_ptr])
+fn supervisor_exclusion_metadata_v1(slot: i64, fd: i64) -> Result<(text, i64, i64, i64), text>:
+    val arena = supervisor_exclusion_slots_v1[slot].arena
+    for at in 0..256: volatile_write_u8(arena + at, 0)
+    val name = supervisor_exclusion_z_v1(slot, "")
+    if statx(fd as i32, name, 4096, 6143u32, arena) != 0 or (volatile_read_u32(arena) & 6143) != 6143:
+        return Err("supervisor-exclusion-statx")
+    val identity = str(volatile_read_u32(arena + 136)) + ":" + str(volatile_read_u32(arena + 140)) + ":" +
+        str(volatile_read_u64(arena + 32)) + ":" + str(volatile_read_u64(arena + 144))
+    Ok((identity, volatile_read_u32(arena + 20), volatile_read_u16(arena + 28), volatile_read_u32(arena + 16)))
+
+@unsafe(reason: "actual retained descriptor filesystem kind", capabilities: [ffi, raw_ptr])
+fn supervisor_exclusion_filesystem_v1(slot: i64, fd: i64) -> Result<i64, text>:
+    val pointer = supervisor_exclusion_slots_v1[slot].arena + 256
+    for at in 0..128: volatile_write_u8(pointer + at, 0)
+    if fstatfs(fd as i32, pointer) != 0: return Err("supervisor-exclusion-filesystem")
+    Ok(volatile_read_u64(pointer))
+
+@unsafe(reason: "retain nofollow descriptor before any fallible metadata or filesystem check", capabilities: [ffi, raw_ptr])
+fn supervisor_exclusion_open_fd_v1(slot: i64, parent: i64, name: text, directory: bool,
+        filesystem: i64, admin: bool) -> Result<i64, text>:
+    val flags = if directory: supervisor_exclusion_directory_flags_v1() else: supervisor_exclusion_file_flags_v1()
+    val pointer = supervisor_exclusion_z_v1(slot, name)
+    if pointer == 0 or flags == 0: return Err("supervisor-exclusion-name-or-abi")
+    if supervisor_exclusion_slots_v1[slot].descriptors.len() >= 4096:
+        return Err("supervisor-exclusion-descriptor-bound")
+    val fd = openat(parent as i32, pointer, flags, 0u32) as i64
+    if fd < 0: return Err("supervisor-exclusion-required-native-entry-missing")
+    val index = supervisor_exclusion_slots_v1[slot].descriptors.len()
+    supervisor_exclusion_slots_v1[slot].descriptors.push(SupervisorOwnedFdV1(fd, "", filesystem))
+    val meta = supervisor_exclusion_metadata_v1(slot, fd)?
+    val kind = if directory: 16384 else: 32768
+    if (meta.2 & 61440) != kind: return Err("supervisor-exclusion-native-entry-kind")
+    if admin and (meta.1 != 0 or (meta.2 & 18) != 0): return Err("supervisor-exclusion-root-protected-ancestry-required")
+    val actual_fs = supervisor_exclusion_filesystem_v1(slot, fd)?
+    if filesystem != 0 and actual_fs != filesystem: return Err("supervisor-exclusion-native-filesystem-mismatch")
+    supervisor_exclusion_slots_v1[slot].descriptors[index].identity = meta.0
+    Ok(index)
+
+fn supervisor_exclusion_fd_v1(slot: i64, index: i64) -> i64:
+    supervisor_exclusion_slots_v1[slot].descriptors[index].fd
+
+fn supervisor_exclusion_chain_v1(slot: i64, parts: [text], filesystem: i64 = 0) -> Result<i64, text>:
+    var index = supervisor_exclusion_open_fd_v1(slot, -100, "/", true, 0, true)?
+    for component in parts:
+        if component == "" or component == "." or component == ".." or component.contains("/"):
+            return Err("supervisor-exclusion-path-component")
+        index = supervisor_exclusion_open_fd_v1(slot, supervisor_exclusion_fd_v1(slot, index), component, true, 0, true)?
+    if filesystem != 0 and supervisor_exclusion_filesystem_v1(slot, supervisor_exclusion_fd_v1(slot, index))? != filesystem:
+        return Err("supervisor-exclusion-native-filesystem-mismatch")
+    Ok(index)
+
+@unsafe(reason: "bounded positional read through exact retained native descriptor", capabilities: [ffi, raw_ptr])
+fn supervisor_exclusion_read_v1(slot: i64, index: i64, maximum: i64) -> Result<text, text>:
+    if maximum < 1 or maximum > 65536: return Err("supervisor-exclusion-read-bound")
+    val pointer = supervisor_exclusion_slots_v1[slot].arena + 8192
+    val fd = supervisor_exclusion_fd_v1(slot, index)
+    var bytes: [u8] = []
+    var offset = 0
+    while offset <= maximum:
+        val count = pread(fd as i32, pointer, (maximum + 1 - offset) as u64, offset)
+        if count < 0 or count > maximum + 1 - offset: return Err("supervisor-exclusion-read")
+        if count == 0: break
+        for at in 0..count: bytes.push(volatile_read_u8(pointer + at) as u8)
+        offset = offset + count
+    if bytes.len() > maximum or not utf8_bytes_valid(bytes): return Err("supervisor-exclusion-read-bound-or-utf8")
+    Ok(bytes_to_text(bytes))
+
+fn supervisor_exclusion_pin_cgroup_v1(slot: i64, path: text) -> Result<(i64, i64), text>:
+    if path == "": return Ok((-1, -1))
+    if not path.starts_with("/") or path == "/" or path.byte_len() > 2048 or path.contains("//") or path.ends_with("/"):
+        return Err("supervisor-exclusion-cgroup-path")
+    if path.split("/").len() > 33: return Err("supervisor-exclusion-cgroup-depth")
+    var current = supervisor_exclusion_chain_v1(slot, ["sys", "fs", "cgroup"], 1667723888)?
+    val relative_path = path.substring(1, path.byte_len())
+    for component in relative_path.split("/"):
+        if component == "" or component == "." or component == "..": return Err("supervisor-exclusion-cgroup-path")
+        current = supervisor_exclusion_open_fd_v1(slot, supervisor_exclusion_fd_v1(slot, current), component, true, 1667723888, false)?
+    val events = supervisor_exclusion_open_fd_v1(slot, supervisor_exclusion_fd_v1(slot, current), "cgroup.events", false, 1667723888, false)?
+    Ok((current, events))
+
+fn supervisor_exclusion_cgroup_empty_v1(slot: i64, unit: SupervisorStoppedUnitV1) -> Result<(), text>:
+    if unit.cgroup_fd < 0:
+        if unit.prior_cgroup != "": return Err("supervisor-exclusion-cgroup-not-owned")
+        return Ok(())
+    val descriptor = supervisor_exclusion_slots_v1[slot].descriptors[unit.cgroup_fd]
+    val meta = supervisor_exclusion_metadata_v1(slot, descriptor.fd)?
+    if meta.0 != descriptor.identity or supervisor_exclusion_filesystem_v1(slot, descriptor.fd)? != 1667723888:
+        return Err("supervisor-exclusion-cgroup-identity-changed")
+    # A removed pinned cgroup is distinct from failing to reopen an old name.
+    # Kernel cgroup rmdir requires an empty process set and no live descendants.
+    if meta.3 == 0: return Ok(())
+    val events = supervisor_exclusion_read_v1(slot, unit.events_fd, 4096)?
+    var populated = ""
+    for line in events.split("\n"):
+        if line.starts_with("populated "):
+            if populated != "": return Err("supervisor-exclusion-cgroup-events-duplicate")
+            populated = line
+    if populated != "populated 0": return Err("supervisor-exclusion-cgroup-populated-or-unknown")
+    Ok(())
+
+fn supervisor_exclusion_bind_current_v1(slot: i64) -> Result<(), text>:
+    val state = supervisor_exclusion_slots_v1[slot]
+    val installed = state.profile.current_v1()?
+    val bus = state.bus.unwrap()
+    val supervisor = bus.unit_path_v1(installed.supervisor_unit)?
+    val provider = bus.unit_path_v1(installed.provider_unit)?
+    if supervisor == provider or bus.unit_by_pid_v1(installed.process.process_id)? != supervisor:
+        return Err("supervisor-exclusion-current-process-unit-mismatch")
+    if bus.string_property_v1(supervisor, "org.freedesktop.systemd1.Unit", "Id")? != installed.supervisor_unit or
+            bus.number_property_v1(supervisor, "org.freedesktop.systemd1.Service", "MainPID")? != installed.process.process_id:
+        return Err("supervisor-exclusion-current-main-process-required")
+    if bus.string_property_v1(provider, "org.freedesktop.systemd1.Unit", "Id")? != installed.provider_unit or
+            bus.string_property_v1(provider, "org.freedesktop.systemd1.Unit", "ActiveState")? != "active":
+        return Err("supervisor-exclusion-provider-unit-not-active")
+    val provider_pid = bus.number_property_v1(provider, "org.freedesktop.systemd1.Service", "MainPID")?
+    if provider_pid <= 0 or provider_pid == installed.process.process_id or bus.unit_by_pid_v1(provider_pid)? != provider:
+        return Err("supervisor-exclusion-provider-main-process-mismatch")
+    if state.supervisor_path != "" and (state.supervisor_path != supervisor or state.provider_path != provider or state.provider_pid != provider_pid):
+        return Err("supervisor-exclusion-current-unit-incarnation-changed")
+    val incarnation = supervisor_exclusion_process_incarnation_v1(slot, provider_pid, installed.service_uid)?
+    if state.provider_incarnation != "" and state.provider_incarnation != incarnation:
+        return Err("supervisor-exclusion-provider-native-incarnation-changed")
+    if bus.number_property_v1(provider, "org.freedesktop.systemd1.Service", "MainPID")? != provider_pid:
+        return Err("supervisor-exclusion-provider-native-incarnation-changed")
+    supervisor_exclusion_slots_v1[slot].supervisor_path = supervisor
+    supervisor_exclusion_slots_v1[slot].provider_path = provider
+    supervisor_exclusion_slots_v1[slot].provider_pid = provider_pid
+    supervisor_exclusion_slots_v1[slot].provider_incarnation = incarnation
+    Ok(())
+
+fn supervisor_exclusion_process_incarnation_v1(slot: i64, pid: i64, uid: i64) -> Result<text, text>:
+    val start = supervisor_exclusion_slots_v1[slot].descriptors.len()
+    val proc = supervisor_exclusion_chain_v1(slot, ["proc"], 40864)?
+    val process = supervisor_exclusion_open_fd_v1(slot, supervisor_exclusion_fd_v1(slot, proc), str(pid), true, 40864, false)?
+    val stat = supervisor_exclusion_open_fd_v1(slot, supervisor_exclusion_fd_v1(slot, process), "stat", false, 40864, false)?
+    val status = supervisor_exclusion_open_fd_v1(slot, supervisor_exclusion_fd_v1(slot, process), "status", false, 40864, false)?
+    val source = supervisor_exclusion_read_v1(slot, stat, 65536)?
+    if not source.starts_with(str(pid) + " (") or not source.ends_with("\n"):
+        return Err("supervisor-exclusion-provider-native-stat")
+    var end = -1
+    for at in 0..source.byte_len():
+        if source.byte_at(at) == 41: end = at
+    if end < 0 or end + 2 >= source.byte_len(): return Err("supervisor-exclusion-provider-native-stat")
+    val tail = source.substring(end + 2, source.byte_len())
+    val normalized = tail.trim()
+    val fields = normalized.split(" ")
+    if fields.len() < 20: return Err("supervisor-exclusion-provider-native-stat")
+    val ticks = fields[19].to_int() ?? 0
+    if ticks <= 0 or str(ticks) != fields[19]: return Err("supervisor-exclusion-provider-native-start-time")
+    val status_source = supervisor_exclusion_read_v1(slot, status, 65536)?
+    if not supervisor_exclusion_status_uid_v1(status_source, uid, true)?:
+        return Err("supervisor-exclusion-provider-dedicated-uid-required")
+    val identity = supervisor_exclusion_slots_v1[slot].descriptors[process].identity + ":" + str(pid) + ":" + str(ticks)
+    for index in start..supervisor_exclusion_slots_v1[slot].descriptors.len():
+        supervisor_exclusion_release_fd_v1(slot, index)?
+    supervisor_exclusion_slots_v1[slot].descriptors = [for at in 0..start:
+        supervisor_exclusion_slots_v1[slot].descriptors[at]]
+    Ok(sha256_text(identity))
+
+fn supervisor_exclusion_prepare_units_v1(slot: i64) -> Result<(), text>:
+    val state = supervisor_exclusion_slots_v1[slot]
+    val bus = state.bus.unwrap()
+    for unit in state.snapshot.unwrap().activation_units:
+        supervisor_exclusion_budget_v1(slot)?
+        val path = bus.unit_path_v1(unit)?
+        if path == state.supervisor_path or path == state.provider_path:
+            return Err("supervisor-exclusion-alias-self-stop-refused")
+        if bus.string_property_v1(path, "org.freedesktop.systemd1.Unit", "Id")? != unit:
+            return Err("supervisor-exclusion-alias-activation-closure-refused")
+        # Keep actual inactive units addressable through stop and rechecks.
+        # References are tied to this retained bus client, not a PID file.
+        bus.ref_unit_v1(unit)?
+        val prior = bus.unit_file_state_v1(unit)?
+        if not ["enabled", "enabled-runtime", "disabled", "static", "indirect", "masked", "masked-runtime"].contains(prior):
+            return Err("supervisor-exclusion-unknown-prior-unit-state")
+        var cgroup = ""
+        if unit.ends_with(".service"):
+            cgroup = bus.string_property_v1(path, "org.freedesktop.systemd1.Service", "ControlGroup")?
+            if bus.string_property_v1(path, "org.freedesktop.systemd1.Service", "KillMode")? != "control-group":
+                return Err("supervisor-exclusion-owned-control-group-stop-required")
+        val pinned = supervisor_exclusion_pin_cgroup_v1(slot, cgroup)?
+        supervisor_exclusion_slots_v1[slot].units.push(SupervisorStoppedUnitV1(name: unit, path: path,
+            prior_file_state: prior, prior_cgroup: cgroup, cgroup_fd: pinned.0, events_fd: pinned.1))
+    Ok(())
+
+fn supervisor_exclusion_stop_units_v1(slot: i64) -> Result<(), text>:
+    val state = supervisor_exclusion_slots_v1[slot]
+    val bus = state.bus.unwrap()
+    # Mask the entire installed activation closure before stopping ANY producer.
+    for index in 0..state.units.len():
+        supervisor_exclusion_budget_v1(slot)?
+        val unit = supervisor_exclusion_slots_v1[slot].units[index]
+        if unit.prior_file_state != "masked" and unit.prior_file_state != "masked-runtime":
+            supervisor_exclusion_slots_v1[slot].mutation_attempted = true
+            val changes = bus.mask_v1(unit.name)?
+            # Retain the actual complete returned list before validating it.
+            supervisor_exclusion_slots_v1[slot].units[index].changes = changes
+            if changes.len() != 1 or changes[0].kind != "symlink" or changes[0].destination != "/dev/null" or
+                    changes[0].path != "/run/systemd/system/" + unit.name:
+                return Err("supervisor-exclusion-mask-change-ownership-uncertain")
+        val actual = bus.unit_file_state_v1(unit.name)?
+        if actual != "masked" and actual != "masked-runtime": return Err("supervisor-exclusion-mask-not-observed")
+    # File mutations alone do not prove the manager loaded the masks.
+    supervisor_exclusion_budget_v1(slot)?
+    bus.reload_v1()?
+    for index in 0..state.units.len():
+        supervisor_exclusion_budget_v1(slot)?
+        val unit = supervisor_exclusion_slots_v1[slot].units[index]
+        supervisor_exclusion_slots_v1[slot].mutation_attempted = true
+        supervisor_exclusion_budget_v1(slot)?
+        val job = bus.stop_v1(unit.name)?
+        supervisor_exclusion_slots_v1[slot].units[index].stop_job = job
+        bus.await_stop_v1(unit.name, job)?
+        supervisor_exclusion_slots_v1[slot].units[index].done = true
+    Ok(())
+
+fn supervisor_exclusion_units_current_v1(slot: i64) -> Result<(), text>:
+    val state = supervisor_exclusion_slots_v1[slot]
+    val bus = state.bus.unwrap()
+    for unit in state.units:
+        supervisor_exclusion_budget_v1(slot)?
+        if not unit.done or unit.stop_job == "": return Err("supervisor-exclusion-stop-job-incomplete")
+        val masked = bus.unit_file_state_v1(unit.name)?
+        if masked != "masked" and masked != "masked-runtime": return Err("supervisor-exclusion-mask-lost")
+        if bus.unit_path_v1(unit.name)? != unit.path or
+                bus.string_property_v1(unit.path, "org.freedesktop.systemd1.Unit", "ActiveState")? != "inactive" or
+                bus.unit_job_v1(unit.path)? != 0:
+            return Err("supervisor-exclusion-unit-inactive-jobless-unproven")
+        if unit.name.ends_with(".service"):
+            if bus.number_property_v1(unit.path, "org.freedesktop.systemd1.Service", "MainPID")? != 0 or
+                    bus.number_property_v1(unit.path, "org.freedesktop.systemd1.Service", "ControlPID")? != 0:
+                return Err("supervisor-exclusion-producer-process-not-reaped")
+            val group = bus.string_property_v1(unit.path, "org.freedesktop.systemd1.Service", "ControlGroup")?
+            if group != "" and group != unit.prior_cgroup:
+                return Err("supervisor-exclusion-current-cgroup-changed")
+            supervisor_exclusion_cgroup_empty_v1(slot, unit)?
+    Ok(())
+
+fn supervisor_exclusion_decimal_v1(value: text) -> Result<i64, text>:
+    if value == "" or value.byte_len() > 10: return Err("supervisor-exclusion-proc-decimal")
+    var number = 0
+    for byte in value.bytes():
+        if byte < 48 or byte > 57: return Err("supervisor-exclusion-proc-decimal")
+        number = number * 10 + byte - 48
+        if number > 4294967295: return Err("supervisor-exclusion-proc-decimal")
+    Ok(number)
+
+fn supervisor_exclusion_status_uid_v1(source: text, uid: i64, all_uid: bool = false) -> Result<bool, text>:
+    var seen = false
+    var matches = false
+    for line in source.split("\n"):
+        if line.starts_with("Uid:"):
+            if seen: return Err("supervisor-exclusion-proc-uid-duplicate")
+            seen = true
+            var parts: [text] = []
+            val uid_tail = line.substring(4, line.byte_len())
+            val uid_normalized = uid_tail.replace("\t", " ")
+            for part in uid_normalized.split(" "):
+                if part != "": parts.push(part)
+            if parts.len() != 4: return Err("supervisor-exclusion-proc-uid-shape")
+            for part in parts:
+                val observed = supervisor_exclusion_decimal_v1(part)?
+                if all_uid and observed != uid: return Err("supervisor-exclusion-provider-unambiguous-uid-required")
+                if observed == uid: matches = true
+    if not seen: return Err("supervisor-exclusion-proc-uid-missing")
+    Ok(matches)
+
+@unsafe(reason: "full bounded genuine procfs enumeration; unknown UID processes are refused, never killed", capabilities: [ffi, raw_ptr])
+fn supervisor_exclusion_processes_v1(slot: i64) -> Result<(), text>:
+    val state = supervisor_exclusion_slots_v1[slot]
+    val snapshot = state.snapshot.unwrap()
+    val descriptor_begin = state.descriptors.len()
+    val directories_begin = state.directories.len()
+    val proc = supervisor_exclusion_chain_v1(slot, ["proc"], 40864)?
+    val proc_fd = supervisor_exclusion_fd_v1(slot, proc)
+    # fdopendir takes a separately opened fd; the pinned proc descriptor remains
+    # independently retained. Every status read is beneath that same mount.
+    val duplicate = openat(proc_fd as i32, supervisor_exclusion_z_v1(slot, "."), supervisor_exclusion_directory_flags_v1(), 0u32)
+    if duplicate < 0: return Err("supervisor-exclusion-proc-enumeration-open")
+    val directory = fdopendir(duplicate)
+    if directory == 0:
+        val consumed = close(duplicate)
+        return Err("supervisor-exclusion-proc-enumeration-owner")
+    val dir_index = supervisor_exclusion_slots_v1[slot].directories.len()
+    supervisor_exclusion_slots_v1[slot].directories.push(directory)
+    var complete = false
+    for row in 0..65536:
+        supervisor_exclusion_budget_v1(slot)?
+        volatile_write_u32(__errno_location(), 0)
+        val entry = readdir(directory)
+        if entry == 0:
+            if volatile_read_u32(__errno_location()) != 0: return Err("supervisor-exclusion-proc-enumeration-error")
+            complete = true
+            break
+        val record_length = volatile_read_u16(entry + 16)
+        if record_length < 20 or record_length > 4096: return Err("supervisor-exclusion-proc-dirent-bound")
+        var name = ""
+        var terminated = false
+        for at in 19..record_length:
+            val byte = volatile_read_u8(entry + at)
+            if byte == 0:
+                terminated = true
+                break
+            name = name + char_from_code(byte)
+        if not terminated: return Err("supervisor-exclusion-proc-dirent-unterminated")
+        var numeric = name != ""
+        for byte in name.bytes():
+            if byte < 48 or byte > 57: numeric = false
+        if numeric:
+            val pid = supervisor_exclusion_decimal_v1(name)?
+            val process = supervisor_exclusion_open_fd_v1(slot, proc_fd, name, true, 40864, false)?
+            val status = supervisor_exclusion_open_fd_v1(slot, supervisor_exclusion_fd_v1(slot, process), "status", false, 40864, false)?
+            if supervisor_exclusion_status_uid_v1(supervisor_exclusion_read_v1(slot, status, 65536)?, snapshot.service_uid)?:
+                if pid != snapshot.process.process_id and pid != state.provider_pid:
+                    return Err("supervisor-exclusion-unknown-service-uid-process")
+                val expected = if pid == snapshot.process.process_id: state.supervisor_path else: state.provider_path
+                if state.bus.unwrap().unit_by_pid_v1(pid)? != expected:
+                    return Err("supervisor-exclusion-service-process-unit-changed")
+            supervisor_exclusion_release_fd_v1(slot, status)?
+            supervisor_exclusion_release_fd_v1(slot, process)?
+            # Reuse bounded transient descriptor slots after each process.
+            supervisor_exclusion_slots_v1[slot].descriptors = [for at in 0..process:
+                supervisor_exclusion_slots_v1[slot].descriptors[at]]
+    if not complete: return Err("supervisor-exclusion-proc-entry-bound")
+    # Consume before close, because a failed close cannot be retried by integer.
+    supervisor_exclusion_slots_v1[slot].directories[dir_index] = 0
+    if closedir(directory) != 0: return Err("supervisor-exclusion-proc-directory-close-uncertain")
+    for index in descriptor_begin..supervisor_exclusion_slots_v1[slot].descriptors.len():
+        supervisor_exclusion_release_fd_v1(slot, index)?
+    supervisor_exclusion_slots_v1[slot].descriptors = [for at in 0..descriptor_begin:
+        supervisor_exclusion_slots_v1[slot].descriptors[at]]
+    supervisor_exclusion_slots_v1[slot].directories = [for at in 0..directories_begin:
+        supervisor_exclusion_slots_v1[slot].directories[at]]
+    Ok(())
+
+@unsafe(reason: "consume transient descriptor before close; uncertainty is terminal and retained diagnostically", capabilities: [ffi])
+fn supervisor_exclusion_release_fd_v1(slot: i64, index: i64) -> Result<(), text>:
+    val fd = supervisor_exclusion_slots_v1[slot].descriptors[index].fd
+    supervisor_exclusion_slots_v1[slot].descriptors[index].fd = -1
+    if fd >= 0 and close(fd as i32) != 0:
+        supervisor_exclusion_slots_v1[slot].cleanup_unknown = true
+        supervisor_exclusion_note_close_v1(slot, "supervisor-exclusion-transient-close-uncertain")
+        return Err("supervisor-exclusion-transient-close-uncertain")
+    Ok(())
+
+fn supervisor_exclusion_checks_v1(slot: i64) -> Result<(), text>:
+    val state = supervisor_exclusion_slots_v1[slot]
+    if state.lock == None or not file_lock_owner_live_v2(state.lock.unwrap()): return Err("supervisor-exclusion-lock-lost")
+    supervisor_exclusion_state_root_v1(slot)?
+    supervisor_exclusion_bind_current_v1(slot)?
+    supervisor_exclusion_units_current_v1(slot)?
+    supervisor_exclusion_processes_v1(slot)?
+    supervisor_exclusion_bind_current_v1(slot)?
+    supervisor_exclusion_budget_v1(slot)
+
+fn supervisor_exclusion_state_root_v1(slot: i64) -> Result<(), text>:
+    val state = supervisor_exclusion_slots_v1[slot]
+    if state.state_directory < 0 or state.lock_path_file < 0:
+        return Err("supervisor-exclusion-fixed-state-owner-missing")
+    val begin = state.descriptors.len()
+    val root = supervisor_exclusion_chain_v1(slot, ["var", "lib", "simple"])?
+    val directory = supervisor_exclusion_open_fd_v1(slot, supervisor_exclusion_fd_v1(slot, root), "container", true, 0, false)?
+    val actual = supervisor_exclusion_metadata_v1(slot, supervisor_exclusion_fd_v1(slot, directory))?
+    if actual.0 != state.descriptors[state.state_directory].identity or
+            actual.1 != state.snapshot.unwrap().service_uid or actual.2 != 16832:
+        return Err("supervisor-exclusion-fixed-state-directory-changed")
+    val lock_file = supervisor_exclusion_open_fd_v1(slot, supervisor_exclusion_fd_v1(slot, directory), "supervisor.fence.lock", false, 0, false)?
+    val lock_meta = supervisor_exclusion_metadata_v1(slot, supervisor_exclusion_fd_v1(slot, lock_file))?
+    if lock_meta.0 != state.descriptors[state.lock_path_file].identity or lock_meta.1 != state.snapshot.unwrap().service_uid or
+            (lock_meta.2 & 18) != 0:
+        return Err("supervisor-exclusion-fixed-lock-path-changed")
+    for index in begin..supervisor_exclusion_slots_v1[slot].descriptors.len():
+        supervisor_exclusion_release_fd_v1(slot, index)?
+    supervisor_exclusion_slots_v1[slot].descriptors = [for at in 0..begin:
+        supervisor_exclusion_slots_v1[slot].descriptors[at]]
+    Ok(())
+
+@unsafe(reason: "fixed lock namespace under administrator-protected ancestry and predelegated UID-private directory", capabilities: [ffi, raw_ptr])
+fn supervisor_exclusion_initialize_v1(slot: i64) -> Result<(), text>:
+    supervisor_exclusion_budget_v1(slot)?
+    val snapshot = supervisor_exclusion_slots_v1[slot].profile.current_v1()?
+    supervisor_exclusion_slots_v1[slot].snapshot = Some(snapshot)
+    val arena = malloc(73736u64)
+    if arena == 0: return Err("supervisor-exclusion-memory")
+    supervisor_exclusion_slots_v1[slot].arena = arena
+    val root = supervisor_exclusion_chain_v1(slot, ["var", "lib", "simple"])?
+    val directory = supervisor_exclusion_open_fd_v1(slot, supervisor_exclusion_fd_v1(slot, root), "container", true, 0, false)?
+    val meta = supervisor_exclusion_metadata_v1(slot, supervisor_exclusion_fd_v1(slot, directory))?
+    if meta.1 != snapshot.service_uid or meta.2 != 16832: return Err("supervisor-exclusion-predelegated-private-state-required")
+    supervisor_exclusion_slots_v1[slot].state_directory = directory
+    # All cooperative successors must join this same fixed namespace. The lock
+    # alone never excludes pre-existing non-cooperative legacy writers.
+    match file_lock_open_owned_v2("/var/lib/simple/container/supervisor.fence.lock", 0):
+        case FileLockOpenV2.Ready(owner): supervisor_exclusion_slots_v1[slot].lock = Some(owner)
+        case FileLockOpenV2.CleanupRequired(owner, reason):
+            supervisor_exclusion_slots_v1[slot].lock = Some(owner)
+            return Err(reason)
+        case FileLockOpenV2.Rejected(reason): return Err(reason)
+    val lock_file = supervisor_exclusion_open_fd_v1(slot, supervisor_exclusion_fd_v1(slot, directory), "supervisor.fence.lock", false, 0, false)?
+    supervisor_exclusion_slots_v1[slot].lock_path_file = lock_file
+    supervisor_exclusion_state_root_v1(slot)?
+    match linux_supervisor_bus_open_v1(supervisor_exclusion_slots_v1[slot].profile):
+        case LinuxSupervisorBusOpenV1.Ready(owner): supervisor_exclusion_slots_v1[slot].bus = Some(owner)
+        case LinuxSupervisorBusOpenV1.CleanupRequired(owner, reason):
+            supervisor_exclusion_slots_v1[slot].bus = Some(owner)
+            return Err(reason)
+        case LinuxSupervisorBusOpenV1.Rejected(reason): return Err(reason)
+    supervisor_exclusion_bind_current_v1(slot)?
+    supervisor_exclusion_prepare_units_v1(slot)?
+    supervisor_exclusion_stop_units_v1(slot)?
+    supervisor_exclusion_checks_v1(slot)?
+    supervisor_exclusion_slots_v1[slot].phase = "exclusion-component-only"
+    Ok(())
+
+@unsafe(reason: "actual process origin before publishing any canonical supervisor capsule", capabilities: [ffi])
+fn supervisor_exclusion_open_v1() -> LinuxInstalledSupervisorOpenV1:
+    val entered = supervisor_exclusion_entry_v1()
+    if entered.is_err(): return LinuxInstalledSupervisorOpenV1.Rejected(entered.unwrap_err())
+    if supervisor_exclusion_directory_flags_v1() == 0: return LinuxInstalledSupervisorOpenV1.Rejected("supervisor-exclusion-abi-unsupported")
+    if supervisor_exclusion_slots_v1.len() >= 256: return LinuxInstalledSupervisorOpenV1.Rejected("supervisor-exclusion-owner-bound")
+    val profile = match linux_installed_supervisor_profile_open_v1():
+        case LinuxInstalledSupervisorProfileOpenV1.Rejected(reason): return LinuxInstalledSupervisorOpenV1.Rejected(reason)
+        case LinuxInstalledSupervisorProfileOpenV1.CleanupRequired(owner, reason):
+            val slot = supervisor_exclusion_slots_v1.len()
+            supervisor_exclusion_slots_v1.push(SupervisorExclusionStateV1(generation: slot + 1, profile: owner))
+            return LinuxInstalledSupervisorOpenV1.CleanupRequired(LinuxInstalledSupervisorOwnerV1(slot: slot, generation: slot + 1), reason)
+        case LinuxInstalledSupervisorProfileOpenV1.Ready(owner): owner
+    val slot = supervisor_exclusion_slots_v1.len()
+    val now = time_sample_monotonic_nanos_or_failure()
+    supervisor_exclusion_slots_v1.push(SupervisorExclusionStateV1(generation: slot + 1, profile: profile,
+        started: now, deadline: if now <= 0 or now > 9223372006854775807: 0 else: now + 30000000000))
+    val owner = LinuxInstalledSupervisorOwnerV1(slot: slot, generation: slot + 1)
+    val initialized = supervisor_exclusion_initialize_v1(slot)
+    if initialized.is_err():
+        supervisor_exclusion_slots_v1[slot].phase = "retained-refusal"
+        return LinuxInstalledSupervisorOpenV1.CleanupRequired(owner, initialized.unwrap_err())
+    LinuxInstalledSupervisorOpenV1.Ready(owner)
+
+fn supervisor_exclusion_current_v1(slot: i64, generation: i64) -> Result<LinuxSupervisorExclusionDiagnosticV1, text>:
+    val state = supervisor_exclusion_state_v1(slot, generation)?
+    if state.phase != "exclusion-component-only": return Err("supervisor-exclusion-incomplete")
+    val now = time_sample_monotonic_nanos_or_failure()
+    if now <= 0 or now > 9223372006854775807: return Err("supervisor-exclusion-clock")
+    supervisor_exclusion_slots_v1[slot].started = now
+    supervisor_exclusion_slots_v1[slot].deadline = now + 30000000000
+    val checked = supervisor_exclusion_checks_v1(slot)
+    if checked.is_err():
+        supervisor_exclusion_slots_v1[slot].phase = "retained-refusal"
+        return Err(checked.unwrap_err())
+    var stopped: [text] = []
+    for unit in state.units: stopped.push(unit.name)
+    val snapshot = state.snapshot.unwrap()
+    Ok(LinuxSupervisorExclusionDiagnosticV1(profile_digest: snapshot.digest,
+        owner_generation: generation, process_identity_digest: snapshot.process.identity_digest,
+        provider_process_id: state.provider_pid, provider_incarnation: state.provider_incarnation,
+        machine_policy_digest: snapshot.machine_policy_digest, manager_unique_name: state.bus.unwrap().manager_v1()?,
+        stopped_units: stopped, mutation_attempted: state.mutation_attempted,
+        exclusion_component_live: true, phase: state.phase))
+
+fn supervisor_exclusion_profile_v1(slot: i64, generation: i64) -> Result<LinuxSupervisorInstalledSnapshotV1, text>:
+    val state = supervisor_exclusion_state_v1(slot, generation)?
+    if state.phase != "exclusion-component-only": return Err("supervisor-exclusion-incomplete")
+    state.profile.current_v1()
+
+@unsafe(reason: "consume each native descriptor before close; never remove masks or restart producers", capabilities: [ffi])
+fn supervisor_exclusion_close_v1(slot: i64, generation: i64) -> text:
+    val entered = supervisor_exclusion_entry_v1()
+    if entered.is_err(): return entered.unwrap_err()
+    if slot < 0 or slot >= supervisor_exclusion_slots_v1.len(): return "stale"
+    val state = supervisor_exclusion_slots_v1[slot]
+    if state.generation != generation: return "stale"
+    if state.closed:
+        return if state.close_diagnostic == "": "released" else: "consumed-error"
+    if state.mutation_attempted: return "retained-supervisor-inhibition-successor-handoff-required"
+    if state.cleanup_unknown:
+        supervisor_exclusion_note_close_v1(slot, "supervisor-exclusion-prior-cleanup-uncertain")
+    for index in 0..state.directories.len():
+        val directory = supervisor_exclusion_slots_v1[slot].directories[index]
+        supervisor_exclusion_slots_v1[slot].directories[index] = 0
+        if directory != 0 and closedir(directory) != 0:
+            supervisor_exclusion_note_close_v1(slot, "supervisor-exclusion-directory-close-consumed-error")
+    for index in 0..state.descriptors.len():
+        val fd = supervisor_exclusion_slots_v1[slot].descriptors[index].fd
+        supervisor_exclusion_slots_v1[slot].descriptors[index].fd = -1
+        if fd >= 0 and close(fd as i32) != 0:
+            supervisor_exclusion_note_close_v1(slot, "supervisor-exclusion-descriptor-close-consumed-error")
+    if state.bus != None and state.bus_close_retryable:
+        val bus = state.bus.unwrap()
+        val result = bus.close_v1()
+        if result != "released":
+            val detail = bus.close_diagnostic_v1()
+            supervisor_exclusion_note_close_v1(slot, if detail == "": "supervisor-exclusion-bus-close:" + result else: detail)
+        if result == "released" or result == "consumed-error":
+            supervisor_exclusion_slots_v1[slot].bus = None
+        else:
+            supervisor_exclusion_slots_v1[slot].bus_close_retryable = result == "retained"
+    if state.lock != None and state.lock_close_retryable:
+        val owner = state.lock.unwrap()
+        val released = file_lock_release_owned_v2(owner)
+        if released.error != "": supervisor_exclusion_note_close_v1(slot, released.error)
+        match released.state:
+            case FileLockReleaseStateV2.Released:
+                if released.closed and released.owner == None:
+                    supervisor_exclusion_slots_v1[slot].lock = None
+                else:
+                    supervisor_exclusion_slots_v1[slot].lock_close_retryable = false
+                    supervisor_exclusion_note_close_v1(slot, "supervisor-exclusion-lock-consumption-unproven")
+            case FileLockReleaseStateV2.ConsumedError:
+                supervisor_exclusion_note_close_v1(slot, "supervisor-exclusion-lock-close-consumed-error")
+                if released.closed and released.owner == None:
+                    supervisor_exclusion_slots_v1[slot].lock = None
+                else:
+                    supervisor_exclusion_slots_v1[slot].lock_close_retryable = false
+            case FileLockReleaseStateV2.Retained:
+                if released.owner != None and not released.closed:
+                    supervisor_exclusion_slots_v1[slot].lock = released.owner
+                else:
+                    supervisor_exclusion_slots_v1[slot].lock_close_retryable = false
+                supervisor_exclusion_note_close_v1(slot, "supervisor-exclusion-lock-release-retained")
+            case FileLockReleaseStateV2.Unknown:
+                # Keep the original exact generation if the lower result lacks
+                # a replacement owner. UNKNOWN cannot authorize a native retry.
+                if released.owner != None: supervisor_exclusion_slots_v1[slot].lock = released.owner
+                supervisor_exclusion_slots_v1[slot].lock_close_retryable = false
+                supervisor_exclusion_note_close_v1(slot, "supervisor-exclusion-lock-close-unknown")
+            case FileLockReleaseStateV2.Stale:
+                supervisor_exclusion_slots_v1[slot].lock_close_retryable = false
+                supervisor_exclusion_note_close_v1(slot, "supervisor-exclusion-lock-close-stale")
+    if not state.profile_consumed and state.profile_close_retryable:
+        val result = state.profile.close_v1()
+        if result != "released":
+            val detail = state.profile.close_diagnostic_v1()
+            supervisor_exclusion_note_close_v1(slot, if detail == "": "supervisor-exclusion-profile-close:" + result else: detail)
+        if result == "released" or result == "consumed-error":
+            supervisor_exclusion_slots_v1[slot].profile_consumed = true
+        else:
+            supervisor_exclusion_slots_v1[slot].profile_close_retryable = result == "retained"
+    val progress = supervisor_exclusion_slots_v1[slot]
+    if progress.bus != None or progress.lock != None or not progress.profile_consumed:
+        return "retained"
+    if progress.arena != 0:
+        supervisor_exclusion_slots_v1[slot].arena = 0
+        free(progress.arena)
+    supervisor_exclusion_slots_v1[slot].closed = true
+    if progress.close_diagnostic == "": "released" else: "consumed-error"
+
+fn supervisor_exclusion_note_close_v1(slot: i64, reason: text):
+    if supervisor_exclusion_slots_v1[slot].close_diagnostic == "":
+        supervisor_exclusion_slots_v1[slot].close_diagnostic = reason
+
+fn supervisor_exclusion_close_diagnostic_v1(slot: i64, generation: i64) -> text:
+    val entered = supervisor_exclusion_entry_v1()
+    if entered.is_err(): return entered.unwrap_err()
+    if slot < 0 or slot >= supervisor_exclusion_slots_v1.len(): return "stale"
+    val state = supervisor_exclusion_slots_v1[slot]
+    if state.generation != generation: return "stale"
+    state.close_diagnostic
+@else:
+fn supervisor_exclusion_current_v1(slot: i64, generation: i64) -> Result<LinuxSupervisorExclusionDiagnosticV1, text>:
+    Err("supervisor-exclusion-linux-required")
+fn supervisor_exclusion_profile_v1(slot: i64, generation: i64) -> Result<LinuxSupervisorInstalledSnapshotV1, text>:
+    Err("supervisor-exclusion-linux-required")
+fn supervisor_exclusion_close_v1(slot: i64, generation: i64) -> text: "stale"
+fn supervisor_exclusion_close_diagnostic_v1(slot: i64, generation: i64) -> text: "stale"
+@end

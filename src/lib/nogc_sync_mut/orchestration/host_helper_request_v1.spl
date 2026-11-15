@@ -19,6 +19,9 @@ use std.common.crypto.sha256.sha256_text
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_create_exclusive, file_read_regular_no_follow_bounded, file_fsync, directory_fsync}
 use std.nogc_sync_mut.io_runtime.dir_create
 use std.nogc_sync_mut.file_system.permissions.file_set_mode
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_read_v3, distributed_operation_journal_read_required_v3,
+    distributed_operation_journal_publish_v3}
 
 pub struct HostHelperRequestV1:
     plan: HostHelperPlanV1
@@ -122,6 +125,11 @@ pub fn host_helper_request_store_v1(root: text, request: HostHelperRequestV1) ->
 pub fn host_helper_request_load_v1(root: text, operation_id: text) -> Result<HostHelperRequestV1, text>:
     if not builder_identifier_valid_v1(operation_id): return Err("helper-request-operation-invalid")
     val reference = file_read_regular_no_follow_bounded(root + "/host-helper-requests/" + sha256_text(operation_id) + ".sdn", 4096)?
+    val digest = helper_request_reference_digest_v1(reference, operation_id)?
+    val bytes = file_read_regular_no_follow_bounded(root + "/host-helper-request-packets/" + digest + ".sdn", 2097152)?
+    helper_request_packet_v1(bytes, digest, operation_id)
+
+fn helper_request_reference_digest_v1(reference: text, operation_id: text) -> Result<text, text>:
     val fields = helper_request_fields_v1(reference)?
     val names = ["version", "kind", "operationId", "packetDigest"]
     for name in fields.keys():
@@ -134,11 +142,65 @@ pub fn host_helper_request_load_v1(root: text, operation_id: text) -> Result<Hos
     val digest = helper_request_text_v1(fields, "packetDigest")?
     if str_len(digest) != 64 or not builder_digest_valid_v1(digest): return Err("helper-request-reference-digest-invalid")
     if sdn_encode_canonical(SdnValue.Dict(fields)) + "\n" != reference: return Err("helper-request-reference-noncanonical")
-    val bytes = file_read_regular_no_follow_bounded(root + "/host-helper-request-packets/" + digest + ".sdn", 2097152)?
+    Ok(digest)
+
+fn helper_request_packet_v1(bytes: text, digest: text, operation_id: text) -> Result<HostHelperRequestV1, text>:
     if sha256_text(bytes) != digest: return Err("helper-request-packet-digest-mismatch")
     val request = host_helper_request_decode_v1(bytes)?
     if request.operation.id != operation_id: return Err("helper-request-operation-mismatch")
     Ok(request)
+
+# Owned storage is the common path for current helper admission. The legacy
+# root-text readers remain for existing Linux recovery callers only.
+pub fn host_helper_object_publish_owned_v2(journal: DistributedOperationJournalV2,
+        relative: text, bytes: text) -> Result<text, text>:
+    if str_len(bytes) > 2097152: return Err("helper-request-size")
+    val published = distributed_operation_journal_publish_v3(journal, relative, bytes)?
+    if distributed_operation_journal_read_required_v3(journal, relative, 2097152)? != bytes:
+        return Err("helper-request-retained-mismatch")
+    Ok(relative)
+
+pub fn host_helper_request_store_owned_v2(journal: DistributedOperationJournalV2,
+        request: HostHelperRequestV1) -> Result<text, text>:
+    val bytes = host_helper_request_encode_v1(request)?
+    val digest = sha256_text(bytes)
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-helper-request-reference"),
+        "operationId": SdnValue.String(request.operation.id), "packetDigest": SdnValue.String(digest)}
+    val reference = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    val relative = "host-helper-requests/" + sha256_text(request.operation.id) + ".sdn"
+    match distributed_operation_journal_read_v3(journal, relative, 4096)?:
+        case Some(retained):
+            if retained != reference: return Err("helper-request-retained-mismatch")
+        case nil: ()
+    val packet = host_helper_object_publish_owned_v2(journal, "host-helper-request-packets/" + digest + ".sdn", bytes)?
+    host_helper_object_publish_owned_v2(journal, relative, reference)
+
+pub fn host_helper_request_load_owned_v2(journal: DistributedOperationJournalV2,
+        operation_id: text) -> Result<HostHelperRequestV1, text>:
+    if not builder_identifier_valid_v1(operation_id): return Err("helper-request-operation-invalid")
+    val reference = distributed_operation_journal_read_required_v3(journal,
+        "host-helper-requests/" + sha256_text(operation_id) + ".sdn", 4096)?
+    val digest = helper_request_reference_digest_v1(reference, operation_id)?
+    val bytes = distributed_operation_journal_read_required_v3(journal,
+        "host-helper-request-packets/" + digest + ".sdn", 2097152)?
+    helper_request_packet_v1(bytes, digest, operation_id)
+
+pub fn host_helper_execution_proof_store_owned_v2(journal: DistributedOperationJournalV2,
+        request: HostHelperRequestV1, signed: DistributedSignedGrantV2,
+        approval: DistributedSignedApprovalV2) -> Result<text, text>:
+    val retained = host_helper_request_load_owned_v2(journal, request.operation.id)?
+    if host_helper_request_encode_v1(retained)? != host_helper_request_encode_v1(request)?:
+        return Err("helper-execution-proof-request-mismatch")
+    host_helper_object_publish_owned_v2(journal, "host-helper-execution-proofs/" + sha256_text(request.operation.id) + ".sdn",
+        host_helper_execution_proof_encode_v1(request, signed, approval)?)
+
+pub fn host_helper_execution_proof_load_owned_v2(journal: DistributedOperationJournalV2,
+        operation_id: text) -> Result<text, text>:
+    val request = host_helper_request_load_owned_v2(journal, operation_id)?
+    val bytes = distributed_operation_journal_read_required_v3(journal,
+        "host-helper-execution-proofs/" + sha256_text(operation_id) + ".sdn", 1048576)?
+    val checked = host_helper_execution_proof_decode_v1(request, bytes)?
+    Ok(bytes)
 
 # Execution proof data, not an encoded lease/capability. Caller verifies current
 # publishers, parent budget and context before publication/begin/effects.

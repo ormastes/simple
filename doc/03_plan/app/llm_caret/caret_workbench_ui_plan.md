@@ -75,6 +75,8 @@ All evidence is the seed interpreter on Windows. **No row is native-verified; ev
 | CU-019 | met (interpreter) | `caret_workbench_generation_spec`: real child restart bumps generation; gen-1 approval/draft/command receipts rejected (#9330) | native run |
 | CU-020 | partial | `provider_skill_report_spec` 4/4 (RED 3/3 first): Claude `PreToolUse` Skill calls (`tool_name=Skill`, `tool_input.skill`) drained by `hook_bridge` are recorded per session, shown on the TUI status line and as the `/capabilities` Skills row (met when a provider reported loaded skills); `capability_checklist_spec` 7/7 | first-use hint decay surface not built; Codex reports none; loaded-vs-requested diff not built; native run |
 
+**Human/host checks** (blocked, not verifiable in CI): CU-001 remote fleet = todo 450; CU-017 screen reader = todo 451, high-DPI = todo 452; CU-020 live Codex skill signal = todo 453 (`doc/08_tracking/todo/todo_db.sdn`).
+
 Open TODOs: `activation_hook_spec` now executes (8/10) with 2 genuine failures — `doc/08_tracking/bug/activation_hook_builtin_registry_unreachable_2026-11-15.md`; `capability_truth_spec` 11/11 and `chat_tui_runtime_spec` 21/21 now execute. P8 release qualification is open: it needs a native/self-hosted build (resume: the sanctioned `scripts/bootstrap/bootstrap-from-scratch.sh`, then rerun every row above with the native binary). Pre-existing base failures in `agent_workspace_spec` (2/9), `lifecycle_spec` (1), `runtime_security_spec` (1).
 
 ## Plan sections 12 to 14
