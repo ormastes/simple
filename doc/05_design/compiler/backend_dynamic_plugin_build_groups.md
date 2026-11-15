@@ -160,3 +160,51 @@ Open items to record as todos, not NOTEs: `--emit-archive` archiver identity (mu
 whether `--no-mangle` already gives C-ABI symbol export on Windows PE (`__declspec(dllexport)`
 is in the C shim, so Simple symbols need only be visible to it); cpu_tiers.sdn alignment once the
 SIMD doc lands.
+
+## 5. Essential composition for the Phase 3 bootstrap binary (2026-11-15)
+
+Inventory (full-CLI HIR order of a real build, 3,155 modules): `plugins.backend_*`
+other than the registry 49, `plugins.backend_registry` 3, non-x86 native isel/encode
+(`isel_aarch64/riscv32/riscv64`, `encode_aarch64/riscv32/riscv64`, `riscv_encoding`) 7,
+Wasm/Byl/IrTc/hwir-to-VHDL adapters 4. About 63 modules are removable by this
+composition (`compiler.backend.*` total 215; LLVM 21 and Cranelift stay). The seam is
+`app.cli.bootstrap_backend_installer`, imported only by `bootstrap_main.spl` and
+`compile_targets.spl`; the full variant names `plugins.backend_registry.full_static_backend_registry`,
+the essential variant (`src/compositions/backends_essential/app/cli/bootstrap_backend_installer.spl`)
+does not.
+
+Build: list the composition roots ahead of `src/app` (first root wins), e.g.
+`--source src/compositions/kernel_llvm_cranelift --source src/compositions/backends_essential --source src/app ...`
+(LLVM-only: `kernel_llvm` instead of `kernel_llvm_cranelift`). The default build is unchanged.
+A request for a non-linked backend answers `PLUG-E-NOTFOUND: backend 'X' not linked ...`;
+a plugin path answers `PLUG-E-UNSUPPORTED` (no provider exports `simple_backend_plugin_v1`).
+
+NOT done: the full CLI (`_CliMain/main_and_help.spl`, `p3_groups/group_7.spl` ->
+`selected_cuda_backend`) still imports the full registry directly, so only the bootstrap
+entry shrinks; the P-static backends are not yet built as static libs / dynlib plugins
+(PR2-3 above); no native Phase 3 rebuild or memory measurement was run for this change.
+
+## 6. Non-backend families in the full-CLI closure (owner: "link non-essential as dynload, load on first use")
+
+Counts from the full-CLI HIR order (3,155 modules); edge = the CLI import that pulls the family in.
+
+| Family | Modules | Edge | Class |
+|---|---|---|---|
+| `plugins.backend_*` (non-registry) | 49 (+3 registry) | `_CliMain/main_and_help.spl:64` -> `full_static_backend_registry`; `p3_groups/group_6.spl:20` (vulkan), `group_7.spl:20` (cuda) | lazy dynload (backend plugin ABI) |
+| `lib.gc_async_mut.gpu.browser_engine` | 50 | transitive (GPU/UI libs) | lazy dynload / separate app |
+| `lib.*.gpu.engine2d` | 74+13+9 | `app/io/feature_registry.spl:12` (sffi_vulkan) | lazy dynload (GPU provider slot, sec 2.6) |
+| `app.traceability` + `lib.common.traceability` | 16+12 | `main_and_help.spl:33` (`use lazy`, still counted in HIR closure) | lazy dynload |
+| `app.t32_cli`, `app.mcp_t32`, `app.cmm_lsp` | 10+14+10 | `main_and_help.spl:53` | separate app binary |
+| `app.office`, `app.devhub`, `app.editor`, `app.ide`, `app.ui` | 78, 57, 27, 19, 27 | `main_and_help.spl` | separate app binary |
+| `os.compositor`, `lib.scv` | 22, 30 | transitive | lazy dynload |
+| `app.mcp`, `app.test_runner` | 14, 7 | `main_and_help.spl` | separate app binary (MCP already has `main_lazy_*`) |
+| `compiler.backend` LLVM/Cranelift, driver, parser, std core | essential | | essential |
+
+Plan delta: `kernel_pluggable_partition.md` already makes the dynamic loader K0 and
+everything else P-dyn, so the target matches; the plan names no migration file
+(`kernel_plugin_migration_plan.md` does not exist; this section stands in). Where it
+differs: (a) `use lazy` defers execution, not HIR membership, so those modules still cost
+build memory; (b) no provider yet exports `simple_backend_plugin_v1`, so no family can be
+lazily loaded today; (c) non-backend apps are not covered by the plugin ABI and need
+separate binaries via `library_unit_link_v1` (planning only, unwired). The lazy-load seam
+is therefore blocked on PR2-3 (first provider), which this change does not attempt.
