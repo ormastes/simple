@@ -1,0 +1,192 @@
+# Native oracle: `Dict<K, T>` values across the erased-generic boundary, for
+# doc/08_tracking/bug/native_generic_payload_encoding_2026-11-15.md (M2).
+# Writers (MIR dumps): concrete code encodes on write (rt_value_int_wide);
+# a free generic fn stores its T word, which its caller already encoded; a
+# generic-class METHOD stores its T argument raw (method arguments are plain).
+# So a free generic body reads the stored word unchanged (T is encoded there)
+# and its caller decodes it; a generic method decodes on read (T is plain
+# there). The method-written hash rows stay wrong: see known_wrong/main.spl.
+# Build: SIMPLE_BOOTSTRAP=1 native-build main.spl --entry-closure (cranelift, llvm).
+# Expected stdout (seed `simple run main.spl`):
+# col get 9000000000
+# col get -5
+# hash text hello
+# hash absent absent
+# b05 ok 40
+# b08 ok 40
+# b08p 41
+# mixh ok 42
+# mixm ok 9
+# gw ok 43
+# b05u ok 40
+# f05 40
+# f04 ok 40
+# fret ok 44
+# fparam ok 46
+# ffield ok 45
+#
+# b05u, f05 and f04 pass an UNANNOTATED dict (local, inline literal,
+# mutated local); fret, fparam and ffield are typed comparison rows.
+
+enum Placement:
+    Column
+    SparseHash
+
+class Store<T>:
+    placement: Placement
+    slots: [T?]
+    hash: Dict<i64, T>
+
+impl Store<T>:
+    fn get(node: i64) -> Result<T, text>:
+        match self.placement:
+            case Column:
+                if node >= 0 and node < self.slots.len():
+                    match self.slots[node]:
+                        case Some(v): return Ok(v)
+                        case None: pass
+            case SparseHash:
+                if self.hash.contains_key(node):
+                    return Ok(self.hash[node])
+        Err("absent")
+
+    me set(node: i64, value: T) -> Result<bool, text>:
+        match self.placement:
+            case Column:
+                while self.slots.len() <= node:
+                    self.slots = self.slots.push(None)
+                self.slots[node] = Some(value)
+            case SparseHash:
+                self.hash[node] = value
+        Ok(true)
+
+fn store_new<T>(placement: Placement) -> Store<T>:
+    val h: Dict<i64, T> = {}
+    val s: [T?] = []
+    Store(placement: placement, slots: s, hash: h)
+
+fn show_i(tag: text, r: Result<i64, text>):
+    match r:
+        case Ok(v): print "{tag} get {v}"
+        case Err(e): print "{tag} absent {e}"
+
+fn drive_i(tag: text, s: Store<i64>):
+    var st = s
+    match st.set(1, 9000000000):
+        case Ok(_): show_i(tag, st.get(1))
+        case Err(e): print "{tag} set err {e}"
+    match st.set(1, -5):
+        case Ok(_): show_i(tag, st.get(1))
+        case Err(e): print "{tag} set err {e}"
+
+class Bag<T>:
+    m: Dict<text, T>
+
+impl Bag<T>:
+    fn lookup(k: text) -> Result<T, text>:
+        if self.m.contains_key(k):
+            return Ok(self.m[k])
+        Err("absent")
+
+    fn peek(k: text) -> T:
+        self.m[k]
+
+fn lookup_res<T>(d: Dict<text, T>, k: text) -> Result<T, text>:
+    if d.contains_key(k):
+        return Ok(d[k])
+    Err("absent")
+
+fn lookup_or<T>(d: Dict<text, T>, k: text, fallback: T) -> Result<T, text>:
+    if d.contains_key(k):
+        return Ok(d[k])
+    Ok(fallback)
+
+fn put_get<T>(v: T) -> Result<T, text>:
+    var d: Dict<text, T> = {}
+    d["k"] = v
+    Ok(d["k"])
+
+fn lookup_opt<T>(d: Dict<text, T>, k: text) -> T?:
+    if d.contains_key(k):
+        return Some(d[k])
+    None
+
+struct DictHolder:
+    d: Dict<text, i64>
+
+fn make_dict() -> Dict<text, i64>:
+    {"a": 44}
+
+fn show(r: Result<i64, text>) -> text:
+    match r:
+        case Ok(v): "ok {v}"
+        case Err(e): "err {e}"
+
+fn b05() -> text:
+    val d: Dict<text, i64> = {"a": 40}
+    show(lookup_res(d, "a"))
+
+fn b08() -> text:
+    val m: Dict<text, i64> = {"a": 40}
+    val b = Bag(m: m)
+    show(b.lookup("a"))
+
+fn b08_peek() -> i64:
+    val m: Dict<text, i64> = {"a": 41}
+    val b = Bag(m: m)
+    b.peek("a")
+
+fn mixed_hit() -> text:
+    val d: Dict<text, i64> = {"a": 42}
+    show(lookup_or(d, "a", 9))
+
+fn mixed_miss() -> text:
+    val d: Dict<text, i64> = {"a": 42}
+    show(lookup_or(d, "z", 9))
+
+fn b05u() -> text:
+    val d = {"a": 40}
+    show(lookup_res(d, "a"))
+
+fn f05() -> i64:
+    lookup_opt({"a": 40}, "a") ?? -1
+
+fn f04() -> text:
+    var d = {"a": 1}
+    d["a"] = 40
+    show(lookup_res(d, "a"))
+
+fn fparam(d: Dict<text, i64>) -> text:
+    show(lookup_res(d, "a"))
+
+fn ffield() -> text:
+    val h = DictHolder(d: {"a": 45})
+    show(lookup_res(h.d, "a"))
+
+fn run_all():
+    drive_i("col", store_new<i64>(Placement.Column))
+    var t: Store<text> = store_new<text>(Placement.SparseHash)
+    match t.set(2, "hello"):
+        case Ok(_): ()
+        case Err(e): print "text set err {e}"
+    match t.get(2):
+        case Ok(v): print "hash text {v}"
+        case Err(e): print "hash text absent {e}"
+    match t.get(3):
+        case Ok(v): print "hash absent {v}"
+        case Err(e): print "hash absent {e}"
+    print "b05 {b05()}"
+    print "b08 {b08()}"
+    print "b08p {b08_peek()}"
+    print "mixh {mixed_hit()}"
+    print "mixm {mixed_miss()}"
+    print "gw {show(put_get(43))}"
+    print "b05u {b05u()}"
+    print "f05 {f05()}"
+    print "f04 {f04()}"
+    print "fret {show(lookup_res(make_dict(), "a"))}"
+    val pd: Dict<text, i64> = {"a": 46}
+    print "fparam {fparam(pd)}"
+    print "ffield {ffield()}"
+
+run_all()

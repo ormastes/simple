@@ -1,0 +1,192 @@
+# @gc — module uses GC runtime
+#
+# tokenizer — SentencePiece-style BPE (HF tokenizer.json, model.type "BPE",
+# byte_fallback) for Llama-2 family checkpoints such as llama2.c stories15M.
+# Encode: prepend "▁", spaces -> "▁", split into codepoints, apply merges by
+# lowest rank, unknown codepoints become <0xHH> byte tokens, BOS prepended.
+# Decode: concatenate pieces, "▁" -> space, <0xHH> runs -> UTF-8 bytes.
+
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear, text_to_bytes_linear}
+use std.common.char_from_code_pure.{char_from_code}
+use std.io_runtime.{file_exists, read_file}
+
+pub struct PureTokenizer:
+    vocab: Dict<text, i64>
+    pieces: [text]
+    ranks: Dict<text, i64>
+    bos_id: i64
+
+fn _unescape(s: text) -> text:
+    if not s.contains("\\"):
+        return s
+    var out = ""
+    var esc = false
+    for ch in s.chars():
+        if esc:
+            if ch == "n":
+                out = out + "\n"
+            elif ch == "t":
+                out = out + "\t"
+            elif ch == "r":
+                out = out + char_from_code(13)
+            else:
+                out = out + ch
+            esc = false
+        elif ch == "\\":
+            esc = true
+        else:
+            out = out + ch
+    out
+
+fn _char_len(s: text) -> i64:
+    var n: i64 = 0
+    for ch in s.chars():
+        n = n + 1
+    n
+
+# Strip the surrounding JSON quotes and a trailing comma from one array line.
+fn _quoted_item(line: text) -> text:
+    var s = line.trim()
+    if s.ends_with(","):
+        s = s.substring(0, _char_len(s) - 1)
+    _unescape(s.substring(1, _char_len(s) - 1))
+
+pub fn pure_tokenizer_from_json(content: text) -> Result<PureTokenizer, text>:
+    var vocab: Dict<text, i64> = {}
+    var ranks: Dict<text, i64> = {}
+    var max_id: i64 = 0
+    var section = 0
+    var rank: i64 = 0
+    val key_end = "\": "
+    for line in content.split("\n"):
+        val t = line.trim()
+        if section == 0:
+            if t == "\"vocab\": \{":
+                section = 1
+            elif t == "\"merges\": [":
+                section = 2
+        elif section == 1:
+            if t == "\},":
+                section = 0
+            else:
+                val p = t.rfind(key_end)
+                if p > 0:
+                    var id_text = t.substring(p + 3, _char_len(t))
+                    if id_text.ends_with(","):
+                        id_text = id_text.substring(0, _char_len(id_text) - 1)
+                    if val id = id_text.parse_i64():
+                        vocab[_unescape(t.substring(1, p))] = id
+                        if id > max_id:
+                            max_id = id
+        elif section == 2:
+            if t == "]":
+                section = 0
+            else:
+                ranks[_quoted_item(t)] = rank
+                rank = rank + 1
+    if vocab.len() == 0 or ranks.len() == 0:
+        return Err("tokenizer.json: vocab or merges not found")
+    var pieces: [text] = []
+    var i: i64 = 0
+    while i <= max_id:
+        pieces.push("")
+        i = i + 1
+    for k in vocab.keys():
+        pieces[vocab[k]] = k
+    Ok(PureTokenizer(vocab: vocab, pieces: pieces, ranks: ranks, bos_id: vocab["<s>"]))
+
+pub fn pure_tokenizer_load(model_dir: text) -> Result<PureTokenizer, text>:
+    val path = model_dir + "/tokenizer.json"
+    if not file_exists(path):
+        return Err("tokenizer.json not found in {model_dir}")
+    pure_tokenizer_from_json(read_file(path))
+
+fn _hex_digit(n: i64) -> text:
+    if n < 10:
+        return char_from_code(48 + n)
+    char_from_code(55 + n)
+
+fn _hex_nibble(c: text) -> i64:
+    val code = c.bytes()[0] as i64
+    if code <= 57:
+        return code - 48
+    code - 55
+
+# Value of a "<0xHH>" byte piece.
+fn _hex_value(p: text) -> i64:
+    _hex_nibble(p.substring(3, 4)) * 16 + _hex_nibble(p.substring(4, 5))
+
+fn _byte_piece(b: i64) -> text:
+    "<0x" + _hex_digit(b / 16) + _hex_digit(b % 16) + ">"
+
+# Merge adjacent pieces by lowest rank until no ranked pair remains.
+fn _bpe(tok: PureTokenizer, word: [text]) -> [text]:
+    var parts = word
+    while parts.len() > 1:
+        var best: i64 = -1
+        var best_rank: i64 = 0
+        var i: i64 = 0
+        while i + 1 < parts.len():
+            val key = parts[i] + " " + parts[i + 1]
+            if tok.ranks.contains_key(key):
+                val r = tok.ranks[key]
+                if best < 0 or r < best_rank:
+                    best = i
+                    best_rank = r
+            i = i + 1
+        if best < 0:
+            break
+        var merged: [text] = []
+        i = 0
+        while i < parts.len():
+            if i == best:
+                merged.push(parts[i] + parts[i + 1])
+                i = i + 2
+            else:
+                merged.push(parts[i])
+                i = i + 1
+        parts = merged
+    parts
+
+pub fn pure_tokenizer_encode(tok: PureTokenizer, s: text, add_bos: bool) -> [i64]:
+    var ids: [i64] = []
+    if add_bos:
+        ids.push(tok.bos_id)
+    if s == "":
+        return ids
+    val norm = "▁" + s.replace(" ", "▁")
+    var word: [text] = []
+    for ch in norm.chars():
+        if tok.vocab.contains_key(ch):
+            word.push(ch)
+        else:
+            for b in text_to_bytes_linear(ch):
+                word.push(_byte_piece(b as i64))
+    for piece in _bpe(tok, word):
+        ids.push(tok.vocab[piece])
+    ids
+
+fn _flush_bytes(buf: [u8]) -> text:
+    match validated_utf8_bytes_to_text_linear(buf):
+        case Ok(v): v
+        case Err(_): ""
+
+# Ids -> text. The leading "▁" of the first piece is kept as a space; callers
+# that decode a whole prompt may trim it.
+pub fn pure_tokenizer_decode(tok: PureTokenizer, ids: [i64]) -> text:
+    var out = ""
+    var pending: [u8] = []
+    for id in ids:
+        if id < 0 or id >= tok.pieces.len() or id == tok.bos_id:
+            continue
+        val p = tok.pieces[id]
+        if p.starts_with("<0x") and p.ends_with(">") and _char_len(p) == 6:
+            pending.push(_hex_value(p) as u8)
+        else:
+            if pending.len() > 0:
+                out = out + _flush_bytes(pending)
+                pending = []
+            out = out + p.replace("▁", " ")
+    if pending.len() > 0:
+        out = out + _flush_bytes(pending)
+    out

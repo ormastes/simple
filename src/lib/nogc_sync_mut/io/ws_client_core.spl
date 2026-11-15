@@ -1,0 +1,249 @@
+# Pure-Simple WebSocket client (RFC 6455) backing the rt_ws_* surface
+#
+# The rt_ws_* names in http_sffi.spl were declared as externs with no runtime
+# implementation (bug native_http_ws_sffi_unimplemented_2026-11-15). They are
+# implemented here in pure Simple over the sync TCP stream.
+#
+# Handle contract (unchanged from the extern declarations): the handle is the
+# connected TCP descriptor; 0 means "no connection". All frame reads take
+# exact byte counts, so no per-connection buffer state is kept.
+#
+# Supported: ws:// URLs, client opening handshake with Sec-WebSocket-Accept
+# validation, masked client frames, text/binary data frames, continuation
+# reassembly, ping -> pong, close handshake. Not supported: wss:// (no TLS
+# here), extensions, subprotocols.
+
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.nogc_sync_mut.http.ws.ws_handshake.{ws_build_client_request, ws_compute_accept_key}
+use std.nogc_sync_mut.http.response.{parse_response}
+use std.nogc_sync_mut.http.headers.{get_header}
+use std.common.base_encoding.base64.{base64_encode_bytes}
+use std.common.text_bytes.{bytes_to_text}
+use std.nogc_sync_mut.sffi.math.{random_i64_raw}
+
+val WS_OP_CONT = 0
+val WS_OP_TEXT = 1
+val WS_OP_BINARY = 2
+val WS_OP_CLOSE = 8
+val WS_OP_PING = 9
+val WS_OP_PONG = 10
+val WS_MAX_HANDSHAKE_BYTES = 8192
+
+fn _ws_random_bytes(count: i64) -> [u8]:
+    var out: [u8] = []
+    var word = random_i64_raw()
+    var left_in_word = 8
+    while out.len() < count:
+        if left_in_word == 0:
+            word = random_i64_raw()
+            left_in_word = 8
+        out.push((word & 255) as u8)
+        word = word >> 8
+        left_in_word = left_in_word - 1
+    out
+
+fn _ws_split_url(url: text) -> (text, text, text):
+    """Return (tcp addr, Host header, path); addr is "" when the URL is unusable."""
+    if not url.starts_with("ws://"):
+        return ("", "", "")
+    val rest = url.substring(5, url.len())
+    var authority = rest
+    var path = "/"
+    val slash = rest.index_of("/")
+    if slash >= 0:
+        authority = rest.substring(0, slash)
+        path = rest.substring(slash, rest.len())
+    if authority == "":
+        return ("", "", "")
+    var addr = authority
+    if not authority.contains(":"):
+        addr = authority + ":80"
+    (addr, authority, path)
+
+fn _ws_write_all(fd: i64, data: [u8]) -> bool:
+    val stream = TcpStream.from_accepted_fd(fd)
+    match stream.write_all(data):
+        case Ok(_): true
+        case Err(_): false
+
+fn _ws_read_exact(fd: i64, count: i64) -> [u8]?:
+    if count == 0:
+        return Some([])
+    val stream = TcpStream.from_accepted_fd(fd)
+    match stream.read_exact(count):
+        case Ok(bytes): Some(bytes)
+        case Err(_): None
+
+fn ws_fd_write_frame(fd: i64, opcode: i64, payload: [u8], masked: bool) -> bool:
+    """Write one FIN frame. Clients must pass masked=true (RFC 6455 §5.3)."""
+    var out: [u8] = []
+    out.push((128 | opcode) as u8)
+    val n = payload.len()
+    val mask_bit = if masked: 128 else: 0
+    if n < 126:
+        out.push((mask_bit | n) as u8)
+    elif n < 65536:
+        out.push((mask_bit | 126) as u8)
+        out.push(((n >> 8) & 255) as u8)
+        out.push((n & 255) as u8)
+    else:
+        out.push((mask_bit | 127) as u8)
+        var shift = 56
+        while shift >= 0:
+            out.push(((n >> shift) & 255) as u8)
+            shift = shift - 8
+    if masked:
+        val key = _ws_random_bytes(4)
+        for k in key:
+            out.push(k)
+        var i = 0
+        while i < n:
+            out.push(((payload[i] as i64) ^ (key[i % 4] as i64)) as u8)
+            i = i + 1
+    else:
+        for b in payload:
+            out.push(b)
+    _ws_write_all(fd, out)
+
+fn ws_fd_read_frame(fd: i64) -> (i64, bool, [u8]):
+    """Read one frame: (opcode, fin, unmasked payload). opcode -1 = I/O or protocol error."""
+    val empty: [u8] = []
+    val head = match _ws_read_exact(fd, 2):
+        case Some(b): b
+        case None: return (-1, true, empty)
+    val b0 = head[0] as i64
+    val b1 = head[1] as i64
+    val fin = (b0 & 128) != 0
+    val opcode = b0 & 15
+    val masked = (b1 & 128) != 0
+    var n = b1 & 127
+    if n == 126:
+        val ext = match _ws_read_exact(fd, 2):
+            case Some(b): b
+            case None: return (-1, true, empty)
+        n = ((ext[0] as i64) << 8) | (ext[1] as i64)
+    elif n == 127:
+        val ext = match _ws_read_exact(fd, 8):
+            case Some(b): b
+            case None: return (-1, true, empty)
+        n = 0
+        for b in ext:
+            n = (n << 8) | (b as i64)
+        if n < 0:
+            return (-1, true, empty)
+    var key: [u8] = []
+    if masked:
+        key = match _ws_read_exact(fd, 4):
+            case Some(b): b
+            case None: return (-1, true, empty)
+    val raw = match _ws_read_exact(fd, n):
+        case Some(b): b
+        case None: return (-1, true, empty)
+    if not masked:
+        return (opcode, fin, raw)
+    var payload: [u8] = []
+    var i = 0
+    while i < n:
+        payload.push(((raw[i] as i64) ^ (key[i % 4] as i64)) as u8)
+        i = i + 1
+    (opcode, fin, payload)
+
+fn _ws_read_handshake(fd: i64) -> text:
+    var buf: [u8] = []
+    while buf.len() < WS_MAX_HANDSHAKE_BYTES:
+        val one = match _ws_read_exact(fd, 1):
+            case Some(b): b
+            case None: return ""
+        buf.push(one[0])
+        val m = buf.len()
+        if m >= 4 and buf[m - 4] == 13 and buf[m - 3] == 10 and buf[m - 2] == 13 and buf[m - 1] == 10:
+            return bytes_to_text(buf)
+    ""
+
+fn _ws_upgrade_accepted(head: text, key: text) -> bool:
+    """101 status + matching Sec-WebSocket-Accept, parsed by the std HTTP response parser."""
+    if head == "":
+        return false
+    val parsed = parse_response(head)
+    if parsed[1] != 101:
+        return false
+    match get_header(parsed[3], "Sec-WebSocket-Accept"):
+        case Some(accept): accept.trim() == ws_compute_accept_key(key)
+        case None: false
+
+fn _ws_close_fd(fd: i64) -> bool:
+    var stream = TcpStream.from_accepted_fd(fd)
+    match stream.close():
+        case Ok(_): true
+        case Err(_): false
+
+fn rt_ws_connect(url: text) -> i64:
+    """Open a ws:// connection and complete the opening handshake; 0 on failure."""
+    val parts = _ws_split_url(url)
+    val addr = parts.0
+    if addr == "":
+        return 0
+    val fd = TcpStream.connect_fd_timeout(addr, 10000)
+    if fd <= 0:
+        return 0
+    val key = base64_encode_bytes(_ws_random_bytes(16))
+    val request = ws_build_client_request(parts.1, parts.2, key)
+    if not _ws_write_all(fd, request.bytes()):
+        _ws_close_fd(fd)
+        return 0
+    if not _ws_upgrade_accepted(_ws_read_handshake(fd), key):
+        _ws_close_fd(fd)
+        return 0
+    fd
+
+fn rt_ws_send(ws: i64, message: text) -> bool:
+    """Send one masked text frame."""
+    if ws <= 0:
+        return false
+    ws_fd_write_frame(ws, WS_OP_TEXT, message.bytes(), true)
+
+fn rt_ws_receive(ws: i64) -> text:
+    """Block for the next text/binary message; answers pings; "" on close or error."""
+    if ws <= 0:
+        return ""
+    var message: [u8] = []
+    while true:
+        val frame = ws_fd_read_frame(ws)
+        val opcode = frame.0
+        if opcode < 0:
+            return ""
+        if opcode == WS_OP_PING:
+            if not ws_fd_write_frame(ws, WS_OP_PONG, frame.2, true):
+                return ""
+        elif opcode == WS_OP_PONG:
+            pass
+        elif opcode == WS_OP_CLOSE:
+            ws_fd_write_frame(ws, WS_OP_CLOSE, frame.2, true)
+            return ""
+        elif opcode == WS_OP_TEXT or opcode == WS_OP_BINARY or opcode == WS_OP_CONT:
+            for b in frame.2:
+                message.push(b)
+            if frame.1:
+                return bytes_to_text(message)
+        else:
+            return ""
+    ""
+
+fn rt_ws_close(ws: i64) -> bool:
+    """Send a normal-closure (1000) close frame, wait for the peer's close, release the socket."""
+    if ws <= 0:
+        return false
+    val code: [u8] = [3, 232]
+    val sent = ws_fd_write_frame(ws, WS_OP_CLOSE, code, true)
+    if sent:
+        var tries = 0
+        while tries < 16:
+            val frame = ws_fd_read_frame(ws)
+            if frame.0 < 0 or frame.0 == WS_OP_CLOSE:
+                break
+            tries = tries + 1
+    val closed = _ws_close_fd(ws)
+    sent and closed
+
+export rt_ws_connect, rt_ws_send, rt_ws_receive, rt_ws_close
+export ws_fd_read_frame, ws_fd_write_frame

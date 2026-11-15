@@ -168,6 +168,19 @@ cd <worktree> && SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=0 \
   is needed. A missing sibling shows up only as "backend library could not be opened".
 - **Compiler trap:** a bare `clang` on PATH may target MSVC (ROCm ships one);
   the script uses `$SIMPLE_MINGW_ROOT/bin/clang.exe` and checks `-dumpmachine`.
+## Pure-Simple runner (no llama.cpp)
+
+`src/lib/gc_async_mut/slang/model_executor/pure/`: `weights.spl` (safetensors),
+`tensor_ops.spl` (the single compute seam; a GPU provider replaces only this),
+`llama_forward.spl` (Llama-2 forward), `kv_cache.spl` (KvSession: per-layer K/V
+rows, prefix reuse, `positions_evaluated` counter), `tokenizer.spl`
+(SentencePiece-BPE from tokenizer.json). Not wired into the engine/server yet.
+Measured on the seed interpreter, stories15M, "Once upon a time": generated
+text matches llama.cpp greedy; about 0.12 tokens/s. Fixture
+`test/fixtures/slang_pure/stories15m_generate.spl`; system spec
+`slang_pure_kv_cache_spec.spl`.
+Seed pitfalls found: an f64 carried through `Result` + `?` is mis-unboxed (parse
+numbers after the `?`); tokenizer.json escapes include `\r`.
 
 ## Related
 
@@ -208,3 +221,7 @@ SLANG_LIVE=1 SLANG_GPU=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi
   probe once). Shell gates on MSYS must avoid per-file `$(...)` pipelines: a spawn costs
   seconds there. The conformance test drops `detect_leaks` on Windows (no LSan) and the
   prefix-cache contract test uses llvm-mingw clang there, as `build-slang-ggml-shim.shs` does.
+## ROCm GPU ops provider (pure runner)
+- Layering: pure runner -> GPU API -> ROCm. Backend: `src/lib/gc_async_mut/gpu/rocm/hip_compute.spl` (HIP + hipRTC via `spl_dlopen`/`spl_wffi_call_i64`; launch through `hipDrvLaunchKernelEx`, 4 int args, so no wide C shim). Ops: `pure/tensor_ops_rocm.spl` (device-resident f32 `RocmTensor`; matvec, rmsnorm, add, mul, silu, attention; all `Result<_, text>`). Weights upload once; CPU `tensor_ops.spl` is untouched.
+- Specs: `test/01_unit/lib/gc_async_mut/slang/model_executor/pure/tensor_ops_rocm_spec.spl`, `test/03_system/lib/slang/feature/slang_pure_rocm_ops_spec.spl` (skip with reason when `C:\Program Files\AMD\ROCm\7.2\bin` DLLs are absent).
+- Weights go to the device as raw F32 bytes (`rocm_tensor_upload_f32_bytes`, ranges from `pure_weights_f32_ranges`): the 32000x288 head uploads in ~23 ms (was ~330 s with per-element f64->f32 staging). Downloads are bulk bytes but decoded per element in the seed interpreter (~2 s for 32000 values), so keep reductions such as argmax on device. `hip_compute.spl` declares no `rt_*` externs (libc malloc/memcpy via `spl_wffi_*`, reads via `sffi.raw_bytes`). `SLANG_ROCM_BIN` overrides the ROCm bin dir.

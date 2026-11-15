@@ -126,7 +126,7 @@ pub fn find_and_exec_method_with_self(
             return Ok(Some((result, updated_self)));
         }
     }
-    // Check impl methods (cached O(1) lookup)
+    // Check impl methods (cached O(1) lookup, then GLOBAL_IMPL_METHODS fallback)
     if let Some(methods) = impl_methods.get(class) {
         if let Some(idx) = lookup_impl_method_index(methods, class, method) {
             let func = &methods[idx];
@@ -143,6 +143,25 @@ pub fn find_and_exec_method_with_self(
             )?;
             return Ok(Some((result, updated_self)));
         }
+    }
+    let global_impl = crate::interpreter::GLOBAL_IMPL_METHODS.with(|cell| {
+        cell.borrow()
+            .get(class)
+            .and_then(|methods| lookup_impl_method_index(methods, class, method).map(|idx| Arc::clone(&methods[idx])))
+    });
+    if let Some(func) = global_impl {
+        let (result, updated_self) = exec_function_with_self_return(
+            &func,
+            args,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+            class,
+            Arc::clone(fields),
+        )?;
+        return Ok(Some((result, updated_self)));
     }
     Ok(None)
 }
@@ -195,6 +214,25 @@ pub fn find_and_exec_method_with_self_owned(
             )?;
             return Ok(Some((result, updated_self)));
         }
+    }
+    let global_impl = crate::interpreter::GLOBAL_IMPL_METHODS.with(|cell| {
+        cell.borrow()
+            .get(class)
+            .and_then(|methods| lookup_impl_method_index(methods, class, method).map(|idx| Arc::clone(&methods[idx])))
+    });
+    if let Some(func) = global_impl {
+        let (result, updated_self) = exec_function_with_self_return(
+            &func,
+            args,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+            class,
+            fields,
+        )?;
+        return Ok(Some((result, updated_self)));
     }
     Ok(None)
 }

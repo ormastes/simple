@@ -338,3 +338,12 @@ of how wide the two-registry gap is rather than a single symbol patched in isola
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **FIXED (confirmed)** — ne10: both stacked blockers landed via 9e7e7a526edb (real top-level import + interpreter_extern handler); the doc's directory-vs-file discriminator re-run green (2/2) on the tracked seed.
+
+## Addendum 2026-11-15 — not verifiable on the Rust seed
+
+`test/01_unit/lib/mcdc_probe_protocol_spec.spl` is 7/10 on a release/1.0.0
+Rust seed: three cases stop at `unknown extern function: rt_current_task_id`.
+That spec's own header says a bootstrap-only native CLI or Rust seed cannot
+qualify it; it needs a receipt-verified pure-Simple host. No such host was
+available, so the "fixed" claim above is neither confirmed nor refuted and the
+row stays open.
