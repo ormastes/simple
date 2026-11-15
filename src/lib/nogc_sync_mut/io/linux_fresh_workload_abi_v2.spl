@@ -1,0 +1,131 @@
+# Read-only hosted ABI utilities. These DATA results are never admission.
+# The actual owner publishes/retains every FD and owns the bounded arena.
+use std.nogc_sync_mut.io.linux_machine_policy_abi_v1.*
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32,
+    volatile_read_u64, volatile_write_u8}
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+
+pub struct LinuxWorkloadMetadataV2:
+    identity: text
+    device: i64
+    inode: i64
+    mount_id: i64
+    mode: i64
+    uid: i64
+    size: i64
+    links: i64
+
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_installed_supervisor_abi_v1.__errno_location
+
+@unsafe(reason: "Linux libc pidfd signal zero queues no signal; only ESRCH is terminal evidence", capabilities: [ffi])
+extern fn pidfd_send_signal(pidfd: i32, signal: i32, info: i64, flags: u32) -> i32
+
+@unsafe(reason: "queries original pidfd without signaling; captures thread errno immediately", capabilities: [ffi, raw_ptr])
+pub fn linux_workload_pidfd_no_task_v2(pidfd: i64) -> Result<(), text>:
+    val result = pidfd_send_signal(pidfd as i32, 0, 0, 0u32)
+    val error = volatile_read_u32(__errno_location())
+    if result == -1 and error == 3: return Ok(())
+    if result == 0: return Err("fresh-workload-original-pidfd-task-still-present")
+    Err("fresh-workload-original-pidfd-no-task-unconfirmed")
+
+@unsafe(reason: "positive ENOENT from exact held parent and fixed retained child name; no path-only grant", capabilities: [ffi, raw_ptr])
+pub fn linux_workload_named_absent_v2(arena: i64, parent: i64, name: text) -> Result<(), text>:
+    val pointer = linux_workload_name_v2(arena, name)
+    if pointer == 0: return Err("fresh-workload-closure-name")
+    val result = statx(parent as i32, pointer, 256, 6143u32, arena)
+    val error = volatile_read_u32(__errno_location())
+    if result == -1 and error == 2: return Ok(())
+    Err("fresh-workload-original-container-name-not-absent")
+
+pub fn linux_workload_flags_v2(directory: bool) -> i32:
+    @when(arch="x86_64"):
+    if directory: 720896 else: 657408
+    @elif(arch="aarch64"):
+    if directory: 573440 else: 559104
+    @else:
+    0
+    @end
+
+@unsafe(reason: "caller owns arena of at least 131072 bytes; writes bounded NUL buffer", capabilities: [raw_ptr])
+pub fn linux_workload_name_v2(arena: i64, name: text) -> i64:
+    if name.byte_len() > 4095 or name.contains("\0"): return 0
+    val pointer = arena + 512
+    for at in 0..name.byte_len(): volatile_write_u8(pointer + at, name.byte_at(at) as i64)
+    volatile_write_u8(pointer + name.byte_len(), 0)
+    pointer
+
+@unsafe(reason: "actual statx, requiring returned security and mount-ID fields", capabilities: [ffi, raw_ptr])
+pub fn linux_workload_metadata_v2(arena: i64, fd: i64, name: text = "", immutable: bool = false, follow_magic: bool = false) -> Result<LinuxWorkloadMetadataV2, text>:
+    for at in 0..256: volatile_write_u8(arena + at, 0)
+    val pointer = linux_workload_name_v2(arena, name)
+    if pointer == 0: return Err("fresh-workload-name-bound")
+    if (statx(fd as i32, pointer, if name == "": 4096 else: (if follow_magic: 0 else: 256), 6143u32, arena) != 0 or
+            (volatile_read_u32(arena) & 6143) != 6143 or volatile_read_u64(arena + 144) <= 0):
+        return Err("fresh-workload-statx-unavailable")
+    val major = volatile_read_u32(arena + 136)
+    val minor = volatile_read_u32(arena + 140)
+    val inode = volatile_read_u64(arena + 32)
+    val mount = volatile_read_u64(arena + 144)
+    val uid = volatile_read_u32(arena + 20)
+    val mode = volatile_read_u16(arena + 28)
+    val size = volatile_read_u64(arena + 40)
+    var identity = str(major) + ":" + str(minor) + ":" + str(inode) + ":" + str(mount) + ":" + str(uid) + ":" + str(mode)
+    if immutable and (mode & 61440) == 32768:
+        identity = identity + ":" + str(size) + ":" + str(volatile_read_u64(arena + 96)) + ":" +
+            str(volatile_read_u32(arena + 104)) + ":" + str(volatile_read_u64(arena + 112)) + ":" + str(volatile_read_u32(arena + 120))
+    Ok(LinuxWorkloadMetadataV2(identity: identity,
+        device: ((major & 4095) << 8) | (minor & 255) | ((major & 4294963200) << 32) | ((minor & 4294967040) << 12),
+        inode: inode, mount_id: mount, uid: uid, mode: mode, size: size, links: volatile_read_u32(arena + 16)))
+
+@unsafe(reason: "actual filesystem type on retained descriptor", capabilities: [ffi, raw_ptr])
+pub fn linux_workload_filesystem_v2(arena: i64, fd: i64, kind: i64) -> Result<(), text>:
+    if fstatfs(fd as i32, arena + 256) != 0 or volatile_read_u64(arena + 256) != kind:
+        return Err("fresh-workload-filesystem-kind")
+    Ok(())
+
+@unsafe(reason: "bounded retained pread in actual owner's arena", capabilities: [ffi, raw_ptr])
+pub fn linux_workload_text_v2(arena: i64, fd: i64, maximum: i64 = 65535) -> Result<text, text>:
+    if maximum < 1 or maximum > 65535: return Err("fresh-workload-text-bound")
+    val count = pread(fd as i32, arena + 8192, (maximum + 1) as u64, 0)
+    if count < 0 or count > maximum: return Err("fresh-workload-text-unavailable-or-truncated")
+    var bytes: [u8] = []
+    for at in 0..count: bytes.push(volatile_read_u8(arena + 8192 + at) as u8)
+    if not utf8_bytes_valid(bytes): return Err("fresh-workload-text-utf8")
+    Ok(bytes_to_text(bytes))
+
+pub fn linux_workload_integer_v2(source: text, maximum: i64 = 1125899906842624) -> Result<i64, text>:
+    val value = source.trim()
+    val parsed = value.to_int() ?? -1
+    if parsed < 0 or parsed > maximum or str(parsed) != value: return Err("fresh-workload-integer")
+    Ok(parsed)
+
+@when(os="linux"):
+@unsafe(reason: "Linux libc new_utsname, six 65-byte fields, no new runtime export", capabilities: [ffi, raw_ptr])
+extern fn uname(buffer: i64) -> i32
+@end
+
+@unsafe(reason: "reads actual uname architecture, never a compile-time machine claim", capabilities: [ffi, raw_ptr])
+pub fn linux_workload_architecture_v2(arena: i64) -> Result<text, text>:
+    @when(os="linux"):
+    if uname(arena) != 0: return Err("fresh-workload-uname-unavailable")
+    var fields: [text] = []
+    for offset in [0, 260]:
+        var bytes: [u8] = []
+        var ended = false
+        for at in 0..65:
+            val byte = volatile_read_u8(arena + offset + at)
+            if byte == 0:
+                ended = true
+                break
+            if byte < 33 or byte > 126: return Err("fresh-workload-uname-encoding")
+            bytes.push(byte as u8)
+        if not ended: return Err("fresh-workload-uname-bound")
+        fields.push(bytes_to_text(bytes))
+    if fields[0] != "Linux" or not ["x86_64", "aarch64"].contains(fields[1]): return Err("fresh-workload-uname-unsupported")
+    Ok(fields[1])
+    @else:
+    Err("fresh-workload-linux-required")
+    @end
+
+@end

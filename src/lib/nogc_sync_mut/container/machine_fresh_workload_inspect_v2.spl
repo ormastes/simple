@@ -1,0 +1,57 @@
+# Strict native-inspect DATA; only the actual retained containment owner and
+# successor can establish workload placement/security after this decoding.
+use std.nogc_sync_mut.container.machine_fresh_workload_record_v2.*
+use std.common.contracts.container.linux_fresh_workload_inspect_v2.{linux_fresh_workload_inspect_identity_v2, linux_fresh_workload_inspect_field_names_v2}
+use std.common.contracts.container.linux_fresh_workload_v2.LinuxFreshWorkloadActionV2
+use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use std.common.json.value.{JsonValue, json_value_get, json_value_as_text, json_value_keys}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.native_inspect_definitively_not_found
+
+pub struct MachineFreshWorkloadInspectV2:
+    pid: i64
+    cgroup_path: text
+
+fn workload_inspect_field_v2(value: JsonValue, key: text) -> Result<JsonValue, text>:
+    match json_value_get(value, key):
+        case Some(found): Ok(found)
+        case None: Err("machine-fresh-workload-inspect-field:" + key)
+
+fn workload_inspect_text_v2(value: JsonValue, key: text) -> Result<text, text>:
+    match json_value_as_text(workload_inspect_field_v2(value, key)?):
+        case Some(found): Ok(found)
+        case None: Err("machine-fresh-workload-inspect-field-type:" + key)
+
+pub fn machine_fresh_workload_inspect_v2(record: MachineFreshWorkloadRecordV2,
+        native_id: text, output: text) -> Result<MachineFreshWorkloadInspectV2, text>:
+    if not builder_digest_valid_v1(native_id): return Err("machine-fresh-workload-full-native-id")
+    val command = machine_fresh_workload_command_v2(record, LinuxFreshWorkloadActionV2.Inspect, native_id)?
+    val value = linux_fresh_workload_inspect_identity_v2(command, output)?
+    val p = record.request.plan
+    if (json_value_keys(value).len() != linux_fresh_workload_inspect_field_names_v2().len() or workload_inspect_text_v2(value, "id")? != native_id or
+            workload_inspect_text_v2(value, "pod_uid")? != p.workload_uid or
+            workload_inspect_text_v2(value, "attempt")? != str(p.attempt) or
+            workload_inspect_text_v2(value, "operation_id")? != p.operation_id or
+            workload_inspect_text_v2(value, "provider_generation")? != str(p.provider_generation) or
+            workload_inspect_text_v2(value, "node_boot_id")? != container_scope_fence_id_v2(record.scope)? or
+            workload_inspect_text_v2(value, "status")? != "running" or
+            workload_inspect_text_v2(value, "manager")? != "cgroupfs" or
+            workload_inspect_text_v2(value, "cgroup_mode")? != "private" or
+            workload_inspect_text_v2(value, "pid_mode")? != "private"):
+        return Err("machine-fresh-workload-inspect-identity")
+    for key in ["privileged"]:
+        if workload_inspect_field_v2(value, key)? != JsonValue.Bool(false): return Err("machine-fresh-workload-inspect-security")
+    for key in ["readonly_rootfs", "no_new_privileges"]:
+        if workload_inspect_field_v2(value, key)? != JsonValue.Bool(true): return Err("machine-fresh-workload-inspect-security")
+    for key in ["effective_caps", "bounding_caps"]:
+        if workload_inspect_field_v2(value, key)? != JsonValue.Int(0): return Err("machine-fresh-workload-inspect-security")
+    val pid = match workload_inspect_field_v2(value, "pid")?:
+        case JsonValue.Int(found): found
+        case _: return Err("machine-fresh-workload-inspect-pid")
+    val cgroup = workload_inspect_text_v2(value, "cgroup")?
+    if pid <= 0 or pid > 2147483647 or not cgroup.starts_with("/") or cgroup == "/" or cgroup.byte_len() > 4095:
+        return Err("machine-fresh-workload-inspect-subject")
+    Ok(MachineFreshWorkloadInspectV2(pid, cgroup))
+
+pub fn machine_fresh_workload_absence_v2(exit_code: i64, output: text) -> bool:
+    native_inspect_definitively_not_found("podman", exit_code, output)

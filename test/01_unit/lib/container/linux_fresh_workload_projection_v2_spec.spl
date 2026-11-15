@@ -1,0 +1,144 @@
+# AUTHORED_NOT_RUN. Pure DATA fixtures exercise production validators/projectors.
+# No synthetic value is native custody, a grant, or a release receipt.
+# @req REQ-LINUX-WORKLOAD-LOWER-001
+# @req REQ-LINUX-WORKLOAD-LOWER-002
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.linux_fresh_workload_v2.*
+use std.common.contracts.container.linux_fresh_workload_inspect_v2.*
+use std.common.contracts.container.linux_fresh_epoch_v1.LinuxFreshEpochProfileV1
+use std.nogc_sync_mut.io.linux_fresh_workload_launch_v2.linux_fresh_workload_argv_v2
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_encode_v1
+use std.common.json.value.*
+use std.common.sdn.value.SdnValue
+
+fn lower_command_fixture_v2() -> LinuxFreshWorkloadCommandV2:
+    val native = LinuxOciRequestV1(pod_uid: "job_1", attempt: 1, operation_id: "operation_1",
+        image: "registry.example/image@sha256:" + "2".repeat(64), bundle_path: "", command: ["/bin/true"],
+        args: [], timeout_ms: 30000, cpu_limit_millis: 1000, memory_limit_bytes: 67108864,
+        pid_limit: 64, network_policy: "none", filesystem_policy: "read-only", replace_entrypoint: true)
+    val scope = ContainerHostScopeV2(physical_host_id: "host_1", service_scope_id: "epoch-" + "a".repeat(64),
+        boot_id: "boot_1", provider_generation: 7, native_machine_id: "linux-machine-id-v1:1234",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot_1")
+    val plan = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: native.pod_uid,
+        attempt: native.attempt, operation_id: native.operation_id, request_digest: linux_oci_request_digest_v1(native).unwrap(),
+        physical_host_id: scope.physical_host_id, service_scope_id: scope.service_scope_id,
+        boot_id: scope.boot_id, provider_generation: scope.provider_generation, native_machine_id: scope.native_machine_id,
+        continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id)
+    LinuxFreshWorkloadCommandV2(request: ContainerExecutionRequestV2(plan, linux_oci_retained_request_encode_v1(native).unwrap()),
+        scope: scope, action: LinuxFreshWorkloadActionV2.Create, native_id: "", image: native.image,
+        entrypoint: native.command, args: native.args, cpu_millis: native.cpu_limit_millis, memory_bytes: native.memory_limit_bytes,
+        pid_limit: native.pid_limit, timeout_ms: native.timeout_ms, helper_cpu_millis: 500, helper_memory_bytes: 33554432)
+
+fn lower_profile_fixture_v2() -> LinuxFreshEpochProfileV1:
+    # DATA-only profile for the pure projector; never passed as installed owner.
+    LinuxFreshEpochProfileV1(fields: {"graphRoot": SdnValue.String("/var/lib/simple/epoch/graph"),
+        "runRoot": SdnValue.String("/var/lib/simple/epoch/run"), "delegatedCgroup": SdnValue.String("/simple/epoch/containers")})
+
+fn lower_created_fixture_v2(command: LinuxFreshWorkloadCommandV2) -> JsonValue:
+    var value = JsonValue.Object([], [])
+    for key in linux_fresh_workload_inspect_field_names_v2(): value = json_value_object_set(value, key, JsonValue.Null)
+    val p = command.request.plan
+    for pair in [("id", command.native_id), ("pod_uid", p.workload_uid), ("attempt", str(p.attempt)),
+            ("node_boot_id", container_scope_fence_id_v2(command.scope).unwrap()), ("provider_generation", str(command.scope.provider_generation)),
+            ("operation_id", p.operation_id), ("cgroup", ""), ("status", "created"), ("runtime", "crun"), ("manager", "cgroupfs"),
+            ("cgroup_mode", "private"), ("pid_mode", "private"), ("cgroups", "default"), ("network_mode", "none"),
+            ("image_digest", "sha256:" + "2".repeat(64)), ("image_name", command.image), ("path", "/bin/true"),
+            ("workdir", "/"), ("cgroup_parent", "/simple/epoch/containers"), ("configured_user", "")]:
+        value = json_value_object_set(value, pair.0, JsonValue.Str(pair.1))
+    for pair in [("pid", 0), ("effective_caps", 0), ("bounding_caps", 0), ("cpu_period", 100000),
+            ("cpu_quota", 100000), ("memory_bytes", 67108864), ("memory_swap", 67108864), ("pids_limit", 64)]:
+        value = json_value_object_set(value, pair.0, JsonValue.Int(pair.1))
+    value = json_value_object_set(value, "privileged", JsonValue.Bool(false))
+    value = json_value_object_set(value, "readonly_rootfs", JsonValue.Bool(true))
+    value = json_value_object_set(value, "no_new_privileges", JsonValue.Bool(true))
+    value = json_value_object_set(value, "environment", json_value_str_array(["PATH=/usr/bin"]))
+    value = json_value_object_set(value, "security_options", json_value_str_array(["no-new-privileges"]))
+    value = json_value_object_set(value, "create_command", json_value_str_array(["/usr/bin/podman", "create"]))
+    value
+
+describe "Closed Linux fresh workload DATA projection v2":
+    it "rejects local transports, short names and malformed registry manifest pins":
+        step("Bind the immutable platform manifest to an explicit registry")
+        val pin = "@sha256:" + "2".repeat(64)
+        expect(linux_fresh_workload_registry_image_v2("registry.example:5000/team/image" + pin).is_ok()).to_equal(true)
+        for image in ["image" + pin, "example/image" + pin, "dir:/host/image" + pin, "oci:/host/image" + pin,
+                "docker-archive:/host/image" + pin, "registry.example/repo:tag" + pin,
+                "registry.example/../image" + pin, "registry.example:0/repo" + pin]:
+            expect(linux_fresh_workload_registry_image_v2(image).is_err()).to_equal(true)
+
+    it "refuses DTO resource, argv or scope fields differing from retained canonical request":
+        step("Compare complete retained request bytes before projecting argv")
+        val original = lower_command_fixture_v2()
+        expect(linux_fresh_workload_command_validate_v2(original).is_ok()).to_equal(true)
+        var changed = original
+        changed.memory_bytes = changed.memory_bytes + 1
+        expect(linux_fresh_workload_command_validate_v2(changed).is_err()).to_equal(true)
+        changed = original
+        changed.args = ["unexpected"]
+        expect(linux_fresh_workload_command_validate_v2(changed).is_err()).to_equal(true)
+        changed = original
+        changed.scope.provider_generation = 8
+        expect(linux_fresh_workload_command_validate_v2(changed).is_err()).to_equal(true)
+
+    it "uses one closed pull and create-never-pull command under pinned roots and labels":
+        step("Keep requested manifest distinct from the eventual local image configuration ID")
+        var command = lower_command_fixture_v2()
+        command.action = LinuxFreshWorkloadActionV2.PullImage
+        val pull = linux_fresh_workload_argv_v2(lower_profile_fixture_v2(), command).unwrap()
+        expect(pull).to_equal(["--remote=false", "--log-level=error", "--cgroup-manager=cgroupfs", "--root",
+            "/var/lib/simple/epoch/graph", "--runroot", "/var/lib/simple/epoch/run", "--storage-driver", "vfs", "--tmpdir",
+            "/var/lib/simple/epoch/run/tmp", "pull", "--quiet", "--", command.image])
+        command.action = LinuxFreshWorkloadActionV2.Create
+        val create = linux_fresh_workload_argv_v2(lower_profile_fixture_v2(), command).unwrap()
+        for item in ["--pull=never", "--cpu-quota=100000", "--memory=67108864", "--memory-swap=67108864",
+                "--pids-limit=64", "--network=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+                "--cgroup-parent=/simple/epoch/containers", "io.simpleorch.node_boot_id=" + container_scope_fence_id_v2(command.scope).unwrap()]:
+            expect(create.contains(item)).to_equal(true)
+        expect(create[create.len() - 2]).to_equal("--")
+        expect(create[create.len() - 1]).to_equal(command.image)
+
+    it "restricts observed configuration image IDs to the closed image-read stages":
+        step("Use actual shared fixed query construction without caller format or argv")
+        var command = lower_command_fixture_v2()
+        command.native_id = "3".repeat(64)
+        command.action = LinuxFreshWorkloadActionV2.ConfigurationImage
+        expect(linux_fresh_workload_command_validate_v2(command).is_err()).to_equal(true)
+        command.observed_image_id = "sha256:" + "4".repeat(64)
+        val image = linux_fresh_workload_argv_v2(lower_profile_fixture_v2(), command).unwrap()
+        expect(image[image.len() - 1]).to_equal(command.observed_image_id)
+        command.action = LinuxFreshWorkloadActionV2.Start
+        expect(linux_fresh_workload_command_validate_v2(command).is_err()).to_equal(true)
+        command.observed_image_id = ""
+        command.action = LinuxFreshWorkloadActionV2.Absence
+        val absence = linux_fresh_workload_argv_v2(lower_profile_fixture_v2(), command).unwrap()
+        expect(absence[absence.len() - 3]).to_equal("""{{.Id}}""")
+
+    it "verifies actual created fields and rejects devices, changed limits and premature execution":
+        step("Exercise restrictive validation only; this output never creates an action grant")
+        var command = lower_command_fixture_v2()
+        command.action = LinuxFreshWorkloadActionV2.Inspect
+        command.native_id = "3".repeat(64)
+        val original = lower_created_fixture_v2(command)
+        expect(linux_fresh_workload_created_config_validate_v2(command, json_value_serialize(original)).is_ok()).to_equal(true)
+        for pair in [("memory_bytes", JsonValue.Int(67108865)), ("pid", JsonValue.Int(123)),
+                ("status", JsonValue.Str("running")), ("privileged", JsonValue.Bool(true)), ("mounts", JsonValue.Array([JsonValue.Object([], [])])),
+                ("devices", JsonValue.Array([json_value_object_from([("PathOnHost", JsonValue.Str("/dev/nvidia0")),
+                    ("PathInContainer", JsonValue.Str("/dev/nvidia0")), ("CgroupPermissions", JsonValue.Str(""))])]))]:
+            val changed = json_value_object_set(original, pair.0, pair.1)
+            expect(linux_fresh_workload_created_config_validate_v2(command, json_value_serialize(changed)).is_err()).to_equal(true)
+        val missing = json_value_object_set(original, "cpu_quota", JsonValue.Null)
+        expect(linux_fresh_workload_created_config_validate_v2(command, json_value_serialize(missing)).is_err()).to_equal(true)
+        expect(linux_fresh_workload_inspect_fields_v2("{}").is_err()).to_equal(true)
+        expect(linux_fresh_workload_inspect_fields_v2("[[],[[[[]]]]]").is_err()).to_equal(true)
+
+    it "emits real Go-template double braces and the complete fixed 42-field schema":
+        step("Compare independent literal action spellings after Simple string decoding")
+        val format = linux_fresh_workload_inspect_format_v2()
+        expect(format).to_contain("""{{json .Id}}""")
+        expect(format).to_contain("""{{json .HostConfig.CpuPeriod}}""")
+        expect(format).to_contain("""{{range .HostConfig.SecurityOpt}}{{if eq . "no-new-privileges"}}true{{end}}{{end}}""")
+        expect(format).to_end_with("""{{json .Config.User}}}""")
+        expect(format.contains("""{{{{""")).to_equal(false)
+        expect(linux_fresh_workload_inspect_field_names_v2().len()).to_equal(42)
