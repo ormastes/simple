@@ -3,10 +3,17 @@
 # existing key/public-wire/pin identity using its shared codec.
 pub use std.nogc_sync_mut.io.host_identity_store_abi_v1.HostIdentityStorePublicationV1
 use std.nogc_sync_mut.io.host_identity_store_abi_v1.host_identity_leaf_valid_v1
+use std.nogc_sync_mut.io.host_identity_ssh_projection_types_v1.HostIdentitySshPathsV1
 @when(os="windows"):
 use std.nogc_sync_mut.io.host_identity_store_windows_v1.{HostIdentityPlatformV1, host_identity_platform_open_v1}
+use std.nogc_sync_mut.io.host_identity_store_windows_v1.{HostIdentityPlatformProjectionV1,
+    host_identity_platform_projection_begin_v1, host_identity_platform_projection_step_v1,
+    host_identity_platform_projection_paths_v1, host_identity_platform_projection_close_v1}
 @else:
 use std.nogc_sync_mut.io.host_identity_store_linux_v1.{HostIdentityPlatformV1, host_identity_platform_open_v1}
+use std.nogc_sync_mut.io.host_identity_store_linux_v1.{HostIdentityPlatformProjectionV1,
+    host_identity_platform_projection_begin_v1, host_identity_platform_projection_step_v1,
+    host_identity_platform_projection_paths_v1, host_identity_platform_projection_close_v1}
 @end
 
 pub class HostIdentityStoreV1:
@@ -66,3 +73,43 @@ pub fn host_identity_store_path_v1(owner: HostIdentityStoreV1, leaf: text) -> Re
 # caller retains this same canonical owner for cleanup after either result.
 pub fn host_identity_store_transport_preflight_v1(owner: HostIdentityStoreV1) -> Result<(), text>:
     owner.platform.transport_preflight_v1()
+
+# Protected configuration data only, never an external SSH transport path.
+# The caller retains this canonical owner through any failed query/cleanup.
+pub fn host_identity_store_profile_locator_v1(owner: HostIdentityStoreV1, leaf: text) -> Result<text, text>:
+    if not host_identity_leaf_valid_v1(leaf) or not leaf.ends_with(".profile"):
+        return Err("identity-store-profile-role")
+    owner.platform.profile_locator_v1(leaf)
+
+pub class HostIdentitySshProjectionV1:
+    platform: HostIdentityPlatformProjectionV1
+
+pub struct HostIdentitySshProjectionTurnV1:
+    owner: Option<HostIdentitySshProjectionV1>
+    ready: bool
+    cleanup_pending: bool
+    error: text
+
+pub struct HostIdentitySshProjectionCloseTurnV1:
+    owner: Option<HostIdentitySshProjectionV1>
+    completed: bool
+    error: text
+
+# Composition ports accept only actual opaque owners. No raw registry token,
+# directory, file descriptor or namespace proof is accepted from callers.
+pub fn host_identity_store_projection_begin_v1(store: HostIdentityStoreV1, key_leaf: text, hosts_leaf: text) -> HostIdentitySshProjectionTurnV1:
+    val turn = host_identity_platform_projection_begin_v1(store.platform, key_leaf, hosts_leaf)
+    var owner: Option<HostIdentitySshProjectionV1> = None
+    if val actual = turn.owner: owner = Some(HostIdentitySshProjectionV1(platform: actual))
+    HostIdentitySshProjectionTurnV1(owner, turn.ready, turn.cleanup_pending, turn.error)
+
+pub fn host_identity_store_projection_step_v1(owner: HostIdentitySshProjectionV1, store: HostIdentityStoreV1, cancel: bool) -> HostIdentitySshProjectionTurnV1:
+    val turn = host_identity_platform_projection_step_v1(owner.platform, store.platform, cancel)
+    HostIdentitySshProjectionTurnV1(if turn.owner == None: None else: Some(owner), turn.ready, turn.cleanup_pending, turn.error)
+
+pub fn host_identity_store_projection_paths_v1(owner: HostIdentitySshProjectionV1, store: HostIdentityStoreV1) -> Result<HostIdentitySshPathsV1, text>:
+    host_identity_platform_projection_paths_v1(owner.platform, store.platform)
+
+pub fn host_identity_store_projection_close_v1(owner: HostIdentitySshProjectionV1) -> HostIdentitySshProjectionCloseTurnV1:
+    val turn = host_identity_platform_projection_close_v1(owner.platform)
+    HostIdentitySshProjectionCloseTurnV1(if turn.consumed: None else: Some(owner), turn.completed, turn.error)

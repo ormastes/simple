@@ -669,10 +669,34 @@ extern fn rt_file_move(old_path: text, new_path: text) -> bool
 use std.io_runtime.{file_copy}
 extern fn rt_file_size(path: text) -> usize?
 
-# NOTE: no rt_ symbol returns a full FileMetadata struct (size/is_file/
-# is_dir/is_symlink/readonly/modified/created) — only rt_file_stat/
-# rt_file_size (single scalars) exist. Left as bare extern, unresolvable-here.
-extern fn file_metadata(path: text) -> FileMetadata?
+# file_metadata: pure-Simple composition of the scalar probes the C runtime
+# exports (no rt_ symbol returns a whole FileMetadata). `is_symlink`,
+# `readonly` and `created` are not observable through those probes and are
+# reported as false/false/0 — see
+# doc/08_tracking/bug/full_cli_native_link_missing_symbols_2026-11-15.md.
+use std.io_runtime.{file_size as _fs_meta_file_size}
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow as _fs_meta_is_regular, file_modified_time as _fs_meta_mtime}
+
+fn file_metadata(path: text) -> FileMetadata?:
+    val is_dir = dir_exists(path)
+    if not is_dir and not file_exists(path):
+        return None
+    val mtime = _fs_meta_mtime(path)
+    var size: i64 = 0
+    if not is_dir:
+        size = _fs_meta_file_size(path)
+    var modified: i64 = 0
+    if mtime > 0:
+        modified = mtime
+    Some(FileMetadata(
+        size: size as usize,
+        is_file: _fs_meta_is_regular(path),
+        is_dir: is_dir,
+        is_symlink: false,
+        readonly: false,
+        modified: modified as usize,
+        created: 0
+    ))
 
 # file_rename has no rt_file_rename runtime symbol; the real symbol is
 # rt_file_move (runtime_native.c:2546, same (src,dst)->bool contract) —

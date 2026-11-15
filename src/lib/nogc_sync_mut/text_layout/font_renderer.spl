@@ -369,7 +369,7 @@ export use std.nogc_sync_mut.text_layout.font_types.{
     CachedGlyph, FontCacheStats, FontGlyphRun, FontTextPayload, FontRenderQuad, FontRenderBatch,
     FontRenderConfig, FontExecutionPolicy, font_execution_plan, font_execution_plan_into, font_render_category_name,
     font_render_config_normalize, font_render_config_default_for_size,
-    font_render_config_identity, font_render_config_valid,
+    font_render_config_identity, font_render_config_identity_sizeless, font_render_config_valid,
     font_render_batch_atlas_owner_identity, font_render_batch_atlas_cache_identity
 }
 
@@ -1226,6 +1226,8 @@ class FontRenderer:
     # the wipe, i.e. to the previous behaviour.
     atlas_parks: [FontAtlasPark] = []
     active_render_config_identity: text = ""
+    # The same identity with `size=` masked: what decides an atlas wipe.
+    active_render_config_atlas_identity: text = ""
     # ---- Staged FontRenderBatch payload -----------------------------------
     # The prepared batch is written HERE instead of being returned. A
     # FontRenderBatch returned across a call kept its scalars/identity/atlas
@@ -1507,9 +1509,14 @@ class FontRenderer:
             var cache = self.cache
             cache.sync_render_config_identity(identity)
             self.cache = cache
-            if self.active_render_config_identity != "":
+            # Atlas cells are keyed by size already (`_font_atlas_entry_index`),
+            # so a size-only change keeps the atlas. Wiping it here re-rasterised
+            # every glyph and forced a full GPU atlas repack per size switch.
+            val atlas_identity = font_render_config_identity_sizeless(identity)
+            if self.active_render_config_atlas_identity != "" and atlas_identity != self.active_render_config_atlas_identity:
                 self._reset_font_atlas(self.atlas_face_generation, self.atlas_font_identity)
             self.active_render_config_identity = identity
+            self.active_render_config_atlas_identity = atlas_identity
 
     # Copy an inbound batch into the staged slot and answer with the quad
     # count. The aggregate crosses only as an INBOUND parameter and the answer

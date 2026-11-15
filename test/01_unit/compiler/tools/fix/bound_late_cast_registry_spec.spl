@@ -1,0 +1,55 @@
+"""
+## Purpose and audience
+Purpose: Prove the SPL-BOUND-002 boundary-return autofix is reachable through the
+fix rule registry that `simple fix` and lint --fix run, and that what it proposes
+is Uncertain (never Safe) and non-empty.
+Audience: compiler and tooling engineers maintaining the fix engine.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Single-file, direct `Unit(extern(literal args))` casts only.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.tools.fix.rules.registry.{registry_fix_producers, run_registry_producer, run_registry_producers}
+use compiler.tools.fix.producer.{fix_unit_from_source}
+use std.tooling.easy_fix.types.{easyfix_code}
+
+fn src() -> text:
+    "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    DistanceKm(c_read_distance())\n"
+
+describe "SPL-BOUND-002 fix rule registration":
+    """The rule is a registered producer, so the fix engine can reach it."""
+
+    it "lists SPL-BOUND-002 among the registry producers":
+        # @req: REQ-DIAG-POLICY-001
+        step("Read the registered producer codes")
+        var codes: [text] = []
+        for p in registry_fix_producers():
+            codes.push(p.code)
+        expect(codes.contains("SPL-BOUND-002")).to_equal(true)
+
+    it "dispatches the code to an Uncertain proposal with an adapter edit":
+        # @req: REQ-DIAG-POLICY-001
+        step("Run the registry producer for the code over a late-cast unit")
+        val fixes = run_registry_producer("SPL-BOUND-002", fix_unit_from_source("/w/client.spl", src()))
+        expect(fixes.len()).to_equal(1)
+        expect(easyfix_code(fixes[0])).to_equal("SPL-BOUND-002")
+        expect(fixes[0].confidence_str()).to_equal("uncertain")
+        expect(fixes[0].is_safe()).to_equal(false)
+        expect(fixes[0].replacements.len()).to_equal(2)
+        expect(fixes[0].replacements[0].new_text).to_contain("fn c_read_distance_as_DistanceKm() -> DistanceKm:")
+        expect(fixes[0].replacements[1].new_text).to_equal("c_read_distance_as_DistanceKm()")
+
+    it "is included in the full registry run and absent for clean source":
+        # @req: REQ-DIAG-POLICY-001
+        step("Run all registry producers over the source and over a clean one")
+        var found = false
+        for f in run_registry_producers(fix_unit_from_source("/w/client.spl", src())):
+            if easyfix_code(f) == "SPL-BOUND-002":
+                found = true
+        expect(found).to_equal(true)
+        val clean = run_registry_producer("SPL-BOUND-002", fix_unit_from_source("/w/c.spl", "fn f() -> i64:\n    1\n"))
+        expect(clean.len()).to_equal(0)
