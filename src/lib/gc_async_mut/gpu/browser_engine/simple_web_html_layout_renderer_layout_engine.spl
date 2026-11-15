@@ -375,6 +375,18 @@ fn flex_zero_basis_floor_w(nodes: [HNode], styles: [Style], child_index: HtmlChi
     if content > frame: content else: frame
 
 # Outer width a `width` declaration gives the item (0 for auto).
+# Move a laid-out box and every descendant box down by `dy`.
+fn shift_subtree_y(child_index: HtmlChildIndex, node: i32, dy: i32, by: [i32]) -> [i32]:
+    var out = by
+    if dy == 0:
+        return out
+    out[node] = out[node] + dy
+    var c = child_index.first_child[node]
+    while c >= 0:
+        out = shift_subtree_y(child_index, c, dy, out)
+        c = child_index.next_sibling[c]
+    out
+
 fn flex_item_authored_outer_w(node: HNode, st: Style, container_w: i32) -> i32:
     if st.width_px > 0 or st.width_zero:
         if node.has_widget_class or node.has_icon_image_class or st.border_box:
@@ -2200,7 +2212,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             flex_h = 1
         out_bh[i] = flex_h
         return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, flex_h)
-    if st.display == "flex" and st.flex_direction == "column":
+    val col_reverse = st.flex_direction == "column-reverse"
+    if st.display == "flex" and (st.flex_direction == "column" or col_reverse):
         var col_nonabs_count = 0
         var col_run_h = 0
         var col_auto_main_margin_count = 0
@@ -2333,6 +2346,29 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 flex_h_col = fill_bottom_col - y
         if flex_h_col < 1:
             flex_h_col = 1
+        val col_start_packed = st.justify_content == "flex-start" or st.justify_content == "normal" or st.justify_content == "start"
+        if col_reverse and col_start_packed:
+            # `column-reverse`: main-start is the bottom of the content box.
+            # The column was laid out top-down; restack the in-flow items in
+            # DOM order upward from the bottom, each keeping its own physical
+            # margins (subtrees move with them). Chrome 159: three 24px items
+            # in a 90px column, the middle one with margin-top:4px, sit at y
+            # 66, 42, 14.
+            # ponytail: flex-start packing only; other justify-content values
+            # keep the top-down column until reverse justify is modelled.
+            var cursor = y + flex_h_col - st.pad_b - st.border_b
+            var placed = 0
+            var rc = child_index.first_child[i]
+            while rc >= 0:
+                val rst = styles[rc]
+                if not rst.position_absolute and rst.display != "none":
+                    if placed > 0:
+                        cursor = cursor - st.row_gap_px
+                    val new_y = cursor - rst.margin_b - out_bh[rc]
+                    out_by = shift_subtree_y(child_index, rc, new_y - out_by[rc], out_by)
+                    cursor = new_y - rst.margin_t
+                    placed = placed + 1
+                rc = child_index.next_sibling[rc]
         out_bh[i] = flex_h_col
         return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, flex_h_col)
     var cy = y + st.border_t + st.pad_t
