@@ -732,7 +732,7 @@ pub fn cl_translate_instruction(
         val dest: LocalId = rt_tuple_get(payload, 0)
         val value: MirConstValue = rt_tuple_get(payload, 1)
         val type_: MirType = rt_tuple_get(payload, 2)
-        val cl_val = cl_translate_const_value(ctx, cl_module, value, type_, MirCallOrigin.Source)
+        val cl_val = cl_translate_const_value(ctx, cl_module, value, type_, func.name, MirCallOrigin.Source)
         value_map[dest.id] = cl_val
         if slot_map.has(dest.id):
             val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
@@ -806,11 +806,7 @@ pub fn cl_translate_instruction(
             cranelift_store(ctx, val_, addr, 0)
 
         case LoadGlobal(dest, symbol):
-            if not global_handles.has(symbol.id):
-                panic("Cranelift global load missing declaration: {symbol.id}")
-            val addr = cranelift_bound_global_address_v1(ctx, global_handles[symbol.id])
-            if addr == 0:
-                panic("Cranelift global address unavailable: {symbol.id}")
+            val addr = cl_global_address(ctx, cl_module, global_handles, symbol.id, "load", func)
             # Globals are declared at their true width (rt_cranelift_declare_
             # global_data sizes the data object from the type code), so the
             # load must stay typed — but the uniformly-i64 lane requires
@@ -828,20 +824,12 @@ pub fn cl_translate_instruction(
             store_local_result(ctx, dest, result, slot_map, func)
 
         case StoreGlobal(symbol, value):
-            if not global_handles.has(symbol.id):
-                panic("Cranelift global store missing declaration: {symbol.id}")
-            val addr = cranelift_bound_global_address_v1(ctx, global_handles[symbol.id])
-            if addr == 0:
-                panic("Cranelift global address unavailable: {symbol.id}")
+            val addr = cl_global_address(ctx, cl_module, global_handles, symbol.id, "store", func)
             val value_ = cl_translate_operand(ctx, cl_module, value, value_map, slot_map, func)
             cranelift_store(ctx, value_, addr, 0)
 
         case GlobalAddr(dest, symbol, _):
-            if not global_handles.has(symbol.id):
-                panic("Cranelift global address missing declaration: {symbol.id}")
-            val addr = cranelift_bound_global_address_v1(ctx, global_handles[symbol.id])
-            if addr == 0:
-                panic("Cranelift global address unavailable: {symbol.id}")
+            val addr = cl_global_address(ctx, cl_module, global_handles, symbol.id, "address", func)
             value_map[dest.id] = addr
             store_local_result(ctx, dest, addr, slot_map, func)
 
@@ -1065,13 +1053,47 @@ pub fn cl_translate_instruction(
             # report success. Same shape as the C and LLVM backends
             # (`emit_unsupported_panic`), including their
             # `SIMPLE_ALLOW_UNLOWERED_MIR=1` escape hatch.
+            # The kind comes from the module being lowered, so on the AOT lane
+            # it fails that module (cl_module_codegen_error), not the worker;
+            # the instruction is dropped and the module never emits an object.
             val cl_unlowered_name = mir_instkind_variant_name(inst_kind)
-            eprint("[cranelift] E-BACKEND-CRANELIFT-INST-{cl_unlowered_name}: Cranelift backend does not lower {cl_unlowered_name}")
             var allow_unlowered = false
             unsafe(capabilities: [ffi]):
                 allow_unlowered = (rt_env_get("SIMPLE_ALLOW_UNLOWERED_MIR") ?? "") == "1"
-            if not allow_unlowered:
-                panic("compile error: E-BACKEND-CRANELIFT-INST-{cl_unlowered_name}: Cranelift backend does not lower {cl_unlowered_name}")
+            if allow_unlowered:
+                eprint("[cranelift] E-BACKEND-CRANELIFT-INST-{cl_unlowered_name}: Cranelift backend does not lower {cl_unlowered_name}")
+            else:
+                cl_module_codegen_error(cl_module, "E-BACKEND-CRANELIFT-INST-{cl_unlowered_name}: in {func.name}: Cranelift backend does not lower {cl_unlowered_name}")
+
+# A condition of the module being lowered that the lowering cannot translate
+# is a compile error of THAT module, like a refused call ABI
+# (cl_aot_refuse_call_abi): recorded into the open AOT module record, so the
+# AOT entry fails the module before any object is emitted, and the caller
+# emits a placeholder to keep the IR well formed. A panic here used to abort
+# the codegen worker and fail every module of its Stage 3 claim. With no AOT
+# record open for this module (the JIT lane, or a caller outside both AOT
+# entries) it stays the fail-closed panic.
+fn cl_module_codegen_error(cl_module: i64, message: text):
+    if cl_aot_refuse_call_abi(cl_module, message):
+        eprint("[cranelift] {message}")
+        return
+    panic("compile error: {message}")
+
+# Address of a module global for `use` (load/store/address) in `func`. A global
+# with no declaration in this module, or one the provider gives no address
+# for, is the module's compile error; the placeholder address is never
+# emitted (the module fails before its object is written).
+fn cl_global_address(ctx: i64, cl_module: i64, global_handles: Dict<i64, CraneliftGlobalBinding>,
+        symbol_id: i64, use_: text, func: MirFunction) -> i64:
+    if not global_handles.has(symbol_id):
+        cl_module_codegen_error(cl_module, "E-BACKEND-CRANELIFT-GLOBAL-UNDECLARED: global {symbol_id}: {use_} in {func.name}: no declaration in this module")
+        return cranelift_iconst(ctx, CL_TYPE_I64, 0)
+    val addr = cranelift_bound_global_address_v1(ctx, global_handles[symbol_id])
+    if addr == 0:
+        cl_module_codegen_error(cl_module, "E-BACKEND-CRANELIFT-GLOBAL-ADDRESS: global {symbol_id}: {use_} in {func.name}: the Cranelift provider gave no address")
+        return cranelift_iconst(ctx, CL_TYPE_I64, 0)
+    # EXPLICIT return: mixed-return/tail rule (see cl_translate_operand).
+    return addr
 
 # ============================================================================
 # Terminator Translation
@@ -1271,7 +1293,7 @@ fn cl_translate_operand(
                 return load_local(ctx, local_value.id, value_map, slot_map, func)
             return cranelift_iconst(ctx, CL_TYPE_I64, 0)
         case Const(value, type_):
-            return cl_translate_const_value(ctx, cl_module, value, type_, operand.call_origin)
+            return cl_translate_const_value(ctx, cl_module, value, type_, func.name, operand.call_origin)
 
 # Uniform-i64 memory load for a local's value: floats keep their typed
 # load, everything else loads as I64 (the lane is uniformly i64 — see the
@@ -1335,7 +1357,7 @@ fn load_local(
 # Constant Translation
 # ============================================================================
 
-fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type_: MirType, origin: MirCallOrigin = MirCallOrigin.Source) -> i64:
+fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type_: MirType, func_name: text, origin: MirCallOrigin = MirCallOrigin.Source) -> i64:
     # EXPLICIT returns: mixed-return/tail rule (see cl_translate_operand).
     match value:
         case Int(_):
@@ -1364,7 +1386,8 @@ fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type
                     if address == 0:
                         if cl_jit_refuse_call_abi(cl_module, "E-JIT-FUNCTION-ADDRESS-UNBOUND: {v}: the Cranelift JIT provider has no address for this function value"):
                             return cranelift_iconst(ctx, CL_TYPE_I64, 0)
-                        panic("Cranelift function address missing declaration: {v}")
+                        cl_module_codegen_error(cl_module, "E-BACKEND-CRANELIFT-FUNCTION-ADDRESS: '{v}': function value in {func_name}: no declaration or import for this function")
+                        return cranelift_iconst(ctx, CL_TYPE_I64, 0)
                     return address
                 case Ptr(_, _):
                     # MIR's literal-print fast path passes raw UTF-8 bytes
@@ -1491,7 +1514,10 @@ fn cl_translate_binop(ctx: i64, cl_module: i64, op: MirBinOp, left_value: i64, r
         case BroadcastPow:
             translate_runtime_import_call_i64(ctx, cl_module, "__simple_runtime_broadcast_pow", [a, b])
         case _:
-            panic("Unsupported Cranelift binary operation")
+            # Every MirBinOp variant has an arm above; reached only through a
+            # corrupted operator value of the function being lowered.
+            cl_module_codegen_error(cl_module, "E-BACKEND-CRANELIFT-BINOP: in {func.name}: unsupported binary operation")
+            cranelift_iconst(ctx, CL_TYPE_I64, 0)
 
 fn cl_mask_shift_count(ctx: i64, count: i64, result_type: MirType) -> i64:
     # SSA uses I64 even for narrow destinations, so the hardware's implicit
