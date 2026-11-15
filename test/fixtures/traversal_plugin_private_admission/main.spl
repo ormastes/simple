@@ -1,0 +1,93 @@
+# AUTHORED / UNRUN. Launch in an isolated user-config environment containing
+# this fixture's public key; never overwrite the developer's real trust root.
+# argv: actual dependency-free provider.so, fresh absolute scratch directory.
+use app.io.cli_ops.{get_args}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.string_core.{text_to_bytes}
+use std.common.binary_inspect.{hex_to_bytes}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded_bytes, file_write_bytes}
+use std.nogc_sync_mut.sffi.dynlib_exact_admission_v1.{dynlib_admit_exact_v1}
+use std.nogc_sync_mut.sffi.dynamic.{provider_lifetime_register_bound_v1,
+    provider_lifetime_begin_bound_v1, provider_lifetime_end_v1}
+use compiler.common.driver_compile_options.{traversal_plugin_provider_request_v1}
+use compiler.common.cache_contract.aspect_plugin_model_v1.*
+use compiler.common.cache_contract.traversal_plugin_selection_v1.*
+use compiler.loader.traversal_plugin_host_trust_v1.{traversal_plugin_host_trust_root_resolve_v1}
+use compiler.loader.traversal_plugin_admission_v1.{traversal_plugin_selection_load_v1,
+    traversal_plugin_host_abi_fingerprint_v1, TRAVERSAL_PLUGIN_ABI_ID_V1,
+    TRAVERSAL_PLUGIN_ENTRY_SYMBOL_V1}
+use compiler.loader.traversal_plugin_selection_owner_v1.{traversal_plugin_selection_validate_v1,
+    traversal_plugin_selection_validate_request_v1}
+
+fn limb(bytes: [i64], start: i64) -> u64:
+    var value = 0u64
+    for index in start..(start + 8): value = (value << 8) | bytes[index].to_u64()
+    value
+
+fn main() -> i32:
+    val args = get_args()
+    assert(args.len() == 3)
+    val artifact = args[1]
+    val scratch = args[2]
+    assert(artifact.starts_with("/") and scratch.starts_with("/"))
+    val key = pure_ed25519_keypair_from_seed([0u8, 1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8,
+        8u8, 9u8, 10u8, 11u8, 12u8, 13u8, 14u8, 15u8, 16u8, 17u8, 18u8,
+        19u8, 20u8, 21u8, 22u8, 23u8, 24u8, 25u8, 26u8, 27u8, 28u8, 29u8, 30u8, 31u8])
+    val trust = traversal_plugin_host_trust_root_resolve_v1().unwrap()
+    assert(trust.public_key == key.1)
+    val code_hex = sha256_u8_hex(file_read_regular_no_follow_bounded_bytes(artifact, 67108864).unwrap())
+    val host_abi = traversal_plugin_host_abi_fingerprint_v1()
+    assert(host_abi != "")
+    val policy = sdn_encode_canonical(SdnValue.Dict({
+        "version": SdnValue.Int(1), "kind": SdnValue.String("simple-traversal-plugin-allowlist"),
+        "hostAbi": SdnValue.String(host_abi), "plugins": SdnValue.Array([SdnValue.Dict({
+            "providerId": SdnValue.String("fixture.private-admission"),
+            "artifactPath": SdnValue.String(artifact), "codeDigest": SdnValue.String("sha256:" + code_hex),
+            "abi": SdnValue.String(TRAVERSAL_PLUGIN_ABI_ID_V1),
+            "entry": SdnValue.String(TRAVERSAL_PLUGIN_ENTRY_SYMBOL_V1),
+            "hostAbi": SdnValue.String(host_abi), "dependencies": SdnValue.Array([])})])})) + "\n"
+    val signature = pure_ed25519_sign(key.0, key.1, text_to_bytes(policy))
+    val policy_path = scratch + "/policy.sdn"
+    val signature_path = scratch + "/policy.sig"
+    assert(file_write_bytes(policy_path, text_to_bytes(policy)))
+    assert(file_write_bytes(signature_path, signature))
+    val request = traversal_plugin_provider_request_v1("fixture.private-admission", policy_path, signature_path).unwrap()
+    val abi = TRAVERSAL_PLUGIN_ABI_ID_V1 + ":" + host_abi
+    val instance = plugin_instance_descriptor_v1(PluginDefinitionV1(code_digest: "sha256:" + code_hex,
+        fields: [PluginConfigFieldV1(name: "entry", role: PluginFieldRoleV1.Instance),
+            PluginConfigFieldV1(name: "abi", role: PluginFieldRoleV1.Instance)]),
+        [PluginConfigValueV1(name: "entry", value: TRAVERSAL_PLUGIN_ENTRY_SYMBOL_V1),
+            PluginConfigValueV1(name: "abi", value: abi)]).unwrap()
+    val descriptor = TraversalPluginDescriptorV1(provider_id: request.provider_id,
+        provider_code_digest: "sha256:" + code_hex, entry_identity: TRAVERSAL_PLUGIN_ENTRY_SYMBOL_V1,
+        abi_schema: abi, policy_identity: traversal_policy_identity_v1("sha256:" + sha256_text(policy),
+            trust.public_key_fingerprint).unwrap(), instance: instance)
+    val identity = traversal_descriptor_identity_v1(descriptor).unwrap()
+    val digest = hex_to_bytes(sha256_text(identity))
+    # A real mapping and matching generic bound lease still confer no compiler admission.
+    val raw = unsafe(capabilities: [ffi]): dynlib_admit_exact_v1(artifact, code_hex).unwrap()
+    val generic = unsafe(capabilities: [ffi]): provider_lifetime_register_bound_v1(raw,
+        limb(digest, 0), limb(digest, 8), limb(digest, 16), limb(digest, 24))
+    assert(generic > 0u64 and generic <= 9223372036854775807u64)
+    val borrowed = unsafe(capabilities: [ffi]): provider_lifetime_begin_bound_v1(generic,
+        limb(digest, 0), limb(digest, 8), limb(digest, 16), limb(digest, 24))
+    assert(borrowed == raw)
+    unsafe(capabilities: [ffi]): provider_lifetime_end_v1(generic)
+    val forged = TraversalPluginSelectionV1(provider_token: generic as i64, canonical_identity: identity)
+    assert(traversal_plugin_selection_validate_v1(forged).is_err())
+    assert(traversal_plugin_selection_validate_request_v1(forged, request).is_err())
+    # The only positive path reads fixed host trust, verifies signature and maps exact bytes.
+    val selected = traversal_plugin_selection_load_v1(request).unwrap()
+    assert(selected.canonical_identity == identity)
+    assert(traversal_plugin_selection_validate_request_v1(selected, request).unwrap().provider_id == request.provider_id)
+    assert(traversal_plugin_selection_validate_v1(selected).unwrap().provider_code_digest == "sha256:" + code_hex)
+    val changed = traversal_plugin_provider_request_v1(request.provider_id, scratch + "/other.sdn", signature_path).unwrap()
+    assert(traversal_plugin_selection_validate_request_v1(selected, changed).is_err())
+    val corrupt = TraversalPluginSelectionV1(..selected, canonical_identity: identity + "x")
+    assert(traversal_plugin_selection_validate_v1(corrupt).is_err())
+    assert(traversal_plugin_selection_validate_v1(TraversalPluginSelectionV1(
+        provider_token: selected.provider_token + 1000, canonical_identity: identity)).is_err())
+    0
