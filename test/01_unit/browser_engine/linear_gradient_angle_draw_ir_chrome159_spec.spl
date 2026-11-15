@@ -61,8 +61,12 @@ PAGE5 (`--window-size=200,100`, small boxes, where the span error is largest):
 |                                                          | (6, 26)    | #592cd2 |
 |                                                          | (9, 26)    | #0d07f9 |
 Each Chrome channel is asserted within 6, as in the CPU raster spec. The lane
-parity rows assert every opaque box within 1 per channel between the Draw IR
-lane and the CPU raster.
+parity rows assert every opaque angled / multi-stop box within 1 per channel
+between the Draw IR lane and the CPU raster; the default top-to-bottom
+two-stop box within 2 (the CPU raster paints it with its own endpoint-exact
+dithered painter, which AC-12 shows is the one off from Chrome on small
+boxes: 10x10 #000 -> #fff row 0 is Chrome #0d0d0d, Draw IR #0d0d0d, CPU
+raster #000000). AC-13 runs the primitive on a real Vulkan device.
 """
 
 """
@@ -72,6 +76,10 @@ Traceability: REQ-BROWSER-ENGINE-LINEAR-GRADIENT-ANGLE-RASTER-001 — the Draw I
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d}
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d.backend_emu.{emu_draw_linear_gradient_stops}
+use std.io_runtime.{file_exists}
 
 val PAGE: text = "<!doctype html><html><head><style>body{{margin:0}}</style></head><body><div style=\"width:200px;height:100px;background:linear-gradient(120deg, #173b7a, #6d28d9)\"></div><div style=\"width:200px;height:100px;background-image:linear-gradient(to right, #ff0000, #00ff00 50%, #0000ff)\"></div><div style=\"width:200px;height:100px;background:linear-gradient(#000000, #ffffff)\"></div></body></html>"
 
@@ -82,6 +90,8 @@ val PAGE3: text = "<!doctype html><html><head><style>body{{margin:0;background:#
 val PAGE4: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}div{{width:200px;height:100px}}</style></head><body><div style=\"background:linear-gradient(45deg, #000000, #ffffff)\"></div><div style=\"background:linear-gradient(135deg, #ff0000, #0000ff)\"></div><div style=\"background:linear-gradient(to right, #ff0000 20px, #0000ff 180px)\"></div><div style=\"background:linear-gradient(to right, rgba(255,0,0,0.5), #0000ff)\"></div></body></html>"
 
 val PAGE5: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}div{{width:10px;height:10px}}.s{{width:12px;height:6px}}</style></head><body><div style=\"background:linear-gradient(45deg, #000000, #ffffff)\"></div><div class=\"s\" style=\"background:linear-gradient(135deg, #ff0000, #0000ff)\"></div><div class=\"s\" style=\"background:linear-gradient(to bottom right, #000000, #ffffff)\"></div><div style=\"background:linear-gradient(to right, rgba(255,0,0,0.5), #0000ff)\"></div></body></html>"
+
+val PAGE7: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}</style></head><body><div style=\"width:10px;height:10px;background:linear-gradient(#000000, #ffffff)\"></div><div style=\"width:12px;height:6px;background:linear-gradient(180deg, #ff0000, #0000ff)\"></div></body></html>"
 
 fn draw_ir(html: text, h: i32) -> [u32]:
     simple_web_layout_render_html_pixels_engine2d(html, 200, h, "software")
@@ -241,7 +251,7 @@ describe "Draw IR linear-gradient vs Chrome 159":
         expect(worst(px, 9, 26, 0x0d07f9u32)).to_be_less_than(7)
 
 describe "Draw IR linear-gradient vs the CPU raster":
-    it "AC-11: the two lanes agree within 1 per channel on every opaque gradient pixel":
+    it "AC-11: the two lanes agree within 1 per channel on opaque angled and multi-stop gradients":
         val ir5 = draw_ir(PAGE5, 100)
         val cpu5 = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE5, 200, 100, "cpu_simd")
         step("small boxes: 10x10 45deg, 12x6 135deg, 12x6 to bottom right")
@@ -258,3 +268,56 @@ describe "Draw IR linear-gradient vs the CPU raster":
         val cpu1 = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, 200, 300, "cpu_simd")
         step("120deg, three-stop to right")
         expect(lane_worst(ir1, cpu1, 0, 200, 0, 200)).to_be_less_than(2)
+        # The default top-to-bottom two-stop ramp: the CPU raster paints it with
+        # its own endpoint-exact dithered row painter (`mix_color_vertical_centered`),
+        # which lands up to 2 from the Draw IR lane on 200x100 and is the one
+        # that is off from Chrome on small boxes (AC-12). Bounded here so the
+        # box is compared at all; the Chrome rows are the arbiter.
+        step("200x100 default top-to-bottom ramp")
+        expect(lane_worst(ir1, cpu1, 0, 200, 200, 300)).to_be_less_than(3)
+
+    it "AC-12: the default top-to-bottom two-stop ramp samples row centres, as Chrome does":
+        val px = draw_ir(PAGE7, 100)
+        step("Chrome 159, 10x10 #000 -> #fff: rows 0, 1, 4, 5, 9")
+        expect(worst(px, 5, 0, 0x0d0d0du32)).to_be_less_than(7)
+        expect(worst(px, 5, 1, 0x262626u32)).to_be_less_than(7)
+        expect(worst(px, 5, 4, 0x737373u32)).to_be_less_than(7)
+        expect(worst(px, 5, 5, 0x8c8c8cu32)).to_be_less_than(7)
+        expect(worst(px, 5, 9, 0xf2f2f2u32)).to_be_less_than(7)
+        step("Chrome 159, 12x6 180deg red -> blue: rows 0, 2, 5")
+        expect(worst(px, 6, 10, 0xe90015u32)).to_be_less_than(7)
+        expect(worst(px, 6, 12, 0x94006au32)).to_be_less_than(7)
+        expect(worst(px, 6, 15, 0x1500eau32)).to_be_less_than(7)
+
+describe "Draw IR linear-gradient on a real Vulkan device":
+    it "AC-13: a VulkanBackend paints the same gradient pixels as the software reference":
+        # Runs where a Vulkan ICD is installed (llvmpipe on the CI hosts:
+        # VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json). Where none is,
+        # the row has nothing to drive and says so.
+        if not file_exists("/usr/share/vulkan/icd.d/lvp_icd.json"):
+            step("no llvmpipe ICD on this host: no Vulkan device to compare")
+            return
+        var e = Engine2D.create_with_backend_fast(40, 20, "vulkan")
+        step("the engine really selected Vulkan (no silent software fallback)")
+        expect(e.backend_name()).to_equal("vulkan")
+        val colors: [u32] = [0xFF000000u32, 0xFFFFFFFFu32]
+        val positions: [i32] = [0, 1000]
+        e.clear(0xFFFFFFFFu32)
+        e.draw_gradient_rect_stops(0, 0, 40, 20, colors, positions, 45)
+        e.submit_batch()
+        val rb = e.read_pixels_with_source()
+        expect(rb.source).to_equal("device_readback")
+        var b = SoftwareBackend.create()
+        expect(b.init(40, 20)).to_equal(true)
+        b.clear(0xFFFFFFFFu32)
+        emu_draw_linear_gradient_stops(b, 0, 0, 40, 20, colors, positions, 45)
+        val p = b.read_pixels()
+        var diff = 0
+        var i = 0
+        while i < 800:
+            if (rb.pixels[i] & 0xFFFFFFu32) != (p[i] & 0xFFFFFFu32):
+                diff = diff + 1
+            i = i + 1
+        step("40x20 45deg black -> white: every device pixel equals the software one")
+        expect(diff).to_equal(0)
+        b.shutdown()

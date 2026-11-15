@@ -1716,7 +1716,8 @@ never cache an answer computed while exhausted) —
 
 ## 2026-11-15 — lane parity: Draw IR gradients, cpu_simd vs Vulkan census, hardware Vulkan 4K
 
-- **Draw IR linear gradients now match the fb raster bit for bit.**
+- **Draw IR angled / multi-stop linear gradients now match the fb raster
+  bit for bit (opaque).**
   `emu_draw_linear_gradient_stops` (`engine2d/backend_emu.spl`) used the
   corner pixel CENTRES as the line ends (`(w-1)` span) and truncated alpha;
   it now uses the fb raster's mapping (integer Q16 sin/cos tables generated
@@ -1727,6 +1728,15 @@ never cache an answer computed while exhausted) —
   (Chrome 159 rows for 45/135deg, `to bottom right` on 12x6, translucent
   stops, and a whole-box lane-parity row; 9/11 -> 11/11). Translucent stops
   stay up to 2 apart: the fb raster quantises alpha to 0..100 %.
+- **The default top-to-bottom two-stop ramp changed on the Draw IR lane
+  too** (it goes through the same primitive): row centres along the line
+  instead of exact stops on the first/last row. That is what Chrome does --
+  10x10 `#000 -> #fff` row 0: Chrome #0d0d0d, Draw IR #0d0d0d (was #000000).
+  The fb raster keeps its endpoint-exact dithered painter
+  (`mix_color_vertical_centered`), which is now the outlier: #000000 there,
+  up to 21 off on 12x6, within 2 on 200x100 (AC-11 bounds it at 2, AC-12
+  pins Chrome). AC-13 runs the primitive on a real `VulkanBackend`
+  (llvmpipe): device readback equals the software reference pixel for pixel.
 - **Trap: the catalog gate's `vulkan` lane never calls that function.**
   `simple_web_render_html_to_pixels_with_engine2d_backend` paints non-"text
   document" pages through the fb raster and presents them; only the Draw IR
@@ -1736,8 +1746,8 @@ never cache an answer computed while exhausted) —
   before claiming a GPU ran. `feature_showcase.spl` is the place where the
   primitive runs on a real `VulkanBackend` (byte-identical, 38 primitives).
 - **cpu_simd vs Vulkan (llvmpipe), 900x760: 62 pixels over all 8 pages**,
-  all text ink one row past the CPU lane's clip; Chrome mismatch identical
-  per page. Record + 25 px repro:
+  all text ink: some glyphs one row lower on Vulkan (per glyph, root cause
+  not found); Chrome mismatch identical per page. Record + 25 px repro:
   `doc/08_tracking/bug/web_vulkan_lane_control_text_one_row_past_clip_2026-11-15.md`.
 - **Hardware Vulkan 4K (NVIDIA GB10, driver 580.173.02,
   `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json`, strict

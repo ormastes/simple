@@ -157,8 +157,8 @@ max-content of mixed inline content, control UA font reset, `h6` margins
   - **Fixed 2026-11-15 (engine2d lane parity):** the engine2d ramp
     (`emu_draw_linear_gradient_stops`) now uses the fb raster's mapping
     exactly -- Q16 angle, line `|w sin a| + |h cos a|` through the box
-    edges, 1025-entry LUT, rounded premultiplied alpha. Opaque gradients
-    are bit-identical between the Draw IR lane and `cpu_simd` (was 16
+    edges, 1025-entry LUT, rounded premultiplied alpha. Opaque angled /
+    multi-stop gradients are bit-identical between the Draw IR lane and `cpu_simd` (was 16
     levels on a 12x6 `to bottom right` box, 13 on a 10x10 45deg box).
     Translucent stops still differ by up to 2: the fb raster quantises
     each pixel's alpha to 0..100 % (`background_gradient_pixel_opacity`);
@@ -168,6 +168,12 @@ max-content of mixed inline content, control UA font reset, `h6` margins
     helpers (`gradient_angle_sin_cos_q16`, `linear_gradient_color_at`);
     folding it onto the engine2d twins is a browser_engine edit left
     for when that tree is not being edited by another lane.
+  - **Open (fb raster):** the default top-to-bottom two-stop ramp
+    (`mix_color_vertical_centered`) puts the exact stop colours on the first
+    and last rows; Chrome 159 samples row centres (10x10 `#000 -> #fff` row
+    0: Chrome #0d0d0d, Draw IR #0d0d0d, fb raster #000000; 12x6 red -> blue
+    up to 21 off). Pinned on the Draw IR side by AC-12 of
+    `linear_gradient_angle_draw_ir_chrome159_spec.spl`.
   - `flex:1 1 100px;max-width:25%` (a growing item with a definite basis)
     is not frozen at its max-width; only zero-basis items are.
 - **Fixed from the 5066a3eeae1 / 5ffa5564085 review:** an angle token is
