@@ -45,8 +45,8 @@ Node pages contain no edge export; page exhaustion is separate from graph
 completeness. Table escapes control characters; structured output uses SDN.
 Native JSON is unsupported. Diagnostics retain their snapshot/rule/entity.
 
-Exit 0: complete scoped query (not qualified evidence). Exit 1: captured graph
-is incomplete or a requested identity/kind is absent. Exit 2: invalid request,
+Exit 0: complete scoped query (not qualified evidence). Exit 1: a requested
+identity/kind is absent. Exit 2: incomplete captured graph, invalid request,
 unavailable group/provider, capture failure, stale cursor or exhausted budget.
 Original `traceability-check` remains a separate SDN structural checker.
 
@@ -434,9 +434,12 @@ error, incomplete graph or capture failure, or a non-`worktree` profile
 `worktree` is evaluated).
 
 Honesty limits:
-- Nothing here ever reports `Verified`. No passing-run evidence source is wired
-  (`doc/08_tracking/bug/trace_cmds_no_passing_evidence_source_2026-11-15.md`); a
-  verifying structural link is `Linked`, and `verified: 0` is the only value.
+- By default nothing reports `Verified`: a verifying structural link is
+  `Linked`. `--evidence=testdb` (off by default) reads passing attempts from
+  `doc/08_tracking/test/test_db.sdn` read-only, counting only runs whose frozen
+  plan matches the graph's snapshot. The committed TestDB has no trace run
+  plans yet, so on it `verified: 0` is still the only value
+  (`doc/08_tracking/bug/trace_cmds_no_passing_evidence_source_2026-11-15.md`).
 - `trace missing --profile=release` is rejected on the seed:
   `ERROR TRACE-QUERY-INVALID: unknown option --profile` (exit 2), contrary to
   the feature note. `--profile` worked on `report`. On the seed,
@@ -457,6 +460,6 @@ Requirements: 20; with a missing link: 20; shown: 20                      (exit 
 `--spec-root` reads `# @req` sidecar annotations. Pointing it at all of
 `test/01_unit` exhausted the spec budget
 (`ERROR TRACE-ANNOTATION-CAPTURE: spec file budget of 4096 exhausted`, exit 2),
-so scope it to a subdirectory. The exit code of `missing` on an incomplete
-graph is being changed by another change: treat it as pending. Here a complete
+so scope it to a subdirectory. `missing` on an incomplete graph exits 2
+(plan section 6, via `trace_command_verdict_v1`). A complete
 graph exits 0 even though links are missing.
