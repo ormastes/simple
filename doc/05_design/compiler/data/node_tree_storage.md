@@ -531,7 +531,9 @@ stopwatch, peak = PowerShell `PeakWorkingSet64` polled every 500 ms; host loaded
 Pre-change tree (same seed, measured earlier that day, not interleaved): wall
 172939 / 177430 / 169297 / 163911 ms, parse mean 159798 ms, peak 232 MB. On-vs-off
 spread (+2-3% parse) is inside the round-to-round drift (off alone ranged 157-181 s);
-peak working set is identical (230-233 MB). The pre-change vs post-change off delta
-(~+7% parse) was taken at different load and is not attributable without an
-interleaved pre/post run, which was not done. Conclusion: no measurable peak-RSS
-change; no time win for `op` on the interpreter lane.
+peak working set is identical (230-233 MB). The ~+7% pre-vs-post gap in those
+non-interleaved numbers is load drift: an interleaved off-path check (base files swapped
+in and out of the same worktree, pre/post/pre/post) gave pre parse 179852 / 174356 ms
+(peak 232 MB) vs post 181995 / 177672 ms (peak 231 MB), +1.5%, inside noise.
+Conclusion: no measurable off-path or peak-RSS cost; no time win for `op` on the
+interpreter lane.
