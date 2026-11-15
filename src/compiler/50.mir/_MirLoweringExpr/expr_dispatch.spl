@@ -2919,6 +2919,11 @@ impl MirLowering:
         var b = self.builder
         val nil_key = b.emit_const_int(3)
         val is_nil = b.emit_binop(MirBinOp.Eq, mir_operand_copy(raw), mir_operand_copy(nil_key), MirType.bool())
+        # The decoded integer word cannot tell a stored 3 from a miss; the
+        # RAW (tagged) word can. Keep that test as the result's presence bit.
+        var present_bit = -1
+        if self.mir_type_is_integer(merge_type):
+            present_bit = b.emit_binop(MirBinOp.Ne, mir_operand_copy(raw), mir_operand_copy(nil_key), MirType.bool()).id
         val nil_block = b.new_block(Some("dict_get_miss_nil"))
         val value_block = b.new_block(Some("dict_get_hit_value"))
         val merge_block = b.new_block(Some("dict_get_merge"))
@@ -2944,6 +2949,8 @@ impl MirLowering:
         b_merge.switch_to_block(merge_block)
         self.builder = b_merge
         self.mark_runtime_value_local(result.id)
+        if present_bit >= 0:
+            self.presence_word_locals[result.id] = present_bit
         result
 
     me lower_dict_runtime_get(base: HirExpr, base_local: LocalId, dict_key: LocalId) -> LocalId:
@@ -5137,6 +5144,25 @@ impl MirLowering:
                 val right_is_nil_lit = match right.kind:
                     case HirExprKind.NilLit: true
                     case _: false
+                # A payload-or-nil word that carries its producer's presence
+                # bit (`.?`, `.ok`/`.err`, `d.get(k)`, and the `if val` /
+                # `while val` binder copied from one) answers `== nil` /
+                # `!= nil` from that bit, never from its value or its payload
+                # type: the binder is typed by the payload, so a scalar one
+                # folded to "present" below, and a present 3 IS the nil word.
+                # doc/08_tracking/bug/native_if_val_presence_test_dropped_2026-11-15.md
+                if op_is_eq_or_neq and left_is_nil_lit != right_is_nil_lit:
+                    val presence_operand = if right_is_nil_lit: left_local else: right_local
+                    val presence_bit = self.presence_word_bit(presence_operand.id)
+                    if presence_bit >= 0:
+                        match op:
+                            case NotEq:
+                                return LocalId(id: presence_bit)
+                            case _:
+                                var b_absent = self.builder
+                                val absent = b_absent.emit_unary(MirUnaryOp.Not, mir_operand_copy(LocalId(id: presence_bit)), MirType.bool())
+                                self.builder = b_absent
+                                return absent
                 var nil_check_operand = LocalId(id: -1)
                 if op_is_eq_or_neq and right_is_nil_lit and not left_is_nil_lit:
                     if self.nil_compare_operand_is_declared_optional(left, left_local) or self.option_value_locals.contains(left_local.id) or self.nil_compare_operand_is_struct(left_local):
@@ -7379,16 +7405,24 @@ impl MirLowering:
                     val fallback_struct_sym = self.struct_value_syms.get(base_local.id)
                     if fallback_struct_sym != None:
                         result_struct_name = fallback_struct_sym ?? ""
-                var b_ec = self.builder
-                val is_some_func = MirOperand(kind: MirOperandKind.Const(
-                    MirConstValue.Str("rt_is_some"),
-                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(
-                        params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false
-                    )))
-                ), call_origin: MirCallOrigin.Runtime)
-                val is_some_res = b_ec.emit_call(is_some_func, [mir_operand_copy(base_local)], MirType.bool())
-                self.builder = b_ec
-                val is_some_local = is_some_res ?? LocalId(id: 0)
+                # A base that already carries its presence bit (`.ok`/`.err`,
+                # `d.get(k)`, a nested `.?`) is a DECODED payload-or-nil word:
+                # test that bit (a present 3 is the nil word, so rt_is_some on
+                # the word cannot answer) and take the word as the payload.
+                # doc/08_tracking/bug/native_if_val_presence_test_dropped_2026-11-15.md
+                val base_presence_bit = self.presence_word_bit(base_local.id)
+                var is_some_local = LocalId(id: base_presence_bit)
+                if base_presence_bit < 0:
+                    var b_ec = self.builder
+                    val is_some_func = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_is_some"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                            params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false
+                        )))
+                    ), call_origin: MirCallOrigin.Runtime)
+                    val is_some_res = b_ec.emit_call(is_some_func, [mir_operand_copy(base_local)], MirType.bool())
+                    self.builder = b_ec
+                    is_some_local = is_some_res ?? LocalId(id: 0)
 
                 var b_split = self.builder
                 val then_block = b_split.new_block(Some("exists_check_some"))
@@ -7401,8 +7435,13 @@ impl MirLowering:
                 var b_then = self.builder
                 b_then.switch_to_block(then_block)
                 self.builder = b_then
-                var some_value = self.option_payload_or_self(base_local)
-                if exists_nominal_payload:
+                var some_value = base_local
+                if base_presence_bit < 0:
+                    some_value = self.option_payload_or_self(base_local)
+                if base_presence_bit >= 0:
+                    # Already the decoded payload on the present edge.
+                    ()
+                elif exists_nominal_payload:
                     # Native records/classes/enums stored in runtime containers
                     # retain their handle bits. The i64 merge carrier is not a
                     # scalar payload: integer unboxing would destroy that handle.
@@ -7450,7 +7489,14 @@ impl MirLowering:
                 b_else.terminate_goto(merge_block)
                 self.builder = b_else
 
-                if self.is_runtime_value_local(some_value.id):
+                # The presence bit of THIS word: the binder's `!= nil` reads it.
+                self.presence_word_locals[result_local.id] = is_some_local.id
+                if base_presence_bit >= 0:
+                    # A presence-carrying base is already decoded (see above):
+                    # never mark it for another runtime decode.
+                    if self.is_decoded_text_option_local(base_local.id):
+                        self.mark_decoded_text_option_local(result_local.id)
+                elif self.is_runtime_value_local(some_value.id):
                     self.mark_runtime_value_local(result_local.id)
                 if self.runtime_array_locals.contains(some_value.id):
                     self.runtime_array_locals[result_local.id] = true
