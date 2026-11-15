@@ -797,6 +797,10 @@ impl LinuxOciRuntimeProviderV1:
         RuntimeValidationV1(accepted: true, reason: "")
 
     pub fn validate(request: LinuxOciRequestV1) -> RuntimeValidationV1:
+        # CLI source pathnames are reopened by the engine. A preflight stat or
+        # no-follow fd cannot bind that reopen to an authorized object.
+        if request.mounts.len() > 0:
+            return RuntimeValidationV1(accepted: false, reason: "linux-mount-native-admission-not-installed")
         if request.containment_profile_digest != "":
             val policy = match self.containment_policy:
                 case Some(value): value
@@ -1875,6 +1879,8 @@ impl LinuxOciRuntimeProviderV1:
 
     fn _execute(command: RuntimeCommandV1, request: LinuxOciRequestV1,
             control: ContainerControlDeadlineV1? = nil) -> RuntimeExecResultV1:
+        if request.mounts.len() > 0:
+            return RuntimeExecResultV1(stdout: "", stderr: "linux-mount-native-admission-not-installed", exit_code: -1, matched: false)
         self.executor_calls = self.executor_calls + 1
         var routed = command
         if self.engine_policy.?:
@@ -2252,6 +2258,10 @@ fn _build_create_command_profile_v1(engine: text, state_dir: text,
         request: LinuxOciRequestV1, operation_id: text,
         provider_generation: i64, node_boot_id: text,
         profile: LinuxOciContainmentProfileV1?) -> (text, RuntimeCommandV1):
+    # Also fence direct command-builder callers; no executable argv is exposed
+    # for V5 mount requests without a qualified native admission owner.
+    if request.mounts.len() > 0:
+        return ("linux-mount-native-admission-not-installed", runtime_command_empty())
     if request.containment_profile_digest != "":
         if not profile.?: return ("containment-profile-not-installed", runtime_command_empty())
         if engine != OCI_ENGINE_PODMAN: return ("containment-podman-required", runtime_command_empty())
