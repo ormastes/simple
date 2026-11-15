@@ -49,6 +49,67 @@ fn claude_loaded_skill(hook_name: text, payload: text) -> text:
         return ""
     extract_json_string(payload, "skill")
 
+# Codex has no Skill tool: a skill is loaded when the agent reads its
+# `skills/<name>/SKILL.md` through a shell tool, which the PreToolUse payload
+# carries as tool_input.command. Returns "" when the command reads no SKILL.md.
+fn _ws_tokens(s: text) -> [text]:
+    s.replace("\n", " ").replace("\t", " ").replace("\r", " ").split(" ")
+
+fn _strip_trailing_punct(s: text) -> text:
+    var t = s
+    val punct = ",.;:!?)]}\"'"
+    while t.byte_len() > 0 and punct.contains(t.substring(t.byte_len() - 1, t.byte_len())):
+        t = t.substring(0, t.byte_len() - 1)
+    t
+
+fn _is_skill_name(s: text) -> bool:
+    val n = s.byte_len()
+    if n == 0:
+        return false
+    val ok_first = "abcdefghijklmnopqrstuvwxyz"
+    val ok_rest = "abcdefghijklmnopqrstuvwxyz0123456789_-"
+    if not ok_first.contains(s.substring(0, 1)):
+        return false
+    var i = 1
+    while i < n:
+        if not ok_rest.contains(s.substring(i, i + 1)):
+            return false
+        i = i + 1
+    true
+
+fn codex_loaded_skill(hook_name: text, payload: text) -> text:
+    if hook_name != "PreToolUse":
+        return ""
+    val command = extract_json_string(payload, "command").replace("\\", "/")
+    for raw in _ws_tokens(command):
+        var tok = raw
+        while tok.byte_len() > 0 and "\"'`;|&(".contains(tok.substring(0, 1)):
+            tok = tok.substring(1, tok.byte_len())
+        tok = _strip_trailing_punct(tok)
+        if not tok.ends_with("/SKILL.md"):
+            continue
+        var segs: [text] = []
+        for seg in tok.split("/"):
+            if seg.byte_len() > 0:
+                segs = segs + [seg]
+        val n = segs.len()
+        if n >= 3 and segs[n - 3] == "skills":
+            return segs[n - 2]
+    ""
+
+# Codex `$name` skill invocations in a UserPromptSubmit prompt are the skills
+# the user requested; compared against codex_loaded_skill for the diff.
+fn codex_requested_skills(hook_name: text, payload: text) -> [text]:
+    var out: [text] = []
+    if hook_name != "UserPromptSubmit":
+        return out
+    for word in _ws_tokens(extract_json_string(payload, "prompt")):
+        if word.starts_with("$") and word.byte_len() > 1:
+            val name = _strip_trailing_punct(word.substring(1, word.byte_len()))
+            if _is_skill_name(name) and not out.contains(name):
+                out = out + [name]
+    out
+
 fn provider_events(provider: text, session: text, generation: i64, op: text, seq: i64, at_ms: i64, event_name: text) -> [ObserverEvent]:
     if provider == "claude":
         return claude_hook_events(session, generation, op, seq, at_ms, event_name)
@@ -56,4 +117,4 @@ fn provider_events(provider: text, session: text, generation: i64, op: text, seq
         return codex_notification_events(session, generation, op, seq, at_ms, event_name)
     []
 
-export claude_hook_events, claude_loaded_skill, codex_notification_events, provider_events
+export claude_hook_events, claude_loaded_skill, codex_loaded_skill, codex_requested_skills, codex_notification_events, provider_events
