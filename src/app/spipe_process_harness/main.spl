@@ -10,6 +10,10 @@ use std.nogc_async_mut.spipe_process_harness.core.{
     gate_from_state, render_state, render_hud, deploy_snippets
 }
 use std.nogc_async_mut.spipe_process_harness.types.{GateVerdict, HookSessionId, ModelName, FeatureSlug, HudSnapshot}
+use std.nogc_async_mut.spipe_process_harness.goal.{
+    GoalExit, GoalResumeVerdict, default_registry_path, goal_exit_code, parse_goal_id,
+    goal_receipt_path, parse_goal_skills_request, plan_goal_skills, evaluate_goal_resume, resume_exit
+}
 use app.io.mod.{env_get, process_run, file_read_text, dir_create}
 use std.io_runtime.{file_write}
 use std.io_runtime.{file_exists}
@@ -35,6 +39,8 @@ fn main() -> i64:
         return run_hud(args)
     if action == "deploy":
         return run_deploy()
+    if action == "goal":
+        return run_goal(args)
     print_usage()
     2
 
@@ -153,6 +159,95 @@ fn run_deploy() -> i64:
         print snippet.path
     0
 
+fn run_goal(args: [text]) -> i64:
+    if args.len() < 2:
+        print_usage()
+        return 2
+    val sub = args[1]
+    if sub == "skills":
+        return goal_skills(args, false)
+    if sub == "start":
+        return goal_skills(args, true)
+    if sub == "status":
+        return goal_status(args)
+    if sub == "resume":
+        return goal_resume(args)
+    print_usage()
+    2
+
+fn goal_registry(args: [text]) -> text:
+    file_read_text(option(args, "--registry", default_registry_path().value))
+
+# `skills` prints the selection; `start` additionally persists the receipt of a
+# Selected outcome. Rejected and ask-fallback outcomes never write.
+fn goal_skills(args: [text], persist: bool) -> i64:
+    val parsed = parse_goal_skills_request(option(args, "--task", ""), option(args, "--provider", env_get("SPIPE_PROVIDER")))
+    match parsed.request:
+        case None:
+            match parsed.error:
+                case Some(message):
+                    print message.value
+                case None:
+                    pass
+            return goal_exit_code(GoalExit.Rejected).value
+        case Some(request):
+            val plan = plan_goal_skills(goal_registry(args), request)
+            print plan.output.value
+            if persist:
+                match plan.receipt:
+                    case Some(receipt):
+                        match parse_goal_id(option(args, "--goal", "")):
+                            case None:
+                                print "error=invalid-goal-id"
+                                return goal_exit_code(GoalExit.Rejected).value
+                            case Some(goal):
+                                val path = goal_receipt_path(goal)
+                                dir_create(".spipe", true)
+                                dir_create(".spipe/{goal.value}", true)
+                                if not file_write(path.value, receipt.value):
+                                    print "error=receipt-write-failed:{path.value}"
+                                    return goal_exit_code(GoalExit.Rejected).value
+                                print "receipt={path.value}"
+                    case None:
+                        pass
+            return goal_exit_code(plan.exit).value
+
+fn read_goal_receipt(args: [text]) -> text?:
+    match parse_goal_id(option(args, "--goal", "")):
+        case None:
+            None
+        case Some(goal):
+            val path = goal_receipt_path(goal).value
+            if file_exists(path):
+                Some(file_read_text(path))
+            else:
+                None
+
+fn goal_status(args: [text]) -> i64:
+    match read_goal_receipt(args):
+        case None:
+            print "error=receipt-missing"
+            goal_exit_code(GoalExit.ReceiptMissing).value
+        case Some(receipt):
+            print receipt
+            0
+
+fn goal_resume(args: [text]) -> i64:
+    match read_goal_receipt(args):
+        case None:
+            print "error=receipt-missing"
+            goal_exit_code(GoalExit.ReceiptMissing).value
+        case Some(receipt):
+            val verdict = evaluate_goal_resume(receipt, goal_registry(args))
+            match verdict:
+                case GoalResumeVerdict.Fresh:
+                    print "resume=fresh"
+                case GoalResumeVerdict.Stale:
+                    print "resume=stale: registry digest changed since the receipt; rerun goal start"
+                case GoalResumeVerdict.Unreadable:
+                    print "resume=unreadable: receipt is not a GoalSkillSelectionV1"
+            goal_exit_code(resume_exit(verdict)).value
+
 fn jj_line(args: [text]) -> text:
     val (out, err, code) = process_run("jj", args)
     if code == 0:
@@ -183,6 +278,10 @@ fn print_usage():
     print "  gate --feature <slug>"
     print "  hud [--model M] [--hr N] [--week N] [--goal text]"
     print "  deploy"
+    print "  goal skills --task <class> [--provider <p>] [--registry <path>]"
+    print "  goal start --goal <id> --task <class> --provider <p>   (writes .spipe/<id>/skill_selection.sdn)"
+    print "  goal status --goal <id>"
+    print "  goal resume --goal <id>   (exit 4 = stale registry digest)"
     print ""
     print "Log options:"
     for line in log_options_help():

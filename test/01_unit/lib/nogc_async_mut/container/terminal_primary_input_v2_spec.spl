@@ -1,0 +1,91 @@
+# AUTHORED SOURCE-ONLY NOT_RUN. Production entrypoint refusal paths only.
+# Synthetic Legacy transfer metadata never reaches a native operation. No
+# opaque Windows lease, adoption, actual input receipt or successful gate is
+# constructed. Positive adopted/native input fixtures are unavailable.
+use std.spec.*
+use test.fixtures.orchestration.container_primary_attach_fixture_v1.container_primary_attach_fixture_v1
+use std.nogc_async_mut.container.terminal_primary_input_v2.{container_primary_input_gate_v2,
+    container_primary_input_install_v2, container_primary_input_revoke_v2}
+use std.nogc_async_mut.container.terminal_session_v1.{ContainerOwnedTerminalSessionV1,
+    container_terminal_output_matches_v1}
+use std.nogc_async_mut.container.terminal_session_v2.{ContainerOwnedTerminalSessionV2,
+    container_terminal_legacy_v2, container_terminal_identity_equal_v2}
+use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedTransferV2, PipedProcessRefV1}
+use std.nogc_sync_mut.io.group_process_owner.GroupProcessStreamOwnerV2
+use std.common.build_manager.group_process_stream_protocol_v2.group_process_stream_identity_profiled_v3
+use std.common.contracts.container.execution_v2.ContainerHostScopeV2
+use std.common.contracts.mux.session_runtime_control_v1.{SessionRuntimeControlTargetV1,
+    SessionRuntimeControlLeaseV1, SessionRuntimeControlKindV1}
+use std.common.crypto.sha256.sha256_text
+
+# The same metadata-only convention as runtime_terminal_ref_spec's
+# owned_terminal_fixture_v3. Reuse the public pure plan fixture rather than
+# importing that suite, which would register unrelated native scenarios.
+# This is not an admitted transfer and must only exercise pre-native refusal
+# and pure identity/projection. It does not represent a live PID or broker.
+fn input_output_follow_transfer_fixture_v2() -> PipedProcessOwnedTransferV2:
+    var launch = container_primary_attach_fixture_v1().launch_template
+    launch.transport_generation = 1
+    launch.request.launch_deadline_unix_ms = 1
+    val identity = group_process_stream_identity_profiled_v3(launch)
+    val owner = GroupProcessStreamOwnerV2(launch: launch, identity_digest: identity)
+    PipedProcessOwnedTransferV2(owner: owner, reference: PipedProcessRefV1(pid: 71,
+        generation: launch.transport_generation, group_root: launch.root, group_identity: identity))
+
+# Public control metadata, explicitly unissued. It is never submitted to a
+# provider: install rejects the OutputFollow kind before examining this lease.
+fn input_unissued_lease_fixture_v2() -> SessionRuntimeControlLeaseV1:
+    val plan = container_primary_attach_fixture_v1()
+    val workload = plan.workload
+    val scope = ContainerHostScopeV2(physical_host_id: workload.physical_host_id,
+        service_scope_id: workload.service_scope_id, boot_id: workload.boot_id,
+        provider_generation: workload.provider_generation, native_machine_id: workload.native_machine_id,
+        continuity_mode: workload.continuity_mode, continuity_id: workload.continuity_id)
+    val target = SessionRuntimeControlTargetV1(scope: scope, runtime: plan.runtime,
+        workload_request_digest: workload.request_digest, binding_uid: "binding-a",
+        binding_digest: plan.identity.binding_digest, service_incarnation: "f".repeat(32),
+        session_id: "session-a", window_id: "window-a", pane_id: "pane-a", service_epoch: 1,
+        child_incarnation: 1, client_id: "client-a", attachment_generation: 1,
+        execution_kind: "primary", native_exec_id: "", exec_request_digest: "")
+    SessionRuntimeControlLeaseV1(target: target, kind: SessionRuntimeControlKindV1.Input,
+        principal_id: "fixture-owner", nonce_digest: sha256_text("unissued-fixture-nonce"),
+        revision: 1, issued_monotonic_ms: 1, expires_monotonic_ms: 1000)
+
+describe "Common primary input production entrypoint refusals":
+    it "rejects Legacy OutputFollow gate observation before native state access":
+        step("Call the actual gate entrypoint on the nonprimary variant and retain its Legacy transfer projection")
+        val transfer = input_output_follow_transfer_fixture_v2()
+        val session = ContainerOwnedTerminalSessionV2.Legacy(ContainerOwnedTerminalSessionV1.OutputFollow(transfer))
+        expect(container_primary_input_gate_v2(session).unwrap_err()).to_equal("container-primary-terminal-required")
+        val legacy = container_terminal_legacy_v2(session).unwrap()
+        expect(container_terminal_output_matches_v1(legacy, transfer)).to_equal(true)
+        expect(container_terminal_identity_equal_v2(session,
+            ContainerOwnedTerminalSessionV2.Legacy(legacy))).to_equal(true)
+
+    it "rejects Legacy OutputFollow installation before unissued credentials can reach a provider":
+        step("Call the actual installer with ordinary and malformed public metadata while preserving the wrong-owner refusal")
+        val transfer = input_output_follow_transfer_fixture_v2()
+        val session = ContainerOwnedTerminalSessionV2.Legacy(ContainerOwnedTerminalSessionV1.OutputFollow(transfer))
+        val lease = input_unissued_lease_fixture_v2()
+        expect(container_primary_input_install_v2(session, lease, lease.target,
+            "fixture-owner", "unissued-fixture-nonce").unwrap_err()).to_equal("container-primary-terminal-required")
+        var malformed = lease
+        malformed.revision = 0
+        malformed.kind = SessionRuntimeControlKindV1.Geometry
+        malformed.nonce_digest = ""
+        expect(container_primary_input_install_v2(session, malformed, malformed.target,
+            "", "").unwrap_err()).to_equal("container-primary-terminal-required")
+        val legacy = container_terminal_legacy_v2(session).unwrap()
+        expect(container_terminal_output_matches_v1(legacy, transfer)).to_equal(true)
+        expect(container_terminal_identity_equal_v2(session,
+            ContainerOwnedTerminalSessionV2.Legacy(legacy))).to_equal(true)
+
+    it "rejects Legacy OutputFollow revocation without inventing a successful no-op":
+        step("Call the actual revoker and retain the original output-only owner metadata after refusal")
+        val transfer = input_output_follow_transfer_fixture_v2()
+        val session = ContainerOwnedTerminalSessionV2.Legacy(ContainerOwnedTerminalSessionV1.OutputFollow(transfer))
+        expect(container_primary_input_revoke_v2(session).unwrap_err()).to_equal("container-primary-terminal-required")
+        val legacy = container_terminal_legacy_v2(session).unwrap()
+        expect(container_terminal_output_matches_v1(legacy, transfer)).to_equal(true)
+        expect(container_terminal_identity_equal_v2(session,
+            ContainerOwnedTerminalSessionV2.Legacy(legacy))).to_equal(true)

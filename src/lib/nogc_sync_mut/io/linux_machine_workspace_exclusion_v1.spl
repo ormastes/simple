@@ -1,0 +1,174 @@
+# AUTHORED_NOT_RUN. A borrowed actual machine-storage port, not admission,
+# all-mutator absence, workspace readiness, migration, quota release or launch.
+# No caller path, lock getter, machine-writer reacquire or new native export.
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.LinuxMachineStorageV1
+use std.nogc_sync_mut.storage_roots.workspace_storage_owner_v1.{WorkspaceStorageLeaseV1, workspace_storage_observe_v1}
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+use std.nogc_sync_mut.io.file_lock_owned_v2.*
+use std.common.contracts.storage.workspace_storage_v1.workspace_storage_binding_v1
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+
+# Diagnostics only. Constructing this value cannot construct an exclusion.
+pub struct LinuxMachineWorkspaceExclusionSnapshotV1:
+    machine_policy_digest: text
+    lease_binding_digest: text
+    workspace_identity_digest: text
+
+pub class LinuxMachineWorkspaceExclusionV1:
+    slot: i64
+    generation: i64
+    pub fn current_v1() -> Result<LinuxMachineWorkspaceExclusionSnapshotV1, text>:
+        linux_workspace_exclusion_current_v1(self.slot, self.generation)
+    pub fn close_v1() -> LinuxMachineWorkspaceExclusionCloseV1:
+        linux_workspace_exclusion_close_v1(self.slot, self.generation)
+
+pub enum LinuxMachineWorkspaceExclusionOpenV1:
+    Rejected(reason: text)
+    CleanupRequired(owner: LinuxMachineWorkspaceExclusionV1, reason: text)
+    Ready(owner: LinuxMachineWorkspaceExclusionV1)
+
+pub struct LinuxMachineWorkspaceExclusionCloseV1:
+    owner: Option<LinuxMachineWorkspaceExclusionV1>
+    closed: bool
+    error: text
+
+struct LinuxWorkspaceExclusionStateV1:
+    generation: i64
+    storage: LinuxMachineStorageV1
+    lease: WorkspaceStorageLeaseV1
+    binding: LinuxMachineWorkspaceExclusionSnapshotV1
+    var lock: Option<FileLockOwnerV2> = nil
+    var phase: text = "acquiring"
+    var close_error: text = ""
+
+# Guard before every registry entry, including close: actual numeric PID/TID
+# alone cannot distinguish an inherited nested-PID-namespace registry.
+var linux_workspace_exclusion_slots_v1: [LinuxWorkspaceExclusionStateV1] = []
+var linux_workspace_exclusion_active_v1: i64 = 0
+
+fn linux_workspace_decimal_v1(value: text, maximum: text) -> bool:
+    if value.byte_len() == 0 or value.byte_len() > maximum.byte_len(): return false
+    if value.byte_len() > 1 and value.byte_at(0) == 48: return false
+    for at in 0..value.byte_len():
+        val byte = value.byte_at(at) as i64
+        if byte < 48 or byte > 57: return false
+    if value.byte_len() < maximum.byte_len(): return true
+    for at in 0..value.byte_len():
+        if value.byte_at(at) < maximum.byte_at(at): return true
+        if value.byte_at(at) > maximum.byte_at(at): return false
+    true
+
+# Exact native XFS spelling is inode:<st_dev>:<st_ino>:<generation>:<uid>.
+# Same physical root aliases contend even when pool mount ID, policy, budget,
+# quota, pathname, guest target or ownership spelling differs. Native observe
+# validates this receipt against actual retained descriptors before this parse.
+fn linux_workspace_physical_digest_v1(workspace: text) -> Result<text, text>:
+    val fields = workspace.split(":")
+    if fields.len() != 5 or fields[0] != "inode": return Err("workspace-exclusion-native-identity-shape")
+    for at in [1, 2]:
+        if not linux_workspace_decimal_v1(fields[at], "18446744073709551615"):
+            return Err("workspace-exclusion-native-identity-number")
+    for at in [3, 4]:
+        if not linux_workspace_decimal_v1(fields[at], "4294967295"):
+            return Err("workspace-exclusion-native-identity-number")
+    Ok(sha256_text("LINUX-WORKSPACE-EXCLUSION-IDENTITY-V1\nlinux-xfs-project-v1\n" +
+        fields[1] + "\n" + fields[2] + "\n" + fields[3] + "\n"))
+
+fn linux_workspace_exclusion_probe_v1(storage: LinuxMachineStorageV1, lease: WorkspaceStorageLeaseV1,
+        lock: Option<FileLockOwnerV2> = nil) -> Result<LinuxMachineWorkspaceExclusionSnapshotV1, text>:
+    val before = sha256_u8_hex(storage.policy_bytes_v1()?)
+    val observed = workspace_storage_observe_v1(lease)?
+    if observed.kind != "linux-xfs-project-v1" or observed.state != "retained":
+        return Err("workspace-exclusion-native-retained-xfs-lease-required")
+    val lease_binding = workspace_storage_binding_v1(lease.request)?
+    if observed.policy_digest != before or observed.binding_digest != lease_binding:
+        return Err("workspace-exclusion-native-lease-policy-binding-differs")
+    val physical = linux_workspace_physical_digest_v1(observed.workspace_id)?
+    if val owner = lock:
+        if not file_lock_owner_live_v2(owner): return Err("workspace-exclusion-lock-not-current")
+    val after = sha256_u8_hex(storage.policy_bytes_v1()?)
+    if after != before: return Err("workspace-exclusion-machine-policy-changed")
+    Ok(LinuxMachineWorkspaceExclusionSnapshotV1(machine_policy_digest: before,
+        lease_binding_digest: lease_binding, workspace_identity_digest: physical))
+
+fn linux_workspace_exclusion_same_v1(left: LinuxMachineWorkspaceExclusionSnapshotV1,
+        right: LinuxMachineWorkspaceExclusionSnapshotV1) -> bool:
+    left.machine_policy_digest == right.machine_policy_digest and left.lease_binding_digest == right.lease_binding_digest and
+        left.workspace_identity_digest == right.workspace_identity_digest
+
+# Borrow storage and quota lease. The caller retains both original owners on
+# every outcome. This capsule never invokes close/release/forget on either.
+pub fn linux_machine_workspace_exclusion_open_v1(storage: LinuxMachineStorageV1,
+        lease: WorkspaceStorageLeaseV1) -> LinuxMachineWorkspaceExclusionOpenV1:
+    val origin = linux_machine_process_origin_check_v1()
+    if origin.is_err(): return LinuxMachineWorkspaceExclusionOpenV1.Rejected(origin.unwrap_err())
+    val checked = linux_workspace_exclusion_probe_v1(storage, lease)
+    if checked.is_err(): return LinuxMachineWorkspaceExclusionOpenV1.Rejected(checked.unwrap_err())
+    if linux_workspace_exclusion_active_v1 >= 32 or linux_workspace_exclusion_slots_v1.len() >= 4096:
+        return LinuxMachineWorkspaceExclusionOpenV1.Rejected("workspace-exclusion-owner-bound")
+    val slot = linux_workspace_exclusion_slots_v1.len()
+    val binding = checked.unwrap()
+    val generation = slot + 1
+    val capsule = LinuxMachineWorkspaceExclusionV1(slot: slot, generation: generation)
+    linux_workspace_exclusion_slots_v1.push(LinuxWorkspaceExclusionStateV1(generation: generation,
+        storage: storage, lease: lease, binding: binding))
+    linux_workspace_exclusion_active_v1 = linux_workspace_exclusion_active_v1 + 1
+    val path = "/var/lib/simple/container/workspace-" + binding.workspace_identity_digest + ".lock"
+    match file_lock_open_owned_v2(path, 0):
+        case FileLockOpenV2.Ready(owner): linux_workspace_exclusion_slots_v1[slot].lock = Some(owner)
+        case FileLockOpenV2.CleanupRequired(owner, reason):
+            # Store the actual returned native generation before another
+            # fallible probe. Backing borrowed owners remain held here.
+            linux_workspace_exclusion_slots_v1[slot].lock = Some(owner)
+            linux_workspace_exclusion_slots_v1[slot].phase = "cleanup"
+            return LinuxMachineWorkspaceExclusionOpenV1.CleanupRequired(capsule, reason)
+        case FileLockOpenV2.Rejected(reason):
+            linux_workspace_exclusion_slots_v1[slot].phase = "closed"
+            linux_workspace_exclusion_active_v1 = linux_workspace_exclusion_active_v1 - 1
+            return LinuxMachineWorkspaceExclusionOpenV1.Rejected(reason)
+    val current = linux_workspace_exclusion_probe_v1(storage, lease, linux_workspace_exclusion_slots_v1[slot].lock)
+    if current.is_err() or not linux_workspace_exclusion_same_v1(binding, current.unwrap()):
+        linux_workspace_exclusion_slots_v1[slot].phase = "cleanup"
+        val reason = if current.is_err(): current.unwrap_err() else: "workspace-exclusion-binding-changed-during-acquisition"
+        return LinuxMachineWorkspaceExclusionOpenV1.CleanupRequired(capsule, reason)
+    linux_workspace_exclusion_slots_v1[slot].phase = "ready"
+    LinuxMachineWorkspaceExclusionOpenV1.Ready(capsule)
+
+fn linux_workspace_exclusion_state_v1(slot: i64, generation: i64) -> Result<LinuxWorkspaceExclusionStateV1, text>:
+    linux_machine_process_origin_check_v1()?
+    if slot < 0 or slot >= linux_workspace_exclusion_slots_v1.len(): return Err("workspace-exclusion-stale-owner")
+    val state = linux_workspace_exclusion_slots_v1[slot]
+    if state.generation != generation: return Err("workspace-exclusion-stale-owner")
+    Ok(state)
+
+fn linux_workspace_exclusion_current_v1(slot: i64, generation: i64) -> Result<LinuxMachineWorkspaceExclusionSnapshotV1, text>:
+    val state = linux_workspace_exclusion_state_v1(slot, generation)?
+    if state.phase != "ready" or state.lock.is_none(): return Err("workspace-exclusion-not-current")
+    val observed = linux_workspace_exclusion_probe_v1(state.storage, state.lease, state.lock)
+    if observed.is_err() or not linux_workspace_exclusion_same_v1(state.binding, observed.unwrap()):
+        linux_workspace_exclusion_slots_v1[slot].phase = "cleanup"
+        if observed.is_err(): return Err(observed.unwrap_err())
+        return Err("workspace-exclusion-retained-binding-changed")
+    observed
+
+fn linux_workspace_exclusion_close_v1(slot: i64, generation: i64) -> LinuxMachineWorkspaceExclusionCloseV1:
+    # No numeric-only shortcut, including after all borrowed parents close.
+    val capsule = LinuxMachineWorkspaceExclusionV1(slot: slot, generation: generation)
+    val loaded = linux_workspace_exclusion_state_v1(slot, generation)
+    if loaded.is_err(): return LinuxMachineWorkspaceExclusionCloseV1(Some(capsule), false, loaded.unwrap_err())
+    val state = loaded.unwrap()
+    if state.phase == "closed": return LinuxMachineWorkspaceExclusionCloseV1(nil, true, state.close_error)
+    if state.lock.is_none(): return LinuxMachineWorkspaceExclusionCloseV1(Some(capsule), false, "workspace-exclusion-lock-owner-unconfirmed")
+    val released = file_lock_release_owned_v2(state.lock.unwrap())
+    if released.closed and (released.state == FileLockReleaseStateV2.Released or released.state == FileLockReleaseStateV2.ConsumedError):
+        linux_workspace_exclusion_slots_v1[slot].lock = nil
+        linux_workspace_exclusion_slots_v1[slot].phase = "closed"
+        linux_workspace_exclusion_active_v1 = linux_workspace_exclusion_active_v1 - 1
+        if state.close_error == "": linux_workspace_exclusion_slots_v1[slot].close_error = released.error
+        return LinuxMachineWorkspaceExclusionCloseV1(nil, true, linux_workspace_exclusion_slots_v1[slot].close_error)
+    if released.owner.is_some(): linux_workspace_exclusion_slots_v1[slot].lock = released.owner
+    # Unknown or stale remains pending; never erase the last exact generation.
+    linux_workspace_exclusion_slots_v1[slot].phase = "cleanup"
+    val reason = if released.error != "": released.error else: "workspace-exclusion-release-unconfirmed"
+    if state.close_error == "": linux_workspace_exclusion_slots_v1[slot].close_error = reason
+    LinuxMachineWorkspaceExclusionCloseV1(Some(capsule), false, reason)

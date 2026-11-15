@@ -1,6 +1,7 @@
 # Trusted installed deployment boundary. No wire-selected parent/root, no
 # boot-continuity assertion, execution lease or service-readiness receipt.
 use std.nogc_sync_mut.io.windows_private_file_v1.*
+use std.nogc_sync_mut.io.windows_journal_store_v1.{WindowsJournalStoreOpenV1, WindowsJournalStoreV1}
 use std.nogc_sync_mut.orchestration.host_service_private_receipt_v2.{HostServicePrivateCleanupV2, host_service_private_cleanup_v2}
 use std.nogc_sync_mut.orchestration.host_service_enrollment_v2.*
 use std.nogc_sync_mut.orchestration.host_enrollment_v1.{HostEnrollmentCredentialV1,
@@ -8,10 +9,10 @@ use std.nogc_sync_mut.orchestration.host_enrollment_v1.{HostEnrollmentCredential
 use std.nogc_sync_mut.orchestration.local_authority_policy_v1.{LocalAuthorityPolicyV1, local_authority_policy_decode_v1}
 use std.nogc_sync_mut.orchestration.host_private_metadata_v2.{HostPrivateMetadataV2,
     HostPrivateMetadataPinsV2, host_private_metadata_decode_v2}
-use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostReservationAuthorizationContextV1
+use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
 use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.distributed_authority_key_check_v2
 use std.common.contracts.distributed_control_v2.distributed_grant_authorize_v2
-use std.nogc_async_mut.container.api_v2.simple_container_observe_v2
+use std.nogc_async_mut.container.observation_v2.simple_container_observe_v2
 use std.nogc_sync_mut.sosix.time.{sosix_time_now_unix_micros, sosix_time_now_monotonic_ms}
 use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
 use std.nogc_sync_mut.io.external_text_io.io_legacy_utf8
@@ -74,6 +75,28 @@ pub class HostWindowsDeploymentOwnerV2:
 
     pub fn binding_v2() -> HostServiceEnrollmentBindingV2: self.binding
     pub fn metadata_v2() -> HostPrivateMetadataV2: self.metadata
+
+    # These are trusted owner ports, not pathname admission. Every use rechecks
+    # the same retained deployment generations and signed installed provenance.
+    pub fn current_v3() -> Result<HostPrivateMetadataV2, text>:
+        val checked = deployment_owner_check_v2(self, false)?
+        Ok(self.metadata)
+
+    pub fn diagnostic_root_v3() -> text:
+        self.anchor.machine_parent + "/" + self.residue.root_child
+
+    pub fn journal_store_v3() -> WindowsJournalStoreOpenV1:
+        val checked = deployment_owner_check_v2(self, true)
+        if checked.is_err(): return WindowsJournalStoreOpenV1.Rejected(checked.unwrap_err())
+        self.native.roots[1].open_journal_store_v1()
+
+    pub fn owns_journal_store_v3(store: WindowsJournalStoreV1) -> bool:
+        self.current_for_store_v3(store).is_ok()
+
+    pub fn current_for_store_v3(store: WindowsJournalStoreV1) -> Result<HostPrivateMetadataV2, text>:
+        val checked = deployment_owner_check_v2(self, false)?
+        if not store.belongs_to(self.native.roots[1]): return Err("windows-deployment-journal-owner-mismatch")
+        Ok(self.metadata)
 
 struct DeploymentClaimV2:
     nonce: text

@@ -1746,8 +1746,8 @@ never cache an answer computed while exhausted) —
   before claiming a GPU ran. `feature_showcase.spl` is the place where the
   primitive runs on a real `VulkanBackend` (byte-identical, 38 primitives).
 - **cpu_simd vs Vulkan (llvmpipe), 900x760: 62 pixels over all 8 pages**,
-  all text ink: some glyphs one row lower on Vulkan (per glyph, root cause
-  not found); Chrome mismatch identical per page. Record + 25 px repro:
+  all text ink: some glyphs one row lower on Vulkan; Chrome mismatch
+  identical per page. FIXED the same day (see the next section). Record + 25 px repro:
   `doc/08_tracking/bug/web_vulkan_lane_control_text_one_row_past_clip_2026-11-15.md`.
 - **Hardware Vulkan 4K (NVIDIA GB10, driver 580.173.02,
   `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json`, strict
@@ -1854,3 +1854,84 @@ never cache an answer computed while exhausted) —
   instead dropped `top:10px`. Auto main margins and `order` are not
   modelled (filed). Next cluster: flex-wrap line stretch under a definite
   height (align-content stretch; Chrome items 45 tall, Simple 24).
+
+## 2026-11-15 — Vulkan text clip: cpu_simd and Vulkan byte-identical
+
+- Root cause of the 62 px: `VulkanBackend.composite_font_batch` (the
+  vector-face path behind `draw_text_with_advances`) ignored `set_clip`; only
+  the bitmap path baked the clip into its quads. Draw IR clips control text to
+  its box, so descenders spilled below `<input>`/`<select>` on Vulkan only.
+  Fixed by clipping the quads on the host; a fully clipped batch is the
+  admitted status `clipped-out`. Record:
+  `doc/08_tracking/bug/web_vulkan_lane_control_text_one_row_past_clip_2026-11-15.md`;
+  RenderDoc params-buffer evidence in the simple_renderdoc skill.
+- 900x760: all 8 catalog pages `cmp`-identical cpu_simd vs Vulkan (llvmpipe).
+- `draw_ir_adv_branch_coverage_spec` hostile-advance row expected 8 skips,
+  but the executor now paints such runs with the font's own advances
+  (`text-advance-arity` fallback; no code emits `text-font-advances` any more,
+  only a stale comment at `draw_ir_adv.spl:555`). Row re-pinned to 9 rendered /
+  0 skipped plus a pixel row proving hostile advances paint exactly like no
+  advances.
+- `engine2d_software_offscreen_dispatch_spec` (0/3) asserts a software rung
+  that `engine.spl` todo 303 says does not exist; filed, not edited:
+  `doc/08_tracking/bug/engine2d_software_offscreen_dispatch_spec_asserts_missing_rung_2026-11-15.md`.
+- Hosts without `/usr/share/vulkan/icd.d/lvp_icd.json` do NOT exercise the
+  Vulkan rows of `vulkan_text_advances_clip_parity_spec` or AC-13 of
+  `linear_gradient_angle_draw_ir_chrome159_spec`: each prints a
+  `[skip] ... was not exercised` line and returns. Read the log, not the
+  pass count, before citing them as Vulkan evidence.
+- Draw IR advances are applied only when they sum to the command width;
+  otherwise the run silently paints with the font's own advances. A test of
+  "advances applied" must set the width to the sum (see the `7,7` row).
+
+## 2026-11-15 — wrapped flex lines size their items; the headless shell is not the oracle
+
+- **Trap — the gates must run FULL Chrome.** With no `CHROME_BIN`, the
+  harvester (`check-chrome-layout-geometry-diff.shs --print-chrome`) prefers
+  the Playwright headless shell, which resolves `monospace` to DejaVu Sans
+  Mono through fontconfig: every `<code>` line box is 1px shorter and the
+  matrix reports 28 NEW ids (127 cells) at an untouched base. Full Chrome
+  (`CHROME_BIN=$HOME/.cache/ms-playwright/chromium-1255/chrome-linux-arm64/chrome
+  CHROME_NO_SANDBOX=1`) gives the recorded 102. Never baseline those ids;
+  cross-check any hand measurement of text from the headless shell.
+- **Fonts on both sides (audit).** Simple's Linux face set is Liberation
+  Sans / Serif / Mono (`browser_host_has_measured_linux_face_set`). Chrome is
+  not handed that file: it resolves the generics through fontconfig to its
+  Arial / Times New Roman / Courier New defaults, which this host aliases to
+  the same Liberation files -- same face by host configuration only. The
+  catalog uses 16px / 24px text and no `@font-face`; no fixture enlarges
+  text to hide a mismatch. High-DPI comparison (owner rule: >= 300 dpi or a
+  shared 1px bitmap font) is blocked on a device scale the renderer does not
+  have: `doc/08_tracking/bug/web_render_no_device_scale_hidpi_gate_2026-11-15.md`.
+- **Wrapped lines align their items.** The wrap branch placed each line at
+  its align-content-stretched offset but laid every item out at content
+  height. After the line loop, each in-flow item is aligned inside its line
+  (CSS Flexbox 9.4 step 11): an auto-height `stretch` item (not replaced,
+  no max-height, no auto cross margin) grows to the line's cross size, an
+  `end`/`flex-end`/`center` item moves down by the free space
+  (`offset_layout_subtree`). The line cross size is the larger of the
+  stretched estimate and the tallest real item, and the next line starts
+  below the REAL items (`line_heights` estimates an auto-height item as one
+  line box, so `aa<br>bb` used to overlap the next line). `wrap-reverse`
+  keeps the old placement. Matrix 102 -> 95 cells (21 `cc-fx-fw-wrap-*`
+  ids). Spec: `flex_wrap_line_stretch_chrome159_spec.spl`.
+
+## 2026-11-15 — `simple_web_renderer_spec` was red from a stale snapshot; the matrix gate picks full Chrome
+
+- **Trap — a red main spec can be a lost harness, not a lost feature.**
+  `88aac2ffe28` (release/1.0 transplant) replaced the spec with an older copy:
+  five helpers, three rows, ten imports and the head of the content-visibility
+  row vanished, so 9 rows died on `function/variable ... not found`. Before
+  triaging a value, grep the spec for every `_helper(` it calls and diff the
+  row against `88aac2ffe28^`. Restored: 111 -> 114 rows, 83 -> 92 passing;
+  the 22 left are classed in
+  `doc/08_tracking/bug/simple_web_renderer_spec_red_rows_2026-11-15.md`.
+- **The matrix gate no longer takes the headless shell.** Without
+  `CHROME_BIN` it uses a system Chrome, else the newest Playwright
+  `chromium-*/chrome-linux*/chrome`; a headless shell (found or passed) is an
+  ERROR naming the reason (`full_chrome_in`, `is_headless_shell`; selftest 11
+  -> 14 fixtures). The geometry differ's own preference for the shell is
+  unchanged.
+- Batch 1 (`71ff31154d5`) catalog 900 px: every page equal to its row
+  (worst css-paint 6.80); `html` 216.2 s vs 226.6 s at base, `css-layout`
+  266.0 s vs 274.3 s, same seed.

@@ -20,7 +20,10 @@ use std.sosix.process.{PipedProcessRefV1, sosix_process_piped_ref_equal_v1,
     PipedProcessOwnedTransferV2}
 use os.apps.smux.vt_retention.{vt_tail_retain}
 use std.nogc_async_mut.container.terminal_session_v1.{ContainerOwnedTerminalSessionV1,
-    container_terminal_identity_equal_v1, container_terminal_output_matches_v1}
+    container_terminal_reference_v1, container_terminal_output_matches_v1}
+use std.nogc_async_mut.container.terminal_session_v2.{ContainerOwnedTerminalSessionV2,
+    container_terminal_identity_equal_v2, container_terminal_legacy_v2}
+use std.common.contracts.container.terminal_text_v2.ContainerTerminalTextStateV2
 
 # =========================================================================
 # Pane record — pane state + its output tail
@@ -30,7 +33,8 @@ struct PaneRecord:
     pane: MuxPane
     focus: bool
     # child_pid — pid of the piped child process backing this pane, or -1 when
-    # the pane has no process attached. Panes are NEVER auto-spawned: creating a
+    # the pane has no process attached; a direct Windows connection uses 0 and
+    # is retained in owned_terminal_session. Panes are NEVER auto-spawned: creating a
     # session or splitting a pane must not fork a shell (that would leak one
     # process per pane in every test), so smux_pane_spawn attaches one
     # explicitly and smux_send_text fails typed on a pane with no child.
@@ -56,7 +60,8 @@ struct PaneRecord:
     terminal_pipe: bool = false
     terminal_eof: bool = false
     terminal_read_error: text = ""
-    owned_terminal_session: ContainerOwnedTerminalSessionV1? = nil
+    owned_terminal_session: ContainerOwnedTerminalSessionV2? = nil
+    terminal_text_state: ContainerTerminalTextStateV2 = ContainerTerminalTextStateV2()
     helper_cleaned_awaiting_release: bool = false
     # Paced Windows PTY input: ingestion_sequence at the last paced write, and
     # the wall-clock deadline (unix us) after which the next chunk goes even
@@ -144,32 +149,65 @@ struct PaneRecord:
     fn same_owned_terminal_transfer(transfer: PipedProcessOwnedTransferV2?) -> bool:
         if self.owned_terminal_session == nil: return transfer == nil
         if transfer == nil: return false
-        return container_terminal_output_matches_v1(self.owned_terminal_session.unwrap(), transfer.unwrap())
+        val legacy = container_terminal_legacy_v2(self.owned_terminal_session.unwrap())
+        if legacy.is_err(): return false
+        return container_terminal_output_matches_v1(legacy.unwrap(), transfer.unwrap())
 
     fn output_terminal_transfer() -> PipedProcessOwnedTransferV2?:
         if self.owned_terminal_session == nil: return nil
         match self.owned_terminal_session.unwrap():
-            case ContainerOwnedTerminalSessionV1.OutputFollow(transfer): Some(transfer)
+            case ContainerOwnedTerminalSessionV2.Legacy(ContainerOwnedTerminalSessionV1.OutputFollow(transfer)): Some(transfer)
             case _: nil
 
-    fn same_owned_terminal_session(session: ContainerOwnedTerminalSessionV1?) -> bool:
+    fn same_owned_terminal_session(session: ContainerOwnedTerminalSessionV2?) -> bool:
         if self.owned_terminal_session == nil: return session == nil
         if session == nil: return false
-        container_terminal_identity_equal_v1(self.owned_terminal_session.unwrap(), session.unwrap())
+        container_terminal_identity_equal_v2(self.owned_terminal_session.unwrap(), session.unwrap())
 
     fn with_owned_terminal_transfer(transfer: PipedProcessOwnedTransferV2) -> PaneRecord:
         self.with_owned_terminal_session(ContainerOwnedTerminalSessionV1.OutputFollow(transfer), transfer.reference)
 
-    # The caller validates the opaque session and exact reference before this
-    # sole registry adoption. Generic replacement never removes owned authority.
+    # Legacy constructors preserve their V1 interface and use the same tagged
+    # canonical registry as direct connections.
     fn with_owned_terminal_session(session: ContainerOwnedTerminalSessionV1, reference: PipedProcessRefV1) -> PaneRecord:
+        self.with_owned_terminal_v2(ContainerOwnedTerminalSessionV2.Legacy(session), Some(reference))
+
+    # The effect-boundary adopter validates actual native ownership first.
+    # This pure registry projection preserves legacy fixture/storage behavior
+    # and checks the optional reference without doing native IO.
+    fn with_owned_terminal_v2(session: ContainerOwnedTerminalSessionV2, reference: PipedProcessRefV1?) -> PaneRecord:
         # Existing owned authority can be released only by a future verified
         # host acknowledgement, never by a generic pane replacement helper.
         if self.owned_terminal_session != nil or self.helper_cleaned_awaiting_release: return self
-        var out = self.with_terminal_ref(reference)
-        if self.same_terminal_ref(reference):
-            out.child_incarnation = self.child_incarnation + 1
+        var out = self
+        match session:
+            case ContainerOwnedTerminalSessionV2.Legacy(_):
+                if reference == nil: return self
+                val legacy = container_terminal_legacy_v2(session)
+                if legacy.is_err(): return self
+                val actual = container_terminal_reference_v1(legacy.unwrap())
+                if actual.is_err(): return self
+                if not sosix_process_piped_ref_equal_v1(actual.unwrap(), reference.unwrap()): return self
+                out = self.with_terminal_ref(reference.unwrap())
+                if self.same_terminal_ref(reference):
+                    out.child_incarnation = self.child_incarnation + 1
+            case ContainerOwnedTerminalSessionV2.WindowsConnection(_):
+                if reference != nil: return self
+                out.input = pane_input_new()
+                out.child_pid = 0
+                out.pty_fd = -1
+                out.terminal_ref = nil
+                out.terminal_pipe = true
+                out.terminal_eof = false
+                out.terminal_read_error = ""
+                out.child_incarnation = self.child_incarnation + 1
+                out.screen = vt_new(self.pane.rows, self.pane.cols)
+                out.tail = ""
+                out.tail_truncated = false
+                if self.tail != "" or not vt_view_equal(self.screen, out.screen):
+                    out.content_revision = self.content_revision + 1
         out.owned_terminal_session = Some(session)
+        out.terminal_text_state = ContainerTerminalTextStateV2()
         out.helper_cleaned_awaiting_release = false
         return out
 
@@ -195,7 +233,7 @@ struct PaneRecord:
         return out
 
     fn has_terminal_stream() -> bool:
-        return self.pty_fd >= 0 or self.terminal_pipe
+        return self.owned_terminal_session != nil or self.pty_fd >= 0 or self.terminal_pipe
 
     fn with_pty(pid: i64, fd: i64) -> PaneRecord:
         if self.owned_terminal_session != nil or self.helper_cleaned_awaiting_release: return self
