@@ -1,6 +1,6 @@
 # Selected-child requester regressions
 
-Status: nineteen authored executable cases; UNRUN. RED/GREEN execution is blocked by
+Status: twenty authored executable cases; UNRUN. RED/GREEN execution is blocked by
 the absence of an admitted general pure-Simple SSpec runner. The frozen policy
 fixtures are injected test inputs, not evidence of driver/frontend authentication.
 
@@ -40,3 +40,6 @@ selected defaults, changed owner-qualified bindings/reset, and formal shadowing
 that must not produce an unrelated nominal proof. All nineteen cases remain
 UNRUN; the sibling-facade positive is still known unsupported. Other default
 forms and bounds remain outside the supported producer slice.
+
+A twentieth case removes the nominal template payload and requires unavailable
+authority rather than treating missing metadata as an empty default list.

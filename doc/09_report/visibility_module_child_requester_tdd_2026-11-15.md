@@ -49,3 +49,7 @@ Box<T = Target> success oracle is unchanged and now intended supported. Three
 new regressions cover pri, qualified-binding mutation/reset and formal shadowing.
 Nineteen consumer cases remain UNRUN. Bounds and other default shapes remain
 unavailable; authenticated sibling facade selection remains an unmet positive.
+
+Self-review hardened missing template payloads: class/enum/trait/function
+authority without its declaration payload is unavailable, never interpreted as
+no generic dependencies. Added the twentieth consumer regression; all UNRUN.
