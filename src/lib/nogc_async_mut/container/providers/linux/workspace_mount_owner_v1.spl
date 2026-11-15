@@ -1,0 +1,276 @@
+# Supporting source observations only. No source/lock sample is a charge,
+# migration fence, cleanup grant, target namespace proof or mount launch owner.
+# The native quota lease is borrowed from its original durable owner; this
+# module never admits a new lease or pretends a live lease has a close operation.
+use std.nogc_async_mut.container.providers.linux.workspace_installed_profile_v1.*
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_decode_v1
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.{LinuxOciEnginePolicyV1,
+    linux_oci_engine_policy_decode_v1, linux_oci_engine_policy_digest_v1}
+use std.nogc_async_mut.container.providers.linux.workspace_mount_inspect_v1.{LinuxWorkspaceMountInspectV1,
+    linux_workspace_mount_inspect_observation_v1}
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeOperationV1}
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.{LinuxMachinePolicyOwnerV1, LinuxMachineProcessContextV1}
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.LinuxMachineStorageV1
+use std.nogc_sync_mut.io.linux_machine_workspace_exclusion_v1.{LinuxMachineWorkspaceExclusionV1,
+    LinuxMachineWorkspaceExclusionOpenV1, linux_machine_workspace_exclusion_open_v1}
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+use std.nogc_sync_mut.io.retained_file.{RetainedDirectoryOwnerV1, retained_directory_open_trusted_v1}
+use std.nogc_sync_mut.storage_roots.workspace_storage_owner_v1.{WorkspaceStorageLeaseV1, workspace_storage_observe_v1}
+use std.common.contracts.storage.workspace_storage_v1.{WorkspaceStorageReceiptV1, workspace_storage_binding_v1}
+use std.common.contracts.container.machine_policy_v1.machine_container_policy_decode_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+
+pub struct LinuxWorkspaceSourceSampleV1:
+    profile: LinuxWorkspaceInstalledProfileV1
+    profile_digest: text
+    storage: WorkspaceStorageReceiptV1
+    process: LinuxMachineProcessContextV1
+    request_digest: text
+    request: LinuxOciRequestV1
+
+pub struct LinuxWorkspaceSourceSampleTurnV1:
+    # Returned on success and refusal. The original durable owner retains
+    # release/recovery responsibility; a copied token is not a release receipt.
+    reader: LinuxMachinePolicyOwnerV1
+    lease: WorkspaceStorageLeaseV1
+    sample: LinuxWorkspaceSourceSampleV1?
+    error: text
+
+pub fn linux_workspace_source_request_match_v1(profile: LinuxWorkspaceInstalledProfileV1,
+        request: LinuxOciRequestV1, actual_uid: i64) -> Result<text, text>:
+    linux_workspace_installed_profile_validate_v1(profile)?
+    val digest = linux_oci_request_digest_v1(request)?
+    if request.mounts.len() != 1: return Err("workspace-source-one-exact-root-required")
+    val mount = request.mounts[0]
+    if (mount.host_root != linux_workspace_source_root_v1(profile) or mount.guest_root != profile.guest_root or
+            mount.read_only != profile.read_only): return Err("workspace-source-request-mapping-mismatch")
+    if request.containment_profile_digest != profile.containment_profile_digest:
+        return Err("workspace-source-containment-binding-mismatch")
+    if request.working_directory != profile.guest_root: return Err("workspace-source-working-directory-mismatch")
+    if (request.network_policy != "none" or request.filesystem_policy != "read-only" or
+            actual_uid <= 0 or request.user_uid != actual_uid or request.user_namespace_mode != "keep-id"):
+        return Err("workspace-source-request-profile-unsupported")
+    if not request.replace_entrypoint: return Err("workspace-source-exact-command-required")
+    Ok(digest)
+
+fn workspace_source_utf8_v1(bytes: [u8]) -> Result<text, text>:
+    if bytes.len() == 0 or bytes.len() > 1048576 or not utf8_bytes_valid(bytes):
+        return Err("workspace-source-policy-utf8")
+    Ok(bytes_to_text(bytes))
+
+fn workspace_source_sample_v1(reader: LinuxMachinePolicyOwnerV1, lease: WorkspaceStorageLeaseV1,
+        request_bytes: text) -> Result<LinuxWorkspaceSourceSampleV1, text>:
+    val request = linux_oci_retained_request_decode_v1(request_bytes)?
+    val machine_bytes = workspace_source_utf8_v1(reader.read_policy_v1()?)?
+    val profile_bytes = workspace_source_utf8_v1(reader.read_workspace_profile_v1()?)?
+    val profile = linux_workspace_installed_profile_decode_v1(profile_bytes)?
+    if profile.machine_policy_digest != sha256_text(machine_bytes): return Err("workspace-source-machine-policy-mismatch")
+    val machine = machine_container_policy_decode_v1(machine_bytes)?
+    var provider_bytes = ""
+    for provider in machine.providers:
+        if provider.backend == "linux-podman": provider_bytes = provider.policy_bytes
+    if provider_bytes == "" or sha256_text(provider_bytes) != profile.provider_policy_digest:
+        return Err("workspace-source-provider-policy-mismatch")
+    val engine = linux_oci_engine_policy_decode_v1(provider_bytes)?
+    val context = reader.actual_process_context_v1()?
+    if engine.expected_uid != context.effective_uid: return Err("workspace-source-provider-uid-mismatch")
+    val root = linux_workspace_source_root_v1(profile)
+    for forbidden in [engine.expected_graph_root, engine.expected_run_root]:
+        if linux_workspace_paths_overlap_v1(root, forbidden): return Err("workspace-source-engine-root-overlap")
+    if workspace_storage_binding_v1(lease.request)? != workspace_storage_binding_v1(linux_workspace_storage_request_v1(profile))?:
+        return Err("workspace-source-storage-binding-mismatch")
+    val storage = workspace_storage_observe_v1(lease)?
+    if storage.state != "retained": return Err("workspace-source-storage-not-retained")
+    val digest = linux_workspace_source_request_match_v1(profile, request, context.effective_uid)?
+    # Recheck the actual reader after the native lease observation. This is
+    # same-turn provenance, not a promise about future Host/path mutations.
+    val after = reader.actual_process_context_v1()?
+    if (after.real_uid != context.real_uid or after.effective_uid != context.effective_uid or
+            after.process_id != context.process_id or after.thread_id != context.thread_id or
+            after.authority_namespace_id != context.authority_namespace_id or after.generation != context.generation):
+        return Err("workspace-source-process-context-changed")
+    if workspace_source_utf8_v1(reader.read_workspace_profile_v1()?)? != profile_bytes:
+        return Err("workspace-source-profile-changed")
+    Ok(LinuxWorkspaceSourceSampleV1(profile: profile, profile_digest: sha256_text(profile_bytes),
+        storage: storage, process: after, request_digest: digest, request: request))
+
+# Real installed-file/process/quota observations with unconditional custody
+# return. This cannot mint LinuxWorkspaceSourceOwnerV1 or mount authority.
+pub fn linux_workspace_source_sample_borrowed_v1(reader: LinuxMachinePolicyOwnerV1,
+        lease: WorkspaceStorageLeaseV1, request_bytes: text) -> LinuxWorkspaceSourceSampleTurnV1:
+    match workspace_source_sample_v1(reader, lease, request_bytes):
+        case Ok(sample): LinuxWorkspaceSourceSampleTurnV1(reader: reader, lease: lease, sample: Some(sample), error: "")
+        case Err(reason): LinuxWorkspaceSourceSampleTurnV1(reader: reader, lease: lease, sample: None, error: reason)
+
+pub enum LinuxWorkspaceSourceOpenV1:
+    Observed(owner: LinuxWorkspaceSourceOwnerV1)
+    Rejected(reader: LinuxMachinePolicyOwnerV1, storage: LinuxMachineStorageV1,
+        lease: WorkspaceStorageLeaseV1, reason: text)
+    CleanupRequired(owner: LinuxWorkspaceSourceOwnerV1, reason: text)
+
+pub struct LinuxWorkspaceSourceCloseV1:
+    reader: LinuxMachinePolicyOwnerV1
+    storage: LinuxMachineStorageV1
+    lease: WorkspaceStorageLeaseV1
+    owner: LinuxWorkspaceSourceOwnerV1?
+    closed: bool
+    error: text
+
+# One canonical resource record per generation. Public values contain no raw
+# descriptors or copied close progress. Closed tombstones are never reused.
+struct LinuxWorkspaceSourceStateV1:
+    generation: i64
+    reader: LinuxMachinePolicyOwnerV1
+    storage: LinuxMachineStorageV1
+    lease: WorkspaceStorageLeaseV1
+    request_digest: text
+    profile_digest: text
+    var workspace_identity_digest: text = ""
+    var exclusion: LinuxMachineWorkspaceExclusionV1? = None
+    var parent_directory: RetainedDirectoryOwnerV1? = None
+    var root_directory: RetainedDirectoryOwnerV1? = None
+    var phase: text = "opening"
+    var cleanup_error: text = ""
+
+var workspace_source_states_v1: [LinuxWorkspaceSourceStateV1] = []
+var workspace_source_active_v1: i64 = 0
+
+fn workspace_source_state_v1(slot: i64, generation: i64) -> Result<LinuxWorkspaceSourceStateV1, text>:
+    linux_machine_process_origin_check_v1()?
+    if slot < 0 or slot >= workspace_source_states_v1.len(): return Err("workspace-source-owner-stale")
+    val state = workspace_source_states_v1[slot]
+    if state.generation != generation: return Err("workspace-source-owner-stale")
+    Ok(state)
+
+pub class LinuxWorkspaceSourceOwnerV1:
+    slot: i64
+    generation: i64
+    # Immutable BORROWED custody only. No owned descriptors/progress here.
+    reader: LinuxMachinePolicyOwnerV1
+    storage: LinuxMachineStorageV1
+    lease: WorkspaceStorageLeaseV1
+
+    pub fn current_v1(request_bytes: text) -> Result<LinuxWorkspaceSourceSampleV1, text>:
+        val state = workspace_source_state_v1(self.slot, self.generation)?
+        if state.phase != "opening" and state.phase != "observed": return Err("workspace-source-owner-not-current")
+        val caller = state.reader.actual_process_context_v1()?
+        if not state.exclusion.? or not state.parent_directory.? or not state.root_directory.?:
+            return Err("workspace-source-owner-incomplete")
+        val exclusion = state.exclusion.unwrap()
+        val excluded = exclusion.current_v1()?
+        val sample = workspace_source_sample_v1(state.reader, state.lease, request_bytes)?
+        if (sample.request_digest != state.request_digest or sample.profile_digest != state.profile_digest or
+                excluded.machine_policy_digest != sample.profile.machine_policy_digest or
+                excluded.lease_binding_digest != sample.storage.binding_digest or
+                excluded.workspace_identity_digest != state.workspace_identity_digest):
+            return Err("workspace-source-owner-binding-changed")
+        val policy = workspace_source_utf8_v1(state.storage.policy_bytes_v1()?)?
+        if sha256_text(policy) != sample.profile.machine_policy_digest:
+            return Err("workspace-source-storage-policy-changed")
+        Ok(sample)
+
+    # Engine-declared configuration correspondence, not namespace/launch proof.
+    pub fn match_engine_projection_v1(request_bytes: text, observed: RuntimeOperationV1,
+            expected: RuntimeIdentityV1, policy: LinuxOciEnginePolicyV1) -> Result<LinuxWorkspaceMountInspectV1, text>:
+        val sample = self.current_v1(request_bytes)?
+        if linux_oci_engine_policy_digest_v1(policy)? != sample.profile.provider_policy_digest:
+            return Err("workspace-source-inspect-provider-policy-mismatch")
+        linux_workspace_mount_inspect_observation_v1(observed, policy, expected, sample.request)
+
+    # Borrowed capabilities stay available even before safe registry access.
+    pub fn close_v1() -> LinuxWorkspaceSourceCloseV1:
+        val loaded = workspace_source_state_v1(self.slot, self.generation)
+        if loaded.is_err():
+            return LinuxWorkspaceSourceCloseV1(reader: self.reader, storage: self.storage,
+                lease: self.lease, owner: Some(self), closed: false, error: loaded.unwrap_err())
+        val state = loaded.unwrap()
+        if state.phase == "closed":
+            return LinuxWorkspaceSourceCloseV1(reader: state.reader, storage: state.storage,
+                lease: state.lease, owner: None, closed: true, error: state.cleanup_error)
+        # The independent genuine process-origin guard already ran before the
+        # registry lookup. Borrowed-reader closure must not strand our owned
+        # directories/lock; cleanup does not borrow launch/policy authority.
+        workspace_source_states_v1[self.slot].phase = "closing"
+        # Clear canonical custody BEFORE native close. Descriptor consumption
+        # and a close diagnostic are distinct from a retained native resource.
+        if workspace_source_states_v1[self.slot].root_directory.?:
+            var root = workspace_source_states_v1[self.slot].root_directory.unwrap()
+            workspace_source_states_v1[self.slot].root_directory = None
+            if not root.close() and workspace_source_states_v1[self.slot].cleanup_error == "":
+                workspace_source_states_v1[self.slot].cleanup_error = "workspace-source-root-close-consumed-with-error"
+        if workspace_source_states_v1[self.slot].parent_directory.?:
+            var parent = workspace_source_states_v1[self.slot].parent_directory.unwrap()
+            workspace_source_states_v1[self.slot].parent_directory = None
+            if not parent.close() and workspace_source_states_v1[self.slot].cleanup_error == "":
+                workspace_source_states_v1[self.slot].cleanup_error = "workspace-source-parent-close-consumed-with-error"
+        if workspace_source_states_v1[self.slot].exclusion.?:
+            val exclusion = workspace_source_states_v1[self.slot].exclusion.unwrap()
+            val released = exclusion.close_v1()
+            # A contradictory closed=false/no-owner outcome cannot prove
+            # consumption: keep the last exact generation rather than lose it.
+            if released.owner.?: workspace_source_states_v1[self.slot].exclusion = released.owner
+            elif released.closed: workspace_source_states_v1[self.slot].exclusion = None
+            if released.error != "" and workspace_source_states_v1[self.slot].cleanup_error == "":
+                workspace_source_states_v1[self.slot].cleanup_error = released.error
+            if workspace_source_states_v1[self.slot].exclusion.?:
+                if workspace_source_states_v1[self.slot].cleanup_error == "":
+                    workspace_source_states_v1[self.slot].cleanup_error = "workspace-source-exclusion-close-unconfirmed"
+                return LinuxWorkspaceSourceCloseV1(reader: state.reader, storage: state.storage,
+                    lease: state.lease, owner: Some(self), closed: false,
+                    error: workspace_source_states_v1[self.slot].cleanup_error)
+        workspace_source_states_v1[self.slot].phase = "closed"
+        workspace_source_active_v1 = workspace_source_active_v1 - 1
+        LinuxWorkspaceSourceCloseV1(reader: state.reader, storage: state.storage,
+            lease: state.lease, owner: None, closed: true,
+            error: workspace_source_states_v1[self.slot].cleanup_error)
+
+# This acquires source observations/exclusion only. It never creates/releases
+# a quota lease, charges capacity, grants launch or mutates workspace contents.
+pub fn linux_workspace_source_open_v1(reader: LinuxMachinePolicyOwnerV1,
+        storage: LinuxMachineStorageV1, lease: WorkspaceStorageLeaseV1,
+        request_bytes: text) -> LinuxWorkspaceSourceOpenV1:
+    match linux_machine_process_origin_check_v1():
+        case Err(reason): return LinuxWorkspaceSourceOpenV1.Rejected(reader, storage, lease, reason)
+        case Ok(_): pass
+    if workspace_source_active_v1 >= 32 or workspace_source_states_v1.len() >= 4096:
+        return LinuxWorkspaceSourceOpenV1.Rejected(reader, storage, lease, "workspace-source-owner-limit")
+    val sample = match workspace_source_sample_v1(reader, lease, request_bytes):
+        case Ok(value): value
+        case Err(reason): return LinuxWorkspaceSourceOpenV1.Rejected(reader, storage, lease, reason)
+    val slot = workspace_source_states_v1.len()
+    val generation = slot + 1
+    workspace_source_states_v1.push(LinuxWorkspaceSourceStateV1(generation: generation,
+        reader: reader, storage: storage, lease: lease, request_digest: sample.request_digest,
+        profile_digest: sample.profile_digest))
+    workspace_source_active_v1 = workspace_source_active_v1 + 1
+    val owner = LinuxWorkspaceSourceOwnerV1(slot: slot, generation: generation, reader: reader, storage: storage, lease: lease)
+    match linux_machine_workspace_exclusion_open_v1(storage, lease):
+        case LinuxMachineWorkspaceExclusionOpenV1.Rejected(reason):
+            workspace_source_states_v1[slot].phase = "closed"
+            workspace_source_active_v1 = workspace_source_active_v1 - 1
+            return LinuxWorkspaceSourceOpenV1.Rejected(reader, storage, lease, reason)
+        case LinuxMachineWorkspaceExclusionOpenV1.CleanupRequired(exclusion, reason):
+            workspace_source_states_v1[slot].exclusion = Some(exclusion)
+            return LinuxWorkspaceSourceOpenV1.CleanupRequired(owner, reason)
+        case LinuxMachineWorkspaceExclusionOpenV1.Ready(exclusion):
+            workspace_source_states_v1[slot].exclusion = Some(exclusion)
+    val exclusion = workspace_source_states_v1[slot].exclusion.unwrap()
+    val excluded = match exclusion.current_v1():
+        case Err(reason): return LinuxWorkspaceSourceOpenV1.CleanupRequired(owner, reason)
+        case Ok(value): value
+    if excluded.workspace_identity_digest == "":
+        return LinuxWorkspaceSourceOpenV1.CleanupRequired(owner, "workspace-source-native-identity-missing")
+    workspace_source_states_v1[slot].workspace_identity_digest = excluded.workspace_identity_digest
+    match retained_directory_open_trusted_v1(sample.profile.protected_parent):
+        case Err(reason): return LinuxWorkspaceSourceOpenV1.CleanupRequired(owner, reason)
+        case Ok(parent): workspace_source_states_v1[slot].parent_directory = Some(parent)
+    match retained_directory_open_trusted_v1(linux_workspace_source_root_v1(sample.profile)):
+        case Err(reason): return LinuxWorkspaceSourceOpenV1.CleanupRequired(owner, reason)
+        case Ok(root): workspace_source_states_v1[slot].root_directory = Some(root)
+    match owner.current_v1(request_bytes):
+        case Err(reason): LinuxWorkspaceSourceOpenV1.CleanupRequired(owner, reason)
+        case Ok(_):
+            workspace_source_states_v1[slot].phase = "observed"
+            LinuxWorkspaceSourceOpenV1.Observed(owner)

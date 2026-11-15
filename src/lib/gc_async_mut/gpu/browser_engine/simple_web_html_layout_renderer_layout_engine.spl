@@ -15,6 +15,8 @@ use std.gc_async_mut.gpu.browser_engine.layout_m14_types.{collapse_margins_signe
 # See doc/08_tracking/bug/live_lane_inline_text_measure_counts_utf8_bytes_2026-08-11.md
 use std.common.layout.text_metrics.{codepoint_cells, text_cell_width}
 use std.common.encoding.utf8.{text_codepoints}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
 
 
 # --- Float context (CSS 2.2 section 9.5) -----------------------------------
@@ -1658,6 +1660,13 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             var grow_acc_wrap = 0
             var flex_child_count_wrap = 0
             var wrap_content_bottom = 0
+            # Per line: its cross size once laid out (the stretched estimate or
+            # the tallest real item, whichever is larger) and its top; per
+            # ordered item: its line (-1 when out of flow). The pass after the
+            # loop aligns each item inside its line (CSS Flexbox 9.4 step 11).
+            var line_cross: [i32] = [0; children_for_i_count]
+            var line_top: [i32] = [0; children_for_i_count]
+            var wrap_item_line: [i32] = [-1; ordered_row_child_count]
             var fc_wrap_i = 0
             while fc_wrap_i < ordered_row_child_count:
                 val fc_wrap = ordered_row_children[fc_wrap_i]
@@ -1703,7 +1712,11 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         if reverse_wrap:
                             cy_wrap = cy_wrap - ((if line_index_wrap + 1 < line_count: line_heights[line_index_wrap + 1] + align_content_line_extra else: 0) + row_wrap_row_gap + align_content_gap_extra)
                         else:
-                            cy_wrap = cy_wrap + line_h_wrap + row_wrap_row_gap + align_content_gap_extra
+                            # The next line starts below the real items of this
+                            # one: `line_heights` estimates an auto-height item
+                            # as one line box.
+                            val placed_line_h = if line_cross[line_index_wrap] > line_h_wrap: line_cross[line_index_wrap] else: line_h_wrap
+                            cy_wrap = cy_wrap + placed_line_h + row_wrap_row_gap + align_content_gap_extra
                         line_index_wrap = line_index_wrap + 1
                         line_h_wrap = if line_index_wrap < line_count: line_heights[line_index_wrap] + align_content_line_extra else: 0
                         flex_child_count_wrap = 0
@@ -1792,8 +1805,42 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     val item_bottom = out_by[fc_wrap] + out_bh[fc_wrap] + resolved_cst.margin_b
                     if item_bottom > wrap_content_bottom:
                         wrap_content_bottom = item_bottom
+                    if line_index_wrap < line_count:
+                        wrap_item_line[fc_wrap_i] = line_index_wrap
+                        line_top[line_index_wrap] = cy_wrap
+                        val item_outer_h = item_bottom - cy_wrap
+                        if line_h_wrap > line_cross[line_index_wrap]:
+                            line_cross[line_index_wrap] = line_h_wrap
+                        if item_outer_h > line_cross[line_index_wrap]:
+                            line_cross[line_index_wrap] = item_outer_h
                     flex_child_count_wrap = flex_child_count_wrap + 1
                 fc_wrap_i = fc_wrap_i + 1
+            # Align each item inside its line: an auto-height `stretch` item
+            # takes the line's cross size (its content stays at the top), an
+            # `end` / `center` item moves down. `wrap-reverse` keeps the old
+            # top placement.
+            if not reverse_wrap:
+                var al_i = 0
+                while al_i < ordered_row_child_count:
+                    val al_line = wrap_item_line[al_i]
+                    if al_line >= 0:
+                        val al_n = ordered_row_children[al_i]
+                        val al_st = flex_item_percent_style(styles[al_n], iw, content_height_limit)
+                        val al_outer = al_st.margin_t + out_bh[al_n] + al_st.margin_b
+                        val al_free = line_cross[al_line] - al_outer
+                        val al_align = effective_item_align(st, al_st)
+                        if al_free > 0 and nodes[al_n].tag != "#text" and not al_st.margin_t_auto and not al_st.margin_b_auto:
+                            if (al_align == "stretch" or al_align == "normal" or al_align == "") and al_st.height_px == 0 and al_st.max_height_px <= 0 and not grid_item_is_replaced(nodes[al_n]):
+                                out_bh[al_n] = out_bh[al_n] + al_free
+                            elif al_align == "flex-end" or al_align == "end" or al_align == "center":
+                                val al_dy = if al_align == "center": al_free / 2 else: al_free
+                                val al_moved = offset_layout_subtree(child_index, al_n, 0, al_dy, out_bx, out_by)
+                                out_bx = al_moved.bx
+                                out_by = al_moved.by
+                            val al_bottom = line_top[al_line] + line_cross[al_line]
+                            if al_bottom > wrap_content_bottom:
+                                wrap_content_bottom = al_bottom
+                    al_i = al_i + 1
             var flex_h_wrap = if st.height_px > 0:
                 if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
             else:

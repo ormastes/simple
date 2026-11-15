@@ -1,3 +1,5 @@
+use std.nogc_sync_mut.io.windows_command_domain_v4.windows_command_origin_matches_v4
+use std.nogc_async_mut.container.execution_progress_v4.{ContainerExecutionProgressV4, simple_container_execution_begin_v4, simple_container_execution_step_v4, simple_container_execution_cancel_v4, simple_container_execution_thread_check_v4, simple_container_execution_scripted_v4}
 # Shared signed host executor. All native/container operations use Simple
 # Container API V2; no Linux/Windows provider or request codec imports.
 # Selected journal profile: process-crash-v1, NOT power-loss durability.
@@ -21,9 +23,7 @@ use std.common.task_runner.distributed_operation_journal_v2.distributed_operatio
 use std.common.build_manager.contracts.builder_digest_valid_v1
 use std.common.crypto.sha256.sha256_text
 use std.common.string_core.str_len
-use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_regular_no_follow_bounded, file_fsync, directory_fsync}
-use std.nogc_sync_mut.io_runtime.dir_create
-use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.nogc_sync_mut.orchestration.host_execution_archive_v3.host_execution_archive_publish_v3
 
 pub struct HostExecutionTurnV2:
     owner: HostCapacityOwnerV1
@@ -114,17 +114,6 @@ fn host_execution_prepare_v2(owner: HostCapacityOwnerV1, container: SimpleContai
     Ok(HostExecutionPreparedV2(envelope: envelope, grant: grant, deadline: deadline,
         operation_digest: operation_digest, runtime_engine: engine, scope: scope, runtime_fence_id: runtime_fence_id))
 
-fn host_execution_archive_object_v2(root: text, directory_name: text, operation_id: text, bytes: text) -> Result<bool, text>:
-    val directory = root + "/" + directory_name
-    if not file_exists(directory) and not dir_create(directory, true): return Err("host-execution-archive-directory-unavailable")
-    val path = directory + "/" + sha256_text(operation_id) + ".sdn"
-    if file_exists(path):
-        if file_read_regular_no_follow_bounded(path, 2097152)? != bytes: return Err("host-execution-retained-archive-mismatch")
-    elif not file_atomic_write_mode(path, bytes, 0o600): return Err("host-execution-archive-publication-failed")
-    if file_read_regular_no_follow_bounded(path, 2097152)? != bytes: return Err("host-execution-archive-readback-mismatch")
-    if not file_fsync(path) or not directory_fsync(directory) or not directory_fsync(root): return Err("host-execution-archive-sync-failed")
-    Ok(true)
-
 fn host_execution_retain_v2(owner: HostCapacityOwnerV1, prepared: HostExecutionPreparedV2, payload: text) -> Result<bool, text>:
     val plan = prepared.envelope.execution.plan
     # Canonical runtime adapter plan is archived separately, never substituted
@@ -132,9 +121,9 @@ fn host_execution_retain_v2(owner: HostCapacityOwnerV1, prepared: HostExecutionP
     val plan_bytes = container_execution_plan_bytes_v2(plan)?
     val request_bytes = container_execution_request_encode_v2(prepared.envelope.execution)?
     if str_len(request_bytes) > 2097152: return Err("host-execution-archive-size")
-    val plan_written = host_execution_archive_object_v2(owner.journal.root, "host-execution-plans", plan.operation_id, plan_bytes)?
-    val request_written = host_execution_archive_object_v2(owner.journal.root, "host-execution-requests", plan.operation_id, request_bytes)?
-    val packet_written = host_execution_archive_object_v2(owner.journal.root, "host-execute-packets", plan.operation_id, payload)?
+    val plan_written = host_execution_archive_publish_v3(owner.journal, "host-execution-plans", plan.operation_id, plan_bytes, 2097152)?
+    val request_written = host_execution_archive_publish_v3(owner.journal, "host-execution-requests", plan.operation_id, request_bytes, 2097152)?
+    val packet_written = host_execution_archive_publish_v3(owner.journal, "host-execute-packets", plan.operation_id, payload, 2097152)?
     Ok(true)
 
 # Read-only evidence-staging preflight. Success grants no launch capability:
@@ -170,7 +159,7 @@ fn host_execution_record_v2(owner: HostCapacityOwnerV1, container: SimpleContain
         observed_unix_ms: context.grant_clock, observed_monotonic_ms: context.monotonic_ms, runtime: runtime, phase: phase,
         create_status: create_status, start_status: start_status, inspect_status: inspect_status,
         reason: if error == "": "native lifecycle observed; completion not awaited" else: error)
-    val stored = host_execution_observation_store_v2(owner.journal.root, observation)
+    val stored = host_execution_observation_store_owned_v3(owner.journal, observation)
     if stored.is_err(): return HostExecutionTurnV2(owner, container, Some(observation), true, stored.unwrap_err())
     HostExecutionTurnV2(owner, container, Some(observation), error != "", error)
 
@@ -181,7 +170,7 @@ fn host_execution_creation_intent_v2(owner: HostCapacityOwnerV1, container: Simp
         operation_id: intent.operation_id, engine: intent.engine, native_id: intent.native_id, node_boot_id: intent.node_boot_id)
     if intent.phase != "created" or not host_execution_identity_match_v2(identity, prepared, created_identity.native_id):
         return Err("host-execution-created-intent-mismatch")
-    val stored = host_execution_intent_store_v1(owner.journal.root, intent)?
+    val stored = host_execution_intent_store_owned_v3(owner.journal, intent)?
     Ok(true)
 
 pub fn host_authorized_execute_v2(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2,
@@ -209,6 +198,15 @@ pub fn host_authorized_execute_v2(owner: HostCapacityOwnerV1, container: SimpleC
     val executing = beginning.unwrap()
     var current_container = container
     var latest_context = commit_context
+    if simple_container_backend_v2(current_container) == "windows-docker-process":
+        # Capacity reservation is not the provider's observed image/engine
+        # preparation. Establish that prerequisite without changing Linux flow.
+        val prepared_turn = simple_container_apply_v2(current_container, "prepare", prepared.envelope.execution, prepared.deadline)
+        current_container = prepared_turn.owner
+        if prepared_turn.operation.status != RUNTIME_STATUS_OK:
+            return host_execution_record_v2(executing, current_container, prepared, expected_provider_identity_digest,
+                latest_context, host_execution_unobserved_v2(prepared), "unknown", "not-attempted", "not-attempted", "not-attempted",
+                "host-execution-prepare-failed:" + prepared_turn.operation.reason)
     val create_context = refresh_context()
     error = host_execution_context_error_v2(commit_context, create_context, policy)
     if error == "":
@@ -258,3 +256,188 @@ pub fn host_authorized_execute_v2(owner: HostCapacityOwnerV1, container: SimpleC
     elif error == "": error = observation_error
     host_execution_record_v2(executing, current_container, prepared, expected_provider_identity_digest,
         latest_context, runtime, phase, created.status, start_status, inspected.status, error)
+
+# Nonreused canonical continuation slots hold stage/command owners only. The
+# caller keeps the sole Host capacity/container pair and passes it each turn.
+pub class HostExecutionContinuationV4:
+    slot: i64
+    scripted: bool
+    scope: ContainerHostScopeV2
+    journal_root: text
+    journal_lease: text
+    journal_authority: text
+
+pub struct HostExecutionProgressTurnV4:
+    owner: HostCapacityOwnerV1
+    container: SimpleContainerOwnerV2
+    continuation: Option<HostExecutionContinuationV4>
+    observation: Option<HostExecutionObservationV2>
+    recovery_required: bool
+    error: text
+
+struct HostExecutionProgressStateV4:
+    prepared: HostExecutionPreparedV2
+    policy: LocalAuthorityPolicyV1
+    provider_digest: text
+    context: HostReservationAuthorizationContextV1
+    journal_root: text
+    journal_lease: text
+    journal_authority: text
+    journal_sequence: i64
+    stage: text = "prepare"
+    active: Option<ContainerExecutionProgressV4> = nil
+    created_id: text = ""
+    create_status: text = "not-attempted"
+    start_status: text = "not-attempted"
+    inspect_status: text = "not-attempted"
+    error: text = ""
+
+var host_execution_progress_slots_v4: [Option<HostExecutionProgressStateV4>] = []
+
+pub fn host_authorized_execution_begin_v4(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2,
+        payload: text, policy: LocalAuthorityPolicyV1, provider_digest: text, service_scope_id: text,
+        context: HostReservationAuthorizationContextV1,
+        refresh: fn() -> HostReservationAuthorizationContextV1) -> HostExecutionProgressTurnV4:
+    if simple_container_backend_v2(container) != "windows-docker-process":
+        return HostExecutionProgressTurnV4(owner, container, nil, nil, false, "host-cooperative-backend-unavailable")
+    val thread = simple_container_execution_thread_check_v4(container)
+    if thread.is_err(): return HostExecutionProgressTurnV4(owner, container, nil, nil, false, thread.unwrap_err())
+    if host_execution_progress_slots_v4.len() >= 100000:
+        return HostExecutionProgressTurnV4(owner, container, nil, nil, false, "host-execution-continuation-limit")
+    if not host_execution_current_v2(owner):
+        return HostExecutionProgressTurnV4(owner, container, nil, nil, true, "host-execution-owner-stale")
+    val checked = host_execution_prepare_v2(owner, container, payload, policy, provider_digest, service_scope_id, context)
+    if checked.is_err(): return HostExecutionProgressTurnV4(owner, container, nil, nil, false, checked.unwrap_err())
+    val prepared = checked.unwrap()
+    val retained = host_execution_retain_v2(owner, prepared, payload)
+    if retained.is_err(): return HostExecutionProgressTurnV4(owner, container, nil, nil, false, retained.unwrap_err())
+    val latest = refresh()
+    var error = host_execution_context_error_v2(context, latest, policy)
+    if error == "": error = host_execution_fresh_authority_v2(prepared, latest)
+    if error != "": return HostExecutionProgressTurnV4(owner, container, nil, nil, false, error)
+    val capacity = owner.ledger.capacity
+    val fence = HostLedgerFenceV1(capacity.authority_id, capacity.boot_id, capacity.provider_generation, owner.ledger.revision)
+    val begun = host_capacity_owner_begin_v1(owner, prepared.envelope.intent, prepared.envelope.operation,
+        prepared.envelope.receipt, fence, prepared.grant, latest)
+    if begun.is_err(): return HostExecutionProgressTurnV4(owner, container, nil, nil, not host_execution_current_v2(owner), begun.unwrap_err())
+    val executing = begun.unwrap()
+    val slot = host_execution_progress_slots_v4.len()
+    host_execution_progress_slots_v4.push(Some(HostExecutionProgressStateV4(prepared: prepared, policy: policy,
+        provider_digest: provider_digest, context: latest, journal_root: executing.journal.root,
+        journal_lease: executing.journal.lease_digest, journal_authority: executing.journal.authority_digest,
+        journal_sequence: executing.journal.sequence)))
+    HostExecutionProgressTurnV4(executing, container, Some(HostExecutionContinuationV4(slot,
+        simple_container_execution_scripted_v4(container).unwrap(), prepared.scope,
+        executing.journal.root, executing.journal.lease_digest, executing.journal.authority_digest)), nil, false, "")
+
+fn host_execution_progress_finish_v4(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2,
+        continuation: HostExecutionContinuationV4, state: HostExecutionProgressStateV4,
+        runtime: RuntimeIdentityV1, phase: text) -> HostExecutionProgressTurnV4:
+    # Called only after active command cleanup has returned no native owner.
+    val turn = host_execution_record_v2(owner, container, state.prepared, state.provider_digest,
+        state.context, runtime, phase, state.create_status, state.start_status, state.inspect_status, state.error)
+    host_execution_progress_slots_v4[continuation.slot] = nil
+    HostExecutionProgressTurnV4(turn.owner, turn.container, nil, turn.observation, turn.recovery_required, turn.error)
+
+# Invalid journal/projection cannot authorize launch, but the exact retained
+# helper lease still authorizes cancellation and retryable handle cleanup.
+fn host_execution_progress_quarantine_v4(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2,
+        continuation: HostExecutionContinuationV4, original: HostExecutionProgressStateV4,
+        error: text) -> HostExecutionProgressTurnV4:
+    var state = original
+    if state.error == "": state.error = error
+    if state.active.is_some():
+        val closed = simple_container_execution_cancel_v4(container, state.active.unwrap())
+        state.active = closed.progress
+        if state.active.is_some():
+            host_execution_progress_slots_v4[continuation.slot] = Some(state)
+            return HostExecutionProgressTurnV4(owner, closed.owner, Some(continuation), nil, true, state.error)
+    host_execution_progress_slots_v4[continuation.slot] = nil
+    # No publication or release through a journal that failed currentness.
+    HostExecutionProgressTurnV4(owner, container, nil, nil, true, state.error)
+
+pub fn host_authorized_execution_step_v4(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2,
+        continuation: HostExecutionContinuationV4, context: HostReservationAuthorizationContextV1,
+        cancel: bool) -> HostExecutionProgressTurnV4:
+    val origin = simple_container_execution_scripted_v4(container)
+    if (origin.is_err() or not windows_command_origin_matches_v4(continuation.scripted, origin.unwrap()) or
+            continuation.scope != simple_container_scope_v2(container) or continuation.journal_root != owner.journal.root or
+            continuation.journal_lease != owner.journal.lease_digest or continuation.journal_authority != owner.journal.authority_digest):
+        return HostExecutionProgressTurnV4(owner, container, Some(continuation), nil, true, "host-execution-continuation-origin-mismatch")
+    val thread = simple_container_execution_thread_check_v4(container)
+    if thread.is_err(): return HostExecutionProgressTurnV4(owner, container, Some(continuation), nil, true, thread.unwrap_err())
+    if continuation.slot < 0 or continuation.slot >= host_execution_progress_slots_v4.len():
+        return HostExecutionProgressTurnV4(owner, container, Some(continuation), nil, true, "host-execution-continuation-invalid")
+    var state = match host_execution_progress_slots_v4[continuation.slot]:
+        case Some(value): value
+        case nil: return HostExecutionProgressTurnV4(owner, container, nil, nil, true, "host-execution-continuation-retired")
+    # Current writer validation is mandatory before advancing a native command.
+    # Wrong supplied owners cannot replace the retained command cleanup carrier.
+    if (owner.journal.root != state.journal_root or owner.journal.lease_digest != state.journal_lease or
+            owner.journal.authority_digest != state.journal_authority or owner.journal.sequence != state.journal_sequence or
+            simple_container_scope_v2(container) != state.prepared.scope or not host_execution_current_v2(owner)):
+        return host_execution_progress_quarantine_v4(owner, container, continuation, state, "host-execution-progress-owner-mismatch")
+    val row = daemon_operation_exact_v2(owner.journal, state.prepared.envelope.operation)
+    if row.is_err() or row.unwrap().state != "executing":
+        return host_execution_progress_quarantine_v4(owner, container, continuation, state, "host-execution-progress-not-executing")
+    var stop = cancel
+    var error = host_execution_context_error_v2(state.context, context, state.policy)
+    if error == "":
+        state.context = context
+        if state.stage != "inspect": error = host_execution_fresh_authority_v2(state.prepared, context)
+    if error != "":
+        stop = true
+        if state.error == "": state.error = error
+    if cancel and state.error == "": state.error = "host-execution-cancelled"
+    if stop and state.active.is_none():
+        return host_execution_progress_finish_v4(owner, container, continuation, state,
+            host_execution_unobserved_v2(state.prepared), "unknown")
+    val progress = if state.active.is_some():
+        simple_container_execution_step_v4(container, state.active.unwrap(), stop)
+    else:
+        simple_container_execution_begin_v4(container, state.stage, state.prepared.envelope.execution, state.prepared.deadline)
+    state.active = progress.progress
+    if progress.error != "" and state.error == "": state.error = progress.error
+    if state.active.is_some():
+        host_execution_progress_slots_v4[continuation.slot] = Some(state)
+        return HostExecutionProgressTurnV4(owner, progress.owner, Some(continuation), nil, state.error != "", state.error)
+    if progress.operation.is_none():
+        if state.error == "": state.error = "host-execution-command-result-missing"
+        return host_execution_progress_finish_v4(owner, progress.owner, continuation, state,
+            host_execution_unobserved_v2(state.prepared), "unknown")
+    val operation = progress.operation.unwrap()
+    if operation.status != RUNTIME_STATUS_OK and state.error == "": state.error = "host-execution-" + state.stage + "-failed:" + operation.reason
+    if stop:
+        return host_execution_progress_finish_v4(owner, progress.owner, continuation, state,
+            host_execution_unobserved_v2(state.prepared), "unknown")
+    if state.stage == "prepare":
+        if state.error != "": return host_execution_progress_finish_v4(owner, progress.owner, continuation, state,
+            host_execution_unobserved_v2(state.prepared), "unknown")
+        state.stage = "create"
+    elif state.stage == "create":
+        state.create_status = operation.status
+        if operation.status == RUNTIME_STATUS_OK:
+            if operation.state.phase != "created" or not host_execution_identity_match_v2(operation.state.identity, state.prepared, ""):
+                state.error = "host-execution-created-identity-mismatch"
+            else:
+                state.created_id = operation.state.identity.native_id
+                val stored = host_execution_creation_intent_v2(owner, progress.owner, state.prepared, operation.state.identity)
+                if stored.is_err(): state.error = stored.unwrap_err()
+        state.stage = if state.error == "": "start" else: "inspect"
+    elif state.stage == "start":
+        state.start_status = operation.status
+        if operation.status == RUNTIME_STATUS_OK and not host_execution_identity_match_v2(operation.state.identity, state.prepared, state.created_id):
+            state.error = "host-execution-started-identity-mismatch"
+        state.stage = "inspect"
+    elif state.stage == "inspect":
+        state.inspect_status = operation.status
+        var runtime = host_execution_unobserved_v2(state.prepared)
+        var phase = "unknown"
+        if operation.status == RUNTIME_STATUS_OK and host_execution_identity_match_v2(operation.state.identity, state.prepared, state.created_id):
+            runtime = operation.state.identity
+            phase = operation.state.phase
+        elif state.error == "": state.error = "host-execution-inspect-failed-or-identity-mismatch"
+        if state.error == "" and phase != "running" and phase != "exited" and phase != "stopped": state.error = "host-execution-inspect-phase-not-started"
+        return host_execution_progress_finish_v4(owner, progress.owner, continuation, state, runtime, phase)
+    host_execution_progress_slots_v4[continuation.slot] = Some(state)
+    HostExecutionProgressTurnV4(owner, progress.owner, Some(continuation), nil, state.error != "", state.error)
