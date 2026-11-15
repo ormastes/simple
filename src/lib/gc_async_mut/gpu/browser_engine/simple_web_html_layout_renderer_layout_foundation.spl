@@ -1526,7 +1526,8 @@ fn _lay_flex_item_max_content_width_inner(nodes: [HNode], styles: [Style], child
     while c >= 0:  # cpu-lane-loop-ok: one pass over this item's children during flex base sizing, bounded by the child list, not on any paint path
         val cst = styles[c]
         val ctag = nodes[c].tag
-        if ctag == "#text" and not (nodes[c].ws_newline and cst.white_space_newline):
+        val kept_breaks = html_kept_newlines(nodes[c], cst.white_space_newline)
+        if ctag == "#text" and kept_breaks == 0:
             val txt: text = nodes[c].text_trimmed
             if txt.len() > 0:
                 if inline_run > 0 and (gap_pending or text_starts_with_collapsible_space(nodes[c].text_data)) and not cst.white_space_pre:
@@ -1543,7 +1544,7 @@ fn _lay_flex_item_max_content_width_inner(nodes: [HNode], styles: [Style], child
                 # A whitespace-only text node between two inline boxes
                 # (`<a>Edit</a> <a>Del</a>`) is one collapsible space.
                 gap_pending = true
-        elif (ctag == "br" or (nodes[c].ws_newline and cst.white_space_newline)) and cst.display == "inline":
+        elif (ctag == "br" or kept_breaks > 0) and cst.display == "inline":
             # A forced break ends the line being measured.
             if inline_run > widest:
                 widest = inline_run
@@ -2571,7 +2572,10 @@ fn constrained_outer_height(node: HNode, st: Style, candidate_height: i32) -> i3
 
 fn absolute_outer_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, node_i: i32, parent: Style, node: HNode, authored_st: Style, containing_w: i32) -> i32:
     val st = style_with_resolved_percent_min_max(authored_st, containing_w + parent.pad_l + parent.pad_r, 0)
-    if st.width_px == 0 and not st.width_zero and st.left_px > 0 and st.right_px >= 0:
+    # `left` is SET (`left:0` / `inset:0` count), not merely positive; a
+    # replaced box keeps its intrinsic width (Chrome 159: `<canvas>` with
+    # `inset:0` stays 300 wide, a `<div>` or `<input>` stretches).
+    if st.width_px == 0 and not st.width_zero and not authored_st.left_auto and st.right_px >= 0 and not absolute_replaced_tag(node.tag):
         val padding_box_w = containing_w + parent.pad_l + parent.pad_r
         var stretched = padding_box_w - st.left_px - st.right_px
         if stretched < 1:
@@ -2663,12 +2667,31 @@ fn absolute_child_x(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex
     if not child.left_auto and not absolute_has_positioned_ancestor(nodes, styles, child_i):
         return child.left_px
     # Both insets with a definite width over-constrain the box; `right` is
-    # ignored in an ltr containing block and `left` in an rtl one (CSS 2.2
-    # 10.3.7).
-    if child.right_px >= 0 and (child.left_auto or parent.direction_rtl):
+    # ignored when the containing block is ltr and `left` when it is rtl
+    # (CSS 2.2 10.3.7). With `width:auto` the box stretches instead and
+    # `left` places it in either direction.
+    val definite_w = child.width_px != 0 or child.width_zero
+    if child.right_px >= 0 and (child.left_auto or (definite_w and absolute_containing_block_rtl(nodes, styles, child_i))):
         val padding_box_w = containing_w + parent.pad_l + parent.pad_r
         return parent_x + parent.border_l + padding_box_w - absolute_outer_width(nodes, styles, child_index, child_i, parent, child_node, child, containing_w) - child.right_px
     parent_x + parent.border_l + child.left_px
+
+fn absolute_replaced_tag(tag: text) -> bool:
+    tag == "canvas" or tag == "img" or tag == "video" or tag == "svg" or tag == "iframe" or tag == "embed" or tag == "object" or tag == "audio"
+
+# Direction of the containing block of the absolute box `node_i`: its
+# nearest positioned ancestor (Chrome 159: an ltr wrapper inside an rtl
+# containing block does not make it ltr).
+fn absolute_containing_block_rtl(nodes: [HNode], styles: [Style], node_i: i32) -> bool:
+    var a = nodes[node_i].parent
+    var root_rtl = false
+    while a >= 0:
+        val ast = styles[a]
+        if ast.position_relative or ast.position_absolute or ast.position_sticky or ast.position_fixed:
+            return ast.direction_rtl
+        root_rtl = ast.direction_rtl
+        a = nodes[a].parent
+    root_rtl
 
 # True when some ancestor of `node_i` establishes an absolute containing block
 # (any non-static position). Transforms/containment are not modelled here.

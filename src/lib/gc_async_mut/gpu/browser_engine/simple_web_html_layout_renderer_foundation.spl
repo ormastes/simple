@@ -721,10 +721,10 @@ class HNode:
     attrs_raw: text    # raw tag inner text for attribute selectors
     parent: i64        # index of parent in the arena (-1 for root)
     is_details_summary: bool # first direct summary owned by details
-    # Whitespace-only text after an element whose source held a newline:
-    # stored as one space, laid out as a forced break where the computed
-    # white-space keeps newlines (`white_space_newline`).
-    ws_newline: bool = false
+    # Raw source of whitespace-only text after an element ("" otherwise).
+    # Where the computed white-space keeps newlines each "\n" in it is a
+    # forced break (`html_kept_newlines`); `text_data` keeps its spaces.
+    ws_raw: text = ""
 
 class HtmlChildIndex:
     first_child: [i32]
@@ -1317,8 +1317,38 @@ fn _parse_html_with_node_limit(html: text, requested_node_limit: i32) -> [HNode]
         html, requested_node_limit, SIMPLE_WEB_MAX_HTML_BYTES
     )
 
-# True when `node` sits inside an element whose UA style preserves
-# newlines (`white-space: pre`).
+# True when `parent` is or sits inside an element the UA stylesheet makes
+# preformatted (`pre`, `textarea`, `listing`, `plaintext`).
+fn _html_in_preformatted(nodes: [HNode], parent: i32) -> bool:
+    var p = parent
+    while p >= 0:
+        val tag = nodes[p].tag
+        if tag == "pre" or tag == "textarea" or tag == "listing" or tag == "plaintext":
+            return true
+        p = nodes[p].parent
+    false
+
+# The spaces of whitespace-only text after an element: one per space or tab
+# in the source, at least one (a newline alone is one space).
+fn _html_ws_spaces(raw: text) -> text:
+    var out = ""
+    for ch in raw.chars():
+        if ch == " " or ch == "\t":
+            out = out + " "
+    if out == "": " " else: out
+
+# Forced breaks a whitespace-only text node makes: its newline count where
+# the computed white-space keeps newlines (`Style.white_space_newline`),
+# else 0.
+fn html_kept_newlines(node: HNode, keeps_newlines: bool) -> i32:
+    if not keeps_newlines or node.ws_raw == "" or node.text_trimmed != "":
+        return 0
+    var n = 0
+    for ch in node.ws_raw.chars():
+        if ch == "\n":
+            n = n + 1
+    n
+
 fn _parse_html_with_limits(
     html: text, requested_node_limit: i32, requested_byte_limit: i64
 ) -> [HNode]:
@@ -1375,12 +1405,15 @@ fn _parse_html_with_limits(
             # puts 4.45px between them in Chrome). Whether it renders at all
             # depends on computed display, so compute_styles hides it beside
             # block-level boxes and inside flex/grid/table containers. A
-            # newline in it is remembered (`ws_newline`): where the computed
+            # newline in it is remembered (`ws_raw`): where the computed
             # white-space keeps newlines the layout breaks the line there.
             # Only a lone " " survived here before.
             val after_element = trimmed.len() == 0 and prev_child_tag_before != "" and prev_child_tag_before != "#text"
-            val text_data = if after_element: " " else: flat.text_data
-            if trimmed.len() > 0 or text_data == " ":
+            # Inside a preformatted element the spaces keep their count
+            # (`<pre><b>a</b>  <b>b</b>` is a two-space gap); elsewhere the
+            # layout would not collapse them, so one space is stored.
+            val text_data = if not after_element: flat.text_data elif _html_in_preformatted(nodes, parent): _html_ws_spaces(flat.text_data) else: " "
+            if trimmed.len() > 0 or after_element or text_data == " ":
                 if (nodes.len() > 0 and nodes[nodes.len() - 1].tag == "#text" and
                     nodes[nodes.len() - 1].parent == parent):
                     val previous_index = nodes.len() - 1
@@ -1393,7 +1426,8 @@ fn _parse_html_with_limits(
                     var text_node = mk_node("#text", parent)
                     text_node.text_data = text_data
                     text_node.text_trimmed = trimmed
-                    text_node.ws_newline = after_element and flat.text_data.contains("\n")
+                    if after_element:
+                        text_node.ws_raw = flat.text_data
                     flat_to_hnode[i] = nodes.len() as i32
                     nodes.push(text_node)
         else:
@@ -3231,7 +3265,7 @@ fn _border_parts_longhands(toks: [text], names: [text]) -> [text]:
     for tok in toks:
         if _border_width_token(tok) and width == "":
             width = _border_width_px(tok)
-        elif css_border_style_token(tok) != "" and style == "":
+        elif (css_border_style_token(tok) != "" or (tok.lower() == "auto" and names[0] == "outline")) and style == "":
             style = tok
         elif _border_color_token(tok) and color == "":
             color = tok
@@ -3251,6 +3285,28 @@ fn _border_parts_longhands(toks: [text], names: [text]) -> [text]:
         out.push(name + "-color")
         out.push(color)
     out
+
+# Painted width of an `outline` shorthand (Chrome 159): an omitted width is
+# medium (3px); an omitted, `none` or `hidden` style paints nothing; `auto`
+# paints the focus ring, modelled as its 1px outer column.
+fn outline_shorthand_paint_width_px(raw: text) -> i32:
+    var width = -1
+    var styled = false
+    var auto_style = false
+    for tok in _decl_top_level_tokens(raw.trim().lower()):
+        if tok == "auto":
+            auto_style = true
+        elif css_border_style_token(tok) != "":
+            if border_style_disables_paint(tok):
+                return 0
+            styled = true
+        elif width < 0 and _border_width_token(tok):
+            width = parse_int(_border_width_px(tok))
+    if width == 0 or (not styled and not auto_style):
+        return 0
+    if auto_style and not styled:
+        return 1
+    if width < 0: 3 else: width
 
 fn _border_width_token(tok: text) -> bool:
     val t = tok.lower()

@@ -331,6 +331,38 @@ max-content of mixed inline content, control UA font reset, `h6` margins
   - The inline-run abspos placement in layout_engine (replaced box inside a
     span, `if cst.left_auto and cst.right_px >= 0`) is still left-wins in an
     rtl containing block.
+  - (round 4) `white-space: pre-line` collapses spaces correctly only
+    because it is not `white_space_pre`; the three-way white-space model
+    (collapse / keep newlines / keep all) is still two booleans.
+- **Review round 4, fixed (2026-11-15):**
+  - Abspos `width:auto` with both insets stretches when `left` is SET
+    (`left:0`, `inset:0`), not only positive; replaced boxes keep their
+    width (`<canvas>` 300x150). The rtl "left is dropped" branch needs a
+    definite width and reads the CONTAINING block's direction (nearest
+    positioned ancestor), not the DOM parent's
+    (`css_abspos_overconstrained_chrome159_spec.spl` AC-3).
+  - `outline`: an omitted width is medium (3px) on every path
+    (`outline:solid`, with or without an outline longhand, and
+    `outline-style:solid` alone), an omitted colour is currentColor, and
+    `auto` paints Chrome's ring as its 1px outer column
+    (`outline_shorthand_paint_width_px`, used by the full and dispatch
+    appliers; `css_border_cascade_chrome159_spec.spl` AC-6).
+  - Kept newlines keep their count (`\n\n` = two breaks, also between
+    blocks) and `<pre>`/`textarea`/`listing`/`plaintext` keep the count of
+    spaces between elements (`HNode.ws_raw`, `html_kept_newlines`;
+    `inline_whitespace_between_elements_chrome159_spec.spl` AC-6).
+- **Review round 4, open (filed):**
+  - Vertical abspos stretch: `top:0;bottom:0;height:auto` / `inset:0` is
+    one line tall (Chrome: the containing block's 50px); `<input>` with
+    `inset:0` keeps its own width (Chrome 200x50).
+  - `outline:auto`'s inner ring column (Chrome paints x 9 AND x 10 for a box
+    at x 10) is not painted.
+  - Spaces between elements under CSS `white-space: pre` / `pre-wrap` /
+    `break-spaces` (not the `<pre>` tag) collapse to one: the count is
+    decided at parse time, and normal-mode layout does not collapse a
+    multi-space whitespace node (two spaces measured 15px against 6).
+  - An abspos box with no positioned ancestor returns its `left` before the
+    rtl test (absolute_child_x early return).
 - **Open: exponents in colour channels.** `rgb(1e2, 0, 0)` reads its channel
   as 1 (the exponent is consumed and dropped); Chrome reads 100. The value is
   pinned by `dom_color_alpha_normalization_spec.spl`

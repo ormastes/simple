@@ -1830,10 +1830,20 @@ never cache an answer computed while exhausted) —
   26 slots per declaration whenever the text held "border" (even
   `box-sizing:border-box`) and was never trimmed -- every lookup scanned
   the empty slots. It is cut to the used length now.
+- **Trap -- abspos stretch tests must read "is set", not "> 0".**
+  `left:0` and `inset:0` were never stretched because the test was
+  `left_px > 0`; use `left_auto`. The rtl over-constraint rule applies only
+  with a definite width and uses the containing block's direction.
+- **Trap -- outline `auto` is not a border style.** `css_border_style_token`
+  does not know it; `outline_shorthand_paint_width_px` is the one resolver
+  for both appliers (omitted width = 3px, omitted style = no paint).
 - **Trap -- `white_space_pre` means nowrap too.** It cannot carry
   `pre-wrap`/`pre-line`; a kept newline between elements uses
-  `Style.white_space_newline` + `HNode.ws_newline` and is laid out by the
-  `<br>` branches (layout_engine, layout_foundation measure).
+  `Style.white_space_newline` + `HNode.ws_raw` (`html_kept_newlines` counts
+  them; extra newlines add line heights) and is laid out by the `<br>`
+  branches (layout_engine, layout_foundation measure). A multi-space
+  whitespace node is NOT collapsed by normal-mode layout, so the parser
+  stores the space count only inside preformatted tags.
 - **`flex-direction: column-reverse`** restacks bottom-up from the content
   bottom in DOM order with physical margins (reflecting the column result
   got asymmetric margins wrong: t=38 vs Chrome 42). Chrome 159:

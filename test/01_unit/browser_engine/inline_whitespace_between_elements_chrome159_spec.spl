@@ -28,6 +28,15 @@ x 0, 24 below `<b>a</b>`; with normal white-space it stays on a's line at
 x 13.36. Between two blocks the newline is an empty line (b 48 below a in
 `<pre>` and `pre-line`); a trailing one after an inline adds no line (the
 `pre-wrap` container stays 24 tall).
+
+Counts are kept (COUNT_PAGE, same capture): `\\n\\n` between inline
+elements puts b 48 below a under `<pre>`, pre-wrap, pre-line and
+break-spaces (normal: same line, x 13.36); two spaces leave a two-space gap
+(b x 17.80) under `<pre>`, pre-wrap and break-spaces but one (13.36) under
+pre-line and normal (only `<pre>`'s count is modelled: CSS white-space
+spaces between elements are filed in the residue record); `\\n\\n` between two blocks in `<pre>` is two empty
+lines (d1 72 below c1); a newline after a block at the end of `<pre>` is
+one empty line (the pre is 48 tall).
 """
 
 """
@@ -45,6 +54,15 @@ val BLOCK_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;font:16
 val PRE_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;font:16px/24px sans-serif}}pre{{margin:0;font:16px/24px sans-serif}}.r{{position:absolute;left:0;width:300px}}</style></head><body><pre class=r style=\"top:0\"><b id=pa>a</b>\n<b id=pb>b</b></pre><div class=r style=\"top:60px;white-space:pre\"><b id=wa>a</b>\n<b id=wb>b</b></div><div class=r style=\"top:120px;white-space:pre-wrap\"><b id=xa>a</b>\n<b id=xb>b</b></div><div class=r style=\"top:180px;white-space:pre-line\"><b id=la>a</b>\n<b id=lb>b</b></div><div class=r style=\"top:240px\"><b id=na>a</b>\n<b id=nb>b</b></div></body></html>"
 
 val PRE_BLOCK_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;font:16px/24px sans-serif}}pre{{margin:0;font:16px/24px sans-serif}}.r{{position:absolute;left:0;width:300px}}</style></head><body><pre class=r style=\"top:0\"><div id=a>a</div>\n<div id=b>b</div></pre><div class=r style=\"top:100px;white-space:pre-line\"><div id=c>a</div>\n<div id=d>b</div></div><div class=r id=f style=\"top:300px;white-space:pre-wrap\"><b>a</b>\n</div></body></html>"
+
+val COUNT_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;font:16px/24px sans-serif}}pre{{margin:0;font:16px/24px sans-serif}}.r{{position:absolute;left:0;width:300px}}</style></head><body><pre class=r style=\"top:0\"><b id=a1>a</b>\n\n<b id=b1>b</b></pre><div class=r style=\"top:100px;white-space:pre-wrap\"><b id=a2>a</b>\n\n<b id=b2>b</b></div><div class=r style=\"top:200px;white-space:pre-line\"><b id=a3>a</b>\n\n<b id=b3>b</b></div><div class=r style=\"top:300px;white-space:break-spaces\"><b id=a4>a</b>\n\n<b id=b4>b</b></div><div class=r style=\"top:400px\"><b id=a5>a</b>\n\n<b id=b5>b</b></div><pre class=r style=\"top:500px\"><b id=a6>a</b>  <b id=b6>b</b></pre><div class=r style=\"top:540px;white-space:pre-wrap\"><b id=a7>a</b>  <b id=b7>b</b></div><div class=r style=\"top:580px;white-space:pre-line\"><b id=a8>a</b>  <b id=b8>b</b></div><div class=r style=\"top:620px;white-space:break-spaces\"><b id=a9>a</b>  <b id=b9>b</b></div><div class=r style=\"top:660px\"><b id=a10>a</b>  <b id=b10>b</b></div><pre class=r style=\"top:700px\"><div id=c1>a</div>\n\n<div id=d1>b</div></pre><pre class=r id=e1 style=\"top:800px\"><div>a</div>\n</pre></body></html>"
+
+fn cnt(id: text, field: text) -> i32:
+    simple_web_layout_debug_layout_by_id(COUNT_PAGE, 900, 900, id, field).to_int()
+
+# Gap between the right edge of `a` and the left edge of `b`.
+fn gap(a: text, b: text) -> i32:
+    cnt(b, "x") - cnt(a, "x") - cnt(a, "w")
 
 fn preb_at(id: text, field: text) -> i32:
     simple_web_layout_debug_layout_by_id(PRE_BLOCK_PAGE, 900, 400, id, field).to_int()
@@ -105,3 +123,17 @@ describe "Whitespace between inline elements":
         expect(preb_at("b", "y") - preb_at("a", "y")).to_equal(48)
         expect(preb_at("d", "y") - preb_at("c", "y")).to_equal(48)
         expect(preb_at("f", "h")).to_equal(24)
+
+    it "AC-6: preserved newlines and spaces keep their count":
+        step("Chrome 159: \\n\\n is two breaks -- b 48 below a under pre, pre-wrap, pre-line, break-spaces")
+        for pair in [["a1", "b1"], ["a2", "b2"], ["a3", "b3"], ["a4", "b4"]]:
+            expect(cnt(pair[1], "x")).to_equal(0)
+            expect(cnt(pair[1], "y") - cnt(pair[0], "y")).to_equal(48)
+        expect(cnt("b5", "y")).to_equal(cnt("a5", "y"))
+        step("Chrome 159: two spaces are two in <pre>, one under pre-line and normal")
+        val one = gap("a10", "b10")
+        expect(gap("a8", "b8")).to_equal(one)
+        expect(gap("a6", "b6") > one).to_equal(true)
+        step("Chrome 159: \\n\\n between blocks is two empty lines; a newline after the last block is one")
+        expect(cnt("d1", "y") - cnt("c1", "y")).to_equal(72)
+        expect(cnt("e1", "h")).to_equal(48)
