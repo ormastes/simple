@@ -1,0 +1,112 @@
+# Stateless extraction of existing authority projections; no writer/authority constructor.
+use std.common.contracts.container.machine_policy_v1.*
+use std.common.contracts.orchestration.host_capacity_v1.HostCapacityV1
+use std.nogc_sync_mut.io.machine_storage_owner_v1.MachineStorageOwnerV1
+use std.nogc_sync_mut.orchestration.host_service_enrollment_proof_v3.VerifiedHostServiceEnrollmentSnapshotV3
+use std.common.contracts.container.execution_v2.ContainerHostObservationV2
+use std.common.contracts.container.local_principal_v1.MachineLocalPrincipalSnapshotV1
+use std.nogc_sync_mut.io.machine_local_process_principal_v1.MachineLocalProcessPrincipalV1
+use std.nogc_sync_mut.container.machine_claim_record_v1.*
+use std.nogc_async_mut.container.observation_v2.simple_container_observe_v2
+use std.common.crypto.sha256.sha256_text
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+
+pub struct MachineManagedClaimSnapshotV1:
+    policy_digest: text
+    commit_digest: text
+    issuer_id: text
+    authority_policy_digest: text
+    enrollment_digest: text
+    credential_digest: text
+    physical_host_id: text
+    native_machine_id: text
+    service_scope_id: text
+    backend: text
+    provider_identity_digest: text
+    provider_generation: i64
+    cpu_millis: i64
+    memory_bytes: i64
+
+pub fn machine_authority_policy_text_v1(bytes: [u8]) -> Result<text, text>:
+    if bytes.len() == 0 or bytes.len() > 1048576 or not utf8_bytes_valid(bytes):
+        return Err("machine-container-authority-policy-utf8")
+    Ok(bytes_to_text(bytes))
+
+pub fn machine_policy_provider_v1(policy: MachineContainerPolicyV1,
+        backend: text) -> Result<MachineContainerProviderPolicyV1, text>:
+    var selected: Option<MachineContainerProviderPolicyV1> = None
+    for provider in policy.providers:
+        if provider.backend == backend:
+            if selected != None: return Err("machine-container-authority-provider-ambiguous")
+            selected = Some(provider)
+    if selected == None: return Err("machine-container-authority-provider-unconfigured")
+    Ok(selected.unwrap())
+
+pub fn machine_policy_local_principal_v1(policy: MachineContainerPolicyV1, backend: text,
+        principal: MachineLocalProcessPrincipalV1) -> Result<MachineLocalPrincipalSnapshotV1, text>:
+    if policy.mode != "standalone": return Err("local-container-managed-authority-required")
+    val actual = principal.current_v1()?
+    val expected = if backend == "linux-podman": "linux" else: "windows"
+    if actual.platform != expected: return Err("machine-container-authority-local-principal-platform")
+    if not policy.local_principals.contains(actual.principal_id):
+        return Err("machine-container-authority-local-principal-unconfigured")
+    Ok(actual)
+
+pub fn machine_policy_observe_v1(policy: MachineContainerPolicyV1,
+        provider: MachineContainerProviderPolicyV1) -> Result<ContainerHostObservationV2, text>:
+    # Execute the actual common provider observer; no decoded observation is
+    # accepted from an app, remote request, policy document or this caller.
+    val observed = simple_container_observe_v2(provider.backend, provider.policy_bytes)?
+    if (observed.native_machine_id != policy.native_machine_id or
+            observed.provider_identity_digest != provider.identity_digest):
+        return Err("machine-container-authority-native-provider-mismatch")
+    Ok(observed)
+
+pub fn machine_observation_fence_v1(observed: ContainerHostObservationV2) -> text:
+    # Length-prefix each actual observed component to avoid delimiter aliases.
+    var parts: [text] = []
+    for value in [observed.native_machine_id, observed.native_boot_id,
+            observed.boot_observation, observed.continuity_assurance]:
+        parts.push("{value.byte_len()}:{value}")
+    parts.join("")
+
+pub fn machine_managed_claim_snapshot_v1(record: MachineManagedScopeRecordV1, commit: text) -> MachineManagedClaimSnapshotV1:
+    MachineManagedClaimSnapshotV1(policy_digest: record.policy_digest, commit_digest: commit,
+        issuer_id: record.issuer_id, authority_policy_digest: record.authority_policy_digest,
+        enrollment_digest: record.enrollment_digest, credential_digest: record.credential_digest,
+        physical_host_id: record.physical_host_id, native_machine_id: record.native_machine_id,
+        service_scope_id: record.service_scope_id, backend: record.backend,
+        provider_identity_digest: record.provider_identity_digest, provider_generation: record.provider_generation,
+        cpu_millis: record.cpu_millis, memory_bytes: record.memory_bytes)
+
+
+pub fn machine_managed_project_record_v1(policy: MachineContainerPolicyV1, policy_digest: text,
+        verified: VerifiedHostServiceEnrollmentSnapshotV3, observed: ContainerHostObservationV2) -> Result<MachineManagedScopeRecordV1, text>:
+    val binding = verified.binding
+    val record = MachineManagedScopeRecordV1(policy_digest: policy_digest,
+        authority_policy_digest: verified.authority_policy_digest, issuer_id: verified.issuer_id,
+        enrollment_digest: verified.enrollment_digest, credential_digest: verified.credential_digest,
+        physical_host_id: binding.physical_host_id, native_machine_id: binding.native_machine_id,
+        service_scope_id: binding.service_scope_id, backend: binding.backend,
+        provider_identity_digest: binding.provider_identity_digest, provider_generation: verified.provider_generation,
+        cpu_millis: binding.physical_cpu_millis, memory_bytes: binding.physical_memory_bytes, expires_at: verified.expires_at)
+    # The complete signed ceiling includes the broker partition. Only nested
+    # Host accounting may subdivide it; another provider gets no parallel pool.
+    # This fence hashes actual observation; it asserts no native continuity.
+    val observed_fence = sha256_text(machine_observation_fence_v1(observed))
+    val available = machine_managed_scope_capacity_v1(HostCapacityV1(physical_host_id: policy.physical_host_id,
+        authority_id: policy.authority_id, boot_id: observed_fence, provider_generation: verified.provider_generation,
+        cpu_millis: policy.cpu_millis, memory_bytes: policy.memory_bytes, exclusive_devices: []), record)?
+    Ok(record)
+
+
+pub fn machine_managed_commit_storage_current_v1(storage: MachineStorageOwnerV1,
+        record: MachineManagedScopeRecordV1, commit: text) -> Result<bool, text>:
+    val head = storage.wal_head_v1()?
+    if commit == "" or head != commit: return Err("machine-managed-claim-commit-changed")
+    val revision = storage.wal_revision_v1(commit)?
+    if revision.digest != commit or revision.parent != "" or revision.first_sequence != 1 or revision.last_sequence != 2:
+        return Err("machine-managed-claim-unknown-history")
+    val entries = storage.wal_segment_v1(revision)?
+    machine_managed_scope_replay_v1(entries, record)
+

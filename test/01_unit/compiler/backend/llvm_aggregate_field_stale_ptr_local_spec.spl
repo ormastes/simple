@@ -1,0 +1,81 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# Regression: native-build of lib.nogc_sync_mut.io.process_ops emitted
+# `%t5125 = ptrtoint ptr %l28 to i64` where `%l28 = call i64
+# @..._process_observation_live_owner_v1(...)` -- llc-18: "'%l28' defined
+# with type 'i64' but expected 'ptr'". The struct-valued call destination's
+# MIR type primed the sticky ptr_locals flag; translate_call overrode
+# local_types to the callee's i64 return, but the struct/tuple/array field
+# store trusted the stale flag and emitted ptrtoint on an i64 value.
+
+use std.spec.step
+
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+
+fn stale_ptr_aggregate_output(kind: AggregateKind) -> text:
+    var translator = MirToLlvm.create("test.llvm.agg_field_stale_ptr", CodegenTarget.X86_64, nil)
+    # %l0 was defined as `call i64 @owner(...)`, but its MIR struct type
+    # primed ptr_locals[0].
+    translator.local_types[0] = "i64"
+    translator.value_types["%l0"] = "i64"
+    translator.ptr_locals[0] = true
+    translator.defined_locals[0] = true
+    val agg = MirInst(kind: MirInstKind.Aggregate(LocalId(id: 1), kind, [MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))]), span: nil)
+    translator.translate_instruction(agg)
+    translator.builder.build()
+
+fn stale_ptr_declared_param_output() -> text:
+    var translator = MirToLlvm.create("test.llvm.declared_param_stale_ptr", CodegenTarget.X86_64, nil)
+    translator.local_types[0] = "i64"
+    translator.value_types["%l0"] = "i64"
+    translator.ptr_locals[0] = true
+    translator.defined_locals[0] = true
+    # Callee with a DECLARED ptr param (like `rt_native_eq(ptr, ptr)`).
+    translator.remember_function_param_types("take_ptr", ["ptr"])
+    translator.remember_function_param_types("@take_ptr", ["ptr"])
+    val func = MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str("take_ptr"),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+    ))
+    val call = MirInst(kind: MirInstKind.Call(Some(LocalId(id: 1)), func, [MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))]), span: nil)
+    translator.translate_call_at([call], 0, -1)
+    translator.builder.build()
+
+describe "LLVM declared ptr call params use the local's recorded type":
+    it "bridges an i64-defined arg with a stale ptr flag into a declared ptr param":
+        # @req REQ-SSPEC-UNIT
+        step("translate a call whose declared ptr param receives an i64 SSA value flagged ptr")
+        val output = stale_ptr_declared_param_output()
+        expect(output).to_contain("inttoptr i64 %l0 to ptr")
+        expect(output.contains("(ptr %l0)")).to_equal(false)
+
+describe "LLVM aggregate field stores use the local's recorded type":
+    it "stores an i64-defined struct field with a stale ptr flag without ptrtoint":
+        # @req REQ-SSPEC-UNIT
+        step("build a struct whose field operand is an i64 SSA value flagged ptr")
+        val output = stale_ptr_aggregate_output(AggregateKind.Struct(SymbolId(id: 1)))
+        expect(output.contains("ptrtoint ptr %l0")).to_equal(false)
+        expect(output).to_contain("store i64 %l0")
+
+    it "bitcasts an i64-defined local with a stale ptr flag to i64 without ptrtoint":
+        # @req REQ-SSPEC-UNIT
+        step("bitcast an i64 SSA value flagged ptr to i64")
+        var translator = MirToLlvm.create("test.llvm.bitcast_stale_ptr", CodegenTarget.X86_64, nil)
+        translator.local_types[0] = "i64"
+        translator.value_types["%l0"] = "i64"
+        translator.ptr_locals[0] = true
+        translator.defined_locals[0] = true
+        val inst = MirInst(kind: MirInstKind.Bitcast(LocalId(id: 1), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))), MirType.i64()), span: nil)
+        translator.translate_instruction(inst)
+        val output = translator.builder.build()
+        expect(output.contains("ptrtoint ptr %l0")).to_equal(false)
+
+    it "stores an i64-defined tuple element with a stale ptr flag without ptrtoint":
+        # @req REQ-SSPEC-UNIT
+        step("build a tuple whose element operand is an i64 SSA value flagged ptr")
+        val output = stale_ptr_aggregate_output(AggregateKind.Tuple)
+        expect(output.contains("ptrtoint ptr %l0")).to_equal(false)
+        expect(output).to_contain("store i64 %l0")

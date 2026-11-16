@@ -1,6 +1,6 @@
 # u64 shift/display go SIGNED outside a `-> u64` typed function
 
-- **Status:** OPEN
+- **Status:** FIXED 2026-11-14 (verified no-repro on the Linux aarch64 seed, PR #9241; pinned by `test/01_unit/bugs/u64_val_binding_unsigned_spec.spl`; not re-measured on Windows x86_64 — see the 2026-11-14 addendum)
 - **Found:** 2026-09-03, while writing dual-run tranche E twins for
   `rt_simd_shl_u64x4` / `rt_simd_shr_u64x4`
 - **Area:** language / tree-walk interpreter, u64 type propagation

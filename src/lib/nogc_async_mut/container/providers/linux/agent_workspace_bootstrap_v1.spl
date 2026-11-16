@@ -1,0 +1,348 @@
+# One primary: real bounded Git helpers, verified worktree, exact agent exec.
+# SOURCE_AUTHORED_NOT_RUN. No creation/start/agent-observation authority here.
+use std.nogc_async_mut.container.providers.linux.agent_workspace_bootstrap_git_v1.*
+use std.nogc_async_mut.container.providers.linux.agent_workspace_bootstrap_verify_v1.*
+use std.common.contracts.orchestration.agent_workspace_invocation_v1.AgentWorkspaceInvocationManifestV1
+use std.common.contracts.orchestration.agent_workspace_invocation_v2.*
+use std.common.contracts.container.agent_executable_profile_v1.AgentExecutableProfileV1
+use std.common.contracts.container.agent_workspace_manifest_v1.*
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.common.process.observation_v4.*
+use std.nogc_sync_mut.io.retained_file.{RetainedDirectoryOwnerV1, retained_directory_open_trusted_v1}
+use std.nogc_sync_mut.io.process_observation_v4.*
+use std.nogc_sync_mut.io.linux_process_replace_v1.*
+use std.nogc_sync_mut.io.env_ops.cwd
+use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure, time_sample_monotonic_nanos_or_failure}
+@when(os="linux"):
+use std.nogc_sync_mut.io.host_identity_store_abi_v1.getpid
+use std.nogc_sync_mut.io.linux_agent_bootstrap_environment_v1.*
+@end
+
+pub class LinuxAgentBootstrapOwnerV1:
+    slot: i64
+    generation: i64
+
+pub struct LinuxAgentBootstrapTurnV1:
+    owner: LinuxAgentBootstrapOwnerV1?
+    phase: text
+    cleanup_pending: bool
+    error: text
+
+struct AgentBootstrapStateV1:
+    generation: i64
+    pid: i64
+    manifest: AgentWorkspaceInvocationManifestV1
+    executable_profile: AgentExecutableProfileV1
+    workspace: AgentWorkspaceManifestV1
+    root_path: text
+    started_ns: i64
+    var root: RetainedDirectoryOwnerV1? = nil
+    var template: RetainedDirectoryOwnerV1? = nil
+    var checkout: RetainedDirectoryOwnerV1? = nil
+    var git_pin: OwnedExecutablePin? = nil
+    var cwd_pin: OwnedCwdPinV4? = nil
+    var git: ProcessObservationLeaseV4? = nil
+    var replacement: LinuxProcessReplaceOwnerV1? = nil
+    var capabilities: ProcessObservationCapabilitiesV4? = nil
+    var command_index: i64 = 0
+    var phase: text = "opening"
+    var error: text = ""
+    var uncertain_birth: bool = false
+    var old_mask: u32 = 0u32
+    var mask_changed: bool = false
+    var retired: bool = false
+
+var bootstrap_states_v1: [AgentBootstrapStateV1] = []
+
+fn bootstrap_turn_v1(owner: LinuxAgentBootstrapOwnerV1) -> LinuxAgentBootstrapTurnV1:
+    val state = bootstrap_states_v1[owner.slot]
+    LinuxAgentBootstrapTurnV1(owner: if state.retired: nil else: Some(owner), phase: state.phase,
+        cleanup_pending: not state.retired and state.error != "", error: state.error)
+
+fn bootstrap_load_v1(owner: LinuxAgentBootstrapOwnerV1) -> Result<AgentBootstrapStateV1, text>:
+    @when(os="linux"):
+    if owner.slot < 0 or owner.slot >= bootstrap_states_v1.len(): return Err("bootstrap-owner-unknown")
+    val state = bootstrap_states_v1[owner.slot]
+    if state.generation != owner.generation or state.pid != getpid() as i64: return Err("bootstrap-owner-origin")
+    if state.retired: return Err("bootstrap-owner-retired")
+    Ok(state)
+    @else:
+    Err("bootstrap-host-unsupported")
+    @end
+
+fn bootstrap_fail_v1(owner: LinuxAgentBootstrapOwnerV1, reason: text) -> LinuxAgentBootstrapTurnV1:
+    if bootstrap_states_v1[owner.slot].error == "": bootstrap_states_v1[owner.slot].error = reason
+    bootstrap_states_v1[owner.slot].phase = "failed-retained"
+    bootstrap_turn_v1(owner)
+
+fn bootstrap_budget_v1(state: AgentBootstrapStateV1) -> Result<i64, text>:
+    val now = time_sample_monotonic_nanos_or_failure()
+    val wall = time_sample_unix_micros_or_failure()
+    val budget = state.manifest.preparation_budget_ms * 1000000
+    if now < state.started_ns or wall <= 0 or wall / 1000 >= state.manifest.not_after:
+        return Err("bootstrap-deadline-expired-or-clock")
+    val elapsed = now - state.started_ns
+    if elapsed >= budget: return Err("bootstrap-preparation-budget")
+    Ok(budget - elapsed)
+
+pub fn linux_agent_bootstrap_open_v1(invocation_digest: text) -> LinuxAgentBootstrapTurnV1:
+    @when(os="linux"):
+    if not builder_digest_valid_v1(invocation_digest) or bootstrap_states_v1.len() != 0:
+        return LinuxAgentBootstrapTurnV1(owner: nil, phase: "rejected", cleanup_pending: false, error: "bootstrap-profile-or-single-primary")
+    val root_path = cwd()
+    val opened = retained_directory_open_trusted_v1(root_path)
+    if opened.is_err(): return LinuxAgentBootstrapTurnV1(owner: nil, phase: "rejected", cleanup_pending: false, error: opened.unwrap_err())
+    var root = opened.unwrap()
+    val file_opened = root.open_file("invocation.sdn", 1048576u64)
+    if file_opened.is_err():
+        val consumed = root.close()
+        return LinuxAgentBootstrapTurnV1(owner: nil, phase: "rejected", cleanup_pending: false, error: file_opened.unwrap_err())
+    var file = file_opened.unwrap()
+    val read = file.read_stage_input_v1(1048576)
+    val consumed_file = file.close()
+    var raw = ""
+    if read.is_ok() and utf8_bytes_valid(read.unwrap()): raw = bytes_to_text(read.unwrap())
+    val decoded = agent_workspace_invocation_manifest_decode_v2(raw)
+    if not consumed_file or read.is_err() or sha256_text(raw) != invocation_digest or decoded.is_err():
+        val consumed = root.close()
+        return LinuxAgentBootstrapTurnV1(owner: nil, phase: "rejected", cleanup_pending: false, error: "bootstrap-invocation-file-binding")
+    val full = decoded.unwrap()
+    if full.executable_profile.architecture != bootstrap_target_architecture_v1():
+        val consumed = root.close()
+        return LinuxAgentBootstrapTurnV1(owner: nil, phase: "rejected", cleanup_pending: false, error: "bootstrap-executable-architecture")
+    val manifest = full.base
+    val workspace = agent_workspace_manifest_decode_v1(manifest.workspace_manifest).unwrap()
+    val started = time_sample_monotonic_nanos_or_failure()
+    val slot = bootstrap_states_v1.len()
+    val owner = LinuxAgentBootstrapOwnerV1(slot: slot, generation: slot + 1)
+    bootstrap_states_v1.push(AgentBootstrapStateV1(generation: slot + 1, pid: getpid() as i64,
+        manifest: manifest, executable_profile: full.executable_profile, workspace: workspace, root_path: root_path, started_ns: started, root: Some(root)))
+    if started <= 0: return bootstrap_fail_v1(owner, "bootstrap-clock-unavailable")
+    # Projection is a separate authorized producer; this profile refuses absent
+    # credential machinery instead of handing secrets to Git or claiming auth.
+    if manifest.credential_refs.len() != 0: return bootstrap_fail_v1(owner, "bootstrap-credential-projection-unavailable")
+    val budget = bootstrap_budget_v1(bootstrap_states_v1[slot])
+    if budget.is_err(): return bootstrap_fail_v1(owner, budget.unwrap_err())
+    val template = retained_directory_open_trusted_v1(AGENT_WORKSPACE_TEMPLATE_V1)
+    if template.is_err(): return bootstrap_fail_v1(owner, template.unwrap_err())
+    bootstrap_states_v1[slot].template = Some(template.unwrap())
+    val template_owner = template.unwrap()
+    val empty = template_owner.directory_is_empty_v1()
+    if empty.is_err() or not empty.unwrap(): return bootstrap_fail_v1(owner, "bootstrap-template-not-retained-empty")
+    val pin = OwnedExecutablePin.pin(AGENT_WORKSPACE_GIT_V1)
+    if pin.is_err(): return bootstrap_fail_v1(owner, pin.unwrap_err())
+    bootstrap_states_v1[slot].git_pin = Some(pin.unwrap())
+    val digest = pin.unwrap().digest()
+    if digest.is_err(): return bootstrap_fail_v1(owner, digest.unwrap_err())
+    # digest() is rawSHA256 bytes; do not hash them a second time.
+    if bootstrap_digest_hex_v1(digest.unwrap()) != workspace.git_digest: return bootstrap_fail_v1(owner, "bootstrap-git-sealed-digest")
+    val cwd_pin = OwnedCwdPinV4.pin(root_path)
+    if cwd_pin.is_err(): return bootstrap_fail_v1(owner, cwd_pin.unwrap_err())
+    bootstrap_states_v1[slot].cwd_pin = Some(cwd_pin.unwrap())
+    val capabilities = process_observation_capabilities_v4()
+    if capabilities.is_err(): return bootstrap_fail_v1(owner, capabilities.unwrap_err())
+    bootstrap_states_v1[slot].capabilities = Some(capabilities.unwrap())
+    bootstrap_states_v1[slot].old_mask = linux_agent_bootstrap_umask_take_v1()
+    bootstrap_states_v1[slot].mask_changed = true
+    bootstrap_states_v1[slot].phase = "git"
+    bootstrap_turn_v1(owner)
+    @else:
+    LinuxAgentBootstrapTurnV1(owner: nil, phase: "rejected", cleanup_pending: false, error: "bootstrap-host-unsupported")
+    @end
+
+fn bootstrap_digest_hex_v1(bytes: [u8]) -> text:
+    val digits = "0123456789abcdef"
+    var output = ""
+    for byte in bytes:
+        val value = byte as i64
+        output = output + digits.substring(value / 16, value / 16 + 1) + digits.substring(value % 16, value % 16 + 1)
+    output
+
+fn bootstrap_output_v1(state: AgentBootstrapStateV1, stdout: [u8]) -> Result<(), text>:
+    if not utf8_bytes_valid(stdout): return Err("bootstrap-git-output-utf8")
+    val output = bytes_to_text(stdout)
+    val prefix = state.root_path + "/" + state.workspace.attempt_leaf
+    if state.command_index == 0 and not agent_git_version_supported_v1(output): return Err("bootstrap-git-version-unsupported")
+    if state.command_index == 3 and output != "commit\n": return Err("bootstrap-revision-not-commit")
+    if state.command_index == 5 and output != agent_worktree_porcelain_v1(state.root_path, state.workspace):
+        return Err("bootstrap-worktree-list-differs")
+    if state.command_index == 6 and output != state.workspace.revision_oid + "\n": return Err("bootstrap-head-output-differs")
+    if state.command_index == 7 and output != prefix + "/repo\n": return Err("bootstrap-common-dir-output-differs")
+    if state.command_index == 8 and output != prefix + "/repo/worktrees/worktree\n": return Err("bootstrap-registration-output-differs")
+    Ok(())
+
+fn bootstrap_git_drive_v1(owner: LinuxAgentBootstrapOwnerV1, cancel: bool) -> LinuxAgentBootstrapTurnV1:
+    val state = bootstrap_states_v1[owner.slot]
+    var lease = state.git.unwrap()
+    if cancel:
+        val cancellation = lease.cancel(1000000)
+        bootstrap_states_v1[owner.slot].git = Some(lease)
+        if cancellation.is_err(): return bootstrap_fail_v1(owner, "bootstrap-git-cancel-unresolved")
+    val collected = lease.collect(1000000)
+    # Preserve latest frozen-kind/ack progress BEFORE any further decoding/check.
+    bootstrap_states_v1[owner.slot].git = Some(lease)
+    if collected.is_err(): return bootstrap_fail_v1(owner, "bootstrap-git-collection-unresolved")
+    val receipt = collected.unwrap()
+    if receipt.packet.packet_kind == ProcessObservationPacketKindV4.CleanupFrozen:
+        if not receipt.packet.tree_empty:
+            return bootstrap_fail_v1(owner, "bootstrap-git-cleanup-tree-unresolved")
+        val cleanup = freeze_process_observation_cleanup_receipt_v4(receipt)
+        if cleanup.is_err(): return bootstrap_fail_v1(owner, "bootstrap-git-cleanup-snapshot")
+        val acknowledged = lease.acknowledge_cleanup(cleanup.unwrap())
+        bootstrap_states_v1[owner.slot].git = Some(lease)
+        if acknowledged.is_err():
+            bootstrap_states_v1[owner.slot].uncertain_birth = true
+            return bootstrap_fail_v1(owner, "bootstrap-git-cleanup-ack-unresolved")
+        bootstrap_states_v1[owner.slot].git = nil
+        return bootstrap_fail_v1(owner, "bootstrap-git-provider-cleanup-failure")
+    if receipt.packet.packet_kind != ProcessObservationPacketKindV4.Frozen: return bootstrap_turn_v1(owner)
+    # Reap, frozen shape or output alone is NOT a descendant retirement proof.
+    if (not receipt.packet.tree_empty or not receipt.packet.tree_control_available or
+            receipt.packet.tree_empty_ns < receipt.packet.process_started_ns):
+        return bootstrap_fail_v1(owner, "bootstrap-git-group-retirement-unresolved")
+    val frozen = freeze_process_observation_receipt_v4(receipt)
+    if frozen.is_err(): return bootstrap_fail_v1(owner, "bootstrap-git-freeze-binding")
+    var failure = ""
+    if (receipt.packet.exit_code != 0 or receipt.packet.signal_number != 0 or
+            receipt.packet.term_attempted or receipt.packet.kill_attempted or
+            receipt.packet.failure_reason != ProcessObservationFailureReasonV4.Unknown or
+            receipt.packet.stdout.state != ProcessObservationStreamStateV4.Eof or
+            receipt.packet.stderr.state != ProcessObservationStreamStateV4.Eof or
+            receipt.packet.stdout.seen_bytes != receipt.packet.stdout.delivered_bytes or
+            receipt.packet.stderr.seen_bytes != receipt.packet.stderr.delivered_bytes): failure = "bootstrap-git-command-failed"
+    if failure == "" and not cancel:
+        val checked = bootstrap_output_v1(state, receipt.stdout)
+        if checked.is_err(): failure = checked.unwrap_err()
+    val acknowledged = lease.acknowledge(frozen.unwrap())
+    bootstrap_states_v1[owner.slot].git = Some(lease)
+    if acknowledged.is_err():
+        bootstrap_states_v1[owner.slot].uncertain_birth = true
+        return bootstrap_fail_v1(owner, "bootstrap-git-ack-unresolved")
+    bootstrap_states_v1[owner.slot].git = nil
+    if failure != "": return bootstrap_fail_v1(owner, failure)
+    if cancel: return bootstrap_fail_v1(owner, "bootstrap-cancelled")
+    bootstrap_states_v1[owner.slot].command_index = state.command_index + 1
+    bootstrap_turn_v1(owner)
+
+fn bootstrap_agent_environment_v1(state: AgentBootstrapStateV1) -> [text]:
+    val prefix = state.root_path + "/" + state.workspace.attempt_leaf
+    ["HOME=" + prefix + "/home", "LANG=C", "LC_ALL=C", "PATH=/usr/bin:/bin", "TERM=xterm-256color",
+        "TMPDIR=" + prefix + "/tmp", "TZ=UTC", "XDG_CACHE_HOME=" + prefix + "/cache",
+        "XDG_CONFIG_HOME=" + prefix + "/xdg-config", "XDG_STATE_HOME=" + prefix + "/xdg-state"]
+
+pub fn linux_agent_bootstrap_step_v1(owner: LinuxAgentBootstrapOwnerV1) -> LinuxAgentBootstrapTurnV1:
+    val loaded = bootstrap_load_v1(owner)
+    if loaded.is_err(): return LinuxAgentBootstrapTurnV1(owner: Some(owner), phase: "unknown", cleanup_pending: true, error: loaded.unwrap_err())
+    val state = loaded.unwrap()
+    if state.error != "": return bootstrap_turn_v1(owner)
+    val budget = bootstrap_budget_v1(state)
+    if budget.is_err(): return bootstrap_fail_v1(owner, budget.unwrap_err())
+    if state.git != nil: return bootstrap_git_drive_v1(owner, false)
+    if state.command_index < 9:
+        val command = agent_git_command_v1(state.command_index, state.root_path, state.workspace)
+        if command.is_err(): return bootstrap_fail_v1(owner, command.unwrap_err())
+        val request = agent_git_request_v1(command.unwrap(), state.root_path, state.workspace, state.capabilities.unwrap(), budget.unwrap())
+        if request.is_err(): return bootstrap_fail_v1(owner, request.unwrap_err())
+        val started = process_observation_start_pinned_v4(state.git_pin.unwrap(), state.cwd_pin.unwrap(), request.unwrap())
+        if started.is_err():
+            # Existing start API can fail decoding after a native attempt. The
+            # outer Container owner remains custody; no retry/absence claim.
+            bootstrap_states_v1[owner.slot].uncertain_birth = true
+            return bootstrap_fail_v1(owner, "bootstrap-git-start-uncertain")
+        bootstrap_states_v1[owner.slot].git = Some(started.unwrap().lease)
+        if started.unwrap().receipt.packet.status == ProcessObservationStatusV4.Rejected:
+            bootstrap_states_v1[owner.slot].git = nil
+            return bootstrap_fail_v1(owner, "bootstrap-git-start-rejected")
+        return bootstrap_turn_v1(owner)
+    if state.checkout == nil and state.replacement == nil:
+        val verified = agent_worktree_verify_v1(state.root.unwrap(), state.root_path, state.workspace)
+        if verified.is_err(): return bootstrap_fail_v1(owner, verified.unwrap_err())
+        bootstrap_states_v1[owner.slot].checkout = Some(verified.unwrap())
+        bootstrap_states_v1[owner.slot].phase = "worktree-verified"
+        return bootstrap_turn_v1(owner)
+    if state.replacement == nil:
+        val request = LinuxProcessReplaceRequestV1(program: state.manifest.inner_argv[0],
+            expected_digest: state.workspace.agent_digest, expected_size_bytes: state.executable_profile.image_size_bytes,
+            max_image_bytes: state.executable_profile.max_image_bytes, architecture: state.executable_profile.architecture,
+            args: state.manifest.inner_argv,
+            environment: bootstrap_agent_environment_v1(state), expires_at_unix_ms: state.manifest.not_after,
+            preparation_started_ns: state.started_ns, preparation_budget_ns: state.manifest.preparation_budget_ms * 1000000)
+        # Corrected exec owner BORROWS this original and validates/duplicates it
+        # before yielding. Bootstrap retains original independently on ALL turns.
+        val opened = linux_process_replace_open_v1(request, state.checkout.unwrap())
+        bootstrap_states_v1[owner.slot].replacement = opened.owner
+        if opened.cwd != nil: bootstrap_states_v1[owner.slot].checkout = opened.cwd
+        if opened.cwd == nil: return bootstrap_fail_v1(owner, "bootstrap-original-cwd-return-missing")
+        if opened.error != "": return bootstrap_fail_v1(owner, opened.error)
+        if opened.owner == nil: return bootstrap_fail_v1(owner, "bootstrap-replacement-owner-unavailable")
+        bootstrap_states_v1[owner.slot].phase = "preparing-agent-exec"
+        return bootstrap_turn_v1(owner)
+    val prepared = linux_process_replace_prepare_step_v1(state.replacement.unwrap())
+    bootstrap_states_v1[owner.slot].replacement = prepared.owner
+    if prepared.error != "": return bootstrap_fail_v1(owner, prepared.error)
+    if prepared.phase != "ready": return bootstrap_turn_v1(owner)
+    if prepared.owner == nil: return bootstrap_fail_v1(owner, "bootstrap-prepared-owner-missing")
+    # Actual success never returns; same primary task/TTY remains outside this module.
+    val failed = linux_process_replace_replace_v1(prepared.owner.unwrap())
+    bootstrap_states_v1[owner.slot].replacement = failed.owner
+    bootstrap_fail_v1(owner, if failed.error == "": "bootstrap-exec-returned" else: failed.error)
+
+pub fn linux_agent_bootstrap_close_v1(owner: LinuxAgentBootstrapOwnerV1) -> LinuxAgentBootstrapTurnV1:
+    val loaded = bootstrap_load_v1(owner)
+    if loaded.is_err(): return LinuxAgentBootstrapTurnV1(owner: Some(owner), phase: "unknown", cleanup_pending: true, error: loaded.unwrap_err())
+    val state = loaded.unwrap()
+    if state.uncertain_birth: return bootstrap_fail_v1(owner, "bootstrap-unknown-cleanup-retained-for-host-control")
+    if state.git != nil: return bootstrap_git_drive_v1(owner, true)
+    if state.replacement != nil:
+        val closed = linux_process_replace_close_v1(state.replacement.unwrap())
+        bootstrap_states_v1[owner.slot].replacement = closed.owner
+        if closed.owner != nil or closed.cleanup_pending: return bootstrap_fail_v1(owner, "bootstrap-replacement-cleanup-retained")
+    if bootstrap_states_v1[owner.slot].checkout != nil:
+        var child = bootstrap_states_v1[owner.slot].checkout.unwrap()
+        bootstrap_states_v1[owner.slot].checkout = nil
+        if not child.close():
+            val ignored = bootstrap_fail_v1(owner, "bootstrap-checkout-close-consumed-error")
+    if state.git_pin != nil:
+        var pin = state.git_pin.unwrap()
+        val closed = pin.close()
+        if closed.is_err():
+            bootstrap_states_v1[owner.slot].uncertain_birth = true
+            return bootstrap_fail_v1(owner, "bootstrap-git-pin-close-unresolved")
+        bootstrap_states_v1[owner.slot].git_pin = nil
+    if state.cwd_pin != nil:
+        var pin = state.cwd_pin.unwrap()
+        val closed = pin.close()
+        if closed.is_err():
+            bootstrap_states_v1[owner.slot].uncertain_birth = true
+            return bootstrap_fail_v1(owner, "bootstrap-cwd-pin-close-unresolved")
+        bootstrap_states_v1[owner.slot].cwd_pin = nil
+    if state.template != nil:
+        var directory = state.template.unwrap()
+        bootstrap_states_v1[owner.slot].template = nil
+        if not directory.close():
+            val ignored = bootstrap_fail_v1(owner, "bootstrap-template-close-consumed-error")
+    if state.root != nil:
+        var directory = state.root.unwrap()
+        bootstrap_states_v1[owner.slot].root = nil
+        if not directory.close():
+            val ignored = bootstrap_fail_v1(owner, "bootstrap-root-close-consumed-error")
+    @when(os="linux"):
+    if state.mask_changed:
+        linux_agent_bootstrap_umask_restore_v1(state.old_mask)
+        bootstrap_states_v1[owner.slot].mask_changed = false
+    @end
+    bootstrap_states_v1[owner.slot].retired = true
+    bootstrap_states_v1[owner.slot].phase = "retired-failed"
+    bootstrap_turn_v1(owner)
+
+# Actual compiled ISA, not caller profile text or a host executable-path guess.
+fn bootstrap_target_architecture_v1() -> text:
+    @when(arch="x86_64"):
+    "linux-x86_64"
+    @elif(arch="aarch64"):
+    "linux-aarch64"
+    @else:
+    "unsupported"
+    @end

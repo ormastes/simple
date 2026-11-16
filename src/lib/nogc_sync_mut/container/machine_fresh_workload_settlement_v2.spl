@@ -1,0 +1,46 @@
+# Production-used eligibility DATA reducer, not native absence or authority.
+# Release row production is ordered AFTER every canonical precondition.
+use std.nogc_sync_mut.container.machine_fresh_workload_record_v2.*
+use std.common.contracts.distributed_operation_state_v2.DistributedOperationStateV2
+use std.nogc_sync_mut.database.wal.WalEntry
+
+pub struct MachineFreshWorkloadSettlementProgressV2:
+    associated: bool
+    helper_retired: bool
+    native_retained: bool
+    absence_completed: bool
+    uncertain: bool
+    settled: bool
+    phase: text
+
+pub fn machine_fresh_workload_prepare_settlement_v2(progress: MachineFreshWorkloadSettlementProgressV2,
+        record: MachineFreshWorkloadRecordV2, terminal: DistributedOperationStateV2,
+        at: i64) -> Result<(MachineFreshWorkloadSettlementProgressV2, [WalEntry]), text>:
+    if (not progress.associated or not progress.helper_retired or not progress.native_retained or
+            not progress.absence_completed or progress.uncertain or progress.settled or progress.phase != "idle"):
+        return Err("machine-fresh-workload-settlement-ineligible")
+    var reserved = progress
+    reserved.phase = "settlement-reserved"
+    # No row constructor is reached on a rejected precondition.
+    val rows = machine_fresh_workload_settle_entries_v2(record, terminal, at)?
+    Ok((reserved, rows))
+
+pub fn machine_fresh_workload_history_budget_v2(committed: i64, projected: i64,
+        cleanup: bool) -> Result<(), text>:
+    # Noncleanup work reserves twenty slots for unfinished admission/association
+    # and the seven Stop/Remove/Absence/settlement commits. Before-read reserves
+    # its complete six-commit batch, rather than failing after its first append.
+    val limit = if cleanup: 64 else: 44
+    if committed < 0 or projected < 1 or projected > 8 or committed > limit - projected:
+        return Err("machine-fresh-workload-history-budget")
+    Ok(())
+
+pub fn machine_fresh_workload_finalize_settlement_v2(reserved: MachineFreshWorkloadSettlementProgressV2) -> Result<MachineFreshWorkloadSettlementProgressV2, text>:
+    if reserved.phase != "settlement-reserved": return Err("machine-fresh-workload-settlement-stale")
+    var completed = reserved
+    completed.settled = true
+    completed.phase = "settled"
+    Ok(completed)
+
+pub fn machine_fresh_workload_first_diagnostic_v2(first: text, next: text) -> text:
+    if first != "": first else: next

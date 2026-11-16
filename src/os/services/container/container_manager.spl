@@ -665,6 +665,30 @@ impl ContainerWorld:
     # restart from asking for MORE. The re-acquisition is therefore attenuated
     # against the frozen create-time ceiling (caps AND root) — a crash-loop is
     # not a privilege-escalation primitive.
+    me bind_runtime_pid(idx: i64, pid: i64) -> bool:
+        """Add the kernel-allocated task id of a launched workload to the
+        container's pid view (ContainerRuntime.start_into_scheduler).
+
+        Refuses an unknown slot, a non-positive pid, or a rootless (stopped /
+        reaped) view, so a dead container can never be widened. Endpoint
+        handles are preserved; only the pid set grows.
+        """
+        if idx < 0 or idx >= self.views.len() or pid <= 0:
+            return false
+        val current = self.views[idx]
+        if current.view.root == "":
+            return false
+        val task_pid = pid as u64
+        if container_view_allows_pid(current.view, task_pid):
+            return true
+        var pids = current.view.pids
+        pids.push(task_pid)
+        var a_views = self.views
+        a_views[idx] = NamespaceView(view: container_view_create(current.view.root, pids),
+            net_handle: current.net_handle, ipc_handle: current.ipc_handle)
+        self.views = a_views
+        true
+
     me sys_restart(idx: i64, reacquired: [text], root: text, pids: [u64], cpu: u64, mem: u64, io: u64, pid_quota: u64) -> SpawnRequest:
         # Re-acquire the namespace view from a rootless base + the freshly
         # declared handles (never the stale collapsed view), clamped to the

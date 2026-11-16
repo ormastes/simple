@@ -99,7 +99,19 @@ for my $key (qw(max-rss-kib interval-ms timeout-seconds term-grace-seconds)) {
 # full cli closure build (1500+ SCV modules) exceeded 24 GiB; widening to
 # 48 GiB to measure the true single-build plateau before final evidence-based
 # tightening. Keep in sync with tree-rss-policy.shs.
-my $compiler_ceiling_kib = 50331648;
+# Seventh widening 2026-11-15: release/1.0.0 MSVC receipt-authorized full run
+# (corridor tip 189dabae8e3) killed at the 48 GiB ceiling with the tree
+# plateaued at peak_rss_kib=51551038 (50.34 GiB, MIR 1832/3148) -- measured
+# plateau, not a leak; 64 GiB Hyper-V balloon host under-reports free memory,
+# so ~1.7 GiB headroom is real. 52 GiB admits the plateau. Evidence:
+# doc/08_tracking/bug/rss_static_ceiling_52gib_request_2026-11-14.md.
+# Keep in sync with tree-rss-policy.shs.
+# Eighth widening 2026-11-15: 52 GiB rung brackets the measured 50.34 GiB
+# plateau (recorded at MIR 1832/3148, before codegen). Codegen historically
+# adds the final peak growth; the host is single-tenant (system ~11 GiB,
+# balloon releases on demand), so 56 GiB is the next evidence-based rung.
+# Keep in sync with tree-rss-policy.shs.
+my $compiler_ceiling_kib = 58720256;
 my $worker_target_kib = 976562;
 my $budget_ceiling_kib = $compiler_ceiling_kib;
 $opt{'budget-scope'} =~ /\A(?:compiler|aggregate-tests)\z/

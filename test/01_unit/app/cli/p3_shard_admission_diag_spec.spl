@@ -1,0 +1,58 @@
+use std.spec
+use app.cli.file_worker_pool_refusal.{file_worker_pool_serial_memory_admits_v1, shard_aggregate_failure_line_v1}
+use app.cli.shard_mem_clamp.{shard_parse_worker_budget_kb_for_v1}
+
+# Phase-3 2026-11-15 (doc/08_tracking/bug/p3_mir_shard_aggregate_fail_no_diag_2026-11-15.md):
+# a 3216-file closure produced 0 objects. The per-file pool was refused before
+# any worker spawned (hir_workers=0: 6815744 kB estimate > 5956828 kB effective),
+# the log only said "MIR shard aggregate failure", and the parse admission priced
+# its workers at host worker_mem_mib (26 GiB) despite the HIR override.
+
+describe "phase-3 shard admission and aggregate diagnostics":
+
+    it "names the refusal or pool verdict in the aggregate failure line":
+        """
+        # @req P3-DIAG-001
+        The bootstrap aggregate failure line carries the reason, so the log
+        alone names the cause instead of only "aggregate failure".
+        """
+        step("refusal reason is embedded")
+        val line = shard_aggregate_failure_line_v1("per-file worker pool refused (hir_workers=0 mir_workers=2)")
+        expect(line).to_contain("MIR shard aggregate failure")
+        expect(line).to_contain("hir_workers=0")
+        step("empty reason keeps a pointer to the owner lines")
+        expect(shard_aggregate_failure_line_v1("")).to_contain("owner=")
+
+    it "admits one serial worker when memory alone refuses the pool":
+        """
+        # @req P3-ADMIT-001
+        Repro: free 31112100 kB, estimate 6815744 kB, hir=0 mir=2, threads 16.
+        One worker plus the 4 GiB coordinator fits in raw free memory: admit 1.
+        """
+        step("phase-3 repro admits")
+        expect(file_worker_pool_serial_memory_admits_v1(0, 2, 16, "", 31112100, 6815744)).to_equal(true)
+        step("generalisation: one worker that does not fit raw free memory stays refused")
+        expect(file_worker_pool_serial_memory_admits_v1(0, 2, 16, "", 9000000, 6815744)).to_equal(false)
+        step("an explicit opt-out or a serial request is never overridden")
+        expect(file_worker_pool_serial_memory_admits_v1(0, 2, 16, "SIMPLE_HIR_CACHE=0", 31112100, 6815744)).to_equal(false)
+        expect(file_worker_pool_serial_memory_admits_v1(0, 2, 1, "", 31112100, 6815744)).to_equal(false)
+        step("an admitted 2-worker pool is not touched")
+        expect(file_worker_pool_serial_memory_admits_v1(2, 2, 16, "", 31112100, 6815744)).to_equal(false)
+
+    it "prices parse shards by the parse override, else capped by the HIR override":
+        """
+        # @req P3-ADMIT-002
+        Repro: host worker_mem_mib 26624 MiB priced parse shards at 27262976 kB
+        although SIMPLE_HIR_SHARD_WORKER_KB=6815744 was set. A parse shard is
+        never heavier than a HIR shard, so the HIR override caps its price.
+        """
+        step("phase-3 repro is capped")
+        expect(shard_parse_worker_budget_kb_for_v1("", "6815744", 27262976, 3800000)).to_equal(6815744)
+        step("parse override wins in both directions")
+        expect(shard_parse_worker_budget_kb_for_v1("1000000", "6815744", 27262976, 3800000)).to_equal(1000000)
+        expect(shard_parse_worker_budget_kb_for_v1("9000000", "6815744", 27262976, 3800000)).to_equal(9000000)
+        step("no overrides keep host, then default (unchanged precedence)")
+        expect(shard_parse_worker_budget_kb_for_v1("", "", 27262976, 3800000)).to_equal(27262976)
+        expect(shard_parse_worker_budget_kb_for_v1("", "", 0, 3800000)).to_equal(3800000)
+        step("a HIR override never raises the price")
+        expect(shard_parse_worker_budget_kb_for_v1("", "9000000", 0, 3800000)).to_equal(3800000)

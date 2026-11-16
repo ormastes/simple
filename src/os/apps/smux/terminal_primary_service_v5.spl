@@ -1,0 +1,117 @@
+# Generic primary owner adoption into the existing sole pane registry.
+# Platform dispatch stays behind the common Container terminal interface.
+use os.apps.smux.service.ServiceState
+use os.apps.smux.service_revision.ServiceRevisionState
+use os.apps.smux.terminal_adoption_service_v2.terminal_transport_metadata_admit_v3
+use std.common.contracts.mux.session_runtime_control_v1.{SessionRuntimeControlTargetV1,
+    session_runtime_control_target_validate_v1}
+use std.nogc_async_mut.container.terminal_session_v1.ContainerPrimaryAttachAdoptionV1
+use std.nogc_async_mut.container.terminal_session_v2.{ContainerOwnedTerminalSessionV2,
+    container_terminal_identity_equal_v2, container_terminal_reference_v2}
+use std.nogc_async_mut.container.terminal_primary_v2.{container_primary_terminal_view_v2,
+    container_primary_terminal_adopt_v2, container_primary_connection_closed_bytes_v2}
+use std.nogc_async_mut.container.terminal_session_v2.container_terminal_cleanup_v2
+use std.nogc_sync_mut.orchestration.host_primary_connection_settlement_v2.HostPrimaryConnectionSettlementAckV2
+use std.common.contracts.container.primary_connection_evidence_v2.container_primary_connection_closed_decode_v2
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.sha256_text
+
+pub struct TerminalPrimaryAdoptionTurnV5:
+    state: ServiceState
+    session: ContainerOwnedTerminalSessionV2
+    adopted: bool
+    error: text
+
+pub struct SmuxPrimaryAdoptionTurnV5:
+    retained: ContainerOwnedTerminalSessionV2?
+    adopted: bool
+    error: text
+
+pub struct TerminalPrimaryCleanupTurnV5:
+    state: ServiceState
+    cleaned: bool
+    error: text
+
+pub fn terminal_primary_cleanup_v5(before: ServiceState, pane_id: text,
+        expected_identity: text) -> TerminalPrimaryCleanupTurnV5:
+    val index = before.find_pane_idx(pane_id)
+    if index < 0: return TerminalPrimaryCleanupTurnV5(before, false, "primary pane missing")
+    var pane = before.get_pane(index)
+    if pane.owned_terminal_session == nil: return TerminalPrimaryCleanupTurnV5(before, false, "primary pane owner missing")
+    val view = container_primary_terminal_view_v2(pane.owned_terminal_session.unwrap())
+    if view.is_err() or view.unwrap().fingerprint != expected_identity:
+        return TerminalPrimaryCleanupTurnV5(before, false, "primary pane identity changed")
+    val turn = container_terminal_cleanup_v2(pane.owned_terminal_session.unwrap())
+    pane.owned_terminal_session = Some(turn.session)
+    pane.helper_cleaned_awaiting_release = turn.cleaned
+    if turn.cleaned: pane.terminal_eof = true
+    # Even failure publishes the exact returned native obligation first.
+    TerminalPrimaryCleanupTurnV5(before.replace_pane(index, pane), turn.cleaned, turn.error)
+
+pub fn terminal_primary_settle_v5(before: ServiceState, clock: ServiceRevisionState,
+        pane_id: text, expected_identity: text, ack: HostPrimaryConnectionSettlementAckV2) -> Result<ServiceState, text>:
+    val index = before.find_pane_idx(pane_id)
+    if index < 0: return Err("primary pane missing")
+    var pane = before.get_pane(index)
+    if pane.owned_terminal_session == nil or not pane.helper_cleaned_awaiting_release:
+        return Err("primary pane cleanup required")
+    val session = pane.owned_terminal_session.unwrap()
+    val view = container_primary_terminal_view_v2(session)?
+    val adoption = match view.adoption:
+        case Some(value): value
+        case None: return Err("primary pane adoption missing")
+    if (clock.epoch > 9223372036854775807 or pane.child_incarnation > 9223372036854775807 or
+            adoption.session_id != pane.pane.session_id or adoption.window_id != pane.pane.window_id or
+            adoption.pane_id != pane_id or adoption.service_epoch != clock.epoch as i64 or
+            adoption.child_incarnation != pane.child_incarnation as i64 or view.fingerprint != expected_identity):
+        return Err("primary pane adoption changed")
+    val closed_bytes = container_primary_connection_closed_bytes_v2(session)?
+    val closed = container_primary_connection_closed_decode_v2(closed_bytes)?
+    if (ack.operation_id != view.identity.operation_id or ack.request_digest != view.request_digest or
+            ack.native_identity_digest != closed.identity_digest or ack.connection_receipt_digest != sha256_text(closed_bytes) or
+            ack.journal_sequence <= 0): return Err("primary connection settlement mismatch")
+    for digest in [ack.request_digest, ack.prepared_receipt_digest, ack.native_identity_digest,
+            ack.connection_receipt_digest, ack.outcome_digest, ack.journal_revision]:
+        if not builder_digest_valid_v1(digest): return Err("primary connection settlement digest")
+    pane.owned_terminal_session = nil
+    pane.terminal_ref = nil
+    pane.helper_cleaned_awaiting_release = false
+    pane.child_pid = -1
+    Ok(before.replace_pane(index, pane))
+
+pub fn terminal_primary_adopt_v5(before: ServiceState, clock: ServiceRevisionState,
+        closing: bool, target: SessionRuntimeControlTargetV1, expected_revision: u64,
+        session: ContainerOwnedTerminalSessionV2) -> TerminalPrimaryAdoptionTurnV5:
+    val valid = session_runtime_control_target_validate_v1(target)
+    if valid.is_err(): return TerminalPrimaryAdoptionTurnV5(before, session, false, valid.unwrap_err())
+    if target.child_incarnation <= 0 or target.service_epoch < 0:
+        return TerminalPrimaryAdoptionTurnV5(before, session, false, "primary adoption incarnation bound")
+    val view = container_primary_terminal_view_v2(session)
+    if view.is_err(): return TerminalPrimaryAdoptionTurnV5(before, session, false, view.unwrap_err())
+    if view.unwrap().adoption != nil:
+        return TerminalPrimaryAdoptionTurnV5(before, session, false, "primary session already adopted")
+    val admitted = terminal_transport_metadata_admit_v3(before, clock, closing,
+        target.session_id, target.window_id, target.pane_id, target.service_epoch as u64,
+        expected_revision, (target.child_incarnation - 1) as u64)
+    if admitted.is_err(): return TerminalPrimaryAdoptionTurnV5(before, session, false, admitted.unwrap_err())
+    for index in 0..before.pane_count:
+        if val owned = before.get_pane(index).owned_terminal_session:
+            if container_terminal_identity_equal_v2(owned, session):
+                return TerminalPrimaryAdoptionTurnV5(before, session, false, "primary owner already adopted")
+    val reference = container_terminal_reference_v2(session)
+    if reference.is_err(): return TerminalPrimaryAdoptionTurnV5(before, session, false, reference.unwrap_err())
+    if val legacy = reference.unwrap():
+        for index in 0..before.pane_count:
+            if before.get_pane(index).same_terminal_ref(legacy):
+                return TerminalPrimaryAdoptionTurnV5(before, session, false, "primary reference already adopted")
+    val adoption = ContainerPrimaryAttachAdoptionV1(binding_uid: target.binding_uid,
+        service_incarnation: target.service_incarnation, session_id: target.session_id,
+        window_id: target.window_id, pane_id: target.pane_id, service_epoch: target.service_epoch,
+        child_incarnation: target.child_incarnation)
+    val adopted = container_primary_terminal_adopt_v2(session, adoption, target)
+    if adopted.error != "": return TerminalPrimaryAdoptionTurnV5(before, adopted.session, false, adopted.error)
+    val pi = admitted.unwrap()
+    val published = before.get_pane(pi).with_owned_terminal_v2(adopted.session, reference.unwrap())
+    if not published.same_owned_terminal_session(Some(adopted.session)):
+        return TerminalPrimaryAdoptionTurnV5(before, adopted.session, false, "primary owner publication refused")
+    TerminalPrimaryAdoptionTurnV5(before.replace_pane(pi, published), adopted.session, true, "")

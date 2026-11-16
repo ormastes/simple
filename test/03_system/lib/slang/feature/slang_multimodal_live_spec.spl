@@ -1,0 +1,182 @@
+# @cover src/lib/gc_async_mut/slang/entrypoints/openai/serving_chat.spl 80%
+# @cover src/lib/gc_async_mut/slang/model_executor/backend.spl 70%
+# @cover src/runtime/slang_ggml_shim.c 40%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+
+"""
+## Purpose and audience
+Purpose: prove on real vision and audio models that an OpenAI chat request
+carrying an image or an audio clip is answered FROM that medium, end to end
+through serve_chat_completions -> engine -> backend -> the shim's mtmd group.
+Audience: engineers changing slang's media path, and operators checking that a
+model directory with an mmproj projector really sees images / hears audio.
+
+## What is checked
+- image: SmolVLM2-256M + llama.cpp's mtmd/test-1.jpeg (a newspaper front page)
+  -> a non-empty answer that mentions newspaper-like content;
+- audio: a model with an audio projector + mtmd/test-2.mp3 (an old news
+  recording about the moon landing) -> an answer that mentions moon or the
+  New York Times;
+- video: refused with a clear 400 unsupported_modality (this host has no
+  ffmpeg, and slang decodes no video container), never answered as text;
+- a text-only model given an image: 400 unsupported_modality.
+Models are 256M-1B parameters, so only coarse keywords are asserted.
+
+## Compatibility and limitations
+Runs when SLANG_LIVE=1, SLANG_MODEL_ROOT names the model directory
+(C:/dev/model) and SLANG_GGML_LIB names a shim built with SLANG_SHIM_MTMD=1
+(scripts/check/build-slang-ggml-shim.shs). Assets come from
+SLANG_MM_ASSET_DIR (default C:/dev/tools/llama.cpp/tools/mtmd). Each scenario is
+skipped (counted, with a reason) when its model directory is absent.
+"""
+
+use std.spec.{describe, it, expect, step, skip, fail}
+use std.gc_async_mut.slang.entrypoints.llm.{engine_backend_available}
+use std.gc_async_mut.slang.engine.llm_engine.{engine_prefix_cache_stats}
+use std.gc_async_mut.slang.entrypoints.openai.serving_chat.{serve_chat_completions}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{json_string_field}
+use std.common.base_encoding.base64.{base64_encode_bytes}
+use std.io_runtime.{env_get, is_dir, file_exists, file_read_bytes, file_append_text, dir_create_all}
+use std.common.text_ascii.{to_lower_ascii}
+
+fn _model_root() -> text:
+    val root = env_get("SLANG_MODEL_ROOT") ?? ""
+    if root == "" or not is_dir(root):
+        return ""
+    root
+
+fn _live_enabled() -> bool:
+    (env_get("SLANG_LIVE") ?? "") == "1" and _model_root() != "" and engine_backend_available()
+
+fn _asset(name: text) -> text:
+    val configured = env_get("SLANG_MM_ASSET_DIR") ?? ""
+    val dir = if configured != "": configured else: "C:/dev/tools/llama.cpp/tools/mtmd"
+    dir + "/" + name
+
+fn _have(model_dir: text) -> bool:
+    is_dir(_model_root() + "/" + model_dir)
+
+fn _text_part(text_value: text) -> text:
+    "{\"type\":\"text\",\"text\":\"" + text_value + "\"}"
+
+fn _image_part(path: text, subtype: text) -> text:
+    "{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/" + subtype + ";base64," + base64_encode_bytes(file_read_bytes(path)) + "\"}}}}"
+
+fn _audio_part(path: text, format: text) -> text:
+    "{\"type\":\"input_audio\",\"input_audio\":{\"data\":\"" + base64_encode_bytes(file_read_bytes(path)) + "\",\"format\":\"" + format + "\"}}}}"
+
+fn _body(model: text, parts: text) -> text:
+    "{\"model\":\"" + model + "\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":[" + parts + "]}]}"
+
+# stdout of a passing example is not kept by the runner, so the answers a human
+# wants to read are appended to a log file as well.
+fn _record(line: text):
+    dir_create_all("build/probe")
+    file_append_text("build/probe/mm_answers.txt", line + "\n")
+
+fn _skip(name: text, why: text):
+    _record("SKIPPED: " + name + " -- " + why + " [live=" + (env_get("SLANG_LIVE") ?? "") + " root=" + _model_root() + " backend=" + engine_backend_available().to_text() + "]")
+    skip(name, why)
+
+fn _lower(s: text) -> text:
+    to_lower_ascii(s)
+
+# The completion text of a 200 response, or the whole body prefixed with the
+# status so a failure message carries the server's own explanation.
+fn _answer(model: text, parts: text) -> text:
+    val response = serve_chat_completions(_model_root(), _body(model, parts))
+    if response.status != 200:
+        return "HTTP " + response.status.to_text() + " " + response.body
+    json_string_field(response.body, "content")
+
+describe "slang answers from an image":
+    it "describes the newspaper in test-1.jpeg with SmolVLM2":
+        if not _live_enabled() or not _have("SmolVLM2-256M-Video-Instruct-GGUF") or not file_exists(_asset("test-1.jpeg")):
+            _skip("describes the newspaper in test-1.jpeg with SmolVLM2", "needs SLANG_LIVE=1, SLANG_MODEL_ROOT, an mtmd shim, SmolVLM2 and test-1.jpeg")
+            return
+        step("Send one image part and one text part through the chat endpoint")
+        val answer = _answer("SmolVLM2-256M-Video-Instruct-GGUF", _image_part(_asset("test-1.jpeg"), "jpeg") + "," + _text_part("Describe this image in one sentence."))
+        _record("MM-ANSWER image: " + answer)
+        val low = _lower(answer)
+        expect(answer.starts_with("HTTP ")).to_equal(false)
+        expect(low.find("newspaper") >= 0 or low.find("new york times") >= 0 or low.find("article") >= 0 or low.find("headline") >= 0).to_equal(true)
+
+describe "slang answers from audio":
+    it "hears the moon-landing recording in test-2.mp3":
+        val configured_model = env_get("SLANG_MM_AUDIO_MODEL") ?? ""
+        val model = if configured_model != "": configured_model else: "ultravox-v0_5-llama-3_2-1b-GGUF"
+        if not _live_enabled() or not _have(model) or not file_exists(_asset("test-2.mp3")):
+            _skip("hears the moon-landing recording in test-2.mp3", "needs SLANG_LIVE=1, SLANG_MODEL_ROOT, an mtmd shim, an audio model and test-2.mp3")
+            return
+        step("Send one audio part and one text part through the chat endpoint")
+        val answer = _answer(model, _audio_part(_asset("test-2.mp3"), "mp3") + "," + _text_part("What is said in this audio?"))
+        _record("MM-ANSWER audio (" + model + "): " + answer)
+        val low = _lower(answer)
+        expect(answer.starts_with("HTTP ")).to_equal(false)
+        expect(low.find("moon") >= 0 or low.find("new york times") >= 0).to_equal(true)
+
+describe "media a model cannot take is refused, not faked":
+    it "refuses video with the reason":
+        if not _live_enabled() or not _have("SmolVLM2-256M-Video-Instruct-GGUF"):
+            _skip("refuses video with the reason", "needs SLANG_LIVE=1, SLANG_MODEL_ROOT and SmolVLM2")
+            return
+        step("A video_url part is refused before any generation")
+        val parts = "{\"type\":\"video_url\",\"video_url\":{\"url\":\"data:video/mp4;base64,AAAAIGZ0eXBpc29t\"}}}}," + _text_part("What happens?")
+        val response = serve_chat_completions(_model_root(), _body("SmolVLM2-256M-Video-Instruct-GGUF", parts))
+        _record("MM-ANSWER video: HTTP " + response.status.to_text() + " " + response.body)
+        expect(response.status).to_equal(400)
+        expect(json_string_field(response.body, "code")).to_equal("unsupported_modality")
+        expect(json_string_field(response.body, "message").find("ffmpeg") >= 0).to_equal(true)
+
+    it "refuses an image sent to a text-only model":
+        if not _live_enabled() or not _have("gemma-3-270m-it-GGUF") or not file_exists(_asset("test-1.jpeg")):
+            _skip("refuses an image sent to a text-only model", "needs SLANG_LIVE=1, SLANG_MODEL_ROOT, gemma-3-270m-it-GGUF and test-1.jpeg")
+            return
+        step("A text-only model must answer 400, not describe an image it never saw")
+        val response = serve_chat_completions(_model_root(), _body("gemma-3-270m-it-GGUF", _image_part(_asset("test-1.jpeg"), "jpeg") + "," + _text_part("Describe this image.")))
+        _record("MM-ANSWER text-only: HTTP " + response.status.to_text() + " " + response.body)
+        expect(response.status).to_equal(400)
+        expect(json_string_field(response.body, "code")).to_equal("unsupported_modality")
+
+fn _stats() -> text:
+    val s = engine_prefix_cache_stats()
+    if s == nil:
+        return "no-stats"
+    "hits=" + s!.hits.to_text() + " misses=" + s!.misses.to_text() + " admissions=" + s!.admissions.to_text() + " reused=" + s!.tokens_reused.to_text()
+
+fn _hits() -> i64:
+    val s = engine_prefix_cache_stats()
+    if s == nil:
+        return -1
+    s!.hits
+
+describe "a media request leaves the prefix cache honest":
+    it "text, text again, image, text again: no reuse is credited to the media request":
+        if not _live_enabled() or not _have("SmolVLM2-256M-Video-Instruct-GGUF") or not file_exists(_asset("test-1.jpeg")):
+            _skip("text, text again, image, text again", "needs SLANG_LIVE=1, SLANG_MODEL_ROOT, an mtmd shim, SmolVLM2 and test-1.jpeg")
+            return
+        val model = "SmolVLM2-256M-Video-Instruct-GGUF"
+        val t = _text_part("Name three colors.")
+        step("1) text cold, 2) text again (hit expected)")
+        val a1 = _answer(model, t)
+        val s1 = _stats()
+        val h1 = _hits()
+        val a2 = _answer(model, t)
+        val s2 = _stats()
+        val h2 = _hits()
+        step("3) an image request must not touch the cache counters")
+        val a3 = _answer(model, _image_part(_asset("test-1.jpeg"), "jpeg") + "," + _text_part("Describe this image in one sentence."))
+        val s3 = _stats()
+        step("4) text again: any hit must come from a snapshot that still exists")
+        val a4 = _answer(model, t)
+        val s4 = _stats()
+        _record("MM-CACHE a1=" + a1 + " | " + s1)
+        _record("MM-CACHE a2=" + a2 + " | " + s2)
+        _record("MM-CACHE a3=" + a3 + " | " + s3)
+        _record("MM-CACHE a4=" + a4 + " | " + s4)
+        expect(a1.starts_with("HTTP ")).to_equal(false)
+        expect(a4.starts_with("HTTP ")).to_equal(false)
+        expect(a4 == "").to_equal(false)
+        expect(h2 > h1).to_equal(true)
+        expect(s3).to_equal(s2)
+        expect(a4 == a2 or a4 == a1).to_equal(true)

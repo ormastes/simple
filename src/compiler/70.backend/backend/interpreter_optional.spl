@@ -1,0 +1,289 @@
+use compiler.backend.backend_types.{backend_value_bool_v1, backend_value_float_v1, backend_value_int_v1, backend_value_option_v1, backend_value_result_v1, backend_value_struct_v1}
+# Interpreter Backend - option/result idioms (`??`, `.?`, `?`, `!`, `?.`),
+# enum and struct values, enum/struct/tuple patterns, casts and trait
+# method dispatch.
+#
+# Some(v)/None are Value.Option, Ok(v)/Err(e) are Value.Result; a bare
+# `nil` (Value.Nil) counts as absent everywhere an Option does.
+#
+# doc/08_tracking/bug/native_cli_test_cannot_run_std_spec_2026-11-15.md
+
+use compiler.hir.hir.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.backend.backend_types.*
+use compiler.backend.env.{EvalContext}
+use compiler.backend.interpreter.{InterpreterBackendImpl, resolve_sym_name}
+
+fn interp_absent(v: Value) -> bool:
+    """True for nil and None."""
+    match v:
+        case Value.Nil: true
+        case Value.Option(inner): not inner.?
+        case _: false
+
+fn interp_present_inner(v: Value) -> Value:
+    """The payload of Some(x), else the value itself."""
+    match v:
+        case Value.Option(inner):
+            if val x = inner:
+                return x
+            Value.Nil
+        case _: v
+
+fn interp_hir_type_name(t: HirType, ctx: EvalContext) -> text:
+    match t.kind:
+        case HirTypeKind.Named(sym, _): resolve_sym_name(sym, ctx)
+        case _: ""
+
+impl InterpreterBackendImpl:
+    fn construct_wrapper(name: text, args: [Value]) -> Value?:
+        """Some/Ok/Err called as functions."""
+        if args.len() != 1:
+            return nil
+        val v: Value = args[0]
+        val some_v: Value? = Some(v)
+        val none_v: Value? = nil
+        match name:
+            case "Some": Some(backend_value_option_v1(some_v))
+            case "Ok": Some(backend_value_result_v1(some_v, none_v))
+            case "Err": Some(backend_value_result_v1(none_v, some_v))
+            case _: nil
+
+    fn eval_null_coalesce(left: HirExpr, right: HirExpr, ctx: EvalContext) -> Result<Value, BackendError>:
+        val lv = self.eval_expr(left, ctx)?
+        if interp_absent(lv):
+            return self.eval_expr(right, ctx)
+        Ok(interp_present_inner(lv))
+
+    fn eval_let_init(let_type: HirType, init: HirExpr, ctx: EvalContext) -> Result<Value, BackendError>:
+        """A binding `val v = e.?` (the `if val v = e` / `?.` desugar) holds
+        the payload or nil; elsewhere `.?` is the presence bool. A declared
+        bool binder keeps presence unless `e` itself is `bool?` (MIR rule,
+        mir_lowering_stmts.spl)."""
+        match init.kind:
+            case HirExprKind.ExistsCheck(base):
+                var payload_mode = true
+                match let_type.kind:
+                    case HirTypeKind.Bool:
+                        payload_mode = false
+                        if base.has_type_:
+                            match base.type_.kind:
+                                case HirTypeKind.Optional(inner_t):
+                                    match inner_t.kind:
+                                        case HirTypeKind.Bool: payload_mode = true
+                                        case _: ()
+                                case _: ()
+                    case _: ()
+                if payload_mode:
+                    val bv = self.eval_expr(base, ctx)?
+                    if interp_absent(bv):
+                        return Ok(Value.Nil)
+                    return Ok(interp_present_inner(bv))
+            case _: ()
+        self.eval_expr(init, ctx)
+
+    fn eval_exists(base: HirExpr, ctx: EvalContext) -> Result<Value, BackendError>:
+        val v = self.eval_expr(base, ctx)?
+        Ok(backend_value_bool_v1(not interp_absent(v)))
+
+    fn eval_unwrap(base: HirExpr, ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
+        val v = self.eval_expr(base, ctx)?
+        match v:
+            case Value.Result(ok, err):
+                if val o = ok:
+                    return Ok(o)
+                return Err(BackendError.runtime_error("unwrap of Err", Some(span)))
+            case _:
+                if interp_absent(v):
+                    return Err(BackendError.runtime_error("unwrap of None", Some(span)))
+                Ok(interp_present_inner(v))
+
+    fn eval_try(inner: HirExpr, ctx: EvalContext) -> Result<Value, BackendError>:
+        """`expr?`: an Err/None returns from the enclosing function."""
+        val v = self.eval_expr(inner, ctx)?
+        match v:
+            case Value.Result(ok, _err):
+                if val o = ok:
+                    return Ok(o)
+                return Err(BackendError.control_flow("return", Some(v)))
+            case _:
+                if interp_absent(v):
+                    val none_v: Value? = nil
+                    return Err(BackendError.control_flow("return", Some(backend_value_option_v1(none_v))))
+                Ok(interp_present_inner(v))
+
+    fn read_field(base_val: Value, field: text, span: Span, ctx: EvalContext) -> Result<Value, BackendError>:
+        # Object first: the Value.Struct arm is struct-shadowed on stage4 and
+        # compiles always-true (see the Field pre-dispatch in interpreter_expr).
+        match base_val:
+            case Value.Object(objv):
+                val ov: ObjectValue = objv
+                if val fv = ctx.env.store.get_field(ov.handle, field):
+                    return Ok(fv)
+                return Err(BackendError.runtime_error("no such field: {field}", Some(span)))
+            case Value.Struct(_stype, sfields):
+                val sf: Dict<text, Value> = sfields
+                if sf.has(field):
+                    return Ok(sf[field])
+                return Err(BackendError.runtime_error("no such field: {field}", Some(span)))
+            case _:
+                Err(BackendError.runtime_error("field access on non-struct value", Some(span)))
+
+    fn eval_optional_chain(base: HirExpr, field: text, ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
+        """`b?.f`: None when b is absent, else Some(b.f)."""
+        val bv = self.eval_expr(base, ctx)?
+        if interp_absent(bv):
+            val none_v: Value? = nil
+            return Ok(backend_value_option_v1(none_v))
+        val fv = self.read_field(interp_present_inner(bv), field, span, ctx)?
+        val some_v: Value? = Some(fv)
+        Ok(backend_value_option_v1(some_v))
+
+    fn eval_struct_lit(type_: HirType, fields: [(text, HirExpr)], ctx: EvalContext) -> Result<Value, BackendError>:
+        var out: Dict<text, Value> = {}
+        for f in fields:
+            val fname: text = f[0]
+            val fexpr: HirExpr = f[1]
+            out[fname] = self.eval_expr(fexpr, ctx)?
+        Ok(backend_value_struct_v1(interp_hir_type_name(type_, ctx), out))
+
+    fn eval_enum_lit(type_: HirType, variant: text, payload: HirEnumPayload?, ctx: EvalContext) -> Result<Value, BackendError>:
+        var values: [Value] = []
+        var named: Dict<text, Value> = {}
+        var is_struct = false
+        if val p = payload:
+            match p:
+                case HirEnumPayload.Tuple(exprs):
+                    for e in exprs:
+                        val e_t: HirExpr = e
+                        values = values.push(self.eval_expr(e_t, ctx)?)
+                case HirEnumPayload.Struct(fields):
+                    is_struct = true
+                    for f in fields:
+                        val fname: text = f[0]
+                        val fexpr: HirExpr = f[1]
+                        named[fname] = self.eval_expr(fexpr, ctx)?
+        val wrapped = self.construct_wrapper(variant, values)
+        if wrapped.?:
+            return Ok(wrapped.unwrap())
+        if variant == "None" and values.len() == 0:
+            val none_v: Value? = nil
+            return Ok(backend_value_option_v1(none_v))
+        val type_name = interp_hir_type_name(type_, ctx)
+        if payload.?:
+            val ep: EnumPayloadValue = if is_struct: EnumPayloadValue.Struct(named) else: EnumPayloadValue.Tuple(values)
+            val ep_opt: EnumPayloadValue? = Some(ep)
+            return Ok(Value.Enum(type_name, variant, ep_opt))
+        val no_payload: EnumPayloadValue? = nil
+        Ok(Value.Enum(type_name, variant, no_payload))
+
+    fn eval_cast(inner: HirExpr, target: HirType, ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
+        val v = self.eval_expr(inner, ctx)?
+        match target.kind:
+            case HirTypeKind.Int(_, _):
+                match v:
+                    case Value.Float(f): Ok(backend_value_int_v1(f as i64))
+                    case Value.Bool(b): Ok(backend_value_int_v1(if b: 1 else: 0))
+                    case Value.Int(_): Ok(v)
+                    case _: Err(BackendError.type_error("cannot cast {v.type_name()} to an integer", Some(span)))
+            case HirTypeKind.Float(_):
+                match v:
+                    case Value.Int(n): Ok(backend_value_float_v1(n as f64))
+                    case Value.Float(_): Ok(v)
+                    case _: Err(BackendError.type_error("cannot cast {v.type_name()} to a float", Some(span)))
+            case _: Ok(v)
+
+    fn payload_binds(patterns: [HirPattern], values: [Value], ctx: EvalContext, span: Span) -> Result<bool, BackendError>:
+        if patterns.len() != values.len():
+            return Ok(false)
+        var i = 0
+        while i < patterns.len():
+            val p: HirPattern = patterns[i]
+            if not self.pattern_binds(p, values[i], ctx, span)?:
+                return Ok(false)
+            i = i + 1
+        Ok(true)
+
+    fn enum_pattern_binds(variant: text, payload: HirPatternPayload?, value: Value, ctx: EvalContext, span: Span) -> Result<bool, BackendError>:
+        var sub: [HirPattern] = []
+        if val pp = payload:
+            match pp:
+                case HirPatternPayload.Tuple(ps): sub = ps
+                case HirPatternPayload.Struct(fields):
+                    for f in fields:
+                        val fp: HirPattern = f[1]
+                        sub = sub.push(fp)
+        match value:
+            case Value.Option(inner):
+                if variant == "None":
+                    return Ok(not inner.?)
+                if variant == "Some":
+                    if val x = inner:
+                        return self.payload_binds(sub, [x], ctx, span)
+                return Ok(false)
+            case Value.Result(ok, err):
+                if variant == "Ok":
+                    if val o = ok:
+                        return self.payload_binds(sub, [o], ctx, span)
+                if variant == "Err":
+                    if val e = err:
+                        return self.payload_binds(sub, [e], ctx, span)
+                return Ok(false)
+            case Value.Nil:
+                Ok(variant == "None")
+            case Value.Enum(_t, vname, vpayload):
+                if vname != variant:
+                    return Ok(false)
+                var vals: [Value] = []
+                if val vp = vpayload:
+                    match vp:
+                        case EnumPayloadValue.Tuple(vs): vals = vs
+                        case EnumPayloadValue.Struct(named):
+                            match payload:
+                                case Some(HirPatternPayload.Struct(fields)):
+                                    for f in fields:
+                                        val fname: text = f[0]
+                                        if not named.has(fname):
+                                            return Ok(false)
+                                        vals = vals.push(named[fname])
+                                case _:
+                                    for k in named.keys():
+                                        vals = vals.push(named[k])
+                if sub.len() == 0:
+                    return Ok(true)
+                self.payload_binds(sub, vals, ctx, span)
+            case _: Ok(false)
+
+    fn struct_pattern_binds(fields: [(text, HirPattern)], value: Value, ctx: EvalContext, span: Span) -> Result<bool, BackendError>:
+        for f in fields:
+            val fname: text = f[0]
+            val fp: HirPattern = f[1]
+            match self.read_field(value, fname, span, ctx):
+                case Ok(fv):
+                    if not self.pattern_binds(fp, fv, ctx, span)?:
+                        return Ok(false)
+                case Err(_): return Ok(false)
+        Ok(true)
+
+    fn tuple_pattern_binds(elements: [HirPattern], value: Value, ctx: EvalContext, span: Span) -> Result<bool, BackendError>:
+        match value:
+            case Value.Tuple(vs): self.payload_binds(elements, vs, ctx, span)
+            case Value.Array(vs): self.payload_binds(elements, vs, ctx, span)
+            case _: Ok(false)
+
+    fn call_trait_method(receiver: HirExpr, method_name: text, args: [HirCallArg], ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
+        """Dispatch `recv.m()` to the impl for the receiver's runtime type."""
+        val recv = self.eval_expr(receiver, ctx)?
+        val type_name = match recv:
+            case Value.Enum(t, _, _): t
+            case Value.Object(ov): ctx.env.store.class_name_of(ov.handle)
+            case _: recv.type_name()
+        var arg_values: [Value] = [recv]
+        for arg in args:
+            val arg_t: HirCallArg = arg
+            arg_values = arg_values.push(self.eval_expr(arg_t.value, ctx)?)
+        for impl_ in ctx.module.impls:
+            val im: HirImpl = impl_
+            if interp_hir_type_name(im.type_, ctx) == type_name and im.methods.has(method_name):
+                return self.call_function_by_id(im.methods[method_name], arg_values, ctx, span)
+        Err(BackendError.runtime_error("no impl of {method_name} for {type_name}", Some(span)))

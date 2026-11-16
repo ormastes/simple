@@ -1,0 +1,35 @@
+# Pure correspondence only. A decoded string/byte tuple never creates quota custody.
+pub fn linux_workspace_identity_decimal_v1(value: text) -> Result<u64, text>:
+    if value.byte_len() < 1 or value.byte_len() > 20 or (value.byte_len() > 1 and value.byte_at(0) == 48):
+        return Err("workspace-retained-identity-decimal")
+    var result = 0u64
+    for byte in value.bytes():
+        if byte < 48 or byte > 57: return Err("workspace-retained-identity-decimal")
+        val digit = (byte - 48) as u64
+        if result > (0xffffffffffffffffu64 - digit) / 10u64: return Err("workspace-retained-identity-overflow")
+        result = result * 10u64 + digit
+    Ok(result)
+
+fn workspace_identity_le_v1(bytes: [u8], start: i64, count: i64) -> u64:
+    var value = 0u64
+    for index in 0..count:
+        value = value | ((bytes[start + index] as u64) << (8 * index))
+    value
+
+pub fn linux_workspace_retained_native_match_v1(identity: [u8], workspace_id: text) -> Result<(), text>:
+    if identity.len() != 16: return Err("workspace-retained-identity-size")
+    val fields = workspace_id.split(":")
+    if fields.len() != 5 or fields[0] != "inode": return Err("workspace-retained-identity-shape")
+    val native_device = linux_workspace_identity_decimal_v1(fields[1])?
+    val native_inode = linux_workspace_identity_decimal_v1(fields[2])?
+    val generation = linux_workspace_identity_decimal_v1(fields[3])?
+    val uid = linux_workspace_identity_decimal_v1(fields[4])?
+    if generation > 4294967295u64 or uid > 4294967295u64: return Err("workspace-retained-identity-field")
+    val inode = workspace_identity_le_v1(identity, 0, 8)
+    val major = workspace_identity_le_v1(identity, 8, 4)
+    val minor = workspace_identity_le_v1(identity, 12, 4)
+    # Linux gnu_dev_makedev representation; statx exposes the major/minor tuple.
+    val device = (((major & 0xfffu64) << 8) | ((major & 0xfffff000u64) << 32) |
+        (minor & 0xffu64) | ((minor & 0xffffff00u64) << 12))
+    if inode != native_inode or device != native_device: return Err("workspace-retained-native-root-differs")
+    Ok(())

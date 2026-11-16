@@ -13,6 +13,7 @@ use compiler.common.assurance.unsafe_capabilities.{UnsafeCapability, unsafe_capa
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering._Expressions.expression_support.{hir_expr_kind_disc, is_tuple_positional_field, parse_tuple_field_index, primitive_cast_type_kind, _hir_expr_symbol_or_invalid}
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+use compiler.core.types.{unit_decl_find}
 use compiler.hir.hir_lowering._Expressions.type_test_operand.{binary_is_type_operand}
 use compiler.hir.hir_lowering._Expressions.source_union_pattern_v1.*
 use compiler.hir.hir_lowering._Expressions.declared_enum_constructor.*
@@ -1280,6 +1281,35 @@ impl HirLowering:
             case ExprKind.Cast(operand, target_type):
                 val cast_operand = self.lower_hir_expr(operand)
                 val cast_target = self.lower_type(target_type)
+                # `raw as Unit` for a declared `unit Name: T as sfx`: a unit is
+                # lowered to the one-field record `Name { value: T }`, so the cast
+                # is that record's construction, the same value `Name(raw)` builds.
+                # Bug: unit_from_primitive_construction_unsupported_runtime_2026-11-15.
+                match target_type.kind:
+                    case TypeKind.Named(unit_name, unit_args):
+                        if unit_args.len() == 0 and unit_decl_find(unit_name) >= 0:
+                            # `u as Unit` where `u` is ALREADY that unit is the
+                            # identity (seed parity); wrapping again would build
+                            # `Unit { value: Unit {...} }`.
+                            # Bug: unit_cast_identity_double_wrap_2026-11-16.
+                            var operand_type: HirType? = None
+                            if cast_operand.has_type_:
+                                operand_type = Some(cast_operand.type_)
+                            else:
+                                operand_type = self.cast_operand_declared_type(operand)
+                            if val ot = operand_type:
+                                val same_unit = match ot.kind:
+                                    case HirTypeKind.Named(op_sym, op_args):
+                                        match cast_target.kind:
+                                            case HirTypeKind.Named(tg_sym, _): op_args.len() == 0 and op_sym.id == tg_sym.id
+                                            case _: false
+                                    case _: false
+                                if same_unit:
+                                    return cast_operand
+                            val unit_fields: [(text, HirExpr)] = [("value", cast_operand)]
+                            return HirExpr(kind: HirExprKind.StructLit(cast_target, unit_fields),
+                                has_type_: true, type_: cast_target, span: e.span)
+                    case _: ()
                 # `T? as <numeric>` outside `unsafe` is a type error, never a
                 # value (nil-only-in-unsafe, ERR-01). The seed produced a
                 # silent 0 / garbage for it; the seed's HIR lowerer now

@@ -124,6 +124,11 @@ val SQLCIPHER4_PAGE1_SALT_BYTES: i64 = 16
 val SQLCIPHER4_PAGE1_CIPHERTEXT_BYTES: i64 = 4000
 # Largest page number representable in the 32-bit LE HMAC binding.
 val SQLCIPHER4_MAX_PAGE_NO: i64 = 4294967295
+
+# 1-based page number (the LE32 HMAC-bound field). Wraps i64 like the rest of
+# the codec; range is enforced by _checked_geometry, not by construction.
+class Sqlcipher4PageNo:
+    value: i64
 # Registry identity of this codec (matches the manifest codec_id).
 val SQLCIPHER4_PAGE_CODEC_ID: text = "sqlcipher4"
 # Opaque CodecSessionV1.secret_material layout: salt || page_key || hmac_key.
@@ -223,11 +228,11 @@ fn _has_plaintext_sqlite_magic(page: [u8]) -> bool:
 # ciphertext is the encrypted page body extent (4000 bytes for page 1,
 # 4016 bytes for pages >= 2), NOT including the plaintext salt. Returns the
 # 64-byte MAC as an [i64] byte list.
-fn sqlcipher4_page_hmac(ciphertext: [u8], iv16: [u8], page_no: i64, hmac_key32: [u8]) -> [i64]:
+fn sqlcipher4_page_hmac(ciphertext: [u8], iv16: [u8], page: Sqlcipher4PageNo, hmac_key32: [u8]) -> [i64]:
     var input: [i64] = []
     _append_i64(input, _u8_to_i64(ciphertext), ciphertext.len())
     _append_i64(input, _u8_to_i64(iv16), iv16.len())
-    _append_i64(input, _page_number_le32(page_no), 4)
+    _append_i64(input, _page_number_le32(page.value), 4)
     val key_i64 = _u8_to_i64(hmac_key32)
     val mac = hmac_sha512_bytes(key_i64, input)
     _zeroize_i64(key_i64)
@@ -289,7 +294,8 @@ fn _checked_geometry(page_no: i64, page_size: i64, aes_key32: [u8], hmac_key32: 
 #   hmac_key32:     32-byte HMAC-SHA512 key.
 #
 # Returns the full 4096-byte page, or a typed error.
-fn sqlcipher4_encode_page(page_no: i64, plaintext_page: [u8], iv16: [u8], aes_key32: [u8], hmac_key32: [u8]) -> Result<[u8], Sqlcipher4Error>:
+fn sqlcipher4_encode_page(page: Sqlcipher4PageNo, plaintext_page: [u8], iv16: [u8], aes_key32: [u8], hmac_key32: [u8]) -> Result<[u8], Sqlcipher4Error>:
+    val page_no = page.value
     match _checked_geometry(page_no, SQLCIPHER4_PAGE_SIZE, aes_key32, hmac_key32):
         case Err(e):
             return Err(e)
@@ -340,7 +346,7 @@ fn sqlcipher4_encode_page(page_no: i64, plaintext_page: [u8], iv16: [u8], aes_ke
                 page[SQLCIPHER4_IV_OFFSET + v] = iv16[v]
                 v = v + 1
             val ct_u8 = _i64_to_u8(ct)
-            val mac = sqlcipher4_page_hmac(ct_u8, iv16, page_no, hmac_key32)
+            val mac = sqlcipher4_page_hmac(ct_u8, iv16, Sqlcipher4PageNo(value: page_no), hmac_key32)
             _zeroize_i64(ct)
             var m = 0
             while m < SQLCIPHER4_HMAC_BYTES:
@@ -389,7 +395,7 @@ fn sqlcipher4_decode_page(page_no: i64, page: [u8], aes_key32: [u8], hmac_key32:
                 m = m + 1
             # AUTHENTICATE BEFORE DECRYPT — a mismatch returns here and the
             # ciphertext is never decrypted.
-            val expected_mac = sqlcipher4_page_hmac(ct, iv, page_no, hmac_key32)
+            val expected_mac = sqlcipher4_page_hmac(ct, iv, Sqlcipher4PageNo(value: page_no), hmac_key32)
             val authentic = sqlcipher4_constant_time_eq(expected_mac, stored_mac)
             _zeroize_i64(expected_mac)
             if not authentic:
@@ -557,7 +563,7 @@ fn sqlcipher4_page_encode_with_session(page_no: i64, plaintext_page: [u8], sessi
                 _zeroize_u8(keys.0)
                 _zeroize_u8(keys.1)
                 return Err(Sqlcipher4Error.CorruptPage(detail: "rng returned {iv16.len()} bytes, profile requires a {SQLCIPHER4_IV_BYTES}-byte IV"))
-            val result = sqlcipher4_encode_page(page_no, plaintext_page, iv16, keys.0, keys.1)
+            val result = sqlcipher4_encode_page(Sqlcipher4PageNo(value: page_no), plaintext_page, iv16, keys.0, keys.1)
             _zeroize_u8(keys.0)
             _zeroize_u8(keys.1)
             result
@@ -587,6 +593,7 @@ export SQLCIPHER4_PAGE_BODY_BYTES, SQLCIPHER4_PAGE1_SALT_BYTES
 export SQLCIPHER4_SESSION_MATERIAL_BYTES, SQLCIPHER4_PAGE_CODEC_ID
 export sqlcipher4_encode_page, sqlcipher4_decode_page, sqlcipher4_page1_salt
 export sqlcipher4_page_hmac, sqlcipher4_constant_time_eq
+export Sqlcipher4PageNo
 export sqlcipher4_page_factory
 export sqlcipher4_page_profile_fn, sqlcipher4_page_manifest_fn
 export sqlcipher4_page_open_key, sqlcipher4_page_close

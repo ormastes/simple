@@ -1,0 +1,39 @@
+# Purpose and audience: compiler engineers who own native trait vtables.
+# @req REQ-SSPEC-UNIT
+"""
+# A class implementing an imported trait gets a real vtable in native builds
+
+Bug: doc/08_tracking/bug/native_user_class_imported_trait_vtable_missing_2026-11-15.md
+
+`class Buf with Transport:` (trait imported from std) passed to std's
+`mcp_serve(t: Transport)` used to link with an unresolved-symbol stub for
+`__vtable__..Buf__for__Transport` and segfault (rc 139) on the first trait
+call. Fixture: `test/fixtures/imported_trait_vtable/main.spl`.
+
+Set `SIMPLE_BIN` to the seed under test (default `bin/simple`). Exercises the
+seed native-project lane (`SIMPLE_NATIVE_BUILD_RUST=1`).
+"""
+use std.spec.step
+use std.spipe.*
+use std.io.{process_run, env_get}
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BIN") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+fn build_and_run() -> text:
+    val exe = "build/nb/imported_trait_vtable_spec.exe"
+    val cmd = "SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NATIVE_INCREMENTAL=1 '" + simple_binary() + "' native-build test/fixtures/imported_trait_vtable/main.spl -o " + exe + " --cache-dir build/nb/cache 2>&1; echo BUILD_RC=$?; ./" + exe + " </dev/null 2>&1; echo RUN_RC=$?"
+    val (stdout, stderr, _code) = process_run("sh", ["-c", cmd])
+    stdout + stderr
+
+describe "native build of a class implementing an imported trait":
+    it "links without stubbing the class vtable and dispatches through it":
+        step("Build the fixture natively, then run it with EOF on stdin")
+        val out = build_and_run()
+        expect(out).to_contain("BUILD_RC=0")
+        expect(out.contains("__vtable__")).to_equal(false)
+        expect(out).to_contain("VTABLE_READ_REACHED")
+        expect(out).to_contain("RUN_RC=0")

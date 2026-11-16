@@ -1,0 +1,91 @@
+"""The bootstrap entry (src/app/cli/bootstrap_main.spl) must not pull any
+non-essential backend into its closure.
+
+Purpose: Stage 3 compiles the bootstrap CLI with itself. Every module in its
+closure costs compile time and memory and is one more chance to hit a bug
+that blocks the self-build. Only the K1 backends of the kernel composition
+(LLVM, Cranelift, interpreter) are essential; the P-static backends (C, Wasm,
+CUDA, HIP, OpenCL, Vulkan, Lean, Lua, LlvmLib, native isel, VHDL/HWIR) are
+reached only through the full static registry, which the full CLI installs.
+
+Operator workflow: the Stage 3 command passes exactly six --source roots
+(K1 kernel root, CUDA root, src/compiler, src/app, src/lib, src/plugins); a
+seventh root is refused by the focused native-build path. The essential
+installer therefore lives inside each kernel composition root, which the
+full CLI (Stage 4) never passes.
+
+Troubleshooting: if a case here fails, a `use` reintroduced a static edge from
+the bootstrap closure to a plugin. Route the request through the static
+backend registry (compiler.backend.static_backend_registry) or the VHDL lane
+slot (compiler.driver.driver_vhdl_lane) instead.
+Design: doc/05_design/compiler/backend_dynamic_plugin_build_groups.md section 5.
+"""
+# @manual_section: compiler/backend_plugins
+use std.spec.*
+use compiler.common.source_root_resolution.{SourceRootResolutionV1}
+use compiler.driver.driver_source_loading.{
+    driver_resolve_closure_import_v1, driver_closure_native_owner_v1,
+    driver_closure_import_specs_v1}
+
+fn stage3_roots(kernel: text) -> [text]:
+    ["src/compositions/" + kernel, "src/compositions/cuda_static", "src/compiler",
+     "src/app", "src/lib", "src/plugins"]
+
+fn resolve_installer(kernel: text) -> text:
+    val spec = "app.cli.bootstrap_backend_installer"
+    match driver_resolve_closure_import_v1(spec, stage3_roots(kernel), "src/app/cli"):
+        case SourceRootResolutionV1.Found(path):
+            driver_closure_native_owner_v1(path, spec, "src/app/cli")
+        case _: ""
+
+fn non_essential_specs(path: text) -> [text]:
+    var bad: [text] = []
+    for spec in driver_closure_import_specs_v1(path):
+        if spec.starts_with("plugins.") or spec.contains("driver_riscv_gen2_product") or
+                spec.contains("driver_public_compile_vhdl") or spec.contains("mir.hwir"):
+            bad.push(spec)
+    bad
+
+describe "bootstrap entry backend closure":
+    it "binds the essential installer inside each kernel composition root":
+        # @req REQ-BACKEND-DYN-005
+        step("Stage 3 six roots resolve app.cli.bootstrap_backend_installer to the kernel root")
+        for kernel in ["kernel_llvm_cranelift", "kernel_llvm"]:
+            val path = resolve_installer(kernel)
+            expect(path).to_contain("src/compositions/" + kernel + "/app/cli/bootstrap_backend_installer.spl")
+
+    it "keeps the bound installer free of plugin imports":
+        # @req REQ-BACKEND-DYN-005
+        step("the essential installer never names plugins.backend_registry")
+        for kernel in ["kernel_llvm_cranelift", "kernel_llvm"]:
+            val path = resolve_installer(kernel)
+            expect(path != "").to_equal(true)
+            expect(non_essential_specs(path)).to_equal([])
+
+    it "routes every VHDL edge of the kernel driver through the lane slot":
+        # @req REQ-BACKEND-DYN-005
+        step("driver seam modules import no VHDL plugin, gen2 product or hwir module")
+        for path in ["src/compiler/80.driver/driver.spl",
+                     "src/compiler/80.driver/driver_aot_pipeline.spl",
+                     "src/compiler/80.driver/driver_orchestration.spl",
+                     "src/compiler/80.driver/driver_public_compile.spl",
+                     "src/app/cli/bootstrap_main.spl"]:
+            expect(non_essential_specs(path)).to_equal([])
+
+    it "keeps divided Phase 3 group entries free of non-essential backends":
+        # @req REQ-BACKEND-DYN-005
+        step("group_5..7 exclude non-essential backend adapters and plugins")
+        for path in ["src/app/cli/p3_groups/group_5.spl",
+                     "src/app/cli/p3_groups/group_6.spl",
+                     "src/app/cli/p3_groups/group_7.spl"]:
+            var group_bad: [text] = []
+            for spec in driver_closure_import_specs_v1(path):
+                if (spec.starts_with("plugins.") or spec.contains("byl_backend") or
+                        spec.contains("gpu_") or spec.contains("hardware_codegen_types") or
+                        spec.contains("hwir_to_vhdl") or spec.contains("irtc_codegen_adapter") or
+                        spec.contains("backend.native.mod") or
+                        spec.contains("verification_codegen_types") or
+                        spec.contains("wasm_codegen_adapter") or
+                        spec.contains("driver_compile_vhdl_util")):
+                    group_bad.push(spec)
+            expect(group_bad).to_equal([])

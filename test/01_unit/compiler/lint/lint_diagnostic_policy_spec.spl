@@ -1,0 +1,70 @@
+"""
+## Purpose and audience
+
+Executable contract that lint's `primitive_api` severity is read from the
+scheduled DiagnosticRulePolicy (config/policy/diagnostic_policy.sdn, rule
+SPL-TYPE-001) with the lint profile table as fallback. Wiring only: the
+levels users see are unchanged (unprofiled/strict/robust/critical deny,
+moderate warn) and no date-based escalation is consulted.
+Audience: lint and diagnostics-policy maintainers.
+"""
+# @cover src/compiler/90.tools/lint/_LintMain/config_and_model.spl
+# @req REQ-DPOL-001
+# @req REQ-DPOL-006
+
+use std.spec
+use std.nogc_sync_mut.fs.text_io.{file_read_text}
+use compiler.common.diagnostics.diagnostic_rule_policy.{
+    DiagnosticPolicySnapshot, load_diagnostic_policy_text, diagnostic_policy_default_path
+}
+use compiler.tools.lint._LintMain.config_and_model.{
+    profile_default_levels, profile_table_levels, policy_overlay_levels,
+    LintConfig, LintProfile, LintLevel
+}
+
+fn policy_from(source: text) -> DiagnosticPolicySnapshot:
+    match load_diagnostic_policy_text(source):
+        Ok(s): s
+        Err(e):
+            panic("fixture policy failed to load: " + e)
+
+fn type001_fixture(strict_level: text) -> text:
+    "diagnostic_policy:\n    version: 1\n    rules:\n        SPL-TYPE-001:\n            modes:\n                moderate: warn\n                strict: " + strict_level + "\n                robust: deny\n                critical: deny\n"
+
+val NO_TYPE001_FIXTURE = "diagnostic_policy:\n    version: 1\n    rules:\n        SPL-UNIT-001:\n            modes:\n                default: warn\n"
+
+describe "lint consults DiagnosticRulePolicy for primitive_api (REQ-DPOL-001/006)":
+    it "keeps today's effective primitive_api level under every profile":
+        # @capture(value): primitive_api level per profile with the shipped policy
+        step("Resolve primitive_api for unprofiled, moderate, strict, robust and critical lint")
+        expect(LintConfig.new().get_level("primitive_api")).to_equal(LintLevel.Deny)
+        expect(profile_default_levels(LintProfile.Moderate)["primitive_api"]).to_equal("warn")
+        expect(profile_default_levels(LintProfile.Strict)["primitive_api"]).to_equal("deny")
+        expect(profile_default_levels(LintProfile.Robust)["primitive_api"]).to_equal("deny")
+        expect(profile_default_levels(LintProfile.Critical)["primitive_api"]).to_equal("deny")
+        step("The shipped policy's baseline columns agree with the profile table")
+        val shipped = policy_from(file_read_text(diagnostic_policy_default_path()))
+        expect(policy_overlay_levels(profile_table_levels(LintProfile.Moderate), Some(shipped), "moderate")["primitive_api"]).to_equal("warn")
+        expect(policy_overlay_levels(profile_table_levels(LintProfile.Strict), Some(shipped), "strict")["primitive_api"]).to_equal("deny")
+        expect(policy_overlay_levels(profile_table_levels(LintProfile.Robust), Some(shipped), "robust")["primitive_api"]).to_equal("deny")
+        expect(policy_overlay_levels(profile_table_levels(LintProfile.Critical), Some(shipped), "critical")["primitive_api"]).to_equal("deny")
+
+    it "follows an edited policy row (the policy is really consulted)":
+        # @capture(value): primitive_api level after editing the strict column
+        step("Lower SPL-TYPE-001's strict column to warn in a fixture policy")
+        val edited = policy_from(type001_fixture("warn"))
+        val levels = policy_overlay_levels(profile_table_levels(LintProfile.Strict), Some(edited), "strict")
+        expect(levels["primitive_api"]).to_equal("warn")
+        step("Set it to allow and the resolved level follows")
+        val silenced = policy_from(type001_fixture("allow"))
+        expect(policy_overlay_levels(profile_table_levels(LintProfile.Strict), Some(silenced), "strict")["primitive_api"]).to_equal("allow")
+
+    it "falls back to the profile table when the policy has no row or no snapshot":
+        # @capture(value): primitive_api and an unbound lint without a policy row
+        step("A policy without SPL-TYPE-001 leaves the table level")
+        val no_row = policy_from(NO_TYPE001_FIXTURE)
+        val levels = policy_overlay_levels(profile_table_levels(LintProfile.Moderate), Some(no_row), "moderate")
+        expect(levels["primitive_api"]).to_equal("warn")
+        expect(levels["bare_bool"]).to_equal("warn")
+        step("No snapshot at all leaves the table level")
+        expect(policy_overlay_levels(profile_table_levels(LintProfile.Robust), None, "robust")["primitive_api"]).to_equal("deny")

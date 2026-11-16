@@ -91,3 +91,12 @@ Traversed on work/p3-caret2-20261111 (origin/release/1.0.0 tip
 The gate's designed target remains a qualified self-hosted POSIX runtime;
 with the cross-engine classification bridge the same check now also passes
 end to end on the tracked seed, closing the seed-runnable half of the row.
+
+## 2026-11-15 addendum — live gate ported to Simple
+
+The Python gate `scripts/check/check-caret-http-attempt-timeout.py` is removed
+(no Python in repo tooling). The spec now starts its own loopback stall/echo
+server, `test/03_system/app/llm_caret/feature/fixtures/caret_timeout_server.spl`,
+via `$SIMPLE_BINARY run`, and asserts the server ledger (`slow=3`, `echo=1`) in
+its own example. `CARET_TIMEOUT_TEST_URL` still overrides the fixture. Windows
+seed run: `Results: 6 total, 6 passed, 0 failed`, exit 0.

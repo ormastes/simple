@@ -1,0 +1,316 @@
+# Pure bug closure gate (plan section 4.2-4.4).
+#
+# bug_closure_evaluate_v1 decides whether a bug may move to a closed state.
+# A fix disposition needs: an exact reproducer observed RED before the fix,
+# a distinct adjacent prevention case (or a not-applicable exception reviewed
+# by someone other than the author), post-fix GREEN for both on every required
+# backend at the candidate source snapshot, no live workaround for the bug,
+# resolvable references, and an unchanged bug/head/workaround snapshot.
+# Non-fix dispositions (triage, duplicate, invalid, wontfix, deferred) need no
+# fix evidence and are never reported as a verified fix.
+#
+# Pure: value inputs only. No file, database, clock or process access, and no
+# DB write; the caller performs the status transition only on Allowed.
+
+use app.bug.workaround_index.{WorkaroundIndex}
+
+# ---------------------------------------------------------------------------
+# Domain values
+# ---------------------------------------------------------------------------
+
+struct BugIdV1:
+    value: text
+
+struct SnapshotDigestV1:
+    # A source revision or record-state digest the evaluation is pinned to.
+    value: text
+
+struct TestCaseIdV1:
+    value: text
+
+struct RequirementIdV1:
+    value: text
+
+struct ReviewIdV1:
+    value: text
+
+struct ReviewerIdV1:
+    value: text
+
+struct BackendIdV1:
+    value: text
+
+struct ClosureRationaleV1:
+    value: text
+
+struct BugClosureProofRefV1:
+    # The exact missing or offending proof: case@backend, path:line, or an id.
+    value: text
+
+enum BugClosureDispositionV1:
+    Fixed
+    Closed
+    Triage
+    Duplicate
+    Invalid
+    Wontfix
+    Deferred
+
+enum BugRunPhaseV1:
+    PreFix
+    PostFix
+
+enum BugRunOutcomeV1:
+    Passed
+    Failed
+    Skipped
+    Cached
+    NotRun
+
+enum BugClosureBlockReasonV1:
+    MissingReproducer
+    MissingPrevention
+    IncompleteEvidence
+    ActiveWorkaround
+    BrokenLink
+    SnapshotRace
+
+enum BugClosureVerdictV1:
+    Allowed
+    Blocked
+
+enum BugClosureKindV1:
+    VerifiedFix
+    NonFixDisposition
+
+# ---------------------------------------------------------------------------
+# Inputs
+# ---------------------------------------------------------------------------
+
+struct BugPreventionExceptionV1:
+    reason: ClosureRationaleV1
+    review: ReviewIdV1
+    reviewer: ReviewerIdV1
+
+struct BugClosureCandidateV1:
+    bug_id: BugIdV1
+    disposition: BugClosureDispositionV1
+    author: ReviewerIdV1
+    head: SnapshotDigestV1
+    bug_state: SnapshotDigestV1
+    rationale: ClosureRationaleV1
+    reproducer: TestCaseIdV1?
+    prevention: TestCaseIdV1?
+    prevention_exception: BugPreventionExceptionV1?
+    requirements: [RequirementIdV1]
+
+enum BugRunEvidenceV1:
+    # Observed: runs come from a real TestDB view and are judged. NotObserved:
+    # the caller has no run source; run-evidence checks are skipped and the
+    # receipt says so, so the result is never read as test-verified.
+    Observed
+    NotObserved
+
+struct BugClosurePolicyV1:
+    required_backends: [BackendIdV1]
+    run_evidence: BugRunEvidenceV1
+
+struct BugTestRunV1:
+    case_id: TestCaseIdV1
+    backend: BackendIdV1
+    phase: BugRunPhaseV1
+    outcome: BugRunOutcomeV1
+    source: SnapshotDigestV1
+
+struct BugTestDbViewV1:
+    # Fresh read taken at admission time.
+    head: SnapshotDigestV1
+    bug_state: SnapshotDigestV1
+    known_bugs: [BugIdV1]
+    known_cases: [TestCaseIdV1]
+    known_requirements: [RequirementIdV1]
+    runs: [BugTestRunV1]
+
+# ---------------------------------------------------------------------------
+# Receipt
+# ---------------------------------------------------------------------------
+
+struct BugClosureFindingV1:
+    reason: BugClosureBlockReasonV1
+    proof: BugClosureProofRefV1
+
+struct BugClosureReceiptV1:
+    bug_id: BugIdV1
+    disposition: BugClosureDispositionV1
+    verdict: BugClosureVerdictV1
+    kind: BugClosureKindV1
+    run_evidence: BugRunEvidenceV1
+    head: SnapshotDigestV1
+    findings: [BugClosureFindingV1]
+
+pub fn bug_closure_block_code_v1(reason: BugClosureBlockReasonV1) -> text:
+    match reason:
+        case BugClosureBlockReasonV1.MissingReproducer: "E-BUG-REPRO-001"
+        case BugClosureBlockReasonV1.MissingPrevention: "E-BUG-PREVENT-002"
+        case BugClosureBlockReasonV1.IncompleteEvidence: "E-BUG-EVIDENCE-003"
+        case BugClosureBlockReasonV1.ActiveWorkaround: "E-BUG-WR-004"
+        case BugClosureBlockReasonV1.BrokenLink: "E-BUG-LINK-005"
+        case BugClosureBlockReasonV1.SnapshotRace: "E-BUG-RACE-006"
+
+pub fn bug_closure_receipt_codes_v1(receipt: BugClosureReceiptV1) -> [text]:
+    var out: [text] = []
+    for finding in receipt.findings:
+        out.push(bug_closure_block_code_v1(finding.reason))
+    out
+
+pub fn bug_closure_disposition_kind_v1(disposition: BugClosureDispositionV1) -> BugClosureKindV1:
+    match disposition:
+        case BugClosureDispositionV1.Fixed: BugClosureKindV1.VerifiedFix
+        case BugClosureDispositionV1.Closed: BugClosureKindV1.VerifiedFix
+        case BugClosureDispositionV1.Triage: BugClosureKindV1.NonFixDisposition
+        case BugClosureDispositionV1.Duplicate: BugClosureKindV1.NonFixDisposition
+        case BugClosureDispositionV1.Invalid: BugClosureKindV1.NonFixDisposition
+        case BugClosureDispositionV1.Wontfix: BugClosureKindV1.NonFixDisposition
+        case BugClosureDispositionV1.Deferred: BugClosureKindV1.NonFixDisposition
+
+pub fn bug_closure_disposition_text_v1(disposition: BugClosureDispositionV1) -> text:
+    match disposition:
+        case BugClosureDispositionV1.Fixed: "fixed"
+        case BugClosureDispositionV1.Closed: "closed"
+        case BugClosureDispositionV1.Triage: "triage"
+        case BugClosureDispositionV1.Duplicate: "duplicate"
+        case BugClosureDispositionV1.Invalid: "invalid"
+        case BugClosureDispositionV1.Wontfix: "wontfix"
+        case BugClosureDispositionV1.Deferred: "deferred"
+
+pub fn bug_closure_disposition_parse_v1(raw: text) -> BugClosureDispositionV1?:
+    for candidate in [BugClosureDispositionV1.Fixed, BugClosureDispositionV1.Closed,
+            BugClosureDispositionV1.Triage, BugClosureDispositionV1.Duplicate,
+            BugClosureDispositionV1.Invalid, BugClosureDispositionV1.Wontfix,
+            BugClosureDispositionV1.Deferred]:
+        if bug_closure_disposition_text_v1(candidate) == raw:
+            return Some(candidate)
+    None
+
+pub fn bug_closure_kind_text_v1(kind: BugClosureKindV1) -> text:
+    match kind:
+        case BugClosureKindV1.VerifiedFix: "verified_fix"
+        case BugClosureKindV1.NonFixDisposition: "non_fix_disposition"
+
+pub fn bug_closure_run_evidence_text_v1(mode: BugRunEvidenceV1) -> text:
+    match mode:
+        case BugRunEvidenceV1.Observed: "observed"
+        case BugRunEvidenceV1.NotObserved: "not_observed"
+
+# ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
+
+fn _finding(reason: BugClosureBlockReasonV1, proof: text) -> BugClosureFindingV1:
+    BugClosureFindingV1(reason: reason, proof: BugClosureProofRefV1(value: proof))
+
+fn _bug_known(list: [BugIdV1], id: text) -> bool:
+    for item in list:
+        if item.value == id: return true
+    false
+
+fn _case_known(list: [TestCaseIdV1], id: text) -> bool:
+    for item in list:
+        if item.value == id: return true
+    false
+
+fn _requirement_known(list: [RequirementIdV1], id: text) -> bool:
+    for item in list:
+        if item.value == id: return true
+    false
+
+fn _observed_pre_fix_red(view: BugTestDbViewV1, case_name: text) -> bool:
+    for r in view.runs:
+        if r.case_id.value == case_name and r.phase == BugRunPhaseV1.PreFix and r.outcome == BugRunOutcomeV1.Failed:
+            return true
+    false
+
+fn _post_fix_green(view: BugTestDbViewV1, case_name: text, backend: text, head: text) -> bool:
+    # Missing, failed, skipped, cached, not-run and stale-snapshot runs never count.
+    for r in view.runs:
+        if r.case_id.value == case_name and r.backend.value == backend and r.phase == BugRunPhaseV1.PostFix:
+            if r.outcome == BugRunOutcomeV1.Passed and r.source.value == head:
+                return true
+    false
+
+fn _evidence_findings(candidate: BugClosureCandidateV1, policy: BugClosurePolicyV1,
+        view: BugTestDbViewV1, cases: [text]) -> [BugClosureFindingV1]:
+    var out: [BugClosureFindingV1] = []
+    if policy.run_evidence == BugRunEvidenceV1.NotObserved:
+        return out
+    if policy.required_backends.len() == 0:
+        out.push(_finding(BugClosureBlockReasonV1.IncompleteEvidence, "policy.required_backends"))
+        return out
+    for case_name in cases:
+        for backend in policy.required_backends:
+            if not _post_fix_green(view, case_name, backend.value, candidate.head.value):
+                out.push(_finding(BugClosureBlockReasonV1.IncompleteEvidence, "{case_name}@{backend.value}"))
+    out
+
+fn _fix_findings(candidate: BugClosureCandidateV1, policy: BugClosurePolicyV1,
+        view: BugTestDbViewV1, workaround_index: WorkaroundIndex, bug: text) -> [BugClosureFindingV1]:
+    var out: [BugClosureFindingV1] = []
+    var cases: [text] = []
+    var repro_name = ""
+    match candidate.reproducer:
+        case Some(repro):
+            repro_name = repro.value
+            cases.push(repro.value)
+            if policy.run_evidence == BugRunEvidenceV1.Observed and not _observed_pre_fix_red(view, repro.value):
+                out.push(_finding(BugClosureBlockReasonV1.MissingReproducer, "{repro.value}:pre_fix_red"))
+        case None:
+            out.push(_finding(BugClosureBlockReasonV1.MissingReproducer, "reproducer"))
+    match candidate.prevention:
+        case Some(prevent):
+            if prevent.value == repro_name:
+                out.push(_finding(BugClosureBlockReasonV1.MissingPrevention, "{prevent.value}:same_as_reproducer"))
+            else:
+                cases.push(prevent.value)
+        case None:
+            match candidate.prevention_exception:
+                case Some(ex):
+                    if ex.review.value == "" or ex.reviewer.value == "" or ex.reviewer.value == candidate.author.value:
+                        out.push(_finding(BugClosureBlockReasonV1.MissingPrevention, "prevention_exception:independent_review"))
+                case None:
+                    out.push(_finding(BugClosureBlockReasonV1.MissingPrevention, "prevention"))
+    for f in _evidence_findings(candidate, policy, view, cases):
+        out.push(f)
+    if not workaround_index.complete:
+        out.push(_finding(BugClosureBlockReasonV1.ActiveWorkaround, "workaround_index:incomplete"))
+    for link in workaround_index.links:
+        if link.bug_id == bug:
+            out.push(_finding(BugClosureBlockReasonV1.ActiveWorkaround, "{link.path}:{link.line}"))
+    for name in cases:
+        if not _case_known(view.known_cases, name):
+            out.push(_finding(BugClosureBlockReasonV1.BrokenLink, name))
+    for req in candidate.requirements:
+        if not _requirement_known(view.known_requirements, req.value):
+            out.push(_finding(BugClosureBlockReasonV1.BrokenLink, req.value))
+    out
+
+pub fn bug_closure_evaluate_v1(candidate_snapshot: BugClosureCandidateV1, bug_id: BugIdV1,
+        policy: BugClosurePolicyV1, test_db_view: BugTestDbViewV1,
+        workaround_index: WorkaroundIndex) -> BugClosureReceiptV1:
+    """Evaluate one closure attempt. Allowed only when no finding remains."""
+    val kind = bug_closure_disposition_kind_v1(candidate_snapshot.disposition)
+    var findings: [BugClosureFindingV1] = []
+    if kind == BugClosureKindV1.VerifiedFix:
+        findings = _fix_findings(candidate_snapshot, policy, test_db_view, workaround_index, bug_id.value)
+    if candidate_snapshot.bug_id.value != bug_id.value:
+        findings.push(_finding(BugClosureBlockReasonV1.BrokenLink, candidate_snapshot.bug_id.value))
+    if not _bug_known(test_db_view.known_bugs, bug_id.value):
+        findings.push(_finding(BugClosureBlockReasonV1.BrokenLink, bug_id.value))
+    if test_db_view.bug_state.value != candidate_snapshot.bug_state.value:
+        findings.push(_finding(BugClosureBlockReasonV1.SnapshotRace, "bug_state:{test_db_view.bug_state.value}"))
+    if test_db_view.head.value != candidate_snapshot.head.value:
+        findings.push(_finding(BugClosureBlockReasonV1.SnapshotRace, "head:{test_db_view.head.value}"))
+    if kind == BugClosureKindV1.VerifiedFix and workaround_index.revision != candidate_snapshot.head.value:
+        findings.push(_finding(BugClosureBlockReasonV1.SnapshotRace, "workaround_index:{workaround_index.revision}"))
+    val verdict = if findings.len() == 0: BugClosureVerdictV1.Allowed else: BugClosureVerdictV1.Blocked
+    BugClosureReceiptV1(bug_id: bug_id, disposition: candidate_snapshot.disposition,
+        verdict: verdict, kind: kind, run_evidence: policy.run_evidence, head: candidate_snapshot.head, findings: findings)

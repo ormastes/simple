@@ -1,0 +1,154 @@
+"""`trace_passing_evidence_from_attempts_v1`: TestDB attempts to passing evidence.
+
+Purpose: prove a requirement becomes Verified only when every spec that verifies
+it has, at the CURRENT snapshot, a latest attempt per case that passed. A stale
+snapshot, a skipped/cached/failed/unfinished latest attempt, a case with no
+frozen-plan identity, or one failing sibling case never count.
+Audience: maintainers of `simple trace --evidence=testdb` and reviewers of what
+the Verified column is allowed to claim.
+"""
+# @req REQ-TRC-021
+use std.spec.*
+use std.spec.step
+use std.common.traceability.model.*
+use std.common.traceability.sidecar_v1.{TraceSidecarReferenceV1}
+use std.common.traceability.query_missing_v1.{TraceSnapshotIdV1, TraceRequirementIdV1}
+use std.common.traceability.query_status_v1.{TracePassingEvidenceV1, trace_requirement_statuses_v1}
+use std.common.traceability.query_missing_v1.{TraceLinkStatus}
+use std.common.traceability.test_query.{TestCasePath, TestCaseName, TestCaseKey, TestRunId, TestPlannedCaseId,
+    TestPlannedCaseIdentity, TestAttemptIdentity, TestAttemptOrdinal, TestQueryStatus, TestQueryRow,
+    TestEvidenceProvenance, qualify_test_query_status}
+use std.common.traceability.passing_evidence_v1.{TraceRunOrderV1, TraceAttemptObservationV1,
+    trace_passing_evidence_from_attempts_v1}
+
+fn _graph() -> TraceGraph:
+    TraceGraph(subject: SnapshotSubject(repository_id: "repo:test", snapshot_id: "snapshot:one",
+        kind: "git_commit", revision_id: "commit:one", tree_id: "tree:one", object_format: "sha256"),
+        input_manifest_id: "inputs:one", generation_id: "generation:one", complete: true,
+        nodes: [TraceNode(id: "req:side", kind: TraceNodeKind.Requirement, title: "Sidecar verified"),
+            TraceNode(id: "req:edge", kind: TraceNodeKind.Requirement, title: "Edge verified"),
+            TraceNode(id: "req:two", kind: TraceNodeKind.Requirement, title: "Two specs"),
+            TraceNode(id: "req:none", kind: TraceNodeKind.Requirement, title: "No spec"),
+            TraceNode(id: "artifact:edge", kind: TraceNodeKind.TestSuite, title: "test/edge_spec.spl"),
+            TraceNode(id: "artifact:two_a", kind: TraceNodeKind.TestSuite, title: "test/two_a_spec.spl"),
+            TraceNode(id: "artifact:two_b", kind: TraceNodeKind.TestSuite, title: "test/two_b_spec.spl")],
+        test_definitions: [], claims: [], origins: [], edge_origins: [], diagnostics: [],
+        locators: [TraceLocator(entity_id: "artifact:edge", path: "test/edge_spec.spl", locator_kind: "file", locator: "", blob_id: "b1"),
+            TraceLocator(entity_id: "artifact:two_a", path: "test/two_a_spec.spl", locator_kind: "file", locator: "", blob_id: "b2"),
+            TraceLocator(entity_id: "artifact:two_b", path: "test/two_b_spec.spl", locator_kind: "file", locator: "", blob_id: "b3")],
+        edges: [TraceEdge(id: "e1", from_id: "req:edge", relation: TraceRelation.VerifiedBy, to_id: "artifact:edge"),
+            TraceEdge(id: "e2", from_id: "req:two", relation: TraceRelation.VerifiedBy, to_id: "artifact:two_a"),
+            TraceEdge(id: "e3", from_id: "req:two", relation: TraceRelation.VerifiedBy, to_id: "artifact:two_b")])
+
+fn _sidecar() -> [TraceSidecarReferenceV1]:
+    [TraceSidecarReferenceV1(source_kind: "annotation", from_id: "req:side", relation: "verified_by",
+        path: "test/side_spec.spl", locator: "header", authority: "annotation-claim")]
+
+fn _obs(snapshot: text, run: i64, path: text, name: text, ordinal: i64, status: TestQueryStatus) -> TraceAttemptObservationV1:
+    TraceAttemptObservationV1(snapshot: TraceSnapshotIdV1(value: snapshot), run_order: TraceRunOrderV1(value: run),
+        row: TestQueryRow(case_key: TestCaseKey(path: TestCasePath(value: path), name: TestCaseName(value: name)),
+            run_id: TestRunId(value: "run-{run}"),
+            planned_case: TestPlannedCaseIdentity.Recorded(id: TestPlannedCaseId(value: "case-{name}")),
+            attempt: TestAttemptIdentity.StreamOrder(ordinal: TestAttemptOrdinal(value: ordinal)),
+            status: status, qualification: qualify_test_query_status(status),
+            provenance: TestEvidenceProvenance.UnverifiedFrameworkObservation))
+
+fn _obs_with(path: text, planned: TestPlannedCaseIdentity, attempt: TestAttemptIdentity) -> TraceAttemptObservationV1:
+    TraceAttemptObservationV1(snapshot: TraceSnapshotIdV1(value: "snapshot:one"), run_order: TraceRunOrderV1(value: 1),
+        row: TestQueryRow(case_key: TestCaseKey(path: TestCasePath(value: path), name: TestCaseName(value: "b")),
+            run_id: TestRunId(value: "run-1"), planned_case: planned, attempt: attempt,
+            status: TestQueryStatus.Passed, qualification: qualify_test_query_status(TestQueryStatus.Passed),
+            provenance: TestEvidenceProvenance.UnverifiedFrameworkObservation))
+
+fn _ids(evidence: [TracePassingEvidenceV1]) -> [text]:
+    var out: [text] = []
+    for item in evidence:
+        out.push(item.requirement_id.value)
+    out
+
+describe "passing evidence from TestDB attempts":
+    it "verifies a requirement whose spec passed at the current snapshot":
+        # @req REQ-TRC-021
+        step("A sidecar-verified and an edge-verified spec both passed at snapshot:one")
+        val obs = [_obs("snapshot:one", 1, "test/side_spec.spl", "a", 0, TestQueryStatus.Passed),
+            _obs("snapshot:one", 1, "test/edge_spec.spl", "b", 0, TestQueryStatus.Passed)]
+        val evidence = trace_passing_evidence_from_attempts_v1(_graph(), _sidecar(), obs)
+        step("Exactly the two linked requirements are evidenced")
+        expect(_ids(evidence)).to_equal(["req:edge", "req:side"])
+        step("Feeding it to the status derivation yields Verified for them only")
+        val statuses = trace_requirement_statuses_v1(_graph(), _sidecar(), evidence)
+        var verified: [text] = []
+        for status in statuses:
+            if status.verification == TraceLinkStatus.Verified:
+                verified.push(status.requirement_id.value)
+        expect(verified).to_equal(["req:edge", "req:side"])
+
+    it "never counts a pass taken at another snapshot":
+        # @req REQ-TRC-021
+        step("The only pass was recorded for snapshot:old")
+        val obs = [_obs("snapshot:old", 1, "test/edge_spec.spl", "b", 0, TestQueryStatus.Passed)]
+        expect(_ids(trace_passing_evidence_from_attempts_v1(_graph(), _sidecar(), obs)).len()).to_equal(0)
+
+    it "never counts skipped, cached, failed or unfinished attempts":
+        # @req REQ-TRC-021
+        step("Each non-passing latest status leaves its requirement unevidenced")
+        val statuses = [TestQueryStatus.Skipped, TestQueryStatus.Cached, TestQueryStatus.Failed,
+            TestQueryStatus.NotFinished, TestQueryStatus.Ignored, TestQueryStatus.Unknown(raw: "weird")]
+        for status in statuses:
+            val obs = [_obs("snapshot:one", 1, "test/edge_spec.spl", "b", 0, status)]
+            expect(_ids(trace_passing_evidence_from_attempts_v1(_graph(), _sidecar(), obs)).len()).to_equal(0)
+
+    it "judges the LATEST attempt, by run then by attempt ordinal":
+        # @req REQ-TRC-021
+        step("An older pass is overridden by a newer failing run")
+        val older_pass = [_obs("snapshot:one", 1, "test/edge_spec.spl", "b", 0, TestQueryStatus.Passed),
+            _obs("snapshot:one", 2, "test/edge_spec.spl", "b", 0, TestQueryStatus.Failed)]
+        expect(_ids(trace_passing_evidence_from_attempts_v1(_graph(), _sidecar(), older_pass)).len()).to_equal(0)
+        step("An older failure is overridden by a newer passing run")
+        val newer_pass = [_obs("snapshot:one", 2, "test/edge_spec.spl", "b", 0, TestQueryStatus.Passed),
+            _obs("snapshot:one", 1, "test/edge_spec.spl", "b", 0, TestQueryStatus.Failed)]
+        expect(_ids(trace_passing_evidence_from_attempts_v1(_graph(), _sidecar(), newer_pass))).to_equal(["req:edge"])
+        step("Within one run the higher attempt ordinal wins (retry passes)")
+        val retry = [_obs("snapshot:one", 1, "test/edge_spec.spl", "b", 1, TestQueryStatus.Passed),
+            _obs("snapshot:one", 1, "test/edge_spec.spl", "b", 0, TestQueryStatus.Failed)]
+        expect(_ids(trace_passing_evidence_from_attempts_v1(_graph(), _sidecar(), retry))).to_equal(["req:edge"])
+
+    it "requires every verifying spec and every case in it to pass":
+        # @req REQ-TRC-021
+        step("req:two has two specs; only one passed")
+        val half = [_obs("snapshot:one", 1, "test/two_a_spec.spl", "a", 0, TestQueryStatus.Passed)]
+        expect(_ids(trace_passing_evidence_from_attempts_v1(_graph(), _sidecar(), half)).len()).to_equal(0)
+        step("Both specs pass but one has a failing sibling case")
+        val sibling = [_obs("snapshot:one", 1, "test/two_a_spec.spl", "a", 0, TestQueryStatus.Passed),
+            _obs("snapshot:one", 1, "test/two_b_spec.spl", "x", 0, TestQueryStatus.Passed),
+            _obs("snapshot:one", 1, "test/two_b_spec.spl", "y", 0, TestQueryStatus.Failed)]
+        expect(_ids(trace_passing_evidence_from_attempts_v1(_graph(), _sidecar(), sibling)).len()).to_equal(0)
+        step("All cases of both specs pass")
+        val all = [_obs("snapshot:one", 1, "test/two_a_spec.spl", "a", 0, TestQueryStatus.Passed),
+            _obs("snapshot:one", 1, "test/two_b_spec.spl", "x", 0, TestQueryStatus.Passed),
+            _obs("snapshot:one", 1, "test/two_b_spec.spl", "y", 0, TestQueryStatus.Passed)]
+        expect(_ids(trace_passing_evidence_from_attempts_v1(_graph(), _sidecar(), all))).to_equal(["req:two"])
+
+    it "ignores attempts without a plan identity or an attempt identity":
+        # @req REQ-TRC-021
+        step("A passing row with no recorded planned case is not evidence")
+        val unplanned = _obs_with("test/edge_spec.spl", TestPlannedCaseIdentity.Missing,
+            TestAttemptIdentity.StreamOrder(ordinal: TestAttemptOrdinal(value: 0)))
+        expect(_ids(trace_passing_evidence_from_attempts_v1(_graph(), _sidecar(), [unplanned])).len()).to_equal(0)
+        step("A passing row with a missing attempt identity is not evidence")
+        val anonymous = _obs_with("test/edge_spec.spl",
+            TestPlannedCaseIdentity.Recorded(id: TestPlannedCaseId(value: "case-b")), TestAttemptIdentity.Missing)
+        expect(_ids(trace_passing_evidence_from_attempts_v1(_graph(), _sidecar(), [anonymous])).len()).to_equal(0)
+        step("Control: the same row with both identities present does count")
+        val control = _obs_with("test/edge_spec.spl",
+            TestPlannedCaseIdentity.Recorded(id: TestPlannedCaseId(value: "case-b")),
+            TestAttemptIdentity.StreamOrder(ordinal: TestAttemptOrdinal(value: 0)))
+        expect(_ids(trace_passing_evidence_from_attempts_v1(_graph(), _sidecar(), [control]))).to_equal(["req:edge"])
+
+    it "yields nothing without observations, and never invents a requirement":
+        # @req REQ-TRC-021
+        step("No observations at all (the repo TestDB today) means no evidence")
+        expect(_ids(trace_passing_evidence_from_attempts_v1(_graph(), _sidecar(), [])).len()).to_equal(0)
+        step("A passing spec that no requirement names verifies nothing")
+        val stray = [_obs("snapshot:one", 1, "test/unlinked_spec.spl", "z", 0, TestQueryStatus.Passed)]
+        expect(_ids(trace_passing_evidence_from_attempts_v1(_graph(), _sidecar(), stray)).len()).to_equal(0)

@@ -61,6 +61,12 @@ fn local_controller_effect_v1(owner: ControllerWorkloadStoreV1, args: [text],
     Ok(fields)
 
 pub fn orchestrator_local_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
+    orchestrator_local_input_command_v1(args, nil)
+
+# A transport may supply already bounded source bytes; filesystem root and
+# controller identity still come from its independently installed local policy.
+# This changes input carriage only, never journal admission or effect authority.
+pub fn orchestrator_local_input_command_v1(args: [text], supplied: Option<text>) -> OrchestratorValidationReplyV1:
     if args.len() == 0: return local_error_v1("local-command-required", 2, false)
     val action = args[0]
     if action == "local-init":
@@ -89,9 +95,13 @@ pub fn orchestrator_local_command_v1(args: [text]) -> OrchestratorValidationRepl
     if marker.unwrap() != local_marker_v1(args[2]): return local_error_v1("local-controller-mismatch", 1, false)
     var source = ""
     if expected == 7:
-        val input = file_read_regular_no_follow_bounded(args[4], 1048576)
-        if input.is_err(): return local_error_v1("local-input-unavailable", 1, false)
-        source = input.unwrap()
+        if supplied.is_some():
+            source = supplied.unwrap()
+            if source.bytes().len() > 1048576: return local_error_v1("local-input-too-large", 1, false)
+        else:
+            val input = file_read_regular_no_follow_bounded(args[4], 1048576)
+            if input.is_err(): return local_error_v1("local-input-unavailable", 1, false)
+            source = input.unwrap()
     val entropy = sosix_random_hex(32)
     if not entropy.?: return local_error_v1("local-owner-entropy-unavailable", 1, false)
     val owner = match controller_workload_store_open_owned_v2(args[1] + "/journal", args[2], entropy ?? "", 100000):

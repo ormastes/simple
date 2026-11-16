@@ -3,6 +3,10 @@
 # This owner does not claim power-loss durability: existing I/O facades do
 # not authenticate fsync/FlushFileBuffers of every file and containing directory.
 # No task-specific database representation or permissive legacy replay.
+use std.nogc_sync_mut.io.windows_journal_store_v1.WindowsJournalStoreV1
+use std.nogc_sync_mut.database.wal_storage_v2.*
+use std.nogc_sync_mut.io.journal_storage_backend_v3.*
+use std.nogc_sync_mut.database.wal_checkpoint_format_v1.*
 use std.nogc_sync_mut.database.wal.{WalEntry, WalEntryType, wal_entry_to_line, wal_entry_from_line}
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive,
@@ -26,17 +30,22 @@ struct DatabaseWalRevisionV1:
     first_sequence: i64
     last_sequence: i64
     segment_digest: text
+    checkpoint_digest: text = ""
 
-fn database_wal_object_v1(root: text, digest: text) -> Result<text, text>:
+fn database_wal_object_stored_v3(root: text, digest: text, backend: JournalStorageBackendV3) -> Result<text, text>:
     if not database_wal_digest_valid_v1(digest): return Err("invalid WAL object identity")
-    val payload = file_read_regular_no_follow_bounded(root + "/objects/" + digest, 1048576)?
+    val payload = database_wal_read_required_v3(root, "objects/" + digest, 1048576, backend)?
     if sha256_text(payload) != digest: return Err("committed WAL object corrupted")
     Ok(payload)
 
-fn database_wal_publish_v1(root: text, payload: text) -> Result<text, text>:
-    if payload.len() < 1 or payload.len() > 1048576: return Err("WAL segment size exceeded")
-    dir_create(root + "/objects", true)
+fn database_wal_publish_stored_v3(root: text, payload: text, backend: JournalStorageBackendV3) -> Result<text, text>:
+    if payload.byte_len() < 1 or payload.byte_len() > 1048576: return Err("WAL segment size exceeded")
     val digest = sha256_text(payload)
+    if not journal_storage_is_legacy_v3(backend):
+        val published = journal_storage_publish_v3(backend, "database-wal/objects/" + digest, payload)?
+        if database_wal_object_stored_v3(root, digest, backend)? != payload: return Err("WAL immutable winner differs")
+        return Ok(digest)
+    dir_create(root + "/objects", true)
     val private_dir = secure_temp_dir(root + "/objects", "wal-stage")?
     val staged = private_dir + "/payload"
     if not file_create_exclusive(staged, payload):
@@ -52,12 +61,20 @@ fn database_wal_publish_v1(root: text, payload: text) -> Result<text, text>:
     file_delete(staged)
     dir_remove(private_dir, false)
     if publication.is_err(): return Err("WAL publication failed")
-    val winner = database_wal_object_v1(root, digest)?
+    val winner = database_wal_object_stored_v3(root, digest, backend)?
     if winner != payload: return Err("WAL immutable winner differs")
     Ok(digest)
 
-fn database_wal_revision_open_v1(root: text, digest: text) -> Result<DatabaseWalRevisionV1, text>:
-    val payload = database_wal_object_v1(root, digest)?
+fn database_wal_revision_open_stored_v3(root: text, digest: text, backend: JournalStorageBackendV3) -> Result<DatabaseWalRevisionV1, text>:
+    val payload = database_wal_object_stored_v3(root, digest, backend)?
+    if payload.starts_with("{"):
+        val marker = database_wal_checkpoint_marker_decode_v1(payload)?
+        if (not database_wal_digest_valid_v1(marker.database_identity) or
+                not database_wal_digest_valid_v1(marker.base_commit) or
+                not database_wal_digest_valid_v1(marker.checkpoint_digest)):
+            return Err("invalid WAL checkpoint identity")
+        return Ok(DatabaseWalRevisionV1(digest, marker.base_commit, marker.database_identity,
+            marker.base_sequence, marker.base_sequence, "", marker.checkpoint_digest))
     val rows = payload.split("\n")
     if rows.len() != 7 or rows[0] != "SIMPLE-DATABASE-WAL-COMMIT-1" or rows[6] != "":
         return Err("invalid WAL commit framing")
@@ -70,14 +87,16 @@ fn database_wal_revision_open_v1(root: text, digest: text) -> Result<DatabaseWal
         return Err("invalid WAL commit values")
     Ok(DatabaseWalRevisionV1(digest, rows[1], rows[2], first, last, rows[5]))
 
-fn database_wal_segment_read_strict_v1(root: text,
-        revision: DatabaseWalRevisionV1) -> Result<[WalEntry], text>:
-    val admitted = database_wal_revision_open_v1(root, revision.digest)?
+fn database_wal_segment_read_strict_stored_v3(root: text,
+        revision: DatabaseWalRevisionV1, backend: JournalStorageBackendV3) -> Result<[WalEntry], text>:
+    val admitted = database_wal_revision_open_stored_v3(root, revision.digest, backend)?
+    if admitted.checkpoint_digest != "" or revision.checkpoint_digest != "":
+        return Err("WAL_CHECKPOINT_NOT_EVENT_SEGMENT")
     if admitted.parent != revision.parent or admitted.database_identity != revision.database_identity or
             admitted.first_sequence != revision.first_sequence or admitted.last_sequence != revision.last_sequence or
             admitted.segment_digest != revision.segment_digest:
         return Err("WAL revision value differs")
-    val payload = database_wal_object_v1(root, revision.segment_digest)?
+    val payload = database_wal_object_stored_v3(root, revision.segment_digest, backend)?
     val rows = payload.split("\n")
     if rows.len() != revision.last_sequence - revision.first_sequence + 3 or
             rows[0] != "#wal-version:2" or rows[rows.len() - 1] != "":
@@ -95,24 +114,30 @@ fn database_wal_segment_read_strict_v1(root: text,
         expected = expected + 1
     Ok(result)
 
-fn database_wal_current_v1(root: text, identity: text) -> Result<text, text>:
+fn database_wal_current_stored_v3(root: text, identity: text, backend: JournalStorageBackendV3) -> Result<text, text>:
     if not database_wal_digest_valid_v1(identity): return Err("invalid database identity")
-    if not file_exists(root + "/CURRENT"): return Ok("")
-    val pointer = file_read_regular_no_follow_bounded(root + "/CURRENT", 128)?
+    val retained = database_wal_read_stored_v3(root, "CURRENT", 128, backend)?
+    if retained.is_none(): return Ok("")
+    val pointer = retained.unwrap()
     if pointer.len() != 65 or not pointer.ends_with("\n"): return Err("invalid WAL CURRENT")
     val digest = pointer[0:64]
-    val revision = database_wal_revision_open_v1(root, digest)?
+    val revision = database_wal_revision_open_stored_v3(root, digest, backend)?
     if revision.database_identity != identity: return Err("WAL database identity differs")
-    val _rows = database_wal_segment_read_strict_v1(root, revision)?
+    if revision.checkpoint_digest == "":
+        val _rows = database_wal_segment_read_strict_stored_v3(root, revision, backend)?
+    else:
+        # Domain replay validates its manifest schema, page graph and projection.
+        # CURRENT authenticates the immutable referenced object, not domain state.
+        val _checkpoint = database_wal_object_stored_v3(root, revision.checkpoint_digest, backend)?
     Ok(digest)
 
-fn database_wal_commit_v1(root: text, identity: text, expected_parent: text,
-        entries: [WalEntry]) -> Result<DatabaseWalRevisionV1, text>:
+fn database_wal_commit_stored_v3(root: text, identity: text, expected_parent: text,
+        entries: [WalEntry], backend: JournalStorageBackendV3) -> Result<DatabaseWalRevisionV1, text>:
     if entries.len() < 1 or entries.len() > 256 or not database_wal_digest_valid_v1(identity):
         return Err("invalid WAL transaction bound")
     var first: i64 = 1
     if expected_parent != "":
-        val parent = database_wal_revision_open_v1(root, expected_parent)?
+        val parent = database_wal_revision_open_stored_v3(root, expected_parent, backend)?
         if parent.database_identity != identity: return Err("WAL parent database differs")
         first = parent.last_sequence + 1
     if first + entries.len() - 1 > 10000000: return Err("WAL sequence capacity exceeded")
@@ -130,24 +155,84 @@ fn database_wal_commit_v1(root: text, identity: text, expected_parent: text,
         val line = wal_entry_to_line(numbered)
         lines = lines.push(line[0:line.len() - 1])
         sequence = sequence + 1
-    val segment = database_wal_publish_v1(root, lines.join("\n") + "\n")?
+    val segment = database_wal_publish_stored_v3(root, lines.join("\n") + "\n", backend)?
     val last = sequence - 1
-    val commit = database_wal_publish_v1(root,
-        "SIMPLE-DATABASE-WAL-COMMIT-1\n{expected_parent}\n{identity}\n{first}\n{last}\n{segment}\n")?
-    val revision = database_wal_revision_open_v1(root, commit)?
-    val _checked = database_wal_segment_read_strict_v1(root, revision)?
+    val commit = database_wal_publish_stored_v3(root,
+        "SIMPLE-DATABASE-WAL-COMMIT-1\n{expected_parent}\n{identity}\n{first}\n{last}\n{segment}\n", backend)?
+    val revision = database_wal_revision_open_stored_v3(root, commit, backend)?
+    val _checked = database_wal_segment_read_strict_stored_v3(root, revision, backend)?
+    val published = database_wal_current_publish_stored_v3(root, identity, expected_parent, commit, backend)?
+    Ok(revision)
+
+# Shared by event and checkpoint commits: exactly one CURRENT mutation boundary.
+fn database_wal_current_publish_stored_v3(root: text, identity: text, expected_parent: text,
+        commit: text, backend: JournalStorageBackendV3) -> Result<bool, text>:
     # Stable lock makes compare-and-publish indivisible across parents. Objects
     # published by a losing/crashed writer remain unreachable, not committed.
+    if not journal_storage_is_legacy_v3(backend):
+        val expected = if expected_parent == "": nil else: Some(expected_parent + "\n")
+        val published = journal_storage_compare_replace_v3(backend, "database-wal/CURRENT", commit + "\n", expected)?
+        if not published: return Err("stale or corrupt WAL commit parent")
+        return Ok(true)
     val lock = file_lock(root + "/commit.lock", 10)
     if lock < 0: return Err("WAL commit lock unavailable")
-    val current = database_wal_current_v1(root, identity)
+    val current = database_wal_current_stored_v3(root, identity, backend)
     if current.is_err() or current.unwrap() != expected_parent:
         file_unlock(lock)
         return Err("stale or corrupt WAL commit parent")
     val published = file_atomic_write(root + "/CURRENT", commit + "\n")
     file_unlock(lock)
     if not published: return Err("WAL commit marker publication failed")
+    Ok(true)
+
+pub fn database_wal_checkpoint_commit_stored_v3(root: text, identity: text,
+        expected_parent: text, checkpoint_digest: text,
+        backend: JournalStorageBackendV3) -> Result<DatabaseWalRevisionV1, text>:
+    if (not database_wal_digest_valid_v1(identity) or
+            not database_wal_digest_valid_v1(expected_parent) or
+            not database_wal_digest_valid_v1(checkpoint_digest)):
+        return Err("invalid WAL checkpoint identity")
+    val parent = database_wal_revision_open_stored_v3(root, expected_parent, backend)?
+    if parent.database_identity != identity: return Err("WAL parent database differs")
+    val _manifest = database_wal_object_stored_v3(root, checkpoint_digest, backend)?
+    val marker = DatabaseWalCheckpointMarkerV1(identity, expected_parent, parent.last_sequence, checkpoint_digest)
+    val commit = database_wal_publish_stored_v3(root, database_wal_checkpoint_marker_encode_v1(marker), backend)?
+    val revision = database_wal_revision_open_stored_v3(root, commit, backend)?
+    val published = database_wal_current_publish_stored_v3(root, identity, expected_parent, commit, backend)?
     Ok(revision)
 
-export DatabaseWalRevisionV1, database_wal_current_v1, database_wal_commit_v1
-export database_wal_revision_open_v1, database_wal_segment_read_strict_v1
+export DatabaseWalRevisionV1, database_wal_current_stored_v3, database_wal_commit_stored_v3
+export database_wal_revision_open_stored_v3, database_wal_segment_read_strict_stored_v3
+export database_wal_object_stored_v3, database_wal_publish_stored_v3, database_wal_checkpoint_commit_stored_v3
+
+# Stable legacy/Windows signatures; protected Linux never chooses these wrappers.
+fn database_wal_object_v1(root: text, digest: text, store: Option<WindowsJournalStoreV1> = nil) -> Result<text, text>:
+    database_wal_object_stored_v3(root, digest, journal_storage_backend_windows_v3(store))
+
+fn database_wal_publish_v1(root: text, payload: text, store: Option<WindowsJournalStoreV1> = nil) -> Result<text, text>:
+    database_wal_publish_stored_v3(root, payload, journal_storage_backend_windows_v3(store))
+
+fn database_wal_revision_open_v1(root: text, digest: text, store: Option<WindowsJournalStoreV1> = nil) -> Result<DatabaseWalRevisionV1, text>:
+    database_wal_revision_open_stored_v3(root, digest, journal_storage_backend_windows_v3(store))
+
+fn database_wal_segment_read_strict_v1(root: text,
+        revision: DatabaseWalRevisionV1, store: Option<WindowsJournalStoreV1> = nil) -> Result<[WalEntry], text>:
+    database_wal_segment_read_strict_stored_v3(root, revision, journal_storage_backend_windows_v3(store))
+
+fn database_wal_current_v1(root: text, identity: text, store: Option<WindowsJournalStoreV1> = nil) -> Result<text, text>:
+    database_wal_current_stored_v3(root, identity, journal_storage_backend_windows_v3(store))
+
+fn database_wal_commit_v1(root: text, identity: text, expected_parent: text,
+        entries: [WalEntry], store: Option<WindowsJournalStoreV1> = nil) -> Result<DatabaseWalRevisionV1, text>:
+    database_wal_commit_stored_v3(root, identity, expected_parent, entries, journal_storage_backend_windows_v3(store))
+
+fn database_wal_current_publish_v1(root: text, identity: text, expected_parent: text,
+        commit: text, store: Option<WindowsJournalStoreV1>) -> Result<bool, text>:
+    database_wal_current_publish_stored_v3(root, identity, expected_parent, commit, journal_storage_backend_windows_v3(store))
+
+pub fn database_wal_checkpoint_commit_v1(root: text, identity: text,
+        expected_parent: text, checkpoint_digest: text,
+        store: Option<WindowsJournalStoreV1> = nil) -> Result<DatabaseWalRevisionV1, text>:
+    database_wal_checkpoint_commit_stored_v3(root, identity, expected_parent, checkpoint_digest, journal_storage_backend_windows_v3(store))
+
+export database_wal_object_v1, database_wal_publish_v1, database_wal_revision_open_v1, database_wal_segment_read_strict_v1, database_wal_current_v1, database_wal_commit_v1, database_wal_current_publish_v1, database_wal_checkpoint_commit_v1
