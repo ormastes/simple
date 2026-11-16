@@ -1,0 +1,280 @@
+# Internal primary bridge over the SAME original writer/custody/lifecycle.
+# The existing Host/common producer remains the sole session constructor.
+use std.nogc_sync_mut.container.machine_fresh_workload_lifecycle_v2.*
+use std.nogc_sync_mut.container.machine_fresh_workload_dispatch_v3.*
+use std.nogc_sync_mut.container.machine_fresh_workspace_primary_custody_v3.*
+use std.nogc_sync_mut.container.machine_fresh_workload_effects_v3.workload_publish_v3
+use std.nogc_sync_mut.io.machine_storage_owner_v1.MachineStorageOwnerV1
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_owner_v1.LinuxFreshEpochSuccessorCustodyV1
+use std.nogc_sync_mut.io.linux_container_containment_v1.LinuxContainerContainmentPopulationV1
+use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedSpawnV2, PipedProcessOwnedTransferV2, process_spawn_piped_owned_v2}
+use std.nogc_sync_mut.io.group_process_owner.GroupProcessStreamOwnerV2
+use std.nogc_async_mut.container.terminal_session_v1.ContainerPrimaryAttachSessionV1
+use std.common.contracts.container.primary_attach_v1.*
+use std.common.contracts.container.stream_v2.*
+use std.common.contracts.container.execution_v2.ContainerExecutionRequestV2
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.linux_fresh_workload_v2.LinuxFreshWorkloadActionV2
+use std.common.contracts.container.linux_fresh_workspace_v3.{LinuxFreshWorkspaceCommandV3, LinuxFreshWorkspacePrimaryAttachCommandV3}
+use std.common.contracts.distributed_operation_state_v2.distributed_operation_transition_v2
+use std.common.build_manager.group_process_stream_protocol_v2.group_process_stream_template_encode_v3
+use std.common.build_manager.group_process_stream_profile_v3.group_process_cpu_quota_v3
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure, time_sample_monotonic_nanos_or_failure}
+use std.common.contracts.container.workspace_preparation_window_v3.container_workspace_launch_expiry_v3
+
+pub(package) fn machine_workspace_primary_plan_v3(custody: LinuxFreshEpochSuccessorCustodyV1,
+        state: MachineFreshWorkloadLifecycleV2, request: ContainerExecutionRequestV2,
+        expected: RuntimeIdentityV1, identity: ContainerOutputIdentityV2,
+        policy: ContainerStreamPolicyV2, resources: ContainerOutputResourcesV2,
+        terminal_mode: text) -> Result<ContainerPrimaryAttachPlanV1, text>:
+    val record = machine_fresh_record_workspace_v3(state.record_v3()?)?
+    if record.request != request or terminal_mode != "tty": return Err("workspace-primary-request-or-tty-mismatch")
+    if state.primary_custody_v3().is_ok(): return Err("workspace-primary-already-attempted")
+    if resources.cpu_millis != record.helper_cpu_millis or resources.memory_bytes != record.helper_memory_bytes:
+        return Err("workspace-primary-original-helper-budget-required")
+    val dispatch = MachineFreshWorkloadRecordDispatchV3.WorkspaceV3(record)
+    val native_id = state.native_id_v2()?
+    if machine_fresh_record_runtime_v3(dispatch, native_id)? != expected: return Err("workspace-primary-runtime-mismatch")
+    val command = machine_fresh_record_command_v3(dispatch, LinuxFreshWorkloadActionV2.Inspect, native_id)?
+    val current = state.running_v2(custody, command)?
+    if current.state != LinuxContainerContainmentPopulationV1.Populated: return Err("workspace-primary-running-unproven")
+    val digest = container_stream_policy_digest_v2(policy)?
+    var template = state.template_v2()?
+    template.root = policy.root + "/primary-attach-" + container_output_identity_digest_v2(identity)?
+    template.worker_id = identity.operation_id
+    template.generation = record.scope.provider_generation
+    template.snapshot_digest = policy.snapshot_digest
+    template.cache_identity = policy.cache_identity
+    template.memory_limit_bytes = resources.memory_bytes
+    template.delegated_cgroup_path = policy.delegated_cgroup_path
+    template.memory_policy = policy.memory_policy
+    var profile = template.profile_v3.unwrap()
+    profile.helper_cpu = group_process_cpu_quota_v3(resources.cpu_millis)?
+    profile.broker = policy.broker_budget
+    profile.child_image_mode = policy.child_image_mode
+    template.profile_v3 = Some(profile)
+    template.request.environment = policy.environment
+    template.request.directory = policy.directory
+    template.request.broker_program = policy.broker_program
+    template.request.broker_digest = policy.broker_digest
+    template.transport_generation = 0
+    template.request.launch_deadline_unix_ms = 0
+    val context = state.source_custody_v3()?.context_v3()?
+    val attach = LinuxFreshWorkspacePrimaryAttachCommandV3(workspace: LinuxFreshWorkspaceCommandV3(command), invocation_source: context.0)
+    val binding = state.workspace_binding_v3()?
+    val launch = custody.bind_workspace_primary_attach_v3(binding, attach, template)?
+    val restrictive = custody.validate_workspace_primary_attach_v3(binding, attach, launch)?
+    var plan = ContainerPrimaryAttachPlanV1(workload: request.plan, runtime: expected,
+        identity: identity, resources: resources, provider_identity_digest: state.history_v2()?.epoch.provider_identity_digest,
+        policy_digest: digest, terminal_mode: terminal_mode, launch_template: launch, request_digest: "")
+    plan.request_digest = container_primary_attach_plan_digest_v1(plan)?
+    Ok(plan)
+
+pub(package) fn machine_workspace_primary_open_v3(storage: MachineStorageOwnerV1,
+        custody: LinuxFreshEpochSuccessorCustodyV1, state: MachineFreshWorkloadLifecycleV2,
+        generation: i64, request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
+        plan: ContainerPrimaryAttachPlanV1, helper: ContainerHelperAdmissionV2,
+        policy: ContainerStreamPolicyV2) -> PipedProcessOwnedSpawnV2:
+    val actual = machine_workspace_primary_open_inner_v3(storage, custody, state, generation, request, expected, plan, helper, policy)
+    if actual.is_err(): return PipedProcessOwnedSpawnV2.Rejected(actual.unwrap_err())
+    actual.unwrap()
+
+fn machine_workspace_primary_open_inner_v3(storage: MachineStorageOwnerV1,
+        custody: LinuxFreshEpochSuccessorCustodyV1, state: MachineFreshWorkloadLifecycleV2,
+        generation: i64, request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
+        plan: ContainerPrimaryAttachPlanV1, helper: ContainerHelperAdmissionV2,
+        policy: ContainerStreamPolicyV2) -> Result<PipedProcessOwnedSpawnV2, text>:
+    val current = machine_workspace_primary_plan_v3(custody, state, request, expected,
+        plan.identity, policy, plan.resources, plan.terminal_mode)?
+    if container_primary_attach_plan_encode_v1(current)? != container_primary_attach_plan_encode_v1(plan)?:
+        return Err("workspace-primary-plan-changed")
+    val admitted = container_primary_attach_admission_validate_v1(current, helper)?
+    val window = state.source_custody_v3()?.launch_window_v3()?
+    val before = time_sample_monotonic_nanos_or_failure()
+    val now = time_sample_unix_micros_or_failure() / 1000
+    val after = time_sample_monotonic_nanos_or_failure()
+    val initial_expiry = container_workspace_launch_expiry_v3(helper.deadline.expires_at_unix_ms,
+        window.0, window.1, before, now, after)?
+    # The existing Session/native archive binds EXACT prepared helper expiry.
+    # A stricter computed cap may refuse; it cannot rewrite that admission.
+    if initial_expiry != helper.deadline.expires_at_unix_ms:
+        return Err("workspace-primary-prepared-window-exceeds-original")
+    val record = state.record_v3()?
+    val command = machine_fresh_record_command_v3(record, LinuxFreshWorkloadActionV2.Inspect, state.native_id_v2()?)?
+    val context = state.source_custody_v3()?.context_v3()?
+    val attach = LinuxFreshWorkspacePrimaryAttachCommandV3(workspace: LinuxFreshWorkspaceCommandV3(command), invocation_source: context.0)
+    val binding = state.workspace_binding_v3()?
+    var launch = current.launch_template
+    val valid = custody.validate_workspace_primary_attach_v3(binding, attach, launch)?
+    val states = state.action_begin_v2("primary-attach", generation)?
+    state.capture_primary_custody_v3(machine_workspace_primary_custody_v3(current, helper))
+    val rows = machine_fresh_record_action_batch_entries_v3(record, states, state.native_id_v2()?,
+        container_primary_attach_plan_encode_v1(current)?, now)?
+    val committed = workload_publish_v3(storage, state, rows)?
+    val final_native = custody.validate_workspace_primary_attach_v3(binding, attach, launch)?
+    # Recheck BOTH original windows AFTER all binding/WAL/readback delay and
+    # immediately before irreversible consumption. Never sample a new origin.
+    val final_before = time_sample_monotonic_nanos_or_failure()
+    val final_wall = time_sample_unix_micros_or_failure() / 1000
+    val final_after = time_sample_monotonic_nanos_or_failure()
+    val final_expiry = container_workspace_launch_expiry_v3(helper.deadline.expires_at_unix_ms,
+        window.0, window.1, final_before, final_wall, final_after)?
+    if final_expiry != helper.deadline.expires_at_unix_ms:
+        return Err("workspace-primary-prepared-window-exceeds-original")
+    # Refusal above retains original intent and actual custody. Native admission
+    # checks this conservatively capped deadline without changing the helper.
+    val consumed = state.consume_action_v2()?
+    val claimed = state.primary_custody_v3()?.consume_v3()?
+    state.capture_primary_custody_v3(claimed)
+    launch.request.launch_deadline_unix_ms = final_expiry
+    # Actual native output is captured canonically BEFORE any return flags.
+    val spawned = process_spawn_piped_owned_v2(launch)
+    state.primary_spawn_captured_v3(claimed.capture_v3(spawned))
+    match spawned:
+        case PipedProcessOwnedSpawnV2.Rejected(_):
+            # Only the actual post-consumption IO Rejected result establishes
+            # no native helper obligation. Earlier/ambiguous publication errors
+            # never enter this completion path or free the workload charge.
+            val recorded = primary_publish_retired_v3(Some(storage), state)
+        case _: pass
+    Ok(spawned)
+
+pub(package) fn machine_workspace_primary_handoff_v3(state: MachineFreshWorkloadLifecycleV2,
+        session: ContainerPrimaryAttachSessionV1) -> Result<(), text>:
+    val loaned = state.primary_custody_v3()?.session_loaned_v3(session)?
+    state.capture_primary_custody_v3(loaned)
+    Ok(())
+
+pub(package) fn machine_workspace_primary_construction_failed_v3(state: MachineFreshWorkloadLifecycleV2,
+        actual: PipedProcessOwnedTransferV2) -> Result<(), text>:
+    val retained = state.primary_custody_v3()?.construction_failed_v3(actual)?
+    state.capture_primary_custody_v3(retained)
+    Ok(())
+
+fn primary_publish_retired_v3(storage: Option<MachineStorageOwnerV1>, state: MachineFreshWorkloadLifecycleV2) -> Result<(), text>:
+    val actual = state.primary_custody_v3()?
+    val proof = actual.retirement_proof_v3()?
+    val prior = state.action_state_v2("primary-attach")?
+    if prior.state == "completed": return Ok(())
+    val completed = distributed_operation_transition_v2(prior, "completed", sha256_text(proof))?
+    val rows = machine_fresh_record_action_entries_v3(state.record_v3()?, completed, state.native_id_v2()?,
+        proof, time_sample_unix_micros_or_failure() / 1000)?
+    if storage.is_none(): return Err("workspace-primary-original-writer-retained-required")
+    val committed = workload_publish_v3(storage.unwrap(), state, rows)?
+    state.primary_completed_v3(completed)
+
+pub(package) fn machine_workspace_primary_session_return_v3(storage: Option<MachineStorageOwnerV1>,
+        state: MachineFreshWorkloadLifecycleV2, session: ContainerPrimaryAttachSessionV1) -> Result<(), text>:
+    val actual = state.primary_custody_v3()?
+    val returned = actual.session_return_v3(session)
+    if returned.is_err():
+        state.capture_primary_custody_v3(actual.retain_diagnostic_v3(returned.unwrap_err()))
+        return Err(returned.unwrap_err())
+    state.capture_primary_custody_v3(returned.unwrap())
+    primary_publish_retired_v3(storage, state)
+
+pub(package) fn machine_workspace_primary_fallback_cleanup_v3(storage: Option<MachineStorageOwnerV1>,
+        state: MachineFreshWorkloadLifecycleV2) -> Result<(), text>:
+    val actual = state.primary_custody_v3()?
+    val closed = actual.fallback_cleanup_v3()
+    if closed.is_err():
+        state.capture_primary_custody_v3(actual.retain_diagnostic_v3(closed.unwrap_err()))
+        return Err(closed.unwrap_err())
+    state.capture_primary_custody_v3(closed.unwrap())
+    primary_publish_retired_v3(storage, state)
+
+# Closed internal request/return shapes keep the authority's private fields in
+# its declaring module. This selector is DATA, never a grant or writer getter.
+pub enum MachineWorkspacePrimaryCallV3:
+    Plan(ContainerExecutionRequestV2, RuntimeIdentityV1, ContainerOutputIdentityV2, ContainerStreamPolicyV2, ContainerOutputResourcesV2, text)
+    Open(ContainerExecutionRequestV2, RuntimeIdentityV1, ContainerPrimaryAttachPlanV1, ContainerHelperAdmissionV2, ContainerStreamPolicyV2)
+    SessionLoaned(ContainerPrimaryAttachSessionV1)
+    ConstructionFailed(PipedProcessOwnedTransferV2)
+    SessionReturn(ContainerPrimaryAttachSessionV1)
+    FallbackCleanup
+    Retirement
+    SessionBinding(ContainerPrimaryAttachSessionV1)
+
+pub struct MachineWorkspacePrimaryRetirementDataV3:
+    native: GroupProcessStreamOwnerV2
+    plan: ContainerPrimaryAttachPlanV1
+    proof: text
+
+# Correlation DATA only; a genuine read loan re-enters the original owner.
+# No pane commit, Host ACK or source-return permission is asserted here.
+pub struct MachineWorkspacePrimarySessionBindingDataV3:
+    session_fingerprint: text
+    request_digest: text
+    native_id: text
+    epoch_digest: text
+    source_binding_digest: text
+    full_invocation_digest: text
+    plan: ContainerPrimaryAttachPlanV1
+
+pub enum MachineWorkspacePrimaryReplyV3:
+    Plan(Result<ContainerPrimaryAttachPlanV1, text>)
+    Spawn(PipedProcessOwnedSpawnV2)
+    Completion(Result<(), text>)
+    Retirement(Result<MachineWorkspacePrimaryRetirementDataV3, text>)
+    SessionBinding(Result<MachineWorkspacePrimarySessionBindingDataV3, text>)
+
+pub(package) fn machine_workspace_primary_requires_live_v3(call: MachineWorkspacePrimaryCallV3) -> bool:
+    match call:
+        case MachineWorkspacePrimaryCallV3.Plan(_, _, _, _, _, _): true
+        case MachineWorkspacePrimaryCallV3.Open(_, _, _, _, _): true
+        case _: false
+
+pub(package) fn machine_workspace_primary_rejected_v3(call: MachineWorkspacePrimaryCallV3, reason: text) -> MachineWorkspacePrimaryReplyV3:
+    match call:
+        case MachineWorkspacePrimaryCallV3.Plan(_, _, _, _, _, _): MachineWorkspacePrimaryReplyV3.Plan(Err(reason))
+        case MachineWorkspacePrimaryCallV3.Open(_, _, _, _, _): MachineWorkspacePrimaryReplyV3.Spawn(PipedProcessOwnedSpawnV2.Rejected(reason))
+        case MachineWorkspacePrimaryCallV3.Retirement: MachineWorkspacePrimaryReplyV3.Retirement(Err(reason))
+        case MachineWorkspacePrimaryCallV3.SessionBinding(_): MachineWorkspacePrimaryReplyV3.SessionBinding(Err(reason))
+        case _: MachineWorkspacePrimaryReplyV3.Completion(Err(reason))
+
+pub(package) fn machine_workspace_primary_dispatch_v3(storage: Option<MachineStorageOwnerV1>,
+        custody: Option<LinuxFreshEpochSuccessorCustodyV1>, state: MachineFreshWorkloadLifecycleV2,
+        generation: i64, call: MachineWorkspacePrimaryCallV3) -> MachineWorkspacePrimaryReplyV3:
+    if machine_workspace_primary_requires_live_v3(call) and (storage.is_none() or custody.is_none()):
+        return machine_workspace_primary_rejected_v3(call, "workspace-primary-original-owners-required")
+    match call:
+        case MachineWorkspacePrimaryCallV3.Plan(request, expected, identity, policy, resources, mode):
+            MachineWorkspacePrimaryReplyV3.Plan(machine_workspace_primary_plan_v3(custody.unwrap(), state, request, expected, identity, policy, resources, mode))
+        case MachineWorkspacePrimaryCallV3.Open(request, expected, plan, helper, policy):
+            MachineWorkspacePrimaryReplyV3.Spawn(machine_workspace_primary_open_v3(storage.unwrap(), custody.unwrap(), state, generation, request, expected, plan, helper, policy))
+        case MachineWorkspacePrimaryCallV3.SessionLoaned(session):
+            MachineWorkspacePrimaryReplyV3.Completion(machine_workspace_primary_handoff_v3(state, session))
+        case MachineWorkspacePrimaryCallV3.ConstructionFailed(actual):
+            MachineWorkspacePrimaryReplyV3.Completion(machine_workspace_primary_construction_failed_v3(state, actual))
+        case MachineWorkspacePrimaryCallV3.SessionReturn(session):
+            MachineWorkspacePrimaryReplyV3.Completion(machine_workspace_primary_session_return_v3(storage, state, session))
+        case MachineWorkspacePrimaryCallV3.FallbackCleanup:
+            MachineWorkspacePrimaryReplyV3.Completion(machine_workspace_primary_fallback_cleanup_v3(storage, state))
+        case MachineWorkspacePrimaryCallV3.Retirement:
+            MachineWorkspacePrimaryReplyV3.Retirement(machine_workspace_primary_retirement_data_v3(state))
+        case MachineWorkspacePrimaryCallV3.SessionBinding(session):
+            MachineWorkspacePrimaryReplyV3.SessionBinding(machine_workspace_primary_session_binding_v3(state, session))
+
+pub(package) fn machine_workspace_primary_retirement_data_v3(state: MachineFreshWorkloadLifecycleV2) -> Result<MachineWorkspacePrimaryRetirementDataV3, text>:
+    # This checks actual canonical positive consumption even if a later WAL
+    # publication failed. It does not upgrade Unknown accounting into success.
+    val actual = state.primary_custody_v3()?
+    val native = actual.retired_native_v3()?
+    Ok(MachineWorkspacePrimaryRetirementDataV3(native: native, plan: actual.plan_v3(),
+        proof: actual.retirement_proof_v3()?))
+
+pub(package) fn machine_workspace_primary_session_binding_v3(state: MachineFreshWorkloadLifecycleV2,
+        session: ContainerPrimaryAttachSessionV1) -> Result<MachineWorkspacePrimarySessionBindingDataV3, text>:
+    val actual = state.primary_custody_v3()?
+    val fingerprint = actual.session_binding_v3(session)?
+    val record = machine_fresh_record_workspace_v3(state.record_v3()?)?
+    val current = state.workspace_binding_v3()?.current_v3()?
+    if current != record.binding: return Err("workspace-primary-source-binding-changed")
+    val context = state.source_custody_v3()?.context_v3()?
+    val invocation = sha256_text(context.0)
+    if invocation != current.invocation_digest: return Err("workspace-primary-invocation-binding-changed")
+    Ok(MachineWorkspacePrimarySessionBindingDataV3(session_fingerprint: fingerprint,
+        request_digest: record.request.plan.request_digest, native_id: state.native_id_v2()?,
+        epoch_digest: record.epoch_digest, source_binding_digest: current.binding_digest,
+        full_invocation_digest: invocation, plan: actual.plan_v3()))

@@ -1,0 +1,90 @@
+# Internal opening implementation over a genuine already-owned storage and
+# genuine installed epoch. No caller record/policy/root or ready flag is input.
+# Returned DATA is not an authority constructor; the defining owner module
+# consumes only this direct call result and retains every cleanup capability.
+use std.nogc_sync_mut.io.machine_storage_owner_v1.MachineStorageOwnerV1
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_owner_v1.LinuxInstalledFreshEpochOwnerV1
+use std.nogc_sync_mut.io.machine_local_process_principal_v1.*
+use std.nogc_sync_mut.container.machine_authority_cleanup_v1.*
+use std.nogc_sync_mut.container.machine_authority_projection_v1.*
+use std.common.contracts.container.machine_policy_v1.*
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.linux_oci_engine_policy_decode_v1
+use std.common.crypto.sha256.sha256_text
+
+pub(package) struct MachineAuthorityStoragePreparationV3:
+    principal: Option<MachineAuthorityLocalProcessV1> = nil
+    policy_digest: text = ""
+    provider_digest: text = ""
+    service_uid: i64 = -1
+    error: text = ""
+
+pub(package) fn machine_authority_prepare_storage_v3(storage: MachineStorageOwnerV1,
+        epoch: LinuxInstalledFreshEpochOwnerV1) -> MachineAuthorityStoragePreparationV3:
+    var retained = MachineAuthorityStoragePreparationV3()
+    val sampled = epoch.current_v1()
+    if sampled.is_err():
+        retained.error = sampled.unwrap_err()
+        return retained
+    val bytes = storage.policy_bytes_v1()
+    if bytes.is_err():
+        retained.error = bytes.unwrap_err()
+        return retained
+    val text = machine_authority_policy_text_v1(bytes.unwrap())
+    if text.is_err():
+        retained.error = text.unwrap_err()
+        return retained
+    val decoded = machine_container_policy_decode_v1(text.unwrap())
+    if decoded.is_err():
+        retained.error = decoded.unwrap_err()
+        return retained
+    val policy = decoded.unwrap()
+    if policy.mode != "standalone":
+        retained.error = "machine-fresh-workspace-standalone-required"
+        return retained
+    val provider = machine_policy_provider_v1(policy, "linux-podman")
+    if provider.is_err():
+        retained.error = provider.unwrap_err()
+        return retained
+    val engine = linux_oci_engine_policy_decode_v1(provider.unwrap().policy_bytes)
+    if engine.is_err():
+        retained.error = engine.unwrap_err()
+        return retained
+    if sampled.unwrap().service_uid <= 0 or engine.unwrap().expected_uid != sampled.unwrap().service_uid:
+        retained.error = "machine-fresh-workspace-service-uid"
+        return retained
+    val pair = machine_authority_pair_open_v1()
+    if pair.is_err():
+        retained.error = pair.unwrap_err()
+        return retained
+    match machine_local_process_principal_open_v1():
+        case MachineLocalProcessPrincipalOpenV1.Rejected(reason):
+            retained.error = reason
+            return retained
+        case MachineLocalProcessPrincipalOpenV1.CleanupRequired(owner, reason):
+            retained.principal = Some(machine_authority_local_pair_bind_v1(owner, pair.unwrap()))
+            retained.error = reason
+            return retained
+        case MachineLocalProcessPrincipalOpenV1.Ready(owner):
+            retained.principal = Some(machine_authority_local_pair_bind_v1(owner, pair.unwrap()))
+    val member = machine_policy_local_principal_v1(policy, "linux-podman", retained.principal.unwrap().principal_capability_v1())
+    if member.is_err():
+        retained.error = member.unwrap_err()
+        return retained
+    val physical = storage.physical_capacity_v1()
+    if physical.is_err():
+        retained.error = physical.unwrap_err()
+        return retained
+    if policy.cpu_millis > physical.unwrap().0 or policy.memory_bytes > physical.unwrap().1:
+        retained.error = "machine-container-authority-physical-capacity-exceeded"
+        return retained
+    val bound = storage.bind_policy_v1(text.unwrap())
+    if bound.is_err():
+        retained.error = bound.unwrap_err()
+        return retained
+    if bound.unwrap() != sha256_text(text.unwrap()):
+        retained.error = "machine-container-authority-policy-binding-mismatch"
+        return retained
+    retained.policy_digest = bound.unwrap()
+    retained.provider_digest = provider.unwrap().identity_digest
+    retained.service_uid = sampled.unwrap().service_uid
+    retained

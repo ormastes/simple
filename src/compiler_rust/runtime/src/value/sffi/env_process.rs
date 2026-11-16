@@ -1778,6 +1778,8 @@ pub unsafe extern "C" fn rt_process_run_with_limits(
             // Helper to call setrlimit
             #[cfg(target_os = "linux")]
             fn set_limit(resource: libc::__rlimit_resource_t, value: u64) -> std::io::Result<()> {
+                // 32-bit targets have a 32-bit rlim_t: saturate to RLIM_INFINITY rather than truncate.
+                let value = libc::rlim_t::try_from(value).unwrap_or(libc::RLIM_INFINITY);
                 let rlim = libc::rlimit {
                     rlim_cur: value,
                     rlim_max: value,

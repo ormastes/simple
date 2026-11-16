@@ -6,7 +6,7 @@
 use app.llm_caret.claude_api.{claude_api_send}
 use app.llm_caret.claude_cli.{claude_cli_send}
 use app.llm_caret.local_torch.{local_torch_send}
-use std.gc_async_mut.slang.entrypoints.llm.{slang_generate, slang_release, engine_backend_available, engine_lib_path}
+use std.gc_async_mut.slang.entrypoints.llm.{slang_generate, slang_generate_chat, slang_release, engine_backend_available, engine_lib_path}
 use app.llm_caret.codex_cli.{codex_cli_send}
 use app.llm_caret.opencode_cli.{opencode_cli_send}
 use app.llm_caret.openai_api.{openai_send}
@@ -159,7 +159,7 @@ fn dispatch_send_advanced(
         # slang in-process, no socket. `base_url` carries the model ROOT
         # directory here rather than a URL -- slang_local has no transport, and
         # reusing the field keeps the caller's argument surface unchanged.
-        return _dispatch_slang_local(base_url, model, prompt, max_tokens, cli_path)
+        return _dispatch_slang_local(base_url, model, prompt, max_tokens, cli_path, false)
     elif provider == "local_torch":
         return _dispatch_local_torch(cli_path, model, prompt, max_tokens)
     else:
@@ -311,7 +311,7 @@ fn _dispatch_compat(base_url: text, api_key: text, model: text, messages_json: t
 # decode loop. Distinct from the "slang" provider above, which reaches a
 # separate slang_server over HTTP -- the two differ in transport, not in engine,
 # and both report provider identity truthfully so a caller can tell which ran.
-fn _dispatch_slang_local(model_root: text, model: text, prompt: text, max_tokens: i64, lib_path: text) -> LLMResponse:
+fn _dispatch_slang_local(model_root: text, model: text, prompt: text, max_tokens: i64, lib_path: text, framed: bool) -> LLMResponse:
     var root = model_root
     if root == "":
         root = "models"
@@ -327,7 +327,13 @@ fn _dispatch_slang_local(model_root: text, model: text, prompt: text, max_tokens
     # tokenizes to ~15k tokens on its own (measured 2026-09-16, caret a11/a12
     # turn 2 -> CapacityExceeded at 8192 AND 16384), so a tool-using loop
     # needs a real window.
-    val answer = slang_generate(root, model, prompt, cap, lib_path, 32768)
+    # `framed` = `prompt` is chat frames: render through the model's chat
+    # template so generation ends at its end-of-turn token. A raw prompt
+    # makes the model keep role-playing "user:/assistant:" turns to the cap.
+    val answer = if framed:
+        slang_generate_chat(root, model, prompt, cap, lib_path, 32768)
+    else:
+        slang_generate(root, model, prompt, cap, lib_path, 32768)
     # Release the backend before returning. Without this, the model stays
     # resident until process exit and ggml's static device destructor runs while
     # its resource sets are still populated -- on macOS/Metal that is a hard
@@ -364,6 +370,10 @@ fn _dispatch_slang_local(model_root: text, model: text, prompt: text, max_tokens
         is_error: false,
         raw: ""
     )
+
+# Chat entry for slang_local: `framed` is the conversation as slang chat frames.
+fn dispatch_slang_local_chat(model_root: text, model: text, framed: text, max_tokens: i64, lib_path: text) -> LLMResponse:
+    _dispatch_slang_local(model_root, model, framed, max_tokens, lib_path, true)
 
 fn _dispatch_local_torch(python_path: text, model_path: text, prompt: text, max_tokens: i64) -> LLMResponse:
     val resp = local_torch_send(python_path, model_path, prompt, max_tokens)

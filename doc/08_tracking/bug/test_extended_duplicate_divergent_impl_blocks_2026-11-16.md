@@ -56,3 +56,21 @@ owner call on which logic is current (or a merge).
    CI to stop recurrence.
 2. Until then, tool builds needing the mcp closure are blocked; the lane runs
    on seed-built mcp as a fallback if needed.
+
+
+## 2026-11-16 resolution: duplicates removed (PR pending); drift audit remains
+
+Fix landed in the same release/1.0.0 lane: all 32 duplicated methods were
+removed from the four satellite modules (queries 14, tracking 11, runs 4,
+core_helpers 3), which are now import-only deprecation-noted modules.
+database.spl stands as the canonical, spec-validated implementation — the
+test suite binds these names to database.spl under the seed's first-match
+resolution, so the removed copies were never the tested behavior.
+
+REMAINS OPEN: the semantic drift audit. 18 of the 32 pairs had divergent
+bodies (e.g. queries.spl's get_counter guarded row_test_id == -1 and
+extracted crashed/skipped counters that database.spl's counter_record_from_row
+path may or may not cover; runs.spl's start_run lacked database.spl's
+missing-table guard). Owners should confirm each divergence is either
+covered by the canonical path or file a targeted bug. The mcp and
+test_runner tool builds against the fixed tree are the verification gate.

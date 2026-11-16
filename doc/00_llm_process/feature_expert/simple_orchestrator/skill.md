@@ -147,3 +147,38 @@ remain open. Follow the host identity guide's ordered generation/pin/profile/
 exchange flow; pending public registration grants no login authority. Windows
 external SSH key-path projection fails closed until its separate capability is
 available. These source paths and their manuals remain NOT_RUN.
+
+## Linux service V4 host composition — service 40 (2026-11-16)
+
+- **Owner module:** `src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl` (#9745, #9747).
+  Spec: `test/01_unit/lib/orchestration/host_linux_service_current_v4_spec.spl`. Fixture:
+  `test/fixtures/orchestration/host_linux_service_verifier_fixture_v1.spl` (`..._ops_v1`, `..._sign_v1`).
+  Both PRs are SOURCE_AUTHORED and NOT_RUN.
+- **Order is structural.**
+  - Startup uses `records_load_v4` through the protected readers with a fresh clock. It checks the sealed proof
+    against the installed binding and credential, using policy re-read through the reader and never the proof's
+    own bytes.
+  - It compares the actual native borrow, mints a service-incarnation scope, and opens the journal with
+    `host_capacity_owner_open_linux_v3` at the installed `journalRoot`.
+  - The current record is published (no-replace) and read back before `published`.
+  - `status_v4()` is the only ready/status producer, and `current_v4()` always rechecks everything.
+- **Prepare/execute.** Signed prepare uses the landed `prepare_v1`; a same-ID replay keeps the original deadline,
+  and both renewal and late retry are refused. The association is published scope-fenced and read back before the
+  prepared reply. Execute requires the stored association bytes, fresh signatures and a live receipt.
+- **Still blocked** (details in `.spipe/simple_orchestrator/continuation_20261116/milestone_0016_service40/` and
+  `milestone_0017_service40_reconcile/`):
+  - The associated execution commit (`begin_associated_v3`) and the `HostLocalRootV3.LinuxService` arm with the
+    listener/smux startup v4. Both wait on the assembly lane's Host21 PR, which owns `host_capacity_owner_v1.spl`
+    and `host_local_root_v1.spl`.
+  - Reconciliation, which needs the upper Linux provider inventory. The owner stays quarantined.
+  - The epoch digest, which has no landed producer, so the caller supplies it.
+
+### Traps
+- Never reconcile a Linux journal from ledger flags alone. The capacity owner requires native inventory/quarantine
+  completion before admission. An empty projected ledger proves nothing (review P1, #9747).
+- The verifier proof's fields are private. Pin it by `binding_digest()` and `credential_digest()`, never by struct
+  equality.
+- A caller-supplied journal opener is an authority-substitution surface. Open the protected journal inside the
+  owner, at the installed root (review P1, #9745).
+- Pure Ed25519 in the interpreter is slow. Expiry specs need a margin of 20 s or more plus a clock poll, never a
+  1–3 s window.

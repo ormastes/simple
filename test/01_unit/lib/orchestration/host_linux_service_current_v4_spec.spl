@@ -1,0 +1,351 @@
+"""
+## Purpose and audience
+Pins the service 40 host-side composition in
+`src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl`:
+startup accepts only the sealed signed-enrollment proof re-verified against
+installed policy with a fresh clock, ready/status cannot exist before the
+immutable current record, associated prepare/execute need fresh real
+signatures over the exact live association, and a same-ID prepare retry keeps
+the original reservation deadline. Written for owners of the Linux Host service.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-16).
+Shutdown (S40-SHUTDOWN-01) and the installed-credential pin are covered here;
+Linux reconciliation is not implemented (blocked on the upper Linux provider inventory).
+## Compatibility and limitations
+Real Ed25519 signatures from the verifier fixture seeds and a real temporary
+capacity journal. No protected root reader, native identity borrow or
+Linux-protected journal exists in a unit run, so the full startup turn and a
+positive ready/status are covered by the configured real fixture driver
+(NOT_AUTHORED). The native snapshot below is DATA, not a borrow.
+## Verification guidance and troubleshooting
+Each refusal names the exact error. `APPROVAL_EXPIRED` after a restart-equivalent
+wait is the owner decision of 2026-11-16, not a flake.
+"""
+use std.spec.{step, fail}
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_open_cleanup_v2
+use test.fixtures.orchestration.host_linux_service_verifier_fixture_v1.*
+# Tests reach the module's private pure gates directly (repo rule: tests may access private).
+use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.{HostLinuxServiceCurrentV4, linux_service_proof_held_v4,
+    linux_service_scope_v4, linux_service_status_bytes_v4, linux_service_prepare_authorize_v4, linux_service_association_v4,
+    linux_service_execute_authorize_core_v4, host_linux_service_close_v4}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.io.host_linux_service_records_v4.*
+use std.nogc_sync_mut.io.linux_service_native_identity_v3.LinuxServiceNativeIdentitySnapshotV3
+use std.nogc_sync_mut.io.local_authority_policy_v1.{local_authority_policy_decode_v1, host_local_context_v1}
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_sync_mut.io.thread.thread_sleep_ms
+use std.nogc_sync_mut.io_runtime.dir_remove
+use std.common.contracts.orchestration.host_linux_service_enrollment_v3.host_linux_service_enrollment_digest_v3
+use std.common.contracts.orchestration.host_prepare_associated_v3.HostPrepareAssociatedRequestV3
+use std.common.contracts.orchestration.host_prepare_request_v1.HostPrepareRequestV1
+use std.common.contracts.orchestration.host_execution_association_v3.*
+use std.common.contracts.orchestration.host_execute_associated_v3.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.container.execution_draft_v3.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2}
+use std.common.crypto.sha256.sha256_text
+
+val S40_OPERATIONS: [text] = ["host_enroll_v1", "host_reservation_v1", "host_execute_associated_v3"]
+val S40_FAR: i64 = 4102444800000
+
+fn s40_fixture() -> LinuxServiceVerifierFixtureV1:
+    linux_service_verifier_fixture_ops_v1(1, 65, S40_FAR, "/var/lib/simple/hosts", S40_OPERATIONS)
+
+fn s40_proof(fixture: LinuxServiceVerifierFixtureV1) -> LinuxServiceVerifiedEnrollmentV1:
+    linux_service_enrollment_verify_v1(fixture.policy, fixture.binding, fixture.credential,
+        fixture.configuration, fixture.engine_policy, fixture.broker_policy).unwrap()
+
+# Snapshot DATA standing in for what an actual borrow's current_v3 returns.
+fn s40_native(fixture: LinuxServiceVerifierFixtureV1) -> LinuxServiceNativeIdentitySnapshotV3:
+    LinuxServiceNativeIdentitySnapshotV3(native_machine_id: fixture.binding.native_machine_id, native_boot_id: "native-boot",
+        architecture: "x86_64", owner_generation: 41, process_identity_digest: "e".repeat(64), process_generation: 2,
+        authority_namespace_id: "namespace_1")
+
+fn s40_scope(fixture: LinuxServiceVerifierFixtureV1) -> ContainerHostScopeV2:
+    linux_service_scope_v4(fixture.binding, s40_native(fixture), "ab".repeat(16)).unwrap()
+
+fn s40_draft(op: text = "operation_2") -> ContainerExecutionDraftV3:
+    ContainerExecutionDraftV3("linux-podman", "workload", 1, op, "a".repeat(64), "opaque-codec-DATA")
+
+fn s40_intent(scope: ContainerHostScopeV2, deadline_ms: i64, op: text = "operation_2", revision: i64 = 1) -> HostReservationIntentV1:
+    val bound = container_execution_draft_bind_v3(s40_draft(op), scope).unwrap()
+    host_reservation_bind_intent_v1(HostReservationIntentV1(physical_host_id: "worker_1",
+        fence: HostLedgerFenceV1("host-authority", container_scope_fence_id_v2(scope).unwrap(), 41, revision),
+        plan_digest: container_execution_plan_digest_v2(bound.plan).unwrap(),
+        reservation: HostReservationV1("reservation_" + op, op, "0".repeat(64), "service_1", 1, "nonce",
+            500, 4096, [], deadline_ms, HostReservationStateV1.Prepared))).unwrap()
+
+fn s40_operation(intent: HostReservationIntentV1) -> OperationEnvelopeV2:
+    OperationEnvelopeV2(2, intent.reservation.operation_id, intent.reservation.payload_digest, "user_1", "project_1", "worker_1",
+        "host_reservation_v1", "a".repeat(64), 4, 2, 3, 4096, 100)
+
+fn s40_grant(operations: [text]) -> ExecutionGrantV2:
+    ExecutionGrantV2("grant_2", "user_1", "project_1", "worker_1", operations, "a".repeat(64), 4, 2, S40_FAR, 536870912, 1000)
+
+fn s40_prepare(scope: ContainerHostScopeV2, deadline_ms: i64, issuer: i64, approver: i64,
+        op: text = "operation_2", revision: i64 = 1) -> HostPrepareAssociatedRequestV3:
+    val intent = s40_intent(scope, deadline_ms, op, revision)
+    val operation = s40_operation(intent)
+    val proof = linux_service_verifier_sign_v1(operation, s40_grant(["host_reservation_v1"]), issuer, approver, S40_FAR)
+    HostPrepareAssociatedRequestV3(HostPrepareRequestV1(intent, operation, proof.0, proof.1), s40_draft(op), scope)
+
+fn s40_epoch() -> text:
+    "c".repeat(64)
+
+fn s40_execution(native: LinuxServiceNativeIdentitySnapshotV3, op: text = "operation_2") -> ContainerExecutionRequestV2:
+    val native_scope = ContainerHostScopeV2(physical_host_id: "worker_1", service_scope_id: "epoch-" + s40_epoch(),
+        boot_id: native.native_boot_id, provider_generation: native.owner_generation, native_machine_id: native.native_machine_id,
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: native.native_boot_id)
+    container_execution_draft_bind_v3(s40_draft(op), native_scope).unwrap()
+
+fn s40_association(fixture: LinuxServiceVerifierFixtureV1, prepare: HostPrepareAssociatedRequestV3,
+        native: LinuxServiceNativeIdentitySnapshotV3) -> Result<HostExecutionAssociationV3, text>:
+    # Integrity-only receipt; production obtains it through the capacity owner.
+    val receipt = host_reservation_receipt_v1(prepare.prepare.intent, prepare.prepare.operation).unwrap()
+    linux_service_association_v4(fixture.binding, s40_scope(fixture), s40_epoch(), native, prepare, receipt, s40_execution(native))
+
+fn s40_execute(prepare: HostPrepareAssociatedRequestV3, association: HostExecutionAssociationV3,
+        issuer: i64, approver: i64) -> HostExecuteAssociatedRequestV3:
+    val receipt = host_reservation_receipt_v1(prepare.prepare.intent, prepare.prepare.operation).unwrap()
+    val operation = host_execute_associated_operation_v3(prepare.prepare.operation, association).unwrap()
+    val proof = linux_service_verifier_sign_v1(operation, s40_grant(["host_execute_associated_v3"]), issuer, approver, S40_FAR)
+    HostExecuteAssociatedRequestV3(prepare, receipt, association, operation, proof.0, proof.1)
+
+fn s40_unsigned_prepare(prepare: HostPrepareAssociatedRequestV3) -> HostPrepareAssociatedRequestV3:
+    var changed = prepare
+    var zero: [u8] = []
+    for index in 0..64: zero.push(0u8)
+    changed.prepare.signed.signature = zero
+    changed.prepare.approval.signature = zero
+    changed
+
+fn s40_open(root: text, capacity: HostCapacityV1) -> HostCapacityOwnerV1:
+    var opened: [HostCapacityOwnerV1] = []
+    match host_capacity_owner_open_owned_v2(root, capacity, "9".repeat(64), 64, true):
+        case HostCapacityOpenV2.Ready(owner): opened.push(owner)
+        case HostCapacityOpenV2.Rejected(reason): fail(reason)
+        case HostCapacityOpenV2.CleanupRequired(cleanup, reason):
+            val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+            expect(closed.error).to_equal("")
+            fail(reason)
+    opened[0]
+
+describe "Linux service V4 host composition (service 40)":
+    it "starts only from the sealed proof re-verified against installed policy with a fresh clock":
+        # @req S40-START-01
+        # @capture(statistics): refusal reason for each missing, foreign or expired proof input
+        step("the genuine proof of this installed association re-verifies against installed bytes")
+        val fixture = s40_fixture()
+        val proof = s40_proof(fixture)
+        expect(linux_service_proof_held_v4(proof, fixture.binding, fixture.credential, Some(fixture.policy)).is_ok()).to_equal(true)
+        step("no installed policy read, or a policy holding other keys, is refused")
+        expect(linux_service_proof_held_v4(proof, fixture.binding, fixture.credential, None).unwrap_err()).to_equal("linux-service-enrollment-installed-policy-mismatch")
+        val other_policy = linux_service_verifier_policy_ops_v1(2, 66, S40_OPERATIONS)
+        expect(linux_service_proof_held_v4(proof, fixture.binding, fixture.credential, Some(other_policy)).unwrap_err()).to_equal("linux-service-enrollment-installed-policy-mismatch")
+        step("a proof of another association never starts this installed binding")
+        val foreign = s40_proof(linux_service_verifier_fixture_ops_v1(1, 65, S40_FAR, "/var/lib/simple/other", S40_OPERATIONS))
+        expect(linux_service_proof_held_v4(foreign, fixture.binding, fixture.credential, Some(fixture.policy)).unwrap_err()).to_equal("linux-host-service-proof-binding-mismatch")
+        step("a genuine proof over a credential other than the installed one is refused")
+        val resigned = linux_service_verifier_credential_v1(fixture.binding, 1, 65, S40_FAR - 1)
+        expect(linux_service_proof_held_v4(proof, fixture.binding, resigned, Some(fixture.policy)).unwrap_err()).to_equal("linux-host-service-proof-credential-mismatch")
+        step("an approval that expires while the service is down is refused at restart")
+        val installed = local_authority_policy_decode_v1(fixture.policy).unwrap()
+        val expires = host_local_context_v1(installed).grant_clock + 20000
+        val short = linux_service_verifier_fixture_ops_v1(1, 65, expires, "/var/lib/simple/hosts", S40_OPERATIONS)
+        val short_proof = s40_proof(short)
+        var polls = 0
+        while host_local_context_v1(installed).grant_clock <= expires and polls < 120:
+            thread_sleep_ms(500)
+            polls = polls + 1
+        expect(host_local_context_v1(installed).grant_clock > expires).to_equal(true)
+        expect(linux_service_proof_held_v4(short_proof, short.binding, short.credential, Some(short.policy)).unwrap_err()).to_equal("APPROVAL_EXPIRED")
+
+    it "mints a stable service-incarnation scope from the actual native machine only":
+        # @req S40-START-02
+        # @capture(statistics): minted scope bytes and each refused native/entropy input
+        step("signed IDs, actual machine and provider generation, empty boot, fresh incarnation")
+        val fixture = s40_fixture()
+        val scope = s40_scope(fixture)
+        expect(scope.boot_id).to_equal("")
+        expect(scope.continuity_mode).to_equal("service-incarnation-v1")
+        expect(scope.provider_generation).to_equal(41)
+        expect(scope.service_scope_id).to_equal(fixture.binding.service_scope_id)
+        step("another machine, a missing generation or non-random incarnation is refused")
+        var other = s40_native(fixture)
+        other.native_machine_id = "linux-machine-id-v1:ffffffffffffffff"
+        expect(linux_service_scope_v4(fixture.binding, other, "ab".repeat(16)).unwrap_err()).to_equal("linux-host-service-native-machine-mismatch")
+        var ungenerated = s40_native(fixture)
+        ungenerated.owner_generation = 0
+        expect(linux_service_scope_v4(fixture.binding, ungenerated, "ab".repeat(16)).unwrap_err()).to_equal("linux-host-service-native-generation")
+        expect(linux_service_scope_v4(fixture.binding, s40_native(fixture), "").unwrap_err()).to_equal("linux-host-service-entropy-unavailable")
+
+    it "never produces ready or status before the current association record is read back":
+        # @req S40-READY-01
+        # @capture(statistics): status refusal for an unstarted owner and status bytes after publication
+        step("an owner with no published current record has no status")
+        val unstarted = HostLinuxServiceCurrentV4(root: "/var/lib/simple/hosts/host-root-x")
+        expect(unstarted.status_v4().unwrap_err()).to_equal("linux-host-service-current-unpublished")
+        step("record bytes that were never read back do not count as published")
+        var unread = HostLinuxServiceCurrentV4(root: "/var/lib/simple/hosts/host-root-x")
+        unread.current_bytes = "version: 4\n"
+        unread.current_relative = "linux-service-current/x.sdn"
+        expect(unread.status_v4().unwrap_err()).to_equal("linux-host-service-current-unpublished")
+        step("a published flag without the retained owners is incomplete acquisition, not ready")
+        unread.published = true
+        expect(unread.status_v4().unwrap_err()).to_equal("linux-host-service-acquisition-incomplete")
+        step("status DATA binds the enrollment, scope and the exact current record digest")
+        val fixture = s40_fixture()
+        expect(linux_service_status_bytes_v4(fixture.binding, s40_scope(fixture), "record\n", false).unwrap_err()).to_equal("linux-host-service-current-unpublished")
+        val status = linux_service_status_bytes_v4(fixture.binding, s40_scope(fixture), "record\n", true).unwrap()
+        expect(status.contains(sha256_text("record\n"))).to_equal(true)
+        expect(status.contains(host_linux_service_enrollment_digest_v3(fixture.binding).unwrap())).to_equal(true)
+
+    it "admits an associated prepare only with fresh real signatures over the live scope":
+        # @req S40-PREPARE-01
+        # @capture(statistics): verified grant id and refusal reason for each unsigned, foreign or mismatched prepare
+        val fixture = s40_fixture()
+        val policy = local_authority_policy_decode_v1(fixture.policy).unwrap()
+        val scope = s40_scope(fixture)
+        val deadline = host_local_context_v1(policy).monotonic_ms + 600000
+        step("issuer and approver signatures by the installed keys verify")
+        val genuine = s40_prepare(scope, deadline, 1, 65)
+        expect(linux_service_prepare_authorize_v4(scope, policy, "issuer_1", genuine, host_local_context_v1(policy)).unwrap().id).to_equal("grant_2")
+        step("an unsigned prepare and one signed by foreign keys are refused")
+        expect(linux_service_prepare_authorize_v4(scope, policy, "issuer_1", s40_unsigned_prepare(genuine), host_local_context_v1(policy)).unwrap_err()).to_equal("ISSUER_SIGNATURE_INVALID")
+        expect(linux_service_prepare_authorize_v4(scope, policy, "issuer_1", s40_prepare(scope, deadline, 2, 66), host_local_context_v1(policy)).unwrap_err()).to_equal("ISSUER_SIGNATURE_INVALID")
+        step("another service incarnation or an unconfigured controller is refused before verification")
+        val other_scope = linux_service_scope_v4(fixture.binding, s40_native(fixture), "cd".repeat(16)).unwrap()
+        expect(linux_service_prepare_authorize_v4(other_scope, policy, "issuer_1", genuine, host_local_context_v1(policy)).unwrap_err()).to_equal("linux-host-service-prepare-scope-mismatch")
+        expect(linux_service_prepare_authorize_v4(scope, policy, "issuer_9", genuine, host_local_context_v1(policy)).unwrap_err()).to_equal("linux-host-service-controller-mismatch")
+
+    it "binds the association to the actual native boot, generation and startup epoch":
+        # @req S40-ASSOC-01
+        # @capture(statistics): association digest and refusal for each changed native projection
+        val fixture = s40_fixture()
+        val policy = local_authority_policy_decode_v1(fixture.policy).unwrap()
+        val prepare = s40_prepare(s40_scope(fixture), host_local_context_v1(policy).monotonic_ms + 600000, 1, 65)
+        step("the projected plan from the actual native identity associates")
+        val native = s40_native(fixture)
+        val association = s40_association(fixture, prepare, native).unwrap()
+        expect(association.epoch_record_digest).to_equal(s40_epoch())
+        expect(association.service_process_identity_digest).to_equal(native.process_identity_digest)
+        step("a plan projected for another boot or provider generation is refused")
+        val receipt = host_reservation_receipt_v1(prepare.prepare.intent, prepare.prepare.operation).unwrap()
+        var other_boot = native
+        other_boot.native_boot_id = "other-boot"
+        expect(linux_service_association_v4(fixture.binding, s40_scope(fixture), s40_epoch(), native, prepare, receipt,
+            s40_execution(other_boot)).unwrap_err()).to_equal("linux-host-service-native-projection-mismatch")
+        var other_generation = native
+        other_generation.owner_generation = 42
+        expect(linux_service_association_v4(fixture.binding, s40_scope(fixture), s40_epoch(), native, prepare, receipt,
+            s40_execution(other_generation)).unwrap_err()).to_equal("linux-host-service-native-projection-mismatch")
+        step("a different startup epoch is refused")
+        expect(linux_service_association_v4(fixture.binding, s40_scope(fixture), "d".repeat(64), native, prepare, receipt,
+            s40_execution(native)).unwrap_err()).to_equal("linux-host-service-native-projection-mismatch")
+
+    it "authorizes associated execute only for the stored association with fresh signatures":
+        # @req S40-EXECUTE-01
+        # @capture(statistics): verified grant id and refusal reason for missing, foreign, unsigned and rebound requests
+        val fixture = s40_fixture()
+        val policy = local_authority_policy_decode_v1(fixture.policy).unwrap()
+        val scope = s40_scope(fixture)
+        val prepare = s40_prepare(scope, host_local_context_v1(policy).monotonic_ms + 600000, 1, 65)
+        val association = s40_association(fixture, prepare, s40_native(fixture)).unwrap()
+        val stored = Some(host_execution_association_encode_v3(association).unwrap())
+        step("the exact stored association signed by the installed keys verifies")
+        val genuine = s40_execute(prepare, association, 1, 65)
+        expect(linux_service_execute_authorize_core_v4(scope, policy, "issuer_1", genuine, stored, host_local_context_v1(policy)).unwrap().id).to_equal("grant_2")
+        step("no stored association, or a foreign one, is refused")
+        expect(linux_service_execute_authorize_core_v4(scope, policy, "issuer_1", genuine, None, host_local_context_v1(policy)).unwrap_err()).to_equal("linux-host-service-association-missing")
+        var foreign_native = s40_native(fixture)
+        foreign_native.process_identity_digest = "f".repeat(64)
+        val foreign = s40_association(fixture, prepare, foreign_native).unwrap()
+        expect(linux_service_execute_authorize_core_v4(scope, policy, "issuer_1", s40_execute(prepare, foreign, 1, 65), stored,
+            host_local_context_v1(policy)).unwrap_err()).to_equal("linux-host-service-association-foreign")
+        step("foreign-key signatures over the genuine association are refused")
+        expect(linux_service_execute_authorize_core_v4(scope, policy, "issuer_1", s40_execute(prepare, association, 2, 66), stored,
+            host_local_context_v1(policy)).unwrap_err()).to_equal("ISSUER_SIGNATURE_INVALID")
+        step("signatures over a foreign association do not authorize the stored one")
+        var rebound = s40_execute(prepare, foreign, 1, 65)
+        rebound.association = association
+        expect(linux_service_execute_authorize_core_v4(scope, policy, "issuer_1", rebound, stored, host_local_context_v1(policy)).unwrap_err()).to_equal("associated-execute-operation-mismatch")
+
+    it "keeps the original deadline on a same-ID prepare retry and refuses a renewal":
+        # @req S40-RETRY-01
+        # @capture(statistics): receipt digests of the first prepare and the retry, and the renewal refusal
+        val fixture = s40_fixture()
+        val policy = local_authority_policy_decode_v1(fixture.policy).unwrap()
+        val scope = s40_scope(fixture)
+        val deadline = host_local_context_v1(policy).monotonic_ms + 600000
+        val prepare = s40_prepare(scope, deadline, 1, 65)
+        val grant = linux_service_prepare_authorize_v4(scope, policy, "issuer_1", prepare, host_local_context_v1(policy)).unwrap()
+        val root = secure_temp_dir("/tmp", "s40-capacity").unwrap()
+        val capacity = HostCapacityV1("worker_1", "host-authority", container_scope_fence_id_v2(scope).unwrap(), 41, 2000, 536870912, [])
+        val owner = s40_open(root + "/journal", capacity)
+        step("first prepare admits and its receipt carries the original intent")
+        val intent = prepare.prepare.intent
+        val operation = prepare.prepare.operation
+        val first = host_capacity_owner_prepare_v1(owner, intent, operation, grant, host_local_context_v1(policy)).unwrap()
+        val receipt = host_capacity_owner_prepared_receipt_v1(first, intent, operation, grant, host_local_context_v1(policy)).unwrap()
+        expect(receipt.intent_digest).to_equal(sha256_text(host_reservation_encode_intent_v1(intent).unwrap()))
+        step("the exact same-ID retry returns the same receipt, not a renewed one")
+        val again = host_capacity_owner_prepare_v1(first, intent, operation, grant, host_local_context_v1(policy)).unwrap()
+        val replay = host_capacity_owner_prepared_receipt_v1(again, intent, operation, grant, host_local_context_v1(policy)).unwrap()
+        expect(replay.receipt_digest).to_equal(receipt.receipt_digest)
+        expect(replay.prepared_revision).to_equal(receipt.prepared_revision)
+        step("the same ID with a later deadline is refused, and its association would differ")
+        val renewed = s40_prepare(scope, deadline + 600000, 1, 65)
+        val renewed_grant = linux_service_prepare_authorize_v4(scope, policy, "issuer_1", renewed, host_local_context_v1(policy)).unwrap()
+        expect(host_capacity_owner_prepare_v1(again, renewed.prepare.intent, renewed.prepare.operation, renewed_grant,
+            host_local_context_v1(policy)).unwrap_err()).to_equal("reservation-payload-mismatch")
+        val original_bytes = host_execution_association_encode_v3(s40_association(fixture, prepare, s40_native(fixture)).unwrap()).unwrap()
+        val renewed_bytes = host_execution_association_encode_v3(s40_association(fixture, renewed, s40_native(fixture)).unwrap()).unwrap()
+        expect(renewed_bytes == original_bytes).to_equal(false)
+        step("a retry after the ORIGINAL deadline is refused: the deadline is never renewed")
+        val brief_deadline = host_local_context_v1(policy).monotonic_ms + 30000
+        val brief = s40_prepare(scope, brief_deadline, 1, 65, "operation_3", again.ledger.revision)
+        val brief_grant = linux_service_prepare_authorize_v4(scope, policy, "issuer_1", brief, host_local_context_v1(policy)).unwrap()
+        val held = host_capacity_owner_prepare_v1(again, brief.prepare.intent, brief.prepare.operation, brief_grant,
+            host_local_context_v1(policy)).unwrap()
+        var waits = 0
+        while host_local_context_v1(policy).monotonic_ms < brief_deadline and waits < 120:
+            thread_sleep_ms(500)
+            waits = waits + 1
+        expect(host_local_context_v1(policy).monotonic_ms >= brief_deadline).to_equal(true)
+        val late = host_capacity_owner_prepare_v1(held, brief.prepare.intent, brief.prepare.operation, brief_grant,
+            host_local_context_v1(policy))
+        expect(late.unwrap_err()).to_equal("prepare-expired")
+        val closed = host_capacity_owner_close_owned_v2(held)
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "shuts down fail-closed and releases the retained journal":
+        # @req S40-SHUTDOWN-01
+        # @capture(statistics): close completion, retained carriers and post-close status refusal
+        step("a closed owner refuses status even if it was published")
+        var owner = HostLinuxServiceCurrentV4(root: "/var/lib/simple/hosts/host-root-x")
+        owner.published = true
+        owner.current_bytes = "record\n"
+        owner.current_relative = "linux-service-current/x.sdn"
+        val empty = host_linux_service_close_v4(owner)
+        expect(empty.completed).to_equal(true)
+        expect(empty.owner.status_v4().unwrap_err()).to_equal("linux-host-service-closed")
+        # Owned-lock journal branch; the Linux-protected close branch needs the real fixture driver.
+        step("a retained owned-lock capacity journal is closed through its owner and no longer retained")
+        val fixture = s40_fixture()
+        val root = secure_temp_dir("/tmp", "s40-close").unwrap()
+        val capacity = HostCapacityV1("worker_1", "host-authority", container_scope_fence_id_v2(s40_scope(fixture)).unwrap(), 41, 2000, 536870912, [])
+        var holding = HostLinuxServiceCurrentV4(root: root)
+        holding.capacity = Some(s40_open(root + "/journal", capacity))
+        val closed = host_linux_service_close_v4(holding)
+        expect(closed.completed).to_equal(true)
+        expect(closed.owner.capacity.is_none()).to_equal(true)
+        expect(closed.owner.journal_cleanup.is_none()).to_equal(true)
+        expect(closed.released_all).to_equal(true)
+        expect(closed.owner.status_v4().unwrap_err()).to_equal("linux-host-service-closed")
+        step("a repeated close of the released owner reports completion again, with nothing retained")
+        expect(host_linux_service_close_v4(closed.owner).completed).to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
