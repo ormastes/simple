@@ -2,7 +2,7 @@
 # This module never imports the capacity owner/local root or a provider, writes
 # a journal, observes a current native process, or creates an exec lease.
 use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
-    distributed_operation_journal_lookup_v2}
+    distributed_operation_journal_lookup_v2, distributed_operation_journal_read_required_v3}
 use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
 use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
 use std.common.contracts.orchestration.host_capacity_v1.HostCapacityV1
@@ -14,8 +14,8 @@ use std.common.contracts.orchestration.host_execute_request_v2.host_execute_requ
 use std.common.contracts.container.execution_v2.{ContainerExecutionPlanV2, ContainerHostScopeV2,
     container_execution_plan_bytes_v2, container_host_scope_bytes_v2}
 use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeIntentV1}
-use std.nogc_sync_mut.orchestration.host_execution_intent_v1.host_execution_intent_load_v1
-use std.nogc_sync_mut.orchestration.host_execution_observation_v2.host_execution_observation_load_v2
+use std.nogc_sync_mut.orchestration.host_execution_intent_v1.{host_execution_intent_load_v1, host_execution_intent_load_owned_v3}
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.{host_execution_observation_load_v2, host_execution_observation_load_owned_v3}
 use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
 use std.common.crypto.sha256.sha256_text
 
@@ -40,8 +40,10 @@ pub fn host_runtime_exec_child_packet_v3(journal: DistributedOperationJournalV2,
     val child_envelope = distributed_encode_operation_v2(child)?
     val child_state = distributed_operation_journal_lookup_v2(journal, child.id)?
     if child_state.envelope != child_envelope: return Err("exec-projection-child-envelope-mismatch")
-    val packet_path = journal.root + "/host-runtime-exec-requests/" + sha256_text(child.id) + ".sdn"
-    val packet = host_runtime_exec_request_decode_v3(file_read_regular_no_follow_bounded(packet_path, 4194304)?)?
+    val packet_bytes = if journal.linux_storage.is_some():
+        distributed_operation_journal_read_required_v3(journal, "host-runtime-exec-requests/" + sha256_text(child.id) + ".sdn", 4194304)?
+        else: file_read_regular_no_follow_bounded(journal.root + "/host-runtime-exec-requests/" + sha256_text(child.id) + ".sdn", 4194304)?
+    val packet = host_runtime_exec_request_decode_v3(packet_bytes)?
     if distributed_encode_operation_v2(packet.operation)? != child_envelope:
         return Err("exec-projection-retained-child-mismatch")
     val matched = host_runtime_exec_parent_projection_v3(journal, capacity, packet)?
@@ -69,7 +71,9 @@ pub fn host_runtime_exec_parent_projection_v3(journal: DistributedOperationJourn
     val parent_envelope = distributed_encode_operation_v2(parent)?
     val parent_state = distributed_operation_journal_lookup_v2(journal, parent.id)?
     if parent_state.envelope != parent_envelope: return Err("exec-projection-parent-envelope-mismatch")
-    val parent_payload = file_read_regular_no_follow_bounded(journal.root + "/reservation-payloads/" + parent.payload_digest + ".sdn", 65536)?
+    val parent_payload = if journal.linux_storage.is_some():
+        distributed_operation_journal_read_required_v3(journal, "reservation-payloads/" + parent.payload_digest + ".sdn", 65536)?
+        else: file_read_regular_no_follow_bounded(journal.root + "/reservation-payloads/" + parent.payload_digest + ".sdn", 65536)?
     val parent_intent = host_reservation_decode_intent_v1(parent_payload)?
     if host_reservation_encode_intent_v1(packet.parent_binding.host_intent)? != parent_payload:
         return Err("exec-projection-parent-intent-mismatch")
@@ -86,10 +90,12 @@ pub fn host_runtime_exec_parent_projection_v3(journal: DistributedOperationJourn
     if packet.intent.request.timeout_ms > child.duration_ms:
         return Err("exec-projection-control-window-mismatch")
 
-    val execute_path = journal.root + "/host-execute-packets/" + sha256_text(parent.id) + ".sdn"
     # V2 only. A current supplied controller chain is correlated to this retained
     # Host record; it is not a claim of historical Host assignment-object storage.
-    val executed = host_execute_request_decode_v2(file_read_regular_no_follow_bounded(execute_path, 2097152)?)?
+    val execute_bytes = if journal.linux_storage.is_some():
+        distributed_operation_journal_read_required_v3(journal, "host-execute-packets/" + sha256_text(parent.id) + ".sdn", 2097152)?
+        else: file_read_regular_no_follow_bounded(journal.root + "/host-execute-packets/" + sha256_text(parent.id) + ".sdn", 2097152)?
+    val executed = host_execute_request_decode_v2(execute_bytes)?
     if (distributed_encode_operation_v2(executed.operation)? != parent_envelope or
             host_reservation_encode_intent_v1(executed.intent)? != parent_payload):
         return Err("exec-projection-parent-execution-envelope-mismatch")
@@ -97,11 +103,13 @@ pub fn host_runtime_exec_parent_projection_v3(journal: DistributedOperationJourn
     if container_execution_plan_bytes_v2(executed.execution.plan)? != container_execution_plan_bytes_v2(expected_plan)?:
         return Err("exec-projection-parent-plan-mismatch")
     val expected_runtime = packet.intent.request.parent_runtime
-    val created = host_execution_intent_load_v1(journal.root, parent.id)?
+    val created = if journal.linux_storage.is_some(): host_execution_intent_load_owned_v3(journal, parent.id)?
+        else: host_execution_intent_load_v1(journal.root, parent.id)?
     if not exec_projection_creation_matches_v3(created, expected_runtime):
         return Err("exec-projection-parent-creation-mismatch")
     # Load the original immutable observation, never a latest native inspection.
-    val observed = host_execution_observation_load_v2(journal.root, parent.id)?
+    val observed = if journal.linux_storage.is_some(): host_execution_observation_load_owned_v3(journal, parent.id)?
+        else: host_execution_observation_load_v2(journal.root, parent.id)?
     if (observed.operation_id != parent.id or observed.operation_digest != packet.intent.parent_operation_digest or
             observed.plan_digest != parent_intent.plan_digest or observed.request_digest != expected_plan.request_digest or
             observed.provider_identity_digest != packet.intent.parent_provider_identity_digest or
