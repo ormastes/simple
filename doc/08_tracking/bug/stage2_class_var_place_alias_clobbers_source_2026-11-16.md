@@ -25,7 +25,8 @@ s3wa2 tip `03b340fbbfe`, lines 1786/1802), the code does:
     ...
     trait_module = self.module_surfaces.surfaces[idx]        # :1802
 
-`LlvmTypeMapper` (`llvm_type_mapper.spl`, 4 impl rows) implements
+`LlvmTypeMapper` (`llvm_type_mapper.spl`: 2 top-level `impl` blocks, but the
+surface's impls array has 4 rows, per the `... 4` in the surface key) implements
 `TypeMapper`. That trait lives in `common.type_mapper`, which has 0 impls. The
 reassignment overwrote `imported_mod` itself. The next impl row (position 3)
 then read `type_mapper`'s empty impls. The surface key had been computed before
@@ -64,16 +65,27 @@ gets a new local and an `emit_copy` of the handle. The record
 `test/01_unit/compiler/mir/class_var_place_alias_spec.spl` (red 2/4, green 4/4
 on the seed).
 
+Native proof (2026-11-16). The fix was compiled into a Stage 3: the integ2
+Stage 2 compiled `mir_lowering_stmts.spl`, which was relinked into `simple-r17m`.
+Both binaries ran `native-build --backend=llvm` on the fixture:
+
+    r16  (unfixed): param a=tm t=tm   loop a=llvm,tm,tm len=4      reverse a=tm t=tm
+    r17m (fixed):   param a=llvm t=tm loop a=llvm,llvm,llvm len=12 reverse a=tm t=llvm
+
+`diaglink/s3i2/gate.sh` passes on r17m (j4/sc/hello, compile + native-build).
+
 ## Workaround (Stage 3 source)
 
 `@workaround bug=stage2_class_var_place_alias_clobbers_source_2026-11-16` in
 `module_reexport_materialization.spl`. It selects the trait owner by index and
 binds it once with `val`.
 
-An awk census of `var X = Y` with a class-typed `Y` that is later reassigned
-found no other site in the HIR/MIR/driver path. Library hits (`ByteBuffer`
-writers, `Engine2D`, ...) are outside the Stage 3 closure, or they never read
-the source again.
+An awk census looked for `var X = Y` / `val X = Y`, with `Y` class-typed and
+either name reassigned later. It found no other site in the HIR/MIR/driver path.
+It is a heuristic: `Y`'s type is inferred only from a parameter or `val`/`var`
+annotation, or from a `ClassName(...)` initializer. An unannotated class local
+can still hide this shape. Library hits (`ByteBuffer` writers, `Engine2D`, ...)
+are outside the Stage 3 closure, or they never read the source again.
 
 ## Note on earlier guards
 
