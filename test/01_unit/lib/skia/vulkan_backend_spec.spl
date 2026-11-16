@@ -10,16 +10,19 @@ to verify this component's observable behavior and pinned values.
 # and CommandBufferRecord production from SkPicture.
 
 use std.spipe.*
-use std.skia.entity.geometry.{SkRect, SkPoint}
+use std.skia.entity.geometry.{SkRect, SkIRect, SkPoint, sk_rrect_make}
 use std.skia.entity.paint.{SkPaint, sk_paint_new, sk_paint_fill, sk_paint_stroke}
+use std.skia.entity.shader.{sk_shader_make_linear_gradient, sk_shader_make_radial_gradient}
 use std.skia.entity.path.{SkPath, SkPathVerb, SkPathSegment, sk_path_new}
-use std.skia.entity.picture.{SkPicture, SkPictureOp, sk_picture_empty}
-use std.skia.entity.enums.{SkBlendMode, SkPaintStyle}
-use std.skia.entity.color.{SkColor, sk_color_black}
+use std.skia.entity.picture.{SkPicture, SkPictureOp, SkPictureOpKind, sk_picture_empty}
+use std.skia.entity.canvas.{sk_canvas_make, sk_save_layer_rec}
+use std.skia.entity.enums.{SkBlendMode, SkPaintStyle, SkTileMode}
+use std.skia.entity.color.{SkColor, sk_color_black, sk_color_argb}
 use std.skia.backend.vulkan.backend.{
     VulkanBackend, PipelineKey, ShaderModule, ShaderKind,
     Vertex, VertexBuffer, DescriptorSet, RenderPassDesc,
     CommandBufferRecord, VulkanSubmissionRecord, VkCommand, VkCommandKind,
+    SkVulkanSurface, sk_vulkan_context_default, sk_vulkan_context_init, sk_vulkan_surface_make,
     vk_backend_new,
     triangulate_path, build_vertex_buffer,
     compile_shader_module, allocate_descriptor_set,
@@ -187,3 +190,68 @@ describe "VulkanBackend":
         expect(submission.submitted_commands).to_equal(0)  # oracle: expected value pinned by spec
         expect(submission.draw_commands).to_equal(0)  # oracle: expected value pinned by spec
         expect(submission.rejected_commands).to_equal(1)  # oracle: expected value pinned by spec
+
+    it "compile_shader_module inspects paint.shader for linear and radial gradients":
+        step("Verify: compile_shader_module inspects paint.shader kinds")
+        val p0 = SkPoint(x: 0.0, y: 0.0)
+        val p1 = SkPoint(x: 100.0, y: 0.0)
+        val cols = [sk_color_argb(255, 255, 0, 0), sk_color_argb(255, 0, 0, 255)]
+        val pos = [0.0, 1.0]
+        val linear = sk_shader_make_linear_gradient(p0, p1, cols, pos, SkTileMode.Clamp)
+        val radial = sk_shader_make_radial_gradient(SkPoint(x: 50.0, y: 50.0), 40.0, cols, pos, SkTileMode.Clamp)
+        val mod_solid = compile_shader_module(sk_paint_new())
+        val mod_lin = compile_shader_module(sk_paint_new().with_shader(linear))
+        val mod_rad = compile_shader_module(sk_paint_new().with_shader(radial))
+        expect(mod_solid.kind).to_equal(ShaderKind.SolidColor)
+        expect(mod_lin.kind).to_equal(ShaderKind.LinearGradient)
+        expect(mod_rad.kind).to_equal(ShaderKind.RadialGradient)
+
+    it "render_picture encodes real SaveLayer, DrawOval, DrawRRect, and Restore ops":
+        step("Verify: render_picture emits BeginRenderPass/Draw/EndRenderPass for real ops")
+        var backend = vk_backend_new()
+        val cull = SkRect(left: 0.0, top: 0.0, right: 100.0, bottom: 100.0)
+        val p_red = sk_paint_fill(sk_color_argb(255, 220, 40, 40))
+        val p_blue = sk_paint_fill(sk_color_argb(255, 40, 80, 220))
+        val layer_rec = sk_save_layer_rec(SkRect(left: 10.0, top: 10.0, right: 90.0, bottom: 90.0), p_red)
+        val rr = sk_rrect_make(SkRect(left: 20.0, top: 20.0, right: 80.0, bottom: 70.0), 8.0, 8.0)
+        val pic = sk_canvas_make(100, 100)
+            .begin_recording(cull)
+            .save_layer(layer_rec)
+            .draw_oval(SkRect(left: 25.0, top: 25.0, right: 75.0, bottom: 75.0), p_red)
+            .draw_rrect(rr, p_blue)
+            .restore()
+            .end_recording()
+        val cb = backend.render_picture(pic, cull)
+        val submission = backend.submit(cb)
+        expect(submission.ok).to_equal(true)
+        expect(submission.draw_commands).to_equal(2)
+        var has_begin_rp = false
+        var has_end_rp = false
+        for cmd in cb.commands:
+            if cmd.kind == VkCommandKind.BeginRenderPass:
+                has_begin_rp = true
+            if cmd.kind == VkCommandKind.EndRenderPass:
+                has_end_rp = true
+        expect(has_begin_rp).to_equal(true)
+        expect(has_end_rp).to_equal(true)
+
+    it "SkVulkanSurface flush_picture, snapshot, and read_pixels return real pixels":
+        step("Verify: SkVulkanSurface flush_picture/snapshot/read_pixels produce rasterized pixels")
+        val ctx = sk_vulkan_context_init(0)
+        val s0 = sk_vulkan_surface_make(ctx, 16, 16)
+        val bounds = SkRect(left: 0.0, top: 0.0, right: 16.0, bottom: 16.0)
+        val fill = sk_paint_fill(sk_color_argb(255, 0x33, 0x66, 0xCC))
+        val pic = sk_canvas_make(16, 16)
+            .begin_recording(bounds)
+            .draw_rect(SkRect(left: 2.0, top: 2.0, right: 14.0, bottom: 14.0), fill)
+            .end_recording()
+        val s1 = s0.flush_picture(pic).flush()
+        val snap = s1.snapshot()
+        expect(snap.width()).to_equal(16)
+        expect(snap.height()).to_equal(16)
+        val px = s1.read_pixels(SkIRect(left: 0, top: 0, right: 16, bottom: 16))
+        expect(px.len()).to_equal(16 * 16 * 4)
+        # Center pixel (8, 8) must have non-zero color channels
+        val off = (8 * 16 + 8) * 4
+        val sum = px[off] + px[off + 1] + px[off + 2] + px[off + 3]
+        expect(sum).to_be_greater_than(0)

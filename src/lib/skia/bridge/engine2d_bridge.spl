@@ -32,9 +32,19 @@
 # ============================================================================
 
 use std.skia.entity.picture.{SkPicture, SkPictureOp, SkPictureOpKind}
-use std.skia.entity.enums.{SkPaintStyle, SkBlendMode, SkColorType, SkAlphaType}
+use std.skia.entity.enums.{SkPaintStyle, SkBlendMode, SkColorType, SkAlphaType, SkPathDirection, SkPathFillType}
+use std.skia.entity.geometry.{SkRect, sk_rrect_make}
+use std.skia.entity.color.{SkColor, SkColor4f, sk_color4f, sk_color_alpha, sk_color_red, sk_color_green, sk_color_blue}
+use std.skia.entity.matrix.{Matrix3x3}
+use std.skia.entity.path.{SkPath, SkPathVerb, sk_path_new, sk_path_mapped}
+use std.skia.entity.paint.{SkPaint}
 use std.skia.entity.image.{SkImage}
-use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.skia.entity.textblob.{sk_unpack_text_blob_from_image, sk_text_blob_run_text}
+use std.skia.feature.text.{skia_default_vector_font_path}
+use std.skia.backend.cpu.raster_prims.{Bitmap, fill_path_aa}
+use std.common.math.special.{sqrt_f64}
+use std.gpu.engine2d.color.{rgba}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D, SfntRasterBitmap, engine2d_sfnt_rasterize_run}
 use std.gc_async_mut.gpu.engine2d.helpers_availability.{backend_canonical_name}
 
 # ----------------------------------------------------------------------------
@@ -219,6 +229,14 @@ fn skia_picture_engine2d_preflight(picture: SkPicture) -> BridgeReport:
 # Engine2D backend lane (SIMD CPU / GPU, selected by `backend_name`) and read
 # back the resulting framebuffer plus the op-coverage report.
 #
+fn _bridge_transform_rect(rect: SkRect, tx: f64, ty: f64, sx: f64, sy: f64) -> SkRect:
+    SkRect(
+        left: rect.left * sx + tx,
+        top: rect.top * sy + ty,
+        right: rect.right * sx + tx,
+        bottom: rect.bottom * sy + ty
+    )
+
 # The whole op loop is inlined here so the engine never crosses a function
 # boundary inside this module.
 # ----------------------------------------------------------------------------
@@ -237,6 +255,8 @@ fn skia_render_picture_on_engine2d_reported(picture: SkPicture, width: i32, heig
             val color = sk_color_to_u32(op.paint.color)
             if op.paint.style == SkPaintStyle.Fill:
                 eng.draw_rect_filled(x, y, w, h, color)
+            elif op.paint.stroke_width > 1.5:
+                eng.draw_rect_thick(x, y, w, h, color, op.paint.stroke_width.to_i64() as i32)
             else:
                 # Stroke (and draw_line, which records as a Stroke DrawRect)
                 # maps to the outline primitive, not a filled block.
@@ -251,27 +271,34 @@ fn skia_render_picture_on_engine2d_reported(picture: SkPicture, width: i32, heig
             val y = _bridge_floor_i32(rect.top)
             val w = _bridge_ceil_i32(rect.right) - x
             val h = _bridge_ceil_i32(rect.bottom) - y
-            # Engine2D takes a single corner radius; skia carries rx/ry, so the
-            # larger of the two is used.
-            var radius = op.rx
-            if op.ry > radius:
-                radius = op.ry
-            eng.draw_rounded_rect(x, y, w, h, radius.to_i64() as i32, sk_color_to_u32(op.paint.color))
+            val color = sk_color_to_u32(op.paint.color)
+            var radius_f = op.rx
+            if op.ry > radius_f:
+                radius_f = op.ry
+            val radius = if radius_f > 0.0: radius_f.to_i64() as i32 else: 0i32
+            if op.paint.style == SkPaintStyle.Stroke:
+                val thick = if op.paint.stroke_width > 1.0: op.paint.stroke_width.to_i64() as i32 else: 1i32
+                eng.draw_rounded_rect_outline(x, y, w, h, radius, color, thick)
+            elif radius <= 0i32:
+                eng.draw_rect_filled(x, y, w, h, color)
+            else:
+                eng.draw_rounded_rect(x, y, w, h, radius, color)
         elif op.kind == SkPictureOpKind.DrawOval:
             val rect = op.rect
             val ox = _bridge_floor_i32(rect.left)
             val oy = _bridge_floor_i32(rect.top)
             val ow = _bridge_ceil_i32(rect.right) - ox
             val oh = _bridge_ceil_i32(rect.bottom) - oy
-            val cx = ox + ow / 2
-            val cy = oy + oh / 2
-            val rx = ow / 2
-            val ry = oh / 2
-            val color = sk_color_to_u32(op.paint.color)
-            if op.paint.style == SkPaintStyle.Fill:
-                eng.draw_ellipse_filled(cx, cy, rx, ry, color)
-            else:
-                eng.draw_ellipse(cx, cy, rx, ry, color)
+            if ow > 0 and oh > 0:
+                val cx = ox + ow / 2
+                val cy = oy + oh / 2
+                val rx = ow / 2
+                val ry = oh / 2
+                val color = sk_color_to_u32(op.paint.color)
+                if op.paint.style == SkPaintStyle.Fill:
+                    eng.draw_ellipse_filled(cx, cy, rx, ry, color)
+                else:
+                    eng.draw_ellipse(cx, cy, rx, ry, color)
         elif op.kind == SkPictureOpKind.DrawImage:
             if val img = op.image:
                 if _bridge_image_shape_valid(img):
@@ -283,8 +310,8 @@ fn skia_render_picture_on_engine2d_reported(picture: SkPicture, width: i32, heig
                     eng.draw_image(x, y, w, h, pixels)
         # Preflight records missing images and unsupported ops in the receipt.
 
-    eng.present()
     val readback = eng.read_pixels_with_source()
+    eng.present()
     coverage.readback_source = readback.source
     val expected_pixels = width.to_i64() * height.to_i64()
     if readback.pixel_count != expected_pixels or readback.pixels.len().to_i64() != expected_pixels:
@@ -300,6 +327,977 @@ fn skia_render_picture_on_engine2d_reported(picture: SkPicture, width: i32, heig
         if coverage.reason == "":
             coverage.reason = "readback-source: {readback.source}"
     BridgeRenderResult(pixels: readback.pixels, report: coverage)
+
+fn _bridge_abs_f64(v: f64) -> f64:
+    if v < 0.0: 0.0 - v else: v
+
+fn _bridge_min_f64(a: f64, b: f64) -> f64:
+    if a < b: a else: b
+
+fn _bridge_max_f64(a: f64, b: f64) -> f64:
+    if a > b: a else: b
+
+fn _bridge_min_i32(a: i32, b: i32) -> i32:
+    if a < b: a else: b
+
+fn _bridge_max_i32(a: i32, b: i32) -> i32:
+    if a > b: a else: b
+
+fn _bridge_round_i32(v: f64) -> i32:
+    _bridge_floor_i32(v + 0.5)
+
+fn _bridge_clamp_u8_i32(v: f64) -> i32:
+    val iv = _bridge_floor_i32(v)
+    if iv < 0: 0 elif iv > 255: 255 else: iv
+
+fn _bridge_ctm_matrix(tx: f64, ty: f64, sx: f64, sy: f64, rot_deg: f64) -> Matrix3x3:
+    val t_mat = Matrix3x3.translate(tx, ty)
+    val tr_mat = if _bridge_abs_f64(rot_deg) > 0.0001:
+        t_mat.mul(Matrix3x3.rotate_degrees(rot_deg))
+    else:
+        t_mat
+    tr_mat.mul(Matrix3x3.scale(sx, sy))
+
+fn _bridge_ctm_is_axis_aligned_pos(sx: f64, sy: f64, rot_deg: f64) -> bool:
+    _bridge_abs_f64(rot_deg) <= 0.0001 and sx > 0.0 and sy > 0.0
+
+fn _bridge_rect_from_ctm(rect: SkRect, ctm: Matrix3x3) -> SkRect:
+    val p0 = ctm.map_point(rect.left, rect.top)
+    val p1 = ctm.map_point(rect.right, rect.top)
+    val p2 = ctm.map_point(rect.right, rect.bottom)
+    val p3 = ctm.map_point(rect.left, rect.bottom)
+    val x0 = _bridge_min_f64(_bridge_min_f64(p0.x, p1.x), _bridge_min_f64(p2.x, p3.x))
+    val x1 = _bridge_max_f64(_bridge_max_f64(p0.x, p1.x), _bridge_max_f64(p2.x, p3.x))
+    val y0 = _bridge_min_f64(_bridge_min_f64(p0.y, p1.y), _bridge_min_f64(p2.y, p3.y))
+    val y1 = _bridge_max_f64(_bridge_max_f64(p0.y, p1.y), _bridge_max_f64(p2.y, p3.y))
+    SkRect(left: x0, top: y0, right: x1, bottom: y1)
+
+fn _bridge_paint_color4f(c: SkColor) -> SkColor4f:
+    sk_color4f(
+        sk_color_red(c).to_f64() / 255.0,
+        sk_color_green(c).to_f64() / 255.0,
+        sk_color_blue(c).to_f64() / 255.0,
+        sk_color_alpha(c).to_f64() / 255.0
+    )
+
+fn _bridge_draw_thick_segment(bitmap: Bitmap, x0: f64, y0: f64, x1: f64, y1: f64, half_w: f64, color: SkColor4f):
+    val dx = x1 - x0
+    val dy = y1 - y0
+    val len = sqrt_f64(dx * dx + dy * dy)
+    if len >= 0.0001:
+        val nx = (0.0 - dy) / len * half_w
+        val ny = dx / len * half_w
+        val quad_path = sk_path_new()
+            .with_fill_type(SkPathFillType.Winding)
+            .move_to(x0 + nx, y0 + ny)
+            .line_to(x1 + nx, y1 + ny)
+            .line_to(x1 - nx, y1 - ny)
+            .line_to(x0 - nx, y0 - ny)
+            .close()
+        fill_path_aa(bitmap, quad_path, color)
+
+fn _bridge_stroke_path(bitmap: Bitmap, path: SkPath, color: SkColor4f, width: f64):
+    val half_w = width / 2.0
+    var cur_x = 0.0
+    var cur_y = 0.0
+    var start_x = 0.0
+    var start_y = 0.0
+    var i: i64 = 0
+    while i < path.segments.len():
+        val seg = path.segments[i]
+        if seg.verb == SkPathVerb.Move:
+            cur_x = seg.pts[0].x
+            cur_y = seg.pts[0].y
+            start_x = cur_x
+            start_y = cur_y
+        elif seg.verb == SkPathVerb.Line:
+            val tx = seg.pts[0].x
+            val ty = seg.pts[0].y
+            _bridge_draw_thick_segment(bitmap, cur_x, cur_y, tx, ty, half_w, color)
+            cur_x = tx
+            cur_y = ty
+        elif seg.verb == SkPathVerb.Close:
+            _bridge_draw_thick_segment(bitmap, cur_x, cur_y, start_x, start_y, half_w, color)
+            cur_x = start_x
+            cur_y = start_y
+        elif seg.verb == SkPathVerb.Quad:
+            val p1x = seg.pts[0].x
+            val p1y = seg.pts[0].y
+            val p2x = seg.pts[1].x
+            val p2y = seg.pts[1].y
+            var step = 0
+            var prev_x = cur_x
+            var prev_y = cur_y
+            while step < 8:
+                step = step + 1
+                val t = (step as f64) / 8.0
+                val mt = 1.0 - t
+                val nx = mt * mt * cur_x + 2.0 * mt * t * p1x + t * t * p2x
+                val ny = mt * mt * cur_y + 2.0 * mt * t * p1y + t * t * p2y
+                _bridge_draw_thick_segment(bitmap, prev_x, prev_y, nx, ny, half_w, color)
+                prev_x = nx
+                prev_y = ny
+            cur_x = p2x
+            cur_y = p2y
+        elif seg.verb == SkPathVerb.Conic:
+            val p1x = seg.pts[0].x
+            val p1y = seg.pts[0].y
+            val p2x = seg.pts[1].x
+            val p2y = seg.pts[1].y
+            var step = 0
+            var prev_x = cur_x
+            var prev_y = cur_y
+            while step < 8:
+                step = step + 1
+                val t = (step as f64) / 8.0
+                val mt = 1.0 - t
+                val nx = mt * mt * cur_x + 2.0 * mt * t * p1x + t * t * p2x
+                val ny = mt * mt * cur_y + 2.0 * mt * t * p1y + t * t * p2y
+                _bridge_draw_thick_segment(bitmap, prev_x, prev_y, nx, ny, half_w, color)
+                prev_x = nx
+                prev_y = ny
+            cur_x = p2x
+            cur_y = p2y
+        elif seg.verb == SkPathVerb.Cubic:
+            val p1x = seg.pts[0].x
+            val p1y = seg.pts[0].y
+            val p2x = seg.pts[1].x
+            val p2y = seg.pts[1].y
+            val p3x = seg.pts[2].x
+            val p3y = seg.pts[2].y
+            var step = 0
+            var prev_x = cur_x
+            var prev_y = cur_y
+            while step < 16:
+                step = step + 1
+                val t = (step as f64) / 16.0
+                val mt = 1.0 - t
+                val nx = mt * mt * mt * cur_x + 3.0 * mt * mt * t * p1x + 3.0 * mt * t * t * p2x + t * t * t * p3x
+                val ny = mt * mt * mt * cur_y + 3.0 * mt * mt * t * p1y + 3.0 * mt * t * t * p2y + t * t * t * p3y
+                _bridge_draw_thick_segment(bitmap, prev_x, prev_y, nx, ny, half_w, color)
+                prev_x = nx
+                prev_y = ny
+            cur_x = p3x
+            cur_y = p3y
+        i = i + 1
+
+fn _bridge_fetch_image_pixel(image: SkImage, px: i64, py: i64) -> SkColor4f:
+    val w = image.info.width
+    val h = image.info.height
+    if px < 0 or px >= w or py < 0 or py >= h or image.pixels.len() == 0:
+        return SkColor4f(r: 0.0, g: 0.0, b: 0.0, a: 0.0)
+    val base = (py * w + px) * 4
+    if base < 0 or base + 3 >= image.pixels.len():
+        return SkColor4f(r: 0.0, g: 0.0, b: 0.0, a: 0.0)
+    val a = (image.pixels[base] & 0xFF).to_f64() / 255.0
+    val r = (image.pixels[base + 1] & 0xFF).to_f64() / 255.0
+    val g = (image.pixels[base + 2] & 0xFF).to_f64() / 255.0
+    val b = (image.pixels[base + 3] & 0xFF).to_f64() / 255.0
+    SkColor4f(r: r, g: g, b: b, a: a)
+
+fn _bridge_sample_image_bilinear(image: SkImage, u: f64, v: f64) -> SkColor4f:
+    if image.pixels.len() == 0:
+        return SkColor4f(r: 0.0, g: 0.0, b: 0.0, a: 0.0)
+    val x0 = u.to_i64()
+    val y0 = v.to_i64()
+    val x1 = if x0 + 1 < image.info.width: x0 + 1 else: x0
+    val y1 = if y0 + 1 < image.info.height: y0 + 1 else: y0
+    val tx = u - x0.to_f64()
+    val ty = v - y0.to_f64()
+    val c00 = _bridge_fetch_image_pixel(image, x0, y0)
+    val c10 = _bridge_fetch_image_pixel(image, x1, y0)
+    val c01 = _bridge_fetch_image_pixel(image, x0, y1)
+    val c11 = _bridge_fetch_image_pixel(image, x1, y1)
+    val r0 = c00.r + (c10.r - c00.r) * tx
+    val g0 = c00.g + (c10.g - c00.g) * tx
+    val b0 = c00.b + (c10.b - c00.b) * tx
+    val a0 = c00.a + (c10.a - c00.a) * tx
+    val r1 = c01.r + (c11.r - c01.r) * tx
+    val g1 = c01.g + (c11.g - c01.g) * tx
+    val b1 = c01.b + (c11.b - c01.b) * tx
+    val a1 = c01.a + (c11.a - c01.a) * tx
+    SkColor4f(
+        r: r0 + (r1 - r0) * ty,
+        g: g0 + (g1 - g0) * ty,
+        b: b0 + (b1 - b0) * ty,
+        a: a0 + (a1 - a0) * ty
+    )
+
+fn _bridge_rasterize_path(path: SkPath, paint: SkPaint, ctm: Matrix3x3, canvas_w: i32, canvas_h: i32) -> SfntRasterBitmap:
+    val ca = sk_color_alpha(paint.color)
+    if ca <= 0 or canvas_w <= 0 or canvas_h <= 0:
+        return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    val dev_path = sk_path_mapped(path, ctm)
+    val bb = dev_path.bounds()
+    val stroke_w = if paint.stroke_width > 0.0: paint.stroke_width else: 1.0
+    val pad = if paint.style == SkPaintStyle.Stroke or paint.style == SkPaintStyle.StrokeAndFill:
+        stroke_w * 0.5 + 2.0
+    else:
+        1.0
+    val x0 = _bridge_max_i32(0, _bridge_floor_i32(bb.left - pad))
+    val y0 = _bridge_max_i32(0, _bridge_floor_i32(bb.top - pad))
+    val x1 = _bridge_min_i32(canvas_w, _bridge_ceil_i32(bb.right + pad))
+    val y1 = _bridge_min_i32(canvas_h, _bridge_ceil_i32(bb.bottom + pad))
+    val bw = x1 - x0
+    val bh = y1 - y0
+    if bw <= 0 or bh <= 0:
+        return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    val local_path = sk_path_mapped(dev_path, Matrix3x3.translate(0.0 - (x0 as f64), 0.0 - (y0 as f64)))
+    var bmp = Bitmap.zeros(bw as i64, bh as i64)
+    val col4 = _bridge_paint_color4f(paint.color)
+    if paint.style == SkPaintStyle.Fill:
+        fill_path_aa(bmp, local_path, col4)
+    elif paint.style == SkPaintStyle.Stroke:
+        _bridge_stroke_path(bmp, local_path, col4, stroke_w)
+    else:
+        fill_path_aa(bmp, local_path, col4)
+        _bridge_stroke_path(bmp, local_path, col4, stroke_w)
+    val cr = sk_color_red(paint.color) as i32
+    val cg = sk_color_green(paint.color) as i32
+    val cb = sk_color_blue(paint.color) as i32
+    val total = (bw as i64) * (bh as i64)
+    var pixels: [u32] = [0u32; total]
+    var i: i64 = 0
+    while i < total:
+        val pa = bmp.pixels[i * 4 + 3] as i32
+        if pa > 0:
+            pixels[i] = rgba(cr, cg, cb, pa)
+        i = i + 1
+    SfntRasterBitmap(x: x0, y: y0, width: bw, height: bh, pixels: pixels)
+
+fn _bridge_clip_rb(rb: SfntRasterBitmap, clip_active: bool, clip_x0: i32, clip_y0: i32, clip_x1: i32, clip_y1: i32) -> SfntRasterBitmap:
+    if (not clip_active) or rb.width <= 0 or rb.height <= 0:
+        return rb
+    val nx0 = _bridge_max_i32(rb.x, clip_x0)
+    val ny0 = _bridge_max_i32(rb.y, clip_y0)
+    val nx1 = _bridge_min_i32(rb.x + rb.width, clip_x1)
+    val ny1 = _bridge_min_i32(rb.y + rb.height, clip_y1)
+    val nw = nx1 - nx0
+    val nh = ny1 - ny0
+    if nw <= 0 or nh <= 0:
+        return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    if nx0 == rb.x and ny0 == rb.y and nw == rb.width and nh == rb.height:
+        return rb
+    val old_w = rb.width as i64
+    val new_w = nw as i64
+    val new_h = nh as i64
+    var clipped: [u32] = [0u32; new_w * new_h]
+    var r: i64 = 0
+    while r < new_h:
+        val src_row = ((ny0 - rb.y) as i64 + r) * old_w + ((nx0 - rb.x) as i64)
+        val dst_row = r * new_w
+        var c: i64 = 0
+        while c < new_w:
+            clipped[dst_row + c] = rb.pixels[src_row + c]
+            c = c + 1
+        r = r + 1
+    SfntRasterBitmap(x: nx0, y: ny0, width: nw, height: nh, pixels: clipped)
+
+fn _bridge_rasterize_image_transformed(img: SkImage, ox: f64, oy: f64, paint: SkPaint, ctm: Matrix3x3, canvas_w: i32, canvas_h: i32) -> SfntRasterBitmap:
+    val iw = img.info.width
+    val ih = img.info.height
+    if iw <= 0 or ih <= 0 or canvas_w <= 0 or canvas_h <= 0:
+        return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    val xform = ctm.mul(Matrix3x3.translate(ox, oy))
+    var inv_mat = Matrix3x3.identity()
+    var has_inv = false
+    match xform.invert():
+        Some(m):
+            inv_mat = m
+            has_inv = true
+        None:
+            return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    if not has_inv:
+        return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    val wf = iw.to_f64()
+    val hf = ih.to_f64()
+    val p0 = xform.map_point(0.0, 0.0)
+    val p1 = xform.map_point(wf, 0.0)
+    val p2 = xform.map_point(wf, hf)
+    val p3 = xform.map_point(0.0, hf)
+    val xmin = _bridge_min_f64(_bridge_min_f64(p0.x, p1.x), _bridge_min_f64(p2.x, p3.x))
+    val xmax = _bridge_max_f64(_bridge_max_f64(p0.x, p1.x), _bridge_max_f64(p2.x, p3.x))
+    val ymin = _bridge_min_f64(_bridge_min_f64(p0.y, p1.y), _bridge_min_f64(p2.y, p3.y))
+    val ymax = _bridge_max_f64(_bridge_max_f64(p0.y, p1.y), _bridge_max_f64(p2.y, p3.y))
+    val x0 = _bridge_max_i32(0, _bridge_floor_i32(xmin))
+    val y0 = _bridge_max_i32(0, _bridge_floor_i32(ymin))
+    val x1 = _bridge_min_i32(canvas_w, _bridge_ceil_i32(xmax))
+    val y1 = _bridge_min_i32(canvas_h, _bridge_ceil_i32(ymax))
+    val bw = x1 - x0
+    val bh = y1 - y0
+    if bw <= 0 or bh <= 0:
+        return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    val paint_a = sk_color_alpha(paint.color).to_f64() / 255.0
+    val total = (bw as i64) * (bh as i64)
+    var pixels: [u32] = [0u32; total]
+    var py: i32 = y0
+    while py < y1:
+        val row_off = ((py - y0) as i64) * (bw as i64)
+        var px: i32 = x0
+        while px < x1:
+            val src = inv_mat.map_point((px as f64) + 0.5, (py as f64) + 0.5)
+            if src.x >= 0.0 and src.x < wf and src.y >= 0.0 and src.y < hf:
+                val sp = _bridge_sample_image_bilinear(img, src.x, src.y)
+                val aa = _bridge_clamp_u8_i32(sp.a * paint_a * 255.0 + 0.5)
+                if aa > 0:
+                    val rr = _bridge_clamp_u8_i32(sp.r * 255.0 + 0.5)
+                    val gg = _bridge_clamp_u8_i32(sp.g * 255.0 + 0.5)
+                    val bb = _bridge_clamp_u8_i32(sp.b * 255.0 + 0.5)
+                    pixels[row_off + ((px - x0) as i64)] = rgba(rr, gg, bb, aa)
+            px = px + 1
+        py = py + 1
+    SfntRasterBitmap(x: x0, y: y0, width: bw, height: bh, pixels: pixels)
+
+fn _bridge_image_has_transparency(pixels: [u32]) -> bool:
+    var i: i64 = 0
+    val n = pixels.len()
+    while i < n:
+        if ((pixels[i] >> 24) & 0xFFu32) < 0xFFu32:
+            return true
+        i = i + 1
+    false
+
+# ----------------------------------------------------------------------------
+# Primary Vulkan base bridge: creates a real Vulkan Engine2D instance (never
+# falling back to CPU), replays Skia picture ops (including Save/Restore,
+# full SetMatrix CTM with rotation/mirror, DrawRect, DrawPaint, DrawRRect,
+# DrawOval/circle with AA parity, DrawPath, DrawText/DrawTextBlob SFNT AA,
+# and DrawImage with transform), presents, and enforces device_readback.
+# ----------------------------------------------------------------------------
+fn skia_picture_to_vulkan_base(picture: SkPicture, width: i32, height: i32) -> Result<BridgeRenderResult, text>:
+    if width <= 0 or height <= 0:
+        return Err("invalid-canvas-size")
+    var eng = match Engine2D.create_vulkan_backend(width, height):
+        Ok(created): created
+        Err(reason): return Err("vulkan-backend-unavailable: " + reason)
+    if backend_canonical_name(eng.backend_name()) != "vulkan":
+        eng.shutdown()
+        return Err("vulkan-backend-fallback: " + eng.backend_name())
+
+    var mapped_rects = 0
+    var mapped_images = 0
+    var mapped_ovals = 0
+    var skipped = 0
+    var first_skip = ""
+
+    var tx = 0.0
+    var ty = 0.0
+    var sx = 1.0
+    var sy = 1.0
+    var rot_deg = 0.0
+    var clip_active = false
+    var clip_x0: i32 = 0
+    var clip_y0: i32 = 0
+    var clip_x1: i32 = width
+    var clip_y1: i32 = height
+    var state_tx: [f64] = []
+    var state_ty: [f64] = []
+    var state_sx: [f64] = []
+    var state_sy: [f64] = []
+    var state_rot: [f64] = []
+    var state_clip_act: [bool] = []
+    var state_clip_x0: [i32] = []
+    var state_clip_y0: [i32] = []
+    var state_clip_x1: [i32] = []
+    var state_clip_y1: [i32] = []
+
+    for op in picture.ops:
+        if op.kind == SkPictureOpKind.Save or op.kind == SkPictureOpKind.SaveLayer:
+            state_tx.push(tx)
+            state_ty.push(ty)
+            state_sx.push(sx)
+            state_sy.push(sy)
+            state_rot.push(rot_deg)
+            state_clip_act.push(clip_active)
+            state_clip_x0.push(clip_x0)
+            state_clip_y0.push(clip_y0)
+            state_clip_x1.push(clip_x1)
+            state_clip_y1.push(clip_y1)
+        elif op.kind == SkPictureOpKind.Restore:
+            val n = state_tx.len()
+            if n > 0:
+                tx = state_tx[n - 1]
+                ty = state_ty[n - 1]
+                sx = state_sx[n - 1]
+                sy = state_sy[n - 1]
+                rot_deg = state_rot[n - 1]
+                clip_active = state_clip_act[n - 1]
+                clip_x0 = state_clip_x0[n - 1]
+                clip_y0 = state_clip_y0[n - 1]
+                clip_x1 = state_clip_x1[n - 1]
+                clip_y1 = state_clip_y1[n - 1]
+                state_tx.pop()
+                state_ty.pop()
+                state_sx.pop()
+                state_sy.pop()
+                state_rot.pop()
+                state_clip_act.pop()
+                state_clip_x0.pop()
+                state_clip_y0.pop()
+                state_clip_x1.pop()
+                state_clip_y1.pop()
+                if clip_active:
+                    val rcw = clip_x1 - clip_x0
+                    val rch = clip_y1 - clip_y0
+                    if rcw > 0 and rch > 0:
+                        eng.set_clip(clip_x0, clip_y0, rcw, rch)
+                else:
+                    eng.clear_clip()
+        elif op.kind == SkPictureOpKind.SetMatrix:
+            tx = op.rect.left
+            ty = op.rect.top
+            sx = if op.rect.right != 0.0: op.rect.right else: 1.0
+            val sy_raw = if op.rect.bottom != 0.0: op.rect.bottom else: 1.0
+            sy = if op.ry < 0.0: -sy_raw else: sy_raw
+            rot_deg = op.rx
+        elif op.kind == SkPictureOpKind.ClipRect:
+            val ctm = _bridge_ctm_matrix(tx, ty, sx, sy, rot_deg)
+            val crect = if _bridge_ctm_is_axis_aligned_pos(sx, sy, rot_deg):
+                _bridge_transform_rect(op.rect, tx, ty, sx, sy)
+            else:
+                _bridge_rect_from_ctm(op.rect, ctm)
+            val cx = _bridge_floor_i32(crect.left)
+            val cy = _bridge_floor_i32(crect.top)
+            val cx1 = _bridge_ceil_i32(crect.right)
+            val cy1 = _bridge_ceil_i32(crect.bottom)
+            clip_x0 = _bridge_max_i32(clip_x0, cx)
+            clip_y0 = _bridge_max_i32(clip_y0, cy)
+            clip_x1 = _bridge_min_i32(clip_x1, cx1)
+            clip_y1 = _bridge_min_i32(clip_y1, cy1)
+            clip_active = true
+            val cw = clip_x1 - clip_x0
+            val ch = clip_y1 - clip_y0
+            if cw > 0 and ch > 0:
+                eng.set_clip(clip_x0, clip_y0, cw, ch)
+            else:
+                eng.set_clip(0, 0, 0, 0)
+        elif op.kind == SkPictureOpKind.DrawRect:
+            mapped_rects = mapped_rects + 1
+            val color = sk_color_to_u32(op.paint.color)
+            if _bridge_ctm_is_axis_aligned_pos(sx, sy, rot_deg):
+                val rect = _bridge_transform_rect(op.rect, tx, ty, sx, sy)
+                val x = _bridge_floor_i32(rect.left)
+                val y = _bridge_floor_i32(rect.top)
+                val w = _bridge_ceil_i32(rect.right) - x
+                val h = _bridge_ceil_i32(rect.bottom) - y
+                if w > 0 and h > 0:
+                    val is_int_rect = _bridge_exact_i32(rect.left) and _bridge_exact_i32(rect.top) and _bridge_exact_i32(rect.right) and _bridge_exact_i32(rect.bottom)
+                    if op.paint.style == SkPaintStyle.Fill and (not op.paint.anti_alias or is_int_rect):
+                        if op.paint.blend_mode == SkBlendMode.Src and x == 0 and y == 0 and w == width and h == height:
+                            eng.clear(color)
+                        else:
+                            eng.draw_rect_filled(x, y, w, h, color)
+                    elif op.paint.style == SkPaintStyle.Stroke and not op.paint.anti_alias:
+                        if op.paint.stroke_width > 1.5:
+                            eng.draw_rect_thick(x, y, w, h, color, op.paint.stroke_width.to_i64() as i32)
+                        else:
+                            eng.draw_rect(x, y, w, h, color)
+                    else:
+                        val ctm = _bridge_ctm_matrix(tx, ty, sx, sy, rot_deg)
+                        val rb = _bridge_rasterize_path(sk_path_new().add_rect(op.rect, SkPathDirection.Cw), op.paint, ctm, width, height)
+                        if rb.width > 0 and rb.height > 0:
+                            eng.draw_image_blend(rb.x, rb.y, rb.width, rb.height, rb.pixels)
+            else:
+                val ctm = _bridge_ctm_matrix(tx, ty, sx, sy, rot_deg)
+                val rb = _bridge_rasterize_path(sk_path_new().add_rect(op.rect, SkPathDirection.Cw), op.paint, ctm, width, height)
+                if rb.width > 0 and rb.height > 0:
+                    eng.draw_image_blend(rb.x, rb.y, rb.width, rb.height, rb.pixels)
+        elif op.kind == SkPictureOpKind.DrawPaint:
+            mapped_rects = mapped_rects + 1
+            val color = sk_color_to_u32(op.paint.color)
+            if sk_color_alpha(op.paint.color) == 255:
+                eng.clear(color)
+            else:
+                eng.draw_rect_filled(0, 0, width, height, color)
+        elif op.kind == SkPictureOpKind.DrawRRect:
+            mapped_rects = mapped_rects + 1
+            val color = sk_color_to_u32(op.paint.color)
+            val axis_pos = _bridge_ctm_is_axis_aligned_pos(sx, sy, rot_deg)
+            val opaque = sk_color_alpha(op.paint.color) == 255
+            if axis_pos and not op.paint.anti_alias and op.paint.style == SkPaintStyle.Fill and opaque and op.rx == op.ry:
+                val rect = _bridge_transform_rect(op.rect, tx, ty, sx, sy)
+                val x = _bridge_floor_i32(rect.left)
+                val y = _bridge_floor_i32(rect.top)
+                val w = _bridge_ceil_i32(rect.right) - x
+                val h = _bridge_ceil_i32(rect.bottom) - y
+                var scale_avg = (sx + sy) * 0.5
+                if scale_avg <= 0.0:
+                    scale_avg = 1.0
+                val radius_f = op.rx * scale_avg
+                val radius = if radius_f > 0.0: radius_f.to_i64() as i32 else: 0i32
+                if w > 0 and h > 0:
+                    if radius <= 0i32:
+                        eng.draw_rect_filled(x, y, w, h, color)
+                    else:
+                        eng.draw_rounded_rect(x, y, w, h, radius, color)
+            else:
+                val ctm = _bridge_ctm_matrix(tx, ty, sx, sy, rot_deg)
+                val rr_path = sk_path_new().add_rrect(sk_rrect_make(op.rect, op.rx, op.ry), SkPathDirection.Cw)
+                val rb = _bridge_rasterize_path(rr_path, op.paint, ctm, width, height)
+                if rb.width > 0 and rb.height > 0:
+                    eng.draw_image_blend(rb.x, rb.y, rb.width, rb.height, rb.pixels)
+        elif op.kind == SkPictureOpKind.DrawOval:
+            mapped_ovals = mapped_ovals + 1
+            val axis_pos = _bridge_ctm_is_axis_aligned_pos(sx, sy, rot_deg)
+            val rect = _bridge_transform_rect(op.rect, tx, ty, sx, sy)
+            val ox = _bridge_floor_i32(rect.left)
+            val oy = _bridge_floor_i32(rect.top)
+            val ow = _bridge_ceil_i32(rect.right) - ox
+            val oh = _bridge_ceil_i32(rect.bottom) - oy
+            val color = sk_color_to_u32(op.paint.color)
+            if axis_pos and not op.paint.anti_alias and ow > 0 and oh > 0 and ow == oh and sk_color_alpha(op.paint.color) == 255:
+                val r = ow / 2
+                val cx = ox + r
+                val cy = oy + r
+                if op.paint.style == SkPaintStyle.Stroke:
+                    val sw = _bridge_round_i32(op.paint.stroke_width)
+                    if sw > 1:
+                        eng.draw_circle_thick(cx, cy, r, color, sw)
+                    else:
+                        eng.draw_circle(cx, cy, r, color)
+                else:
+                    eng.draw_circle_filled(cx, cy, r, color)
+                    if op.paint.style == SkPaintStyle.StrokeAndFill:
+                        val sw = _bridge_round_i32(op.paint.stroke_width)
+                        if sw > 1:
+                            eng.draw_circle_thick(cx, cy, r, color, sw)
+                        else:
+                            eng.draw_circle(cx, cy, r, color)
+            elif axis_pos and not op.paint.anti_alias and ow > 0 and oh > 0 and op.paint.style == SkPaintStyle.Fill and sk_color_alpha(op.paint.color) == 255:
+                val rx = ow / 2
+                val ry = oh / 2
+                eng.draw_ellipse_filled(ox + rx, oy + ry, rx, ry, color)
+            else:
+                val ctm = _bridge_ctm_matrix(tx, ty, sx, sy, rot_deg)
+                val oval_path = sk_path_new().add_oval(op.rect, SkPathDirection.Cw)
+                val rb = _bridge_rasterize_path(oval_path, op.paint, ctm, width, height)
+                if rb.width > 0 and rb.height > 0:
+                    eng.draw_image_blend(rb.x, rb.y, rb.width, rb.height, rb.pixels)
+        elif op.kind == SkPictureOpKind.DrawPath:
+            if val p = op.path:
+                mapped_rects = mapped_rects + 1
+                val ctm = _bridge_ctm_matrix(tx, ty, sx, sy, rot_deg)
+                val rb = _bridge_rasterize_path(p, op.paint, ctm, width, height)
+                if rb.width > 0 and rb.height > 0:
+                    eng.draw_image_blend(rb.x, rb.y, rb.width, rb.height, rb.pixels)
+            else:
+                skipped = skipped + 1
+                if first_skip == "":
+                    first_skip = "path-missing"
+        elif op.kind == SkPictureOpKind.DrawText or op.kind == SkPictureOpKind.DrawTextBlob:
+            mapped_images = mapped_images + 1
+            val color = sk_color_to_u32(op.paint.color)
+            val ctm = _bridge_ctm_matrix(tx, ty, sx, sy, rot_deg)
+            match sk_unpack_text_blob_from_image(op.image):
+                Some(blob):
+                    var ri: i64 = 0
+                    while ri < blob.runs.len():
+                        val run = blob.runs[ri]
+                        val content = sk_text_blob_run_text(run)
+                        if content != "":
+                            val font_sz = if run.font.size > 0.0: run.font.size else: if op.ry > 0.0: op.ry else: 16.0
+                            var fpath = run.font.effective_font_path()
+                            if fpath == "":
+                                fpath = skia_default_vector_font_path()
+                            val run_ox = if run.positions.len() > 0: run.positions[0].x else: 0.0
+                            val run_oy = if run.positions.len() > 0: run.positions[0].y else: 0.0
+                            var text_ctm = ctm
+                            if run.font.scale_x != 1.0 and run.font.scale_x != 0.0:
+                                text_ctm = ctm.mul(Matrix3x3.scale(run.font.scale_x, 1.0))
+                            val raw_rb = engine2d_sfnt_rasterize_run(
+                                op.x + run_ox, op.y + run_oy, content, color, font_sz, fpath,
+                                true, text_ctm.m00, text_ctm.m01, text_ctm.m02, text_ctm.m10, text_ctm.m11, text_ctm.m12
+                            )
+                            val rb = _bridge_clip_rb(raw_rb, clip_active, clip_x0, clip_y0, clip_x1, clip_y1)
+                            if rb.width > 0 and rb.height > 0:
+                                eng.draw_image_blend(rb.x, rb.y, rb.width, rb.height, rb.pixels)
+                        ri = ri + 1
+                None:
+                    val font_sz = if op.ry > 0.0: op.ry else: 16.0
+                    val raw_rb = engine2d_sfnt_rasterize_run(
+                        op.x, op.y, "text", color, font_sz, "",
+                        true, ctm.m00, ctm.m01, ctm.m02, ctm.m10, ctm.m11, ctm.m12
+                    )
+                    val rb = _bridge_clip_rb(raw_rb, clip_active, clip_x0, clip_y0, clip_x1, clip_y1)
+                    if rb.width > 0 and rb.height > 0:
+                        eng.draw_image_blend(rb.x, rb.y, rb.width, rb.height, rb.pixels)
+        elif op.kind == SkPictureOpKind.DrawImage:
+            if val img = op.image:
+                if _bridge_image_shape_valid(img):
+                    mapped_images = mapped_images + 1
+                    val axis_pos = _bridge_ctm_is_axis_aligned_pos(sx, sy, rot_deg)
+                    if axis_pos and _bridge_abs_f64(sx - 1.0) <= 0.0001 and _bridge_abs_f64(sy - 1.0) <= 0.0001:
+                        val pixels = sk_image_to_u32_pixels(img)
+                        val x = _bridge_floor_i32(op.x + tx)
+                        val y = _bridge_floor_i32(op.y + ty)
+                        val w = img.info.width as i32
+                        val h = img.info.height as i32
+                        if sk_color_alpha(op.paint.color) < 255 or _bridge_image_has_transparency(pixels):
+                            eng.draw_image_blend(x, y, w, h, pixels)
+                        else:
+                            eng.draw_image(x, y, w, h, pixels)
+                    else:
+                        val ctm = _bridge_ctm_matrix(tx, ty, sx, sy, rot_deg)
+                        val rb = _bridge_rasterize_image_transformed(img, op.x, op.y, op.paint, ctm, width, height)
+                        if rb.width > 0 and rb.height > 0:
+                            eng.draw_image_blend(rb.x, rb.y, rb.width, rb.height, rb.pixels)
+                else:
+                    skipped = skipped + 1
+                    if first_skip == "":
+                        first_skip = "image-shape-invalid"
+            else:
+                skipped = skipped + 1
+                if first_skip == "":
+                    first_skip = "image-missing"
+        else:
+            skipped = skipped + 1
+            if first_skip == "":
+                first_skip = "unsupported-op"
+
+    val readback = eng.read_pixels_with_source()
+    eng.present()
+    val pixels = readback.pixels
+    val pixel_count = readback.pixel_count
+    val source = readback.source
+    val final_backend = backend_canonical_name(eng.backend_name())
+    eng.shutdown()
+
+    val expected_pixels = width.to_i64() * height.to_i64()
+    if pixel_count != expected_pixels or pixels.len().to_i64() != expected_pixels:
+        return Err("vulkan-readback-size")
+    if final_backend != "vulkan":
+        return Err("vulkan-backend-fallback: " + final_backend)
+    if source != "device_readback":
+        return Err("vulkan-readback-not-device: " + source)
+
+    val report = BridgeReport(
+        mapped_rects: mapped_rects,
+        mapped_images: mapped_images,
+        mapped_ovals: mapped_ovals,
+        skipped: skipped,
+        lossy: 0,
+        readback_source: source,
+        complete: skipped == 0,
+        reason: first_skip
+    )
+    Ok(BridgeRenderResult(pixels: pixels, report: report))
+
+# ----------------------------------------------------------------------------
+# Parity SkPicture renderer for any requested Engine2D backend ("vulkan",
+# "software", "cpu", "cpu_simd") — keeps Engine2D draw loop inline!
+# ----------------------------------------------------------------------------
+fn skia_picture_to_engine2d_parity(picture: SkPicture, width: i32, height: i32, backend_name: text) -> Result<BridgeRenderResult, text>:
+    if width <= 0 or height <= 0:
+        return Err("invalid-canvas-size")
+    val canon = backend_canonical_name(backend_name)
+    if canon == "vulkan":
+        return skia_picture_to_vulkan_base(picture, width, height)
+    var eng = Engine2D.create_with_backend(width, height, backend_name)
+
+    var mapped_rects = 0
+    var mapped_images = 0
+    var mapped_ovals = 0
+    var skipped = 0
+    var first_skip = ""
+
+    var tx = 0.0
+    var ty = 0.0
+    var sx = 1.0
+    var sy = 1.0
+    var rot_deg = 0.0
+    var clip_active = false
+    var clip_x0: i32 = 0
+    var clip_y0: i32 = 0
+    var clip_x1: i32 = width
+    var clip_y1: i32 = height
+    var state_tx: [f64] = []
+    var state_ty: [f64] = []
+    var state_sx: [f64] = []
+    var state_sy: [f64] = []
+    var state_rot: [f64] = []
+    var state_clip_act: [bool] = []
+    var state_clip_x0: [i32] = []
+    var state_clip_y0: [i32] = []
+    var state_clip_x1: [i32] = []
+    var state_clip_y1: [i32] = []
+
+    for op in picture.ops:
+        if op.kind == SkPictureOpKind.Save or op.kind == SkPictureOpKind.SaveLayer:
+            state_tx.push(tx)
+            state_ty.push(ty)
+            state_sx.push(sx)
+            state_sy.push(sy)
+            state_rot.push(rot_deg)
+            state_clip_act.push(clip_active)
+            state_clip_x0.push(clip_x0)
+            state_clip_y0.push(clip_y0)
+            state_clip_x1.push(clip_x1)
+            state_clip_y1.push(clip_y1)
+        elif op.kind == SkPictureOpKind.Restore:
+            val n = state_tx.len()
+            if n > 0:
+                tx = state_tx[n - 1]
+                ty = state_ty[n - 1]
+                sx = state_sx[n - 1]
+                sy = state_sy[n - 1]
+                rot_deg = state_rot[n - 1]
+                clip_active = state_clip_act[n - 1]
+                clip_x0 = state_clip_x0[n - 1]
+                clip_y0 = state_clip_y0[n - 1]
+                clip_x1 = state_clip_x1[n - 1]
+                clip_y1 = state_clip_y1[n - 1]
+                state_tx.pop()
+                state_ty.pop()
+                state_sx.pop()
+                state_sy.pop()
+                state_rot.pop()
+                state_clip_act.pop()
+                state_clip_x0.pop()
+                state_clip_y0.pop()
+                state_clip_x1.pop()
+                state_clip_y1.pop()
+                if clip_active:
+                    val rcw = clip_x1 - clip_x0
+                    val rch = clip_y1 - clip_y0
+                    if rcw > 0 and rch > 0:
+                        eng.set_clip(clip_x0, clip_y0, rcw, rch)
+                else:
+                    eng.clear_clip()
+        elif op.kind == SkPictureOpKind.SetMatrix:
+            tx = op.rect.left
+            ty = op.rect.top
+            sx = if op.rect.right != 0.0: op.rect.right else: 1.0
+            val sy_raw = if op.rect.bottom != 0.0: op.rect.bottom else: 1.0
+            sy = if op.ry < 0.0: -sy_raw else: sy_raw
+            rot_deg = op.rx
+        elif op.kind == SkPictureOpKind.ClipRect:
+            val ctm = _bridge_ctm_matrix(tx, ty, sx, sy, rot_deg)
+            val crect = if _bridge_ctm_is_axis_aligned_pos(sx, sy, rot_deg):
+                _bridge_transform_rect(op.rect, tx, ty, sx, sy)
+            else:
+                _bridge_rect_from_ctm(op.rect, ctm)
+            val cx = _bridge_floor_i32(crect.left)
+            val cy = _bridge_floor_i32(crect.top)
+            val cx1 = _bridge_ceil_i32(crect.right)
+            val cy1 = _bridge_ceil_i32(crect.bottom)
+            clip_x0 = _bridge_max_i32(clip_x0, cx)
+            clip_y0 = _bridge_max_i32(clip_y0, cy)
+            clip_x1 = _bridge_min_i32(clip_x1, cx1)
+            clip_y1 = _bridge_min_i32(clip_y1, cy1)
+            clip_active = true
+            val cw = clip_x1 - clip_x0
+            val ch = clip_y1 - clip_y0
+            if cw > 0 and ch > 0:
+                eng.set_clip(clip_x0, clip_y0, cw, ch)
+            else:
+                eng.set_clip(0, 0, 0, 0)
+        elif op.kind == SkPictureOpKind.DrawRect:
+            mapped_rects = mapped_rects + 1
+            val color = sk_color_to_u32(op.paint.color)
+            if _bridge_ctm_is_axis_aligned_pos(sx, sy, rot_deg):
+                val rect = _bridge_transform_rect(op.rect, tx, ty, sx, sy)
+                val x = _bridge_floor_i32(rect.left)
+                val y = _bridge_floor_i32(rect.top)
+                val w = _bridge_ceil_i32(rect.right) - x
+                val h = _bridge_ceil_i32(rect.bottom) - y
+                if w > 0 and h > 0:
+                    val is_int_rect = _bridge_exact_i32(rect.left) and _bridge_exact_i32(rect.top) and _bridge_exact_i32(rect.right) and _bridge_exact_i32(rect.bottom)
+                    if op.paint.style == SkPaintStyle.Fill and (not op.paint.anti_alias or is_int_rect):
+                        if op.paint.blend_mode == SkBlendMode.Src and x == 0 and y == 0 and w == width and h == height:
+                            eng.clear(color)
+                        else:
+                            eng.draw_rect_filled(x, y, w, h, color)
+                    elif op.paint.style == SkPaintStyle.Stroke and not op.paint.anti_alias:
+                        if op.paint.stroke_width > 1.5:
+                            eng.draw_rect_thick(x, y, w, h, color, op.paint.stroke_width.to_i64() as i32)
+                        else:
+                            eng.draw_rect(x, y, w, h, color)
+                    else:
+                        val ctm = _bridge_ctm_matrix(tx, ty, sx, sy, rot_deg)
+                        val rb = _bridge_rasterize_path(sk_path_new().add_rect(op.rect, SkPathDirection.Cw), op.paint, ctm, width, height)
+                        if rb.width > 0 and rb.height > 0:
+                            eng.draw_image_blend(rb.x, rb.y, rb.width, rb.height, rb.pixels)
+            else:
+                val ctm = _bridge_ctm_matrix(tx, ty, sx, sy, rot_deg)
+                val rb = _bridge_rasterize_path(sk_path_new().add_rect(op.rect, SkPathDirection.Cw), op.paint, ctm, width, height)
+                if rb.width > 0 and rb.height > 0:
+                    eng.draw_image_blend(rb.x, rb.y, rb.width, rb.height, rb.pixels)
+        elif op.kind == SkPictureOpKind.DrawPaint:
+            mapped_rects = mapped_rects + 1
+            val color = sk_color_to_u32(op.paint.color)
+            if sk_color_alpha(op.paint.color) == 255:
+                eng.clear(color)
+            else:
+                eng.draw_rect_filled(0, 0, width, height, color)
+        elif op.kind == SkPictureOpKind.DrawRRect:
+            mapped_rects = mapped_rects + 1
+            val color = sk_color_to_u32(op.paint.color)
+            val axis_pos = _bridge_ctm_is_axis_aligned_pos(sx, sy, rot_deg)
+            val opaque = sk_color_alpha(op.paint.color) == 255
+            if axis_pos and not op.paint.anti_alias and op.paint.style == SkPaintStyle.Fill and opaque and op.rx == op.ry:
+                val rect = _bridge_transform_rect(op.rect, tx, ty, sx, sy)
+                val x = _bridge_floor_i32(rect.left)
+                val y = _bridge_floor_i32(rect.top)
+                val w = _bridge_ceil_i32(rect.right) - x
+                val h = _bridge_ceil_i32(rect.bottom) - y
+                var scale_avg = (sx + sy) * 0.5
+                if scale_avg <= 0.0:
+                    scale_avg = 1.0
+                val radius_f = op.rx * scale_avg
+                val radius = if radius_f > 0.0: radius_f.to_i64() as i32 else: 0i32
+                if w > 0 and h > 0:
+                    if radius <= 0i32:
+                        eng.draw_rect_filled(x, y, w, h, color)
+                    else:
+                        eng.draw_rounded_rect(x, y, w, h, radius, color)
+            else:
+                val ctm = _bridge_ctm_matrix(tx, ty, sx, sy, rot_deg)
+                val rr_path = sk_path_new().add_rrect(sk_rrect_make(op.rect, op.rx, op.ry), SkPathDirection.Cw)
+                val rb = _bridge_rasterize_path(rr_path, op.paint, ctm, width, height)
+                if rb.width > 0 and rb.height > 0:
+                    eng.draw_image_blend(rb.x, rb.y, rb.width, rb.height, rb.pixels)
+        elif op.kind == SkPictureOpKind.DrawOval:
+            mapped_ovals = mapped_ovals + 1
+            val axis_pos = _bridge_ctm_is_axis_aligned_pos(sx, sy, rot_deg)
+            val rect = _bridge_transform_rect(op.rect, tx, ty, sx, sy)
+            val ox = _bridge_floor_i32(rect.left)
+            val oy = _bridge_floor_i32(rect.top)
+            val ow = _bridge_ceil_i32(rect.right) - ox
+            val oh = _bridge_ceil_i32(rect.bottom) - oy
+            val color = sk_color_to_u32(op.paint.color)
+            if axis_pos and not op.paint.anti_alias and ow > 0 and oh > 0 and ow == oh and sk_color_alpha(op.paint.color) == 255:
+                val r = ow / 2
+                val cx = ox + r
+                val cy = oy + r
+                if op.paint.style == SkPaintStyle.Stroke:
+                    val sw = _bridge_round_i32(op.paint.stroke_width)
+                    if sw > 1:
+                        eng.draw_circle_thick(cx, cy, r, color, sw)
+                    else:
+                        eng.draw_circle(cx, cy, r, color)
+                else:
+                    eng.draw_circle_filled(cx, cy, r, color)
+                    if op.paint.style == SkPaintStyle.StrokeAndFill:
+                        val sw = _bridge_round_i32(op.paint.stroke_width)
+                        if sw > 1:
+                            eng.draw_circle_thick(cx, cy, r, color, sw)
+                        else:
+                            eng.draw_circle(cx, cy, r, color)
+            elif axis_pos and not op.paint.anti_alias and ow > 0 and oh > 0 and op.paint.style == SkPaintStyle.Fill and sk_color_alpha(op.paint.color) == 255:
+                val rx = ow / 2
+                val ry = oh / 2
+                eng.draw_ellipse_filled(ox + rx, oy + ry, rx, ry, color)
+            else:
+                val ctm = _bridge_ctm_matrix(tx, ty, sx, sy, rot_deg)
+                val oval_path = sk_path_new().add_oval(op.rect, SkPathDirection.Cw)
+                val rb = _bridge_rasterize_path(oval_path, op.paint, ctm, width, height)
+                if rb.width > 0 and rb.height > 0:
+                    eng.draw_image_blend(rb.x, rb.y, rb.width, rb.height, rb.pixels)
+        elif op.kind == SkPictureOpKind.DrawPath:
+            if val p = op.path:
+                mapped_rects = mapped_rects + 1
+                val ctm = _bridge_ctm_matrix(tx, ty, sx, sy, rot_deg)
+                val rb = _bridge_rasterize_path(p, op.paint, ctm, width, height)
+                if rb.width > 0 and rb.height > 0:
+                    eng.draw_image_blend(rb.x, rb.y, rb.width, rb.height, rb.pixels)
+            else:
+                skipped = skipped + 1
+                if first_skip == "":
+                    first_skip = "path-missing"
+        elif op.kind == SkPictureOpKind.DrawText or op.kind == SkPictureOpKind.DrawTextBlob:
+            mapped_images = mapped_images + 1
+            val color = sk_color_to_u32(op.paint.color)
+            val ctm = _bridge_ctm_matrix(tx, ty, sx, sy, rot_deg)
+            match sk_unpack_text_blob_from_image(op.image):
+                Some(blob):
+                    var ri: i64 = 0
+                    while ri < blob.runs.len():
+                        val run = blob.runs[ri]
+                        val content = sk_text_blob_run_text(run)
+                        if content != "":
+                            val font_sz = if run.font.size > 0.0: run.font.size else: if op.ry > 0.0: op.ry else: 16.0
+                            var fpath = run.font.effective_font_path()
+                            if fpath == "":
+                                fpath = skia_default_vector_font_path()
+                            val run_ox = if run.positions.len() > 0: run.positions[0].x else: 0.0
+                            val run_oy = if run.positions.len() > 0: run.positions[0].y else: 0.0
+                            var text_ctm = ctm
+                            if run.font.scale_x != 1.0 and run.font.scale_x != 0.0:
+                                text_ctm = ctm.mul(Matrix3x3.scale(run.font.scale_x, 1.0))
+                            val raw_rb = engine2d_sfnt_rasterize_run(
+                                op.x + run_ox, op.y + run_oy, content, color, font_sz, fpath,
+                                true, text_ctm.m00, text_ctm.m01, text_ctm.m02, text_ctm.m10, text_ctm.m11, text_ctm.m12
+                            )
+                            val rb = _bridge_clip_rb(raw_rb, clip_active, clip_x0, clip_y0, clip_x1, clip_y1)
+                            if rb.width > 0 and rb.height > 0:
+                                eng.draw_image_blend(rb.x, rb.y, rb.width, rb.height, rb.pixels)
+                        ri = ri + 1
+                None:
+                    val font_sz = if op.ry > 0.0: op.ry else: 16.0
+                    val raw_rb = engine2d_sfnt_rasterize_run(
+                        op.x, op.y, "text", color, font_sz, "",
+                        true, ctm.m00, ctm.m01, ctm.m02, ctm.m10, ctm.m11, ctm.m12
+                    )
+                    val rb = _bridge_clip_rb(raw_rb, clip_active, clip_x0, clip_y0, clip_x1, clip_y1)
+                    if rb.width > 0 and rb.height > 0:
+                        eng.draw_image_blend(rb.x, rb.y, rb.width, rb.height, rb.pixels)
+        elif op.kind == SkPictureOpKind.DrawImage:
+            if val img = op.image:
+                if _bridge_image_shape_valid(img):
+                    mapped_images = mapped_images + 1
+                    val axis_pos = _bridge_ctm_is_axis_aligned_pos(sx, sy, rot_deg)
+                    if axis_pos and _bridge_abs_f64(sx - 1.0) <= 0.0001 and _bridge_abs_f64(sy - 1.0) <= 0.0001:
+                        val pixels = sk_image_to_u32_pixels(img)
+                        val x = _bridge_floor_i32(op.x + tx)
+                        val y = _bridge_floor_i32(op.y + ty)
+                        val w = img.info.width as i32
+                        val h = img.info.height as i32
+                        if sk_color_alpha(op.paint.color) < 255 or _bridge_image_has_transparency(pixels):
+                            eng.draw_image_blend(x, y, w, h, pixels)
+                        else:
+                            eng.draw_image(x, y, w, h, pixels)
+                    else:
+                        val ctm = _bridge_ctm_matrix(tx, ty, sx, sy, rot_deg)
+                        val rb = _bridge_rasterize_image_transformed(img, op.x, op.y, op.paint, ctm, width, height)
+                        if rb.width > 0 and rb.height > 0:
+                            eng.draw_image_blend(rb.x, rb.y, rb.width, rb.height, rb.pixels)
+                else:
+                    skipped = skipped + 1
+                    if first_skip == "":
+                        first_skip = "image-shape-invalid"
+            else:
+                skipped = skipped + 1
+                if first_skip == "":
+                    first_skip = "image-missing"
+        else:
+            skipped = skipped + 1
+            if first_skip == "":
+                first_skip = "unsupported-op"
+
+    val readback = eng.read_pixels_with_source()
+    eng.present()
+    val pixels = readback.pixels
+    val pixel_count = readback.pixel_count
+    val source = readback.source
+    eng.shutdown()
+
+    val expected_pixels = width.to_i64() * height.to_i64()
+    if pixel_count != expected_pixels or pixels.len().to_i64() != expected_pixels:
+        return Err("engine2d-readback-size")
+    if not _bridge_readback_source_valid(backend_name, source):
+        return Err("engine2d-readback-source-invalid: " + source)
+
+    val report = BridgeReport(
+        mapped_rects: mapped_rects,
+        mapped_images: mapped_images,
+        mapped_ovals: mapped_ovals,
+        skipped: skipped,
+        lossy: 0,
+        readback_source: source,
+        complete: skipped == 0,
+        reason: first_skip
+    )
+    Ok(BridgeRenderResult(pixels: pixels, report: report))
 
 # Strict callers receive no pixels if any operation cannot be replayed exactly
 # by this bridge. Preflight covers the complete picture before engine creation.
@@ -323,4 +1321,4 @@ fn skia_render_picture_on_engine2d(picture: SkPicture, width: i32, height: i32, 
         Ok(result): Ok(result.pixels)
         Err(reason): Err(reason)
 
-export sk_image_to_u32_pixels, skia_render_picture_on_engine2d, skia_render_picture_on_engine2d_reported, skia_render_picture_on_engine2d_strict
+export sk_image_to_u32_pixels, skia_render_picture_on_engine2d, skia_render_picture_on_engine2d_reported, skia_render_picture_on_engine2d_strict, skia_picture_to_vulkan_base, skia_picture_to_engine2d_parity

@@ -27,6 +27,11 @@ describe "compare_view open mode":
         expect(compare_view_mode_parse("1")).to_equal("stay")
         expect(compare_view_mode_parse(" Auto ")).to_equal("auto")
 
+    it "parses html dump and files as html":
+        expect(compare_view_mode_parse("html")).to_equal("html")
+        expect(compare_view_mode_parse(" Dump ")).to_equal("html")
+        expect(compare_view_mode_parse("FILES")).to_equal("html")
+
 describe "compare_view screen size":
 
     it "parses WxH":
@@ -202,3 +207,90 @@ describe "compare_view page stylesheet":
     it "enlarges small images to fill the window when fit is on":
         val html = compare_view_html("t", "a", "a.png", Length(value: 4), Length(value: 4), "b", "b.png", Length(value: 4), Length(value: 4))
         expect(html).to_contain(r"#fit:checked~main img{width:100%;height:100%;object-fit:contain}")
+
+    it "includes match percentage and small-buffer warning when below 128x96":
+        val html = compare_view_html_diff("t", "a", "a.png", Length(value: 10), Length(value: 10), "b", "b.png", Length(value: 10), Length(value: 10), "diff.png", Count(value: 25))
+        expect(html).to_contain("match: 75.00%")
+        expect(html).to_contain("SMALL BUFFER")
+
+    it "omits small-buffer warning when both buffers are at least 128x96":
+        val html = compare_view_html_diff("t", "a", "a.png", Length(value: 128), Length(value: 96), "b", "b.png", Length(value: 128), Length(value: 96), "diff.png", Count(value: 0))
+        expect(html).to_contain("match: 100.00%")
+        expect(html.contains("SMALL BUFFER")).to_equal(false)
+
+describe "compare_view comparable size":
+
+    it "requires at least 128x96":
+        expect(compare_view_is_comparable_size(128, 96)).to_equal(true)
+        expect(compare_view_is_comparable_size(320, 160)).to_equal(true)
+        expect(compare_view_is_comparable_size(127, 96)).to_equal(false)
+        expect(compare_view_is_comparable_size(128, 95)).to_equal(false)
+        expect(compare_view_is_comparable_size(32, 16)).to_equal(false)
+
+describe "compare_view heatmap image":
+
+    it "colors 0 delta dim grey, 1..tol yellow, tol+1..32 orange, >32 magenta":
+        val a: [u32] = [0xFFFFFFFFu32, 0xFF808080u32, 0xFF808080u32, 0xFF000000u32]
+        val b: [u32] = [0xFFFFFFFFu32, 0xFF838080u32, 0xFF908080u32, 0xFF400000u32]
+        val heat = compare_view_heatmap_argb(a, b, 4)
+        val grey = compare_view_diff_argb([0xFFFFFFFFu32], [0xFFFFFFFFu32])[0]
+        expect(heat.len()).to_equal(4)
+        expect(heat[0]).to_equal(grey)
+        expect(heat[1]).to_equal(0xFFFFCC00u32)
+        expect(heat[2]).to_equal(0xFFFF6600u32)
+        expect(heat[3]).to_equal(0xFFFF00FFu32)
+
+describe "compare_view visual diff and stats":
+
+    it "reports zero diff stats on identical buffers":
+        val px: [u32] = [0x00000000u32, 0xFF1E50C8u32, 0xFF1E50C8u32, 0x00000000u32]
+        val stats = compare_view_diff_stats(px, px)
+        expect(stats.total_diff).to_equal(0)
+        expect(stats.color_only_diff).to_equal(0)
+        expect(stats.alpha_or_shape_diff).to_equal(0)
+        expect(stats.max_channel_delta).to_equal(0)
+
+    it "distinguishes A-only shape fill, B-only shape fill, and opaque color diff":
+        # index 0: shared transparent corner backdrop
+        # index 1: present in A (blue), transparent in B (gold/orange like winding inner pentagon)
+        # index 2: transparent in A, present in B (red-orange) -> cyan
+        # index 3: blue in A vs red-orange in B -> amplified purple RGB delta
+        val a: [u32] = [0x00000000u32, 0xFF1E50C8u32, 0x00000000u32, 0xFF1E50C8u32]
+        val b: [u32] = [0x00000000u32, 0x00000000u32, 0xFFC83C1Eu32, 0xFFC83C1Eu32]
+        val res = compare_view_visual_diff_with_stats(a, b)
+        expect(res.stats.total_diff).to_equal(3)
+        expect(res.stats.alpha_or_shape_diff).to_equal(2)
+        expect(res.stats.color_only_diff).to_equal(1)
+        expect(res.stats.max_channel_delta).to_equal(255)
+        val px_a_only = res.pixels[1]
+        val px_b_only = res.pixels[2]
+        val px_color = res.pixels[3]
+        # Gold/orange for A-only: R=255, G>=155, B=20
+        expect(((px_a_only >> 16) & 0xFFu32)).to_equal(255u32)
+        expect(((px_a_only >> 8) & 0xFFu32) >= 155u32).to_equal(true)
+        expect((px_a_only & 0xFFu32)).to_equal(20u32)
+        # Cyan for B-only: R=20, G>=180, B=255
+        expect(((px_b_only >> 16) & 0xFFu32)).to_equal(20u32)
+        expect(((px_b_only >> 8) & 0xFFu32) >= 180u32).to_equal(true)
+        expect((px_b_only & 0xFFu32)).to_equal(255u32)
+        # Purple color delta for blue-vs-red: distinct from gold A-only pixel
+        expect(px_color != px_a_only).to_equal(true)
+        expect(((px_color >> 16) & 0xFFu32) > 150u32).to_equal(true)
+        expect((px_color & 0xFFu32) > 150u32).to_equal(true)
+
+    it "sizes 3-pane windows wide enough for side-by-side 200x200 panes and cascades position":
+        val plan = compare_view_plan_panes(1440, 900, 200, 200, 200, 200, 3)
+        expect(plan.side_by_side).to_equal(true)
+        expect(plan.window_w >= 636).to_equal(true)
+        val args = compare_view_browser_args_offset("file:///x/index.html", plan, "/x/.profile", 1)
+        expect(args).to_contain("--window-position=36,32")
+
+    it "renders IDENTICAL and breakdown status badges in compare_view_html_rich":
+        val zero = CompareViewDiffStats(total_diff: 0, color_only_diff: 0, alpha_or_shape_diff: 0, max_channel_delta: 0)
+        val h_ident = compare_view_html_rich("same", "a", "a.png", 200, 200, "b", "b.png", 200, 200, "delta.png", "heatmap.png", zero)
+        expect(h_ident).to_contain("IDENTICAL (0 color diff, 0 shape/alpha diff, max Δ=0)")
+        expect(h_ident).to_contain("src=delta.png")
+        expect(h_ident).to_contain("src=heatmap.png")
+        val mixed = CompareViewDiffStats(total_diff: 120, color_only_diff: 90, alpha_or_shape_diff: 30, max_channel_delta: 255)
+        val h_diff = compare_view_html_rich("diff", "a", "a.png", 200, 200, "b", "b.png", 200, 200, "delta.png", "heatmap.png", mixed)
+        expect(h_diff).to_contain("max Δ=255 | shape/alpha: 30 px (gold=A, cyan=B) | color: 90 px")

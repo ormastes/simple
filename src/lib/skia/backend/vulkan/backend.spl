@@ -7,12 +7,14 @@
 
 use std.skia.entity.canvas.{SkCanvas, sk_canvas_make}
 use std.skia.entity.image.{SkImage, SkImageInfo, sk_image_info_n32_premul}
-use std.skia.entity.geometry.{SkIRect, SkRect, SkPoint}
+use std.skia.entity.geometry.{SkIRect, SkRect, SkPoint, sk_rrect_make}
 use std.skia.entity.picture.{SkPicture, SkPictureOp, SkPictureOpKind}
 use std.skia.entity.paint.{SkPaint, sk_paint_new}
-use std.skia.entity.path.{SkPath, SkPathVerb, SkPathSegment}
-use std.skia.entity.enums.{SkBlendMode, SkPaintStyle}
+use std.skia.entity.path.{SkPath, SkPathVerb, SkPathSegment, sk_path_new}
+use std.skia.entity.enums.{SkBlendMode, SkPaintStyle, SkPathDirection}
+use std.skia.entity.shader.{SkShaderKind}
 use std.skia.capability.{SkCapability, sk_capability_vulkan}
+use std.skia.backend.cpu.backend.{cpu_backend_new}
 
 # ============================================================================
 # SkVulkanContext — opaque Vulkan device/queue context
@@ -46,15 +48,24 @@ class SkVulkanSurface:
     info: SkImageInfo
     context: SkVulkanContext
     canvas: SkCanvas
+    pixels: [i64]
 
 fn sk_vulkan_surface_make(ctx: SkVulkanContext, width: i64, height: i64) -> SkVulkanSurface:
     val info = sk_image_info_n32_premul(width, height)
-    val canvas = sk_canvas_make(width, height)
-    SkVulkanSurface(info: info, context: ctx, canvas: canvas)
+    val safe_w = if width > 0: width else: 1
+    val safe_h = if height > 0: height else: 1
+    val total = safe_w * safe_h * 4
+    val pixels: [i64] = [0i64; total]
+    val cull = SkRect(left: 0.0, top: 0.0, right: safe_w.to_f64(), bottom: safe_h.to_f64())
+    val canvas = sk_canvas_make(width, height).begin_recording(cull)
+    SkVulkanSurface(info: info, context: ctx, canvas: canvas, pixels: pixels)
 
 impl SkVulkanSurface:
     fn canvas() -> SkCanvas:
         self.canvas
+
+    fn with_canvas(c: SkCanvas) -> SkVulkanSurface:
+        SkVulkanSurface(info: self.info, context: self.context, canvas: c, pixels: self.pixels)
 
     fn capability() -> SkCapability:
         sk_capability_vulkan()
@@ -66,13 +77,90 @@ impl SkVulkanSurface:
         self.info.height
 
     fn snapshot() -> SkImage:
-        SkImage(info: self.info, pixels: [])
+        val n = self.pixels.len()
+        var copied: [i64] = [0i64; n]
+        var i = 0
+        while i < n:
+            copied[i] = self.pixels[i]
+            i = i + 1
+        SkImage(info: self.info, pixels: copied)
 
     fn read_pixels(dst_rect: SkIRect) -> [i64]:
-        []
+        val w = self.info.width
+        val h = self.info.height
+        if dst_rect.right > dst_rect.left and dst_rect.bottom > dst_rect.top:
+            val rw = dst_rect.right.to_i64() - dst_rect.left.to_i64()
+            val rh = dst_rect.bottom.to_i64() - dst_rect.top.to_i64()
+            val total = rw * rh * 4
+            if (total > 0 and total <= 2147483647 and
+                dst_rect.left >= 0 and dst_rect.top >= 0 and
+                dst_rect.right <= w and dst_rect.bottom <= h):
+                val last = ((dst_rect.bottom.to_i64() - 1) * w + (dst_rect.right.to_i64() - 1)) * 4
+                if last + 3 < self.pixels.len():
+                    var result: [i64] = [0i64; total]
+                    var write_at = 0
+                    var y = dst_rect.top
+                    while y < dst_rect.bottom:
+                        var x = dst_rect.left
+                        while x < dst_rect.right:
+                            val base = (y * w + x) * 4
+                            result[write_at] = self.pixels[base]
+                            result[write_at + 1] = self.pixels[base + 1]
+                            result[write_at + 2] = self.pixels[base + 2]
+                            result[write_at + 3] = self.pixels[base + 3]
+                            write_at = write_at + 4
+                            x = x + 1
+                        y = y + 1
+                    return result
+        var result: [i64] = []
+        var y = dst_rect.top
+        while y < dst_rect.bottom:
+            var x = dst_rect.left
+            while x < dst_rect.right:
+                val base = (y * w + x) * 4
+                if (base + 3) < self.pixels.len():
+                    result.push(self.pixels[base])
+                    result.push(self.pixels[base + 1])
+                    result.push(self.pixels[base + 2])
+                    result.push(self.pixels[base + 3])
+                x = x + 1
+            y = y + 1
+        result
 
     fn flush() -> SkVulkanSurface:
-        self
+        val pic = self.canvas.end_recording()
+        if pic.op_count == 0:
+            val w = if self.info.width > 0: self.info.width else: 1
+            val h = if self.info.height > 0: self.info.height else: 1
+            val cull = SkRect(left: 0.0, top: 0.0, right: w.to_f64(), bottom: h.to_f64())
+            return SkVulkanSurface(
+                info: self.info,
+                context: self.context,
+                canvas: sk_canvas_make(w, h).begin_recording(cull),
+                pixels: self.pixels
+            )
+        self.flush_picture(pic)
+
+    fn flush_picture(picture: SkPicture) -> SkVulkanSurface:
+        if not self.context.is_valid():
+            return self
+        val w = if self.info.width > 0: self.info.width else: 1
+        val h = if self.info.height > 0: self.info.height else: 1
+        val cull = SkRect(left: 0.0, top: 0.0, right: w.to_f64(), bottom: h.to_f64())
+        var vk = vk_backend_init(self.context)
+        val cb = vk.render_picture(picture, cull)
+        val sr = vk.submit(cb)
+        if not sr.ok:
+            return self
+        val bm = cpu_backend_new().render_picture(picture, cull)
+        val total = bm.width * bm.height * 4
+        var out: [i64] = [0i64; total]
+        var i = 0
+        while i < total:
+            out[i] = bm.pixels[i] as i64
+            i = i + 1
+        val fresh_canvas = sk_canvas_make(w, h).begin_recording(cull)
+        SkVulkanSurface(info: self.info, context: self.context, canvas: fresh_canvas, pixels: out)
 
 # ============================================================================
 # ShaderKind — which shader variant to use for a given paint
@@ -238,7 +326,13 @@ class VulkanSubmissionRecord:
 # ============================================================================
 
 fn _paint_to_shader_kind(paint: SkPaint) -> ShaderKind:
-    # For now every paint resolves to SolidColor (no gradient shader attached)
+    if val sh = paint.shader:
+        if sh.kind == SkShaderKind.LinearGradient:
+            return ShaderKind.LinearGradient
+        if sh.kind == SkShaderKind.RadialGradient or sh.kind == SkShaderKind.TwoPointConicalGradient or sh.kind == SkShaderKind.SweepGradient:
+            return ShaderKind.RadialGradient
+        if sh.kind == SkShaderKind.Image:
+            return ShaderKind.Pattern
     ShaderKind.SolidColor
 
 fn _paint_to_pipeline_key(paint: SkPaint) -> PipelineKey:
@@ -519,6 +613,36 @@ fn vk_backend_init(ctx: SkVulkanContext) -> SkiaVulkanBackend:
             last_error: ""
         )
 
+fn _vk_op_vertex_count(op: SkPictureOp) -> i64:
+    if op.kind == SkPictureOpKind.DrawPath:
+        if val p = op.path:
+            val verts = triangulate_path(p)
+            if verts.len() >= 3:
+                return verts.len() as i64
+        return 6
+    if op.kind == SkPictureOpKind.DrawOval:
+        val oval_verts = triangulate_path(sk_path_new().add_oval(op.rect, SkPathDirection.Cw))
+        if oval_verts.len() >= 3:
+            return oval_verts.len() as i64
+        return 24
+    if op.kind == SkPictureOpKind.DrawRRect:
+        val rrect_verts = triangulate_path(sk_path_new().add_rrect(sk_rrect_make(op.rect, op.rx, op.ry), SkPathDirection.Cw))
+        if rrect_verts.len() >= 3:
+            return rrect_verts.len() as i64
+        return 6
+    6
+
+fn _vk_is_draw_op(kind: SkPictureOpKind) -> bool:
+    (kind == SkPictureOpKind.DrawRect or
+        kind == SkPictureOpKind.DrawRRect or
+        kind == SkPictureOpKind.DrawOval or
+        kind == SkPictureOpKind.DrawPath or
+        kind == SkPictureOpKind.DrawImage or
+        kind == SkPictureOpKind.DrawPaint or
+        kind == SkPictureOpKind.DrawText or
+        kind == SkPictureOpKind.DrawTextBlob or
+        kind == SkPictureOpKind.DrawPoints)
+
 impl SkiaVulkanBackend:
     # Look up or compile a pipeline for the given paint
     me get_or_compile_pipeline(paint: SkPaint) -> Pipeline:
@@ -534,15 +658,74 @@ impl SkiaVulkanBackend:
             me.next_pipeline_id = me.next_pipeline_id + 1
             pipeline
 
-    # Render a recorded picture into a CommandBufferRecord
+    # Translate an SkPicture into Vulkan command buffer records using me.pipeline_cache.
+    # Honors real picture.ops when present while preserving synthetic op_count testing
+    # when picture.ops is empty.
     me render_picture(picture: SkPicture, cull: SkRect) -> CommandBufferRecord:
         if not me.initialized:
             return CommandBufferRecord(commands: [], pipeline_cache_hits: 0, unique_pipelines: 0)
         var commands: [VkCommand] = []
         var cache_hits: i64 = 0
+        if picture.ops.len() > 0:
+            var layer_stack: [bool] = []
+            for op in picture.ops:
+                if op.kind == SkPictureOpKind.Save:
+                    layer_stack.push(false)
+                elif op.kind == SkPictureOpKind.SaveLayer:
+                    layer_stack.push(true)
+                    val pass_bounds = if op.rect.right > op.rect.left and op.rect.bottom > op.rect.top: op.rect else: cull
+                    commands.push(VkCommand(
+                        kind: VkCommandKind.BeginRenderPass,
+                        pipeline_id: 0,
+                        vertex_count: 0,
+                        descriptor_set_id: 0,
+                        render_pass_bounds: pass_bounds
+                    ))
+                elif op.kind == SkPictureOpKind.Restore:
+                    if layer_stack.len() > 0:
+                        val is_layer = layer_stack[layer_stack.len() - 1]
+                        layer_stack.pop()
+                        if is_layer:
+                            commands.push(VkCommand(
+                                kind: VkCommandKind.EndRenderPass,
+                                pipeline_id: 0,
+                                vertex_count: 0,
+                                descriptor_set_id: 0,
+                                render_pass_bounds: cull
+                            ))
+                elif _vk_is_draw_op(op.kind):
+                    val paint = op.paint
+                    val key = _paint_to_pipeline_key(paint)
+                    val cached = _find_cached_pipeline(me.pipeline_cache, key)
+                    var pipeline = me.get_or_compile_pipeline(paint)
+                    if cached != nil:
+                        cache_hits = cache_hits + 1
+                        pipeline = cached
+                    val desc = allocate_descriptor_set(key)
+                    val op_bounds = if op.rect.right > op.rect.left and op.rect.bottom > op.rect.top: op.rect else: cull
+                    val vcount = _vk_op_vertex_count(op)
+                    commands.push(VkCommand(
+                        kind: VkCommandKind.BindPipeline,
+                        pipeline_id: pipeline.pipeline_id,
+                        vertex_count: 0,
+                        descriptor_set_id: desc.set_id,
+                        render_pass_bounds: op_bounds
+                    ))
+                    commands.push(VkCommand(
+                        kind: VkCommandKind.Draw,
+                        pipeline_id: pipeline.pipeline_id,
+                        vertex_count: vcount,
+                        descriptor_set_id: desc.set_id,
+                        render_pass_bounds: op_bounds
+                    ))
+            val unique = me.pipeline_cache.len() as i64
+            return CommandBufferRecord(
+                commands: commands,
+                pipeline_cache_hits: cache_hits,
+                unique_pipelines: unique
+            )
         var op_idx = 0
-        # Walk op_count ops — for each op emit pipeline bind + draw
-        # (SkPicture stores op_count; actual ops would come from a real recorder)
+        # Synthetic picture without ops list — preserve op_count translation.
         while op_idx < picture.op_count:
             val paint = sk_paint_new()
             val key = _paint_to_pipeline_key(paint)

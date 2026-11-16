@@ -14,9 +14,10 @@ use std.skia.entity.paint.{SkPaint, sk_paint_fill, sk_paint_stroke}
 use std.skia.entity.color.{sk_color_argb}
 use std.skia.entity.enums.{SkPaintStyle}
 use std.skia.entity.picture.{SkPicture, SkPictureOp, SkPictureOpKind, sk_picture_recorder_new, sk_picture_op_draw_rect, sk_picture_op_draw_rrect, sk_picture_op_draw_paint, sk_picture_op_draw_path}
+use std.skia.entity.geometry.{SkRect, sk_rect_make_xywh, sk_rrect_make}
 use std.skia.entity.image.{sk_image_info_n32_premul, sk_image_make}
 use std.skia.entity.path.{sk_path_new}
-use std.skia.bridge.engine2d_bridge.{sk_image_to_u32_pixels, skia_render_picture_on_engine2d, skia_render_picture_on_engine2d_reported}
+use std.skia.bridge.engine2d_bridge.{sk_image_to_u32_pixels, skia_render_picture_on_engine2d, skia_render_picture_on_engine2d_reported, skia_picture_to_vulkan_base}
 
 
 # Record a real skia SkPicture via SkPictureRecorder: an opaque background rect
@@ -245,3 +246,65 @@ describe "SkiaEngine2DBridge":
         expect(packed[1]).to_equal(0x00000000u32)
         expect(packed[2]).to_equal(0x00000000u32)
         expect(packed[3]).to_equal(0x00000000u32)
+
+    it "distinguishes DrawRRect Stroke vs Fill and paints thick DrawRect strokes":
+        # @req REQ-SSPEC-LIB
+        step("distinguishes DrawRRect Stroke vs Fill and paints thick DrawRect strokes")
+        val w = 32
+        val h = 24
+        val full = SkRect(left: 0.0, top: 0.0, right: 32.0, bottom: 24.0)
+        val bg = sk_color_argb(255, 0x10, 0x20, 0x30)
+        val fg = sk_color_argb(255, 0xEE, 0x44, 0x22)
+        val rec = sk_picture_recorder_new().begin_recording(full)
+        rec.record(sk_picture_op_draw_rect(full, sk_paint_fill(bg)))
+        rec.record(sk_picture_op_draw_rrect(
+            SkRect(left: 4.0, top: 4.0, right: 20.0, bottom: 20.0),
+            3.0, 3.0,
+            sk_paint_stroke(fg, 2.0)
+        ))
+        rec.record(sk_picture_op_draw_rect(
+            SkRect(left: 22.0, top: 4.0, right: 30.0, bottom: 20.0),
+            sk_paint_stroke(fg, 2.0)
+        ))
+        val pic = rec.finish_recording()
+        val result = skia_render_picture_on_engine2d_reported(pic, w, h, "cpu_simd")
+        expect(result.report.mapped_rects).to_equal(3)
+        expect(result.report.skipped).to_equal(0)
+        # Interior of stroked DrawRRect (12, 12) stays background
+        expect(result.pixels[12 + 12 * w]).to_equal(0xFF102030u32)
+        # Interior of stroked DrawRect (26, 12) stays background
+        expect(result.pixels[26 + 12 * w]).to_equal(0xFF102030u32)
+        # Border edge of stroked DrawRect (22, 12) has foreground color
+        expect(result.pixels[22 + 12 * w]).to_equal(0xFFEE4422u32)
+
+    it "rejects empty DrawOval bounds without crashing":
+        # @req REQ-SSPEC-LIB
+        step("rejects empty DrawOval bounds without crashing")
+        val w = 24
+        val h = 16
+        val full = SkRect(left: 0.0, top: 0.0, right: 24.0, bottom: 16.0)
+        val bg = sk_color_argb(255, 0x11, 0x22, 0x33)
+        val rec = sk_picture_recorder_new().begin_recording(full)
+        rec.record(sk_picture_op_draw_rect(full, sk_paint_fill(bg)))
+        rec.record(SkPictureOp(
+            kind: SkPictureOpKind.DrawOval,
+            rect: SkRect(left: 5.0, top: 5.0, right: 5.0, bottom: 10.0),
+            rx: 0.0, ry: 0.0,
+            path: None, image: None,
+            paint: sk_paint_fill(bg),
+            x: 0.0, y: 0.0
+        ))
+        val pic = rec.finish_recording()
+        val result = skia_render_picture_on_engine2d_reported(pic, w, h, "cpu_simd")
+        expect(result.pixels.len()).to_equal(w * h)
+
+    it "skia_picture_to_vulkan_base rejects invalid non-positive dimensions":
+        # @req REQ-SSPEC-LIB
+        step("skia_picture_to_vulkan_base rejects invalid non-positive dimensions")
+        val full = SkRect(left: 0.0, top: 0.0, right: 10.0, bottom: 10.0)
+        val pic = sk_picture_recorder_new().begin_recording(full).finish_recording()
+        val res = skia_picture_to_vulkan_base(pic, 0, 10)
+        val is_err = match res:
+            Ok(_): false
+            Err(_): true
+        expect(is_err).to_equal(true)
