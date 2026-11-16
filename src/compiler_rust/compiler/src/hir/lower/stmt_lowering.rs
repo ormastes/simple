@@ -3044,7 +3044,9 @@ impl Lowerer {
             Pattern::Or(alternatives) => {
                 let mut arms: Vec<(Option<HirExpr>, Vec<HirStmt>)> = Vec::new();
                 for alt in alternatives {
-                    let cond = self.subpattern_condition(slot, alt, ctx);
+                    // Typed by the slot's own type, as the arm test is: an
+                    // erased type resolves `Copy(d)` by name only (#6953).
+                    let cond = self.subpattern_condition_typed(slot, slot.ty, alt, ctx);
                     let mut alt_out: Vec<HirStmt> = Vec::new();
                     self.bind_subpattern(slot, alt, binding_type_map, ctx, &mut alt_out);
                     let irrefutable = cond.is_none();

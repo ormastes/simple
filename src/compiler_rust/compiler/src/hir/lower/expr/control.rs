@@ -1219,21 +1219,10 @@ impl Lowerer {
     /// `case C(L2.S(L3.X(n)), tag)` select on `L2.S` alone, so an `L3.Y`
     /// subject took the `L3.X` arm.
     ///
-    /// The slot's static type is unknown here; see
-    /// [`Self::subpattern_condition_typed`] for the typed walk.
-    pub(crate) fn subpattern_condition(
-        &mut self,
-        slot: &HirExpr,
-        pattern: &Pattern,
-        ctx: &mut FunctionContext,
-    ) -> Option<HirExpr> {
-        self.subpattern_condition_typed(slot, TypeId::ANY, pattern, ctx)
-    }
-
-    /// [`Self::subpattern_condition`] with the slot's DECLARED static type
-    /// (`TypeId::ANY` when unknown). The slot expression itself stays
-    /// ANY-typed; `slot_ty` only decides whether a bare identifier is a
-    /// variant test.
+    /// `slot_ty` is the slot's DECLARED static type (`TypeId::ANY` when
+    /// unknown). The slot expression itself stays ANY-typed; `slot_ty`
+    /// decides whether a bare identifier is a variant test and which enum
+    /// owns a variant's discriminant (#6953).
     ///
     /// A bare `Red` in a tuple element / array element / enum payload slot
     /// whose declared type is an enum owning a variant `Red` is a VARIANT
@@ -1740,7 +1729,7 @@ impl Lowerer {
     ///
     /// Only the TOP-LEVEL position was wrong. A struct pattern nested in an enum
     /// payload, an array element or a tuple element routes through
-    /// [`Self::subpattern_condition`], which has tested struct fields since
+    /// [`Self::subpattern_condition_typed`], which has tested struct fields since
     /// `5ce2f653a49`. Recursion (depth 3+, literal fields, array/tuple field
     /// sub-patterns) is likewise [`Self::struct_fields_condition`]'s; this is
     /// only the entry point.
@@ -1770,7 +1759,7 @@ impl Lowerer {
     ///
     /// A field name that does not resolve leaves the pattern irrefutable rather
     /// than inventing an index — the same under-report rule
-    /// [`Self::subpattern_condition`] already applies to this spelling.
+    /// [`Self::subpattern_condition_typed`] already applies to this spelling.
     pub(crate) fn named_struct_pattern_condition(
         &mut self,
         subject_ref: &HirExpr,
