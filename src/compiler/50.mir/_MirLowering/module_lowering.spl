@@ -196,7 +196,8 @@ use compiler.core.interpreter.hashmap.{hm_hash_text}
 
 # Import struct definitions from types module
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
-use compiler.common.mir_target_context.{MirTargetContext, mir_target_context_from}
+use compiler.common.mir_target_context.{MirTargetContext, mir_target_context_from, mir_target_context_identity_payload_v1}
+use compiler.mir.mir_unfrozen_module_input_v1.{UnfrozenMirModuleInputV1, mir_unfrozen_module_input_validate_v1}
 use compiler.mir.mir_target_hir_layout.{mir_target_aware_struct_layout, mir_target_hir_live_struct_layout}
 use compiler.mir.mir_target_hir_select.{mir_target_hir_mode_from_env}
 use compiler.hir.target_hir.target_hir_flags.{target_hir_mode_or_legacy}
@@ -801,6 +802,7 @@ impl MirLowering:
             array_global_mutation_warned: {},
             symbol_write_ledger: mir_symbol_write_ledger_legacy(),
             target_context: target_context,
+            module_target_identity_v1: mir_target_context_identity_payload_v1(target_context),
             allow_ambient_bootstrap_policy: true,
             resource_owned_locals: [],
             consumed_resource_locals: {},
@@ -2771,6 +2773,21 @@ impl MirLowering:
             return_type: self.lower_type(declaration.return_type), is_variadic: false,
             params_known: true)
         self.exact_extern_signatures = signatures
+
+    me lower_unfrozen_module_v1(input: UnfrozenMirModuleInputV1,
+            providers: [HirModule] = [], is_entry_module: bool = true,
+            archive_function_symbols: [i64]? = None, archive_primary_globals: MirModule? = None,
+            archive_trait_thunks: [MirFunction] = []) -> Result<MirModule, text>:
+        # Validate before trace scope, declaration cfg reads or scratch writes.
+        # Revalidate here because the unfrozen carrier has no sealed authority.
+        mir_unfrozen_module_input_validate_v1(input)?
+        val requested = mir_target_context_identity_payload_v1(input.target)
+        if requested != mir_target_context_identity_payload_v1(self.target_context):
+            return Err("mir_module_target_mismatch: input and lowerer contexts differ")
+        if self.module_target_identity_v1 == "" or requested != self.module_target_identity_v1:
+            return Err("mir_module_target_rebound: lowerer constructor context changed")
+        Ok(self.lower_module(input.module, providers, is_entry_module,
+            archive_function_symbols, archive_primary_globals, archive_trait_thunks))
 
     me lower_module(module: HirModule, providers: [HirModule] = [], is_entry_module: bool = true,
             archive_function_symbols: [i64]? = None, archive_primary_globals: MirModule? = None,
