@@ -38,7 +38,7 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_target.{
 use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback, engine2d_readback_with_identity}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch}
 use std.nogc_sync_mut.text_layout.font_advance_layout.{font_advances_codepoint_arity}
-use std.common.encoding.utf8.{text_codepoints}
+use std.common.encoding.utf8.{text_codepoints, char_from_codepoint}
 use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
     Engine2dGlassExecutionResult,
     Engine2dGlassMaterialConfig,
@@ -1661,10 +1661,27 @@ fn _engine2d_draw_ir_text_bitmap_fallback(eng: Engine2D, x: i32, y: i32, command
             paint_clip,
             draw_ir_rect_bounds(x, 0, command.width, eng.height()))
         eng.set_clip(band.x, band.y, band.width, band.height)
-        eng.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+        _engine2d_draw_ir_bitmap_text(eng, x, y, command)
         _engine2d_draw_ir_restore_clip(eng, paint_clip)
     else:
-        eng.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+        _engine2d_draw_ir_bitmap_text(eng, x, y, command)
+
+# A bitmap-glyph run. `bitmap-glyph-advance` (a password mask: Chrome 159's
+# 8px U+2022 advances 2.80, not the 5x7 cell's 5) steps each codepoint by
+# that producer-resolved advance, as the browser raster does; otherwise the
+# run keeps the cell advance of `draw_text`.
+fn _engine2d_draw_ir_bitmap_text(eng: Engine2D, x: i32, y: i32, command: DrawIrCommand):
+    val font_size = _engine2d_draw_ir_text_font_size(command.computed_style)
+    val step_text = _engine2d_draw_ir_style_value(command.computed_style, "bitmap-glyph-advance")
+    val step = if step_text == "": 0 else: step_text.to_i64() as i32
+    if step <= 0:
+        eng.draw_text(x, y, command.text_value, command.color, font_size)
+        return
+    var pen = x
+    # cpu-lane-loop-ok: one draw_text per codepoint of a single masked input value; bound is that value's codepoint count
+    for cp in text_codepoints(command.text_value):
+        eng.draw_text(pen, y, char_from_codepoint(cp), command.color, font_size)
+        pen = pen + step
 
 fn _engine2d_draw_ir_append_unsupported_reason(reason: text, unsupported_kinds: text) -> text:
     if unsupported_kinds == "none":
@@ -2537,15 +2554,7 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
                     if probe_this:
                         _e2d_text_probe_count = _e2d_text_probe_count + 1
                         print("[e2d-text-probe] ir kind=plain len={command.text_value.len()}")
-                    if command.width > 0:
-                        val band = draw_ir_rect_intersection(
-                            text_paint_clip,
-                            draw_ir_rect_bounds(x, 0, command.width, eng.height()))
-                        eng.set_clip(band.x, band.y, band.width, band.height)
-                        eng.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
-                        _engine2d_draw_ir_restore_clip(eng, text_paint_clip)
-                    else:
-                        eng.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+                    _engine2d_draw_ir_text_bitmap_fallback(eng, x, y, command, text_paint_clip)
                     rendered = rendered + 1
             if not font_ready:
                 skipped = skipped + 1
