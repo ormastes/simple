@@ -76,16 +76,41 @@ describe "XRay LLVM function attributes":
         expect(ir).to_contain("XRAY-E-UNSUPPORTED-TARGET")
 
     # @req REQ-XRAY-V1-API-01
-    it "rejects windows-msvc (no auto-export) and admits windows-gnu":
-        step("clang-cl / --msvc: the __simple_xray_* data symbols would not be exported")
+    it "admits windows-msvc with an explicit /EXPORT list for every xray symbol":
+        """MSVC link has no auto-export: the object carries `/EXPORT:<sym>,DATA`
+        in .drectve for each flag-guard data symbol, and no dllexport."""
         val module = xray_attr_module([xray_attr_fn(1, "xr_tail", 2)])
         val msvc = xray_env_translator("windows", "msvc").translate_module(module)
-        expect(msvc).to_contain("XRAY-E-UNSUPPORTED-TARGET")
-        expect(msvc).to_contain("no auto-export")
-        step("llvm-mingw windows-gnu keeps the flag-guard route")
+        step("No fail-fast")
+        expect(msvc.contains("XRAY-E-")).to_equal(false)
+        expect(msvc).to_contain("@__simple_xray_slot_xr_tail")
+        expect(msvc.contains("dllexport")).to_equal(false)
+        step("The export list names every exported xray symbol as DATA")
+        expect(msvc).to_contain("module asm \".section .drectve,\\22yn\\22\"")
+        for sym in ["__simple_xray_descriptor_v1", "__simple_xray_names_v1", "__simple_xray_hook_v1", "__simple_xray_ring_v2"]:
+            expect(msvc).to_contain("module asm \".ascii \\22 /EXPORT:{sym},DATA\\22\"")
+        expect(msvc.contains("__simple_xray_ring_wrap_v2")).to_equal(false)
+
+    # @req REQ-XRAY-V1-API-01
+    it "adds the wrap marker to the msvc export list in wrap mode":
+        var module = xray_attr_module([xray_attr_fn(1, "xr_tail", 2)])
+        module.xray_ring_wrap = true
+        val msvc = xray_env_translator("windows", "msvc").translate_module(module)
+        expect(msvc).to_contain("module asm \".ascii \\22 /EXPORT:__simple_xray_ring_wrap_v2,DATA\\22\"")
+
+    # @req REQ-XRAY-V1-API-01
+    it "keeps windows-gnu free of any export list (mingw auto-export)":
+        step("Generalisation: gnu output has no .drectve/EXPORT and equals the env-less windows output")
+        val module = xray_attr_module([xray_attr_fn(1, "xr_tail", 2)])
         val gnu = xray_env_translator("windows", "gnu").translate_module(module)
         expect(gnu.contains("XRAY-E-")).to_equal(false)
         expect(gnu).to_contain("@__simple_xray_slot_xr_tail")
+        expect(gnu.contains("/EXPORT")).to_equal(false)
+        expect(gnu.contains("drectve")).to_equal(false)
+        expect(gnu.contains("module asm")).to_equal(false)
+        var wrap = xray_attr_module([xray_attr_fn(1, "xr_tail", 2)])
+        wrap.xray_ring_wrap = true
+        expect(xray_env_translator("windows", "gnu").translate_module(wrap).contains("/EXPORT")).to_equal(false)
 
     it "admits the host-default Linux translator used by the driver":
         step("MirToLlvm.create derives target_os from the triple parser, not a literal")
