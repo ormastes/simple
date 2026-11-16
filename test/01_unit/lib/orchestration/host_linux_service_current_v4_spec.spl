@@ -14,7 +14,8 @@ Shutdown (S40-SHUTDOWN-01), the installed-credential pin and the associated
 execution commit gates (S40-COMMIT-01) are covered here;
 Linux reconciliation (host_linux_service_reconcile_v4_spec) runs at startup over
 the offline fresh-epoch store inventory lent by the same admission (S40-LOAN-03..05); a lent or once-lent epoch never
-starts its provider (S40-LOAN-06).
+starts its provider (S40-LOAN-06); the store inventory goes back to the lender only after the startup reconcile
+proved continuity, and the once-lent gates still refuse afterwards (S40-HANDOFF-01..03, milestone_0021 PR1).
 ## Compatibility and limitations
 Real Ed25519 signatures from the verifier fixture seeds and a real temporary
 capacity journal. No protected root reader, native identity borrow or
@@ -32,7 +33,7 @@ use test.fixtures.orchestration.host_linux_service_verifier_fixture_v1.*
 use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.{HostLinuxServiceCurrentV4, linux_service_proof_held_v4,
     linux_service_scope_v4, linux_service_status_bytes_v4, linux_service_prepare_authorize_v4, linux_service_association_v4,
     linux_service_execute_authorize_core_v4, host_linux_service_close_v4, host_linux_service_anchor_parent_v4,
-    host_linux_service_open_installed_v4}
+    host_linux_service_open_installed_v4, linux_service_inventory_handoff_v4, linux_service_inventory_return_v4}
 use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
 use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
 use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.host_capacity_owned_fresh_error_v3
@@ -652,3 +653,87 @@ describe "Linux service installed opener and fresh-epoch service loan (service 4
         expect(ended.error).to_equal("machine-fresh-epoch-provider-start-after-service-loan")
         expect(ended.started).to_equal(false)
         expect(ended.owner.service_reader.is_some()).to_equal(true)
+
+    it "returns the store inventory only after the startup reconcile proved continuity":
+        # @req S40-HANDOFF-01 (milestone_0021 PR1; every case returns before any slot is touched)
+        step("no proven capacity (published owner): the handoff is refused and the inventory stays lent")
+        val unproven = linux_service_inventory_handoff_v4(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service",
+            native: Some(s40_borrow(1, 4)), inventory: Some(s40_inventory(1, 4)), published: true,
+            admission: Some(MachineFreshEpochAdmissionTurnV1(owner: Some(s40_store_lender(true))))))
+        expect(unproven.error).to_equal("linux-host-service-inventory-handoff-unproven")
+        expect(unproven.owner.inventory.is_some()).to_equal(true)
+        expect(unproven.owner.inventory_returned).to_equal(false)
+        expect(unproven.owner.admission.unwrap().owner.unwrap().store_inventory_loaned).to_equal(true)
+        step("a recorded reconcile refusal (also without capacity) keeps the inventory lent")
+        val quarantined = linux_service_inventory_handoff_v4(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service",
+            native: Some(s40_borrow(1, 4)), inventory: Some(s40_inventory(1, 4)), published: true,
+            reconcile_error: "linux-service-inventory-begun-present",
+            admission: Some(MachineFreshEpochAdmissionTurnV1(owner: Some(s40_store_lender(true))))))
+        expect(quarantined.error).to_equal("linux-host-service-inventory-handoff-unproven")
+        expect(quarantined.owner.inventory.is_some()).to_equal(true)
+        expect(quarantined.owner.admission.unwrap().owner.unwrap().store_inventory_loaned).to_equal(true)
+        step("an unpublished owner (also without capacity) keeps the inventory lent; the full gate is pinned in S40-HANDOFF-03")
+        val unpublished = linux_service_inventory_handoff_v4(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service",
+            native: Some(s40_borrow(1, 4)), inventory: Some(s40_inventory(1, 4)),
+            admission: Some(MachineFreshEpochAdmissionTurnV1(owner: Some(s40_store_lender(true))))))
+        expect(unpublished.error).to_equal("linux-host-service-inventory-handoff-unproven")
+        expect(unpublished.owner.inventory.is_some()).to_equal(true)
+
+    it "returns only the exact lent inventory and grants nothing by returning it":
+        # @req S40-HANDOFF-02 (the private return step after the proof gate; DATA lender, no slot is touched)
+        step("a foreign inventory borrow is refused and both loans stay")
+        val foreign = linux_service_inventory_return_v4(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service",
+            native: Some(s40_borrow(1, 4)), inventory: Some(s40_inventory(1, 5)),
+            admission: Some(MachineFreshEpochAdmissionTurnV1(owner: Some(s40_store_lender(true))))))
+        expect(foreign.error).to_equal("machine-fresh-epoch-store-inventory-loan-foreign-borrow")
+        expect(foreign.owner.inventory.is_some()).to_equal(true)
+        expect(foreign.owner.inventory_returned).to_equal(false)
+        expect(foreign.owner.admission.unwrap().owner.unwrap().store_inventory_loaned).to_equal(true)
+        step("a missing borrow or a missing lender is refused")
+        val missing = linux_service_inventory_return_v4(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service",
+            native: Some(s40_borrow(1, 4)),
+            admission: Some(MachineFreshEpochAdmissionTurnV1(owner: Some(s40_store_lender(true))))))
+        expect(missing.error).to_equal("linux-host-service-inventory-borrow-missing")
+        val lenderless = linux_service_inventory_return_v4(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service",
+            native: Some(s40_borrow(1, 4)), inventory: Some(s40_inventory(1, 4))))
+        expect(lenderless.error).to_equal("linux-host-service-admission-missing")
+        expect(lenderless.owner.inventory.is_some()).to_equal(true)
+        step("the exact borrow ends the store loan only; the service loan stays")
+        val returned = linux_service_inventory_return_v4(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service",
+            native: Some(s40_borrow(1, 4)), inventory: Some(s40_inventory(1, 4)),
+            admission: Some(MachineFreshEpochAdmissionTurnV1(owner: Some(s40_store_lender(true))))))
+        expect(returned.error).to_equal("")
+        expect(returned.owner.inventory.is_none()).to_equal(true)
+        expect(returned.owner.inventory_returned).to_equal(true)
+        val lender = returned.owner.admission.unwrap().owner.unwrap()
+        expect(lender.store_inventory_loaned).to_equal(false)
+        expect(lender.service_loaned).to_equal(true)
+        step("a second return is refused")
+        expect(linux_service_inventory_return_v4(returned.owner).error).to_equal("linux-host-service-inventory-returned")
+        step("the returned epoch still never starts its provider and never transfers (once-lent)")
+        expect(lender.start_provider_v1(s40_template()).error).to_equal("machine-fresh-epoch-provider-start-after-service-loan")
+        expect(lender.transfer_workload_v2().error).to_equal("machine-fresh-epoch-service-loan-active")
+        step("close after the handoff skips the returned inventory and stops at the service loan")
+        var closing = returned.owner
+        closing.native = Some(s40_borrow(2, 4))
+        val closed = host_linux_service_close_v4(closing)
+        expect(closed.error).to_equal("machine-fresh-epoch-service-loan-foreign-borrow")
+        expect(closed.owner.admission.unwrap().owner.unwrap().service_loaned).to_equal(true)
+
+    it "hands the inventory back from the opener only after a proven start, and current_v4 accepts it only then":
+        # @req S40-HANDOFF-03 (structural pin: the positive path needs installed roots and an admitted epoch)
+        val source = s40_source(S40_CURRENT)
+        expect(s40_before(source, "val started = host_linux_service_start_v4(anchor,",
+            "linux_service_inventory_handoff_v4(owner)")).to_equal(true)
+        expect(source.contains("elif (not self.inventory_returned or self.inventory.is_some() or\n" +
+            "                    not self.capacity.unwrap().ledger.continuity_proven):")).to_equal(true)
+        expect(source.contains("if self.inventory.is_none() or self.inventory_returned:")).to_equal(true)
+        expect(source.contains("return Err(\"linux-host-service-inventory-return-unproven\")")).to_equal(true)
+        step("the opener skips the handoff on a quarantined start, and the handoff gate needs every proof fact")
+        expect(s40_before(source, "if started.error != \"\": return HostLinuxServiceStartTurnV4(owner: owner, error: started.error)",
+            "if owner.reconcile_error != \"\" or owner.capacity.is_none() or not owner.capacity.unwrap().ledger.continuity_proven:")).to_equal(true)
+        expect(s40_before(source, "not owner.capacity.unwrap().ledger.continuity_proven:\n        return HostLinuxServiceStartTurnV4(owner: owner, error: \"\")",
+            "    linux_service_inventory_handoff_v4(owner)")).to_equal(true)
+        expect(source.contains("    if (not owner.published or owner.reconcile_error != \"\" or owner.capacity.is_none() or\n" +
+            "            not owner.capacity.unwrap().ledger.continuity_proven):\n" +
+            "        return linux_service_start_error_v4(owner, \"linux-host-service-inventory-handoff-unproven\")")).to_equal(true)
