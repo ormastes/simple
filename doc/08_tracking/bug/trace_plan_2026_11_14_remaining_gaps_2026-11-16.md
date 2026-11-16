@@ -21,7 +21,12 @@ flagged, but they break the "no primitive in public API" requirement:
   unwrap at use sites, keep the SDN wire format byte-identical (codec specs).
 
 ## 3. MCP / ctx
-  23 lint errors (unchanged by waves 1–3).
+
+- `simple_ctx_purge` is a compare-and-swap on the store generation key, but an
+  append that lands between the final key check and the rename still targets
+  the replaced file and is lost (`src/app/mcp/main_lazy_ctx_tools.spl`,
+  `ctx_purge_commit`). Unblock: an OS compare-and-rename, or appends that
+  re-check the generation after writing.
 - `simple_trace` validates `profile` but does not change enforcement by it, and
   exposes only `operation: missing`.
 - `simple_test_query`: the TestDB-absent (no cold start) path has no spec.
