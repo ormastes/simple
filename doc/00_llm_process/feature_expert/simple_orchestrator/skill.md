@@ -176,15 +176,46 @@ available. These source paths and their manuals remain NOT_RUN.
   domain only status and close reach it; every other route refuses it. The 26 Windows-only wildcard matches
   already refuse.
 - **Custody fix** (#9751): no panic after acquisition or after a committed begin in host execution.
-- **Still blocked** (details in `.spipe/simple_orchestrator/continuation_20261116/milestone_0018_service40_execution/DESIGN.md`):
-  - Listener/startup: nothing in production builds the LinuxService domain. The native identity borrow needs the
-    machine policy reader plus the fresh-epoch successor custody that `machine_container_authority_open_fresh_epoch_v1`
-    retains, which needs an owner decision. The smux startup v4 draft also needs the fenced cut-4 `server.spl` factory.
-  - Assembly remainder (service7/wireR2/wireR3/driver3/wire_redaction_test8): most of it has no production caller
-    until cut 4, and cut 4 needs authR2's `host_service_ready_reader_v1`. Cut 1 is held under the
-    no-unused-code rule.
-  - Reconciliation, which needs the upper Linux provider inventory. The owner stays quarantined.
-  - The epoch digest, which has no landed producer, so the caller supplies it.
+- **Lease tokens** (#9775): each smux client lease token is
+  `hex(HMAC-SHA256(owner_nonce, "smux-client-lease-v1|" + len:session|len:client|gen))[0:32] + ":" + gen`.
+  The nonce never appears in a token or on the wire. Its only other use is process-internal: `attachment_owner` in
+  service_revision.
+- **Release today:** nothing in production builds the LinuxService domain (`host_linux_service_start_v4` has 0
+  callers). There is no service loan (`lend_service_identity_v1` is absent), and the caller still supplies the
+  epoch digest.
+- **Prepared but not landed.** The bytes are in
+  `.spipe/simple_orchestrator/continuation_20261116/milestone_0018_service40_execution/combined_A1_reconcile/`.
+  That location is host-local and untracked; the design is in `../DESIGN.md` and the blocker trace in
+  `combined_A1_reconcile/NOTES.md`.
+  - Throwaway 8d13e3c8cdc is NOT to be landed.
+  - A1 alone: independent review A1-r2 APPROVE on 62ba00decce, conditional on landing together with reconcile.
+  - Reconcile: independent review Breconcile-r1 CHANGES_REQUIRED (P0 F1, P1 F2). Fixes were authored in round 2
+    but have not been independently re-reviewed.
+  - The combined unit has not been reviewed.
+
+  The bytes cover:
+  - the machine admission owner's service loan (second policy reader plus fresh-epoch custody, exact-borrow return);
+  - the epoch digest, computed as `sha256(machine_fresh_epoch_record_bytes_v1)`;
+  - the `linux-service` installed opener, with read-only checks before the durable admission;
+  - a fixed Host-only control policy;
+  - prepare/execute routed to `host_linux_service_dispatch_installed_v4`;
+  - `host_linux_service_reconcile_flip_v4`, the only continuity flip, with its proof private to the reconcile
+    module;
+  - the `check-continuity-proven-setters.shs` ratchet.
+- **Why it is held:** reconcile needs an authenticated store inventory, and nothing can lend one.
+  `linux_installed_supervisor_open_v1` has 0 callers. It masks the activation closure and cannot close without
+  an unimplemented successor handoff. The fresh epoch requires the installed provider to stay masked, while the
+  installed inventory talks only to that provider's live MainPID.
+  - Missing, owned by the machine-authority / fresh-epoch lane:
+    - M1: `linux_fresh_epoch_store_inventory_v1` (owner decision: offline store read, or start the provider first);
+    - M2: `lend_store_inventory_v1` / `end_store_inventory_loan_v1` on the admission owner.
+  - M3 (this lane, after M1/M2): `host_linux_service_reconcile_flip_v4` takes the M2 inventory borrow in place of
+    `supervisor`, and `close_v4` ends that loan before `end_service_loan_v1`.
+  - Without these, every start ends quarantined, so the stack is not landed.
+- **The Agent V7 wire (assembly cuts 1-4) is not landed** (E-cuts r2 CHANGES_REQUIRED). In the held cut bytes,
+  nothing ever sets `ServiceSlotV5.installed` (E2-1), so invoke always refuses, and invoke is the only creator of
+  `session.workspace`. Plan: DESIGN.md A2, which reapplies the E-r1 fixes on top of the installed slot. It depends
+  on the serving path above.
 
 ### Traps
 - Never reconcile a Linux journal from ledger flags alone. The capacity owner requires native inventory/quarantine
@@ -197,4 +228,8 @@ available. These source paths and their manuals remain NOT_RUN.
   1–3 s window.
 - An import is not a caller. Before landing a staged unit, check production reachability, not just import
   closure. Specs do not count (wire v7 cut 1 was held for this, 2026-11-16).
+- Simple does not enforce field privacy: any module can construct or mutate a "private" class field. A proof
+  value is a seal only if it never leaves its module, so do the check and the effect in one call there.
+- A start that ALWAYS refuses after durable work (admission, journal open, current publish) is dead weight, not
+  fail-closed. Check refusal reachability before admitting a backend at the primary shape.
 - `std.spec` `fail()` records the failure and returns. Code after it still runs, so return explicitly.
