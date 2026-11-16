@@ -36,11 +36,14 @@ still renders grayscale text. It does not render wrong text.
    `s5 = (cov * color_a / 255) >> 3`.
    - These kernels already read `dst[di]` and write it back, so no
      dual-source blending is needed. The change is local to the kernel body.
-2. **The GLSL source is not in the tree.** `backend_vulkan_font_spirv.spl` keeps
-   only the words plus `Source SHA-256: 8a5c5422…`. There is no
-   `shaders/*.comp` for it (compare the `rect_batch`, `blur_rect`,
-   `shadow_rect` and `glass_material` lanes). Regenerating it needs that source
-   recovered or rewritten first. The new blob also needs a
+2. **The GLSL source IS in the tree (corrected 2026-11-17).** It is
+   `test/09_baselines/engine2d_vulkan/font_atlas_packed.comp`: its SHA-256 is
+   exactly the `Source SHA-256: 8a5c5422…` recorded in
+   `backend_vulkan_font_spirv.spl`. It lives with the baselines, not under
+   `shaders/` like the `rect_batch`, `blur_rect`, `shadow_rect` and
+   `glass_material` lanes, which is why the first search missed it.
+   `glslangValidator` and `spirv-val` are installed in `~/.local/bin`, so
+   this item does not block the fix. The new blob still needs a
    `check-*-spirv-pinned.shs` row, like its siblings, and a semantics-version
    bump.
 3. **The fallback cannot be per glyph.** Running LCD text on Vulkan through
@@ -51,7 +54,7 @@ still renders grayscale text. It does not render wrong text.
 
 ## Fix plan
 
-- Recover or rewrite the font batch GLSL as `shaders/font_atlas_batch.comp`.
+- Move `test/09_baselines/engine2d_vulkan/font_atlas_packed.comp` to `shaders/font_atlas_batch.comp` (or extend it in place), keeping its hash provenance.
 - Add the per-channel branch.
 - Regenerate the SPIR-V, bump `FONT_ATLAS_COMPOSITE_VULKAN_SEMANTICS_VERSION`, and
   add the pinned-SPIR-V check.
