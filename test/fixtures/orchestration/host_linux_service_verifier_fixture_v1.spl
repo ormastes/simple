@@ -41,20 +41,26 @@ fn linux_verifier_public_hex_v1(offset: i64) -> text:
     for byte in derived.public_key: wide.push(byte as i64)
     bytes_to_hex_canonical(wide)
 
-fn linux_verifier_key_v1(identity: text, role: text, offset: i64) -> SdnValue:
+fn linux_verifier_key_v1(identity: text, role: text, offset: i64, operations: [text]) -> SdnValue:
+    var allowed: [SdnValue] = []
+    for operation in operations: allowed.push(SdnValue.String(operation))
     SdnValue.Dict({"identity": SdnValue.String(identity), "role": SdnValue.String(role), "revision": SdnValue.Int(1),
         "publicKeyHex": SdnValue.String(linux_verifier_public_hex_v1(offset)), "principal": SdnValue.String("user_1"),
         "project": SdnValue.String("project_1"), "hostId": SdnValue.String("worker_1"),
-        "operations": SdnValue.Array([SdnValue.String("host_enroll_v1")]), "maximumMemoryBytes": SdnValue.Int(1073741824),
+        "operations": SdnValue.Array(allowed), "maximumMemoryBytes": SdnValue.Int(1073741824),
         "maximumDurationMs": SdnValue.Int(2000), "policyRevision": SdnValue.Int(4), "revocationEpoch": SdnValue.Int(2),
         "expiresAt": SdnValue.Int(LINUX_VERIFIER_FAR_V1), "revoked": SdnValue.Bool(false)})
 
 # Installed administrator policy: the two public keys derived from the seeds.
 pub fn linux_service_verifier_policy_v1(issuer_offset: i64, approver_offset: i64) -> text:
+    linux_service_verifier_policy_ops_v1(issuer_offset, approver_offset, ["host_enroll_v1"])
+
+# Same installed policy whose two keys may also sign the given operations.
+pub fn linux_service_verifier_policy_ops_v1(issuer_offset: i64, approver_offset: i64, operations: [text]) -> text:
     val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "generation": SdnValue.Int(7),
         "policyRevision": SdnValue.Int(4), "revocationEpoch": SdnValue.Int(2), "sessionGeneration": SdnValue.Int(3),
-        "keys": SdnValue.Array([linux_verifier_key_v1("issuer_1", "grant-issuer", issuer_offset),
-            linux_verifier_key_v1("approver_1", "human-approver", approver_offset)])}
+        "keys": SdnValue.Array([linux_verifier_key_v1("issuer_1", "grant-issuer", issuer_offset, operations),
+            linux_verifier_key_v1("approver_1", "human-approver", approver_offset, operations)])}
     sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
 
 fn linux_verifier_configuration_v1() -> text:
@@ -102,6 +108,12 @@ pub fn linux_service_verifier_credential_v1(binding: HostLinuxServiceEnrollmentB
     val grant = ExecutionGrantV2(id: "grant_1", principal: "user_1", project: "project_1", host_id: "worker_1",
         operations: ["host_enroll_v1"], environment_digest: "a".repeat(64), policy_revision: 4, revocation_epoch: 2,
         expires_at: LINUX_VERIFIER_FAR_V1, maximum_memory_bytes: 536870912, maximum_duration_ms: 1000)
+    val proof = linux_service_verifier_sign_v1(operation, grant, issuer_offset, approver_offset, approval_expires_at)
+    HostEnrollmentCredentialV1(operation: operation, signed: proof.0, approval: proof.1)
+
+# Real issuer grant signature and approver signature over `operation` by the seeds.
+pub fn linux_service_verifier_sign_v1(operation: OperationEnvelopeV2, grant: ExecutionGrantV2, issuer_offset: i64,
+        approver_offset: i64, approval_expires_at: i64) -> (DistributedSignedGrantV2, DistributedSignedApprovalV2):
     var signed = DistributedSignedGrantV2(grant: grant, issuer_id: "issuer_1", key_revision: 1, signature: [])
     signed.signature = pure_ed25519_sign_from_seed_v1(linux_verifier_seed_v1(issuer_offset),
         distributed_grant_signature_message_v2(signed).unwrap()).signature
@@ -111,13 +123,18 @@ pub fn linux_service_verifier_credential_v1(binding: HostLinuxServiceEnrollmentB
         session_generation: 3, expires_at: approval_expires_at, signature: [])
     approval.signature = pure_ed25519_sign_from_seed_v1(linux_verifier_seed_v1(approver_offset),
         distributed_approval_signature_message_v2(approval).unwrap()).signature
-    HostEnrollmentCredentialV1(operation: operation, signed: signed, approval: approval)
+    (signed, approval)
 
 # Association whose policy holds the public keys of the given seeds and whose
 # credential is signed by the same seeds. Genuine installed seeds: 1 and 65.
 pub fn linux_service_verifier_fixture_with_v1(issuer_offset: i64, approver_offset: i64,
         approval_expires_at: i64, parent: text = "/var/lib/simple/hosts") -> LinuxServiceVerifierFixtureV1:
-    val policy = linux_service_verifier_policy_v1(issuer_offset, approver_offset)
+    linux_service_verifier_fixture_ops_v1(issuer_offset, approver_offset, approval_expires_at, parent, ["host_enroll_v1"])
+
+# Genuine association whose installed keys may also sign `operations`.
+pub fn linux_service_verifier_fixture_ops_v1(issuer_offset: i64, approver_offset: i64, approval_expires_at: i64,
+        parent: text, operations: [text]) -> LinuxServiceVerifierFixtureV1:
+    val policy = linux_service_verifier_policy_ops_v1(issuer_offset, approver_offset, operations)
     val configuration = linux_verifier_configuration_v1()
     val engine_policy = "version: 1\nkind: linux-engine-policy-fixture\n"
     val broker_policy = linux_verifier_broker_v1()

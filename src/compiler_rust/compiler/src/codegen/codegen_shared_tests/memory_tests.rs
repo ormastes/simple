@@ -17,6 +17,7 @@ shared_test!(shared_enum_payload, |f: &mut MirFunction| {
         dest: wrapped,
         enum_name: "Option".to_string(),
         variant_name: "Some".to_string(),
+        discriminant: simple_runtime::value::hash_variant_discriminant("Some"),
         payload,
     });
     block.instructions.push(MirInst::EnumPayload { dest, value: wrapped });

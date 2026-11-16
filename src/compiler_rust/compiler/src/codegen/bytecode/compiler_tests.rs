@@ -309,6 +309,7 @@ fn test_compile_enum_constructors_preserve_runtime_type_identity() {
             dest: VReg(0),
             enum_name: "pkg.Config".to_string(),
             variant_name: "Ready".to_string(),
+            discriminant: simple_runtime::value::hash_variant_discriminant("Ready"),
         }],
         Terminator::Return(Some(VReg(0))),
     );
@@ -324,6 +325,7 @@ fn test_compile_enum_constructors_preserve_runtime_type_identity() {
                 dest: VReg(1),
                 enum_name: "pkg.Other".to_string(),
                 variant_name: "Ready".to_string(),
+                discriminant: simple_runtime::value::hash_variant_discriminant("Ready"),
                 payload: VReg(0),
             },
         ],
@@ -367,6 +369,7 @@ fn test_compile_enum_variant_test_preserves_type_and_full_discriminant() {
     let variant = |enum_name: &str, variant_name: &str| MirPattern::Variant {
         enum_name: enum_name.to_string(),
         variant_name: variant_name.to_string(),
+        discriminant: simple_runtime::value::hash_variant_discriminant(variant_name),
         payload: None,
     };
     let func = make_function(
@@ -377,6 +380,7 @@ fn test_compile_enum_variant_test_preserves_type_and_full_discriminant() {
                 dest: VReg(0),
                 enum_name: "pkg.Config".to_string(),
                 variant_name: "Ready".to_string(),
+                discriminant: simple_runtime::value::hash_variant_discriminant("Ready"),
             },
             MirInst::PatternTest {
                 dest: VReg(1),
