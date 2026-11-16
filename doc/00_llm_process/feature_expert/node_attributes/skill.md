@@ -73,3 +73,17 @@ rejects any `var` binding, `mut T` parameter, `me`-method `self`, `Ref`/`Ptr`-ty
 binding or closure capture of those, nested anywhere in the argument
 (`InitCapabilityScanV1`; `init_capability_escape_v1_spec`, 12/12). `val x = counter`
 then `async_init(x)` is accepted.
+
+## Backing layouts + AoS/SoA (2026-11-16)
+Placements are now `direct | column | array_index | sparse_hash`, plus `array_ptr | hash_ptr`.
+The two pointer tokens resolve, but construction returns `Err` (no safe stable
+reference across growth/rehash; `TODO(node-attr-pointer-layouts)`).
+`array_index` keeps the slot index on the node, through an `AttrOwnerV1<i64>`
+index owner (`attr_store_indexed_v1`) or an internal `AttrIndexCellsV1` when
+detached, and reuses retired slots from a free list.
+Multi-field side arrays: `AttrGroupStoreV1<T>` with `AttrLayoutV1` `Aos | Soa`
+(default soa), column/array_index only.
+AST wiring (`nodes.spl`): mode 3 = array_index, `layout=aos|soa` key
+(`expr_attr_side_layout()`); a pointer token turns the switch off.
+Spec doc: `doc/07_guide/language/attributes/node_attribute_layouts.md`.
+Matrix: `test/01_unit/compiler/data/attribute_layouts_spec.spl`.
