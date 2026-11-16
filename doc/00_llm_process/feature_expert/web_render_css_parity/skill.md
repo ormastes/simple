@@ -2132,3 +2132,11 @@ never cache an answer computed while exhausted) —
 
   Phases for tab-bar at K=4, before -> after: document (parse, style, layout, compose) 0.46 s -> 0.46 s; device-scale pass 0.04 s -> 0.04 s; paint 810 s -> 69 s; PPM encode 27 s -> 21 s. Phase lines come from `SIMPLE_WEB_PHASE_TRACE=1`, which also covers the at_device_scale entry.
 - Remaining cost: interpreter per-pixel work (the box-shadow loop, 64 px glyph raster, the PPM encoder). See `doc/08_tracking/bug/web_render_dpr4_residual_per_pixel_cost_2026-11-16.md`.
+
+## 2026-11-16 — select UA background, native vs styled
+
+- Chrome 159 computes `background-color: ButtonFace` (`rgb(239,239,239)`) for every `<select>`, but paints it only when the author styles the box: any `border*` (radius alone counts), `background*`, `box-shadow` or non-`auto` `appearance`. Otherwise the native menulist paints a WHITE field. `padding`, `color` and `font-size` do not count. A listbox (`multiple`, or `size` > 1) is a white `Field` either way. The UA fill is in `form_control_ua_box_decls`; the native white is the cascade tail's `_select_author_styled` check (`..._core.spl`). Spec: `select_ua_background_chrome159_spec`. forms-media 6.37 -> 6.08 at 1x.
+- **Trap — computed value is not painted value for `appearance:auto` controls.** `getComputedStyle` says ButtonFace on the unstyled select too; only a `--screenshot` pixel shows the white. Pin control colours from pixels, not from computed style.
+- **Trap — Chrome's catalog screenshots use LCD subpixel text AA** (colour fringes, e.g. `f0ce8c`/`6ec0f2` next to a `#172033` stem); Engine2D is grayscale. On forms-media the list text bands are about 70 % of the remaining mismatch with geometry aligned to <= 1 px. Before chasing a text band, sample a few pixels: coloured fringes mean AA mode, not layout. Changing the gate's Chrome flags (`--disable-lcd-text`) would rebase every row and is an owner decision.
+- Method that found it: a tile map (50x20 px mismatch counts) plus per-row ink profiles of the two frames. Rows aligned within a pixel ruled out layout; the remaining non-text tiles were the select.
+- Gates at the fix: matrix 979 cells, 88 mismatching (no change, geometry-only gate); catalog 1x worst 6.80 (css-paint), every row unchanged except forms-media 6.37 -> 6.08 (baseline lowered).
