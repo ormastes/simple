@@ -56,3 +56,25 @@ describe "restricted workspace source loan boundary":
         for forbidden in ["state.source.close", "state.source.reader", "state.source.storage", "state.source.lease",
                 "state.source.begin_binding", "state.source.retire_native", "state.source.retained_metadata", "state.source.owner"]:
             expect(source.contains(forbidden)).to_equal(false)
+
+    it "returns acquired custody when host request encoding fails after acquisition":
+        step("Fail closed with the acquired source loan instead of panicking (#9749 review H2-P2-2)")
+        val shared = workspace_loan_source_v3("src/lib/nogc_sync_mut/orchestration/host_authorized_execution_v2.spl")
+        expect(shared.contains("host_execute_request_encode_v2(native.packet.host).unwrap()")).to_equal(false)
+        val after_acquire = shared.split("var native = acquired.state.unwrap()")
+        expect(after_acquire.len()).to_equal(2)
+        val split_prepare = after_acquire[1].split("val prepared = host_execution_prepare_projected_v3(")
+        expect(split_prepare.len()).to_be_greater_than(1)
+        val before_prepare = split_prepare[0]
+        expect(before_prepare.contains("val encoded = host_execute_request_encode_v2(native.packet.host)")).to_equal(true)
+        expect(before_prepare.contains("if encoded.is_err(): return host_agent_native_reply_v2(owner, current, Some(native), None, None, true, encoded.unwrap_err())")).to_equal(true)
+
+    it "reads the scripted flag before the capacity begin commits":
+        step("No fallible call may follow a committed begin (#9749 follow-up A-P3-2)")
+        val shared = workspace_loan_source_v3("src/lib/nogc_sync_mut/orchestration/host_authorized_execution_v2.spl")
+        expect(shared.contains("simple_container_execution_scripted_v4(container).unwrap()")).to_equal(false)
+        val restricted = shared.split("fn host_execution_restricted_begin_v4(")
+        expect(restricted.len()).to_equal(2)
+        val before_begin = restricted[1].split("val begun = host_capacity_owner_begin_v1(owner, prepared.envelope.intent")
+        expect(before_begin.len()).to_equal(2)
+        expect(before_begin[0].contains("val scripted = simple_container_execution_scripted_v4(container)")).to_equal(true)

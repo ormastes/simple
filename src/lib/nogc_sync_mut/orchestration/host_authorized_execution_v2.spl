@@ -461,6 +461,9 @@ fn host_execution_restricted_begin_v4(owner: HostCapacityOwnerV1, container: Sim
     if error != "": return HostExecutionProgressTurnV4(owner, container, nil, nil, false, error)
     val capacity = owner.ledger.capacity
     val fence = HostLedgerFenceV1(capacity.authority_id, capacity.boot_id, capacity.provider_generation, owner.ledger.revision)
+    # Read the scripted flag before begin commits: nothing fallible may follow the commit.
+    val scripted = simple_container_execution_scripted_v4(container)
+    if scripted.is_err(): return HostExecutionProgressTurnV4(owner, container, None, None, not host_execution_current_v2(owner), scripted.unwrap_err())
     val begun = host_capacity_owner_begin_v1(owner, prepared.envelope.intent, prepared.envelope.operation,
         prepared.envelope.receipt, fence, prepared.grant, latest)
     if begun.is_err(): return HostExecutionProgressTurnV4(owner, container, nil, nil, not host_execution_current_v2(owner), begun.unwrap_err())
@@ -471,7 +474,7 @@ fn host_execution_restricted_begin_v4(owner: HostCapacityOwnerV1, container: Sim
         journal_lease: executing.journal.lease_digest, journal_authority: executing.journal.authority_digest,
         journal_sequence: executing.journal.sequence, constraint: constraint, input_constraint: input_constraint)))
     HostExecutionProgressTurnV4(executing, container, Some(HostExecutionContinuationV4(slot,
-        simple_container_execution_scripted_v4(container).unwrap(), prepared.scope,
+        scripted.unwrap(), prepared.scope,
         executing.journal.root, executing.journal.lease_digest, executing.journal.authority_digest)), nil, false, "")
 
 fn host_execution_progress_finish_v4(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2,
@@ -691,7 +694,10 @@ fn host_agent_native_begin_installed_v2(owner: HostCapacityOwnerV1, container: S
     if acquired.error != "" or acquired.state.is_none():
         return HostAgentWorkspaceProgressTurnV2(owner, current, acquired.lease, acquired.source, None, None, true, acquired.error)
     var native = acquired.state.unwrap()
-    val host_payload = host_execute_request_encode_v2(native.packet.host).unwrap()
+    # Encoding can fail after acquisition: return the acquired source/container custody, never panic.
+    val encoded = host_execute_request_encode_v2(native.packet.host)
+    if encoded.is_err(): return host_agent_native_reply_v2(owner, current, Some(native), None, None, true, encoded.unwrap_err())
+    val host_payload = encoded.unwrap()
     val prepared = host_execution_prepare_projected_v3(owner, current, host_payload, policy, provider, service, context, native.projection)
     if prepared.is_err(): return host_agent_native_reply_v2(owner, current, Some(native), None, None, true, prepared.unwrap_err())
     val saved = host_execution_retain_v2(owner, prepared.unwrap(), host_payload)
