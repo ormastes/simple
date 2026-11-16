@@ -503,8 +503,20 @@ describe "SimpleWebRenderer":
         val pixels = simple_web_render_html_to_pixels(html, 64, 48)
 
         expect(query.kind).to_equal("text")
+        # RTL glyph reversal is NOT Chrome behaviour (Chrome 159 paints Latin
+        # "ABCDEFGHIJK" in logical order under direction:rtl); left as-is
+        # pending the owner's RTL/bidi decision.
         expect(query.text_value).to_equal("KJIHGFEDCBA")
-        expect(query.x).to_equal(1)  # oracle: 1 is the pinned authoritative contract value
+        # Chrome 159 (2026-11-16): the 11-glyph value is 56px wide in a 34px
+        # content box (scrollWidth 56 > clientWidth 34), so text-align:center
+        # is ignored and the RTL run is end-anchored at the content box's
+        # right edge: center, start and left paint identical ink columns.
+        # Chrome x = 37 - 56 = -19. The engine applies the same rule:
+        # content right 43 (content-box input 46 wide; Chrome's default
+        # <input> box-sizing is border-box, filed separately) minus the full
+        # 11 x 5px run = -12. The old 1 assumed 4px glyphs, a 9-glyph cap and
+        # centring of an overflowing run.
+        expect(query.x).to_equal(43 - 11 * 5)
         expect(query.y).to_equal(7)  # oracle: 7 is the pinned authoritative contract value
         expect(query.clip_rect.present).to_be(true)
         expect(query.clip_rect.x).to_equal(3)  # oracle: 3 is the pinned authoritative contract value
@@ -514,8 +526,17 @@ describe "SimpleWebRenderer":
         expect(query.color).to_equal(0xFF22C55Eu32)
         expect(hint.kind).to_equal("text")
         expect(hint.color).to_equal(0xFFEF4444u32)
-        expect(pixels[7 * 64 + 5]).to_equal(0xFF22C55Eu32)
+        # Chrome 159 screenshot of this page: text ink only in columns
+        # 4..21 (inside the 3..22 clip), and (5,7) itself is NOT ink there
+        # (#e3fdff), so the old single-pixel (5,7) pin was an artefact of
+        # the 4px-glyph x=1 run. Pin ink inside the clip in the exact text
+        # color, and no paint at all right of the clip across the whole
+        # input row (a superset of the old (25,7) white check).
+        expect(_count_non_color_rect(pixels, 64, 3, 3, 22, 16, 0xFF22C55Eu32)).to_be_less_than(19 * 13)
+        # Chrome 159: 101 non-white pixels in the 3..22 x 3..16 clip region.
+        expect(_ink_near_chrome(_count_non_color_rect(pixels, 64, 3, 3, 22, 16, 0xFFFFFFFFu32), 101)).to_equal(true)
         expect(pixels[7 * 64 + 25]).to_equal(0xFFFFFFFFu32)
+        expect(_count_non_color_rect(pixels, 64, 22, 0, 64, 16, 0xFFFFFFFFu32)).to_equal(0)  # oracle: Chrome 159 paints nothing right of the .clip box
 
     it "maps logical border block and inline properties to physical edges":
         # @req REQ-WEB-RENDER-001
