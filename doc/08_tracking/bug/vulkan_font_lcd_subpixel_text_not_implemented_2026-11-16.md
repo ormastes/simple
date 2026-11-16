@@ -1,6 +1,7 @@
 # Vulkan font batch has no LCD subpixel text (CPU lanes do)
 
-Status: OPEN 2026-11-16, filed with `work/webrender-lcd-text-20261116`.
+Status: FIXED 2026-11-17 on `work/vulkan-lcd-text-20261117` (see "Resolution" at the end; one decision left to the owner).
+Was: OPEN 2026-11-16, filed with `work/webrender-lcd-text-20261116`.
 
 ## Context
 
@@ -61,3 +62,82 @@ still renders grayscale text. It does not render wrong text.
 - Let `_lcd_text_active()` admit `vulkan`.
 - Acceptance: the spec above, run with the backend `vulkan` (llvmpipe), paints
   the same stem bytes as `cpu_simd`.
+
+## Resolution (2026-11-17)
+
+The Vulkan packed font kernel now paints LCD subpixel text byte for byte like
+`engine2d_lcd_quad_composite`, and `_lcd_text_active()` admits `vulkan`.
+
+What changed:
+- `shaders/font_atlas_batch.comp` is the shipping source (copied from
+  `test/09_baselines/engine2d_vulkan/font_atlas_packed.comp`, which stays as the
+  gray C-bench baseline). SPIR-V 7012 -> 12732 bytes, sha256
+  `da1c8a82ce2ce822b80c27fa3e656d19ed7fa6272d94d2afb558364ac94ab9c5`
+  (was `4b5f44e2...`), compiled with plain `glslangValidator -V`, `spirv-val` clean.
+- `backend_vulkan_font_spirv.spl` regenerated (head + tail halves kept). Pinned by
+  `scripts/check/check-font-atlas-batch-spirv-pinned.shs` (6-fixture selftest;
+  also pins `# Source SHA-256` and the runtime-trusted sha), manifest row
+  `push-font-atlas-batch-spirv-pinned` plus an exact dispatch arm in
+  `check-push-must-pass.shs`, like the glass/blur/shadow siblings.
+- Per-QUAD semantics, as on the CPU: LCD math only when the quad holds an LCD
+  cell and every destination pixel is opaque and on the surface; otherwise the
+  old gray blend for the whole quad. Inside an LCD quad gray cells go through the
+  s32 tables too. The opacity gate needs a whole quad in one workgroup, so an LCD
+  batch dispatches X = 1.
+- Tables (`engine2d_lcd_s32_tables`, moved to `engine2d/helpers/lcd_s32_tables.spl`,
+  not duplicated) and per-glyph indices ride in an opt-in trailer of the params
+  buffer (header word 7 bit 31). Deviations from the plan, with reasons: the
+  seed fixes the compute pipeline layout at bindings 0..2
+  (`interpreter_extern/gpu.rs` ~5054), so there is no 4th storage binding; and
+  the 7-word glyph record is unchanged because `metal_font_packed_parity_spec`
+  and `VULKAN_FONT_PACKED_MAX_BYTES == 114720` pin it.
+- Two traps found by differential runs against `cpu_simd`, both fixed and pinned:
+  the 5x7 bitmap atlas has rgb = 0 (read as an LCD cell it blanks the text), and
+  Draw IR's per-box clip trims quads on the host so a quad overhanging the
+  surface looked fully on-surface to the kernel while the CPU, whose off-surface
+  readback is 0, paints it gray (every page with text at x = 0 or flush right).
+
+Evidence (lavapipe, `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json`, seed
+`cargo-target-webrender-vk`):
+- `lcd_subpixel_text_chrome159_spec` AC-6/AC-7 were red on base (and still red
+  with only `_lcd_text_active()` widened: 369 differing pixels on a probe page,
+  `vector_font_device_executed=true`, so the kernel drew, not the CPU suffix) and
+  are green; 7/7.
+- `direction_rtl_bidi_order_chrome159_spec` AC-7 (LCD on, text flush at both
+  surface edges) was red (87 px, all within 5 px of an edge) and is green; 7/7.
+  AC-6 keeps `SIMPLE_WEB_LCD_TEXT=0`: its ink-order check is AA-sensitive like AC-5
+  (it fails with LCD on although the frame equals the CPU frame).
+- `vulkan_font_lcd_packed_params_spec` (new, 7 rows) pins the trailer layout.
+- Differential probes (not committed, device frame vs `simple_web_render_html_to_pixels`
+  at 64x64): 9 pages (edge-overhanging text, alpha text, text over a gradient and
+  over a dark fill, 40 px and 11-12 px, overlapping glyphs, five text colours, a
+  clip box) show 0 differing pixels; 7 of them ran on the device kernel, 2 (bottom
+  edge, clip box) fell back to the CPU suffix and are not kernel evidence. The
+  bitmap lane is covered by `input_password_mask_chrome159_spec` (5/5).
+- Regression (head vs base, same failing names): `simple_web_renderer_spec`
+  116/116, `browser_renderer_spec` 131/131 and 4/4, `web_device_scale_spec` 7/7,
+  the six input/button chrome159 specs and the Vulkan engine2d font specs, apart
+  from four specs that fail identically on base
+  (`input_text_overlay_plan_contract_spec` 1, `backend_vulkan_font_perf_evidence_spec` 2,
+  `backend_vulkan_font_spec` 5, `engine_vulkan_font_route_spec` 1). Wall time of
+  `simple_web_renderer_spec` 149.8 / 147.6 s base vs 148.7 / 148.2 s head.
+
+Left open:
+1. `FONT_ATLAS_COMPOSITE_VULKAN_SEMANTICS_VERSION` is NOT bumped (still 2).
+   `vulkan_session.spl:473` requires it to equal the common
+   `FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION`; bumping only the Vulkan one rejects
+   every pinned install (`font-pipeline-semantics-mismatch`), and bumping the
+   common one also hits the CUDA check (`backend_cuda_font_ptx.spl:182`,
+   `engine.spl:1325`) and specs pinned at 2 (`font_atlas_composite_identity_spec`,
+   `font_renderer_spec`, `cuda_generated_font_handoff_spec`). Owner decision.
+2. The shipped kernel is now a superset of the frozen common GLSL
+   (`font_atlas_composite_vulkan_glsl_source`, sha256 `8a5c5422...`, which
+   `check-portable-compute-toolchains.shs` still compiles to `4b5f44e2...`). The
+   `runtime-glsl` fallback (no pinned SPIR-V) and the OpenCL/CUDA/Metal twins
+   still paint an LCD atlas cell as gray; they are not admitted by
+   `_lcd_text_active()`.
+3. LCD on a trimmed quad gates on the visible pixels' opacity, the CPU on the
+   whole untrimmed quad's; equal on an opaque frame, different on a translucent
+   one (not exercised).
+4. More than 32 distinct LCD text colours in one batch is refused and falls to
+   the per-quad-readback CPU suffix (correct, slow).
