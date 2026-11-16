@@ -107,11 +107,27 @@ fn machine_fresh_probe_select_owned_v3(storage: MachineStorageOwnerV1, state: Ma
     # A single initial request plus this complete fixed finite profile fits
     # below the original 64-segment horizon, including cleanup/settlement room.
     # Successor chains require their own linked preflight, never this reset.
-    if state.history_v2()?.segments.len() != 1: return Err("machine-probe-initial-history-required")
+    if state.history_v2()?.link_parent == "":
+        if state.history_v2()?.segments.len() != 1: return Err("machine-probe-initial-history-required")
+    else:
+        machine_fresh_probe_linked_preflight_v3(state)?
     val staged = state.install_probe_v3(selected)?
     val rows = machine_fresh_probe_selection_entries_v3(record, provider, index, time_sample_unix_micros_or_failure() / 1000)?
     val committed = workload_publish_v3(storage, state, rows)?
     state.capture_probe_v3(selected.selection_published_v3()?)
+    Ok(())
+
+# milestone_0021 3.2a: the linked preflight a successor probe needs. Same fixed probe profile and the same
+# per-history 64-segment budget as the unlinked check above: the successor holds exactly its own reserve segment,
+# anchored directly after the predecessor's last verified segment (the store binding of that anchor is re-proved
+# by machine_fresh_workload_history_verify_v2 on every publish). No reset of a used history.
+pub fn machine_fresh_probe_linked_preflight_v3(state: MachineFreshWorkloadLifecycleV2) -> Result<(), text>:
+    val history = state.history_v2()?
+    if history.link_parent == "" or history.link_sequence <= 5 or history.segments.len() != 1:
+        return Err("machine-probe-linked-history-required")
+    val first = history.segments[0].revision
+    if first.parent != history.link_parent or first.first_sequence != history.link_sequence:
+        return Err("machine-probe-linked-history-anchor")
     Ok(())
 
 fn machine_fresh_probe_evidence_owned_v3(state: MachineFreshWorkloadLifecycleV2) -> Result<ProfiledCombinedCaptureEvidenceV1, text>:

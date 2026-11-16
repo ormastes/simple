@@ -1,10 +1,11 @@
 # Restrictive invocation DATA over an actual opaque contained compatibility
 # selection. Policy/source/task DTOs do not grant TaskRef access or execution.
 # No proof constructor, effect API, Host open, journal or terminal exists here.
-use std.common.contracts.provider_cli.adapter_types_v1.ProviderCliProviderV1
+use std.common.contracts.provider_cli.adapter_types_v1.{ProviderCliProviderV1, ProviderCliVersionDataV1}
 use std.common.contracts.provider_cli.codex_interactive_v1.{ProviderCliCodexInteractiveRequestDataV1,
     plan_provider_cli_codex_interactive_v1}
-use std.nogc_async_mut.llm.provider_cli_container_probe_v1.{ProviderCliContainedSelectionV1, ProviderCliContainedProbeReceiptV1}
+use std.nogc_async_mut.llm.provider_cli_container_probe_v1.{ProviderCliContainedSelectionV1, ProviderCliContainedProbeReceiptV1,
+    ProviderCliContainedProbeSnapshotV1}
 use std.common.contracts.orchestration.desired_input_v1.{ControllerDesiredInputV1, controller_desired_input_encode_v1}
 use std.common.contracts.orchestration.agent_policy_resolution_v1.AgentPolicyResolutionV1
 use std.common.contracts.orchestration.agent_invocation_binding_v1.AgentTaskInputV1
@@ -37,6 +38,15 @@ pub fn build_provider_cli_interactive_intent_data_v1(selection: ProviderCliConta
         version_receipt: ProviderCliContainedProbeReceiptV1, source: ControllerDesiredInputV1,
         policy: AgentPolicyResolutionV1, task: AgentTaskInputV1,
         request: ProviderCliCodexInteractiveRequestDataV1) -> Result<ProviderCliInteractiveIntentDataV1, text>:
+    build_provider_cli_interactive_intent_from_data_v1(selection.version_data_v1(), selection.binding_digest_v1(),
+        version_receipt.snapshot_v1(), source, policy, task, request)
+
+# milestone_0021 F20: the V1 body over DATA (version, binding digest, version-probe snapshot), so a V4 agent can
+# feed its V2 selection (`version_data_v2`, `binding_digest_v2`, receipt 0 `snapshot_v2()?.base`). No V1 change.
+pub fn build_provider_cli_interactive_intent_from_data_v1(version: ProviderCliVersionDataV1, binding_digest: text,
+        observed: ProviderCliContainedProbeSnapshotV1, source: ControllerDesiredInputV1,
+        policy: AgentPolicyResolutionV1, task: AgentTaskInputV1,
+        request: ProviderCliCodexInteractiveRequestDataV1) -> Result<ProviderCliInteractiveIntentDataV1, text>:
     val source_bytes = controller_desired_input_encode_v1(source)?
     if (not builder_digest_valid_v1(policy.source_digest) or not builder_digest_valid_v1(policy.catalog_digest) or
             source.source_digest != policy.source_digest or source.resource_identity !=
@@ -50,10 +60,8 @@ pub fn build_provider_cli_interactive_intent_data_v1(selection: ProviderCliConta
         return Err("interactive-intent-task-prompt-mismatch")
     if not builder_digest_valid_v1(task.content_digest) or sha256_text(task.content) != task.content_digest:
         return Err("interactive-intent-task-content-mismatch")
-    val version = selection.version_data_v1()
-    val observed = version_receipt.snapshot_v1()
     if (version.provider != ProviderCliProviderV1.Codex or observed.provider != version.provider or
-            observed.probe_index != 0 or observed.program_binding_digest != selection.binding_digest_v1()):
+            observed.probe_index != 0 or observed.program_binding_digest != binding_digest):
         return Err("interactive-intent-selection-receipt-mismatch")
     val planned = plan_provider_cli_codex_interactive_v1(version, request)?
     if policy.session.template.containers.len() != 1:

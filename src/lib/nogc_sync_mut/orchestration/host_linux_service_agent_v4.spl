@@ -1,0 +1,986 @@
+# milestone_0021 PR2: the V4-native installed agent owner (DESIGN sections 1-4,
+# .spipe/simple_orchestrator/continuation_20261116/milestone_0021_agent_owner_v4/DESIGN.md).
+# SOURCE_AUTHORED / NOT_RUN.
+#
+# One agent workload per service incarnation, preceded by its n provider probe
+# workloads, all on the epoch's ONE lent transfer, strictly one after another.
+# Each call advances at most one bounded step. This file owns the agent state,
+# the invoke codec, the probe request, the stored-bytes gates (2-5), the
+# section 4 checks, the stage drivers (3.4a, 3.4b), the Host settle (3.6) and
+# the agent half of the staged close (3.7). The V4 service owner
+# (HostLinuxServiceCurrentV4) holds it and supplies the borrowed Host
+# capacity owner, the archived bytes and the live clock; this file never
+# imports that owner (no import cycle). It opens no journal, reader, epoch or
+# admission of its own, and its only Host progress write is the associated settle.
+use std.container.{SimpleContainerOwnerV2, simple_container_scope_v2,
+    simple_container_intent_v2, simple_container_probe_v3, MachineFreshProbeCallV3, MachineFreshProbeReplyV3,
+    ContainerWorkspaceActionV3, LinuxWorkspaceSourceLoanV3,
+    simple_container_workspace_source_open_installed_v3, simple_container_enable_workspace_v3,
+    simple_container_workspace_begin_v3, simple_container_workspace_step_v3}
+use std.container.{simple_container_open_lent_v4, simple_container_take_workspace_root_v3,
+    simple_container_end_workspace_root_loan_v3, simple_container_end_service_loan_v3,
+    simple_container_adopt_lent_workspace_reader_v3, simple_container_advance_workload_v3,
+    simple_container_set_lifecycle_root_v3, simple_container_epoch_current_v3, simple_container_helper_dirs_v3,
+    simple_container_validate_helper_template_v3, simple_container_settle_workspace_v3,
+    simple_container_return_settled_workspace_source_v3, simple_container_close_workload_v3,
+    simple_container_close_epoch_v3}
+use std.container.{LinuxFreshWorkloadOwnerV2, LinuxWorkspaceRootBorrowV3, LinuxOciRequestV1,
+    linux_oci_request_digest_v1, linux_oci_retained_request_encode_v1, linux_oci_retained_request_decode_v1}
+use std.common.contracts.container.linux_fresh_workload_v2.LinuxFreshWorkloadActionV2
+use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, ContainerHostScopeV2,
+    container_host_scope_bytes_v2, container_scope_fence_id_v2}
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeOperationV1, RUNTIME_STATUS_OK,
+    RUNTIME_PHASE_RUNNING, RUNTIME_PHASE_CREATED}
+use std.common.contracts.container.execution_input_configuration_v1.container_execution_input_configuration_decode_v1
+use std.common.contracts.orchestration.agent_workspace_invocation_v2.{AgentWorkspaceInvocationManifestV2,
+    agent_workspace_invocation_manifest_encode_v2, agent_workspace_invocation_manifest_decode_v2,
+    agent_workspace_invocation_manifest_digest_v2}
+use std.common.contracts.orchestration.host_execute_associated_v3.{HostExecuteAssociatedRequestV3, host_execute_associated_decode_v3}
+use std.common.contracts.orchestration.host_execution_association_v3.host_execution_association_encode_v3
+use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
+use std.common.contracts.orchestration.host_service_operation_v6.host_service_hex_shape_v6
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.contracts.provider_cli.adapter_types_v1.ProviderCliProviderV1
+use std.common.contracts.provider_cli.adapter_v1.{decode_provider_cli_provider_v1, provider_cli_probe_count_v1,
+    provider_cli_probe_argv_v1}
+use std.common.contracts.provider_cli.codex_interactive_v1.ProviderCliCodexInteractiveRequestDataV1
+use std.common.build_manager.group_process_stream_protocol_v2.GroupProcessStreamLaunchV2
+use std.nogc_async_mut.llm.provider_cli_profiled_probe_v2.{ProviderCliContainedProbeOwnerV2,
+    ProviderCliContainedProbeTurnV2, ProviderCliContainedProbeReceiptV2, ProviderCliContainedSelectionV2, provider_cli_profiled_probe_begin_v2,
+    provider_cli_profiled_probe_step_v2, provider_cli_profiled_selection_v2, provider_cli_profiled_probe_list_digest_v2}
+use std.nogc_async_mut.llm.provider_cli_interactive_intent_v1.{ProviderCliInteractiveIntentDataV1,
+    build_provider_cli_interactive_intent_from_data_v1}
+use std.nogc_sync_mut.container.machine_authority_v1.MachineFreshEpochAdmissionOwnerV1
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.MachineFreshEpochRecordV1
+use std.nogc_sync_mut.io.linux_service_native_identity_v3.LinuxServiceNativeIdentityBorrowV3
+use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
+use std.nogc_sync_mut.io.dir_ops.dir_remove_all
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{HostCapacityOwnerV1, host_capacity_owner_settle_associated_v3}
+use std.nogc_sync_mut.orchestration.host_linux_completion_evidence_v3.{HostAgentOutcomeRecordV4,
+    host_agent_outcome_encode_v4, host_agent_outcome_decode_v4, host_agent_outcome_relative_v4}
+use std.nogc_sync_mut.orchestration.host_agent_workspace_execution_v2.{host_agent_workspace_manifest_check_v2,
+    host_agent_workspace_source_projection_check_v2}
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.{HostExecutionObservationV2,
+    host_execution_observation_store_owned_v3}
+use std.nogc_sync_mut.orchestration.host_execution_intent_v1.host_execution_intent_store_owned_v3
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_read_v3
+use std.common.crypto.sha256.sha256_text
+use std.common.build_manager.contracts.{builder_digest_valid_v1, builder_identifier_valid_v1}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+# 30 s: the collector deadline (provider_cli_container_probe_v1.spl:302-303) and the per-probe timeout cap.
+const HOST_AGENT_PROBE_TIMEOUT_MS_V4: i64 = 30000
+const HOST_AGENT_INVOKE_MAX_BYTES_V4: i64 = 2097152
+
+# The agent owner (DESIGN section 2). Transfer holder: exactly one of `container`, `fresh`, `collector` is Some
+# while the transfer is held. Fields after `error` are the bounded-step cursors (deviation D17).
+pub struct HostLinuxServiceAgentV4:
+    container: Option<SimpleContainerOwnerV2> = None
+    fresh: Option<LinuxFreshWorkloadOwnerV2> = None
+    collector: Option<ProviderCliContainedProbeOwnerV2> = None
+    root: Option<LinuxWorkspaceRootBorrowV3> = None
+    # U-01: aliases the capsule's source custody; dropped at `stopping`, never used after it.
+    source: Option<LinuxWorkspaceSourceLoanV3> = None
+    receipts: [ProviderCliContainedProbeReceiptV2] = []
+    selection: Option<ProviderCliContainedSelectionV2> = None
+    operation_id: text = ""
+    association_digest: text = ""
+    payload_digest: text = ""
+    workload_index: i64 = 0
+    helper_roots: [text] = []
+    root_nonce: text = ""
+    stage: text = "transfer"
+    workload_closed: bool = false
+    # P2R1-F2: the service loan on the transfer has ended; release then retries only the epoch close.
+    loan_ended: bool = false
+    error: text = ""
+    probe_count: i64 = 0
+    pending: bool = false
+    cleanup_action: text = ""
+    reserved: bool = false
+    intent: Option<ProviderCliInteractiveIntentDataV1> = None
+    created: Option<RuntimeIdentityV1> = None
+    probe_settles: [text] = []
+    outcome: text = ""
+    exit_digest: text = ""
+    destroy_digest: text = ""
+    observed: bool = false
+    # A probe record was reserved by Select and is not yet settled; the current lifecycle is closed (probe-close
+    # done, advance not yet).
+    probe_record: bool = false
+    lifecycle_closed: bool = false
+
+# Canonical invoke payload: {operation_id, manifest bytes}. The manifest is untrusted transport; only the
+# signed association digest admits it (section 4 check 1).
+pub struct HostAgentInvokeRequestV4:
+    operation_id: text
+    manifest: text
+
+# Everything a step reads that is not agent state: re-derived by the service owner on EVERY call from the
+# archived signed execute and its live clock, never carried across calls.
+pub struct HostAgentStepInputV4:
+    execute: HostExecuteAssociatedRequestV3
+    manifest: AgentWorkspaceInvocationManifestV2
+    provider: ProviderCliProviderV1
+    request: LinuxOciRequestV1
+    template: GroupProcessStreamLaunchV2
+    clock: HostReservationAuthorizationContextV1
+    service_scope: text
+    fence: text
+    # P2R1-F3: the SIGNED enrollment provider identity (records.binding), never the held epoch's own value.
+    expected_provider: text
+
+pub struct HostLinuxServiceAgentTurnV4:
+    agent: HostLinuxServiceAgentV4
+    capacity: HostCapacityOwnerV1
+    response: text
+    error: text
+    effect_attempted: bool
+
+# Stage `transfer` result: the agent on success or post-transfer failure, else the admission returned whole.
+pub struct HostLinuxServiceAgentOpenV4:
+    agent: Option<HostLinuxServiceAgentV4> = None
+    admission: Option<MachineFreshEpochAdmissionOwnerV1> = None
+    # A pre-transfer root whose loan end was refused (3.3 N-05): the service owner keeps and ends it first.
+    root: Option<LinuxWorkspaceRootBorrowV3> = None
+    error: text = ""
+
+pub struct HostLinuxServiceAgentCloseV4:
+    agent: HostLinuxServiceAgentV4
+    closed: bool
+    error: text
+
+# ---- codec ----
+
+pub fn host_agent_invoke_request_encode_v4(value: HostAgentInvokeRequestV4) -> Result<text, text>:
+    if not builder_identifier_valid_v1(value.operation_id): return Err("linux-host-agent-invoke-operation")
+    if value.manifest.byte_len() == 0 or value.manifest.contains("\0"): return Err("linux-host-agent-invoke-manifest")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("linux-host-agent-invoke"),
+        "operationId": SdnValue.String(value.operation_id), "manifest": SdnValue.String(value.manifest)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if bytes.byte_len() > HOST_AGENT_INVOKE_MAX_BYTES_V4: return Err("linux-host-agent-invoke-size")
+    Ok(bytes)
+
+fn host_agent_invoke_text_v4(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("linux-host-agent-invoke-field:" + name)
+
+pub fn host_agent_invoke_request_decode_v4(source: text) -> Result<HostAgentInvokeRequestV4, text>:
+    if source.byte_len() == 0 or source.byte_len() > HOST_AGENT_INVOKE_MAX_BYTES_V4: return Err("linux-host-agent-invoke-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: HOST_AGENT_INVOKE_MAX_BYTES_V4,
+            max_depth: 2, max_nodes: 16, max_rows: 0, max_cells: 0, max_columns: 8)):
+        case Ok(value): value
+        case Err(issue): return Err("linux-host-agent-invoke-syntax:" + issue.code)
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("linux-host-agent-invoke-object")
+    if fields.len() != 4: return Err("linux-host-agent-invoke-fields")
+    for name in ["version", "kind", "operationId", "manifest"]:
+        if not fields.contains_key(name): return Err("linux-host-agent-invoke-fields")
+    val value = HostAgentInvokeRequestV4(operation_id: host_agent_invoke_text_v4(fields, "operationId")?,
+        manifest: host_agent_invoke_text_v4(fields, "manifest")?)
+    # Canonical bytes only (version and kind included).
+    if host_agent_invoke_request_encode_v4(value)? != source: return Err("linux-host-agent-invoke-noncanonical")
+    Ok(value)
+
+# ---- stored-bytes gates (section 2 gates 2-5; gate 1 and the archive/association reads are the service owner's) ----
+
+# Gate 2: the archived signed execute for exactly this operation. Gates 4-5 run on the STORED association bytes.
+pub fn host_linux_service_agent_execute_v4(archived: Option<text>, operation_id: text) -> Result<HostExecuteAssociatedRequestV3, text>:
+    if archived.is_none(): return Err("linux-host-agent-execute-unarchived")
+    val execute = host_execute_associated_decode_v3(archived.unwrap())
+    if execute.is_err(): return Err("linux-host-agent-execute-unarchived")
+    if execute.unwrap().prepare.prepare.operation.id != operation_id: return Err("linux-host-agent-execute-foreign")
+    Ok(execute.unwrap())
+
+# Gates 3-5 and section 4 checks 1-2 over the archived execute and the stored association bytes. Returns the
+# decoded signed manifest; nothing from the payload is used except through it. `replay` (P2R1-F1, DESIGN section 2
+# gate 1b before gates 2-5): the caller's agent matched this op and payload and is at `settled` or `host-settle`,
+# so a `completed` row is also admitted and the step performs 1b against the row and the outcome record. Every
+# other gate still runs.
+pub fn host_linux_service_agent_admit_v4(capacity: HostCapacityOwnerV1, scope: ContainerHostScopeV2,
+        execute: HostExecuteAssociatedRequestV3, stored_association: Option<text>,
+        invoke: HostAgentInvokeRequestV4, replay: bool) -> Result<AgentWorkspaceInvocationManifestV2, text>:
+    val row = daemon_operation_exact_v2(capacity.journal, execute.prepare.prepare.operation)?
+    if row.state != "executing" and not (replay and row.state == "completed"): return Err("linux-host-agent-row-not-executing")
+    if stored_association.is_none(): return Err("linux-host-agent-association-missing")
+    if host_execution_association_encode_v3(execute.association)? != stored_association.unwrap():
+        return Err("linux-host-agent-association-foreign")
+    if container_host_scope_bytes_v2(execute.association.service_scope)? != container_host_scope_bytes_v2(scope)?:
+        return Err("linux-host-agent-association-fence")
+    val association = execute.association
+    if not association.readonly_rootfs: return Err("linux-host-agent-root-not-read-only")
+    if (not builder_digest_valid_v1(association.agent_invocation_manifest_digest) or
+            not builder_digest_valid_v1(association.agent_probe_list_digest)):
+        return Err("linux-host-agent-binding-unsigned")
+    val manifest = agent_workspace_invocation_manifest_decode_v2(invoke.manifest)
+    if manifest.is_err(): return Err("linux-host-agent-manifest-unsigned")
+    if sha256_text(agent_workspace_invocation_manifest_encode_v2(manifest.unwrap())?) != association.agent_invocation_manifest_digest:
+        return Err("linux-host-agent-manifest-unsigned")
+    # Check 2: the backend projection of the signed request is read-only with no writable output mount.
+    val request = linux_oci_retained_request_decode_v1(association.execution.request_bytes)?
+    if request.filesystem_policy != "read-only" or request.build_output_root != "":
+        return Err("linux-host-agent-root-not-read-only")
+    Ok(manifest.unwrap())
+
+# The per-call step input from the archived execute and the decoded manifest.
+pub fn host_linux_service_agent_input_v4(execute: HostExecuteAssociatedRequestV3, manifest: AgentWorkspaceInvocationManifestV2,
+        template: GroupProcessStreamLaunchV2, clock: HostReservationAuthorizationContextV1,
+        service_scope: text, scope: ContainerHostScopeV2, expected_provider: text) -> Result<HostAgentStepInputV4, text>:
+    val provider = decode_provider_cli_provider_v1(manifest.base.task_use.provider)?
+    val request = linux_oci_retained_request_decode_v1(execute.association.execution.request_bytes)?
+    Ok(HostAgentStepInputV4(execute: execute, manifest: manifest, provider: provider, request: request,
+        template: template, clock: clock, service_scope: service_scope, fence: container_scope_fence_id_v2(scope)?,
+        expected_provider: expected_provider))
+
+# 3.4 step 1: n probes at min(timeout, 30 s) plus the agent must fit the signed operation duration.
+pub fn host_linux_service_agent_budget_v4(input: HostAgentStepInputV4) -> Result<(), text>:
+    val n = provider_cli_probe_count_v1(input.provider)
+    val agent = input.request.timeout_ms
+    val probe = if agent < HOST_AGENT_PROBE_TIMEOUT_MS_V4: agent else: HOST_AGENT_PROBE_TIMEOUT_MS_V4
+    if n < 1 or agent <= 0 or n * probe + agent > input.execute.operation.duration_ms:
+        return Err("linux-host-agent-duration-budget")
+    Ok(())
+
+# ---- probe request (3.4a, r5 V-04) ----
+
+# Pure: the signed request with ONLY the probe fields replaced, and the signed plan with ONLY request_digest
+# replaced. A distinct request per index gives a distinct machine record id.
+pub fn host_linux_service_agent_probe_request_v4(execution: ContainerExecutionRequestV2,
+        manifest: AgentWorkspaceInvocationManifestV2, provider: ProviderCliProviderV1,
+        index: i64) -> Result<ContainerExecutionRequestV2, text>:
+    val signed = linux_oci_retained_request_decode_v1(execution.request_bytes)?
+    val argv = manifest.base.inner_argv
+    if argv.len() == 0 or not argv[0].starts_with("/"): return Err("linux-host-agent-probe-program")
+    if not signed.image.contains("@sha256:"): return Err("linux-host-agent-probe-image")
+    val timeout = if signed.timeout_ms < HOST_AGENT_PROBE_TIMEOUT_MS_V4: signed.timeout_ms else: HOST_AGENT_PROBE_TIMEOUT_MS_V4
+    val probe = LinuxOciRequestV1(pod_uid: signed.pod_uid, attempt: signed.attempt, operation_id: signed.operation_id,
+        image: signed.image, bundle_path: "", command: [argv[0]], args: provider_cli_probe_argv_v1(provider, index)?,
+        timeout_ms: timeout, cpu_limit_millis: signed.cpu_limit_millis, memory_limit_bytes: signed.memory_limit_bytes,
+        pid_limit: signed.pid_limit, network_policy: "none", filesystem_policy: "read-only", build_input_root: "",
+        build_output_root: "", replace_entrypoint: true, environment: [], working_directory: "", terminal_mode: "none",
+        mounts: [])
+    var plan = execution.plan
+    plan.request_digest = linux_oci_request_digest_v1(probe)?
+    Ok(ContainerExecutionRequestV2(plan: plan, request_bytes: linux_oci_retained_request_encode_v1(probe)?))
+
+# ---- transfer holder twins (3.5: the epoch through whichever holder has the transfer) ----
+
+pub fn host_linux_service_agent_epoch_v4(agent: HostLinuxServiceAgentV4) -> Result<MachineFreshEpochRecordV1, text>:
+    if val held = agent.container: return simple_container_epoch_current_v3(held)
+    if val held = agent.fresh: return held.epoch_current_v3()
+    if val held = agent.collector: return held.epoch_current_v3()
+    Err("linux-host-agent-transfer-missing")
+
+fn host_agent_turn_v4(agent: HostLinuxServiceAgentV4, capacity: HostCapacityOwnerV1, response: text, error: text,
+        effect_attempted: bool) -> HostLinuxServiceAgentTurnV4:
+    HostLinuxServiceAgentTurnV4(agent: agent, capacity: capacity, response: response, error: error,
+        effect_attempted: effect_attempted)
+
+# Reply DATA: never a grant. `pending` until stage settled.
+pub fn host_linux_service_agent_reply_v4(agent: HostLinuxServiceAgentV4) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("linux-host-agent-invoke-reply"),
+        "operationId": SdnValue.String(agent.operation_id), "associationDigest": SdnValue.String(agent.association_digest),
+        "stage": SdnValue.String(agent.stage), "workloadIndex": SdnValue.Int(agent.workload_index),
+        "outcome": SdnValue.String(agent.outcome), "pending": SdnValue.Bool(agent.stage != "settled")}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+# Terminal: wedged keeps the Host row executing and charged (U-02); it drains at reopen (rec4:227-230/236).
+fn host_agent_wedged_v4(agent: HostLinuxServiceAgentV4, capacity: HostCapacityOwnerV1, error: text) -> HostLinuxServiceAgentTurnV4:
+    var retained = agent
+    if retained.error == "": retained.error = error
+    retained.stage = "wedged"
+    retained.pending = false
+    host_agent_turn_v4(retained, capacity, "", retained.error, true)
+
+# A failure with no unsettled machine record (pre-enable): the run ends; 3.7 closes the lifecycle (T-04).
+fn host_agent_failed_v4(agent: HostLinuxServiceAgentV4, capacity: HostCapacityOwnerV1, error: text) -> HostLinuxServiceAgentTurnV4:
+    var retained = agent
+    if retained.error == "": retained.error = error
+    retained.stage = "failed"
+    retained.pending = false
+    host_agent_turn_v4(retained, capacity, "", retained.error, true)
+
+fn host_agent_pending_v4(agent: HostLinuxServiceAgentV4, capacity: HostCapacityOwnerV1) -> HostLinuxServiceAgentTurnV4:
+    host_agent_turn_v4(agent, capacity, host_linux_service_agent_reply_v4(agent), "", true)
+
+# ---- stage `transfer` (3.4 steps 1-4) ----
+
+# The admission moves whole into the factory. On a pre-transfer failure the admission comes back whole (its
+# root loan ended and R3 closed by the factory); on a post-transfer failure the agent holds the fresh owner in
+# stage `failed`. The template is validated against the HELD epoch before any reserve.
+pub fn host_linux_service_agent_open_v4(admission: MachineFreshEpochAdmissionOwnerV1,
+        native: LinuxServiceNativeIdentityBorrowV3, input: HostAgentStepInputV4, operation_id: text,
+        association_digest: text, payload_digest: text) -> HostLinuxServiceAgentOpenV4:
+    val budget = host_linux_service_agent_budget_v4(input)
+    if budget.is_err(): return HostLinuxServiceAgentOpenV4(admission: Some(admission), error: budget.unwrap_err())
+    # Per-incarnation CSPRNG nonce drawn BEFORE any effect, so an entropy failure is retryable.
+    val nonce = sosix_random_hex(8) ?? ""
+    if not host_service_hex_shape_v6(nonce, 16): return HostLinuxServiceAgentOpenV4(admission: Some(admission),
+        error: "linux-host-agent-entropy-unavailable")
+    val opened = simple_container_open_lent_v4(admission, native, input.template)
+    val shell = HostLinuxServiceAgentV4(operation_id: operation_id, association_digest: association_digest,
+        payload_digest: payload_digest, root_nonce: nonce, probe_count: provider_cli_probe_count_v1(input.provider))
+    if opened.admission_cleanup.is_some():
+        return HostLinuxServiceAgentOpenV4(admission: opened.admission_cleanup, root: opened.root,
+            error: if opened.error != "": opened.error else: "linux-host-agent-transfer-refused")
+    if opened.fresh_cleanup.is_some():
+        var failed = shell
+        failed.fresh = opened.fresh_cleanup
+        failed.root = opened.root
+        failed.stage = "failed"
+        failed.error = if opened.error != "": opened.error else: "linux-host-agent-transfer-failed"
+        return HostLinuxServiceAgentOpenV4(agent: Some(failed), error: failed.error)
+    if opened.owner.is_none():
+        # P2R1-F6: carry the root (unreachable path, see the factory) so the service owner still ends its loan.
+        return HostLinuxServiceAgentOpenV4(root: opened.root,
+            error: if opened.error != "": opened.error else: "linux-host-agent-transfer-owner-missing")
+    var agent = shell
+    agent.container = opened.owner
+    # The root stays inside the fresh owner (few take/end twins); the agent takes it only at close (3.7 step 2).
+    val first = host_agent_lifecycle_root_v4(input.template, nonce, 0)
+    val rooted = simple_container_set_lifecycle_root_v3(agent.container.unwrap(), first)
+    agent.container = Some(rooted.owner)
+    if rooted.error != "":
+        agent.stage = "failed"
+        agent.error = rooted.error
+        return HostLinuxServiceAgentOpenV4(agent: Some(agent), error: agent.error)
+    var bound = input.template
+    bound.root = first
+    val valid = simple_container_validate_helper_template_v3(agent.container.unwrap(), bound)
+    if valid.is_err():
+        agent.stage = "failed"
+        agent.error = "linux-host-agent-helper-template-invalid:" + valid.unwrap_err()
+        return HostLinuxServiceAgentOpenV4(agent: Some(agent), error: agent.error)
+    agent.stage = "probe-reserve"
+    HostLinuxServiceAgentOpenV4(agent: Some(agent))
+
+# `<pinned root>-<nonce>-w<index>`: distinct per lifecycle and per incarnation (r5 V-01).
+fn host_agent_lifecycle_root_v4(template: GroupProcessStreamLaunchV2, nonce: text, index: i64) -> text:
+    template.root + "-" + nonce + "-w" + index.to_text()
+
+# ---- probe stages (3.4a) ----
+
+fn host_agent_probe_call_v4(agent: HostLinuxServiceAgentV4, request: ContainerExecutionRequestV2,
+        call: MachineFreshProbeCallV3) -> (HostLinuxServiceAgentV4, MachineFreshProbeReplyV3):
+    var retained = agent
+    val turn = simple_container_probe_v3(retained.container.unwrap(), request, call)
+    retained.container = Some(turn.owner)
+    (retained, turn.result)
+
+fn host_agent_completion_v4(reply: MachineFreshProbeReplyV3) -> Result<(), text>:
+    match reply:
+        case MachineFreshProbeReplyV3.Completion(actual): actual
+        case _: Err("linux-host-agent-probe-turn-mismatch")
+
+fn host_agent_progress_v4(reply: MachineFreshProbeReplyV3) -> Result<bool, text>:
+    match reply:
+        case MachineFreshProbeReplyV3.Progress(actual): actual
+        case _: Err("linux-host-agent-probe-turn-mismatch")
+
+# Settle digest of one probe: there is no transfer accessor for the released machine-charge row
+# (rec2:170-172), so the evidence binds the probe's own identity and its receipt (deviation D19).
+fn host_agent_probe_settle_digest_v4(request: ContainerExecutionRequestV2, receipt: ProviderCliContainedProbeReceiptV2,
+        index: i64) -> Result<text, text>:
+    val snapshot = receipt.snapshot_v2()?
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-host-agent-probe-settled"),
+        "probeIndex": SdnValue.Int(index), "requestDigest": SdnValue.String(request.plan.request_digest),
+        "transcriptDigest": SdnValue.String(snapshot.base.transcript_digest), "charge": SdnValue.String("released")}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))))
+
+fn host_agent_probe_step_v4(agent: HostLinuxServiceAgentV4, capacity: HostCapacityOwnerV1,
+        input: HostAgentStepInputV4) -> HostLinuxServiceAgentTurnV4:
+    var state = agent
+    val index = state.workload_index
+    val built = host_linux_service_agent_probe_request_v4(input.execute.association.execution, input.manifest,
+        input.provider, index)
+    if built.is_err(): return host_agent_failed_v4(state, capacity, built.unwrap_err())
+    val request = built.unwrap()
+    val deadline = container_effect_deadline_v1(request.plan.request_digest, request.plan.operation_id,
+        ["create", "start"], input.manifest.base.not_after)
+    if deadline.is_err(): return host_agent_failed_v4(state, capacity, deadline.unwrap_err())
+    if state.stage == "probe-reserve":
+        if index > 0:
+            val rooted = simple_container_set_lifecycle_root_v3(state.container.unwrap(),
+                host_agent_lifecycle_root_v4(input.template, state.root_nonce, index))
+            state.container = Some(rooted.owner)
+            if rooted.error != "": return host_agent_failed_v4(state, capacity, rooted.error)
+        val selected = host_agent_probe_call_v4(state, request, MachineFreshProbeCallV3.Select(request, input.provider, index))
+        state = selected.0
+        val accepted = host_agent_completion_v4(selected.1)
+        # Select reserves the probe's own record; a refusal cannot prove no record exists: fail closed.
+        state.probe_record = true
+        if accepted.is_err(): return host_agent_wedged_v4(state, capacity, accepted.unwrap_err())
+        state.stage = "probe-workflow"
+        return host_agent_pending_v4(state, capacity)
+    if state.stage == "probe-workflow":
+        val call = if state.pending: MachineFreshProbeCallV3.WorkflowStep
+            else: MachineFreshProbeCallV3.WorkflowBegin(ContainerWorkspaceActionV3.Create, Some(deadline.unwrap()))
+        val moved = host_agent_probe_call_v4(state, request, call)
+        state = moved.0
+        if not state.pending:
+            val begun = host_agent_completion_v4(moved.1)
+            if begun.is_err(): return host_agent_wedged_v4(state, capacity, begun.unwrap_err())
+            state.pending = true
+            return host_agent_pending_v4(state, capacity)
+        val operation = match moved.1:
+            case MachineFreshProbeReplyV3.Operation(result): result
+            case _: Err("linux-host-agent-probe-turn-mismatch")
+        if operation.is_err(): return host_agent_wedged_v4(state, capacity, operation.unwrap_err())
+        if operation.unwrap().is_none(): return host_agent_pending_v4(state, capacity)
+        if operation.unwrap().unwrap().status != RUNTIME_STATUS_OK:
+            return host_agent_wedged_v4(state, capacity, "linux-host-agent-probe-create:" + operation.unwrap().unwrap().reason)
+        state.pending = false
+        state.stage = "probe-start"
+        return host_agent_pending_v4(state, capacity)
+    if state.stage == "probe-start":
+        val call = if state.pending: MachineFreshProbeCallV3.StartStep(false) else: MachineFreshProbeCallV3.Start(Some(deadline.unwrap()))
+        val moved = host_agent_probe_call_v4(state, request, call)
+        state = moved.0
+        if not state.pending:
+            val begun = host_agent_completion_v4(moved.1)
+            if begun.is_err(): return host_agent_wedged_v4(state, capacity, begun.unwrap_err())
+            state.pending = true
+            return host_agent_pending_v4(state, capacity)
+        val progressed = host_agent_progress_v4(moved.1)
+        if progressed.is_err(): return host_agent_wedged_v4(state, capacity, progressed.unwrap_err())
+        if not progressed.unwrap(): return host_agent_pending_v4(state, capacity)
+        state.pending = false
+        state.stage = "probe-collect"
+        return host_agent_pending_v4(state, capacity)
+    if state.stage == "probe-collect": return host_agent_collect_step_v4(state, capacity, input, request)
+    if state.stage == "probe-cleanup":
+        val action = if state.cleanup_action == "absence": LinuxFreshWorkloadActionV2.Absence else: LinuxFreshWorkloadActionV2.Remove
+        val call = if state.pending: MachineFreshProbeCallV3.CleanupStep(action, false) else: MachineFreshProbeCallV3.CleanupBegin(action)
+        val moved = host_agent_probe_call_v4(state, request, call)
+        state = moved.0
+        if not state.pending:
+            val begun = host_agent_completion_v4(moved.1)
+            if begun.is_err(): return host_agent_wedged_v4(state, capacity, begun.unwrap_err())
+            state.pending = true
+            return host_agent_pending_v4(state, capacity)
+        val progressed = host_agent_progress_v4(moved.1)
+        if progressed.is_err(): return host_agent_wedged_v4(state, capacity, progressed.unwrap_err())
+        if not progressed.unwrap(): return host_agent_pending_v4(state, capacity)
+        state.pending = false
+        if state.cleanup_action == "absence":
+            state.cleanup_action = ""
+            state.stage = "probe-settle"
+        else:
+            state.cleanup_action = "absence"
+        return host_agent_pending_v4(state, capacity)
+    if state.stage == "probe-settle":
+        val moved = host_agent_probe_call_v4(state, request, MachineFreshProbeCallV3.Settle)
+        state = moved.0
+        val settled = host_agent_completion_v4(moved.1)
+        if settled.is_err(): return host_agent_wedged_v4(state, capacity, settled.unwrap_err())
+        state.probe_record = false
+        val digest = host_agent_probe_settle_digest_v4(request, state.receipts[index], index)
+        if digest.is_err(): return host_agent_failed_v4(state, capacity, digest.unwrap_err())
+        state.probe_settles.push(digest.unwrap())
+        state.stage = "probe-close"
+        return host_agent_pending_v4(state, capacity)
+    if state.stage == "probe-close":
+        state = host_agent_copy_helper_dirs_v4(state)
+        val closed = simple_container_close_workload_v3(state.container.unwrap())
+        if closed.is_err(): return host_agent_failed_v4(state, capacity, closed.unwrap_err())
+        state.lifecycle_closed = true
+        state.stage = "advance"
+        return host_agent_pending_v4(state, capacity)
+    if state.stage == "advance":
+        val advanced = simple_container_advance_workload_v3(state.container.unwrap())
+        state.container = Some(advanced.owner)
+        if advanced.error != "": return host_agent_failed_v4(state, capacity, advanced.error)
+        state.lifecycle_closed = false
+        state.workload_index = index + 1
+        state.stage = if state.workload_index < state.probe_count: "probe-reserve" else: "selection"
+        return host_agent_pending_v4(state, capacity)
+    host_agent_failed_v4(state, capacity, "linux-host-agent-stage-invalid")
+
+# The original collector deadline (30 s, monotonic) is fixed at begin; pp2 keeps it for every later step.
+fn host_agent_collect_begin_v4(state: HostLinuxServiceAgentV4, input: HostAgentStepInputV4,
+        request: ContainerExecutionRequestV2) -> ProviderCliContainedProbeTurnV2:
+    val now = time_sample_monotonic_nanos_or_failure()
+    if now <= 0 or now > 9223372036854775807 - HOST_AGENT_PROBE_TIMEOUT_MS_V4 * 1000000:
+        return ProviderCliContainedProbeTurnV2(owner: state.container.unwrap(), probe: None, receipt: None,
+            error: "linux-host-agent-probe-clock")
+    provider_cli_profiled_probe_begin_v2(state.container.unwrap(), request, input.provider, state.workload_index,
+        now + HOST_AGENT_PROBE_TIMEOUT_MS_V4 * 1000000)
+
+# One collector step (pp2). The container moves into `collector` while a collection is in flight and comes
+# back with the receipt; a collection that ends without one leaves the probe Unknown (pown:140/168/225): wedged.
+fn host_agent_collect_step_v4(agent: HostLinuxServiceAgentV4, capacity: HostCapacityOwnerV1,
+        input: HostAgentStepInputV4, request: ContainerExecutionRequestV2) -> HostLinuxServiceAgentTurnV4:
+    var state = agent
+    if state.collector.is_none() and state.container.is_none():
+        return host_agent_failed_v4(state, capacity, "linux-host-agent-transfer-missing")
+    val turn = if state.collector.is_some(): provider_cli_profiled_probe_step_v2(state.collector.unwrap(), false)
+        else: host_agent_collect_begin_v4(state, input, request)
+    state.container = None
+    state.collector = turn.probe
+    if turn.probe.is_none(): state.container = Some(turn.owner)
+    if turn.receipt.is_some():
+        state.receipts.push(turn.receipt.unwrap())
+        state.stage = "probe-cleanup"
+        state.cleanup_action = "remove"
+        return host_agent_pending_v4(state, capacity)
+    if turn.error != "" and turn.probe.is_none(): return host_agent_wedged_v4(state, capacity, turn.error)
+    host_agent_pending_v4(state, capacity)
+
+# 3.4 step 4: copy the action directories the current lifecycle's begins created, before its close or at agent
+# close for a wedged lifecycle (deduplicated). Removal happens only after the epoch close, on exactly these paths.
+fn host_agent_copy_helper_dirs_v4(agent: HostLinuxServiceAgentV4) -> HostLinuxServiceAgentV4:
+    var state = agent
+    var dirs: Result<[text], text> = Err("linux-host-agent-transfer-missing")
+    if state.container.is_some(): dirs = simple_container_helper_dirs_v3(state.container.unwrap())
+    elif state.fresh.is_some(): dirs = state.fresh.unwrap().helper_dirs_v3()
+    if dirs.is_err(): return state
+    for path in dirs.unwrap():
+        if not state.helper_roots.contains(path): state.helper_roots.push(path)
+    state
+
+# ---- agent stages (3.4b) ----
+
+fn host_agent_reservation_row_v4(input: HostAgentStepInputV4) -> (i64, i64, text):
+    val row = input.execute.prepare.prepare.intent.reservation
+    (row.cpu_millis, row.memory_bytes, row.id)
+
+# U-01: V7's source bindings (awe:186-203) with the intent from the REAL selection, the association plan and the
+# associated Host row. Runs before every non-running agent step.
+fn host_agent_source_check_v4(agent: HostLinuxServiceAgentV4, capacity: HostCapacityOwnerV1,
+        input: HostAgentStepInputV4) -> Result<(), text>:
+    if agent.source.is_none() or agent.intent.is_none(): return Err("linux-host-agent-source-missing")
+    val row = host_agent_reservation_row_v4(input)
+    val projection = host_agent_workspace_source_projection_check_v2(agent.source.unwrap(),
+        input.execute.association.execution.request_bytes, input.manifest, agent.intent.unwrap(),
+        input.execute.association.execution.plan, row.0, row.1, input.execute.operation.duration_ms, capacity,
+        input.execute.prepare.prepare.operation, row.2, "executing")?
+    Ok(())
+
+fn host_agent_grant_expiry_v4(execute: HostExecuteAssociatedRequestV3) -> i64:
+    if execute.approval.expires_at < execute.signed.grant.expires_at: return execute.approval.expires_at
+    execute.signed.grant.expires_at
+
+# Check 3 (stage `selection`): the real selection reproduces the signed probe list and selection binding.
+fn host_agent_selection_step_v4(agent: HostLinuxServiceAgentV4, capacity: HostCapacityOwnerV1,
+        input: HostAgentStepInputV4) -> HostLinuxServiceAgentTurnV4:
+    var state = agent
+    val selection = provider_cli_profiled_selection_v2(input.provider, state.receipts)
+    if selection.is_err(): return host_agent_failed_v4(state, capacity, selection.unwrap_err())
+    val listed = provider_cli_profiled_probe_list_digest_v2(selection.unwrap())
+    if listed.is_err(): return host_agent_failed_v4(state, capacity, listed.unwrap_err())
+    if listed.unwrap() != input.execute.association.agent_probe_list_digest:
+        return host_agent_failed_v4(state, capacity, "linux-host-agent-probe-list-mismatch")
+    if selection.unwrap().binding_digest_v2() != input.manifest.base.selection_binding_digest:
+        return host_agent_failed_v4(state, capacity, "linux-host-agent-selection-binding-mismatch")
+    state.selection = Some(selection.unwrap())
+    state.stage = "source"
+    host_agent_pending_v4(state, capacity)
+
+# Check 3a then the source open (stage `source`, on the AGENT lifecycle, before any agent record).
+fn host_agent_source_step_v4(agent: HostLinuxServiceAgentV4, capacity: HostCapacityOwnerV1,
+        input: HostAgentStepInputV4) -> HostLinuxServiceAgentTurnV4:
+    var state = agent
+    val container = state.container.unwrap()
+    val resolved = host_agent_workspace_manifest_check_v2(input.manifest, input.execute.association.execution.plan,
+        capacity.ledger.capacity, container, input.expected_provider, input.service_scope,
+        input.clock.grant_clock, host_agent_grant_expiry_v4(input.execute))
+    if resolved.is_err(): return host_agent_failed_v4(state, capacity, resolved.unwrap_err())
+    val selection = state.selection.unwrap()
+    val version = state.receipts[0].snapshot_v2()
+    if version.is_err(): return host_agent_failed_v4(state, capacity, version.unwrap_err())
+    val manifest = input.manifest.base
+    val intent = build_provider_cli_interactive_intent_from_data_v1(selection.version_data_v2(), selection.binding_digest_v2(),
+        version.unwrap().base, manifest.desired, resolved.unwrap(), manifest.task,
+        ProviderCliCodexInteractiveRequestDataV1(prompt: manifest.task.content, model: manifest.task_use.model))
+    if intent.is_err(): return host_agent_failed_v4(state, capacity, intent.unwrap_err())
+    val scope_digest = container_host_scope_bytes_v2(simple_container_scope_v2(container))
+    if scope_digest.is_err(): return host_agent_failed_v4(state, capacity, scope_digest.unwrap_err())
+    val built = intent.unwrap()
+    if (built.binding_digest != manifest.interactive_intent_digest or built.program_binding_digest != manifest.selection_binding_digest or
+            built.image_config_id != manifest.image_config_id or sha256_text(built.scope_bytes) != sha256_text(scope_digest.unwrap()) or
+            built.argv != manifest.inner_argv):
+        return host_agent_failed_v4(state, capacity, "linux-host-agent-intent-mismatch")
+    state.intent = Some(built)
+    # R3 into the agent lifecycle (no record, source phase none), the agent root, then the source.
+    val adopted = simple_container_adopt_lent_workspace_reader_v3(container)
+    state.container = Some(adopted.owner)
+    if adopted.error != "": return host_agent_failed_v4(state, capacity, adopted.error)
+    val rooted = simple_container_set_lifecycle_root_v3(state.container.unwrap(),
+        host_agent_lifecycle_root_v4(input.template, state.root_nonce, state.workload_index))
+    state.container = Some(rooted.owner)
+    if rooted.error != "": return host_agent_failed_v4(state, capacity, rooted.error)
+    val opened = simple_container_workspace_source_open_installed_v3(state.container.unwrap(), input.execute.association.execution)
+    state.container = Some(opened.owner)
+    if opened.error != "" or opened.pending or opened.source.is_none():
+        return host_agent_failed_v4(state, capacity, if opened.error != "": opened.error else: "linux-host-agent-source-open-pending")
+    state.source = opened.source
+    val checked = host_agent_source_check_v4(state, capacity, input)
+    if checked.is_err(): return host_agent_failed_v4(state, capacity, checked.unwrap_err())
+    state.stage = "stage"
+    host_agent_pending_v4(state, capacity)
+
+fn host_agent_runtime_match_v4(agent: HostLinuxServiceAgentV4, input: HostAgentStepInputV4, runtime: RuntimeIdentityV1) -> bool:
+    val plan = input.execute.association.execution.plan
+    val scope = ContainerHostScopeV2(physical_host_id: plan.physical_host_id, service_scope_id: plan.service_scope_id,
+        boot_id: plan.boot_id, provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,
+        continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
+    val fence = container_scope_fence_id_v2(scope)
+    (fence.is_ok() and runtime.pod_uid == plan.workload_uid and runtime.attempt == plan.attempt and
+        runtime.operation_id == plan.operation_id and runtime.provider_generation == plan.provider_generation and
+        runtime.engine == "podman" and builder_digest_valid_v1(runtime.native_id) and runtime.node_boot_id == fence.unwrap() and
+        (agent.created.is_none() or runtime == agent.created.unwrap()))
+
+fn host_agent_observation_v4(agent: HostLinuxServiceAgentV4, input: HostAgentStepInputV4, container: SimpleContainerOwnerV2,
+        operation: RuntimeOperationV1) -> Result<HostExecutionObservationV2, text>:
+    val host = input.execute.prepare.prepare
+    val epoch = simple_container_epoch_current_v3(container)?
+    Ok(HostExecutionObservationV2(scope: simple_container_scope_v2(container), operation_id: host.operation.id,
+        operation_digest: sha256_text(distributed_encode_operation_v2(host.operation)?), plan_digest: host.intent.plan_digest,
+        request_digest: input.execute.association.execution.plan.request_digest, grant_id: input.execute.signed.grant.id,
+        principal: input.execute.signed.grant.principal, issuer_id: input.execute.signed.issuer_id,
+        approver_id: input.execute.approval.approver_id, provider_identity_digest: epoch.provider_identity_digest,
+        observed_unix_ms: input.clock.grant_clock, observed_monotonic_ms: input.clock.monotonic_ms,
+        runtime: operation.state.identity, phase: operation.state.phase, create_status: "ok", start_status: "ok",
+        inspect_status: operation.status, reason: "V4 agent native primary observation; no readiness is inferred"))
+
+fn host_agent_digest_fields_v4(kind: text, operation: RuntimeOperationV1) -> text:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String(kind), "status": SdnValue.String(operation.status),
+        "phase": SdnValue.String(operation.state.phase), "nativeId": SdnValue.String(operation.state.identity.native_id),
+        "exitCode": SdnValue.Int(operation.state.exit_code)}
+    sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+# Stages stage .. running (V4's own drivers, not V7's native step). After `enable` an agent record exists and,
+# until association, a native error leaves it Unknown and unsettleable (F22): every effect error is `wedged`.
+fn host_agent_native_step_v4(agent: HostLinuxServiceAgentV4, capacity: HostCapacityOwnerV1,
+        input: HostAgentStepInputV4) -> HostLinuxServiceAgentTurnV4:
+    var state = agent
+    val request = input.execute.association.execution
+    val manifest_bytes = agent_workspace_invocation_manifest_encode_v2(input.manifest)
+    val digest = agent_workspace_invocation_manifest_digest_v2(input.manifest)
+    if manifest_bytes.is_err() or digest.is_err(): return host_agent_failed_v4(state, capacity, "linux-host-agent-manifest-unsigned")
+    if state.stage != "running" and not state.pending:
+        val checked = host_agent_source_check_v4(state, capacity, input)
+        if checked.is_err():
+            if state.reserved: return host_agent_wedged_v4(state, capacity, checked.unwrap_err())
+            return host_agent_failed_v4(state, capacity, checked.unwrap_err())
+    if state.stage == "stage":
+        val staged = state.source.unwrap().stage_agent_invocation_v2(request.request_bytes,
+            input.manifest.base.workspace_manifest, digest.unwrap(), manifest_bytes.unwrap())
+        state.source = Some(staged.loan)
+        if staged.error != "" or not staged.ready:
+            return host_agent_failed_v4(state, capacity, if staged.error != "": staged.error else: "linux-host-agent-stage-incomplete")
+        state.stage = "enable"
+        return host_agent_pending_v4(state, capacity)
+    if state.stage == "enable":
+        # The agent's WorkspaceV3 record is reserved here (enable_workspace_source_v3 -> reserve_workspace_v3).
+        val enabled = simple_container_enable_workspace_v3(state.container.unwrap(), request,
+            input.manifest.base.workspace_manifest, digest.unwrap(), manifest_bytes.unwrap())
+        state.container = Some(enabled.owner)
+        state.reserved = true
+        if enabled.error != "": return host_agent_wedged_v4(state, capacity, enabled.error)
+        state.stage = "prepare"
+        return host_agent_pending_v4(state, capacity)
+    val action = match state.stage:
+        case "prepare": ContainerWorkspaceActionV3.Prepare
+        case "create": ContainerWorkspaceActionV3.Create
+        case "configuration": ContainerWorkspaceActionV3.InputConfiguration
+        case "start": ContainerWorkspaceActionV3.Start
+        case "inspect": ContainerWorkspaceActionV3.Inspect
+        case "running": ContainerWorkspaceActionV3.Inspect
+        case _: return host_agent_wedged_v4(state, capacity, "linux-host-agent-stage-invalid")
+    val deadline = container_effect_deadline_v1(request.plan.request_digest, request.plan.operation_id,
+        ["create", "start"], input.manifest.base.not_after)
+    if deadline.is_err(): return host_agent_wedged_v4(state, capacity, deadline.unwrap_err())
+    val turn = if state.pending: simple_container_workspace_step_v3(state.container.unwrap(), request)
+        else: simple_container_workspace_begin_v3(state.container.unwrap(), action, request,
+            if state.stage == "running": None else: Some(deadline.unwrap()))
+    state.container = Some(turn.owner)
+    state.pending = turn.pending
+    if turn.error != "": return host_agent_wedged_v4(state, capacity, turn.error)
+    if state.pending: return host_agent_pending_v4(state, capacity)
+    if turn.operation.is_none(): return host_agent_wedged_v4(state, capacity, "linux-host-agent-operation-missing")
+    val operation = turn.operation.unwrap()
+    if operation.status != RUNTIME_STATUS_OK:
+        return host_agent_wedged_v4(state, capacity, "linux-host-agent-" + state.stage + ":" + operation.reason)
+    if state.stage == "prepare": state.stage = "create"
+    elif state.stage == "create":
+        if operation.state.phase != RUNTIME_PHASE_CREATED or not host_agent_runtime_match_v4(state, input, operation.state.identity):
+            return host_agent_wedged_v4(state, capacity, "linux-host-agent-created-identity")
+        state.created = Some(operation.state.identity)
+        val intent = simple_container_intent_v2(state.container.unwrap(), request)
+        if intent.is_err(): return host_agent_wedged_v4(state, capacity, intent.unwrap_err())
+        val stored = host_execution_intent_store_owned_v3(capacity.journal, intent.unwrap())
+        if stored.is_err(): return host_agent_wedged_v4(state, capacity, stored.unwrap_err())
+        state.stage = "configuration"
+    elif state.stage == "configuration":
+        val decoded = container_execution_input_configuration_decode_v1(operation.stdout)
+        if decoded.is_err(): return host_agent_wedged_v4(state, capacity, decoded.unwrap_err())
+        val observed = decoded.unwrap()
+        var expected_argv = input.request.command
+        for arg in input.request.args: expected_argv.push(arg)
+        if (state.created.is_none() or observed.configuration.runtime != state.created.unwrap() or
+                observed.configuration.scope != simple_container_scope_v2(state.container.unwrap()) or
+                observed.configuration.request_digest != request.plan.request_digest or
+                observed.configuration.requested_image_ref != input.request.image or
+                observed.configuration.image_config_id != input.manifest.base.image_config_id or
+                observed.configuration.primary_argv != expected_argv or
+                observed.configuration.working_directory != input.request.working_directory or
+                not observed.configuration.readonly_rootfs or not observed.open_stdin or not observed.tty or observed.stdin_once):
+            return host_agent_wedged_v4(state, capacity, "linux-host-agent-effective-configuration-mismatch")
+        state.stage = "start"
+    elif state.stage == "start":
+        if not host_agent_runtime_match_v4(state, input, operation.state.identity):
+            return host_agent_wedged_v4(state, capacity, "linux-host-agent-started-identity")
+        state.stage = "inspect"
+    else:
+        if not host_agent_runtime_match_v4(state, input, operation.state.identity):
+            return host_agent_wedged_v4(state, capacity, "linux-host-agent-inspect-identity")
+        if not state.observed:
+            # Write-once observation artifact on the borrowed writer; not a ledger or row mutation.
+            val observation = host_agent_observation_v4(state, input, state.container.unwrap(), operation)
+            if observation.is_err(): return host_agent_wedged_v4(state, capacity, observation.unwrap_err())
+            val saved = host_execution_observation_store_owned_v3(capacity.journal, observation.unwrap())
+            if saved.is_err(): return host_agent_wedged_v4(state, capacity, saved.unwrap_err())
+            state.observed = true
+        state.stage = "running"
+        # The workload left `running` (exited/stopped) or the signed window closed: stop and settle.
+        if operation.state.phase != RUNTIME_PHASE_RUNNING or input.clock.grant_clock >= input.manifest.base.not_after:
+            state.outcome = if operation.state.phase != RUNTIME_PHASE_RUNNING and operation.state.exit_code == 0: "succeeded" else: "failed"
+            state.exit_digest = host_agent_digest_fields_v4("linux-host-agent-exit", operation)
+            state.stage = "stopping"
+    host_agent_pending_v4(state, capacity)
+
+# ---- settle (3.6): machine release first, then ONE Host settle ----
+
+fn host_agent_release_step_v4(agent: HostLinuxServiceAgentV4, capacity: HostCapacityOwnerV1,
+        input: HostAgentStepInputV4) -> HostLinuxServiceAgentTurnV4:
+    var state = agent
+    val request = input.execute.association.execution
+    if state.stage == "stopping":
+        # F21: the source loan aliases custody that the source return releases; never used after this point.
+        state.source = None
+        val turn = if state.pending: simple_container_workspace_step_v3(state.container.unwrap(), request)
+            else: simple_container_workspace_begin_v3(state.container.unwrap(), ContainerWorkspaceActionV3.Destroy, request, None)
+        state.container = Some(turn.owner)
+        state.pending = turn.pending
+        if turn.error != "": return host_agent_wedged_v4(state, capacity, turn.error)
+        if state.pending: return host_agent_pending_v4(state, capacity)
+        if turn.operation.is_none(): return host_agent_wedged_v4(state, capacity, "linux-host-agent-destroy-missing")
+        if turn.operation.unwrap().status != RUNTIME_STATUS_OK:
+            return host_agent_wedged_v4(state, capacity, "linux-host-agent-destroy:" + turn.operation.unwrap().reason)
+        state.destroy_digest = host_agent_digest_fields_v4("linux-host-agent-destroy", turn.operation.unwrap())
+        state.stage = "settle"
+        return host_agent_pending_v4(state, capacity)
+    if state.stage == "settle":
+        # A refusal here precedes any write (T-01 gates): the stage resumes on the next call.
+        val settled = simple_container_settle_workspace_v3(state.container.unwrap())
+        if settled.is_err(): return host_agent_turn_v4(state, capacity, "", settled.unwrap_err(), true)
+        state.stage = "source-return"
+        return host_agent_pending_v4(state, capacity)
+    if state.stage == "source-return":
+        val returned = simple_container_return_settled_workspace_source_v3(state.container.unwrap())
+        if returned.is_err(): return host_agent_turn_v4(state, capacity, "", returned.unwrap_err(), true)
+        state.stage = "host-settle"
+        return host_agent_pending_v4(state, capacity)
+    if state.stage == "host-settle": return host_agent_host_settle_v4(state, capacity, input)
+    host_agent_wedged_v4(state, capacity, "linux-host-agent-stage-invalid")
+
+# The machine settle digest: no transfer accessor exposes the wsr:212-213 settle row, so the evidence binds the
+# settled workload's own identity (deviation D19, same as the probe settles).
+fn host_agent_machine_settle_digest_v4(input: HostAgentStepInputV4) -> text:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-host-agent-workspace-settled"),
+        "operationId": SdnValue.String(input.execute.prepare.prepare.operation.id),
+        "requestDigest": SdnValue.String(input.execute.association.execution.plan.request_digest),
+        "charge": SdnValue.String("released")}
+    sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+pub fn host_linux_service_agent_outcome_v4(agent: HostLinuxServiceAgentV4, input: HostAgentStepInputV4) -> HostAgentOutcomeRecordV4:
+    HostAgentOutcomeRecordV4(operation_id: input.execute.prepare.prepare.operation.id, fence: input.fence,
+        association_digest: agent.association_digest, payload_digest: agent.payload_digest, outcome: agent.outcome,
+        exit_observation_digest: agent.exit_digest, probe_settle_digests: agent.probe_settles,
+        selection_binding_digest: input.manifest.base.selection_binding_digest, destroy_digest: agent.destroy_digest,
+        absence_result: "absent", machine_settle_digest: host_agent_machine_settle_digest_v4(input), source_return: "returned")
+
+fn host_agent_host_settle_v4(agent: HostLinuxServiceAgentV4, capacity: HostCapacityOwnerV1,
+        input: HostAgentStepInputV4) -> HostLinuxServiceAgentTurnV4:
+    var state = agent
+    val evidence = host_agent_outcome_encode_v4(host_linux_service_agent_outcome_v4(state, input))
+    if evidence.is_err(): return host_agent_turn_v4(state, capacity, "", evidence.unwrap_err(), true)
+    val settled = host_capacity_owner_settle_associated_v3(capacity, input.execute.prepare.prepare.operation,
+        input.execute.association, state.outcome, evidence.unwrap())
+    # The returned journal owner is the single writer: adopted even on error.
+    if settled.error != "": return host_agent_turn_v4(state, settled.owner, "", settled.error, true)
+    state.stage = "settled"
+    host_agent_turn_v4(state, settled.owner, host_linux_service_agent_reply_v4(state), "", true)
+
+# Gate 1b (U-03): terminal ONLY when the row is `completed` with outcome digest == sha256(record bytes) and the
+# record carries this payload digest. A record whose row is still `executing` resumes at `host-settle`.
+fn host_agent_settled_v4(agent: HostLinuxServiceAgentV4, capacity: HostCapacityOwnerV1,
+        input: HostAgentStepInputV4) -> HostLinuxServiceAgentTurnV4:
+    var state = agent
+    val operation = input.execute.prepare.prepare.operation
+    val stored = distributed_operation_journal_read_v3(capacity.journal, host_agent_outcome_relative_v4(operation.id), 65536)
+    if stored.is_err(): return host_agent_turn_v4(state, capacity, "", stored.unwrap_err(), false)
+    if stored.unwrap().is_none():
+        state.stage = "host-settle"
+        return host_agent_host_settle_v4(state, capacity, input)
+    val record = host_agent_outcome_decode_v4(stored.unwrap().unwrap())
+    if record.is_err(): return host_agent_turn_v4(state, capacity, "", record.unwrap_err(), false)
+    if record.unwrap().payload_digest != state.payload_digest:
+        return host_agent_turn_v4(state, capacity, "", "linux-host-agent-invoke-conflict", false)
+    val row = daemon_operation_exact_v2(capacity.journal, operation)
+    if row.is_err(): return host_agent_turn_v4(state, capacity, "", row.unwrap_err(), false)
+    if row.unwrap().state == "completed" and row.unwrap().outcome_digest == sha256_text(stored.unwrap().unwrap()):
+        return host_agent_turn_v4(state, capacity, host_linux_service_agent_reply_v4(state), "", false)
+    state.stage = "host-settle"
+    host_agent_host_settle_v4(state, capacity, input)
+
+# ---- one bounded step per call ----
+
+pub fn host_linux_service_agent_step_v4(agent: HostLinuxServiceAgentV4, capacity: HostCapacityOwnerV1,
+        input: HostAgentStepInputV4) -> HostLinuxServiceAgentTurnV4:
+    val stage = agent.stage
+    if stage == "wedged" or stage == "failed": return host_agent_turn_v4(agent, capacity, "", agent.error, true)
+    if stage == "settled": return host_agent_settled_v4(agent, capacity, input)
+    if agent.container.is_none() and stage != "probe-collect":
+        return host_agent_failed_v4(agent, capacity, "linux-host-agent-transfer-missing")
+    if stage.starts_with("probe-") or stage == "advance": return host_agent_probe_step_v4(agent, capacity, input)
+    if stage == "selection": return host_agent_selection_step_v4(agent, capacity, input)
+    if stage == "source": return host_agent_source_step_v4(agent, capacity, input)
+    if (stage == "stopping" or stage == "settle" or stage == "source-return" or stage == "host-settle"):
+        return host_agent_release_step_v4(agent, capacity, input)
+    host_agent_native_step_v4(agent, capacity, input)
+
+# ---- staged close (3.7), agent half ----
+
+fn host_agent_close_reply_v4(agent: HostLinuxServiceAgentV4, closed: bool, error: text) -> HostLinuxServiceAgentCloseV4:
+    HostLinuxServiceAgentCloseV4(agent: agent, closed: closed, error: error)
+
+# Steps 0, 2, 3. Step 1 (3.6) is the step driver's: a reserved agent record that is not settled keeps the
+# agent open and the close pending (the Host row stays executing and drains at reopen). The transfer, custody,
+# R2, N's lender and the authority stay in the holder.
+pub fn host_linux_service_agent_close_v4(agent: HostLinuxServiceAgentV4) -> HostLinuxServiceAgentCloseV4:
+    var state = agent
+    if state.workload_closed: return host_agent_close_reply_v4(state, true, "")
+    var turns = 0
+    while state.collector.is_some() and turns < 64:
+        val turn = provider_cli_profiled_probe_step_v2(state.collector.unwrap(), true)
+        state.collector = turn.probe
+        if turn.probe.is_none():
+            state.container = Some(turn.owner)
+            # A cancel mid-collection turns the probe Unknown (pown:140/168/225): no clean probe settle.
+            state.stage = "wedged"
+            if state.error == "": state.error = "linux-host-agent-collection-cancelled"
+        turns = turns + 1
+    if state.collector.is_some(): return host_agent_close_reply_v4(state, false, "linux-host-agent-collector-close-pending")
+    state = host_agent_copy_helper_dirs_v4(state)
+    if state.stage == "wedged": return host_agent_close_reply_v4(state, false, "linux-host-agent-wedged")
+    if state.reserved and state.stage != "settled": return host_agent_close_reply_v4(state, false, "linux-host-agent-settle-pending")
+    # An unsettled probe record is never closed from here (fail closed).
+    if state.probe_record: return host_agent_close_reply_v4(state, false, "linux-host-agent-probe-settle-pending")
+    # Step 2 (*): end the workspace-root loan BEFORE the workload close (the borrow aliases R3).
+    if val held = state.container:
+        val taken = simple_container_take_workspace_root_v3(held)
+        state.container = Some(taken.owner)
+        if taken.root.is_some():
+            state.root = taken.root
+    elif val held = state.fresh:
+        val taken = held.take_workspace_root_v3()
+        state.fresh = Some(taken.owner)
+        if taken.root.is_some():
+            state.root = taken.root
+    if val root = state.root:
+        if val held = state.container:
+            val ended = simple_container_end_workspace_root_loan_v3(held, root)
+            state.container = Some(ended.owner)
+            state.root = ended.root
+            if ended.error != "": return host_agent_close_reply_v4(state, false, ended.error)
+        elif val held = state.fresh:
+            val ended = held.end_workspace_root_loan_v3(root)
+            state.fresh = Some(ended.owner)
+            state.root = ended.root
+            if ended.error != "": return host_agent_close_reply_v4(state, false, ended.error)
+        state.root = None
+    # Step 3. A lifecycle already closed by `probe-close` and not yet advanced has nothing left to close.
+    if not state.lifecycle_closed:
+        var closed: Result<(), text> = Err("linux-host-agent-transfer-missing")
+        if state.container.is_some(): closed = simple_container_close_workload_v3(state.container.unwrap())
+        elif state.fresh.is_some(): closed = state.fresh.unwrap().close_workload_v3()
+        if closed.is_err(): return host_agent_close_reply_v4(state, false, closed.unwrap_err())
+        state.lifecycle_closed = true
+    state.workload_closed = true
+    host_agent_close_reply_v4(state, true, "")
+
+pub struct HostLinuxServiceAgentReleaseV4:
+    agent: Option<HostLinuxServiceAgentV4>
+    native: Option<LinuxServiceNativeIdentityBorrowV3>
+    released: bool
+    error: text
+
+# Service close steps 3-4 and 6 (3.7): end the service loan on the transfer's admission, close the epoch
+# (authority, R2, never-adopted R3, custody, phase closed), then remove exactly the copied helper roots. A
+# failed removal is residue only (reported, not fatal). The agent is dropped only once the epoch close completed.
+pub fn host_linux_service_agent_release_v4(agent: HostLinuxServiceAgentV4,
+        native: Option<LinuxServiceNativeIdentityBorrowV3>) -> HostLinuxServiceAgentReleaseV4:
+    var state = agent
+    if not state.workload_closed:
+        return HostLinuxServiceAgentReleaseV4(agent: Some(state), native: native, released: false,
+            error: "linux-host-agent-close-pending")
+    if state.container.is_none() and state.fresh.is_none():
+        return HostLinuxServiceAgentReleaseV4(agent: Some(state), native: native, released: false,
+            error: "linux-host-agent-transfer-missing")
+    # Step 3, once: the service loan. After it ends the borrow is consumed (native None) and a failed epoch
+    # close below is retried on the next close without it (P2R1-F2).
+    if not state.loan_ended:
+        if native.is_none():
+            return HostLinuxServiceAgentReleaseV4(agent: Some(state), native: None, released: false,
+                error: "linux-host-service-loan-borrow-missing")
+        var ended_error = ""
+        if val held = state.container:
+            val ended = simple_container_end_service_loan_v3(held, native.unwrap())
+            state.container = Some(ended.owner)
+            ended_error = ended.error
+        elif val held = state.fresh:
+            val ended = held.end_service_loan_v3(native.unwrap())
+            state.fresh = Some(ended.owner)
+            ended_error = ended.error
+        if ended_error != "":
+            return HostLinuxServiceAgentReleaseV4(agent: Some(state), native: native, released: false, error: ended_error)
+        state.loan_ended = true
+    # Step 4: the epoch close (retryable).
+    var closed = false
+    var error = ""
+    if val held = state.container:
+        val turn = simple_container_close_epoch_v3(held)
+        state.container = turn.owner
+        closed = turn.closed and turn.owner.is_none()
+        error = turn.error
+    elif val held = state.fresh:
+        val turn = held.close_v2()
+        state.fresh = turn.owner
+        closed = turn.closed and turn.owner.is_none()
+        error = turn.error
+    if not closed:
+        return HostLinuxServiceAgentReleaseV4(agent: Some(state), native: None, released: false,
+            error: if error != "": error else: "linux-host-agent-epoch-close-pending")
+    var residue = ""
+    for path in state.helper_roots:
+        if not dir_remove_all(path) and residue == "": residue = "linux-host-agent-helper-root-residue:" + path
+    HostLinuxServiceAgentReleaseV4(agent: None, native: None, released: true, error: residue)
+
+export HostLinuxServiceAgentV4, HostAgentInvokeRequestV4, HostAgentStepInputV4, HostLinuxServiceAgentTurnV4
+export HostLinuxServiceAgentOpenV4, HostLinuxServiceAgentCloseV4, HostLinuxServiceAgentReleaseV4
+export host_agent_invoke_request_encode_v4, host_agent_invoke_request_decode_v4
+export host_linux_service_agent_execute_v4, host_linux_service_agent_admit_v4, host_linux_service_agent_input_v4
+export host_linux_service_agent_budget_v4, host_linux_service_agent_probe_request_v4, host_linux_service_agent_epoch_v4
+export host_linux_service_agent_reply_v4, host_linux_service_agent_open_v4
+export host_linux_service_agent_outcome_v4, host_linux_service_agent_step_v4
+export host_linux_service_agent_close_v4, host_linux_service_agent_release_v4
