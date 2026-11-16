@@ -91,3 +91,25 @@ fn match_arms_test_the_owning_enums_declared_indexes() {
     assert_eq!(tested_discriminants(&hir, "rank_qualified"), vec![0, 1, 2, 3]);
     assert_eq!(tested_discriminants(&hir, "rank_bare"), vec![0, 1, 2, 3]);
 }
+
+#[test]
+fn constructor_carries_the_owning_enums_declared_index_into_mir() {
+    pre_resolve_wide_order_in_this_process();
+    let (_hir, mir) = lower_entry(
+        &[("wide.spl", WIDE), ("narrow.spl", NARROW), ("wide_user.spl", WIDE_USER)],
+        ENTRY,
+    );
+    let pick = mir.functions.iter().find(|f| f.name == "pick").expect("pick lowered");
+    let carried: Vec<u32> = pick
+        .blocks
+        .iter()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|inst| match inst {
+            crate::mir::MirInst::EnumUnit { variant_name, discriminant, .. } if variant_name == "Speed6953" => {
+                Some(*discriminant)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(carried, vec![2], "construction must agree with the match arms' owner index");
+}

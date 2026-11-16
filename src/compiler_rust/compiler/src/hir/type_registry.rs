@@ -50,6 +50,31 @@ impl Default for TypeIdAllocator {
     }
 }
 
+/// #6953 fallback for a lowering site that could NOT resolve the owning enum
+/// of `variant` (erased receiver, lost metadata, merged same-named enums).
+///
+/// The answer comes from the process-global name-keyed registry, so it is
+/// registration-order dependent and may disagree with the owner's declared
+/// index that every resolved site uses. Builtin `Ok`/`Err`/`Some`/`None` are
+/// fixed ABI values and stay silent; any other variant is reported once per
+/// name (`warning[enum-discriminant-owner-unresolved]`). With
+/// `SIMPLE_ENUM_OWNER_STRICT=1` the report is fatal.
+pub fn name_only_variant_discriminant(site: &'static str, variant: &str) -> i64 {
+    if !matches!(variant, "Ok" | "Err" | "Some" | "None") {
+        static REPORTED: std::sync::OnceLock<dashmap::DashSet<String>> = std::sync::OnceLock::new();
+        if REPORTED.get_or_init(dashmap::DashSet::new).insert(variant.to_string()) {
+            eprintln!(
+                "warning[enum-discriminant-owner-unresolved]: variant `{variant}` lowered by name only at {site}; \
+                 its discriminant is not tied to its owning enum (see #6953)"
+            );
+            if std::env::var_os("SIMPLE_ENUM_OWNER_STRICT").is_some_and(|v| v == "1") {
+                panic!("SIMPLE_ENUM_OWNER_STRICT=1: unresolved enum owner for variant `{variant}` at {site}");
+            }
+        }
+    }
+    simple_runtime::value::hash_variant_discriminant(variant) as i64
+}
+
 /// Type registry that maps TypeId to HirType
 #[derive(Debug, Default, Clone)]
 pub struct TypeRegistry {
@@ -65,6 +90,11 @@ pub struct TypeRegistry {
     /// lowered. Empty outside HIR lowering of a flattened unit with a
     /// collision. See `hir/lower/module_lowering/flatten_struct_owner.rs`.
     scope_aliases: HashMap<String, String>,
+    /// Enum TypeIds whose variant list is NOT one owner's declaration: a bare
+    /// name declared by several modules, seeded from the merged global enum
+    /// table (`Lowerer::register_global_enums`). Their variant ORDER is the
+    /// union's, so it must never yield a discriminant (#6953).
+    merged_enum_ids: std::collections::HashSet<TypeId>,
 }
 
 impl TypeRegistry {
@@ -75,6 +105,7 @@ impl TypeRegistry {
             name_to_id: HashMap::new(),
             optional_type_ids: std::collections::HashSet::new(),
             scope_aliases: HashMap::new(),
+            merged_enum_ids: std::collections::HashSet::new(),
         };
 
         // Register built-in types
@@ -207,12 +238,83 @@ impl TypeRegistry {
             }
             // Update in place - keep the same TypeId
             self.optional_type_ids.remove(&existing_id);
+            self.merged_enum_ids.remove(&existing_id);
             Self::note_enum_positions(&ty);
             self.types.insert(existing_id, ty);
             existing_id
         } else {
             // No existing type, register as new
             self.register_named(name, ty)
+        }
+    }
+
+    /// Mark `id` as an enum whose variant list is a merge of several
+    /// same-named declarations (see `merged_enum_ids`).
+    pub fn mark_merged_enum(&mut self, id: TypeId) {
+        self.merged_enum_ids.insert(id);
+    }
+
+    /// #6953: discriminant of `variant` in its OWNING enum -- the enum `ty`
+    /// is (through shared/optional pointers), else the enum registered as
+    /// `enum_name` (or its last path segment). `None` when neither resolves to
+    /// one declaration that declares `variant`; the caller then has no owner
+    /// and must not guess positionally.
+    pub fn owned_variant_discriminant(&self, ty: TypeId, enum_name: Option<&str>, variant: &str) -> Option<i64> {
+        if let Some(index) = self.declared_index_through(ty, variant, 0) {
+            return Some(index);
+        }
+        let name = enum_name.filter(|name| !name.is_empty() && *name != "_")?;
+        let tail = name
+            .rsplit_once("::")
+            .map(|(_, tail)| tail)
+            .unwrap_or(name)
+            .rsplit('.')
+            .next()
+            .unwrap_or(name);
+        [name, tail]
+            .into_iter()
+            .filter_map(|candidate| self.lookup(candidate))
+            .find_map(|id| self.declared_index_through(id, variant, 0))
+    }
+
+    /// Like `owned_variant_discriminant`, then -- for an erased subject and a
+    /// bare `case Variant:` -- the index every enum visible to THIS module
+    /// that declares `variant` agrees on. Visibility is a function of the
+    /// module's own imports, not of process registration order; enums that
+    /// disagree make the answer `None` (ambiguous, never a positional guess).
+    pub fn owned_or_unique_variant_discriminant(&self, ty: TypeId, enum_name: Option<&str>, variant: &str) -> Option<i64> {
+        if let Some(index) = self.owned_variant_discriminant(ty, enum_name, variant) {
+            return Some(index);
+        }
+        let mut agreed: Option<i64> = None;
+        for (id, ty) in &self.types {
+            let HirType::Enum { variants, .. } = ty else {
+                continue;
+            };
+            let Some(index) =
+                simple_runtime::value::declared_variant_discriminant(variants.iter().map(|(name, _)| name.as_str()), variant)
+            else {
+                continue;
+            };
+            if self.merged_enum_ids.contains(id) {
+                return None;
+            }
+            match agreed {
+                Some(prior) if prior != i64::from(index) => return None,
+                _ => agreed = Some(i64::from(index)),
+            }
+        }
+        agreed
+    }
+
+    fn declared_index_through(&self, ty: TypeId, variant: &str, depth: u8) -> Option<i64> {
+        match self.types.get(&ty)? {
+            HirType::Enum { variants, .. } if !self.merged_enum_ids.contains(&ty) => {
+                simple_runtime::value::declared_variant_discriminant(variants.iter().map(|(name, _)| name.as_str()), variant)
+                    .map(i64::from)
+            }
+            HirType::Pointer { inner, .. } if depth < 4 => self.declared_index_through(*inner, variant, depth + 1),
+            _ => None,
         }
     }
 

@@ -433,6 +433,25 @@ mod positional_registry {
     }
 }
 
+/// Owner-correct discriminant (#6953): `variant`'s index in ITS OWN enum's
+/// declared variant list, or `None` when that enum does not declare it.
+///
+/// This is a pure function of one declaration, so every compile site, worker
+/// process and cached object agrees on it regardless of which other enums
+/// declare the same variant name or in what order they were registered. Every
+/// compiler site that can resolve the owning enum must use this rather than
+/// the name-only `hash_variant_discriminant`. Builtins agree with the fixed
+/// ABI: `Option` declares `[Some, None]` and `Result` `[Ok, Err]`.
+pub fn declared_variant_discriminant<'a>(
+    declared_variants: impl IntoIterator<Item = &'a str>,
+    variant: &str,
+) -> Option<u32> {
+    declared_variants
+        .into_iter()
+        .position(|name| name == variant)
+        .map(|index| index as u32)
+}
+
 /// Register an enum declaration's variants in declaration order so that
 /// `hash_variant_discriminant` yields the positional (pure-Simple) index.
 pub fn register_enum_variants<'a>(variants: impl IntoIterator<Item = &'a str>) {

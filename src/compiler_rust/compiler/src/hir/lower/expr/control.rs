@@ -785,7 +785,7 @@ impl Lowerer {
                     ty: TypeId::BOOL,
                 })
             }
-            Pattern::Enum { name: _, variant, .. } => {
+            Pattern::Enum { name: pattern_enum, variant, .. } => {
                 // Warn-only, DEFAULT OFF. Expression-form twin of the statement
                 // check in hir/lower/stmt_lowering.rs; reached for
                 // `val x = match subj: case Some(v)`. See
@@ -886,10 +886,10 @@ impl Lowerer {
                     return Ok(self.class_pattern_condition(&subject_ref, &variant, payload, ctx));
                 }
 
-                // Validate the stable enum identity and hashed variant tag.
-                let expected_disc: i64 = {
-                    simple_runtime::value::hash_variant_discriminant(variant) as i64
-                };
+                // Validate the stable enum identity and the OWNING enum's
+                // declared variant index (#6953).
+                let expected_disc: i64 =
+                    self.owner_variant_discriminant(subject_ty, Some(pattern_enum.as_str()), variant, "hir match arm");
 
                 let expected_val = HirExpr {
                     kind: HirExprKind::Integer(expected_disc),
@@ -1281,7 +1281,12 @@ impl Lowerer {
                             ty: TypeId::I64,
                         },
                         HirExpr {
-                            kind: HirExprKind::Integer(simple_runtime::value::hash_variant_discriminant(name) as i64),
+                            kind: HirExprKind::Integer(self.owner_variant_discriminant(
+                                slot_ty,
+                                None,
+                                name,
+                                "hir nested bare variant",
+                            )),
                             ty: TypeId::I64,
                         },
                     ],
@@ -1430,9 +1435,8 @@ impl Lowerer {
                     let positional: Vec<(usize, &Pattern)> = fields.iter().enumerate().collect();
                     return self.struct_fields_condition(slot, variant, &positional, ctx);
                 }
-                let expected_disc: i64 = {
-                    simple_runtime::value::hash_variant_discriminant(variant) as i64
-                };
+                let expected_disc: i64 =
+                    self.owner_variant_discriminant(slot_ty, Some(name.as_str()), variant, "hir nested variant");
                 let tag_test = HirExpr {
                     kind: HirExprKind::BuiltinCall {
                         name: "rt_enum_check_variant".to_string(),

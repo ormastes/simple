@@ -1660,7 +1660,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         Ok(())
     }
 
-    fn emit_enum_unit(&mut self, dest: VReg, _enum_name: &str, _variant_name: &str) -> Result<(), String> {
+    fn emit_enum_unit(&mut self, dest: VReg, _enum_name: &str, _variant_name: &str, _discriminant: u32) -> Result<(), String> {
         // Enum unit variant: encode as tagged integer (discriminant only)
         let result = self.call_runtime("rt_enum_unit", &[self.i64_const(0)])?;
         self.set(dest, result);
@@ -1672,6 +1672,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         dest: VReg,
         _enum_name: &str,
         _variant_name: &str,
+        _discriminant: u32,
         payload: VReg,
     ) -> Result<(), String> {
         let pay = self.get(payload)?;

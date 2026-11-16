@@ -3387,9 +3387,8 @@ impl Lowerer {
             Pattern::Identifier(name) => {
                 if self.subject_enum_has_variant(subject_ty, name) {
                     // Treat as an identity-aware enum variant pattern.
-                    let expected_disc: i64 = {
-                        simple_runtime::value::hash_variant_discriminant(name) as i64
-                    };
+                    let expected_disc: i64 =
+                        self.owner_variant_discriminant(subject_ty, None, name, "hir match bare variant arm");
 
                     let expected_val = HirExpr {
                         kind: HirExprKind::Integer(expected_disc),
@@ -3592,7 +3591,7 @@ impl Lowerer {
                 let fields = fields.clone();
                 Ok(self.named_struct_pattern_condition(&subject_ref, &name, &fields, ctx))
             }
-            Pattern::Enum { name: _, variant, .. } => {
+            Pattern::Enum { name: pattern_enum, variant, .. } => {
                 // Warn-only, DEFAULT OFF. This is the statement-form half of the
                 // JIT's pattern decision -- proved by instrumentation to be the
                 // only site reached for `match x: case Some(v)` and for
@@ -3706,10 +3705,10 @@ impl Lowerer {
                     return Ok(self.class_pattern_condition(&subject_ref, &variant, payload, ctx));
                 }
 
-                // Validate the stable enum identity and hashed variant tag.
-                let expected_disc: i64 = {
-                    simple_runtime::value::hash_variant_discriminant(variant) as i64
-                };
+                // Validate the stable enum identity and the OWNING enum's
+                // declared variant index (#6953).
+                let expected_disc: i64 =
+                    self.owner_variant_discriminant(subject_ty, Some(pattern_enum.as_str()), variant, "hir match statement arm");
 
                 let expected_val = HirExpr {
                     kind: HirExprKind::Integer(expected_disc),
