@@ -54,24 +54,71 @@ Rebuilt with the K1 command in `full_cli_native_link_missing_symbols_2026-11-15.
   So `test <spec>` still reports no passed examples. The brief's goal of
   nonzero passed was **not** reached.
 
-## Open (plan): std.spec still cannot run on this walker
-Next: builtin method calls on text, arrays and dicts (`len` first). The
-walker's `MethodCall` arm errors on `MethodResolution.Unresolved`, which is
-what builtin receiver methods lower to, and on `TraitMethod`.
-The walker has no arms for most HIR kinds that std.spec and real specs use:
-statements `Return`/`Break`/`Continue`/`While`/`For`/`Loop` are not covered
-(stmts handled: Let, Assign, Expr, Block, AsmAssert). Expression kinds not
-handled include `MatchCase`, `While`, `For`, `Loop`, `Return`, `Try`,
-`OptionalChain`, `NullCoalesce`, `ExistsCheck`, `Unwrap`, `StructLit`,
-`EnumLit`, `Cast`, `As`, `Range`, `Comprehension`, `TupleIndex`, `With`,
-`TryCatch` and `TypeTest`. Module-level `val`/`var` of a provider are not
-initialized. Interpolation `:format` specs are ignored. Each is its own slice.
-The alternative is to route native `run`/`test` to a complete engine, such as
-the MIR interpreter (`95.interp/mir_interpreter.spl`), which no CLI path
-calls today.
+## Slice 1 (2026-11-16): builtin methods, loops, return, literal match
+`interpreter_control.spl` adds: Unresolved receiver methods dispatched on the
+runtime value (text len/is_empty/trim/contains/starts_with/ends_with/split;
+array len/is_empty/push (written back to the variable)/contains; dict
+len/is_empty/keys/contains_key/has; int/bool to_text), dict indexing,
+`While`/`Loop`/`For` (array, text, dict keys, bounded `Range`), `Return`/
+`Break`/`Continue` (a `BackendErrorKind.ControlFlow` error; the return value
+rides on `BackendError.ctl_value` because a value parked on the by-value
+Environment is lost across copies), and `MatchCase` with wildcard/literal/
+binding/or patterns plus guards. Spec:
+`test/01_unit/compiler/backend/interpreter_backend_walker_slice1_spec.spl`.
+
+Alternatives checked: `src/app/interpreter` (25k lines) has rotted: it imports
+`parser.treesitter` / `lib.parser.parser`, which do not exist, and `run`
+on it fails at parse in `core/__init__.spl:18`. The MIR interpreter keeps
+values in i64 slots with placeholder `rt_array_*` stubs (lines 1114-1137) and
+no text/dict model, so it is not a drop-in for std.spec either.
+
+## Open (plan): remaining walker gaps
+Expression kinds `As`, `ConvertCall`, `Comprehension`, `With`, `TryCatch`,
+`TypeTest`; array/range match patterns; open ranges; `return`/`?` inside a
+closure body (`call_closure` does not catch the ControlFlow error);
+interpolation `:format` specs. Each is its own slice.
+
+## Slice 2 (2026-11-16): option/result idioms, enums, patterns, casts, traits
+`interpreter_optional.spl` adds `??`, `.?` (presence; a `val v = e.?` binder
+from `if val`/`?.` holds payload-or-nil, MIR rule), `!`, `?` (Err/None return
+from the function), `?.`, `StructLit`, `EnumLit`, `Cast` (int<->float),
+`TupleIndex`/tuple indexing, enum (incl. Some/None/Ok/Err), struct and tuple
+patterns, and `TraitMethod` dispatch on the receiver type. Some/Ok/Err calls
+build `Value.Option`/`Value.Result`; `None` is tested before the env lookup
+(the env answered it with a Function value). `call_function_by_id` falls back
+to the numeric id: a trait-impl method's SymbolId did not match as a dict key.
+Spec `interpreter_backend_walker_slice2_spec.spl`: seed RED
+`Results: 11 total, 1 passed, 10 failed`, GREEN `11 total, 11 passed, 0 failed`.
+Native fixture `test/fixtures/native_interp_walker_slice2/main.spl`: old
+`cli_tip.exe` RED `Interpret error ...: function 'Some' not found`; rebuilt
+(`Build complete: 3786 compiled, 0 cached, 0 failed`) GREEN, same 10 lines as
+the seed (`coalesce=17` ... `trait=cat2`). Not covered by a spec: the
+`TraitMethod` resolution arm (the spec's call resolves as InstanceMethod).
 
 ## Perf (recorded, not fixed here)
 `cli_tip.exe run` of a two-file program takes 48 s wall, while the HIR phase
 reports `elapsed_ms=26`. The time goes elsewhere in startup or admission.
 `provider_context_for` also rebuilds the owner module's name map and fn index
 on every cross-module call. A per-module context cache is the follow-up.
+
+## 2026-11-16: `unresolved method call: len` (receiver kind function)
+
+Not a stale cache (the only emitter is #9601's fallback in
+`interpreter_control.spl`). Cause: the HIR interpreter never bound module-level
+`val`/`var` (`HirModule.constants`), so a NamedVar read of an imported global
+(`_aggregate_ledger_paths` at `src/lib/nogc_sync_mut/spec.spl:97`) fell back to
+a Function value. Fixed by evaluating provider + entry constants as globals
+before `main`; Array `push` now returns the grown array so `xs = xs.push(v)`
+keeps xs. Native repro: `test/fixtures/native_interp_module_var/main.spl`
+(RED `unresolved method call: push (receiver kind function)`, GREEN
+`ledger_len=1`; seed interpreter was never affected).
+Next blocker: `expression kind not implemented (disc 1572658204) at
+src/lib/nogc_sync_mut/spec.spl:1244:21` (`env_get(...) ?? ""`). Status stays
+verification-pending.
+Next native blocker (`cli_tip.exe test test/01_unit/lib/nogc_sync_mut/fs/flat_file_metadata_spec.spl`,
+75 s): the `?? ""` gap at `spec.spl:1244` is gone; the run now stops at
+`Interpret error in test.01_unit.lib.nogc_sync_mut.fs.flat_file_metadata_spec: function not found by symbol ID`
+(also `app.test_runner_new.test_db_lane_main`), `Results: 1 total, 0 passed, 1 failed`.
+Likely a method resolved to a SymbolId owned by an imported module:
+`call_function_by_id` only searches the entry module (slice 3).
+Status stays verification-pending.

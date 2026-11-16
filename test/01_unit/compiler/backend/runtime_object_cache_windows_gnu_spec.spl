@@ -1,0 +1,35 @@
+use std.spec.*
+use compiler.backend.runtime_object_cache_windows.{runtime_windows_cache_driver_kind_v1, runtime_windows_cache_split_args_v1}
+
+# Regression: on Windows the llvm-mingw `clang.exe` (GNU driver) runtime lane
+# had no runtime object cache at all, so every native-build recompiled ~60
+# runtime C files serially (~92 s of a 200 s warm p2_add smoke build).
+# doc/08_tracking/bug/windows_gnu_clang_runtime_objects_uncached_2026-11-16.md
+
+describe "Windows runtime cache driver kind":
+    it "admits clang-cl and the llvm-mingw GNU clang driver":
+        expect(runtime_windows_cache_driver_kind_v1("C:/LLVM/bin/clang-cl.exe")).to_equal("cl")
+        expect(runtime_windows_cache_driver_kind_v1("C:/Users/u/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64/bin/clang.exe")).to_equal("gnu")
+        expect(runtime_windows_cache_driver_kind_v1("C:\\tc\\bin\\CLANG.EXE")).to_equal("gnu")
+        expect(runtime_windows_cache_driver_kind_v1("C:/tc/bin/x86_64-w64-mingw32-clang.exe")).to_equal("gnu")
+
+    it "refuses unknown or bare compiler spellings":
+        expect(runtime_windows_cache_driver_kind_v1("clang.exe")).to_equal("")
+        expect(runtime_windows_cache_driver_kind_v1("C:/tc/bin/gcc.exe")).to_equal("")
+        expect(runtime_windows_cache_driver_kind_v1("C:/tc/bin/clang++.exe")).to_equal("")
+        expect(runtime_windows_cache_driver_kind_v1("")).to_equal("")
+
+describe "Windows runtime cache argument split":
+    it "turns a GNU compile into a preprocess of the same TU and a compile of the .i":
+        val args = ["-c", "--target=x86_64-w64-windows-gnu", "-O2", "-I", "rt", "-o", "C:/t/simple_rt_1_x.o", "rt/runtime_native.c"]
+        val split = runtime_windows_cache_split_args_v1("gnu", args, "rt/runtime_native.c", "C:/t/simple_rt_1_x.o", "S/input.i")
+        expect(split.preprocess.join(" ")).to_equal("--target=x86_64-w64-windows-gnu -O2 -I rt rt/runtime_native.c -E -o S/input.i")
+        expect(split.compile.join(" ")).to_equal("-c --target=x86_64-w64-windows-gnu -O2 -I rt -o C:/t/simple_rt_1_x.o S/input.i")
+        expect(split.options.join(" ")).to_equal("-c --target=x86_64-w64-windows-gnu -O2 -I rt -o <runtime-object> rt/runtime_native.c")
+
+    it "keeps the clang-cl split unchanged":
+        val args = ["/c", "/O2", "/Forun.obj", "rt/a.c"]
+        val split = runtime_windows_cache_split_args_v1("cl", args, "rt/a.c", "run.obj", "S/input.i")
+        expect(split.preprocess.join(" ")).to_equal("/O2 rt/a.c /P /FiS/input.i")
+        expect(split.compile.join(" ")).to_equal("/c /O2 /Forun.obj S/input.i")
+        expect(split.options.join(" ")).to_equal("/c /O2 /Fo<runtime-object> rt/a.c")

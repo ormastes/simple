@@ -22,6 +22,15 @@ use std.common.text_bytes.{bytes_to_text}
 use std.nogc_sync_mut.ptr.raw.{rt_ptr_read_i64, rt_ptr_write_i64, rt_ptr_read_u8, rt_ptr_write_u8}
 use std.nogc_sync_mut.trace.xray_llvm_adapter_v1.{XrayLlvmLeafV1, XRAY_LLVM_STATUS_SUCCESS_V1, XRAY_LLVM_STATUS_FAILED_V1, XRAY_LLVM_STATUS_INVALID_ID_V1}
 use std.nogc_sync_mut.trace.observer_native_channel_v1.{trace_native_channel_close_v1, trace_native_channel_record_words_v1}
+use std.nogc_sync_mut.atomic.{rt_par_atomic_load_i64}
+use std.nogc_sync_mut.io.volatile_ops.{rt_load_barrier}
+
+# Ring slot seq load with acquire ordering (the writer publishes seq with
+# release): the payload reads that follow cannot be hoisted above it on ARM64.
+# On x86 this is the same plain load as rt_ptr_read_i64.
+@unsafe(reason: "atomic load of a live aligned ring seq cell", capabilities: [ffi])
+fn xray_ring_seq_acquire_v1(ring: i64, off: i64) -> i64:
+    unsafe(capabilities: [ffi]): rt_par_atomic_load_i64(ring + off)
 
 pub const XRAY_WIN_DESCRIPTOR_SYMBOL_V1: text = "__simple_xray_descriptor_v1"
 pub const XRAY_WIN_NAMES_SYMBOL_V1: text = "__simple_xray_names_v1"
@@ -150,7 +159,7 @@ impl XrayWinFlagLeafV1:
             if end > cap: end = cap
             while self.ring_read < end:
                 val rec = 24 + self.ring_read * 32
-                if rt_ptr_read_i64(self.ring, rec + 16) != self.ring_read + 1: break
+                if xray_ring_seq_acquire_v1(self.ring, rec + 16) != self.ring_read + 1: break
                 val site = rt_ptr_read_i64(self.ring, rec)
                 val kind = (rt_ptr_read_i64(self.ring, rec + 8) & 4294967295) as i32
                 val ts = rt_ptr_read_i64(self.ring, rec + 24) as u64
@@ -178,7 +187,7 @@ impl XrayWinFlagLeafV1:
             while self.ring_read < end:
                 val rec = 24 + (self.ring_read % cap) * 32
                 val expect_seq = self.ring_read + 1
-                val seq = rt_ptr_read_i64(self.ring, rec + 16)
+                val seq = xray_ring_seq_acquire_v1(self.ring, rec + 16)
                 if seq < expect_seq:
                     if seq == 0 or self.ring_stall != self.ring_read:
                         self.ring_stall = self.ring_read
@@ -188,7 +197,8 @@ impl XrayWinFlagLeafV1:
                     val site = rt_ptr_read_i64(self.ring, rec)
                     val kind = (rt_ptr_read_i64(self.ring, rec + 8) & 4294967295) as i32
                     val ts = rt_ptr_read_i64(self.ring, rec + 24) as u64
-                    if rt_ptr_read_i64(self.ring, rec + 16) == expect_seq:
+                    rt_load_barrier()
+                    if xray_ring_seq_acquire_v1(self.ring, rec + 16) == expect_seq:
                         xray_win_edge_record_stamped_v1(self.sink, site, kind, xray_win_ticks_to_ns_v1(ts, self.tick_hz))
                         n = n + 1
                     else:

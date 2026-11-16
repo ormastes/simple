@@ -1,0 +1,230 @@
+use compiler.backend.backend_types.{backend_value_array_v1, backend_value_bool_v1, backend_value_int_v1, backend_value_string_v1}
+# Interpreter Backend - loops, early exits, literal match and builtin
+# receiver methods (text / array / dict).
+#
+# Control flow (return / break / continue) travels on the error channel as a
+# BackendErrorKind.ControlFlow error whose message names the signal; a
+# `return` value rides on the error itself (BackendError.ctl_value). The
+# catcher truncates the scope stack back to its own depth, because an error
+# propagated with `?` skips every intervening eval_block's pop_scope.
+#
+# doc/08_tracking/bug/native_cli_test_cannot_run_std_spec_2026-11-15.md
+
+use compiler.hir.hir.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.backend.backend_types.*
+use compiler.backend.env.{EvalContext}
+use compiler.backend.interpreter.{InterpreterBackendImpl, resolve_sym_name}
+
+fn interp_is_ctl(err: BackendError, signal: text) -> bool:
+    err.kind == BackendErrorKind.ControlFlow and err.message == signal
+
+impl InterpreterBackendImpl:
+    fn run_loop_body(body: HirBlock, ctx: EvalContext) -> Result<bool, BackendError>:
+        """Run one loop iteration. Ok(true) = keep looping, Ok(false) = break."""
+        val depth = ctx.env.scope_depth()
+        match self.eval_block(body, ctx):
+            case Ok(_): Ok(true)
+            case Err(e):
+                if interp_is_ctl(e, "break"):
+                    ctx.env.truncate_scopes(depth)
+                    return Ok(false)
+                if interp_is_ctl(e, "continue"):
+                    ctx.env.truncate_scopes(depth)
+                    return Ok(true)
+                Err(e)
+
+    fn eval_while(cond: HirExpr?, body: HirBlock, ctx: EvalContext) -> Result<Value, BackendError>:
+        """`while cond:`; a `loop:` passes None."""
+        while true:
+            if val c = cond:
+                val cv = self.eval_expr(c, ctx)?
+                if not cv.is_truthy():
+                    break
+            if not self.run_loop_body(body, ctx)?:
+                break
+        Ok(Value.Nil)
+
+    fn eval_for(var_: SymbolId, iter: HirExpr, body: HirBlock, ctx: EvalContext) -> Result<Value, BackendError>:
+        val name = resolve_sym_name(var_, ctx)
+        val source = self.eval_expr(iter, ctx)?
+        var items: [Value] = []
+        match source:
+            case Value.Array(elements): items = elements
+            case Value.String(s):
+                for ch in s.chars():
+                    items = items.push(backend_value_string_v1(ch.to_text()))
+            case Value.Dict(entries):
+                for k in entries.keys():
+                    items = items.push(backend_value_string_v1(k))
+            case _:
+                return Err(BackendError.type_error("for loop over a non-iterable value", Some(iter.span)))
+        for item in items:
+            val item_t: Value = item
+            ctx.env.push_scope()
+            ctx.env.define(name, item_t)
+            val keep = self.run_loop_body(body, ctx)?
+            ctx.env.pop_scope()
+            if not keep:
+                break
+        Ok(Value.Nil)
+
+    fn eval_range(start: HirExpr?, end: HirExpr?, inclusive: bool, step: HirExpr?, span: Span, ctx: EvalContext) -> Result<Value, BackendError>:
+        # Ranges materialize as an int array: the walker only consumes them in
+        # `for`, and a bounded range is all std.spec needs.
+        if not start.? or not end.?:
+            return Err(BackendError.not_implemented("open-ended range"))
+        val lo = self.eval_expr(start.unwrap(), ctx)?
+        val hi = self.eval_expr(end.unwrap(), ctx)?
+        var by: i64 = 1
+        if step.?:
+            match self.eval_expr(step.unwrap(), ctx)?:
+                case Value.Int(n): by = n
+                case _: return Err(BackendError.type_error("range step must be an integer", Some(span)))
+        if by == 0:
+            return Err(BackendError.runtime_error("range step must not be zero", Some(span)))
+        match lo:
+            case Value.Int(a):
+                match hi:
+                    case Value.Int(b):
+                        var out: [Value] = []
+                        var i = a
+                        val last = if inclusive: b else: b - by
+                        if by > 0:
+                            while i <= last:
+                                out = out.push(backend_value_int_v1(i))
+                                i = i + by
+                        else:
+                            while i >= last:
+                                out = out.push(backend_value_int_v1(i))
+                                i = i + by
+                        Ok(backend_value_array_v1(out))
+                    case _: Err(BackendError.type_error("range bounds must be integers", Some(span)))
+            case _: Err(BackendError.type_error("range bounds must be integers", Some(span)))
+
+    fn eval_return(value: HirExpr?, ctx: EvalContext) -> Result<Value, BackendError>:
+        val v = if value.?: self.eval_expr(value.unwrap(), ctx)? else: Value.Nil
+        Err(BackendError.control_flow("return", Some(v)))
+
+    fn pattern_binds(pattern: HirPattern, value: Value, ctx: EvalContext, span: Span) -> Result<bool, BackendError>:
+        """Test `value` against `pattern`, defining any binding in the current scope."""
+        match pattern.kind:
+            case HirPatternKind.Wildcard: Ok(true)
+            case HirPatternKind.Literal(lit):
+                val lv = self.eval_expr(lit, ctx)?
+                val eq = self.eval_binop(HirBinOp.Eq, value, lv, span, false, false)?
+                Ok(eq.is_truthy())
+            case HirPatternKind.Binding(symbol, _):
+                ctx.env.define(resolve_sym_name(symbol, ctx), value)
+                Ok(true)
+            case HirPatternKind.Or(patterns):
+                for p in patterns:
+                    val p_t: HirPattern = p
+                    if self.pattern_binds(p_t, value, ctx, span)?:
+                        return Ok(true)
+                Ok(false)
+            case HirPatternKind.Enum(_type, variant, payload):
+                self.enum_pattern_binds(variant, payload, value, ctx, span)
+            case HirPatternKind.Tuple(elements):
+                self.tuple_pattern_binds(elements, value, ctx, span)
+            case HirPatternKind.Struct(_type, fields):
+                self.struct_pattern_binds(fields, value, ctx, span)
+            case _: Err(BackendError.not_implemented("match pattern kind not implemented"))
+
+    fn eval_match(scrutinee: HirExpr, arms: [HirMatchArm], ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
+        val sv = self.eval_expr(scrutinee, ctx)?
+        for arm in arms:
+            val arm_t: HirMatchArm = arm
+            ctx.env.push_scope()
+            var hit = self.pattern_binds(arm_t.pattern, sv, ctx, span)?
+            if hit and arm_t.has_guard:
+                hit = self.eval_expr(arm_t.guard, ctx)?.is_truthy()
+            if hit:
+                val result = self.eval_block(arm_t.body, ctx)?
+                ctx.env.pop_scope()
+                return Ok(result)
+            ctx.env.pop_scope()
+        Err(BackendError.runtime_error("no match arm matched", Some(span)))
+
+    fn eval_builtin_method(receiver: HirExpr, method_name: text, args: [HirCallArg], ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
+        """Receiver methods the frontend leaves Unresolved: dispatch on the runtime value kind."""
+        val recv = self.eval_expr(receiver, ctx)?
+        var a: [Value] = []
+        for arg in args:
+            val arg_t: HirCallArg = arg
+            a = a.push(self.eval_expr(arg_t.value, ctx)?)
+        match recv:
+            case Value.String(s):
+                match method_name:
+                    case "len": return Ok(backend_value_int_v1(s.len()))
+                    case "is_empty": return Ok(backend_value_bool_v1(s.len() == 0))
+                    case "to_text": return Ok(recv)
+                    case "trim": return Ok(backend_value_string_v1(s.trim()))
+                    case _: ()
+                if a.len() == 1:
+                    match a[0]:
+                        case Value.String(t):
+                            match method_name:
+                                case "contains": return Ok(backend_value_bool_v1(s.contains(t)))
+                                case "starts_with": return Ok(backend_value_bool_v1(s.starts_with(t)))
+                                case "ends_with": return Ok(backend_value_bool_v1(s.ends_with(t)))
+                                case "split":
+                                    var parts: [Value] = []
+                                    for part in s.split(t):
+                                        parts = parts.push(backend_value_string_v1(part))
+                                    return Ok(backend_value_array_v1(parts))
+                                case _: ()
+                        case _: ()
+            case Value.Array(elements):
+                match method_name:
+                    case "len": return Ok(backend_value_int_v1(elements.len()))
+                    case "is_empty": return Ok(backend_value_bool_v1(elements.len() == 0))
+                    case "push":
+                        if a.len() != 1:
+                            return Err(BackendError.runtime_error("push takes one argument", Some(span)))
+                        val grown = backend_value_array_v1(elements.push(a[0]))
+                        self.write_back(receiver, grown, ctx, span)?
+                        # `xs = xs.push(v)` is the common idiom: return the
+                        # grown array, not Nil, or the assignment erases xs.
+                        return Ok(grown)
+                    case "contains":
+                        if a.len() == 1:
+                            for el in elements:
+                                if self.eval_binop(HirBinOp.Eq, el, a[0], span, false, false)?.is_truthy():
+                                    return Ok(backend_value_bool_v1(true))
+                            return Ok(backend_value_bool_v1(false))
+                    case _: ()
+            case Value.Dict(entries):
+                match method_name:
+                    case "len": return Ok(backend_value_int_v1(entries.len()))
+                    case "is_empty": return Ok(backend_value_bool_v1(entries.len() == 0))
+                    case "keys":
+                        var ks: [Value] = []
+                        for k in entries.keys():
+                            ks = ks.push(backend_value_string_v1(k))
+                        return Ok(backend_value_array_v1(ks))
+                    case "contains_key" | "has" | "contains":
+                        if a.len() == 1:
+                            match a[0]:
+                                case Value.String(k): return Ok(backend_value_bool_v1(entries.has(k)))
+                                case _: ()
+                    case _: ()
+            case Value.Int(n):
+                if method_name == "to_text":
+                    return Ok(backend_value_string_v1(n.to_text()))
+            case Value.Bool(b):
+                if method_name == "to_text":
+                    return Ok(backend_value_string_v1(b.to_text()))
+            case _: ()
+        Err(BackendError.runtime_error("unresolved method call: {method_name} (receiver kind {recv.type_name()}) at {span.file}:{span.line}:{span.col}", Some(span)))
+
+    fn write_back(target: HirExpr, value: Value, ctx: EvalContext, span: Span) -> Result<(), BackendError>:
+        """Store a mutated value back into the variable a mutating method was called on."""
+        var name = ""
+        match target.kind:
+            case HirExprKind.NamedVar(_s, n): name = n
+            case HirExprKind.Var(s): name = resolve_sym_name(s, ctx)
+            case _: ()
+        if name == "" or not ctx.env.assign(name, value):
+            return Err(BackendError.not_implemented("mutating method on a non-variable receiver"))
+        Ok(())

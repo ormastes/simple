@@ -1,4 +1,4 @@
-use compiler.backend.backend_types.{backend_value_array_v1, backend_value_bool_v1, backend_value_closure_v1, backend_value_dict_v1, backend_value_float_v1, backend_value_function_v1, backend_value_int_v1, backend_value_string_v1, backend_value_tuple_v1}
+use compiler.backend.backend_types.{backend_value_array_v1, backend_value_bool_v1, backend_value_closure_v1, backend_value_dict_v1, backend_value_float_v1, backend_value_function_v1, backend_value_int_v1, backend_value_option_v1, backend_value_string_v1, backend_value_tuple_v1}
 # Interpreter Backend - expression evaluation extension
 #
 # Split from interpreter.spl to bound the largest physical parser surface.
@@ -168,6 +168,11 @@ impl InterpreterBackendImpl:
                 # Typed rebinds (stage4 extracted-payload hazard, iteration 18).
                 val nv_name_t: text = name
                 itrace("[EE] NamedVar arm name={nv_name_t}")
+                # `None` is the empty Option. Test it before the lookup: the
+                # env was seen answering it with a Function value.
+                if nv_name_t == "None":
+                    val none_v: Value? = nil
+                    return Ok(backend_value_option_v1(none_v))
                 # Name-keyed lookup (iteration 21): the NamedVar's `symbol` is a
                 # corrupt looked-up handle on stage4, but `name` is reliable.
                 val nv_value = ctx.env.lookup(nv_name_t)
@@ -258,10 +263,29 @@ impl InterpreterBackendImpl:
                                     Ok(ae[iv])
                             case _:
                                 Err(BackendError.type_error("array index must be an integer", Some(expr.span)))
-                    # ponytail: only Array indexing is needed for the #112
-                    # class-in-array repro. Dict/Tuple/string indexing and
-                    # Index-as-assignment-target (`arr[i] = v`) are intentionally
-                    # left out until a concrete case needs them.
+                    case Value.Dict(dict_entries):
+                        val de: Dict<text, Value> = dict_entries
+                        match idx_key_v:
+                            case Value.String(dk):
+                                if de.has(dk):
+                                    val dv: Value = de[dk]
+                                    Ok(dv)
+                                else:
+                                    Err(BackendError.runtime_error("dict key not found: {dk}", Some(expr.span)))
+                            case _:
+                                Err(BackendError.type_error("dict key must be text", Some(expr.span)))
+                    case Value.Tuple(tup_elems):
+                        val te: [Value] = tup_elems
+                        match idx_key_v:
+                            case Value.Int(ti):
+                                if ti < 0 or ti >= te.len():
+                                    Err(BackendError.runtime_error("tuple index out of bounds", Some(expr.span)))
+                                else:
+                                    Ok(te[ti])
+                            case _:
+                                Err(BackendError.type_error("tuple index must be an integer", Some(expr.span)))
+                    # String indexing and Index-as-assignment-target
+                    # (`arr[i] = v`) are left out until a concrete case needs them.
                     case _:
                         Err(BackendError.type_error("indexing requires an array", Some(expr.span)))
 
@@ -362,6 +386,9 @@ impl InterpreterBackendImpl:
                         val builtin_result = self.try_call_builtin(cname_t, arg_values)
                         if builtin_result.?:
                             return builtin_result.unwrap()
+                        val wrapper_result = self.construct_wrapper(cname_t, arg_values)
+                        if wrapper_result.?:
+                            return Ok(wrapper_result.unwrap())
                         # User-defined function fast-path keyed on the callee NAME.
                         # The `Value.Function` payload channel loses its
                         # FunctionValue on stage4 (env-hit yields f_nil=true, so
@@ -456,11 +483,10 @@ impl InterpreterBackendImpl:
                         self.call_function_by_id(func_id, arg_values, ctx, expr.span)
 
                     case MethodResolution.TraitMethod(_, _):
-                        # Trait method - requires dynamic dispatch (not implemented yet)
-                        Err(BackendError.not_implemented("trait method calls not yet supported"))
+                        self.call_trait_method(receiver, method_name, args, ctx, expr.span)
 
                     case MethodResolution.Unresolved:
-                        Err(BackendError.runtime_error("unresolved method call: {method_name}", Some(expr.span)))
+                        self.eval_builtin_method(receiver, method_name, args, ctx, expr.span)
 
             case HirExprKind.StaticCall(type_, method_name, args, resolution):
                 # Static call: Type.method(args) - similar to StaticMethod variant
@@ -494,6 +520,66 @@ impl InterpreterBackendImpl:
                 self.eval_block(body, ctx)?
                 Ok(Value.Nil)
 
+            case HirExprKind.While(cond, body, _):
+                self.eval_while(Some(cond), body, ctx)
+
+            case HirExprKind.Loop(body, _):
+                self.eval_while(None, body, ctx)
+
+            case HirExprKind.For(var_, iter, body, _):
+                self.eval_for(var_, iter, body, ctx)
+
+            case HirExprKind.Range(start, end, inclusive, step):
+                self.eval_range(start, end, inclusive, step, expr.span, ctx)
+
+            case HirExprKind.MatchCase(scrutinee, arms):
+                self.eval_match(scrutinee, arms, ctx, expr.span)
+
+            case HirExprKind.Return(value):
+                self.eval_return(value, ctx)
+
+            case HirExprKind.Break(_, _):
+                Err(BackendError.control_flow("break", None))
+
+            case HirExprKind.Continue(_):
+                Err(BackendError.control_flow("continue", None))
+
+            case HirExprKind.NullCoalesce(left, right):
+                self.eval_null_coalesce(left, right, ctx)
+
+            case HirExprKind.ExistsCheck(base):
+                self.eval_exists(base, ctx)
+
+            case HirExprKind.Unwrap(base):
+                self.eval_unwrap(base, ctx, expr.span)
+
+            case HirExprKind.Try(inner):
+                self.eval_try(inner, ctx)
+
+            case HirExprKind.OptionalChain(base, field):
+                self.eval_optional_chain(base, field, ctx, expr.span)
+
+            case HirExprKind.StructLit(type_, fields):
+                self.eval_struct_lit(type_, fields, ctx)
+
+            case HirExprKind.EnumLit(type_, variant, payload):
+                self.eval_enum_lit(type_, variant, payload, ctx)
+
+            case HirExprKind.Cast(inner, target):
+                self.eval_cast(inner, target, ctx, expr.span)
+
+            case HirExprKind.TupleIndex(base, index):
+                val tb = self.eval_expr(base, ctx)?
+                match tb:
+                    case Value.Tuple(tes):
+                        val tes_t: [Value] = tes
+                        if index < 0 or index >= tes_t.len():
+                            Err(BackendError.runtime_error("tuple index out of bounds", Some(expr.span)))
+                        else:
+                            Ok(tes_t[index])
+                    case _:
+                        Err(BackendError.type_error("tuple index on a non-tuple value", Some(expr.span)))
+
             # Seed treats these no-payload patterns as irrefutable, so they must
             # remain after every payload-bearing expression arm.
             case HirExprKind.NilLit:
@@ -504,4 +590,4 @@ impl InterpreterBackendImpl:
 
             case _:
                 itrace("[EE] catch-all arm")
-                Err(BackendError.not_implemented("expression kind not implemented"))
+                Err(BackendError.not_implemented("expression kind not implemented (disc {ee_disc}) at {expr.span.file}:{expr.span.line}:{expr.span.col}"))

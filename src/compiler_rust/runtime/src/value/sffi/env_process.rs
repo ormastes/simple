@@ -2045,6 +2045,21 @@ pub unsafe extern "C" fn rt_process_run_bounded_tuple(
     process_result_block(rt_process_run_bounded(cmd_ptr, cmd_len, args, timeout_ms, max_output_bytes))
 }
 
+/// Raw 3-word block (stdout, stderr, untagged status) for
+/// `rt_process_run_timeout` (C twin: `rt_process_run_timeout_tuple`).
+///
+/// # Safety
+/// Same contract as [`rt_process_run_timeout`].
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_run_timeout_tuple(
+    cmd_ptr: *const u8,
+    cmd_len: u64,
+    args: RuntimeValue,
+    timeout_ms: i64,
+) -> *mut i64 {
+    process_result_block(rt_process_run_timeout(cmd_ptr, cmd_len, args, timeout_ms))
+}
+
 /// Repack a (stdout, stderr, status) result tuple: slots 0/1 keep their
 /// runtime values, slot 2 is untagged (C twin: `rt_process_result_to_tuple`).
 fn process_result_block(tuple: RuntimeValue) -> *mut i64 {

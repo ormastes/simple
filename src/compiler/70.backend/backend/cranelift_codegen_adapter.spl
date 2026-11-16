@@ -24,6 +24,7 @@ use compiler.backend.cranelift_runtime_imports.{translate_runtime_import_call_f6
 use compiler.backend.mir_target_context_provider.{backend_requested_aot_target_triple}
 use compiler.mir.mir_instruction_graph.{mir_module_functions_sorted, mir_module_statics_sorted}
 use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name, mir_runtime_owned_local_symbol}
+use compiler.mir.text_extern_abi.{runtime_tuple_result_facade}
 use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.sffi.codegen.*
 use compiler.mir.mir_instruction_support.{mir_operand_const_int}
@@ -1809,6 +1810,11 @@ fn cl_translate_call(
                     if source_call and func_handles.has(name):
                         val source_ref = cranelift_import_function(ctx, func_handles[name])
                         return cranelift_call(ctx, source_ref, arg_vals)
+                    # Tuple-result owners (process-run, cpuid) -> raw-block
+                    # facade for runtime AND foreign (stdlib extern) origin.
+                    val tuple_facade = if source_call: "" else: runtime_tuple_result_facade(name, arg_vals.len())
+                    if tuple_facade != "":
+                        return translate_runtime_import_call_i64(ctx, cl_module, tuple_facade, arg_vals)
                     if func_op.call_origin != MirCallOrigin.Runtime:
                         val external_name = if source_call and mir_runtime_owned_call_name(name): mir_runtime_owned_local_symbol(name) else: name
                         val abi_error = cl_import_call_abi_error(type_, args, ret_type, has_ret_dest, func)
@@ -1874,28 +1880,6 @@ fn cl_translate_call(
                         return translate_runtime_import_call_i64(ctx, cl_module, name, arg_vals)
                     if name == "rt_process_spawn_guarded":
                         return translate_runtime_import_call_i64(ctx, cl_module, "rt_process_spawn_guarded_value", arg_vals)
-                    # Process-run owners return a registered SplArray, but
-                    # MIR destructures the (text, text, int) result by
-                    # loading words 0/8/16 of the handle -- which read the
-                    # array header (status came back as its capacity, 4).
-                    # Use the runtime_native.c *_tuple facades the LLVM lane
-                    # already uses: same (ptr, len, args, ...) words, raw
-                    # 3-word result block with slot 2 untagged. Arity is the
-                    # post-split word count (cmd = ptr + len), like the MIR guard.
-                    if name == "rt_process_run" and arg_vals.len() == 3:
-                        return translate_runtime_import_call_i64(ctx, cl_module, "rt_process_run_tuple", arg_vals)
-                    if name == "rt_process_run_bounded" and arg_vals.len() == 5:
-                        return translate_runtime_import_call_i64(ctx, cl_module, "rt_process_run_bounded_tuple", arg_vals)
-                    if name == "rt_process_run_timeout" and arg_vals.len() == 4:
-                        return translate_runtime_import_call_i64(ctx, cl_module, "rt_process_run_timeout_tuple", arg_vals)
-                    if name == "rt_process_run_owned_observed_bounded_value" and arg_vals.len() == 5:
-                        return translate_runtime_import_call_i64(ctx, cl_module, "rt_process_run_owned_observed_bounded_text", arg_vals)
-                    if name == "rt_process_run_bounded_bytes" and arg_vals.len() == 5:
-                        return translate_runtime_import_call_i64(ctx, cl_module, "rt_process_run_bounded_bytes_tuple", arg_vals)
-                    # rt_cpuid_tuple returns a registered 4-tuple of tagged
-                    # ints; the raw-block twin holds the untagged registers.
-                    if name == "rt_cpuid_tuple" and arg_vals.len() == 2:
-                        return translate_runtime_import_call_i64(ctx, cl_module, "rt_cpuid_tuple_block", arg_vals)
                     if name == "rt_env_get" and arg_vals.len() == 1:
                         return translate_runtime_import_call_i64(ctx, cl_module, "rt_env_get_value", arg_vals)
                     # MIR currently represents compiler-generated collection
@@ -1969,7 +1953,12 @@ fn cl_function_emit_name(name: text) -> text:
     var no_mangle = false
     unsafe(capabilities: [ffi]):
         no_mangle = (rt_env_get("SIMPLE_NATIVE_BUILD_NO_MANGLE") ?? "") == "1"
-    if no_mangle and not cl_is_lowering_owned_runtime(name) and not mir_runtime_owned_call_name(name):
+    # `--no-mangle` builds the C-ABI runtime provider: its `rt_*` definitions
+    # ARE the runtime symbols and keep the bare name (same rule as
+    # MirToLlvm.llvm_function_symbol_name). MIR already stripped the module
+    # prefix and fails closed on leaf collisions (mir_no_mangle_claim_leaf).
+    # See doc/08_tracking/bug/no_mangle_emits_module_qualified_symbols_2026-11-16.md
+    if no_mangle and not cl_is_lowering_owned_runtime(name):
         return name
     # cl_is_lowering_owned_runtime names are unconditionally runtime-routed
     # in cl_translate_call above -- a same-named local body is unreachable

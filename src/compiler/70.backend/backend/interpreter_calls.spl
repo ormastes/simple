@@ -235,6 +235,7 @@ impl InterpreterBackendImpl:
                     return result
         # AOP hook (task #31): weave declarative `on pc{...} use ... before`
         # advice for interpreted calls. See interpreter_aop_weave.spl.
+        val frame_depth = ctx.env.scope_depth()
         ctx.env.push_scope()
 
         # Bind parameters
@@ -252,8 +253,17 @@ impl InterpreterBackendImpl:
             ctx.env.define(param.name, value)
 
         # Execute body
-        val result = self.eval_block(fn_.body, ctx)?
+        # A `return` arrives as a ControlFlow error carrying its value on the env.
+        var result: Value = Value.Nil
+        match self.eval_block(fn_.body, ctx):
+            case Ok(v): result = v
+            case Err(e):
+                if e.kind == BackendErrorKind.ControlFlow and e.message == "return":
+                    result = e.ctl_value ?? Value.Nil
+                else:
+                    return Err(e)
 
+        ctx.env.truncate_scopes(frame_depth + 1)
         ctx.env.pop_scope()
         # AOP hook (task #31): weave after_success/after_error advice.
         self.interp_aop_run_after(fn_, ctx, result)
@@ -262,11 +272,16 @@ impl InterpreterBackendImpl:
     fn call_function_by_id(method_id: SymbolId, args: [Value], ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
         """Look up function by symbol ID and call it."""
         # Look up function definition in module
-        if not ctx.module.functions.has(method_id):
-            return Err(BackendError.runtime_error("function not found by symbol ID", Some(span)))
-
-        val fn_ = ctx.module.functions[method_id]
-        self.call_hir_function(fn_, args, ctx)
+        if ctx.module.functions.has(method_id):
+            return self.call_hir_function(ctx.module.functions[method_id], args, ctx)
+        # A trait-impl method's SymbolId carries the same numeric id as its
+        # functions key but does not compare equal as a struct key; match the
+        # id number instead.
+        for f_ in ctx.module.functions.values():
+            val f: HirFunction = f_
+            if f.symbol.id == method_id.id:
+                return self.call_hir_function(f, args, ctx)
+        Err(BackendError.runtime_error("function not found by symbol ID", Some(span)))
 
     fn call_closure(closure: ClosureValue, args: [Value], ctx: EvalContext) -> Result<Value, BackendError>:
         ctx.env.push_scope()

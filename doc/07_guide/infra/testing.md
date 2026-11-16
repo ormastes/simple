@@ -1411,3 +1411,48 @@ The exact candidate runs `test/03_system/check/post_bootstrap_stage4_acceptance_
 with absolute `STAGE4_POST_BOOTSTRAP_BINARY` and adjacent
 `STAGE4_POST_BOOTSTRAP_PROVENANCE`. Use interpreter, no daemon/database/cache,
 `--assert-ran`, and `--fail-fast`. Retained smoke is hash-verified, not rerun.
+
+
+---
+
+## TestDB Read-Only Query: `test query` / `test explain`
+
+Purpose: look at recorded attempt rows for exactly one case without touching
+the test database (no cold-start create, no save, no migration).
+
+```bash
+bin/simple test query   <path>::<case> [--run <id>] [--limit N] [--cursor C] [--format table|sdn]
+bin/simple test explain <path>::<case> [--run <id>]
+# direct form: bin/simple run src/app/test_runner_new/main.spl query ...
+```
+
+Defaults: table format, `--limit 50` (explain 1000). The database path is fixed
+at `doc/08_tracking/test/test_db.sdn`.
+
+Exit codes: 0 rows found, 1 no rows, 2 usage error, unknown run, or missing /
+corrupt / unsealed database.
+
+Verified output (seed `bin/simple.exe`, release tip `75d3cba7d16`; both the
+`test query` and direct forms behave the same):
+
+```text
+$ bin/simple test query test/01_unit/app/traceability/trace_matrix_spec.spl::x
+no rows: no recorded attempts for test/01_unit/app/traceability/trace_matrix_spec.spl::x
+(exit 1)
+
+$ bin/simple test query nocolon
+usage: simple test query <path>::<case> [--run <id>] [--limit N] [--cursor C] [--format table|sdn]
+       simple test explain <path>::<case> [--run <id>]
+exit codes: 0 rows found, 1 no rows, 2 usage error or unreadable/corrupt test database
+(exit 2)
+```
+
+The committed `test_db.sdn` holds no trace-case event tables, so a rows-found
+example could not be produced from the repo DB. When rows exist, the source
+(`src/app/test_runner_new/test_query_cli.spl`) renders one
+`attempt <n> of <case> in run <id>: status=<s>` line per attempt, then
+`partial: truncated, more rows exist` and `next cursor: N` when paged, or
+`partial: some attempts are unfinished or have missing identity`. `explain`
+adds a reason per status (skipped, cached, blocked and unknown never qualify as
+a pass) and an `identity missing:` line. Rows are unverified framework
+observations, not admitted evidence. MCP twin: `simple_test_query`.

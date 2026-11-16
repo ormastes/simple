@@ -1,0 +1,35 @@
+# KNOWN WRONG, out of scope for the extern runtime-tuple-ARRAY fix.
+# Build: same recipe as test/fixtures/native_for_tuple_destructure/main.spl.
+# K1 `{o.?}` on an `i64?` taken from a tuple: the language rule prints the
+#   presence bool. Seed prints the payload (`K1 present=9`, `K1 present=nil`);
+#   Stage 2 e45e89468d3e (both backends) prints `present=9` / `present=3`.
+#   Expected: `K1 present=true ol=[s]` / `K1 present=false ol=[n]`.
+# W1/W2 a DIRECT tuple extern built by rt_tuple_new without a backend facade
+#   (rt_shell_exec_tuple). Seed: `W1 out=[hi] errlen=0 code=0`,
+#   `W2 p0=[hi] p2=0`. Stage 2 e45e89468d3e (both backends):
+#   `W1 out=[] errlen=-1 code=4`, `W2 p0=[] p2=4` -- the same header misread,
+#   left alone: a direct tuple extern can be a backend facade
+#   (cranelift_codegen_adapter.spl rt_process_run -> rt_process_run_tuple,
+#   gated on the split-arg count) that already returns a native block, so a
+#   blanket conversion would double-convert it. P1/P2: this file's own
+#   `extern fn rt_process_run` does NOT reach that facade on e45e89468d3e:
+#   seed `P1 out=[ok] errlen=0 code=0` / `P2 p0=[ok] p2=0`, Stage 2 (both
+#   backends) `P1 out=[] errlen=-1 code=4` / `P2 p0=[] p2=4`.
+@unsafe(reason: "shell probe", capabilities: [ffi])
+extern fn rt_shell_exec_tuple(cmd: text) -> (text, text, i64)
+@unsafe(reason: "process probe", capabilities: [ffi])
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn main():
+    val ot: [(i64?, text)] = [(Some(9), "s"), (None, "n")]
+    for e in ot:
+        val (o, ol) = e
+        print "K1 present={o.?} ol=[{ol}]"
+    val r = unsafe(capabilities: [ffi]): rt_shell_exec_tuple("printf hi")
+    val (out, err, code) = r
+    print "W1 out=[{out}] errlen={err.len()} code={code}"
+    print "W2 p0=[{r.0}] p2={r.2}"
+    val pr = unsafe(capabilities: [ffi]): rt_process_run("printf", ["ok"])
+    val (pout, perr, pcode) = pr
+    print "P1 out=[{pout}] errlen={perr.len()} code={pcode}"
+    print "P2 p0=[{pr.0}] p2={pr.2}"

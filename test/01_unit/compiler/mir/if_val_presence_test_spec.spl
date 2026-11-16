@@ -1,0 +1,289 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+"""
+`if val x = <T?>` must branch on the Option's PRESENCE, never on the binder.
+
+Bug: doc/08_tracking/bug/native_if_val_presence_test_dropped_2026-11-15.md
+
+`if val x = e` is parser-desugared to `val x = e.?` plus `x != nil`. The `.?`
+yields a payload-or-nil WORD (nil = 3) and the binder is typed by the
+payload. For a scalar payload (`i64?`) the `x != nil` compare saw a
+statically non-optional i64 and folded to `true`
+(expr_dispatch nil-compare fold), so natively every None took the Some
+branch with the nil word 3 as the value. A runtime `x != 3` compare is no
+fix either: a present 3 is the nil word too. The presence must come from
+the Option itself (`rt_is_some` on the subject, the Result tag for
+`.ok`/`.err`, the dict-miss test for `d.get(k)`).
+
+The rows lower HIR with SIMPLE_BOOTSTRAP=1 (how native-build runs) and MIR
+without it, and check the condition of the branch that enters the if-val
+body. The native oracle is test/fixtures/native_if_val_presence/main.spl.
+"""
+
+use std.spec
+use std.io_runtime.{env_set}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+fn lower_module_json(src: text) -> Dict<text, text>:
+    val module = parse_full_frontend(src, "if_val_presence.spl", "if_val_presence.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("if_val_presence.spl")
+    env_set("SIMPLE_BOOTSTRAP", "1")
+    val hir = hir_lowering.lower_module(module)
+    env_set("SIMPLE_BOOTSTRAP", "")
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var out: Dict<text, text> = {}
+    for function in mir.functions.values():
+        val dot = function.name.rfind(".")
+        val short = if dot >= 0: function.name.substring(dot + 1, function.name.len()) else: function.name
+        out[short] = serialize_mir_function(function)
+    out
+
+fn digits_from(s: text, start: i64) -> text:
+    var i = start
+    var out = ""
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if not "0123456789".contains(ch):
+            return out
+        out = out + ch
+        i = i + 1
+    out
+
+fn block_id_of(mir: text, label: text) -> text:
+    # The LAST such block: an `elif val` body follows the plain `if` arm.
+    val at = mir.rfind("\"label\":\"" + label + "\"")
+    if at < 0:
+        return ""
+    val head = mir.substring(0, at)
+    val id_at = head.rfind("\"id\":")
+    if id_at < 0:
+        return ""
+    digits_from(head, id_at + 5)
+
+fn def_of(mir: text, local: text) -> text:
+    val at = mir.index_of("\"dest\":" + local + ",")
+    if at < 0:
+        return ""
+    val end = if at + 220 < mir.len(): at + 220 else: mir.len()
+    mir.substring(at, end)
+
+fn left_operand_def(mir: text, binop_def: text) -> text:
+    val left_at = binop_def.index_of("\"left\":")
+    if left_at < 0:
+        return ""
+    val tail = binop_def.substring(left_at, binop_def.len())
+    val copy_at = tail.index_of("\"Copy\":")
+    if copy_at < 0:
+        return ""
+    def_of(mir, digits_from(tail, copy_at + 7))
+
+fn body_entry_condition(mir: text) -> text:
+    """Local id of the branch condition that enters the if-val body."""
+    var then_id = block_id_of(mir, "if_chain_then")
+    if then_id == "":
+        then_id = block_id_of(mir, "then")
+    if then_id == "":
+        return ""
+    val branch_at = mir.index_of("\"then\":" + then_id + ",")
+    if branch_at < 0:
+        return ""
+    val head = mir.substring(0, branch_at)
+    val copy_at = head.rfind("\"Copy\":")
+    if copy_at < 0:
+        return ""
+    digits_from(head, copy_at + 7)
+
+fn presence_problem(fns: Dict<text, text>, name: text) -> text:
+    """Empty when the if-val body is entered on a presence test of the
+    subject; otherwise a description of what the condition really is."""
+    val mir = fns[name] ?? ""
+    if mir == "":
+        return "{name}: no MIR"
+    val cond = body_entry_condition(mir)
+    if cond == "":
+        return "{name}: no if-val branch found"
+    val def = def_of(mir, cond)
+    if def.contains("\"value\":\"rt_is_some\""):
+        return ""
+    if def.contains("\"op\":\"Eq\"") and left_operand_def(mir, def).contains("rt_enum_discriminant"):
+        return ""
+    if def.contains("\"op\":\"Ne\"") and left_operand_def(mir, def).contains("rt_dict_get"):
+        return ""
+    "{name}: body entered on %{cond} = {def}"
+
+val NL: text = "\n"
+
+val REPRO_SOURCE: text = "fn g(k: i64) -> i64?:" + NL +
+    "    if k == 0: return None" + NL +
+    "    Some(k)" + NL + NL +
+    "fn f_call(k: i64) -> i64:" + NL +
+    "    if val x = g(k):" + NL +
+    "        return x" + NL +
+    "    -1" + NL + NL +
+    "fn f_local(k: i64) -> i64:" + NL +
+    "    val o: i64? = g(k)" + NL +
+    "    if val x = o:" + NL +
+    "        return x" + NL +
+    "    -1" + NL + NL +
+    "fn f_param(o: i64?) -> i64:" + NL +
+    "    if val x = o:" + NL +
+    "        return x" + NL +
+    "    -1" + NL
+
+val NEARBY_SOURCE: text = "fn g(k: i64) -> i64?:" + NL +
+    "    if k == 0: return None" + NL +
+    "    Some(k)" + NL + NL +
+    "fn res(b: bool) -> Result<i64, text>:" + NL +
+    "    if b: return Ok(3)" + NL +
+    "    Err(\"bad\")" + NL + NL +
+    "struct Holder:" + NL +
+    "    slot: i64?" + NL + NL +
+    "fn f_field(h: Holder) -> i64:" + NL +
+    "    if val x = h.slot:" + NL +
+    "        return x" + NL +
+    "    -1" + NL + NL +
+    "fn f_elif(k: i64) -> i64:" + NL +
+    "    if k == 99:" + NL +
+    "        return 0" + NL +
+    "    elif val x = g(k):" + NL +
+    "        return x" + NL +
+    "    -1" + NL + NL +
+    "fn f_ok(b: bool) -> i64:" + NL +
+    "    if val x = res(b).ok:" + NL +
+    "        return x" + NL +
+    "    -1" + NL + NL +
+    "fn f_index(k: i64) -> i64:" + NL +
+    "    val xs: [i64?] = [None, Some(3)]" + NL +
+    "    if val x = xs[k]:" + NL +
+    "        return x" + NL +
+    "    -1" + NL + NL +
+    "fn f_dict(k: text) -> i64:" + NL +
+    "    val d: {{text: i64}} = {{\"a\": 3}}" + NL +
+    "    if val x = d.get(k):" + NL +
+    "        return x" + NL +
+    "    -1" + NL + NL +
+    "fn first_of<T>(xs: [T]) -> T?:" + NL +
+    "    if xs.len() == 0: return None" + NL +
+    "    Some(xs[0])" + NL + NL +
+    "fn f_generic(xs: [i64]) -> i64:" + NL +
+    "    if val x = first_of(xs):" + NL +
+    "        return x" + NL +
+    "    -1" + NL + NL +
+    "fn nxt(n: i64) -> i64?:" + NL +
+    "    if n > 5: return None" + NL +
+    "    Some(n)" + NL + NL +
+    "fn f_while() -> i64:" + NL +
+    "    var acc = 0" + NL +
+    "    while val x = nxt(acc):" + NL +
+    "        acc = acc + x + 1" + NL +
+    "    acc" + NL
+
+describe "if val on a scalar optional enters its body only when present":
+    it "tests presence for a call, an annotated local and a parameter (the reported shapes)":
+        val fns = lower_module_json(REPRO_SOURCE)
+        for name in ["f_call", "f_local", "f_param"]:
+            expect(presence_problem(fns, name)).to_equal("")
+
+describe "every if-val consumer shape tests presence, not the payload word":
+    it "tests presence for a field, elif val, Result.ok, an optional array element, Dict.get, while val and an erased generic result":
+        val fns = lower_module_json(NEARBY_SOURCE)
+        for name in ["f_field", "f_elif", "f_ok", "f_index", "f_dict", "f_while", "f_generic"]:
+            expect(presence_problem(fns, name)).to_equal("")
+
+fn dict_presence_bit(mir: text) -> text:
+    """Dest of the `raw != nil` bit recorded for a `d.get(k)` word, or ""."""
+    var rest = mir
+    var at = rest.index_of("\"dest\":")
+    while at >= 0:
+        val local = digits_from(rest, at + 7)
+        val def = def_of(mir, local)
+        if def.starts_with("\"dest\":" + local + ",\"op\":\"Ne\"") and left_operand_def(mir, def).contains("rt_dict_get"):
+            return local
+        rest = rest.substring(at + 7, rest.len())
+        at = rest.index_of("\"dest\":")
+    ""
+
+fn copy_uses(mir: text, local: text) -> i64:
+    var count = 0
+    var rest = mir
+    val needle = "\"Copy\":" + local
+    var at = rest.index_of(needle)
+    while at >= 0:
+        val after = rest.substring(at + needle.len(), at + needle.len() + 1)
+        if not "0123456789".contains(after):
+            count = count + 1
+        rest = rest.substring(at + needle.len(), rest.len())
+        at = rest.index_of(needle)
+    count
+
+val VAR_LOOP_SOURCE: text = "fn f_var_eq() -> i64:" + NL +
+    "    val d: {{text: i64}} = {{\"t\": 0}}" + NL +
+    "    var g = d.get(\"t\")" + NL +
+    "    var n = 0" + NL +
+    "    var i = 0" + NL +
+    "    while i < 2:" + NL +
+    "        if g == nil:" + NL +
+    "            n = n + 1" + NL +
+    "        g = nil" + NL +
+    "        i = i + 1" + NL +
+    "    n" + NL + NL +
+    "fn f_var_ne(k: i64) -> i64:" + NL +
+    "    val d: {{text: i64}} = {{\"t\": 0}}" + NL +
+    "    var g = d.get(\"t\")" + NL +
+    "    var n = 0" + NL +
+    "    for i in [0, 1]:" + NL +
+    "        if g != nil:" + NL +
+    "            n = n + 1" + NL +
+    "        match k:" + NL +
+    "            case 1: g = nil" + NL +
+    "            case _: ()" + NL +
+    "    n" + NL + NL +
+    "fn f_val_eq(k: text) -> i64:" + NL +
+    "    val d: {{text: i64}} = {{\"t\": 3}}" + NL +
+    "    val g = d.get(k)" + NL +
+    "    if g == nil:" + NL +
+    "        return 1" + NL +
+    "    0" + NL
+
+describe "a reassigned var never answers presence from its initializer's bit":
+    it "a loop-carried var re-tests its current word; a val keeps the producer bit":
+        val fns = lower_module_json(VAR_LOOP_SOURCE)
+        for name in ["f_var_eq", "f_var_ne"]:
+            val mir = fns[name] ?? ""
+            val bit = dict_presence_bit(mir)
+            expect(bit != "").to_equal(true)
+            val uses = copy_uses(mir, bit)
+            expect("{name} uses {uses}").to_equal("{name} uses 0")
+        val val_mir = fns["f_val_eq"] ?? ""
+        val val_bit = dict_presence_bit(val_mir)
+        expect(val_bit != "").to_equal(true)
+        val val_uses = copy_uses(val_mir, val_bit)
+        expect("f_val_eq uses {val_uses}").to_equal("f_val_eq uses 1")
+
+val AGREE_SOURCE: text = "fn f_coal(k: text) -> i64:" + NL +
+    "    val d: {{text: i64}} = {{\"t\": 3}}" + NL +
+    "    val g = d.get(k)" + NL +
+    "    g ?? -5" + NL + NL +
+    "fn f_none(k: text) -> i64:" + NL +
+    "    val d: {{text: i64}} = {{\"t\": 3}}" + NL +
+    "    val g = d.get(k)" + NL +
+    "    if g == None:" + NL +
+    "        return 1" + NL +
+    "    0" + NL
+
+describe "`??` and `== None` answer presence from the same bit as `== nil`":
+    it "a d.get word holding the nil word 3 is present for `??` and `== None`":
+        val fns = lower_module_json(AGREE_SOURCE)
+        for name in ["f_coal", "f_none"]:
+            val mir = fns[name] ?? ""
+            val bit = dict_presence_bit(mir)
+            expect(bit != "").to_equal(true)
+            val uses = copy_uses(mir, bit)
+            expect("{name} uses {uses}").to_equal("{name} uses 1")
