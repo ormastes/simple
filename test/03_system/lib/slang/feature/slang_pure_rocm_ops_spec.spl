@@ -8,11 +8,18 @@ Skips with a reason when the ROCm DLLs or the model file are absent.
 """
 
 use std.spec.*
-use std.io_runtime.{file_exists, file_read_bytes}
+use std.io_runtime.{file_exists, file_read_bytes, file_append_text, dir_create_all}
 use std.gc_async_mut.gpu.rocm.hip_compute.{rocm_available_at, rocm_bin_default}
 use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values, tensor_matvec, tensor_decode_f32_le}
 use std.gc_async_mut.slang.model_executor.pure.weights.{pure_weights_f32_ranges, PureF32Range}
 use std.gc_async_mut.slang.model_executor.pure.tensor_ops_rocm.{rocm_ops_open, rocm_ops_device_name, rocm_tensor_upload, rocm_tensor_upload_f32_bytes, rocm_tensor_download, rocm_tensor_matvec, rocm_tensor_free, rocm_ops_sync}
+
+# The runner does not keep stdout of passing examples and counts skip() as a
+# pass, so evidence (and every skip reason) is also appended to a file.
+fn _record(line: text):
+    print line
+    dir_create_all("build/probe")
+    file_append_text("build/probe/pure_evidence.txt", line + "\n")
 
 extern fn rt_time_now_nanos() -> i64
 
@@ -89,7 +96,7 @@ fn bench_range(ops, bytes: [u8], r: PureF32Range, cpu_reps: i64, gpu_reps: i64) 
         rocm_tensor_free(ops, dxi).unwrap()
         i = i + 1
     val tt1 = rt_time_now_nanos()
-    print "PERF matvec {rows}x{cols}: cpu_ms={ms3((tc1 - tc0) / cpu_reps / 1000)} gpu_excl_transfer_ms={ms3((tk1 - tk0) / gpu_reps / 1000)} gpu_incl_x_up_y_down_ms={ms3((tt1 - tt0) / gpu_reps / 1000)} weight_bulk_upload_once_ms={(tu1 - tu0) / 1000000}"
+    _record("PERF matvec {rows}x{cols}: cpu_ms={ms3((tc1 - tc0) / cpu_reps / 1000)} gpu_excl_transfer_ms={ms3((tk1 - tk0) / gpu_reps / 1000)} gpu_incl_x_up_y_down_ms={ms3((tt1 - tt0) / gpu_reps / 1000)} weight_bulk_upload_once_ms={(tu1 - tu0) / 1000000}")
     rel_err(gpu, cpu)
 
 fn find_shape(ranges: [PureF32Range], rows: i64, cols: i64) -> PureF32Range:
@@ -101,13 +108,13 @@ fn find_shape(ranges: [PureF32Range], rows: i64, cols: i64) -> PureF32Range:
 describe "slang pure runner ROCm provider (system)":
     it "runs matvec on the Radeon GPU and matches the CPU op":
         if not rocm_available_at(rocm_bin_default()):
-            print "SKIP: ROCm DLLs not found in {rocm_bin_default()}"
+            _record("SKIPPED: ROCm DLLs not found in {rocm_bin_default()}")
         elif not file_exists(MODEL):
-            print "SKIP: {MODEL} not found"
+            _record("SKIPPED: {MODEL} not found")
         else:
             val ops = rocm_ops_open().unwrap()
             val name = rocm_ops_device_name(ops)
-            print "DEVICE: {name}"
+            _record("DEVICE: {name}")
             expect(name).to_contain("Radeon")
             val bytes = file_read_bytes(MODEL)
             val ranges = pure_weights_f32_ranges(bytes).unwrap()
@@ -117,6 +124,6 @@ describe "slang pure runner ROCm provider (system)":
             expect(head.shape[0]).to_equal(32000)
             val e_small = bench_range(ops, bytes, small, 20, 200)
             val e_head = bench_range(ops, bytes, head, 1, 20)
-            print "PERF rel_err small={e_small} head={e_head}"
+            _record("PERF rel_err small={e_small} head={e_head}")
             expect(e_small < 0.0001).to_equal(true)
             expect(e_head < 0.0001).to_equal(true)

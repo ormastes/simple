@@ -2,7 +2,7 @@
 
 - Date: 2026-11-15
 - Severity: P3 (wrong metadata; completion text is correct)
-- Status: open (filed, not fixed)
+- Status: fixed 2026-11-15 (engine_complete_chat returns EngineChatResult with prompt/completion token counts for both runners; serving_chat passes them through; slang_http_server_live_spec asserts > 0)
 - Host: Windows 11, CPU ggml shim, Qwen2.5-1.5B-Instruct-Q4_K_M
 
 ## Symptom
