@@ -287,3 +287,38 @@ describe "The Vulkan backdrop blur and glass material run on the device, pixel-f
         expect(device_glass).to_equal(1)
         expect(device[2 * 32 + 2]).to_equal(0xFF4B4B4Du32)
         expect(mismatch_count(cpu, device)).to_equal(0)
+
+    it "renders the legacy widget frame and offset text through Draw IR on the device, as cpu_simd does":
+        # Legacy widget chrome (widget-panel, no <style>) lowers its frame
+        # rects and its sparse offset text to Draw IR rect commands, so the
+        # Vulkan device paints them exactly as cpu_simd. Page A takes the
+        # generated chrome text, page B the x+8 / y+7 offset text.
+        val chrome_page = "<html><body><section class='widget-panel'><div class='widget-button'><span>Menu</span></div></section></body></html>"
+        val offset_page = "<html><body><div>Menu</div><section class='widget-panel'></section></body></html>"
+        val readbacks_before = vulkan_readback_count()
+        val device_a = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(chrome_page, 40, 64, "vulkan")
+        val device_b = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(offset_page, 40, 64, "vulkan")
+        val readbacks_after = vulkan_readback_count()
+        val cpu_a = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(chrome_page, 40, 64, "cpu_simd")
+        val cpu_b = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(offset_page, 40, 64, "cpu_simd")
+        # Both frames were read back from the device, not a CPU fallback.
+        expect(readbacks_after - readbacks_before >= 2).to_equal(true)
+        # Frame: focus border, image swatch and chips, button frame / face / icon,
+        # and the bottom-corner page-base patch.
+        expect(device_a[0]).to_equal(0xFF0066CCu32)
+        expect(device_a[63 * 40 + 39]).to_equal(0xFF0066CCu32)
+        expect(device_a[34 * 40 + 6]).to_equal(0xFF2563EBu32)
+        expect(device_a[38 * 40 + 10]).to_equal(0xFFF59E0Bu32)
+        expect(device_a[39 * 40 + 20]).to_equal(0xFF22C55Eu32)
+        expect(device_a[50 * 40 + 5]).to_equal(0xFF64748Bu32)
+        expect(device_a[52 * 40 + 7]).to_equal(0xFFCBD5E1u32)
+        expect(device_a[57 * 40 + 12]).to_equal(0xFF2563EBu32)
+        expect(device_a[63 * 40 + 2]).to_equal(0xFFF5F5F5u32)
+        expect(device_b[0]).to_equal(0xFF0066CCu32)
+        expect(mismatch_count(cpu_a, device_a)).to_equal(0)
+        expect(mismatch_count(cpu_b, device_b)).to_equal(0)
+        # The offset text really paints on the device: page B differs from
+        # the same page without its text.
+        val bare_page = "<html><body><div></div><section class='widget-panel'></section></body></html>"
+        val device_bare = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(bare_page, 40, 64, "vulkan")
+        expect(mismatch_count(device_bare, device_b) > 0).to_equal(true)
