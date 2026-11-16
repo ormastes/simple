@@ -482,6 +482,13 @@ pub fn hash_variant_discriminant(variant_name: &str) -> u32 {
 pub(crate) const RESULT_ENUM_ID: u32 = 0;
 pub(crate) const OPTION_ENUM_ID: u32 = 1;
 
+/// Result's runtime enum id: 0 from compiled code, 2 from the C runtime's
+/// `rt_result_ok`/`rt_result_err`. A user enum's declared index is 0/1 for its
+/// first two variants (#6953), so Ok/Err may only be read under these ids.
+fn is_result_enum_id(enum_id: u32) -> bool {
+    enum_id == RESULT_ENUM_ID || enum_id == 2
+}
+
 pub(crate) fn rt_option_none() -> RuntimeValue {
     rt_enum_new(OPTION_ENUM_ID, hash_variant_discriminant("None"), RuntimeValue::NIL)
 }
@@ -666,12 +673,14 @@ pub extern "C" fn rt_unwrap_or_trap(value: RuntimeValue) -> RuntimeValue {
         return value;
     }
 
-    if discriminant == hash_variant_discriminant("Ok") {
-        return payload;
-    }
-    if discriminant == hash_variant_discriminant("Err") {
-        eprintln!("error: called unwrap on Err");
-        std::process::abort();
+    if is_result_enum_id(enum_id) {
+        if discriminant == hash_variant_discriminant("Ok") {
+            return payload;
+        }
+        if discriminant == hash_variant_discriminant("Err") {
+            eprintln!("error: called unwrap on Err");
+            std::process::abort();
+        }
     }
 
     // Arbitrary user enum: preserve the pre-existing "return self" fallback.
@@ -775,11 +784,13 @@ pub extern "C" fn rt_expect_or_trap(value: RuntimeValue, msg: RuntimeValue) -> R
         return value;
     }
 
-    if discriminant == hash_variant_discriminant("Ok") {
-        return payload;
-    }
-    if discriminant == hash_variant_discriminant("Err") {
-        trap();
+    if is_result_enum_id(enum_id) {
+        if discriminant == hash_variant_discriminant("Ok") {
+            return payload;
+        }
+        if discriminant == hash_variant_discriminant("Err") {
+            trap();
+        }
     }
 
     // Arbitrary user enum: preserve the pre-existing "return self" fallback.
