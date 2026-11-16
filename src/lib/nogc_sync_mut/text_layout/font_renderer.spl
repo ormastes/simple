@@ -448,6 +448,9 @@ val GLYPH_RASTER_CACHE_LIMIT: i64 = 4096
 # LCD glyphs rasterised at a non-zero quarter-pixel phase, keyed
 # "{atlas font identity}|{face generation}|{codepoint}|{size}|{phase}".
 var _lcd_phase_glyphs: Dict<text, CachedGlyph> = {}
+# Last atlas slot of each phase cell, same keys. A hint only: every read is
+# checked against the slot's identity before use (see _lcd_phase_atlas_index).
+var _lcd_phase_atlas_slots: Dict<text, i32> = {}
 var _glyph_raster_keys: [text] = []
 var _glyph_raster_values: [CachedGlyph] = []
 var _glyph_raster_cursor: i64 = 0
@@ -1557,6 +1560,23 @@ class FontRenderer:
     # advances are exactly the measured ones, so the fractions describe the
     # pens actually used. Phase cells are atlas entries with glyph_index
     # -1 - phase (plain codepoint glyphs use -1).
+    # `_font_atlas_entry_index` scans every atlas entry; a run phases most of
+    # its glyphs, so that scan per glyph per frame cost about 0.2 s on a 16-line
+    # page. The slot hint makes the warm path O(1).
+    fn _lcd_phase_atlas_index(key: text, glyph_index: i32, codepoint: i32, font_size: i32) -> i32:
+        if val Some(slot) = _lcd_phase_atlas_slots.get(key):
+            if (slot >= 0 and slot < self.atlas_codepoints.len() and
+                self.atlas_face_ids[slot] == 0 and
+                self.atlas_face_generations[slot] == 0 and
+                self.atlas_glyph_indices[slot] == glyph_index and
+                self.atlas_codepoints[slot] == codepoint and
+                self.atlas_font_sizes[slot] == font_size):
+                return slot
+        val idx = self._font_atlas_entry_index(0, 0, glyph_index, codepoint, font_size)
+        if idx >= 0:
+            _lcd_phase_atlas_slots[key] = idx
+        idx
+
     me _lcd_apply_pen_phases(content: text, advance_widths: [i32], font_size: i32):
         if not self._lcd_applies(font_size):
             return
@@ -1613,10 +1633,11 @@ class FontRenderer:
                         pg = self._lcd_glyph(SFNT_GLYPH_SELECTOR_CODEPOINT, cp.to_i64(), cp, (-1 - phase).to_i32(), 0, font_size, base, phase)
                         _lcd_phase_glyphs[key] = pg
                     if pg.glyph_index == (-1 - phase).to_i32():
-                        var idx = self._font_atlas_entry_index(0, 0, pg.glyph_index, cp, font_size)
+                        var idx = self._lcd_phase_atlas_index(key, pg.glyph_index, cp, font_size)
                         if idx < 0:
                             idx = self._insert_font_atlas_glyph(pg)
                             if idx >= 0:
+                                _lcd_phase_atlas_slots[key] = idx
                                 inserted.push(FontRenderQuad(codepoint: cp, byte_offset: q.byte_offset,
                                     dst_x: 0, dst_y: 0, width: self.atlas_widths[idx], height: self.atlas_heights[idx],
                                     atlas_x: self.atlas_xs[idx], atlas_y: self.atlas_ys[idx], color: q.color))

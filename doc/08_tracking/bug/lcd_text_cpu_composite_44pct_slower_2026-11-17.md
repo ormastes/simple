@@ -1,26 +1,30 @@
-# LCD text makes the Engine2D CPU text path about 44 % slower
+# LCD text makes the Engine2D CPU text path slower
 
-Status: OPEN 2026-11-17, filed with `work/webrender-lcd-text-20261116`.
+Status: MITIGATED 2026-11-17. 1x is within the 10 % target; 4x is still +14 %. Filed with `work/webrender-lcd-text-20261116`.
 
 ## Measurement
 
-The page is 16 `<p>` lines of 11–13 px Liberation Sans, 480x280 CSS px. The backend is `cpu_simd` at 1x and `simple_web_render_html_to_pixels_at_device_scale` at k=4. Each figure is a warm run (glyph caches hot), the mean of 2–3 runs. The binary is the seed `/home/yoon/.cache/cargo-target-webrender-vk/release/simple` (59635056 B, 2026-11-14 09:32). Base and head ran back to back on the same host.
+- **Page.** 16 `<p>` lines of 11–13 px Liberation Sans, 480x280 CSS px. The backend is `cpu_simd` at 1x and `simple_web_render_html_to_pixels_at_device_scale` at k=4.
+- **Runs.** Warm runs (glyph caches hot), mean of 2–3. Base, the first LCD commit and the optimised code ran back to back on the same host.
+- **Binary.** The seed `/home/yoon/.cache/cargo-target-webrender-vk/release/simple` (59635056 B, 2026-11-14 09:32).
 
-| lane | base | head | head, `SIMPLE_WEB_LCD_TEXT=0` | head, phases off |
-|---|---|---|---|---|
-| 1x warm | 3.28 s | 4.72 s (+44 %) | 3.29 s | 4.43 s |
-| 4x warm | 28.5 s | 41.5 s (+46 %) | — | — |
-| 1x cold | 14.8 s | 19.8 s | — | — |
+| lane | base | first LCD commit | optimised |
+|---|---|---|---|
+| 1x warm | 3.22 s | 4.66 s (+45 %) | 3.52 s (+9 %) |
+| 4x warm | 26.6 s | 40.2 s (+51 %) | 30.4 s (+14 %) |
 
-`SIMPLE_WEB_LCD_TEXT=0` restores the base time. About 80 % of the cost is the composite and about 20 % is the quarter-phase pass.
+The output is unchanged by the optimisation. Whole-frame digests of the perf page and of a coloured-text page are identical between the first LCD commit and the optimised code, at 1x and 4x. The coloured page has white on indigo, amber on a gradient, translucent red, and 50 px grayscale text.
 
-## Cause
+## What was fixed
 
-- **Composite (about 1.1 s at 1x).** `_draw_font_batch_cpu_suffix` takes one `read_pixels_region` per glyph quad. It then blends per channel in pure Simple (`engine2d_lcd_quad_composite`, three preblend lookups and three blends per pixel) and writes the quad back with `draw_image_blend`. The grayscale path makes a single blend call per quad.
-- **Phase pass (about 0.3 s).** `_lcd_apply_pen_phases` reruns `_text_pen_milli` (advance and kerning lookups) for every staged run, every frame. `measure_text_advances` has already walked the same run.
+- The LCD composite runs before the grayscale subrect, and the grayscale pixels are built only when LCD declines. Before this, every quad ran both loops.
+- Coverage to Skia s32 tables, with the preblend and text alpha folded in, are cached per text colour. Before this, each pixel made three preblend lookups and three function calls.
+- Zero-coverage cells copy `dst`. Full-coverage cells write the text colour. Row offsets are hoisted out of the pixel loop.
+- The quarter-phase pass gets an O(1) atlas slot hint (`_lcd_phase_atlas_index`). Before this it scanned every atlas entry (`_font_atlas_entry_index`) for every phased glyph on every frame.
 
-## Fix plan
+## What is left
 
-1. Composite in place on the CPU framebuffer for the whole batch. One frame borrow per batch, not a region copy per quad.
-2. Return the milli pens from `measure_text_advances`, or memo them with its run memo, so the phase pass does not walk the run again.
-3. Acceptance: the head 1x warm time is within 10 % of base on the page above, and `lcd_subpixel_text_chrome159_spec` stays 5/5.
+- The per-pixel composite is still interpreted Simple. Mixed-coverage pixels do three table lookups and three blends each.
+- Each quad still takes a `read_pixels_region` copy and a `draw_image_blend` pass.
+- At 4x, the 11–12 px CSS text is 44–48 device px. It stays LCD, and its quads are 16x larger, so 4x pays proportionally more.
+- Next step: a native span kernel for the LCD blend (like `rt_engine2d_simd_blend_span_u32`), taking per-channel coverage and the three s32 tables. It would blend in place on `SoftwareBackend.buf`, with no region copy.
