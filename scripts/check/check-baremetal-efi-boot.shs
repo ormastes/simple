@@ -12,7 +12,7 @@
 #   aarch64 AAVMF pflash  -> FAT ESP BOOTAA64.EFI -> flat image
 #   riscv64 OpenSBI fw_payload (v1.4, built with clang LLVM=1) via -bios
 # PASS needs the exact transcript on serial, in order:
-#   hello from Simple bare metal / n=42 / panic: boom
+#   hello from Simple bare metal / n=42 / ints 0 -7 MAX MIN / panic: boom
 # and NOT "after panic" (proves rt_panic halted).
 #
 # .claude/rules/board-runnable.md: real firmware only -- no QEMU -kernel, no
@@ -52,9 +52,10 @@ work=${BM_WORK:-$(mktemp -d "${TMPDIR:-/tmp}/bm-efi-boot.XXXXXX")}
 RT_SYMS="rt_string_new rt_string_new_literal rt_string_data rt_string_len rt_raw_i64_to_string rt_strcat_tagged rt_interp_cstr rt_println_str rt_println rt_panic"
 EXPECT="hello from Simple bare metal
 n=42
+ints 0 -7 9223372036854775807 -9223372036854775808
 panic: boom"
 
-need_tools="$CLANG ld.lld lld-link llvm-objcopy llvm-nm timeout"
+need_tools="$CLANG ld.lld lld-link llvm-objcopy llvm-nm llvm-readelf timeout"
 for t in $need_tools; do
     if ! command -v "$t" >/dev/null 2>&1; then
         echo "ERROR -- nothing was checked (missing tool: $t)"; exit 2
@@ -75,7 +76,7 @@ firmware_for() {
             q=qemu-system-aarch64 ;;
         riscv64)
             command -v qemu-system-riscv64 >/dev/null 2>&1 && command -v make >/dev/null 2>&1 \
-                && echo "$OPENSBI_SRC - qemu-system-riscv64"
+                && echo "opensbi - qemu-system-riscv64"
             return ;;
     esac
     [ -f "$c" ] && [ -f "$v" ] && command -v "$q" >/dev/null 2>&1 && echo "$c $v $q"
@@ -115,6 +116,15 @@ build_image() {
         why=link; return 1; }
     # No undefined runtime symbol may survive (fail closed on a partial runtime).
     if llvm-nm -u "$d/image.elf" | grep -q .; then why=undefined; return 1; fi
+    # x86_64/aarch64 images are linked at 0 but run wherever AllocatePages put
+    # them, so any absolute relocation would point at the wrong address. Fail
+    # closed rather than boot a silently mis-relocated image.
+    if [ "$a" != riscv64 ]; then
+        if llvm-readelf -r "$d/crt0.o" "$d/main.o" "$d/bm_rt_abi.o" > "$d/relocs.txt" 2>&1 \
+            && grep -E -q 'R_X86_64_(32S?|64) |R_AARCH64_(ABS(16|32|64)|MOVW_UABS)' "$d/relocs.txt"; then
+            why=absolute-reloc; return 1
+        fi
+    fi
     llvm-objcopy -O binary "$d/image.elf" "$d/image.bin" || { why=objcopy; return 1; }
 }
 
@@ -142,9 +152,9 @@ u64 efi_main(void *h, void *st) {
     if (alloc(0, 1, (n + 4095) / 4096, &addr) != 0) { for (;;) {} }
     for (u64 i = 0; i < n; i++) ((volatile unsigned char *)addr)[i] = image_start[i];
 #if defined(__aarch64__)
-    for (u64 i = 0; i < n; i += 4) __asm__ volatile("dc cvau, %0" :: "r"(addr + i));
+    for (u64 i = 0; i < n; i += 64) __asm__ volatile("dc cvau, %0" :: "r"(addr + i));
     __asm__ volatile("dsb ish");
-    for (u64 i = 0; i < n; i += 4) __asm__ volatile("ic ivau, %0" :: "r"(addr + i));
+    for (u64 i = 0; i < n; i += 64) __asm__ volatile("ic ivau, %0" :: "r"(addr + i));
     __asm__ volatile("dsb ish\nisb");
 #endif
     ((void (*)(void))addr)();
@@ -176,7 +186,7 @@ build_opensbi() {
 
 transcript_ok() {
     # Exact expected lines, consecutive, starting at the first "hello from Simple".
-    tr -d '\r' < "$1" | tr -c '[:print:]\n' '?' | sed -n '/hello from Simple/,$p' | head -3 > "$1.got"
+    tr -d '\r' < "$1" | tr -c '[:print:]\n' '?' | sed -n '/hello from Simple/,$p' | head -4 > "$1.got"
     printf '%s\n' "$EXPECT" > "$1.want"
     cmp -s "$1.got" "$1.want" && ! grep -a -q "after panic" "$1"
 }
