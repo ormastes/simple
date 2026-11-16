@@ -92,6 +92,23 @@ fn match_arms_test_the_owning_enums_declared_indexes() {
     assert_eq!(tested_discriminants(&hir, "rank_bare"), vec![0, 1, 2, 3]);
 }
 
+/// `case Copy(d) | Move(d):` over a subject whose variant names are also
+/// declared, at other indexes, by a sibling enum (`MirInst` vs the many
+/// `Copy`/`Move` declarers in the compiler). The arm test resolved the owner
+/// through the subject type, but the per-alternative BINDING guard was lowered
+/// with an erased slot type and fell back to the name-keyed registry.
+const OR_BINDING: &str = "enum Inst6953:\n    Copy6953(v: i64)\n    Move6953(v: i64)\n\n\
+enum Shadow6953:\n    Nop6953\n    Pad6953\n    Copy6953(v: i64)\n    Move6953(v: i64)\n\n\
+fn dest_of(inst: Inst6953) -> i64:\n    match inst:\n        case Copy6953(d) | Move6953(d): d\n";
+
+#[test]
+fn or_pattern_binding_guards_test_the_subjects_declared_indexes() {
+    let (hir, _mir) = lower_entry(&[], OR_BINDING);
+    let mut tested = tested_discriminants(&hir, "dest_of");
+    tested.sort();
+    assert_eq!(tested, vec![0, 0, 1, 1], "arm test + binding guard, each for Copy6953(0) and Move6953(1)");
+}
+
 #[test]
 fn constructor_carries_the_owning_enums_declared_index_into_mir() {
     pre_resolve_wide_order_in_this_process();
