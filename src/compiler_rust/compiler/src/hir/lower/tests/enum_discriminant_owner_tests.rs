@@ -43,7 +43,8 @@ fn lower_entry(files: &[(&str, &str)], entry: &str) -> (HirModule, crate::mir::M
 }
 
 /// Integer discriminants that a function's HIR match arms test, in arm order.
-/// `rt_enum_check_variant(slot, enum_id, disc)` / `rt_enum_check_discriminant(slot, disc)`.
+/// `rt_enum_check_variant(slot, enum_id, disc)` / `rt_try_is_absent(slot, enum_id, disc)` /
+/// `rt_enum_check_discriminant(slot, disc)`.
 fn tested_discriminants(hir: &HirModule, function: &str) -> Vec<i64> {
     let body = format!(
         "{:?}",
@@ -54,7 +55,11 @@ fn tested_discriminants(hir: &HirModule, function: &str) -> Vec<i64> {
             .body
     );
     let mut found = Vec::new();
-    for (marker, skip) in [("\"rt_enum_check_variant\"", 1usize), ("\"rt_enum_check_discriminant\"", 0usize)] {
+    for (marker, skip) in [
+        ("\"rt_enum_check_variant\"", 1usize),
+        ("\"rt_try_is_absent\"", 1usize),
+        ("\"rt_enum_check_discriminant\"", 0usize),
+    ] {
         let mut rest = body.as_str();
         while let Some(at) = rest.find(marker) {
             rest = &rest[at + marker.len()..];
@@ -286,4 +291,17 @@ fn erased_subject_with_builtin_variant_names_tests_the_builtin_index() {
     assert_eq!(tested_discriminants(&hir, "erased_is_err"), vec![1]);
     assert_eq!(tested_discriminants(&hir, "erased_is_ok"), vec![0]);
     assert_eq!(tested_discriminants(&hir, "erased_case"), vec![0, 1]);
+}
+
+/// Round 3 P2(a): `?` on a TYPED user enum must test that enum's own `Err`
+/// index (2 here), not the builtin's 1 (which is `Sent6953`, so a sent
+/// result propagated as the error).
+const TYPED_TRY: &str = "enum UdpResult6953:\n    Pending6953\n    Sent6953\n    Err(code: i64)\n\n\
+fn send() -> UdpResult6953:\n    UdpResult6953.Sent6953\n\n\
+fn forward() -> UdpResult6953:\n    val r = send()?\n    UdpResult6953.Pending6953\n";
+
+#[test]
+fn try_on_a_typed_user_enum_tests_its_own_err_index() {
+    let (hir, _mir) = lower_entry(&[], TYPED_TRY);
+    assert_eq!(tested_discriminants(&hir, "forward"), vec![2]);
 }
