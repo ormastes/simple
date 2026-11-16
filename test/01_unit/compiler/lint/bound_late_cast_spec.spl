@@ -340,3 +340,23 @@ describe "SPL-BOUND review follow-ups":
         val fs = check_bound_late_casts(src, "app/f.spl")
         expect(fs.len()).to_equal(2)
         expect(fs[0].code).to_equal("SPL-BOUND-001")
+
+    it "accepts pass-through of an extern whose return type is already safe":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint thin wrappers over text?, [u8]?, Option, Result, bool and unit-typed externs")
+        val src = "unit Km: i64\nextern fn c_name() -> text?\nextern fn c_bytes() -> [u8]?\nextern fn c_opt() -> Option<i64>\nextern fn c_res() -> Result<i64, text>\nextern fn c_ok() -> bool\nextern fn c_km() -> Km\nfn a() -> text?:\n    c_name()\nfn b() -> [u8]?:\n    return c_bytes()\nfn c() -> Option<i64>:\n    val r = c_opt()\n    r\nfn d() -> Result<i64, text>:\n    c_res()\nfn e() -> bool:\n    return c_ok()\nfn g() -> Km:\n    c_km()\n"
+        expect(check_bound_late_casts(src, "app/f.spl").len()).to_equal(0)
+
+    it "still reports pass-through of a raw i64 or f64 extern":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint thin wrappers over raw numeric externs")
+        val src = "extern fn c_size() -> i64\nextern fn c_ratio() -> f64\nfn a() -> i64:\n    c_size()\nfn b() -> f64:\n    val r = c_ratio()\n    return r\n"
+        val fs = check_bound_late_casts(src, "app/f.spl")
+        expect(fs.len()).to_equal(2)
+        expect(fs[0].code).to_equal("SPL-BOUND-001")
+
+    it "accepts a raw i64 extern result validated before return":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a raw i64 extern result passed through validation")
+        val src = "extern fn c_size() -> i64\nfn a() -> i64:\n    val raw = c_size()\n    if raw < 0:\n        return 0\n    clamp_size(raw)\n"
+        expect(check_bound_late_casts(src, "app/f.spl").len()).to_equal(0)

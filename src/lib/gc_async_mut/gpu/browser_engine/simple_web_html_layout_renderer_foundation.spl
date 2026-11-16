@@ -704,6 +704,149 @@ fn _web_budget_expired_in(name: text) -> bool:
 # Flat node arena
 # ---------------------------------------------------------------------------
 
+# Tier 1 HNode attribute presence bits (lower 16 bits of HNode.attr_mask).
+pub val HNODE_ATTR_ID_BIT: u32 = 1u32
+pub val HNODE_ATTR_CLASS_BIT: u32 = 2u32
+pub val HNODE_ATTR_STYLE_BIT: u32 = 4u32
+pub val HNODE_ATTR_HIDDEN_BIT: u32 = 8u32
+pub val HNODE_ATTR_DISABLED_BIT: u32 = 16u32
+pub val HNODE_ATTR_CHECKED_BIT: u32 = 32u32
+pub val HNODE_ATTR_SELECTED_BIT: u32 = 64u32
+pub val HNODE_ATTR_OPEN_BIT: u32 = 128u32
+pub val HNODE_ATTR_ROLE_BIT: u32 = 256u32
+pub val HNODE_ATTR_TYPE_BIT: u32 = 512u32
+pub val HNODE_ATTR_NAME_BIT: u32 = 1024u32
+pub val HNODE_ATTR_HREF_BIT: u32 = 2048u32
+pub val HNODE_ATTR_SRC_BIT: u32 = 4096u32
+pub val HNODE_ATTR_LANG_BIT: u32 = 8192u32
+pub val HNODE_ATTR_ARIA_BIT: u32 = 16384u32
+pub val HNODE_ATTR_DATA_BIT: u32 = 32768u32
+
+# reason: 32-bit Bloom filter mask for HNode attribute presence prefilter
+# @allow(primitive_api)
+pub fn hnode_attr_bloom_bit(attr_lower: text) -> u32:
+    var h: u32 = 5381u32
+    var i = 0
+    val n = attr_lower.byte_len()
+    while i < n:
+        var ch = attr_lower.byte_at(i)
+        if ch >= 65 and ch <= 90:
+            ch = ch + 32
+        h = ((h << 5) + h + ch.to_u32()) & 65535u32
+        i = i + 1
+    val slot = (h ^ (h >> 4)) & 15u32
+    1u32 << (16u32 + slot)
+
+# reason: HNode lower-16 presence bitmask aligned with HNODE_ATTR_* constants
+# @allow(primitive_api)
+pub fn hnode_hot_bit_for_name(attr_lower: text) -> u32:
+    if attr_lower == "id": return HNODE_ATTR_ID_BIT
+    if attr_lower == "class": return HNODE_ATTR_CLASS_BIT
+    if attr_lower == "style": return HNODE_ATTR_STYLE_BIT
+    if attr_lower == "hidden": return HNODE_ATTR_HIDDEN_BIT
+    if attr_lower == "disabled": return HNODE_ATTR_DISABLED_BIT
+    if attr_lower == "checked": return HNODE_ATTR_CHECKED_BIT
+    if attr_lower == "selected": return HNODE_ATTR_SELECTED_BIT
+    if attr_lower == "open": return HNODE_ATTR_OPEN_BIT
+    if attr_lower == "role": return HNODE_ATTR_ROLE_BIT
+    if attr_lower == "type": return HNODE_ATTR_TYPE_BIT
+    if attr_lower == "name": return HNODE_ATTR_NAME_BIT
+    if attr_lower == "href": return HNODE_ATTR_HREF_BIT
+    if attr_lower == "src": return HNODE_ATTR_SRC_BIT
+    if attr_lower == "lang": return HNODE_ATTR_LANG_BIT
+    if attr_lower.starts_with("aria-"): return HNODE_ATTR_ARIA_BIT
+    if attr_lower.starts_with("data-"): return HNODE_ATTR_DATA_BIT
+    0u32
+
+class _HNodeAttrScan:
+    attr_mask: u32
+    role_attr: text
+    type_attr: text
+
+fn _hnode_is_ws_byte(b: i64) -> bool:
+    b == 32 or b == 9 or b == 10 or b == 13
+
+fn _hnode_scan_attrs(inner: text, start_at: i32) -> _HNodeAttrScan:
+    val n = inner.byte_len() as i32
+    var mask: u32 = 0u32
+    var role_val = ""
+    var has_role = false
+    var type_val = ""
+    var has_type = false
+    var i: i32 = start_at
+    while i < n:  # cpu-lane-loop-ok: single linear scan of ONE element's raw attribute span in mk_element_node
+        val b = inner.byte_at(i)
+        if _hnode_is_ws_byte(b) or b == 47 or b == 62:
+            i = i + 1
+            continue
+        val name_start = i
+        var h: u32 = 5381u32
+        while i < n:
+            val nb = inner.byte_at(i)
+            if _hnode_is_ws_byte(nb) or nb == 61 or nb == 47 or nb == 62:
+                break
+            var lb = nb
+            if lb >= 65 and lb <= 90:
+                lb = lb + 32
+            h = ((h << 5) + h + lb.to_u32()) & 65535u32
+            i = i + 1
+        val name_len = i - name_start
+        if name_len > 0:
+            val slot = (h ^ (h >> 4)) & 15u32
+            mask = mask | (1u32 << (16u32 + slot))
+            val name_lower = inner.substring(name_start, i).lower()
+            mask = mask | hnode_hot_bit_for_name(name_lower)
+            while i < n and _hnode_is_ws_byte(inner.byte_at(i)):
+                i = i + 1
+            if i < n and inner.byte_at(i) == 61:
+                i = i + 1
+                while i < n and _hnode_is_ws_byte(inner.byte_at(i)):
+                    i = i + 1
+                var val_start = i
+                var val_end = i
+                if i < n and (inner.byte_at(i) == 34 or inner.byte_at(i) == 39):
+                    val q = inner.byte_at(i)
+                    i = i + 1
+                    val_start = i
+                    while i < n and inner.byte_at(i) != q:
+                        i = i + 1
+                    val_end = i
+                    if i < n and inner.byte_at(i) == q:
+                        i = i + 1
+                else:
+                    val_start = i
+                    while i < n and not _hnode_is_ws_byte(inner.byte_at(i)) and inner.byte_at(i) != 62:
+                        i = i + 1
+                    val_end = i
+                if not has_role and name_lower == "role":
+                    role_val = inner.substring(val_start, val_end)
+                    has_role = true
+                elif not has_type and name_lower == "type":
+                    type_val = inner.substring(val_start, val_end)
+                    has_type = true
+        else:
+            i = i + 1
+    _HNodeAttrScan(attr_mask: mask, role_attr: role_val, type_attr: type_val)
+
+# reason: builds u32 attr presence/Bloom bitmask for HNode
+# @allow(primitive_api)
+pub fn hnode_compute_attr_mask(
+    attrs_raw: text, id_attr: text, class_attr: text, style_attr: text,
+    role_attr: text, type_attr: text
+) -> u32:
+    var mask = _hnode_scan_attrs(attrs_raw, 0).attr_mask
+    if id_attr != "":
+        mask = mask | HNODE_ATTR_ID_BIT | hnode_attr_bloom_bit("id")
+    if class_attr != "":
+        mask = mask | HNODE_ATTR_CLASS_BIT | hnode_attr_bloom_bit("class")
+    if style_attr != "":
+        mask = mask | HNODE_ATTR_STYLE_BIT | hnode_attr_bloom_bit("style")
+    if role_attr != "":
+        mask = mask | HNODE_ATTR_ROLE_BIT | hnode_attr_bloom_bit("role")
+    if type_attr != "":
+        mask = mask | HNODE_ATTR_TYPE_BIT | hnode_attr_bloom_bit("type")
+    mask
+
 class HNode:
     tag: text          # lowercased tag, "#text", or "#root"
     text_data: text    # text for #text nodes
@@ -718,6 +861,9 @@ class HNode:
     has_widget_image_class: bool
     has_focused_class: bool
     id_attr: text
+    role_attr: text = ""
+    type_attr: text = ""
+    attr_mask: u32 = 0u32
     attrs_raw: text    # raw tag inner text for attribute selectors
     parent: i64        # index of parent in the arena (-1 for root)
     is_details_summary: bool # first direct summary owned by details
@@ -756,7 +902,7 @@ class ClassFlags:
     has_focused_class: bool
 
 fn mk_node(tag: text, parent: i64) -> HNode:
-    HNode(tag: tag, text_data: "", text_trimmed: "", style_attr: "", class_attr: "", class_words: [], has_widget_class: false, has_icon_image_class: false, has_widget_panel_class: false, has_widget_button_class: false, has_widget_image_class: false, has_focused_class: false, id_attr: "", attrs_raw: "", parent: parent, is_details_summary: false)
+    HNode(tag: tag, text_data: "", text_trimmed: "", style_attr: "", class_attr: "", class_words: [], has_widget_class: false, has_icon_image_class: false, has_widget_panel_class: false, has_widget_button_class: false, has_widget_image_class: false, has_focused_class: false, id_attr: "", role_attr: "", type_attr: "", attr_mask: 0u32, attrs_raw: "", parent: parent, is_details_summary: false)
 
 fn build_child_index(nodes: [HNode]) -> HtmlChildIndex:
     val node_count = nodes.len()
@@ -1175,11 +1321,31 @@ fn mk_element_node(tag: text, parent: i64, inner: text) -> HNode:
     val class_attr: text = attr_value_by_key(inner, "class=")
     val class_words: [text] = if class_attr.len() > 0: split_class_words_trimmed(class_attr) else: []
     val flags: ClassFlags = class_flags_from_attr(class_attr)
+    val id_attr: text = attr_value_by_key(inner, "id=")
+    val style_attr: text = attr_value_by_key(inner, "style=")
+    val tag_len = tag.byte_len() as i32
+    val inner_len = inner.byte_len() as i32
+    var scan_start: i32 = 0
+    if tag_len > 0 and inner_len >= tag_len:
+        if inner == tag:
+            scan_start = tag_len
+        elif inner_len > tag_len and inner.substring(0, tag_len).lower() == tag.lower():
+            val next_b = inner.byte_at(tag_len)
+            if _hnode_is_ws_byte(next_b) or next_b == 47 or next_b == 62:
+                scan_start = tag_len
+    val scanned = _hnode_scan_attrs(inner, scan_start)
+    var attr_mask = scanned.attr_mask
+    if id_attr != "":
+        attr_mask = attr_mask | HNODE_ATTR_ID_BIT | hnode_attr_bloom_bit("id")
+    if class_attr != "":
+        attr_mask = attr_mask | HNODE_ATTR_CLASS_BIT | hnode_attr_bloom_bit("class")
+    if style_attr != "":
+        attr_mask = attr_mask | HNODE_ATTR_STYLE_BIT | hnode_attr_bloom_bit("style")
     HNode(
         tag: tag,
         text_data: "",
         text_trimmed: "",
-        style_attr: attr_value_by_key(inner, "style="),
+        style_attr: style_attr,
         class_attr: class_attr,
         class_words: class_words,
         has_widget_class: flags.has_widget_class,
@@ -1188,7 +1354,10 @@ fn mk_element_node(tag: text, parent: i64, inner: text) -> HNode:
         has_widget_button_class: flags.has_widget_button_class,
         has_widget_image_class: flags.has_widget_image_class,
         has_focused_class: flags.has_focused_class,
-        id_attr: attr_value_by_key(inner, "id="),
+        id_attr: id_attr,
+        role_attr: scanned.role_attr,
+        type_attr: scanned.type_attr,
+        attr_mask: attr_mask,
         attrs_raw: inner,
         parent: parent,
         is_details_summary: false

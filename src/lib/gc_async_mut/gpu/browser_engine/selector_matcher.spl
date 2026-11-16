@@ -35,59 +35,297 @@ fn br_tag_name_from_content(content: text) -> text:
         return body.substring(0, space).lower()
     body.lower()
 
+fn _sel_split_ws(value: text) -> [text]:
+    val norm = value.trim().replace("\t", " ").replace("\n", " ").replace("\r", " ")
+    val parts = norm.split(" ")
+    var out: [text] = []
+    var i = 0
+    while i < parts.len():
+        val p = parts[i].trim()
+        if p != "":
+            out.push(p)
+        i = i + 1
+    out
+
+fn _sel_attr_present(tag: text, attr: text) -> bool:
+    val lo = tag.lower()
+    val want = attr.lower()
+    val wlen = want.byte_len()
+    val n = lo.byte_len()
+    if wlen == 0 or n < wlen:
+        return false
+    var i = 0
+    var quote = ""
+    while i < n:
+        val ch = lo.substring(i, i + 1)
+        if quote != "":
+            if ch == quote:
+                quote = ""
+            i = i + 1
+            continue
+        if ch == "\"" or ch == "'":
+            quote = ch
+            i = i + 1
+            continue
+        if i + wlen <= n and lo.substring(i, i + wlen) == want:
+            val left_ok = if i == 0:
+                true
+            else:
+                val prev = lo.substring(i - 1, i)
+                prev == " " or prev == "\t" or prev == "\n" or prev == "\r" or prev == "<"
+            val after = i + wlen
+            val right_ok = if after >= n:
+                true
+            else:
+                val nx = lo.substring(after, after + 1)
+                nx == "=" or nx == " " or nx == "\t" or nx == "\n" or nx == "\r" or nx == ">" or nx == "/"
+            if left_ok and right_ok:
+                return true
+        i = i + 1
+    false
+
+fn _sel_attr_expr_matches(tag: text, raw_expr: text) -> bool:
+    val s = raw_expr.trim()
+    val slen = s.byte_len()
+    if slen == 0:
+        return false
+    var pos = 0
+    while pos < slen:
+        val ch = s.substring(pos, pos + 1)
+        if (
+            ch == " " or ch == "\t" or ch == "\n" or ch == "\r" or
+            ch == "=" or ch == "~" or ch == "|" or ch == "^" or ch == "$" or ch == "*"
+        ):
+            break
+        pos = pos + 1
+    val name = s.substring(0, pos).trim()
+    if name == "":
+        return false
+    while pos < slen:
+        val ws = s.substring(pos, pos + 1)
+        if ws != " " and ws != "\t" and ws != "\n" and ws != "\r":
+            break
+        pos = pos + 1
+    if pos >= slen:
+        return _sel_attr_present(tag, name)
+    var op = 0
+    val c0 = s.substring(pos, pos + 1)
+    if c0 == "=":
+        op = 1
+        pos = pos + 1
+    elif pos + 2 <= slen and s.substring(pos, pos + 2) == "~=":
+        op = 2
+        pos = pos + 2
+    elif pos + 2 <= slen and s.substring(pos, pos + 2) == "|=":
+        op = 3
+        pos = pos + 2
+    elif pos + 2 <= slen and s.substring(pos, pos + 2) == "^=":
+        op = 4
+        pos = pos + 2
+    elif pos + 2 <= slen and s.substring(pos, pos + 2) == "$=":
+        op = 5
+        pos = pos + 2
+    elif pos + 2 <= slen and s.substring(pos, pos + 2) == "*=":
+        op = 6
+        pos = pos + 2
+    else:
+        return false
+    while pos < slen:
+        val ws = s.substring(pos, pos + 1)
+        if ws != " " and ws != "\t" and ws != "\n" and ws != "\r":
+            break
+        pos = pos + 1
+    var want = ""
+    if pos < slen and (s.substring(pos, pos + 1) == "\"" or s.substring(pos, pos + 1) == "'"):
+        val quote = s.substring(pos, pos + 1)
+        pos = pos + 1
+        val vstart = pos
+        var closed = false
+        while pos < slen:
+            val qc = s.substring(pos, pos + 1)
+            if qc == "\\" and pos + 1 < slen:
+                pos = pos + 2
+                continue
+            if qc == quote:
+                closed = true
+                break
+            pos = pos + 1
+        if not closed:
+            return false
+        want = s.substring(vstart, pos)
+        pos = pos + 1
+    else:
+        val vstart = pos
+        while pos < slen:
+            val vc = s.substring(pos, pos + 1)
+            if vc == " " or vc == "\t" or vc == "\n" or vc == "\r":
+                break
+            pos = pos + 1
+        want = s.substring(vstart, pos)
+    val flag = s.substring(pos, slen).trim().lower()
+    var ci = false
+    if flag == "i":
+        ci = true
+    elif flag != "" and flag != "s":
+        return false
+    if not _sel_attr_present(tag, name):
+        return false
+    val actual = _sel_attr_value(tag, name)
+    val a = if ci: actual.lower() else: actual
+    val w = if ci: want.lower() else: want
+    if op == 1:
+        return a == w
+    if op == 2:
+        if w == "" or w.contains(" ") or w.contains("\t"):
+            return false
+        val words = _sel_split_ws(a)
+        var wi = 0
+        while wi < words.len():
+            if words[wi] == w:
+                return true
+            wi = wi + 1
+        return false
+    if op == 3:
+        return a == w or (w != "" and a.starts_with(w + "-"))
+    if op == 4:
+        return w != "" and a.starts_with(w)
+    if op == 5:
+        return w != "" and a.ends_with(w)
+    if op == 6:
+        return w != "" and a.contains(w)
+    false
+
+fn _sel_split_top_level_commas(selector: text) -> [text]:
+    var out: [text] = []
+    var start = 0
+    var i = 0
+    var paren_depth = 0
+    var bracket_depth = 0
+    var quote = ""
+    val n = selector.byte_len()
+    while i < n:
+        val ch = selector.substring(i, i + 1)
+        if quote != "":
+            if ch == "\\" and i + 1 < n:
+                i = i + 2
+                continue
+            if ch == quote:
+                quote = ""
+        else:
+            if ch == "\"" or ch == "'":
+                quote = ch
+            elif ch == "(":
+                paren_depth = paren_depth + 1
+            elif ch == ")" and paren_depth > 0:
+                paren_depth = paren_depth - 1
+            elif ch == "[":
+                bracket_depth = bracket_depth + 1
+            elif ch == "]" and bracket_depth > 0:
+                bracket_depth = bracket_depth - 1
+            elif ch == "," and paren_depth == 0 and bracket_depth == 0:
+                val part = selector.substring(start, i).trim()
+                if part != "":
+                    out.push(part)
+                start = i + 1
+        i = i + 1
+    val tail = selector.substring(start, n).trim()
+    if tail != "":
+        out.push(tail)
+    out
+
+fn _sel_find_top_level_not(item: text) -> i64:
+    var i = 0
+    var bracket_depth = 0
+    var quote = ""
+    val n = item.byte_len()
+    while i + 5 <= n:
+        val ch = item.substring(i, i + 1)
+        if quote != "":
+            if ch == "\\" and i + 1 < n:
+                i = i + 2
+                continue
+            if ch == quote:
+                quote = ""
+        else:
+            if ch == "\"" or ch == "'":
+                quote = ch
+            elif ch == "[":
+                bracket_depth = bracket_depth + 1
+            elif ch == "]" and bracket_depth > 0:
+                bracket_depth = bracket_depth - 1
+            elif bracket_depth == 0 and item.substring(i, i + 5) == ":not(":
+                return i
+        i = i + 1
+    -1
+
+fn _sel_find_matching_rparen(s: text, open_body_start: i64) -> i64:
+    var i = open_body_start
+    var depth = 1
+    var bracket_depth = 0
+    var quote = ""
+    val n = s.byte_len()
+    while i < n:
+        val ch = s.substring(i, i + 1)
+        if quote != "":
+            if ch == "\\" and i + 1 < n:
+                i = i + 2
+                continue
+            if ch == quote:
+                quote = ""
+        else:
+            if ch == "\"" or ch == "'":
+                quote = ch
+            elif ch == "[":
+                bracket_depth = bracket_depth + 1
+            elif ch == "]" and bracket_depth > 0:
+                bracket_depth = bracket_depth - 1
+            elif bracket_depth == 0:
+                if ch == "(":
+                    depth = depth + 1
+                elif ch == ")":
+                    depth = depth - 1
+                    if depth == 0:
+                        return i
+        i = i + 1
+    -1
+
 fn _sel_option_matches_tag(option: text, tag_name: text, tag: text) -> bool:
     val opt = option.trim()
-    # Attribute substring selector [attr*="value"]
-    val attr_start = opt.index_of("[")
-    if attr_start >= 0:
-        val attr_end = opt.index_of("]")
-        if attr_end > attr_start:
-            val attr_expr = opt.substring(attr_start + 1, attr_end)
-            val star_eq = attr_expr.index_of("*=\"")
-            if star_eq >= 0:
-                val attr_name = attr_expr.substring(0, star_eq)
-                val value_part = attr_expr.substring(star_eq + 3, attr_expr.byte_len())
-                val close_dq = value_part.index_of("\"")
-                val sub = if close_dq >= 0: value_part.substring(0, close_dq) else value_part
-                val attr_val = _sel_attr_value(tag, attr_name)
-                return attr_val.contains(sub)
-    # Compound tag.class selector
-    val dot = opt.index_of(".")
-    if dot > 0:
-        val opt_tag = opt.substring(0, dot)
-        val opt_class = opt.substring(dot + 1, opt.byte_len())
-        if opt_tag == tag_name:
-            val class_val = _sel_attr_value(tag, "class")
-            val classes = class_val.split(" ")
-            var idx: i32 = 0
-            val class_count = classes.len()
-            while idx < class_count:
-                if classes[idx].trim() == opt_class:
-                    return true
-                idx = idx + 1
-    false
+    if opt == "":
+        return false
+    _sel_compound_matches_element(opt, tag_name, tag)
 
 # Returns true when the :not() selector does NOT match the element described by
 # tag_name and tag (i.e. the element is a valid match for the full selector).
 pub fn br_selector_list_contains_not_self(selector: text, tag_name: text, tag: text) -> bool:
-    val marker = tag_name + ":not("
-    val start = selector.index_of(marker)
-    if start < 0:
-        return false
-    val after = selector.substring(start + marker.byte_len(), selector.byte_len())
-    val close = after.index_of(")")
-    if close < 0:
-        return false
-    val options_str = after.substring(0, close)
-    val options = options_str.split(",")
-    var idx: i32 = 0
-    val option_count = options.len()
-    while idx < option_count:
-        val opt = options[idx].trim()
-        if opt != "" and _sel_option_matches_tag(opt, tag_name, tag):
-            return false
-        idx = idx + 1
-    true
+    val items = _sel_split_top_level_commas(selector)
+    var ii = 0
+    while ii < items.len():
+        val item = items[ii]
+        val not_pos = _sel_find_top_level_not(item)
+        if not_pos >= 0:
+            val body_start = not_pos + 5
+            val close = _sel_find_matching_rparen(item, body_start)
+            if close > body_start:
+                val prefix = item.substring(0, not_pos).trim()
+                val suffix = item.substring(close + 1, item.byte_len()).trim()
+                val outer_compound = prefix + suffix
+                val outer_ok = _sel_compound_matches_element(outer_compound, tag_name, tag)
+                if outer_ok:
+                    val options_str = item.substring(body_start, close)
+                    val options = _sel_split_top_level_commas(options_str)
+                    var excluded = false
+                    var idx: i32 = 0
+                    while idx < options.len():
+                        val opt = options[idx].trim()
+                        if opt != "" and _sel_option_matches_tag(opt, tag_name, tag):
+                            excluded = true
+                            break
+                        idx = idx + 1
+                    if not excluded:
+                        return true
+        ii = ii + 1
+    false
 
 fn _sel_name_char(ch: text) -> bool:
     (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
@@ -125,14 +363,20 @@ fn br_selector_list_contains_has_descendant(selector: text, tag_name: text, tag:
     false
 
 fn br_selector_list_contains_attr_self(selector: text, tag_name: text, tag: text) -> bool:
-    _sel_option_matches_tag(selector, tag_name, tag)
+    val items = _sel_split_top_level_commas(selector)
+    var i = 0
+    while i < items.len():
+        if _sel_option_matches_tag(items[i], tag_name, tag):
+            return true
+        i = i + 1
+    false
 
 fn br_selector_list_contains_empty_self(selector: text, tag_name: text, tag: text) -> bool:
     selector.contains(":empty")
 
 # Does the compound selector that carries a pseudo-class (the text between
 # the previous combinator and the `:`) describe this element? Checks the type
-# selector, every `.class` and the `#id`; attribute parts are not evaluated.
+# selector, every `.class`, `#id`, and `[attr...]` predicate.
 fn _sel_compound_matches_element(compound: text, tag_name: text, tag: text) -> bool:
     val c = compound.trim()
     var i = 0
@@ -148,12 +392,39 @@ fn _sel_compound_matches_element(compound: text, tag_name: text, tag: text) -> b
     val id_value = _sel_attr_value(tag, "id")
     while i < n:
         val mark = c.substring(i, i + 1)
+        if mark == "[":
+            var j = i + 1
+            var quote = ""
+            var closed = false
+            while j < n:
+                val qc = c.substring(j, j + 1)
+                if quote != "":
+                    if qc == "\\" and j + 1 < n:
+                        j = j + 2
+                        continue
+                    if qc == quote:
+                        quote = ""
+                else:
+                    if qc == "\"" or qc == "'":
+                        quote = qc
+                    elif qc == "]":
+                        closed = true
+                        break
+                j = j + 1
+            if not closed:
+                return false
+            if not _sel_attr_expr_matches(tag, c.substring(i + 1, j)):
+                return false
+            i = j + 1
+            continue
         if mark != "." and mark != "#":
             return true
         var j = i + 1
         while j < n and _sel_name_char(c.substring(j, j + 1)):
             j = j + 1
         val name = c.substring(i + 1, j)
+        if name == "":
+            return false
         if mark == "." and not classes.contains(" " + name + " "):
             return false
         if mark == "#" and id_value != name:

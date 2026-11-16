@@ -137,9 +137,14 @@ fn windows_redirected_wait(token: i64, timeout_ms: i64) -> i64:
     val started = time_now_unix_micros()
     while true:
         var state = _windows_redirected_states[slot]
-        if file_size(state.stdout_path) > state.capture_limit or file_size(state.stderr_path) > state.capture_limit:
+        # The capture limit bounds what the parent READS (head+tail); exceeding
+        # it must not kill the child, or a failing producer's real exit status
+        # and final diagnostics are lost (reported as exit -1, empty output).
+        # Only a runaway writer past the disk ceiling is cancelled.
+        val disk_ceiling = windows_redirected_disk_ceiling(state.capture_limit)
+        if file_size(state.stdout_path) > disk_ceiling or file_size(state.stderr_path) > disk_ceiling:
             state.failed = true
-            state.failure_reason = "output exceeded configured capture limit"
+            state.failure_reason = "output exceeded capture disk ceiling ({disk_ceiling} bytes)"
             _windows_redirected_states[slot] = state
             val cancelled = windows_process_cancel_v1(state.lease)
         match windows_process_poll_v1(state.lease):
@@ -263,6 +268,11 @@ fn windows_redirected_kill(token: i64) -> bool:
     false
 @end
 
+fn windows_redirected_disk_ceiling(capture_limit: i64) -> i64:
+    """On-disk bytes a redirected stream may reach before the child is cancelled."""
+    val scaled = capture_limit * 16
+    if scaled > 67_108_864: scaled else: 67_108_864
+
 # Keep the existing integer-token API for callers that cannot carry a reason.
 fn windows_redirected_spawn_with_memory(cmd: text, args: [text], stdout_path: text,
         stderr_path: text, timeout_ms: i64, capture_limit: i64, memory_limit_bytes: i64) -> i64:
@@ -279,7 +289,7 @@ fn windows_redirected_spawn(cmd: text, args: [text], stdout_path: text,
 
 export WINDOWS_REDIRECTED_TOKEN_BASE, windows_redirected_spawn, windows_redirected_wait
 export windows_redirected_is_running, windows_redirected_kill, windows_redirected_token_slot
-export windows_redirected_failure_reason
+export windows_redirected_failure_reason, windows_redirected_disk_ceiling
 export windows_redirected_admission_count
 export windows_redirected_completion
 export windows_redirected_quarantine

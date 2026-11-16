@@ -28,12 +28,7 @@ use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin
 # Layout helpers
 # ============================================================================
 
-fn cuda_align_to(offset: i64, align: i64) -> i64:
-    """Round offset up to the given alignment (align <= 1 is a no-op)."""
-    if align <= 1:
-        offset
-    else:
-        ((offset + align - 1) / align) * align
+use compiler.backend.common.cuda_layout_extent_v1.*
 
 fn cuda_mapper_can_size(ty: MirType) -> bool:
     """
@@ -893,6 +888,7 @@ class CudaBackend:
         val dest_ty = self.operand_mir_type(func, MirOperand.copy(dest))?
         if not self.cuda_can_size(dest_ty):
             return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: aggregate type is not sizable"))
+        val _ = self.cuda_type_size(dest_ty)?
         val expected_count = match dest_ty.kind:
             case Struct(symbol):
                 match kind:
@@ -1001,7 +997,7 @@ class CudaBackend:
         val dest_reg = "%r{dest.id}"
         val base_reg = self.operand_to_reg(builder, base)
         if indices.len() > 0:
-            val elem_size = self.cuda_type_size(elem)
+            val elem_size = self.cuda_type_size(elem)?
             val idx_reg = self.operand_to_reg(builder, indices[0])
             val tmp = builder.alloc_reg(PrimitiveType.U64)
             builder.emit_reg_decl(tmp, PrimitiveType.U64)
@@ -1474,7 +1470,7 @@ class CudaBackend:
                 true
             case _: cuda_mapper_can_size(ty)
 
-    me cuda_type_size(ty: MirType) -> i64:
+    me cuda_type_size(ty: MirType) -> Result<i64, CompileError>:
         """
         Byte size of ty for CUDA layout purposes. Struct(SymbolId)/
         Enum(SymbolId) resolve against self.type_defs; everything else
@@ -1490,25 +1486,25 @@ class CudaBackend:
                     val type_def: MirTypeDef = self.type_defs[symbol]
                     match type_def.kind:
                         case MirTypeDefKind.Struct(fields): self.cuda_struct_size(fields)
-                        case _: 8
+                        case _: Ok(8)
                 else:
-                    8
+                    Ok(8)
             case Enum(symbol):
                 if self.type_defs.contains_key(symbol):
                     val type_def: MirTypeDef = self.type_defs[symbol]
                     match type_def.kind:
                         case MirTypeDefKind.Enum(variants): self.cuda_enum_size(variants)
-                        case _: 8
+                        case _: Ok(8)
                 else:
-                    8
-            case Array(elem, size): self.cuda_type_size(elem) * size
+                    Ok(8)
+            case Array(elem, size): cuda_checked_extent_product_v1(self.cuda_type_size(elem)?, size)
             case Tuple(elements):
                 var total = 0
                 for e in elements:
-                    total = cuda_align_to(total, self.cuda_type_align(e))
-                    total = total + self.cuda_type_size(e)
-                cuda_align_to(total, self.cuda_type_align(ty))
-            case _: self.type_mapper.size_of(ty)
+                    total = cuda_checked_extent_align_v1(total, self.cuda_type_align(e))?
+                    total = cuda_checked_extent_add_v1(total, self.cuda_type_size(e)?)?
+                cuda_checked_extent_align_v1(total, self.cuda_type_align(ty))
+            case _: cuda_checked_extent_add_v1(0, self.type_mapper.size_of(ty))
 
     me cuda_type_align(ty: MirType) -> i64:
         """Precondition: cuda_can_size admitted ty; type_defs stays immutable during emission."""
@@ -1542,18 +1538,22 @@ class CudaBackend:
                     best
             case _: self.type_mapper.align_of(ty)
 
-    me cuda_struct_size(fields: [MirFieldDef]) -> i64:
+    me cuda_struct_size(fields: [MirFieldDef]) -> Result<i64, CompileError>:
         """
-        Total struct size: the last field's precomputed offset plus its own
-        size, rounded up to the struct's alignment. Offsets are trusted as
+        Total struct size: maximum precomputed field end, rounded to the
+        existing alignment. Declaration order may differ from physical order.
+        Offsets are trusted as
         computed by MIR lowering (compute_struct_layout in module_lowering.spl)
         rather than re-derived here.
         """
         if fields.len() == 0:
-            return 0
-        val last = fields[fields.len() - 1]
-        val end = last.offset + self.cuda_type_size(last.type_)
-        cuda_align_to(end, self.cuda_struct_align(fields))
+            return Ok(0)
+        var offsets: [i64] = []
+        var sizes: [i64] = []
+        for field in fields:
+            offsets.push(field.offset)
+            sizes.push(self.cuda_type_size(field.type_)?)
+        cuda_checked_struct_extent_v1(offsets, sizes, self.cuda_struct_align(fields))
 
     me cuda_struct_align(fields: [MirFieldDef]) -> i64:
         if fields.len() == 0:
@@ -1565,17 +1565,17 @@ class CudaBackend:
                 best = a
         best
 
-    me cuda_enum_size(variants: [MirVariantDef]) -> i64:
+    me cuda_enum_size(variants: [MirVariantDef]) -> Result<i64, CompileError>:
         """Tagged-union layout: 8-byte discriminant + largest payload, aligned to the widest member."""
         var payload_max = 0
         for v in variants:
             match v.payload:
                 case Some(p):
-                    val sz = self.cuda_type_size(p)
+                    val sz = self.cuda_type_size(p)?
                     if sz > payload_max:
                         payload_max = sz
                 case None: ()
-        cuda_align_to(8 + payload_max, self.cuda_enum_align(variants))
+        cuda_checked_extent_align_v1(cuda_checked_extent_add_v1(8, payload_max)?, self.cuda_enum_align(variants))
 
     me cuda_enum_align(variants: [MirVariantDef]) -> i64:
         var best = 8
@@ -1620,7 +1620,7 @@ class CudaBackend:
                     return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: array field index out of range"))
                 if not self.cuda_can_size(elem):
                     return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: array element type is not sizable"))
-                Ok((field * self.cuda_type_size(elem), elem))
+                Ok((cuda_checked_extent_product_v1(self.cuda_type_size(elem)?, field)?, elem))
             case _:
                 Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: aggregate type not resolvable at this call site"))
 
@@ -1647,10 +1647,10 @@ class CudaBackend:
             val ft = elements[i]
             if not self.cuda_can_size(ft):
                 return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: field type is not sizable"))
-            offset = cuda_align_to(offset, self.cuda_type_align(ft))
+            offset = cuda_checked_extent_align_v1(offset, self.cuda_type_align(ft))?
             if i == field:
                 return Ok((offset, ft))
-            offset = offset + self.cuda_type_size(ft)
+            offset = cuda_checked_extent_add_v1(offset, self.cuda_type_size(ft)?)?
             i = i + 1
         Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: field walk failed"))
 
