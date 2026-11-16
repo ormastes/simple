@@ -2063,3 +2063,7 @@ never cache an answer computed while exhausted) —
 ## 2026-11-16 — single-line row flex cross alignment
 
 - The wrap path aligned items per line after layout, but the single-line path had no such pass: stretch, center and end there only used `st.height_px`. The fix is the wrap path's loop run once with `max_child_h` as the line. Stretch only raises `out_bh`, since block content stays at the top; center and end move the subtree with `offset_layout_subtree`.
+
+## 2026-11-16 — background shorthand after the size group
+
+- `_parse_background_shorthand` is a token state machine. `after_slash` must END at the first non-size token, or every box, attachment or colour keyword after `pos / size` fails the whole layer closed. Its regression partner is `layout_renderer_background_and_grid_decls_spec` "refuses a malformed position/size slash": `center / 1px 2px 3px` must stay invalid, which is why a position token after the slash returns empty.
