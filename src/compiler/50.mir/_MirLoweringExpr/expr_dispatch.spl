@@ -2965,9 +2965,13 @@ impl MirLowering:
         other present word keeps the runtime decode it always had.
         doc/08_tracking/bug/native_if_val_presence_test_dropped_2026-11-15.md"""
         var scalar_payload = false
+        var bool_payload = false
         if val declared_inner = self.option_inner_hir_type_for_local(base, base_local):
             match declared_inner.kind:
-                case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char: scalar_payload = true
+                case HirTypeKind.Bool:
+                    scalar_payload = true
+                    bool_payload = true
+                case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Char: scalar_payload = true
                 case _: ()
         if not scalar_payload:
             return self.decode_runtime_value(base_local, result_type)
@@ -3006,7 +3010,17 @@ impl MirLowering:
         var b_word = self.builder
         b_word.switch_to_block(word_block)
         self.builder = b_word
-        val decoded_word = self.decode_runtime_value(base_local, result_type)
+        # A bool word (true 11 / false 19) must not take the wide-int unbox
+        # the i64-typed `.?` slot would pick: 19 >> 3 = 2 bound `if val v =
+        # d.get(k)` to a truthy 2 (native_dict_get_bool_coalesce_decoded_as_int_2026-11-16).
+        var decoded_word = base_local
+        if bool_payload:
+            val as_bool = self.enum_payload_value(base_local, MirType.bool())
+            var b_widen = self.builder
+            decoded_word = b_widen.emit_cast(mir_operand_copy(as_bool), result_type)
+            self.builder = b_widen
+        else:
+            decoded_word = self.decode_runtime_value(base_local, result_type)
         b_word = self.builder
         b_word.emit_copy(payload, decoded_word)
         b_word.terminate_goto(merge_block)
@@ -3175,9 +3189,13 @@ impl MirLowering:
                 # the erased i64 and decoded the hit with rt_value_as_int_wide:
                 # the false word 19 became 2, i.e. true
                 # (native_dict_get_bool_coalesce_decoded_as_int_2026-11-16).
+                # The arm is chosen by the MIR result type, so record `bool?`
+                # even when no HIR value type reached here (an untyped
+                # `{1: true}` literal local).
+                var bool_value_type = HirType(kind: HirTypeKind.Bool, span: base.span)
                 if val bool_value_hir = dict_value_hir_type:
-                    val bool_value_type: HirType = bool_value_hir
-                    self.remember_local_hir_type(get_local.id, HirType(kind: HirTypeKind.Optional(bool_value_type), span: base.span), 0, 0)
+                    bool_value_type = bool_value_hir
+                self.remember_local_hir_type(get_local.id, HirType(kind: HirTypeKind.Optional(bool_value_type), span: base.span), 0, 0)
                 return get_local
             var decoded = self.decode_runtime_value(get_local, dict_result_type)
             # Only the decode arms that TRANSFORM the raw word destroy the miss
