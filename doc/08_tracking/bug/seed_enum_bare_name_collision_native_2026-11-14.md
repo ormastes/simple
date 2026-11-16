@@ -88,6 +88,17 @@ Open, recorded rather than fixed:
   visible user enum declaring `Err` at another index no longer hands its index
   to `r.is_err()` / `case Err` on an untyped Result. A user-enum value reaching
   an erased subject is still tested against the builtin index (wildcard enum id 0).
+- **Runtime Ok/Err tests must check the Result enum id (fixed for unwrap/expect).**
+  Owner-correct numbering gives a user enum's first two variants 0/1. The Rust
+  `rt_unwrap_or_trap` / `rt_expect_or_trap` tested `disc == Ok/Err` with no
+  enum-id check, so `_sffi_tuple_get_req<MirConstValue>` (`rt_tuple_get<T>(..)
+  .unwrap()`) returned `MirConstValue.Int`'s raw payload and aborted on `.Float`
+  ("called unwrap on Err"): every Stage 2 llvm native-build failed with
+  `E-BACKEND-LLVM-CONST-GARBAGE` (base d63d23935b6: old seed llvm `hello 42`,
+  fixed seed garbage; struct-key/transient merges not involved). Both now
+  require enum id 0 or 2, matching the C twin. Still open: `rt_try_is_absent`
+  with `expected_enum_id == 0` (erased `?`) and `rt_enum_check_variant` id-0
+  wildcard callers match any enum at the Err/Ok index.
 - **native -> interpreter enums are not bridged at all:**
   `runtime_bridge.rs` `runtime_to_value_inner` (~442) has no
   `HeapObjectType::Enum` arm, so a native enum value crossing back into the
