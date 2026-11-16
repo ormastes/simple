@@ -5,9 +5,9 @@ use std.common.contracts.container.agent_executable_profile_v1.{AgentExecutableP
 use std.common.contracts.orchestration.agent_workspace_invocation_packet_v2.*
 use std.common.contracts.orchestration.agent_policy_resolution_v1.{AgentPolicyResolutionV1, resolve_agent_policy_v1}
 use std.common.contracts.orchestration.resource_set_v1.{ResourceSetItemV1, decode_resource_set, resource_set_item_identity}
-use std.common.contracts.orchestration.host_capacity_v1.{HostReservationStateV1, host_available_capacity_v1}
+use std.common.contracts.orchestration.host_capacity_v1.{HostCapacityV1, HostReservationStateV1, host_available_capacity_v1}
 use std.common.contracts.container.agent_workspace_manifest_v1.agent_workspace_manifest_decode_v1
-use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, ContainerHostScopeV2, ContainerRequestProjectionV2, container_host_scope_bytes_v2, container_scope_fence_id_v2}
+use std.common.contracts.container.execution_v2.{ContainerExecutionPlanV2, ContainerExecutionRequestV2, ContainerHostScopeV2, ContainerRequestProjectionV2, container_host_scope_bytes_v2, container_scope_fence_id_v2}
 use std.common.contracts.distributed_control_v2.{OperationEnvelopeV2, ExecutionGrantV2}
 use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2}
 use std.common.contracts.provider_cli.codex_interactive_v1.ProviderCliCodexInteractiveRequestDataV1
@@ -181,24 +181,37 @@ pub fn host_agent_workspace_source_check_v2(owner: HostCapacityOwnerV1, containe
         policy, state.provider_digest, state.service_scope, context, required_state)?
     if context.grant_clock < state.context.grant_clock or context.monotonic_ms < state.context.monotonic_ms:
         return Err("agent-workspace-native-clock-regressed")
-    val full = state.packet.manifest
+    val packet = state.packet
+    host_agent_workspace_source_projection_check_v2(state.source, packet.host.execution.request_bytes, packet.manifest,
+        verified.intent, packet.host.execution.plan, packet.host.intent.reservation.cpu_millis,
+        packet.host.intent.reservation.memory_bytes, packet.host.operation.duration_ms, owner, packet.host.operation,
+        packet.host.intent.reservation.id, required_state)
+
+# milestone_0021 U-01: the V7 source bindings over DATA, so the V4 agent (intent from the REAL selection, the
+# association plan, the associated Host row) runs exactly the checks V7 runs, in the same order. The memory check
+# runs inside, between profile and image as before (deviation from DESIGN's `memory_ok` param: the projection it
+# needs only exists here).
+pub fn host_agent_workspace_source_projection_check_v2(source: LinuxWorkspaceSourceLoanV3, request_bytes: text,
+        full: AgentWorkspaceInvocationManifestV2, intent: ProviderCliInteractiveIntentDataV1, plan: ContainerExecutionPlanV2,
+        reservation_cpu: i64, reservation_memory: i64, duration_ms: i64, owner: HostCapacityOwnerV1,
+        operation: OperationEnvelopeV2, reservation_id: text, required_state: text) -> Result<ContainerRequestProjectionV2, text>:
     val manifest = full.base
     val digest = agent_workspace_invocation_manifest_digest_v2(full)?
-    val projection = state.source.agent_invocation_projection_v2(state.packet.host.execution.request_bytes, manifest.workspace_manifest, digest)?
-    val program = state.source.agent_invocation_program_match_v2(state.packet.host.execution.request_bytes,
-        manifest.workspace_manifest, digest, verified.intent.argv[0], verified.intent.image_config_id)?
+    val projection = source.agent_invocation_projection_v2(request_bytes, manifest.workspace_manifest, digest)?
+    val program = source.agent_invocation_program_match_v2(request_bytes,
+        manifest.workspace_manifest, digest, intent.argv[0], intent.image_config_id)?
     if not program: return Err("agent-workspace-native-program-mismatch")
-    val actual_profile = state.source.agent_executable_profile_v2(state.packet.host.execution.request_bytes, manifest.workspace_manifest, digest)?
+    val actual_profile = source.agent_executable_profile_v2(request_bytes, manifest.workspace_manifest, digest)?
     if agent_executable_profile_encode_v1(actual_profile)? != agent_executable_profile_encode_v1(full.executable_profile)?:
         return Err("agent-workspace-native-actual-executable-profile-mismatch")
-    val memory = host_agent_workspace_memory_check_v2(owner, state.packet, projection, actual_profile, required_state)?
-    val native = linux_oci_retained_request_decode_v1(state.packet.host.execution.request_bytes)?
-    if native.image != verified.intent.requested_image_ref: return Err("agent-workspace-native-image-mismatch")
-    val plan = state.packet.host.execution.plan
+    val memory = host_agent_workspace_memory_check_core_v2(owner, operation, reservation_id, reservation_memory,
+        projection, actual_profile, required_state)?
+    val native = linux_oci_retained_request_decode_v1(request_bytes)?
+    if native.image != intent.requested_image_ref: return Err("agent-workspace-native-image-mismatch")
     if (not projection.has_workspace or projection.has_devices or projection.operation_id != plan.operation_id or
             projection.workload_uid != plan.workload_uid or projection.attempt != plan.attempt or projection.request_digest != plan.request_digest or
-            projection.cpu_millis != state.packet.host.intent.reservation.cpu_millis or projection.memory_bytes != state.packet.host.intent.reservation.memory_bytes or
-            projection.timeout_ms <= 0 or projection.timeout_ms > state.packet.host.operation.duration_ms):
+            projection.cpu_millis != reservation_cpu or projection.memory_bytes != reservation_memory or
+            projection.timeout_ms <= 0 or projection.timeout_ms > duration_ms):
         return Err("agent-workspace-native-projection-mismatch")
     Ok(projection)
 
@@ -207,22 +220,30 @@ pub fn host_agent_workspace_source_check_v2(owner: HostCapacityOwnerV1, containe
 pub fn host_agent_workspace_memory_check_v2(owner: HostCapacityOwnerV1, packet: AgentWorkspaceInvocationPacketV2,
         projection: ContainerRequestProjectionV2, actual_profile: AgentExecutableProfileV1,
         required_state: text) -> Result<(), text>:
+    host_agent_workspace_memory_check_core_v2(owner, packet.host.operation, packet.host.intent.reservation.id,
+        packet.host.intent.reservation.memory_bytes, projection, actual_profile, required_state)
+
+# milestone_0021: the V7 memory check body over DATA (operation, reservation id and memory); V7 passes its packet
+# values, V4 the associated Host row's. Unchanged checks and order.
+pub fn host_agent_workspace_memory_check_core_v2(owner: HostCapacityOwnerV1, operation: OperationEnvelopeV2,
+        reservation_id: text, reservation_memory: i64, projection: ContainerRequestProjectionV2,
+        actual_profile: AgentExecutableProfileV1, required_state: text) -> Result<(), text>:
     if required_state != "admitted" and required_state != "executing": return Err("agent-workspace-native-memory-state")
-    val parent = daemon_operation_exact_v2(owner.journal, packet.host.operation)?
+    val parent = daemon_operation_exact_v2(owner.journal, operation)?
     if parent.state != required_state: return Err("agent-workspace-native-memory-parent-state")
     val valid_ledger = host_available_capacity_v1(owner.ledger)?
     if owner.ledger.revision != owner.journal.sequence + 1: return Err("agent-workspace-native-memory-projection-stale")
     val minimum = agent_executable_profile_minimum_memory_v1(actual_profile)?
     var matched: i64 = 0
     for row in owner.ledger.reservations:
-        if row.id != packet.host.intent.reservation.id: continue
+        if row.id != reservation_id: continue
         matched = matched + 1
         val expected = if required_state == "executing": HostReservationStateV1.Executing else: HostReservationStateV1.Prepared
-        if row.operation_id != packet.host.operation.id or row.state != expected:
+        if row.operation_id != operation.id or row.state != expected:
             return Err("agent-workspace-native-memory-reservation-state")
         if row.memory_bytes < minimum: return Err("agent-workspace-native-original-allocation-insufficient")
         if (projection.memory_bytes < minimum or projection.memory_bytes != row.memory_bytes or
-                packet.host.operation.memory_bytes != row.memory_bytes or packet.host.intent.reservation.memory_bytes != row.memory_bytes):
+                operation.memory_bytes != row.memory_bytes or reservation_memory != row.memory_bytes):
             return Err("agent-workspace-native-memory-request-allocation-mismatch")
     if matched != 1: return Err("agent-workspace-native-memory-reservation-missing")
     Ok(())
@@ -457,7 +478,6 @@ pub fn host_agent_workspace_authenticate_v2(owner: HostCapacityOwnerV1, containe
     val packet_bytes = agent_workspace_invocation_packet_encode_v2(packet)?
     val full = packet.manifest
     val manifest = full.base
-    if manifest.credential_refs.len() != 0: return Err("agent-workspace-credential-projection-unavailable")
     if not builder_digest_valid_v1(policy.source_digest) or not builder_digest_valid_v1(expected_provider):
         return Err("agent-workspace-installed-digest-invalid")
     if (context.grant_clock <= 0 or context.monotonic_ms < 0 or context.policy_revision != policy.snapshot.policy_revision or
@@ -484,8 +504,37 @@ pub fn host_agent_workspace_authenticate_v2(owner: HostCapacityOwnerV1, containe
         return Err("agent-workspace-platform-unsupported")
     val scope = simple_container_scope_v2(container)
     val scope_digest = sha256_text(container_host_scope_bytes_v2(scope)?)
-    val plan = packet.host.execution.plan
-    val capacity = owner.ledger.capacity
+    var execution = packet.host.operation
+    execution.operation = "host_execute_v1"
+    val host_grant = distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, packet.host.signed, packet.host.approval,
+        execution, context.grant_clock, policy.snapshot.generation, context.policy_revision, context.revocation_epoch, context.session_generation)?
+    val invocation = host_agent_workspace_invocation_operation_v2(full, packet.host.operation, policy, scope, context)?
+    val grant = distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, packet.signed, packet.approval,
+        invocation, context.grant_clock, policy.snapshot.generation, context.policy_revision, context.revocation_epoch, context.session_generation)?
+    var expires_at = grant.expires_at
+    for other in [packet.approval.expires_at, host_grant.expires_at, packet.host.approval.expires_at]:
+        if other < expires_at: expires_at = other
+    val resolved = host_agent_workspace_manifest_check_v2(full, packet.host.execution.plan, owner.ledger.capacity, container,
+        expected_provider, service_scope, context.grant_clock, expires_at)?
+    val intent = build_provider_cli_interactive_intent_data_v1(selection, receipt, manifest.desired, resolved, manifest.task,
+        ProviderCliCodexInteractiveRequestDataV1(prompt: manifest.task.content, model: manifest.task_use.model))?
+    if (intent.binding_digest != manifest.interactive_intent_digest or intent.program_binding_digest != manifest.selection_binding_digest or
+            intent.image_config_id != manifest.image_config_id or sha256_text(intent.scope_bytes) != scope_digest or intent.argv != manifest.inner_argv):
+        return Err("agent-workspace-actual-selection-invocation-mismatch")
+    Ok(HostAgentWorkspaceAuthorizationV2(invocation: invocation, grant: grant, host_grant: host_grant, intent: intent))
+
+
+# milestone_0021 3.4b check 3a: the V7 manifest checks over DATA (plan, capacity, clock, grant expiry) so the V4
+# agent runs the same ones with its association plan, V4 capacity, V4 clock and archived execute-grant expiry.
+# Returns the resolved policy the intent builder needs. Unchanged checks; V7 now runs them after its grant
+# verification, which only changes the reported reason for an input with several faults (accept/refuse unchanged).
+pub fn host_agent_workspace_manifest_check_v2(full: AgentWorkspaceInvocationManifestV2, plan: ContainerExecutionPlanV2,
+        capacity: HostCapacityV1, container: SimpleContainerOwnerV2, expected_provider: text, service_scope: text,
+        clock: i64, grant_expires_at: i64) -> Result<AgentPolicyResolutionV1, text>:
+    val manifest = full.base
+    if manifest.credential_refs.len() != 0: return Err("agent-workspace-credential-projection-unavailable")
+    val scope = simple_container_scope_v2(container)
+    val scope_digest = sha256_text(container_host_scope_bytes_v2(scope)?)
     val observed = simple_container_observation_v2(container)
     val fence = container_scope_fence_id_v2(scope)?
     if (plan.physical_host_id != scope.physical_host_id or plan.service_scope_id != scope.service_scope_id or
@@ -502,29 +551,14 @@ pub fn host_agent_workspace_authenticate_v2(owner: HostCapacityOwnerV1, containe
         return Err("agent-workspace-policy-task-use-mismatch")
     if full.executable_profile.architecture != "linux-" + resolved.runtime.architecture or observed.architecture != resolved.runtime.architecture:
         return Err("agent-workspace-native-executable-architecture-mismatch")
-    val intent = build_provider_cli_interactive_intent_data_v1(selection, receipt, manifest.desired, resolved, manifest.task,
-        ProviderCliCodexInteractiveRequestDataV1(prompt: manifest.task.content, model: manifest.task_use.model))?
-    if (intent.binding_digest != manifest.interactive_intent_digest or intent.program_binding_digest != manifest.selection_binding_digest or
-            intent.image_config_id != manifest.image_config_id or sha256_text(intent.scope_bytes) != scope_digest or intent.argv != manifest.inner_argv):
-        return Err("agent-workspace-actual-selection-invocation-mismatch")
     val workspace = agent_workspace_manifest_decode_v1(manifest.workspace_manifest)?
     if workspace.repository_ref != resolved.session.workspace.repository_ref or resolved.session.workspace.isolation != "worktree":
         return Err("agent-workspace-repository-policy-mismatch")
     # Logical revision references require an installed mapping. This initial
     # slice accepts only an explicit full commit OID in the signed desired spec.
     if workspace.revision_oid != resolved.session.workspace.revision_ref: return Err("agent-workspace-exact-revision-required")
-    var execution = packet.host.operation
-    execution.operation = "host_execute_v1"
-    val host_grant = distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, packet.host.signed, packet.host.approval,
-        execution, context.grant_clock, policy.snapshot.generation, context.policy_revision, context.revocation_epoch, context.session_generation)?
-    val invocation = host_agent_workspace_invocation_operation_v2(full, packet.host.operation, policy, scope, context)?
-    val grant = distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, packet.signed, packet.approval,
-        invocation, context.grant_clock, policy.snapshot.generation, context.policy_revision, context.revocation_epoch, context.session_generation)?
-    if (manifest.not_after <= context.grant_clock or manifest.not_after > grant.expires_at or manifest.not_after > packet.approval.expires_at or
-            manifest.not_after > host_grant.expires_at or manifest.not_after > packet.host.approval.expires_at):
-        return Err("agent-workspace-inner-exec-deadline-invalid")
-    Ok(HostAgentWorkspaceAuthorizationV2(invocation: invocation, grant: grant, host_grant: host_grant, intent: intent))
-
+    if manifest.not_after <= clock or manifest.not_after > grant_expires_at: return Err("agent-workspace-inner-exec-deadline-invalid")
+    Ok(resolved)
 
 # Internal validator for the actual slot producer; no caller packet is accepted
 # by the exported Host terminal-context entry and no native/helper is required.

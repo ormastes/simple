@@ -105,12 +105,12 @@ int main(void) {
     int lock_status;LuSlotV1* slot=lu_lock_v1(token,&lock_status);assert(slot&&lock_status==0);
     int inherited_fd=slot->fd;
     assert(pthread_mutex_lock(&lu_registry_v1)==0);
-    assert(!atomic_flag_test_and_set_explicit(&rt_core_immortal_registry_lock,memory_order_acquire));
-    /* All three inherited gates are held, including the REAL generic allocator
+    for(size_t k=0;k<RT_CORE_IMMORTAL_SHARDS;k++) assert(!atomic_flag_test_and_set_explicit(&rt_core_immortal_shards[k].lock,memory_order_acquire)); /* every registry shard */
+    /* All three inherited gates are held, including EVERY shard of the REAL generic allocator
      * registry spinlock. Even allocating an error array here would deadlock. */
     pid_t child=fork();assert(child>=0);
     if(child==0) {
-        assert(atomic_flag_test_and_set_explicit(&rt_core_immortal_registry_lock,memory_order_acquire));
+        for(size_t k=0;k<RT_CORE_IMMORTAL_SHARDS;k++) assert(atomic_flag_test_and_set_explicit(&rt_core_immortal_shards[k].lock,memory_order_acquire));
         alarm(3);int64_t deadline=lu_clock_v1(CLOCK_MONOTONIC)+500;
         foreign(rt_local_unix_connect_v1(path,strlen(path),geteuid(),deadline));
         foreign(rt_local_unix_read_v1(token,1,deadline));
@@ -125,7 +125,7 @@ int main(void) {
         _exit(0);
     }
     assert(waitpid(child,&status,0)==child&&WIFEXITED(status)&&WEXITSTATUS(status)==0);
-    atomic_flag_clear_explicit(&rt_core_immortal_registry_lock,memory_order_release);
+    for(size_t k=0;k<RT_CORE_IMMORTAL_SHARDS;k++) atomic_flag_clear_explicit(&rt_core_immortal_shards[k].lock,memory_order_release);
     assert(pthread_mutex_unlock(&lu_registry_v1)==0);
     assert(pthread_mutex_unlock(&slot->operation)==0);
     receipt=rt_local_unix_read_v1(token,1,lu_clock_v1(CLOCK_MONOTONIC)+100);

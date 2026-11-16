@@ -14,14 +14,20 @@ fn form_control_ua_box_decls(node: HNode) -> text:
     for any other element. The border colour is Chrome's light-scheme control
     border."""
     if node.tag == "input":
+        # Chrome 159 computes `box-sizing: border-box` for every input type
+        # except `image` (content-box): `width:40px;height:16px;padding:2px`
+        # gives a 40x16 rect for text, password, search, button, submit,
+        # checkbox, radio, range, color, file, date. Author box-sizing wins.
         val input_type = attr_value(node.attrs_raw, "type").trim().lower()
         if input_type == "checkbox":
-            return "margin:3px 3px 3px 4px"
+            return "margin:3px 3px 3px 4px;box-sizing:border-box"
         if input_type == "radio":
-            return "margin:3px 3px 0 5px"
+            return "margin:3px 3px 0 5px;box-sizing:border-box"
         if input_type == "hidden":
             return ""
-        return "border:2px solid #767676"
+        if input_type == "image":
+            return "border:2px solid #767676"
+        return "border:2px solid #767676;box-sizing:border-box"
     if node.tag == "button":
         return "border:2px solid #767676"
     if node.tag == "select":
@@ -1194,16 +1200,16 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             # uppercase` run painted differently from the identical
             # authored-uppercase run.
             val metric_text_raw = if st.white_space_nowrap: nd.text_data else: nd.text_trimmed
-            # direction:rtl paints the run REVERSED (reverse_text_for_paint in
-            # both painters) and steps it with this advance table by position,
-            # so the table must be measured over that same visual string.
-            # Measured over the logical string, each glyph took the advance of
-            # the glyph at its mirror position: with a fractional-advance face
-            # (Liberation Sans, 8 px) `ABC` under rtl put its `B` 1 px left of
-            # the identical authored `CBA`
-            # (browser_renderer_spec "renders direction rtl by reversing ...").
+            # direction:rtl paints the run in bidi VISUAL order
+            # (bidi_visual_text_for_rtl in both painters: Latin keeps its
+            # logical order, RTL script is reversed) and steps it with this
+            # advance table by position, so the table must be measured over
+            # that same visual string. Measured over the logical string, a
+            # reordered glyph took the advance of the glyph at its visual
+            # position (with Liberation Sans 8 px, a reversed `ABC` put its `B`
+            # 1 px off the authored `CBA`).
             val metric_text_logical = apply_text_transform_for_paint(metric_text_raw, st.text_transform)
-            val metric_text = if st.direction_rtl: reverse_text_for_paint(metric_text_logical) else: metric_text_logical
+            val metric_text = if st.direction_rtl: bidi_visual_text_for_rtl(metric_text_logical) else: metric_text_logical
             if trace_stages:
                 print "[layout-trace] style_stage=metric-text-ready index={i} len={metric_text.len()}"
             val _wsc_lt = if _wsc_armed(): _wsc_now_us() else: 0

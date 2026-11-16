@@ -1,7 +1,8 @@
 # Historical evidence through the SAME retained Linux journal. No pathname
 # reader, current execution grant or terminal-row flag authorizes release.
 use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
-    distributed_operation_journal_read_required_v3, distributed_operation_journal_linux_current_v3}
+    distributed_operation_journal_read_required_v3, distributed_operation_journal_linux_current_v3,
+    distributed_operation_journal_read_v3}
 use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
 use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
 use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
@@ -13,7 +14,13 @@ use std.nogc_sync_mut.orchestration.host_execution_envelope_v2.host_execution_de
 use std.nogc_sync_mut.orchestration.host_execution_observation_v2.host_execution_observation_load_owned_v3
 use std.nogc_sync_mut.orchestration.host_primary_connection_receipt_v2.host_primary_connection_completion_evidence_v2
 use std.common.crypto.sha256.sha256_text
-use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.contracts.orchestration.host_execute_associated_v3.host_execute_associated_decode_v3
+use std.common.contracts.orchestration.host_execution_association_v3.host_execution_association_digest_v3
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
 
 pub fn host_linux_completion_evidence_v3(journal: DistributedOperationJournalV2,
         operation: OperationEnvelopeV2) -> Result<text, text>:
@@ -26,6 +33,10 @@ pub fn host_linux_completion_evidence_v3(journal: DistributedOperationJournalV2,
     if operation.operation != "host_reservation_v1" or not builder_identifier_valid_v1(operation.id):
         return Err("host-linux-completion-original-action")
     val key = sha256_text(operation.id) + ".sdn"
+    # milestone_0021 3.6 reopen arm: a V4 agent run is bound by host-execute-associated/ and leaves no
+    # host-execute-packets/ entry; its release evidence is the published agent outcome record.
+    val agent = distributed_operation_journal_read_v3(journal, host_agent_outcome_relative_v4(operation.id), 65536)?
+    if agent.is_some(): return host_agent_outcome_evidence_v4(journal, operation, agent.unwrap())
     val receipt = host_cleanup_receipt_decode_v1(distributed_operation_journal_read_required_v3(journal,
         "host-cleanup-receipts-v1/" + key, 131072)?)?
     if receipt.operation_id != operation.id: return Err("host-cleanup-operation-mismatch")
@@ -53,3 +64,109 @@ pub fn host_linux_completion_evidence_v3(journal: DistributedOperationJournalV2,
     if (sha256_text(host_cleanup_intent_encode_v1(intent)?) != receipt.cleanup_intent_digest or
             receipt.observed_unix_ms < intent.authorized_unix_ms): return Err("host-cleanup-intent-receipt-mismatch")
     Ok(host_cleanup_receipt_encode_v1(receipt)?)
+
+# ---- milestone_0021 3.6: V4 agent outcome record (host-settle evidence, read back before record_outcome). ----
+# Keyed by sha256(operation id) like every other receipt in this file (deviation from DESIGN's sha256(fence\nop):
+# the reopen arm only has the operation); the fence is a field, and the arm re-derives the association path from it.
+pub struct HostAgentOutcomeRecordV4:
+    operation_id: text
+    fence: text
+    association_digest: text
+    payload_digest: text
+    outcome: text
+    exit_observation_digest: text
+    probe_settle_digests: [text]
+    selection_binding_digest: text
+    destroy_digest: text
+    absence_result: text
+    machine_settle_digest: text
+    source_return: text
+
+pub fn host_agent_outcome_relative_v4(operation_id: text) -> text:
+    "host-agent-outcomes-v4/" + sha256_text(operation_id) + ".sdn"
+
+fn host_agent_outcome_names_v4() -> [text]:
+    ["version", "kind", "operationId", "fence", "associationDigest", "payloadDigest", "outcome", "exitObservationDigest",
+        "probeSettleDigests", "selectionBindingDigest", "destroyDigest", "absenceResult", "machineSettleDigest", "sourceReturn"]
+
+fn host_agent_outcome_validate_v4(value: HostAgentOutcomeRecordV4) -> Result<(), text>:
+    if not builder_identifier_valid_v1(value.operation_id) or value.fence == "": return Err("host-agent-outcome-invalid")
+    for digest in [value.association_digest, value.payload_digest, value.exit_observation_digest,
+            value.selection_binding_digest, value.destroy_digest, value.machine_settle_digest]:
+        if not builder_digest_valid_v1(digest): return Err("host-agent-outcome-invalid")
+    if value.probe_settle_digests.len() == 0 or value.probe_settle_digests.len() > 16: return Err("host-agent-outcome-invalid")
+    for digest in value.probe_settle_digests:
+        if not builder_digest_valid_v1(digest): return Err("host-agent-outcome-invalid")
+    if value.outcome != "succeeded" and value.outcome != "failed": return Err("host-agent-outcome-invalid")
+    if value.absence_result != "absent" or value.source_return != "returned": return Err("host-agent-outcome-unsettled")
+    Ok(())
+
+pub fn host_agent_outcome_encode_v4(value: HostAgentOutcomeRecordV4) -> Result<text, text>:
+    host_agent_outcome_validate_v4(value)?
+    var probes: [SdnValue] = []
+    for digest in value.probe_settle_digests: probes.push(SdnValue.String(digest))
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("linux-host-agent-outcome"),
+        "operationId": SdnValue.String(value.operation_id), "fence": SdnValue.String(value.fence),
+        "associationDigest": SdnValue.String(value.association_digest), "payloadDigest": SdnValue.String(value.payload_digest),
+        "outcome": SdnValue.String(value.outcome), "exitObservationDigest": SdnValue.String(value.exit_observation_digest),
+        "probeSettleDigests": SdnValue.Array(probes), "selectionBindingDigest": SdnValue.String(value.selection_binding_digest),
+        "destroyDigest": SdnValue.String(value.destroy_digest), "absenceResult": SdnValue.String(value.absence_result),
+        "machineSettleDigest": SdnValue.String(value.machine_settle_digest), "sourceReturn": SdnValue.String(value.source_return)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+fn host_agent_outcome_text_v4(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("host-agent-outcome-field:" + name)
+
+pub fn host_agent_outcome_decode_v4(source: text) -> Result<HostAgentOutcomeRecordV4, text>:
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 65536, max_depth: 3,
+            max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 16)):
+        case Ok(value): value
+        case Err(issue): return Err("host-agent-outcome-syntax:" + issue.code)
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("host-agent-outcome-object")
+    val names = host_agent_outcome_names_v4()
+    if fields.len() != names.len(): return Err("host-agent-outcome-fields")
+    for name in names:
+        if not fields.contains_key(name): return Err("host-agent-outcome-fields")
+    var probes: [text] = []
+    match fields["probeSettleDigests"]:
+        case SdnValue.Array(items):
+            for item in items:
+                match item:
+                    case SdnValue.String(digest): probes.push(digest)
+                    case _: return Err("host-agent-outcome-field:probeSettleDigests")
+        case _: return Err("host-agent-outcome-field:probeSettleDigests")
+    val value = HostAgentOutcomeRecordV4(operation_id: host_agent_outcome_text_v4(fields, "operationId")?,
+        fence: host_agent_outcome_text_v4(fields, "fence")?,
+        association_digest: host_agent_outcome_text_v4(fields, "associationDigest")?,
+        payload_digest: host_agent_outcome_text_v4(fields, "payloadDigest")?,
+        outcome: host_agent_outcome_text_v4(fields, "outcome")?,
+        exit_observation_digest: host_agent_outcome_text_v4(fields, "exitObservationDigest")?,
+        probe_settle_digests: probes,
+        selection_binding_digest: host_agent_outcome_text_v4(fields, "selectionBindingDigest")?,
+        destroy_digest: host_agent_outcome_text_v4(fields, "destroyDigest")?,
+        absence_result: host_agent_outcome_text_v4(fields, "absenceResult")?,
+        machine_settle_digest: host_agent_outcome_text_v4(fields, "machineSettleDigest")?,
+        source_return: host_agent_outcome_text_v4(fields, "sourceReturn")?)
+    # Canonical bytes only: a re-encode must reproduce the record exactly (version/kind included).
+    if host_agent_outcome_encode_v4(value)? != source: return Err("host-agent-outcome-noncanonical")
+    Ok(value)
+
+# The association a V4 agent run was admitted under, read through the SAME journal at the fence the record names.
+pub fn host_agent_associated_digest_v4(journal: DistributedOperationJournalV2, fence: text, operation_id: text) -> Result<text, text>:
+    val packet = distributed_operation_journal_read_required_v3(journal,
+        "host-execute-associated/" + sha256_text(fence + "\n" + operation_id) + ".sdn", 2097152)?
+    host_execution_association_digest_v3(host_execute_associated_decode_v3(packet)?.association)
+
+# Reopen arm: the record must be canonical, name this operation, satisfy every settle field (absence, machine
+# settle, source return, destroy digest) and carry the association digest of the archived associated packet.
+fn host_agent_outcome_evidence_v4(journal: DistributedOperationJournalV2, operation: OperationEnvelopeV2,
+        source: text) -> Result<text, text>:
+    val record = host_agent_outcome_decode_v4(source)?
+    if record.operation_id != operation.id: return Err("host-agent-outcome-operation")
+    if host_agent_associated_digest_v4(journal, record.fence, operation.id)? != record.association_digest:
+        return Err("host-agent-outcome-association")
+    Ok(source)

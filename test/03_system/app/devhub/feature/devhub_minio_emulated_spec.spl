@@ -151,6 +151,26 @@ describe "devhub minio over an emulated S3":
         expect(emu_problems(gen_id, 1)).to_equal("")
         expect(ok).to_equal(true)
 
+    it "puts multibyte text with a Content-Length that counts bytes":
+        # @req REQ-DEVHUB-EMU-S3-008
+        step("Upload text whose UTF-8 bytes outnumber its characters")
+        val gen_id = emu_load([emu_row("PUT", "/widgets/uni.txt", SIG + " ;; Content-Type=text/plain", "eq:café ☃", 200, "ETag: \"syn\"", "")])
+        # @capture(protocol): the signed PUT whose body must arrive whole
+        val (ok, _etag, _raw) = minio_put_text(cfg(), "widgets", "uni.txt", "café ☃", "text/plain")
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(true)
+
+    it "reports the byte length of a multibyte object body":
+        # @req REQ-DEVHUB-EMU-S3-006
+        step("Fetch an object whose UTF-8 bytes outnumber its characters")
+        val gen_id = emu_load([emu_row("GET", "/widgets/uni.txt", SIG, "none", 200, "Content-Type: text/plain", "@s3/object_multibyte.txt")])
+        # @capture(protocol): the GET and decoded body
+        val (ok, got, _raw) = minio_get_object(cfg(), "widgets", "uni.txt", "")
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(true)
+        expect(got.body).to_equal("café ☃")
+        expect(got.content_length).to_equal(9)
+
     it "deletes an object and creates a bucket":
         # @req REQ-DEVHUB-EMU-S3-009
         step("Issue DeleteObject and CreateBucket")
@@ -256,6 +276,17 @@ describe "devhub minio over an emulated S3":
         expect(ok).to_equal(true)
         expect(message.len()).to_equal(2097152)
         expect(got.body.len()).to_equal(2097152)
+
+    it "refuses a non-UTF-8 object body instead of returning corrupted text":
+        # @req REQ-DEVHUB-EMU-S3-006
+        step("Serve bytes that are not valid UTF-8 (a PNG-like header)")
+        val gen_id = emu_load([emu_row("GET", "/widgets/blob.bin", SIG, "none", 200, "Content-Type: application/octet-stream", "hex:89 50 4e 47 ff fe 00 80")])
+        # @capture(protocol): the GET whose body cannot be text
+        val (ok, got, message) = minio_get_object(cfg(), "widgets", "blob.bin", "")
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(false)
+        expect(message).to_contain("invalid UTF-8")
+        expect(got.body).to_equal("")
 
     it "lists through the CLI as a user would":
         # @req REQ-DEVHUB-EMU-S3-014

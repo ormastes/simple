@@ -1,4 +1,6 @@
-use std.nogc_sync_mut.orchestration.host_linux_completion_evidence_v3.host_linux_completion_evidence_v3
+use std.nogc_sync_mut.orchestration.host_linux_completion_evidence_v3.{host_linux_completion_evidence_v3,
+    host_agent_outcome_decode_v4, host_agent_outcome_relative_v4, host_agent_associated_digest_v4}
+use std.common.contracts.orchestration.host_execution_association_v3.host_execution_association_digest_v3
 use std.nogc_sync_mut.orchestration.host_primary_connection_receipt_v2.host_primary_connection_completion_evidence_v2
 use std.nogc_sync_mut.io.windows_journal_store_v1.WindowsJournalStoreV1
 use std.common.task_runner.distributed_operation_journal_v2.{distributed_operation_journal_open_windows_v3, distributed_operation_journal_read_required_v3, distributed_operation_journal_read_v3, distributed_operation_journal_publish_v3}
@@ -699,3 +701,77 @@ fn host_capacity_owned_fresh_error_v3(before: HostReservationAuthorizationContex
             after.session_generation != before.session_generation): return "host-owned-authorization-context-changed"
     if deadline_unix_ms <= after.grant_clock: return "host-owned-authorization-expired"
     ""
+
+# milestone_0021 3.6 (R-09): the ONLY progress write of a V4 agent run. It never begins, transitions-prepared or
+# reserves, so it cannot re-begin or re-charge. Machine release (destroy, absence, machine settle, source return)
+# already happened; `evidence` is the canonical agent outcome record, published no-replace and read back, and the
+# release evidence is re-derived through host_capacity_completion_evidence_owned_v2 (the reopen arm plus the
+# runtime-exec cleanup barrier). The journal terminal state is always `completed`; the agent's success or failure
+# lives only in the evidence. An exact same-digest `completed` row is idempotent.
+pub fn host_capacity_owner_settle_associated_v3(owner: HostCapacityOwnerV1, operation: OperationEnvelopeV2,
+        association: HostExecutionAssociationV3, outcome: text, evidence: text) -> HostCapacityMutationTurnV3:
+    var turn = HostCapacityMutationTurnV3(owner, false, "")
+    val checked = host_capacity_settle_associated_check_v3(owner, operation, association, outcome, evidence)
+    if checked.is_err():
+        turn.error = checked.unwrap_err()
+        return turn
+    val state = checked.unwrap().0
+    val prior_digest = checked.unwrap().1
+    if state != "completed":
+        val published = distributed_operation_journal_publish_v3(owner.journal, host_agent_outcome_relative_v4(operation.id), evidence)
+        val stored = distributed_operation_journal_read_required_v3(owner.journal, host_agent_outcome_relative_v4(operation.id), 65536)
+        if stored.is_err() or stored.unwrap() != evidence:
+            turn.error = if published.is_err(): published.unwrap_err() else: "host-agent-outcome-readback"
+            return turn
+    val derived = host_capacity_completion_evidence_owned_v2(owner.journal, owner.ledger.capacity, operation)
+    if derived.is_err():
+        turn.error = derived.unwrap_err()
+        return turn
+    val digest = sha256_text(derived.unwrap())
+    if state == "completed":
+        if prior_digest != digest: turn.error = "host-settlement-outcome-conflict"
+        return turn
+    turn.effect_attempted = true
+    val committed = daemon_operation_record_outcome_v2(owner.journal, operation, "completed", digest)
+    if committed.is_err():
+        turn.error = committed.unwrap_err()
+        return turn
+    turn.owner.journal = committed.unwrap()
+    var found = 0
+    for index in 0..turn.owner.ledger.reservations.len():
+        var row = turn.owner.ledger.reservations[index]
+        if row.operation_id == operation.id:
+            row.state = HostReservationStateV1.Released
+            turn.owner.ledger.reservations[index] = row
+            found = found + 1
+    turn.owner.ledger.revision = turn.owner.journal.sequence + 1
+    if found != 1:
+        turn.error = "host-settlement-row-missing"
+        return turn
+    val available = host_available_capacity_v1(turn.owner.ledger)
+    if available.is_err(): turn.error = available.unwrap_err()
+    turn
+
+fn host_capacity_settle_associated_check_v3(owner: HostCapacityOwnerV1, operation: OperationEnvelopeV2,
+        association: HostExecutionAssociationV3, outcome: text, evidence: text) -> Result<(text, text), text>:
+    host_capacity_owner_linux_current_v3(owner)?
+    if not owner.ledger.continuity_proven: return Err("host-reconciliation-required")
+    if operation.operation != "host_reservation_v1": return Err("host-settlement-associated-operation")
+    val state = daemon_operation_exact_v2(owner.journal, operation)?
+    if state.state != "executing" and state.state != "completed": return Err("host-settlement-execution-required")
+    val record = host_agent_outcome_decode_v4(evidence)?
+    val digest = host_execution_association_digest_v3(association)?
+    if record.operation_id != operation.id or record.outcome != outcome or record.association_digest != digest:
+        return Err("host-settlement-associated-evidence")
+    if host_agent_associated_digest_v4(owner.journal, record.fence, operation.id)? != digest:
+        return Err("host-settlement-association-mismatch")
+    var matched = 0
+    for row in owner.ledger.reservations:
+        if row.operation_id != operation.id: continue
+        matched = matched + 1
+        if row.payload_digest != operation.payload_digest: return Err("host-settlement-row-mismatch")
+        if state.state == "executing" and row.state != HostReservationStateV1.Executing: return Err("host-settlement-row-mismatch")
+    if matched != 1: return Err("host-settlement-row-missing")
+    # T-05 barrier 1 (the second, runtime-exec cleanup, is applied by the evidence derivation).
+    host_capacity_owner_parent_helpers_settled_v1(owner, operation.id)?
+    Ok((state.state, state.outcome_digest))
