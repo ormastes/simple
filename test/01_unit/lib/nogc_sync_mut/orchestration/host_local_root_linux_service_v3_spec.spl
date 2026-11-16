@@ -1,8 +1,10 @@
 """
 ## Purpose and audience
 Pins the `HostLocalRootV3.LinuxService` arm. The signed-enrollment Linux service owner
-(`host_linux_service_current_v4`) is reachable through the shared Host domain for status and close
-only. Every V2 effect, cooperative execution and primary-connection route refuses it.
+(`host_linux_service_current_v4`) is reachable through the shared Host domain for status and close,
+and through the authenticated V6 listener for policy, journal binding, ready publication and
+controller status, and associated prepare/execute through the installed dispatch. Every V2 effect
+and direct primary-connection (terminal) route refuses it.
 ## Operator workflow
 Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
 Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-16).
@@ -13,6 +15,7 @@ configured real fixture driver (NOT_AUTHORED).
 ## Verification guidance and troubleshooting
 Each refusal names the exact error string in the response payload.
 """
+use std.spec.step
 use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
 use std.nogc_sync_mut.orchestration.host_service_domain_v3.*
 use std.nogc_sync_mut.orchestration.host_service_domain_v2.HostServiceRequestV2
@@ -20,12 +23,24 @@ use std.nogc_sync_mut.orchestration.host_service_execution_v4.host_service_execu
 use std.nogc_sync_mut.orchestration.host_primary_connection_policy_v3.host_primary_connection_policy_bytes_v3
 use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.HostLinuxServiceCurrentV4
 use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use std.nogc_sync_mut.orchestration.host_service_installed_v3.{host_service_installed_shape_v3,
+    host_service_primary_installed_shape_v3}
+use std.nogc_sync_mut.orchestration.host_primary_connection_service_v3.host_primary_connection_supported_v3
+use std.nogc_sync_mut.orchestration.host_controller_publication_v3.{host_controller_journal_binding_v3,
+    host_controller_publication_begin_v3}
+use std.nogc_sync_mut.orchestration.host_controller_observation_v3.{host_controller_status_v3,
+    host_controller_retained_origin_v3}
+use std.io.tcp.TcpListener
+use os.apps.smux.runtime_connection_owner_v5.smux_runtime_connection_open_v5
+use os.apps.smux.runtime_connection_policy_v5.{smux_runtime_connection_policy_load_v5, linux_service_host_only_policy_v5}
+use os.apps.smux.runtime_control_policy_v1.smux_runtime_control_policy_validate_v1
+use os.apps.smux.runtime_host_continuation_v6.{smux_host_continuation_new_v6, smux_host_continuation_current_v6}
 
 fn arm_domain_v3() -> HostServiceDomainV3:
     HostServiceDomainV3(HostLocalRootV3.LinuxService(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service")))
 
 describe "HostLocalRootV3.LinuxService arm":
-    it "routes only status through the shared domain and fails closed when unpublished":
+    it "refuses validate on the shared domain and fails status closed when unpublished":
         # @req S40-ARM-01
         val status = host_service_domain_turn_v3(arm_domain_v3(), HostServiceRequestV2("host-status", "", ""))
         expect(status.exit_code).to_equal(2)
@@ -34,13 +49,11 @@ describe "HostLocalRootV3.LinuxService arm":
         expect(validate.exit_code).to_equal(1)
         expect(validate.response.contains("host-linux-service-action-route")).to_equal(true)
 
-    it "refuses every V2 effect, cooperative execution and primary-connection route":
+    it "refuses every V2 effect and the direct primary-connection route":
         # @req S40-ARM-02
         val effect = host_service_domain_effect_turn_v3(arm_domain_v3(), HostServiceRequestV2("host-execute", "op_1", "x"))
         expect(effect.exit_code).to_equal(1)
         expect(effect.response.contains("host-linux-service-execution-route")).to_equal(true)
-        val begun = host_service_execution_begin_v4(arm_domain_v3(), HostServiceRequestV2("host-execute", "op_1", "x"))
-        expect(begun.error).to_equal("host-linux-service-execution-route")
         expect(host_primary_connection_policy_bytes_v3(arm_domain_v3().local).unwrap_err()).to_equal("host-primary-connection-direct-route-unsupported")
 
     it "closes through the service owner and exposes no usable scope before startup":
@@ -50,3 +63,87 @@ describe "HostLocalRootV3.LinuxService arm":
         expect(closed.cleanup.is_none()).to_equal(true)
         val owner = HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service")
         expect(container_scope_fence_id_v2(owner.scope_v4()).is_err()).to_equal(true)
+
+    it "selects the installed linux-service backend from the anchor alone and keeps linux-podman unchanged":
+        # @req S40-ARM-04
+        val anchor = "/var/lib/simple/hosts/host-root-" + "a".repeat(64)
+        expect(host_service_installed_shape_v3("linux-service", anchor, "-", "-")).to_equal("")
+        expect(host_service_installed_shape_v3("linux-service", anchor, "pin", "-")).to_equal("host-service-linux-anchor-fields")
+        expect(host_service_installed_shape_v3("linux-service", anchor, "-", "binding.sdn")).to_equal("host-service-linux-anchor-fields")
+        expect(host_service_installed_shape_v3("linux-service", "/var/lib/simple/hosts/other", "-", "-")).to_equal("host-service-linux-service-anchor")
+        expect(host_service_installed_shape_v3("linux-podman", "/any/root", "-", "-")).to_equal("")
+        expect(host_service_primary_installed_shape_v3("linux-service", anchor, "-", "-")).to_equal("")
+        expect(host_service_primary_installed_shape_v3("linux-podman", "/any/root", "-", "-")).to_equal("host-primary-provider-connection-unsupported")
+
+    it "returns a failed installed start as the LinuxService cleanup carrier":
+        # @req S40-ARM-05
+        match host_service_domain_open_linux_service_v3("relative/host-root-x"):
+            case HostServiceDomainOpenV3.CleanupRequired(cleanup, error):
+                expect(error).to_equal("linux-host-service-anchor-invalid")
+                val closed = host_service_cleanup_v3(cleanup)
+                expect(closed.closed).to_equal(true)
+                expect(closed.cleanup.is_none()).to_equal(true)
+            case _: expect("unexpected-open-shape").to_equal("cleanup-required")
+
+# S53 (A1 Linux serving path). Status: AUTHORED, NOT_RUN. Behavioural over
+# an unpublished owner; a started owner needs the real fixture driver.
+describe "HostLocalRootV3.LinuxService authenticated V6 serving route":
+    it "uses a fixed Host-only control policy that validates and never decodes broker bytes":
+        # @req S53-ROUTE-01
+        val fixed = linux_service_host_only_policy_v5()
+        expect(smux_runtime_control_policy_validate_v1(fixed).is_ok()).to_equal(true)
+        expect(fixed.allowed.len()).to_equal(0)
+        step("an unpublished owner is refused on currency before any policy is returned")
+        expect(smux_runtime_connection_policy_load_v5(arm_domain_v3().local).unwrap_err()).to_equal("linux-host-service-current-unpublished")
+
+    it "keeps the current_v4 refusal text on the connection open and retains the domain":
+        # @req S53-ROUTE-02
+        expect(host_primary_connection_supported_v3(arm_domain_v3().local)).to_equal(false)
+        val opened = smux_runtime_connection_open_v5(arm_domain_v3(), "a".repeat(32))
+        expect(opened.owner.is_none()).to_equal(true)
+        expect(opened.retained.is_some()).to_equal(true)
+        expect(opened.error).to_equal("linux-host-service-current-unpublished")
+
+    it "routes associated prepare and execute to the service dispatch and returns the owner":
+        # @req S53-ROUTE-03
+        val prepare = host_service_domain_turn_v3(arm_domain_v3(), HostServiceRequestV2("host-prepare", "op_1", "x"))
+        expect(prepare.exit_code).to_equal(2)
+        expect(prepare.response.contains("linux-host-service-current-unpublished")).to_equal(true)
+        val begun = host_service_execution_begin_v4(arm_domain_v3(), HostServiceRequestV2("host-execute", "op_1", "x"))
+        expect(begun.continuation.is_none()).to_equal(true)
+        expect(begun.exit_code).to_equal(2)
+        expect(begun.error == "host-linux-service-execution-route").to_equal(false)
+        expect(begun.error).to_equal("linux-host-service-current-unpublished")
+        match begun.domain.local:
+            case HostLocalRootV3.LinuxService(owner): expect(owner.root).to_equal("/nonexistent/linux-service")
+            case _: expect("other-arm").to_equal("linux-service")
+        step("validate and inspect stay explicit refusals")
+        val inspect = host_service_domain_turn_v3(arm_domain_v3(), HostServiceRequestV2("host-inspect", "op_1", ""))
+        expect(inspect.response.contains("host-linux-service-action-route")).to_equal(true)
+
+    it "binds ready publication and refuses it before any IO effect when the owner is not current":
+        # @req S53-CTRL-01
+        expect(host_controller_journal_binding_v3(arm_domain_v3()).unwrap_err()).to_equal("linux-host-service-current-unpublished")
+        val bound = TcpListener.bind("127.0.0.1:0")
+        expect(bound.is_ok()).to_equal(true)
+        if bound.is_err(): return
+        var listener = bound.unwrap()
+        val turn = host_controller_publication_begin_v3(arm_domain_v3(), listener, "/nonexistent/setup", "b".repeat(64), "c".repeat(32))
+        expect(turn.publication.is_none()).to_equal(true)
+        expect(turn.publication_state).to_equal("not-attempted")
+        expect(turn.completed).to_equal(false)
+        expect(turn.error).to_equal("linux-host-service-current-unpublished")
+        expect(listener.close().is_ok()).to_equal(true)
+
+    it "reports controller status only through current_v4 and refuses the podman root":
+        # @req S53-CTRL-02
+        expect(host_controller_status_v3(arm_domain_v3()).unwrap_err()).to_equal("linux-host-service-current-unpublished")
+        val origin = host_controller_retained_origin_v3(arm_domain_v3())
+        # On Linux the main-thread runner passes the procfs origin; any refusal
+        # is the origin guard's own, never the old backend refusal.
+        if origin.is_err(): expect(origin.unwrap_err().starts_with("linux-machine-")).to_equal(true)
+
+    it "refuses journal currency for an unauthenticated continuation":
+        # @req S53-CONT-01
+        val current = smux_host_continuation_current_v6(arm_domain_v3(), smux_host_continuation_new_v6(), false)
+        expect(current.is_err()).to_equal(true)

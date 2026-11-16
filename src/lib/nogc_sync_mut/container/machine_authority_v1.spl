@@ -32,7 +32,12 @@ use std.nogc_sync_mut.container.machine_fresh_probe_owner_v3.*
 use std.common.contracts.container.workspace_action_v3.ContainerWorkspaceActionV3
 use std.common.contracts.container.runtime_v1.RuntimeOperationV1
 use std.nogc_sync_mut.io.linux_fresh_workspace_binding_v3.LinuxFreshWorkspaceBindingV3
-use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.LinuxMachinePolicyOwnerV1
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.{LinuxMachinePolicyOwnerV1, LinuxMachinePolicyOpenV1,
+    linux_machine_policy_open_v1}
+use std.nogc_sync_mut.io.linux_service_native_identity_v3.{LinuxServiceNativeIdentityBorrowV3,
+    linux_service_native_identity_borrow_v3}
+use std.nogc_sync_mut.io.linux_fresh_epoch_store_inventory_v1.{LinuxFreshEpochStoreInventoryBorrowV1,
+    linux_fresh_epoch_store_inventory_borrow_v1}
 use std.nogc_sync_mut.container.machine_fresh_workload_projection_v2.machine_fresh_workload_scope_v2
 use std.nogc_sync_mut.container.machine_fresh_workload_history_v2.*
 use std.nogc_sync_mut.container.machine_fresh_workload_lifecycle_v2.*
@@ -240,6 +245,23 @@ pub struct MachineFreshEpochProviderStartTurnV1:
     started: bool = false
     error: text = ""
 
+# One Linux service loan. `owner` keeps the lent reader and custody on every
+# path; `native` is an observation borrow only and `epoch_digest` is the
+# digest of this owner's actual admitted record ("epoch-" + digest is the
+# service scope id of every workload projected from this epoch).
+pub struct MachineFreshEpochServiceLoanTurnV1:
+    owner: MachineFreshEpochAdmissionOwnerV1
+    native: Option<LinuxServiceNativeIdentityBorrowV3> = None
+    epoch_digest: text = ""
+    error: text = ""
+
+# One offline store-inventory loan inside an active service loan. `owner`
+# keeps the reader and custody on every path; `inventory` reads only.
+pub struct MachineFreshEpochStoreInventoryLoanTurnV1:
+    owner: MachineFreshEpochAdmissionOwnerV1
+    inventory: Option<LinuxFreshEpochStoreInventoryBorrowV1> = None
+    error: text = ""
+
 # Private construction requires the actual original writer, exact durable
 # charge, genuine transferred custody and a private canonical creator slot.
 pub class MachineFreshEpochAdmissionOwnerV1:
@@ -250,6 +272,13 @@ pub class MachineFreshEpochAdmissionOwnerV1:
     custody_generation: i64
     lifecycle: MachineFreshEpochLifecycleV1
     error: text
+    # Second machine-policy reader opened by the service lend (the original
+    # was consumed into storage). Retained here until close_v1, never moved.
+    service_reader: Option<LinuxMachinePolicyOwnerV1> = None
+    service_loaned: bool = false
+    # Store-inventory loan (milestone_0019 M2): only inside the service loan,
+    # over the same retained service reader and custody; it ends first.
+    store_inventory_loaned: bool = false
 
     pub fn current_v1() -> Result<MachineFreshEpochRecordV1, text>:
         val phase = self.lifecycle.phase_v1()?
@@ -294,6 +323,12 @@ pub class MachineFreshEpochAdmissionOwnerV1:
 
     pub fn start_provider_v1(template: GroupProcessStreamLaunchV2) -> MachineFreshEpochProviderStartTurnV1:
         var retained = MachineFreshEpochProviderStartTurnV1(owner: self)
+        # A lent (or once-lent) epoch never starts its provider: the store
+        # inventory loan rests on the provider staying never-started, and the
+        # direct spawn would bypass the masked unit the manager checks.
+        if self.service_loaned or self.store_inventory_loaned or self.service_reader.is_some():
+            retained.error = "machine-fresh-epoch-provider-start-after-service-loan"
+            return retained
         val initial_phase = self.lifecycle.phase_v1()
         if initial_phase.is_err():
             retained.error = initial_phase.unwrap_err()
@@ -346,8 +381,116 @@ pub class MachineFreshEpochAdmissionOwnerV1:
         val process = self.lifecycle.process_current_v1()?
         Ok(current)
 
+    # Lends this admitted epoch's actual native identity to ONE Linux service
+    # incarnation. No ownership moves: the lend opens its own second
+    # machine-policy reader (the original was consumed by open_storage_v1, so
+    # its process context is no longer readable) and retains it here on every
+    # path. At most once per owner; close_v1 and transfer_workload_v2 refuse
+    # while the loan is active.
+    pub fn lend_service_identity_v1() -> MachineFreshEpochServiceLoanTurnV1:
+        var retained = self
+        if retained.service_loaned:
+            return MachineFreshEpochServiceLoanTurnV1(owner: retained, error: "machine-fresh-epoch-service-loan-active")
+        if retained.service_reader.is_some():
+            return MachineFreshEpochServiceLoanTurnV1(owner: retained, error: "machine-fresh-epoch-service-loan-consumed")
+        if retained.custody.is_none():
+            return MachineFreshEpochServiceLoanTurnV1(owner: retained, error: "machine-fresh-epoch-service-loan-lender-consumed")
+        val current = retained.current_v1()
+        if current.is_err(): return MachineFreshEpochServiceLoanTurnV1(owner: retained, error: current.unwrap_err())
+        # Only a pre-creator epoch lends: once intent is committed or a launch
+        # attempted, the epoch belongs to that creator path, not a service.
+        val phase = retained.lifecycle.phase_v1()
+        if phase.is_err(): return MachineFreshEpochServiceLoanTurnV1(owner: retained, error: phase.unwrap_err())
+        if phase.unwrap() != "admitted":
+            return MachineFreshEpochServiceLoanTurnV1(owner: retained, error: "machine-fresh-epoch-service-loan-phase:" + phase.unwrap())
+        # Same digest convention as machine_fresh_workload_scope_v2.
+        val bytes = machine_fresh_epoch_record_bytes_v1(retained.record)
+        if bytes.is_err(): return MachineFreshEpochServiceLoanTurnV1(owner: retained, error: bytes.unwrap_err())
+        val digest = sha256_text(bytes.unwrap())
+        val reader = match linux_machine_policy_open_v1():
+            case LinuxMachinePolicyOpenV1.Rejected(reason):
+                return MachineFreshEpochServiceLoanTurnV1(owner: retained, error: reason)
+            case LinuxMachinePolicyOpenV1.CleanupRequired(owner, reason):
+                retained.service_reader = Some(owner)
+                return MachineFreshEpochServiceLoanTurnV1(owner: retained, error: reason)
+            case LinuxMachinePolicyOpenV1.Ready(owner): owner
+        retained.service_reader = Some(reader)
+        val borrowed = linux_service_native_identity_borrow_v3(reader, retained.custody.unwrap())
+        if borrowed.is_err(): return MachineFreshEpochServiceLoanTurnV1(owner: retained, error: borrowed.unwrap_err())
+        retained.service_loaned = true
+        MachineFreshEpochServiceLoanTurnV1(owner: retained, native: Some(borrowed.unwrap()), epoch_digest: digest)
+
+    # The borrower hands the exact lent borrow back by value. It must alias
+    # this owner's retained service reader and successor custody (same slot
+    # and generation); anything else keeps the loan active. The retained
+    # service reader stays owned here and is closed only by close_v1.
+    pub fn end_service_loan_v1(borrow: LinuxServiceNativeIdentityBorrowV3) -> MachineFreshEpochServiceLoanTurnV1:
+        var retained = self
+        if not retained.service_loaned:
+            return MachineFreshEpochServiceLoanTurnV1(owner: retained, error: "machine-fresh-epoch-service-loan-inactive")
+        if retained.service_reader.is_none() or retained.custody.is_none():
+            return MachineFreshEpochServiceLoanTurnV1(owner: retained, error: "machine-fresh-epoch-service-loan-lender-consumed")
+        val reader = retained.service_reader.unwrap()
+        val custody = retained.custody.unwrap()
+        if (borrow.reader.slot != reader.slot or borrow.reader.generation != reader.generation or
+                borrow.successor.slot != custody.slot or borrow.successor.generation != custody.generation):
+            return MachineFreshEpochServiceLoanTurnV1(owner: retained, error: "machine-fresh-epoch-service-loan-foreign-borrow")
+        if retained.store_inventory_loaned:
+            return MachineFreshEpochServiceLoanTurnV1(owner: retained, error: "machine-fresh-epoch-store-inventory-loan-active")
+        retained.service_loaned = false
+        MachineFreshEpochServiceLoanTurnV1(owner: retained)
+
+    # Lends an offline inventory of this epoch's held provider store to the
+    # service that holds the service loan. Valid only while that loan is
+    # active and the epoch is still pre-creator (`admitted`); the provider
+    # stays masked, so nothing is started. Ownership never moves.
+    pub fn lend_store_inventory_v1() -> MachineFreshEpochStoreInventoryLoanTurnV1:
+        var retained = self
+        if not retained.service_loaned:
+            return MachineFreshEpochStoreInventoryLoanTurnV1(owner: retained, error: "machine-fresh-epoch-store-inventory-service-loan-inactive")
+        if retained.store_inventory_loaned:
+            return MachineFreshEpochStoreInventoryLoanTurnV1(owner: retained, error: "machine-fresh-epoch-store-inventory-loan-active")
+        if retained.service_reader.is_none() or retained.custody.is_none():
+            return MachineFreshEpochStoreInventoryLoanTurnV1(owner: retained, error: "machine-fresh-epoch-service-loan-lender-consumed")
+        val current = retained.current_v1()
+        if current.is_err(): return MachineFreshEpochStoreInventoryLoanTurnV1(owner: retained, error: current.unwrap_err())
+        val phase = retained.lifecycle.phase_v1()
+        if phase.is_err(): return MachineFreshEpochStoreInventoryLoanTurnV1(owner: retained, error: phase.unwrap_err())
+        if phase.unwrap() != "admitted":
+            return MachineFreshEpochStoreInventoryLoanTurnV1(owner: retained,
+                error: "machine-fresh-epoch-store-inventory-loan-phase:" + phase.unwrap())
+        # Same epoch digest the service loan lent: plans projected from this
+        # epoch carry service_scope_id "epoch-" + it.
+        val bytes = machine_fresh_epoch_record_bytes_v1(retained.record)
+        if bytes.is_err(): return MachineFreshEpochStoreInventoryLoanTurnV1(owner: retained, error: bytes.unwrap_err())
+        val borrowed = linux_fresh_epoch_store_inventory_borrow_v1(retained.service_reader.unwrap(), retained.custody.unwrap(),
+            sha256_text(bytes.unwrap()))
+        if borrowed.is_err(): return MachineFreshEpochStoreInventoryLoanTurnV1(owner: retained, error: borrowed.unwrap_err())
+        retained.store_inventory_loaned = true
+        MachineFreshEpochStoreInventoryLoanTurnV1(owner: retained, inventory: Some(borrowed.unwrap()))
+
+    # The borrower hands the exact lent inventory borrow back by value; it must
+    # alias this owner's retained service reader and custody.
+    pub fn end_store_inventory_loan_v1(borrow: LinuxFreshEpochStoreInventoryBorrowV1) -> MachineFreshEpochStoreInventoryLoanTurnV1:
+        var retained = self
+        if not retained.store_inventory_loaned:
+            return MachineFreshEpochStoreInventoryLoanTurnV1(owner: retained, error: "machine-fresh-epoch-store-inventory-loan-inactive")
+        if retained.service_reader.is_none() or retained.custody.is_none():
+            return MachineFreshEpochStoreInventoryLoanTurnV1(owner: retained, error: "machine-fresh-epoch-service-loan-lender-consumed")
+        val reader = retained.service_reader.unwrap()
+        val custody = retained.custody.unwrap()
+        if (borrow.reader.slot != reader.slot or borrow.reader.generation != reader.generation or
+                borrow.successor.slot != custody.slot or borrow.successor.generation != custody.generation):
+            return MachineFreshEpochStoreInventoryLoanTurnV1(owner: retained, error: "machine-fresh-epoch-store-inventory-loan-foreign-borrow")
+        retained.store_inventory_loaned = false
+        MachineFreshEpochStoreInventoryLoanTurnV1(owner: retained)
+
     pub fn transfer_workload_v2() -> MachineFreshWorkloadTransferTurnV2:
         var retained = self
+        # A lent or once-lent owner never transfers: the transfer close does
+        # not own the retained service reader.
+        if retained.service_loaned or retained.store_inventory_loaned or retained.service_reader.is_some():
+            return MachineFreshWorkloadTransferTurnV2(None, Some(retained), "machine-fresh-epoch-service-loan-active")
         val actual = retained.current_v1()
         if actual.is_err(): return MachineFreshWorkloadTransferTurnV2(nil, Some(retained), actual.unwrap_err())
         if retained.lifecycle.phase_v1().unwrap() != "admitted":
@@ -383,6 +526,12 @@ pub class MachineFreshEpochAdmissionOwnerV1:
 
     pub fn close_v1() -> MachineFreshEpochCloseTurnV1:
         var retained = self
+        # Plain refusal, not a sticky lifecycle diagnostic: the borrower ends
+        # the loan and a later close proceeds cleanly.
+        if retained.store_inventory_loaned:
+            return MachineFreshEpochCloseTurnV1(Some(retained), false, "machine-fresh-epoch-store-inventory-loan-active")
+        if retained.service_loaned:
+            return MachineFreshEpochCloseTurnV1(Some(retained), false, "machine-fresh-epoch-service-loan-active")
         val phase = retained.lifecycle.phase_v1()
         if phase.is_err(): return MachineFreshEpochCloseTurnV1(Some(retained), false, phase.unwrap_err())
         if phase.unwrap() == "workload-transferred-v2":
@@ -409,6 +558,18 @@ pub class MachineFreshEpochAdmissionOwnerV1:
             if not ["released", "consumed-error"].contains(state):
                 if state != "retained": return retained.pending_close_v1("machine-fresh-epoch-writer-close:" + state)
                 return retained.pending_close_v1("", "machine-fresh-epoch-writer-close:" + state)
+        # Lent service reader: closed before custody, diagnostic retained as
+        # for the writer above. A retained/stale reader keeps close pending.
+        if val reader = retained.service_reader:
+            val state = reader.close_v1()
+            if ["released", "consumed-error"].contains(state): retained.service_reader = None
+            val actual_error = if state == "consumed-error": "machine-fresh-epoch-service-reader-consumed-error" else: ""
+            val recorded = retained.lifecycle.retain_diagnostic_v1(actual_error)
+            if recorded.is_err(): return retained.pending_close_v1(actual_error, recorded.unwrap_err())
+            retained.error = recorded.unwrap()
+            if not ["released", "consumed-error"].contains(state):
+                if state != "retained": return retained.pending_close_v1("machine-fresh-epoch-service-reader-close:" + state)
+                return retained.pending_close_v1("", "machine-fresh-epoch-service-reader-close:" + state)
         if val custody = retained.custody:
             val closed = custody.close_v1()
             retained.custody = closed.owner

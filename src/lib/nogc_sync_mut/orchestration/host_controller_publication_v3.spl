@@ -4,6 +4,7 @@ use std.io.tcp.TcpListener
 use std.nogc_sync_mut.orchestration.host_service_domain_v3.HostServiceDomainV3
 use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
 use std.nogc_sync_mut.orchestration.host_windows_local_root_v3.HostWindowsLocalRootV3
+use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.HostLinuxServiceCurrentV4
 use std.nogc_sync_mut.io.host_service_auth_listener_publication_v6.{HostServiceAuthListenerPublicationV6,
     HostServiceAuthListenerPublicationTurnV6, host_service_auth_listener_publication_begin_v6,
     host_service_auth_listener_publication_step_v6, host_service_auth_listener_publication_close_v6}
@@ -28,6 +29,16 @@ pub struct HostControllerPublicationTurnV3:
     error: text
 
 pub fn host_controller_journal_binding_v3(domain: HostServiceDomainV3) -> Result<HostControllerJournalBindingV3, text>:
+    match domain.local:
+        case HostLocalRootV3.LinuxService(service):
+            # current_v4 includes host_capacity_owner_linux_current_v3 and pins
+            # journal.root to the installed root's "journal" child, which is
+            # exactly where the Linux ready reader reopens it Linux-protected.
+            val current = service.current_v4()?
+            val journal = service.capacity.unwrap().journal
+            if journal.root != service.root + "/journal": return Err("controller-host-publication-journal-root")
+            return Ok(HostControllerJournalBindingV3(service.root, journal.lease_digest, journal.authority_digest))
+        case _: pass
     val local = match domain.local:
         case HostLocalRootV3.Windows(value): value
         case _: return Err("controller-host-publication-backend")
@@ -60,8 +71,34 @@ fn controller_publication_accept_v3(local: HostWindowsLocalRootV3,
         turn.host_authority_digest, turn.publication,
         turn.completed and error == "" and not turn.cleanup_pending, turn.cleanup_pending, error)
 
+# The caller has ALREADY written turn.journal back into the returned domain,
+# so the same borrowed journal is retained before any error is inspected.
+fn controller_publication_linux_turn_v3(domain: HostServiceDomainV3,
+        turn: HostServiceAuthListenerPublicationTurnV6) -> HostControllerPublicationTurnV3:
+    HostControllerPublicationTurnV3(domain, turn.owner, turn.ready_digest, turn.host_lease_digest,
+        turn.host_authority_digest, turn.publication,
+        turn.completed and turn.error == "" and not turn.cleanup_pending, turn.cleanup_pending, turn.error)
+
+# The service owner keeps its capacity in an Option; callers only reach this
+# with capacity present (begin via current_v4, step/close via the guard).
+fn controller_publication_service_accept_v3(original: HostLinuxServiceCurrentV4,
+        turn: HostServiceAuthListenerPublicationTurnV6) -> HostControllerPublicationTurnV3:
+    var local = original
+    var capacity = local.capacity.unwrap()
+    capacity.journal = turn.journal
+    local.capacity = Some(capacity)
+    controller_publication_linux_turn_v3(HostServiceDomainV3(HostLocalRootV3.LinuxService(local)), turn)
+
 pub fn host_controller_publication_begin_v3(domain: HostServiceDomainV3, listener: TcpListener,
         setup_path: text, pin: text, incarnation: text) -> HostControllerPublicationTurnV3:
+    match domain.local:
+        case HostLocalRootV3.LinuxService(service):
+            val current = service.current_v4()
+            if current.is_err(): return controller_publication_refused_v3(domain, None, current.unwrap_err())
+            val turn = host_service_auth_listener_publication_begin_v6(listener, service.capacity.unwrap().journal,
+                setup_path, pin, incarnation)
+            return controller_publication_service_accept_v3(service, turn)
+        case _: pass
     val local = match domain.local:
         case HostLocalRootV3.Windows(value): value
         case _: return controller_publication_refused_v3(domain, nil, "controller-host-publication-backend")
@@ -73,6 +110,16 @@ pub fn host_controller_publication_begin_v3(domain: HostServiceDomainV3, listene
 
 pub fn host_controller_publication_step_v3(domain: HostServiceDomainV3, listener: TcpListener,
         publication: HostServiceAuthListenerPublicationV6, cancel: bool = false) -> HostControllerPublicationTurnV3:
+    match domain.local:
+        case HostLocalRootV3.LinuxService(service):
+            # Drain is never gated on a renewed current_v4. A missing capacity
+            # keeps the publication owner retained for recovery.
+            if service.capacity.is_none():
+                return controller_publication_refused_v3(domain, Some(publication), "controller-host-publication-journal-missing")
+            val turn = host_service_auth_listener_publication_step_v6(listener, publication,
+                service.capacity.unwrap().journal, cancel)
+            return controller_publication_service_accept_v3(service, turn)
+        case _: pass
     val local = match domain.local:
         case HostLocalRootV3.Windows(value): value
         case _: return controller_publication_refused_v3(domain, Some(publication), "controller-host-publication-backend")
@@ -83,6 +130,13 @@ pub fn host_controller_publication_step_v3(domain: HostServiceDomainV3, listener
 
 pub fn host_controller_publication_close_v3(domain: HostServiceDomainV3,
         publication: HostServiceAuthListenerPublicationV6) -> HostControllerPublicationTurnV3:
+    match domain.local:
+        case HostLocalRootV3.LinuxService(service):
+            if service.capacity.is_none():
+                return controller_publication_refused_v3(domain, Some(publication), "controller-host-publication-journal-missing")
+            val turn = host_service_auth_listener_publication_close_v6(publication, service.capacity.unwrap().journal)
+            return controller_publication_service_accept_v3(service, turn)
+        case _: pass
     val local = match domain.local:
         case HostLocalRootV3.Windows(value): value
         case _: return controller_publication_refused_v3(domain, Some(publication), "controller-host-publication-backend")
