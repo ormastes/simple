@@ -45,6 +45,9 @@ use compiler.hir.hir_definitions.{HirClass, HirStruct, HirField, HirFunction, Hi
 use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTable}
 use compiler.core.lexer_types.{Span}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind}
+use compiler.types.type_layout.{layoutattr_default_}
+use compiler.mir.mir_types.{MirTypeDefKind}
+use compiler.mir._MirLowering.module_lowering.*
 use compiler.common.attributes.{ExportAttr, DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
 use compiler.common.dependency.visibility.{Visibility}
 
@@ -115,6 +118,7 @@ fn make_field(name: text, type_: HirType) -> HirField:
         type_: type_,
         has_default: false,
         default: dummy_expr(),
+        visibility: Visibility.Public,
         is_public: true,
         is_volatile: false,
         has_bits_attr: false,
@@ -286,6 +290,37 @@ fn make_module() -> HirModule:
     )
 
 describe "MIR exported type lowering":
+    it "preserves field identity when a struct layout reorders mixed widths":
+        var source = make_plain_struct()
+        source.has_layout_attr = true
+        source.layout_attr = layoutattr_default_()
+        source.fields = [make_field("small", make_u8_type()), make_field("wide", make_hir_type(HirTypeKind.Int(64, false)))]
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.lower_struct_type(source)
+        match lowering.builder.module.types[source.symbol].kind:
+            case MirTypeDefKind.Struct(fields):
+                expect(fields[0].name).to_equal("small")
+                expect(fields[0].offset).to_equal(8)
+                expect(fields[1].name).to_equal("wide")
+                expect(fields[1].offset).to_equal(0)
+            case _: fail("struct definition missing")
+
+    it "preserves field identity when a class layout reorders mixed widths":
+        var source = make_exported_class()
+        source.has_export_attr = false
+        source.has_layout_attr = true
+        source.layout_attr = layoutattr_default_()
+        source.fields = [make_field("small", make_u8_type()), make_field("wide", make_hir_type(HirTypeKind.Int(64, false)))]
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.lower_class_type(source)
+        match lowering.builder.module.types[source.symbol].kind:
+            case MirTypeDefKind.Struct(fields):
+                expect(fields[0].name).to_equal("small")
+                expect(fields[0].offset).to_equal(8)
+                expect(fields[1].name).to_equal("wide")
+                expect(fields[1].offset).to_equal(0)
+            case _: fail("class definition missing")
+
     # @manual scenario evidence
     it "materializes exported classes into MirModule.types with bit metadata":
         # @req REQ-SSPEC-COMPILER
