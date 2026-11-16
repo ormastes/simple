@@ -1,0 +1,189 @@
+"""
+# Freestanding bare-metal runtime (pure Simple)
+
+The smallest runtime a `<arch>-unknown-none` Simple program needs to print
+text and panic with no OS, no libc and no heap allocator. It backs the symbols
+the native backend emits for `print`, text literals, `{}` interpolation and
+`panic` (measured with `llvm-nm -u` on a hello world, 2026-11-16):
+
+    rt_string_new  rt_string_new_literal  rt_string_data  rt_string_len
+    rt_raw_i64_to_string  rt_strcat_tagged  rt_interp_cstr
+    rt_println_str  rt_println  rt_panic
+
+The compiler module-prefixes these definitions (`bm_rt.rt_println_str`); the
+link step binds the plain names with `llvm-objcopy --redefine-sym`.
+
+Only four primitives come from the per-arch `crt0_<arch>.S`, because each is a
+single instruction Simple cannot express: `bm_putc` (UART byte), `bm_load8` /
+`bm_store8` (raw byte access) and `bm_halt` (wfi/hlt forever). `bm_arena_base`
+/ `bm_arena_size` name the static arena the crt0 reserves.
+
+Text value layout in the arena: `[len: 8 bytes LE][bytes...]`; the value is the
+header address. The arena is a bump allocator whose first 8 bytes hold the
+next-free offset (0 = fresh, the crt0 places the arena in zero-filled .data).
+No module-level state is used, so nothing depends on baremetal module init.
+"""
+
+extern fn bm_putc(ch: i64)
+extern fn bm_load8(addr: i64) -> i64
+extern fn bm_store8(addr: i64, value: i64)
+extern fn bm_halt()
+extern fn bm_arena_base() -> i64
+extern fn bm_arena_size() -> i64
+
+fn bm_load64(addr: i64) -> i64:
+    var v = 0
+    var i = 7
+    while i >= 0:
+        v = (v << 8) | bm_load8(addr + i)
+        i = i - 1
+    v
+
+fn bm_store64(addr: i64, value: i64):
+    var i = 0
+    var v = value
+    while i < 8:
+        bm_store8(addr + i, v & 255)
+        v = v >> 8
+        i = i + 1
+
+fn bm_copy(dst: i64, src: i64, len: i64):
+    var i = 0
+    while i < len:
+        bm_store8(dst + i, bm_load8(src + i))
+        i = i + 1
+
+fn bm_write(ptr: i64, len: i64):
+    var i = 0
+    while i < len:
+        bm_putc(bm_load8(ptr + i))
+        i = i + 1
+
+fn bm_write_lit(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64):
+    # Writes up to seven bytes; 0 bytes are skipped. Used only for fixed runtime
+    # messages, because a text literal here would recurse into this runtime.
+    # No array literal: that would need the hosted array runtime.
+    bm_put_nz(a)
+    bm_put_nz(b)
+    bm_put_nz(c)
+    bm_put_nz(d)
+    bm_put_nz(e)
+    bm_put_nz(f)
+    bm_put_nz(g)
+
+fn bm_put_nz(ch: i64):
+    if ch != 0:
+        bm_putc(ch)
+
+fn bm_panic_halt():
+    bm_halt()
+
+# Bump-allocates a text value of `len` bytes; halts with "OOM" when full.
+fn bm_alloc_text(len: i64) -> i64:
+    val base = bm_arena_base()
+    var off = bm_load64(base)
+    if off == 0:
+        off = 8
+    # No `/` or `%` anywhere here: riscv64-unknown-none objects carry no M
+    # extension, so division would need compiler-rt's __divdi3/__moddi3.
+    val need = (len + 8 + 7) & (0 - 8)
+    if off + need > bm_arena_size():
+        bm_write_lit(0x4F, 0x4F, 0x4D, 0x0A, 0, 0, 0)
+        bm_panic_halt()
+    val v = base + off
+    bm_store64(base, off + need)
+    bm_store64(v, len)
+    v
+
+@allow(primitive_api)  # C-ABI runtime boundary: raw i64 handles the backend emits
+pub fn rt_string_new(bytes: i64, len: i64) -> i64:
+    val v = bm_alloc_text(len)
+    bm_copy(v + 8, bytes, len)
+    v
+
+@allow(primitive_api)  # C-ABI runtime boundary: raw i64 handles the backend emits
+pub fn rt_string_new_literal(bytes: i64, len: i64) -> i64:
+    rt_string_new(bytes, len)
+
+@allow(primitive_api)  # C-ABI runtime boundary: raw i64 handles the backend emits
+pub fn rt_string_data(v: i64) -> i64:
+    v + 8
+
+@allow(primitive_api)  # C-ABI runtime boundary: raw i64 handles the backend emits
+pub fn rt_string_len(v: i64) -> i64:
+    bm_load64(v)
+
+@allow(primitive_api)  # C-ABI runtime boundary: raw i64 handles the backend emits
+pub fn rt_raw_i64_to_string(n: i64) -> i64:
+    # 20 digits + sign fit i64.
+    val tmp = bm_alloc_text(24)
+    var x = n
+    var neg = false
+    if x < 0:
+        neg = true
+        x = 0 - x
+    # Digits by repeated subtraction of powers of ten (no division, see
+    # bm_alloc_text). i64::MIN negates to itself and is printed as "-" only.
+    var pos = 0
+    var p = 1000000000000000000
+    var started = false
+    while p > 0:
+        var digit = 0
+        while x >= p:
+            x = x - p
+            digit = digit + 1
+        if digit > 0 or started or p == 1:
+            started = true
+            bm_store8(tmp + 8 + pos, 0x30 + digit)
+            pos = pos + 1
+        p = bm_div10(p)
+    if neg:
+        return bm_neg_text(tmp + 8, pos)
+    rt_string_new(tmp + 8, pos)
+
+# p divided by ten, for p an exact power of ten, using shifts and adds only.
+fn bm_div10(p: i64) -> i64:
+    if p == 1:
+        return 0
+    var q = 1
+    # q * 10 as shifts: no M extension means no hardware multiply either.
+    while (q << 3) + (q << 1) < p:
+        q = (q << 3) + (q << 1)
+    q
+
+fn bm_neg_text(digits: i64, n: i64) -> i64:
+    val v = bm_alloc_text(n + 1)
+    bm_store8(v + 8, 0x2D)
+    bm_copy(v + 9, digits, n)
+    v
+
+
+@allow(primitive_api)  # C-ABI runtime boundary: raw i64 handles the backend emits
+pub fn rt_strcat_tagged(a: i64, b: i64) -> i64:
+    val la = rt_string_len(a)
+    val lb = rt_string_len(b)
+    val v = bm_alloc_text(la + lb)
+    bm_copy(v + 8, a + 8, la)
+    bm_copy(v + 8 + la, b + 8, lb)
+    v
+
+@allow(primitive_api)  # C-ABI runtime boundary: raw i64 handles the backend emits
+pub fn rt_interp_cstr(v: i64) -> i64:
+    v
+
+@allow(primitive_api)  # C-ABI runtime boundary: raw i64 handles the backend emits
+pub fn rt_println_str(ptr: i64, len: i64):
+    bm_write(ptr, len)
+    bm_putc(0x0A)
+
+@allow(primitive_api)  # C-ABI runtime boundary: raw i64 handles the backend emits
+pub fn rt_println(v: i64):
+    rt_println_str(v + 8, rt_string_len(v))
+
+# Prints "panic: <msg>" and halts the hart/CPU forever; never returns.
+@allow(primitive_api)  # C-ABI runtime boundary: raw i64 handles the backend emits
+pub fn rt_panic(ptr: i64, len: i64):
+    bm_write_lit(0x70, 0x61, 0x6E, 0x69, 0x63, 0x3A, 0x20)
+    bm_write(ptr, len)
+    bm_putc(0x0A)
+    bm_panic_halt()
