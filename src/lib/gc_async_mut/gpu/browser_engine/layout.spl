@@ -36,11 +36,16 @@ fn layout_tree(root: BeDomNode, viewport_w: f64, viewport_h: f64) -> BeLayoutBox
     Performs a simplified normal-flow block layout:
     - Width is inherited from parent (viewport for root).
     - Height accumulates children top-down.
+    The root is a block formatting context root (CSS 2.2 §9.4.1, like
+    `<html>`): no child margin collapses through it. Its own margins are not
+    applied.
     """
-    _layout_block_node(root, 0.0, 0.0, viewport_w, viewport_h)
+    _layout_block_node(root, 0.0, 0.0, viewport_w, viewport_h, true)
 
-fn _layout_block_node(node: BeDomNode, x: f64, y: f64, avail_w: f64, avail_h: f64) -> BeLayoutBox:
-    """Recursively compute layout for a single node."""
+fn _layout_block_node(node: BeDomNode, x: f64, y: f64, avail_w: f64, avail_h: f64, bfc_root: bool) -> BeLayoutBox:
+    """Recursively compute layout for a single node. `bfc_root` is set when the
+    container makes this box a BFC root that its own style cannot show (the
+    layout root, a flex item)."""
     if node.is_text():
         # Estimate text box height as 1.5 × font-size, width as content length
         val font_size = if node.style.font_size > 0.0: node.style.font_size else: 16.0
@@ -79,15 +84,22 @@ fn _layout_block_node(node: BeDomNode, x: f64, y: f64, avail_w: f64, avail_h: f6
 
     # Layout children top-down. Adjoining sibling margins collapse in block
     # flow only (CSS 2.2 §8.3.1); flex items never collapse (CSS Flexbox 1
-    # §4.2). Parent/child collapse is not modelled: the first child's top and
-    # last child's bottom margins stay inside this box's content height.
+    # §4.2). Parent/child collapse (§8.3.1): when this box lets its first
+    # child's top margin through, the caller already placed this box at the
+    # collapsed margin, so the first child sits at the content top; when it
+    # lets the last child's bottom margin through, that margin is left out of
+    # this box's height and the caller collapses it with the next sibling.
+    # Every adjoining set resolves as (largest positive + most negative).
     val collapse = style.display != "flex" and style.display != "inline-flex"
+    val items_bfc = _items_are_bfc_roots(style)
+    val top_through = not bfc_root and _top_margin_passes(style)
+    val bottom_through = not bfc_root and _bottom_margin_passes(style)
     val inner_x = x + style.padding_left + style.border_width
     val content_top = y + style.padding_top + style.border_width
     # cursor_y = bottom border edge of the previous child (or content top)
     var cursor_y = content_top
     val inner_w = self_w - px
-    var prev_mb = 0.0
+    var prev_mb = [0.0, 0.0]
     var has_prev = false
 
     var i = 0
@@ -99,10 +111,15 @@ fn _layout_block_node(node: BeDomNode, x: f64, y: f64, avail_w: f64, avail_h: f6
         # separate the siblings around it (CSS Display 3 §2.5).
         if not child.is_text() and child.style.display == "none":
             continue
-        val child_mt = if child.is_text(): 0.0 else: child.style.margin_top
-        var gap = prev_mb + child_mt
-        if has_prev and collapse:
-            gap = _collapse_margins(prev_mb, child_mt)
+        val child_mt = _top_margin_set(child, items_bfc)
+        var gap = _margin_set_value(child_mt)
+        if has_prev:
+            if collapse:
+                gap = _margin_set_value(_margin_set_join(prev_mb, child_mt))
+            else:
+                gap = _margin_set_value(prev_mb) + _margin_set_value(child_mt)
+        elif top_through:
+            gap = 0.0
         # Horizontal margins (CSS 2.2 §10.3.3): the child's margin box spans the
         # content width, so its border box starts at margin-left and an auto
         # width fills what the two margins leave. Auto margins take the
@@ -116,14 +133,15 @@ fn _layout_block_node(node: BeDomNode, x: f64, y: f64, avail_w: f64, avail_h: f6
         var child_w = inner_w - child_ml - child_mr
         if child_w < 0.0:
             child_w = 0.0
-        var child_box = _layout_block_node(child, inner_x + child_ml, cursor_y + gap, child_w, avail_h)
+        var child_box = _layout_block_node(child, inner_x + child_ml, cursor_y + gap, child_w, avail_h, items_bfc)
         child_box.margin_left = child_ml
         child_box.margin_right = child_mr
         cursor_y = cursor_y + gap + child_box.height
-        prev_mb = child_box.margin_bottom
+        prev_mb = _bottom_margin_set(child, items_bfc)
         has_prev = true
         box.children.push(child_box)
-    cursor_y = cursor_y + prev_mb
+    if not bottom_through:
+        cursor_y = cursor_y + _margin_set_value(prev_mb)
 
     # Determine self height: an explicit height is the content height unless
     # box-sizing:border-box; the content height never goes below 0.
@@ -170,18 +188,99 @@ fn _used_horizontal_margins(style: StyleProps, inner_w: f64) -> [f64]:
         return [leftover, mr]
     [ml, leftover]
 
-fn _collapse_margins(a: f64, b: f64) -> f64:
-    """Collapse two adjoining vertical margins (CSS 2.2 §8.3.1): the larger
-    positive one, the most negative one, or their sum when the signs differ."""
-    if a >= 0.0 and b >= 0.0:
-        if a > b:
-            return a
-        return b
-    if a < 0.0 and b < 0.0:
-        if a < b:
-            return a
-        return b
-    a + b
+fn _margin_set(m: f64) -> [f64]:
+    """A set of adjoining vertical margins as [largest positive, most
+    negative] (CSS 2.2 §8.3.1). Folding pairwise collapses is wrong once signs
+    mix (10, -5, 3 must give 5, not 8), so sets join component-wise and
+    resolve once."""
+    if m >= 0.0:
+        return [m, 0.0]
+    [0.0, m]
+
+fn _margin_set_join(a: [f64], b: [f64]) -> [f64]:
+    var pos = a[0]
+    if b[0] > pos:
+        pos = b[0]
+    var neg = a[1]
+    if b[1] < neg:
+        neg = b[1]
+    [pos, neg]
+
+fn _margin_set_value(m: [f64]) -> f64:
+    m[0] + m[1]
+
+fn _establishes_bfc(style: StyleProps) -> bool:
+    """Block formatting context roots detectable from StyleProps (CSS 2.2
+    §9.4.1, CSS Display 3): flex/grid/flow-root/inline-block/table boxes,
+    `overflow` other than visible/clip, floats, absolute/fixed positioning."""
+    val d = style.display
+    if d == "flex" or d == "inline-flex" or d == "grid" or d == "inline-grid":
+        return true
+    if d == "flow-root" or d == "inline-block" or d == "table" or d == "inline-table" or d == "table-cell":
+        return true
+    val o = style.overflow
+    if o != "" and o != "visible" and o != "clip":
+        return true
+    if style.float_css != "" and style.float_css != "none":
+        return true
+    style.position == "absolute" or style.position == "fixed"
+
+fn _items_are_bfc_roots(style: StyleProps) -> bool:
+    """Flex and grid items each establish an independent formatting context."""
+    val d = style.display
+    d == "flex" or d == "inline-flex" or d == "grid" or d == "inline-grid"
+
+fn _top_margin_passes(style: StyleProps) -> bool:
+    """A box's top margin adjoins its first in-flow child's (CSS 2.2 §8.3.1)
+    with no top border, no top padding and no own BFC. Clearance is not
+    modelled on this path (no floats are placed here)."""
+    not _establishes_bfc(style) and style.padding_top == 0.0 and style.border_width == 0.0
+
+fn _bottom_margin_passes(style: StyleProps) -> bool:
+    """A box's bottom margin adjoins its last in-flow child's with no bottom
+    border/padding, an auto height and no own BFC. `height:0` reads as auto
+    and `min-height` is not in StyleProps."""
+    not _establishes_bfc(style) and style.padding_bottom == 0.0 and style.border_width == 0.0 and style.height <= 0.0
+
+fn _flow_child_index(node: BeDomNode, last: bool) -> i64:
+    """Index of the first (or last) child that generates a box, or -1.
+    display:none children are skipped. Empty children are not collapsed
+    through (open)."""
+    val n = node.children.len()
+    var i = 0
+    while i < n:
+        val k = if last: n - 1 - i else: i
+        val c = node.children[k]
+        if c.is_text() or c.style.display != "none":
+            return k
+        i = i + 1
+    -1
+
+fn _top_margin_set(node: BeDomNode, bfc_root: bool) -> [f64]:
+    """The collapsed top-margin set a box presents to its container: its own
+    margin-top joined with its first in-flow child's set when they adjoin."""
+    if node.is_text():
+        return [0.0, 0.0]
+    val m = _margin_set(node.style.margin_top)
+    if bfc_root or not _top_margin_passes(node.style):
+        return m
+    val k = _flow_child_index(node, false)
+    if k < 0:
+        return m
+    _margin_set_join(m, _top_margin_set(node.children[k], _items_are_bfc_roots(node.style)))
+
+fn _bottom_margin_set(node: BeDomNode, bfc_root: bool) -> [f64]:
+    """The collapsed bottom-margin set a box presents after itself: its own
+    margin-bottom joined with its last in-flow child's set when they adjoin."""
+    if node.is_text():
+        return [0.0, 0.0]
+    val m = _margin_set(node.style.margin_bottom)
+    if bfc_root or not _bottom_margin_passes(node.style):
+        return m
+    val k = _flow_child_index(node, true)
+    if k < 0:
+        return m
+    _margin_set_join(m, _bottom_margin_set(node.children[k], _items_are_bfc_roots(node.style)))
 
 fn layout_node(node: BeDomNode, container: BeLayoutBox, parent_style: StyleProps) -> BeLayoutBox:
     """Lay out a single node within a container box and computed parent style.
