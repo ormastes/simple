@@ -29,6 +29,11 @@ pub fn llvm_ir_builder_set_simpleos_header(enabled: bool):
 # Re-import from split module for re-export (backward compatibility)
 use compiler.backend.llvm_passes.{LlvmPass, passes_for_level}
 
+# Fixed metadata id layout: !0-!5 debug-info header, !6-!7 bare-metal
+# attributes, !10-!20 TBAA, DISubprograms from !21 (next_debug_id).
+val LLVM_TBAA_FIRST_ID: i64 = 10
+val LLVM_DEBUG_FIRST_SUBPROGRAM_ID: i64 = 21
+
 # ============================================================================
 # LLVM IR Builder
 # ============================================================================
@@ -130,9 +135,9 @@ class LlvmIRBuilder:
             sb: builder_handle,
             current_function: nil,
             local_counter: 0,
-            debug_counter: 10,
+            debug_counter: LLVM_DEBUG_FIRST_SUBPROGRAM_ID,
             size_type: st,
-            tbaa_counter: 100,
+            tbaa_counter: LLVM_TBAA_FIRST_ID,
             target_arch: target_arch,
             target_vendor: target_vendor,
             target_os: target_os,
@@ -198,8 +203,8 @@ class LlvmIRBuilder:
         # string is truthy, so `!"no-builtins"` -> `false`), silently
         # rewriting the emitted line to the invalid `!0 = !false`. See
         # doc/08_tracking/bug/nvme_rv32_smp_flatten_seed_object_to_int_2026-07-19.md.
-        lines = lines.push("!0 = !{{!\"no-builtins\"}}")
-        lines = lines.push("!1 = !{{!\"trap-func-name\", !\"abort\"}}")
+        lines = lines.push("!6 = !{{!\"no-builtins\"}}")
+        lines = lines.push("!7 = !{{!\"trap-func-name\", !\"abort\"}}")
         lines = lines.push("")
         if self.header_emitted:
             for line in lines:
@@ -599,14 +604,10 @@ class LlvmIRBuilder:
         # Emitting verifier-clean metadata is the resolution the old comment
         # asked for, and it keeps llvm_opt_pipeline_spec's "Simple TBAA"
         # expectation honest instead of green-by-accident.
-        # The hierarchy is emitted at module end, after every DISubprogram:
-        # a module with more than 90 functions has debug ids past 100, and a
-        # fixed base 100 made llc reject the module with "Metadata id is
-        # already used" (compiler.mir.mir_data, 2026-11-16). No instruction
-        # carries a `!tbaa` tag yet, so moving the base is safe.
-        # ponytail: tbaa_tag_for_type still assumes base 100; derive it from
-        # this base when tags are attached to loads/stores.
-        val base = if self.debug_counter > self.tbaa_counter: self.debug_counter else: self.tbaa_counter
+        # Reserved ids (LLVM_TBAA_FIRST_ID): the old base 100 collided with
+        # DISubprogram ids in any module over 90 functions (llc: "Metadata id
+        # is already used", compiler.mir.mir_data, 2026-11-16).
+        val base = LLVM_TBAA_FIRST_ID
         val lb = "{"
         val rb = "}"
         self.emit("")
@@ -627,7 +628,7 @@ class LlvmIRBuilder:
 
     fn tbaa_tag_for_type(ty: text) -> i64:
         """Get TBAA access tag metadata ID for a given LLVM type."""
-        val base = 100  # Must match tbaa_counter initial value
+        val base = LLVM_TBAA_FIRST_ID
         if ty == "i64" or ty == "i32" or ty == "i16" or ty == "i8":
             return base + 6
         if ty == "double" or ty == "float":
