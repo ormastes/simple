@@ -5,7 +5,7 @@ use compiler.common.config.{Logger}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.frontend.parser_types.{ParserModule}
-use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module, LoweringErrorKind}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
 use compiler.hir.hir_types.*
@@ -32,6 +32,8 @@ fn declared_params_fixture() -> HirModule:
     expect(lowering.errors.len()).to_equal(0)
     hir
 
+var trait_fixture_recovered_count = -1
+
 fn declared_params_generic_trait_fixture() -> HirModule:
     val logger = Logger(level: 0)
     val traits = "pub trait Emit<T>:\n    fn emit(value: T):\n        pass\n    fn marker() -> i64\n"
@@ -45,8 +47,17 @@ fn declared_params_generic_trait_fixture() -> HirModule:
     expect(surfaces.is_ok()).to_equal(true)
     var lowering = hirlowering_for_module("params.consumer", surfaces.unwrap())
     val hir = lowering.lower_module(parse_full_frontend(consumer, "params.consumer", "params.consumer", logger))
-    expect(lowering.errors.len()).to_equal(0)
+    # Hard errors only: the staged W-HIR-UNDECL-IMPORT-001 recovered warning
+    # this fixture currently triggers is pinned separately below.
+    var hard_errors = 0
+    for e in lowering.errors:
+        match e.kind:
+            case LoweringErrorKind.Recovered: ()
+            case _: hard_errors = hard_errors + 1
+    expect(hard_errors).to_equal(0)
+    trait_fixture_recovered_count = lowering.errors.len() - hard_errors
     hir
+
 
 fn check_declared_params(hir: HirModule):
     val id = hir.symbols.lookup_or_invalid("params.owner.Builder::emit_const_float")
@@ -62,7 +73,7 @@ fn check_declared_params(hir: HirModule):
         case Named(owner, _): expect(owner.id).to_equal(nominal)
         case _: expect(false).to_equal(true)
     val hir_float = match params[3].kind:
-        case F64: true
+        case HirTypeKind.Float(bits): bits == 64
         case _: false
     expect(hir_float).to_equal(true)
     var lowering = MirLowering.new(hir.symbols)
@@ -75,7 +86,7 @@ fn check_declared_params(hir: HirModule):
                     expect(signature.declared_params_known).to_equal(true)
                     expect(signature.declared_params.len()).to_equal(4)
                     val mir_float = match signature.declared_params[3].kind:
-                        case F64: true
+                        case MirTypeKind.F64: true
                         case _: false
                     expect(mir_float).to_equal(true)
                 case _: expect(false).to_equal(true)
@@ -96,8 +107,11 @@ describe "imported callable declared parameter metadata":
         val hir = declared_params_fixture()
         val empty = hir.symbols.get_symbol(hir.symbols.lookup_or_invalid("empty")).unwrap()
         val unknown = hir.symbols.get_symbol(hir.symbols.lookup_or_invalid("unknown")).unwrap()
-        expect(empty.declared_param_types_v1.?).to_equal(true)
-        expect(empty.declared_param_types_v1.unwrap().len()).to_equal(0)
+        # `.?` is presence AND non-empty, so known-empty is checked by binding.
+        var empty_known_zero = false
+        if val empty_params = empty.declared_param_types_v1:
+            empty_known_zero = empty_params.len() == 0
+        expect(empty_known_zero).to_equal(true)
         expect(unknown.declared_param_types_v1 == nil).to_equal(true)
 
     it "keeps callable metadata through a lexical alias rename":
@@ -124,7 +138,7 @@ describe "imported callable declared parameter metadata":
                 expect(owner.id).to_equal(hir.symbols.lookup_qualified_type_raw("params.kinds", "PrimitiveType"))
             case _: expect(false).to_equal(true)
         val float_parameter = match params[1].kind:
-            case F64: true
+            case HirTypeKind.Float(bits): bits == 64
             case _: false
         expect(float_parameter).to_equal(true)
 
@@ -135,6 +149,13 @@ describe "imported callable declared parameter metadata":
         val symbol: HirSymbol = hir.symbols.get_symbol(id).unwrap()
         expect(symbol.type_ == nil).to_equal(true)
         expect(symbol.declared_param_types_v1 == nil).to_equal(true)
+
+    it "does not report an uninstantiated trait binder as an undeclared import":
+        # RED by design: pre-existing staged W-HIR-UNDECL-IMPORT-001 on the
+        # trait binder `T`; see doc/08_tracking/bug/
+        # trait_binder_reported_as_undeclared_import_2026-11-17.md
+        declared_params_generic_trait_fixture()
+        expect(trait_fixture_recovered_count).to_equal(0)
 
     it "retains known-empty proof in the actual emitted direct-call signature":
         val hir = declared_params_fixture()
