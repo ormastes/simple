@@ -58,3 +58,29 @@ not explicitly imported keep the old last-wins fallback.
   `primitive_field_method_call_is_builtin_qualified`, native_project
   `native_project_fs_platform_aliases_keep_the_sync_path_owner` and
   `test_linker_fails_closed_on_undefined_runtime_symbol`, interpreter 4 (vulkan, cache_host, ...).
+
+## #6953 follow-up (2026-11-16): discriminant = owning enum's declared index
+
+Branch `work/enum-discriminant-order-6953-20261116`. Lowering, MIR, codegen,
+the interpreter bridge and `rt_enum_discriminant` now take a variant's
+discriminant from its owning enum's declaration; the process-global
+name-keyed registry (`runtime/src/value/objects.rs` `positional_registry`,
+read by `hash_variant_discriminant`) is only the reported fallback
+(`warning[enum-discriminant-owner-unresolved]`, fatal with
+`SIMPLE_ENUM_OWNER_STRICT=1`). Builtin `Ok`/`Err`/`Some`/`None` keep 0/1 only
+when the owner IS `Result`/`Option` (`TraceLevel.None` = 0 is its own index).
+
+Open, recorded rather than fixed:
+- **`TypeRegistry::update_named` is last-registration-wins by bare name**
+  (`compiler/src/hir/type_registry.rs` ~243), and so are the interpreter's
+  `GLOBAL_ENUMS` / `INTERP_ENUMS` maps the bridge consults. Two same-named
+  enums visible in one module (or one interpreter thread) resolve to whichever
+  registered last; the merged-name guard (`imports.rs duplicate_enum_defs` ->
+  `mark_merged_enum`) only covers the global seeded table.
+- **`codegen/instr/calls.rs` `compile_known_enum_constructor_call`** stays
+  name-only even when `ctx.enum_defs` holds a non-merged owner row: the
+  codegen context carries no merged-name set to tell the two apart. Not hit
+  in the integ4 Stage 2 build (1517 modules, 0 owner-unresolved warnings).
+- Untyped `.is_ok()`/`.is_err()` in Cranelift/LLVM codegen and the
+  `?`-operator `Err` checks (`hir/lower/expr/control.rs`) assume the builtin
+  Result; the codegen sites now report through the fallback.
