@@ -10,6 +10,8 @@ the original reservation deadline. Written for owners of the Linux Host service.
 ## Operator workflow
 Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
 Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-16).
+Shutdown (S40-SHUTDOWN-01) and the installed-credential pin are covered here;
+Linux reconciliation is not implemented (blocked on the upper Linux provider inventory).
 ## Compatibility and limitations
 Real Ed25519 signatures from the verifier fixture seeds and a real temporary
 capacity journal. No protected root reader, native identity borrow or
@@ -26,7 +28,7 @@ use test.fixtures.orchestration.host_linux_service_verifier_fixture_v1.*
 # Tests reach the module's private pure gates directly (repo rule: tests may access private).
 use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.{HostLinuxServiceCurrentV4, linux_service_proof_held_v4,
     linux_service_scope_v4, linux_service_status_bytes_v4, linux_service_prepare_authorize_v4, linux_service_association_v4,
-    linux_service_execute_authorize_core_v4}
+    linux_service_execute_authorize_core_v4, host_linux_service_close_v4}
 use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
 use std.nogc_sync_mut.io.host_linux_service_records_v4.*
 use std.nogc_sync_mut.io.linux_service_native_identity_v3.LinuxServiceNativeIdentitySnapshotV3
@@ -138,14 +140,17 @@ describe "Linux service V4 host composition (service 40)":
         step("the genuine proof of this installed association re-verifies against installed bytes")
         val fixture = s40_fixture()
         val proof = s40_proof(fixture)
-        expect(linux_service_proof_held_v4(proof, fixture.binding, Some(fixture.policy)).is_ok()).to_equal(true)
+        expect(linux_service_proof_held_v4(proof, fixture.binding, fixture.credential, Some(fixture.policy)).is_ok()).to_equal(true)
         step("no installed policy read, or a policy holding other keys, is refused")
-        expect(linux_service_proof_held_v4(proof, fixture.binding, None).unwrap_err()).to_equal("linux-service-enrollment-installed-policy-mismatch")
+        expect(linux_service_proof_held_v4(proof, fixture.binding, fixture.credential, None).unwrap_err()).to_equal("linux-service-enrollment-installed-policy-mismatch")
         val other_policy = linux_service_verifier_policy_ops_v1(2, 66, S40_OPERATIONS)
-        expect(linux_service_proof_held_v4(proof, fixture.binding, Some(other_policy)).unwrap_err()).to_equal("linux-service-enrollment-installed-policy-mismatch")
+        expect(linux_service_proof_held_v4(proof, fixture.binding, fixture.credential, Some(other_policy)).unwrap_err()).to_equal("linux-service-enrollment-installed-policy-mismatch")
         step("a proof of another association never starts this installed binding")
         val foreign = s40_proof(linux_service_verifier_fixture_ops_v1(1, 65, S40_FAR, "/var/lib/simple/other", S40_OPERATIONS))
-        expect(linux_service_proof_held_v4(foreign, fixture.binding, Some(fixture.policy)).unwrap_err()).to_equal("linux-host-service-proof-binding-mismatch")
+        expect(linux_service_proof_held_v4(foreign, fixture.binding, fixture.credential, Some(fixture.policy)).unwrap_err()).to_equal("linux-host-service-proof-binding-mismatch")
+        step("a genuine proof over a credential other than the installed one is refused")
+        val resigned = linux_service_verifier_credential_v1(fixture.binding, 1, 65, S40_FAR - 1)
+        expect(linux_service_proof_held_v4(proof, fixture.binding, resigned, Some(fixture.policy)).unwrap_err()).to_equal("linux-host-service-proof-credential-mismatch")
         step("an approval that expires while the service is down is refused at restart")
         val installed = local_authority_policy_decode_v1(fixture.policy).unwrap()
         val expires = host_local_context_v1(installed).grant_clock + 20000
@@ -156,7 +161,7 @@ describe "Linux service V4 host composition (service 40)":
             thread_sleep_ms(500)
             polls = polls + 1
         expect(host_local_context_v1(installed).grant_clock > expires).to_equal(true)
-        expect(linux_service_proof_held_v4(short_proof, short.binding, Some(short.policy)).unwrap_err()).to_equal("APPROVAL_EXPIRED")
+        expect(linux_service_proof_held_v4(short_proof, short.binding, short.credential, Some(short.policy)).unwrap_err()).to_equal("APPROVAL_EXPIRED")
 
     it "mints a stable service-incarnation scope from the actual native machine only":
         # @req S40-START-02
@@ -315,4 +320,32 @@ describe "Linux service V4 host composition (service 40)":
         expect(late.unwrap_err()).to_equal("prepare-expired")
         val closed = host_capacity_owner_close_owned_v2(held)
         expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "shuts down fail-closed and releases the retained journal":
+        # @req S40-SHUTDOWN-01
+        # @capture(statistics): close completion, retained carriers and post-close status refusal
+        step("a closed owner refuses status even if it was published")
+        var owner = HostLinuxServiceCurrentV4(root: "/var/lib/simple/hosts/host-root-x")
+        owner.published = true
+        owner.current_bytes = "record\n"
+        owner.current_relative = "linux-service-current/x.sdn"
+        val empty = host_linux_service_close_v4(owner)
+        expect(empty.completed).to_equal(true)
+        expect(empty.owner.status_v4().unwrap_err()).to_equal("linux-host-service-closed")
+        # Owned-lock journal branch; the Linux-protected close branch needs the real fixture driver.
+        step("a retained owned-lock capacity journal is closed through its owner and no longer retained")
+        val fixture = s40_fixture()
+        val root = secure_temp_dir("/tmp", "s40-close").unwrap()
+        val capacity = HostCapacityV1("worker_1", "host-authority", container_scope_fence_id_v2(s40_scope(fixture)).unwrap(), 41, 2000, 536870912, [])
+        var holding = HostLinuxServiceCurrentV4(root: root)
+        holding.capacity = Some(s40_open(root + "/journal", capacity))
+        val closed = host_linux_service_close_v4(holding)
+        expect(closed.completed).to_equal(true)
+        expect(closed.owner.capacity.is_none()).to_equal(true)
+        expect(closed.owner.journal_cleanup.is_none()).to_equal(true)
+        expect(closed.released_all).to_equal(true)
+        expect(closed.owner.status_v4().unwrap_err()).to_equal("linux-host-service-closed")
+        step("a repeated close of the released owner reports completion again, with nothing retained")
+        expect(host_linux_service_close_v4(closed.owner).completed).to_equal(true)
         expect(dir_remove(root, true)).to_equal(true)

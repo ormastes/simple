@@ -4,7 +4,7 @@
 # SOURCE_AUTHORED / NOT_RUN. The upper container producers (actual epoch digest,
 # draft projection), historical reservation reconciliation and the associated
 # execution commit are NOT on release; see
-# .spipe/simple_orchestrator/continuation_20261116/milestone_0016_service40/DESIGN.md.
+# .spipe/simple_orchestrator/continuation_20261116/milestone_0016_service40/DESIGN.md and milestone_0017_service40_reconcile/DESIGN.md.
 use std.common.contracts.orchestration.host_linux_service_enrollment_v3.{HostLinuxServiceEnrollmentBindingV3,
     host_linux_service_enrollment_digest_v3, host_linux_service_allocatable_v3}
 use std.common.contracts.orchestration.host_prepare_associated_v3.{HostPrepareAssociatedRequestV3,
@@ -22,19 +22,21 @@ use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, Container
     container_host_scope_bytes_v2, container_scope_fence_id_v2}
 use std.common.contracts.distributed_control_v2.ExecutionGrantV2
 use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalOpenCleanupV2,
+    distributed_operation_journal_open_cleanup_v2,
     distributed_operation_journal_publish_v3, distributed_operation_journal_read_v3,
     distributed_operation_journal_read_required_v3}
 use std.nogc_sync_mut.io.host_linux_service_records_v4.{HostLinuxServiceRecordsV4, LinuxServiceVerifiedEnrollmentV1,
     linux_service_enrollment_installed_v1}
 use std.nogc_sync_mut.io.host_private_metadata_v2.HostPrivateMetadataV2
-use std.nogc_sync_mut.io.linux_protected_root_reader_v1.LinuxProtectedRootReaderV1
+use std.nogc_sync_mut.io.host_enrollment_v1.{HostEnrollmentCredentialV1, host_enrollment_credential_encode_v1}
+use std.nogc_sync_mut.io.linux_protected_root_reader_v1.{LinuxProtectedRootReaderV1, linux_protected_root_reader_close_v1}
 use std.nogc_sync_mut.io.linux_service_native_identity_v3.{LinuxServiceNativeIdentityBorrowV3, LinuxServiceNativeIdentitySnapshotV3}
 use std.nogc_sync_mut.io.local_authority_policy_v1.{LocalAuthorityPolicyV1, host_local_context_v1}
 use std.nogc_sync_mut.orchestration.host_linux_service_records_v4.{host_linux_service_read_v4,
     host_linux_service_records_load_v4, linux_service_current_bytes_v4}
 use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{HostCapacityOwnerV1, HostCapacityOpenV2,
     host_capacity_owner_open_linux_v3, host_capacity_owner_linux_current_v3, host_capacity_owner_prepare_v1,
-    host_capacity_owner_prepared_receipt_v1}
+    host_capacity_owner_prepared_receipt_v1, host_capacity_owner_close_owned_v2}
 use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
 use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
 use std.common.build_manager.contracts.builder_digest_valid_v1
@@ -61,11 +63,14 @@ pub class HostLinuxServiceCurrentV4:
     current_relative: text = ""
     current_bytes: text = ""
     published: bool = false
+    closed: bool = false
+    close_error: text = ""
 
     # Rechecks readers, installed records, the sealed proof under freshly read
     # installed policy, the actual native identity, Linux-protected journal
     # currency and the stored current record before returning metadata.
     pub fn current_v4() -> Result<HostPrivateMetadataV2, text>:
+        if self.closed: return Err("linux-host-service-closed")
         if not self.published or self.current_bytes == "" or self.current_relative == "":
             return Err("linux-host-service-current-unpublished")
         if (self.root_reader.is_none() or self.parent_reader.is_none() or self.proof.is_none() or
@@ -74,7 +79,7 @@ pub class HostLinuxServiceCurrentV4:
             return Err("linux-host-service-acquisition-incomplete")
         val loaded = host_linux_service_records_load_v4(self.root, self.root_reader.unwrap(), self.parent_reader.unwrap())?
         linux_service_records_same_v4(self.records.unwrap(), loaded)?
-        linux_service_proof_read_v4(self.proof.unwrap(), loaded.binding, self.root_reader.unwrap())?
+        linux_service_proof_read_v4(self.proof.unwrap(), loaded.binding, loaded.credential, self.root_reader.unwrap())?
         val native = self.native.unwrap().current_v3()?
         if linux_service_native_key_v4(native) != linux_service_native_key_v4(self.native_snapshot.unwrap()):
             return Err("linux-host-service-native-changed")
@@ -126,19 +131,22 @@ fn linux_service_records_same_v4(original: HostLinuxServiceRecordsV4, loaded: Ho
         return Err("linux-host-service-installed-records-changed")
     Ok(())
 
-# The proof must be this installed association and must re-verify, with a fresh
-# clock, against policy bytes `held` that the caller read through its OWN
-# protected reader. An approval that expired while down is refused here.
+# The proof must be this installed association AND its installed credential,
+# and must re-verify, with a fresh clock, against policy bytes `held` that the
+# caller read through its OWN protected reader. An approval that expired while
+# down is refused here.
 fn linux_service_proof_held_v4(proof: LinuxServiceVerifiedEnrollmentV1, binding: HostLinuxServiceEnrollmentBindingV3,
-        held: Option<text>) -> Result<(), text>:
+        credential: HostEnrollmentCredentialV1, held: Option<text>) -> Result<(), text>:
     if proof.binding_digest()? != host_linux_service_enrollment_digest_v3(binding)?:
         return Err("linux-host-service-proof-binding-mismatch")
+    if proof.credential_digest()? != sha256_text(host_enrollment_credential_encode_v1(credential)?):
+        return Err("linux-host-service-proof-credential-mismatch")
     linux_service_enrollment_installed_v1(proof, held)
 
 fn linux_service_proof_read_v4(proof: LinuxServiceVerifiedEnrollmentV1, binding: HostLinuxServiceEnrollmentBindingV3,
-        reader: LinuxProtectedRootReaderV1) -> Result<(), text>:
+        credential: HostEnrollmentCredentialV1, reader: LinuxProtectedRootReaderV1) -> Result<(), text>:
     val held = host_linux_service_read_v4(reader, "authority-policy.sdn")?
-    linux_service_proof_held_v4(proof, binding, Some(held))
+    linux_service_proof_held_v4(proof, binding, credential, Some(held))
 
 # Stable service scope: signed physical/service IDs, actual native machine and
 # provider generation, empty boot and one fresh OS-random incarnation.
@@ -197,7 +205,7 @@ pub fn host_linux_service_start_v4(root: text, root_reader: LinuxProtectedRootRe
     if loaded.is_err(): return linux_service_start_error_v4(owner, loaded.unwrap_err())
     owner.records = Some(loaded.unwrap())
     val binding = loaded.unwrap().binding
-    val proved = linux_service_proof_read_v4(proof, binding, root_reader)
+    val proved = linux_service_proof_read_v4(proof, binding, loaded.unwrap().credential, root_reader)
     if proved.is_err(): return linux_service_start_error_v4(owner, proved.unwrap_err())
     val observed = native.current_v3()
     if observed.is_err(): return linux_service_start_error_v4(owner, observed.unwrap_err())
@@ -381,6 +389,59 @@ pub fn host_linux_service_dispatch_v4(owner: HostLinuxServiceCurrentV4, action: 
         return linux_service_reply_v4(owner, "", "linux-host-service-associated-execute-commit-unavailable", false)
     linux_service_reply_v4(owner, "", "linux-host-service-action-unknown", false)
 
-export HostLinuxServiceCurrentV4, HostLinuxServiceStartTurnV4, HostLinuxServiceReplyV4
+pub struct HostLinuxServiceCloseV4:
+    owner: HostLinuxServiceCurrentV4
+    completed: bool
+    released_all: bool
+    error: text
+
+fn linux_service_close_reason_v4(error: text, fallback: text) -> text:
+    if error != "": return error
+    fallback
+
+# Shutdown. `closed` is set first so no status/prepare/execute can follow.
+# Owner-bearing carriers stay ONLY in the returned owner: the journal owner is
+# cleared only once its close completed or its cleanup carrier was taken over;
+# readers are replaced by whatever the landed close retained. A failed release
+# is sticky in `close_error`, so a retry never reports a clean completion over
+# an earlier failure. The native identity borrow is released with its upper parent.
+pub fn host_linux_service_close_v4(original: HostLinuxServiceCurrentV4) -> HostLinuxServiceCloseV4:
+    var owner = original
+    owner.closed = true
+    var error = ""
+    if owner.journal_cleanup.is_some():
+        val turn = distributed_operation_journal_open_cleanup_v2(owner.journal_cleanup.unwrap())
+        owner.journal_cleanup = turn.cleanup
+        if not turn.closed or turn.error != "":
+            error = linux_service_close_reason_v4(turn.error, "linux-host-service-journal-close-pending")
+    if owner.capacity.is_some() and owner.journal_cleanup.is_none():
+        val turn = host_capacity_owner_close_owned_v2(owner.capacity.unwrap())
+        if turn.closed and turn.error == "":
+            owner.capacity = None
+        elif turn.cleanup.is_some():
+            owner.capacity = None
+            owner.journal_cleanup = turn.cleanup
+        if not turn.closed or turn.error != "":
+            if error == "": error = linux_service_close_reason_v4(turn.error, "linux-host-service-journal-close-pending")
+    elif owner.capacity.is_some():
+        if error == "": error = "linux-host-service-journal-cleanup-pending"
+    if owner.parent_reader.is_some():
+        val closed = linux_protected_root_reader_close_v1(owner.parent_reader.unwrap())
+        owner.parent_reader = closed.owner
+        if not closed.completed and error == "": error = linux_service_close_reason_v4(closed.error, "linux-host-service-reader-close-pending")
+    if owner.root_reader.is_some():
+        val closed = linux_protected_root_reader_close_v1(owner.root_reader.unwrap())
+        owner.root_reader = closed.owner
+        if not closed.completed and error == "": error = linux_service_close_reason_v4(closed.error, "linux-host-service-reader-close-pending")
+    if error != "": owner.close_error = error
+    val reported = if error != "": error else: owner.close_error
+    # released_all: nothing owner-bearing is retained now, even if an earlier
+    # attempt failed (that failure stays visible in `error`/`completed`).
+    val released = (owner.capacity.is_none() and owner.journal_cleanup.is_none() and owner.parent_reader.is_none() and
+        owner.root_reader.is_none())
+    HostLinuxServiceCloseV4(owner: owner, completed: reported == "", released_all: released, error: reported)
+
+export HostLinuxServiceCurrentV4, HostLinuxServiceStartTurnV4, HostLinuxServiceReplyV4, HostLinuxServiceCloseV4
+export host_linux_service_close_v4
 export host_linux_service_start_v4, host_linux_service_prepare_v4, host_linux_service_execute_authorize_v4
 export host_linux_service_dispatch_v4
