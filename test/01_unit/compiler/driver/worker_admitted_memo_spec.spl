@@ -1,0 +1,72 @@
+# Phase-3 unit child emitted 0 objects in 51 minutes (bug
+# unit_child_first_walk_resolves_every_edge_2026-11-16).
+#
+# Before its first ledger write, every per-file unit child walks the whole
+# admitted graph, and every import edge paid a full resolve + native-owner
+# check, even when another module in the same directory had just resolved the
+# same spelling. SIMPLE_WORKER_ADMITTED_MEMO=1 resolves each
+# (candidate, importer dir) pair once per walk; the graph must be identical.
+use std.spec
+use std.io_runtime.{env_set_process, env_remove_process}
+use compiler.driver.driver_worker_surface_closure_v1.{worker_admitted_edges_v1,
+    worker_admitted_resolutions_v1, worker_admitted_memo_key_v1, WORKER_ADMITTED_MEMO_ENV_V1}
+
+# Inventory: two providers plus `n` importers per directory, each importing
+# both providers.
+fn inventory(n: i64, dirs: [text]) -> ([text], [text], [text]):
+    var paths: [text] = ["src/lib/common/ctype.spl", "src/lib/common/numeric_round.spl"]
+    var contents: [text] = ["fn a():\n    pass\n", "fn b():\n    pass\n"]
+    var names: [text] = ["std.common.ctype", "std.common.numeric_round"]
+    for d in dirs:
+        var k = 0
+        while k < n:
+            paths.push("{d}/p3z_importer_{k}.spl")
+            contents.push("use std.common.ctype\nuse std.common.numeric_round\n")
+            names.push("p3z.importer{k}")
+            k = k + 1
+    (paths, contents, names)
+
+fn walk(memo: bool, n: i64, dirs: [text]) -> (i64, [[i64]], [text]):
+    if memo:
+        val _s = env_set_process(WORKER_ADMITTED_MEMO_ENV_V1, "1")
+    else:
+        val _r = env_remove_process(WORKER_ADMITTED_MEMO_ENV_V1)
+    val (paths, contents, names) = inventory(n, dirs)
+    val before = worker_admitted_resolutions_v1()
+    val got = worker_admitted_edges_v1(paths, contents, names, [], "")
+    val after = worker_admitted_resolutions_v1()
+    val _r2 = env_remove_process(WORKER_ADMITTED_MEMO_ENV_V1)
+    if got.is_err(): return (-1, [], [got.unwrap_err()])
+    (after - before, got.unwrap().edges, got.unwrap().errors)
+
+describe "worker admitted-graph resolution memo":
+    """
+    # @req P3Z-001: one walk resolves each (candidate, importer dir) once
+    """
+    it "resolves a spelling once for every importer in one directory":
+        step("12 importers in one directory share two import spellings")
+        val (off_count, off_edges, off_errors) = walk(false, 12, ["src/lib/common"])
+        val (on_count, on_edges, on_errors) = walk(true, 12, ["src/lib/common"])
+        step("memo off pays one resolution per edge; memo on pays one per spelling")
+        expect(on_count).to_equal(2)
+        expect(off_count).to_equal(24)
+        step("the frozen graph is unchanged")
+        expect(on_edges).to_equal(off_edges)
+        expect(on_errors).to_equal(off_errors)
+
+    it "keys on the importer directory and keeps per-importer error text":
+        """
+        # @req P3Z-002: relative resolution never crosses directories
+        """
+        step("3 importers in each of two directories")
+        val dirs = ["src/lib/common", "src/lib/common/text"]
+        val (off_count, off_edges, off_errors) = walk(false, 3, dirs)
+        val (on_count, on_edges, on_errors) = walk(true, 3, dirs)
+        expect(on_count).to_equal(4)
+        expect(off_count).to_equal(12)
+        expect(on_edges).to_equal(off_edges)
+        expect(on_errors).to_equal(off_errors)
+
+    it "separates logical owners only in a library mode":
+        expect(worker_admitted_memo_key_v1("a.b", "d", "", "o1")).to_equal(worker_admitted_memo_key_v1("a.b", "d", "", "o2"))
+        expect(worker_admitted_memo_key_v1("a.b", "d", "m", "o1") != worker_admitted_memo_key_v1("a.b", "d", "m", "o2")).to_equal(true)
