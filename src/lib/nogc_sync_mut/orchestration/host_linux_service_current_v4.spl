@@ -10,11 +10,12 @@ use std.common.contracts.orchestration.host_linux_service_enrollment_v3.{HostLin
 use std.common.contracts.orchestration.host_prepare_associated_v3.{HostPrepareAssociatedRequestV3,
     host_prepare_associated_decode_v3, host_prepare_associated_transport_v3}
 use std.common.contracts.orchestration.host_execution_association_v3.{HostExecutionAssociationV3, HostPreparedAssociatedReplyV3,
-    host_execution_association_encode_v3, host_execution_association_match_v3, host_prepared_associated_reply_encode_v3}
+    host_execution_association_encode_v3, host_execution_association_match_v3, host_prepared_associated_reply_encode_v3,
+    host_execution_association_digest_v3}
 use std.common.contracts.orchestration.host_execute_associated_v3.{HostExecuteAssociatedRequestV3,
     host_execute_associated_decode_v3, host_execute_associated_encode_v3}
 use std.common.contracts.orchestration.host_reservation_codec_v1.{HostPreparedReservationReceiptV1, host_reservation_encode_intent_v1}
-use std.common.contracts.orchestration.host_capacity_v1.HostCapacityV1
+use std.common.contracts.orchestration.host_capacity_v1.{HostCapacityV1, HostLedgerFenceV1}
 use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
 use std.common.contracts.orchestration.host_service_operation_v6.host_service_hex_shape_v6
 use std.common.contracts.container.execution_draft_v3.ContainerExecutionDraftV3
@@ -36,7 +37,8 @@ use std.nogc_sync_mut.orchestration.host_linux_service_records_v4.{host_linux_se
     host_linux_service_records_load_v4, linux_service_current_bytes_v4}
 use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{HostCapacityOwnerV1, HostCapacityOpenV2,
     host_capacity_owner_open_linux_v3, host_capacity_owner_linux_current_v3, host_capacity_owner_prepare_v1,
-    host_capacity_owner_prepared_receipt_v1, host_capacity_owner_close_owned_v2}
+    host_capacity_owner_prepared_receipt_v1, host_capacity_owner_close_owned_v2, host_capacity_owner_begin_associated_v3}
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
 use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
 use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
 use std.common.build_manager.contracts.builder_digest_valid_v1
@@ -356,8 +358,7 @@ pub fn host_linux_service_prepare_v4(original: HostLinuxServiceCurrentV4, source
     if reply.is_err(): return linux_service_reply_v4(owner, "", reply.unwrap_err(), true)
     linux_service_reply_v4(owner, reply.unwrap(), "", true)
 
-# Verified authorization only. Committing execution needs an associated
-# capacity begin that is not on release (DESIGN.md: execution commit).
+# Verified authorization only; host_linux_service_execute_v4 commits.
 # The preparation must still be live: its signed prepare re-verifies now and
 # the capacity owner reissues the identical receipt for the retained intent
 # (expired, aborted or consumed preparations get none). Fail closed.
@@ -379,14 +380,76 @@ pub fn host_linux_service_execute_authorize_v4(owner: HostLinuxServiceCurrentV4,
     val current = owner.current_v4()?
     Ok(grant)
 
+fn linux_service_execute_relative_v4(scope: ContainerHostScopeV2, operation_id: text) -> Result<text, text>:
+    Ok("host-execute-associated/" + sha256_text(container_scope_fence_id_v2(scope)? + "\n" + operation_id) + ".sdn")
+
+fn linux_service_admitted_reply_v4(owner: HostLinuxServiceCurrentV4, operation_id: text, association_digest: text,
+        effect_attempted: bool) -> HostLinuxServiceReplyV4:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("linux-host-execution-admission"),
+        "operationId": SdnValue.String(operation_id), "associationDigest": SdnValue.String(association_digest),
+        "state": SdnValue.String("execution-admitted"), "pending": SdnValue.Bool(true)}
+    linux_service_reply_v4(owner, sdn_encode_canonical(SdnValue.Dict(fields)) + "\n", "", effect_attempted)
+
+# Execute commit. A same-ID retry of the exact archived packet whose journal
+# row already left "admitted" is answered from the journal with no new
+# effect; a different packet for that operation is refused. Otherwise:
+# full re-authorization, a no-replace archive of the exact signed packet
+# (read back), then ONE associated begin on the original reservation row.
+# The actually returned journal is adopted even on error. Admission only:
+# the native launch is not composed here (DESIGN.md, milestone_0018).
+pub fn host_linux_service_execute_v4(original: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
+    var owner = original
+    val metadata = owner.current_v4()
+    if metadata.is_err(): return linux_service_reply_v4(owner, "", metadata.unwrap_err(), false)
+    val request = host_execute_associated_decode_v3(source)
+    if request.is_err(): return linux_service_reply_v4(owner, "", request.unwrap_err(), false)
+    val prepare = request.unwrap().prepare.prepare
+    val digest = host_execution_association_digest_v3(request.unwrap().association)
+    if digest.is_err(): return linux_service_reply_v4(owner, "", digest.unwrap_err(), false)
+    val relative = linux_service_execute_relative_v4(owner.scope.unwrap(), prepare.operation.id)
+    if relative.is_err(): return linux_service_reply_v4(owner, "", relative.unwrap_err(), false)
+    val journal = owner.capacity.unwrap().journal
+    val archived = distributed_operation_journal_read_v3(journal, relative.unwrap(), 2097152)
+    if archived.is_err(): return linux_service_reply_v4(owner, "", archived.unwrap_err(), false)
+    if archived.unwrap().is_some():
+        if archived.unwrap().unwrap() != source: return linux_service_reply_v4(owner, "", "linux-host-service-execution-packet-conflict", false)
+        val row = daemon_operation_exact_v2(journal, prepare.operation)
+        if row.is_err(): return linux_service_reply_v4(owner, "", row.unwrap_err(), false)
+        if row.unwrap().state != "admitted":
+            if row.unwrap().state != "executing": return linux_service_reply_v4(owner, "", "linux-host-service-execution-state-changed", true)
+            return linux_service_admitted_reply_v4(owner, prepare.operation.id, digest.unwrap(), false)
+    # Freshness baseline taken BEFORE authorization, so the commit-time gate
+    # covers the whole authorize -> archive -> begin window.
+    val before = host_local_context_v1(metadata.unwrap().policy)
+    val grant = host_linux_service_execute_authorize_v4(owner, source)
+    if grant.is_err(): return linux_service_reply_v4(owner, "", grant.unwrap_err(), false)
+    val approval = request.unwrap().approval
+    val deadline = if approval.expires_at < grant.unwrap().expires_at: approval.expires_at else: grant.unwrap().expires_at
+    # No-replace: an existing archive must be these exact bytes.
+    val saved = distributed_operation_journal_publish_v3(journal, relative.unwrap(), source)
+    if saved.is_err(): return linux_service_reply_v4(owner, "", saved.unwrap_err(), true)
+    val readback = distributed_operation_journal_read_required_v3(journal, relative.unwrap(), 2097152)
+    if readback.is_err(): return linux_service_reply_v4(owner, "", readback.unwrap_err(), true)
+    if readback.unwrap() != source: return linux_service_reply_v4(owner, "", "linux-host-service-execution-packet-conflict", true)
+    # Re-read installed policy after the archive; the commit refresh uses it.
+    val recheck = owner.current_v4()
+    if recheck.is_err(): return linux_service_reply_v4(owner, "", recheck.unwrap_err(), true)
+    val policy = recheck.unwrap().policy
+    val capacity = owner.capacity.unwrap()
+    val fence = HostLedgerFenceV1(capacity.ledger.capacity.authority_id, capacity.ledger.capacity.boot_id,
+        capacity.ledger.capacity.provider_generation, capacity.ledger.revision)
+    val refresh = fn() -> HostReservationAuthorizationContextV1: host_local_context_v1(policy)
+    val begun = host_capacity_owner_begin_associated_v3(capacity, prepare.intent, prepare.operation, request.unwrap().receipt,
+        fence, request.unwrap().association, request.unwrap().operation, grant.unwrap(), before, deadline, refresh)
+    owner.capacity = Some(begun.owner)
+    if begun.error != "": return linux_service_reply_v4(owner, "", begun.error, true)
+    linux_service_admitted_reply_v4(owner, prepare.operation.id, digest.unwrap(), true)
+
 # Accepted-connection dispatch: only the two associated actions exist here.
 pub fn host_linux_service_dispatch_v4(owner: HostLinuxServiceCurrentV4, action: text, source: text,
         project: fn(ContainerExecutionDraftV3) -> Result<ContainerExecutionRequestV2, text>) -> HostLinuxServiceReplyV4:
     if action == "host_prepare_associated_v3": return host_linux_service_prepare_v4(owner, source, project)
-    if action == "host_execute_associated_v3":
-        val authorized = host_linux_service_execute_authorize_v4(owner, source)
-        if authorized.is_err(): return linux_service_reply_v4(owner, "", authorized.unwrap_err(), false)
-        return linux_service_reply_v4(owner, "", "linux-host-service-associated-execute-commit-unavailable", false)
+    if action == "host_execute_associated_v3": return host_linux_service_execute_v4(owner, source)
     linux_service_reply_v4(owner, "", "linux-host-service-action-unknown", false)
 
 pub struct HostLinuxServiceCloseV4:
@@ -444,4 +507,4 @@ pub fn host_linux_service_close_v4(original: HostLinuxServiceCurrentV4) -> HostL
 export HostLinuxServiceCurrentV4, HostLinuxServiceStartTurnV4, HostLinuxServiceReplyV4, HostLinuxServiceCloseV4
 export host_linux_service_close_v4
 export host_linux_service_start_v4, host_linux_service_prepare_v4, host_linux_service_execute_authorize_v4
-export host_linux_service_dispatch_v4
+export host_linux_service_dispatch_v4, host_linux_service_execute_v4

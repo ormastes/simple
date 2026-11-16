@@ -10,7 +10,8 @@ the original reservation deadline. Written for owners of the Linux Host service.
 ## Operator workflow
 Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
 Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-16).
-Shutdown (S40-SHUTDOWN-01) and the installed-credential pin are covered here;
+Shutdown (S40-SHUTDOWN-01), the installed-credential pin and the associated
+execution commit gates (S40-COMMIT-01) are covered here;
 Linux reconciliation is not implemented (blocked on the upper Linux provider inventory).
 ## Compatibility and limitations
 Real Ed25519 signatures from the verifier fixture seeds and a real temporary
@@ -30,6 +31,8 @@ use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.{HostLinuxServ
     linux_service_scope_v4, linux_service_status_bytes_v4, linux_service_prepare_authorize_v4, linux_service_association_v4,
     linux_service_execute_authorize_core_v4, host_linux_service_close_v4}
 use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.host_capacity_owned_fresh_error_v3
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
 use std.nogc_sync_mut.io.host_linux_service_records_v4.*
 use std.nogc_sync_mut.io.linux_service_native_identity_v3.LinuxServiceNativeIdentitySnapshotV3
 use std.nogc_sync_mut.io.local_authority_policy_v1.{local_authority_policy_decode_v1, host_local_context_v1}
@@ -319,6 +322,67 @@ describe "Linux service V4 host composition (service 40)":
             host_local_context_v1(policy))
         expect(late.unwrap_err()).to_equal("prepare-expired")
         val closed = host_capacity_owner_close_owned_v2(held)
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "commits associated execution only through the associated begin on a protected journal":
+        # @req S40-COMMIT-01
+        # @capture(statistics): refusal reason per gate and the journal row state after each refusal
+        val fixture = s40_fixture()
+        val policy = local_authority_policy_decode_v1(fixture.policy).unwrap()
+        val scope = s40_scope(fixture)
+        val prepare = s40_prepare(scope, host_local_context_v1(policy).monotonic_ms + 600000, 1, 65)
+        val grant = linux_service_prepare_authorize_v4(scope, policy, "issuer_1", prepare, host_local_context_v1(policy)).unwrap()
+        val root = secure_temp_dir("/tmp", "s40-commit").unwrap()
+        val capacity = HostCapacityV1("worker_1", "host-authority", container_scope_fence_id_v2(scope).unwrap(), 41, 2000, 536870912, [])
+        val intent = prepare.prepare.intent
+        val operation = prepare.prepare.operation
+        val prepared = host_capacity_owner_prepare_v1(s40_open(root + "/journal", capacity), intent, operation, grant,
+            host_local_context_v1(policy)).unwrap()
+        val receipt = host_capacity_owner_prepared_receipt_v1(prepared, intent, operation, grant, host_local_context_v1(policy)).unwrap()
+        val association = s40_association(fixture, prepare, s40_native(fixture)).unwrap()
+        val execution = host_execute_associated_operation_v3(operation, association).unwrap()
+        val ledger = prepared.ledger
+        val fence = HostLedgerFenceV1(ledger.capacity.authority_id, ledger.capacity.boot_id, ledger.capacity.provider_generation, ledger.revision)
+        val associated = s40_grant(["host_execute_associated_v3"])
+        val refresh = fn() -> HostReservationAuthorizationContextV1: host_local_context_v1(policy)
+        step("the V1 begin refuses an associated-only grant")
+        expect(host_capacity_owner_begin_v1(prepared, intent, operation, receipt, fence, associated,
+            host_local_context_v1(policy)).unwrap_err()).to_equal("OPERATION_DENIED")
+        step("an envelope not bound to the association is refused before any effect")
+        val unbound = host_capacity_owner_begin_associated_v3(prepared, intent, operation, receipt, fence, association, operation, associated,
+            host_local_context_v1(policy), S40_FAR, refresh)
+        expect(unbound.error).to_equal("host-associated-execution-envelope-mismatch")
+        expect(unbound.effect_attempted).to_equal(false)
+        step("an envelope bound to a different association is refused: the payload is bound by the owner")
+        var foreign_native = s40_native(fixture)
+        foreign_native.process_identity_digest = "f".repeat(64)
+        val foreign = s40_association(fixture, prepare, foreign_native).unwrap()
+        val rebound = host_capacity_owner_begin_associated_v3(prepared, intent, operation, receipt, fence, association,
+            host_execute_associated_operation_v3(operation, foreign).unwrap(), associated, host_local_context_v1(policy), S40_FAR, refresh)
+        expect(rebound.error).to_equal("host-associated-execution-envelope-mismatch")
+        expect(rebound.effect_attempted).to_equal(false)
+        step("a prepare-only grant cannot commit the associated envelope")
+        val prepare_only = host_capacity_owner_begin_associated_v3(prepared, intent, operation, receipt, fence, association, execution,
+            s40_grant(["host_reservation_v1"]), host_local_context_v1(policy), S40_FAR, refresh)
+        expect(prepare_only.error).to_equal("OPERATION_DENIED")
+        step("a genuine associated grant still cannot commit on an unprotected journal")
+        val unprotected = host_capacity_owner_begin_associated_v3(prepared, intent, operation, receipt, fence, association, execution, associated,
+            host_local_context_v1(policy), S40_FAR, refresh)
+        expect(unprotected.error).to_equal("OPERATION_JOURNAL_LINUX_PROTECTED_REQUIRED")
+        expect(unprotected.effect_attempted).to_equal(false)
+        expect(daemon_operation_exact_v2(unprotected.owner.journal, operation).unwrap().state).to_equal("admitted")
+        step("the commit-time context must not regress, change or pass the signed deadline")
+        val now = host_local_context_v1(policy)
+        expect(host_capacity_owned_fresh_error_v3(now, now, S40_FAR)).to_equal("")
+        var regressed = now
+        regressed.grant_clock = now.grant_clock - 1
+        expect(host_capacity_owned_fresh_error_v3(now, regressed, S40_FAR)).to_equal("host-owned-authorization-clock-regressed")
+        var changed = now
+        changed.policy_revision = now.policy_revision + 1
+        expect(host_capacity_owned_fresh_error_v3(now, changed, S40_FAR)).to_equal("host-owned-authorization-context-changed")
+        expect(host_capacity_owned_fresh_error_v3(now, now, now.grant_clock)).to_equal("host-owned-authorization-expired")
+        val closed = host_capacity_owner_close_owned_v2(unprotected.owner)
         expect(closed.closed and closed.error == "").to_equal(true)
         expect(dir_remove(root, true)).to_equal(true)
 
