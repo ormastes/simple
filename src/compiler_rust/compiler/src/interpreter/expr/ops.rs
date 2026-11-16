@@ -833,6 +833,14 @@ pub(super) fn eval_op_expr(
                         Ok(result_family) => {
                             // Operation allowed - perform it on inner values
                             let result_val = evaluate_unit_binary_inner(lv, rv, *op)?;
+                            // Comparisons yield a plain bool, never a unit-wrapped one
+                            // (`5_fbytes == 5_fbytes` must be `true`, not `true_fbytes`).
+                            if matches!(
+                                op,
+                                BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq
+                            ) {
+                                return Ok(Some(result_val));
+                            }
                             // Return unit with result family (or left family if same-family operation).
                             //
                             // The result SUFFIX is the left operand's suffix whenever the
