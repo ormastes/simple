@@ -268,6 +268,15 @@ Red specs are in `83f6dae5031`. Seed: generic 3/4 -> 4/4, tail 6/8 -> 8/8.
   (`expr_dispatch.spl`, `expected_if_type` / `expected_match_type`). The arm
   narrow therefore also fires outside return position when that type is a
   plain tuple. It traps on None instead of returning a silent wrong value.
+- Review P2-1, fixed by `join_needs_default_def_v1`: dropping that default
+  left the join slot undefined on a live edge when an arm diverges through a
+  unit call, as in `fn die_arm(k) -> (i64, bool): if k > 0: (k, true) else:
+  die("neg")` and in the `elif` form `chain_die`. This is the NULL
+  merge-operand class (`mir_lower_child_tasks_append_access_violation_2026-10-19`).
+  `lower_if` and `lower_if_chain` now keep the default for a plain-tuple
+  expected slot. Guard: `child_tasks_append_lowering_spec`, which runs the
+  every-edge check, seed 2/3 -> 3/3. The same unit-arm shape is
+  pre-existing, and unchanged here, for `-> bool` tails and enum matches.
 - Not covered: a non-return conditional that typed HIR joins to `(A, B)?`
   still sends its raw tuple arm through `ensure_option_handle`. That is the
   same headerless-normalise hazard, and this change does not fix it.

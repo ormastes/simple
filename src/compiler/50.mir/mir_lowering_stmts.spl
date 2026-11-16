@@ -4320,6 +4320,19 @@ impl MirLowering:
         self.error_fatal("present collection binding lost declared optional payload", None)
         raw
 
+    me join_needs_default_def_v1(expected_type: HirType?) -> bool:
+        """Whether a value-position if / if-chain join slot gets the
+        dominating `Const 0` default def. Untyped joins always do (an arm may
+        end in a unit statement). So does a declared plain tuple slot
+        (is_plain_tuple_conditional_return_v1): a diverging unit arm such as
+        `else: die("neg")` defines nothing, and dropping the default left the
+        slot undefined on that live merge edge. Other expected types keep
+        their old behaviour.
+        doc/08_tracking/bug/stage2_payload_bind_and_tail_option_wrap_2026-11-16.md"""
+        if val found_expected = expected_type:
+            return self.is_plain_tuple_payload_slot_v1(found_expected)
+        true
+
     me lower_if(cond: HirExpr, then_: HirBlock, else_: HirBlock?, expected_type: HirType?) -> LocalId:
         """Lower if expression."""
         # The If dispatcher decodes and validates its mandatory payloads, but
@@ -4402,7 +4415,7 @@ impl MirLowering:
         # (`out.push(item)`), leaving `result` defined on one edge of the merge
         # only; native backends then read an undefined operand there. A
         # dominating default def makes every edge define it; arms overwrite it.
-        if expected_type == None and not result_slot_payloadless:
+        if self.join_needs_default_def_v1(expected_type) and not result_slot_payloadless:
             b.emit_const(result, MirConstValue.Int(0), MirType.i64())
         b.terminate_if(mir_operand_copy(cond_local), then_block, else_block)
         self.builder = b
@@ -4554,7 +4567,7 @@ impl MirLowering:
         # lower_if -- a statement-position chain with an else whose arms mix a
         # unit statement and a value-yielding one defines `result` on one merge
         # edge only. Dominating default def; arms overwrite it.
-        if chain_has_else and expected_type == None and not result_slot_payloadless:
+        if chain_has_else and self.join_needs_default_def_v1(expected_type) and not result_slot_payloadless:
             b.emit_const(result, MirConstValue.Int(0), MirType.i64())
         self.builder = b
         var result_defined = false
