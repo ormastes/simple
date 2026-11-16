@@ -1,0 +1,58 @@
+#!/bin/sh
+# Pin: the Rust runtime crate (src/compiler_rust/runtime) must type-check on
+# 32-bit Linux targets. Catches 64-bit assumptions (off_t/time_t/rlim_t width,
+# i64 st_size, x86_64-only syscall numbers) that broke the i686/armv7
+# cross-compile matrix rows. Uses clang as the C compiler/linker, never GCC.
+#
+# Usage: sh scripts/check/check-runtime-32bit-cargo-check.shs [target...]
+# Default targets: i686-unknown-linux-gnu armv7-unknown-linux-gnueabihf
+# Env: RT32_INSTALL_TARGETS=1 installs missing rustup targets (off by default).
+# Env: CARGO_TARGET_DIR (default build/runtime-32bit-check), CARGO_JOBS (default 8)
+# Verdict: PASS exit 0 / FAIL exit 1 / ERROR (nothing checked) exit 2.
+set -u
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+crate="$repo_root/src/compiler_rust/runtime"
+targets=${*:-"i686-unknown-linux-gnu armv7-unknown-linux-gnueabihf"}
+: "${CARGO_TARGET_DIR:=$repo_root/build/runtime-32bit-check}"
+export CARGO_TARGET_DIR
+jobs=${CARGO_JOBS:-8}
+
+if ! command -v cargo >/dev/null 2>&1 || ! command -v clang >/dev/null 2>&1; then
+    echo "ERROR — nothing was checked (cargo or clang not found)"
+    exit 2
+fi
+installed=$(rustup target list --installed 2>/dev/null)
+
+checked=0
+failed=""
+for t in $targets; do
+    if ! printf '%s\n' "$installed" | grep -qx "$t"; then
+        if [ "${RT32_INSTALL_TARGETS:-0}" != 1 ]; then
+            echo "ERROR — nothing was checked (rustup target $t not installed; rerun with RT32_INSTALL_TARGETS=1 to install)"; exit 2
+        fi
+        rustup target add "$t" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (rustup target $t unavailable)"; exit 2; }
+    fi
+    var=$(printf '%s' "$t" | tr 'a-z-' 'A-Z_')
+    cc_var=$(printf '%s' "$t" | tr '-' '_')
+    log="$CARGO_TARGET_DIR/$t.check.log"
+    mkdir -p "$CARGO_TARGET_DIR"
+    (cd "$crate" && env "CC_$cc_var=clang" "CARGO_TARGET_${var}_LINKER=clang" \
+        cargo check -j "$jobs" --target "$t" --lib --tests --message-format short) >"$log" 2>&1
+    rc=$?
+    checked=$((checked + 1))
+    if [ "$rc" -ne 0 ]; then
+        failed="$failed $t"
+        grep -E "(^|: )error" "$log" | head -20 >&2
+    fi
+done
+
+if [ "$checked" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+if [ -n "$failed" ]; then
+    echo "FAIL — simple-runtime does not type-check on:$failed (logs in $CARGO_TARGET_DIR)"
+    exit 1
+fi
+echo "PASS — $checked 32-bit target(s) checked, simple-runtime type-checks cleanly"
+exit 0

@@ -1,0 +1,80 @@
+# NOT_RUN. Pure production admission/byte contracts; no native launch fixture.
+# @req REQ-WINDOWS-COMMAND-001
+# @req REQ-WINDOWS-COMMAND-002
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.windows_command_contract_v2.*
+
+fn command_request() -> WindowsCommandRequestV2:
+    WindowsCommandRequestV2(program: "C:\\Tools\\docker.exe", args: ["inspect", "exact-id"],
+        environment: ["DOCKER_HOST=npipe:////./pipe/docker_engine", "PATH=C:\\Windows\\System32"],
+        directory: "C:\\Work", timeout_ms: 5000, max_output_bytes: 65536, expires_at_unix_ms: 2000)
+
+describe "Windows retained command contracts v2":
+    it "accepts the explicit absolute executable and environment shape":
+        step("Validate the actual production request contract without native effects")
+        expect(windows_command_request_validate_v2(command_request()).is_ok()).to_equal(true)
+
+    it "rejects implicit executable search and relative working directories":
+        step("Require an explicit executable and absolute working directory")
+        var request = command_request()
+        request.program = "docker.exe"
+        expect(windows_command_request_validate_v2(request).unwrap_err()).to_equal("windows-command-absolute-path-required")
+        request = command_request()
+        request.directory = "relative"
+        expect(windows_command_request_validate_v2(request).unwrap_err()).to_equal("windows-command-absolute-path-required")
+
+    it "rejects NUL in native launch fields":
+        step("Prevent native text truncation before preparation")
+        var request = command_request()
+        request.args = ["inspect\0hidden"]
+        expect(windows_command_request_validate_v2(request).unwrap_err()).to_equal("windows-command-argument-invalid")
+        request = command_request()
+        request.program = "C:\\Tools\\docker.exe\0hidden"
+        expect(windows_command_request_validate_v2(request).unwrap_err()).to_equal("windows-command-path-invalid")
+
+    it "refuses unbounded timeout capture and absent admission expiry":
+        step("Reject zero limits and missing launch expiry")
+        var request = command_request()
+        request.timeout_ms = 0
+        expect(windows_command_request_validate_v2(request).unwrap_err()).to_equal("windows-command-bounds")
+        request = command_request()
+        request.max_output_bytes = 16777217
+        expect(windows_command_request_validate_v2(request).unwrap_err()).to_equal("windows-command-bounds")
+        request = command_request()
+        request.expires_at_unix_ms = 0
+        expect(windows_command_request_validate_v2(request).unwrap_err()).to_equal("windows-command-bounds")
+
+    it "rejects malformed and case-insensitive duplicate environment entries":
+        step("Admit one unambiguous explicit Windows environment block")
+        var request = command_request()
+        request.environment = ["missing-equals"]
+        expect(windows_command_request_validate_v2(request).unwrap_err()).to_equal("windows-command-environment-invalid")
+        request.environment = ["PATH=first", "path=second"]
+        expect(windows_command_request_validate_v2(request).unwrap_err()).to_equal("windows-command-environment-duplicate")
+        request.environment = ["=C:=C:\\Work"]
+        expect(windows_command_request_validate_v2(request).unwrap_err()).to_equal("windows-command-environment-invalid")
+
+    it "rejects expiry at the boundary and unavailable clocks":
+        step("Use the same pre-effect gate for CreateProcess and ResumeThread")
+        expect(windows_command_admission_clock_v2(2000, 1999999).is_ok()).to_equal(true)
+        expect(windows_command_admission_clock_v2(2000, 2000000).unwrap_err()).to_equal("windows-command-admission-expired")
+        expect(windows_command_admission_clock_v2(2000, 0).unwrap_err()).to_equal("windows-command-admission-clock-unavailable")
+
+    it "preserves empty and spaced arguments in the production quoting path":
+        step("Quote complete argv instead of constructing a shell command")
+        var request = command_request()
+        request.args = ["", "two words"]
+        expect(windows_command_line_v2(request).unwrap()).to_equal("\"C:\\Tools\\docker.exe\" \"\" \"two words\"")
+
+    it "enforces timeout when the successful resume counter is zero":
+        step("Distinguish not resumed from an actual zero boot counter")
+        expect(windows_command_timeout_due_v2(false, 0u64, 999u64, 5).unwrap()).to_equal(false)
+        expect(windows_command_timeout_due_v2(true, 0u64, 4u64, 5).unwrap()).to_equal(false)
+        expect(windows_command_timeout_due_v2(true, 0u64, 5u64, 5).unwrap()).to_equal(true)
+        expect(windows_command_timeout_due_v2(true, 9u64, 8u64, 5).unwrap_err()).to_equal("windows-command-monotonic-clock-regressed")
+
+    it "decodes UTF8 only after complete bounded byte capture":
+        step("Preserve a multibyte scalar assembled across capture chunks")
+        expect(windows_command_output_decode_v2([226u8, 130u8, 172u8]).unwrap()).to_equal("€")
+        expect(windows_command_output_decode_v2([226u8, 130u8]).unwrap_err()).to_equal("windows-command-output-invalid-utf8")
+        expect(windows_command_output_decode_v2([]).unwrap()).to_equal("")

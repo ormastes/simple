@@ -621,7 +621,10 @@ const NATIVE_PTR_TAG_BITS: u64 = 0;
 fn native_word_exceeds_user_va(word: u64) -> bool {
     (word & !NATIVE_PTR_TAG_BITS) > NATIVE_USER_VA_MAX
 }
-const NATIVE_DIRECT_FUNCTION_RECORD_MARKER: usize = 0x5344_4952_4543_5446;
+// Codegen emits direct-function records as two 64-bit slots on every target
+// ([fn_addr, marker] at offsets 0 and 8), so the marker is a u64, not a usize.
+const NATIVE_DIRECT_FUNCTION_RECORD_MARKER: u64 = 0x5344_4952_4543_5446;
+const NATIVE_RECORD_SLOT_WORDS: usize = std::mem::size_of::<u64>() / std::mem::size_of::<usize>();
 
 enum NativeCallable {
     ClosureRecord {
@@ -837,14 +840,16 @@ unsafe fn native_callable(kind: i64, closure_arg: u64) -> Option<NativeCallable>
         });
     }
 
-    if native_words_readable(payload_addr, 2) == Some(false) {
+    if native_words_readable(payload_addr, 2 * NATIVE_RECORD_SLOT_WORDS) == Some(false) {
         return None;
     }
-    let entry = *(payload as *const usize);
+    let Ok(entry) = usize::try_from(*(payload as *const u64)) else {
+        return None;
+    };
     if entry < 4096 {
         return None;
     }
-    if *((payload as *const usize).add(1)) == NATIVE_DIRECT_FUNCTION_RECORD_MARKER {
+    if *((payload as *const u64).add(1)) == NATIVE_DIRECT_FUNCTION_RECORD_MARKER {
         return Some(NativeCallable::DirectFunction { entry, raw_worker_args });
     }
 

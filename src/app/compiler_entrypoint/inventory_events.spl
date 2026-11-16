@@ -16,7 +16,7 @@ use std.scv.compile_source_inventory.{compile_source_inventory_cache_root_valid_
     compile_source_inventory_publish_blob_v1, compile_source_inventory_gc_generations_v1}
 use std.nogc_sync_mut.io.dir_ops.{dir_walk, dir_list}
 use std.nogc_sync_mut.io.file_ops.{
-    file_delete, file_is_regular_no_follow, file_size,
+    file_delete, file_is_regular_no_follow, file_size, file_atomic_write,
     file_read_regular_no_follow_bounded, file_modified_time
 }
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
@@ -53,6 +53,8 @@ struct CompilerInventoryGitEventsV1:
     untracked_test_digest: text
     untracked_paths: [text]
     untracked_examples_tooling_digest: text = ""
+    # Tracked paths whose worktree/index differs from HEAD (dirty sidecar).
+    dirty_paths: [text] = []
 
 struct CompilerInventoryUntrackedDigestsV1:
     valid: bool
@@ -339,6 +341,7 @@ fn compiler_inventory_parse_porcelain_cost_v1(
     # interpret before advancing the cursor.
     var changed = events
     var untracked_paths: [text] = []
+    var dirty_paths: [text] = []
     for row in output.split("\n"):
         # @workaround bug=seed_untyped_byte_len_binding_raw_i64_misdecoded_2026_11_09 reason=a split() element is an erased receiver on the deployed seed; `row.byte_len()` is then typed ANY and the raw i64 is misdecoded (11 reads as `true`), so `<= 3` took the fail-closed arm and every cold/warm admission died with git-event-refresh-failed. Bind through a declared text first.
         val line: text = row
@@ -369,6 +372,7 @@ fn compiler_inventory_parse_porcelain_cost_v1(
         if next == nil:
             return nil
         changed = next!
+        dirty_paths.push(path)
     val untracked = untracked_paths.join("\n")
     val digests = compiler_inventory_untracked_digests_v1(
         untracked, source_roots)
@@ -381,7 +385,8 @@ fn compiler_inventory_parse_porcelain_cost_v1(
             return nil
         changed = next!
     Some(CompilerInventoryGitEventsV1(
-        changed, digests.src_digest, digests.test_digest, digests.paths, digests.examples_tooling_digest))
+        changed, digests.src_digest, digests.test_digest, digests.paths, digests.examples_tooling_digest,
+        dirty_paths))
 
 fn compiler_inventory_git_events_v1(
     root: text, previous_head: text, head: text, source_roots: [text], cold_init: bool
@@ -412,12 +417,26 @@ fn _compiler_inventory_git_events_traced_cost_v1(
         # enumeration. Derive both the cold inventory and its untracked
         # membership cursor from that same output; separate ls-files calls
         # could observe different directory memberships during refresh.
+        # --modified adds a `C` row (worktree differs from the index, deleted
+        # included) beside the `H` row; with staged-only changes those are the
+        # dirty tracked paths the sidecar must name.
         val listed = _compiler_inventory_git_lines_traced_v1(
             root, ["-c", "core.quotePath=false", "ls-files", "-t",
-                "--cached", "--others", "--exclude-standard", "--"] + source_roots, trace, 1)
+                "--cached", "--others", "--modified", "--exclude-standard", "--"] + source_roots, trace, 1)
         if listed == nil:
             return nil
+        val staged = compiler_inventory_git_lines_v1(
+            root, ["-c", "core.quotePath=false", "diff", "--cached", "--name-only",
+                "--no-renames", head, "--"] + source_roots)
+        if staged == nil:
+            return nil
         var untracked_paths: [text] = []
+        var dirty_paths: [text] = []
+        var dirty_seen: Dict<text, bool> = {}
+        for path in staged!.split("\n"):
+            if path != "" and not dirty_seen.has(path):
+                dirty_seen[path] = true
+                dirty_paths.push(path)
         for row in listed!.split("\n"):
             # @workaround bug=seed_untyped_byte_len_binding_raw_i64_misdecoded_2026_11_09 reason=same erased-receiver byte_len misdecode as the porcelain loop above; this is the cold-init arm that failed stage2 admission (phase_blockers item 7, 2026-11-09)
             val line: text = row
@@ -430,6 +449,12 @@ fn _compiler_inventory_git_events_traced_cost_v1(
                     tag != "R" and tag != "C":
                 return nil
             val path = line.substring(2)
+            if tag == "C":
+                # The `H` row of this path already pushed its event.
+                if not dirty_seen.has(path):
+                    dirty_seen[path] = true
+                    dirty_paths.push(path)
+                continue
             if tag == "?":
                 untracked_paths = untracked_paths.push(path)
             val next = compiler_inventory_event_push_cost_v1(
@@ -443,7 +468,7 @@ fn _compiler_inventory_git_events_traced_cost_v1(
             return nil
         return Some(CompilerInventoryGitEventsV1(
             events, digests.src_digest, digests.test_digest,
-            digests.paths, digests.examples_tooling_digest))
+            digests.paths, digests.examples_tooling_digest, dirty_paths))
     if head == "" or previous_head == "":
         return nil
     if head != previous_head:
@@ -570,6 +595,70 @@ fn compiler_inventory_membership_path_v1(
     cache_root: text, digest: text
 ) -> text:
     "{compiler_inventory_event_root_v1(cache_root)}/untracked/{digest}.paths"
+
+# Dirty-tracked sidecar: the tracked paths whose rows in inventory generation
+# <digest> may differ from HEAD (worktree/index dirty when it was published).
+# A warm refresh re-reads every listed path that is clean now; Git reports no
+# event for a dirty path turning clean (checkout, stash, edit back, restore).
+# Keyed and bound by the inventory digest named in CURRENT, so a generation
+# published by a binary that predates the sidecar has none and the owner
+# re-lists the tree once. Older binaries never read this directory.
+val COMPILER_INVENTORY_DIRTY_HEADER_V1: text = "simple-compile-dirty-tracked-v1"
+
+fn compiler_inventory_dirty_path_v1(cache_root: text, inventory_digest: text) -> text:
+    "{compiler_inventory_event_root_v1(cache_root)}/dirty/{inventory_digest}.paths"
+
+fn compiler_inventory_dirty_encode_v1(inventory_digest: text, paths: [text]) -> text:
+    var kept: [text] = []
+    var seen: Dict<text, bool> = {}
+    for path in paths:
+        if compile_source_inventory_path_valid_v1(path) and
+                compiler_inventory_family_v1(path) != "" and not seen.has(path):
+            seen[path] = true
+            kept.push(path)
+    kept.sort()
+    ([COMPILER_INVENTORY_DIRTY_HEADER_V1, "inventory={inventory_digest}",
+        "count={kept.len()}"] + kept).join("\n")
+
+# The sidecar bound to `inventory_digest`, or nil when it is missing, corrupt
+# or bound to another generation (the dirty set is then unknown).
+fn compiler_inventory_dirty_read_v1(cache_root: text, inventory_digest: text) -> [text]?:
+    if not compile_source_inventory_digest_valid_v1(inventory_digest):
+        return nil
+    val path = compiler_inventory_dirty_path_v1(cache_root, inventory_digest)
+    if not file_is_regular_no_follow(path):
+        return nil
+    val size = file_size(path)
+    if size <= 0 or size > 16 * 1024 * 1024:
+        return nil
+    val content = match file_read_regular_no_follow_bounded(path, size):
+        case Err(_): return nil
+        case Ok(value): value
+    val rows = content.split("\n")
+    if rows.len() < 3 or rows[0] != COMPILER_INVENTORY_DIRTY_HEADER_V1 or
+            rows[1] != "inventory={inventory_digest}" or not rows[2].starts_with("count="):
+        return nil
+    val count = rows[2].substring(6).to_i64() ?? -1
+    if count < 0 or rows.len() != count + 3:
+        return nil
+    var paths: [text] = []
+    var index = 3
+    while index < rows.len():
+        paths.push(rows[index])
+        index = index + 1
+    if compiler_inventory_dirty_encode_v1(inventory_digest, paths) != content:
+        return nil
+    Some(paths)
+
+# Missing sidecar costs one full re-list on the next refresh, never a wrong
+# row, so a failed write is not a refresh failure.
+fn compiler_inventory_dirty_write_v1(cache_root: text, inventory_digest: text, paths: [text]):
+    val content = compiler_inventory_dirty_encode_v1(inventory_digest, paths)
+    val path = compiler_inventory_dirty_path_v1(cache_root, inventory_digest)
+    if file_exists(path) and file_read(path) == content:
+        return
+    if dir_create(compiler_inventory_event_root_v1(cache_root) + "/dirty", true):
+        val _written = file_atomic_write(path, content)
 
 fn compiler_inventory_membership_encode_v1(paths: [text]) -> text:
     var rows = ["simple-compile-untracked-membership-v1", "count={paths.len()}"]
@@ -701,7 +790,7 @@ fn compiler_inventory_untracked_deletions_v1(
     Some(deletions)
 
 fn _compiler_inventory_refresh_observed_cost_v1(
-    root: text, cache_root: text, source_roots: [text], cold_init: bool,
+    root: text, cache_root: text, source_roots_requested: [text], cold_init_requested: bool,
     trace: CompilerInventoryTraceV1?, cost: ScvCompileCostV1?
 ) -> CompilerInventoryRefreshV1:
     # A cold refresh replaces the inventory, so source_roots must cover the
@@ -709,6 +798,15 @@ fn _compiler_inventory_refresh_observed_cost_v1(
     # union of src and test before calling this function.
     val pointer_content = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
     val cursor = compiler_inventory_cursor_read_v1(cache_root, pointer_content)
+    var previous_dirty: [text]? = nil
+    if cursor.valid and not cold_init_requested:
+        previous_dirty = compiler_inventory_dirty_read_v1(cache_root, cursor.inventory_digest)
+    # No dirty sidecar bound to CURRENT (a store from before the sidecar, or a
+    # generation an older binary published): which rows hold a since-reverted
+    # edit is unknown, so re-list the whole closed scope once.
+    val relist = cursor.valid and not cold_init_requested and previous_dirty == nil
+    val cold_init = cold_init_requested or relist
+    val source_roots = if relist: ["src", "test", "examples/10_tooling"] else: source_roots_requested
     if trace != nil:
         trace!.captured_pointer(pointer_content, cursor.inventory_digest,
             cursor.inventory_generation, cursor.untracked_membership_digest)
@@ -825,6 +923,22 @@ fn _compiler_inventory_refresh_observed_cost_v1(
             git_events.push(event)
         next_membership_paths = compiler_inventory_membership_merge_v1(
             previous!, observed.untracked_paths, source_roots)
+    var next_dirty = direct.dirty_paths
+    if previous_dirty != nil:
+        var still_listed: Dict<text, bool> = {}
+        for path in direct.dirty_paths: still_listed[path] = true
+        for path in observed.untracked_paths: still_listed[path] = true
+        for event in git_events: still_listed[event.source_identity] = true
+        for path in previous_dirty!:
+            if compiler_inventory_path_selected_v1(path, source_roots) and
+                    not still_listed.has(path):
+                # Dirty at the last refresh and clean now: Git reports nothing.
+                val next = compiler_inventory_event_push_v1(git_events, root, "modify", path)
+                if next == nil:
+                    return compiler_inventory_invalid_v1("dirty-tracked-reconcile-failed")
+                git_events = next!
+        next_dirty = compiler_inventory_membership_merge_v1(
+            previous_dirty!, direct.dirty_paths, source_roots)
     val untracked_src_digest = if observed.untracked_src_digest != "":
         observed.untracked_src_digest
     elif cursor.valid and cursor.untracked_src_digest != "":
@@ -937,6 +1051,7 @@ fn _compiler_inventory_refresh_observed_cost_v1(
         return compiler_inventory_invalid_v1(
             "observed-event-apply:" + inventory.reason)
     if trace != nil: trace!.published(inventory.digest, inventory.inventory!.generation)
+    compiler_inventory_dirty_write_v1(cache_root, inventory.digest, next_dirty)
     # CURRENT names membership_digest now. A sweeper that read the OLD pointer
     # may have just reclaimed a record we reused; put it back from the paths
     # in hand rather than leave a pointer at a missing record.
@@ -998,6 +1113,17 @@ fn compiler_inventory_gc_v1(cache_root: text, min_age_s: i64) -> i64:
         if recheck <= 0 or now - recheck < min_age_s:
             continue
         if file_delete(path):
+            removed = removed + 1
+    # Dirty sidecars: one per published generation. Deleting one that is still
+    # named only costs a re-list, so the age floor alone suffices.
+    val referenced_inventory = if cursor.valid: cursor.inventory_digest else: ""
+    val dirty_directory = compiler_inventory_event_root_v1(cache_root) + "/dirty"
+    for name in dir_list(dirty_directory):
+        if not name.ends_with(".paths") or name == referenced_inventory + ".paths":
+            continue
+        val path = "{dirty_directory}/{name}"
+        val modified = file_modified_time(path)
+        if modified > 0 and now - modified >= min_age_s and file_delete(path):
             removed = removed + 1
     removed
 
@@ -1183,6 +1309,10 @@ fn _compiler_inventory_admit_extra_roots_unlocked_v1(
         if compiler_inventory_publication_superseded_v1(inventory.reason):
             return compiler_inventory_invalid_v1("compile-event-refresh-snapshot-superseded")
         return compiler_inventory_invalid_v1("extra-root-admission-apply:" + inventory.reason)
+    # Extra roots are not Git families: the dirty set carries over unchanged.
+    val carried = compiler_inventory_dirty_read_v1(cache_root, cursor.inventory_digest)
+    if carried != nil:
+        compiler_inventory_dirty_write_v1(cache_root, inventory.digest, carried!)
     CompilerInventoryRefreshV1(
         true, "ok", inventory.digest, inventory.inventory!.generation)
 

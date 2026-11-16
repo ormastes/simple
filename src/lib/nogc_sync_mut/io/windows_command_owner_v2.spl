@@ -1,0 +1,393 @@
+# Canonical Windows-thread command continuation. No worker, PID lookup,
+# positive wait, Sleep, executable hashing or whole-command capture callback.
+# Explicit absolute executable trust matches the prior Docker capture boundary;
+# this is not a pinned-image or hostile-directory containment claim.
+pub use std.nogc_sync_mut.io.windows_command_contract_v2.{WindowsCommandRequestV2,
+    WindowsCommandResultV2}
+use std.nogc_sync_mut.io.windows_command_contract_v2.{windows_command_request_validate_v2,
+    windows_command_admission_clock_v2, windows_command_line_v2, windows_command_output_decode_v2,
+    windows_command_timeout_due_v2}
+use std.nogc_sync_mut.io.windows_command_abi_v2.*
+use std.nogc_sync_mut.io.windows_process_text.windows_process_wide_linear_v1
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u32,
+    volatile_read_u64, volatile_write_u32, volatile_write_u64}
+
+pub class WindowsCommandOwnerV2:
+    slot: i64
+
+pub struct WindowsCommandTurnV2:
+    owner: WindowsCommandOwnerV2?
+    result: WindowsCommandResultV2?
+    error: text
+
+# Only the canonical reducer can mint this receipt. No caller DTO constructor,
+# no process image/digest claim, and no invented bytes-seen/truncation facts.
+pub class WindowsCommandCaptureEvidenceV1:
+    stdout: [u8]
+    stderr: [u8]
+    stdout_eof: bool
+    stderr_eof: bool
+    terminal: bool
+    cleanup_confirmed: bool
+    attempted: bool
+
+    pub fn stdout_bytes_v1() -> [u8]: command_capture_copy_v1(self.stdout)
+    pub fn stderr_bytes_v1() -> [u8]: command_capture_copy_v1(self.stderr)
+    pub fn stdout_eof_v1() -> bool: self.stdout_eof
+    pub fn stderr_eof_v1() -> bool: self.stderr_eof
+    pub fn terminal_v1() -> bool: self.terminal
+    pub fn cleanup_confirmed_v1() -> bool: self.cleanup_confirmed
+    pub fn effect_attempted_v1() -> bool: self.attempted
+
+pub struct WindowsCommandCaptureTurnV1:
+    owner: Option<WindowsCommandOwnerV2>
+    result: Option<WindowsCommandResultV2>
+    evidence: Option<WindowsCommandCaptureEvidenceV1>
+    error: text
+    retirement_confirmed: bool
+
+fn command_capture_copy_v1(bytes: [u8]) -> [u8]:
+    var copied: [u8] = []
+    for byte in bytes: copied.push(byte)
+    copied
+
+pub fn windows_command_capture_begin_v1(request: WindowsCommandRequestV2) -> WindowsCommandCaptureTurnV1:
+    val turn = windows_command_begin_v2(request)
+    WindowsCommandCaptureTurnV1(turn.owner, turn.result, nil, turn.error, false)
+
+struct CommandState:
+    request: WindowsCommandRequestV2
+    stage: text = "prepare"
+    heap: i64 = 0
+    allocations: [i64] = []
+    # Fixed native pointers into allocations, never independently freed.
+    app: i64 = 0
+    argv: i64 = 0
+    cwd: i64 = 0
+    environment: i64 = 0
+    arena: i64 = 0
+    attributes: i64 = 0
+    attributes_initialized: bool = false
+    # Handle slots: job, process, primary thread, stdin, stdout read/write,
+    # stderr read/write. Failed CloseHandle leaves the original slot intact.
+    handles: [i64] = [0, 0, 0, 0, 0, 0, 0, 0]
+    assigned: bool = false
+    attempted: bool = false
+    resumed_at: u64 = 0u64
+    resumed: bool = false
+    termination_requested: bool = false
+    terminal: bool = false
+    stdout_eof: bool = false
+    stderr_eof: bool = false
+    stdout: [u8] = []
+    stderr: [u8] = []
+    exit_code: i64 = -1
+    limit_type: text = ""
+    error: text = ""
+    closed: bool = false
+
+# Nonreused slots and a single canonical thread make copied wrappers aliases
+# of one native owner. Every returned turn supersedes the caller's old copy.
+var commands: [CommandState?] = []
+
+fn fail(state: CommandState, reason: text) -> CommandState:
+    var changed = state
+    if changed.error == "": changed.error = reason
+    changed.stage = if changed.handles[1] != 0: "terminate" else: "cleanup"
+    changed
+
+pub fn windows_command_thread_check_v2() -> Result<(), text>:
+    @when(os="windows"):
+    val status = unsafe(capabilities: [ffi]): rt_windows_pty_owner_thread_guard_v1()
+    if status == 1: return Ok(())
+    Err("windows-command-canonical-thread-required")
+    @else:
+    Err("windows-command-host-unsupported")
+    @end
+
+pub fn windows_command_begin_v2(request: WindowsCommandRequestV2) -> WindowsCommandTurnV2:
+    match windows_command_request_validate_v2(request):
+        case Err(reason): return WindowsCommandTurnV2(None, None, reason)
+        case Ok(_): pass
+    match windows_command_thread_check_v2():
+        case Err(reason): return WindowsCommandTurnV2(None, None, reason)
+        case Ok(_): pass
+    if commands.len() >= 100000: return WindowsCommandTurnV2(None, None, "windows-command-slot-bound")
+    val slot = commands.len()
+    commands.push(Some(CommandState(request: request)))
+    WindowsCommandTurnV2(Some(WindowsCommandOwnerV2(slot: slot)), None, "")
+
+@unsafe(reason: "all temporary allocations immediately join the canonical cleanup list", capabilities: [ffi, raw_ptr])
+fn prepare(state: CommandState) -> CommandState:
+    var changed = state
+    val line = windows_command_line_v2(state.request)
+    if line.is_err(): return fail(changed, line.unwrap_err())
+    var sorted = state.request.environment
+    var index = 1
+    while index < sorted.len():
+        var prior = index
+        while prior > 0 and sorted[prior].to_upper() < sorted[prior - 1].to_upper():
+            val value = sorted[prior - 1]
+            sorted[prior - 1] = sorted[prior]
+            sorted[prior] = value
+            prior = prior - 1
+        index = index + 1
+    var environment = ""
+    for assignment in sorted: environment = environment + assignment + "\0"
+    if environment == "": environment = "\0"
+    changed.heap = GetProcessHeap()
+    if changed.heap == 0: return fail(changed, "windows-command-heap-unavailable")
+    changed.app = windows_process_wide_linear_v1(changed.heap, state.request.program)
+    changed.allocations.push(changed.app)
+    changed.argv = windows_process_wide_linear_v1(changed.heap, line.unwrap())
+    changed.allocations.push(changed.argv)
+    changed.cwd = windows_process_wide_linear_v1(changed.heap, state.request.directory)
+    changed.allocations.push(changed.cwd)
+    changed.environment = windows_process_wide_linear_v1(changed.heap, environment)
+    changed.allocations.push(changed.environment)
+    # arena layout: STARTUPINFOEX112, PROCESS_INFO24 at128, security24 at160,
+    # size8 at192, handlelist24 at208, joblimits144 at240, accounting48 at384,
+    # scratch DWORDs at448/456, pipe HANDLE outputs at464/472, bytes4096 at512.
+    changed.arena = HeapAlloc(changed.heap, 8u32, 4608u64)
+    changed.allocations.push(changed.arena)
+    for allocation in changed.allocations:
+        if allocation == 0: return fail(changed, "windows-command-allocation-failed")
+    volatile_write_u32(changed.arena + 160, 24)
+    volatile_write_u32(changed.arena + 176, 1)
+    changed.stage = "pipes"
+    changed
+
+@unsafe(reason: "captures both CreatePipe outputs even on failure; exact inherited endpoints only", capabilities: [ffi, raw_ptr])
+fn prepare_pipes(state: CommandState) -> CommandState:
+    var changed = state
+    val arena = state.arena
+    var failed = false
+    for stream in 0..2:
+        volatile_write_u64(arena + 464, 0)
+        volatile_write_u64(arena + 472, 0)
+        val made = CreatePipe(arena + 464, arena + 472, arena + 160, 4096u32)
+        changed.handles[4 + stream * 2] = volatile_read_u64(arena + 464)
+        changed.handles[5 + stream * 2] = volatile_read_u64(arena + 472)
+        if made == 0: failed = true
+        if made != 0 and SetHandleInformation(changed.handles[4 + stream * 2], 1u32, 0u32) == 0:
+            failed = true
+    # Reuse the owned UTF16 cwd allocation only as storage for its own text;
+    # NUL receives a separate tracked allocation and inheritable handle.
+    val nul = windows_process_wide_linear_v1(state.heap, "NUL")
+    changed.allocations.push(nul)
+    if nul == 0: return fail(changed, "windows-command-nul-allocation-failed")
+    val input = CreateFileW(nul, 2147483648u32, 3u32, arena + 160, 3u32, 128u32, 0)
+    if input != -1: changed.handles[3] = input
+    if failed or input == -1 or input == 0: return fail(changed, "windows-command-stream-admission-failed")
+    volatile_write_u32(arena, 112)
+    volatile_write_u32(arena + 60, 256)
+    volatile_write_u64(arena + 80, changed.handles[3])
+    volatile_write_u64(arena + 88, changed.handles[5])
+    volatile_write_u64(arena + 96, changed.handles[7])
+    volatile_write_u64(arena + 208, changed.handles[3])
+    volatile_write_u64(arena + 216, changed.handles[5])
+    volatile_write_u64(arena + 224, changed.handles[7])
+    val sized = InitializeProcThreadAttributeList(0, 1u32, 0u32, arena + 192)
+    val size = volatile_read_u64(arena + 192)
+    if size <= 0 or size > 1048576: return fail(changed, "windows-command-attribute-size")
+    changed.attributes = HeapAlloc(state.heap, 8u32, size as u64)
+    changed.allocations.push(changed.attributes)
+    if changed.attributes == 0: return fail(changed, "windows-command-attribute-allocation")
+    if InitializeProcThreadAttributeList(changed.attributes, 1u32, 0u32, arena + 192) == 0:
+        return fail(changed, "windows-command-attribute-initialize")
+    changed.attributes_initialized = true
+    if UpdateProcThreadAttribute(changed.attributes, 0u32, 131074u64, arena + 208, 24u64, 0, 0) == 0:
+        return fail(changed, "windows-command-handle-whitelist")
+    volatile_write_u64(arena + 104, changed.attributes)
+    changed.stage = "job"
+    changed
+
+@unsafe(reason: "kill-on-close job before any suspended process creation", capabilities: [ffi, raw_ptr])
+fn prepare_job(state: CommandState) -> CommandState:
+    var changed = state
+    changed.handles[0] = CreateJobObjectW(0, 0)
+    volatile_write_u32(state.arena + 256, 8192)
+    if changed.handles[0] == 0 or SetInformationJobObject(changed.handles[0], 9, state.arena + 240, 144u32) == 0:
+        return fail(changed, "windows-command-job-policy")
+    if QueryInformationJobObject(changed.handles[0], 9, state.arena + 240, 144u32, 0) == 0 or
+            volatile_read_u32(state.arena + 256) != 8192:
+        return fail(changed, "windows-command-job-policy-readback")
+    changed.stage = "create"
+    changed
+
+@unsafe(reason: "actual Unix admission clock immediately precedes suspended CreateProcess; all returned handles retained", capabilities: [ffi, raw_ptr])
+fn create(state: CommandState) -> CommandState:
+    var changed = state
+    val clock = windows_command_admission_clock_v2(state.request.expires_at_unix_ms, time_sample_unix_micros_or_failure())
+    if clock.is_err(): return fail(changed, clock.unwrap_err())
+    changed.attempted = true
+    val created = CreateProcessW(state.app, state.argv, 0, 0, 1, 134743044u32,
+        state.environment, state.cwd, state.arena, state.arena + 128)
+    val failure = if created == 0: GetLastError() else: 0u32
+    changed.handles[1] = volatile_read_u64(state.arena + 128)
+    changed.handles[2] = volatile_read_u64(state.arena + 136)
+    if created == 0 or changed.handles[1] == 0 or changed.handles[2] == 0:
+        return fail(changed, "windows-command-create-unconfirmed:{failure}")
+    changed.stage = "assign"
+    changed
+
+@unsafe(reason: "one available output chunk per stream; sole reader; never a blocking empty-pipe read", capabilities: [ffi, raw_ptr])
+fn read_stream(state: CommandState, stream: i64) -> CommandState:
+    var changed = state
+    if (stream == 0 and state.stdout_eof) or (stream == 1 and state.stderr_eof): return changed
+    val pipe = state.handles[4 + stream * 2]
+    volatile_write_u32(state.arena + 448, 0)
+    if PeekNamedPipe(pipe, 0, 0u32, 0, state.arena + 448, 0) == 0:
+        val error = GetLastError()
+        if error == 109u32:
+            if stream == 0: changed.stdout_eof = true
+            else: changed.stderr_eof = true
+            return changed
+        return fail(changed, "windows-command-pipe-peek-failed:{error}")
+    val available = volatile_read_u32(state.arena + 448)
+    if available == 0: return changed
+    val remaining = state.request.max_output_bytes - state.stdout.len() - state.stderr.len()
+    if remaining <= 0:
+        changed.limit_type = "output"
+        return fail(changed, "windows-command-output-limit")
+    val count = if available > 4096: 4096 else: available
+    val bounded = if count > remaining: remaining else: count
+    volatile_write_u32(state.arena + 456, 0)
+    if ReadFile(pipe, state.arena + 512, bounded as u32, state.arena + 456, 0) == 0:
+        return fail(changed, "windows-command-pipe-read-failed")
+    val received = volatile_read_u32(state.arena + 456)
+    if received <= 0 or received > bounded: return fail(changed, "windows-command-pipe-read-count")
+    for index in 0..received:
+        val byte = volatile_read_u8(state.arena + 512 + index) as u8
+        if stream == 0: changed.stdout.push(byte)
+        else: changed.stderr.push(byte)
+    changed
+
+@unsafe(reason: "zero-wait exact process and job-tree observation, no PID authority", capabilities: [ffi, raw_ptr])
+fn observe(state: CommandState) -> CommandState:
+    var changed = read_stream(state, 0)
+    changed = read_stream(changed, 1)
+    if not state.termination_requested and state.error == "":
+        val due = windows_command_timeout_due_v2(state.resumed, state.resumed_at,
+            GetTickCount64(), state.request.timeout_ms)
+        if due.is_err(): return fail(changed, due.unwrap_err())
+        if due.unwrap():
+            changed.limit_type = "timeout"
+            return fail(changed, "windows-command-timeout")
+    val waited = WaitForSingleObject(state.handles[1], 0u32)
+    if waited != 0u32 and waited != 258u32: return fail(changed, "windows-command-process-poll-failed")
+    if state.assigned:
+        if QueryInformationJobObject(state.handles[0], 1, state.arena + 384, 48u32, 0) == 0:
+            return fail(changed, "windows-command-job-poll-failed")
+        if volatile_read_u32(state.arena + 424) != 0: return changed
+    if waited != 0u32: return changed
+    if GetExitCodeProcess(state.handles[1], state.arena + 448) == 0:
+        return fail(changed, "windows-command-exit-status-unavailable")
+    changed.exit_code = volatile_read_u32(state.arena + 448)
+    changed.terminal = true
+    if changed.error != "" or (changed.stdout_eof and changed.stderr_eof): changed.stage = "cleanup"
+    changed
+
+@unsafe(reason: "one retryable native handle release or one allocation release per step", capabilities: [ffi, raw_ptr])
+fn cleanup(state: CommandState) -> CommandState:
+    var changed = state
+    if state.handles[1] != 0 and not state.terminal: return fail(changed, "windows-command-cleanup-before-terminal-refused")
+    for index in 0..changed.handles.len():
+        if changed.handles[index] != 0:
+            if CloseHandle(changed.handles[index]) != 0: changed.handles[index] = 0
+            elif changed.error == "": changed.error = "windows-command-handle-close-pending"
+            return changed
+    if changed.attributes_initialized:
+        DeleteProcThreadAttributeList(changed.attributes)
+        changed.attributes_initialized = false
+        return changed
+    for index in 0..changed.allocations.len():
+        if changed.allocations[index] != 0:
+            if HeapFree(changed.heap, 0u32, changed.allocations[index]) != 0: changed.allocations[index] = 0
+            elif changed.error == "": changed.error = "windows-command-allocation-release-pending"
+            return changed
+    changed.closed = true
+    changed.stage = "done"
+    changed
+
+@unsafe(reason: "canonical same-thread stage transition, retained owner on all unfinished or uncertain effects", capabilities: [ffi, raw_ptr])
+pub fn windows_command_step_v2(owner: WindowsCommandOwnerV2, cancel: bool = false) -> WindowsCommandTurnV2:
+    val turn = command_capture_step_v1(owner, cancel, false)
+    WindowsCommandTurnV2(turn.owner, turn.result, turn.error)
+
+pub fn windows_command_capture_step_v1(owner: WindowsCommandOwnerV2, cancel: bool = false) -> WindowsCommandCaptureTurnV1:
+    command_capture_step_v1(owner, cancel, true)
+
+fn command_capture_step_v1(owner: WindowsCommandOwnerV2, cancel: bool, capture: bool) -> WindowsCommandCaptureTurnV1:
+    match windows_command_thread_check_v2():
+        case Err(reason): return WindowsCommandCaptureTurnV1(Some(owner), None, nil, reason, false)
+        case Ok(_): pass
+    if owner.slot < 0 or owner.slot >= commands.len(): return WindowsCommandCaptureTurnV1(Some(owner), None, nil, "windows-command-owner-invalid", false)
+    var state = match commands[owner.slot]:
+        case Some(value): value
+        case None: return WindowsCommandCaptureTurnV1(None, None, nil, "windows-command-owner-retired", true)
+    if cancel and state.stage != "cleanup" and not state.termination_requested:
+        state = fail(state, "windows-command-cancelled")
+    match state.stage:
+        case "prepare": state = prepare(state)
+        case "pipes": state = prepare_pipes(state)
+        case "job": state = prepare_job(state)
+        case "create": state = create(state)
+        case "assign":
+            if AssignProcessToJobObject(state.handles[0], state.handles[1]) == 0:
+                state = fail(state, "windows-command-job-assignment-failed")
+            else:
+                state.assigned = true
+                state.stage = "resume"
+        case "resume":
+            val clock = windows_command_admission_clock_v2(state.request.expires_at_unix_ms, time_sample_unix_micros_or_failure())
+            if clock.is_err(): state = fail(state, clock.unwrap_err())
+            elif ResumeThread(state.handles[2]) == 4294967295u32:
+                state = fail(state, "windows-command-resume-unconfirmed")
+            else:
+                state.resumed_at = GetTickCount64()
+                state.resumed = true
+                state.stage = "close-writers"
+        case "close-writers":
+            var pending = false
+            # Bound to three handles; no final EOF while parent owns writers.
+            for index in [3, 5, 7]:
+                if state.handles[index] != 0:
+                    if CloseHandle(state.handles[index]) != 0: state.handles[index] = 0
+                    else: pending = true
+            if pending: state = fail(state, "windows-command-parent-writer-close-pending")
+            else: state.stage = "run"
+        case "run": state = observe(state)
+        case "terminate":
+            if state.handles[1] == 0: state.stage = "cleanup"
+            else:
+                val terminated = if state.assigned: TerminateJobObject(state.handles[0], 125u32) else: TerminateProcess(state.handles[1], 125u32)
+                if terminated != 0:
+                    state.termination_requested = true
+                    state.stage = "run"
+                # Termination can fail after the child exits; observation still
+                # determines exact terminal/tree state, never the error alone.
+                else: state = observe(state)
+        case "cleanup": state = cleanup(state)
+        case _: state = fail(state, "windows-command-stage-invalid")
+    commands[owner.slot] = Some(state)
+    if not state.closed: return WindowsCommandCaptureTurnV1(Some(owner), None, nil, state.error, false)
+    val stdout = windows_command_output_decode_v2(state.stdout)
+    val stderr = windows_command_output_decode_v2(state.stderr)
+    if stdout.is_err() and state.error == "": state.error = stdout.unwrap_err()
+    if stderr.is_err() and state.error == "": state.error = stderr.unwrap_err()
+    # An invalid-text result is explicit failure; no partial UTF8 is invented.
+    val result = WindowsCommandResultV2(stdout: if stdout.is_ok(): stdout.unwrap() else: "",
+        stderr: if stderr.is_ok(): stderr.unwrap() else: "", exit_code: state.exit_code,
+        limit_type: state.limit_type, effect_attempted: state.attempted)
+    val evidence = if capture:
+        Some(WindowsCommandCaptureEvidenceV1(stdout: state.stdout, stderr: state.stderr,
+            stdout_eof: state.stdout_eof, stderr_eof: state.stderr_eof,
+            terminal: state.terminal, cleanup_confirmed: state.closed, attempted: state.attempted))
+    else:
+        nil
+    # The nonreused empty slot rejects aliases without retaining capture bytes
+    # or environment secrets for every historical command.
+    commands[owner.slot] = None
+    WindowsCommandCaptureTurnV1(None, Some(result), evidence, state.error, true)

@@ -30,6 +30,10 @@ use std.nogc_sync_mut.sffi.dynamic.{spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi
 use std.common.string_core.{bytes_to_text, text_to_utf8_bytes}
 use std.io_runtime.{file_exists}
 
+# Bytes IN only: the callee gets (prefix..., ptr, len, suffix...) for a copy that
+# lives for this one call. Media payloads cross the int64-only ABI this way.
+extern fn spl_wffi_call_i64_with_bytes(fptr: i64, prefix_args: [i64], bytes: [u8], offset: i64, length: i64, suffix_args: [i64]) -> i64
+
 enum BackendError:
     LibraryNotFound
     SymbolMissing
@@ -46,6 +50,8 @@ enum BackendError:
     PhysicalPageBusy
     InvalidTokenBudget
     CapacityExceeded
+    MediaUnsupported
+    MediaRejected
 
 fn backend_error_text(e: BackendError) -> text:
     match e:
@@ -64,9 +70,12 @@ fn backend_error_text(e: BackendError) -> text:
         BackendError.PhysicalPageBusy: "physical paged KV provider is busy"
         BackendError.InvalidTokenBudget: "max_tokens must be a nonnegative signed 64-bit integer"
         BackendError.CapacityExceeded: "prompt plus generation exceeds the context window"
+        BackendError.MediaUnsupported: "the backend or model cannot take this media"
+        BackendError.MediaRejected: "media was rejected: unsupported container, preprocessing failure, or marker count mismatch"
 
 const SLANG_CAP_PHYSICAL_PAGED_KV: i64 = 32
 const SLANG_CAP_PHYSICAL_LIGHTWEIGHT_REQUESTS: i64 = 64
+const SLANG_CAP_MTMD: i64 = 128
 const SLANG_PHYSICAL_PAGE_ABI_V1: i64 = 1
 const INVALID_NONNEGATIVE_I64_TEXT: i64 = -1
 
@@ -125,6 +134,8 @@ struct GgmlBackend:
     f_prefix_rejected_bytes: i64
     f_prefix_restore_failures: i64
     f_context_profile_configure: i64
+    f_gpu_offload_supported: i64
+    f_model_offloaded: i64
     f_request_chat_render: i64
     f_request_configure: i64
     f_request_create: i64
@@ -143,6 +154,14 @@ struct GgmlBackend:
     f_request_sample: i64
     f_request_piece: i64
     f_request_kv_clear: i64
+    multimodal: bool
+    f_mm_load: i64
+    f_mm_caps: i64
+    f_mm_free: i64
+    f_mm_reset: i64
+    f_mm_add_encoded: i64
+    f_mm_tokenize: i64
+    f_mm_eval_prompt: i64
     independent_requests: bool
     physical_page_status: PhysicalPageProviderStatus
     f_page_abi_version: i64
@@ -269,7 +288,11 @@ fn _preload_windows_dll_siblings(lib_path: text):
                 cut = i
             i = i + 1
         val dir = if cut >= 0: lib_path[0:cut + 1] else: ""
-        for dep in ["ggml-base.dll", "ggml-cpu.dll", "ggml.dll", "llama.dll"]:
+        # llvm-mingw builds name the llama DLL libllama.dll and import the
+        # mingw C++ runtime DLLs; MSVC builds name it llama.dll.
+        for dep in ["libwinpthread-1.dll", "libunwind.dll", "libc++.dll",
+                    "ggml-base.dll", "ggml-cpu.dll", "ggml-vulkan.dll", "ggml.dll", "llama.dll", "libllama.dll",
+                    "libmtmd.dll"]:
             if file_exists(dir + dep):
                 spl_dlopen(dir + dep)
 
@@ -305,7 +328,8 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
         "slang_ggml_prefix_resident_bytes", "slang_ggml_prefix_rejected_bytes",
         "slang_ggml_prefix_restore_failures",
         "slang_ggml_context_profile_configure",
-        "slang_ggml_request_chat_render"
+        "slang_ggml_request_chat_render",
+        "slang_ggml_gpu_offload_supported", "slang_ggml_model_offloaded"
     ]
     var optional: [i64] = []
     for n in optional_names:
@@ -364,7 +388,23 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
         physical_page_abi_version)
     if physical_page_status != PhysicalPageProviderStatus.Ready:
         physical_page_addrs = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-    val shim_has_light_requests = (reported_capabilities & SLANG_CAP_PHYSICAL_LIGHTWEIGHT_REQUESTS) != 0
+    # The mtmd group exists only in a shim built with SLANG_SHIM_MTMD=1 and is
+    # advertised by bit 128. As with pages, never dlsym it without the bit.
+    val mm_names = [
+        "slang_ggml_mm_load", "slang_ggml_mm_caps", "slang_ggml_mm_free",
+        "slang_ggml_request_mm_reset", "slang_ggml_request_mm_add_encoded",
+        "slang_ggml_request_mm_tokenize", "slang_ggml_request_mm_eval_prompt"
+    ]
+    var mm_addrs: [i64] = []
+    var multimodal = request_group_ok and (reported_capabilities & SLANG_CAP_MTMD) != 0
+    for n in mm_names:
+        val address = if multimodal: spl_dlsym(lib, n) else: 0
+        mm_addrs.push(address)
+        if address == 0:
+            multimodal = false
+    if not multimodal:
+        mm_addrs = [0, 0, 0, 0, 0, 0, 0]
+    val shim_has_light_requests =(reported_capabilities & SLANG_CAP_PHYSICAL_LIGHTWEIGHT_REQUESTS) != 0
     var f_page_request_create = if shim_has_light_requests: spl_dlsym(lib, "slang_ggml_page_request_create") else: 0
     val physical_lightweight_requests = (
         physical_page_status == PhysicalPageProviderStatus.Ready and
@@ -389,6 +429,7 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
         f_prefix_restore_failures: optional[6],
         f_context_profile_configure: optional[7],
         f_request_chat_render: optional[8],
+        f_gpu_offload_supported: optional[9], f_model_offloaded: optional[10],
         f_request_configure: request_addrs[0], f_request_create: request_addrs[1],
         f_request_close: request_addrs[2], f_request_cancel: request_addrs[3],
         f_request_str_reset: request_addrs[4], f_request_str_push: request_addrs[5],
@@ -399,6 +440,10 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
         f_request_eval_prompt: request_addrs[12], f_request_eval: request_addrs[13],
         f_request_sample: request_addrs[14], f_request_piece: request_addrs[15],
         f_request_kv_clear: request_addrs[16], independent_requests: request_group_ok,
+        multimodal: multimodal,
+        f_mm_load: mm_addrs[0], f_mm_caps: mm_addrs[1], f_mm_free: mm_addrs[2],
+        f_mm_reset: mm_addrs[3], f_mm_add_encoded: mm_addrs[4],
+        f_mm_tokenize: mm_addrs[5], f_mm_eval_prompt: mm_addrs[6],
         physical_page_status: physical_page_status,
         f_page_abi_version: physical_page_addrs[0],
         f_page_execution_namespace: physical_page_addrs[1],
@@ -469,6 +514,11 @@ fn _read_request_out(b: GgmlBackend, request: GgmlRequest) -> text:
 fn chat_frame(role: text, content: text) -> text:
     text_to_utf8_bytes(role).len().to_text() + ":" + role +
         text_to_utf8_bytes(content).len().to_text() + ":" + content
+
+# Stands in a chat frame for one media part, in client order. It is llama.cpp
+# mtmd's default marker and the shim pins the mtmd context to exactly this
+# text, so the two sides cannot disagree about it.
+const SLANG_MEDIA_MARKER: text = "<__media__>"
 
 fn load_model(b: GgmlBackend, model_path: text, n_gpu_layers: i64) -> Result<(), BackendError>:
     _call0(b.f_backend_init)
@@ -582,6 +632,11 @@ fn _generate_request_observed(input: BackendActiveGenerationRequest) -> Result<B
         return Err(BackendError.DecodeFailed)
     if _call1(b.f_request_eval_prompt, request.handle) < 0:
         return Err(BackendError.DecodeFailed)
+    _sample_loop(b, request, max_tokens)
+
+# One sample, one detokenize, one eval per iteration, after a prefill that left
+# logits for the last prompt position.
+fn _sample_loop(b: GgmlBackend, request: GgmlRequest, max_tokens: i64) -> Result<BackendGeneration, BackendError>:
     var out = ""
     var produced = 0
     while produced < max_tokens:
@@ -595,6 +650,82 @@ fn _generate_request_observed(input: BackendActiveGenerationRequest) -> Result<B
             return Err(BackendError.DecodeFailed)
         produced = produced + 1
     Ok(BackendGeneration(output: out, generated_tokens: produced.to_text()))
+
+# The mmproj projector a model's media goes through. Returns the capability mask
+# (1 = vision, 2 = audio). Call after load_model, before any media request.
+fn load_mmproj(b: GgmlBackend, mmproj_path: text) -> Result<i64, BackendError>:
+    if not b.multimodal:
+        return Err(BackendError.MediaUnsupported)
+    if _push_text(b, mmproj_path) < 0:
+        return Err(BackendError.ModelLoadFailed)
+    val caps = _call0(b.f_mm_load)
+    if caps <= 0:
+        return Err(BackendError.ModelLoadFailed)
+    Ok(caps)
+
+fn backend_media_caps(b: GgmlBackend) -> i64:
+    if not b.multimodal:
+        return 0
+    _call0(b.f_mm_caps)
+
+# One encoded media file (jpeg/png/gif/bmp image, wav/mp3/flac audio).
+struct MediaBlob:
+    bytes: [u8]
+
+struct BackendMediaGenerationRequest:
+    max_tokens: text
+    prompt: text
+    backend: GgmlBackend
+    media: [MediaBlob]
+
+fn _mm_error(code: i64) -> BackendError:
+    if code == -12 or code == -13 or code == -14:
+        BackendError.MediaRejected
+    else:
+        BackendError.DecodeFailed
+
+# Chat generation with media. `prompt` is chat frames whose content holds one
+# SLANG_MEDIA_MARKER per blob, in order. The request never touches the prefix
+# cache: the shim clears its KV and prefills through mtmd.
+fn generate_media_request(input: BackendMediaGenerationRequest) -> Result<BackendGeneration, BackendError>:
+    val b = input.backend
+    val max_tokens = parse_nonnegative_i64_text_exact(input.max_tokens)
+    if max_tokens == INVALID_NONNEGATIVE_I64_TEXT:
+        return Err(BackendError.InvalidTokenBudget)
+    if not b.multimodal or backend_media_caps(b) <= 0 or b.f_request_chat_render == 0:
+        return Err(BackendError.MediaUnsupported)
+    match open_request(b, _call0(b.f_n_ctx)):
+        Err(error): return Err(error)
+        Ok(request):
+            val result = _generate_media_active(input, request)
+            match close_backend_request(b, request):
+                Err(_): return Err(BackendError.DecodeFailed)
+                Ok(_): return result
+
+fn _generate_media_active(input: BackendMediaGenerationRequest, request: GgmlRequest) -> Result<BackendGeneration, BackendError>:
+    val b = input.backend
+    val max_tokens = parse_nonnegative_i64_text_exact(input.max_tokens)
+    _call1(b.f_mm_reset, request.handle)
+    for blob in input.media:
+        val added = spl_wffi_call_i64_with_bytes(b.f_mm_add_encoded, [request.handle], blob.bytes, 0, blob.bytes.len(), [])
+        if added <= 0:
+            _call1(b.f_mm_reset, request.handle)
+            return Err(_mm_error(added))
+    if _push_request_text(b, request, input.prompt) < 0:
+        return Err(BackendError.TokenizeFailed)
+    if _call1(b.f_request_chat_render, request.handle) < 0:
+        _call1(b.f_mm_reset, request.handle)
+        return Err(BackendError.TokenizeFailed)
+    val positions = _call1(b.f_mm_tokenize, request.handle)
+    if positions <= 0:
+        _call1(b.f_mm_reset, request.handle)
+        return Err(_mm_error(positions))
+    if positions + max_tokens > _call1(b.f_request_n_ctx, request.handle):
+        _call1(b.f_mm_reset, request.handle)
+        return Err(BackendError.CapacityExceeded)
+    if _call1(b.f_mm_eval_prompt, request.handle) < 0:
+        return Err(BackendError.DecodeFailed)
+    _sample_loop(b, request, max_tokens)
 
 # slang's decode loop. One sample, one detokenize, one eval per iteration, with
 # the stop conditions evaluated here rather than inside the kernel library.
@@ -677,6 +808,13 @@ fn prefix_cache_stats(b: GgmlBackend) -> PrefixCacheStats:
         rejected_bytes: _optional_call0(b.f_prefix_rejected_bytes),
         restore_failures: _optional_call0(b.f_prefix_restore_failures)
     )
+
+# 1 when the shim reports real GPU offload support / a model loaded with offload; 0 when absent.
+fn gpu_offload_supported(b: GgmlBackend) -> bool:
+    _optional_call0(b.f_gpu_offload_supported) == 1
+
+fn model_offloaded(b: GgmlBackend) -> bool:
+    _optional_call0(b.f_model_offloaded) == 1
 
 fn configure_prefix_cache(b: GgmlBackend, entries: i64, bytes: i64) -> bool:
     if b.f_prefix_configure == 0:
@@ -885,6 +1023,9 @@ fn physical_page_bytes(b: GgmlBackend, pool: i64) -> Result<i64, BackendError>:
 # Releases the model, context and sampler, then the library itself. Callers that
 # stop a model mid-session rely on this leaving no handle behind.
 fn close_backend(b: GgmlBackend) -> Result<(), BackendError>:
+    # The projector was built on the model: release it first.
+    if b.f_mm_free != 0:
+        _call0(b.f_mm_free)
     if _call0(b.f_free) < 0:
         return Err(BackendError.NotOpen)
     spl_dlclose(b.lib)
@@ -892,10 +1033,12 @@ fn close_backend(b: GgmlBackend) -> Result<(), BackendError>:
 
 export BackendError, backend_error_text, GgmlBackend, BackendGeneration, BackendGenerationRequest, PhysicalPagePoolCreateRequest, PrefixCacheStats
 export PhysicalPageProviderStatus, SLANG_CAP_PHYSICAL_PAGED_KV, SLANG_PHYSICAL_PAGE_ABI_V1
-export chat_frame
+export chat_frame, SLANG_MEDIA_MARKER
 export GgmlRequest, open_backend, load_model, open_context, open_request, close_backend_request, cancel_backend_request
 export open_physical_request, prepare_request_tokens, request_token_at
 export request_sample, request_is_eog, request_piece
+export gpu_offload_supported, model_offloaded
+export MediaBlob, BackendMediaGenerationRequest, generate_media_request, load_mmproj, backend_media_caps
 export generate, generate_observed, generate_observed_request, configure_prefix_cache, prefix_cache_stats, configure_matched_cpu_context, close_backend
 export physical_page_version_probe_is_authorized, physical_page_group_status_from_probe
 export physical_page_provider_status

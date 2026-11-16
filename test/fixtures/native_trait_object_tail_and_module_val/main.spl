@@ -1,0 +1,134 @@
+# Trait-object conversion at an IMPLICIT tail (`-> Trait`, `-> Trait?`, a
+# generic `-> Reader<i64>`, if/else and match tails, methods) and at a
+# MODULE-LEVEL typed val (`val t: Tag = Alpha(..)`). Before the fix the tail
+# was never converted (bootstrap HIR erases `-> Tag` to i64 and only an
+# Optional declared return was recovered): native binaries SIGSEGV'd at the
+# first dispatch through the result. Module vals skipped the conversion (and
+# its admission check) entirely. Controls: explicit return, argument,
+# assignment, field init.
+# Spec guard: test/01_unit/compiler/mir/native_trait_tail_module_val_conversion_spec.spl
+# Refusal twin: test/fixtures/native_trait_object_tail_refused/main.spl
+# Build with `native-build main.spl --backend=<cranelift|llvm> --entry-closure`
+# from a directory outside test/. Reference = seed interpreter.
+# Expected stdout, exactly (both backends):
+#   make_tag 3
+#   pick_if true 1 false 102
+#   pick_match 0 10 1 120
+#   some_tag some 4
+#   no_tag none
+#   make_reader some 41
+#   make_reader miss none
+#   make_reader ifval 41
+#   factory build 6
+#   factory rebuild 107
+#   module_tag 5
+#   module_reader some 9000000000
+#   explicit 108
+#   argument 11
+#   assigned 112
+#   field 13
+
+trait Tag:
+    fn tag() -> i64
+
+trait Reader<T>:
+    fn read(node: i64) -> T?
+
+class Alpha:
+    k: i64
+
+impl Tag for Alpha:
+    fn tag() -> i64:
+        self.k
+
+class Beta:
+    k: i64
+
+impl Tag for Beta:
+    fn tag() -> i64:
+        100 + self.k
+
+class ICell:
+    cell: i64?
+
+impl Reader<i64> for ICell:
+    fn read(node: i64) -> i64?:
+        if node == 1: self.cell else: None
+
+# Implicit tails into a trait-typed result.
+fn make_tag(k: i64) -> Tag:
+    Alpha(k: k)
+
+fn pick_if(b: bool) -> Tag:
+    if b: Alpha(k: 1) else: Beta(k: 2)
+
+fn pick_match(n: i64) -> Tag:
+    match n:
+        case 0: Alpha(k: 10)
+        case _: Beta(k: 20)
+
+fn some_tag(k: i64) -> Tag?:
+    Some(Alpha(k: k))
+
+fn no_tag() -> Tag?:
+    None
+
+fn make_reader(v: i64) -> Reader<i64>:
+    ICell(cell: Some(v))
+
+# Controls: the forms that already converted.
+fn explicit_tag(k: i64) -> Tag:
+    return Beta(k: k)
+
+fn tag_of(t: Tag) -> i64:
+    t.tag()
+
+class Factory:
+    base: i64
+
+impl Factory:
+    fn build() -> Tag:
+        Alpha(k: self.base)
+    me rebuild(k: i64) -> Tag:
+        self.base = k
+        Beta(k: self.base)
+
+class Holder:
+    t: Tag
+
+# Module-level typed vals.
+val module_tag: Tag = Alpha(k: 5)
+val module_reader: Reader<i64> = ICell(cell: Some(9000000000))
+
+print "make_tag {make_tag(3).tag()}"
+print "pick_if true {pick_if(true).tag()} false {pick_if(false).tag()}"
+print "pick_match 0 {pick_match(0).tag()} 1 {pick_match(1).tag()}"
+match some_tag(4):
+    case Some(t): print "some_tag some {t.tag()}"
+    case None: print "some_tag none"
+match no_tag():
+    case Some(t): print "no_tag some {t.tag()}"
+    case None: print "no_tag none"
+val r = make_reader(41)
+match r.read(1):
+    case Some(v): print "make_reader some {v}"
+    case None: print "make_reader none"
+match r.read(2):
+    case Some(v): print "make_reader miss some {v}"
+    case None: print "make_reader miss none"
+if val w = r.read(1):
+    print "make_reader ifval {w}"
+var f = Factory(base: 6)
+print "factory build {f.build().tag()}"
+print "factory rebuild {f.rebuild(7).tag()}"
+print "module_tag {module_tag.tag()}"
+match module_reader.read(1):
+    case Some(v): print "module_reader some {v}"
+    case None: print "module_reader none"
+print "explicit {explicit_tag(8).tag()}"
+print "argument {tag_of(Alpha(k: 11))}"
+var assigned: Tag = Alpha(k: 0)
+assigned = Beta(k: 12)
+print "assigned {assigned.tag()}"
+val h = Holder(t: Alpha(k: 13))
+print "field {h.t.tag()}"

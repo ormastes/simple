@@ -1,0 +1,94 @@
+"""
+## Purpose and audience
+Purpose: Prove the sffi_abi_mismatch lint row (SPL-SFFI-ABI-001, deny) is
+registered, picks its target triple from an explicit setting or the host, and
+refuses to default when the target is unknown.
+Audience: compiler and tooling engineers maintaining robust-boundary lints.
+## Operator workflow
+Run with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+The explicit target comes from SIMPLE_TARGET_TRIPLE; the lint API has no target
+field yet.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use compiler.tools.lint.static_rules.{LintParamsV1, LintUnit, StaticLintLevel, static_lint_rule_table, run_static_lint_rule_table}
+use compiler.tools.lint.rules.sffi_abi_mismatch_rule.{sffi_abi_lint_triple, sffi_abi_check_with_triple, sffi_abi_row_findings}
+
+describe "sffi_abi_mismatch lint row":
+    """The row runs SPL-SFFI-ABI-001 at deny level against an explicit or host triple."""
+
+    it "is present once in the static rule table":
+        # @req: REQ-DIAG-POLICY-001
+        step("Count rows named sffi_abi_mismatch")
+        var n = 0
+        for rule in static_lint_rule_table():
+            if rule.id() == "sffi_abi_mismatch":
+                n = n + 1
+        expect(n).to_equal(1)
+
+    it "emits a deny-level finding for a width mismatch":
+        # @req: REQ-DIAG-POLICY-001
+        step("Check an i32 unit declared against int64_t on linux x86_64")
+        val src = "unit Ticks: i32 as tk\n@c_abi(Ticks: \"int64_t\")\nextern fn c_ticks() -> Ticks\n"
+        val fs = sffi_abi_check_with_triple(LintUnit("app/x.spl", src), "x86_64-unknown-linux-gnu")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].code).to_equal("SPL-SFFI-ABI-001")
+        expect(fs[0].level).to_equal(StaticLintLevel.Deny)
+
+    it "prefers an explicit target over the host":
+        # @req: REQ-DIAG-POLICY-001
+        step("Resolve the triple with and without an explicit setting")
+        expect(sffi_abi_lint_triple("aarch64-unknown-linux-gnu", "x86_64", "linux")).to_equal("aarch64-unknown-linux-gnu")
+        expect(sffi_abi_lint_triple("", "x86_64", "linux")).to_equal("x86_64-unknown-linux-gnu")
+        expect(sffi_abi_lint_triple("", "aarch64", "macos")).to_equal("aarch64-apple-darwin")
+        expect(sffi_abi_lint_triple("", "x86_64", "windows")).to_equal("x86_64-pc-windows-msvc")
+
+    it "returns empty for an unknown host instead of defaulting":
+        # @req: REQ-DIAG-POLICY-001
+        step("Resolve the triple for an unrecognised host")
+        expect(sffi_abi_lint_triple("", "", "linux")).to_equal("")
+        expect(sffi_abi_lint_triple("", "x86_64", "")).to_equal("")
+        expect(sffi_abi_lint_triple("", "sparc", "plan9")).to_equal("")
+
+
+    it "stays silent on files without @c_abi":
+        # @req: REQ-DIAG-POLICY-001
+        step("Run the row through the full table on a plain file")
+        val run = run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit("app/y.spl", "fn f() -> i64:\n    1\n"), static_lint_rule_table())
+        var hits = 0
+        for f in run.findings:
+            if f.code == "SPL-SFFI-ABI-001":
+                hits = hits + 1
+        expect(hits).to_equal(0)
+
+    it "builds FreeBSD and arm linux host triples":
+        # @req: REQ-DIAG-POLICY-001
+        step("Resolve host triples for FreeBSD and arm linux")
+        expect(sffi_abi_lint_triple("", "x86_64", "freebsd")).to_equal("x86_64-unknown-freebsd")
+        expect(sffi_abi_lint_triple("", "aarch64", "freebsd")).to_equal("aarch64-unknown-freebsd")
+        expect(sffi_abi_lint_triple("", "riscv64", "freebsd")).to_equal("riscv64-unknown-freebsd")
+        expect(sffi_abi_lint_triple("", "armv7l", "linux")).to_equal("armv7-unknown-linux-gnueabihf")
+        expect(sffi_abi_lint_triple("", "arm", "linux")).to_equal("armv7-unknown-linux-gnueabihf")
+
+    it "emits no deny when the host is unresolvable and no target is set":
+        # @req: REQ-DIAG-POLICY-001
+        step("Run the row logic with an unknown host and no explicit target")
+        val src = "unit Ticks: i64 as tk\n@c_abi(Ticks: \"int64_t\")\nextern fn c_ticks() -> Ticks\n"
+        val fs = sffi_abi_row_findings(LintUnit("app/x.spl", src), "", "sparc", "plan9")
+        var denies = 0
+        for f in fs:
+            if f.level == StaticLintLevel.Deny:
+                denies = denies + 1
+        expect(denies).to_equal(0)
+
+    it "keeps the unknown-target deny for an explicit unknown triple":
+        # @req: REQ-DIAG-POLICY-001
+        step("Run the row logic with SIMPLE_TARGET_TRIPLE set to a mystery target")
+        val src = "unit Ticks: i64 as tk\n@c_abi(Ticks: \"int64_t\")\nextern fn c_ticks() -> Ticks\n"
+        val fs = sffi_abi_row_findings(LintUnit("app/x.spl", src), "mystery-os", "x86_64", "linux")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].level).to_equal(StaticLintLevel.Deny)
+        expect(fs[0].message).to_contain("unknown target")

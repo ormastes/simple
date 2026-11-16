@@ -310,6 +310,34 @@ the site list below): `spl_dlopen_checked`,
 seed std `plugin/__init__.spl:89/113`, `packaging_build.spl:221`. Suggested ratchet:
 freeze this list in a `scripts/check/` baseline and fail on growth; convert sites
 to the address idiom as they are touched.
+
+### 2026-11-16 — `sffi/dynamic.spl:149/176` fixed; the "why did they pass" answered
+
+The Stage 3 self-build (r16, objects from the integ2 Stage 2) failed
+`stage=borrow` on exactly these two sites (`_sffi_dlopen_checked` 133:1 mir
+point 21, `_sffi_dlsym_checked` 171:1 mir point 7). The rejection is correct; the
+integ2 Stage 2 binary is the unsound one. Same checker source in both
+(`55.borrow/borrow_check/mod.spl` record_direct_call_contract_v1 ->
+`nll_short_calls.spl:181-182`). Single-file `compile` fixtures, typed path:
+
+| fixture | integ2 Stage 2 | r16 |
+|---|---|---|
+| straight-line `var h; ext(&mut h)` (with/without `unsafe`, `@unsafe`, text arg, Result return) | rejects | rejects |
+| same, preceded by `if path == "": return 0` | **accepts** | rejects |
+
+So Stage 2 drops the live `&mut` loan whenever an early-return join precedes
+it: a Stage 2 checker-execution defect, not a safety proof. Fixed at the
+source: both functions use only the direct-return `spl_dlopen` / `spl_dlsym`
+(the C `spl_dlopen` *is* the checked call returning its handle on status 0).
+The address form was not usable here: the seed `interpreter_extern/wsffi.rs:331/426`
+raises `output must be &mut i64` for any non-`&mut` out. Evidence: r16
+`compile src/lib/nogc_sync_mut/sffi/dynamic.spl` borrow stage 80/80 succeeded
+(was rc=1 with both sites); spec cases in
+`test/01_unit/compiler/borrow/extern_out_slot_address_form_spec.spl` (join
+shape must reject; real loader/resolver slice must pass). The spec runner was not executable on this
+host: the 11-05 seed cannot parse `00.common/driver_compile_options.spl:63`,
+and the 11-16 seed fails `test` on a `mcdc/dynamic_probe.spl` visibility error.
+Remaining list above: unchanged.
 ## Census state at hand-off
 
 MIR phase complete 1619/1619 (progress counter said `failed=1`; the

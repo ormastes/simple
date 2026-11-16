@@ -1,0 +1,298 @@
+# AUTHORED_NOT_RUN. Legacy imports and neutral implementation share nominal
+# DATA types. Contained receipts and selections below are TEST DATA built under
+# the test-private exemption (no native capture ran); they grant no execution,
+# TaskRef access or terminal, and only drive the pure intent-DATA builder.
+use std.spec.{describe, it, expect, step}
+use app.llm_caret.provider_cli_adapter_types_v1.{ProviderCliProviderV1, ProviderCliVersionDataV1}
+use app.llm_caret.provider_cli_codex_interactive_v1.{ProviderCliCodexInteractiveRequestDataV1,
+    ProviderCliCodexInteractivePlanDataV1}
+use app.llm_caret.provider_cli_interactive_intent_v1.{ProviderCliInteractiveIntentDataV1,
+    build_provider_cli_interactive_intent_data_v1}
+use std.common.contracts.provider_cli.codex_interactive_v1.plan_provider_cli_codex_interactive_v1
+use std.nogc_async_mut.llm.provider_cli_container_probe_v1.{ProviderCliContainedSelectionV1,
+    ProviderCliContainedProbeReceiptV1, ProviderCliContainedProbeSnapshotV1}
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_host_scope_bytes_v2}
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.execution_configuration_v1.{ContainerExecutionConfigurationObservationV1,
+    ContainerExecutionMountObservationV1}
+use std.nogc_sync_mut.io.process_capture_evidence_v1.ProcessCaptureEvidenceV1
+use std.common.contracts.orchestration.desired_input_v1.ControllerDesiredInputV1
+use std.common.contracts.orchestration.agent_policy_resolution_v1.{AgentPolicyResolutionV1, resolve_agent_policy_v1}
+use std.common.contracts.orchestration.agent_invocation_binding_v1.AgentTaskInputV1
+use std.common.contracts.orchestration.resource_set_v1.{ResourceSetItemV1, resource_set_item_identity}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+
+fn intent_program_v1() -> text: "/usr/local/bin/codex"
+
+fn intent_binding_v1() -> text: "d".repeat(64)
+
+fn intent_session_source_v1() -> text:
+    file_read_regular_no_follow_bounded("test/fixtures/orchestration/caret_agent_session.sdn", 1048576).unwrap()
+
+fn intent_policy_from_v1(source: text) -> AgentPolicyResolutionV1:
+    val catalog = file_read_regular_no_follow_bounded("test/fixtures/orchestration/caret_policy_catalog.sdn", 1048576).unwrap()
+    resolve_agent_policy_v1(source, catalog, "caret", "review-simple").unwrap()
+
+fn intent_policy_v1() -> AgentPolicyResolutionV1: intent_policy_from_v1(intent_session_source_v1())
+
+fn intent_task_v1(policy: AgentPolicyResolutionV1, content: text) -> AgentTaskInputV1:
+    AgentTaskInputV1(ns: policy.session.meta.ns, reference: policy.session.agent.task_ref,
+        content: content, content_digest: sha256_text(content))
+
+fn intent_source_input_v1(policy: AgentPolicyResolutionV1) -> ControllerDesiredInputV1:
+    ControllerDesiredInputV1(controller_id: "caret-controller", workload_uid: "workload-uid-1",
+        source_digest: policy.source_digest,
+        resource_identity: resource_set_item_identity(ResourceSetItemV1.AgentSession(policy.session)))
+
+# Valid per execution_scope_valid_v2: service incarnation requires an empty boot id.
+fn intent_scope_v1() -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "data-host", service_scope_id: "data-service",
+        boot_id: "", provider_generation: 1, native_machine_id: "data-machine",
+        continuity_mode: "service-incarnation-v1", continuity_id: "data-continuity")
+
+fn intent_snapshot_v1(probe_index: i64, image: text, image_config_id: text, prefix: [text],
+        binding: text) -> ProviderCliContainedProbeSnapshotV1:
+    val runtime = RuntimeIdentityV1(pod_uid: "data-pod", attempt: 1, provider_generation: 1,
+        operation_id: "data-operation", engine: "data-engine", native_id: "data-native", node_boot_id: "data-boot")
+    var argv: [text] = []
+    for part in prefix: argv.push(part)
+    argv.push("--version")
+    val digests: [text] = []
+    val names: [text] = ["PATH"]
+    val defaults: [text] = ["PATH"]
+    val mounts: [ContainerExecutionMountObservationV1] = []
+    val configuration = ContainerExecutionConfigurationObservationV1(scope: intent_scope_v1(), runtime: runtime,
+        request_digest: "a".repeat(64), requested_image_ref: image, requested_image_kind: "tag",
+        runtime_image_id: "b".repeat(64), image_config_id: image_config_id, image_repo_digests: digests,
+        primary_argv: argv, working_directory: "/workspace", configured_user: "1000", readonly_rootfs: true,
+        mounts: mounts, environment_digest: "e".repeat(64), environment_names: names,
+        image_default_environment_digest: "f".repeat(64), image_default_environment_names: defaults,
+        configuration_digest: "0".repeat(64))
+    ProviderCliContainedProbeSnapshotV1(provider: ProviderCliProviderV1.Codex, probe_index: probe_index,
+        configuration: configuration, program_prefix: prefix, program_binding_digest: binding,
+        transcript_digest: sha256_text("codex-cli 0.169.0\n"), transcript_bytes: 18)
+
+fn intent_evidence_v1() -> ProcessCaptureEvidenceV1:
+    val empty: [u8] = []
+    ProcessCaptureEvidenceV1(result: None, stdout: empty, stderr: empty, output_complete: None,
+        stdout_eof: None, stderr_eof: None, stdout_seen: None, stderr_seen: None, stdout_kept: None,
+        stderr_kept: None, stdout_truncated: None, stderr_truncated: None, terminal: None, reaped: None,
+        identity_revalidated: None, native_error: None, cancel_requested: None, observation_status: None,
+        retirement_confirmed: false, effect_attempted: None)
+
+fn intent_receipt_v1(snapshot: ProviderCliContainedProbeSnapshotV1) -> ProviderCliContainedProbeReceiptV1:
+    ProviderCliContainedProbeReceiptV1(snapshot: snapshot, transcript: "codex-cli 0.169.0\n",
+        evidence: intent_evidence_v1())
+
+fn intent_selection_v1(receipt: ProviderCliContainedProbeReceiptV1) -> ProviderCliContainedSelectionV1:
+    ProviderCliContainedSelectionV1(provider: ProviderCliProviderV1.Codex,
+        version: ProviderCliVersionDataV1(provider: ProviderCliProviderV1.Codex, version: "0.169.0"),
+        program_binding_digest: intent_binding_v1(), receipts: [receipt])
+
+fn intent_default_receipt_v1(policy: AgentPolicyResolutionV1) -> ProviderCliContainedProbeReceiptV1:
+    intent_receipt_v1(intent_snapshot_v1(0, policy.session.template.containers[0].image,
+        "sha256:" + "c".repeat(64), [intent_program_v1()], intent_binding_v1()))
+
+fn intent_task_content_v1() -> text: "--not-an-option\nReview $(literal) and 'quoted' text"
+
+describe "Interactive provider neutral compatibility exports":
+    it "passes an app request into the neutral root planner and returns the app nominal result":
+        step("Use compatibility types directly without DTO conversion")
+        val version = ProviderCliVersionDataV1(ProviderCliProviderV1.Codex, "0.169.0")
+        val request = ProviderCliCodexInteractiveRequestDataV1(prompt: "-")
+        val planned: ProviderCliCodexInteractivePlanDataV1 = plan_provider_cli_codex_interactive_v1(version, request).unwrap()
+        expect(planned.argv).to_equal(["--", "-"])
+        expect(planned.raw_prompt_digest).to_equal(sha256_text("-"))
+        expect(planned.expected_normalized_prompt_digest).to_equal(sha256_text("-"))
+        expect(planned.version.version).to_equal("0.169.0")
+
+    it "digests the raw prompt and the CR/CRLF-normalized prompt separately":
+        step("Raw digest is over the exact bytes; normalized digest folds CRLF and CR to LF")
+        val version = ProviderCliVersionDataV1(ProviderCliProviderV1.Codex, "0.169.0")
+        val prompt = "line one\r\nline two\rline three"
+        val planned = plan_provider_cli_codex_interactive_v1(version,
+            ProviderCliCodexInteractiveRequestDataV1(prompt: prompt)).unwrap()
+        expect(planned.raw_prompt_digest).to_equal(sha256_text(prompt))
+        expect(planned.expected_normalized_prompt_digest).to_equal(sha256_text("line one\nline two\nline three"))
+        expect(planned.raw_prompt_digest == planned.expected_normalized_prompt_digest).to_equal(false)
+        val modeled = plan_provider_cli_codex_interactive_v1(version,
+            ProviderCliCodexInteractiveRequestDataV1(prompt: "task", model: "chosen-model")).unwrap()
+        expect(modeled.argv).to_equal(["--model", "chosen-model", "--", "task"])
+
+    it "preserves exact family rejection and initial root prompt semantics":
+        step("Keep unknown versions rejected and flag-like text positional")
+        val request = ProviderCliCodexInteractiveRequestDataV1(prompt: "--help")
+        val version = ProviderCliVersionDataV1(ProviderCliProviderV1.Codex, "0.169.0")
+        expect(plan_provider_cli_codex_interactive_v1(version, request).unwrap().argv).to_equal(["--", "--help"])
+        val wrong = ProviderCliVersionDataV1(ProviderCliProviderV1.Codex, "0.167.0")
+        expect(plan_provider_cli_codex_interactive_v1(wrong, request).unwrap_err()).to_equal("codex-interactive-exact-version-required")
+        val other = ProviderCliVersionDataV1(ProviderCliProviderV1.Claude, "0.169.0")
+        expect(plan_provider_cli_codex_interactive_v1(other, request).unwrap_err()).to_equal("codex-interactive-exact-version-required")
+
+    it "rejects empty, NUL-bearing and oversize prompts and invalid models":
+        step("Bound prompt bytes and keep option-like or control-byte models out of argv")
+        val version = ProviderCliVersionDataV1(ProviderCliProviderV1.Codex, "0.169.0")
+        for prompt in ["", "bad\0prompt", "x".repeat(4097)]:
+            val rejected = plan_provider_cli_codex_interactive_v1(version, ProviderCliCodexInteractiveRequestDataV1(prompt: prompt))
+            expect(rejected.unwrap_err()).to_equal("codex-interactive-prompt-utf8-byte-bound")
+        expect(plan_provider_cli_codex_interactive_v1(version,
+            ProviderCliCodexInteractiveRequestDataV1(prompt: "x".repeat(4096))).is_ok()).to_equal(true)
+        for model in ["-x", " model", "model ", "bad\nmodel", "m".repeat(257)]:
+            val rejected_model = plan_provider_cli_codex_interactive_v1(version,
+                ProviderCliCodexInteractiveRequestDataV1(prompt: "task", model: model))
+            expect(rejected_model.unwrap_err()).to_equal("codex-interactive-model-invalid")
+
+describe "Interactive intent DATA builder over a contained selection":
+    it "binds program prefix, planned argv and retained digests into the intent":
+        step("Build intent DATA from consistent policy, task, source, selection and receipt")
+        val policy = intent_policy_v1()
+        val task = intent_task_v1(policy, intent_task_content_v1())
+        val source = intent_source_input_v1(policy)
+        val receipt = intent_default_receipt_v1(policy)
+        val selection = intent_selection_v1(receipt)
+        val request = ProviderCliCodexInteractiveRequestDataV1(prompt: task.content)
+        val planned = plan_provider_cli_codex_interactive_v1(selection.version_data_v1(), request).unwrap()
+        val intent: ProviderCliInteractiveIntentDataV1 = build_provider_cli_interactive_intent_data_v1(selection,
+            receipt, source, policy, task, request).unwrap()
+        expect(planned.argv).to_equal(["--", task.content])
+        expect(intent.program_prefix).to_equal([intent_program_v1()])
+        expect(intent.argv).to_equal([intent_program_v1(), "--", task.content])
+        expect(intent.provider_version).to_equal("0.169.0")
+        expect(intent.task_digest).to_equal(task.content_digest)
+        expect(intent.raw_prompt_digest).to_equal(planned.raw_prompt_digest)
+        expect(intent.raw_prompt_digest).to_equal(sha256_text(task.content))
+        expect(intent.expected_normalized_prompt_digest).to_equal(planned.expected_normalized_prompt_digest)
+        expect(intent.source_digest).to_equal(policy.source_digest)
+        expect(intent.catalog_digest).to_equal(policy.catalog_digest)
+        expect(intent.controller_id).to_equal("caret-controller")
+        expect(intent.session_uid).to_equal("workload-uid-1")
+        expect(intent.requested_image_ref).to_equal("registry.example/simple-agent:resolved-before-apply")
+        expect(intent.image_config_id).to_equal("sha256:" + "c".repeat(64))
+        expect(intent.program_binding_digest).to_equal(intent_binding_v1())
+        expect(intent.scope_bytes).to_equal(container_host_scope_bytes_v2(intent_scope_v1()).unwrap())
+        expect(intent.provider_generation).to_equal(1)
+        expect(intent.binding_digest.byte_len()).to_equal(64)
+        expect(builder_digest_valid_v1(intent.binding_digest)).to_equal(true)
+
+    it "keeps the binding digest deterministic and sensitive to task and image inputs":
+        step("Rebuild identical inputs, then change one bound input at a time")
+        val policy = intent_policy_v1()
+        val task = intent_task_v1(policy, intent_task_content_v1())
+        val source = intent_source_input_v1(policy)
+        val receipt = intent_default_receipt_v1(policy)
+        val selection = intent_selection_v1(receipt)
+        val request = ProviderCliCodexInteractiveRequestDataV1(prompt: task.content)
+        val first = build_provider_cli_interactive_intent_data_v1(selection, receipt, source, policy, task, request).unwrap()
+        val again = build_provider_cli_interactive_intent_data_v1(selection, receipt, source, policy, task, request).unwrap()
+        expect(again.binding_digest).to_equal(first.binding_digest)
+        val other_task = intent_task_v1(policy, "Review a different immutable task")
+        val other_request = ProviderCliCodexInteractiveRequestDataV1(prompt: other_task.content)
+        val changed_task = build_provider_cli_interactive_intent_data_v1(selection, receipt, source, policy,
+            other_task, other_request).unwrap()
+        expect(changed_task.binding_digest == first.binding_digest).to_equal(false)
+        expect(changed_task.argv).to_equal([intent_program_v1(), "--", "Review a different immutable task"])
+        val other_receipt = intent_receipt_v1(intent_snapshot_v1(0, policy.session.template.containers[0].image,
+            "sha256:" + "9".repeat(64), [intent_program_v1()], intent_binding_v1()))
+        val changed_image = build_provider_cli_interactive_intent_data_v1(intent_selection_v1(other_receipt),
+            other_receipt, source, policy, task, request).unwrap()
+        expect(changed_image.binding_digest == first.binding_digest).to_equal(false)
+        var other_source = source
+        other_source.workload_uid = "workload-uid-2"
+        val changed_source = build_provider_cli_interactive_intent_data_v1(selection, receipt, other_source, policy,
+            task, request).unwrap()
+        expect(changed_source.binding_digest == first.binding_digest).to_equal(false)
+
+    it "rejects a source object that does not match the retained policy":
+        step("Fail closed on an encodable source whose digest is not the policy source digest")
+        val policy = intent_policy_v1()
+        val task = intent_task_v1(policy, intent_task_content_v1())
+        val receipt = intent_default_receipt_v1(policy)
+        val selection = intent_selection_v1(receipt)
+        val request = ProviderCliCodexInteractiveRequestDataV1(prompt: task.content)
+        var source = intent_source_input_v1(policy)
+        source.source_digest = "e".repeat(64)
+        expect(build_provider_cli_interactive_intent_data_v1(selection, receipt, source, policy, task,
+            request).unwrap_err()).to_equal("interactive-intent-retained-source-mismatch")
+        source = intent_source_input_v1(policy)
+        source.resource_identity = "orchestration.simple/AgentSession/caret/other-session"
+        expect(build_provider_cli_interactive_intent_data_v1(selection, receipt, source, policy, task,
+            request).unwrap_err()).to_equal("interactive-intent-retained-source-mismatch")
+
+    it "requires a codex smux session":
+        step("Reject a retained claude session even with otherwise consistent inputs")
+        val policy = intent_policy_from_v1(intent_session_source_v1().replace("provider: codex", "provider: claude"))
+        expect(policy.session.agent.provider).to_equal("claude")
+        val task = intent_task_v1(policy, intent_task_content_v1())
+        val source = intent_source_input_v1(policy)
+        val receipt = intent_default_receipt_v1(policy)
+        val selection = intent_selection_v1(receipt)
+        val request = ProviderCliCodexInteractiveRequestDataV1(prompt: task.content)
+        expect(build_provider_cli_interactive_intent_data_v1(selection, receipt, source, policy, task,
+            request).unwrap_err()).to_equal("interactive-intent-codex-smux-required")
+
+    it "rejects task scope, prompt and content mismatches":
+        step("Keep the request prompt bound to the exact retained task content")
+        val policy = intent_policy_v1()
+        val task = intent_task_v1(policy, intent_task_content_v1())
+        val source = intent_source_input_v1(policy)
+        val receipt = intent_default_receipt_v1(policy)
+        val selection = intent_selection_v1(receipt)
+        val request = ProviderCliCodexInteractiveRequestDataV1(prompt: task.content)
+        var changed = task
+        changed.reference = "wrong-reference"
+        expect(build_provider_cli_interactive_intent_data_v1(selection, receipt, source, policy, changed,
+            request).unwrap_err()).to_equal("interactive-intent-task-reference-mismatch")
+        val other_request = ProviderCliCodexInteractiveRequestDataV1(prompt: "a different prompt")
+        expect(build_provider_cli_interactive_intent_data_v1(selection, receipt, source, policy, task,
+            other_request).unwrap_err()).to_equal("interactive-intent-task-prompt-mismatch")
+        changed = task
+        changed.content_digest = "e".repeat(64)
+        expect(build_provider_cli_interactive_intent_data_v1(selection, receipt, source, policy, changed,
+            request).unwrap_err()).to_equal("interactive-intent-task-content-mismatch")
+
+    it "rejects a version receipt not bound to the selection":
+        step("Require probe index zero and the selection's program binding digest")
+        val policy = intent_policy_v1()
+        val task = intent_task_v1(policy, intent_task_content_v1())
+        val source = intent_source_input_v1(policy)
+        val selection = intent_selection_v1(intent_default_receipt_v1(policy))
+        val request = ProviderCliCodexInteractiveRequestDataV1(prompt: task.content)
+        val image = policy.session.template.containers[0].image
+        val rebound = intent_receipt_v1(intent_snapshot_v1(0, image, "sha256:" + "c".repeat(64),
+            [intent_program_v1()], "7".repeat(64)))
+        expect(build_provider_cli_interactive_intent_data_v1(selection, rebound, source, policy, task,
+            request).unwrap_err()).to_equal("interactive-intent-selection-receipt-mismatch")
+        val help_probe = intent_receipt_v1(intent_snapshot_v1(1, image, "sha256:" + "c".repeat(64),
+            [intent_program_v1()], intent_binding_v1()))
+        expect(build_provider_cli_interactive_intent_data_v1(selection, help_probe, source, policy, task,
+            request).unwrap_err()).to_equal("interactive-intent-selection-receipt-mismatch")
+
+    it "rejects an observed image that is not the session container image":
+        step("Bind the session's single container image to the probed requested image")
+        val policy = intent_policy_v1()
+        val task = intent_task_v1(policy, intent_task_content_v1())
+        val source = intent_source_input_v1(policy)
+        val receipt = intent_receipt_v1(intent_snapshot_v1(0, "registry.example/other-agent:latest",
+            "sha256:" + "c".repeat(64), [intent_program_v1()], intent_binding_v1()))
+        val selection = intent_selection_v1(receipt)
+        val request = ProviderCliCodexInteractiveRequestDataV1(prompt: task.content)
+        expect(build_provider_cli_interactive_intent_data_v1(selection, receipt, source, policy, task,
+            request).unwrap_err()).to_equal("interactive-intent-image-reference-unresolved-or-mismatched")
+
+    it "rejects an unmapped program prefix and an oversize final argv":
+        step("Require one program element and bound the composed argv bytes")
+        val policy = intent_policy_v1()
+        val task = intent_task_v1(policy, intent_task_content_v1())
+        val source = intent_source_input_v1(policy)
+        val image = policy.session.template.containers[0].image
+        val request = ProviderCliCodexInteractiveRequestDataV1(prompt: task.content)
+        val interpreted = intent_receipt_v1(intent_snapshot_v1(0, image, "sha256:" + "c".repeat(64),
+            ["/usr/bin/node", "/opt/codex.js"], intent_binding_v1()))
+        expect(build_provider_cli_interactive_intent_data_v1(intent_selection_v1(interpreted), interpreted, source,
+            policy, task, request).unwrap_err()).to_equal("interactive-intent-codex-program-mapping-required")
+        val long_program = intent_receipt_v1(intent_snapshot_v1(0, image, "sha256:" + "c".repeat(64),
+            ["/" + "p".repeat(8200)], intent_binding_v1()))
+        expect(build_provider_cli_interactive_intent_data_v1(intent_selection_v1(long_program), long_program, source,
+            policy, task, request).unwrap_err()).to_equal("interactive-intent-final-argv-byte-bound")

@@ -42,12 +42,15 @@ use compiler.semantics.lint.riscv_rtl_debuggability_lint.{lint_riscv_rtl_debugga
 use compiler.core.ast.{module_get_decls}
 use compiler.core.ast_expr.{ast_generation}
 use compiler.core.parser.{parse_module_silent_checked, parser_has_errors, parser_set_had_error, parser_first_error_get}
+use compiler.core.types.{unit_decl_pool_reset}
+use compiler.types.units.unit_registry.{unit_registry_build, unit_registry_collisions}
 use compiler.semantics.lint.argument_count.{check_argument_count}
 use compiler.semantics.lint.collection_patterns.{check_collection_patterns}
 use compiler.semantics.lint.star_import.{check_star_export_file}
 use compiler.semantics.lint.stub_impl.{check_stub_impl}
 use compiler.semantics.lint.wide_public.{check_wide_public_file}
-use compiler.semantics.lint.semantic_api.exported_graph.{check_semantic_api_decls}
+use compiler.semantics.lint.semantic_api.exported_graph.{check_semantic_api_decls_for_package}
+use compiler.semantics.lint.semantic_api.package_manifest.{semantic_api_manifest_text_for, semantic_api_module_stem}
 use compiler.tools.fix.rules.impl_.lint_allow.{lines_allow_rule, line_is_allowed}
 use compiler.semantics.lint.option_me_call.{check_option_me_call_source}
 use compiler.semantics.lint.required_comment.{check_required_comment, required_comment_source_may_match}
@@ -78,6 +81,19 @@ fn _lint_profile_to_assurance_name(profile: Option<LintProfile>) -> text:
 
 use compiler.frontend.core.representation_declarations_v1.{representation_checked_parse_receipt_v1}
 
+fn lint_cli_unit_results(config: LintConfig, path: String) -> [LintRunResult]:
+    """SPL-UNIT-004 suffix collisions among the unit declarations of the parse
+    just done. SPL-UNIT-001/003 are already reported by the text EasyFix
+    producers (fix registry), so they are not repeated from parser_warn."""
+    var results: [LintRunResult] = []
+    for message in unit_registry_collisions(unit_registry_build()):
+        val policy = lint_policy_decision(
+            config, "SPL-UNIT-004", LintLevel.Deny, LintEvidenceTier.ParsedStructural)
+        if not policy.keep: continue
+        val lint = LintDiag.new("SPL-UNIT-004", policy.level, LintCategory.Correctness, message[14:])
+        results.push(LintRunResult.new(path, 1, 0, lint))
+    results
+
 fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintRunResult]:
     val previous_parse_error = parser_has_errors()
     var results = linter.lint_source_for_parsed_append(path, content)
@@ -90,7 +106,8 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintRunRes
     # module boundary, which made this gate fail open — lint reported
     # `all files clean` on files the compiler rejects outright. See
     # doc/08_tracking/bug/lint_does_not_detect_syntax_errors_2026-07-28.md.
-    val parse_failed = if val receipt = representation_checked_parse_receipt_v1(content, path):
+    unit_decl_pool_reset()
+    val parse_failed =if val receipt = representation_checked_parse_receipt_v1(content, path):
         receipt
     else:
         parse_module_silent_checked(content, path)
@@ -154,6 +171,8 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintRunRes
     val any_decl_level = any_rule_relay_level(any_config, "written_any_decl", any_decl.keep, any_decl.level, any_env_level)
     val any_fallback_level = any_rule_relay_level(any_config, "any_fallback_use", any_fallback.keep, any_fallback.level, any_env_level)
     val any_receiver_level = any_rule_relay_level(any_config, "any_receiver_use", any_receiver.keep, any_receiver.level, any_env_level)
+    for unit_result in lint_cli_unit_results(any_config, path):
+        results.push(unit_result)
     var parsed_results = lint_cli_append_parsed_results(linter, path, content, module_get_decls(), results)
     # Robust/critical default to warnings. Moderate/strict and explicit allow
     # keep an empty mask: no checker process, HIR lowering, or walk.
@@ -254,7 +273,8 @@ fn _append_semantic_api_results(
     val lines = content.split("\n")
     if lines_allow_rule(lines, "primitive_api"):
         return results
-    val findings = check_semantic_api_decls(decls)
+    val findings = check_semantic_api_decls_for_package(
+        decls, semantic_api_module_stem(path), semantic_api_manifest_text_for(path))
     val critical = config.profile.? and config.profile.unwrap() == LintProfile.Critical
     var reported_lines: Dict<text, bool> = {}
     for f in findings:

@@ -1,0 +1,185 @@
+# AUTHORED SOURCE-ONLY NOT_RUN. Public plan/lease metadata only; no native owner,
+# adoption, issuer grant or actual resize is created by these pure cases.
+use std.spec.*
+use test.fixtures.orchestration.simple_container_windows_adapter_fixture_v2.{
+    windows_adapter_request_fixture_v2, windows_adapter_scope_fixture_v2}
+use std.common.contracts.container.primary_connection_v2.*
+use std.common.contracts.container.primary_geometry_v1.ContainerPrimaryGeometryRequestV1
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.stream_v2.{ContainerOutputIdentityV2, ContainerOutputResourcesV2}
+use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use std.common.contracts.mux.session_runtime_control_v1.{SessionRuntimeControlTargetV1,
+    SessionRuntimeControlLeaseV1, SessionRuntimeControlKindV1, session_runtime_control_target_digest_v1}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.text_bytes.boxed_text_bytes_checked
+use std.nogc_async_mut.container.providers.windows.primary_geometry_wire_v2.*
+use std.nogc_async_mut.container.providers.windows.docker_engine_codec_v3.windows_engine_container_resize_v3
+use std.nogc_async_mut.container.providers.windows.docker_engine_exchange_v3.windows_docker_engine_exchange_serialize_v3
+
+fn geometry_wire_plan_fixture_v2() -> ContainerPrimaryConnectionPlanV2:
+    val workload = windows_adapter_request_fixture_v2().plan
+    var plan = ContainerPrimaryConnectionPlanV2(workload: workload,
+        runtime: RuntimeIdentityV1(pod_uid: workload.workload_uid, attempt: workload.attempt,
+            operation_id: workload.operation_id, provider_generation: workload.provider_generation,
+            engine: "docker", native_id: "4".repeat(64),
+            node_boot_id: container_scope_fence_id_v2(windows_adapter_scope_fixture_v2()).unwrap()),
+        identity: ContainerOutputIdentityV2(operation_id: "geometry-connection", parent_operation_id: workload.operation_id,
+            parent_operation_digest: "b".repeat(64), parent_assignment_digest: "c".repeat(64),
+            parent_budget_digest: "d".repeat(64), binding_digest: "e".repeat(64)),
+        resources: ContainerOutputResourcesV2(cpu_millis: 100, memory_bytes: 67108864),
+        provider_identity_digest: "1".repeat(64), installation_digest: "2".repeat(64),
+        journal_lease_digest: "5".repeat(64), policy_digest: "3".repeat(64),
+        terminal_mode: "tty", timeout_ms: 30000, request_digest: "")
+    plan.request_digest = container_primary_connection_plan_digest_v2(plan).unwrap()
+    plan
+
+fn geometry_wire_request_fixture_v2(plan: ContainerPrimaryConnectionPlanV2) -> ContainerPrimaryGeometryRequestV1:
+    val target = SessionRuntimeControlTargetV1(scope: container_primary_connection_scope_v2(plan), runtime: plan.runtime,
+        workload_request_digest: plan.workload.request_digest, binding_uid: "binding-a",
+        binding_digest: plan.identity.binding_digest, service_incarnation: "f".repeat(32),
+        session_id: "session-a", window_id: "window-a", pane_id: "pane-a", service_epoch: 1,
+        child_incarnation: 1, client_id: "client-a", attachment_generation: 1,
+        execution_kind: "primary", native_exec_id: "", exec_request_digest: "")
+    val nonce = "geometry-raw-fixture"
+    val lease = SessionRuntimeControlLeaseV1(target: target, kind: SessionRuntimeControlKindV1.Geometry,
+        principal_id: "fixture-owner", nonce_digest: sha256_text(nonce), revision: 3,
+        issued_monotonic_ms: 100, expires_monotonic_ms: 1000)
+    val wire = windows_docker_engine_exchange_serialize_v3(
+        windows_engine_container_resize_v3("1.48", plan.runtime.native_id, 24, 80, true).unwrap()).unwrap()
+    ContainerPrimaryGeometryRequestV1(lease: lease, target: target, principal: "fixture-owner", nonce: nonce,
+        attempt_sequence: 1, columns: 80, rows: 24, request_digest: sha256_u8_hex(wire))
+
+describe "Pure Windows primary geometry wire metadata":
+    it "serializes the exact resize wire and binds its entire digest to Geometry control":
+        step("Compare the full production wire against exact HTTP method target headers and empty body")
+        val plan = geometry_wire_plan_fixture_v2()
+        val request = geometry_wire_request_fixture_v2(plan)
+        val result = windows_primary_geometry_wire_v2(plan, request, 200).unwrap()
+        val expected = "POST /v1.48/containers/" + plan.runtime.native_id +
+            "/resize?h=24&w=80 HTTP/1.1\r\nHost: docker\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        expect(result.wire).to_equal(boxed_text_bytes_checked(expected).unwrap())
+        expect(sha256_u8_hex(result.wire)).to_equal(request.request_digest)
+        expect(result.binding.target_digest).to_equal(container_primary_connection_binding_digest_v2(request.target).unwrap())
+        expect(result.binding.kind).to_equal("geometry")
+        expect(result.binding.payload_digest).to_equal(request.request_digest)
+        expect(result.control.target_digest).to_equal(session_runtime_control_target_digest_v1(request.target).unwrap())
+        expect(result.control.binding_digest).to_equal(result.binding.target_digest)
+        expect(result.control.kind).to_equal("geometry")
+        expect(result.control.nonce_digest).to_equal(sha256_text(request.nonce))
+        expect(result.control.revision).to_equal(3)
+        expect(result.control.expires_monotonic_ns).to_equal(1000000000)
+
+    it "preserves stable binding across attachment rotation while changing the full control target":
+        step("Rotate only client and attachment metadata with a correspondingly matching public lease")
+        val plan = geometry_wire_plan_fixture_v2()
+        val request = geometry_wire_request_fixture_v2(plan)
+        val original = windows_primary_geometry_wire_v2(plan, request, 200).unwrap()
+        var rotated = request
+        rotated.target.client_id = "client-b"
+        rotated.target.attachment_generation = 2
+        rotated.lease.target = rotated.target
+        val result = windows_primary_geometry_wire_v2(plan, rotated, 200).unwrap()
+        expect(result.wire).to_equal(original.wire)
+        expect(result.binding.target_digest).to_equal(original.binding.target_digest)
+        expect(result.control.target_digest == original.control.target_digest).to_equal(false)
+
+    it "rejects stale plan self-digest foreign runtime target and changed lease target":
+        step("Validate exact plan and target correlation before producing any wire metadata")
+        val plan = geometry_wire_plan_fixture_v2()
+        val request = geometry_wire_request_fixture_v2(plan)
+        var stale = plan
+        stale.request_digest = "9".repeat(64)
+        expect(windows_primary_geometry_wire_v2(stale, request, 200).unwrap_err()).to_equal("primary-connection-plan-digest")
+        var foreign = request
+        foreign.target.runtime.native_id = "8".repeat(64)
+        foreign.lease.target = foreign.target
+        expect(windows_primary_geometry_wire_v2(plan, foreign, 200).unwrap_err()).to_equal("primary-connection-target-plan")
+        var changed = request
+        changed.lease.target.client_id = "client-b"
+        expect(windows_primary_geometry_wire_v2(plan, changed, 200).unwrap_err()).to_equal("control-target-changed")
+
+    it "rejects a canonical nonTTY direct connection plan":
+        step("Recompute the valid stdin plan digest so refusal specifically checks terminal mode")
+        var plan = geometry_wire_plan_fixture_v2()
+        plan.terminal_mode = "stdin"
+        plan.request_digest = container_primary_connection_plan_digest_v2(plan).unwrap()
+        val request = geometry_wire_request_fixture_v2(plan)
+        expect(windows_primary_geometry_wire_v2(plan, request, 200).unwrap_err()).to_equal("windows-primary-geometry-tty-required")
+
+    it "requires the Geometry kind and exact principal and raw nonce correlation":
+        step("Do not reinterpret an Input lease or a changed credential as geometry permission")
+        val plan = geometry_wire_plan_fixture_v2()
+        val request = geometry_wire_request_fixture_v2(plan)
+        var input = request
+        input.lease.kind = SessionRuntimeControlKindV1.Input
+        expect(windows_primary_geometry_wire_v2(plan, input, 200).unwrap_err()).to_equal("control-kind-denied")
+        var principal = request
+        principal.principal = "another-owner"
+        expect(windows_primary_geometry_wire_v2(plan, principal, 200).unwrap_err()).to_equal("control-principal-denied")
+        var nonce = request
+        nonce.nonce = "different-raw-nonce"
+        expect(windows_primary_geometry_wire_v2(plan, nonce, 200).unwrap_err()).to_equal("control-capability-stale")
+
+    it "accepts exactly 256 nonce bytes and refuses empty or oversized nonce":
+        step("Hash the exact raw nonce only after its byte bound and matching lease metadata")
+        val plan = geometry_wire_plan_fixture_v2()
+        var request = geometry_wire_request_fixture_v2(plan)
+        request.nonce = "n".repeat(256)
+        request.lease.nonce_digest = sha256_text(request.nonce)
+        expect(windows_primary_geometry_wire_v2(plan, request, 200).unwrap().control.nonce_digest).to_equal(sha256_text(request.nonce))
+        for nonce in ["", "n".repeat(257)]:
+            request.nonce = nonce
+            request.lease.nonce_digest = sha256_text(nonce)
+            expect(windows_primary_geometry_wire_v2(plan, request, 200).unwrap_err()).to_equal("windows-primary-geometry-nonce-bound")
+
+    it "bounds nanosecond conversion before multiplication and preserves the largest safe deadline":
+        step("Keep a valid short lease window near the maximum representable nanosecond deadline")
+        val plan = geometry_wire_plan_fixture_v2()
+        var request = geometry_wire_request_fixture_v2(plan)
+        request.lease.issued_monotonic_ms = 9223372036754
+        request.lease.expires_monotonic_ms = 9223372036854
+        val result = windows_primary_geometry_wire_v2(plan, request, 9223372036853).unwrap()
+        expect(result.control.expires_monotonic_ns).to_equal(9223372036854000000)
+        for expiry in [-1, 0, 9223372036855]:
+            request.lease.expires_monotonic_ms = expiry
+            expect(windows_primary_geometry_wire_v2(plan, request, 200).unwrap_err()).to_equal("windows-primary-geometry-deadline-bound")
+
+    it "refuses expired not-yet-valid and malformed lease windows":
+        step("Require actual request-check lease timing without widening its metadata window")
+        val plan = geometry_wire_plan_fixture_v2()
+        val request = geometry_wire_request_fixture_v2(plan)
+        for now in [-1, 0, 99, 1000, 1001]:
+            expect(windows_primary_geometry_wire_v2(plan, request, now).unwrap_err()).to_equal("control-lease-expired")
+        var malformed = request
+        malformed.lease.expires_monotonic_ms = malformed.lease.issued_monotonic_ms
+        expect(windows_primary_geometry_wire_v2(plan, malformed, 100).unwrap_err()).to_equal("control-lease-window-invalid")
+
+    it "requires the digest of the full exact wire rather than geometry text or a stale dimension":
+        step("Refuse changed dimensions and a valid-looking digest of a different representation")
+        val plan = geometry_wire_plan_fixture_v2()
+        val request = geometry_wire_request_fixture_v2(plan)
+        var changed = request
+        changed.columns = 81
+        expect(windows_primary_geometry_wire_v2(plan, changed, 200).unwrap_err()).to_equal("windows-primary-geometry-wire-digest")
+        changed = request
+        changed.request_digest = sha256_text("24x80")
+        expect(windows_primary_geometry_wire_v2(plan, changed, 200).unwrap_err()).to_equal("windows-primary-geometry-wire-digest")
+        changed.request_digest = ""
+        expect(windows_primary_geometry_wire_v2(plan, changed, 200).unwrap_err()).to_equal("primary-geometry-request-bound")
+
+    it "preserves shared geometry dimension attempt and revision bounds":
+        step("Reject dimensions outside the common geometry contract before codec serialization")
+        val plan = geometry_wire_plan_fixture_v2()
+        val original = geometry_wire_request_fixture_v2(plan)
+        for field in ["columns-zero", "columns-max", "rows-zero", "rows-max", "cells", "attempt", "revision"]:
+            var request = original
+            if field == "columns-zero": request.columns = 0
+            elif field == "columns-max": request.columns = 513
+            elif field == "rows-zero": request.rows = 0
+            elif field == "rows-max": request.rows = 257
+            elif field == "cells":
+                request.columns = 512
+                request.rows = 256
+            elif field == "attempt": request.attempt_sequence = 0
+            else: request.lease.revision = 0
+            expect(windows_primary_geometry_wire_v2(plan, request, 200).unwrap_err()).to_equal("primary-geometry-request-bound")

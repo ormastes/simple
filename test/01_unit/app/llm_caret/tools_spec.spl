@@ -295,6 +295,17 @@ describe "edit_file executor":
         expect(res.content).to_contain("replaced 1 occurrence")
         expect(rt_file_read_text(path) ?? "").to_equal("alpha\nBETA\n  second\ngamma\n")
 
+    it "should remove all of a non-ASCII old_text, leaving no stray bytes":
+        _setup()
+        val path = WS_ROOT + "/edit_utf8.txt"
+        _clean(path)
+        rt_file_write_text(path, "a éé b\n")
+        val input = _LB() + _kv("path", "edit_utf8.txt") + "," + _kv("old_text", "éé") + "," + _kv("new_text", "X") + _RB()
+        val p = policy_with_allow(WS_ROOT, ["edit_file"])
+        val res = run_tool(p, new_tool_call("e1u", "edit_file", input))
+        assert_false(res.is_error)
+        expect(rt_file_read_text(path) ?? "").to_equal("a X b\n")
+
     it "should error and leave the file unchanged when old_text is not found":
         _setup()
         val path = WS_ROOT + "/edit_miss.txt"
@@ -318,6 +329,45 @@ describe "edit_file executor":
         assert_true(res.is_error)
         expect(res.content).to_contain("2 times")
         expect(rt_file_read_text(path) ?? "").to_equal("x = 1\nx = 1\n")
+
+    it "should refuse a missing or cut-off new_text and leave the file unchanged":
+        _setup()
+        val path = WS_ROOT + "/edit_cut.txt"
+        _clean(path)
+        rt_file_write_text(path, "alpha\nbeta\n")
+        val p = policy_with_allow(WS_ROOT, ["edit_file"])
+        # No new_text key at all.
+        val missing = _LB() + _kv("path", "edit_cut.txt") + "," + _kv("old_text", "beta") + _RB()
+        val res_missing = run_tool(p, new_tool_call("e5", "edit_file", missing))
+        assert_true(res_missing.is_error)
+        expect(res_missing.content).to_contain("new_text is missing")
+        # A tool call cut off inside the new_text value (no closing quote).
+        val cut = _LB() + _kv("path", "edit_cut.txt") + "," + _kv("old_text", "beta") + ",\"new_text\":\"BET"
+        val res_cut = run_tool(p, new_tool_call("e6", "edit_file", cut))
+        assert_true(res_cut.is_error)
+        expect(rt_file_read_text(path) ?? "").to_equal("alpha\nbeta\n")
+
+    it "should still delete when new_text is an explicit empty string":
+        _setup()
+        val path = WS_ROOT + "/edit_del.txt"
+        _clean(path)
+        rt_file_write_text(path, "alpha\nbeta\n")
+        val input = _LB() + _kv("path", "edit_del.txt") + "," + _kv("old_text", "beta\n".replace("\n", "\\" + "n")) + "," + _kv("new_text", "") + _RB()
+        val p = policy_with_allow(WS_ROOT, ["edit_file"])
+        val res = run_tool(p, new_tool_call("e7", "edit_file", input))
+        assert_false(res.is_error)
+        expect(rt_file_read_text(path) ?? "").to_equal("alpha\n")
+
+    it "should keep multi-byte text in new_text intact":
+        _setup()
+        val path = WS_ROOT + "/edit_mb.txt"
+        _clean(path)
+        rt_file_write_text(path, "alpha\nbeta\n")
+        val input = _LB() + _kv("path", "edit_mb.txt") + "," + _kv("old_text", "beta") + "," + _kv("new_text", "é — 한글 end") + _RB()
+        val p = policy_with_allow(WS_ROOT, ["edit_file"])
+        val res = run_tool(p, new_tool_call("e8", "edit_file", input))
+        assert_false(res.is_error)
+        expect(rt_file_read_text(path) ?? "").to_equal("alpha\né — 한글 end\n")
 
     it "should refuse paths outside the workspace root":
         val p = allow_all_policy(WS_ROOT)

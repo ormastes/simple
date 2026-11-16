@@ -1,0 +1,27 @@
+# bridge_worker --once drains the durable outbox over HTTP into a loopback
+# server built on the shared pure-Simple HTTP server (http_server_core).
+# Native lane: run the probe with `native` and BRIDGE_WORKER_EXE set to a
+# native-built src/app/llm_caret/messaging/bridge_worker.spl.
+use std.spec.*
+use std.spec.step
+use std.process.{run}
+
+val PROBE = "test/01_unit/app/llm_caret/messaging/fixtures/bridge_worker_http_probe.shs"
+val probe = run("bash", [PROBE, "interp"])
+
+describe "bridge_worker HTTP delivery over the shared Simple HTTP server":
+    """
+    As an LLM Caret operator, when a chat message is queued for a remote HTTP
+    transport, one bridge pass delivers it and dead-letters a request the
+    server rejects, so the outbox reflects what the server actually answered.
+    """
+    it "delivers a queued request the server accepts and dead-letters a 404":
+        step("Queue two requests, start the loopback server, run bridge_worker --once")
+        expect(probe.stdout).to_contain("queued: true true")
+        expect(probe.stdout).to_contain("bridge: {\"handled\":0,\"failed\":0,\"delivered\":1,\"delivery_failed\":1}")
+        expect(probe.stdout).to_contain("bridge_exit: 1")
+
+    it "records the server's answer in the outbox and keeps a refused connection for retry":
+        step("Drain routed, unrouted and refused-port requests in one pass")
+        expect(probe.stdout).to_contain("drain delivered=1 failed=2")
+        expect(probe.stdout).to_contain("state routed=delivered unrouted=dead_letter refused=queued")

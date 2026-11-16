@@ -1,0 +1,127 @@
+# Caret cs terminal-surface passthrough (CU-005; plan 6.3).
+#
+# Pure pieces of the live key loop: split a raw read into whole keys without
+# ever cutting an escape sequence or a UTF-8 character (the tail is carried to
+# the next read), and route one key to a pane through an injected send function
+# behind the (session id, generation) pane-binding guard.
+
+use std.common.text_bytes.{bytes_to_text}
+use app.llm_caret.workbench.leader_keys.{LeaderState}
+use app.llm_caret.workbench.key_resolver.{KeyEvent, KeyFocus, KeyRoute, KeyRouteKind,
+    key_event, resolve_key}
+use app.llm_caret.workbench.pane_binding.{PaneBindingResult, input_target_allowed,
+    pane_binding_label}
+
+struct TerminalStep:
+    state: LeaderState
+    route: KeyRoute
+    # Non-empty when a forward was refused.
+    status: text
+    # True only when the send function accepted the bytes.
+    sent: bool
+
+fn _slice(buf: [u8], from: i64, to: i64) -> [u8]:
+    var out: [u8] = []
+    var i = from
+    while i < to:
+        out.push(buf[i])
+        i = i + 1
+    out
+
+fn _utf8_len(lead: i64) -> i64:
+    if lead >= 240:
+        return 4
+    if lead >= 224:
+        return 3
+    2
+
+# Whole keys in `carry + chunk`, plus the incomplete tail to carry forward.
+# A key is one byte, one UTF-8 character, ESC + one byte, SS3 (ESC O x) or a
+# CSI sequence (ESC [ params final).
+fn split_complete_keys(carry: [u8], chunk: [u8]) -> ([[u8]], [u8]):
+    var buf: [u8] = []
+    for b in carry:
+        buf.push(b)
+    for b in chunk:
+        buf.push(b)
+    val n = buf.len()
+    var keys: [[u8]] = []
+    var i = 0
+    while i < n:
+        val b = buf[i]
+        var end = i + 1
+        if b == 27:
+            if i + 1 >= n:
+                return (keys, _slice(buf, i, n))
+            val nxt = buf[i + 1]
+            if nxt == 91:
+                var j = i + 2
+                while j < n and buf[j] >= 32 and buf[j] <= 63:
+                    j = j + 1
+                if j >= n:
+                    return (keys, _slice(buf, i, n))
+                end = j + 1
+            elif nxt == 79:
+                if i + 2 >= n:
+                    return (keys, _slice(buf, i, n))
+                end = i + 3
+            else:
+                end = i + 2
+        elif b >= 192:
+            end = i + _utf8_len(b)
+            if end > n:
+                return (keys, _slice(buf, i, n))
+        keys.push(_slice(buf, i, end))
+        i = end
+    var none: [u8] = []
+    (keys, none)
+
+# A carry that no further byte completed (idle read timed out): forward it as
+# it is, so a lone Esc keypress is not held back forever.
+fn flush_carry(carry: [u8]) -> [[u8]]:
+    var keys: [[u8]] = []
+    if carry.len() > 0:
+        keys.push(carry)
+    keys
+
+fn _key_name(bytes: [u8]) -> text:
+    if bytes.len() == 1:
+        val code = bytes[0]
+        val plain = code == 8 or code == 9 or code == 10 or code == 13
+        if code >= 1 and code <= 26 and not plain:
+            return "ctrl+" + "abcdefghijklmnopqrstuvwxyz".slice(code - 1, code)
+    if bytes.len() == 5 and bytes[0] == 27 and bytes[1] == 91 and bytes[2] == 50 and bytes[3] == 49 and bytes[4] == 126:
+        return "f10"
+    bytes_to_text(bytes)
+
+# Routes one whole key while the terminal surface has focus. A Forward route
+# sends its exact bytes through `send` -- but only when the binding names the
+# live (id, generation); otherwise nothing is sent and `status` says why.
+# `send` receives the bytes (decoded as UTF-8 text by the production sender,
+# since the smux send primitive takes text).
+fn terminal_key_step(leader: text, state: LeaderState, key: [u8],
+        binding: PaneBindingResult, live_id: text, live_generation: i64,
+        send: fn([u8]) -> bool) -> TerminalStep:
+    val res = resolve_key(leader, state, key_event(_key_name(key), key), KeyFocus.TerminalSurface)
+    if res.route.kind != KeyRouteKind.Forward:
+        return TerminalStep(state: res.state, route: res.route, status: "", sent: false)
+    if not input_target_allowed(binding, live_id, live_generation):
+        var why = pane_binding_label(binding)
+        match binding:
+            case PaneBindingResult.Bound(_b): why = "session generation changed"
+            case PaneBindingResult.Unbound(_r): pass
+        return TerminalStep(state: res.state, route: res.route,
+            status: "terminal input refused: " + why, sent: false)
+    TerminalStep(state: res.state, route: res.route, status: "", sent: send(res.route.bytes))
+
+fn toggle_focus(focus: KeyFocus) -> KeyFocus:
+    if focus == KeyFocus.TerminalSurface:
+        return KeyFocus.NativeView
+    KeyFocus.TerminalSurface
+
+fn focus_label(focus: KeyFocus, pane_id: text) -> text:
+    if focus == KeyFocus.TerminalSurface:
+        return "focus: terminal " + pane_id
+    "focus: command"
+
+export TerminalStep, split_complete_keys, flush_carry, terminal_key_step, toggle_focus, focus_label

@@ -183,3 +183,14 @@ Hot loop, 4-arm int `match` statement, six alternating runs, host load ~25
 Minimums differ by 2-3%, inside the run-to-run spread on a loaded host; the
 matching path executes no new code on the interpreter, and one never-taken
 branch target on the JIT.
+
+## Addendum 2026-11-15 — census fallout: lean_codegen_spec
+
+The full-spec census of the "no arm matches -> fail" change found one real
+fallout: `test/01_unit/compiler/verification/lean_codegen_spec.spl` and its
+twin `test/00_formal_verification/compiler/lean_codegen_spec.spl` matched
+`Ok`/`Err` over `generate_contract_theorems`, which returns the `LeanCodegen`
+itself, so the case never asserted anything. Both cases now pin the real
+behaviour (an empty contract adds no theorem). The `LEGACY-CONTRACT-UNSUPPORTED`
+rejection those cases named is NOT implemented in product code; implementing it
+would change the method's return type and is left open.

@@ -1,0 +1,59 @@
+# AUTHORED_NOT_RUN. Production DATA planning only, no provider invocation.
+use std.spec.{describe, it, expect, step}
+use app.llm_caret.provider_cli_adapter_types_v1.*
+use app.llm_caret.provider_cli_adapter_v1.{decode_provider_cli_version_v1, plan_provider_cli_action_v1}
+use app.llm_caret.provider_cli_codex_prompt_mode_v1.*
+
+fn codex_prompt_version_data_v1() -> ProviderCliVersionDataV1:
+    decode_provider_cli_version_v1(ProviderCliProviderV1.Codex, "codex-cli 0.169.0\n").unwrap()
+
+fn codex_prompt_unicode_data_v1(count: i64) -> text:
+    var text = ""
+    for index in 0..count: text = text + "é"
+    text
+
+describe "Explicit Codex 0.169 prompt-mode DATA":
+    it "terminates options before every positional prompt without invoking a shell":
+        step("Plan documented Argv mode explicitly, preserving prompt bytes as one argument")
+        for prompt in ["--model=override", "resume", "--", "$(do-not-run)\nsecond line"]:
+            val request = ProviderCliRequestDataV1(action: ProviderCliActionV1.Start, prompt: prompt)
+            val planned = plan_provider_cli_codex_prompt_mode_v1(codex_prompt_version_data_v1(), request,
+                ProviderCliCodexPromptModeV1.Argv).unwrap()
+            expect(planned.plan.argv).to_equal(["exec", "--json", "--", prompt])
+            expect(planned.plan.stdin_text).to_equal("")
+            expect(planned.input_mode).to_equal(ProviderCliCodexPromptModeV1.Argv)
+            expect(planned.requires_closed_stdin_non_tty).to_equal(true)
+            expect(planned.prompt_bytes).to_equal(prompt.byte_len())
+
+    it "keeps the original stdin plan and exact resume selector DATA intact":
+        step("Choose Stdin without silently switching to argument injection")
+        val request = ProviderCliRequestDataV1(action: ProviderCliActionV1.Start, prompt: "-hello")
+        val original = plan_provider_cli_action_v1(codex_prompt_version_data_v1(), request).unwrap()
+        val stdin = plan_provider_cli_codex_prompt_mode_v1(codex_prompt_version_data_v1(), request,
+            ProviderCliCodexPromptModeV1.Stdin).unwrap()
+        expect(stdin.plan.argv).to_equal(original.argv)
+        expect(stdin.plan.stdin_text).to_equal(original.stdin_text)
+        expect(stdin.requires_closed_stdin_non_tty).to_equal(false)
+        val resume = plan_provider_cli_codex_prompt_mode_v1(codex_prompt_version_data_v1(),
+            ProviderCliRequestDataV1(action: ProviderCliActionV1.Resume, prompt: "--last", session_id: "session-abc"),
+            ProviderCliCodexPromptModeV1.Argv).unwrap()
+        expect(resume.plan.argv).to_equal(["exec", "resume", "--json", "session-abc", "--", "--last"])
+
+    it "rejects the stdin sentinel, wrong family/version/action and over-limit UTF8 prompt bytes":
+        step("Reject unsupported Argv cases instead of treating them as stdin or flags")
+        expect(plan_provider_cli_codex_prompt_mode_v1(codex_prompt_version_data_v1(),
+            ProviderCliRequestDataV1(action: ProviderCliActionV1.Start, prompt: "-"),
+            ProviderCliCodexPromptModeV1.Argv).unwrap_err()).to_equal("codex-argv-dash-requires-stdin")
+        val exactly = ProviderCliRequestDataV1(action: ProviderCliActionV1.Start, prompt: codex_prompt_unicode_data_v1(2048))
+        expect(plan_provider_cli_codex_prompt_mode_v1(codex_prompt_version_data_v1(), exactly,
+            ProviderCliCodexPromptModeV1.Argv).unwrap().prompt_bytes).to_equal(4096)
+        val over = ProviderCliRequestDataV1(action: ProviderCliActionV1.Start, prompt: codex_prompt_unicode_data_v1(2049))
+        expect(plan_provider_cli_codex_prompt_mode_v1(codex_prompt_version_data_v1(), over,
+            ProviderCliCodexPromptModeV1.Argv).unwrap_err()).to_equal("codex-prompt-mode-utf8-byte-bound")
+        for version in [ProviderCliVersionDataV1(ProviderCliProviderV1.Codex, "0.168.0"),
+                ProviderCliVersionDataV1(ProviderCliProviderV1.Claude, "2.1.325")]:
+            expect(plan_provider_cli_codex_prompt_mode_v1(version, exactly,
+                ProviderCliCodexPromptModeV1.Argv).is_err()).to_equal(true)
+        expect(plan_provider_cli_codex_prompt_mode_v1(codex_prompt_version_data_v1(),
+            ProviderCliRequestDataV1(action: ProviderCliActionV1.AuthInspect),
+            ProviderCliCodexPromptModeV1.Argv).is_err()).to_equal(true)

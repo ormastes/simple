@@ -34,7 +34,7 @@ use compiler.backend.verify.allocator_symbol_scan.{flight_allocator_scan_for_pro
 # resolves doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
 use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256_or_shell, file_hash_sha256_or_empty, file_size_raw, remove_file_if_exists, process_run, process_run_timeout, dir_create_all, dir_exists, dir_remove_all}
 use compiler.backend.llvm_native_link_hosted_support.{compile_entry_point_c}
-use compiler.backend.simpleos_native_symbols.{simpleos_x86_64_sysroot, simpleos_x86_64_user_link_inputs, compile_simpleos_x86_64_c, simpleos_x86_64_c_flags, simpleos_x86_64_clang, compile_simpleos_arm64, simpleos_spl_start_symbol}
+use compiler.backend.simpleos_native_symbols.{simpleos_user_link_arch, simpleos_user_sysroot, simpleos_user_entry_clang_target, simpleos_user_c_flags, simpleos_user_link_args_for_arch, simpleos_user_link_inputs_for_arch, simpleos_x86_64_sysroot,simpleos_x86_64_user_link_inputs, compile_simpleos_x86_64_c, simpleos_x86_64_c_flags, simpleos_x86_64_clang, compile_simpleos_arm64, simpleos_spl_start_symbol}
 use compiler.backend.simpleos_native_guards.{simpleos_entry_key, simpleos_check_no_forbidden_allocators, simpleos_check_no_fabricated_rt_stubs, simpleos_module_init_symbols, simpleos_module_init_caller_source, simpleos_module_init_caller_source_for_symbol}
 
 fn _simpleos_internal_requested() -> bool:
@@ -52,7 +52,70 @@ fn _simpleos_internal_link(objects: [text], archives: [text], output: text,
     config.extra_flags = flags
     link_simpleos_internal(objects, output, target, config)
 
+# Filesystem-launched user ELF for aarch64/riscv64 SimpleOS, linked from the
+# sysroot built by scripts/os/simpleos-sysroot-{aarch64,riscv64}.shs
+# (crt0.o, libsimpleos_all.a, share/simpleos/simpleos.ld) with ld.lld.
+fn link_simpleos_user_64(arch: text, user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:
+    val sysroot = simpleos_user_sysroot(arch)
+    for path in simpleos_user_link_inputs_for_arch(arch, sysroot):
+        if not file_exists(path):
+            return Err("SimpleOS {arch} user sysroot is incomplete: missing {path}; run sh scripts/os/simpleos-sysroot-{arch}.shs or set SIMPLEOS_SYSROOT")
+    var linker_script = env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
+    if linker_script == "":
+        linker_script = env_get("SIMPLE_LINKER_SCRIPT") ?? ""
+    val script_path = if linker_script != "": linker_script else: "{sysroot}/share/simpleos/simpleos.ld"
+    if not file_exists(script_path):
+        return Err("SimpleOS {arch} user sysroot is incomplete: missing {script_path}")
+    val core_env = env_get("SIMPLE_SIMPLE_CORE_PATH") ?? ""
+    val core_archive = if core_env != "" and file_exists(core_env) and not dir_exists(core_env): core_env else: ""
+    val configured_cc = env_get("SIMPLE_CC") ?? ""
+    val cc = if configured_cc != "": configured_cc else: "clang"
+    if not cc.contains("clang"):
+        return Err("SimpleOS {arch} user link requires Clang; SIMPLE_CC must name clang")
+    val entry_result = compile_entry_point_c([], getpid(), verbose, opt_level, cc, simpleos_user_entry_clang_target(arch))
+    val entry_object = match entry_result:
+        case Ok(path): path
+        case Err(e): return Err("SimpleOS {arch} entry compilation failed: {e}")
+    val module_init_names = simpleos_module_init_symbols(user_objects)
+    var init_o = ""
+    if module_init_names.len() > 0:
+        if not dir_create_all("build/os"):
+            file_delete(entry_object)
+            return Err("SimpleOS {arch} module-init staging directory creation failed")
+        val init_c = "build/os/simpleos_{arch}_user_module_init_{getpid()}.c"
+        init_o = "build/os/simpleos_{arch}_user_module_init_{getpid()}.o"
+        file_write(init_c, simpleos_module_init_caller_source_for_symbol(module_init_names, "__wrap___simple_call_module_inits"))
+        var cflags = simpleos_user_c_flags(arch)
+        cflags.push("-c")
+        cflags.push("-o")
+        cflags.push(init_o)
+        cflags.push(init_c)
+        val (_io, init_err, init_code) = process_run(cc, cflags)
+        file_delete(init_c)
+        if init_code != 0:
+            file_delete(entry_object)
+            return Err("SimpleOS {arch} module-init caller compilation failed: {init_err}")
+    val args = match simpleos_user_link_args_for_arch(arch, sysroot, linker_script, entry_object, init_o, core_archive, user_objects, output):
+        case Ok(a): a
+        case Err(e):
+            file_delete(entry_object)
+            if init_o != "": file_delete(init_o)
+            return Err(e)
+    if verbose:
+        val joined_args = args.join(" ")
+        print "[llvm-link] SimpleOS {arch} user link: ld.lld {joined_args}"
+    val (_out, err, code) = process_run("ld.lld", args)
+    file_delete(entry_object)
+    if init_o != "": file_delete(init_o)
+    if code != 0:
+        return Err("SimpleOS {arch} user executable link failed: {err}")
+    if verbose:
+        print "[llvm-link] SimpleOS {arch} user executable: {output}"
+    Ok(output)
+
 fn link_simpleos_arm64(user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:
+    if simpleos_user_link_arch(env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? "") == "aarch64":
+        return link_simpleos_user_64("aarch64", user_objects, output, verbose, opt_level)
     val pid = getpid()
     val crt_o = "build/os/simpleos_arm64_crt0_{pid}.o"
     val stubs_o = "build/os/simpleos_arm64_baremetal_stubs_{pid}.o"
@@ -408,7 +471,9 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
 pub fn link_simpleos_x86_64_external(user_objects: [text], output: text) -> Result<text, text>:
     link_simpleos_x86_64(user_objects, output, false, 2)
 
-fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> Result<text, text>:
+fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool, opt_level: i64 = 2) -> Result<text, text>:
+    if simpleos_user_link_arch(env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? "") == "riscv64":
+        return link_simpleos_user_64("riscv64", user_objects, output, verbose, opt_level)
     var is_smoke_entry = false
     val is_display_smoke = output.contains("simpleos_riscv64_display_smoke")
     val uses_freestanding_runtime = is_display_smoke or output.contains("simpleos_riscv64_host_gpu_probe")
@@ -469,7 +534,8 @@ fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> R
     entry_src = entry_src + "  wfi\n"
     entry_src = entry_src + "  j 3b\n"
     file_write(entry_s, entry_src)
-    val (entry_out, entry_err, entry_code) = process_run("riscv64-unknown-elf-gcc", [
+    val (entry_out, entry_err, entry_code) = process_run("clang", [
+        "--target=riscv64-unknown-elf",
         "-c", "-march=rv64gc", "-mabi=lp64d", "-ffreestanding", "-nostdlib",
         "-o", entry_o, entry_s
     ])
@@ -480,7 +546,8 @@ fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> R
         "src/os/kernel/arch/riscv64/boot/freestanding_runtime.c"
     else:
         "examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_stubs.c"
-    val (runtime_out, runtime_err, runtime_code) = process_run("riscv64-unknown-elf-gcc", [
+    val (runtime_out, runtime_err, runtime_code) = process_run("clang", [
+        "--target=riscv64-unknown-elf",
         "-c", "-march=rv64gc", "-mabi=lp64d", "-mcmodel=medany", "-ffreestanding", "-nostdlib",
         "-DSIMPLE_BOOT_MINIMAL=1", "-DSIMPLE_RUNTIME_NO_ENTRY=1", "-DSIMPLE_RUNTIME_NO_WEAK_HEAP=1",
         "-o", runtime_o, runtime_source
@@ -497,7 +564,8 @@ fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> R
     # freestanding kernel is linked high (0x80200000+, see linker_script).
     val module_init_names = simpleos_module_init_symbols(user_objects)
     file_write(init_c, simpleos_module_init_caller_source(module_init_names))
-    val (init_out, init_err, init_code) = process_run("riscv64-unknown-elf-gcc", [
+    val (init_out, init_err, init_code) = process_run("clang", [
+        "--target=riscv64-unknown-elf",
         "-c", "-march=rv64gc", "-mabi=lp64d", "-mcmodel=medany", "-ffreestanding", "-nostdlib",
         "-o", init_o, init_c
     ])
@@ -561,7 +629,8 @@ fn link_simpleos_riscv32(user_objects: [text], output: text, verbose: bool) -> R
     stub_src = stub_src + "void rt_riscv_uart_put(uint64_t b){while(!(UART0[5]&0x20)){} UART0[0]=(uint8_t)b;}\n"
     stub_src = stub_src + "long long rt_pool_safepoint(void){return 0;}\n"
     file_write(stub_c, stub_src)
-    val (stub_out, stub_err, stub_code) = process_run("riscv64-unknown-elf-gcc", [
+    val (stub_out, stub_err, stub_code) = process_run("clang", [
+        "--target=riscv64-unknown-elf",
         "-c", "-march=rv32imafdc", "-mabi=ilp32d", "-ffreestanding", "-nostdlib",
         "-o", stub_o, stub_c
     ])

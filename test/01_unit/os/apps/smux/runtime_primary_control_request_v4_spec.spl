@@ -61,8 +61,8 @@ describe "smux primary control V4 immutable request":
         boundary.maximum = 1
         expect(smux_primary_control_request_decode_v4(smux_primary_control_request_encode_v4(boundary).unwrap()).unwrap()).to_equal(boundary)
 
-    it "retains V1 noninput action validation and requires all attempt metadata to be zero":
-        step("retains V1 noninput action validation and requires all attempt metadata to be zero")
+    it "retains V1 noninput validation with zero offsets and explicit resize attempts":
+        step("retains V1 noninput validation with zero offsets and explicit resize attempts")
         for action in ["resolve", "issue", "inspect", "revoke", "resize"]:
             var request = primary_control_fixture_v4()
             request.control.action = action
@@ -85,7 +85,15 @@ describe "smux primary control V4 immutable request":
             val bytes = smux_primary_control_request_encode_v4(request).unwrap()
             expect(smux_primary_control_request_decode_v4(bytes).unwrap()).to_equal(request)
             for field in ["attemptSequence", "offset", "maxBytes"]:
-                expect(smux_primary_control_request_decode_v4(primary_control_wire_v4(bytes, field, SdnValue.Int(1))).is_err()).to_equal(true)
+                if action == "resize" and field == "attemptSequence":
+                    for attempt in [1, 1152921504606846975]:
+                        var attempted = request
+                        attempted.attempt_sequence = attempt
+                        expect(smux_primary_control_request_decode_v4(smux_primary_control_request_encode_v4(attempted).unwrap()).unwrap()).to_equal(attempted)
+                    for invalid in [-1, 1152921504606846976]:
+                        expect(smux_primary_control_request_decode_v4(primary_control_wire_v4(bytes, field, SdnValue.Int(invalid))).is_err()).to_equal(true)
+                else:
+                    expect(smux_primary_control_request_decode_v4(primary_control_wire_v4(bytes, field, SdnValue.Int(1))).is_err()).to_equal(true)
 
     it "delegates nested V1 validity and canonicality without accepting a V1 request as V4":
         step("delegates nested V1 validity and canonicality without accepting a V1 request as V4")

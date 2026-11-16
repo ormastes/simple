@@ -591,16 +591,22 @@ pub const SHARD_TREE_HEADROOM_KB_V1: i64 = 25165824
 
 # The floor the worker pool leaves free, in KiB. Precedence: explicit
 # SIMPLE_BUILD_MEMORY_RESERVE_BYTES, then host config mem_reserve_free_mib
-# (SIMPLE_HOST_MEM_RESERVE_FREE_MIB > host.sdn > config/host/*.sdn), then the
-# host-scaled build_memory_reserve_default_kib_v1(total_kib) -- the SAME reserve
-# the build start guard keeps, so a 32 GiB host gets 16 GiB instead of a flat
-# 24 GiB that left 0 HIR workers (tree_rss_whole_build_floor_blocks_32g_hosts).
+# (SIMPLE_HOST_MEM_RESERVE_FREE_MIB > host.sdn > config/host/*.sdn), then
+# min(24 GiB, total RAM / 4). Why a quarter, not the start guard's half: the
+# start guard's RAM/2 must cover a whole build's ~10.4 GB footprint, but pool
+# workers are already priced one by one (measured peak + 25%), so this headroom
+# is only a margin left beside them. Under RAM/2 a 24 GiB WSL host (22624328 kB
+# free, 6815744 kB/worker) admitted 1 worker and the pool refused (need >= 2);
+# RAM/4 = 6 GiB admits 2. Hosts >= 96 GiB (the 80-thread host) keep 24 GiB;
+# 48-96 GiB hosts drop below 24 GiB in the pool only, never in the start guard.
 # Unknown total (<= 0) keeps the 24 GiB cap: unknown never shrinks the floor.
 pub fn shard_tree_headroom_kib_for_v1(reserve_bytes_field: text, host_reserve_kib: i64, total_kib: i64 = 0) -> i64:
     val parsed = shard_mem_available_kb_from_field(reserve_bytes_field)
     if parsed > 0: return parsed / 1024
     if host_reserve_kib > 0: return host_reserve_kib
-    build_memory_reserve_default_kib_v1(total_kib)
+    if total_kib <= 0: return BUILD_MEMORY_RESERVE_CAP_KIB_V1
+    val quarter = total_kib / 4
+    if quarter <= 0 or quarter >= BUILD_MEMORY_RESERVE_CAP_KIB_V1: BUILD_MEMORY_RESERVE_CAP_KIB_V1 else: quarter
 
 pub fn shard_tree_headroom_kib_v1() -> i64:
     val field = env_get("SIMPLE_BUILD_MEMORY_RESERVE_BYTES") ?? ""
@@ -980,3 +986,15 @@ pub const SHARD_MEASURED_FLOOR_KB_V1: i64 = 1048576
 pub fn shard_measured_estimate_kib_v1(recorded_peak_kib: i64) -> i64:
     val est = recorded_peak_kib + recorded_peak_kib / 4
     if est > SHARD_MEASURED_FLOOR_KB_V1: est else: SHARD_MEASURED_FLOOR_KB_V1
+
+# Parse-shard price (phase-3 2026-11-15): SIMPLE_PARSE_SHARD_WORKER_KB wins;
+# else host worker_mem_mib, else the default -- capped by an explicit
+# SIMPLE_HIR_SHARD_WORKER_KB, since a slim parse shard is never heavier than a
+# HIR shard (host 26 GiB priced parse at 27262976 kB despite HIR=6815744).
+pub fn shard_parse_worker_budget_kb_for_v1(parse_raw: text, hir_raw: text, host_kb: i64, default_kb: i64) -> i64:
+    val parse_kb = shard_mem_available_kb_from_field(parse_raw)
+    if parse_kb > 0:
+        return parse_kb
+    val base = if host_kb > 0: host_kb else: default_kb
+    val hir_kb = shard_mem_available_kb_from_field(hir_raw)
+    if hir_kb > 0 and hir_kb < base: hir_kb else: base

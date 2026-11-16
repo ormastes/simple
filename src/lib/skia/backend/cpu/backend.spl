@@ -122,6 +122,11 @@ class CanvasState:
     alpha: f64
     clip: SkRect
     transform: Matrix3x3
+    # SaveLayer blend mode. ponytail: applied per child draw, not at Restore, so
+    # overlapping children in one layer also blend with each other; only
+    # identity-transform DrawRect honours it (RRect/Path/transformed rects stay
+    # SrcOver). Upgrade: offscreen layer bitmap composited at Restore.
+    mode: SkBlendMode
 
 fn _clone_state(src: CanvasState) -> CanvasState:
     CanvasState(
@@ -132,8 +137,25 @@ fn _clone_state(src: CanvasState) -> CanvasState:
             right: src.clip.right,
             bottom: src.clip.bottom
         ),
-        transform: src.transform
+        transform: src.transform,
+        mode: src.mode
     )
+
+# Non-SrcOver rect fill: each pixel whose centre is inside `r` becomes
+# compose(src, dst, mode). ponytail: no edge AA and identity transform only;
+# extend to coverage-weighted compose when a scene needs AA'd blend edges.
+fn _fill_rect_mode(bitmap: Bitmap, r: SkRect, color: SkColor4f, mode: SkBlendMode):
+    var y = _ceil_i64(r.top - 0.5)
+    while y.to_f64() + 0.5 < r.bottom:
+        var x = _ceil_i64(r.left - 0.5)
+        while x.to_f64() + 0.5 < r.right:
+            if x >= 0 and x < bitmap.width and y >= 0 and y < bitmap.height:
+                val idx = (y * bitmap.width + x) * 4
+                val dst = SkColor4f(r: (bitmap.pixels[idx] as f64) / 255.0, g: (bitmap.pixels[idx + 1] as f64) / 255.0,
+                    b: (bitmap.pixels[idx + 2] as f64) / 255.0, a: (bitmap.pixels[idx + 3] as f64) / 255.0)
+                bitmap.set_pixel(x, y, apply_blend(color, dst, mode))
+            x = x + 1
+        y = y + 1
 
 fn _rect_is_empty(r: SkRect) -> bool:
     (r.right <= r.left) or (r.bottom <= r.top)
@@ -145,7 +167,7 @@ fn _rect_is_empty(r: SkRect) -> bool:
 class CpuBackend:
     pass_do_nothing
 
-fn cpu_backend_new() -> CpuBackend:
+pub fn cpu_backend_new() -> CpuBackend:
     CpuBackend()
 
 impl CpuBackend:
@@ -164,7 +186,7 @@ impl CpuBackend:
             bottom: safe_h.to_f64()
         )
         var state_stack: [CanvasState] = [
-            CanvasState(alpha: 1.0, clip: root_clip, transform: Matrix3x3.identity())
+            CanvasState(alpha: 1.0, clip: root_clip, transform: Matrix3x3.identity(), mode: SkBlendMode.SrcOver)
         ]
         var stack_depth = 1
 
@@ -196,7 +218,8 @@ impl CpuBackend:
                             right: top.clip.right,
                             bottom: top.clip.bottom
                         ),
-                        transform: top.transform
+                        transform: top.transform,
+                        mode: op.paint.blend_mode
                     )
                     state_stack.push(new_state)
                     stack_depth = stack_depth + 1
@@ -219,7 +242,8 @@ impl CpuBackend:
                             val replaced = CanvasState(
                                 alpha: cur.alpha,
                                 clip: new_clip,
-                                transform: cur.transform
+                                transform: cur.transform,
+                                mode: cur.mode
                             )
                             state_stack[stack_depth - 1] = replaced
                         else:
@@ -249,7 +273,8 @@ impl CpuBackend:
                                 val replaced = CanvasState(
                                     alpha: cur.alpha,
                                     clip: cur.clip,
-                                    transform: new_xform
+                                    transform: new_xform,
+                                    mode: cur.mode
                                 )
                                 state_stack[stack_depth - 1] = replaced
                             else:
@@ -266,7 +291,10 @@ impl CpuBackend:
                                         pass_do_nothing
                                     else:
                                         val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
-                                        if cur.transform.is_identity():
+                                        val mode = if op.paint.blend_mode != SkBlendMode.SrcOver: op.paint.blend_mode else: cur.mode
+                                        if mode != SkBlendMode.SrcOver and cur.transform.is_identity():
+                                            _fill_rect_mode(bitmap, visible, color, mode)
+                                        elif cur.transform.is_identity():
                                             fill_rect(bitmap, op.rect, color)
                                         else:
                                             _fill_transformed_rect(bitmap, op.rect, cur.transform, cur.clip, color)

@@ -1,0 +1,200 @@
+# Hosted shs support — the host-parity half of the Simple shell.
+#
+# On a host (Windows/macOS/Linux/BSD) ShellApp runs over the real host
+# filesystem and launches real host programs, so `simple src/app/shs/main.spl`
+# can be the default PTY shell (doc/05_design/pty_shell_kinds_shs_default.md):
+#
+#   HostFilesystem      Filesystem driver over std fs, mounted at "/" so
+#                       ls/cat/cd/mkdir/rm/mv hit the host tree unchanged.
+#   shell_host_run      unknown commands -> SOSIX process facade, captured.
+#   shell_host_env      the host environment, for `$VAR` expansion.
+#
+# SimpleOS never constructs these; its shell keeps the kernel VFS + fs-exec.
+#
+# MDSOC: feature dimension, shell layer
+
+use os.kernel.types.fs_types.{FileFlags, FsNode, FsNodeKind, DirEntry}
+use os.services.vfs.vfs.{VfsManager, Filesystem, SeekWhence}
+use std.nogc_sync_mut.binary_io.{bytes_to_string}
+use std.nogc_sync_mut.io_runtime.{file_exists, file_delete, file_read_bytes_result, file_write,
+    file_append_text, file_size, is_dir, dir_create, dir_remove, dir_list_optional, rename_path,
+    env_set_process, cwd_process}
+use std.nogc_sync_mut.io.env_ops.{env_vars}
+use std.nogc_sync_mut.sffi.env.{env_set_cwd_raw}
+use std.nogc_sync_mut.sosix.process.{sosix_process_run_bounded}
+
+pub const SHELL_HOST_RUN_TIMEOUT_MS = 600000
+pub const SHELL_HOST_RUN_MAX_OUTPUT = 16777216
+
+# Open-handle table (handle = index + 1). Module state, not class state:
+# Filesystem trait methods are `fn`, and a pane owns one shell process.
+var _host_open_paths: [text] = []
+var _host_open_offsets: [u64] = []
+
+fn _host_node(path: text) -> Result<FsNode, text>:
+    if is_dir(path):
+        return Ok(FsNode(id: 0, kind: FsNodeKind.Directory, size: 0, permissions: 493, owner: 0, group: 0,
+            created_ns: 0, modified_ns: 0))
+    if file_exists(path):
+        val size = file_size(path)
+        val bytes: u64 = if size > 0: size as u64 else: 0
+        return Ok(FsNode(id: 0, kind: FsNodeKind.File, size: bytes, permissions: 420, owner: 0, group: 0,
+            created_ns: 0, modified_ns: 0))
+    Err("no such file or directory: {path}")
+
+fn _host_join(dir: text, name: text) -> text:
+    if dir.ends_with("/"): return dir + name
+    dir + "/" + name
+
+fn _host_base(entry: text) -> text:
+    var last = -1
+    var i = 0
+    for ch in entry:
+        if ch == '/': last = i
+        i = i + 1
+    if last < 0: return entry
+    entry.slice(last + 1, entry.len())
+
+fn _host_slot(handle: u64) -> Result<i64, text>:
+    val idx = handle as i64 - 1
+    if idx < 0 or idx >= _host_open_paths.len() or _host_open_paths[idx] == "":
+        return Err("bad host file handle")
+    Ok(idx)
+
+class HostFilesystem:
+    """Filesystem driver backed by the host's real filesystem (std fs)."""
+    label: text
+
+impl HostFilesystem:
+    static fn new() -> HostFilesystem:
+        HostFilesystem(label: "hostfs")
+
+impl Filesystem for HostFilesystem:
+    fn fs_name() -> text:
+        "hostfs"
+
+    fn mount(device: text, options: text) -> Result<bool, text>:
+        Ok(true)
+
+    fn unmount() -> Result<bool, text>:
+        Ok(true)
+
+    fn open(path: text, flags: FileFlags) -> Result<u64, text>:
+        if flags.write and flags.truncate:
+            if not file_write(path, ""): return Err("cannot open for write: {path}")
+        elif flags.write and flags.create and not file_exists(path):
+            if not file_write(path, ""): return Err("cannot create: {path}")
+        elif not file_exists(path) and not is_dir(path):
+            return Err("no such file or directory: {path}")
+        _host_open_paths.push(path)
+        _host_open_offsets.push(0)
+        Ok(_host_open_paths.len() as u64)
+
+    fn read(handle: u64, size: u64) -> Result<[u8], text>:
+        val idx = _host_slot(handle)?
+        val all = file_read_bytes_result(_host_open_paths[idx])?
+        val start = _host_open_offsets[idx] as i64
+        if start >= all.len(): return Ok([])
+        var end = start + size as i64
+        if end > all.len(): end = all.len()
+        _host_open_offsets[idx] = end as u64
+        Ok(all.slice(start, end))
+
+    fn write(handle: u64, data: [u8]) -> Result<u64, text>:
+        val idx = _host_slot(handle)?
+        if not file_append_text(_host_open_paths[idx], bytes_to_string(data)):
+            return Err("write failed: {_host_open_paths[idx]}")
+        Ok(data.len() as u64)
+
+    fn close(handle: u64) -> Result<bool, text>:
+        val idx = _host_slot(handle)?
+        _host_open_paths[idx] = ""
+        Ok(true)
+
+    fn seek(handle: u64, offset: i64, whence: SeekWhence) -> Result<u64, text>:
+        val idx = _host_slot(handle)?
+        match whence:
+            SeekWhence.Set:
+                _host_open_offsets[idx] = offset as u64
+                Ok(offset as u64)
+            SeekWhence.Cur:
+                val next = _host_open_offsets[idx] as i64 + offset
+                _host_open_offsets[idx] = next as u64
+                Ok(next as u64)
+            SeekWhence.End:
+                val next = file_size(_host_open_paths[idx]) + offset
+                _host_open_offsets[idx] = next as u64
+                Ok(next as u64)
+
+    fn stat(path: text) -> Result<FsNode, text>:
+        _host_node(path)
+
+    fn stat_no_follow(path: text) -> Result<FsNode, text>:
+        _host_node(path)
+
+    fn chmod(path: text, mode: u16) -> Result<bool, text>:
+        Err("hostfs chmod unsupported")
+
+    fn mkdir(path: text) -> Result<bool, text>:
+        if dir_create(path, false): return Ok(true)
+        Err("cannot create directory: {path}")
+
+    fn rmdir(path: text) -> Result<bool, text>:
+        if dir_remove(path, false): return Ok(true)
+        Err("cannot remove directory: {path}")
+
+    fn readdir(path: text) -> Result<[DirEntry], text>:
+        if not is_dir(path): return Err("not a directory: {path}")
+        val listed = dir_list_optional(path) ?? []
+        var entries: [DirEntry] = []
+        for raw in listed:
+            val name = _host_base(raw)
+            if name == "" or name == "." or name == "..": continue
+            val node = _host_node(_host_join(path, name))
+            if node.is_ok():
+                entries.push(DirEntry(name: name, node: node.unwrap()))
+        Ok(entries)
+
+    fn unlink(path: text) -> Result<bool, text>:
+        if file_delete(path): return Ok(true)
+        Err("cannot remove: {path}")
+
+    fn rename(old_path: text, new_path: text) -> Result<bool, text>:
+        if rename_path(old_path, new_path): return Ok(true)
+        Err("cannot rename {old_path} -> {new_path}")
+
+    fn symlink(target: text, link_path: text) -> Result<bool, text>:
+        Err("hostfs symlink unsupported")
+
+    fn readlink(path: text) -> Result<text, text>:
+        Err("hostfs readlink unsupported")
+
+# A VfsManager whose root is the host filesystem.
+pub fn shell_host_vfs() -> VfsManager:
+    var vfs = VfsManager.new()
+    vfs.mount("/", "hostfs", "host", false, HostFilesystem.new())
+    vfs
+
+# The host environment as shell env pairs ([] when unreadable).
+pub fn shell_host_env() -> [(text, text)]:
+    val vars = unsafe(capabilities: [ffi]):
+        env_vars()
+    vars ?? []
+
+pub fn shell_host_cwd() -> text:
+    cwd_process()
+
+# Keep the host process cwd in step with `cd`, so launched programs see it.
+pub fn shell_host_chdir(path: text) -> bool:
+    env_set_cwd_raw(path)
+
+pub fn shell_host_export(key: text, value: text) -> bool:
+    env_set_process(key, value)
+
+# Launch a host program through the SOSIX process facade; returns
+# (stdout, stderr, exit_code). Resolution uses the host PATH.
+pub fn shell_host_run(command: text, args: [text]) -> (text, text, i64):
+    sosix_process_run_bounded(command, args, SHELL_HOST_RUN_TIMEOUT_MS, SHELL_HOST_RUN_MAX_OUTPUT)
+
+export HostFilesystem, SHELL_HOST_RUN_TIMEOUT_MS, SHELL_HOST_RUN_MAX_OUTPUT
+export shell_host_vfs, shell_host_env, shell_host_cwd, shell_host_chdir, shell_host_export, shell_host_run

@@ -25,6 +25,15 @@ already work on macOS through `std.sosix.pty`.
 
 ## Still red, and why
 
+> **Update 2026-11-14 (later):** blocker 2 below (no Unix provider) is fixed —
+> `unix_pty_structured_launch_literal_bytes_exit_code_missing_2026-11-14.md`
+> (configured 0/3 -> 1/3; literal still 0/3 on the fixture gate and the
+> `std.sys.terminal_console` stub). Blocker 3 (Windows shell syntax) is ported.
+> The transport spec is fixed (0/1 -> 1/1):
+> `piped_process_ref_v1_missing_in_rust_interpreter_2026-11-14.md`. The SOSIX
+> boundary spec is fixed: `smux_product_imports_bypass_sosix_boundary_2026-11-14.md`.
+> Both fixes need a seed built from that tree.
+
 ### `smux_literal_input_spec.spl` (0/3), `smux_configured_launch_spec.spl` (0/3)
 
 Not macOS-specific; the same specs are recorded red on Windows under the seed in

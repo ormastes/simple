@@ -1,3 +1,4 @@
+use std.common.task_runner.distributed_operation_journal_v2.{distributed_operation_journal_read_required_v3, distributed_operation_journal_publish_v3}
 # Persistent startup reconciliation over the SAME host capacity owner.
 # The actual provider refresh runs after acquiring that journal's writer.
 # No inventory supplied by a request, boolean ready setter, or second ledger.
@@ -48,16 +49,16 @@ fn host_service_inventory_match_v2(owner: HostCapacityOwnerV1, scope: ContainerH
         if state.state == "admitted": return Err("host-service-native-effect-without-execution-intent")
         val operation = distributed_decode_operation_v2(state.envelope)?
         if operation.operation != "host_reservation_v1": return Err("host-service-inventory-operation-kind")
-        val intent = host_reservation_decode_intent_v1(file_read_regular_no_follow_bounded(
-            owner.journal.root + "/reservation-payloads/" + operation.payload_digest + ".sdn", 65536)?)?
+        val intent = host_reservation_decode_intent_v1(distributed_operation_journal_read_required_v3(owner.journal,
+            "reservation-payloads/" + operation.payload_digest + ".sdn", 65536)?)?
         val matched = host_reservation_match_operation_v1(intent, operation)?
         if (intent.fence.boot_id != container_scope_fence_id_v2(entry.scope)? or
                 intent.fence.provider_generation != entry.scope.provider_generation or
                 intent.reservation.service_scope_id != scope.service_scope_id or
                 intent.reservation.cpu_millis < entry.cpu_millis or intent.reservation.memory_bytes < entry.memory_bytes):
             return Err("host-service-inventory-charge-mismatch")
-        val retained = container_execution_request_decode_v2(file_read_regular_no_follow_bounded(
-            owner.journal.root + "/host-execution-requests/" + sha256_text(operation.id) + ".sdn", 2097152)?)?
+        val retained = container_execution_request_decode_v2(distributed_operation_journal_read_required_v3(owner.journal,
+            "host-execution-requests/" + sha256_text(operation.id) + ".sdn", 2097152)?)?
         val plan = retained.plan
         if (container_execution_plan_digest_v2(plan)? != intent.plan_digest or
                 plan.backend != "windows-docker-process" or plan.operation_id != operation.id or
@@ -86,6 +87,14 @@ fn host_service_receipt_store_v2(owner: HostCapacityOwnerV1, scope: ContainerHos
         "journalCommitDigest": SdnValue.String(owner.journal.revision), "journalSequence": SdnValue.Int(owner.journal.sequence),
         "durabilityProfile": SdnValue.String("process-crash-v1"), "reservations": SdnValue.Array(classifications)}
     val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if owner.journal.windows_store.is_some():
+        val relative = "service-reconciliations/" + sha256_text(bytes) + ".sdn"
+        val stored = distributed_operation_journal_publish_v3(owner.journal, relative, bytes)
+        if stored.is_err(): return HostServicePrivateReceiptTurnV2("", nil, stored.unwrap_err())
+        val checked = distributed_operation_journal_read_required_v3(owner.journal, relative, 4194304)
+        if checked.is_err() or checked.unwrap() != bytes:
+            return HostServicePrivateReceiptTurnV2("", nil, "host-service-receipt-readback-failed")
+        return HostServicePrivateReceiptTurnV2(owner.journal.root + "/" + relative, nil, "")
     @when(os="windows"):
     host_service_private_receipt_store_v2(owner.journal.root, bytes)
     @else:
@@ -177,7 +186,7 @@ pub fn host_service_reconcile_v2(owner: HostCapacityOwnerV1,
         val operation_result = distributed_decode_operation_v2(state.envelope)
         if operation_result.is_err(): return HostServiceReconciliationTurnV2(current, current_container, nil, "", operation_result.unwrap_err())
         val operation = operation_result.unwrap()
-        val intent_bytes = file_read_regular_no_follow_bounded(current.journal.root + "/reservation-payloads/" + operation.payload_digest + ".sdn", 65536)
+        val intent_bytes = distributed_operation_journal_read_required_v3(current.journal, "reservation-payloads/" + operation.payload_digest + ".sdn", 65536)
         if intent_bytes.is_err(): return HostServiceReconciliationTurnV2(current, current_container, nil, "", intent_bytes.unwrap_err())
         val decoded = host_reservation_decode_intent_v1(intent_bytes.unwrap())
         if decoded.is_err(): return HostServiceReconciliationTurnV2(current, current_container, nil, "", decoded.unwrap_err())

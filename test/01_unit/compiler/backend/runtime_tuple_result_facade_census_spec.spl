@@ -1,0 +1,110 @@
+# @req REQ-SSPEC-COMPILER
+# Every `extern fn` whose declared return type is a tuple must be classified
+# against runtime_tuple_result_facade, the ONE table both pure-Simple AOT
+# backends (Cranelift, LLVM) consult (src/compiler/50.mir/text_extern_abi.spl) to route a tuple-returning runtime owner
+# to its raw 3/4-word result-block facade.
+#
+# MIR destructures a tuple call result with GetField 0/1/2 (raw word loads).
+# A runtime owner that returns a registered SplArray/tuple handle is therefore
+# read as its header unless the backend calls the raw-block facade. The two
+# backends used to keep separate redirect lists, and BOTH applied them
+# to runtime-origin calls only, so every stdlib `extern fn rt_process_run*`
+# call (foreign origin) read garbage natively. A new tuple-returning extern
+# must now be added either to the table or, knowingly, to the unrouted list
+# below -- never neither.
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read, dir_walk}
+use compiler.mir.text_extern_abi.{runtime_tuple_result_facade}
+
+# (extern name, post-split word count, facade) -- routed by the table.
+fn census_routed() -> [(text, i64, text)]:
+    [("rt_process_run", 3, "rt_process_run_tuple"),
+        ("rt_process_run_timeout", 4, "rt_process_run_timeout_tuple"),
+        ("rt_process_run_bounded", 5, "rt_process_run_bounded_tuple"),
+        ("rt_process_run_bounded_bytes", 5, "rt_process_run_bounded_bytes_tuple"),
+        ("rt_process_run_owned_observed_bounded_value", 5, "rt_process_run_owned_observed_bounded_text"),
+        ("rt_cpuid_tuple", 2, "rt_cpuid_tuple_block")]
+
+# Tuple-returning externs with NO raw-block facade. Their native result read
+# is unverified; see
+# doc/08_tracking/bug/native_tuple_returning_externs_without_facade_2026-11-15.md.
+# Shrink this list as facades land; do not grow it without a record.
+fn census_unrouted() -> [text]:
+    ["rt_shell_exec_tuple", "rt_io_udp_recv_from", "rt_host_wm_client_request",
+        "rt_host_wm_client_poll_event", "rt_gamepad_get_power_info", "rt_gamepad_button_data",
+        "rt_terminal_get_size", "rt_ssh_exec", "rt_sftp_stat", "rt_http_request", "rt_http_get",
+        "rt_http_download", "rt_execute_native", "rt_compile_to_native_with_opt",
+        "rt_compile_to_native", "native_udp_send_to", "native_udp_bind",
+        "rt_winit_event_mouse_moved", "rt_winit_event_keyboard_input", "rt_vulkan_api_version",
+        "rt_rv32_sbi_call", "rt_rapier2d_world_cast_ray", "rt_rapier2d_contacts_get",
+        "rt_rapier2d_body_get_velocity", "rt_rapier2d_body_get_position",
+        "rt_process_run_with_limits", "rt_process_owned_v3_poll_value",
+        "rt_process_observation_v4_start_value", "rt_process_observation_v4_start_pinned_value",
+        "rt_process_observation_v4_reserved_observe_value", "rt_process_observation_v4_reserved_ack_value",
+        "rt_process_observation_v4_poll_value", "rt_process_observation_v4_collect_value",
+        "rt_process_observation_v4_cancel_value", "rt_process_observation_v4_ack_collect_value",
+        "rt_process_inspection_v1_start_pinned_value", "rt_mmap_file",
+        "rt_lyon_vertex_buffer_get_position", "rt_lyon_vertex_buffer_get_normal",
+        "rt_lyon_path_get_bounds", "rt_http_put", "rt_http_post", "rt_http_patch", "rt_http_head",
+        "rt_http_delete", "rt_atomic_store", "rt_arm64_set_exec_image", "native_tcp_bind",
+        "native_async_file_start_loading", "__mock_policy_init_hal_only", "__mock_policy_init_all",
+        "__mock_policy_disable", "async_yield"]
+
+fn census_extern_name(line: text) -> text:
+    """The name of a single-line `extern fn NAME(...) -> (` declaration, else ""."""
+    val trimmed = line.trim()
+    if not trimmed.starts_with("extern fn "):
+        return ""
+    val open = trimmed.index_of("(") ?? -1
+    if open < 0:
+        return ""
+    val close = trimmed.index_of(") -> (") ?? -1
+    if close < 0:
+        return ""
+    trimmed.substring(10, open).trim()
+
+fn census_tuple_externs() -> [text]:
+    var names: [text] = []
+    for path in dir_walk("src"):
+        if not path.ends_with(".spl"):
+            continue
+        if path.contains("/vendor/"):
+            continue
+        for line in file_read(path).split("\n"):
+            val name = census_extern_name(line)
+            if name != "" and not names.contains(name):
+                names = names.push(name)
+    names
+
+describe "runtime tuple-result facade table":
+    it "routes every listed owner at its post-split word count":
+        for case_ in census_routed():
+            step("{case_.0}/{case_.1}")
+            expect(runtime_tuple_result_facade(case_.0, case_.1)).to_equal(case_.2)
+
+    it "keeps a different-arity import of the same name on its own callee":
+        expect(runtime_tuple_result_facade("rt_process_run", 1)).to_equal("")
+        expect(runtime_tuple_result_facade("rt_process_run_timeout", 3)).to_equal("")
+        expect(runtime_tuple_result_facade("rt_print_str", 1)).to_equal("")
+
+    it "classifies every tuple-returning extern declared under src/":
+        val routed_names = census_routed().map(\c: c.0)
+        val unrouted = census_unrouted()
+        val found = census_tuple_externs()
+        expect(found.len() > 0).to_equal(true)
+        var unclassified: [text] = []
+        for name in found:
+            if not routed_names.contains(name) and not unrouted.contains(name):
+                unclassified = unclassified.push(name)
+        expect(unclassified.join(",")).to_equal("")
+        for name in routed_names:
+            expect(found).to_contain(name)
+
+    it "is the only process-run redirect list in either backend":
+        val cranelift = file_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
+        val llvm = file_read("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl")
+        expect(cranelift).to_contain("runtime_tuple_result_facade(")
+        expect(llvm).to_contain("runtime_tuple_result_facade(")
+        expect(cranelift.contains("\"rt_process_run_tuple\"")).to_equal(false)
+        expect(llvm.contains("\"@rt_process_run_tuple\"")).to_equal(false)

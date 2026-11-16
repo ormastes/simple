@@ -1,0 +1,245 @@
+# @req REQ-TASK REQ-TASK-USE REQ-TASK-REPLAY
+# Authored actual owned-journal/filesystem scenarios. Execution NOT_RUN.
+# No fake owner, authority success, provider, Host or terminal effects.
+use std.nogc_sync_mut.orchestration.workload_store_v1.*
+use std.nogc_sync_mut.orchestration.controller_agent_task_objects_v1.*
+use std.common.contracts.orchestration.agent_invocation_binding_v1.AgentTaskInputV1
+use std.common.contracts.orchestration.agent_task_object_v1.*
+use std.common.contracts.orchestration.agent_task_use_v1.*
+use std.common.contracts.distributed_control_codec_v2.distributed_decode_operation_v2
+use std.common.task_runner.distributed_operation_journal_v2.*
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.{daemon_operation_admit_v2, daemon_operation_begin_v2, daemon_operation_record_outcome_v2}
+use std.nogc_sync_mut.io.file_lock_owned_v2.FileLockReleaseStateV2
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_read_regular_no_follow_bounded, file_atomic_write}
+use std.nogc_sync_mut.io_runtime.dir_remove
+use std.common.crypto.sha256.sha256_text
+
+fn task_store_open_v1(root: text, nonce: text) -> ControllerWorkloadStoreV1:
+    task_store_open_bounded_v1(root, nonce, 4096)
+
+fn task_store_open_bounded_v1(root: text, nonce: text, maximum: i64) -> ControllerWorkloadStoreV1:
+    match controller_workload_store_open_owned_v2(root, "controller", nonce, maximum):
+        case ControllerWorkloadStoreOpenV2.Ready(owner): owner
+        case ControllerWorkloadStoreOpenV2.Rejected(reason): fail("unexpected owned store rejection:" + reason)
+        case ControllerWorkloadStoreOpenV2.CleanupRequired(cleanup, reason):
+            val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+            expect(closed.cleanup.is_none()).to_equal(true)
+            expect(closed.closed).to_equal(true)
+            expect(closed.error).to_equal("")
+            fail("unexpected retained owned cleanup:" + reason)
+
+fn task_store_close_v1(owner: ControllerWorkloadStoreV1):
+    val closed = controller_workload_store_close_owned_v2(owner)
+    expect(closed.cleanup.is_none()).to_equal(true)
+    expect(closed.closed).to_equal(true)
+    expect(closed.error).to_equal("")
+    expect(closed.state).to_equal(FileLockReleaseStateV2.Released)
+
+fn task_store_retain_ok_v1(owner: ControllerWorkloadStoreV1, task: AgentTaskInputV1) -> ControllerWorkloadStoreV1:
+    val turn = controller_workload_store_task_retain_v1(owner, task)
+    expect(turn.error).to_equal("")
+    turn.owner
+
+fn task_store_use_ok_v1(owner: ControllerWorkloadStoreV1, binding: AgentTaskUseBindingV1) -> ControllerWorkloadStoreV1:
+    val turn = controller_workload_store_task_use_v1(owner, binding)
+    expect(turn.error).to_equal("")
+    turn.owner
+
+fn task_store_cleanup_v1(owner: ControllerWorkloadStoreV1):
+    val root = owner.journal.root
+    task_store_close_v1(owner)
+    expect(dir_remove(root, true)).to_equal(true)
+
+fn task_store_fixture_v1(pin_policy: bool) -> (ControllerWorkloadStoreV1, AgentTaskInputV1, AgentTaskUseBindingV1):
+    task_store_fixture_bounded_v1(pin_policy, 4096)
+
+fn task_store_fixture_bounded_v1(pin_policy: bool, maximum: i64) -> (ControllerWorkloadStoreV1, AgentTaskInputV1, AgentTaskUseBindingV1):
+    val source = file_read_regular_no_follow_bounded("test/fixtures/orchestration/caret_agent_session.sdn", 1048576).unwrap()
+    val catalog = file_read_regular_no_follow_bounded("test/fixtures/orchestration/caret_policy_catalog.sdn", 1048576).unwrap()
+    val root = secure_temp_dir("/tmp", "owned-task-store-").unwrap()
+    var owner = task_store_open_bounded_v1(root, "a".repeat(64), maximum)
+    owner = controller_workload_store_submit_agent_v1(owner, "session", source, "caret", "review-simple").unwrap()
+    if pin_policy: owner = controller_workload_store_pin_policy_v1(owner, "session", catalog, "caret", "review-simple").unwrap()
+    val task = AgentTaskInputV1(ns: "caret", reference: "task-immutable-42", content: "original\r\nraw\r-", content_digest: sha256_text("original\r\nraw\r-"))
+    val binding = AgentTaskUseBindingV1(controller_id: "controller", session_uid: "session", attempt: 1,
+        ns: task.ns, task_ref: task.reference, task_digest: task.content_digest,
+        source_digest: sha256_text(source), catalog_digest: sha256_text(catalog), provider: "codex",
+        adapter_id: "codex-root-start-0.169.0-v1", model: "", host_scope_digest: "c".repeat(64))
+    (owner, task, binding)
+
+describe "immutable task objects in the actual owned Controller journal":
+    it "commits exact raw object and use then replays unchanged with idempotent retries":
+        step("Retain an immutable task before committing its per-attempt use")
+        val fixture = task_store_fixture_v1(true)
+        val task = fixture.1
+        val binding = fixture.2
+        var owner = task_store_retain_ok_v1(fixture.0, task)
+        val retain_revision = owner.journal.revision
+        owner = task_store_retain_ok_v1(owner, task)
+        expect(owner.journal.revision).to_equal(retain_revision)
+        expect(controller_workload_store_task_materialize_v1(owner, binding).is_err()).to_equal(true)
+        owner = task_store_use_ok_v1(owner, binding)
+        val use_revision = owner.journal.revision
+        owner = task_store_use_ok_v1(owner, binding)
+        expect(owner.journal.revision).to_equal(use_revision)
+        val materialized = controller_workload_store_task_materialize_v1(owner, binding).unwrap()
+        expect(materialized.content).to_equal(task.content)
+        expect(materialized.content_digest).to_equal(task.content_digest)
+        val operation = controller_agent_task_use_operation_v1(binding).unwrap()
+        val record = distributed_operation_journal_lookup_v2(owner.journal, operation.id).unwrap()
+        expect(record.state).to_equal("completed")
+        expect(record.outcome_digest).to_equal(agent_task_use_digest_v1(binding).unwrap())
+        val root = owner.journal.root
+        task_store_close_v1(owner)
+        owner = task_store_open_v1(root, "b".repeat(64))
+        expect(controller_workload_store_task_materialize_v1(owner, binding).unwrap().content).to_equal(task.content)
+        task_store_cleanup_v1(owner)
+
+    it "rejects same attempt substitution of every valid use field without changing stored bytes":
+        step("Refuse replacement under an already committed use identity")
+        val fixture = task_store_fixture_v1(true)
+        val binding = fixture.2
+        var owner = task_store_retain_ok_v1(fixture.0, fixture.1)
+        owner = task_store_use_ok_v1(owner, binding)
+        var changed = binding
+        changed.model = "other-model"
+        expect((controller_workload_store_task_use_v1(owner, changed).error != "")).to_equal(true)
+        expect(controller_workload_store_task_materialize_v1(owner, changed).is_err()).to_equal(true)
+        changed = binding
+        changed.host_scope_digest = "d".repeat(64)
+        expect((controller_workload_store_task_use_v1(owner, changed).error != "")).to_equal(true)
+        changed = binding
+        changed.task_digest = sha256_text("another body")
+        expect((controller_workload_store_task_use_v1(owner, changed).error != "")).to_equal(true)
+        changed = binding
+        changed.ns = "other"
+        expect((controller_workload_store_task_use_v1(owner, changed).error != "")).to_equal(true)
+        changed = binding
+        changed.task_ref = "other-task"
+        expect((controller_workload_store_task_use_v1(owner, changed).error != "")).to_equal(true)
+        changed = binding
+        changed.source_digest = "e".repeat(64)
+        expect((controller_workload_store_task_use_v1(owner, changed).error != "")).to_equal(true)
+        changed = binding
+        changed.catalog_digest = "f".repeat(64)
+        expect((controller_workload_store_task_use_v1(owner, changed).error != "")).to_equal(true)
+        expect(controller_workload_store_task_materialize_v1(owner, binding).unwrap().content).to_equal(fixture.1.content)
+        task_store_cleanup_v1(owner)
+
+    it "retains two versions of one reference without selecting latest and permits a second exact use":
+        step("Pin a raw version for each attempt while reusing immutable content")
+        val fixture = task_store_fixture_v1(true)
+        val task = fixture.1
+        var owner = task_store_retain_ok_v1(fixture.0, task)
+        val newer = AgentTaskInputV1(ns: task.ns, reference: task.reference, content: "another body", content_digest: sha256_text("another body"))
+        owner = task_store_retain_ok_v1(owner, newer)
+        owner = task_store_use_ok_v1(owner, fixture.2)
+        expect(controller_workload_store_task_materialize_v1(owner, fixture.2).unwrap().content).to_equal(task.content)
+        var second = fixture.2
+        second.attempt = 2
+        owner = task_store_use_ok_v1(owner, second)
+        expect(controller_workload_store_task_materialize_v1(owner, second).unwrap().content).to_equal(task.content)
+        var third = second
+        third.attempt = 3
+        third.task_digest = newer.content_digest
+        owner = task_store_use_ok_v1(owner, third)
+        expect(controller_workload_store_task_materialize_v1(owner, third).unwrap().content).to_equal(newer.content)
+        task_store_cleanup_v1(owner)
+
+    it "rejects absent task and uncommitted policy without accepting caller supplied digest data":
+        step("Require actual committed parents in the current owned store")
+        val fixture = task_store_fixture_v1(true)
+        expect((controller_workload_store_task_use_v1(fixture.0, fixture.2).error != "")).to_equal(true)
+        expect(controller_agent_task_object_retain_v1(fixture.0.journal, fixture.1).unwrap()).to_equal(true)
+        expect((controller_workload_store_task_use_v1(fixture.0, fixture.2).error != "")).to_equal(true)
+        task_store_cleanup_v1(fixture.0)
+        val unpinned = task_store_fixture_v1(false)
+        val owner = task_store_retain_ok_v1(unpinned.0, unpinned.1)
+        expect((controller_workload_store_task_use_v1(owner, unpinned.2).error != "")).to_equal(true)
+        task_store_cleanup_v1(owner)
+
+    it "recovers admitted task object and pending use through the same journal projection":
+        step("Recover pending metadata using the existing owned journal")
+        val fixture = task_store_fixture_v1(true)
+        val retain = controller_agent_task_retain_operation_v1("controller", fixture.1).unwrap()
+        expect(controller_agent_task_object_retain_v1(fixture.0.journal, fixture.1).unwrap()).to_equal(true)
+        val admitted = daemon_operation_admit_v2(fixture.0.journal, retain).unwrap()
+        var owner = controller_workload_store_project_owned_v3(admitted.journal, "controller").unwrap()
+        expect(distributed_operation_journal_lookup_v2(owner.journal, retain.id).unwrap().state).to_equal("completed")
+        val use = controller_agent_task_use_operation_v1(fixture.2).unwrap()
+        expect(controller_agent_task_use_retain_v1(owner.journal, fixture.2).unwrap()).to_equal(true)
+        val use_admitted = daemon_operation_admit_v2(owner.journal, use).unwrap()
+        owner = controller_workload_store_project_owned_v3(use_admitted.journal, "controller").unwrap()
+        expect(controller_workload_store_task_materialize_v1(owner, fixture.2).unwrap().content).to_equal(fixture.1.content)
+        task_store_cleanup_v1(owner)
+
+    it "preserves historical evidence after cancellation while refusing current use and materialization":
+        step("Cancel the parent without erasing its earlier committed task use")
+        val fixture = task_store_fixture_v1(true)
+        var owner = task_store_retain_ok_v1(fixture.0, fixture.1)
+        owner = task_store_use_ok_v1(owner, fixture.2)
+        owner = controller_workload_store_cancel_agent_v1(owner, "session", fixture.2.source_digest).unwrap()
+        val root = owner.journal.root
+        task_store_close_v1(owner)
+        owner = task_store_open_v1(root, "b".repeat(64))
+        expect(controller_workload_store_task_use_v1(owner, fixture.2).error).to_equal("agent-task-use-cancelled")
+        expect(controller_workload_store_task_materialize_v1(owner, fixture.2).unwrap_err()).to_equal("agent-task-use-cancelled")
+        val use = controller_agent_task_use_operation_v1(fixture.2).unwrap()
+        expect(controller_agent_task_use_read_v1(owner.journal, use, "controller").unwrap().task_digest).to_equal(fixture.1.content_digest)
+        task_store_cleanup_v1(owner)
+
+    it "requires actual stored parent even when an unrelated session has identical policy content":
+        step("Reject a missing desired parent rather than trust public binding data")
+        val fixture = task_store_fixture_v1(true)
+        val owner = task_store_retain_ok_v1(fixture.0, fixture.1)
+        var changed = fixture.2
+        changed.session_uid = "unsubmitted-session"
+        expect(controller_agent_task_policy_v1(owner.journal, changed).is_err()).to_equal(true)
+        expect((controller_workload_store_task_use_v1(owner, changed).error != "")).to_equal(true)
+        task_store_cleanup_v1(owner)
+
+    it "rejects modified retained bytes and preserves original lease custody on read failure":
+        step("Detect corruption instead of repairing a committed task from caller data")
+        val fixture = task_store_fixture_v1(true)
+        var owner = task_store_retain_ok_v1(fixture.0, fixture.1)
+        owner = task_store_use_ok_v1(owner, fixture.2)
+        val operation = controller_agent_task_retain_operation_v1("controller", fixture.1).unwrap()
+        val path = owner.journal.root + "/desired-input-objects/" + operation.payload_digest + ".sdn"
+        expect(file_atomic_write(path, "corrupt retained object")).to_equal(true)
+        expect(controller_workload_store_task_materialize_v1(owner, fixture.2).is_err()).to_equal(true)
+        expect((controller_workload_store_task_retain_v1(owner, fixture.1).error != "")).to_equal(true)
+        expect(file_atomic_write(path, agent_task_object_encode_v1(fixture.1).unwrap())).to_equal(true)
+        task_store_cleanup_v1(owner)
+
+    it "returns the latest actual owner when the journal budget fails after admission":
+        step("Retain advanced journal custody on a later phase error")
+        # Three events each for desired, policy and retained task leave exactly
+        # one real event for use admission; begin exceeds the actual open bound.
+        val fixture = task_store_fixture_bounded_v1(true, 10)
+        val owner = task_store_retain_ok_v1(fixture.0, fixture.1)
+        expect(owner.journal.sequence).to_equal(9)
+        val turn = controller_workload_store_task_use_v1(owner, fixture.2)
+        expect(turn.effect_attempted).to_equal(true)
+        expect(turn.error == "").to_equal(false)
+        expect(turn.owner.journal.sequence).to_equal(10)
+        expect(turn.owner.journal.revision == owner.journal.revision).to_equal(false)
+        expect(turn.owner.journal.lease_digest).to_equal(owner.journal.lease_digest)
+        val operation = controller_agent_task_use_operation_v1(fixture.2).unwrap()
+        expect(distributed_operation_journal_lookup_v2(turn.owner.journal, operation.id).unwrap().state).to_equal("admitted")
+        task_store_cleanup_v1(turn.owner)
+
+    it "rejects a wrong completed outcome and terminal failure through real journal projection":
+        step("Validate stored task outcome equality during replay")
+        for terminal in ["completed", "failed"]:
+            val fixture = task_store_fixture_v1(true)
+            val operation = controller_agent_task_retain_operation_v1("controller", fixture.1).unwrap()
+            expect(controller_agent_task_object_retain_v1(fixture.0.journal, fixture.1).unwrap()).to_equal(true)
+            val admitted = daemon_operation_admit_v2(fixture.0.journal, operation).unwrap()
+            val executing = daemon_operation_begin_v2(admitted.journal, operation).unwrap()
+            val outcome = daemon_operation_record_outcome_v2(executing, operation, terminal, "f".repeat(64)).unwrap()
+            expect(controller_workload_store_project_owned_v3(outcome, "controller").is_err()).to_equal(true)
+            # The projection performed no recovery; retain the actual returned
+            # journal for the same owned lease rather than the stale fixture.
+            var current = fixture.0
+            current.journal = outcome
+            task_store_cleanup_v1(current)

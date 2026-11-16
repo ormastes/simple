@@ -1,0 +1,147 @@
+# Actual fixed installed reader custody. AUTHORED_NOT_RUN; no profile DTO grant.
+use std.common.contracts.container.linux_fresh_epoch_v1.*
+use std.common.contracts.container.machine_policy_v1.{MachineContainerPolicyV1, machine_container_policy_decode_v1}
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_host_scope_bytes_v2}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.*
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_machine_policy_abi_v1.getgid
+@end
+
+pub struct LinuxFreshEpochProfileSnapshotV1:
+    profile: LinuxFreshEpochProfileV1
+    profile_digest: text
+    process: LinuxMachineProcessContextV1
+
+pub class LinuxInstalledFreshEpochProfileV1:
+    slot: i64
+    generation: i64
+    pub fn current_v1() -> Result<LinuxFreshEpochProfileSnapshotV1, text>: fresh_profile_current_v1(self.slot, self.generation)
+    pub fn actual_boot_id_v2() -> Result<text, text>:
+        val current = fresh_profile_current_v1(self.slot, self.generation)?
+        val state = fresh_profile_state_v1(self.slot, self.generation)?
+        state.reader.actual_boot_id_v2()
+    pub fn validate_native_machine_v2(observed: text) -> Result<(), text>:
+        val policy = fresh_profile_machine_v2(self.slot, self.generation)?
+        if policy.native_machine_id != observed: return Err("fresh-workload-native-machine-policy-mismatch")
+        Ok(())
+    pub fn validate_workload_scope_v2(scope: ContainerHostScopeV2) -> Result<(), text>:
+        val policy = fresh_profile_machine_v2(self.slot, self.generation)?
+        val shape = container_host_scope_bytes_v2(scope)?
+        val boot = self.actual_boot_id_v2()?
+        if (scope.physical_host_id != policy.physical_host_id or scope.native_machine_id != policy.native_machine_id or
+                scope.boot_id != boot or scope.continuity_id != boot or scope.continuity_mode != "native-boot-incarnation-v1" or
+                not scope.service_scope_id.starts_with("epoch-") or scope.service_scope_id.byte_len() != 70):
+            return Err("fresh-workload-scope-installed-context")
+        if not builder_digest_valid_v1(scope.service_scope_id.substring(6, 70)): return Err("fresh-workload-service-scope-shape")
+        Ok(())
+    pub fn close_v1() -> LinuxFreshEpochProfileCloseTurnV1: fresh_profile_close_v1(self.slot, self.generation)
+
+pub enum LinuxFreshEpochProfileOpenV1:
+    Rejected(reason: text)
+    CleanupRequired(owner: LinuxInstalledFreshEpochProfileV1, reason: text)
+    Ready(owner: LinuxInstalledFreshEpochProfileV1)
+
+pub struct LinuxFreshEpochProfileCloseTurnV1:
+    owner: Option<LinuxInstalledFreshEpochProfileV1>
+    closed: bool
+    error: text
+
+struct FreshProfileStateV1:
+    generation: i64
+    reader: LinuxMachinePolicyOwnerV1
+    var digest: text = ""
+    var phase: text = "opening"
+    var error: text = ""
+
+var fresh_profile_slots_v1: [FreshProfileStateV1] = []
+
+fn fresh_profile_state_v1(slot: i64, generation: i64) -> Result<FreshProfileStateV1, text>:
+    linux_machine_process_origin_check_v1()?
+    if slot < 0 or slot >= fresh_profile_slots_v1.len() or fresh_profile_slots_v1[slot].generation != generation:
+        return Err("fresh-epoch-profile-stale")
+    Ok(fresh_profile_slots_v1[slot])
+
+fn fresh_profile_machine_v2(slot: i64, generation: i64) -> Result<MachineContainerPolicyV1, text>:
+    val current = fresh_profile_current_v1(slot, generation)?
+    val state = fresh_profile_state_v1(slot, generation)?
+    val bytes = state.reader.read_policy_v1()?
+    if not utf8_bytes_valid(bytes): return Err("fresh-workload-machine-policy-utf8")
+    machine_container_policy_decode_v1(bytes_to_text(bytes))
+
+@unsafe(reason: "compares actual admitted service group with root-installed metadata", capabilities: [ffi])
+fn fresh_profile_current_v1(slot: i64, generation: i64) -> Result<LinuxFreshEpochProfileSnapshotV1, text>:
+    val state = fresh_profile_state_v1(slot, generation)?
+    if state.phase != "ready" and state.phase != "opening": return Err("fresh-epoch-profile-not-current")
+    val machine_bytes = state.reader.read_policy_v1()?
+    if not utf8_bytes_valid(machine_bytes): return Err("fresh-epoch-machine-policy-utf8")
+    val machine = machine_container_policy_decode_v1(bytes_to_text(machine_bytes))?
+    val machine_digest = sha256_u8_hex(machine_bytes)
+    val context = state.reader.actual_process_context_v1()?
+    val bytes = state.reader.read_fresh_epoch_profile_v1()?
+    if not utf8_bytes_valid(bytes): return Err("fresh-epoch-profile-utf8")
+    val profile = linux_fresh_epoch_profile_decode_v1(bytes_to_text(bytes))?
+    if (profile.text_v1("machinePolicyDigest")? != machine_digest or profile.number_v1("serviceUid")? != context.effective_uid or
+            context.real_uid != context.effective_uid): return Err("fresh-epoch-profile-native-principal-or-policy")
+    @when(os="linux"):
+    if profile.number_v1("serviceGid")? != getgid() as i64: return Err("fresh-epoch-profile-native-group")
+    @else:
+    return Err("fresh-epoch-profile-linux-required")
+    @end
+    val cpu = profile.number_v1("partitionCpuMillis")?
+    val memory = profile.number_v1("partitionMemoryBytes")?
+    if (profile.number_v1("outsideCpuMillis")? > machine.cpu_millis - cpu or
+            profile.number_v1("outsideMemoryBytes")? > machine.memory_bytes - memory):
+        return Err("fresh-epoch-profile-machine-allocation-exceeded")
+    var provider_matches = 0
+    for provider in machine.providers:
+        if provider.backend == "linux-podman" and sha256_text(provider.policy_bytes) == profile.text_v1("providerPolicyDigest")?:
+            linux_fresh_epoch_provider_matches_v1(profile, provider.policy_bytes)?
+            provider_matches = provider_matches + 1
+    if provider_matches != 1: return Err("fresh-epoch-profile-provider-policy-binding")
+    val digest = sha256_u8_hex(bytes)
+    if state.digest != "" and state.digest != digest: return Err("fresh-epoch-profile-replaced")
+    val current = state.reader.actual_process_context_v1()?
+    if current.identity_digest != context.identity_digest: return Err("fresh-epoch-profile-context-changed")
+    Ok(LinuxFreshEpochProfileSnapshotV1(profile: profile, profile_digest: digest, process: context))
+
+pub fn linux_installed_fresh_epoch_profile_open_v1() -> LinuxFreshEpochProfileOpenV1:
+    val origin = linux_machine_process_origin_check_v1()
+    if origin.is_err(): return LinuxFreshEpochProfileOpenV1.Rejected(origin.unwrap_err())
+    if fresh_profile_slots_v1.len() >= 4096: return LinuxFreshEpochProfileOpenV1.Rejected("fresh-epoch-profile-bound")
+    var reason = ""
+    val reader = match linux_machine_policy_open_v1():
+        case LinuxMachinePolicyOpenV1.Rejected(error): return LinuxFreshEpochProfileOpenV1.Rejected(error)
+        case LinuxMachinePolicyOpenV1.CleanupRequired(owner, error):
+            reason = error
+            owner
+        case LinuxMachinePolicyOpenV1.Ready(owner): owner
+    val slot = fresh_profile_slots_v1.len()
+    val owner = LinuxInstalledFreshEpochProfileV1(slot: slot, generation: slot + 1)
+    fresh_profile_slots_v1.push(FreshProfileStateV1(generation: slot + 1, reader: reader))
+    if reason != "": return LinuxFreshEpochProfileOpenV1.CleanupRequired(owner, reason)
+    val current = fresh_profile_current_v1(slot, slot + 1)
+    if current.is_err():
+        fresh_profile_slots_v1[slot].phase = "cleanup"
+        return LinuxFreshEpochProfileOpenV1.CleanupRequired(owner, current.unwrap_err())
+    fresh_profile_slots_v1[slot].digest = current.unwrap().profile_digest
+    fresh_profile_slots_v1[slot].phase = "ready"
+    LinuxFreshEpochProfileOpenV1.Ready(owner)
+
+fn fresh_profile_close_v1(slot: i64, generation: i64) -> LinuxFreshEpochProfileCloseTurnV1:
+    val owner = LinuxInstalledFreshEpochProfileV1(slot: slot, generation: generation)
+    val loaded = fresh_profile_state_v1(slot, generation)
+    if loaded.is_err(): return LinuxFreshEpochProfileCloseTurnV1(Some(owner), false, loaded.unwrap_err())
+    val state = loaded.unwrap()
+    if state.phase == "closed": return LinuxFreshEpochProfileCloseTurnV1(nil, true, state.error)
+    fresh_profile_slots_v1[slot].phase = "closing"
+    val closed = state.reader.close_v1()
+    if closed == "released" or closed == "consumed-error":
+        fresh_profile_slots_v1[slot].phase = "closed"
+        if closed == "consumed-error" and state.error == "": fresh_profile_slots_v1[slot].error = closed
+        return LinuxFreshEpochProfileCloseTurnV1(nil, true, fresh_profile_slots_v1[slot].error)
+    if state.error == "": fresh_profile_slots_v1[slot].error = "fresh-epoch-profile-reader-close:" + closed
+    LinuxFreshEpochProfileCloseTurnV1(Some(owner), false, fresh_profile_slots_v1[slot].error)

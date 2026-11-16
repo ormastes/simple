@@ -1,0 +1,55 @@
+# AUTHORED_NOT_RUN fixture assertions for the actual signed Host harness.
+# No synthetic Host owners, journal grants or successful native births exist here.
+use std.spec.{expect, step, fail}
+use std.nogc_sync_mut.orchestration.host_authorized_execution_v2.{HostExecutionTurnV2, HostExecutionProgressTurnV4}
+use std.common.contracts.orchestration.host_capacity_v1.HostReservationStateV1
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+
+pub fn check_real_pre_start_success_v1(turn: HostExecutionTurnV2,
+        expected_journal_lease: text, reservation_id: text, expected_runtime: RuntimeIdentityV1) -> HostExecutionTurnV2:
+    step("Check the caller-owned successful admitted turn without constructing a native owner")
+    expect(turn.owner.journal.lease_digest).to_equal(expected_journal_lease)
+    expect(turn.error).to_equal("")
+    expect(turn.recovery_required).to_equal(false)
+    if turn.observation.is_none():
+        fail("actual successful constrained Host observation required")
+        return turn
+    expect(turn.observation.unwrap().runtime).to_equal(expected_runtime)
+    expect(turn.observation.unwrap().create_status).to_equal("ok")
+    expect(turn.observation.unwrap().start_status).to_equal("ok")
+    var found = false
+    for reservation in turn.owner.ledger.reservations:
+        if reservation.id == reservation_id:
+            found = true
+            expect(reservation.state != HostReservationStateV1.Released).to_equal(true)
+    expect(found).to_equal(true)
+    turn
+
+pub fn check_real_pre_start_refusal_v1(turn: HostExecutionTurnV2,
+        expected_journal_lease: text, reservation_id: text) -> HostExecutionTurnV2:
+    step("Keep the actual writer and charged reservation after configuration mismatch prevents start")
+    expect(turn.owner.journal.lease_digest).to_equal(expected_journal_lease)
+    expect(turn.error.byte_len()).to_be_greater_than(0)
+    expect(turn.recovery_required).to_equal(true)
+    if turn.observation.is_none():
+        fail("actual refused constrained Host observation required")
+        return turn
+    expect(turn.observation.unwrap().start_status).to_equal("not-attempted")
+    var found = false
+    for reservation in turn.owner.ledger.reservations:
+        if reservation.id == reservation_id:
+            found = true
+            expect(reservation.state != HostReservationStateV1.Released).to_equal(true)
+    expect(found).to_equal(true)
+    turn
+
+# Invoke only on a real pending native create/cancel turn from the existing
+# Windows cooperative owner. The harness retains this returned carrier and
+# continues actual cleanup; no observation/exit success is manufactured.
+pub fn check_real_pre_start_pending_cleanup_v1(turn: HostExecutionProgressTurnV4,
+        expected_journal_lease: text) -> HostExecutionProgressTurnV4:
+    step("Retain the genuine canonical continuation while native command cleanup is incomplete")
+    expect(turn.owner.journal.lease_digest).to_equal(expected_journal_lease)
+    expect(turn.continuation.is_some()).to_equal(true)
+    expect(turn.observation.is_none()).to_equal(true)
+    turn

@@ -1,0 +1,118 @@
+#!/bin/sh
+# check-cache-protocol-formal.shs — C6 formal gate for the cache protocol.
+#
+# Checks (all fail-closed):
+#   1. `lake build` of src/verification/cache_protocol succeeds.
+#   2. No `sorry` / `admit` / `native_decide` / unapproved `axiom` in the cache
+#      proof roots (cache_protocol AND the imported cache_identity).
+#   3. Coverage: schema KEY-field count + 1 (domain) == generated
+#      *_change_visible theorem count, and excluded_from_key count ==
+#      generated *_absent theorem count.
+#   4. Regeneration is clean: rerunning the generator reproduces the four
+#      generated artifacts byte-for-byte.
+#
+# Verdict is the LAST line of stdout:
+#   PASS — <what ran>        exit 0
+#   FAIL — <reason>          exit 1
+#   ERROR — nothing was checked (<reason>)   exit 2
+# Run from the repo root. Anywhere else must yield ERROR (exit 2), never PASS.
+
+set -u
+
+err() { echo "ERROR — nothing was checked ($1)"; exit 2; }
+fail() { echo "FAIL — $1"; exit 1; }
+
+PROJ=src/verification/cache_protocol
+SCHEMA=src/compiler/80.driver/cache/schema/cache_protocol.sdn
+GEN=src/app/gen_cache_model/main.spl
+
+# ---- fail-closed on cwd ----------------------------------------------------
+[ -d "$PROJ" ] || err "no $PROJ under cwd $(pwd)"
+[ -f "$SCHEMA" ] || err "no schema at $SCHEMA"
+[ -f "$GEN" ] || err "no generator at $GEN"
+[ -d src/verification/cache_identity ] || err "no cache_identity project"
+[ -x "$HOME/.elan/bin/lake" ] && PATH="$HOME/.elan/bin:$PATH"
+command -v lake >/dev/null 2>&1 || err "lake not on PATH (install elan)"
+
+# ---- 2. trust-bypass scan --------------------------------------------------
+# `axiom` has no approved instances in these roots today; any hit is a FAIL
+# until it is explicitly added to the allowlist below.
+# Comments (`-- …` and nested `/- … -/`) are stripped first: prose such as
+# "no sorry, no axioms" in a docstring is not a trust bypass (this scan used to
+# FAIL on exactly that, so the gate had never been green).
+lean_code_lines() {
+  find "$PROJ/src" src/verification/cache_identity/src -name '*.lean' | sort | while IFS= read -r _f; do
+    awk -v F="$_f" '
+      { s = $0; out = ""; i = 1
+        while (i <= length(s)) {
+          two = substr(s, i, 2)
+          if (depth > 0) {
+            if (two == "/-") { depth++; i += 2; continue }
+            if (two == "-/") { depth--; i += 2; continue }
+            i++; continue
+          }
+          if (two == "/-") { depth = 1; i += 2; continue }
+          if (two == "--") break
+          out = out substr(s, i, 1); i++
+        }
+        if (out ~ /[^[:space:]]/) printf "%s:%d:%s\n", F, NR, out }' "$_f"
+  done
+}
+BAD=$(lean_code_lines \
+      | grep -E ":[0-9]+:.*(^|[^A-Za-z_])(sorry|admit|native_decide)([^A-Za-z_]|$)|:[0-9]+:[[:space:]]*axiom[[:space:]]" \
+      | grep -v "allowed-axiom:" || true)
+[ -z "$BAD" ] || { echo "$BAD"; fail "trust bypass (sorry/admit/native_decide/axiom) in cache proof roots"; }
+
+# ---- 3. coverage: per-name, against the COMPILED generated files ----------
+# (Until 2026-10-24 this counted theorems in Generated/Visibility.lean, a stale
+# file that did not compile and that `lake build` never reached, so the count
+# proved nothing. Every file counted below is imported by CacheProtocol.lean.)
+FT="$PROJ/src/CacheProtocol/Generated/FieldTheorems.lean"
+LK="$PROJ/src/CacheProtocol/Generated/LiveKey.lean"
+LIVE=src/compiler/80.driver/cache/schema/live_object_key.sdn
+BIND=src/verification/cache_protocol/source_bindings.txt
+for f in "$FT" "$LK" "$LIVE" "$BIND"; do [ -f "$f" ] || err "missing $f"; done
+for m in CacheProtocol.Generated.FieldTheorems CacheProtocol.Generated.LiveKey CacheProtocol.Theorems.LiveKey; do
+  grep -qx "import $m" "$PROJ/src/CacheProtocol.lean" || fail "$m is not imported by CacheProtocol.lean, so lake build never checks it"
+done
+
+block_names() {  # block_names <block-key> <name-key> <file>
+  awk -v b="$1:" -v k="$2" '
+    index($0, b) && $0 ~ ("^[[:space:]]*" b) { f=1; next }
+    f && /^[[:space:]]*- \{/ { if (match($0, k ": *[A-Za-z_0-9]+")) { s=substr($0,RSTART,RLENGTH); sub(/^[^:]*: */,"",s); print s }; next }
+    f && /^[[:space:]]*(#|$)/ { next }
+    f { f=0 }' "$3"
+}
+has_thm() { grep -q "^theorem $1[[:space:](:]" "$2" || grep -qx "theorem $1" "$2"; }
+
+key_fields=$(block_names canonical_order name "$SCHEMA")
+excluded=$(block_names excluded_from_key name "$SCHEMA")
+[ -n "$key_fields" ] || err "schema parse found 0 canonical_order rows"
+[ -n "$excluded" ] || err "schema parse found 0 excluded_from_key rows"
+vis_count=0; abs_count=0
+for n in domain $key_fields; do has_thm "${n}_change_visible" "$FT" || fail "coverage: no ${n}_change_visible in FieldTheorems.lean"; vis_count=$((vis_count+1)); done
+for n in $excluded; do has_thm "${n}_absent" "$FT" || fail "coverage: no ${n}_absent in FieldTheorems.lean"; abs_count=$((abs_count+1)); done
+
+# ---- 3b. live key accounting (T-K1 / T-I1, plan §4.2) ----------------------
+live_comps=$(block_names components name "$LIVE")
+live_gaps=$(block_names known_gaps id "$LIVE")
+live_total=$(awk '/^[[:space:]]*inputs_total:/ { print $2; exit }' "$LIVE")
+nc=$(printf '%s\n' $live_comps | grep -c .); ng=$(printf '%s\n' $live_gaps | grep -c .)
+[ "$nc" -gt 0 ] || err "live_object_key.sdn parse found 0 components"
+case "$live_total" in ''|*[!0-9]*) err "live_object_key.sdn has no numeric inputs_total" ;; esac
+[ $((nc + ng)) -eq "$live_total" ] || fail "live key accounting: $nc components + $ng known_gaps != inputs_total $live_total"
+for n in $live_comps; do has_thm "${n}_live_change_visible" "$LK" || fail "coverage: no ${n}_live_change_visible in LiveKey.lean"; done
+for n in $live_gaps; do has_thm "${n}_gap_invisible" "$LK" || fail "coverage: no ${n}_gap_invisible in LiveKey.lean"; done
+lk_vis=$(grep -c '^theorem [a-z_0-9]*_live_change_visible ' "$LK"); lk_gap=$(grep -c '^theorem [a-z_0-9]*_gap_invisible ' "$LK")
+[ "$lk_vis" -eq "$nc" ] || fail "LiveKey.lean has $lk_vis *_live_change_visible for $nc components"
+[ "$lk_gap" -eq "$ng" ] || fail "LiveKey.lean has $lk_gap *_gap_invisible for $ng known gaps (a gap may not disappear silently)"
+for t in live_key_sound live_key_sound_without_gaps invalidation_complete; do
+  has_thm "$t" "$PROJ/src/CacheProtocol/Theorems/LiveKey.lean" || fail "missing manual theorem $t"
+done
+# every component's source declaration must be pinned by the source binding
+for s in $(awk '/source:/ { if (match($0, /source: *[^ }]+/)) { s=substr($0,RSTART,RLENGTH); sub(/^source: */,"",s); print s } }' "$LIVE" | sort -u); do
+  awk '!/^#/ {print $2}' "$BIND" | grep -qx "$s" || fail "live key source $s is not pinned in $BIND"
+done
+
+
+echo "PASS — canonical formal stages2-3: trust scan, schema/name coverage and source pins; package build RSS-capped; full-generator regeneration UNRUN"
