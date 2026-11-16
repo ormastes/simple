@@ -1,0 +1,80 @@
+# Explicit probe action extension; original V2 rows/operation names unchanged.
+# Distributed V2 is only the transition oracle, never admission permission.
+use std.nogc_sync_mut.container.machine_fresh_workload_record_v2.*
+use std.common.contracts.distributed_operation_state_v2.*
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.contracts.provider_cli.adapter_types_v1.ProviderCliProviderV1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.nogc_sync_mut.database.wal.{WalEntry, WalEntryType}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.contracts.container.linux_fresh_workload_probe_v3.LinuxFreshWorkloadProbeAbsenceV3
+
+pub fn machine_fresh_probe_action_initial_v3(record: MachineFreshWorkloadRecordV2,
+        action: text, generation: i64) -> Result<DistributedOperationStateV2, text>:
+    if not ["probe-wait", "probe-logs"].contains(action): return Err("machine-probe-action-name")
+    val id = machine_fresh_workload_id_v2(record)?
+    val envelope = OperationEnvelopeV2(version: 2, id: "probe-" + id + "-" + action,
+        payload_digest: id, principal: "local-" + record.principal_digest, project: "fresh-epoch-probe-v3",
+        host_id: record.scope.physical_host_id, operation: action, environment_digest: record.epoch_digest,
+        policy_revision: 3, revocation_epoch: 0, session_generation: generation,
+        memory_bytes: record.memory_bytes + record.helper_memory_bytes, duration_ms: 30000)
+    distributed_operation_initial_v2(distributed_encode_operation_v2(envelope)?)
+
+pub fn machine_fresh_probe_action_entries_v3(record: MachineFreshWorkloadRecordV2,
+        state: DistributedOperationStateV2, native_id: text, evidence: text, at: i64) -> Result<[WalEntry], text>:
+    if at <= 0 or not builder_digest_valid_v1(native_id) or evidence.byte_len() > 65536:
+        return Err("machine-probe-action-fields")
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("machine-fresh-workload-probe-action"),
+        "version": SdnValue.Int(3), "workloadDigest": SdnValue.String(machine_fresh_workload_id_v2(record)?),
+        "envelope": SdnValue.String(state.envelope), "state": SdnValue.String(state.state),
+        "outcomeDigest": SdnValue.String(state.outcome_digest), "nativeId": SdnValue.String(native_id),
+        "layout": SdnValue.String("combined-profiled-v1"), "evidence": SdnValue.String(evidence)}
+    Ok([WalEntry(0, if state.state == "admitted": WalEntryType.Insert else: WalEntryType.Update,
+        "machine-fresh-workload-probe-actions-v3", state.operation_id, sdn_encode_canonical(SdnValue.Dict(fields)), at)])
+
+pub fn machine_fresh_probe_wait_output_v3(output: text) -> Result<i64, text>:
+    # Helper exit0 is distinct from the payload's decimal wait exit code.
+    # This strict CPU probe profile accepts only actual payload success.
+    if output != "0" and output != "0\n" and output != "0\r\n": return Err("machine-probe-payload-exit-not-zero")
+    Ok(0)
+
+pub fn machine_fresh_probe_selection_entries_v3(record: MachineFreshWorkloadRecordV2,
+        provider: ProviderCliProviderV1, index: i64, at: i64) -> Result<[WalEntry], text>:
+    if at <= 0: return Err("machine-probe-selection-clock")
+    val name = match provider:
+        case ProviderCliProviderV1.Codex: "codex"
+        case ProviderCliProviderV1.Claude: "claude"
+        case ProviderCliProviderV1.Gemini: "gemini"
+        case ProviderCliProviderV1.Kimi: "kimi"
+    val id = machine_fresh_workload_id_v2(record)?
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("machine-fresh-compiled-cpu-probe"),
+        "version": SdnValue.Int(3), "workloadDigest": SdnValue.String(id),
+        "provider": SdnValue.String(name), "probeIndex": SdnValue.Int(index),
+        "attachment": SdnValue.String("none"), "captureLayout": SdnValue.String("combined-profiled-v1")}
+    Ok([WalEntry(0, WalEntryType.Insert, "machine-fresh-workload-probes-v3", id,
+        sdn_encode_canonical(SdnValue.Dict(fields)), at)])
+
+# Production-used DATA decision only. This cannot publish a selection, acquire
+# native custody or authorize an effect without the original sealed owner.
+pub fn machine_fresh_probe_selection_require_v3(phase: text) -> Result<(), text>:
+    if not ["selected", "spawn-unresolved", "capturing", "native-retired", "published"].contains(phase):
+        return Err("machine-probe-selection-publication-required")
+    Ok(())
+
+pub fn machine_fresh_probe_settlement_entries_v3(record: MachineFreshWorkloadRecordV2,
+        terminal: DistributedOperationStateV2, closure: LinuxFreshWorkloadProbeAbsenceV3, at: i64) -> Result<[WalEntry], text>:
+    val rows = machine_fresh_workload_settle_entries_v2(record, terminal, at)?
+    val id = machine_fresh_workload_id_v2(record)?
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("machine-fresh-probe-cohort-settlement"),
+        "version": SdnValue.Int(3), "workloadDigest": SdnValue.String(id), "nativeId": SdnValue.String(closure.native_id),
+        "assurance": SdnValue.String(closure.assurance), "requestBinding": SdnValue.String(closure.request_binding_digest),
+        "partition": SdnValue.String(closure.partition_identity_digest), "store": SdnValue.String(closure.store_identity_digest),
+        "machine": SdnValue.String(closure.native_machine_id), "boot": SdnValue.String(closure.native_boot_id),
+        "excludedHost": SdnValue.String(closure.excluded_process_identity_digest),
+        "uid": SdnValue.Int(closure.service_uid), "subuidStart": SdnValue.Int(closure.subuid_start),
+        "subuidCount": SdnValue.Int(closure.subuid_count), "ownerGeneration": SdnValue.Int(closure.owner_generation),
+        "sampleStarted": SdnValue.Int(closure.sample_started_monotonic_ns), "sampleFinished": SdnValue.Int(closure.sample_finished_monotonic_ns)}
+    Ok([WalEntry(0, WalEntryType.Insert, "machine-fresh-probe-settlements-v3", id,
+        sdn_encode_canonical(SdnValue.Dict(fields)), at)] + rows)

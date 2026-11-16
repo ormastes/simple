@@ -27,6 +27,7 @@ use std.nogc_sync_mut.container.machine_fresh_workload_native_dispatch_v3.*
 use std.nogc_sync_mut.container.machine_fresh_workload_effects_v3.*
 use std.nogc_sync_mut.container.machine_fresh_workspace_workflow_v3.*
 use std.nogc_sync_mut.container.machine_fresh_workspace_primary_v3.*
+use std.nogc_sync_mut.container.machine_fresh_probe_owner_v3.*
 use std.common.contracts.container.workspace_action_v3.ContainerWorkspaceActionV3
 use std.common.contracts.container.runtime_v1.RuntimeOperationV1
 use std.nogc_sync_mut.io.linux_fresh_workspace_binding_v3.LinuxFreshWorkspaceBindingV3
@@ -523,6 +524,7 @@ pub class MachineFreshWorkloadTransferV2:
     # transfer's own source custody; no caller-supplied binding is accepted.
     pub fn reserve_owned_v3(request: ContainerExecutionRequestV2, template: GroupProcessStreamLaunchV2) -> Result<MachineFreshWorkloadRecordDispatchV3, text>:
         val principal = self.owned_principal_v3()?
+        if self.state.source_custody_v3().is_ok(): return Err("machine-fresh-probe-before-source-required")
         Ok(MachineFreshWorkloadRecordDispatchV3.CpuV2(self.reserve_v2(principal, request, template)?))
 
     fn owned_principal_v3() -> Result<MachineLocalProcessPrincipalV1, text>:
@@ -587,6 +589,20 @@ pub class MachineFreshWorkloadTransferV2:
         val record = machine_fresh_record_workspace_v3(self.state.record_v3()?)?
         if record.request != request: return Err("machine-fresh-workspace-request-changed")
         self.state.workflow_cancel_v3()
+
+    pub fn probe_v3(request: ContainerExecutionRequestV2, call: MachineFreshProbeCallV3) -> MachineFreshProbeReplyV3:
+        val phase = self.admission.lifecycle.phase_v1()
+        if phase.is_err(): return machine_fresh_probe_rejected_v3(call, phase.unwrap_err())
+        if phase.unwrap() != "workload-transferred-v2" or self.admission.authority.is_none() or self.admission.custody.is_none():
+            return machine_fresh_probe_rejected_v3(call, "machine-probe-original-owner-required")
+        val retained_request = self.state.record_v2()
+        if retained_request.is_err(): return machine_fresh_probe_rejected_v3(call, retained_request.unwrap_err())
+        if retained_request.unwrap().request != request: return machine_fresh_probe_rejected_v3(call, "machine-probe-original-request-mismatch")
+        if not machine_fresh_probe_cleanup_call_v3(call):
+            val current = self.current_v2()
+            if current.is_err(): return machine_fresh_probe_rejected_v3(call, current.unwrap_err())
+        machine_fresh_probe_dispatch_v3(self.admission.authority.unwrap().storage, self.admission.custody.unwrap(),
+            self.state, self.admission.custody_generation, call)
 
     pub fn primary_v3(call: MachineWorkspacePrimaryCallV3) -> MachineWorkspacePrimaryReplyV3:
         val phase = self.admission.lifecycle.phase_v1()
