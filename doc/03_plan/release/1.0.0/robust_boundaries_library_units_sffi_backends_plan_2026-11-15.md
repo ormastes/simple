@@ -9,6 +9,7 @@
 
 | Date | Slice | What landed | Evidence |
 |---|---|---|---|
+| 2026-11-16 | rb6-ratchet (§7 ratified, 5C) | `diagnostic_policy.sdn`: BOUND-001..003 + new `SPL-UNIT-003` row get `error_since_lang_version: "2027.2"`, robust/critical/verified deny; illustrative-dates header removed. `diagnostic_rule_policy.spl`: unset `error_not_before_date` no longer blocks edition promotion (`date_gate_open`). SFFI rules unchanged (deny now) | `diagnostic_rule_policy_spec.spl` 18/18 |
 | 2026-11-16 | rb5-backend (§6 admission slice) | `src/app/build/targets/build_targets.spl`: `BackendProviderDescriptor` + `admit_backend_provider` (ABI v1 / host triple / declared capabilities, stable `backend-admission:` codes) + `select_backend_group` (refuses unadmitted descriptors); `default_group_targets` untouched. Gate only — no backend is production-ready; still missing: `provider_entry.spl`, `runtime_gpu.sdn`, real exporters, wiring to `70.backend/backend_plugin/admission.spl` + `simple_backend_plugin_v1.h` | `test/01_unit/app/build/backend_provider_admission_spec.spl` |
 | 2026-11-16 | rb4-unitmethod | Seed `call_method_on_value` gains a `Value::Unit` arm: chained `opt.unwrap().value()` / `.to_i64()` work (bug `seed_unit_value_nested_method_dispatch_2026-11-16.md`, verification-pending); pure-Simple parity not audited | `test/01_unit/compiler/interpreter/unit_nested_method_dispatch_spec.spl` |
 | 2026-11-16 | Library Units (sources CLI) | `simple build sources [<lib dir>]` in `src/app/build/sources_cli.spl`, wired in `build/cli_entry.spl`: walks the dir, relativizes, selects via `source_inventory_resolve_unit_v1(["**/*.spl"])`, prints one sorted path per line. Include set is a seam until the simple.sdn unit parser lands | `test/01_unit/app/build/build_sources_cli_spec.spl` |
@@ -139,18 +140,19 @@ Provider admission receipt: name, semver, ABI major/minor, roles, targets, toolc
 
 ## 7. Diagnostics and ratchet
 
-| Code | Trigger | Initial | Robust (future) |
+| Code | Trigger | Edition 2026.11 default | Robust profile (now) / edition 2027.2 default |
 |---|---|---|---|
 | `SPL-BOUND-001` | foreign raw primitive escapes adapter | warn | error |
 | `SPL-BOUND-002` | late primitive->unit cast on foreign-origin value | warn | error |
 | `SPL-BOUND-003` | unit erased/modified/reasserted without validated construction | warn | error |
 | `SPL-SFFI-ABI-001` | ABI class/CC/width/ownership mismatch | **error now** | error |
 | `SPL-SFFI-RANGE-001` | restricted unit returned without proof or validation | **error now** | error |
+| `SPL-UNIT-003` | numeric newtype auto-derives arithmetic (derived-unit) | warn | error |
 | `SPL-BUILD-SRC-001` | unowned/overlapping source, manifest drift | warn (inventory) | error |
 | `SPL-BUILD-ROLE-001` | unapproved boundary role / expired exception | error in release | error |
 | `SPL-PROVIDER-ABI-001` | provider signature/target/receipt mismatch | error | error |
 
-Ratchet: inventory -> new-code gate -> migration -> robust error in a ratified edition -> cleanup. No wall-clock flips; severity is a function of edition + release/as-of date + policy digest. The BOUND rules deliberately carry no `error_not_before_date` until owners ratify one.
+**Ratified (owner decision 5C, 2026-11-16).** Promotion is by language edition + profile, never wall-clock dates: `SPL-BOUND-001..003` and `SPL-UNIT-003` warn in edition 2026.11 default, deny now in `robust`/`critical`/`verified`, and deny by default from edition 2027.2 (`error_since_lang_version: "2027.2"`, no `error_not_before_date`; an unset date never blocks the edition). `SPL-SFFI-ABI-001`/`SPL-SFFI-RANGE-001` stay error now (security stage). Ratchet: inventory -> new-code gate -> migration -> edition error -> cleanup. Pinned by `test/01_unit/compiler/diagnostics/diagnostic_rule_policy_spec.spl`.
 
 Boundary-return autofix variants: reuse typed HAL facade; generate SFFI adapter; generate checked constrained adapter + error propagation; move late cast to the boundary and update callers; scoped exemption with reason/expiry; no fix when ambiguous. All via atomic, revision-checked multi-file `fix_transaction`, rechecked after apply, never inserting `unwrap`/panic.
 
