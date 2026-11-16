@@ -268,6 +268,14 @@ impl Lowerer {
             }
         }
 
+        // Erased record unit: `.value` on the scalar is the identity.
+        if field == "value"
+            && !self.record_unit_scalars.is_empty()
+            && Self::is_scalar_type(self.module.types.get(recv_hir.ty))
+        {
+            return Ok(*recv_hir);
+        }
+
         // Check for SIMD neighbor access
         if field == "left_neighbor" || field == "right_neighbor" {
             if let Some(result) = self.lower_neighbor_access(&recv_hir, field)? {

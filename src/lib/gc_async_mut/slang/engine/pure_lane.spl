@@ -1,0 +1,65 @@
+# @gc — module uses GC runtime
+#
+# pure lane — one resident model of the pure-Simple LLM runner plus the single
+# KvSession that lives across requests (llm_engine.spl owns the PureLane value,
+# exactly as it owns the ggml backend handle). A request that shares a token
+# prefix with the previous one re-uses the session's K/V rows and evaluates only
+# its new positions.
+#
+# PROMPT LIMIT: the pure runner serves base-model checkpoints such as
+# stories15M that carry no chat template, so the prompt is the contents of the
+# request messages joined with newlines, role names and special tokens are not
+# rendered. A single-message request is exactly that message's text.
+
+use std.gc_async_mut.slang.model_executor.pure.llama_forward.{LlamaModel, llama_load}
+use std.gc_async_mut.slang.model_executor.pure.kv_cache.{KvSession, kv_session_new, kv_generate_greedy}
+use std.gc_async_mut.slang.model_executor.pure.tokenizer.{PureTokenizer, pure_tokenizer_load, pure_tokenizer_encode, pure_tokenizer_decode}
+
+struct PureLane:
+    model: LlamaModel
+    tokenizer: PureTokenizer
+    session: KvSession
+    requests: i64
+
+# What one request did, in the units the ggml lane's prefix-cache stats use.
+struct PureGeneration:
+    lane: PureLane
+    output: text
+    prompt_tokens: i64
+    completion_tokens: i64
+    reused_positions: i64
+    evaluated_positions: i64
+
+fn pure_lane_load(model_dir: text) -> Result<PureLane, text>:
+    val model = llama_load(model_dir)?
+    val tokenizer = pure_tokenizer_load(model_dir)?
+    Ok(PureLane(model: model, tokenizer: tokenizer, session: kv_session_new(model), requests: 0))
+
+# Greedy generation of at most `max_tokens` (<= 0 means "as many as fit"),
+# bounded by the model's context. A prompt that already fills the context is an
+# Err, as the ggml lane's CapacityExceeded is.
+fn pure_lane_generate(lane: PureLane, prompt: text, max_tokens: i64) -> Result<PureGeneration, text>:
+    val ids = pure_tokenizer_encode(lane.tokenizer, prompt, true)
+    val room = lane.model.config.max_pos - ids.len()
+    if room <= 0:
+        return Err("prompt is " + ids.len().to_text() + " tokens, which fills the model's " + lane.model.config.max_pos.to_text() + "-token context")
+    var budget = max_tokens
+    if budget <= 0 or budget > room:
+        budget = room
+    val before = lane.session.positions_evaluated
+    val res = kv_generate_greedy(lane.model, lane.session, ids, budget)
+    # An end-of-sequence id ends generation but is not completion text, and the
+    # ggml lane does not count its end-of-generation token either.
+    var generated = res.generated
+    if generated.len() > 0 and generated[generated.len() - 1] == lane.model.config.eos_id:
+        generated = generated.slice(0, generated.len() - 1)
+    val next = PureLane(model: lane.model, tokenizer: lane.tokenizer, session: res.session, requests: lane.requests + 1)
+    Ok(PureGeneration(
+        lane: next,
+        output: pure_tokenizer_decode(lane.tokenizer, generated),
+        prompt_tokens: ids.len(),
+        completion_tokens: generated.len(),
+        reused_positions: res.reused_positions,
+        evaluated_positions: res.session.positions_evaluated - before))
+
+export PureLane, PureGeneration, pure_lane_load, pure_lane_generate

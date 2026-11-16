@@ -1426,6 +1426,12 @@ bin/simple test explain <path>::<case> [--run <id>]
 # direct form: bin/simple run src/app/test_runner_new/main.spl query ...
 ```
 
+`--cursor` takes only the opaque token printed as `next cursor: <token>` of a
+previous page. The token is bound to the case, `--run`, `--limit` and the result
+rows it was issued over; a plain integer, an edited token, a token from another
+query, or one issued before a new attempt was recorded is rejected with exit 2
+(`invalid query`). Restart without `--cursor` to re-page.
+
 Defaults: table format, `--limit 50` (explain 1000). The database path is fixed
 at `doc/08_tracking/test/test_db.sdn`.
 
@@ -1451,7 +1457,7 @@ The committed `test_db.sdn` holds no trace-case event tables, so a rows-found
 example could not be produced from the repo DB. When rows exist, the source
 (`src/app/test_runner_new/test_query_cli.spl`) renders one
 `attempt <n> of <case> in run <id>: status=<s>` line per attempt, then
-`partial: truncated, more rows exist` and `next cursor: N` when paged, or
+`partial: truncated, more rows exist` and `next cursor: <token>` when paged, or
 `partial: some attempts are unfinished or have missing identity`. `explain`
 adds a reason per status (skipped, cached, blocked and unknown never qualify as
 a pass) and an `identity missing:` line. Rows are unverified framework

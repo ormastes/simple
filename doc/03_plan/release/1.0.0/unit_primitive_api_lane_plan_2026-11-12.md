@@ -1,5 +1,7 @@
 # Unit / primitive-API / scheduled-diagnostics — lane plan (2026-11-12)
 
+> **Superseded by [unit_semantic_text_bool_public_api_plan_2026-11-16.md](unit_semantic_text_bool_public_api_plan_2026-11-16.md)** (owner directive 2026-11-16: no primitive on public API including semantic-domain `text`; public `bool` incl. `is_*` predicates not exempt).
+
 Input (authoritative, retained): [unified_unit_primitive_api_scheduled_diagnostics_plan_2026-11-12.md](inputs_2026-11-12/unified_unit_primitive_api_scheduled_diagnostics_plan_2026-11-12.md).
 Requirements: [unit_primitive_api_diagnostics.md](../../../02_requirements/compiler/unit_primitive_api_diagnostics.md).
 Base branch: `release/1.0.0`. Every lane is TDD (red then green), lands in small PRs, and owns only the files listed for it.

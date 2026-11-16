@@ -1,0 +1,135 @@
+"""
+## Purpose and audience
+Regression pins for the three milestone_0021 PR2 extractions the V4 agent
+reuses (DESIGN 3.4b U-01 and section 4 check 3a; progress deviations D11/D12):
+`host_agent_workspace_manifest_check_v2`, `host_agent_workspace_source_projection_check_v2`
+with `host_agent_workspace_memory_check_core_v2` (V7, host_agent_workspace_execution_v2.spl)
+and `build_provider_cli_interactive_intent_from_data_v1` (V1). For owners of
+the V7 agent wire and the provider-CLI intent builder.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-16).
+## Compatibility and limitations
+V7's accept/refuse set is unchanged; only the REPORTED reason can differ for an
+input with several faults, because the manifest checks now run after both grant
+verifications (D12). This spec pins that as text: (1) the refusal-reason set on
+V7's authenticate/source/memory path equals BASE 10e5ca13c1f exactly (32
+reasons, none added, none dropped); (2) every V7 call site passes its own packet
+values into the extracted bodies; (3) the four-way deadline of BASE
+(`not_after > grant`, `> packet.approval`, `> host_grant`, `> packet.host.approval`)
+is the minimum of the same four expiries; (4) V1 delegates with its own
+selection and receipt. Single-fault behavioural cases need a genuine signed
+packet, an installed capacity owner and a source capsule: they are the
+env-gated S40-AGENT-11 cases of
+test/03_system/lib/container/linux_service_agent_chain_v4_spec.spl.
+## Verification guidance and troubleshooting
+A new or removed reason in (1) is a behaviour change on the V7 path, not a
+re-pin: compare against BASE before editing the constant.
+"""
+use std.spec.{step, fail}
+use std.io.file_read_text
+
+fn x7_count(source: text, token: text) -> i64:
+    source.split(token).len() - 1
+
+fn x7_body(source: text, name: text) -> text:
+    val start = source.index_of("fn " + name + "(")
+    if start < 0: return ""
+    val tail = source.substring(start + 3, source.byte_len())
+    var stop = tail.byte_len()
+    for marker in ["\n    pub fn ", "\n    fn ", "\npub fn ", "\nfn ", "\nexport ", "\npub struct ", "\nstruct "]:
+        val at = tail.index_of(marker)
+        if at >= 0 and at < stop: stop = at
+    source.substring(start, start + 3 + stop)
+
+# Every `Err("reason")` literal in the given bodies, deduplicated, in first-seen order.
+fn x7_reasons(source: text, names: [text]) -> [text]:
+    var seen: [text] = []
+    for name in names:
+        val parts = x7_body(source, name).split("Err(\"")
+        for index in 1..parts.len():
+            val end = parts[index].index_of("\"")
+            if end > 0:
+                val reason = parts[index].substring(0, end)
+                if not seen.contains(reason): seen.push(reason)
+    seen
+
+fn x7_awe() -> text:
+    file_read_text("src/lib/nogc_sync_mut/orchestration/host_agent_workspace_execution_v2.spl")
+
+describe "V7 and V1 extraction regression (milestone_0021 PR2)":
+    it "keeps V7's refusal-reason set on the authenticate, source and memory path exactly as on BASE":
+        # @req S40-AGENT-11 (V7 regression pin for the extractions; D11/D12 reason order only)
+        val path = ["host_agent_workspace_authenticate_v2", "host_agent_workspace_source_check_v2",
+            "host_agent_workspace_memory_check_v2", "host_agent_workspace_policy_v2", "host_agent_workspace_manifest_check_v2",
+            "host_agent_workspace_source_projection_check_v2", "host_agent_workspace_memory_check_core_v2"]
+        val actual = x7_reasons(x7_awe(), path)
+        val expected = ["agent-workspace-actual-host-scope-mismatch", "agent-workspace-actual-selection-invocation-mismatch",
+            "agent-workspace-capacity-projection-stale", "agent-workspace-credential-projection-unavailable",
+            "agent-workspace-desired-not-session", "agent-workspace-desired-schema", "agent-workspace-desired-session-missing",
+            "agent-workspace-exact-revision-required", "agent-workspace-inner-exec-deadline-invalid",
+            "agent-workspace-installed-context-stale", "agent-workspace-installed-digest-invalid",
+            "agent-workspace-native-actual-executable-profile-mismatch", "agent-workspace-native-clock-regressed",
+            "agent-workspace-native-executable-architecture-mismatch", "agent-workspace-native-image-mismatch",
+            "agent-workspace-native-memory-parent-state", "agent-workspace-native-memory-projection-stale",
+            "agent-workspace-native-memory-request-allocation-mismatch", "agent-workspace-native-memory-reservation-missing",
+            "agent-workspace-native-memory-reservation-state", "agent-workspace-native-memory-state",
+            "agent-workspace-native-original-allocation-insufficient", "agent-workspace-native-program-mismatch",
+            "agent-workspace-native-projection-mismatch", "agent-workspace-operation-recovery-required",
+            "agent-workspace-platform-unsupported", "agent-workspace-policy-task-use-mismatch",
+            "agent-workspace-reconciliation-required", "agent-workspace-repository-policy-mismatch",
+            "agent-workspace-retained-capacity-mismatch", "agent-workspace-retained-capacity-missing",
+            "agent-workspace-state-invalid"]
+        expect(actual.len()).to_equal(expected.len())
+        for reason in expected:
+            step("still refused with: " + reason)
+            expect(actual.contains(reason)).to_equal(true)
+
+    it "feeds the extracted V7 bodies only with V7's own packet values":
+        # @req S40-AGENT-11 (no V7 input is replaced by a V4 value)
+        val awe = x7_awe()
+        val source = x7_body(awe, "host_agent_workspace_source_check_v2")
+        expect(source).to_contain("host_agent_workspace_source_projection_check_v2(state.source, packet.host.execution.request_bytes, packet.manifest,")
+        expect(source).to_contain("verified.intent, packet.host.execution.plan, packet.host.intent.reservation.cpu_millis,")
+        expect(source).to_contain("packet.host.intent.reservation.memory_bytes, packet.host.operation.duration_ms, owner, packet.host.operation,")
+        expect(source).to_contain("packet.host.intent.reservation.id, required_state)")
+        val memory = x7_body(awe, "host_agent_workspace_memory_check_v2")
+        expect(memory).to_contain("host_agent_workspace_memory_check_core_v2(owner, packet.host.operation, packet.host.intent.reservation.id,")
+        expect(memory).to_contain("packet.host.intent.reservation.memory_bytes, projection, actual_profile, required_state)")
+        step("the manifest checks run after BOTH grant verifications with the minimum of the four BASE expiries")
+        val auth = x7_body(awe, "host_agent_workspace_authenticate_v2")
+        val host_grant = auth.index_of("val host_grant = distributed_verify_grant_approval_from_snapshot_v2(")
+        val grant = auth.index_of("val grant = distributed_verify_grant_approval_from_snapshot_v2(")
+        val checked = auth.index_of("val resolved = host_agent_workspace_manifest_check_v2(full, packet.host.execution.plan, owner.ledger.capacity, container,")
+        expect(host_grant >= 0 and grant > host_grant and checked > grant).to_equal(true)
+        expect(auth).to_contain("var expires_at = grant.expires_at")
+        expect(auth).to_contain("for other in [packet.approval.expires_at, host_grant.expires_at, packet.host.approval.expires_at]:")
+        expect(auth).to_contain("expected_provider, service_scope, context.grant_clock, expires_at)?")
+        expect(auth).to_contain("        if other < expires_at: expires_at = other\n")
+        step("the memory core compares each row against the parameters V7 passes (BASE row predicates)")
+        val core = x7_body(awe, "host_agent_workspace_memory_check_core_v2")
+        expect(core).to_contain("val parent = daemon_operation_exact_v2(owner.journal, operation)?")
+        expect(core).to_contain("if row.id != reservation_id: continue")
+        expect(core).to_contain("if row.operation_id != operation.id or row.state != expected:")
+        val projected = x7_body(awe, "host_agent_workspace_source_projection_check_v2")
+        expect(projected).to_contain("if native.image != intent.requested_image_ref: return Err(\"agent-workspace-native-image-mismatch\")")
+        val manifest = x7_body(awe, "host_agent_workspace_manifest_check_v2")
+        expect(manifest).to_contain("if manifest.not_after <= clock or manifest.not_after > grant_expires_at: return Err(\"agent-workspace-inner-exec-deadline-invalid\")")
+        step("each extracted body is reached once from V7 and owns its checks (no duplicate copy left behind)")
+        expect(x7_count(awe, "if manifest.credential_refs.len() != 0:")).to_equal(1)
+        expect(x7_count(awe, "if required_state != \"admitted\" and required_state != \"executing\": return Err(\"agent-workspace-native-memory-state\")")).to_equal(1)
+
+    it "keeps the V1 intent builder a pure delegation over its own selection and version receipt":
+        # @req S40-AGENT-11 (V1 regression pin, F20)
+        val intent = file_read_text("src/lib/nogc_async_mut/llm/provider_cli_interactive_intent_v1.spl")
+        val v1 = x7_body(intent, "build_provider_cli_interactive_intent_data_v1")
+        expect(v1).to_contain("build_provider_cli_interactive_intent_from_data_v1(selection.version_data_v1(), selection.binding_digest_v1(),")
+        expect(v1).to_contain("version_receipt.snapshot_v1(), source, policy, task, request)")
+        expect(x7_count(intent, "fn build_provider_cli_interactive_intent_from_data_v1(")).to_equal(1)
+
+    it "keeps the V7 transfer close running close_native_v2 unless the native state is already closed":
+        # @req S40-AGENT-11 (P2R1-F9: V7 never closes the state before the transfer close)
+        val close = x7_body(file_read_text("src/lib/nogc_sync_mut/container/machine_authority_v1.spl"), "close_v2")
+        expect(close).to_contain("val already = retained.state.closed_state_v3()")
+        expect(close).to_contain("val native = if already.is_ok() and already.unwrap(): Ok(()) else: retained.state.close_native_v2()")
+        expect(x7_count(close, "close_native_v2()")).to_equal(1)

@@ -78,6 +78,29 @@ pub(package) fn machine_workspace_source_cleanup_v3(storage: MachineStorageOwner
     val returned = state.source_returned_v3()?
     Ok(true)
 
+# T-01 (milestone_0021): returns a RESERVED, settled workspace source. The lc2 preflight replaces the
+# never-reserved one of machine_workspace_source_cleanup_v3 (which stays unchanged); the tail is that function's.
+pub(package) fn machine_workspace_source_return_settled_v3(storage: MachineStorageOwnerV1,
+        state: MachineFreshWorkloadLifecycleV2) -> Result<bool, text>:
+    val safe = state.source_return_settled_preflight_v3()?
+    val closed = state.source_custody_v3()?.cleanup_v3()
+    state.capture_source_custody_v3(closed.owner.retain_diagnostic_v3(closed.error))
+    if closed.owner.returned_v3():
+        val returned = state.source_returned_v3()?
+        return Ok(true)
+    if closed.error != "": return Err(closed.error)
+    val epoch = state.history_v2()?.epoch
+    val rows = machine_workspace_source_release_rows_v3(state,
+        sha256_text(machine_fresh_epoch_record_bytes_v1(epoch)?), time_sample_unix_micros_or_failure() / 1000)?
+    val committed = workload_publish_v3(storage, state, rows)?
+    val published = state.source_custody_v3()?.published_v3()?
+    state.capture_source_custody_v3(published)
+    val forgotten = published.cleanup_v3()
+    state.capture_source_custody_v3(forgotten.owner.retain_diagnostic_v3(forgotten.error))
+    if not forgotten.owner.returned_v3(): return Err(forgotten.error)
+    val returned = state.source_returned_v3()?
+    Ok(true)
+
 pub(package) fn machine_workspace_enable_context_v3(state: MachineFreshWorkloadLifecycleV2,
         request: ContainerExecutionRequestV2, manifest: text, digest: text,
         full_invocation_source: text) -> Result<LinuxFreshWorkspaceBindingV3, text>:

@@ -1,11 +1,53 @@
 use std.spec
-use std.nogc_sync_mut.io.file_ops.{file_write, secure_temp_dir}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_read, secure_temp_dir}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
 use std.common.json.parser.{json_parse}
 use std.common.json.object_ops.{json_object_get}
 use std.common.json.array_ops.{json_array_get, json_array_length}
 use std.common.json.types.{json_get_type, json_to_number, json_to_string}
-use std.nogc_sync_mut.lsp.lsp_handlers.{lsp_handle_definition, lsp_handle_references}
+use std.nogc_sync_mut.lsp.lsp_handlers.{lsp_handle_definition, lsp_handle_references,
+    lsp_handle_did_open, lsp_handle_did_change, lsp_handle_did_close, lsp_handle_document_symbol}
+use std.nogc_sync_mut.lsp.lsp_document_sync.{lsp_visibility_dependencies_current_v1, lsp_document_sync_apply}
+use std.common.json.value.{JsonValue, json_value_object_from, json_value_serialize}
+use std.nogc_sync_mut.lsp.lsp_visibility_provider_v1.{LspVisibilitySourceStatusV1,
+    LspVisibilitySourceV1, LspVisibilitySourceReaderV1, LspVisibilityQueryStatusV1}
+use app.lsp.visibility_provider_v1.{lsp_install_visibility_provider_v1}
+use app.cli._QueryVisibility.source_reader.{query_visibility_source_read_v1}
+use app.cli._QueryVisibility.query_commands.{query_visibility_symbols_payload_v1}
+use std.io_runtime.{file_exists}
+
+var stale_manifest_path_v1 = ""
+var stale_target_path_v1 = ""
+
+fn overlay_document_body_v1(uri: text) -> text:
+    val document = json_value_object_from([("uri", JsonValue.Str(uri))])
+    json_value_serialize(json_value_object_from([("textDocument", document)]))
+
+fn overlay_open_body_v1(uri: text, version: i64, source: text) -> text:
+    val document = json_value_object_from([("uri", JsonValue.Str(uri)),
+        ("languageId", JsonValue.Str("simple")), ("version", JsonValue.Int(version)),
+        ("text", JsonValue.Str(source))])
+    json_value_serialize(json_value_object_from([("textDocument", document)]))
+
+fn overlay_change_body_v1(uri: text, version: i64, source: text) -> text:
+    val document = json_value_object_from([("uri", JsonValue.Str(uri)), ("version", JsonValue.Int(version))])
+    val change = json_value_object_from([("text", JsonValue.Str(source))])
+    json_value_serialize(json_value_object_from([("textDocument", document),
+        ("contentChanges", JsonValue.Array([change]))]))
+
+fn wrong_owner_source_v1(path: text) -> LspVisibilitySourceV1:
+    LspVisibilitySourceV1(LspVisibilitySourceStatusV1.Ready, path + ".wrong", "",
+        "disk", "fn wrong_owner_v1() -> i64: 0", -1, -1, -1)
+
+fn stale_manifest_source_v1(path: text) -> LspVisibilitySourceV1:
+    if not file_exists(path):
+        return LspVisibilitySourceV1(LspVisibilitySourceStatusV1.Missing, path, "",
+            "", "", -1, -1, -1)
+    val content = file_read(path)
+    if path == stale_target_path_v1:
+        file_write(stale_manifest_path_v1, "arch { dimension = \"package\" }")
+    LspVisibilitySourceV1(LspVisibilitySourceStatusV1.Ready, path, "", "disk",
+        content, -1, -1, -1)
 
 fn server_query_body_v1(path: text, line: i64, column: i64) -> text:
     "{\"textDocument\":{\"uri\":\"file://{path}\"},\"position\":{\"line\":{line},\"character\":{column}},\"context\":{\"includeDeclaration\":true}}"
@@ -36,6 +78,113 @@ fn server_query_location_line_v1(location: any, path: text) -> any?:
     json_to_number(json_object_get(start, "line"))
 
 describe "LSP server query integration":
+    it "does not reuse inactive CLI source reads across disk edits":
+        val root = secure_temp_dir("/tmp", "simple-lsp-source-reader-v1-").unwrap()
+        val path = root + "/source.spl"
+        expect(file_write(path, "first_source_v1")).to_equal(true)
+        val first = query_visibility_source_read_v1(path).unwrap()
+        expect(file_write(path, "second_source_v1")).to_equal(true)
+        val second = query_visibility_source_read_v1(path).unwrap()
+        dir_remove_all(root)
+        expect(first).to_equal("first_source_v1")
+        expect(second).to_equal("second_source_v1")
+
+    it "rejects a visibility reader that returns another canonical owner":
+        val root = secure_temp_dir("/tmp", "simple-lsp-source-owner-v1-").unwrap()
+        val path = root + "/source.spl"
+        expect(file_write(path, "fn owner_identity_v1() -> i64: 1")).to_equal(true)
+        val reader = LspVisibilitySourceReaderV1(wrong_owner_source_v1)
+        val result = query_visibility_symbols_payload_v1(path, path, "", "", "", reader, 0)
+        dir_remove_all(root)
+        expect(result.status).to_equal(LspVisibilityQueryStatusV1.Unavailable)
+
+    it "rejects a closed disk target whose manifest changed after the query read it":
+        val root = secure_temp_dir("/tmp", "simple-lsp-stale-manifest-v1-").unwrap()
+        stale_manifest_path_v1 = root + "/__init__.spl"
+        stale_target_path_v1 = root + "/target.spl"
+        expect(file_write(stale_manifest_path_v1, "arch { dimension = \"feature\" }")).to_equal(true)
+        expect(file_write(stale_target_path_v1, "fn stale_manifest_target_v1() -> i64: 1")).to_equal(true)
+        val reader = LspVisibilitySourceReaderV1(stale_manifest_source_v1)
+        val result = query_visibility_symbols_payload_v1(stale_target_path_v1,
+            stale_target_path_v1, "", "", "", reader, 0)
+        val dependencies_current = lsp_visibility_dependencies_current_v1(result.dependencies)
+        dir_remove_all(root)
+        expect(result.status).to_equal(LspVisibilityQueryStatusV1.Ready)
+        expect(dependencies_current).to_equal(false)
+
+    it "uses the current document overlay for document symbols and preserves disk bytes":
+        step("Send real didOpen and didChange notifications before requesting document symbols")
+        val root = secure_temp_dir("/tmp", "simple-lsp-overlay-symbols-v1-").unwrap()
+        val path = root + "/fixture.spl"
+        val saved = "fn saved_visibility_name_v1() -> i64: 1"
+        val opened = "fn opened_visibility_name_v1() -> i64: 0"
+        val unsaved = "fn unsaved_visibility_name_v1() -> i64: 2"
+        expect(file_write(path, saved)).to_equal(true)
+        lsp_install_visibility_provider_v1()
+        val uri = "file://" + path
+        lsp_handle_did_open(overlay_open_body_v1(uri, 1, opened))
+        lsp_handle_did_change(overlay_change_body_v1(uri, 2, unsaved))
+        val reply = lsp_handle_document_symbol("91", overlay_document_body_v1(uri))
+        val disk_after = file_read(path)
+        lsp_handle_did_close(overlay_document_body_v1(uri))
+        val closed_reply = lsp_handle_document_symbol("92", overlay_document_body_v1(uri))
+        dir_remove_all(root)
+        val symbols = server_query_response_result_v1(reply, 91.0)
+        val closed_symbols = server_query_response_result_v1(closed_reply, 92.0)
+        expect(json_get_type(symbols)).to_equal("array")
+        expect(json_get_type(closed_symbols)).to_equal("array")
+        expect(disk_after).to_equal(saved)
+
+        var saw_unsaved = false
+        var saw_saved = false
+        var symbol_index = 0
+        while symbol_index < json_array_length(symbols):
+            val symbol = json_array_get(symbols, symbol_index)
+            val name = json_to_string(json_object_get(symbol, "name"))
+            if name == "unsaved_visibility_name_v1": saw_unsaved = true
+            if name == "saved_visibility_name_v1": saw_saved = true
+            symbol_index = symbol_index + 1
+        expect(saw_unsaved).to_equal(true)
+        expect(saw_saved).to_equal(false)
+        var saw_saved_on_disk = false
+        var closed_index = 0
+        while closed_index < json_array_length(closed_symbols):
+            if json_to_string(json_object_get(json_array_get(closed_symbols, closed_index), "name")) == "saved_visibility_name_v1":
+                saw_saved_on_disk = true
+            closed_index = closed_index + 1
+        expect(saw_saved_on_disk).to_equal(true)
+
+    it "rejects a manifest that appears after its absence was observed":
+        step("Observe a missing manifest before the target read creates it")
+        val root = secure_temp_dir("/tmp", "simple-lsp-created-manifest-v1-").unwrap()
+        stale_manifest_path_v1 = root + "/__init__.spl"
+        stale_target_path_v1 = root + "/target.spl"
+        expect(file_write(stale_target_path_v1, "fn created_manifest_target_v1() -> i64: 1")).to_equal(true)
+        val reader = LspVisibilitySourceReaderV1(stale_manifest_source_v1)
+        val result = query_visibility_symbols_payload_v1(stale_target_path_v1,
+            stale_target_path_v1, "", "", "", reader, 0)
+        val dependencies_current = lsp_visibility_dependencies_current_v1(result.dependencies)
+        dir_remove_all(root)
+        expect(result.status).to_equal(LspVisibilityQueryStatusV1.Ready)
+        expect(dependencies_current).to_equal(false)
+
+    it "uses an open overlay with a valid negative document version":
+        step("Open a document at signed version minus two and request its symbols")
+        val root = secure_temp_dir("/tmp", "simple-lsp-negative-version-v1-").unwrap()
+        val path = root + "/fixture.spl"
+        val uri = "file://" + path
+        expect(file_write(path, "fn disk_negative_fixture_v1(): 1")).to_equal(true)
+        lsp_install_visibility_provider_v1()
+        expect(lsp_document_sync_apply("textDocument/didOpen",
+            overlay_open_body_v1(uri, -2, "fn live_negative_fixture_v1(): 2"))).to_equal(true)
+        val reply = lsp_handle_document_symbol("93", overlay_document_body_v1(uri))
+        lsp_handle_did_close(overlay_document_body_v1(uri))
+        dir_remove_all(root)
+        val symbols = server_query_response_result_v1(reply, 93.0)
+        expect(json_get_type(symbols)).to_equal("array")
+        expect(reply).to_contain("live_negative_fixture_v1")
+        expect(reply.contains("disk_negative_fixture_v1")).to_equal(false)
+
     it "keeps definition and references attached to the selected local symbol":
         step("Decode actual LSP responses for a shadowed symbol, including declaration context")
         val root = secure_temp_dir("/tmp", "simple-lsp-server-query-v1-").unwrap()

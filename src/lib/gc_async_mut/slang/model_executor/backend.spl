@@ -190,6 +190,7 @@ struct GgmlRequest:
 struct BackendGeneration:
     generated_tokens: text
     output: text
+    prompt_tokens: i64
 
 # `chat` marks `prompt` as chat frames (see chat_frame) to be rendered through
 # the model's chat template; otherwise `prompt` is fed to the model verbatim.
@@ -632,11 +633,11 @@ fn _generate_request_observed(input: BackendActiveGenerationRequest) -> Result<B
         return Err(BackendError.DecodeFailed)
     if _call1(b.f_request_eval_prompt, request.handle) < 0:
         return Err(BackendError.DecodeFailed)
-    _sample_loop(b, request, max_tokens)
+    _sample_loop(b, request, max_tokens, prompt_tokens)
 
 # One sample, one detokenize, one eval per iteration, after a prefill that left
 # logits for the last prompt position.
-fn _sample_loop(b: GgmlBackend, request: GgmlRequest, max_tokens: i64) -> Result<BackendGeneration, BackendError>:
+fn _sample_loop(b: GgmlBackend, request: GgmlRequest, max_tokens: i64, prompt_tokens: i64) -> Result<BackendGeneration, BackendError>:
     var out = ""
     var produced = 0
     while produced < max_tokens:
@@ -649,7 +650,7 @@ fn _sample_loop(b: GgmlBackend, request: GgmlRequest, max_tokens: i64) -> Result
         if _call2(b.f_request_eval, request.handle, tok) < 0:
             return Err(BackendError.DecodeFailed)
         produced = produced + 1
-    Ok(BackendGeneration(output: out, generated_tokens: produced.to_text()))
+    Ok(BackendGeneration(output: out, generated_tokens: produced.to_text(), prompt_tokens: prompt_tokens))
 
 # The mmproj projector a model's media goes through. Returns the capability mask
 # (1 = vision, 2 = audio). Call after load_model, before any media request.
@@ -725,7 +726,7 @@ fn _generate_media_active(input: BackendMediaGenerationRequest, request: GgmlReq
         return Err(BackendError.CapacityExceeded)
     if _call1(b.f_mm_eval_prompt, request.handle) < 0:
         return Err(BackendError.DecodeFailed)
-    _sample_loop(b, request, max_tokens)
+    _sample_loop(b, request, max_tokens, positions)
 
 # slang's decode loop. One sample, one detokenize, one eval per iteration, with
 # the stop conditions evaluated here rather than inside the kernel library.
@@ -776,7 +777,7 @@ fn generate_observed_request(input: BackendGenerationRequest) -> Result<BackendG
         if _call1(b.f_eval, tok) < 0:
             return Err(BackendError.DecodeFailed)
         produced = produced + 1
-    Ok(BackendGeneration(output: out, generated_tokens: produced.to_text()))
+    Ok(BackendGeneration(output: out, generated_tokens: produced.to_text(), prompt_tokens: shared_prompt_tokens))
 
 fn generate_observed(b: GgmlBackend, prompt: text,
                      max_tokens: i64) -> Result<BackendGeneration, BackendError>:

@@ -173,6 +173,22 @@ describe "TestDB query provenance and missing identity":
         expect(_status_name(rows[1].status)).to_equal("not_finished")
         expect(_qualifies(rows[1].status)).to_equal("not-pass")
 
+fn _first_cursor(rows: [TestQueryRow], query: TestQuery) -> TestQueryCursor:
+    match paginate_test_query_rows(rows, query):
+        case Err(error): fail("first page failed: {error.detail}")
+        case Ok(page):
+            match page.truncation:
+                case TestQueryTruncation.Truncated(next): next
+                case TestQueryTruncation.Complete: fail("fixture did not truncate")
+
+fn _cursor_rejected(rows: [TestQueryRow], query: TestQuery) -> bool:
+    match paginate_test_query_rows(rows, query):
+        case Err(error):
+            match error.kind:
+                case TestQueryErrorKind.InvalidQuery: true
+                case _: false
+        case Ok(_): false
+
 describe "TestDB query pagination":
     it "returns a bounded page with a typed truncation and next cursor":
         # @req TESTDB-004
@@ -184,15 +200,22 @@ describe "TestDB query pagination":
                 match page.truncation:
                     case TestQueryTruncation.Complete: fail("a truncated page reported Complete")
                     case TestQueryTruncation.Truncated(next):
-                        expect(next.offset).to_equal(2)
-                        step("Follow the cursor to the last page")
-                        match paginate_test_query_rows(_rows(5), _query(2, Some(TestQueryCursor(offset: 4)))):
-                            case Err(error): fail("last page failed: {error.detail}")
-                            case Ok(last):
-                                expect(last.rows.len()).to_equal(1)
-                                match last.truncation:
-                                    case TestQueryTruncation.Complete: pass
-                                    case TestQueryTruncation.Truncated(_): fail("the last page claimed more rows")
+                        expect(next.token.starts_with("tq1:")).to_equal(true)
+                        step("Follow the opaque cursor twice to the last page")
+                        match paginate_test_query_rows(_rows(5), _query(2, Some(next))):
+                            case Err(error): fail("second page failed: {error.detail}")
+                            case Ok(second):
+                                expect(second.rows.len()).to_equal(2)
+                                match second.truncation:
+                                    case TestQueryTruncation.Complete: fail("the middle page claimed to be complete")
+                                    case TestQueryTruncation.Truncated(next2):
+                                        match paginate_test_query_rows(_rows(5), _query(2, Some(next2))):
+                                            case Err(error): fail("last page failed: {error.detail}")
+                                            case Ok(last):
+                                                expect(last.rows.len()).to_equal(1)
+                                                match last.truncation:
+                                                    case TestQueryTruncation.Complete: pass
+                                                    case TestQueryTruncation.Truncated(_): fail("the last page claimed more rows")
 
     it "marks a page that contains an unfinished attempt as partial coverage":
         # @req TESTDB-004
@@ -206,7 +229,7 @@ describe "TestDB query pagination":
                     case TestQueryCoverage.Full: fail("an interrupted attempt was reported as full coverage")
                     case TestQueryCoverage.Partial: expect(page.rows.len()).to_equal(2)
 
-    it "rejects a zero limit, an oversized limit and a cursor past the end":
+    it "rejects a zero limit and an oversized limit":
         # @req TESTDB-004
         step("A zero limit is an invalid query, not an empty success")
         match paginate_test_query_rows(_rows(3), _query(0, None)):
@@ -217,6 +240,27 @@ describe "TestDB query pagination":
                     case _: fail("wrong error kind for limit 0")
         step("A limit above the bound is rejected")
         expect(paginate_test_query_rows(_rows(3), _query(1001, None)).is_err()).to_equal(true)
-        step("A cursor beyond the row count is rejected")
-        expect(paginate_test_query_rows(_rows(3), _query(2, Some(TestQueryCursor(offset: 4)))).is_err()).to_equal(true)
-        expect(paginate_test_query_rows(_rows(3), _query(2, Some(TestQueryCursor(offset: -1)))).is_err()).to_equal(true)
+
+    it "rejects a plain integer cursor, a tampered token and a token from another query or snapshot":
+        # @req TESTDB-004
+        step("Take a genuine cursor from page one of five rows, limit two")
+        val genuine = _first_cursor(_rows(5), _query(2, None))
+        step("A plain row offset is not a cursor")
+        expect(_cursor_rejected(_rows(5), _query(2, Some(TestQueryCursor(token: "2"))))).to_equal(true)
+        expect(_cursor_rejected(_rows(5), _query(2, Some(TestQueryCursor(token: ""))))).to_equal(true)
+        step("Altering the offset digits or the digest of a real token is rejected")
+        expect(_cursor_rejected(_rows(5), _query(2, Some(TestQueryCursor(token: genuine.token + "0"))))).to_equal(true)
+        expect(_cursor_rejected(_rows(5), _query(2, Some(TestQueryCursor(token: "tq1:00:2"))))).to_equal(true)
+        expect(_cursor_rejected(_rows(5), _query(2, Some(TestQueryCursor(token: genuine.token.replace("tq1:", "tq1:f")))))).to_equal(true)
+        step("The same token under a different limit, case or run is rejected")
+        expect(_cursor_rejected(_rows(5), _query(3, Some(genuine)))).to_equal(true)
+        val other_case = TestQuery(case_key: _key("test/a_spec.spl", "subtracts"), run_id: None,
+            limit: TestQueryLimit(value: 2), cursor: Some(genuine))
+        expect(_cursor_rejected(_rows(5), other_case)).to_equal(true)
+        val other_run = TestQuery(case_key: _key("test/a_spec.spl", "adds"), run_id: Some(TestRunId(value: "run-9")),
+            limit: TestQueryLimit(value: 2), cursor: Some(genuine))
+        expect(_cursor_rejected(_rows(5), other_run)).to_equal(true)
+        step("The same token against a changed row set (new attempt recorded) is rejected")
+        expect(_cursor_rejected(_rows(6), _query(2, Some(genuine)))).to_equal(true)
+        step("The genuine token still works on the unchanged query")
+        expect(_cursor_rejected(_rows(5), _query(2, Some(genuine)))).to_equal(false)

@@ -106,6 +106,8 @@ pub struct Lowerer {
     pub(super) capability_env: CapabilityEnv,
     /// Type aliases: alias_name -> original_name
     pub(super) type_aliases: HashMap<String, String>,
+    /// Record units (`unit Name: T`) erased to their underlying scalar `T`.
+    pub(super) record_unit_scalars: HashMap<String, TypeId>,
     /// Function aliases: alias_name -> original_name
     pub(super) function_aliases: HashMap<String, String>,
     /// Free-function names THIS module's own source declares. Used to detect a
@@ -412,6 +414,7 @@ impl Lowerer {
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),
             type_aliases: HashMap::new(),
+            record_unit_scalars: HashMap::new(),
             function_aliases: HashMap::new(),
             own_declared_function_names: std::collections::HashSet::new(),
             own_declared_type_names: std::collections::HashSet::new(),
@@ -505,6 +508,7 @@ impl Lowerer {
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),
             type_aliases: HashMap::new(),
+            record_unit_scalars: HashMap::new(),
             function_aliases: HashMap::new(),
             own_declared_function_names: std::collections::HashSet::new(),
             own_declared_type_names: std::collections::HashSet::new(),
@@ -621,6 +625,7 @@ impl Lowerer {
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),
             type_aliases: HashMap::new(),
+            record_unit_scalars: HashMap::new(),
             function_aliases: HashMap::new(),
             own_declared_function_names: std::collections::HashSet::new(),
             own_declared_type_names: std::collections::HashSet::new(),

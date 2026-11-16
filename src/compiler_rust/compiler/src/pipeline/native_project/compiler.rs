@@ -640,6 +640,47 @@ fn shared_suffix_index(
     Some(std::sync::Arc::new(build_suffix_index(imports.all_mangled.as_ref())))
 }
 
+/// Per-file phase timer for `SIMPLE_NATIVE_FILE_TIMING=1`. Each `mark` prints
+/// the time spent since the previous mark immediately, so a file that hits the
+/// worker timeout still shows the last phase it finished.
+pub(super) struct FilePhaseTimer<'a> {
+    enabled: bool,
+    file: &'a Path,
+    last: std::time::Instant,
+}
+
+impl<'a> FilePhaseTimer<'a> {
+    pub(super) fn new(file: &'a Path) -> Self {
+        Self::with_enabled(file, std::env::var("SIMPLE_NATIVE_FILE_TIMING").as_deref() == Ok("1"))
+    }
+
+    pub(super) fn with_enabled(file: &'a Path, enabled: bool) -> Self {
+        Self {
+            enabled,
+            file,
+            last: std::time::Instant::now(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn last_for_tests(&self) -> std::time::Instant {
+        self.last
+    }
+
+    pub(super) fn mark(&mut self, phase: &str) {
+        if !self.enabled {
+            return;
+        }
+        let now = std::time::Instant::now();
+        eprintln!("{}", phase_line(phase, now.duration_since(self.last).as_secs_f64(), self.file));
+        self.last = now;
+    }
+}
+
+pub(super) fn phase_line(phase: &str, secs: f64, file: &Path) -> String {
+    format!("[native-file-phase] {phase}={secs:.2}s {}", file.display())
+}
+
 /// Compile a single .spl file to object code.
 #[allow(clippy::too_many_arguments)] // reason: native compilation requires all project context
 pub(crate) fn compile_file_to_object(
@@ -656,6 +697,7 @@ pub(crate) fn compile_file_to_object(
     imports: &ModuleImports,
     global_suffix_index: &Option<std::sync::Arc<std::collections::HashMap<String, Vec<String>>>>,
 ) -> Result<Vec<u8>, String> {
+    let mut phase_timer = FilePhaseTimer::new(file_path);
     // Bootstrap hack: normalize optional types that older lenient type resolver misses
     let is_bootstrap = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
     let target = effective_target();
@@ -698,6 +740,7 @@ pub(crate) fn compile_file_to_object(
     let mut ast = parser
         .parse()
         .map_err(|e| format!("{}: parse: {e}", file_path.display()))?;
+    phase_timer.mark("parse");
     // Drop `@cfg(<arch>)` function variants that do not match the effective
     // build target, before same-named variants collapse to a source-order
     // first-wins pick in codegen (bug
@@ -816,9 +859,11 @@ pub(crate) fn compile_file_to_object(
         lowerer.set_merged_global_enum_names(std::sync::Arc::clone(&imports.duplicate_enum_names));
         lowerer.register_global_enums();
     }
+    phase_timer.mark("pre_hir");
     let (mut hir, function_return_types) = lowerer
         .lower_module_with_return_types(&ast)
         .map_err(|e| format!("{}: hir: {e}", file_path.display()))?;
+    phase_timer.mark("hir");
     let module_prefix = module_prefix_from_path(file_path, source_root);
     assign_native_dynamic_initializer_identity(&mut hir, &module_prefix);
     let pipeline =
@@ -835,6 +880,7 @@ pub(crate) fn compile_file_to_object(
         signed_word_lane,
     )
     .map_err(|e| format!("{}: mir: {e}", file_path.display()))?;
+    phase_timer.mark("mir");
     qualify_native_struct_layouts(
         &mut mir,
         &module_prefix,
@@ -855,6 +901,7 @@ pub(crate) fn compile_file_to_object(
         imports.enum_runtime_names.as_ref(),
     )
     .map_err(|e| format!("{}: mir enum identity: {e}", file_path.display()))?;
+    phase_timer.mark("mir_qualify");
 
     // Trampoline: when the entry file has no local `main` but re-exports one
     // via `use`, inject a synthetic MIR function that forwards to the resolved
@@ -1017,6 +1064,7 @@ pub(crate) fn compile_file_to_object(
             if !no_mangle {
                 llvm.set_module_prefix(module_prefix.clone());
             }
+            phase_timer.mark("mangle");
             let obj = match llvm.compile(&mir) {
                 Ok(object) => object,
                 Err(error) => {
@@ -1034,6 +1082,7 @@ pub(crate) fn compile_file_to_object(
                     return Err(format!("{}: llvm codegen: {error}", file_path.display()));
                 }
             };
+            phase_timer.mark("codegen");
             if let Err(dump_error) = persist_llvm_codegen_success(&llvm, &mir, file_path, source_root) {
                 return Err(format!(
                     "{}: LLVM diagnostic emission: {dump_error}",
@@ -1059,6 +1108,7 @@ pub(crate) fn compile_file_to_object(
     }
 
     // Cranelift backend
+    phase_timer.mark("mir_post");
     let target = effective_target();
     let mut codegen =
         Codegen::for_target_with_opt_level_and_cpu(target, opt_level, native_build_cpu_for_target(target))
@@ -1080,6 +1130,7 @@ pub(crate) fn compile_file_to_object(
     let obj = codegen
         .compile_module(&mir)
         .map_err(|e| format!("{}: codegen: {e}", file_path.display()))?;
+    phase_timer.mark("codegen");
 
     Ok(obj)
 }

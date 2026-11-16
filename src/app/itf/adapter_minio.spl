@@ -9,6 +9,9 @@ use std.nogc_sync_mut.env.{env_get}
 use std.nogc_sync_mut.file_system.file_ops.{file_exists}
 use std.nogc_sync_mut.io_runtime.{file_read_nullable}
 use std.nogc_sync_mut.io.http_sffi.{rt_http_request, rt_http_download}
+use std.io.http_client_core.{http_request_v2_raw}
+use std.common.http_curl.{curl_request_bytes}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 use std.nogc_sync_mut.aws_sigv4.{
     SIGV4_EMPTY_SHA256, SIGV4_UNSIGNED_PAYLOAD,
     SigV4Header, SigV4QueryParam,
@@ -441,6 +444,36 @@ class GetObjectResult:
     etag: text
 
 
+val MINIO_INVALID_UTF8_PREFIX = "object body is invalid UTF-8"
+
+
+fn _minio_header_value(raw_headers: text, name: text) -> text:
+    """First value of a header in a raw response block; "" when absent."""
+    val prefix = name.lower() + ":"
+    for line in raw_headers.split("\n"):
+        if line.trim().lower().starts_with(prefix):
+            return line.trim()[prefix.len():].trim()
+    ""
+
+
+fn _minio_get_checked(url: text, headers: [text]) -> (i64, text, text):
+    """GET that treats a short body as an error and refuses non-UTF-8 bodies."""
+    val no_body: [u8] = []
+    val response: (i64, text, text, [u8], text) = http_request_v2_raw("GET", url, headers, no_body, 30000)
+    # @workaround bug=windows_core_http_client_unavailable_2026_10_27 reason=The core Windows runtime has no native HTTP v2 provider; curl reports a short body itself
+    if response.0 == -1 and response.4.contains("native HTTP is unavailable"):
+        return curl_request_bytes("GET", url, headers, [])
+    if response.0 == -1:
+        return (0, "", response.4)
+    val received: [u8] = response.3
+    val declared = _minio_header_value(response.2, "Content-Length")
+    if declared != "" and declared != "{received.len()}":
+        return (0, "", "truncated response: Content-Length {declared}, received {received.len()} bytes")
+    match validated_utf8_bytes_to_text_linear(received):
+        case Ok(decoded): (response.0, decoded, "")
+        case Err(why): (0, "", "{MINIO_INVALID_UTF8_PREFIX}: {why}; use minio_download for binary objects")
+
+
 fn minio_get_object(cfg: MinioConfig, bucket: text, key: text, range_header: text) -> (bool, GetObjectResult, text):
     """GET /{bucket}/{key} — small/text bodies. For large/binary, use minio_download."""
     val canonical_uri = _build_object_path(bucket, key)
@@ -468,12 +501,12 @@ fn minio_get_object(cfg: MinioConfig, bucket: text, key: text, range_header: tex
         sffi = sffi + ["Range: {range_header}"]
     sffi = sffi + ["Authorization: {auth}"]
 
-    val (status, body, err) = rt_http_request("GET", "{cfg.url}{canonical_uri}", sffi, "")
+    val (status, body, err) = _minio_get_checked("{cfg.url}{canonical_uri}", sffi)
     val mapped = map_s3_error(status, body, err)
     val empty = GetObjectResult(body: "", content_length: -1, etag: "")
     if mapped.kind != "ok":
         return (false, empty, mapped.message)
-    (true, GetObjectResult(body: body, content_length: body.len(), etag: ""), body)
+    (true, GetObjectResult(body: body, content_length: body.byte_len(), etag: ""), body)
 
 
 fn minio_download(cfg: MinioConfig, bucket: text, key: text, dest_path: text, expires: i64) -> (bool, i64, text):
@@ -559,7 +592,7 @@ fn minio_put_text(cfg: MinioConfig, bucket: text, key: text, body: text, content
 
     Returns (success, etag_or_empty, raw_response_body_or_error).
     """
-    if body.len() > MINIO_MULTIPART_THRESHOLD:
+    if body.byte_len() > MINIO_MULTIPART_THRESHOLD:
         return (false, "", "minio_put_text: body exceeds {MINIO_MULTIPART_THRESHOLD} bytes — multipart not yet implemented (issue #10 follow-up)")
     val canonical_uri = _build_object_path(bucket, key)
     val amz_dt = _amz_datetime_now()
@@ -569,7 +602,7 @@ fn minio_put_text(cfg: MinioConfig, bucket: text, key: text, body: text, content
     val ct = if content_type == "": "application/octet-stream" else: content_type
 
     var sig_headers: [SigV4Header] = []
-    sig_headers = sig_headers + [SigV4Header(name: "content-length", value: "{body.len()}")]
+    sig_headers = sig_headers + [SigV4Header(name: "content-length", value: "{body.byte_len()}")]
     sig_headers = sig_headers + [SigV4Header(name: "content-type", value: ct)]
     sig_headers = sig_headers + [SigV4Header(name: "host", value: host)]
     sig_headers = sig_headers + [SigV4Header(name: "x-amz-content-sha256", value: payload_hash)]
@@ -583,7 +616,7 @@ fn minio_put_text(cfg: MinioConfig, bucket: text, key: text, body: text, content
     var sffi: [text] = []
     sffi = sffi + ["Host: {host}"]
     sffi = sffi + ["Content-Type: {ct}"]
-    sffi = sffi + ["Content-Length: {body.len()}"]
+    sffi = sffi + ["Content-Length: {body.byte_len()}"]
     sffi = sffi + ["x-amz-content-sha256: {payload_hash}"]
     sffi = sffi + ["x-amz-date: {amz_dt}"]
     sffi = sffi + ["Authorization: {auth}"]

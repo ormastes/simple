@@ -23,6 +23,8 @@ use std.common.contracts.orchestration.host_prepare_request_v1.host_prepare_requ
 use std.common.task_runner.distributed_operation_journal_v2.*
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.host_agent_invoke_request_decode_v4
 
 pub struct HostServiceDomainV3:
     local: HostLocalRootV3
@@ -147,6 +149,33 @@ fn service_linux_prepare_v3(local: HostLinuxServiceCurrentV4, request: HostServi
         return HostServiceTurnV3(domain, 2, host_service_error_payload_v2(request, "host-service-response-size", true))
     HostServiceTurnV3(domain, 0, reply.response)
 
+# milestone_0021 R-03 route half: `host-agent-invoke` exists on the LinuxService arm only. The V2 action lists
+# (host_service_domain_v2.spl) are untouched (N-07: a 9th entry would make a full-grant V2 peer rule
+# unencodable), so the Linux V2 and Windows arms keep refusing it as host-service-action-unsupported. Same
+# bounds as host_service_request_error_v2 (v2:65-73); the payload must name the request's operation id.
+fn host_service_agent_invoke_request_error_v3(request: HostServiceRequestV2) -> text:
+    if not builder_identifier_valid_v1(request.operation_id) or request.operation_id.byte_len() > HOST_SERVICE_MAX_OPERATION_BYTES_V2:
+        return "host-service-operation-invalid"
+    if request.payload.byte_len() == 0 or request.payload.byte_len() > HOST_SERVICE_MAX_PAYLOAD_BYTES_V2:
+        return "host-service-payload-size"
+    if request.payload.contains("\u{0}"): return "host-service-payload-nul"
+    val decoded = host_agent_invoke_request_decode_v4(request.payload)
+    if decoded.is_err(): return decoded.unwrap_err()
+    if decoded.unwrap().operation_id != request.operation_id: return "host-service-agent-invoke-operation-mismatch"
+    ""
+
+# EFFECT action: an effect-attempted refusal maps to exit 2 with the recovery flag in the error payload (as
+# service_linux_prepare_v3); a plain refusal is 1.
+fn service_linux_agent_invoke_v3(local: HostLinuxServiceCurrentV4, request: HostServiceRequestV2) -> HostServiceTurnV3:
+    val reply = host_linux_service_dispatch_installed_v4(local, "host_agent_invoke_v4", request.payload)
+    val domain = HostServiceDomainV3(HostLocalRootV3.LinuxService(reply.owner))
+    if reply.error != "":
+        return HostServiceTurnV3(domain, if reply.effect_attempted: 2 else: 1,
+            host_service_error_payload_v2(request, reply.error, reply.effect_attempted))
+    if reply.response.byte_len() > HOST_SERVICE_MAX_RESPONSE_BYTES_V2:
+        return HostServiceTurnV3(domain, 2, host_service_error_payload_v2(request, "host-service-response-size", true))
+    HostServiceTurnV3(domain, 0, reply.response)
+
 pub fn host_service_domain_turn_v3(owner: HostServiceDomainV3, request: HostServiceRequestV2) -> HostServiceTurnV3:
     match owner.local:
         case HostLocalRootV3.Linux(local):
@@ -155,7 +184,14 @@ pub fn host_service_domain_turn_v3(owner: HostServiceDomainV3, request: HostServ
         case HostLocalRootV3.LinuxService(local):
             # Status, and associated prepare through the installed dispatch.
             # Execute is host_service_execution_v4's route; validate, inspect,
-            # wait and cancel stay explicit refusals.
+            # wait and cancel stay explicit refusals. The agent invoke is checked
+            # before the V2 validator, whose action list it is deliberately not in.
+            if request.action == "host-agent-invoke":
+                val invoke_invalid = host_service_agent_invoke_request_error_v3(request)
+                if invoke_invalid != "": return HostServiceTurnV3(owner, 1, host_service_error_payload_v2(request, invoke_invalid, false))
+                val recheck = local.current_v4()
+                if recheck.is_err(): return HostServiceTurnV3(owner, 2, host_service_error_payload_v2(request, recheck.unwrap_err(), true))
+                return service_linux_agent_invoke_v3(local, request)
             val invalid = host_service_request_error_v2(request)
             if invalid != "": return HostServiceTurnV3(owner, 1, host_service_error_payload_v2(request, invalid, false))
             if request.action != "host-status" and request.action != "host-prepare":
