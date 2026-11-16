@@ -180,42 +180,30 @@ available. These source paths and their manuals remain NOT_RUN.
   `hex(HMAC-SHA256(owner_nonce, "smux-client-lease-v1|" + len:session|len:client|gen))[0:32] + ":" + gen`.
   The nonce never appears in a token or on the wire. Its only other use is process-internal: `attachment_owner` in
   service_revision.
-- **Release today:** nothing in production builds the LinuxService domain (`host_linux_service_start_v4` has 0
-  callers). There is no service loan (`lend_service_identity_v1` is absent), and the caller still supplies the
-  epoch digest.
-- **Prepared but not landed.** The bytes are in
-  `.spipe/simple_orchestrator/continuation_20261116/milestone_0018_service40_execution/combined_A1_reconcile/`.
-  That location is host-local and untracked; the design is in `../DESIGN.md` and the blocker trace in
-  `combined_A1_reconcile/NOTES.md`.
-  - Throwaway 8d13e3c8cdc is NOT to be landed.
-  - A1 alone: independent review A1-r2 APPROVE on 62ba00decce, conditional on landing together with reconcile.
-  - Reconcile: independent review Breconcile-r1 CHANGES_REQUIRED (P0 F1, P1 F2). Fixes were authored in round 2
-    but have not been independently re-reviewed.
-  - The combined unit has not been reviewed.
-
-  The bytes cover:
-  - the machine admission owner's service loan (second policy reader plus fresh-epoch custody, exact-borrow return);
-  - the epoch digest, computed as `sha256(machine_fresh_epoch_record_bytes_v1)`;
-  - the `linux-service` installed opener, with read-only checks before the durable admission;
-  - a fixed Host-only control policy;
-  - prepare/execute routed to `host_linux_service_dispatch_installed_v4`;
-  - `host_linux_service_reconcile_flip_v4`, the only continuity flip, with its proof private to the reconcile
-    module;
-  - the `check-continuity-proven-setters.shs` ratchet.
-- **Why it is held:** reconcile needs an authenticated store inventory, and nothing can lend one.
-  `linux_installed_supervisor_open_v1` has 0 callers. It masks the activation closure and cannot close without
-  an unimplemented successor handoff. The fresh epoch requires the installed provider to stay masked, while the
-  installed inventory talks only to that provider's live MainPID.
-  - Missing, owned by the machine-authority / fresh-epoch lane:
-    - M1: `linux_fresh_epoch_store_inventory_v1` (owner decision: offline store read, or start the provider first);
-    - M2: `lend_store_inventory_v1` / `end_store_inventory_loan_v1` on the admission owner.
-  - M3 (this lane, after M1/M2): `host_linux_service_reconcile_flip_v4` takes the M2 inventory borrow in place of
-    `supervisor`, and `close_v4` ends that loan before `end_service_loan_v1`.
-  - Without these, every start ends quarantined, so the stack is not landed.
+- **Serving path + reconcile landed** (#9798, merge 4b89efd8dc4; SOURCE_AUTHORED, specs NOT_RUN). Independent
+  opus review reached r3 APPROVE.
+  - `host_linux_service_open_installed_v4` runs the read-only checks first. It then does the durable fresh-epoch
+    admission, `lend_service_identity_v1`, `lend_store_inventory_v1`, a re-pin, and `start_v4`. Start publishes,
+    then calls `host_linux_service_reconcile_flip_v4(owner, native, inventory)`. The flip is the only continuity
+    flip; its proof stays private to the module.
+  - Production reachability: `host-authenticated-service` -> `open_installed_v3('linux-service')` -> the opener.
+  - **M1** `io/linux_fresh_epoch_store_inventory_v1.spl` is an OFFLINE read. The installed provider stays masked
+    and never starts. The successor custody re-enumerates its retained graphRoot/runRoot fds, which must be empty;
+    any entry refuses. The read is bound to boot, owner generation, process identity, store/partition digests and
+    the lender's epoch digest. No provider format is parsed and there are no object rows.
+  - **M2** On `MachineFreshEpochAdmissionOwnerV1`, the store-inventory loan exists only inside the service loan,
+    in phase `admitted`. While it is active, `end_service_loan_v1`, `transfer_workload_v2`, `start_provider_v1`
+    and `close_v1` all refuse. `close_v4` ends it first.
+  - **M3 release rule:** released rows release by receipt, and never-begun rows (admitted, or abort receipt) by
+    absence. A begun row needs a plan for this boot and generation with any `epoch-`+64hex scope; the store roots
+    are fixed per install, so an empty read covers every epoch.
+- **Open (owner decision):** a begun row whose plan names a previous boot keeps the service quarantined
+  permanently, and there is no recovery path. The boot check is not needed for soundness. Receipts:
+  `.spipe/simple_orchestrator/continuation_20261116/milestone_0019_service40_inventory/` (host-local).
 - **The Agent V7 wire (assembly cuts 1-4) is not landed** (E-cuts r2 CHANGES_REQUIRED). In the held cut bytes,
   nothing ever sets `ServiceSlotV5.installed` (E2-1), so invoke always refuses, and invoke is the only creator of
-  `session.workspace`. Plan: DESIGN.md A2, which reapplies the E-r1 fixes on top of the installed slot. It depends
-  on the serving path above.
+  `session.workspace`. Plan: milestone_0018 DESIGN.md section I (A2), which reapplies the E-r1 fixes on top of the
+  installed slot. The serving path it depended on has landed (#9798).
 
 ### Traps
 - Never reconcile a Linux journal from ledger flags alone. The capacity owner requires native inventory/quarantine
@@ -233,3 +221,9 @@ available. These source paths and their manuals remain NOT_RUN.
 - A start that ALWAYS refuses after durable work (admission, journal open, current publish) is dead weight, not
   fail-closed. Check refusal reachability before admitting a backend at the primary shape.
 - `std.spec` `fail()` records the failure and returns. Code after it still runs, so return explicitly.
+- Never bind a release to THIS epoch's scope. Every start admits a new epoch, so released and never-begun
+  history rows from earlier epochs would quarantine every restart (milestone_0019 r2 P1). Check plan
+  boot/generation/scope only for begun, unreleased rows.
+- `check-continuity-proven-setters.shs` also counts positional `HostCapacityLedgerV1(` constructions, using a
+  paren-depth scan across lines. Multi-line named constructions are therefore fine, but a `)` inside a string can
+  skew the scan.
