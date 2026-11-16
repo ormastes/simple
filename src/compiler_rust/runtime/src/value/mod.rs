@@ -896,6 +896,7 @@ pub use net::{
     rt_browser_http_job_take_error,
     rt_browser_http_job_take_response,
     rt_dns_lookup,
+    rt_dns_lookup_timeout_ms,
     rt_io_tcp_accept,
     rt_io_tcp_accept_timeout,
     rt_io_tcp_bind,
