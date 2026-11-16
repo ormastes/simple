@@ -1,0 +1,50 @@
+"""
+## Purpose and audience
+Purpose: Prove the SPL-BOUND lint rule resolves a linted file's `use` imports
+to module sources on disk and reports a late unit cast of a value returned raw
+by an imported boundary function (cross-file SPL-BOUND-002).
+Audience: compiler and tooling engineers maintaining robust-boundary lints.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Imports resolve relative to the importer's directory and its ancestors (and
+`src/lib` for `std.`), depth-bounded at 3. SPL-BOUND-003 stays single-file.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use compiler.semantics.lint.bound_late_cast.{check_bound_late_casts_cross}
+use compiler.tools.lint.rules.bound_import_graph.{bound_import_summaries, bound_resolve_module}
+
+val FIX_DIR = "test/01_unit/compiler/lint/fixtures/bound_graph"
+
+fn _lint(name: text) -> [text]:
+    val path = FIX_DIR + "/" + name
+    val src = file_read(path)
+    [f.code for f in check_bound_late_casts_cross(src, path, bound_import_summaries(src, path))]
+
+describe "SPL-BOUND cross-file import graph":
+    it "resolves a sibling module import to its file":
+        step("Resolve `use sensor_raw` from the client fixture")
+        expect(bound_resolve_module("sensor_raw", FIX_DIR + "/sensor_client.spl")).to_equal(FIX_DIR + "/sensor_raw.spl")
+
+    it "reports the late cast of an imported raw-return value":
+        step("Lint the client fixture; its import returns an extern value unconverted")
+        expect(_lint("sensor_client.spl").contains("SPL-BOUND-002")).to_equal(true)
+
+    it "summarises the exporter's raw pub fn":
+        step("Summaries for the client name read_distance")
+        val path = FIX_DIR + "/sensor_client.spl"
+        val sums = bound_import_summaries(file_read(path), path)
+        expect(sums.len()).to_equal(1)
+        expect(sums[0].raw_fns.contains("read_distance")).to_equal(true)
+
+    it "terminates on an import cycle":
+        step("Lint a fixture whose import cycles back to itself")
+        expect(_lint("sensor_cycle_a.spl").len()).to_equal(0)
+
+    it "ignores imports that do not resolve":
+        step("Unresolvable module yields no summary")
+        expect(bound_import_summaries("use no_such_mod_xyz.{{f}}\n", FIX_DIR + "/x.spl").len()).to_equal(0)

@@ -1,6 +1,10 @@
 # Pure lease owner for explicitly leased interactive attachments. Legacy API
 # attachments are not entered here. The API supplies monotonic SOSIX time and a
 # checked secure owner nonce, then commits leases and attachments together.
+# The owner nonce is an HMAC key and never appears in a token: each token's hex
+# half is HMAC(owner_nonce, session|client|generation), so holding one lease's
+# token does not let a client derive another lease's token.
+use std.common.crypto.hmac.hmac_sha256
 
 pub const SMUX_CLIENT_LEASE_CAPACITY: int = 4
 pub const SMUX_CLIENT_LEASE_TTL_MS: i64 = 15000
@@ -60,6 +64,12 @@ fn lease_state(state: ClientLeaseState, entries: [ClientLease], generation: i64,
     return ClientLeaseState(owner_nonce: state.owner_nonce, next_generation: generation,
         last_now_ms: now_ms, leases: entries)
 
+# Length-prefixed binding input, so no session/client split collides.
+fn lease_token_mint(owner_nonce: text, session_id: text, client_id: text, generation: i64) -> text:
+    val binding = "smux-client-lease-v1|" + session_id.byte_len().to_text() + ":" + session_id + "|" +
+        client_id.byte_len().to_text() + ":" + client_id + "|" + generation.to_text()
+    hmac_sha256(owner_nonce, binding)[0:32] + ":" + generation.to_text()
+
 pub fn smux_lease_admit(state: ClientLeaseState, session_id: text, client_id: text, now_ms: i64) -> Result<ClientLeaseAdmission, text>:
     if session_id == "" or client_id == "":
         return Err("client lease target is empty")
@@ -74,7 +84,7 @@ pub fn smux_lease_admit(state: ClientLeaseState, session_id: text, client_id: te
     if retained.len() >= SMUX_CLIENT_LEASE_CAPACITY:
         return Err("client lease capacity reached")
     val admitted = ClientLease(session_id: session_id, client_id: client_id,
-        token: state.owner_nonce + ":" + state.next_generation.to_text(),
+        token: lease_token_mint(state.owner_nonce, session_id, client_id, state.next_generation),
         generation: state.next_generation, deadline_ms: now_ms + SMUX_CLIENT_LEASE_TTL_MS)
     retained.push(admitted)
     return Ok(ClientLeaseAdmission(state: lease_state(state, retained, state.next_generation + 1, now_ms), lease: admitted))

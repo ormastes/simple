@@ -1,6 +1,6 @@
 # Test runner reports a failed native producer as `exit=-1, limit=infrastructure` with empty output (2026-11-12)
 
-Status: OPEN (filed, not fixed). Severity P2 (every native-route failure looks like an
+Status: verification-pending (2026-11-16). Windows owned scope now keeps head+tail of an over-cap capture and no longer cancels the child at the cap (disk ceiling max(16x cap, 64 MiB)); spec test/01_unit/lib/nogc_sync_mut/io/resource_scope_failed_child_diagnostics_spec.spl RED 1 failed -> GREEN 2 passed. Not verified: end-to-end native runner route on a real compiler failure.
 infrastructure kill; the real compiler error is only in a file nobody is told about).
 
 ## Symptom

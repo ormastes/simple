@@ -731,13 +731,13 @@ pub(super) fn eval_op_expr(
                         (Some(l), Some(r)) if l != r => {
                             Some(format!("`{} {} {}`: distinct units never mix implicitly", l, op_sym, r))
                         }
-                        (Some(l), None) if is_scalar(&right_val) && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mod) => {
+                        (Some(l), None) if is_scalar(&right_val) && (cmp || matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mod)) => {
                             Some(format!(
                                 "`{} {} <scalar>`: no implicit arithmetic between a unit and a raw scalar; convert explicitly",
                                 l, op_sym
                             ))
                         }
-                        (None, Some(r)) if is_scalar(&left_val) && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mod) => {
+                        (None, Some(r)) if is_scalar(&left_val) && (cmp || matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mod)) => {
                             Some(format!(
                                 "`<scalar> {} {}`: no implicit arithmetic between a unit and a raw scalar; convert explicitly",
                                 op_sym, r
@@ -833,6 +833,18 @@ pub(super) fn eval_op_expr(
                         Ok(result_family) => {
                             // Operation allowed - perform it on inner values
                             let result_val = evaluate_unit_binary_inner(lv, rv, *op)?;
+                            // Comparisons yield a plain bool, and U * U / U / U on a
+                            // nominal `unit Name: T` yield the underlying scalar
+                            // (pure-Simple `unit_op_verdict`), never a unit.
+                            if matches!(
+                                op,
+                                BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq
+                            ) || (matches!(op, BinOp::Mul | BinOp::Div)
+                                && left_family == right_family
+                                && crate::interpreter_unit::is_record_unit_class(left_family))
+                            {
+                                return Ok(Some(result_val));
+                            }
                             // Return unit with result family (or left family if same-family operation).
                             //
                             // The result SUFFIX is the left operand's suffix whenever the

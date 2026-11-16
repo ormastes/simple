@@ -11,6 +11,8 @@ use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{simple_web_layout_set_render_budget_floor_ms}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_last_render_degraded}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{simple_web_layout_render_html_readback}
+use std.io_runtime.{env_get}
+use std.nogc_sync_mut.ui.compare_view_host.{compare_view_inspect}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_write_bytes(path: text, content: [u8]) -> bool
@@ -59,21 +61,21 @@ describe "production web renderer Vulkan readback":
         # This prevents diagnostic style-budget degradation from weakening the
         # parity assertion; it does not bypass any producer or GPU work.
         simple_web_layout_set_render_budget_floor_ms(900000)
-        val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#123456}.box{width:12px;height:10px;background-color:#cc3366}</style></head><body><div class='box'></div></body></html>"
+        val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#123456}.box{width:320px;height:240px;background-color:#cc3366}</style></head><body><div class='box'></div></body></html>"
 
         step("Render the production web producer CPU oracle")
-        val cpu = simple_web_layout_render_html_readback(html, 24, 20, "cpu")
+        val cpu = simple_web_layout_render_html_readback(html, 640, 480, "cpu")
         expect(simple_web_layout_last_render_degraded()).to_equal(false)
         expect(cpu.source).to_equal("cpu_mirror")
-        expect(cpu.pixels.len()).to_equal(480)  # oracle: pinned constant asserted by this scenario
+        expect(cpu.pixels.len()).to_equal(307200)  # oracle: pinned constant asserted by this scenario
 
         step("Submit the same production DrawIR through Engine2D Vulkan")
-        val gpu = simple_web_layout_render_html_readback(html, 24, 20, "vulkan")
+        val gpu = simple_web_layout_render_html_readback(html, 640, 480, "vulkan")
         expect(simple_web_layout_last_render_degraded()).to_equal(false)
         expect(gpu.source).to_equal("device_readback")
         expect(gpu.backend_handle).to_be_greater_than(0)
         expect(gpu.device_identity).to_be_greater_than(0)
-        expect(gpu.pixel_count).to_equal(480)  # oracle: pinned constant asserted by this scenario
+        expect(gpu.pixel_count).to_equal(307200)  # oracle: pinned constant asserted by this scenario
 
         step("Compare raw device readback with the web CPU oracle")
         val cpu_checksum = _checksum(cpu.pixels)
@@ -83,6 +85,10 @@ describe "production web renderer Vulkan readback":
         print("web_vulkan_readback_source=" + gpu.source)
         print("web_vulkan_cpu_checksum=" + cpu_checksum.to_text())
         print("web_vulkan_gpu_checksum=" + gpu_checksum.to_text())
+        val cv_status = compare_view_inspect("web_vulkan_production_readback", "simple_web_cpu", cpu.pixels, 640, 480, "simple_web_vulkan", gpu.pixels, 640, 480)
+        print("web_vulkan_compare_view=" + cv_status)
+        if (env_get("SIMPLE_COMPARE_VIEW") ?? "").trim().lower() == "html":
+            expect(cv_status.starts_with("written:")).to_equal(true)
         expect(gpu.pixels).to_equal(cpu.pixels)
         expect(gpu_checksum).to_equal(cpu_checksum)
         step("Retain machine-readable production web evidence")
@@ -98,7 +104,7 @@ describe "production web renderer Vulkan readback":
 
         step("Retain physical Vulkan image and ordered pipeline events")
         val image_path = WEB_VULKAN_ARTIFACT_DIR + "/production_web_vulkan.ppm"
-        expect(rt_file_write_bytes(image_path, _ppm_p6(gpu.pixels, 24, 20))).to_equal(true)
+        expect(rt_file_write_bytes(image_path, _ppm_p6(gpu.pixels, 640, 480))).to_equal(true)
         val events = "{\"sequence\":1,\"stage\":\"producer\",\"owner\":\"SimpleWebLayout\",\"status\":\"complete\"}\n" +
             "{\"sequence\":2,\"stage\":\"draw_ir\",\"owner\":\"DrawIR\",\"status\":\"complete\"}\n" +
             "{\"sequence\":3,\"stage\":\"engine2d\",\"owner\":\"Engine2D\",\"status\":\"complete\"}\n" +

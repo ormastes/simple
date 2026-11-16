@@ -7,7 +7,7 @@ Audience: compiler cache engineers.
 """
 
 use std.spec
-use std.nogc_sync_mut.io.disk_admission.{disk_admission_decide, disk_publish_admitted, disk_admission_reserve_bytes}
+use std.nogc_sync_mut.io.disk_admission.{disk_admission_decide, disk_publish_admitted, disk_admission_reserve_bytes, disk_headroom_from_raw, disk_admission_decide_free, FreeBytes}
 
 describe "cache publish disk admission":
     it "admits when the write leaves at least the reserve":
@@ -23,3 +23,20 @@ describe "cache publish disk admission":
     it "has a positive default reserve and admits a tiny write on this host":
         expect(disk_admission_reserve_bytes() > 0).to_equal(true)
         expect(disk_publish_admitted(".", 1)).to_equal(true)
+
+describe "headroom boundary wraps the raw extern into FreeBytes":
+    it "wraps a valid positive headroom as a typed FreeBytes":
+        val got = disk_headroom_from_raw(4096)
+        expect(got.is_some()).to_equal(true)
+        val f = got.unwrap()
+        expect(f.value).to_equal(4096)
+
+    it "does not wrap the cannot-measure (0) or error (<0) sentinel as a size":
+        expect(disk_headroom_from_raw(0).is_some()).to_equal(false)
+        expect(disk_headroom_from_raw(-1).is_some()).to_equal(false)
+        expect(disk_headroom_from_raw(-22).is_some()).to_equal(false)
+
+    it "decides on the typed value and admits when unmeasured":
+        expect(disk_admission_decide_free(Some(FreeBytes(10000)), 1000, 9000)).to_equal(true)
+        expect(disk_admission_decide_free(Some(FreeBytes(10000)), 1001, 9000)).to_equal(false)
+        expect(disk_admission_decide_free(None, 1000000, 9000)).to_equal(true)
