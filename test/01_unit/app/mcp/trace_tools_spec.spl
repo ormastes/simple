@@ -2,7 +2,11 @@
 # MCP tool contracts for MCP facade authors and evidence reviewers.
 # @req REQ-TRC-021 TESTDB-001 TESTDB-004
 use std.spec.*
-use app.mcp.main_lazy_trace_tools.{TraceToolBody, TraceToolErrorKind, TraceToolSnapshot, TraceToolFormat, TraceToolStatus, trace_tool_parse_request, trace_tool_cli_args, trace_tool_run, trace_tool_outcome, trace_tool_shape_result, test_query_tool_parse_request, test_query_shape_result, test_query_error_text}
+use app.mcp.main_lazy_trace_tools.{TraceToolBody, TraceToolErrorKind, TraceToolSnapshot, TraceToolFormat, TraceToolStatus, TraceToolOperation, TraceToolExitCode, trace_tool_parse_request, trace_tool_cli_args, trace_tool_run, trace_tool_outcome, trace_tool_outcome_from_exit, trace_tool_status_for, trace_tool_shape_result, test_query_tool_parse_request, test_query_tool_run_at, test_query_shape_result, test_query_error_text}
+use app.traceability.query_cmds_main_v1.{trace_cmd_execute_v1}
+use std.common.traceability.query_missing_v1.{TraceGraphCompletenessV1}
+use app.mcp.main_static_tools.{_mcp_static_tools_result}
+use std.io_runtime.{file_exists, dir_create_all, dir_remove_all, dir_list_or_empty}
 use app.mcp.main_dispatch.{dispatch_tool}
 use std.common.traceability.profile_v1.{TraceProfile}
 use std.common.traceability.test_query.{TestCasePath, TestCaseName, TestCaseKey, TestRunId, TestPlannedCaseIdentity, TestAttemptIdentity, TestAttemptOrdinal, TestQueryStatus, TestQualification, TestEvidenceProvenance, TestQueryRow, TestQueryPage, TestQueryTruncation, TestQueryCursor, TestQueryCoverage, TestQueryError, TestQueryErrorKind}
@@ -53,7 +57,7 @@ describe "simple_trace argument parsing":
         # @req REQ-TRC-021
         expect(trace_tool_parse_request(_body("\"limit\":5")).unwrap_err().kind == TraceToolErrorKind.MissingArgument).to_equal(true)
         step("unsupported operation")
-        expect(trace_tool_parse_request(_body("\"profile\":\"push\",\"operation\":\"explain\"")).unwrap_err().kind == TraceToolErrorKind.UnsupportedOperation).to_equal(true)
+        expect(trace_tool_parse_request(_body("\"profile\":\"push\",\"operation\":\"bogus\"")).unwrap_err().kind == TraceToolErrorKind.UnsupportedOperation).to_equal(true)
         step("limit above the cap")
         expect(trace_tool_parse_request(_body("\"profile\":\"push\",\"limit\":999")).unwrap_err().kind == TraceToolErrorKind.InvalidArgument).to_equal(true)
 
@@ -139,3 +143,107 @@ describe "simple_trace against an unbuildable snapshot":
         expect(outcome.status == TraceToolStatus.Incomplete).to_equal(true)
         expect(outcome.exit_code.value).to_equal(2)
         expect(outcome.rendered.len() > 0).to_equal(true)
+
+describe "simple_trace operations":
+    it "accepts the CLI operations and rejects anything else":
+        step("parse each operation")
+        # @req REQ-TRC-021
+        for name in ["matrix", "links", "report"]:
+            val parsed = trace_tool_parse_request(_body("\"profile\":\"push\",\"operation\":\"" + name + "\""))
+            expect(parsed.is_ok()).to_equal(true)
+        val missing_default = trace_tool_parse_request(_body("\"profile\":\"push\"")).unwrap()
+        expect(missing_default.operation == TraceToolOperation.Missing).to_equal(true)
+        step("an unknown operation is a closed-set error")
+        val bad = trace_tool_parse_request(_body("\"profile\":\"push\",\"operation\":\"refs\"")).unwrap_err()
+        expect(bad.kind == TraceToolErrorKind.UnsupportedOperation).to_equal(true)
+        expect(bad.message.contains("missing, matrix, links, explain, diff, report")).to_equal(true)
+
+    it "builds the same argument vector the CLI parses, carrying the profile":
+        step("matrix with axes")
+        # @req REQ-TRC-021
+        val matrix = trace_tool_parse_request(_body("\"profile\":\"ci\",\"operation\":\"matrix\",\"rows\":\"component\",\"cols\":\"layer\",\"evidence\":\"testdb\"")).unwrap()
+        expect(trace_tool_cli_args(matrix).join(" ")).to_equal("matrix --snapshot=worktree --format=table --limit=100 --profile=ci --rows=component --cols=layer --evidence=testdb")
+        step("explain puts the requirement id right after the command")
+        val explain = trace_tool_parse_request(_body("\"profile\":\"release\",\"operation\":\"explain\",\"requirement\":\"REQ-TRC-016\"")).unwrap()
+        expect(trace_tool_cli_args(explain).join(" ")).to_equal("explain REQ-TRC-016 --snapshot=worktree --format=table --limit=100 --profile=release")
+        step("diff replaces --snapshot with --base/--head")
+        val diff = trace_tool_parse_request(_body("\"profile\":\"audit\",\"operation\":\"diff\",\"base\":\"git:abc\",\"head\":\"index\"")).unwrap()
+        expect(trace_tool_cli_args(diff).join(" ")).to_equal("diff --format=table --limit=100 --profile=audit --base=git:abc --head=index")
+
+    it "requires the operation's own arguments":
+        step("explain without a requirement and diff without a base")
+        # @req REQ-TRC-021
+        val no_req = trace_tool_parse_request(_body("\"profile\":\"push\",\"operation\":\"explain\"")).unwrap_err()
+        expect(no_req.kind == TraceToolErrorKind.MissingArgument).to_equal(true)
+        val no_base = trace_tool_parse_request(_body("\"profile\":\"push\",\"operation\":\"diff\"")).unwrap_err()
+        expect(no_base.kind == TraceToolErrorKind.MissingArgument).to_equal(true)
+        step("diff does not take snapshot")
+        val snap = trace_tool_parse_request(_body("\"profile\":\"push\",\"operation\":\"diff\",\"base\":\"index\",\"snapshot\":\"index\"")).unwrap_err()
+        expect(snap.kind == TraceToolErrorKind.InvalidArgument).to_equal(true)
+
+    it "maps the CLI exit code onto status: 0 complete, 1 issues, 2 incomplete":
+        step("shape each exit")
+        # @req REQ-TRC-021
+        expect(trace_tool_outcome_from_exit(TraceProfile.Worktree, TraceToolExitCode(value: 0), "ok").status == TraceToolStatus.Complete).to_equal(true)
+        val issues = trace_tool_outcome_from_exit(TraceProfile.Worktree, TraceToolExitCode(value: 1), "dangling")
+        expect(issues.status == TraceToolStatus.Issues).to_equal(true)
+        expect(issues.exit_code.value).to_equal(1)
+        expect(trace_tool_shape_result(issues).contains("status: issues")).to_equal(true)
+        val incomplete = trace_tool_outcome_from_exit(TraceProfile.Worktree, TraceToolExitCode(value: 2), "bad")
+        expect(incomplete.status == TraceToolStatus.Incomplete).to_equal(true)
+        expect(incomplete.exit_code.value).to_equal(2)
+
+describe "simple_trace profile enforcement":
+    it "only the worktree profile can be complete, exactly like the CLI verdict":
+        step("complete graph under each profile")
+        # @req REQ-TRC-021
+        expect(trace_tool_status_for(TraceGraphCompletenessV1.Complete, TraceProfile.Worktree) == TraceToolStatus.Complete).to_equal(true)
+        for profile in [TraceProfile.Editor, TraceProfile.Commit, TraceProfile.Push, TraceProfile.Remote, TraceProfile.Audit, TraceProfile.Ci, TraceProfile.Release]:
+            expect(trace_tool_status_for(TraceGraphCompletenessV1.Complete, profile) == TraceToolStatus.Incomplete).to_equal(true)
+        step("an incomplete graph is incomplete under worktree too")
+        expect(trace_tool_status_for(TraceGraphCompletenessV1.Incomplete, TraceProfile.Worktree) == TraceToolStatus.Incomplete).to_equal(true)
+
+    it "runs a non-missing operation through the shared CLI executor with the same result":
+        step("links over a revision that does not exist")
+        # @req REQ-TRC-021
+        val request = trace_tool_parse_request(_body("\"profile\":\"commit\",\"operation\":\"links\",\"snapshot\":\"git:no-such-revision-zzz\"")).unwrap()
+        val outcome = trace_tool_run(request)
+        val cli = trace_cmd_execute_v1(trace_tool_cli_args(request))
+        expect(outcome.exit_code.value).to_equal(cli.exit.value)
+        expect(outcome.exit_code.value).to_equal(2)
+        expect(outcome.rendered).to_equal(cli.output)
+        step("an invalid axis is incomplete, not a crash")
+        val bad = trace_tool_parse_request(_body("\"profile\":\"push\",\"operation\":\"matrix\",\"rows\":\"nonsense\"")).unwrap()
+        expect(trace_tool_run(bad).status == TraceToolStatus.Incomplete).to_equal(true)
+
+describe "simple_test_query with the TestDB absent":
+    it "reports absence and never creates or writes a TestDB":
+        step("point the tool at a directory that holds no database")
+        # @req TESTDB-004
+        val dir = "build/w6b_testdb_absent_probe"
+        dir_remove_all(dir)
+        dir_create_all(dir)
+        val base = dir + "/test_db"
+        val before = dir_list_or_empty(dir).len()
+        val request = test_query_tool_parse_request(_body("\"path\":\"t/a_spec.spl\",\"name\":\"adds\"")).unwrap()
+        step("run the query")
+        val result = test_query_tool_run_at(request, base)
+        expect(result.is_err()).to_equal(true)
+        expect(test_query_error_text(result.unwrap_err())).to_equal("test query store_unreadable: test database not found: " + base + ".sdn")
+        step("nothing was created")
+        expect(file_exists(base + ".sdn")).to_equal(false)
+        expect(dir_list_or_empty(dir).len()).to_equal(before)
+        dir_remove_all(dir)
+
+describe "simple_trace input schema":
+    it "advertises closed enums for profile and operation":
+        step("read the simple_trace schema from tools/list")
+        # @req REQ-TRC-021
+        val listing = _mcp_static_tools_result()
+        val start = listing.index_of("{\"name\":\"simple_trace\"") ?? -1
+        expect(start >= 0).to_equal(true)
+        val rest = listing.substring(start, listing.byte_len())
+        val end = rest.index_of("{\"name\":\"simple_test_query\"") ?? rest.byte_len()
+        val schema = rest.substring(0, end)
+        expect(schema.contains("\"enum\":[\"missing\",\"matrix\",\"links\",\"explain\",\"diff\",\"report\"]")).to_equal(true)
+        expect(schema.contains("\"enum\":[\"worktree\",\"editor\",\"commit\",\"push\",\"remote\",\"audit\",\"ci\",\"release\"]")).to_equal(true)

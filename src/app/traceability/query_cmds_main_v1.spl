@@ -43,6 +43,15 @@ fn cmd_evidence_v1(options: TraceCmdOptionsV1, graph: TraceGraph,
 pub struct TraceCmdExitV1:
     value: i64
 
+# Rendered output plus exit code. The CLI prints it; the MCP `simple_trace`
+# tool shapes it; neither re-implements the command logic.
+pub struct TraceCmdResultV1:
+    exit: TraceCmdExitV1
+    output: text
+
+fn cmd_result_v1(code: i64, output: text) -> TraceCmdResultV1:
+    TraceCmdResultV1(exit: TraceCmdExitV1(value: code), output: output)
+
 pub fn run_trace_cmd_v1(args: [text]) -> TraceCmdExitV1:
     TraceCmdExitV1(value: run_trace_cmd_code_v1(args))
 
@@ -50,66 +59,61 @@ fn run_trace_cmd_code_v1(args: [text]) -> i64:
     if args.len() == 2 and (args[1] == "--help" or args[1] == "-h"):
         cmd_print_v1(trace_cmd_help_v1())
         return 0
+    val result = trace_cmd_execute_v1(args)
+    cmd_print_v1(result.output)
+    result.exit.value
+
+# Pure of printing: parses, builds the snapshot, runs the command, returns the
+# rendered output and exit code (0 clean, 1 link issue or unknown id, 2 incomplete).
+pub fn trace_cmd_execute_v1(args: [text]) -> TraceCmdResultV1:
     val options = match trace_cmd_options_parse_v1(args):
         case Ok(value): value
         case Err(reason):
             val format = if trace_query_sdn_requested_v1(args): "sdn" else: "table"
-            cmd_print_v1(trace_query_error_v1(reason, "unresolved", format))
-            return 2
+            return cmd_result_v1(2, trace_query_error_v1(reason, "unresolved", format))
     val build = match trace_query_build_snapshot_v1(options.query):
         case Ok(value): value
         case Err(reason):
-            cmd_print_v1(trace_query_error_v1(reason, options.query.snapshot, options.query.format))
-            return 2
+            return cmd_result_v1(2, trace_query_error_v1(reason, options.query.snapshot, options.query.format))
     val graph = build.graph
     # Evidence is off unless --evidence=testdb is explicit, so default output is
     # unchanged and nothing reaches Verified (trace_cmds_no_passing_evidence_source_2026-11-15.md).
     val evidence = match cmd_evidence_v1(options, graph, build.sidecar_references):
         case Ok(value): value
         case Err(error):
-            cmd_print_v1(trace_query_error_v1("TRACE-QUERY-EVIDENCE: " + error.detail,
+            return cmd_result_v1(2, trace_query_error_v1("TRACE-QUERY-EVIDENCE: " + error.detail,
                 graph.subject.snapshot_id, options.query.format))
-            return 2
     match options.command:
         case TraceCmdKindV1.Matrix:
             val result = trace_matrix_v1(graph, build.sidecar_references, evidence, options.rows, options.cols, options.profile)
-            cmd_print_v1(trace_cmd_render_matrix_v1(result, options))
-            return cmd_exit_v1(result.verdict, false)
+            return cmd_result_v1(cmd_exit_v1(result.verdict, false), trace_cmd_render_matrix_v1(result, options))
         case TraceCmdKindV1.Links:
             val result = trace_links_check_v1(graph, build.sidecar_references, evidence, options.profile)
-            cmd_print_v1(trace_cmd_render_links_v1(result, options))
-            return cmd_exit_v1(result.verdict, result.issues.len() > 0)
+            return cmd_result_v1(cmd_exit_v1(result.verdict, result.issues.len() > 0), trace_cmd_render_links_v1(result, options))
         case TraceCmdKindV1.Explain:
             val id = options.requirement.unwrap()
             match trace_explain_requirement_v1(graph, build.sidecar_references, evidence, id, options.profile):
                 case Some(result):
-                    cmd_print_v1(trace_cmd_render_explain_v1(result, options))
-                    return cmd_exit_v1(result.verdict, false)
+                    return cmd_result_v1(cmd_exit_v1(result.verdict, false), trace_cmd_render_explain_v1(result, options))
                 case None:
-                    cmd_print_v1(trace_query_error_v1("TRACE-QUERY-NOT-FOUND: no requirement " + id.value,
+                    return cmd_result_v1(1, trace_query_error_v1("TRACE-QUERY-NOT-FOUND: no requirement " + id.value,
                         graph.subject.snapshot_id, options.query.format, true))
-                    return 1
         case TraceCmdKindV1.Diff:
             val base_options = options.base.unwrap()
             val base_build = match trace_query_build_snapshot_v1(base_options):
                 case Ok(value): value
                 case Err(reason):
-                    cmd_print_v1(trace_query_error_v1(reason, base_options.snapshot, options.query.format))
-                    return 2
+                    return cmd_result_v1(2, trace_query_error_v1(reason, base_options.snapshot, options.query.format))
             val base_evidence = match cmd_evidence_v1(options, base_build.graph, base_build.sidecar_references):
                 case Ok(value): value
                 case Err(error):
-                    cmd_print_v1(trace_query_error_v1("TRACE-QUERY-EVIDENCE: " + error.detail,
+                    return cmd_result_v1(2, trace_query_error_v1("TRACE-QUERY-EVIDENCE: " + error.detail,
                         base_options.snapshot, options.query.format))
-                    return 2
             val result = trace_diff_v1(base_build.graph, base_build.sidecar_references, base_evidence,
                 graph, build.sidecar_references, evidence, options.profile)
-            cmd_print_v1(trace_cmd_render_diff_v1(result, options))
-            return cmd_exit_v1(result.verdict, false)
+            return cmd_result_v1(cmd_exit_v1(result.verdict, false), trace_cmd_render_diff_v1(result, options))
         case TraceCmdKindV1.Report:
             val result = trace_report_v1(graph, build.sidecar_references, evidence, options.profile,
                 TraceRequirementCountV1(value: options.query.limit))
-            cmd_print_v1(trace_cmd_render_report_v1(result, options))
-            return cmd_exit_v1(result.verdict, false)
-    2
-
+            return cmd_result_v1(cmd_exit_v1(result.verdict, false), trace_cmd_render_report_v1(result, options))
+    cmd_result_v1(2, "")

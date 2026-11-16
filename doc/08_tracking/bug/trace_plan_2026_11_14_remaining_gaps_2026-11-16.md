@@ -26,9 +26,6 @@ flagged, but they break the "no primitive in public API" requirement:
   lost (documented in `doc/07_guide/app/mcp/mcp.md`).
 - Postings are rebuilt per store generation and only after 128 cache hits;
   there is no incremental update on append.
-- `simple_trace` validates `profile` but does not change enforcement by it, and
-  exposes only `operation: missing`.
-- `simple_test_query`: the TestDB-absent (no cold start) path has no spec.
 
 ## 4. Test query and harness
 
