@@ -1,0 +1,86 @@
+# Authored UNRUN. Actual parser, registry, registration and lexical mutations.
+use std.spec.*
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolKind, ScopeKind}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.context_helpers.*
+use compiler.hir.hir_lowering._Items.module_import_registration.*
+use compiler.hir.hir_lowering._Items.module_import_resolution.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+
+fn import_category_lowering_v1() -> HirLowering:
+    val path = "privacy/owner.spl"
+    val content = "pub struct Target:\n    value: i64\npri type Alias = Target\n"
+    val owner = parse_and_build_module(content, path)
+    val registry = module_surfaces_from_modules({"privacy.owner": owner},
+        [SourceFile(path: path, content: content, module_name: "privacy.owner")]).unwrap()
+    val lowering = HirLowering.with_filename("privacy/requester.spl")
+    lowering.module_surfaces = registry
+    lowering
+
+fn import_alias_category_v1(lowering: HirLowering) -> text:
+    lowering.register_imported_symbol_selected_v1(0, "privacy.owner", "Alias", "Alias", Span.empty(), true)
+
+describe "actual imported binding category survives transparent alias expansion":
+    it "retains alias selection when its canonical symbol is a public struct":
+        val lowering = import_category_lowering_v1()
+        expect(import_alias_category_v1(lowering)).to_equal("type_alias")
+        val bound = lowering.symbols.lookup_binding_v1("Alias")
+        expect(bound.symbol_id >= 0).to_equal(true)
+        val symbol = lowering.symbols.get_symbol_raw(bound.symbol_id).unwrap()
+        expect(symbol.kind).to_equal(SymbolKind.Struct)
+        expect(symbol.declaration_modifier_v1).to_equal("public")
+        lowering.reject_explicit_private_selected_import_v1(lowering.module_surfaces.surfaces[0],
+            "Alias", "type_alias", Span.empty())
+        var rejected = false
+        for diagnostic in lowering.errors:
+            if diagnostic.message.contains("cannot import explicitly private declaration"):
+                rejected = true
+        expect(rejected).to_equal(true)
+
+    it "returns the retained category on a warm memo hit":
+        val lowering = import_category_lowering_v1()
+        expect(import_alias_category_v1(lowering)).to_equal("type_alias")
+        val skips = lowering.registered_import_skip_count
+        expect(import_alias_category_v1(lowering)).to_equal("type_alias")
+        expect(lowering.registered_import_skip_count).to_equal(skips + 1)
+
+    it "does not reuse a memo after same-ID rebind or unbind tombstone":
+        val lowering = import_category_lowering_v1()
+        import_alias_category_v1(lowering)
+        val id = lowering.symbols.lookup_or_invalid("Alias")
+        val before = lowering.registered_import_memo_categories_v1.len()
+        lowering.symbols.rebind_local_type("Alias", id)
+        expect(import_alias_category_v1(lowering)).to_equal("type_alias")
+        expect(lowering.registered_import_memo_categories_v1.len()).to_be_greater_than(before)
+        val rebound = lowering.registered_import_memo_categories_v1.len()
+        lowering.symbols.unbind_local_type("Alias")
+        expect(import_alias_category_v1(lowering)).to_equal("type_alias")
+        expect(lowering.symbols.lookup_or_invalid("Alias").is_valid()).to_equal(true)
+        expect(lowering.registered_import_memo_categories_v1.len()).to_be_greater_than(rebound)
+
+    it "clears category ownership when symbol IDs restart for another module":
+        val lowering = import_category_lowering_v1()
+        import_alias_category_v1(lowering)
+        expect(lowering.registered_import_memo_categories_v1.len()).to_be_greater_than(0)
+        lowering.begin_module("privacy/next.spl")
+        expect(lowering.registered_import_memo_categories_v1.len()).to_equal(0)
+        expect(lowering.symbols.lookup_or_invalid("Alias").is_valid()).to_equal(false)
+        expect(import_alias_category_v1(lowering)).to_equal("type_alias")
+
+    it "records the selected lexical scope without borrowing an outer alias memo":
+        val lowering = import_category_lowering_v1()
+        import_alias_category_v1(lowering)
+        val outer = lowering.symbols.lookup_binding_v1("Alias")
+        val child = lowering.symbols.push_scope(ScopeKind.Block)
+        lowering.registering_lexical_import = true
+        expect(import_alias_category_v1(lowering)).to_equal("type_alias")
+        val inner = lowering.symbols.lookup_binding_v1("Alias")
+        expect(inner.scope_id).to_equal(child.id)
+        expect(inner.symbol_id).to_equal(outer.symbol_id)
+        lowering.symbols.pop_scope()
+        lowering.registering_lexical_import = false
+        expect(lowering.symbols.lookup_binding_v1("Alias").scope_id).to_equal(outer.scope_id)

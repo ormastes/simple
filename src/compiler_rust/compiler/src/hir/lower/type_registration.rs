@@ -617,3 +617,164 @@ impl Lowerer {
         Ok(())
     }
 }
+
+/// Static unit identity of an expression, for the SPL-UNIT-002 verdict table
+/// (same table as `interpreter/expr/ops.rs`). `Unknown` is never checked.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum UnitKind {
+    Unit(String),
+    Raw,
+    Unknown,
+}
+
+impl Lowerer {
+    pub(crate) fn simple_type_name(ty: &ast::Type) -> Option<String> {
+        match ty {
+            ast::Type::Simple(n) => Some(n.clone()),
+            _ => None,
+        }
+    }
+
+    /// `Some(Some(unit))` for a record unit, `Some(None)` for a raw numeric
+    /// scalar type name, `None` for anything else (unchecked).
+    pub(crate) fn unit_kind_of_type_name(&self, name: &str) -> Option<Option<String>> {
+        if self.record_unit_scalars.contains_key(name) {
+            return Some(Some(name.to_string()));
+        }
+        const RAW: [&str; 13] = [
+            "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "int", "float", "usize",
+        ];
+        RAW.contains(&name).then_some(None)
+    }
+
+    fn unit_kind_from_name(&self, name: Option<&String>) -> UnitKind {
+        match name.and_then(|n| self.unit_kind_of_type_name(n)) {
+            Some(Some(u)) => UnitKind::Unit(u),
+            Some(None) => UnitKind::Raw,
+            None => UnitKind::Unknown,
+        }
+    }
+
+    pub(crate) fn unit_kind_of_expr(&self, e: &ast::Expr, ctx: &FunctionContext) -> UnitKind {
+        use ast::{BinOp, Expr};
+        if self.record_unit_scalars.is_empty() {
+            return UnitKind::Unknown;
+        }
+        match e {
+            Expr::Integer(_) | Expr::Float(_) => UnitKind::Raw,
+            Expr::Identifier(n) => match ctx.local_unit_kinds.get(n) {
+                Some(Some(u)) => UnitKind::Unit(u.clone()),
+                Some(None) => UnitKind::Raw,
+                None => UnitKind::Unknown,
+            },
+            Expr::Unary { op: ast::UnaryOp::Neg, operand } => self.unit_kind_of_expr(operand, ctx),
+            Expr::FieldAccess { receiver, field } if field == "value" => {
+                match self.unit_kind_of_expr(receiver, ctx) {
+                    UnitKind::Unit(_) => UnitKind::Raw,
+                    _ => UnitKind::Unknown,
+                }
+            }
+            Expr::Call { callee, .. } => match callee.as_ref() {
+                Expr::Identifier(n) if self.record_unit_scalars.contains_key(n) => UnitKind::Unit(n.clone()),
+                Expr::Identifier(n) => match self.fn_sig_type_names.get(n) {
+                    Some((_, ret)) => self.unit_kind_from_name(ret.as_ref()),
+                    None => UnitKind::Unknown,
+                },
+                _ => UnitKind::Unknown,
+            },
+            Expr::Binary { op, left, right } => {
+                let (l, r) = (self.unit_kind_of_expr(left, ctx), self.unit_kind_of_expr(right, ctx));
+                let cmp = matches!(
+                    op,
+                    BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq
+                );
+                match (l, r) {
+                    (UnitKind::Unit(a), UnitKind::Unit(b)) if a == b && !cmp => match op {
+                        BinOp::Add | BinOp::Sub | BinOp::Mod => UnitKind::Unit(a),
+                        BinOp::Mul | BinOp::Div => UnitKind::Raw,
+                        _ => UnitKind::Unknown,
+                    },
+                    (UnitKind::Unit(a), UnitKind::Raw) if matches!(op, BinOp::Mul | BinOp::Div) => UnitKind::Unit(a),
+                    (UnitKind::Raw, UnitKind::Unit(b)) if matches!(op, BinOp::Mul) => UnitKind::Unit(b),
+                    (UnitKind::Raw, UnitKind::Raw) if !cmp => UnitKind::Raw,
+                    _ => UnitKind::Unknown,
+                }
+            }
+            _ => UnitKind::Unknown,
+        }
+    }
+
+    fn unit_deny(why: String) -> LowerError {
+        // The SIMPLE_JIT_STRICT marker keeps the driver from demoting this to
+        // the interpreter: the denial is the language rule, not a JIT gap.
+        LowerError::Unsupported(format!(
+            "SIMPLE_JIT_STRICT: SPL-UNIT-002: {why} is not an approved unit operation; \
+             convert explicitly through `.value`, or construct the intended unit"
+        ))
+    }
+
+    /// SPL-UNIT-002 for a binary operator (mirrors `interpreter/expr/ops.rs`).
+    pub(crate) fn check_unit_binary(
+        &self,
+        op: &ast::BinOp,
+        left: &ast::Expr,
+        right: &ast::Expr,
+        ctx: &FunctionContext,
+    ) -> LowerResult<()> {
+        use ast::BinOp;
+        let cmp = matches!(
+            op,
+            BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq
+        );
+        let arith = matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod);
+        if !(cmp || arith) || self.record_unit_scalars.is_empty() {
+            return Ok(());
+        }
+        let sym = format!("{op:?}");
+        let strict_scalar = cmp || matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mod);
+        match (self.unit_kind_of_expr(left, ctx), self.unit_kind_of_expr(right, ctx)) {
+            (UnitKind::Unit(l), UnitKind::Unit(r)) if l != r => {
+                Err(Self::unit_deny(format!("`{l} {sym} {r}`: distinct units never mix implicitly")))
+            }
+            (UnitKind::Unit(l), UnitKind::Raw) if strict_scalar => {
+                Err(Self::unit_deny(format!("`{l} {sym} <scalar>`")))
+            }
+            (UnitKind::Raw, UnitKind::Unit(r)) if strict_scalar => {
+                Err(Self::unit_deny(format!("`<scalar> {sym} {r}`")))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Passing unit A where unit B is declared is denied at a free-function call.
+    pub(crate) fn check_unit_call_args(
+        &self,
+        callee: &str,
+        args: &[ast::Argument],
+        ctx: &FunctionContext,
+    ) -> LowerResult<()> {
+        if self.record_unit_scalars.is_empty() {
+            return Ok(());
+        }
+        let Some((params, _)) = self.fn_sig_type_names.get(callee) else {
+            return Ok(());
+        };
+        for (i, arg) in args.iter().enumerate() {
+            if arg.name.is_some() {
+                continue;
+            }
+            let Some(Some(want)) = params.get(i).map(|p| p.as_ref().filter(|n| self.record_unit_scalars.contains_key(*n))) else {
+                continue;
+            };
+            if let UnitKind::Unit(got) = self.unit_kind_of_expr(&arg.value, ctx) {
+                if &got != want {
+                    return Err(Self::unit_deny(format!(
+                        "passing `{got}` for parameter {} of `{callee}` (expects `{want}`)",
+                        i + 1
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+}

@@ -1,0 +1,43 @@
+"""
+Declaration origin belongs to the canonical symbol, independently of requester
+or facade permissions. These tests use the production symbol owner and its
+binding/rename operations; no parser or native qualification is implied.
+"""
+use std.spec.*
+use compiler.hir.hir_types.{SymbolTable, SymbolKind}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.diagnostics.span.{Span}
+
+describe "canonical symbol declaration origin":
+    it "preserves explicit privacy through alias renaming without granting access":
+        step("Create and bind the real terminal declaration")
+        val symbols = SymbolTable.new()
+        val id = symbols.define("hidden", SymbolKind.Function, nil, Span.empty(), Visibility.Private, false, Some("feature.owner"))
+        val bound = symbols.bind_declaration_origin_v1(id, "feature.owner", "hidden", "pri", "/project/feature/owner.spl", "function:hidden")
+        expect(bound.is_ok()).to_equal(true)
+        expect(bound.unwrap()).to_equal(true)
+        symbols.rename_symbol(id, "renamed")
+        val symbol = symbols.get_symbol(id).unwrap()
+        expect(symbol.declaration_modifier_v1).to_equal("pri")
+        expect(symbol.declaration_projection_key_v1).to_equal("function:hidden")
+        expect(symbol.declaration_owner_v1).to_equal("feature.owner")
+        expect(symbol.visibility).to_equal(Visibility.Private)
+        expect(symbol.is_public).to_equal(false)
+
+    it "refuses conflicting origins on a reused canonical symbol":
+        step("Bind folder intent then attempt to replace it through another route")
+        val symbols = SymbolTable.new()
+        val id = symbols.define("local", SymbolKind.Function, nil, Span.empty(), Visibility.Private, false, Some("feature.owner"))
+        expect(symbols.bind_declaration_origin_v1(id, "feature.owner", "local", "omitted", "/project/feature/owner.spl", "function:local").is_ok()).to_equal(true)
+        expect(symbols.bind_declaration_origin_v1(id, "feature.owner", "local", "public", "/project/feature/owner.spl", "function:local").is_err()).to_equal(true)
+        expect(symbols.get_symbol(id).unwrap().declaration_modifier_v1).to_equal("omitted")
+
+    it "does not attach an alias declaration to its shared target symbol":
+        step("Offer type-alias origin to a canonical struct target")
+        val symbols = SymbolTable.new()
+        val id = symbols.define("Target", SymbolKind.Struct, nil, Span.empty(), Visibility.Private, false, Some("feature.owner"))
+        val alias = symbols.bind_declaration_origin_v1(id, "feature.owner", "Alias", "public", "/project/feature/owner.spl", "type_alias:Alias")
+        expect(alias.is_ok()).to_equal(true)
+        expect(alias.unwrap()).to_equal(false)
+        expect(symbols.get_symbol(id).unwrap().declaration_modifier_v1).to_equal("")

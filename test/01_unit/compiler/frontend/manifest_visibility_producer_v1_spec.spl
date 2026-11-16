@@ -1,0 +1,129 @@
+"""
+Actual parser and flat-cache manifest retention. Authored UNRUN while native
+builds are held; no canonical HIR codec or global visibility admission claim.
+"""
+use std.spec.*
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.config.{Logger}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module,
+    flat_pools_dump_all, flat_pools_restore_all, build_module_from_flat_pool_blob}
+use compiler.core.parser.{parser_has_errors}
+use compiler.core.ast.{decl_count, decl_get_manifest_role_v1, decl_set_manifest_role_v1}
+use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
+use compiler.frontend.parse_context.{parse_context_take, parse_context_install}
+use compiler.hir.hir_lowering.module_surface_declarations.{ModuleSurfaceParserOwner, module_surface_owner_value}
+use compiler.frontend.desugar.desugar_async.{desugar_module}
+
+val MANIFEST_SOURCE_V1 = "# é Unicode prefix\narch {\n    dimension = \"feature\"\n    layer = \"app\"\n    imports { allow = [\"unrelated\"] }\n    exports { expose = [\"./ports\", \"./é\"] }\n}\npub mod open_child\nmod closed_child\nuse .ordinary_import\n"
+val MANIFEST_PATH_V1 = "/snapshot/src/sample/__init__.spl"
+
+fn manifest_roles_v1() -> [text]:
+    var roles: [text] = []
+    for index in 0..decl_count():
+        val role = decl_get_manifest_role_v1(index)
+        if role != "": roles.push(role)
+    roles
+
+describe "REQ-VIS-MANIFEST producer":
+    it "retains real token facts and distinguishes explicit mod from use":
+        step("Parse actual arch and module declarations after a Unicode prefix")
+        val parsed = parse_and_build_module(MANIFEST_SOURCE_V1, MANIFEST_PATH_V1)
+        expect(parser_has_errors()).to_equal(false)
+        val facts = parsed.manifest_visibility_v1
+        expect(facts.valid).to_equal(true)
+        expect(facts.has_arch).to_equal(true)
+        expect(facts.dimension).to_equal("feature")
+        expect(facts.layer).to_equal("app")
+        expect(facts.expose_paths).to_equal(["./ports", "./é"])
+        expect(facts.child_names).to_equal(["open_child", "closed_child"])
+        expect(facts.child_visibilities).to_equal(["public", "private"])
+        expect(facts.child_modifiers).to_equal(["pub", "omitted"])
+        expect(parsed.domain_blocks.len()).to_equal(1)
+        expect(parsed.domain_blocks[0].payload).to_contain("\"feature\"")
+        expect(manifest_roles_v1()).to_equal(["domain", "child", "child"])
+
+    it "round trips roles and facts through real cache and parser owner transport":
+        step("Capture real parser pools, switch context, and restore the source-bound frame")
+        val parsed = parse_and_build_module(MANIFEST_SOURCE_V1, MANIFEST_PATH_V1)
+        val encoded = flat_pools_dump_all()
+        val context = parse_context_take()
+        expect(manifest_roles_v1().len()).to_equal(0)
+        parse_context_install(context)
+        expect(manifest_roles_v1()).to_equal(["domain", "child", "child"])
+        val restored = build_module_from_flat_pool_blob(encoded, MANIFEST_SOURCE_V1, MANIFEST_PATH_V1)
+        expect(restored.?).to_equal(true)
+        val retained = desugar_module(module_surface_owner_value(ModuleSurfaceParserOwner.new(restored.unwrap())))
+        expect(retained.manifest_visibility_v1.expose_paths).to_equal(parsed.manifest_visibility_v1.expose_paths)
+        expect(retained.manifest_visibility_v1.child_names).to_equal(["open_child", "closed_child"])
+        expect(retained.manifest_visibility_v1.child_modifiers).to_equal(["pub", "omitted"])
+        expect(retained.manifest_visibility_v1.valid).to_equal(true)
+        step("Reject the old cache schema and clear role admission")
+        expect(flat_pools_restore_all(encoded.replace(FLAT_POOL_CODEC_VERSION,
+            "spl-flatpool-v18-aspect-owner-declaration-intent-binding-v1"))).to_equal(false)
+        expect(manifest_roles_v1().len()).to_equal(0)
+
+    it "does not infer metadata from source strings or compiler helper spellings":
+        step("Parse a source-spelled helper expression and an ordinary import")
+        val spoof = parse_and_build_module("__domain_block(\"arch\", \"dimension = feature\")\nuse .child\n", MANIFEST_PATH_V1)
+        expect(spoof.manifest_visibility_v1.has_arch).to_equal(false)
+        expect(spoof.manifest_visibility_v1.child_names.len()).to_equal(0)
+        expect(spoof.domain_blocks.len()).to_equal(0)
+        expect(manifest_roles_v1().len()).to_equal(0)
+
+    it "rejects duplicate, nonliteral, nested-lookalike and malformed facts":
+        step("Duplicate dimensions and computed policy values cannot produce valid facts")
+        val duplicate = parse_and_build_module("arch { dimension = \"feature\"; dimension = \"other\" }\n", MANIFEST_PATH_V1)
+        expect(duplicate.manifest_visibility_v1.valid).to_equal(false)
+        val computed = parse_and_build_module("arch { dimension = \"fea\" + \"ture\" }\n", MANIFEST_PATH_V1)
+        expect(computed.manifest_visibility_v1.valid).to_equal(false)
+        val nested = parse_and_build_module("arch { imports { dimension = \"feature\" } }\n", MANIFEST_PATH_V1)
+        expect(nested.manifest_visibility_v1.dimension).to_equal("")
+        val malformed = parse_and_build_module("arch { exports { expose = [\"a\" \"b\"] } }\n", MANIFEST_PATH_V1)
+        expect(malformed.manifest_visibility_v1.valid).to_equal(false)
+        val two = parse_and_build_module("arch {}\narch {}\n", MANIFEST_PATH_V1)
+        expect(two.manifest_visibility_v1.valid).to_equal(false)
+
+    it "rejects a role inconsistent with its actual flat declaration kind":
+        step("Mutate an actual use record to the domain-only role before encoding")
+        val parsed = parse_and_build_module("use .child\n", MANIFEST_PATH_V1)
+        expect(decl_count()).to_be_greater_than(0)
+        decl_set_manifest_role_v1(0, "domain")
+        val corrupted = flat_pools_dump_all()
+        expect(flat_pools_restore_all(corrupted)).to_equal(false)
+        expect(manifest_roles_v1().len()).to_equal(0)
+
+    it "retains facts through the actual full frontend alongside extracted raw domains":
+        val source = MANIFEST_SOURCE_V1 + "schema{ fixture }\n"
+        val parsed = parse_full_frontend(source, MANIFEST_PATH_V1, "sample", Logger(level: 0))
+        expect(parser_has_errors()).to_equal(false)
+        expect(parsed.manifest_visibility_v1.has_arch).to_equal(true)
+        expect(parsed.manifest_visibility_v1.dimension).to_equal("feature")
+        expect(parsed.manifest_visibility_v1.child_names).to_equal(["open_child", "closed_child"])
+        expect(parsed.domain_blocks.len()).to_equal(2)
+        expect(parsed.domain_blocks[0].kind).to_equal("arch")
+        expect(parsed.domain_blocks[1].kind).to_equal("schema")
+
+    it "preserves config metadata behavior and refuses dotted child policy":
+        val config = parse_and_build_module("config { value = 1 }\nmetadata { value = 2 }\n", MANIFEST_PATH_V1)
+        expect(config.domain_blocks.len()).to_equal(2)
+        expect(config.domain_blocks[0].payload).to_equal("")
+        expect(config.domain_blocks[1].payload).to_equal("")
+        expect(config.manifest_visibility_v1.has_arch).to_equal(false)
+        val dotted = parse_and_build_module("pub mod foo.bar\n", MANIFEST_PATH_V1)
+        expect(dotted.manifest_visibility_v1.valid).to_equal(false)
+        expect(dotted.manifest_visibility_v1.child_names.len()).to_equal(0)
+        expect(dotted.imports[0].module).to_equal(".bar")
+
+    it "retains exact omitted and pri child modifiers despite identical legacy visibility":
+        val parsed = parse_and_build_module("mod folder_child\npri mod file_child\npub mod public_child\n", MANIFEST_PATH_V1)
+        expect(parser_has_errors()).to_equal(false)
+        val facts = parsed.manifest_visibility_v1
+        expect(facts.valid).to_equal(true)
+        expect(facts.child_names).to_equal(["folder_child", "file_child", "public_child"])
+        expect(facts.child_visibilities).to_equal(["private", "private", "public"])
+        expect(facts.child_modifiers).to_equal(["omitted", "pri", "pub"])
+        val restored = build_module_from_flat_pool_blob(flat_pools_dump_all(),
+            "mod folder_child\npri mod file_child\npub mod public_child\n", MANIFEST_PATH_V1)
+        expect(restored.?).to_equal(true)
+        val owned = module_surface_owner_value(ModuleSurfaceParserOwner.new(restored.unwrap()))
+        expect(owned.manifest_visibility_v1.child_modifiers).to_equal(["omitted", "pri", "pub"])

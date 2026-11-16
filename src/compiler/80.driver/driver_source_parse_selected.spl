@@ -1,3 +1,18 @@
+use compiler.common.cache_contract.directory_macro_projection_v2.{DirectoryMacroProjectionV2}
+use compiler.driver.cache.directory_macro_capture_v2.{directory_macro_capture_no_reads_v2}
+use compiler.frontend.cache_artifact.macro_category_projection_v2.{MacroCategoryDraftV2, macro_category_capture_draft_v2}
+use compiler.driver.cache.directory_aspect_capture_v2.{directory_aspect_capture_v2}
+use compiler.common.cache_contract.directory_aspect_draft_v2.{DirectoryAspectDraftV2}
+use compiler.common.cache_contract.directory_category_projection_v2.{DirectoryCategoryProjectionV2,
+    directory_category_projection_valid_v2}
+use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_trait_root_v2,
+    module_surface_extension_root_v2}
+use compiler.core.frontend.{parser_provider_v1_default, parser_provider_v1_name}
+use compiler.frontend.frontend_advisory_preprocess_port_v1.{FrontendAdvisoryPreprocessPolicyV1}
+use compiler.common.cache.visibility_manifest_policy_v1.{VisibilityManifestPolicyV1}
+use compiler.common.cache.visibility_manifest_read_v1.{VisibilityManifestReadV1}
+use compiler.common.dependency.manifest_visibility_v1.{ParserManifestVisibilityV1}
+use compiler.common.driver_source_file.{source_file_with_manifest_evidence_v1}
 # CompilerDriver phase-2 source parsing.
 
 use compiler.driver.cache.tldr_layout_v1.{tldr_dir_v1}
@@ -24,7 +39,7 @@ use compiler.frontend.frontend_target_cfg_receipt_v1.{frontend_cfg_receipt_valid
 use compiler.frontend.core.parser_preprocessor.{pp_declare_parse_scope}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.frontend.core.lexer_struct.{core_token_text_intern_reset}
-use compiler.frontend.aspect_registry.{aspect_registry_promote_transient_owner}
+use compiler.frontend.aspect_registry.{aspect_registry_promote_transient_owner, aspect_registry_seal_parser_inventory_v2}
 use compiler.frontend.effect_registry.{effect_registry_promote_transient_owner}
 use compiler.frontend.rt_criticality_registry.{rt_criticality_promote_transient_owner}
 use compiler.frontend.layer_eq_registry.{layer_eq_registry_promote_transient_owner}
@@ -112,6 +127,51 @@ use compiler.driver.driver_source_parse_support.{
 }
 
 impl CompilerDriver:
+    # Called only after successful full parsing while the AST scope is alive.
+    # Missing target decisions or policy identity conservatively omit the row.
+    me project_directory_categories_v2(owner: ModuleSurfaceParserOwner,
+        source_path: text, canonical_path: text, source_content: text,
+        surface_text: text, worker_mode: i64) -> DirectoryCategoryProjectionV2?:
+        if worker_mode == 2 or surface_text != source_content or
+                self.ctx.runtime_std_full_inventory_selection.is_none() or
+                not self.ctx.runtime_std_cfg_source_identity_by_path.has(source_path):
+            return None
+        val identity = self.ctx.runtime_std_cfg_source_identity_by_path[source_path]
+        if not self.ctx.runtime_std_cfg_decisions.has(identity): return None
+        val decision = self.ctx.runtime_std_cfg_decisions[identity]
+        val source_digest = sha256_text(source_content)
+        if not frontend_cfg_receipt_valid_v1(decision, identity, source_digest,
+                self.ctx.native_target): return None
+        val projection = DirectoryCategoryProjectionV2(
+            canonical_path: canonical_path, source_identity: identity,
+            source_digest: source_digest, target_triple: self.ctx.native_target,
+            preprocessed_digest: decision.preprocessed_digest,
+            cfg_decision_digest: decision.decision_digest,
+            environment_policy_digest: self.ctx.environment_variant_policy_digest,
+            trait_root: module_surface_trait_root_v2(owner.traits),
+            extension_root: module_surface_extension_root_v2(owner.impls, owner.extend_enums))
+        if not directory_category_projection_valid_v2(projection): return None
+        Some(projection)
+
+    me project_directory_macro_draft_v2(source_path: text, module_name: text,
+            source_content: text, projection: DirectoryCategoryProjectionV2?,
+            parser_before: i64) -> MacroCategoryDraftV2?:
+        if projection.is_none() or self.ctx.directory_source_epoch_v2.is_none() or
+                parser_initialization_generation_v1() <= parser_before: return None
+        val category = projection.unwrap()
+        if not self.ctx.runtime_std_cfg_decisions.has(category.source_identity): return None
+        val observed = self.ctx.kernel_image_digest_provider()
+        if observed.is_err(): return None
+        # Preserve the existing module_artifacts namespace policy. This is not
+        # package-scope authority, and no provisional imports become projectable.
+        val captured = macro_category_capture_draft_v2("", module_name, source_path,
+            category.source_identity, source_content,
+            self.ctx.runtime_std_cfg_decisions[category.source_identity],
+            category.target_triple, category.environment_policy_digest,
+            observed.unwrap().sha256, self.ctx.directory_source_epoch_v2.unwrap())
+        if captured.is_err(): return None
+        Some(captured.unwrap())
+
     me promote_target_cfg_receipt_v1(source_path: text) -> bool:
         if self.ctx.runtime_std_full_inventory_selection == nil:
             return true
@@ -273,6 +333,85 @@ impl CompilerDriver:
             case Err(_): Err(
                 "required environment variant frontend provider unavailable for {source_path}")
 
+    # Parse an implicit manifest under the same selected frontend policy as
+    # ordinary sources, retaining only metadata. This method never creates a
+    # ModuleSurface or follows the manifest's imports/executable declarations.
+    me parse_visibility_manifest_policy_v1(content: text, observation: VisibilityManifestReadV1,
+            coverage_root: text, module_name: text) -> Result<VisibilityManifestPolicyV1, text>:
+        val path = observation.manifest_path
+        # Initialise the actual producer fingerprint outside scratch so its
+        # process memo never borrows storage from this policy parse.
+        val frontend_identity = native_build_frontend_identity()
+        ast_prepare_persistent_owner_v1()
+        val generation = parser_initialization_generation_v1()
+        if not driver_parse_transient_scope_begin_v1():
+            return Err("manifest parser scope unavailable: " + path)
+        # Policy provider provenance is from a fresh actual parse. Existing
+        # private/shared flat-cache restoration is deliberately disabled here.
+        val parsed = self.parse_full_frontend_in_borrowed_scope_selected_uncached_v1(content, path, module_name)
+        var projected: Result<VisibilityManifestPolicyV1, text> = Err("manifest projection unavailable")
+        match parsed:
+            case Err(reason): projected = Err(reason)
+            case Ok(module):
+                if par_had_error_get():
+                    projected = Err(driver_parse_error_message(path))
+                else:
+                    val facts: ParserManifestVisibilityV1 = module.manifest_visibility_v1
+                    val policy = VisibilityManifestPolicyV1.from_facts(path,
+                        observation.directory_path, coverage_root, observation.content_sha256,
+                        observation.snapshot_id, facts)
+                    val friend_modules: [text] = module.friends
+                    val internal_exports: [text] = module.internal_exports
+                    policy.friend_modules = friend_modules.copy()
+                    policy.internal_exports = internal_exports.copy()
+                    policy.frontend_identity = frontend_identity
+                    policy.parser_provider_id = parser_provider_v1_name(parser_provider_v1_default())
+                    policy.advisory_policy = match self.ctx.frontend_advisory_policy:
+                        case FrontendAdvisoryPreprocessPolicyV1.Reference: "reference"
+                        case FrontendAdvisoryPreprocessPolicyV1.PreferSimd: "prefer-simd"
+                        case FrontendAdvisoryPreprocessPolicyV1.RequireSimd: "require-simd"
+                    policy.advisory_identity = self.ctx.environment_variant_frontend_cache_identity
+                    policy.frontend_route = "advisory-selected"
+                    policy.target_triple = self.ctx.native_target
+                    policy.preprocessed_source_sha256 = module.source_declaration_digest_v1
+                    if self.ctx.runtime_std_full_inventory_selection.?:
+                        # The target-receipted owner explicitly selects the
+                        # reference advisory, independently of ctx preference.
+                        policy.frontend_route = "target-cfg-reference"
+                        policy.advisory_policy = "reference"
+                        policy.advisory_identity = ""
+                    if self.ctx.runtime_std_full_inventory_selection.? and
+                            self.ctx.runtime_std_cfg_source_identity_by_path.has(path):
+                        val identity = self.ctx.runtime_std_cfg_source_identity_by_path[path]
+                        if self.ctx.runtime_std_cfg_decisions.has(identity):
+                            val receipt = self.ctx.runtime_std_cfg_decisions[identity]
+                            policy.cfg_receipt_present = true
+                            policy.cfg_source_identity = receipt.source_identity
+                            policy.cfg_preprocessed_sha256 = receipt.preprocessed_digest
+                            policy.cfg_decision_digest = receipt.decision_digest
+                    projected = Ok(policy)
+        if not driver_parse_transient_scope_pause_v1():
+            val _ended = driver_end_transient_parse_scope()
+            return Err("manifest parser scope pause failed: " + path)
+        val owners_ok = driver_promote_retained_frontend_owners_v1(
+            parser_initialization_generation_v1() != generation)
+        val receipt_ok = if parsed.is_ok(): self.promote_target_cfg_receipt_v1(path) else: true
+        # Rebox on the paused heap and promote only the compact policy/error.
+        # The full ParserModule and executable bodies die with this scope.
+        var reboxed: Result<VisibilityManifestPolicyV1, text> = Err("manifest result was not reboxed")
+        var payload_ok = false
+        match projected:
+            case Ok(policy):
+                payload_ok = rt_transient_heap_promote(policy)
+                reboxed = Ok(policy)
+            case Err(reason):
+                payload_ok = rt_transient_heap_promote(reason)
+                reboxed = Err(reason)
+        val ended = driver_end_transient_parse_scope()
+        if not (owners_ok and receipt_ok and payload_ok and ended):
+            return Err("manifest projection ownership failed: " + path)
+        reboxed
+
     me add_streaming_module_surface(
         builder: ModuleSurfaceBuilder,
         source_path: text,
@@ -296,14 +435,20 @@ impl CompilerDriver:
         val parser_generation = parser_initialization_generation_v1()
         if not driver_parse_transient_scope_begin_v1():
             return Err("transient parser scope unavailable for {source_path}")
-        val source = SourceFile(
+        var source = SourceFile(
             path: source_path,
             authored_path: source_authored_path,
             content: source_content,
             module_name: source_module_name)
+        if source_index < self.ctx.source_manifest_evidence_owner_v1.len():
+            source = source_file_with_manifest_evidence_v1(source,
+                self.ctx.source_manifest_evidence_owner_v1[source_index])
         # Step-3 lazy restore: an opted-in HIR shard worker builds the surface
         # from the module skeleton (driver_hir_worker_surface_v1.spl).
-        val surface_text = if frozen_parse_text != nil:
+        val is_manifest_source = source.visibility_manifest_complete_v1 and source_path.ends_with("/__init__.spl")
+        val surface_text = if is_manifest_source:
+            source_content
+        elif frozen_parse_text.is_some():
             frozen_parse_text.unwrap()
         elif worker_mode == 2:
             ""
@@ -362,6 +507,23 @@ impl CompilerDriver:
         # Surface extraction then crosses the module boundary by class
         # reference instead of copying every executable body by value.
         val module_owner = ModuleSurfaceParserOwner.new(module)
+        val category_projection = self.project_directory_categories_v2(module_owner,
+            source_path, canonical_path, source_content, surface_text, worker_mode)
+        # Only this successful full-source parse can seal the parser family's
+        # known-empty state. Cached/skeleton parses leave it unavailable.
+        if category_projection.is_some() and self.ctx.directory_source_epoch_v2.is_some() and
+                parser_initialization_generation_v1() > parser_generation:
+            val _sealed = aspect_registry_seal_parser_inventory_v2(source_path, true)
+        val aspect_draft: DirectoryAspectDraftV2? = if category_projection.is_some() and self.ctx.directory_source_epoch_v2.is_some():
+            directory_aspect_capture_v2(module_owner, source_path, category_projection.unwrap(),
+                self.ctx.directory_source_epoch_v2.unwrap(), parser_generation, parser_initialization_generation_v1())
+        else: None
+        val macro_draft = self.project_directory_macro_draft_v2(source_path,
+            source_module_name, source_content, category_projection, parser_generation)
+        var macro_projection: DirectoryMacroProjectionV2? = None
+        if macro_draft.is_some() and category_projection.is_some():
+            val projected = directory_macro_capture_no_reads_v2(macro_draft.unwrap(), category_projection.unwrap())
+            if projected.is_ok(): macro_projection = Some(projected.unwrap())
         val declaration_only = driver_native_parser_can_persist_objectless(module_owner)
         val surface_result = module_surface_from_owner(
             module_owner, source, source_index)
@@ -393,6 +555,18 @@ impl CompilerDriver:
                 parser_initialization_generation_v1() != parser_generation):
             val _ended = driver_end_transient_parse_scope()
             return Err("frontend registry promotion failed for {source_path}")
+        if category_projection.is_some() and not rt_transient_heap_promote(category_projection):
+            val _ended = driver_end_transient_parse_scope()
+            return Err("directory category projection promotion failed for {source_path}")
+        if aspect_draft.is_some() and not rt_transient_heap_promote(aspect_draft):
+            if not driver_end_transient_parse_scope(): panic("aspect draft scope close failed")
+            return Err("directory aspect draft promotion failed for {source_path}")
+        if macro_draft.is_some() and not rt_transient_heap_promote(macro_draft):
+            if not driver_end_transient_parse_scope(): panic("macro draft scope close failed")
+            return Err("directory macro draft promotion failed for {source_path}")
+        if macro_projection.is_some() and not rt_transient_heap_promote(macro_projection):
+            if not driver_end_transient_parse_scope(): panic("macro projection scope close failed")
+            return Err("directory macro projection promotion failed for {source_path}")
         if not module_surface_promote(surface):
             val _ended = driver_end_transient_parse_scope()
             return Err("module surface promotion failed for {source_path}")
@@ -406,6 +580,15 @@ impl CompilerDriver:
             surface, source_module_name, canonical_path)
         if add_result.is_err():
             return Err(add_result.unwrap_err())
+        if category_projection.is_some():
+            val projected = category_projection.unwrap()
+            self.ctx.directory_category_projections_v2[projected.canonical_path] = projected
+        if val captured = aspect_draft:
+            self.ctx.directory_aspect_drafts_v2[captured.source.canonical_path] = captured
+        if val captured = macro_draft:
+            self.ctx.directory_macro_drafts_v2[canonical_path] = captured
+        if val projected = macro_projection:
+            self.ctx.directory_macro_projections_v2[canonical_path] = projected
         # The transient scope is already closed: only allocate the digest/key
         # and persistent proof row now, never retain ParserModule or its bodies.
         if declaration_only and worker_mode != 2 and frozen_parse_text == nil:

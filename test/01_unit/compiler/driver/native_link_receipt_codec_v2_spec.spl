@@ -1,0 +1,95 @@
+# Pure codec contract using production SHA-256. Expected link inputs below
+# model caller-owned current identities, never values read from the receipt.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.native_initializer_result_v2.{NativeInitializerStartupV2}
+use compiler.driver.driver_build.native_link_receipt_codec_v2.{native_link_receipt_render_v2, native_link_receipt_startup_read_v2}
+
+fn link_v2_startup(names: [text]) -> NativeInitializerStartupV2:
+    NativeInitializerStartupV2(ordered_init_symbols: names,
+        entry_source_digest: sha256_text("entry source"), entry_object_digest: sha256_text("entry object"))
+
+fn link_v2_record(names: [text]) -> text:
+    native_link_receipt_render_v2(sha256_text("link key"), sha256_text("output"),
+        [sha256_text("first"), sha256_text("second"), sha256_text("first")], link_v2_startup(names)).unwrap()
+
+fn link_v2_read(content: text) -> NativeInitializerStartupV2?:
+    native_link_receipt_startup_read_v2(content, sha256_text("link key"), sha256_text("output"),
+        [sha256_text("first"), sha256_text("second"), sha256_text("first")])
+
+describe "Native link receipt v2 startup codec":
+    it "preserves startup order and repeated object digests":
+        val record = link_v2_record(["__module_init_z", "__module_init_a"])
+        val startup = link_v2_read(record).unwrap()
+        expect(startup.ordered_init_symbols[0]).to_equal("__module_init_z")
+        expect(startup.ordered_init_symbols[1]).to_equal("__module_init_a")
+        expect(startup.entry_source_digest).to_equal(sha256_text("entry source"))
+        expect(startup.entry_object_digest).to_equal(sha256_text("entry object"))
+        expect(record == link_v2_record(["__module_init_a", "__module_init_z"])).to_equal(false)
+
+    it "represents checked empty startup distinctly from an old or unknown schema":
+        val record = link_v2_record([])
+        expect(link_v2_read(record).unwrap().ordered_init_symbols.len()).to_equal(0)
+        expect(link_v2_read(record.replace("simple-link-receipt: 2", "simple-link-receipt: 1"))).to_be_nil()
+        expect(link_v2_read(record.replace("simple-link-receipt: 2", "simple-link-receipt: 3"))).to_be_nil()
+        val legacy = "simple-link-receipt: 1\nkey: " + sha256_text("link key") + "\noutput-sha256: " + sha256_text("output") + "\n"
+        expect(link_v2_read(legacy)).to_be_nil()
+
+    it "binds the actual current key output and object order":
+        val record = link_v2_record([])
+        val objects = [sha256_text("first"), sha256_text("second"), sha256_text("first")]
+        expect(native_link_receipt_startup_read_v2(record, sha256_text("other"), sha256_text("output"), objects)).to_be_nil()
+        expect(native_link_receipt_startup_read_v2(record, sha256_text("link key"), sha256_text("changed output"), objects)).to_be_nil()
+        expect(native_link_receipt_startup_read_v2(record, sha256_text("link key"), sha256_text("output"), [objects[1], objects[0], objects[2]])).to_be_nil()
+        expect(native_link_receipt_startup_read_v2(record, sha256_text("link key"), sha256_text("output"), [objects[0], objects[1]])).to_be_nil()
+
+    it "rejects malformed counts checksum corruption truncation and trailing data":
+        val record = link_v2_record(["__module_init_x"])
+        expect(link_v2_read(record.replace("init-count: 1", "init-count: 01"))).to_be_nil()
+        expect(link_v2_read(record.replace("init-count: 1", "init-count: +1"))).to_be_nil()
+        expect(link_v2_read(record.replace("init-count: 1", "init-count: 65537"))).to_be_nil()
+        expect(link_v2_read(record.replace("__module_init_x", "__module_init_y"))).to_be_nil()
+        expect(link_v2_read(record.replace("receipt-sha256:", "wrong-sha256:"))).to_be_nil()
+        expect(link_v2_read(record.substring(0, record.len() - 1))).to_be_nil()
+        expect(link_v2_read(record + "extra\n")).to_be_nil()
+
+    it "rejects duplicate and non-discovery initializer names":
+        val key = sha256_text("link key")
+        val output = sha256_text("output")
+        expect(native_link_receipt_render_v2(key, output, [], link_v2_startup(["__module_init_x", "__module_init_x"]))).to_be_nil()
+        expect(native_link_receipt_render_v2(key, output, [], link_v2_startup(["ordinary_function"]))).to_be_nil()
+        expect(native_link_receipt_render_v2(key, output, [], link_v2_startup(["__module_init_unsafe\nrow"]))).to_be_nil()
+        expect(native_link_receipt_render_v2(key, output, [], link_v2_startup(["__module_init_bad-name"]))).to_be_nil()
+
+    it "binds both startup source and object digests in the sealed record":
+        val record = link_v2_record([])
+        expect(link_v2_read(record.replace(sha256_text("entry source"), sha256_text("new source")))).to_be_nil()
+        expect(link_v2_read(record.replace(sha256_text("entry object"), sha256_text("new object")))).to_be_nil()
+        val changed = NativeInitializerStartupV2(ordered_init_symbols: [], entry_source_digest: sha256_text("new source"), entry_object_digest: sha256_text("entry object"))
+        val changed_record = native_link_receipt_render_v2(sha256_text("link key"), sha256_text("output"), [sha256_text("first"), sha256_text("second"), sha256_text("first")], changed).unwrap()
+        expect(record == changed_record).to_equal(false)
+        expect(link_v2_read(changed_record).unwrap().entry_source_digest).to_equal(sha256_text("new source"))
+
+    it "validates trusted inputs and rejects oversized symbol or excessive line counts":
+        val record = link_v2_record([])
+        expect(native_link_receipt_startup_read_v2(record, "invalid", sha256_text("output"), [])).to_be_nil()
+        expect(native_link_receipt_render_v2(sha256_text("link key"), sha256_text("output"), ["bad digest"], link_v2_startup([]))).to_be_nil()
+        var long_symbol = "__module_init_"
+        while long_symbol.byte_len() <= 1024: long_symbol = long_symbol + "x"
+        expect(native_link_receipt_render_v2(sha256_text("link key"), sha256_text("output"), [], link_v2_startup([long_symbol]))).to_be_nil()
+        var lines = "\n"
+        var power = 0
+        while power < 18:
+            lines = lines + lines
+            power = power + 1
+        expect(link_v2_read(lines)).to_be_nil()
+
+    it "rejects records beyond the byte cap before parsing":
+        var oversized = "x"
+        var power = 0
+        while power < 24:
+            oversized = oversized + oversized
+            power = power + 1
+        oversized = oversized + "x"
+        expect(oversized.byte_len()).to_equal(16777217)
+        expect(link_v2_read(oversized)).to_be_nil()

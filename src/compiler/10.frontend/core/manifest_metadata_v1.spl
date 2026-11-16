@@ -1,0 +1,150 @@
+# Structural metadata parser. Input comes from the real lexer, never source
+# substring matching. Unrelated blocks remain opaque and cannot supply policy.
+use compiler.common.dependency.manifest_visibility_v1.{ParserManifestVisibilityV1}
+use compiler.core.tokens.{TOK_IDENT, TOK_STRING_LIT, TOK_ASSIGN, TOK_LBRACE, TOK_RBRACE,
+    TOK_LBRACKET, TOK_RBRACKET, TOK_NEWLINE, TOK_INDENT, TOK_DEDENT,
+    TOK_COMMA, TOK_SEMICOLON}
+
+class ManifestMetadataCursorV1:
+    kinds: [i64]
+    values: [text]
+    pos: i64 = 0
+    valid: bool = true
+
+    fn kind() -> i64:
+        if self.pos < self.kinds.len(): self.kinds[self.pos] else: -1
+
+    fn layout():
+        while self.kind() == TOK_NEWLINE or self.kind() == TOK_INDENT or
+                self.kind() == TOK_DEDENT or self.kind() == TOK_SEMICOLON or
+                self.kind() == TOK_COMMA:
+            self.pos = self.pos + 1
+
+    fn take(expected: i64) -> bool:
+        if self.kind() != expected:
+            self.valid = false
+            return false
+        self.pos = self.pos + 1
+        true
+
+    fn string_value() -> text:
+        if not self.take(TOK_STRING_LIT): return ""
+        val value = self.values[self.pos - 1]
+        # Permission values are literals. Interpolation must never be evaluated
+        # as compiler policy, including a string that resembles a path.
+        if value.contains("{") or value.contains("}"):
+            self.valid = false
+        value
+
+    fn end_value():
+        val kind = self.kind()
+        if kind != -1 and kind != TOK_NEWLINE and kind != TOK_INDENT and
+                kind != TOK_DEDENT and kind != TOK_SEMICOLON and
+                kind != TOK_COMMA and kind != TOK_RBRACE:
+            self.valid = false
+
+    fn skip_entry():
+        var braces = 0
+        var brackets = 0
+        while self.pos < self.kinds.len():
+            val kind = self.kind()
+            if braces == 0 and brackets == 0 and (kind == TOK_NEWLINE or
+                    kind == TOK_SEMICOLON or kind == TOK_COMMA or kind == TOK_RBRACE):
+                return
+            if kind == TOK_LBRACE: braces = braces + 1
+            elif kind == TOK_RBRACE:
+                braces = braces - 1
+                if braces < 0:
+                    self.valid = false
+                    return
+            elif kind == TOK_LBRACKET: brackets = brackets + 1
+            elif kind == TOK_RBRACKET:
+                brackets = brackets - 1
+                if brackets < 0: self.valid = false
+            self.pos = self.pos + 1
+            if kind == TOK_RBRACE and braces == 0 and brackets == 0: return
+        if braces != 0 or brackets != 0: self.valid = false
+
+    fn exposes() -> [text]:
+        var paths: [text] = []
+        if not self.take(TOK_LBRACKET): return paths
+        self.layout()
+        while self.valid and self.kind() != TOK_RBRACKET:
+            if self.kind() == -1:
+                self.valid = false
+                break
+            val path = self.string_value()
+            if path == "" or paths.contains(path): self.valid = false
+            paths.push(path)
+            # Require commas; layout alone cannot join adjacent string tokens.
+            while self.kind() == TOK_NEWLINE or self.kind() == TOK_INDENT or self.kind() == TOK_DEDENT:
+                self.pos = self.pos + 1
+            if self.kind() == TOK_COMMA:
+                self.pos = self.pos + 1
+                self.layout()
+            elif self.kind() != TOK_RBRACKET:
+                self.valid = false
+        if self.valid: self.take(TOK_RBRACKET)
+        paths
+
+pub fn parser_manifest_arch_tokens_v1(kinds: [i64], values: [text]) -> ParserManifestVisibilityV1:
+    var facts = ParserManifestVisibilityV1(has_arch: true)
+    if kinds.len() != values.len():
+        facts.valid = false
+        return facts
+    val cursor = ManifestMetadataCursorV1(kinds: kinds, values: values)
+    var seen_dimension = false
+    var seen_layer = false
+    var seen_exports = false
+    cursor.layout()
+    while cursor.valid and cursor.pos < kinds.len():
+        if cursor.kind() != TOK_IDENT:
+            cursor.valid = false
+            break
+        val key = values[cursor.pos]
+        cursor.pos = cursor.pos + 1
+        if key == "dimension" or key == "layer":
+            if not cursor.take(TOK_ASSIGN): break
+            val value = cursor.string_value()
+            if value == "": cursor.valid = false
+            if key == "dimension":
+                if seen_dimension: cursor.valid = false
+                seen_dimension = true
+                facts.dimension = value
+            else:
+                if seen_layer: cursor.valid = false
+                seen_layer = true
+                facts.layer = value
+            cursor.end_value()
+        elif key == "exports":
+            if seen_exports: cursor.valid = false
+            seen_exports = true
+            if not cursor.take(TOK_LBRACE): break
+            var seen_expose = false
+            cursor.layout()
+            while cursor.valid and cursor.kind() != TOK_RBRACE:
+                if cursor.kind() == -1:
+                    cursor.valid = false
+                    break
+                if cursor.kind() != TOK_IDENT:
+                    cursor.valid = false
+                    break
+                val export_key = values[cursor.pos]
+                cursor.pos = cursor.pos + 1
+                if export_key == "expose":
+                    if seen_expose: cursor.valid = false
+                    seen_expose = true
+                    if not cursor.take(TOK_ASSIGN): break
+                    facts.expose_paths = cursor.exposes()
+                    cursor.end_value()
+                else:
+                    cursor.skip_entry()
+                cursor.layout()
+            if cursor.valid: cursor.take(TOK_RBRACE)
+        else:
+            cursor.skip_entry()
+        cursor.layout()
+    facts.valid = cursor.valid
+    facts
+
+export parser_manifest_arch_tokens_v1

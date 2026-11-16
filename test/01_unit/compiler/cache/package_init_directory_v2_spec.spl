@@ -1,0 +1,215 @@
+# @req REQ-DTA-A1 REQ-DTA-C1 REQ-DTA-H1 REQ-DTA-H2 REQ-DTA-H4
+use std.spec.*
+use std.common.crypto.sha256.{sha256_u8_hex, sha256_text}
+use std.common.structural.wire.{wire_check_envelope, wire_magic}
+use compiler.common.cache_contract.package_init_tld_v1.{PackageInitTldV1,
+    package_init_tld_valid_v1, package_init_tld_schema_v1,
+    package_init_tld_encode_v1, package_init_tld_decode_v1,
+    package_init_tld_physical_binding_valid_v1}
+use compiler.common.cache_contract.package_init_directory_v2.{FileTldrDigestV2,
+    directory_file_tldr_root_v2, package_init_directory_produce_v2,
+    package_init_directory_compare_v2, package_init_directory_identity_v2,
+    package_init_directory_produce_v3, package_init_directory_compare_v3, package_init_directory_identity_v3}
+use compiler.common.cache_contract.aspect_match_shard_v1.{
+    DirectoryJoinPointFactsV1, JoinPointFactV1, directory_join_point_facts_v1}
+
+use compiler.common.cache_contract.physical_tld_v1.{TldPayloadRoleV1,
+    TldSectionRefV1, PhysicalTldHeaderV1, PhysicalTldObjectV1,
+    physical_tld_section_table_digest_v1}
+
+use compiler.driver.cache.directory_tldr_producer_v2.{directory_tldr_from_reader_v2}
+use compiler.driver.cache.source_reader_v1.{SourceReader}
+use compiler.frontend.parser_types.{ParserModule}
+
+struct DirectoryFixtureReaderV2:
+    a_tldr: text
+    b_tldr: text
+
+impl SourceReader for DirectoryFixtureReaderV2:
+    fn read_src(path: text) -> ParserModule?: nil
+    fn read_tldr(path: text) -> text:
+        if path == "pkg/a.spl": return self.a_tldr
+        if path == "pkg/b.spl": return self.b_tldr
+        ""
+    fn update_src(path: text) -> bool: false
+    fn update_tldr(path: text) -> text: "fixture is immutable"
+
+fn physical_package(record: [u8]) -> PhysicalTldObjectV1:
+    val digest = sha256_u8_hex(record)
+    val section = TldSectionRefV1(role: TldPayloadRoleV1.PackageInitTld,
+        section_index: 0, kind: "package_init_v1", semantic_object_digest: digest,
+        offset: 0, stored_bytes: record.len(), decoded_bytes: record.len(), encoding_profile: "raw-v1")
+    PhysicalTldObjectV1(header: PhysicalTldHeaderV1(schema: 1,
+        role: TldPayloadRoleV1.PackageInitTld, semantic_record_digest: digest,
+        section_table_digest: physical_tld_section_table_digest_v1([section]),
+        payload_bytes: record.len(), sections: [section]), canonical_sections: [record])
+
+fn d(ch: text) -> text: ch.repeat(64)
+
+fn base() -> PackageInitTldV1:
+    PackageInitTldV1(package_id: "pkg", parent_scope_digest: Some(d("b")),
+        membership_root_digest: d("c"), ordered_member_ids: ["pkg/a.spl", "pkg/b.spl"],
+        aspect_root_digest: d("d"), trait_root_digest: d("e"), macro_root_digest: d("f"),
+        extension_root_digest: d("0"), template_root_digest: d("1"),
+        initializer_contract_digest: d("2"), ordered_initializer_refs: ["pkg.init"])
+
+fn members() -> [FileTldrDigestV2]:
+    [FileTldrDigestV2(member_id: "pkg/a.spl", tldr_digest: d("a")),
+     FileTldrDigestV2(member_id: "pkg/b.spl", tldr_digest: d("b"))]
+
+fn facts() -> DirectoryJoinPointFactsV1:
+    directory_join_point_facts_v1("pkg", ["pkg/a.spl", "pkg/b.spl"],
+        [JoinPointFactV1(id: "pkg.a.f", kind: "forward", symbol: "pkg.a.f", attrs: [],
+            owner_file: "pkg/a.spl", base_body_digest: "sha256:" + d("a"))], [], true)
+
+fn produced() -> PackageInitTldV1:
+    package_init_directory_produce_v2(base(), members(), facts(), "compiler/provider-A").unwrap()
+
+describe "directory package roots and versioned codec":
+    it "preserves the frozen legacy encoding and does not admit it as a directory snapshot":
+        val legacy = base()
+        val bytes = package_init_tld_encode_v1(legacy)
+        expect(bytes.len()).to_equal(326)
+        expect(sha256_u8_hex(bytes)).to_equal("3d57cf352a3fb94905b82403f19b1c9ab37304f10551057b8b299ff062eedbc5")
+        expect(package_init_tld_schema_v1(legacy)).to_equal(1)
+        val decoded = package_init_tld_decode_v1(bytes)
+        expect(decoded.ok).to_equal(true)
+        expect(decoded.value.unwrap().file_tldr_root_digest).to_equal(nil)
+        expect(package_init_tld_encode_v1(decoded.value.unwrap())).to_equal(bytes)
+        expect(package_init_directory_compare_v2(legacy, produced(), facts())).to_equal(nil)
+
+    it "roundtrips the explicit schema 2 roots while old envelope readers refuse it":
+        val value = produced()
+        expect(value.file_tldr_root_digest).to_equal(directory_file_tldr_root_v2(members()))
+        expect(value.join_point_facts_digest).to_equal(Some(facts().facts_key))
+        expect(value.active_guard_root_digest).to_equal(Some(facts().active_guard_root))
+        val bytes = package_init_tld_encode_v1(value)
+        expect(wire_check_envelope(bytes, 0, wire_magic("PIT1"), 2)).to_equal(true)
+        expect(wire_check_envelope(bytes, 0, wire_magic("PIT1"), 1)).to_equal(false)
+        val decoded = package_init_tld_decode_v1(bytes)
+        expect(decoded.ok).to_equal(true)
+        expect(package_init_tld_encode_v1(decoded.value.unwrap())).to_equal(bytes)
+        expect(package_init_directory_compare_v2(decoded.value.unwrap(), value, facts()).?).to_equal(true)
+
+    it "rejects partial extensions and non-identity digest algorithms":
+        val partial = PackageInitTldV1(..base(), file_tldr_root_digest: Some(d("a")))
+        expect(package_init_tld_valid_v1(partial)).to_equal(false)
+        expect(package_init_tld_encode_v1(partial)).to_equal([])
+        val weak = PackageInitTldV1(..produced(), join_point_facts_digest: Some("xxh3-128:" + "a".repeat(32)))
+        expect(package_init_tld_valid_v1(weak)).to_equal(false)
+        expect(package_init_tld_encode_v1(weak)).to_equal([])
+
+    it "rejects every truncation in the appended extension and trailing bytes":
+        val bytes = package_init_tld_encode_v1(produced())
+        val legacy_size = package_init_tld_encode_v1(base()).len()
+        var prefix: [u8] = []
+        for index in 0..bytes.len():
+            if index >= legacy_size:
+                expect(package_init_tld_decode_v1(prefix).ok).to_equal(false)
+            prefix.push(bytes[index])
+        var trailing = bytes
+        trailing.push(0)
+        expect(package_init_tld_decode_v1(trailing).ok).to_equal(false)
+
+    it "rejects an envelope and payload schema disagreement":
+        var bytes = package_init_tld_encode_v1(produced())
+        bytes[4] = 1
+        expect(package_init_tld_decode_v1(bytes).ok).to_equal(false)
+
+    it "changes the Merkle root for content, member identity and cardinality":
+        val original = directory_file_tldr_root_v2(members())
+        val edited = [FileTldrDigestV2(member_id: "pkg/a.spl", tldr_digest: d("c")), members()[1]]
+        val renamed = [FileTldrDigestV2(member_id: "pkg/aa.spl", tldr_digest: d("a")), members()[1]]
+        expect(directory_file_tldr_root_v2(edited) == original).to_equal(false)
+        expect(directory_file_tldr_root_v2(renamed) == original).to_equal(false)
+        expect(directory_file_tldr_root_v2([members()[0]]) == original).to_equal(false)
+        expect(directory_file_tldr_root_v2([]).?).to_equal(true)
+        expect(directory_file_tldr_root_v2([]) == original).to_equal(false)
+
+    it "rejects duplicate and unsorted members instead of silently collapsing a leaf":
+        expect(directory_file_tldr_root_v2([members()[0], members()[0]])).to_equal(nil)
+        expect(directory_file_tldr_root_v2([members()[1], members()[0]])).to_equal(nil)
+        expect(directory_file_tldr_root_v2([FileTldrDigestV2(member_id: "x", tldr_digest: "bad")])).to_equal(nil)
+
+    it "refuses incomplete, stale and foreign facts before producing a summary":
+        val incomplete = DirectoryJoinPointFactsV1(..facts(), complete: false)
+        expect(package_init_directory_produce_v2(base(), members(), incomplete, "provider").is_err()).to_equal(true)
+        val stale = DirectoryJoinPointFactsV1(..facts(), facts_key: "sha256:" + d("f"))
+        expect(package_init_directory_produce_v2(base(), members(), stale, "provider").is_err()).to_equal(true)
+        val foreign = directory_join_point_facts_v1("other", ["pkg/a.spl", "pkg/b.spl"], [], [], true)
+        expect(package_init_directory_produce_v2(base(), members(), foreign, "provider").is_err()).to_equal(true)
+        expect(package_init_directory_produce_v2(base(), [members()[0]], facts(), "provider").is_err()).to_equal(true)
+
+    it "never reuses a record after a file TLDR digest changes":
+        val old = produced()
+        val changed = [FileTldrDigestV2(member_id: "pkg/a.spl", tldr_digest: d("c")), members()[1]]
+        val fresh = package_init_directory_produce_v2(base(), changed, facts(), "compiler/provider-A").unwrap()
+        expect(package_init_directory_compare_v2(old, fresh, facts())).to_equal(nil)
+        expect(package_init_directory_identity_v2(old)).to_equal(package_init_directory_identity_v2(fresh))
+        val before = package_init_directory_compare_v2(old, old, facts()).unwrap()
+        val after = package_init_directory_compare_v2(fresh, fresh, facts()).unwrap()
+        expect(before.output_digest == after.output_digest).to_equal(false)
+
+    it "binds scope, parent, membership, provider and guard to directory identity":
+        val value = produced()
+        val identity = package_init_directory_identity_v2(value)
+        for changed in [PackageInitTldV1(..value, package_id: "other"),
+                PackageInitTldV1(..value, parent_scope_digest: nil),
+                PackageInitTldV1(..value, membership_root_digest: d("3")),
+                PackageInitTldV1(..value, compiler_provider_id: Some("compiler/provider-B")),
+                PackageInitTldV1(..value, active_guard_root_digest: Some("sha256:" + d("4")))]:
+            expect(package_init_directory_identity_v2(changed).?).to_equal(true)
+            expect(package_init_directory_identity_v2(changed) == identity).to_equal(false)
+            expect(package_init_directory_compare_v2(value, changed, facts())).to_equal(nil)
+
+    it "repeats identical bytes and output digests for an unchanged snapshot":
+        val first = produced()
+        val second = produced()
+        expect(package_init_tld_encode_v1(first)).to_equal(package_init_tld_encode_v1(second))
+        expect(package_init_directory_compare_v2(first, second, facts()).unwrap().output_digest).to_equal(
+            sha256_u8_hex(package_init_tld_encode_v1(second)))
+
+    it "binds schema 2 to the existing physical payload and rejects recomputed corrupt records":
+        val record = package_init_tld_encode_v1(produced())
+        expect(package_init_tld_physical_binding_valid_v1(physical_package(record))).to_equal(true)
+        var corrupt = record
+        corrupt[4] = 1
+        # Recomputed physical checksums do not excuse a payload schema mismatch.
+        expect(package_init_tld_physical_binding_valid_v1(physical_package(corrupt))).to_equal(false)
+
+    it "reads exact current TLDR bytes and refuses missing or stale reader metadata":
+        val reader = DirectoryFixtureReaderV2(a_tldr: "TLDR a", b_tldr: "TLDR b")
+        val actual = directory_tldr_from_reader_v2(reader, base(), facts(), "provider").unwrap()
+        val expected_members = [FileTldrDigestV2(member_id: "pkg/a.spl", tldr_digest: sha256_text("TLDR a")),
+            FileTldrDigestV2(member_id: "pkg/b.spl", tldr_digest: sha256_text("TLDR b"))]
+        expect(actual.file_tldr_root_digest).to_equal(directory_file_tldr_root_v2(expected_members))
+        val missing = DirectoryFixtureReaderV2(a_tldr: "TLDR a", b_tldr: "")
+        expect(directory_tldr_from_reader_v2(missing, base(), facts(), "provider").is_err()).to_equal(true)
+        val changed = DirectoryFixtureReaderV2(a_tldr: "TLDR a edited", b_tldr: "TLDR b")
+        val fresh = directory_tldr_from_reader_v2(changed, base(), facts(), "provider").unwrap()
+        expect(package_init_directory_compare_v2(actual, fresh, facts())).to_equal(nil)
+
+
+describe "schema3 complete inline facts comparison":
+    it "produces schema3 through the existing root owner and rejects schema2 hits":
+        val current = package_init_directory_produce_v3(base(), members(), facts(), "compiler/provider-A").unwrap()
+        expect(package_init_tld_schema_v1(current)).to_equal(3)
+        expect(package_init_directory_compare_v3(current, current, facts()) != nil).to_equal(true)
+        expect(package_init_directory_compare_v3(produced(), current, facts())).to_equal(nil)
+        expect(package_init_directory_identity_v3(current) != nil).to_equal(true)
+        expect(package_init_directory_identity_v2(current)).to_equal(nil)
+        expect(package_init_directory_produce_v2(current, members(), facts(), "compiler/provider-A").is_err()).to_equal(true)
+
+    it "compares body facets even when selection facts keys remain equal":
+        val before = facts()
+        val point = JoinPointFactV1(..before.sorted_join_points[0], base_body_digest: "sha256:" + d("b"))
+        val after = directory_join_point_facts_v1("pkg", before.sorted_member_files, [point], [], true)
+        expect(before.facts_key).to_equal(after.facts_key)
+        val current = package_init_directory_produce_v3(base(), members(), before, "compiler/provider-A").unwrap()
+        expect(package_init_directory_compare_v3(current, current, after)).to_equal(nil)
+
+    it "refuses noncanonical inline attributes instead of silently reordering them":
+        val before = facts()
+        val point = JoinPointFactV1(..before.sorted_join_points[0], attrs: ["z", "a"])
+        val unordered = directory_join_point_facts_v1("pkg", before.sorted_member_files, [point], [], true)
+        expect(package_init_directory_produce_v3(base(), members(), unordered, "compiler/provider-A").is_err()).to_equal(true)

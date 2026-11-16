@@ -1,3 +1,4 @@
+use compiler.core.ast.{decl_set_manifest_role_v1}
 use compiler.frontend.core._ParserDecls.named_aspect_decls.{parse_named_aspect_decl}
 use compiler.core.ast.{decl_set_param_defaults}
 # Declaration parsing: enum, top-level visibility, module body.
@@ -78,7 +79,7 @@ use compiler.frontend.aspect_registry.{aspect_pending_set_noalloc, aspect_pendin
 use compiler.frontend.aspect_registry.{aspect_pending_kind_get, aspect_pending_selector_get}
 use compiler.frontend.aspect_registry.{aspect_pending_mode_get, aspect_pending_readonly_get}
 use compiler.frontend.aspect_registry.{aspect_pending_noalloc_get, aspect_pending_bounded_time_get}
-use compiler.frontend.aspect_registry.{aspect_pending_saw_advice_get, aspect_pending_reset}
+use compiler.frontend.aspect_registry.{aspect_pending_saw_advice_get, aspect_pending_reset, aspect_registry_record_parser_declaration_v2}
 use compiler.common.rt_profile_policy.{rt_implicit_profile_is_error}
 # ===== Helper Functions =====
 
@@ -879,6 +880,7 @@ fn finalize_decl_visibility(decl_id: i64, visibility: text) -> i64:
 fn parse_mod_decl_with_visibility(visibility: text) -> i64:
     parser_advance()
     var mod_last_seg = ""
+    var mod_segment_count = 0
     while true:
         var segment = ""
         if par_kind_get() == 6:
@@ -889,11 +891,16 @@ fn parse_mod_decl_with_visibility(visibility: text) -> i64:
             parser_error("expected module name after 'mod'")
             return -1
         mod_last_seg = segment
+        mod_segment_count = mod_segment_count + 1
         parser_advance()
         if par_kind_get() != 164:
             break
         parser_advance()
-    finalize_decl_visibility(decl_use_import("." + mod_last_seg, [], 0), visibility)
+    val child = decl_use_import("." + mod_last_seg, [], 0)
+    # Legacy import lowering uses the last segment. It is not an immediate
+    # child authorization for a dotted declaration. Refuse that policy shape.
+    decl_set_manifest_role_v1(child, if mod_segment_count == 1: "child" else: "child-invalid")
+    finalize_decl_visibility(child, visibility)
 
 fn parse_module_decl_with_visibility(loop_index: i64, visibility: text) -> i64:
     if par_kind_get() == 53:
@@ -2148,6 +2155,9 @@ pub fn parse_module_body():
                     # pointcut the author never wrote, and the validator would
                     # then reject a perfectly ordinary function.
                     if aspect_pending_saw_advice_get():
+                        aspect_registry_record_parser_declaration_v2(decl_get_name(adv_d),
+                            aspect_pending_kind_get(), aspect_pending_selector_get(), aspect_pending_mode_get(),
+                            aspect_pending_readonly_get(), aspect_pending_noalloc_get(), aspect_pending_bounded_time_get())
                         val adv_helper = expr_ident("__advice_decl", 0)
                         var adv_args: [i64] = []
                         adv_args.push(expr_string_lit(decl_get_name(adv_d), 0))

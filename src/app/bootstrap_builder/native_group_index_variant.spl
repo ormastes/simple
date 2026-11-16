@@ -1,16 +1,11 @@
-# Exact AOT option profile for a manager-owned full-inventory cold V2 index.
-# Features and environment inputs have no typed CompileOptions projection yet;
-# rejecting them prevents a caller assertion from masquerading as compiler
-# configuration authority.
+# Compatibility facade over the compiler-owned exact full-inventory profile.
+# Existing callers retain names/result while semantic admission shares one owner.
 use app.bootstrap_builder.native_group_index_contract.{NativeGroupIndexConfigV1}
-use compiler.common.driver_compile_options.{CompileOptions,
-    driver_core_compile_options_default, compileoptions_normalize_mir_optimization,
-    compileoptions_target_profile_v1, target_profile_identity_fields_v1,
-    TargetTraceResolutionV1}
-use compiler.driver.driver_xray_policy.{driver_target_trace_capability_v1}
-use compiler.common.driver_core_modes.{CompileMode, driver_output_format_native}
-use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1,
-    config_variant_digest_v1}
+use compiler.common.driver_compile_options.{CompileOptions}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1}
+use compiler.driver.cache.native_full_index_variant_v1.{
+    native_full_index_variant_target_v1, native_full_index_target_build_mode_v1,
+    native_full_index_variant_profile_v1, native_full_index_variant_admit_v1}
 
 struct NativeGroupIndexVariantOptionsV1:
     options: CompileOptions
@@ -18,91 +13,29 @@ struct NativeGroupIndexVariantOptionsV1:
     digest: text
 
 fn native_group_index_variant_target_v1(target: text) -> bool:
-    ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu",
-        "aarch64-unknown-linux-gnu"].contains(target)
+    native_full_index_variant_target_v1(target)
 
-# Profile belongs to the artifact being built, never its producer executable.
 fn native_group_target_build_mode_v1(phase: text) -> Result<text, text>:
-    if phase == "phase3": return Ok("debug")
-    if phase == "phase4": return Ok("release")
-    Err("index target phase unsupported")
+    native_full_index_target_build_mode_v1(phase)
 
 fn native_group_index_variant_profile_v1(phase: text, backend: text,
         target: text, build_mode: text, language_abi: text
         ) -> Result<NativeGroupIndexVariantOptionsV1, text>:
-    if (phase != "phase3" and phase != "phase4") or
-            (backend != "llvm" and backend != "cranelift") or
-            not native_group_index_variant_target_v1(target):
-        return Err("index variant phase, backend, or target unsupported")
-    if (build_mode != "debug" and build_mode != "release") or
-            language_abi != "simple-v1":
-        return Err("index variant build mode or language ABI unsupported")
-    val expected_build_mode = native_group_target_build_mode_v1(phase)?
-    if build_mode != expected_build_mode:
-        return Err("index target phase does not match build profile")
-    val release = build_mode == "release"
-    var options = driver_core_compile_options_default()
-    val default_debug_info = options.debug_info
-    options.mode = CompileMode.Aot
-    options.cli_mode_text = "aot"
-    options.output_format = driver_output_format_native()
-    options.backend = backend
-    options.native_target = target
-    options.build_mode = build_mode
-    options.profile = if release: "prod" else: "dev"
-    options.managed_build_phase = phase
-    options.opt_level = if release: 2 else: 0
-    options.release = release
-    options.low_memory = true
-    options = compileoptions_normalize_mir_optimization(options)
-    if options.mode.to_text() != "aot" or
-            options.output_format.to_text() != "native" or
-            options.backend != backend or options.native_target != target or
-            options.build_mode != build_mode or options.release != release or
-            (options.opt_level ?? -1) != (if release: 2 else: 0) or
-            options.debug_info != default_debug_info or not options.low_memory:
-        return Err("index CompileOptions normalization changed the profile")
-    val target_profile = compileoptions_target_profile_v1(options,
-        driver_target_trace_capability_v1(options))?
-    # The index request has no trace admission receipt. A future provider must
-    # bind that receipt identity here before an Available result can be cached.
-    if target_profile.trace_resolution == TargetTraceResolutionV1.Available:
-        return Err("index trace admission identity unavailable")
-    var normalized = [
-        "managed_build_phase=" + phase,
-        "target_trace_admission_identity=absent",
-        "debug_info=" + (if options.debug_info: "1" else: "0"),
-        "low_memory=" + (if options.low_memory: "1" else: "0"),
-        "mode=" + options.mode.to_text(),
-        "opt_level=" + str(options.opt_level ?? -1),
-        "output_format=" + options.output_format.to_text()
-    ]
-    for field in target_profile_identity_fields_v1(target_profile):
-        normalized.push(field)
-    val variant = ConfigVariantKeyV1(options.native_target,
-        options.backend, [], options.build_mode, language_abi, normalized, [])
-    val digest = config_variant_digest_v1(variant)
-    if digest == "": return Err("index variant profile digest unavailable")
-    Ok(NativeGroupIndexVariantOptionsV1(options, variant, digest))
+    val derived = native_full_index_variant_profile_v1(
+        phase, backend, target, build_mode, language_abi)?
+    Ok(NativeGroupIndexVariantOptionsV1(derived.options, derived.variant, derived.digest))
 
 fn native_group_index_variant_admit_v1(config: NativeGroupIndexConfigV1
         ) -> Result<NativeGroupIndexVariantOptionsV1, text>:
-    val derived = native_group_index_variant_profile_v1(config.phase,
-        config.backend, config.target, config.variant.build_mode,
-        config.variant.language_abi)?
-    if config.variant.target_triple != derived.variant.target_triple or
-            config.variant.backend != derived.variant.backend or
-            config.variant.features != derived.variant.features or
-            config.variant.build_mode != derived.variant.build_mode or
-            config.variant.language_abi != derived.variant.language_abi or
-            config.variant.normalized_options != derived.variant.normalized_options or
-            config.variant.environment_inputs != derived.variant.environment_inputs or
-            config.variant_digest != derived.digest:
+    if config.backend != config.variant.backend or
+            config.target != config.variant.target_triple:
         return Err("index supplied variant does not match typed CompileOptions")
-    Ok(derived)
+    val derived = native_full_index_variant_admit_v1(config.phase, config.variant)?
+    if config.variant_digest != derived.digest:
+        return Err("index supplied variant does not match typed CompileOptions")
+    Ok(NativeGroupIndexVariantOptionsV1(derived.options, derived.variant, derived.digest))
 
 export NativeGroupIndexVariantOptionsV1
 export native_group_index_variant_target_v1, native_group_index_variant_profile_v1
 export native_group_index_variant_admit_v1
-
 export native_group_target_build_mode_v1
