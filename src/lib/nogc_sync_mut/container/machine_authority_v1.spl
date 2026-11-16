@@ -13,7 +13,8 @@ use std.nogc_sync_mut.container.machine_claim_record_v1.*
 use std.nogc_sync_mut.container.machine_authority_projection_v1.*
 use std.nogc_sync_mut.container.machine_authority_storage_prepare_v3.*
 use std.nogc_sync_mut.container.machine_fresh_workspace_source_transition_v3.*
-use std.nogc_async_mut.container.providers.linux.workspace_root_borrow_v3.LinuxWorkspaceRootBorrowV3
+use std.nogc_async_mut.container.providers.linux.workspace_root_borrow_v3.{LinuxWorkspaceRootBorrowV3,
+    linux_workspace_root_borrow_from_storage_v3}
 use std.nogc_sync_mut.container.machine_authority_opening_v3.*
 export MachineManagedClaimSnapshotV1, MachineContainerAuthorityCleanupV1, machine_container_authority_cleanup_v1, machine_container_authority_cleanup_diagnostic_v1
 use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.*
@@ -262,6 +263,13 @@ pub struct MachineFreshEpochStoreInventoryLoanTurnV1:
     inventory: Option<LinuxFreshEpochStoreInventoryBorrowV1> = None
     error: text = ""
 
+# One V4 workspace-root loan (milestone_0021 3.1). `owner` keeps the lent reader
+# R3 on every path; `root` is a borrow capsule with no close right.
+pub struct MachineFreshEpochWorkspaceRootLoanTurnV1:
+    owner: MachineFreshEpochAdmissionOwnerV1
+    root: Option<LinuxWorkspaceRootBorrowV3> = None
+    error: text = ""
+
 # Private construction requires the actual original writer, exact durable
 # charge, genuine transferred custody and a private canonical creator slot.
 pub class MachineFreshEpochAdmissionOwnerV1:
@@ -279,6 +287,12 @@ pub class MachineFreshEpochAdmissionOwnerV1:
     # Store-inventory loan (milestone_0019 M2): only inside the service loan,
     # over the same retained service reader and custody; it ends first.
     store_inventory_loaned: bool = false
+    # Workspace-root loan (milestone_0021 3.1): reader R3 opened by the lend, retained here until the agent
+    # lifecycle adopts it (stage `source`) or close_v1/close_v2/end_workspace_root_loan_v1 closes it.
+    workspace_reader: Option<LinuxMachinePolicyOwnerV1> = None
+    workspace_root_loaned: bool = false
+    workspace_reader_slot: i64 = -1
+    workspace_reader_generation: i64 = -1
 
     pub fn current_v1() -> Result<MachineFreshEpochRecordV1, text>:
         val phase = self.lifecycle.phase_v1()?
@@ -485,6 +499,120 @@ pub class MachineFreshEpochAdmissionOwnerV1:
         retained.store_inventory_loaned = false
         MachineFreshEpochStoreInventoryLoanTurnV1(owner: retained)
 
+    # Lends the workspace root of this admitted epoch to the V4 agent (milestone_0021 3.1, R-02). Only inside the
+    # service loan and after the PR1 store-inventory handoff, at most once at a time, before any workload write.
+    # R3 is retained in `workspace_reader` on Ready AND CleanupRequired; a failure after opening it sets no loan, so
+    # only close_v1 closes it (not retryable). The borrow aliases R3 and authority.storage and carries no close.
+    pub fn lend_workspace_root_v1() -> MachineFreshEpochWorkspaceRootLoanTurnV1:
+        var retained = self
+        if not retained.service_loaned:
+            return MachineFreshEpochWorkspaceRootLoanTurnV1(owner: retained, error: "machine-fresh-epoch-workspace-root-service-loan-inactive")
+        if retained.store_inventory_loaned:
+            return MachineFreshEpochWorkspaceRootLoanTurnV1(owner: retained, error: "machine-fresh-epoch-store-inventory-loan-active")
+        if retained.workspace_root_loaned:
+            return MachineFreshEpochWorkspaceRootLoanTurnV1(owner: retained, error: "machine-fresh-epoch-workspace-root-loan-active")
+        if retained.workspace_reader.is_some():
+            return MachineFreshEpochWorkspaceRootLoanTurnV1(owner: retained, error: "machine-fresh-epoch-workspace-root-loan-consumed")
+        if retained.custody.is_none() or retained.authority.is_none():
+            return MachineFreshEpochWorkspaceRootLoanTurnV1(owner: retained, error: "machine-fresh-epoch-service-loan-lender-consumed")
+        val current = retained.current_v1()
+        if current.is_err(): return MachineFreshEpochWorkspaceRootLoanTurnV1(owner: retained, error: current.unwrap_err())
+        val phase = retained.lifecycle.phase_v1()
+        if phase.is_err(): return MachineFreshEpochWorkspaceRootLoanTurnV1(owner: retained, error: phase.unwrap_err())
+        if phase.unwrap() != "admitted":
+            return MachineFreshEpochWorkspaceRootLoanTurnV1(owner: retained, error: "machine-fresh-epoch-workspace-root-phase:" + phase.unwrap())
+        val authority = retained.authority.unwrap()
+        if authority.local_principal.is_none():
+            return MachineFreshEpochWorkspaceRootLoanTurnV1(owner: retained, error: "machine-fresh-workload-local-principal-required")
+        val reader = match linux_machine_policy_open_v1():
+            case LinuxMachinePolicyOpenV1.Rejected(reason):
+                return MachineFreshEpochWorkspaceRootLoanTurnV1(owner: retained, error: reason)
+            case LinuxMachinePolicyOpenV1.CleanupRequired(owner, reason):
+                retained.workspace_reader = Some(owner)
+                return MachineFreshEpochWorkspaceRootLoanTurnV1(owner: retained, error: reason)
+            case LinuxMachinePolicyOpenV1.Ready(owner): owner
+        retained.workspace_reader = Some(reader)
+        # N-09: the prepared-workspace opening's service-uid check (machine_authority_storage_prepare_v3.spl:51-53),
+        # against the custody's CURRENT observation, so the V4 and V7 paths admit the same principal.
+        val observed = retained.custody.unwrap().current_v1()
+        if observed.is_err(): return MachineFreshEpochWorkspaceRootLoanTurnV1(owner: retained, error: observed.unwrap_err())
+        if observed.unwrap().service_uid <= 0 or observed.unwrap().service_uid != authority.selected_linux_uid:
+            return MachineFreshEpochWorkspaceRootLoanTurnV1(owner: retained, error: "machine-fresh-epoch-workspace-root-service-uid")
+        val borrowed = linux_workspace_root_borrow_from_storage_v3(authority.storage, reader)
+        if borrowed.is_err(): return MachineFreshEpochWorkspaceRootLoanTurnV1(owner: retained, error: borrowed.unwrap_err())
+        # Protected opt-in profiles are checked BEFORE the flag and before any workload write.
+        val profiles = borrowed.unwrap().validate_profiles_v3()
+        if profiles.is_err(): return MachineFreshEpochWorkspaceRootLoanTurnV1(owner: retained, error: profiles.unwrap_err())
+        retained.workspace_reader_slot = reader.slot
+        retained.workspace_reader_generation = reader.generation
+        retained.workspace_root_loaned = true
+        MachineFreshEpochWorkspaceRootLoanTurnV1(owner: retained, root: Some(borrowed.unwrap()))
+
+    # The borrower hands the exact lent root back by value: its reader must be the recorded R3 and its storage the
+    # alias of authority.storage. U-06: a still never-adopted R3 is closed here too, so a retry can lend again.
+    pub fn end_workspace_root_loan_v1(root: LinuxWorkspaceRootBorrowV3) -> MachineFreshEpochWorkspaceRootLoanTurnV1:
+        var retained = self
+        if not retained.workspace_root_loaned:
+            return MachineFreshEpochWorkspaceRootLoanTurnV1(owner: retained, root: Some(root), error: "machine-fresh-epoch-workspace-root-loan-inactive")
+        if retained.authority.is_none():
+            return MachineFreshEpochWorkspaceRootLoanTurnV1(owner: retained, root: Some(root), error: "machine-fresh-epoch-service-loan-lender-consumed")
+        val alias = linux_workspace_root_borrow_from_storage_v3(retained.authority.unwrap().storage, root.reader)
+        if (root.reader.slot != retained.workspace_reader_slot or root.reader.generation != retained.workspace_reader_generation or
+                alias.is_err() or alias.unwrap().storage.slot != root.storage.slot or
+                alias.unwrap().storage.generation != root.storage.generation):
+            return MachineFreshEpochWorkspaceRootLoanTurnV1(owner: retained, root: Some(root), error: "machine-fresh-epoch-workspace-root-foreign-borrow")
+        retained.workspace_root_loaned = false
+        retained.close_workspace_reader_v1()
+
+    # Service-reader close pattern (close_v1) for a never-adopted R3; retained or stale keeps it and reports.
+    fn close_workspace_reader_v1() -> MachineFreshEpochWorkspaceRootLoanTurnV1:
+        var retained = self
+        if val reader = retained.workspace_reader:
+            val state = reader.close_v1()
+            if ["released", "consumed-error"].contains(state): retained.workspace_reader = None
+            if state == "consumed-error":
+                return MachineFreshEpochWorkspaceRootLoanTurnV1(owner: retained, error: "machine-fresh-epoch-workspace-reader-consumed-error")
+            if not ["released", "consumed-error"].contains(state):
+                return MachineFreshEpochWorkspaceRootLoanTurnV1(owner: retained, error: "machine-fresh-epoch-workspace-reader-close:" + state)
+        MachineFreshEpochWorkspaceRootLoanTurnV1(owner: retained)
+
+    # The V4 lent transfer (milestone_0021 3.2, R-06). The transfer_workload_v2 body is DUPLICATED, not refactored,
+    # so transfer_workload_v2 and start_provider_v1 stay byte-unchanged. The admission moves whole into the transfer
+    # with service_loaned, R2 and the never-adopted R3; N must alias the retained R2 and custody.
+    pub fn transfer_workload_lent_v3(native: LinuxServiceNativeIdentityBorrowV3) -> MachineFreshWorkloadTransferTurnV2:
+        var retained = self
+        if not retained.service_loaned:
+            return MachineFreshWorkloadTransferTurnV2(None, Some(retained), "machine-fresh-epoch-service-loan-inactive")
+        if retained.store_inventory_loaned:
+            return MachineFreshWorkloadTransferTurnV2(None, Some(retained), "machine-fresh-epoch-store-inventory-loan-active")
+        if not retained.workspace_root_loaned:
+            return MachineFreshWorkloadTransferTurnV2(None, Some(retained), "machine-fresh-epoch-workspace-root-loan-required")
+        if retained.service_reader.is_none() or retained.custody.is_none():
+            return MachineFreshWorkloadTransferTurnV2(None, Some(retained), "machine-fresh-epoch-service-loan-lender-consumed")
+        val reader = retained.service_reader.unwrap()
+        val custody = retained.custody.unwrap()
+        if (native.reader.slot != reader.slot or native.reader.generation != reader.generation or
+                native.successor.slot != custody.slot or native.successor.generation != custody.generation):
+            return MachineFreshWorkloadTransferTurnV2(None, Some(retained), "machine-fresh-epoch-service-loan-foreign-borrow")
+        val actual = retained.current_v1()
+        if actual.is_err(): return MachineFreshWorkloadTransferTurnV2(None, Some(retained), actual.unwrap_err())
+        if retained.lifecycle.phase_v1().unwrap() != "admitted":
+            return MachineFreshWorkloadTransferTurnV2(None, Some(retained), "machine-fresh-workload-precreator-required")
+        val authority = retained.authority.unwrap()
+        if authority.local_principal.is_none():
+            return MachineFreshWorkloadTransferTurnV2(None, Some(retained), "machine-fresh-workload-local-principal-required")
+        val state = machine_fresh_workload_lifecycle_open_v2(retained.record, retained.initial_commit)
+        if state.is_err(): return MachineFreshWorkloadTransferTurnV2(None, Some(retained), state.unwrap_err())
+        val consumed = retained.lifecycle.transfer_workload_v2()
+        if consumed.is_err(): return MachineFreshWorkloadTransferTurnV2(None, Some(retained), consumed.unwrap_err())
+        val paired = authority.local_principal.unwrap().transfer_workload_v2()
+        var transferred_authority = authority
+        if paired.is_ok(): transferred_authority.local_principal = Some(paired.unwrap())
+        retained.authority = Some(transferred_authority)
+        val reason = if paired.is_err(): paired.unwrap_err() else: ""
+        val owner = MachineFreshWorkloadTransferV2(admission: retained, state: state.unwrap(), error: reason)
+        MachineFreshWorkloadTransferTurnV2(Some(owner), None, reason)
+
     pub fn transfer_workload_v2() -> MachineFreshWorkloadTransferTurnV2:
         var retained = self
         # A lent or once-lent owner never transfers: the transfer close does
@@ -532,6 +660,8 @@ pub class MachineFreshEpochAdmissionOwnerV1:
             return MachineFreshEpochCloseTurnV1(Some(retained), false, "machine-fresh-epoch-store-inventory-loan-active")
         if retained.service_loaned:
             return MachineFreshEpochCloseTurnV1(Some(retained), false, "machine-fresh-epoch-service-loan-active")
+        if retained.workspace_root_loaned:
+            return MachineFreshEpochCloseTurnV1(Some(retained), false, "machine-fresh-epoch-workspace-root-loan-active")
         val phase = retained.lifecycle.phase_v1()
         if phase.is_err(): return MachineFreshEpochCloseTurnV1(Some(retained), false, phase.unwrap_err())
         if phase.unwrap() == "workload-transferred-v2":
@@ -570,6 +700,17 @@ pub class MachineFreshEpochAdmissionOwnerV1:
             if not ["released", "consumed-error"].contains(state):
                 if state != "retained": return retained.pending_close_v1("machine-fresh-epoch-service-reader-close:" + state)
                 return retained.pending_close_v1("", "machine-fresh-epoch-service-reader-close:" + state)
+        # A never-adopted workspace reader R3 (milestone_0021 3.1): the same pattern, before custody.
+        if val reader = retained.workspace_reader:
+            val state = reader.close_v1()
+            if ["released", "consumed-error"].contains(state): retained.workspace_reader = None
+            val actual_error = if state == "consumed-error": "machine-fresh-epoch-workspace-reader-consumed-error" else: ""
+            val recorded = retained.lifecycle.retain_diagnostic_v1(actual_error)
+            if recorded.is_err(): return retained.pending_close_v1(actual_error, recorded.unwrap_err())
+            retained.error = recorded.unwrap()
+            if not ["released", "consumed-error"].contains(state):
+                if state != "retained": return retained.pending_close_v1("machine-fresh-epoch-workspace-reader-close:" + state)
+                return retained.pending_close_v1("", "machine-fresh-epoch-workspace-reader-close:" + state)
         if val custody = retained.custody:
             val closed = custody.close_v1()
             retained.custody = closed.owner
@@ -594,6 +735,14 @@ pub struct MachineWorkspaceReaderTurnV3:
     retained_reader: Option<LinuxMachinePolicyOwnerV1>
     error: text
 
+# One V4 transfer step that changes the transfer value itself (a loan end, or a lifecycle advance that swaps
+# `state`). `owner` is always returned; `root`/`native` are handed back when an end was refused.
+pub struct MachineFreshWorkloadTransferStepTurnV3:
+    owner: MachineFreshWorkloadTransferV2
+    root: Option<LinuxWorkspaceRootBorrowV3> = None
+    native: Option<LinuxServiceNativeIdentityBorrowV3> = None
+    error: text = ""
+
 pub struct MachineFreshWorkloadCloseTurnV2:
     owner: Option<MachineFreshWorkloadTransferV2>
     closed: bool
@@ -604,6 +753,9 @@ pub class MachineFreshWorkloadTransferV2:
     admission: MachineFreshEpochAdmissionOwnerV1
     state: MachineFreshWorkloadLifecycleV2
     error: text
+    # milestone_0021 3.2a: closed, settled lifecycles of this transfer, in order. `state` is always the CURRENT
+    # lifecycle; every existing method acts on it only. Defaulted, so transfer_workload_v2 stays byte-unchanged.
+    predecessors: [MachineFreshWorkloadLifecycleV2] = []
 
     pub fn current_v2() -> Result<MachineFreshEpochRecordV1, text>:
         if self.error != "" or self.admission.authority.is_none() or self.admission.custody.is_none(): return Err(if self.error != "": self.error else: "machine-fresh-workload-owner-closing")
@@ -786,6 +938,112 @@ pub class MachineFreshWorkloadTransferV2:
         machine_fresh_workload_associate_v3(self.admission.authority.unwrap().storage,
             self.admission.custody.unwrap(), self.state, self.admission.custody_generation)
 
+    # ---- milestone_0021 V4 lent-transfer methods (3.2, 3.2a). All delegate to self.admission / self.state. ----
+
+    # R3 into the AGENT lifecycle (stage `source`), so live_v2's reader requirement holds; probes never hold it.
+    pub fn adopt_lent_workspace_reader_v3() -> MachineWorkspaceReaderTurnV3:
+        var retained = self
+        if retained.admission.workspace_reader.is_none():
+            return MachineWorkspaceReaderTurnV3(retained, None, "machine-fresh-epoch-workspace-reader-missing")
+        val reader = retained.admission.workspace_reader.unwrap()
+        val captured = retained.state.capture_workspace_reader_v3(reader)
+        if captured.is_err(): return MachineWorkspaceReaderTurnV3(retained, None, captured.unwrap_err())
+        retained.admission.workspace_reader = None
+        MachineWorkspaceReaderTurnV3(retained, None, "")
+
+    pub fn end_workspace_root_loan_v3(root: LinuxWorkspaceRootBorrowV3) -> MachineFreshWorkloadTransferStepTurnV3:
+        var retained = self
+        val ended = retained.admission.end_workspace_root_loan_v1(root)
+        retained.admission = ended.owner
+        if ended.error != "": return MachineFreshWorkloadTransferStepTurnV3(owner: retained, root: ended.root, error: ended.error)
+        MachineFreshWorkloadTransferStepTurnV3(owner: retained)
+
+    pub fn end_service_loan_v3(native: LinuxServiceNativeIdentityBorrowV3) -> MachineFreshWorkloadTransferStepTurnV3:
+        var retained = self
+        val ended = retained.admission.end_service_loan_v1(native)
+        retained.admission = ended.owner
+        if ended.error != "": return MachineFreshWorkloadTransferStepTurnV3(owner: retained, native: Some(native), error: ended.error)
+        MachineFreshWorkloadTransferStepTurnV3(owner: retained)
+
+    # The V4 service gate (R-04): the epoch only, never `state`, `predecessors`, live_v2, workload history or
+    # self.error, so a dead, wedged or uncertain workload never fails status, prepare or execute.
+    pub fn epoch_current_v3() -> Result<MachineFreshEpochRecordV1, text>:
+        if self.admission.authority.is_none() or self.admission.custody.is_none(): return Err("machine-fresh-workload-owner-closing")
+        if self.admission.lifecycle.phase_v1()? != "workload-transferred-v2": return Err("machine-fresh-workload-transfer-stale")
+        if not self.admission.service_loaned: return Err("machine-fresh-epoch-service-loan-inactive")
+        val authority = self.admission.authority.unwrap()
+        val actual = self.admission.custody.unwrap().current_v1()?
+        if actual.owner_generation != self.admission.custody_generation: return Err("machine-fresh-workload-custody-generation")
+        val projected = machine_authority_fresh_record_v1(authority, Ok(actual))?
+        if machine_fresh_epoch_stable_v1(projected)? != machine_fresh_epoch_stable_v1(self.admission.record)?:
+            return Err("machine-fresh-workload-live-binding")
+        Ok(self.admission.record)
+
+    # T-01: the workspace machine settle (settle_v2 stays CPU-only and byte-unchanged).
+    pub fn settle_workspace_v3() -> Result<(), text>:
+        val epoch = self.epoch_current_v3()?
+        machine_fresh_workload_settle_workspace_v3(self.admission.authority.unwrap().storage,
+            self.admission.custody.unwrap(), self.state)
+
+    # T-01: a settled, reserved source leaves runtime-active only here (same gate shape as cleanup_workspace_source_v3).
+    pub fn return_settled_workspace_source_v3() -> Result<bool, text>:
+        if self.admission.lifecycle.phase_v1()? != "workload-transferred-v2" or self.admission.authority.is_none(): return Err("machine-fresh-workspace-source-cleanup-stale")
+        machine_workspace_source_return_settled_v3(self.admission.authority.unwrap().storage, self.state)
+
+    # N-04/U-04/T-01: closes the CURRENT lifecycle only; no authority, custody or phase change. A never-reserved but
+    # opened source is cleaned first; phase `none` runs nothing (src3 would refuse source-custody-required); a
+    # reserved agent source must already be `returned`, and lc2's close_native_v2 stays the authority for that.
+    pub fn close_workload_v3() -> Result<(), text>:
+        val phase = self.state.source_phase_v3()?
+        if not ["none", "returned"].contains(phase) and self.state.installed_record_v3().is_err():
+            val cleaned = self.cleanup_workspace_source_v3()?
+        self.state.close_native_v2()?
+        self.state.closed_v2()
+
+    # 3.2a: open the next lifecycle ANCHORED after the closed, settled current one. At most one unsettled machine
+    # record exists at any time (the predecessor is settled), so the partition remainder is never double-booked.
+    pub fn advance_workload_v3() -> MachineFreshWorkloadTransferStepTurnV3:
+        var retained = self
+        val epoch = retained.epoch_current_v3()
+        if epoch.is_err(): return MachineFreshWorkloadTransferStepTurnV3(owner: retained, error: epoch.unwrap_err())
+        val link = retained.state.closed_link_v3()
+        if link.is_err(): return MachineFreshWorkloadTransferStepTurnV3(owner: retained, error: link.unwrap_err())
+        # 6 = 5 probes + 1 agent, the provider_cli_probe_count_v1 maximum.
+        if retained.predecessors.len() + 1 >= 6:
+            return MachineFreshWorkloadTransferStepTurnV3(owner: retained, error: "machine-fresh-workload-chain-bound")
+        val head = retained.admission.authority.unwrap().storage.wal_head_v1()
+        if head.is_err(): return MachineFreshWorkloadTransferStepTurnV3(owner: retained, error: head.unwrap_err())
+        if head.unwrap() != link.unwrap().0:
+            return MachineFreshWorkloadTransferStepTurnV3(owner: retained, error: "machine-fresh-workload-link-foreign-write")
+        val initial = retained.state.initial_commit_v3()
+        if initial.is_err(): return MachineFreshWorkloadTransferStepTurnV3(owner: retained, error: initial.unwrap_err())
+        val next = machine_fresh_workload_lifecycle_open_successor_v3(epoch.unwrap(), initial.unwrap(), link.unwrap().0,
+            link.unwrap().1 + 1)
+        if next.is_err(): return MachineFreshWorkloadTransferStepTurnV3(owner: retained, error: next.unwrap_err())
+        var chain = retained.predecessors
+        chain.push(retained.state)
+        retained.predecessors = chain
+        retained.state = next.unwrap()
+        MachineFreshWorkloadTransferStepTurnV3(owner: retained)
+
+    # F15 (B) / r5 V-03: dry-run bind of the pinned template against the HELD epoch profile; only its Err is kept
+    # (validate_profiled_launch_v1 needs an already-bound template). Budget lnch:56-62, root lnch:63-67.
+    pub fn validate_helper_template_v3(template: GroupProcessStreamLaunchV2) -> Result<(), text>:
+        val epoch = self.epoch_current_v3()?
+        val bound = self.admission.custody.unwrap().bind_profiled_launch_v1(template)?
+        Ok(())
+
+    # 3.4 step 4: a lifecycle root may change only while the current lifecycle holds no record. The root itself is
+    # held by the fresh owner's template (few), which applies it after this check.
+    pub fn lifecycle_root_check_v3(root: text) -> Result<(), text>:
+        val epoch = self.epoch_current_v3()?
+        if self.state.installed_record_v3().is_ok(): return Err("machine-fresh-workload-lifecycle-root-reserved")
+        if root == "" or not root.starts_with("/") or root.contains("\0") or root.ends_with("/"):
+            return Err("machine-fresh-workload-lifecycle-root-invalid")
+        Ok(())
+
+    pub fn helper_dirs_v3() -> Result<[text], text>: self.state.helper_dirs_v3()
+
     pub fn settle_v2() -> Result<(), text>:
         val current = self.current_v2()?
         machine_fresh_workload_settle_cpu_v3(self.admission.authority.unwrap().storage,
@@ -815,10 +1073,19 @@ pub class MachineFreshWorkloadTransferV2:
     pub fn settled_v2() -> Result<bool, text>: self.state.settled_v2()
     pub fn close_v2() -> MachineFreshWorkloadCloseTurnV2:
         var retained = self
+        # milestone_0021: plain refusals while any V4 loan is active (no-ops for V7: transfer_workload_v2 refuses a
+        # lent owner, so these flags are false and both readers None there).
+        if retained.admission.service_loaned:
+            return MachineFreshWorkloadCloseTurnV2(Some(retained), false, "machine-fresh-epoch-service-loan-active")
+        if retained.admission.workspace_root_loaned:
+            return MachineFreshWorkloadCloseTurnV2(Some(retained), false, "machine-fresh-epoch-workspace-root-loan-active")
+        if retained.admission.store_inventory_loaned:
+            return MachineFreshWorkloadCloseTurnV2(Some(retained), false, "machine-fresh-epoch-store-inventory-loan-active")
         val phase = retained.admission.lifecycle.phase_v1()
         if phase.is_err(): return MachineFreshWorkloadCloseTurnV2(Some(retained), false, phase.unwrap_err())
         if phase.unwrap() == "closed": return MachineFreshWorkloadCloseTurnV2(nil, true, retained.admission.lifecycle.diagnostic_v1().unwrap())
-        val native = retained.state.close_native_v2()
+        val already = retained.state.closed_state_v3()
+        val native = if already.is_ok() and already.unwrap(): Ok(()) else: retained.state.close_native_v2()
         val native_diagnostic = retained.state.diagnostic_v2()
         if native_diagnostic.is_ok():
             val first = retained.admission.lifecycle.retain_diagnostic_v1(native_diagnostic.unwrap())
@@ -831,6 +1098,15 @@ pub class MachineFreshWorkloadTransferV2:
             if not ["released", "consumed-error"].contains(closed):
                 return MachineFreshWorkloadCloseTurnV2(Some(retained), false, if first.is_ok(): first.unwrap() else: "machine-fresh-workload-writer-retained")
             retained.admission.authority = nil
+        # milestone_0021 N-05: the lent service reader R2 and a never-adopted R3, between authority and custody.
+        if val reader = retained.admission.service_reader:
+            val state = reader.close_v1()
+            if ["released", "consumed-error"].contains(state): retained.admission.service_reader = None
+            else: return MachineFreshWorkloadCloseTurnV2(Some(retained), false, "machine-fresh-epoch-service-reader-close:" + state)
+        if val reader = retained.admission.workspace_reader:
+            val state = reader.close_v1()
+            if ["released", "consumed-error"].contains(state): retained.admission.workspace_reader = None
+            else: return MachineFreshWorkloadCloseTurnV2(Some(retained), false, "machine-fresh-epoch-workspace-reader-close:" + state)
         if val custody = retained.admission.custody:
             val closed = custody.close_v1()
             retained.admission.custody = closed.owner

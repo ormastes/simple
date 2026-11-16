@@ -49,8 +49,11 @@ layout metadata before raster.
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     SimpleWebRenderer, simple_web_render_html_to_scene, simple_web_render_html_to_pixels,
-    simple_web_render_url_to_pixels, simple_web_resolved_engine2d_backend_name}
+    simple_web_render_url_to_pixels, simple_web_resolved_engine2d_backend_name,
+    simple_web_render_html_to_pixels_with_resolved_engine2d_backend}
+use std.gc_async_mut.gpu.engine2d.backend_metal_msl.{_engine2d_msl}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    generated_widget_chrome_text_pixels,
     simple_web_layout_material_provenance_after_backend_execution,
     simple_web_layout_material_provenance_after_execution,
     simple_web_layout_render_html_draw_ir,
@@ -80,7 +83,7 @@ use std.common.gpu.simpleos_host_gpu_draw_ir.{
 use std.nogc_sync_mut.text_layout.font_provider.{browser_host_has_measured_linux_face_set}
 use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{simple_web_engine2d_resolved_backend_name_with_reason}
 use std.gc_async_mut.gpu.engine2d.helpers_availability.{backend_canonical_name}
-use std.io_runtime.{env_get, file_exists}
+use std.io_runtime.{env_get, file_exists, read_file}
 
 # Host-dependent: a requested GPU backend keeps its canonical name only when
 # this host can initialize it; otherwise the honest fallback is "software"
@@ -489,7 +492,9 @@ describe "SimpleWebRenderer":
         expect(query_text.kind).to_equal("text")
         expect(query_text.text_value).to_equal("Simple")
         expect(password_text.kind).to_equal("text")
-        expect(password_text.text_value).to_equal("*")
+        # Chrome 159: one U+2022 disc for the one-codepoint value "é"
+        # (computed -webkit-text-security: disc; was "*").
+        expect(password_text.text_value).to_equal("•")
 
     it "shares transformed aligned clipped themed input text with Draw IR":
         # @req REQ-WEB-RENDER-001
@@ -503,26 +508,31 @@ describe "SimpleWebRenderer":
         val pixels = simple_web_render_html_to_pixels(html, 64, 48)
 
         expect(query.kind).to_equal("text")
-        # RTL glyph reversal is NOT Chrome behaviour (Chrome 159 paints Latin
-        # "ABCDEFGHIJK" in logical order under direction:rtl); left as-is
-        # pending the owner's RTL/bidi decision.
-        expect(query.text_value).to_equal("KJIHGFEDCBA")
+        # Chrome 159 paints Latin "ABCDEFGHIJK" in logical order under
+        # direction:rtl (bidi); the engine used to reverse it to KJIHGFEDCBA.
+        # Owner decision 2026-11-16: "all same as chrome".
+        expect(query.text_value).to_equal("ABCDEFGHIJK")
         # Chrome 159 (2026-11-16): the 11-glyph value is 56px wide in a 34px
         # content box (scrollWidth 56 > clientWidth 34), so text-align:center
         # is ignored and the RTL run is end-anchored at the content box's
         # right edge: center, start and left paint identical ink columns.
         # Chrome x = 37 - 56 = -19. The engine applies the same rule:
-        # content right 43 (content-box input 46 wide; Chrome's default
-        # <input> box-sizing is border-box, filed separately) minus the full
-        # 11 x 5px run = -12. The old 1 assumed 4px glyphs, a 9-glyph cap and
-        # centring of an overflowing run.
-        expect(query.x).to_equal(43 - 11 * 5)
-        expect(query.y).to_equal(7)  # oracle: 7 is the pinned authoritative contract value
+        # content right 37 (Chrome's UA box-sizing:border-box makes the
+        # 40x16 input's content box 3,3,34,10, as in Chrome; it was 43 on the
+        # old content-box 46-wide input) minus the full 11 x 5px run = -18
+        # (Chrome's Arial run is 56). The old 1 assumed 4px glyphs, a 9-glyph
+        # cap and centring of an overflowing run.
+        expect(query.x).to_equal(37 - 11 * 5)
+        # Content y 3 + (content h 10 - 7-row cell) / 2; was 7 on the 22-tall
+        # content-box input.
+        expect(query.y).to_equal(4)
         expect(query.clip_rect.present).to_be(true)
         expect(query.clip_rect.x).to_equal(3)  # oracle: 3 is the pinned authoritative contract value
         expect(query.clip_rect.y).to_equal(3)  # oracle: 3 is the pinned authoritative contract value
         expect(query.clip_rect.width).to_equal(19)  # oracle: 19 is the pinned authoritative contract value
-        expect(query.clip_rect.height).to_equal(13)  # oracle: 13 is the pinned authoritative contract value
+        # Chrome 159 content box height 10 (border-box 16 - 2*1 border -
+        # 2*2 padding); was 13 when the input grew to 22 under content-box.
+        expect(query.clip_rect.height).to_equal(10)
         expect(query.color).to_equal(0xFF22C55Eu32)
         expect(hint.kind).to_equal("text")
         expect(hint.color).to_equal(0xFFEF4444u32)
@@ -918,9 +928,44 @@ describe "SimpleWebRenderer":
         expect(_draw_ir_style_value(card, "backdrop-filter-realized-blur-radius-px")).to_equal("4")
         expect(_draw_ir_style_value(card, "backdrop-filter-realized-saturation-milli")).to_equal("1700")
         expect(_draw_ir_style_value(card, "backdrop-filter-reduction-reason")).to_equal("cpu-blur-radius-bounded-to-4")
-        expect(_draw_ir_style_value(card, "wm-material-surface-alpha-milli")).to_equal("200")
+        # Surface OPACITY in per-mille: 0.80 -> alpha 0xCC (204, the same
+        # alpha "background-color" 3424591649 = 0xCC1F1F21 carries above) ->
+        # 204 * 1000 / 255 = 800. It is backend-neutral: the CPU twin, Metal
+        # and Vulkan all read it as 255 * milli / 1000 straight alpha, so
+        # 800 is the expected value for Metal AND for Vulkan (see the next
+        # row and backend_vulkan_device_glass_blur_spec). The old oracle 200
+        # was a transparency value no consumer reads; on any backend it would
+        # paint a 20 % surface.
+        expect(_draw_ir_style_value(card, "wm-material-surface-alpha-milli")).to_equal("800")
         expect(_draw_ir_style_value(card, "background-image-composite-mode")).to_equal("surface-then-alpha-gradient")
         expect(_draw_ir_style_value(card, "background-layers-raw")).to_equal("")
+
+    it "reads the WM material surface alpha as per-mille opacity on the CPU twin, Metal and Vulkan":
+        # @req REQ-WEB-RENDER-001
+        # @capture(gui_image): retained evidence for scenario "reads the WM material surface alpha as per-mille opacity on the CPU twin, Metal and Vulkan"
+        step("Verify: reads the WM material surface alpha as per-mille opacity on the CPU twin, Metal and Vulkan")
+        # No gradient, so the hand oracle stays one blend: the card covers
+        # (0,0) on a white canvas, the blurred backdrop is flat white, and
+        # rgb(31,31,33) at alpha 255 * 800 / 1000 = 204 over white is
+        # (31*204 + 255*51) / 255 = 75 and (33*204 + 255*51) / 255 = 77.
+        # Read as transparency (alpha 51) it would be 210/211 instead.
+        val html = "<html><body style='margin:0;background:#ffffff'><section id='card' data-wm-theme-material-mode='engine2d-cpu-composited-material-v1' data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456' style='display:block;width:12px;height:8px;background:rgba(31,31,33,0.80);backdrop-filter:blur(30px) saturate(170%)'></section></body></html>"
+        val composition = simple_web_layout_render_html_draw_ir(html, 32, 20)
+        val card = _draw_ir_command_by_id(composition.batches[0].commands, "card")
+        expect(_draw_ir_style_value(card, "wm-material-surface-alpha-milli")).to_equal("800")
+        val cpu = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(html, 32, 20, "cpu_simd")
+        expect(cpu[2 * 32 + 2]).to_equal(0xFF4B4B4Du32)
+        # Metal is static analysis on a Linux host: the kernel's surface and
+        # gradient tints read the same per-mille opacity, with the src-over
+        # blend bit-identical to the CPU twin's.
+        val msl = _engine2d_msl()
+        expect(msl.contains("int alpha = 255 * glass_clamp(p.surface_alpha_milli, 0, 1000) / 1000;")).to_equal(true)
+        expect(msl.contains(": (uint)(255 * glass_clamp(p.surface_alpha_milli, 0, 1000) / 1000);")).to_equal(true)
+        # Vulkan: the SPIR-V is pinned to this GLSL by
+        # check-glass-material-spirv-pinned.shs; the device pixels are proven
+        # on lavapipe by backend_vulkan_device_glass_blur_spec.
+        val glsl = read_file("src/lib/gc_async_mut/gpu/engine2d/shaders/glass_material.comp")
+        expect(glsl.contains("255 * clampi(pc.surface_alpha_milli, 0, 1000) / 1000, 0, 255);")).to_equal(true)
 
     it "claims CPU material provenance only with a matching execution receipt":
         # @req REQ-WEB-RENDER-001
@@ -1444,6 +1489,58 @@ describe "SimpleWebRenderer":
         expect(with_widget_text[chrome_probe]).to_equal(0xFF48484Bu32)
         expect(without_widget_text[chrome_probe]).to_equal(0xFFF5F5F5u32)
         expect(_pixels_equal(with_widget_text, without_widget_text)).to_equal(false)
+
+    it "lowers the generated widget chrome text into Draw IR from the raster's own point table":
+        # @req REQ-WEB-RENDER-001
+        # @capture(gui_image): retained evidence for scenario "lowers the generated widget chrome text into Draw IR from the raster's own point table"
+        step("Verify: lowers the generated widget chrome text into Draw IR from the raster's own point table")
+        val html_with_widget_text = "<html><body><section class='widget-panel'><div class='widget-button'><span>Menu</span></div></section></body></html>"
+        # Widget mode, but the text sits BEFORE the panel and under no widget
+        # ancestor. (After an empty panel it would be off screen: the panel
+        # fills the viewport height in Draw IR layout.)
+        val html_without_widget_text = "<html><body><div>Menu</div><section class='widget-panel'></section></body></html>"
+        val table = generated_widget_chrome_text_pixels()
+        val with_text = simple_web_layout_render_html_draw_ir(html_with_widget_text, 40, 64)
+        val without_text = simple_web_layout_render_html_draw_ir(html_without_widget_text, 40, 64)
+        var chrome_points = 0
+        var text_runs = 0
+        for batch in with_text.batches:
+            for command in batch.commands:
+                if command.component_id.starts_with("widget-chrome-text-"):
+                    chrome_points = chrome_points + 1
+                if command.text_value != "":
+                    text_runs = text_runs + 1
+        var chrome_points_without = 0
+        var text_runs_without = 0
+        for batch in without_text.batches:
+            for command in batch.commands:
+                if command.component_id.starts_with("widget-chrome-text-"):
+                    chrome_points_without = chrome_points_without + 1
+                if command.text_value != "":
+                    text_runs_without = text_runs_without + 1
+        # Every table point once; the generated text replaces the node glyphs.
+        expect(chrome_points).to_equal(table.xs.len())
+        expect(text_runs).to_equal(0)
+        # No widget-ancestor text: the node text paints and no table point does.
+        expect(chrome_points_without).to_equal(0)
+        expect(text_runs_without > 0).to_equal(true)
+        # Pixel API (Draw IR -> Engine2D) paints every table point exactly.
+        val pixels = simple_web_render_html_to_pixels(html_with_widget_text, 40, 64)
+        var wrong = 0
+        var k = 0
+        while k < table.xs.len():
+            if pixels[table.ys[k] * 40 + table.xs[k]] != table.colors[k]:
+                wrong = wrong + 1
+            k = k + 1
+        expect(wrong).to_equal(0)
+        # Below 38x62 the table does not fit, in Draw IR exactly as in raster.
+        val small = simple_web_layout_render_html_draw_ir(html_with_widget_text, 37, 64)
+        var small_points = 0
+        for batch in small.batches:
+            for command in batch.commands:
+                if command.component_id.starts_with("widget-chrome-text-"):
+                    small_points = small_points + 1
+        expect(small_points).to_equal(0)
 
     it "keeps lowercase browser text glyphs distinct from uppercase glyphs":
         # @req REQ-WEB-RENDER-001

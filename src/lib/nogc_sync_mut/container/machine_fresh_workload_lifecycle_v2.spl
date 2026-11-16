@@ -82,6 +82,9 @@ struct FreshWorkloadStateV2:
     configuration_batch: i64 = 0
     input_configuration_batch: i64 = 0
     closed: bool = false
+    # milestone_0021 3.4 step 4: helper action directories this lifecycle's begins created or adopted, recorded
+    # right after the create (before any row), so a begin that later fails pre-row is still removed at service close.
+    helper_dirs: [text] = []
 
 var fresh_workload_states_v2: [FreshWorkloadStateV2] = []
 var fresh_workload_thread_v2: i64 = 0
@@ -127,6 +130,36 @@ pub class MachineFreshWorkloadLifecycleV2:
         val state = self.state_v2()?
         if state.closed: return Err("machine-fresh-workload-closed")
         Ok(state.history)
+
+    # Direct slot reads, valid in any phase (history_v2 refuses a closed lifecycle, r5 V-02).
+    pub fn helper_dirs_v3() -> Result<[text], text>:
+        val state = self.state_v2()?
+        Ok(state.helper_dirs)
+
+    pub(package) fn record_helper_dir_v3(path: text) -> Result<(), text>:
+        val state = self.state_v2()?
+        if not state.helper_dirs.contains(path):
+            var dirs = state.helper_dirs
+            dirs.push(path)
+            fresh_workload_states_v2[self.slot].helper_dirs = dirs
+        Ok(())
+
+    # The anchor a successor lifecycle links after (3.2a): only a CLOSED and SETTLED lifecycle with at least its own
+    # reserve segment qualifies. Returns (head, last verified sequence).
+    pub fn closed_link_v3() -> Result<(text, i64), text>:
+        val state = self.state_v2()?
+        val history = state.history
+        if not state.closed or not state.settled or history.segments.len() == 0:
+            return Err("machine-fresh-workload-link-ineligible")
+        Ok((machine_fresh_workload_head_v2(history), history.segments[history.segments.len() - 1].revision.last_sequence))
+
+    pub fn closed_state_v3() -> Result<bool, text>:
+        val state = self.state_v2()?
+        Ok(state.closed)
+
+    pub fn initial_commit_v3() -> Result<text, text>:
+        val state = self.state_v2()?
+        Ok(state.history.initial_commit)
 
     pub fn installed_record_v3() -> Result<MachineFreshWorkloadRecordDispatchV3, text>:
         val state = self.state_v2()?
@@ -224,6 +257,21 @@ pub class MachineFreshWorkloadLifecycleV2:
         if state.closed or state.record.is_some() or state.operations.len() != 0 or state.process.is_some() or state.containment.is_some():
             return Err("machine-fresh-workspace-execution-or-charge-retained")
         Ok(())
+
+    # T-01: the only way a RESERVED source leaves runtime-active. `settled` implies the settle re-observed native
+    # absence and correlated it (validate_closure_v2), so no process can still use the source; containment may still
+    # be Some and close_native_v2 closes it before its source-phase check.
+    pub(package) fn source_return_settled_preflight_v3() -> Result<(), text>:
+        val state = self.state_v2()?
+        val absence = state.operations.contains_key("absence") and state.operations["absence"].state == "completed"
+        if (state.closed or not state.settled or not absence or state.process.is_some() or
+                state.extra_containment.len() != 0 or state.source_phase != "runtime-active"):
+            return Err("machine-fresh-workspace-source-return-ineligible")
+        Ok(())
+
+    pub(package) fn source_phase_v3() -> Result<text, text>:
+        val state = self.state_v2()?
+        Ok(state.source_phase)
 
     pub(package) fn source_returned_v3() -> Result<(), text>:
         val state = self.state_v2()?
@@ -799,4 +847,18 @@ pub fn machine_fresh_workload_lifecycle_open_v2(epoch: MachineFreshEpochRecordV1
     val slot = fresh_workload_states_v2.len()
     fresh_workload_states_v2.push(FreshWorkloadStateV2(epoch: epoch,
         history: MachineFreshWorkloadHistoryV2(epoch, initial, [])))
+    Ok(MachineFreshWorkloadLifecycleV2(slot: slot, generation: slot + 1))
+
+# 3.2a successor on the same transfer: the same push as machine_fresh_workload_lifecycle_open_v2 with a history
+# ANCHORED at (link_parent, link_sequence). `initial` is the predecessor's initial commit, which the unchanged
+# initial-binding check of machine_fresh_workload_history_verify_v2 still reads.
+pub fn machine_fresh_workload_lifecycle_open_successor_v3(epoch: MachineFreshEpochRecordV1, initial: text,
+        link_parent: text, link_sequence: i64) -> Result<MachineFreshWorkloadLifecycleV2, text>:
+    val context = fresh_workload_entry_v2()?
+    if link_parent == "" or link_sequence <= 5: return Err("machine-fresh-workload-link-binding")
+    if fresh_workload_states_v2.len() >= 256: return Err("machine-fresh-workload-owner-bound")
+    val slot = fresh_workload_states_v2.len()
+    fresh_workload_states_v2.push(FreshWorkloadStateV2(epoch: epoch,
+        history: MachineFreshWorkloadHistoryV2(epoch: epoch, initial_commit: initial, segments: [], link_parent: link_parent,
+            link_sequence: link_sequence)))
     Ok(MachineFreshWorkloadLifecycleV2(slot: slot, generation: slot + 1))

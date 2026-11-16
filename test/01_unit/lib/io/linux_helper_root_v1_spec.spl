@@ -1,0 +1,92 @@
+"""
+## Purpose and audience
+Pins the create-or-adopt-empty helper action directory of milestone_0021 PR2
+(DESIGN 3.4 step 4, r7 X-01, r8 Y-01, r9 Z-01..Z-05):
+`dir_create_private_exclusive_v1` in `src/lib/nogc_sync_mut/io/dir_entry_ops.spl`
+creates `<lifecycle root>-<action name>` with mode 0700, and on EEXIST adopts the
+directory only through `linux_helper_root_adopt_v1`
+(`src/lib/nogc_sync_mut/io/linux_helper_root_v1.spl`): one no-follow descriptor,
+statx TYPE|MODE|UID, owner == euid, mode exactly 040700, and no entry besides
+`.`/`..`. Written for owners of the fresh-workload begin effects.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-16). The
+deployed binary must dispatch the openat/statx/fdopendir/readdir/closedir libc
+externs (r8 Y-04); until a run on that binary these cases are `unverified`.
+## Compatibility and limitations
+Linux only. The cases use a private temporary directory under /tmp; a symlink is
+made through the no-follow snapshot link helper (kind 2 = directory target).
+## Verification guidance and troubleshooting
+Every refusal names `machine-fresh-helper-root-exists`; the arch refusal is
+`machine-fresh-helper-root-arch-unsupported` and only runs where
+`linux_workload_flags_v2(true) == 0`.
+"""
+use std.spec.{step, fail}
+use std.nogc_sync_mut.io.dir_entry_ops.{dir_create_private_exclusive_v1, directory_create_private}
+use std.nogc_sync_mut.io.linux_helper_root_v1.linux_helper_root_adopt_v1
+use std.nogc_sync_mut.io.linux_fresh_workload_abi_v2.linux_workload_flags_v2
+use std.nogc_sync_mut.io.dir_ops.{dir_create, dir_remove_all}
+use std.nogc_sync_mut.io_runtime.file_write
+use std.nogc_sync_mut.io.file_ops.package_chmod
+use std.nogc_sync_mut.io.snapshot_links.snapshot_symlink_create_nofollow_v1
+use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
+
+fn helper_root_base_v1(tag: text) -> text:
+    val nanos = time_sample_monotonic_nanos_or_failure()
+    val base = "/tmp/simple-helper-root-spec-" + tag + "-" + str(nanos)
+    expect(directory_create_private(base)).to_equal(true)
+    base
+
+describe "Helper action directory create-or-adopt-empty (milestone_0021 PR2)":
+    it "creates a missing action directory private and adopts an empty euid-owned 0700 one":
+        # @req S40-AGENT-08 (3.4 step 4 steps 1-2 and the empty-adopt case)
+        if linux_workload_flags_v2(true) == 0: return
+        val base = helper_root_base_v1("create")
+        step("a missing directory is created by the begin (0700) and returns Ok")
+        expect(dir_create_private_exclusive_v1(base + "/root-w0-prepare")).to_equal(Ok(()))
+        step("the same name again is EEXIST and the empty private directory is adopted")
+        expect(dir_create_private_exclusive_v1(base + "/root-w0-prepare")).to_equal(Ok(()))
+        expect(linux_helper_root_adopt_v1(base + "/root-w0-prepare")).to_equal(Ok(()))
+        expect(dir_remove_all(base)).to_equal(true)
+
+    it "refuses every used, non-empty, shared, special-bit or linked directory with zero side effects":
+        # @req S40-AGENT-08 (r9 Z-02 list (a)-(e); r8 Y-02 items (iii)-(v))
+        if linux_workload_flags_v2(true) == 0: return
+        val base = helper_root_base_v1("refuse")
+        step("(a) a used root holding broker.claim")
+        expect(dir_create_private_exclusive_v1(base + "/claimed")).to_equal(Ok(()))
+        expect(file_write(base + "/claimed/broker.claim", "claim\n")).to_equal(true)
+        expect(dir_create_private_exclusive_v1(base + "/claimed")).to_equal(Err("machine-fresh-helper-root-exists"))
+        step("(b) a non-empty directory without a claim")
+        expect(dir_create_private_exclusive_v1(base + "/nonempty")).to_equal(Ok(()))
+        expect(file_write(base + "/nonempty/other", "x\n")).to_equal(true)
+        expect(dir_create_private_exclusive_v1(base + "/nonempty")).to_equal(Err("machine-fresh-helper-root-exists"))
+        step("(c) an empty 0755 and an empty 0750 directory")
+        for mode in [493, 488]:
+            val path = base + "/shared-" + str(mode)
+            expect(dir_create_private_exclusive_v1(path)).to_equal(Ok(()))
+            expect(package_chmod(path, mode as i32)).to_equal(0)
+            expect(dir_create_private_exclusive_v1(path)).to_equal(Err("machine-fresh-helper-root-exists"))
+        step("(d) an empty setgid 042700 directory")
+        expect(dir_create_private_exclusive_v1(base + "/setgid")).to_equal(Ok(()))
+        expect(package_chmod(base + "/setgid", 1472 as i32)).to_equal(0)
+        expect(dir_create_private_exclusive_v1(base + "/setgid")).to_equal(Err("machine-fresh-helper-root-exists"))
+        step("(e) a symlink to an empty euid-owned 0700 directory (the only proof of no-follow)")
+        expect(dir_create_private_exclusive_v1(base + "/target")).to_equal(Ok(()))
+        expect(snapshot_symlink_create_nofollow_v1(base, base + "/link", "target", 2 as i32)).to_equal(true)
+        expect(dir_create_private_exclusive_v1(base + "/link")).to_equal(Err("machine-fresh-helper-root-exists"))
+        expect(linux_helper_root_adopt_v1(base + "/link")).to_equal(Err("machine-fresh-helper-root-exists"))
+        step("a regular file at the path is refused too")
+        expect(file_write(base + "/plain", "x\n")).to_equal(true)
+        expect(dir_create_private_exclusive_v1(base + "/plain")).to_equal(Err("machine-fresh-helper-root-exists"))
+        expect(dir_remove_all(base)).to_equal(true)
+
+    it "refuses a path the kernel cannot hold and an unsupported architecture before any open":
+        # @req S40-AGENT-08 (step 4 any other errno; r9 Z-01)
+        step("a missing parent is not EEXIST and is refused")
+        val missing = dir_create_private_exclusive_v1("/nonexistent-helper-parent-m21/root-w0-prepare")
+        expect(missing.is_err()).to_equal(true)
+        expect(dir_create_private_exclusive_v1("")).to_equal(Err("machine-fresh-helper-root-path"))
+        expect(dir_create_private_exclusive_v1("relative/root")).to_equal(Err("machine-fresh-helper-root-path"))
+        if linux_workload_flags_v2(true) == 0:
+            expect(linux_helper_root_adopt_v1("/tmp")).to_equal(Err("machine-fresh-helper-root-arch-unsupported"))
