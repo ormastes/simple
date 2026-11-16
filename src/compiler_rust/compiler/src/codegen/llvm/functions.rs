@@ -1668,9 +1668,7 @@ impl LlvmBackend {
                         }
                     },
                     crate::mir::MirPattern::Variant {
-                        enum_name,
-                        variant_name,
-                        ..
+                        enum_name, discriminant, ..
                     } => {
                         // Runtime type and discriminant must both match.
                         let rt_enum_disc = module.get_function("rt_enum_discriminant").unwrap_or_else(|| {
@@ -1695,9 +1693,8 @@ impl LlvmBackend {
                             .basic()
                             .unwrap_or_else(|| i64_type.const_int(u64::MAX, false).into())
                             .into_int_value();
-                        let expected = {
-                            simple_runtime::value::hash_variant_discriminant(variant_name) as u64
-                        };
+                        // Owning enum's declared index from MIR (#6953).
+                        let expected = u64::from(*discriminant);
                         let expected_val = i64_type.const_int(expected, false);
                         let disc_cmp = builder
                             .build_int_compare(inkwell::IntPredicate::EQ, disc, expected_val, "pat_var_eq")
@@ -1822,14 +1819,13 @@ impl LlvmBackend {
             MirInst::EnumUnit {
                 dest,
                 enum_name,
-                variant_name,
+                discriminant,
+                ..
             } => {
                 // rt_enum_new(enum_id: u32, discriminant: u32, payload: RuntimeValue) -> RuntimeValue
                 let i64_t = self.runtime_int_type();
                 let i32_t = self.context_ref().i32_type();
-                let disc = {
-                    simple_runtime::value::hash_variant_discriminant(variant_name) as u32
-                };
+                let disc = *discriminant;
                 let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
                     module.add_function("rt_enum_new", fn_type, None)
@@ -1856,14 +1852,13 @@ impl LlvmBackend {
             MirInst::EnumWith {
                 dest,
                 enum_name,
-                variant_name,
+                discriminant,
                 payload,
+                ..
             } => {
                 let i64_t = self.runtime_int_type();
                 let i32_t = self.context_ref().i32_type();
-                let disc = {
-                    simple_runtime::value::hash_variant_discriminant(variant_name) as u32
-                };
+                let disc = *discriminant;
                 let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
                     module.add_function("rt_enum_new", fn_type, None)

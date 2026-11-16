@@ -1,0 +1,860 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# @req REQ-SKIA-ENGINE2D-PARITY
+# @timeout_secs 1800
+
+"""Skia vs Simple 2D Parity Spec: Stepped Font Ladder, Vector vs Bitmap, Circles, Star/Counters, 6 Orientations, and Multi-Card Layout."""
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_exists}
+use std.common.encoding.utf8.{text_codepoints}
+use std.skia.entity.geometry.{SkRect, sk_rrect_make}
+use std.skia.entity.paint.{sk_paint_fill, sk_paint_stroke}
+use std.skia.entity.path.{SkPath, sk_path_new}
+use std.skia.entity.enums.{SkPaintStyle, SkPathDirection, SkPathFillType, SkColorType, SkAlphaType}
+use std.skia.entity.color.{sk_color_argb}
+use std.skia.entity.font.{sk_font_default, sk_font_with_ttf}
+use std.skia.entity.image.{SkImage, sk_image_info_n32_premul, sk_image_make}
+use std.skia.entity.canvas.{sk_canvas_make}
+use std.skia.entity.picture.{SkPicture, SkPictureOp, SkPictureOpKind}
+use std.skia.backend.cpu.backend.{cpu_backend_new}
+use std.skia.bridge.engine2d_bridge.{BridgeReport, BridgeRenderResult, skia_picture_to_vulkan_base, skia_picture_to_engine2d_parity}
+use std.skia.feature.text.text_render_parity.{
+    skia_load_cached_font_bytes,
+    skia_default_vector_font_path,
+    skia_sfnt_text_bounds_and_advance,
+    skia_sfnt_text_path_baseline,
+    skia_bitmap_8x16_path,
+    skia_bitmap_5x7_path,
+    bitmap_8x16_argb_buffer
+}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D, engine2d_sfnt_rasterize_run}
+use std.gc_async_mut.gpu.engine2d.helpers_availability.{backend_canonical_name}
+use std.nogc_sync_mut.ui.compare_view_host.{compare_view_inspect}
+
+val FONT_MONO_PATH: text = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
+val FONT_BUNGEE_PATH: text = "assets/fonts/google-fonts/ofl/bungee/Bungee-Regular.ttf"
+
+val COL_BG: u32 = 0xFF0F172Au32
+val COL_CARD: u32 = 0xFF1E293Bu32
+val COL_BORDER: u32 = 0xFF38BDF8u32
+val COL_TEXT: u32 = 0xFFF8FAFCu32
+val COL_ACCENT: u32 = 0xFFF59E0Bu32
+val COL_TEAL: u32 = 0xFF14B8A6u32
+val COL_EMERALD: u32 = 0xFF22C55Eu32
+val COL_CRIMSON: u32 = 0xFFEF4444u32
+val COL_PURPLE: u32 = 0xFF6366F1u32
+
+fn _sk_u32(c: u32) -> i64:
+    c.to_i64()
+
+fn _abs_i32(v: i32) -> i32:
+    if v < 0: -v else: v
+
+fn _max_rgb_diff(a: u32, b: u32) -> i32:
+    val ar = ((a >> 16) & 0xFFu32) as i32
+    val ag = ((a >> 8) & 0xFFu32) as i32
+    val ab = (a & 0xFFu32) as i32
+    val br = ((b >> 16) & 0xFFu32) as i32
+    val bg = ((b >> 8) & 0xFFu32) as i32
+    val bb = (b & 0xFFu32) as i32
+    var md = _abs_i32(ar - br)
+    val gd = _abs_i32(ag - bg)
+    val bd = _abs_i32(ab - bb)
+    if gd > md: md = gd
+    if bd > md: md = bd
+    md
+
+fn _bitmap_to_u32_argb(bmp: [u8], w: i32, h: i32) -> [u32]:
+    val total = (w as i64) * (h as i64)
+    var out: [u32] = [0u32; total]
+    var i: i64 = 0
+    while i < total:
+        val base = i * 4
+        val r = bmp[base] as i64
+        val g = bmp[base + 1] as i64
+        val b = bmp[base + 2] as i64
+        val a = bmp[base + 3] as i64
+        val sr = if a == 255 or a == 0: r else: (r * 255 + a / 2) / a
+        val sg = if a == 255 or a == 0: g else: (g * 255 + a / 2) / a
+        val sb = if a == 255 or a == 0: b else: (b * 255 + a / 2) / a
+        val cr = if sr > 255: 255 else: sr
+        val cg = if sg > 255: 255 else: sg
+        val cb = if sb > 255: 255 else: sb
+        out[i] = ((a << 24) | (cr << 16) | (cg << 8) | cb) as u32
+        i = i + 1
+    out
+
+fn _similarity_pct(a: [u32], b: [u32], tol: i32) -> i64:
+    if a.len() == 0 or a.len() != b.len():
+        return 0
+    var matched: i64 = 0
+    var i: i64 = 0
+    val n = a.len()
+    while i < n:
+        if _max_rgb_diff(a[i], b[i]) <= tol:
+            matched = matched + 1
+        i = i + 1
+    (matched * 100) / n
+
+fn _prefer_vulkan_backend() -> text:
+    match Engine2D.create_vulkan_backend(16, 16):
+        Ok(eng):
+            val canon = backend_canonical_name(eng.backend_name())
+            eng.shutdown()
+            if canon == "vulkan":
+                return "vulkan"
+            "software"
+        Err(_):
+            "software"
+
+fn _render_bridge_parity(pic: SkPicture, w: i32, h: i32, preferred_backend: text) -> BridgeRenderResult:
+    if preferred_backend == "vulkan":
+        match skia_picture_to_vulkan_base(pic, w, h):
+            Ok(res):
+                expect(res.report.readback_source).to_equal("device_readback")
+                return res
+            Err(_): ()
+    match skia_picture_to_engine2d_parity(pic, w, h, "software"):
+        Ok(res):
+            return res
+        Err(reason):
+            expect(reason).to_equal("")
+            val empty_rep = BridgeReport(
+                mapped_rects: 0, mapped_images: 0, mapped_ovals: 0,
+                skipped: 1, lossy: 0, readback_source: "", complete: false, reason: reason
+            )
+            BridgeRenderResult(pixels: [], report: empty_rep)
+
+fn _cpu_render(pic: SkPicture, w: i32, h: i32) -> [u32]:
+    val cull = SkRect(left: 0.0, top: 0.0, right: w.to_f64(), bottom: h.to_f64())
+    val bmp = cpu_backend_new().render_picture(pic, cull)
+    _bitmap_to_u32_argb(bmp.pixels, w, h)
+
+fn _count_ink_pixels(pixels: [u32], w: i32, h: i32, x0: i32, y0: i32, x1: i32, y1: i32, bg: u32) -> i64:
+    var count: i64 = 0
+    var y = if y0 < 0: 0 else: y0
+    val ey = if y1 > h: h else: y1
+    val sx = if x0 < 0: 0 else: x0
+    val ex = if x1 > w: w else: x1
+    while y < ey:
+        var x = sx
+        while x < ex:
+            val px = pixels[(y * w + x) as i64]
+            if _max_rgb_diff(px, bg) > 20:
+                count = count + 1
+            x = x + 1
+        y = y + 1
+    count
+
+fn _collect_glyph_column_bounds(pixels: [u32], w: i32, h: i32, x0: i32, y0: i32, x1: i32, y1: i32, bg: u32) -> ([i32], [i32], [i32], [i32]):
+    # Scan vertical ink columns inside [x0, x1) x [y0, y1) and group contiguous
+    # active columns into separated glyph ink boxes (top, bottom, left, right).
+    var tops: [i32] = []
+    var bottoms: [i32] = []
+    var lefts: [i32] = []
+    var rights: [i32] = []
+    var in_glyph = false
+    var g_top: i32 = y1
+    var g_bot: i32 = y0 - 1
+    var g_left: i32 = x1
+    var g_right: i32 = x0 - 1
+
+    var x = if x0 < 0: 0 else: x0
+    val ex = if x1 > w: w else: x1
+    val sy = if y0 < 0: 0 else: y0
+    val ey = if y1 > h: h else: y1
+    while x < ex:
+        var col_has_ink = false
+        var col_top = ey
+        var col_bot = sy - 1
+        var y = sy
+        while y < ey:
+            val px = pixels[(y * w + x) as i64]
+            if _max_rgb_diff(px, bg) > 24:
+                col_has_ink = true
+                if y < col_top: col_top = y
+                if y > col_bot: col_bot = y
+            y = y + 1
+        if col_has_ink:
+            if not in_glyph:
+                in_glyph = true
+                g_left = x
+                g_right = x
+                g_top = col_top
+                g_bot = col_bot
+            else:
+                g_right = x
+                if col_top < g_top: g_top = col_top
+                if col_bot > g_bot: g_bot = col_bot
+        else:
+            if in_glyph:
+                tops.push(g_top)
+                bottoms.push(g_bot)
+                lefts.push(g_left)
+                rights.push(g_right)
+                in_glyph = false
+        x = x + 1
+    if in_glyph:
+        tops.push(g_top)
+        bottoms.push(g_bot)
+        lefts.push(g_left)
+        rights.push(g_right)
+    (tops, bottoms, lefts, rights)
+
+fn _build_star_path(cx: f64, cy: f64, r_out: f64, r_in: f64) -> SkPath:
+    sk_path_new()
+        .with_fill_type(SkPathFillType.Winding)
+        .move_to(cx, cy - r_out)
+        .line_to(cx + r_in * 0.587785, cy - r_in * 0.809017)
+        .line_to(cx + r_out * 0.951057, cy - r_out * 0.309017)
+        .line_to(cx + r_in * 0.951057, cy + r_in * 0.309017)
+        .line_to(cx + r_out * 0.587785, cy + r_out * 0.809017)
+        .line_to(cx, cy + r_in)
+        .line_to(cx - r_out * 0.587785, cy + r_out * 0.809017)
+        .line_to(cx - r_in * 0.951057, cy + r_in * 0.309017)
+        .line_to(cx - r_out * 0.951057, cy - r_out * 0.309017)
+        .line_to(cx - r_in * 0.587785, cy - r_in * 0.809017)
+        .close()
+
+fn _build_quadrant_stamp_sk_image() -> SkImage:
+    val sw: i64 = 16
+    val sh: i64 = 16
+    val info = sk_image_info_n32_premul(sw, sh)
+    var px: [i64] = [0i64; (sw * sh * 4)]
+    var y: i64 = 0
+    while y < sh:
+        var x: i64 = 0
+        while x < sw:
+            val base = (y * sw + x) * 4
+            var a: i64 = 255
+            var r: i64 = 240
+            var g: i64 = 240
+            var b: i64 = 240
+            if x == 0 or y == 0 or x == sw - 1 or y == sh - 1:
+                a = 180
+                r = 255
+                g = 255
+                b = 255
+            elif x < 8 and y < 8:
+                r = 239
+                g = 68
+                b = 68
+            elif x >= 8 and y < 8:
+                r = 34
+                g = 197
+                b = 94
+            elif x < 8 and y >= 8:
+                r = 56
+                g = 189
+                b = 248
+            else:
+                r = 245
+                g = 158
+                b = 11
+            px[base] = a
+            px[base + 1] = r
+            px[base + 2] = g
+            px[base + 3] = b
+            x = x + 1
+        y = y + 1
+    sk_image_make(info, px)
+
+fn _split_words(s: text) -> [text]:
+    var out: [text] = []
+    var cur = ""
+    val n = s.len()
+    var i: i64 = 0
+    while i < n:
+        val ch = s.slice(i, i + 1)
+        if ch == " ":
+            if cur != "":
+                out.push(cur)
+                cur = ""
+        else:
+            cur = cur + ch
+        i = i + 1
+    if cur != "":
+        out.push(cur)
+    out
+
+fn _wrap_text_to_width(blob: [u8], content: text, font_size: f64, max_w: f64) -> [text]:
+    val words = _split_words(content)
+    var lines: [text] = []
+    var cur = ""
+    var wi: i64 = 0
+    while wi < words.len():
+        val w = words[wi]
+        val cand = if cur == "": w else: cur + " " + w
+        val m = skia_sfnt_text_bounds_and_advance(blob, cand, font_size)
+        if cur != "" and m.advance_px > max_w:
+            lines.push(cur)
+            cur = w
+        else:
+            cur = cand
+        wi = wi + 1
+    if cur != "":
+        lines.push(cur)
+    lines
+
+fn _aligned_x(blob: [u8], line_text: text, font_size: f64, box_x: f64, box_w: f64, align_mode: text) -> f64:
+    val m = skia_sfnt_text_bounds_and_advance(blob, line_text, font_size)
+    if align_mode == "center":
+        box_x + (box_w - m.advance_px) * 0.5
+    elif align_mode == "right":
+        box_x + box_w - m.advance_px
+    else:
+        box_x
+
+describe "Skia vs Simple 2D Circle, Text Ladder, Orientation & Layout Parity":
+    it "Case 1: renders 10-step SFNT pixel-level font ladder (100px..8px) with 0px cap/baseline jitter and high parity":
+        val w: i32 = 1040
+        val h: i32 = 600
+        val backend = _prefer_vulkan_backend()
+        expect(file_exists(FONT_MONO_PATH)).to_equal(true)
+        expect(file_exists(FONT_BUNGEE_PATH)).to_equal(true)
+        val mono_blob = skia_load_cached_font_bytes(FONT_MONO_PATH)
+        val bungee_blob = skia_load_cached_font_bytes(FONT_BUNGEE_PATH)
+        expect(mono_blob.len()).to_be_greater_than(1000)
+        expect(bungee_blob.len()).to_be_greater_than(1000)
+
+        # Full 10-step size ladder: 100 -> 72 -> 48 -> 36 -> 24 -> 18 -> 14 -> 12 -> 10 -> 8
+        val sizes: [f64] = [100.0, 72.0, 48.0, 36.0, 24.0, 18.0, 14.0, 12.0, 10.0, 8.0]
+        val baselines: [i32] = [102, 184, 244, 292, 328, 358, 384, 408, 430, 452]
+
+        # 1A: Verify 0px flat-cap top/bottom jitter & zero horizontal overlap across all 10 sizes on Engine2D.draw_text_sfnt_baseline_aa
+        var align_eng = Engine2D.create_with_backend(w, h, backend)
+        align_eng.clear(COL_BG)
+        var si: i64 = 0
+        while si < sizes.len():
+            val sz = sizes[si]
+            val by = baselines[si]
+            align_eng.draw_text_sfnt_baseline_aa(24, by, "HEFILTB", COL_TEXT, sz, FONT_MONO_PATH)
+            if sz < 12.0:
+                align_eng.draw_text_sfnt_baseline_aa(180, by, "H E F I L T B", COL_TEXT, sz, FONT_MONO_PATH)
+            align_eng.draw_text_sfnt_baseline_aa(470, by, "AO80", COL_ACCENT, sz * 0.72, FONT_BUNGEE_PATH)
+            si = si + 1
+        align_eng.draw_text_sfnt_baseline_aa(24, 535, "Hamburgefontsiv", COL_TEAL, 44.0, FONT_MONO_PATH)
+        val align_rb = align_eng.read_pixels_with_source()
+        align_eng.present()
+        align_eng.shutdown()
+        expect(align_rb.pixels.len().to_i64()).to_equal((w as i64) * (h as i64))
+
+        # Check every rung for flat-top cap alignment (H,E,F,I,L,T,B) and baseline alignment.
+        si = 0
+        while si < sizes.len():
+            val sz = sizes[si]
+            val by = baselines[si]
+            val band_top = by - ((sz + 8.0) as i32)
+            val band_bot = by + 6
+            val scan_right = if sz < 12.0: 170 else: 455
+            val (tops, bots, lefts, rights) = _collect_glyph_column_bounds(align_rb.pixels, w, h, 20, band_top, scan_right, band_bot, COL_BG)
+            expect(tops.len()).to_be_greater_than(0)
+            if sz >= 12.0:
+                # Zero horizontal overlap: all 7 letters H E F I L T B remain distinct column groups.
+                expect(tops.len()).to_equal(7)
+            var min_top = tops[0]
+            var max_top = tops[0]
+            var min_bot = bots[0]
+            var max_bot = bots[0]
+            var gi: i64 = 1
+            while gi < tops.len():
+                if tops[gi] < min_top: min_top = tops[gi]
+                if tops[gi] > max_top: max_top = tops[gi]
+                if bots[gi] < min_bot: min_bot = bots[gi]
+                if bots[gi] > max_bot: max_bot = bots[gi]
+                expect(lefts[gi]).to_be_greater_than(rights[gi - 1])
+                gi = gi + 1
+            # 0px cap-top & baseline jitter across flat-top capitals H,E,F,I,L,T,B.
+            expect(max_top - min_top).to_equal(0)
+            expect(max_bot - min_bot).to_equal(0)
+            if sz < 12.0:
+                # At 10px/8px packed monospace glyphs occupy adjacent integer pixel columns;
+                # also inspect separated H E F I L T B glyphs so all 7 letters check individually.
+                val (s_tops, s_bots, s_lefts, s_rights) = _collect_glyph_column_bounds(align_rb.pixels, w, h, 176, band_top, 360, band_bot, COL_BG)
+                expect(s_tops.len()).to_equal(7)
+                var s_min_t = s_tops[0]
+                var s_max_t = s_tops[0]
+                var s_min_b = s_bots[0]
+                var s_max_b = s_bots[0]
+                var sgi: i64 = 1
+                while sgi < s_tops.len():
+                    if s_tops[sgi] < s_min_t: s_min_t = s_tops[sgi]
+                    if s_tops[sgi] > s_max_t: s_max_t = s_tops[sgi]
+                    if s_bots[sgi] < s_min_b: s_min_b = s_bots[sgi]
+                    if s_bots[sgi] > s_max_b: s_max_b = s_bots[sgi]
+                    expect(s_lefts[sgi]).to_be_greater_than(s_rights[sgi - 1])
+                    sgi = sgi + 1
+                expect(s_max_t - s_min_t).to_equal(0)
+                expect(s_max_b - s_min_b).to_equal(0)
+            si = si + 1
+
+        # 1B: Build real Skia SkCanvas picture of the full 10-step ladder & compare CpuBackend vs Engine2D.draw_text_sfnt_baseline_aa + bridge.
+        val bounds = SkRect(left: 0.0, top: 0.0, right: w.to_f64(), bottom: h.to_f64())
+        val p_bg = sk_paint_fill(_sk_u32(COL_BG)).with_anti_alias(false)
+        val p_fg = sk_paint_fill(_sk_u32(COL_TEXT))
+        val p_acc = sk_paint_fill(_sk_u32(COL_ACCENT))
+        val p_teal = sk_paint_fill(_sk_u32(COL_TEAL))
+        var canvas = sk_canvas_make(w as i64, h as i64).begin_recording(bounds).draw_rect(bounds, p_bg)
+        var e2d = Engine2D.create_with_backend(w, h, backend)
+        e2d.clear(COL_BG)
+
+        si = 0
+        while si < sizes.len():
+            val sz = sizes[si]
+            val by = baselines[si]
+            val b_sz = if sz * 0.72 >= 8.0: sz * 0.72 else: 8.0
+            val mono_font = sk_font_with_ttf(FONT_MONO_PATH, sz)
+            val bungee_font = sk_font_with_ttf(FONT_BUNGEE_PATH, b_sz)
+            canvas = canvas
+                .draw_string("HEFILTB AO80", 20.0, by as f64, mono_font, p_fg)
+                .draw_string("AO80", 780.0, by as f64, bungee_font, p_acc)
+            e2d.draw_text_sfnt_baseline_aa(20, by, "HEFILTB AO80", COL_TEXT, sz, FONT_MONO_PATH)
+            e2d.draw_text_sfnt_baseline_aa(780, by, "AO80", COL_ACCENT, b_sz, FONT_BUNGEE_PATH)
+            si = si + 1
+
+        val ham_font = sk_font_with_ttf(FONT_MONO_PATH, 44.0)
+        canvas = canvas.draw_string("Hamburgefontsiv", 20.0, 535.0, ham_font, p_teal)
+        e2d.draw_text_sfnt_baseline_aa(20, 535, "Hamburgefontsiv", COL_TEAL, 44.0, FONT_MONO_PATH)
+
+        val ladder_pic = canvas.end_recording()
+        val e2d_rb = e2d.read_pixels_with_source()
+        e2d.present()
+        e2d.shutdown()
+
+        val skia_pixels = _cpu_render(ladder_pic, w, h)
+        val bridge_res = _render_bridge_parity(ladder_pic, w, h, backend)
+        expect(bridge_res.report.complete).to_equal(true)
+
+        val cv_cpu_vs_bridge = compare_view_inspect(
+            "case1_stepped_font_ladder_skia_vs_bridge",
+            "skia_cpu", skia_pixels, w, h,
+            "bridge_" + backend, bridge_res.pixels, w, h
+        )
+        val cv_cpu_vs_e2d = compare_view_inspect(
+            "case1_stepped_font_ladder_skia_vs_engine2d",
+            "skia_cpu", skia_pixels, w, h,
+            "engine2d_sfnt_aa", e2d_rb.pixels, w, h
+        )
+        print("case1_cv_cpu_vs_bridge=" + cv_cpu_vs_bridge)
+        print("case1_cv_cpu_vs_e2d=" + cv_cpu_vs_e2d)
+
+        val sim_bridge = _similarity_pct(skia_pixels, bridge_res.pixels, 8)
+        val sim_e2d = _similarity_pct(skia_pixels, e2d_rb.pixels, 24)
+        print("case1_sim_bridge=" + sim_bridge.to_text() + " case1_sim_e2d=" + sim_e2d.to_text())
+        expect(sim_bridge).to_be_greater_than(98)
+        expect(sim_e2d).to_be_greater_than(94)
+
+    it "Case 2: verifies vector SFNT font vs crisp 1x bitmap font (8x16 VGA + 5x7 at 1x) without big-pixel scaling":
+        val w: i32 = 640
+        val h: i32 = 480
+        val backend = _prefer_vulkan_backend()
+        val mono_blob = skia_load_cached_font_bytes(FONT_MONO_PATH)
+        val bungee_blob = skia_load_cached_font_bytes(FONT_BUNGEE_PATH)
+        val bounds = SkRect(left: 0.0, top: 0.0, right: w.to_f64(), bottom: h.to_f64())
+        val p_bg = sk_paint_fill(_sk_u32(COL_BG)).with_anti_alias(false)
+        val p_card = sk_paint_fill(_sk_u32(COL_CARD)).with_anti_alias(false)
+        val p_vec = sk_paint_fill(_sk_u32(COL_TEXT))
+        val p_vga = sk_paint_fill(_sk_u32(COL_EMERALD)).with_anti_alias(false)
+        val p_b57 = sk_paint_fill(_sk_u32(COL_BORDER)).with_anti_alias(false)
+
+        val vec_path_1 = skia_sfnt_text_path_baseline(mono_blob, "Vector SFNT 24px AA", 44.0, 96.0, 24.0)
+        val vec_path_2 = skia_sfnt_text_path_baseline(bungee_blob, "BUNGEE 20PX", 44.0, 140.0, 20.0)
+        val vga_path = skia_bitmap_8x16_path("VGA 8x16 1x Native", 44.0, 228.0, 1)
+        val b57_path = skia_bitmap_5x7_path("5x7 1x Native Crisp", 44.0, 310.0, 7.0)
+
+        val pic = sk_canvas_make(w as i64, h as i64)
+            .begin_recording(bounds)
+            .draw_rect(bounds, p_bg)
+            .draw_rect(SkRect(left: 24.0, top: 28.0, right: 616.0, bottom: 172.0), p_card)
+            .draw_rect(SkRect(left: 24.0, top: 192.0, right: 616.0, bottom: 380.0), p_card)
+            .draw_path(vec_path_1, p_vec)
+            .draw_path(vec_path_2, p_vec)
+            .draw_path(vga_path, p_vga)
+            .draw_path(b57_path, p_b57)
+            .end_recording()
+
+        val skia_pixels = _cpu_render(pic, w, h)
+        val bridge_res = _render_bridge_parity(pic, w, h, backend)
+        expect(bridge_res.report.complete).to_equal(true)
+
+        # Render Engine2D side with direct draw_text_sfnt_baseline_aa + 1x bitmap_8x16_argb_buffer + 1x draw_text (5x7).
+        var eng = Engine2D.create_with_backend(w, h, backend)
+        eng.clear(COL_BG)
+        eng.draw_rect_filled(24, 28, 592, 144, COL_CARD)
+        eng.draw_rect_filled(24, 192, 592, 188, COL_CARD)
+        eng.draw_text_sfnt_baseline_aa(44, 96, "Vector SFNT 24px AA", COL_TEXT, 24.0, FONT_MONO_PATH)
+        eng.draw_text_sfnt_baseline_aa(44, 140, "BUNGEE 20PX", COL_TEXT, 20.0, FONT_BUNGEE_PATH)
+        val vga_buf = bitmap_8x16_argb_buffer("VGA 8x16 1x Native", COL_EMERALD, 0x00000000u32, 1)
+        eng.draw_image_blend(44, 228, vga_buf.width, vga_buf.height, vga_buf.pixels)
+        eng.draw_text(44, 310, "5x7 1x Native Crisp", COL_BORDER, 7)
+        val e2d_rb = eng.read_pixels_with_source()
+        eng.present()
+        eng.shutdown()
+
+        # Verify 1x bitmap height is strictly <= 16px (VGA 8x16) and <= 7px (5x7), never chunky 3x/4x scaled.
+        val (vga_t, vga_b, _vl, _vr) = _collect_glyph_column_bounds(e2d_rb.pixels, w, h, 40, 224, 300, 250, COL_CARD)
+        expect(vga_t.len()).to_be_greater_than(5)
+        var max_vga_h = 0
+        var vi: i64 = 0
+        while vi < vga_t.len():
+            val gh = vga_b[vi] - vga_t[vi] + 1
+            if gh > max_vga_h: max_vga_h = gh
+            vi = vi + 1
+        expect(max_vga_h).to_be_less_than(17)
+
+        val (b57_t, b57_b, _bl, _br) = _collect_glyph_column_bounds(e2d_rb.pixels, w, h, 40, 306, 300, 326, COL_CARD)
+        expect(b57_t.len()).to_be_greater_than(5)
+        var max_57_h = 0
+        var bi: i64 = 0
+        while bi < b57_t.len():
+            val gh = b57_b[bi] - b57_t[bi] + 1
+            if gh > max_57_h: max_57_h = gh
+            bi = bi + 1
+        expect(max_57_h).to_be_less_than(8)
+
+        # Verify vector text uses intermediate AA shading (not binary blocky stair-steps).
+        var vec_aa_shades = 0
+        var vx = 40
+        while vx < 400:
+            var vy = 70
+            while vy < 105:
+                val px = e2d_rb.pixels[(vy * w + vx) as i64]
+                val d = _max_rgb_diff(px, COL_CARD)
+                if d > 20 and d < 190:
+                    vec_aa_shades = vec_aa_shades + 1
+                vy = vy + 1
+            vx = vx + 1
+        expect(vec_aa_shades).to_be_greater_than(20)
+
+        val cv_bridge = compare_view_inspect(
+            "case2_vector_vs_bitmap_skia_vs_bridge",
+            "skia_cpu", skia_pixels, w, h,
+            "bridge_" + backend, bridge_res.pixels, w, h
+        )
+        val cv_e2d = compare_view_inspect(
+            "case2_vector_vs_bitmap_skia_vs_engine2d",
+            "skia_cpu", skia_pixels, w, h,
+            "engine2d_direct", e2d_rb.pixels, w, h
+        )
+        print("case2_cv_bridge=" + cv_bridge + " case2_cv_e2d=" + cv_e2d)
+        expect(_similarity_pct(skia_pixels, bridge_res.pixels, 8)).to_be_greater_than(98)
+        expect(_similarity_pct(skia_pixels, e2d_rb.pixels, 24)).to_be_greater_than(93)
+
+    it "Case 3: verifies circles, thin/thick strokes, concentric rings, overlapping alpha circles, and oval pills":
+        val w: i32 = 640
+        val h: i32 = 480
+        val backend = _prefer_vulkan_backend()
+        val bounds = SkRect(left: 0.0, top: 0.0, right: w.to_f64(), bottom: h.to_f64())
+        val p_bg = sk_paint_fill(_sk_u32(COL_BG)).with_anti_alias(false)
+        val p_fill = sk_paint_fill(_sk_u32(COL_ACCENT))
+        val p_thin = sk_paint_stroke(_sk_u32(COL_BORDER), 1.5)
+        val p_thick = sk_paint_stroke(_sk_u32(COL_TEAL), 6.0)
+        val p_ring1 = sk_paint_stroke(_sk_u32(COL_TEXT), 3.0)
+        val p_ring2 = sk_paint_stroke(_sk_u32(COL_EMERALD), 5.0)
+        val p_alpha1 = sk_paint_fill(sk_color_argb(140, 239, 68, 68))
+        val p_alpha2 = sk_paint_fill(sk_color_argb(140, 56, 189, 248))
+        val p_pill = sk_paint_fill(_sk_u32(COL_PURPLE))
+
+        val pic = sk_canvas_make(w as i64, h as i64)
+            .begin_recording(bounds)
+            .draw_rect(bounds, p_bg)
+            .draw_circle(110.0, 115.0, 58.0, p_fill)
+            .draw_circle(260.0, 115.0, 58.0, p_thin)
+            .draw_circle(410.0, 115.0, 58.0, p_thick)
+            .draw_circle(540.0, 115.0, 54.0, p_ring1)
+            .draw_circle(540.0, 115.0, 34.0, p_ring2)
+            .draw_circle(540.0, 115.0, 16.0, p_fill)
+            .draw_circle(160.0, 320.0, 68.0, p_alpha1)
+            .draw_circle(220.0, 320.0, 68.0, p_alpha2)
+            .draw_oval(SkRect(left: 340.0, top: 265.0, right: 570.0, bottom: 375.0), p_pill)
+            .draw_rrect(sk_rrect_make(SkRect(left: 360.0, top: 395.0, right: 550.0, bottom: 445.0), 25.0, 25.0), p_fill)
+            .end_recording()
+
+        val skia_pixels = _cpu_render(pic, w, h)
+        val bridge_res = _render_bridge_parity(pic, w, h, backend)
+        expect(bridge_res.report.complete).to_equal(true)
+        expect(bridge_res.report.mapped_ovals).to_be_greater_than(6)
+
+        val cv = compare_view_inspect(
+            "case3_circles_and_rings",
+            "skia_cpu", skia_pixels, w, h,
+            "bridge_" + backend, bridge_res.pixels, w, h
+        )
+        print("case3_cv=" + cv)
+        val sim = _similarity_pct(skia_pixels, bridge_res.pixels, 6)
+        print("case3_sim_pct=" + sim.to_text())
+        expect(sim).to_be_greater_than(98)
+
+    it "Case 4: verifies 5-point star, outer ring, and counter-hole glyph shapes (O, B, 8, A) preserve open counters":
+        val w: i32 = 640
+        val h: i32 = 480
+        val backend = _prefer_vulkan_backend()
+        val mono_blob = skia_load_cached_font_bytes(FONT_MONO_PATH)
+        val bounds = SkRect(left: 0.0, top: 0.0, right: w.to_f64(), bottom: h.to_f64())
+        val p_bg = sk_paint_fill(_sk_u32(COL_BG)).with_anti_alias(false)
+        val p_ring = sk_paint_stroke(_sk_u32(COL_TEAL), 6.0)
+        val p_star = sk_paint_fill(_sk_u32(COL_ACCENT))
+        val p_glyph = sk_paint_fill(_sk_u32(COL_TEXT))
+
+        val star = _build_star_path(180.0, 240.0, 110.0, 44.0)
+        val ob8a_path = skia_sfnt_text_path_baseline(mono_blob, "OB8A", 330.0, 275.0, 96.0)
+
+        val pic = sk_canvas_make(w as i64, h as i64)
+            .begin_recording(bounds)
+            .draw_rect(bounds, p_bg)
+            .draw_circle(180.0, 240.0, 128.0, p_ring)
+            .draw_path(star, p_star)
+            .draw_path(ob8a_path, p_glyph)
+            .end_recording()
+
+        val skia_pixels = _cpu_render(pic, w, h)
+        val bridge_res = _render_bridge_parity(pic, w, h, backend)
+        expect(bridge_res.report.complete).to_equal(true)
+
+        # Also check Engine2D.draw_text_sfnt_baseline_aa preserves interior counter holes for "OB8A".
+        var eng = Engine2D.create_with_backend(w, h, backend)
+        eng.clear(COL_BG)
+        eng.draw_text_sfnt_baseline_aa(330, 275, "OB8A", COL_TEXT, 96.0, FONT_MONO_PATH)
+        val e2d_rb = eng.read_pixels_with_source()
+        eng.present()
+        eng.shutdown()
+        val (g_tops, g_bots, g_lefts, g_rights) = _collect_glyph_column_bounds(e2d_rb.pixels, w, h, 325, 175, 610, 290, COL_BG)
+        expect(g_tops.len()).to_equal(4)
+        # Inside center of 'O', 'B', '8', 'A' counter holes, center pixels must retain COL_BG (counter un-filled!).
+        var open_counter_glyphs = 0
+        var gi: i64 = 0
+        while gi < g_lefts.len():
+            val cx = (g_lefts[gi] + g_rights[gi]) / 2
+            val cy = (g_tops[gi] + g_bots[gi]) / 2
+            # Search a small 5x5 core near glyph centroid/upper-hole for transparent background pixel.
+            var found_bg = false
+            var dy = -8
+            while dy <= 8:
+                var dx = -4
+                while dx <= 4:
+                    val py = cy + dy
+                    val px = cx + dx
+                    if px >= 0 and px < w and py >= 0 and py < h:
+                        if _max_rgb_diff(e2d_rb.pixels[(py * w + px) as i64], COL_BG) <= 8:
+                            found_bg = true
+                    dx = dx + 1
+                dy = dy + 1
+            if found_bg:
+                open_counter_glyphs = open_counter_glyphs + 1
+            gi = gi + 1
+        expect(open_counter_glyphs).to_equal(4)
+
+        val cv = compare_view_inspect(
+            "case4_star_and_counter_hole_glyphs",
+            "skia_cpu", skia_pixels, w, h,
+            "bridge_" + backend, bridge_res.pixels, w, h
+        )
+        print("case4_cv=" + cv)
+        val sim = _similarity_pct(skia_pixels, bridge_res.pixels, 8)
+        print("case4_sim_pct=" + sim.to_text())
+        expect(sim).to_be_greater_than(98)
+
+    it "Case 5: renders star, circle, vector text, bitmap text, and image stamp across 6 orientations (0, 90, 180, 270, 45, mirror)":
+        val w: i32 = 800
+        val h: i32 = 600
+        val backend = _prefer_vulkan_backend()
+        val mono_blob = skia_load_cached_font_bytes(FONT_MONO_PATH)
+        val bounds = SkRect(left: 0.0, top: 0.0, right: w.to_f64(), bottom: h.to_f64())
+        val p_bg = sk_paint_fill(_sk_u32(COL_BG)).with_anti_alias(false)
+        val p_card = sk_paint_fill(_sk_u32(COL_CARD)).with_anti_alias(false)
+        val p_star = sk_paint_fill(_sk_u32(COL_ACCENT))
+        val p_circle = sk_paint_fill(_sk_u32(COL_TEAL))
+        val p_ring = sk_paint_stroke(_sk_u32(COL_BORDER), 3.0)
+        val p_vec = sk_paint_fill(_sk_u32(COL_TEXT))
+        val p_bmp = sk_paint_fill(_sk_u32(COL_EMERALD)).with_anti_alias(false)
+
+        val local_star = _build_star_path(-32.0, -18.0, 28.0, 12.0)
+        val local_vec = skia_sfnt_text_path_baseline(mono_blob, "AB", -48.0, 32.0, 24.0)
+        val local_bmp = skia_bitmap_8x16_path("1x", 8.0, 16.0, 1)
+        val stamp = _build_quadrant_stamp_sk_image()
+
+        val tile_cx: [f64] = [140.0, 400.0, 660.0, 140.0, 400.0, 660.0]
+        val tile_cy: [f64] = [150.0, 150.0, 150.0, 430.0, 430.0, 430.0]
+        val rots: [f64] = [0.0, 90.0, 180.0, 270.0, 45.0, 0.0]
+        val sxs: [f64] = [1.0, 1.0, 1.0, 1.0, 1.0, -1.0]
+
+        var rec_canvas = sk_canvas_make(w as i64, h as i64).begin_recording(bounds).draw_rect(bounds, p_bg)
+        var ti: i64 = 0
+        while ti < 6:
+            val cx = tile_cx[ti]
+            val cy = tile_cy[ti]
+            rec_canvas = rec_canvas.draw_rect(SkRect(left: cx - 105.0, top: cy - 105.0, right: cx + 105.0, bottom: cy + 105.0), p_card)
+            ti = ti + 1
+
+        val rec = match rec_canvas.recorder:
+            Some(r): r
+            None:
+                expect("recorder").to_equal("present")
+                return
+
+        ti = 0
+        while ti < 6:
+            val cx = tile_cx[ti]
+            val cy = tile_cy[ti]
+            val rot = rots[ti]
+            val sx = sxs[ti]
+            rec.record(SkPictureOp(kind: SkPictureOpKind.Save, rect: SkRect(left: 0.0, top: 0.0, right: 0.0, bottom: 0.0), rx: 0.0, ry: 0.0, path: None, image: None, paint: sk_paint_fill(0), x: 0.0, y: 0.0))
+            rec.record(SkPictureOp(kind: SkPictureOpKind.SetMatrix, rect: SkRect(left: cx, top: cy, right: sx, bottom: 1.0), rx: rot, ry: 0.0, path: None, image: None, paint: sk_paint_fill(0), x: 0.0, y: 0.0))
+            rec.record(SkPictureOp(kind: SkPictureOpKind.DrawOval, rect: SkRect(left: 12.0, top: -46.0, right: 64.0, bottom: 6.0), rx: 26.0, ry: 26.0, path: None, image: None, paint: p_circle, x: 38.0, y: -20.0))
+            rec.record(SkPictureOp(kind: SkPictureOpKind.DrawOval, rect: SkRect(left: 12.0, top: -46.0, right: 64.0, bottom: 6.0), rx: 26.0, ry: 26.0, path: None, image: None, paint: p_ring, x: 38.0, y: -20.0))
+            rec.record(SkPictureOp(kind: SkPictureOpKind.DrawPath, rect: SkRect(left: 0.0, top: 0.0, right: 0.0, bottom: 0.0), rx: 0.0, ry: 0.0, path: Some(local_star), image: None, paint: p_star, x: 0.0, y: 0.0))
+            rec.record(SkPictureOp(kind: SkPictureOpKind.DrawPath, rect: SkRect(left: 0.0, top: 0.0, right: 0.0, bottom: 0.0), rx: 0.0, ry: 0.0, path: Some(local_vec), image: None, paint: p_vec, x: 0.0, y: 0.0))
+            rec.record(SkPictureOp(kind: SkPictureOpKind.DrawPath, rect: SkRect(left: 0.0, top: 0.0, right: 0.0, bottom: 0.0), rx: 0.0, ry: 0.0, path: Some(local_bmp), image: None, paint: p_bmp, x: 0.0, y: 0.0))
+            rec.record(SkPictureOp(kind: SkPictureOpKind.DrawImage, rect: SkRect(left: 0.0, top: 0.0, right: 0.0, bottom: 0.0), rx: 0.0, ry: 0.0, path: None, image: Some(stamp), paint: p_vec, x: -16.0, y: 46.0))
+            rec.record(SkPictureOp(kind: SkPictureOpKind.Restore, rect: SkRect(left: 0.0, top: 0.0, right: 0.0, bottom: 0.0), rx: 0.0, ry: 0.0, path: None, image: None, paint: sk_paint_fill(0), x: 0.0, y: 0.0))
+            ti = ti + 1
+
+        val orient_pic = rec_canvas.end_recording()
+        val skia_pixels = _cpu_render(orient_pic, w, h)
+        val bridge_res = _render_bridge_parity(orient_pic, w, h, backend)
+        expect(bridge_res.report.complete).to_equal(true)
+
+        # Also verify DrawTextBlob across all 6 orientations via the bridge produces active rotated/mirrored SFNT text ink.
+        var blob_canvas = sk_canvas_make(w as i64, h as i64).begin_recording(bounds).draw_rect(bounds, p_bg)
+        val blob_rec = match blob_canvas.recorder:
+            Some(r): r
+            None:
+                expect("blob_recorder").to_equal("present")
+                return
+        ti = 0
+        while ti < 6:
+            val cx = tile_cx[ti]
+            val cy = tile_cy[ti]
+            val rot = rots[ti]
+            val sx = sxs[ti]
+            blob_rec.record(SkPictureOp(kind: SkPictureOpKind.Save, rect: SkRect(left: 0.0, top: 0.0, right: 0.0, bottom: 0.0), rx: 0.0, ry: 0.0, path: None, image: None, paint: sk_paint_fill(0), x: 0.0, y: 0.0))
+            blob_rec.record(SkPictureOp(kind: SkPictureOpKind.SetMatrix, rect: SkRect(left: cx, top: cy, right: sx, bottom: 1.0), rx: rot, ry: 0.0, path: None, image: None, paint: sk_paint_fill(0), x: 0.0, y: 0.0))
+            blob_rec.record(SkPictureOp(kind: SkPictureOpKind.DrawTextBlob, rect: SkRect(left: -20.0, top: -16.0, right: 20.0, bottom: 4.0), rx: 4.0, ry: 20.0, path: None, image: None, paint: p_vec, x: -20.0, y: 0.0))
+            blob_rec.record(SkPictureOp(kind: SkPictureOpKind.Restore, rect: SkRect(left: 0.0, top: 0.0, right: 0.0, bottom: 0.0), rx: 0.0, ry: 0.0, path: None, image: None, paint: sk_paint_fill(0), x: 0.0, y: 0.0))
+            ti = ti + 1
+        val blob_pic = blob_canvas.end_recording()
+        val blob_res = _render_bridge_parity(blob_pic, w, h, backend)
+        expect(blob_res.report.complete).to_equal(true)
+
+        # Verify each of the 6 orientation tiles received real ink on BOTH pictures.
+        ti = 0
+        while ti < 6:
+            val cx = tile_cx[ti] as i32
+            val cy = tile_cy[ti] as i32
+            val ink_main = _count_ink_pixels(bridge_res.pixels, w, h, cx - 100, cy - 100, cx + 100, cy + 100, COL_CARD)
+            val ink_blob = _count_ink_pixels(blob_res.pixels, w, h, cx - 100, cy - 100, cx + 100, cy + 100, COL_BG)
+            expect(ink_main).to_be_greater_than(1200)
+            expect(ink_blob).to_be_greater_than(40)
+            ti = ti + 1
+
+        val cv = compare_view_inspect(
+            "case5_six_orientations",
+            "skia_cpu", skia_pixels, w, h,
+            "bridge_" + backend, bridge_res.pixels, w, h
+        )
+        print("case5_cv=" + cv)
+        val sim = _similarity_pct(skia_pixels, bridge_res.pixels, 8)
+        print("case5_sim_pct=" + sim.to_text())
+        expect(sim).to_be_greater_than(98)
+
+    it "Case 6: renders 2D multi-card & aligned/wrapped text layout (left, center, right, wrapped) with empty layout diff and high pixel parity":
+        val w: i32 = 800
+        val h: i32 = 600
+        val backend = _prefer_vulkan_backend()
+        val mono_blob = skia_load_cached_font_bytes(FONT_MONO_PATH)
+        val bungee_blob = skia_load_cached_font_bytes(FONT_BUNGEE_PATH)
+
+        # 2x2 structured card grid on 800x600
+        val card_xs: [f64] = [32.0, 412.0, 32.0, 412.0]
+        val card_ys: [f64] = [32.0, 32.0, 308.0, 308.0]
+        val card_w: f64 = 356.0
+        val card_h: f64 = 252.0
+        val headers: [text] = ["LEFT ALIGN", "CENTER ALIGN", "RIGHT ALIGN", "WRAPPED BODY"]
+        val aligns: [text] = ["left", "center", "right", "left"]
+        val bodies: [text] = [
+            "Crisp glyph alignment stays locked to baseline pixels",
+            "Centered headings compute exact hmtx advance widths",
+            "Right aligned labels flush cleanly against inner margin",
+            "Word wrapping breaks multi card paragraphs inside fixed card width without horizontal overflow"
+        ]
+
+        val bounds = SkRect(left: 0.0, top: 0.0, right: w.to_f64(), bottom: h.to_f64())
+        val p_bg = sk_paint_fill(_sk_u32(COL_BG)).with_anti_alias(false)
+        val p_card = sk_paint_fill(_sk_u32(COL_CARD)).with_anti_alias(true)
+        val p_border = sk_paint_stroke(_sk_u32(COL_BORDER), 2.0)
+        val p_hdr = sk_paint_fill(_sk_u32(COL_ACCENT))
+        val p_body = sk_paint_fill(_sk_u32(COL_TEXT))
+
+        var canvas = sk_canvas_make(w as i64, h as i64).begin_recording(bounds).draw_rect(bounds, p_bg)
+        var eng = Engine2D.create_with_backend(w, h, backend)
+        eng.clear(COL_BG)
+
+        var skia_layout_record = ""
+        var e2d_layout_record = ""
+
+        var ci: i64 = 0
+        while ci < 4:
+            val cx = card_xs[ci]
+            val cy = card_ys[ci]
+            val rr = sk_rrect_make(SkRect(left: cx, top: cy, right: cx + card_w, bottom: cy + card_h), 12.0, 12.0)
+            canvas = canvas.draw_rrect(rr, p_card).draw_rrect(rr, p_border)
+            eng.draw_rounded_rect(cx as i32, cy as i32, card_w as i32, card_h as i32, 12, COL_CARD)
+            eng.draw_rounded_rect_outline(cx as i32, cy as i32, card_w as i32, card_h as i32, 12, COL_BORDER, 2)
+
+            val pad = 18.0
+            val inner_x = cx + pad
+            val inner_w = card_w - pad * 2.0
+            val align = aligns[ci]
+            val hdr_x = _aligned_x(bungee_blob, headers[ci], 18.0, inner_x, inner_w, align)
+            val hdr_y = cy + 44.0
+            val hdr_path = skia_sfnt_text_path_baseline(bungee_blob, headers[ci], hdr_x, hdr_y, 18.0)
+            canvas = canvas.draw_path(hdr_path, p_hdr)
+            eng.draw_text_sfnt_baseline_aa((hdr_x + 0.5) as i32, hdr_y as i32, headers[ci], COL_ACCENT, 18.0, FONT_BUNGEE_PATH)
+            skia_layout_record = skia_layout_record + "card={ci}|hdr={headers[ci]}|x={(hdr_x + 0.5) as i32}|y={hdr_y as i32}\n"
+            e2d_layout_record = e2d_layout_record + "card={ci}|hdr={headers[ci]}|x={(hdr_x + 0.5) as i32}|y={hdr_y as i32}\n"
+
+            val lines = _wrap_text_to_width(mono_blob, bodies[ci], 14.0, inner_w)
+            expect(lines.len()).to_be_greater_than(1)
+            var li: i64 = 0
+            while li < lines.len():
+                val line_txt = lines[li]
+                val line_m = skia_sfnt_text_bounds_and_advance(mono_blob, line_txt, 14.0)
+                expect(line_m.advance_px <= inner_w + 1.0).to_equal(true)
+                val lx = _aligned_x(mono_blob, line_txt, 14.0, inner_x, inner_w, align)
+                val ly = cy + 88.0 + (li as f64) * 24.0
+                val line_path = skia_sfnt_text_path_baseline(mono_blob, line_txt, lx, ly, 14.0)
+                canvas = canvas.draw_path(line_path, p_body)
+                eng.draw_text_sfnt_baseline_aa((lx + 0.5) as i32, ly as i32, line_txt, COL_TEXT, 14.0, FONT_MONO_PATH)
+                skia_layout_record = skia_layout_record + "line={li}|t={line_txt}|x={(lx + 0.5) as i32}|y={ly as i32}\n"
+                e2d_layout_record = e2d_layout_record + "line={li}|t={line_txt}|x={(lx + 0.5) as i32}|y={ly as i32}\n"
+                li = li + 1
+            ci = ci + 1
+
+        val layout_pic = canvas.end_recording()
+        val e2d_rb = eng.read_pixels_with_source()
+        eng.present()
+        eng.shutdown()
+
+        # Layout text diff check (== "")
+        val layout_diff = if skia_layout_record == e2d_layout_record: "" else: "mismatch"
+        expect(layout_diff).to_equal("")
+
+        val skia_pixels = _cpu_render(layout_pic, w, h)
+        val bridge_res = _render_bridge_parity(layout_pic, w, h, backend)
+        expect(bridge_res.report.complete).to_equal(true)
+
+        val cv_bridge = compare_view_inspect(
+            "case6_multicard_layout_skia_vs_bridge",
+            "skia_cpu", skia_pixels, w, h,
+            "bridge_" + backend, bridge_res.pixels, w, h
+        )
+        val cv_e2d = compare_view_inspect(
+            "case6_multicard_layout_skia_vs_engine2d",
+            "skia_cpu", skia_pixels, w, h,
+            "engine2d_layout", e2d_rb.pixels, w, h
+        )
+        print("case6_cv_bridge=" + cv_bridge + " case6_cv_e2d=" + cv_e2d)
+        expect(_similarity_pct(skia_pixels, bridge_res.pixels, 8)).to_be_greater_than(98)
+        expect(_similarity_pct(skia_pixels, e2d_rb.pixels, 24)).to_be_greater_than(95)

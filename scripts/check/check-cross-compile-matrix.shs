@@ -1,0 +1,418 @@
+#!/bin/sh
+# check-cross-compile-matrix.shs — cross-compile the Simple lint and
+# test-runner binaries for every supported target with the phase-2
+# (self-hosted) compiler, on a Linux host, and check each artifact.
+#
+# Replaces the ad-hoc WSL helpers (xc.sh/xc2.sh/sosxc_nb.sh/matrix.sh/
+# winrun_*/bsdrun_*/sosrun_*). Guide + per-target status:
+#   doc/07_guide/infra/toolchain/cross_compile_status_2026-11-15.md
+#
+# Per (target, artifact) row:
+#   1. preflight: builder, clang, ld.lld, llvm-readelf, file, the target's
+#      sysroot / llvm-mingw / compiler-rt / rustup target, qemu-user for --run.
+#      A missing tool is an ERROR row with a fix hint. Never GCC: Linux
+#      riscv64/i686/armv7 also run check-linux-cross-no-libgcc.shs.
+#   2. free-memory gate (MemAvailable >= --min-free-gb, waits up to
+#      XC_MEM_WAIT_S, default 1800s), then ONE native-build at a time with
+#      SIMPLE_CACHE_SCOPE=xc-<target>.
+#   3. artifact check: `file` + llvm-readelf/llvm-readobj class and machine;
+#      an ELF with NEEDED libgcc_s is a FAIL.
+#   4. --run: execute `<artifact> --help` under qemu-user (never wine).
+#
+# Row status: PASS | FAIL | ERROR (could not check) | BLOCKED (known gap).
+# Verdict (last stdout line, .claude/rules/vcs.md convention):
+#   PASS — <n> row(s) built and checked ...        exit 0
+#   FAIL — <k> row(s) failed: <names> ...          exit 1
+#   ERROR — nothing was checked (...) / <k> row(s) could not be checked  exit 2
+# A run with zero PASS rows is never a PASS.
+#
+# Extra targets hook (e.g. NVMe FW bare-metal lane): XC_MATRIX_EXTRA_TARGETS=<file>
+# with TAB-separated rows
+#   name  triple  kind  class  arch-regex  qemu  entry-args
+# kind = rust | simpleos | baremetal ; class = ELF32|ELF64|PE32+ ;
+# entry-args (optional) are extra native-build args. '#' lines are comments.
+#
+# usage: sh scripts/check/check-cross-compile-matrix.shs [--targets a,b|all]
+#        [--artifacts lint,test] [--builder PATH] [--min-free-gb N] [--run]
+#        [--out DIR] [--dry-run] [--selftest] [--list]
+set -u
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd) || { echo "ERROR — nothing was checked (no repo root)"; exit 2; }
+
+ALL_TARGETS="linux-x86_64 linux-aarch64 linux-riscv64 linux-i686 linux-armv7
+windows-x86_64 windows-aarch64 freebsd-x86_64 freebsd-aarch64
+simpleos-x86_64 simpleos-aarch64 simpleos-riscv64gc
+baremetal-x86 baremetal-x86_64 baremetal-arm baremetal-aarch64 baremetal-riscv32 baremetal-riscv64"
+
+TC=${XC_TOOLCHAINS:-$HOME/toolchains}
+LLVM_BIN=${XC_LLVM_BIN:-/usr/lib/llvm-18/bin}
+
+# target_info <name> -> sets T_TRIPLE T_KIND T_CLASS T_ARCH T_QEMU T_CC T_LINUX T_EXTRA
+target_info() {
+    T_TRIPLE=""; T_KIND=rust; T_CLASS=ELF64; T_ARCH=""; T_QEMU=""; T_CC=""; T_LINUX=""; T_EXTRA=""
+    case $1 in
+        linux-x86_64)  T_TRIPLE=x86_64-unknown-linux-gnu;  T_ARCH='x86-64|X86_64'; T_QEMU=native; T_CC="clang --target=x86_64-linux-gnu -fuse-ld=lld --rtlib=compiler-rt --unwindlib=libunwind" ;;
+        linux-aarch64) T_TRIPLE=aarch64-unknown-linux-gnu; T_ARCH='aarch64|AArch64|AARCH64'; T_QEMU=qemu-aarch64; T_CC="clang --target=aarch64-linux-gnu -fuse-ld=lld --rtlib=compiler-rt --unwindlib=libunwind" ;;
+        linux-riscv64) T_TRIPLE=riscv64gc-unknown-linux-gnu; T_ARCH='RISC-V'; T_QEMU=qemu-riscv64; T_LINUX=rv64 ;;
+        linux-i686)    T_TRIPLE=i686-unknown-linux-gnu; T_CLASS=ELF32; T_ARCH='80386|Intel 80386'; T_QEMU=qemu-i386; T_LINUX=i686 ;;
+        linux-armv7)   T_TRIPLE=armv7-unknown-linux-gnueabihf; T_CLASS=ELF32; T_ARCH='ARM'; T_QEMU=qemu-arm; T_LINUX=armv7 ;;
+        windows-x86_64)  T_TRIPLE=x86_64-pc-windows-gnu; T_CLASS=PE32+; T_ARCH='x86-64|AMD64'; T_CC=mingw:x86_64-w64-mingw32-clang ;;
+        windows-aarch64) T_TRIPLE=aarch64-pc-windows-gnullvm; T_CLASS=PE32+; T_ARCH='Aarch64|ARM64'; T_CC=mingw:aarch64-w64-mingw32-clang ;;
+        freebsd-x86_64)  T_TRIPLE=x86_64-unknown-freebsd; T_ARCH='x86-64|X86_64'; T_CC="clang --target=x86_64-unknown-freebsd14 --sysroot=$TC/freebsd/amd64 -fuse-ld=lld" ;;
+        freebsd-aarch64) T_TRIPLE=aarch64-unknown-freebsd; T_ARCH='aarch64|AArch64|AARCH64'; T_CC="clang --target=aarch64-unknown-freebsd14 --sysroot=$TC/freebsd/aarch64 -fuse-ld=lld" ;;
+        simpleos-x86_64)    T_TRIPLE=x86_64-unknown-simpleos; T_KIND=simpleos; T_ARCH='x86-64|X86_64' ;;
+        simpleos-aarch64)   T_TRIPLE=aarch64-unknown-simpleos; T_KIND=simpleos; T_ARCH='aarch64|AArch64|AARCH64' ;;
+        simpleos-riscv64gc) T_TRIPLE=riscv64gc-unknown-simpleos; T_KIND=simpleos; T_ARCH='RISC-V' ;;
+        baremetal-x86)     T_TRIPLE=i686-unknown-none-elf; T_KIND=baremetal; T_CLASS=ELF32; T_ARCH='80386' ;;
+        baremetal-x86_64)  T_TRIPLE=x86_64-unknown-none; T_KIND=baremetal; T_ARCH='x86-64|X86_64' ;;
+        baremetal-arm)     T_TRIPLE=armv7-unknown-none-eabi; T_KIND=baremetal; T_CLASS=ELF32; T_ARCH='ARM' ;;
+        baremetal-aarch64) T_TRIPLE=aarch64-unknown-none; T_KIND=baremetal; T_ARCH='aarch64|AArch64|AARCH64' ;;
+        baremetal-riscv32) T_TRIPLE=riscv32-unknown-none-elf; T_KIND=baremetal; T_CLASS=ELF32; T_ARCH='RISC-V' ;;
+        baremetal-riscv64) T_TRIPLE=riscv64gc-unknown-none-elf; T_KIND=baremetal; T_ARCH='RISC-V' ;;
+        *) extra_target_info "$1" || return 1 ;;
+    esac
+    return 0
+}
+
+# extra_target_info <name>: look the name up in $XC_MATRIX_EXTRA_TARGETS.
+extra_target_info() {
+    _f=${XC_MATRIX_EXTRA_TARGETS:-}
+    [ -n "$_f" ] && [ -f "$_f" ] || return 1
+    _row=$(grep -v '^#' "$_f" | awk -F'\t' -v n="$1" '$1==n {print; exit}')
+    [ -n "$_row" ] || return 1
+    T_TRIPLE=$(printf '%s' "$_row" | cut -f2); T_KIND=$(printf '%s' "$_row" | cut -f3)
+    T_CLASS=$(printf '%s' "$_row" | cut -f4); T_ARCH=$(printf '%s' "$_row" | cut -f5)
+    T_QEMU=$(printf '%s' "$_row" | cut -f6); T_EXTRA=$(printf "%s" "$_row" | cut -f7)
+    # extra args are spliced into an eval'd command: reject shell metacharacters
+    case $T_EXTRA in *[\;\&\|\`\$\(\)\<\>\'\"]*) return 1 ;; esac
+    [ -n "$T_TRIPLE" ] && [ -n "$T_KIND" ] || return 1
+    return 0
+}
+
+extra_target_names() {
+    _f=${XC_MATRIX_EXTRA_TARGETS:-}
+    [ -n "$_f" ] && [ -f "$_f" ] || return 0
+    grep -v '^#' "$_f" | awk -F'\t' 'NF>=5 {print $1}'
+}
+
+# classify_artifact <file-output> <headers-output> <class> <arch-regex>
+#   prints a reason and returns 1 when the artifact does not match.
+classify_artifact() {
+    _fo=$1; _ho=$2; _cl=$3; _ar=$4
+    [ -n "$_fo" ] || { echo "no artifact"; return 1; }
+    case $_cl in
+        ELF64) printf '%s' "$_fo" | grep -q 'ELF 64-bit' || { echo "class: want ELF64, file says: $_fo"; return 1; }
+               printf '%s' "$_ho" | grep -q 'ELF64' || { echo "class: readelf does not report ELF64"; return 1; } ;;
+        ELF32) printf '%s' "$_fo" | grep -q 'ELF 32-bit' || { echo "class: want ELF32, file says: $_fo"; return 1; }
+               printf '%s' "$_ho" | grep -q 'ELF32' || { echo "class: readelf does not report ELF32"; return 1; } ;;
+        PE32+) printf '%s' "$_fo" | grep -q 'PE32+' || { echo "class: want PE32+, file says: $_fo"; return 1; } ;;
+        *) echo "class: unknown expected class '$_cl'"; return 1 ;;
+    esac
+    printf '%s' "$_fo" | grep -E -q "$_ar" || { echo "arch: want /$_ar/, file says: $_fo"; return 1; }
+    printf '%s\n' "$_ho" | grep -E -i 'Machine|Arch' | grep -E -i -q "$_ar" || { echo "arch: headers do not report /$_ar/"; return 1; }
+    return 0
+}
+
+# needs_libgcc <dynamic-section-output> -> 0 when a GCC runtime is NEEDED
+needs_libgcc() { printf '%s\n' "$1" | grep -E 'NEEDED' | grep -q -E 'libgcc'; }
+
+# mem_avail_gb <meminfo-file>
+mem_avail_gb() { awk '/^MemAvailable:/ {printf "%d\n", $2/1048576; f=1} END {if (!f) print -1}' "$1"; }
+
+# aggregate <results.tsv> -> prints verdict line, returns exit code
+# columns: target artifact status detail
+aggregate() {
+    _p=$(awk -F'\t' '$3=="PASS"' "$1" | wc -l | tr -d ' ')
+    _f=$(awk -F'\t' '$3=="FAIL" {printf "%s/%s ", $1, $2}' "$1")
+    _e=$(awk -F'\t' '$3=="ERROR" {printf "%s/%s ", $1, $2}' "$1")
+    _b=$(awk -F'\t' '$3=="BLOCKED"' "$1" | wc -l | tr -d ' ')
+    _n=$(awk -F'\t' 'NF>=3' "$1" | wc -l | tr -d ' ')
+    if [ "$_n" -eq 0 ]; then echo "ERROR — nothing was checked (0 rows)"; return 2; fi
+    if [ -n "$_f" ]; then echo "FAIL — $(echo $_f | wc -w | tr -d ' ') row(s) failed: ${_f% } (pass=$_p blocked=$_b of $_n)"; return 1; fi
+    if [ -n "$_e" ]; then echo "ERROR — $(echo $_e | wc -w | tr -d ' ') row(s) could not be checked: ${_e% } (pass=$_p blocked=$_b of $_n)"; return 2; fi
+    if [ "$_p" -eq 0 ]; then echo "ERROR — nothing was checked (0 PASS rows; blocked=$_b of $_n)"; return 2; fi
+    echo "PASS — $_p row(s) built and checked (blocked=$_b of $_n)"; return 0
+}
+
+selftest() {
+    _t=$(mktemp -d) || return 1
+    _rc=0
+    _bad() { echo "selftest: $1" >&2; _rc=1; }
+    elf64x='ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked'
+    elf64h='Class: ELF64
+  Machine: Advanced Micro Devices X86-64'
+    classify_artifact "$elf64x" "$elf64h" ELF64 'x86-64|X86_64' >/dev/null || _bad "good x86-64 ELF64 rejected"
+    classify_artifact "$elf64x" "$elf64h" ELF64 'aarch64|AArch64' >/dev/null && _bad "wrong arch accepted"
+    classify_artifact "$elf64x" "$elf64h" ELF32 '80386' >/dev/null && _bad "wrong class accepted"
+    classify_artifact 'ELF 32-bit LSB executable, Intel 80386' 'Class: ELF32
+  Machine: Intel 80386' ELF32 '80386' >/dev/null || _bad "good i686 ELF32 rejected"
+    classify_artifact 'PE32+ executable (console) Aarch64, for MS Windows' 'Arch: aarch64
+Machine: IMAGE_FILE_MACHINE_ARM64 (0xAA64)' PE32+ 'Aarch64|ARM64' >/dev/null || _bad "good PE32+ arm64 rejected"
+    classify_artifact 'PE32+ executable (console) x86-64, for MS Windows' 'Machine: IMAGE_FILE_MACHINE_AMD64' PE32+ 'Aarch64|ARM64' >/dev/null && _bad "x64 PE accepted as arm64"
+    classify_artifact '' '' ELF64 'x86-64' >/dev/null && _bad "missing artifact accepted"
+    needs_libgcc ' 0x1 (NEEDED) Shared library: [libgcc_s.so.1]' || _bad "NEEDED libgcc_s not flagged"
+    needs_libgcc ' 0x1 (NEEDED) Shared library: [libc.so.6]' && _bad "libc flagged as libgcc"
+    printf 'MemTotal: 25165824 kB\nMemAvailable: 12582912 kB\n' > "$_t/mi"
+    [ "$(mem_avail_gb "$_t/mi")" = 12 ] || _bad "MemAvailable parse"
+    printf 'MemTotal: 1 kB\n' > "$_t/mi2"
+    [ "$(mem_avail_gb "$_t/mi2")" = -1 ] || _bad "missing MemAvailable not -1"
+    target_info nosuch-target && _bad "unknown target accepted"
+    target_info windows-aarch64 && [ "$T_CLASS" = PE32+ ] || _bad "windows-aarch64 table"
+    printf 'nvme-fw-rv32\triscv32-unknown-none-elf\tbaremetal\tELF32\tRISC-V\t\t\n' > "$_t/extra"
+    _saved_extra=${XC_MATRIX_EXTRA_TARGETS-}; XC_MATRIX_EXTRA_TARGETS="$_t/extra"
+    target_info nvme-fw-rv32 && [ "$T_TRIPLE" = riscv32-unknown-none-elf ] || _bad "extra-target hook"
+    printf "x	riscv32-unknown-none-elf	baremetal	ELF32	RISC-V		--x;rm
+" > "$_t/extra"
+    target_info x && _bad "shell metachar in extra args accepted"
+    XC_MATRIX_EXTRA_TARGETS=$_saved_extra
+    # aggregate fixtures
+    printf 'a\tlint\tPASS\tok\nb\tlint\tBLOCKED\tx\n' > "$_t/r1"
+    aggregate "$_t/r1" >/dev/null; [ $? -eq 0 ] || _bad "pass+blocked not PASS"
+    printf 'a\tlint\tPASS\tok\nb\tlint\tFAIL\tx\nc\ttest\tERROR\ty\n' > "$_t/r2"
+    aggregate "$_t/r2" >/dev/null; [ $? -eq 1 ] || _bad "fail not FAIL"
+    printf 'a\tlint\tPASS\tok\nc\ttest\tERROR\ty\n' > "$_t/r3"
+    aggregate "$_t/r3" >/dev/null; [ $? -eq 2 ] || _bad "error not ERROR"
+    printf 'b\tlint\tBLOCKED\tx\n' > "$_t/r4"
+    aggregate "$_t/r4" >/dev/null; [ $? -eq 2 ] || _bad "blocked-only not ERROR (vacuous)"
+    : > "$_t/r5"
+    aggregate "$_t/r5" >/dev/null; [ $? -eq 2 ] || _bad "empty not ERROR"
+    rm -rf "$_t"
+    return $_rc
+}
+SELFTEST_FIXTURES=22
+
+# ---------------------------------------------------------------- args
+targets=all; artifacts="lint test"; builder=""; min_free=8; run=0; dry=0; only_selftest=0; list=0
+out=""
+while [ $# -gt 0 ]; do
+    case $1 in
+        --targets) targets=${2:-}; shift ;;
+        --targets=*) targets=${1#*=} ;;
+        --artifacts) artifacts=$(echo "${2:-}" | tr ',' ' '); shift ;;
+        --artifacts=*) artifacts=$(echo "${1#*=}" | tr ',' ' ') ;;
+        --builder) builder=${2:-}; shift ;;
+        --builder=*) builder=${1#*=} ;;
+        --min-free-gb) min_free=${2:-}; shift ;;
+        --min-free-gb=*) min_free=${1#*=} ;;
+        --out) out=${2:-}; shift ;;
+        --out=*) out=${1#*=} ;;
+        --run) run=1 ;;
+        --dry-run) dry=1 ;;
+        --selftest) only_selftest=1 ;;
+        --list) list=1 ;;
+        -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+        *) echo "ERROR — nothing was checked (unknown argument '$1')"; exit 2 ;;
+    esac
+    shift
+done
+
+selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+if [ $only_selftest = 1 ]; then echo "PASS — selftest $SELFTEST_FIXTURES fixture(s) checked"; exit 0; fi
+
+case $min_free in ''|*[!0-9]*) echo "ERROR — nothing was checked (--min-free-gb must be an integer)"; exit 2 ;; esac
+[ "$targets" = all ] && targets="$ALL_TARGETS $(extra_target_names)"
+targets=$(echo "$targets" | tr ',\n' '  ')
+for a in $artifacts; do
+    case $a in lint|test) ;; *) echo "ERROR — nothing was checked (unknown artifact '$a')"; exit 2 ;; esac
+done
+for t in $targets; do
+    target_info "$t" || { echo "ERROR — nothing was checked (unknown target '$t'; --list shows them)"; exit 2; }
+done
+if [ $list = 1 ]; then
+    for t in $targets; do target_info "$t"; printf '%s\t%s\t%s\t%s\n' "$t" "$T_TRIPLE" "$T_KIND" "$T_CLASS"; done
+    exit 0
+fi
+
+if [ -z "$builder" ]; then
+    if [ -x "$HOME/xc/simple-p2" ]; then builder=$HOME/xc/simple-p2
+    else builder=$repo_root/bin/release/x86_64-unknown-linux-gnu/simple; fi
+fi
+[ -n "$out" ] || out=$repo_root/build/cross-matrix
+export PATH="$LLVM_BIN:$PATH"
+command -v cargo >/dev/null 2>&1 || { [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"; }
+
+entry_of() { case $1 in lint) echo src/app/cli/lint_entry.spl ;; test) echo src/app/test_runner_new/main.spl ;; esac; }
+
+mingw_bin() {
+    for d in ${SIMPLE_LLVM_MINGW:-} "$TC"/llvm-mingw-*-ucrt-ubuntu-*-x86_64 "$HOME"/.simple/toolchains/llvm-mingw-*-ucrt-ubuntu-*-x86_64; do
+        [ -n "$d" ] && [ -x "$d/bin/x86_64-w64-mingw32-clang" ] && { echo "$d/bin"; return 0; }
+    done
+    return 1
+}
+
+# preflight <target> -> prints "" when ok, else "MISSING <what> — fix: <hint>"
+preflight() {
+    command -v clang >/dev/null 2>&1 || { echo "MISSING clang — fix: apt install clang-18 lld-18 llvm-18 (or . scripts/setup/llvm-toolchain-env.shs)"; return; }
+    command -v ld.lld >/dev/null 2>&1 || { echo "MISSING ld.lld — fix: apt install lld-18"; return; }
+    command -v llvm-readelf >/dev/null 2>&1 || { echo "MISSING llvm-readelf — fix: apt install llvm-18"; return; }
+    command -v file >/dev/null 2>&1 || { echo "MISSING file — fix: apt install file"; return; }
+    [ -x "$builder" ] || { echo "MISSING builder $builder — fix: pass --builder <phase-2 simple> (bootstrap phase 2, see .claude/rules/bootstrap.md)"; return; }
+    if [ "$T_KIND" = rust ]; then
+        command -v cargo >/dev/null 2>&1 || { echo "MISSING cargo — fix: install rustup, . ~/.cargo/env"; return; }
+        rustup target list --installed 2>/dev/null | grep -qx "$T_TRIPLE" ||
+            { echo "MISSING rustup target $T_TRIPLE — fix: rustup target add $T_TRIPLE"; return; }
+    fi
+    if [ -n "$T_LINUX" ]; then
+        _cc=$(sh "$repo_root/scripts/setup/linux-cross-cc.shs" "$T_LINUX" 2>/dev/null) || { echo "MISSING linux-cross-cc.shs $T_LINUX — fix: see scripts/setup/linux-cross-cc.shs"; return; }
+        _gt=$(sh "$repo_root/scripts/setup/linux-cross-cc.shs" --gnu-triple "$T_LINUX")
+        [ -d "/usr/$_gt/lib" ] || { echo "MISSING sysroot /usr/$_gt — fix: apt install libc6-dev-$(echo "$_gt" | cut -d- -f1 | sed 's/^i686$/i386/;s/^arm$/armhf/;s/^riscv64$/riscv64/')-cross"; return; }
+        _rt=${SIMPLE_CROSS_RT_PREFIX:-$HOME/.simple/toolchains/llvm-cross-rt-18}
+        [ -d "$_rt/$_gt/lib" ] || { echo "MISSING compiler-rt/libunwind $_rt/$_gt — fix: sh scripts/setup/build-linux-cross-compiler-rt.shs"; return; }
+        T_CC=$_cc
+    fi
+    case $T_TRIPLE in
+        aarch64-unknown-linux-gnu) [ -d /usr/aarch64-linux-gnu/lib ] || { echo "MISSING sysroot /usr/aarch64-linux-gnu — fix: apt install libc6-dev-arm64-cross"; return; } ;;
+        *freebsd) _sr=$(echo "$T_CC" | sed -n 's/.*--sysroot=\([^ ]*\).*/\1/p')
+            [ -d "$_sr/usr/lib" ] || [ -d "$_sr/lib" ] || { echo "MISSING FreeBSD sysroot $_sr — fix: extract FreeBSD 14.x base.txz into $_sr (\$XC_TOOLCHAINS/freebsd/<amd64|aarch64>)"; return; } ;;
+    esac
+    case $T_CC in mingw:*)
+        _mw=$(mingw_bin) || { echo "MISSING llvm-mingw UCRT — fix: extract mstorsjo/llvm-mingw <ver>-ucrt-ubuntu-22.04-x86_64 into \$XC_TOOLCHAINS or set SIMPLE_LLVM_MINGW"; return; }
+        T_CC="$_mw/${T_CC#mingw:}" ;;
+    esac
+    if [ "$T_KIND" = simpleos ] && [ ! -f "$repo_root/scripts/check/check-simple-core-runtime-smoke.shs" ]; then
+        echo "MISSING scripts/check/check-simple-core-runtime-smoke.shs — fix: sync the repo"; return
+    fi
+    if [ $run = 1 ] && [ -n "$T_QEMU" ] && [ "$T_QEMU" != native ]; then
+        command -v "$T_QEMU" >/dev/null 2>&1 || { echo "MISSING $T_QEMU — fix: apt install qemu-user (wine is not allowed)"; return; }
+    fi
+    command -v mold >/dev/null 2>&1 || XC_NOTE="mold absent (ld.lld used)"
+    echo ""
+}
+
+blocked_reason() {
+    case $T_KIND in
+        baremetal) [ "${XC_BAREMETAL_ENABLE:-0}" = 1 ] && { echo ""; return; }
+            echo "bare metal has no hosted runtime for lint/test-runner (set XC_BAREMETAL_ENABLE=1 or add an NVMe FW row via XC_MATRIX_EXTRA_TARGETS)" ;;
+        *) echo "" ;;
+    esac
+}
+
+wait_mem() {
+    _waited=0; _lim=${XC_MEM_WAIT_S:-1800}
+    while :; do
+        _g=$(mem_avail_gb /proc/meminfo)
+        [ "$_g" -lt 0 ] && { echo "unknown (no MemAvailable)"; return 1; }
+        [ "$_g" -ge "$min_free" ] && return 0
+        [ "$_waited" -ge "$_lim" ] && { echo "$_g"; return 1; }
+        sleep 20; _waited=$((_waited + 20))
+    done
+}
+
+# build_cmd <target> <artifact> <outfile> -> prints the shell command (plan + exec)
+build_cmd() {
+    _e=$(entry_of "$2")
+    _common="env RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_CACHE_SCOPE=xc-$1 SIMPLE_BUILD_MEMORY_RESERVE_BYTES=2147483648"
+    case $T_KIND in
+        rust)
+            echo "$_common SIMPLE_SCV_INVENTORY_COLD_INIT=1 '$builder' native-build --target $T_TRIPLE --runtime-path '$out'/cargo-target/$T_TRIPLE/bootstrap --source src/compositions/kernel_llvm_cranelift --source src --entry-closure --entry $_e --mode dynload --threads ${XC_THREADS:-12} --timeout ${XC_TIMEOUT:-600} --output '$3' $T_EXTRA" ;;
+        simpleos|baremetal)
+            echo "$_common SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_SIMPLE_CORE_PATH='$out'/simple-core-$T_TRIPLE/libsimple_runtime.a '$builder' native-build --source src/compositions/kernel_llvm_cranelift --source src --backend cranelift --runtime-bundle simple-core --entry-closure --entry $_e --target $T_TRIPLE --threads ${XC_THREADS:-12} --timeout ${XC_TIMEOUT:-1800} -o '$3' $T_EXTRA" ;;
+    esac
+}
+
+# runtime_prep <target> <log> : cargo runtime (rust) or simple-core archive (simpleos)
+runtime_prep() {
+    case $T_KIND in
+        rust)
+            _rd=$out/cargo-target/$T_TRIPLE/bootstrap
+            [ -f "$_rd/libsimple_native_all.a" ] && return 0
+            mkdir -p "$out/cc/$1"
+            printf '#!/bin/sh\nexec %s "$@"\n' "$T_CC" > "$out/cc/$1/cc"; chmod +x "$out/cc/$1/cc"
+            _u=$(echo "$T_TRIPLE" | tr 'a-z-' 'A-Z_'); _l=$(echo "$T_TRIPLE" | tr - _)
+            ( cd "$repo_root/src/compiler_rust" &&
+              env CARGO_TARGET_DIR="$out/cargo-target" "CARGO_TARGET_${_u}_LINKER=$out/cc/$1/cc" \
+                  "CC_${_l}=$out/cc/$1/cc" "AR_${_l}=llvm-ar" CARGO_BUILD_JOBS=${XC_THREADS:-12} \
+                  cargo build --profile bootstrap -p simple-native-all --features driver-compat --target "$T_TRIPLE" ) >> "$2" 2>&1
+            [ -f "$_rd/libsimple_native_all.a" ] ;;
+        simpleos|baremetal)
+            _sd=$out/simple-core-$T_TRIPLE
+            [ -s "$_sd/libsimple_runtime.a" ] && return 0
+            ( cd "$repo_root" && SIMPLE_BINARY="$builder" SIMPLE_CORE_BUILD_DIR="$_sd" SIMPLE_CORE_BACKEND=cranelift \
+                BUILD_DIR="$_sd/work" ARCHIVE_ONLY=1 TARGET="$T_TRIPLE" sh scripts/check/check-simple-core-runtime-smoke.shs ) >> "$2" 2>&1
+            [ -s "$_sd/libsimple_runtime.a" ] ;;
+    esac
+}
+
+mkdir -p "$out/logs" || { echo "ERROR — nothing was checked (cannot create $out)"; exit 2; }
+res=$out/results.tsv; : > "$res"
+emit() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$res"; }
+
+if [ $dry = 1 ]; then
+    echo "# plan: builder=$builder min_free_gb=$min_free run=$run out=$out"
+fi
+libgcc_checked=""; dry_missing=""
+for t in $targets; do
+    target_info "$t"
+    for a in $artifacts; do
+        XC_NOTE=""
+        br=$(blocked_reason)
+        if [ -n "$br" ]; then
+            [ $dry = 1 ] && echo "$t/$a: BLOCKED — $br"
+            emit "$t" "$a" BLOCKED "$br"; continue
+        fi
+        o=$out/$t/simple_$a; [ "$T_CLASS" = PE32+ ] && o=$o.exe
+        if [ $dry = 1 ]; then
+            preflight > "$out/.pf"; pf=$(cat "$out/.pf")
+            [ -n "$pf" ] && dry_missing="$dry_missing $t/$a"
+            echo "$t/$a: triple=$T_TRIPLE kind=$T_KIND class=$T_CLASS preflight=${pf:-ok}"
+            echo "  $(build_cmd "$t" "$a" "$o")"
+            continue
+        fi
+        log=$out/logs/$t-$a.log; : > "$log"
+        preflight > "$out/.pf"; pf=$(cat "$out/.pf")
+        if [ -n "$pf" ]; then emit "$t" "$a" ERROR "$pf"; continue; fi
+        if [ -n "$T_LINUX" ] && ! echo " $libgcc_checked " | grep -q " $T_LINUX "; then
+            libgcc_checked="$libgcc_checked $T_LINUX"
+            lg=$(sh "$repo_root/scripts/check/check-linux-cross-no-libgcc.shs" "$T_LINUX" 2>>"$log" | tail -1)
+            case $lg in PASS*) ;; *) emit "$t" "$a" FAIL "no-libgcc gate: $lg"; continue ;; esac
+        fi
+        if ! fg=$(wait_mem); then emit "$t" "$a" ERROR "free memory ${fg}G < ${min_free}G after ${XC_MEM_WAIT_S:-1800}s"; continue; fi
+        if ! runtime_prep "$t" "$log"; then emit "$t" "$a" FAIL "runtime build failed (see $log)"; continue; fi
+        mkdir -p "$out/$t"; rm -f "$o"
+        cmd=$(build_cmd "$t" "$a" "$o")
+        echo "[xc] $t/$a: $cmd" >> "$log"
+        ( cd "$repo_root" && eval "$cmd" ) >> "$log" 2>&1
+        nb=$?
+        if [ $nb -ne 0 ] || [ ! -f "$o" ]; then
+            fe=$(grep -m1 -E 'first-compile-error|^error|error:' "$log" | cut -c1-200)
+            emit "$t" "$a" FAIL "native-build rc=$nb: ${fe:-see $log}"; continue
+        fi
+        fo=$(file -b "$o")
+        case $T_CLASS in
+            PE32+) ho=$(llvm-readobj --file-headers "$o" 2>&1) ;;
+            *) ho=$(llvm-readelf -h "$o" 2>&1) ;;
+        esac
+        if ! why=$(classify_artifact "$fo" "$ho" "$T_CLASS" "$T_ARCH"); then emit "$t" "$a" FAIL "$why"; continue; fi
+        if [ "$T_CLASS" != PE32+ ] && needs_libgcc "$(llvm-readelf -d "$o" 2>/dev/null)"; then
+            emit "$t" "$a" FAIL "NEEDED libgcc (GCC runtime pulled into link)"; continue
+        fi
+        detail="$T_CLASS ok, native-build rc=$nb"
+        if [ $run = 1 ]; then
+            case $T_QEMU in
+                native) "$o" --help >>"$log" 2>&1; rr=$? ;;
+                '') rr=skip ;;
+                *) "$T_QEMU" "$o" --help >>"$log" 2>&1; rr=$? ;;
+            esac
+            case $rr in
+                skip) detail="$detail; run: no qemu-user for $T_KIND (not run)" ;;
+                0) detail="$detail; run ok" ;;
+                *) emit "$t" "$a" FAIL "run rc=$rr (see $log)"; continue ;;
+            esac
+        fi
+        [ -n "$XC_NOTE" ] && detail="$detail; $XC_NOTE"
+        emit "$t" "$a" PASS "$detail"
+    done
+done
+
+if [ $dry = 1 ]; then
+    [ -n "$dry_missing" ] && { echo "ERROR — dry-run: preflight MISSING for$dry_missing; nothing built"; exit 2; }
+    echo "PASS — dry-run: preflight ok, plan printed for $(echo $targets | wc -w | tr -d ' ') target(s) x $(echo $artifacts | wc -w | tr -d ' ') artifact(s); nothing built"
+    exit 0
+fi
+
+echo "| target | artifact | status | detail |"
+echo "|---|---|---|---|"
+awk -F'\t' '{printf "| %s | %s | %s | %s |\n", $1, $2, $3, $4}' "$res"
+echo "results: $res"
+aggregate "$res"
+exit $?

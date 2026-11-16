@@ -1,4 +1,4 @@
-use app.build.sources_cli.{build_sources_output, run_build_sources}
+use app.build.sources_cli.{build_sources_output, build_sources_output_for_manifest, run_build_sources}
 
 describe "build sources CLI":
     it "defaults the library dir to current directory":
@@ -28,3 +28,23 @@ describe "build sources CLI":
 
     it "formats empty inventory as empty text":
         expect(build_sources_output(["lib"], [])).to_equal("")
+
+    it "accepts --digest alongside the dir":
+        expect(build_sources_output(["--digest", "lib"], ["lib/a.spl"])).to_equal("a.spl\n")
+
+    it "uses manifest include/exclude globs":
+        val manifest = "project:\n  name: u\n  version: 1.0.0\n  type: library\n  sources:\n    include: [\"a/**/*.spl\"]\n    exclude: [\"a/skip/**\"]\n"
+        val walked = ["lib/a/x.spl", "lib/a/skip/y.spl", "lib/b/z.spl"]
+        val r = build_sources_output_for_manifest("lib", manifest, walked)
+        expect(r.unwrap()).to_equal("a/x.spl\n")
+
+    it "falls back to every .spl when the manifest is absent":
+        val r = build_sources_output_for_manifest("lib", "", ["lib/b.spl", "lib/a/c.spl"])
+        expect(r.unwrap()).to_equal("a/c.spl\nb.spl\n")
+
+    it "surfaces an invalid manifest as an error":
+        val r = build_sources_output_for_manifest("lib", "project:\n  name: u\n", ["lib/a.spl"])
+        expect(r.is_err()).to_equal(true)
+
+    it "exits 2 on an invalid manifest":
+        expect(run_build_sources(["test/01_unit/app/build/fixtures/bad_manifest_unit"])).to_equal(2)

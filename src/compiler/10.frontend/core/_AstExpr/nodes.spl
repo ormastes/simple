@@ -13,7 +13,7 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set, env_remove_process, file_read_nullable}
 use compiler.core.types.{int_to_str}
 use compiler.frontend.core.flat_pool_codec.*
-use compiler.common.data.attribute_schema_v1.{AttributeStoreV1, AttrPlacementV1, attr_placement_from_token_v1, attr_store_detached_v1}
+use compiler.common.data.attribute_schema_v1.{AttributeStoreV1, AttrPlacementV1, attr_placement_from_token_v1, attr_placement_token_v1, attr_layout_from_token_v1, attr_store_detached_v1}
 use compiler.common.data.data_schema_resolver.{data_attr_storage_resolve_v1, data_policy_rules_from_sdn_v1}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}  # explicit: a glob is not an import-origin for surface projection
 
@@ -412,6 +412,9 @@ var expr_attr_counts: [i64] = [0, 0, 0, 0, 0, 0]
 # Driver latch (C.2): [SIMPLE_NODE_ATTR, SIMPLE_NODE_ATTR_SDN, SIMPLE_NODE_ATTR_COUNT]
 # captured once by expr_attr_driver_latch; empty = read the env at each expr_reset.
 var expr_attr_latch: [text] = []
+# Side-array data layout (0 = soa, 1 = aos) from `layout=`; single-field stores
+# answer identically in both, multi-field AttrGroupStoreV1 stores honour it.
+var expr_attr_side_layout_mode: [i64] = [0]
 
 fn expr_attr_mode_of(token: text) -> Result<i64, text>:
     match attr_placement_from_token_v1(token):
@@ -420,7 +423,22 @@ fn expr_attr_mode_of(token: text) -> Result<i64, text>:
                 case Embedded: Ok(0)
                 case Column: Ok(1)
                 case SparseHash: Ok(2)
+                case ArrayIndex: Ok(3)
+                case _: Err("node-attr: {token} is unsupported: no safe element reference survives side-array growth or hash rehash")
         case Err(e): Err(e)
+
+fn expr_attr_layout_mode_of(token: text) -> Result<i64, text>:
+    match attr_layout_from_token_v1(token):
+        case Ok(l):
+            match l:
+                case Soa: Ok(0)
+                case Aos: Ok(1)
+        case Err(e): Err(e)
+
+# Side-array data layout selected by `layout=` (aos | soa); soa when unset.
+pub fn expr_attr_side_layout() -> text:
+    if expr_attr_side_layout_mode[0] == 1: return "aos"
+    "soa"
 
 fn expr_attr_nil_guard():
     if expr_attr_extra_mode == nil or expr_attr_extra_mode.len() == 0:
@@ -443,9 +461,13 @@ fn expr_attr_nil_guard():
         expr_attr_counts = [0, 0, 0, 0, 0, 0]
     if expr_attr_latch == nil:
         expr_attr_latch = []
+    if expr_attr_side_layout_mode == nil or expr_attr_side_layout_mode.len() == 0:
+        expr_attr_side_layout_mode = [0]
 
 fn expr_attr_placement_of(mode: i64) -> AttrPlacementV1:
-    if mode == 1: AttrPlacementV1.Column else: AttrPlacementV1.SparseHash
+    if mode == 1: return AttrPlacementV1.Column
+    if mode == 3: return AttrPlacementV1.ArrayIndex
+    AttrPlacementV1.SparseHash
 
 # Fail-closed gate: a native build can corrupt the generic store's payloads
 # (doc/08_tracking/bug/native_erased_generic_optional_return_2026-11-15.md),
@@ -475,32 +497,40 @@ fn expr_attr_text_round_trips(placement: AttrPlacementV1) -> bool:
         case Err(_): return false
 
 fn expr_attr_self_check_failed(mode: i64):
-    val token = if mode == 1: "column" else: "sparse_hash"
+    val token = attr_placement_token_v1(expr_attr_placement_of(mode))
     eprint("node-attr: {token} store failed its round-trip self-check on this build; staying on direct storage (see doc/08_tracking/bug/native_erased_generic_optional_return_2026-11-15.md)")
 
-# Config text: comma list of `<attr>=<direct|column|sparse_hash>` for attr in
-# extra, s_val, op. Unknown attrs are ignored; an unknown token turns everything off.
+# Config text: comma list of `<attr>=<direct|column|array_index|sparse_hash>` for
+# attr in extra, s_val, op, plus `layout=<aos|soa>` for multi-field side arrays
+# (default soa). Unknown attrs are ignored; an unknown or unsupported token
+# (array_ptr, hash_ptr) turns everything off.
 pub fn expr_attr_apply_config(spec: text) -> Result<bool, text>:
     expr_attr_nil_guard()
+    expr_attr_side_layout_mode[0] = 0
     var extra_mode = 0
     var s_mode = 0
     var op_mode = 0
+    var layout_mode = 0
     for part in spec.split(","):
         val kv = part.trim().split("=")
         if kv.len() != 2:
             continue
         val key = kv[0].trim()
-        if key != "extra" and key != "s_val" and key != "op":
+        if key != "extra" and key != "s_val" and key != "op" and key != "layout":
             continue
-        match expr_attr_mode_of(kv[1].trim()):
+        val parsed = if key == "layout": expr_attr_layout_mode_of(kv[1].trim()) else: expr_attr_mode_of(kv[1].trim())
+        match parsed:
             case Ok(m):
-                if key == "extra":
+                if key == "layout":
+                    layout_mode = m
+                elif key == "extra":
                     extra_mode = m
                 elif key == "op":
                     op_mode = m
                 else:
                     s_mode = m
             case Err(e):
+                expr_attr_side_layout_mode[0] = 0
                 expr_attr_extra_mode[0] = 0
                 expr_attr_s_val_mode[0] = 0
                 expr_attr_op_mode[0] = 0
@@ -534,17 +564,18 @@ pub fn expr_attr_apply_config(spec: text) -> Result<bool, text>:
     expr_attr_extra_stores.clear()
     expr_attr_s_val_stores.clear()
     if extra_mode != 0:
-        val placement = if extra_mode == 1: AttrPlacementV1.Column else: AttrPlacementV1.SparseHash
+        val placement = expr_attr_placement_of(extra_mode)
         match attr_store_detached_v1("extra", placement):
             case Ok(store): expr_attr_extra_stores.push(store)
             case Err(e): return Err(e)
         expr_attr_extra_mode[0] = extra_mode
     if s_mode != 0:
-        val placement = if s_mode == 1: AttrPlacementV1.Column else: AttrPlacementV1.SparseHash
+        val placement = expr_attr_placement_of(s_mode)
         match attr_store_detached_v1("s_val", placement):
             case Ok(store): expr_attr_s_val_stores.push(store)
             case Err(e): return Err(e)
         expr_attr_s_val_mode[0] = s_mode
+    expr_attr_side_layout_mode[0] = layout_mode
     Ok(true)
 
 pub val EXPR_ATTR_TREE: text = "compiler.ast"
@@ -604,19 +635,25 @@ fn expr_attr_apply_env() -> Result<bool, text>:
 pub fn expr_attr_extra_placement() -> text:
     if expr_attr_extra_mode[0] == 1: return "column"
     if expr_attr_extra_mode[0] == 2: return "sparse_hash"
+    if expr_attr_extra_mode[0] == 3: return "array_index"
     "direct"
 
 # Entries held by the extra store; -1 when the switch is off (no store exists).
 pub fn expr_attr_extra_present() -> i64:
     if expr_attr_extra_mode[0] == 0: return -1
-    expr_attr_extra_stores[0].len()
+    # @workaround bug=phase2_mir_unresolved_field_receiver_2026-11-15
+    val extra_store: AttributeStoreV1<i64> = expr_attr_extra_stores[0]
+    extra_store.len()
 
 fn expr_extra_get(idx: i64) -> i64:
     if expr_attr_count_on[0] != 0:
         expr_attr_counts[0] = expr_attr_counts[0] + 1
     if expr_attr_extra_mode[0] == 0:
         return expr_extra[idx]
-    match expr_attr_extra_stores[0].get(idx):
+    # @workaround bug=phase2_mir_unresolved_field_receiver_2026-11-15
+    val extra_store: AttributeStoreV1<i64> = expr_attr_extra_stores[0]
+    val extra_got: Result<i64, text> = extra_store.get(idx)
+    match extra_got:
         case Ok(v): v
         case Err(_): -1
 
@@ -627,9 +664,13 @@ fn expr_extra_put(idx: i64, value: i64):
         expr_extra[idx] = value
         return
     if value == -1:
-        expr_attr_extra_stores[0].retire(idx)
+        # @workaround bug=phase2_mir_unresolved_field_receiver_2026-11-15
+        val extra_store: AttributeStoreV1<i64> = expr_attr_extra_stores[0]
+        extra_store.retire(idx)
     else:
-        expr_attr_extra_stores[0].set(idx, value)
+        # @workaround bug=phase2_mir_unresolved_field_receiver_2026-11-15
+        val extra_store: AttributeStoreV1<i64> = expr_attr_extra_stores[0]
+        extra_store.set(idx, value)
 
 # Dense array view for the pool snapshot codec.
 fn expr_extra_dense() -> [i64]:
@@ -648,7 +689,7 @@ fn expr_extra_load(values: [i64]):
         expr_extra = values
         return
     expr_attr_extra_stores.clear()
-    match attr_store_detached_v1("extra", if expr_attr_extra_mode[0] == 1: AttrPlacementV1.Column else: AttrPlacementV1.SparseHash):
+    match attr_store_detached_v1("extra", expr_attr_placement_of(expr_attr_extra_mode[0])):
         case Ok(store): expr_attr_extra_stores.push(store)
         case Err(_):
             expr_attr_extra_mode[0] = 0
@@ -657,24 +698,32 @@ fn expr_extra_load(values: [i64]):
     var i = 0
     while i < values.len():
         if values[i] != -1:
-            expr_attr_extra_stores[0].set(i, values[i])
+            # @workaround bug=phase2_mir_unresolved_field_receiver_2026-11-15
+            val extra_store: AttributeStoreV1<i64> = expr_attr_extra_stores[0]
+            extra_store.set(i, values[i])
         i = i + 1
 
 pub fn expr_attr_s_val_placement() -> text:
     if expr_attr_s_val_mode[0] == 1: return "column"
     if expr_attr_s_val_mode[0] == 2: return "sparse_hash"
+    if expr_attr_s_val_mode[0] == 3: return "array_index"
     "direct"
 
 pub fn expr_attr_s_val_present() -> i64:
     if expr_attr_s_val_mode[0] == 0: return -1
-    expr_attr_s_val_stores[0].len()
+    # @workaround bug=phase2_mir_unresolved_field_receiver_2026-11-15
+    val s_val_store: AttributeStoreV1<text> = expr_attr_s_val_stores[0]
+    s_val_store.len()
 
 fn expr_s_val_get(idx: i64) -> text:
     if expr_attr_count_on[0] != 0:
         expr_attr_counts[2] = expr_attr_counts[2] + 1
     if expr_attr_s_val_mode[0] == 0:
         return expr_s_val[idx]
-    match expr_attr_s_val_stores[0].get(idx):
+    # @workaround bug=phase2_mir_unresolved_field_receiver_2026-11-15
+    val s_val_store: AttributeStoreV1<text> = expr_attr_s_val_stores[0]
+    val s_val_got: Result<text, text> = s_val_store.get(idx)
+    match s_val_got:
         case Ok(v): v
         case Err(_): ""
 
@@ -685,9 +734,13 @@ fn expr_s_val_put(idx: i64, value: text):
         expr_s_val[idx] = value
         return
     if value == "":
-        expr_attr_s_val_stores[0].retire(idx)
+        # @workaround bug=phase2_mir_unresolved_field_receiver_2026-11-15
+        val s_val_store: AttributeStoreV1<text> = expr_attr_s_val_stores[0]
+        s_val_store.retire(idx)
     else:
-        expr_attr_s_val_stores[0].set(idx, value)
+        # @workaround bug=phase2_mir_unresolved_field_receiver_2026-11-15
+        val s_val_store: AttributeStoreV1<text> = expr_attr_s_val_stores[0]
+        s_val_store.set(idx, value)
 
 fn expr_s_val_dense() -> [text]:
     if expr_attr_s_val_mode[0] == 0:
@@ -705,7 +758,7 @@ fn expr_s_val_load(values: [text]):
         expr_s_val = values
         return
     expr_attr_s_val_stores.clear()
-    match attr_store_detached_v1("s_val", if expr_attr_s_val_mode[0] == 1: AttrPlacementV1.Column else: AttrPlacementV1.SparseHash):
+    match attr_store_detached_v1("s_val", expr_attr_placement_of(expr_attr_s_val_mode[0])):
         case Ok(store): expr_attr_s_val_stores.push(store)
         case Err(_):
             expr_attr_s_val_mode[0] = 0
@@ -714,18 +767,23 @@ fn expr_s_val_load(values: [text]):
     var i = 0
     while i < values.len():
         if values[i] != "":
-            expr_attr_s_val_stores[0].set(i, values[i])
+            # @workaround bug=phase2_mir_unresolved_field_receiver_2026-11-15
+            val s_val_store: AttributeStoreV1<text> = expr_attr_s_val_stores[0]
+            s_val_store.set(i, values[i])
         i = i + 1
 
 pub fn expr_attr_op_placement() -> text:
     if expr_attr_op_mode[0] == 1: return "column"
     if expr_attr_op_mode[0] == 2: return "sparse_hash"
+    if expr_attr_op_mode[0] == 3: return "array_index"
     "direct"
 
 # Entries held by the op store (one per op-family node); -1 when op is direct.
 pub fn expr_attr_op_present() -> i64:
     if expr_attr_op_mode[0] == 0: return -1
-    expr_attr_op_stores[0].len()
+    # @workaround bug=phase2_mir_unresolved_field_receiver_2026-11-15
+    val op_store: AttributeStoreV1<i64> = expr_attr_op_stores[0]
+    op_store.len()
 
 fn expr_is_op_tag(idx: i64) -> bool:
     val t = expr_tag[idx]
@@ -735,7 +793,10 @@ fn expr_is_op_tag(idx: i64) -> bool:
 fn expr_int_raw_get(idx: i64) -> i64:
     if expr_attr_op_mode[0] == 0 or not expr_is_op_tag(idx):
         return expr_i_val[idx]
-    match expr_attr_op_stores[0].get(idx):
+    # @workaround bug=phase2_mir_unresolved_field_receiver_2026-11-15
+    val op_store: AttributeStoreV1<i64> = expr_attr_op_stores[0]
+    val op_got: Result<i64, text> = op_store.get(idx)
+    match op_got:
         case Ok(v): v
         case Err(_): 0
 
@@ -744,7 +805,9 @@ fn expr_int_raw_set(idx: i64, value: i64):
         expr_i_val[idx] = value
         return
     expr_i_val[idx] = 0
-    expr_attr_op_stores[0].set(idx, value)
+    # @workaround bug=phase2_mir_unresolved_field_receiver_2026-11-15
+    val op_store: AttributeStoreV1<i64> = expr_attr_op_stores[0]
+    op_store.set(idx, value)
 
 fn expr_op_or_int_get(idx: i64) -> i64:
     if expr_attr_count_on[0] != 0 and expr_is_op_tag(idx):
@@ -848,7 +911,9 @@ fn expr_owner_tag_set(idx: i64, value: i64):
     # op placed off the array: move the i_val between store and array with the tag.
     val v = expr_int_raw_get(idx)
     if expr_is_op_tag(idx):
-        expr_attr_op_stores[0].retire(idx)
+        # @workaround bug=phase2_mir_unresolved_field_receiver_2026-11-15
+        val op_store: AttributeStoreV1<i64> = expr_attr_op_stores[0]
+        op_store.retire(idx)
     expr_tag[idx] = value
     expr_int_raw_set(idx, v)
 fn expr_owner_args_set(idx: i64, value: [i64]):
@@ -1738,6 +1803,12 @@ pub fn expr_store_state_take() -> ExprStoreState:
     expr_asm_clobbers = []
     expr_asm_outputs = []
     expr_count_slot = [0]
+    # bug=node_attr_expr_take_reuses_detached_values_2026_11_14:
+    # The returned snapshot owns dense values. Replace the active detached
+    # stores too, before allocation can reuse ID zero in this fresh owner.
+    # Keep the selected placement; these loaders also handle direct storage.
+    expr_extra_load([])
+    expr_s_val_load([])
     asm_arm_archs = []
     asm_arm_os = []
     asm_arm_abi = []

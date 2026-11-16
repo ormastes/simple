@@ -197,6 +197,15 @@ pub fn init_interpreter_state(items: &[Node]) {
     publish_interp_definitions_snapshot();
 }
 
+/// Declared index of `variant` in the enum the hybrid interpreter knows as `name`.
+pub(crate) fn interp_enum_variant_index(name: &str, variant: &str) -> Option<u32> {
+    INTERP_ENUMS.with(|enums| {
+        enums.borrow().get(name).and_then(|def| {
+            simple_runtime::value::declared_variant_discriminant(def.variants.iter().map(|v| v.name.as_str()), variant)
+        })
+    })
+}
+
 /// Clear interpreter state
 pub fn clear_interpreter_state() {
     INTERP_FUNCTIONS.with(|f| f.borrow_mut().clear());

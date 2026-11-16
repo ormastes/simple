@@ -1,0 +1,42 @@
+# Mechanical initial-WAL publication/readback factoring. Both input owners
+# are genuine held capabilities; result DATA cannot mint an admission owner.
+use std.nogc_sync_mut.io.machine_storage_owner_v1.MachineStorageOwnerV1
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_owner_v1.LinuxInstalledFreshEpochOwnerV1
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.*
+use std.nogc_sync_mut.container.machine_fresh_epoch_history_v1.machine_fresh_epoch_read_initial_v1
+
+pub(package) struct MachineFreshEpochCommitTurnV3:
+    record: Option<MachineFreshEpochRecordV1> = nil
+    commit_digest: text = ""
+    error: text = ""
+
+pub(package) fn machine_fresh_epoch_prepare_commit_v3(storage: MachineStorageOwnerV1,
+        epoch: LinuxInstalledFreshEpochOwnerV1, candidate: MachineFreshEpochRecordV1) -> MachineFreshEpochCommitTurnV3:
+    var retained = MachineFreshEpochCommitTurnV3()
+    val head = storage.fresh_epoch_head_v1(epoch, candidate)
+    if head.is_err():
+        retained.error = head.unwrap_err()
+        return retained
+    var commit = head.unwrap()
+    if commit == "":
+        val written = storage.fresh_epoch_commit_v1(epoch, candidate)
+        if written.is_err():
+            retained.error = "machine-fresh-epoch-publication-uncertain:" + written.unwrap_err()
+            return retained
+        commit = written.unwrap().digest
+    retained.commit_digest = commit
+    val original = machine_fresh_epoch_read_initial_v1(storage, commit)
+    if original.is_err():
+        retained.error = original.unwrap_err()
+        return retained
+    val record = original.unwrap()
+    val existing_binding = machine_fresh_epoch_stable_v1(record)
+    val candidate_binding = machine_fresh_epoch_stable_v1(candidate)
+    if existing_binding.is_err() or candidate_binding.is_err():
+        retained.error = "machine-fresh-epoch-existing-binding-invalid"
+        return retained
+    if existing_binding.unwrap() != candidate_binding.unwrap():
+        retained.error = "machine-fresh-epoch-existing-binding-differs"
+        return retained
+    retained.record = Some(record)
+    retained
