@@ -74,3 +74,10 @@ Remaining gaps: no real ssh run; ssh hosts have no send command (loopback only,
 `<snapshot>.in` inbox); snapshot polling not push; the GUI page does not draw the
 host row; the 50-row roster is clipped by the TUI region height (attention rows
 come first); the other CU-010 states are carried, not re-verified natively.
+
+## CU-001..020 traceability (2026-11-17)
+Owner plan copied to `doc/03_plan/app/llm_caret/caret_suite_final_ui_extension_traceability_plan.md`;
+per-row status in `doc/03_plan/app/llm_caret/caret_suite_cu_verification_status.md`.
+Tagged specs exist for 17/20 rows; CU-007, CU-012, CU-018 have none. Native
+verification is PENDING for all rows (bootstrap in progress) — never mark PASS
+without native evidence.
