@@ -1,0 +1,66 @@
+# AUTHORED_NOT_RUN. Shape validation DATA fixtures, never native owner/proof.
+use std.spec.{describe, it, expect}
+use std.common.contracts.container.execution_stats_v1.*
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2}
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.crypto.sha256.sha256_text
+
+fn stats_shape_value_v1() -> ContainerExecutionStatsObservationV1:
+    val scope = ContainerHostScopeV2(physical_host_id: "host", service_scope_id: "service", boot_id: "boot",
+        provider_generation: 1, native_machine_id: "machine", continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot")
+    val runtime = RuntimeIdentityV1(pod_uid: "pod", attempt: 1, provider_generation: 1, operation_id: "operation",
+        engine: "podman", native_id: sha256_text("native-container"), node_boot_id: container_scope_fence_id_v2(scope).unwrap())
+    ContainerExecutionStatsObservationV1(scope: scope, runtime: runtime, request_digest: sha256_text("request"),
+        source: "linux-cgroup2-original-container-root-and-descendants-v1", subject_identity_digest: sha256_text("subject"),
+        sample_started_monotonic_ns: 100, sample_finished_monotonic_ns: 200,
+        cpu_usage_usec: ContainerStatsCounterV1.Observed(0), memory_current_bytes: ContainerStatsCounterV1.Observed(4096),
+        pids_current: ContainerStatsCounterV1.Observed(1), io: ContainerStatsIoV1.Unsupported("linux-cgroup2-io-not-exposed"))
+
+describe "typed container stats observation shape remains DATA":
+    it "accepts observed zero with explicit unsupported I/O and an honest read interval":
+        expect(container_execution_stats_observation_validate_v1(stats_shape_value_v1()).is_ok()).to_equal(true)
+
+    it "refuses nonpositive or reversed monotonic intervals":
+        var value = stats_shape_value_v1()
+        value.sample_started_monotonic_ns = 0
+        expect(container_execution_stats_observation_validate_v1(value).is_err()).to_equal(true)
+        value.sample_started_monotonic_ns = 201
+        expect(container_execution_stats_observation_validate_v1(value).is_err()).to_equal(true)
+        value.sample_started_monotonic_ns = 200
+        expect(container_execution_stats_observation_validate_v1(value).is_ok()).to_equal(true)
+
+    it "refuses wrong provider generation or incarnation in observation metadata":
+        var value = stats_shape_value_v1()
+        value.runtime.provider_generation = 2
+        expect(container_execution_stats_observation_validate_v1(value).is_err()).to_equal(true)
+        value = stats_shape_value_v1()
+        value.runtime.node_boot_id = sha256_text("other-incarnation")
+        expect(container_execution_stats_observation_validate_v1(value).is_err()).to_equal(true)
+
+    it "refuses missing attribution or a claimed different observation source":
+        var value = stats_shape_value_v1()
+        value.subject_identity_digest = ""
+        expect(container_execution_stats_observation_validate_v1(value).is_err()).to_equal(true)
+        value = stats_shape_value_v1()
+        value.request_digest = ""
+        expect(container_execution_stats_observation_validate_v1(value).is_err()).to_equal(true)
+        value = stats_shape_value_v1()
+        value.source = "podman-human-memory-working-set-and-cpu-percent"
+        expect(container_execution_stats_observation_validate_v1(value).is_err()).to_equal(true)
+
+    it "refuses negative counters and a permission error disguised as unsupported":
+        var value = stats_shape_value_v1()
+        value.cpu_usage_usec = ContainerStatsCounterV1.Observed(-1)
+        expect(container_execution_stats_observation_validate_v1(value).is_err()).to_equal(true)
+        value = stats_shape_value_v1()
+        value.memory_current_bytes = ContainerStatsCounterV1.Unsupported("permission-denied")
+        expect(container_execution_stats_observation_validate_v1(value).is_err()).to_equal(true)
+
+    it "requires a bounded consistent I/O collection":
+        var value = stats_shape_value_v1()
+        value.io = ContainerStatsIoV1.Observed(ContainerStatsIoCountersV1(read_bytes: 0, write_bytes: 0,
+            read_operations: 0, write_operations: 0, device_count: 129))
+        expect(container_execution_stats_observation_validate_v1(value).is_err()).to_equal(true)
+        value.io = ContainerStatsIoV1.Observed(ContainerStatsIoCountersV1(read_bytes: 1, write_bytes: 0,
+            read_operations: 0, write_operations: 0, device_count: 0))
+        expect(container_execution_stats_observation_validate_v1(value).is_err()).to_equal(true)

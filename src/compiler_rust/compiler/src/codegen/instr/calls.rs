@@ -3143,7 +3143,11 @@ fn compile_known_enum_constructor_call<M: Module>(
         return true;
     };
 
-    let disc = simple_runtime::value::hash_variant_discriminant(variant_name) as i64;
+    // MIR did not resolve this constructor to an owning enum (it would have
+    // emitted EnumUnit/EnumWith with the declared index), and the global
+    // `enum_defs` row may be a merge of same-named enums -- so the owner is
+    // unknown here. Name-only, reported (#6953).
+    let disc = crate::hir::name_only_variant_discriminant("codegen enum constructor call", variant_name);
     let enum_id_val = builder.ins().iconst(
         types::I32,
         i64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)),
