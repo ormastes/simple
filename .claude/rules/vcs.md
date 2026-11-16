@@ -206,7 +206,7 @@ that does not start with `v` (e.g. `probe-tag-gate`), which no ruleset covers
 and which deletes cleanly.
 ## Pre-push guards
 
-**(2026-09-28) Merging main into a stale PR branch no longer trips the 64-commit bound:** `check-push-must-pass.shs` excludes `refs/remotes/<remote>/main` from the conflict-tree union and uses the tip's merge-base with it as the per-ref range base, so only the branch's own commits count; `check-tree-size-push.shs` bands a merge against its closest parent. Missing remote main ⇒ NOTE on stderr and the old range (fail-closed); 65 genuinely new commits still FAIL.
+**(2026-09-28) Merging main into a stale PR branch no longer trips the 64-commit bound:** `check-push-must-pass.shs` excludes `refs/remotes/<remote>/main` from the conflict-tree union and uses the tip's merge-base with it as the per-ref range base, so only the branch's own commits count; `check-tree-size-push.shs` bands a merge against its closest parent. Missing remote main ⇒ NOTE on stderr and the old range (fail-closed); 65 genuinely new commits still FAIL. **(2026-11-17) Release lines too:** the per-ref base is the closest unique merge-base among remote main and every `refs/remotes/<remote>/release/<x.y>` (conflict-tree union already excluded advertised release tips), so merging an advanced `release/1.0.0` into a release-based PR counts only the branch's own commits (selftest: release-line merge fixture).
 
 ### What ACTUALLY runs on push (verified 2026-09-01 — read this before trusting any "Wired into" line below)
 
