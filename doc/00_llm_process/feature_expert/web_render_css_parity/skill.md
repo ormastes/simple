@@ -2205,3 +2205,9 @@ Gates and remaining gaps:
   - `web_device_scale_spec` "re-rasterizes text at k x font-size" expected 4x ink > 10 x 1x ink. It now pins the ink counts exactly: 1x 190, 4x 1629, i.e. 8.6x (Chrome: 199 and 1640, i.e. 8.2x). LCD fringes widen the 1x ink. The non-uniform 4x4 block check is kept.
 - Perf: the first LCD commit was 45-51 % slower. After optimising the composite (s32 tables per colour, LCD before the gray subrect, empty and solid fast paths) and adding an O(1) atlas slot hint for phase cells: 1x 3.22 -> 3.52 s (+9 %), 4x 26.6 -> 30.4 s (+14 %). Frame digests are byte-identical to the first LCD commit. The remainder is the interpreted per-pixel blend; see `doc/08_tracking/bug/lcd_text_cpu_composite_44pct_slower_2026-11-17.md`.
 - Combo matrix: 979 cells, 88 mismatching. Unchanged; it is a geometry gate.
+
+## 2026-11-17 — css-paint residual classified (no fix)
+
+- css-paint 5.68% = 38,905 px: ~75% glyph residual (LCD, vertical hinting, pen phase; excluded), 16.7% vertical drift (everything below the h3 sits 1 row low), ~7% the 18.72px h3 (integer font-size, 5 px wide), ~0.4% box edges. Table and fix sketch: `doc/08_tracking/bug/web_render_css_paint_residual_2026-11-17.md`.
+- **Trap — a 1-row text offset on a plain `<p>` is not a baseline bug.** A probe page of `<p>` blocks matches Chrome ink rows exactly at 12/16/20/24 px; the drift comes from em margins (0.83em, 1em) and line-height 28.08 rounded box by box in i32 layout (Chrome 331.33 vs Simple 332). Do not touch the glyph baseline; carry a fractional margin remainder through the block cursor instead (all block-flow paths together).
+- **Trap — `--dump-dom` without `--hide-scrollbars` lays out 15 px narrower.** Use only the y column of such a run.
