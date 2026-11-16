@@ -17,6 +17,8 @@
 // Run:    VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json \
 //         ./vk2d_bench [w] [h] [rects] [frames] [readback=0|1]
 
+/* glibc hides clock_gettime/nanosleep under -std=c99 without this. */
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stddef.h>
 #include <stdlib.h>
