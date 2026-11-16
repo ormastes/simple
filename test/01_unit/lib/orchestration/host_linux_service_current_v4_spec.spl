@@ -13,7 +13,8 @@ Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-16).
 Shutdown (S40-SHUTDOWN-01), the installed-credential pin and the associated
 execution commit gates (S40-COMMIT-01) are covered here;
 Linux reconciliation (host_linux_service_reconcile_v4_spec) runs at startup over
-the offline fresh-epoch store inventory lent by the same admission (S40-LOAN-03..05).
+the offline fresh-epoch store inventory lent by the same admission (S40-LOAN-03..05); a lent or once-lent epoch never
+starts its provider (S40-LOAN-06).
 ## Compatibility and limitations
 Real Ed25519 signatures from the verifier fixture seeds and a real temporary
 capacity journal. No protected root reader, native identity borrow or
@@ -58,6 +59,8 @@ use std.nogc_sync_mut.container.machine_fresh_epoch_lifecycle_v1.MachineFreshEpo
 use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.MachineFreshEpochRecordV1
 use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.LinuxMachinePolicyOwnerV1
 use std.nogc_sync_mut.io.linux_installed_fresh_epoch_owner_v1.LinuxFreshEpochSuccessorCustodyV1
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamRequestV2,
+    GroupProcessStreamLaunchV2, group_process_child_argv_digest_v2}
 use std.nogc_sync_mut.io.linux_service_native_identity_v3.LinuxServiceNativeIdentityBorrowV3
 use std.nogc_sync_mut.io.linux_fresh_epoch_store_inventory_v1.LinuxFreshEpochStoreInventoryBorrowV1
 
@@ -470,6 +473,18 @@ fn s40_store_lender(store_loaned: bool) -> MachineFreshEpochAdmissionOwnerV1:
     lender.store_inventory_loaned = store_loaned
     lender
 
+# Synthetic launch DATA: start_provider_v1 refuses a lent epoch before it binds,
+# encodes or validates the template, so no field is ever read.
+fn s40_template() -> GroupProcessStreamLaunchV2:
+    val digest = "a".repeat(64)
+    val request = GroupProcessStreamRequestV2(program: "/synthetic/program",
+        producer_digest: digest, args: [], environment: ["LANG=C"], directory: "/synthetic/work",
+        inputs: [], timeout_ms: 1000, broker_program: "/synthetic/broker", broker_digest: digest,
+        child_argv_digest: group_process_child_argv_digest_v2("/synthetic/program", []), launch_deadline_unix_ms: 1)
+    GroupProcessStreamLaunchV2(root: "/synthetic/group", worker_id: "worker-a",
+        generation: 1, snapshot_digest: digest, cache_identity: digest, memory_limit_bytes: 1048576,
+        request: request, delegated_cgroup_path: "/synthetic/cgroup", transport_generation: 1)
+
 fn s40_inventory(reader_generation: i64, custody_slot: i64) -> LinuxFreshEpochStoreInventoryBorrowV1:
     LinuxFreshEpochStoreInventoryBorrowV1(reader: LinuxMachinePolicyOwnerV1(slot: 3, generation: reader_generation),
         successor: LinuxFreshEpochSuccessorCustodyV1(slot: custody_slot, generation: 1), epoch_digest: "c".repeat(64))
@@ -616,3 +631,24 @@ describe "Linux service installed opener and fresh-epoch service loan (service 4
         val lender = ordered.owner.admission.unwrap().owner.unwrap()
         expect(lender.store_inventory_loaned).to_equal(false)
         expect(lender.service_loaned).to_equal(true)
+
+    it "never starts the provider of a lent or once-lent epoch":
+        # @req S40-LOAN-06 (R2-F4/R3-F3; every case returns before lifecycle, custody or template use)
+        step("an active service loan refuses the start and keeps the loan")
+        val lent = s40_lender(true, s40_reader()).start_provider_v1(s40_template())
+        expect(lent.error).to_equal("machine-fresh-epoch-provider-start-after-service-loan")
+        expect(lent.started).to_equal(false)
+        expect(lent.process.is_none()).to_equal(true)
+        expect(lent.reference.is_none()).to_equal(true)
+        expect(lent.owner.service_loaned).to_equal(true)
+        step("an active store inventory loan refuses the start and keeps both loans")
+        val stored = s40_store_lender(true).start_provider_v1(s40_template())
+        expect(stored.error).to_equal("machine-fresh-epoch-provider-start-after-service-loan")
+        expect(stored.started).to_equal(false)
+        expect(stored.owner.store_inventory_loaned).to_equal(true)
+        expect(stored.owner.service_loaned).to_equal(true)
+        step("an ended loan still refuses: the retained service reader marks the epoch once-lent")
+        val ended = s40_lender(false, s40_reader()).start_provider_v1(s40_template())
+        expect(ended.error).to_equal("machine-fresh-epoch-provider-start-after-service-loan")
+        expect(ended.started).to_equal(false)
+        expect(ended.owner.service_reader.is_some()).to_equal(true)

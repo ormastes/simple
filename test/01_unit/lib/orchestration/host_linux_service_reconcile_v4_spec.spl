@@ -76,7 +76,7 @@ fn rc_inventory(boot: text = "native-boot") -> LinuxFreshEpochStoreInventoryV1:
 fn rc_row(op: text, state: text, plan: bool = true) -> HostLinuxServiceRowFactV4:
     HostLinuxServiceRowFactV4(operation_id: op, payload_digest: "0".repeat(64), action: "host_reservation_v1",
         journal_state: state, projected_released: false, abort_receipt: false, child_barrier: false,
-        plan_bound: plan, plan_boot_id: RC_BOOT, plan_generation: 41, plan_scope: "epoch-" + RC_EPOCH)
+        plan_bound: plan, plan_machine_id: "machine_1", plan_scope: "epoch-" + RC_EPOCH)
 
 # DATA borrows: slots are never touched (the flip refuses the alias first).
 fn rc_native_borrow(custody_slot: i64) -> LinuxServiceNativeIdentityBorrowV3:
@@ -101,8 +101,8 @@ fn rc_count(source: text, needle: text) -> i64:
 fn rc_fixture() -> LinuxServiceVerifierFixtureV1:
     linux_service_verifier_fixture_ops_v1(1, 65, RC_FAR, "/var/lib/simple/hosts", RC_OPERATIONS)
 
-fn rc_fixture_native(fixture: LinuxServiceVerifierFixtureV1) -> LinuxServiceNativeIdentitySnapshotV3:
-    LinuxServiceNativeIdentitySnapshotV3(native_machine_id: fixture.binding.native_machine_id, native_boot_id: RC_BOOT,
+fn rc_fixture_native(fixture: LinuxServiceVerifierFixtureV1, boot: text = RC_BOOT) -> LinuxServiceNativeIdentitySnapshotV3:
+    LinuxServiceNativeIdentitySnapshotV3(native_machine_id: fixture.binding.native_machine_id, native_boot_id: boot,
         architecture: "x86_64", owner_generation: 41, process_identity_digest: "e".repeat(64), process_generation: 2,
         authority_namespace_id: "namespace_1")
 
@@ -137,17 +137,20 @@ fn rc_open(root: text, capacity: HostCapacityV1) -> HostCapacityOwnerV1:
     opened[0]
 
 describe "Linux service capacity reconcile V4 (service 40, fail-closed)":
-    it "refuses an inventory or retained plan from a different boot":
+    it "refuses an inventory from a different boot or a retained plan from another machine":
         # @req S40-RECONCILE-01
         step("the inventory's own boot must be the actual native boot")
         expect(host_linux_service_inventory_match_v4([rc_row("operation_2", "executing")], rc_inventory("other-boot"), rc_native(),
             rc_capacity()).unwrap_err()).to_equal("linux-service-inventory-boot-mismatch")
-        step("a retained plan from another boot is refused")
-        var old_plan = rc_row("operation_2", "executing")
-        old_plan.plan_boot_id = "previous-boot"
-        expect(rc_match([old_plan]).unwrap_err()).to_equal("linux-service-inventory-boot-mismatch")
+        step("a begun row's retained plan must name this native machine")
+        var foreign_plan = rc_row("operation_2", "executing")
+        foreign_plan.plan_machine_id = "machine_2"
+        expect(rc_match([foreign_plan]).unwrap_err()).to_equal("linux-service-inventory-machine-mismatch")
+        var no_machine = rc_row("operation_2", "executing")
+        no_machine.plan_machine_id = ""
+        expect(rc_match([no_machine]).unwrap_err()).to_equal("linux-service-inventory-machine-mismatch")
 
-    it "refuses a different provider generation on the ledger, the inventory or the retained plan":
+    it "refuses a different provider generation on the ledger or the inventory":
         # @req S40-RECONCILE-02
         expect(host_linux_service_inventory_match_v4([rc_row("operation_2", "admitted", false)], rc_inventory(), rc_native(),
             rc_capacity(40)).unwrap_err()).to_equal("linux-service-inventory-generation-mismatch")
@@ -156,9 +159,6 @@ describe "Linux service capacity reconcile V4 (service 40, fail-closed)":
         stale.owner_generation = 40
         expect(host_linux_service_inventory_match_v4([rc_row("operation_2", "admitted", false)], stale, rc_native(),
             rc_capacity()).unwrap_err()).to_equal("linux-service-inventory-generation-mismatch")
-        var old_generation = rc_row("operation_2", "executing")
-        old_generation.plan_generation = 40
-        expect(rc_match([old_generation]).unwrap_err()).to_equal("linux-service-inventory-generation-mismatch")
 
     it "refuses a begun plan without an epoch scope and an unbound or tampered inventory":
         # @req S40-RECONCILE-03
@@ -222,13 +222,10 @@ describe "Linux service capacity reconcile V4 (service 40, fail-closed)":
         var completed = rc_row("op_completed", "completed")
         completed.projected_released = true
         completed.plan_scope = "epoch-" + "d".repeat(64)
-        completed.plan_boot_id = "previous-boot"
         var admitted = rc_row("op_admitted", "admitted")
         admitted.plan_scope = "epoch-" + "d".repeat(64)
-        admitted.plan_boot_id = "previous-boot"
         var aborted = rc_row("op_aborted", "cancelled")
         aborted.abort_receipt = true
-        aborted.plan_boot_id = "previous-boot"
         val reasons = rc_drain([completed, admitted, aborted]).unwrap()
         expect(reasons.len()).to_equal(3)
         expect(reasons[0].reason).to_equal("completion-receipt")
@@ -238,12 +235,9 @@ describe "Linux service capacity reconcile V4 (service 40, fail-closed)":
         var earlier = rc_row("op_earlier", "executing")
         earlier.plan_scope = "epoch-" + "d".repeat(64)
         expect(rc_drain([earlier]).unwrap()[0].reason).to_equal("begun-absent")
-        step("a begun row planned on another boot stays quarantined (documented liveness limit)")
-        var rebooted = rc_row("op_rebooted", "executing")
-        rebooted.plan_boot_id = "previous-boot"
-        expect(rc_match([rebooted]).unwrap_err()).to_equal("linux-service-inventory-boot-mismatch")
+        # A begun row planned by an earlier boot is covered by S40-RECONCILE-12.
 
-    it "releases every row only from a receipt or a same-boot, same-generation absence":
+    it "releases every row only from a receipt or a same-machine absence":
         # @req S40-RECONCILE-06
         # @capture(statistics): release reason per projected row
         var completed = rc_row("op_completed", "completed")
@@ -277,7 +271,7 @@ describe "Linux service capacity reconcile V4 (service 40, fail-closed)":
         expect(bare.len()).to_equal(1)
         expect(bare[0].journal_state).to_equal("admitted")
         expect(bare[0].plan_bound).to_equal(false)
-        step("the retained association binds the native boot, generation and epoch scope")
+        step("the retained association binds the native machine and epoch scope")
         val receipt = host_reservation_receipt_v1(prepare.prepare.intent, prepare.prepare.operation).unwrap()
         val execution = container_execution_draft_bind_v3(prepare.draft, rc_native_scope(native)).unwrap()
         val association = linux_service_association_v4(fixture.binding, scope, "c".repeat(64), native, prepare, receipt, execution).unwrap()
@@ -285,8 +279,7 @@ describe "Linux service capacity reconcile V4 (service 40, fail-closed)":
         expect(distributed_operation_journal_publish_v3(prepared.journal, relative, host_execution_association_encode_v3(association).unwrap()).unwrap()).to_equal(true)
         val facts = linux_service_row_facts_v4(prepared.journal, prepared.ledger).unwrap()
         expect(facts[0].plan_bound).to_equal(true)
-        expect(facts[0].plan_boot_id).to_equal(RC_BOOT)
-        expect(facts[0].plan_generation).to_equal(41)
+        expect(facts[0].plan_machine_id).to_equal(fixture.binding.native_machine_id)
         expect(facts[0].plan_scope).to_equal(rc_native_scope(native).service_scope_id)
         step("the journal-derived facts match this epoch's empty store and drain as a never-begun absence")
         expect(host_linux_service_inventory_match_v4(facts, rc_inventory(), native, prepared.ledger.capacity).is_ok()).to_equal(true)
@@ -297,6 +290,43 @@ describe "Linux service capacity reconcile V4 (service 40, fail-closed)":
         stale.revision = stale.revision + 1
         expect(linux_service_journal_identity_v4(prepared.journal, stale).unwrap_err()).to_equal("linux-service-reconcile-projection-stale")
         expect(identity.byte_len()).to_equal(64)
+        val closed = host_capacity_owner_close_owned_v2(prepared)
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "releases a begun row whose retained plan names a previous boot (no permanent quarantine)":
+        # @req S40-RECONCILE-12 (coordinator decision 2026-11-16; before it this row refused
+        # linux-service-inventory-boot-mismatch on every restart and kept the journal quarantined forever)
+        # The graph root is persistent and the run root may be tmpfs; preparation proved both empty, censused
+        # the service uid range and masked the provider units, so after a reboot nothing of the old plan can
+        # be live or come back. The machine is still pinned (S40-RECONCILE-01).
+        val fixture = rc_fixture()
+        val policy = local_authority_policy_decode_v1(fixture.policy).unwrap()
+        val before_reboot = rc_fixture_native(fixture, "previous-boot")
+        val scope = linux_service_scope_v4(fixture.binding, before_reboot, "ab".repeat(16)).unwrap()
+        val prepare = rc_prepare(scope, host_local_context_v1(policy).monotonic_ms + 600000)
+        val grant = linux_service_prepare_authorize_v4(scope, policy, "issuer_1", prepare, host_local_context_v1(policy)).unwrap()
+        val root = secure_temp_dir("/tmp", "s40-reconcile-reboot").unwrap()
+        val capacity = HostCapacityV1("worker_1", "host-authority", container_scope_fence_id_v2(scope).unwrap(), 41, 2000, 536870912, [])
+        val prepared = host_capacity_owner_prepare_v1(rc_open(root + "/journal", capacity), prepare.prepare.intent, prepare.prepare.operation,
+            grant, host_local_context_v1(policy)).unwrap()
+        step("the previous boot retained an association for its plan")
+        val receipt = host_reservation_receipt_v1(prepare.prepare.intent, prepare.prepare.operation).unwrap()
+        val execution = container_execution_draft_bind_v3(prepare.draft, rc_native_scope(before_reboot)).unwrap()
+        val association = linux_service_association_v4(fixture.binding, scope, "c".repeat(64), before_reboot, prepare, receipt,
+            execution).unwrap()
+        val relative = "host-execution-associations/" + sha256_text(container_scope_fence_id_v2(scope).unwrap() + "\n" + "operation_2") + ".sdn"
+        expect(distributed_operation_journal_publish_v3(prepared.journal, relative, host_execution_association_encode_v3(association).unwrap()).unwrap()).to_equal(true)
+        var facts = linux_service_row_facts_v4(prepared.journal, prepared.ledger).unwrap()
+        expect(facts[0].plan_bound).to_equal(true)
+        step("as a begun row it matches this boot's empty store and drains as an accountable absence")
+        # Facts are DATA: mark the derived row begun (the begin itself needs the Linux-protected journal).
+        var begun = facts[0]
+        begun.journal_state = "executing"
+        facts[0] = begun
+        val after_reboot = rc_fixture_native(fixture)
+        expect(host_linux_service_inventory_match_v4(facts, rc_inventory(), after_reboot, rc_capacity()).is_ok()).to_equal(true)
+        expect(host_linux_service_drain_v4(facts).unwrap()[0].reason).to_equal("begun-absent")
         val closed = host_capacity_owner_close_owned_v2(prepared)
         expect(closed.closed and closed.error == "").to_equal(true)
         expect(dir_remove(root, true)).to_equal(true)

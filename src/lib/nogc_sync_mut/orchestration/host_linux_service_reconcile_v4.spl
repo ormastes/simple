@@ -25,13 +25,22 @@
 # to the flip. The flip is in memory only; every reopen is quarantined again.
 #
 # Absence is accountable for a begun row only when it retained a plan for this
-# boot and provider generation with an epoch scope ("epoch-" + 64 hex). The
-# graph and run roots are fixed by the installed profile, so the authenticated
-# empty read covers objects of EVERY epoch of this install; each start admits
-# a new epoch, so the scope is not required to be this epoch (that would
-# quarantine every restart). Liveness limit (kept strict): a begun row whose
-# plan names another boot stays quarantined. Released, admitted and
-# abort-receipt rows need no plan check: receipts or never-begun absence.
+# native machine with an epoch scope ("epoch-" + 64 hex). The graph and run
+# roots are fixed by the installed profile, so the authenticated empty read
+# covers objects of EVERY epoch of this install; each start admits a new
+# epoch, so the scope is not required to be this epoch (that would quarantine
+# every restart). The plan's boot and provider generation are NOT compared
+# (coordinator decision 2026-11-16, independent soundness review): the graph
+# root is persistent and only the run root may be tmpfs, preparation proved
+# both empty, censused the service uid range and checked the partition, and
+# the provider units stay masked, so a plan from an earlier boot or process
+# cannot be live or come back; the generation is a process-local counter.
+# The reconcile-time read does not repeat the uid census or partition check
+# (preparation=false); "cannot be live" rests on the preparation census plus
+# the epoch's exclusive custody. Known gap (owner item SB-P1): the plan does not
+# record which store it ran in, so "roots fixed per install" is not verified.
+# Released, admitted and abort-receipt rows need no plan check: receipts or
+# never-begun absence.
 use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
     distributed_operation_journal_lookup_v2, distributed_operation_journal_read_required_v3,
     distributed_operation_journal_read_v3}
@@ -61,8 +70,7 @@ pub struct HostLinuxServiceRowFactV4:
     abort_receipt: bool
     child_barrier: bool
     plan_bound: bool = false
-    plan_boot_id: text = ""
-    plan_generation: i64 = 0
+    plan_machine_id: text = ""
     plan_scope: text = ""
 
 # Why one row may stop being charged (DATA; grants nothing by itself).
@@ -147,8 +155,7 @@ fn linux_service_row_facts_v4(journal: DistributedOperationJournalV2,
                         plan.operation_id != operation.id):
                     return Err("linux-service-reconcile-association-foreign")
                 fact.plan_bound = true
-                fact.plan_boot_id = plan.boot_id
-                fact.plan_generation = plan.provider_generation
+                fact.plan_machine_id = plan.native_machine_id
                 fact.plan_scope = plan.service_scope_id
         facts.push(fact)
     Ok(facts)
@@ -168,10 +175,11 @@ fn linux_service_inventory_digest_v4(inventory: LinuxFreshEpochStoreInventoryV1)
     sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)))
 
 # Checks an authenticated empty-store observation against the actual native
-# identity and the ledger, and every row's retained plan against this boot,
-# generation and epoch. Refusals:
-#   boot        inventory boot or a retained plan boot differs;
-#   generation  inventory, ledger or retained plan generation differs;
+# identity and the ledger, and every begun row's retained plan against this
+# machine and an epoch scope. Refusals:
+#   boot        inventory boot differs from the native boot;
+#   generation  inventory or ledger generation differs;
+#   machine     a begun row's retained plan names another native machine;
 #   process     inventory read by another process identity;
 #   store       inventory not bound to a store, partition or epoch;
 #   scope       a begun row's retained plan without an epoch scope;
@@ -195,12 +203,12 @@ pub fn host_linux_service_inventory_match_v4(rows: [HostLinuxServiceRowFactV4],
         seen[row.operation_id] = true
         # Absence is accountable for a never-begun row (admitted, or a verified
         # abort receipt) and a released row by its receipt; a begun row needs
-        # a retained plan for THIS boot and generation with an epoch scope.
+        # a retained plan for THIS machine with an epoch scope.
         val begun = row.journal_state != "admitted" and not row.abort_receipt
         if row.projected_released or not begun: continue
         if not row.plan_bound: return Err("linux-service-inventory-row-absent-unverified:" + row.operation_id)
-        if row.plan_boot_id != native.native_boot_id: return Err("linux-service-inventory-boot-mismatch")
-        if row.plan_generation != native.owner_generation: return Err("linux-service-inventory-generation-mismatch")
+        if row.plan_machine_id == "" or row.plan_machine_id != native.native_machine_id:
+            return Err("linux-service-inventory-machine-mismatch")
         if not row.plan_scope.starts_with("epoch-") or row.plan_scope.byte_len() != 70:
             return Err("linux-service-inventory-plan-scope")
     Ok(())
