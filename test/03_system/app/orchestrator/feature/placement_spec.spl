@@ -1,5 +1,9 @@
+# codex-system-test
 # @req ORCH-01 ORCH-02 HOST-02
-# Pure proposals only; SSpec NOT_RUN pending qualified tooling.
+# @acceptance AT-ORCH-01 AT-ORCH-02
+# AUTHORED_NOT_RUN: pure production placement and ledger transitions.
+# Synthetic inventory is not live capacity, authorization, or native device proof.
+use std.spec.{describe, it, expect, step}
 use std.common.contracts.orchestration.placement_v1.*
 use std.common.contracts.orchestration.host_capacity_v1.*
 use std.common.contracts.orchestration.profile_v1.*
@@ -28,7 +32,7 @@ fn placement_gpu_reservation(devices: [text], state: HostReservationStateV1) -> 
         prepare_deadline_ms: 100, state: state)
 
 describe "native host placement proposals":
-    it "places Windows requests only on the explicit Windows Docker runtime class":
+    it "should place Windows requests only on the explicit Windows Docker runtime class":
         step("Keep Windows Docker eligibility separate from Linux Podman hosts")
         var request = placement_request()
         request.execution_os = "windows"
@@ -44,7 +48,7 @@ describe "native host placement proposals":
         expect(refused.selected_index).to_equal(-1)
         expect(refused.offers.len()).to_equal(0)
 
-    it "preserves GPU hosts for CPU work and publishes effective caps":
+    it "should preserve GPU hosts for CPU work and publishes effective caps":
         step("Prefer a feasible CPU host and inspect reserved-equivalent caps")
         val plan = plan_host_placement_v1(placement_request(), [placement_host("gpu", ["gpu-0"], 8000, 24000), placement_host("cpu", [], 4000, 8000)]).unwrap()
         val selected = plan.offers[plan.selected_index]
@@ -53,20 +57,20 @@ describe "native host placement proposals":
         expect(selected.allocation.cpu_cap_millis).to_equal(2000)
         expect(selected.allocation.memory_cap_bytes).to_equal(4000)
 
-    it "queues below minimum and exposes the rejection reason":
+    it "should queue below minimum and exposes the rejection reason":
         step("Refuse a host below the declared CPU floor")
         val plan = plan_host_placement_v1(placement_request(), [placement_host("small", [], 999, 8000)]).unwrap()
         expect(plan.selected_index).to_equal(-1)
         expect(plan.rejected[0].reason).to_equal("insufficient-cpu-minimum")
 
-    it "allocates between minimum and recommendation without increasing caps":
+    it "should allocate between minimum and recommendation without increasing caps":
         step("Expose constrained admission instead of pretending to meet recommendation")
         val plan = plan_host_placement_v1(placement_request(), [placement_host("small", [], 1500, 3000)]).unwrap()
         expect(plan.offers[0].allocation.below_recommendation).to_equal(true)
         expect(plan.offers[0].allocation.cpu_cap_millis).to_equal(1500)
         expect(plan.offers[0].allocation.memory_cap_bytes).to_equal(3000)
 
-    it "rejects duplicate physical capacity and unsupported GPU sharing":
+    it "should reject duplicate physical capacity and unsupported GPU sharing":
         step("Reject two inventory rows for one machine and an unqualified sharing mode")
         val host = placement_host("same", [], 4000, 8000)
         expect(plan_host_placement_v1(placement_request(), [host, host]).unwrap_err()).to_equal("duplicate-physical-host")
@@ -74,7 +78,7 @@ describe "native host placement proposals":
         request.gpu_mode = "shared"
         expect(plan_host_placement_v1(request, [host]).unwrap_err()).to_equal("unsupported-gpu-mode")
 
-    it "never downgrades a required GPU claim to CPU":
+    it "should never downgrade a required GPU claim to CPU":
         step("Require an explicit GPU claim and a feasible device")
         var request = placement_request()
         request.profile.gpu_required = true
@@ -85,7 +89,7 @@ describe "native host placement proposals":
         expect(plan.selected_index).to_equal(-1)
         expect(plan.rejected[0].reason).to_equal("exclusive-gpu-unavailable")
 
-    it "requires current authorization health and enforcement":
+    it "should require current authorization health and enforcement":
         step("Refuse unauthorized, draining, unhealthy and unenforced host snapshots")
         val base = placement_host("host", [], 4000, 8000)
         var host = base
@@ -101,7 +105,7 @@ describe "native host placement proposals":
         host.limits_enforced = false
         expect(plan_host_placement_v1(placement_request(), [host]).unwrap().rejected[0].reason).to_equal("resource-enforcement-unavailable")
 
-    it "rejects stale continuity and mismatched runtime eligibility":
+    it "should reject stale continuity and mismatched runtime eligibility":
         step("Refuse uncertain inventory and mismatched execution targets")
         val base = placement_host("host", [], 4000, 8000)
         var host = base
@@ -114,7 +118,7 @@ describe "native host placement proposals":
         host.architecture = "x86_64"
         expect(plan_host_placement_v1(placement_request(), [host]).unwrap().rejected[0].reason).to_equal("architecture-mismatch")
 
-    it "uses a stable host identity tie break independent of inventory order":
+    it "should use a stable host identity tie break independent of inventory order":
         step("Permute equivalent hosts and preserve the selected identity")
         val a = placement_host("a", [], 4000, 8000)
         val b = placement_host("b", [], 4000, 8000)
@@ -123,7 +127,7 @@ describe "native host placement proposals":
         expect(first.offers[first.selected_index].physical_host_id).to_equal("a")
         expect(second.offers[second.selected_index].physical_host_id).to_equal("a")
 
-    it "binds the selected offer and attempt identity into canonical host intent":
+    it "should bind the selected offer and attempt identity into canonical host intent":
         step("Carry exact host fence, allocation and immutable plan identity to admission")
         val plan = plan_host_placement_v1(placement_request(), [placement_host("host", [], 4000, 8000)]).unwrap()
         val identity = PlacementAttemptIdentityV1(reservation_id: "one", operation_id: "op-one",
@@ -139,7 +143,7 @@ describe "native host placement proposals":
         changed.plan_digest = "2".repeat(64)
         expect(placement_reservation_intent_v1(plan, changed).unwrap().reservation.payload_digest == intent.reservation.payload_digest).to_equal(false)
 
-    it "cannot construct a reservation for a queued or invalid selection":
+    it "should refuse to construct a reservation for a queued or invalid selection":
         step("Reject missing selection before indexing any host or creating an intent")
         val identity = PlacementAttemptIdentityV1(reservation_id: "one", operation_id: "op-one",
             assignment_generation: 1, nonce: "nonce-one", plan_digest: "1".repeat(64), prepare_deadline_ms: 100)
@@ -149,7 +153,7 @@ describe "native host placement proposals":
         invalid.selected_index = 1
         expect(placement_reservation_intent_v1(invalid, identity).unwrap_err()).to_equal("invalid-selected-offer")
 
-    it "rejects unresolved devices or allocation and cap disagreement":
+    it "should reject unresolved devices or allocation and cap disagreement":
         step("Fail closed on an inconsistent programmatically constructed offer")
         val plan = plan_host_placement_v1(placement_request(), [placement_host("host", [], 4000, 8000)]).unwrap()
         val identity = PlacementAttemptIdentityV1(reservation_id: "one", operation_id: "op-one",
@@ -163,7 +167,7 @@ describe "native host placement proposals":
         val uncapped = PlacementPlanV1(offers: [offer], rejected: [], selected_index: 0)
         expect(placement_reservation_intent_v1(uncapped, identity).unwrap_err()).to_equal("allocation-cap-mismatch")
 
-    it "reserves exactly one available GPU across inventory permutations and active states":
+    it "should propose exactly one available GPU across inventory permutations and active states":
         step("Keep a busy first GPU charged and choose the same free GPU for each ordering")
         var request = placement_request()
         request.profile.gpu_required = true
@@ -193,7 +197,7 @@ describe "native host placement proposals":
                 expect(remaining.exclusive_devices.len()).to_equal(1)
                 expect(remaining.exclusive_devices[0]).to_equal("gpu-2")
 
-    it "queues when every GPU is busy and reuses only an explicitly released device":
+    it "should queue when every GPU is busy and reuses only an explicitly released device":
         step("Keep prepared executing and uncertain claims exclusive until their state is Released")
         var request = placement_request()
         request.profile.gpu_required = true
@@ -211,3 +215,46 @@ describe "native host placement proposals":
         expect(available.selected_index).to_equal(0)
         expect(available.offers[0].exclusive_devices.len()).to_equal(1)
         expect(available.offers[0].exclusive_devices[0]).to_equal("gpu-0")
+
+    it "should admit exactly the CPU and memory floors with matching caps":
+        step("Offer exactly the declared minima and expose constrained allocation")
+        val plan = plan_host_placement_v1(placement_request(), [placement_host("floor", [], 1000, 2000)]).unwrap()
+        expect(plan.selected_index).to_equal(0)
+        expect(plan.offers.len()).to_equal(1)
+        expect(plan.rejected.len()).to_equal(0)
+        val allocation = plan.offers[0].allocation
+        expect(allocation.cpu_millis).to_equal(1000)
+        expect(allocation.cpu_cap_millis).to_equal(1000)
+        expect(allocation.memory_bytes).to_equal(2000)
+        expect(allocation.memory_cap_bytes).to_equal(2000)
+        expect(allocation.below_recommendation).to_equal(true)
+
+    it "should queue one byte below the memory floor despite spare CPU":
+        step("Offer enough CPU but one byte less than the declared memory minimum")
+        val plan = plan_host_placement_v1(placement_request(), [placement_host("memory-short", [], 8000, 1999)]).unwrap()
+        expect(plan.selected_index).to_equal(-1)
+        expect(plan.offers.len()).to_equal(0)
+        expect(plan.rejected.len()).to_equal(1)
+        expect(plan.rejected[0].reason).to_equal("insufficient-memory-minimum")
+
+    it "should keep the only uncertain GPU unavailable after reducing CPU and memory requests":
+        step("Keep the single exclusive GPU charged while CPU and memory are abundant")
+        var host = placement_host("single-gpu", ["gpu-0"], 8000, 24000)
+        host.ledger.reservations = [placement_gpu_reservation(["gpu-0"], HostReservationStateV1.Uncertain)]
+        var request = placement_request()
+        request.profile.gpu_required = true
+        request.gpu_mode = "whole-exclusive"
+        val original = plan_host_placement_v1(request, [host]).unwrap()
+        expect(original.selected_index).to_equal(-1)
+        expect(original.rejected[0].reason).to_equal("exclusive-gpu-unavailable")
+        step("Reduce only CPU and memory while preserving the required exclusive device claim")
+        request.profile.cpu = ResourceAmountRangeV1(minimum: 500, recommended: 500, preferred: 500, limit: 500)
+        request.profile.memory = ResourceAmountRangeV1(minimum: 1000, recommended: 1000, preferred: 1000, limit: 1000)
+        val reduced = plan_host_placement_v1(request, [host]).unwrap()
+        expect(reduced.selected_index).to_equal(-1)
+        expect(reduced.offers.len()).to_equal(0)
+        expect(reduced.rejected[0].reason).to_equal("exclusive-gpu-unavailable")
+        val remaining = host_available_capacity_v1(host.ledger).unwrap()
+        expect(remaining.cpu_millis).to_equal(7000)
+        expect(remaining.memory_bytes).to_equal(23000)
+        expect(remaining.exclusive_devices.len()).to_equal(0)
