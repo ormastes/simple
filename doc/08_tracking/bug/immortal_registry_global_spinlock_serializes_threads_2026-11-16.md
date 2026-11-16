@@ -65,20 +65,19 @@ wall time is Amdahl-bound. The serial `elf_relax_tls` phase takes about
 
 ## Still open
 
-- This selfcheck is not yet wired into
-  `scripts/check/build-core-c-bootstrap-runtime-capsule.shs`. It
-  `#include`s `runtime_native.c`, so it needs a link line that does not also
-  pull the runtime archive.
+- (Resolved 2026-11-16, round 2.) The selfcheck is wired into
+  `scripts/check/build-core-c-bootstrap-runtime-capsule.shs`. It links
+  standalone with dead code stripped, and the expected check count went from 67
+  to 68. The step itself passes when run on its own (WSL Ubuntu 24.04, clang
+  18). No full capsule run has been done yet.
 - The ucrt process heap (`RtlAllocateHeap`) is a secondary contention point.
 - I have not checked natively whether the dropped array/struct worker
   argument bug (`isolated_thread_args_drop_arrays_structs_2026-11-16.md`)
   affects the C spawn path. That path shares data words, so the bug may be
   interpreter-only. Probe: `build/elfpar/argprobe.spl`.
-- **Fork no-deadlock selfchecks hold only shard 0.** This affects
-  `local_unix_fork_origin_v1_selfcheck.c` and
-  `local_unix_listener_now_v1_selfcheck.c`. They still pass, but they no
-  longer cover child registrations in the other 63 shards. They need a helper
-  that holds all shards.
+- (Resolved 2026-11-16, round 2.) The fork no-deadlock selfchecks now hold
+  all 64 shard locks across `fork()`. Both pass in WSL Ubuntu 24.04 with
+  clang 18.
 - **Retired tables can wait a long time to be freed.** Reclaim needs every
   reader stripe at zero at the same moment, so under constant reads retired
   tables may never be freed. The leak is bounded: tables double, so retired
