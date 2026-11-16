@@ -52,11 +52,19 @@ pub fn render_rows(rows: [TraceViewRow]) -> [text]:
         lines.push(render_row(row.id, row.title, row.badge))
     lines
 
-pub fn view_state(current_snapshot: text, response_snapshot: text, cancelled: bool, source_present: bool) -> TraceViewState:
+pub enum TraceViewRequestV1:
+    Active
+    Cancelled
+
+pub enum TraceViewSourceV1:
+    Present
+    Missing
+
+pub fn view_state(current_snapshot: text, response_snapshot: text, request: TraceViewRequestV1, source: TraceViewSourceV1) -> TraceViewState:
     """Pure guard: a response is Ready only for the selected snapshot, uncancelled, with its source."""
-    if cancelled: return TraceViewState.Cancelled
+    if request == TraceViewRequestV1.Cancelled: return TraceViewState.Cancelled
     if response_snapshot != current_snapshot: return TraceViewState.Stale
-    if not source_present: return TraceViewState.SourceMissing
+    if source == TraceViewSourceV1.Missing: return TraceViewState.SourceMissing
     TraceViewState.Ready
 
 pub fn view_state_lines(state: TraceViewState) -> [text]:
@@ -73,8 +81,8 @@ fn header(snapshot: text) -> [text]:
 
 pub fn trace_view_lines(graph: TraceGraph, query: TraceNodeQueryV1, quals: [TraceQualification], snapshot: text) -> [text]:
     """list / show: identity line, structural banner when non-empty, then rows."""
-    val state = view_state(snapshot, graph.subject.snapshot_id, false, true)
-    val qstate = view_state(snapshot, query.snapshot_id, false, true)
+    val state = view_state(snapshot, graph.subject.snapshot_id, TraceViewRequestV1.Active, TraceViewSourceV1.Present)
+    val qstate = view_state(snapshot, query.snapshot_id, TraceViewRequestV1.Active, TraceViewSourceV1.Present)
     if state != TraceViewState.Ready: return view_state_lines(state)
     if qstate != TraceViewState.Ready: return view_state_lines(qstate)
     match view_query(graph, query, quals):
@@ -89,7 +97,7 @@ fn refs_page_lines(page: TraceReferencePageV1, quals: [TraceQualification], snap
     header(snapshot) + [view_banner(rows)] + ["selected: " + page.selected.id + " " + page.selected.title] + render_rows(rows)
 
 pub fn refs_view_lines(graph: TraceGraph, query: TraceReferenceQueryV1, quals: [TraceQualification], snapshot: text) -> [text]:
-    val state = view_state(snapshot, graph.subject.snapshot_id, false, true)
+    val state = view_state(snapshot, graph.subject.snapshot_id, TraceViewRequestV1.Active, TraceViewSourceV1.Present)
     if state != TraceViewState.Ready: return view_state_lines(state)
     match query_trace_references_v1(graph, query):
         case Err(e): header(snapshot) + ["unavailable: " + e]
@@ -100,14 +108,17 @@ pub fn file_refs_view_lines(page: Result<TraceReferencePageV1, text>, quals: [Tr
     match page:
         case Err(e): header(snapshot) + ["unavailable: " + e]
         case Ok(p):
-            val state = view_state(snapshot, p.snapshot_id, false, true)
+            val state = view_state(snapshot, p.snapshot_id, TraceViewRequestV1.Active, TraceViewSourceV1.Present)
             if state != TraceViewState.Ready: return view_state_lines(state)
             refs_page_lines(p, quals, snapshot)
 
-pub fn impact_edges(graph: TraceGraph, selected_id: text, direction: text, limit: i64) -> Result<[TraceEdge], text>:
+pub struct TraceImpactLimitV1:
+    value: i64
+
+pub fn impact_edges(graph: TraceGraph, selected_id: text, direction: text, impact_limit: TraceImpactLimitV1) -> Result<[TraceEdge], text>:
     """Reverse impact: the service's edge list for one node, verbatim. direction: incoming | outgoing."""
     val result = query_trace_graph(graph, TraceQuery(snapshot_id: graph.subject.snapshot_id,
-        selected_id: selected_id, direction: direction, limit: limit, cursor: ""))
+        selected_id: selected_id, direction: direction, limit: impact_limit.value, cursor: ""))
     if result.diagnostics.len() > 0 and result.nodes.len() == 0:
         return Err(result.diagnostics[0].message)
     Ok(result.edges)
