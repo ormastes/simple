@@ -95,7 +95,7 @@ use compiler.backend.linker.elf.synthetic_sections.{
     GOTPLT_RESERVED
 }
 use compiler.backend.linker.elf.elf_exec_writer.{
-    ElfOutSec, ElfExecPlan, elf_out_sec, elf_exec_find,
+    ElfOutSec, ElfExecPlan, elf_out_sec, elf_exec_find, elf_exec_plan_class, elf_write_image32_bytes,
     ELF_SEG_R, ELF_SEG_RX, ELF_SEG_RW,
     SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHT_PROGBITS_E, SHT_STRTAB_E, SHT_NOTE_E, SHT_NOBITS_E
 }
@@ -180,10 +180,16 @@ fn elf_static_machine(target: RelocArch) -> Result<i64, text>:
             Ok(EM_AARCH64)
         case Riscv64:
             Ok(243)
+        case I386:
+            Ok(3)
+        case Arm32:
+            Ok(40)
         case Riscv32:
             Err("elf_static_link: RV32 ELF driver is not supported")
-        case _:
-            Err("elf_static_link: slice 1 supports only x86_64 and aarch64 targets")
+
+fn elf_got_word(w32: bool, value: i64) -> [i64]:
+    """One GOT slot: 4 bytes for ELFCLASS32 targets, 8 otherwise."""
+    if w32: write_u32_le([], value) else: write_u64_le([], value)
 
 fn elf_static_page(target: RelocArch) -> i64:
     # ld.lld's default max-page-size: 64 KiB on aarch64 (64K-page kernels), 4 KiB on x86_64.
@@ -1300,6 +1306,13 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     val target = req.target
     val machine = elf_static_machine(target)?
     val mode = req.mode
+    # ELFCLASS32 targets (i386, armv7): static ET_EXEC only. Their PLT/GOT
+    # dynamic relocations, PIE self-relocation and .symtab emission are not
+    # implemented, so every other mode fails closed here.
+    val w32 = target == RelocArch.I386 or target == RelocArch.Arm32
+    val got_ws: i64 = if w32: 4 else: 8
+    if w32 and mode != ELF_LINK_STATIC_EXEC:
+        return Err("unsupported ELF32 output mode: only static ET_EXEC is admitted for i386/armv7")
     if target == RelocArch.Riscv64 and mode != ELF_LINK_STATIC_EXEC:
         return Err("unsupported RISC-V output mode: only static ET_EXEC is admitted (RV64 PLT/GOT/dynamic relocations are not implemented)")
     val dynamic = elf_mode_dynamic(mode)
@@ -1429,7 +1442,9 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
                 (target == RelocArch.X86_64 and
                 (r.rtype == R_X86_64_GOTOFF64 or r.rtype == R_X86_64_PLTOFF64)) or
                 (elf_target_is_a64(target) and
-                (r.rtype == R_AARCH64_GOTREL64 or r.rtype == R_AARCH64_GOTREL32)):
+                (r.rtype == R_AARCH64_GOTREL64 or r.rtype == R_AARCH64_GOTREL32)) or
+                (target == RelocArch.I386 and
+                (r.rtype == 3 or r.rtype == 9 or r.rtype == 10 or r.rtype == 43)):
             need_got_base = true
     val copies = elf_place_copies(common.inputs, sc)
     val inputs = copies.inputs
@@ -1544,7 +1559,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     if nplt > 0 or need_got_base:
         secs = secs.push(elf_out_sec(".got.plt", SHT_PROGBITS_E, SHF_ALLOC | SHF_WRITE, 8, elf_gotplt_size(nplt), ELF_SEG_RW))
     if sc.got_keys.len() > 0:
-        secs = secs.push(elf_out_sec(".got", SHT_PROGBITS_E, SHF_ALLOC | SHF_WRITE, 8, sc.got_keys.len() * 8, ELF_SEG_RW))
+        secs = secs.push(elf_out_sec(".got", SHT_PROGBITS_E, SHF_ALLOC | SHF_WRITE, got_ws, sc.got_keys.len() * got_ws, ELF_SEG_RW))
     if pie or dynamic:
         var dlink = ""
         if dynamic:
@@ -1565,7 +1580,12 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     if pie:
         base = 0
         e_type = ET_DYN_T
-    val plan = operations.layout(secs, base, elf_static_page(target))?
+    # ELF32 images use the class-aware planner and writer directly: the sealed
+    # layout/write_image operations validate the ELF64 header contract.
+    val plan = if w32:
+        elf_exec_plan_class(secs, base, elf_static_page(target), true)?
+    else:
+        operations.layout(secs, base, elf_static_page(target))?
     # A selected layout may move the image. Synthetic header symbols must
     # follow its validated header LOAD rather than the requested default base.
     for segment in plan.segments:
@@ -1686,7 +1706,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             else:
                 rtype = 10  # R_X86_64_32 applies Z + A with width checking
         else if r.rclass == RC_TLS_IE:
-            s = got_v + sc.got_idx[elf_got_key(r)] * 8
+            s = got_v + sc.got_idx[elf_got_key(r)] * got_ws
             if target == RelocArch.Riscv64:
                 a = 0
                 rtype = 23 # TLS_GOT_HI20 addresses the slot using AUIPC.
@@ -1698,7 +1718,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             else:
                 rtype = 2  # R_X86_64_PC32 applies GOTTPOFF's GOT + A - P formula
         else if (r.rclass == RC_GOT or r.rclass == RC_GOT_RELAX) and not r.relax:
-            s = got_v + sc.got_idx[elf_got_key(r)] * 8
+            s = got_v + sc.got_idx[elf_got_key(r)] * got_ws
             if target == RelocArch.X86_64 and (r.rtype == R_X86_64_GOT32 or
                     r.rtype == R_X86_64_GOT64 or
                     r.rtype == R_X86_64_GOTPLT64): s = s - gotplt_v
@@ -1723,6 +1743,11 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             s = p + 4 - a
         if target == RelocArch.X86_64 and (r.rtype == R_X86_64_GOTOFF64 or
                 r.rtype == R_X86_64_PLTOFF64): p = gotplt_v
+        if target == RelocArch.I386:
+            # lld I386: GOTPC = GOT + A - P; GOTOFF = S + A - GOT;
+            # GOT32[X] = G + A - GOT (S already holds the slot address G).
+            if r.rtype == 10: s = gotplt_v
+            if r.rtype == 9 or r.rtype == 3 or r.rtype == 43: p = gotplt_v
         if target == RelocArch.Riscv64 and (r.rtype == 24 or r.rtype == 25):
             val key = "{r.oi}#{s}"
             if not riscv_highs.has(key):
@@ -1732,7 +1757,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             val high_value = elf_ref_value(ctx, lay, high)?
             var high_target = high_value.address
             if high.rtype == 20 or high.rtype == 21:
-                high_target = got_v + sc.got_idx[elf_got_key(high)] * 8
+                high_target = got_v + sc.got_idx[elf_got_key(high)] * got_ws
             s = riscv_static_delta(high_target, high_value.addend, high_place)?
             a = 0
             p = 0
@@ -1773,21 +1798,21 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     var gi: i64 = 0
     while gi < sc.got_keys.len():
         val r = refs[sc.got_ref[gi]]
-        val slot = got_v + gi * 8
+        val slot = got_v + gi * got_ws
         if r.rclass == RC_TLS_IE and r.kind == SYMREF_IMPORT:
-            got.extend(write_u64_le([], 0))
+            got.extend(elf_got_word(w32, 0))
             rela_sym.extend(elf_rela_entry(slot, sc.import_idx[r.name], elf_dyn_tpoff64(target), 0))
         else if r.rclass == RC_TLS_IE:
-            got.extend(write_u64_le([], elf_tls_tprel(plan, target,
+            got.extend(elf_got_word(w32, elf_tls_tprel(plan, target,
                 elf_ref_addr(ctx, lay, r)? + r.addend)?))
         else if r.kind == SYMREF_IMPORT and sc.copy_idx.has(r.name):
-            got.extend(write_u64_le([], elf_ref_addr(ctx, lay, r)?))
+            got.extend(elf_got_word(w32, elf_ref_addr(ctx, lay, r)?))
         else if r.kind == SYMREF_IMPORT:
-            got.extend(write_u64_le([], 0))
+            got.extend(elf_got_word(w32, 0))
             rela_sym.extend(elf_rela_entry(slot, sc.import_idx[r.name], elf_dyn_glob_dat(target), 0))
         else:
             val v = elf_ref_addr(ctx, lay, r)?
-            got.extend(write_u64_le([], v))
+            got.extend(elf_got_word(w32, v))
             if pie and r.kind == SYMREF_DEFINED:
                 rela_rel.extend(elf_rela_entry(slot, 0, elf_dyn_relative(target), v))
         gi = gi + 1
@@ -1895,7 +1920,14 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
 
     elf_link_trace("output sections")
     val entry_addr = elf_entry_addr(ctx, lay, res.defined[req.entry])?
-    var image = operations.write_image(e_type, machine, entry_addr, plan, out)?
+    var image: [u8] = []
+    if w32:
+        # EM_ARM loaders check e_flags (EABI version, float ABI): carry the
+        # first input's flags. i386 defines no e_flags.
+        val e_flags = if target == RelocArch.Arm32: elf_u8_read_le(roots[0].raw, 36, 4) else: 0
+        image = elf_write_image32_bytes(e_type, machine, e_flags, entry_addr, plan, out)
+    else:
+        image = operations.write_image(e_type, machine, entry_addr, plan, out)?
     val note_index = elf_exec_find(plan, ".note.gnu.build-id")
     if note_index < 0: return Err("ELF writer build-id section is missing")
     val note_start = plan.offsets[note_index]
@@ -1905,7 +1937,8 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         # Header identity participates in the existing final build-id hash.
         image[48] = (riscv_flags & 0xff) as u8
     elf_link_trace("image written")
-    if not strip_output:
+    # .symtab append is ELF64-only; ELF32 output is emitted stripped.
+    if not strip_output and not w32:
         image = elf_append_symtab(image, elf_build_symtab(ctx, lay)?)?
     if riscv_attributes.len() > 0:
         image = elf_append_nonalloc_section_bytes(image,

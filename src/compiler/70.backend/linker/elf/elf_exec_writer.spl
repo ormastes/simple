@@ -23,7 +23,7 @@ use compiler.backend.linker.elf_writer.{
     ElfLayoutSection,
     strtab_new, strtab_add, strtab_find, align_up,
     write_zeros,
-    emit_elf_header_full, emit_section_header_at, write_u32_le, write_u64_le,
+    emit_elf_header_full, emit_section_header_at, write_u16_le, write_u32_le, write_u64_le,
     ELF64_PHDR_SIZE
 }
 use compiler.backend.linker.elf_inspect.{ELF64_HEADER_SIZE, ELF64_SHDR_SIZE}
@@ -60,6 +60,10 @@ val SHT_NOBITS_E: i64 = 8
 val ELF_SEG_R: i64 = 0
 val ELF_SEG_RX: i64 = 1
 val ELF_SEG_RW: i64 = 2
+
+val ELF32_EHDR_SIZE: i64 = 52
+val ELF32_PHDR_SIZE: i64 = 32
+val ELF32_SHDR_SIZE: i64 = 40
 
 # ============================================================================
 # Types
@@ -132,7 +136,14 @@ fn elf_exec_is_relro(name: text) -> bool:
 # ============================================================================
 
 fn elf_exec_plan(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan, text>:
-    """Plan R / RX / RW PT_LOADs for secs (already in segment order)."""
+    """Plan R / RX / RW PT_LOADs for secs (already in segment order), ELF64."""
+    elf_exec_plan_class(secs, base, page, false)
+
+fn elf_exec_plan_class(secs: [ElfOutSec], base: i64, page: i64, class32: bool) -> Result<ElfExecPlan, text>:
+    """Plan R / RX / RW PT_LOADs; class32 sizes the headers for ELFCLASS32
+    (52-byte Ehdr, 32-byte Phdr) instead of ELF64 (64 / 56)."""
+    val ehsize = if class32: ELF32_EHDR_SIZE else: ELF64_HEADER_SIZE
+    val phentsize = if class32: ELF32_PHDR_SIZE else: ELF64_PHDR_SIZE
     var has_seg: [bool] = [false, false, false]
     var has_interp = false
     var has_dynamic = false
@@ -187,7 +198,7 @@ fn elf_exec_plan(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan,
     var offsets: [i64] = []
     var vaddrs: [i64] = []
     var loads: [ElfExecSegment] = []
-    var off = ELF64_HEADER_SIZE + phnum * ELF64_PHDR_SIZE
+    var off = ehsize + phnum * phentsize
     var vend = base
     var file_end = off
     var seg: i64 = 0
@@ -246,9 +257,9 @@ fn elf_exec_plan(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan,
     # Program header table in conventional order.
     var segs: [ElfExecSegment] = []
     if has_interp:
-        val phsz = phnum * ELF64_PHDR_SIZE
-        segs = segs.push(ElfExecSegment(p_type: PT_PHDR, p_flags: PF_R, p_offset: ELF64_HEADER_SIZE,
-            p_vaddr: base + ELF64_HEADER_SIZE, p_paddr: base + ELF64_HEADER_SIZE, p_filesz: phsz, p_memsz: phsz, p_align: 8))
+        val phsz = phnum * phentsize
+        segs = segs.push(ElfExecSegment(p_type: PT_PHDR, p_flags: PF_R, p_offset: ehsize,
+            p_vaddr: base + ehsize, p_paddr: base + ehsize, p_filesz: phsz, p_memsz: phsz, p_align: 8))
     var k: i64 = 0
     while k < secs.len():
         if secs[k].name == ".interp":
@@ -399,12 +410,97 @@ fn elf_write_image_bytes(e_type: i64, e_machine: i64, e_entry: i64, plan: ElfExe
     b.write_span(tail_bytes, shoff, 0, tail_bytes.len())
     b
 
+# reason: positional image writer inputs (type, machine, flags, entry, plan, per-section bytes)
+fn elf_write_image32_bytes(e_type: i64, e_machine: i64, e_flags: i64, e_entry: i64,
+        plan: ElfExecPlan, contents: [[u8]]) -> [u8]:
+    """ELFCLASS32 twin of `elf_write_image_bytes` for a plan made by
+    `elf_exec_plan_class(..., true)`: 52-byte Ehdr (with e_flags, which
+    EM_ARM loaders read for the EABI version / float ABI), 32-byte Phdr with
+    p_flags after p_memsz, and 40-byte Shdr with 32-bit address fields."""
+    var shstr = strtab_new()
+    for s in plan.secs:
+        shstr = strtab_add(shstr, s.name)
+    shstr = strtab_add(shstr, ".shstrtab")
+
+    val shstr_off = plan.file_end
+    val shoff = align_up(shstr_off + shstr.data.len(), 4)
+    val shnum = plan.secs.len() + 2
+    val phnum = plan.segments.len()
+
+    var head: [i64] = [0x7f, 0x45, 0x4c, 0x46, 1, 1, 1, 0]
+    head = write_zeros(head, 8)
+    head = write_u16_le(head, e_type)
+    head = write_u16_le(head, e_machine)
+    head = write_u32_le(head, 1)
+    head = write_u32_le(head, e_entry)
+    head = write_u32_le(head, ELF32_EHDR_SIZE)
+    head = write_u32_le(head, shoff)
+    head = write_u32_le(head, e_flags)
+    head = write_u16_le(head, ELF32_EHDR_SIZE)
+    head = write_u16_le(head, ELF32_PHDR_SIZE)
+    head = write_u16_le(head, phnum)
+    head = write_u16_le(head, ELF32_SHDR_SIZE)
+    head = write_u16_le(head, shnum)
+    head = write_u16_le(head, shnum - 1)
+    for seg in plan.segments:
+        head = write_u32_le(head, seg.p_type)
+        head = write_u32_le(head, seg.p_offset)
+        head = write_u32_le(head, seg.p_vaddr)
+        head = write_u32_le(head, seg.p_paddr)
+        head = write_u32_le(head, seg.p_filesz)
+        head = write_u32_le(head, seg.p_memsz)
+        head = write_u32_le(head, seg.p_flags)
+        head = write_u32_le(head, seg.p_align)
+    var b: [u8] = elf_u8_zeros(shoff + shnum * ELF32_SHDR_SIZE)
+    val head_bytes = elf_u8_from_i64(head)
+    b.write_span(head_bytes, 0, 0, head_bytes.len())
+
+    var i: i64 = 0
+    while i < plan.secs.len():
+        if plan.secs[i].sh_type != SHT_NOBITS_E:
+            val n = contents[i].len()
+            if n > 0: b.write_span(contents[i], plan.offsets[i], 0, n)
+        i = i + 1
+    val shstr_bytes = elf_u8_from_i64(shstr.data)
+    if shstr_bytes.len() > 0: b.write_span(shstr_bytes, shstr_off, 0, shstr_bytes.len())
+
+    var tail: [i64] = write_zeros([], ELF32_SHDR_SIZE)
+    i = 0
+    while i < plan.secs.len():
+        val s = plan.secs[i]
+        var link: i64 = 0
+        if s.link != "":
+            link = elf_exec_find(plan, s.link) + 1
+        tail = elf_shdr32(tail, strtab_find(shstr, s.name), s.sh_type, s.sh_flags, plan.vaddrs[i],
+            plan.offsets[i], s.size, link, s.info, s.align, s.entsize)
+        i = i + 1
+    tail = elf_shdr32(tail, strtab_find(shstr, ".shstrtab"), SHT_STRTAB_E, 0, 0, shstr_off,
+        shstr.data.len(), 0, 0, 1, 0)
+    val tail_bytes = elf_u8_from_i64(tail)
+    b.write_span(tail_bytes, shoff, 0, tail_bytes.len())
+    b
+
+# reason: the ten positional Elf32_Shdr fields in on-disk order
+fn elf_shdr32(buf: [i64], name: i64, sh_type: i64, flags: i64, addr: i64, offset: i64,
+        size: i64, link: i64, info: i64, align: i64, entsize: i64) -> [i64]:
+    var b = write_u32_le(buf, name)
+    b = write_u32_le(b, sh_type)
+    b = write_u32_le(b, flags)
+    b = write_u32_le(b, addr)
+    b = write_u32_le(b, offset)
+    b = write_u32_le(b, size)
+    b = write_u32_le(b, link)
+    b = write_u32_le(b, info)
+    b = write_u32_le(b, align)
+    write_u32_le(b, entsize)
+
 # ============================================================================
 # Exports
 # ============================================================================
 
 export ElfOutSec, ElfExecSegment, ElfExecPlan
-export elf_out_sec, elf_exec_plan, elf_exec_find, elf_write_image, elf_write_image_bytes
+export elf_out_sec, elf_exec_plan, elf_exec_plan_class, elf_exec_find, elf_write_image, elf_write_image_bytes
+export elf_write_image32_bytes, ELF32_EHDR_SIZE, ELF32_PHDR_SIZE, ELF32_SHDR_SIZE
 export ELF_SEG_R, ELF_SEG_RX, ELF_SEG_RW
 export PT_LOAD, PT_DYNAMIC, PT_INTERP, PT_NOTE, PT_PHDR, PT_TLS, PT_GNU_EH_FRAME, PT_GNU_STACK, PT_GNU_RELRO, PF_X, PF_W, PF_R
 export SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR

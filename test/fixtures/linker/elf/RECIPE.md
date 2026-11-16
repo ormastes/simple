@@ -157,3 +157,18 @@ The x86_64 dynamic outputs are compared with
 `ld.lld --dynamic-linker /lib64/ld-linux-x86-64.so.2 [-pie] pic_start_x64.o libadd_x64.so.1`
 (`llvm-readelf -l -S -d -r`, `llvm-objdump -d --section=.plt`). They are never
 executed: this aarch64 host has no x86_64 glibc or ld-linux-x86-64.so.2.
+
+## ELF32 fixtures (i386 + armv7, internal linker ELF32 lane)
+
+`elf32_hello.c` writes `hello internal linker\n` three times and exits 42 via
+`helper(40)` in `elf32_helper.c`. Produced with `Ubuntu clang version 18.1.3`:
+
+```
+CF="-c -O1 -ffreestanding -fno-stack-protector -fno-asynchronous-unwind-tables -fno-unwind-tables"
+clang --target=i686-linux-gnu $CF -fno-pic elf32_hello.c  -o elf32_hello_i386.o
+clang --target=i686-linux-gnu $CF -fno-pic elf32_helper.c -o elf32_helper_i386.o
+clang --target=i686-linux-gnu $CF -fPIC   elf32_hello.c  -o elf32_hello_i386_pic.o   # GOTPC/GOTOFF/PLT32
+clang --target=i686-linux-gnu $CF -fPIC   elf32_helper.c -o elf32_helper_i386_pic.o  # GOTPC/GOT32X
+clang --target=armv7-linux-gnueabihf $CF -fno-pic elf32_hello.c  -o elf32_hello_arm.o
+clang --target=armv7-linux-gnueabihf $CF -fno-pic elf32_helper.c -o elf32_helper_arm.o
+```
