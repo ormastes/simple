@@ -23,16 +23,46 @@ pub struct HostHelperSettlementCommitTurnV1:
     ack: HostHelperSettlementAckV1?
     error: text
 
+# Closed set of settlement domains (milestone_0022 N2). One table maps each kind to its record kind text; both
+# kinds share one exact field list. The text entry point and the typed entry point share them, so there is no
+# second list. A kind added later needs a table row and a match arm (the compiler checks the match).
+pub enum HostHelperSettlementKindV1:
+    StreamSettlement
+    PrimaryAttachSettlement
+
+fn host_helper_settlement_kinds_v1() -> [HostHelperSettlementKindV1]:
+    [HostHelperSettlementKindV1.StreamSettlement, HostHelperSettlementKindV1.PrimaryAttachSettlement]
+
+fn host_helper_settlement_kind_text_v1(kind: HostHelperSettlementKindV1) -> text:
+    match kind:
+        case HostHelperSettlementKindV1.StreamSettlement: "host-helper-stream-settlement"
+        case HostHelperSettlementKindV1.PrimaryAttachSettlement: "host-primary-attach-settlement"
+
+fn host_helper_settlement_field_names_v1() -> [text]:
+    ["version", "kind", "operationId", "operationDigest", "requestDigest", "preparedReceiptDigest",
+        "consumptionDigest", "nativeIdentityDigest", "treeReceiptDigest"]
+
+# Text -> kind by walking the one table: an unknown text maps to nothing.
+fn host_helper_settlement_kind_of_text_v1(kind: text) -> Option<HostHelperSettlementKindV1>:
+    for candidate in host_helper_settlement_kinds_v1():
+        if host_helper_settlement_kind_text_v1(candidate) == kind: return Some(candidate)
+    None
+
+# Text entry point (unchanged signature and refusal): both existing callers pass one of the two literal kinds.
 pub fn host_helper_settlement_commit_v1(owner: HostCapacityOwnerV1, operation: OperationEnvelopeV2,
         kind: text, outcome: text) -> HostHelperSettlementCommitTurnV1:
-    if not ["host-helper-stream-settlement", "host-primary-attach-settlement"].contains(kind):
-        return HostHelperSettlementCommitTurnV1(owner, nil, "helper-settlement-domain-invalid")
+    match host_helper_settlement_kind_of_text_v1(kind):
+        case Some(parsed): host_helper_settlement_commit_kind_v1(owner, operation, parsed, outcome)
+        case None: HostHelperSettlementCommitTurnV1(owner, nil, "helper-settlement-domain-invalid")
+
+pub fn host_helper_settlement_commit_kind_v1(owner: HostCapacityOwnerV1, operation: OperationEnvelopeV2,
+        kind: HostHelperSettlementKindV1, outcome: text) -> HostHelperSettlementCommitTurnV1:
     # Derive ACK facts from independently validated evidence, not caller facts.
     val checked = host_capacity_completion_evidence_owned_v2(owner.journal, owner.ledger.capacity, operation)
     if checked.is_err(): return HostHelperSettlementCommitTurnV1(owner, nil, checked.unwrap_err())
     if checked.unwrap() != outcome: return HostHelperSettlementCommitTurnV1(owner, nil, "helper-settlement-evidence-mismatch")
-    val decoded = host_helper_stream_fields_v1(outcome, kind, ["version", "kind", "operationId", "operationDigest",
-        "requestDigest", "preparedReceiptDigest", "consumptionDigest", "nativeIdentityDigest", "treeReceiptDigest"])
+    val decoded = host_helper_stream_fields_v1(outcome, host_helper_settlement_kind_text_v1(kind),
+        host_helper_settlement_field_names_v1())
     if decoded.is_err(): return HostHelperSettlementCommitTurnV1(owner, nil, decoded.unwrap_err())
     val fields = decoded.unwrap()
     var facts: [text] = []
