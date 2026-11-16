@@ -174,3 +174,11 @@ clang --target=armv7-linux-gnueabihf $CF -fno-pic elf32_helper.c -o elf32_helper
 ```
 
 clang --target=i686-linux-gnu -c elf32_got32_nobase_i386.s -o elf32_got32_nobase_i386.o  # GOT32 without base register
+
+## elf32_hello_arm_soft.o / elf32_helper_arm_soft.o
+
+Same sources (`elf32_hello.c` / `elf32_helper.c`), built soft-float
+(no Tag_ABI_VFP_args) for the EF_ARM_ABI_FLOAT_SOFT e_flags test:
+
+    clang --target=armv7-linux-gnueabihf -mfloat-abi=soft -ffreestanding -fno-pic -O1 -c elf32_hello.c -o elf32_hello_arm_soft.o
+    clang --target=armv7-linux-gnueabihf -mfloat-abi=soft -ffreestanding -fno-pic -O1 -c elf32_helper.c -o elf32_helper_arm_soft.o

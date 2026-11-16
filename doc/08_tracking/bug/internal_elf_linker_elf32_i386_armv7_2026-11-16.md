@@ -38,18 +38,37 @@ ELF64-only. Since PR #9584, an EM_386 object fails closed in
 1. ELF32 supports static ET_EXEC only. PIE and dynamic links return
    "unsupported ELF32 output mode", because the i386/ARM PLT, GOT dynamic
    relocations and `.rel.dyn` are not implemented.
-2. ELF32 output is always stripped, because `elf_append_symtab` writes ELF64
-   Sym/Shdr. The fix is to add an Elf32_Sym (16-byte) symtab path.
+2. Closed (2026-11-16, verification-pending): ELF32 output now carries
+   `.symtab`/`.strtab` (`elf_append_symtab32`, 16-byte Elf32_Sym, 40-byte
+   Shdr) unless stripped. For i686, the hello link's `llvm-readelf -s` output
+   matches ld.lld's 7 entries.
 3. ELF32 bypasses the sealed `layout` / `write_image` operations, which
    validate the ELF64 contract. The operation contract needs a class field.
-4. EF_ARM_ABI_FLOAT_HARD (0x400) is not derived from `.ARM.attributes` (lld sets it; input e_flags are EABI5 only). Static binaries run without it. No PT_ARM_EXIDX segment is emitted. `.ARM.exidx` is loaded as ordinary
-   read-only data, so unwinding through it is not supported.
-5. Parallelism: input parsing, the relocation scan and relocation application
-   are all sequential (`elf_static_link.spl:33`). This differs from mold, which
-   parses and relocates per file in parallel. A lockless design would have
-   per-object workers produce immutable parse and relocation results that a
-   single merge step then combines.
-6. The internal engine has only been run inside an interpreted/JIT seed
-   process. The engine measures 1-8 ms for a link, but the process takes
-   ~15 s, almost all of it compiling the linker source. Native wall time and
-   RSS have not been measured.
+4. Partly closed (2026-11-16, verification-pending): armv7 e_flags now include
+   EF_ARM_ABI_FLOAT_HARD (0x400) when an input's `.ARM.attributes` has
+   Tag_ABI_VFP_args = 1, and EF_ARM_ABI_FLOAT_SOFT (0x200) otherwise, as
+   ld.lld does (0x5000400 / 0x5000200). Still open: no PT_ARM_EXIDX segment is
+   emitted, and `.ARM.exidx` is loaded as ordinary read-only data, so
+   unwinding through it is not supported.
+5. Partly closed (2026-11-16, verification-pending): the relocation scan and
+   apply (non-RISC-V) now fan out over per-object ranges on lockless workers
+   (`elf/elf_par.spl`, CAS gate + immutable snapshot, flat `[i64]` results
+   merged in order). Output is byte-identical to jobs=1 on all six hello
+   targets and on a 200-object / 120k-reloc set. Still open: parsing stays
+   serial (an `ElfObject` cannot cross a thread, see
+   `isolated_thread_args_drop_arrays_structs_2026-11-16.md`), and the fan-out
+   is a net LOSS today. On the 200-object set, jobs=16 takes 42.0 s against
+   30.3 s for jobs=1, because the snapshot copies and the `[i64]` encoding
+   cost more than the scan and apply save. Serial phases dominate.
+6. Measured natively (2026-11-16, Windows x86_64 native build of a driver;
+   lld/mold run in WSL on the same objects):
+
+   | set | internal j1 | internal j16 | ld.lld | mold |
+   |---|---|---|---|---|
+   | hello (2 objs, per arch) | 1-2 ms engine | 2-3 ms | 20-30 ms, 56 MB | 10 ms, 7 MB |
+   | 200 objs, 120k relocs, x86_64 | 30.3 s, 10.0 GB HWM | 42.0 s, 10.0 GB | 0.12 s, 68 MB | 0.10 s, 7 MB |
+
+   Internal numbers are engine time inside one process; HWM is the process
+   peak. The internal linker is about 250x slower than lld at scale, and its
+   memory use is pathological (about 1.2 GB per MB of input). Its output runs
+   correctly (qemu rc=0).
