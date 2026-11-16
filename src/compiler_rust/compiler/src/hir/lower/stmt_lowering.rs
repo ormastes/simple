@@ -779,6 +779,23 @@ impl Lowerer {
                 let trait_dispatch_owner = self.declared_local_trait_owner(
                     let_stmt.ty.as_ref().or(pattern_type), let_stmt.value.as_ref(), ctx,
                 );
+                let unit_kind = match (&let_stmt.ty, &let_stmt.value) {
+                    (Some(t), _) => Self::simple_type_name(t).and_then(|n| self.unit_kind_of_type_name(&n)),
+                    (None, Some(init)) => match self.unit_kind_of_expr(init, ctx) {
+                        super::type_registration::UnitKind::Unit(u) => Some(Some(u)),
+                        super::type_registration::UnitKind::Raw => Some(None),
+                        super::type_registration::UnitKind::Unknown => None,
+                    },
+                    _ => None,
+                };
+                match unit_kind {
+                    Some(kind) => {
+                        ctx.local_unit_kinds.insert(name.clone(), kind);
+                    }
+                    None => {
+                        ctx.local_unit_kinds.remove(&name);
+                    }
+                }
                 let local_index = ctx.add_local(name, ty, let_stmt.mutability);
                 ctx.locals[local_index].trait_dispatch_owner = trait_dispatch_owner;
                 if let Some(HirExprKind::Lambda { params, body, .. }) = value.as_ref().map(|v| &v.kind) {

@@ -35,6 +35,9 @@ pub(super) struct FunctionContext {
     /// decisions. This map is consulted in exactly one place — the ANY-receiver
     /// fallback in `expr/access.rs` — and is scoped to one function.
     pub static_call_type_hints: HashMap<String, String>,
+    /// Unit identity of locals for SPL-UNIT-002: `Some(unit)` = a record unit,
+    /// `None` = a known raw scalar; absent = unknown (never checked).
+    pub local_unit_kinds: HashMap<String, Option<String>>,
     /// Declared payload types for Result locals, keyed by local slot.
     ///
     /// The ordinary local type stores the runtime carrier (i64), so property
@@ -69,6 +72,7 @@ impl FunctionContext {
             has_self: false,
             is_me_method: false,
             static_call_type_hints: HashMap::new(),
+            local_unit_kinds: HashMap::new(),
             result_projection_types: HashMap::new(),
             lambda_local_fn_types: HashMap::new(),
             optional_trait_payloads: HashMap::new(),
@@ -87,6 +91,7 @@ impl FunctionContext {
             has_self: true,
             is_me_method,
             static_call_type_hints: HashMap::new(),
+            local_unit_kinds: HashMap::new(),
             result_projection_types: HashMap::new(),
             lambda_local_fn_types: HashMap::new(),
             optional_trait_payloads: HashMap::new(),

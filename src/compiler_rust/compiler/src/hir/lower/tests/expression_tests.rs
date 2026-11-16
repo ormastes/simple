@@ -2158,3 +2158,42 @@ fn record_unit_is_erased_to_scalar() {
         .any(|s| matches!(s, HirStmt::Return(Some(e)) if matches!(e.kind, HirExprKind::StructInit { .. })));
     assert!(!has_struct_init, "unit constructor must not build a class value");
 }
+
+/// SPL-UNIT-002 must survive scalar erasure: HIR keeps unit identity through
+/// checking, so the JIT path denies what the interpreter denies.
+#[test]
+fn record_unit_spl_unit_002_denied_through_hir() {
+    let decls = "unit A: i64\nunit B: i64\n\n";
+    let denied = [
+        "fn f(x: A, y: B) -> i64:\n    (x + y).value\n",
+        "fn f(x: A, y: B) -> bool:\n    x < y\n",
+        "fn f(x: A) -> A:\n    x + 5\n",
+        "fn f(x: A) -> A:\n    x - 1\n",
+        "fn f(x: A) -> A:\n    x % 2\n",
+        "fn f(x: A) -> bool:\n    x < 5\n",
+        "fn f(x: A) -> bool:\n    x == 5\n",
+        "fn f(n: i64, x: A) -> A:\n    n + x\n",
+        "fn g(y: B) -> i64:\n    y.value\n\nfn f(x: A) -> i64:\n    g(x)\n",
+    ];
+    for body in denied {
+        let err = parse_and_lower(&format!("{decls}{body}")).expect_err(&format!("must deny:\n{body}"));
+        let text = format!("{err}");
+        assert!(text.contains("SPL-UNIT-002") && text.contains("SIMPLE_JIT_STRICT"), "{body}\n{text}");
+    }
+    let allowed = [
+        "fn f(x: A, y: A) -> A:\n    x + y\n",
+        "fn f(x: A, y: A) -> A:\n    x - y\n",
+        "fn f(x: A, y: A) -> i64:\n    (x * y).value\n",
+        "fn f(x: A, y: A) -> i64:\n    (x / y).value\n",
+        "fn f(x: A) -> A:\n    x * 3\n",
+        "fn f(x: A) -> A:\n    3 * x\n",
+        "fn f(x: A) -> A:\n    x / 2\n",
+        "fn f(x: A, y: A) -> bool:\n    x < y\n",
+        "fn f(x: A) -> bool:\n    x.value < 5\n",
+        "fn f(x: A) -> i64:\n    x.value + 1\n",
+        "fn g(y: A) -> i64:\n    y.value\n\nfn f(x: A) -> i64:\n    g(x)\n",
+    ];
+    for body in allowed {
+        parse_and_lower(&format!("{decls}{body}")).unwrap_or_else(|e| panic!("must lower:\n{body}\n{e}"));
+    }
+}
