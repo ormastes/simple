@@ -1,0 +1,81 @@
+# Library unit manifest (typed simple.sdn record for the source inventory).
+#
+# Pure: the caller supplies manifest text. Name/type/dependencies come from
+# the shared `library_unit_decl_parse_v1`; this adds `project.version` and the
+# `project.sources` include/exclude globs consumed by
+# `source_inventory_resolve_unit_v1`. Every missing or malformed field fails
+# closed with a `<dir>/simple.sdn: ...` message.
+#
+#   project:
+#     sources:
+#       include: [glob, ...]   # required when `sources:` is present
+#       exclude: [glob, ...]   # optional
+#
+# No `sources:` block means every `.spl` under the unit directory.
+
+use std.common.sdn.parser (parse)
+use std.common.sdn.value.{SdnValue}
+use compiler.driver.driver_build.library_unit_plan_v1.{library_unit_decl_parse_v1}
+
+struct LibraryUnitManifestV1:
+    name: text
+    version: text
+    kind: text
+    dir: text
+    deps: [text]
+    includes: [text]   # unit-relative globs
+    excludes: [text]
+
+fn _manifest_glob_list_v1(where: text, node: SdnValue, field: text) -> Result<[text], text>:
+    val items = match node.as_array():
+        case Some(xs): xs
+        case None: return Err("{where}: project.sources.{field} is not a list")
+    var out: [text] = []
+    for item in items:
+        val g = item.as_str() ?? ""
+        if g == "":
+            return Err("{where}: project.sources.{field} has a non-text or empty entry")
+        if g.starts_with("/") or g.starts_with("\\") or (g.len() > 1 and g[1:2] == ":") or g == ".." or g.starts_with("../") or g.contains("/../"):
+            return Err("{where}: source glob '{g}' must be unit-relative")
+        out.push(g)
+    Ok(out)
+
+pub fn library_unit_manifest_parse_v1(manifest_dir: text, content: text) -> Result<LibraryUnitManifestV1, text>:
+    val decl = match library_unit_decl_parse_v1(manifest_dir, content):
+        case Ok(d): d
+        case Err(e): return Err(e)
+    val where = "{manifest_dir}/simple.sdn"
+    val root = match parse(content):
+        case Ok(v): v
+        case Err(e): return Err("{where}: {e}")
+    val version = match root.get_path("project.version"):
+        case Some(v):
+            match v.as_i64():
+                case Some(i): "{i}"
+                case None: v.as_str() ?? ""
+        case None: ""
+    if version == "":
+        return Err("{where}: project.version is missing")
+    var includes: [text] = ["**/*.spl"]
+    var excludes: [text] = []
+    match root.get_path("project.sources"):
+        case Some(src):
+            includes = match src.get("include"):
+                case Some(node):
+                    match _manifest_glob_list_v1(where, node, "include"):
+                        case Ok(xs): xs
+                        case Err(e): return Err(e)
+                case None: return Err("{where}: project.sources.include is missing")
+            if includes.len() == 0:
+                return Err("{where}: project.sources.include is empty")
+            match src.get("exclude"):
+                case Some(node):
+                    excludes = match _manifest_glob_list_v1(where, node, "exclude"):
+                        case Ok(xs): xs
+                        case Err(e): return Err(e)
+                case None:
+                    pass
+        case None:
+            pass
+    Ok(LibraryUnitManifestV1(name: decl.name, version: version, kind: decl.kind,
+        dir: decl.dir, deps: decl.deps, includes: includes, excludes: excludes))
