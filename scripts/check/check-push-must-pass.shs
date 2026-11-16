@@ -1121,6 +1121,12 @@ run_manifest_push_gates() {
                 # for shaders/glass_material.comp ->
                 # backend_vulkan_glass_material_spirv.spl.
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-glass-material-spirv-pinned.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-font-atlas-batch-spirv-pinned:tree:sh scripts/check/check-font-atlas-batch-spirv-pinned.shs')
+                # Same shape as the sibling SPIR-V pin gates above, for
+                # shaders/font_atlas_batch.comp -> backend_vulkan_font_spirv.spl
+                # (head + tail halves; also pins the trusted sha256 value and
+                # the GLSL source hash).
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-font-atlas-batch-spirv-pinned.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-chrome-dynlib-probe:tree:sh scripts/check/check-chrome-dynlib-probe.shs')
                 # Advisory by manifest: stage B needs a pinned CEF drop most
                 # push hosts lack, and stage A needs a runnable Simple binary a
@@ -1332,17 +1338,47 @@ published_main_ref() {
 # main, use the unique merge-base of tip and main as the predecessor if it
 # descends from the old ref. Every commit this drops from old..tip is reachable
 # from published main; the branch's own commits all stay in range.
+#
+# Release lines (2026-11-17): a PR based on release/<x.y> that merges the
+# advanced release tip had merge-base(tip, main) as its base, so every
+# inherited release commit was scanned. Candidates are now published main plus
+# every versioned refs/remotes/<remote>/release/<x.y>; each must have a unique
+# merge-base with the tip, and the one leaving the fewest tip-side commits wins.
+# Any unique merge-base with a published tip is itself published.
 main_merged_predecessor() {
     _mm_tip=$1
     _mm_old=$2
     _mm_ref=$(published_main_ref) || return 1
-    _mm_base=$(git -C "$ROOT" merge-base --all "$_mm_ref" "$_mm_tip") || return 1
-    [ -n "$_mm_base" ] || return 1
-    [ "$(printf '%s\n' "$_mm_base" | wc -l | tr -d ' ')" -eq 1 ] || return 1
-    [ "$_mm_base" != "$_mm_tip" ] || return 1
+    _mm_remote=${MUST_CHECK_PUSH_REMOTE}
+    _mm_cands=$(printf '%s\n' "$_mm_ref"
+        git -C "$ROOT" for-each-ref --format='%(refname)' "refs/remotes/$_mm_remote/release/" 2>/dev/null)
+    _mm_old_count=$(git -C "$ROOT" rev-list --count "$_mm_old..$_mm_tip") || return 1
+    _mm_best=""
+    _mm_best_count=""
+    for _mm_cand in $_mm_cands; do
+        case "$_mm_cand" in
+            "$_mm_ref") ;;
+            refs/remotes/"$_mm_remote"/release/*)
+                _mm_version=${_mm_cand#refs/remotes/$_mm_remote/release/}
+                case "$_mm_version" in *.*) ;; *) continue ;; esac
+                case "$_mm_version" in ''|.*|*.|*..*|*[!0-9.]*) continue ;; esac
+                ;;
+            *) continue ;;
+        esac
+        _mm_base=$(git -C "$ROOT" merge-base --all "$_mm_cand" "$_mm_tip") || continue
+        [ -n "$_mm_base" ] || continue
+        [ "$(printf '%s\n' "$_mm_base" | wc -l | tr -d ' ')" -eq 1 ] || continue
+        [ "$_mm_base" != "$_mm_tip" ] || continue
+        _mm_count=$(git -C "$ROOT" rev-list --count "$_mm_base..$_mm_tip") || continue
+        if [ -z "$_mm_best_count" ] || [ "$_mm_count" -lt "$_mm_best_count" ]; then
+            _mm_best=$_mm_base
+            _mm_best_count=$_mm_count
+        fi
+    done
+    [ -n "$_mm_best" ] || return 1
     # Only replace old when it is strictly narrower.
-    [ "$(git -C "$ROOT" rev-list --count "$_mm_base..$_mm_tip")" -lt "$(git -C "$ROOT" rev-list --count "$_mm_old..$_mm_tip")" ] || return 1
-    printf '%s\n' "$_mm_base"
+    [ "$_mm_best_count" -lt "$_mm_old_count" ] || return 1
+    printf '%s\n' "$_mm_best"
 }
 
 # A non-fast-forward PR update replaces a branch built on an old base with a
@@ -2137,6 +2173,33 @@ SLOW_GIT
         MUST_CHECK_BUDGET_MS=10000; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
         run_conflict_tree_union "$_tmp/rebased/big-refs"
     ) >/dev/null 2>&1 && die "65 genuinely new commits passed the 64-commit bound"
+    # Release-line merge fixture (2026-11-17): a PR branch based on
+    # release/<x.y> merges the advanced release tip. The per-ref base must be
+    # that release merge-base, not merge-base(tip, main), or every inherited
+    # release commit is charged to the push.
+    git -C "$ROOT" switch -q -c release/9.9 main
+    git -C "$ROOT" commit -q --allow-empty -m rel-root || die "release fixture commit failed"
+    git -C "$ROOT" push -q origin release/9.9 || die "release fixture push failed"
+    git -C "$ROOT" switch -q -c relpr release/9.9
+    git -C "$ROOT" commit -q --allow-empty -m relpr-own || die "release fixture own commit failed"
+    _relpr_old=$(git -C "$ROOT" rev-parse HEAD)
+    git -C "$ROOT" switch -q release/9.9
+    _rel_i=0
+    while [ "$_rel_i" -lt 70 ]; do
+        git -C "$ROOT" commit -q --allow-empty -m "rel-adv-$_rel_i" || die "release fixture advance failed"
+        _rel_i=$((_rel_i + 1))
+    done
+    git -C "$ROOT" push -q origin release/9.9 || die "release fixture advance push failed"
+    git -C "$ROOT" switch -q relpr
+    git -C "$ROOT" merge -q --no-ff -m merge-release release/9.9 || die "release fixture merge failed"
+    _relpr_tip=$(git -C "$ROOT" rev-parse HEAD)
+    [ "$(git -C "$ROOT" rev-list --count "$_relpr_old..$_relpr_tip")" -gt 64 ] || die "release fixture did not exceed the 64-commit bound"
+    _relpr_pred=$(MUST_CHECK_PUSH_REMOTE=origin main_merged_predecessor "$_relpr_tip" "$_relpr_old") ||
+        die "release fixture: no published-line predecessor for a release merge"
+    [ "$_relpr_pred" = "$(git -C "$ROOT" rev-parse refs/remotes/origin/release/9.9)" ] ||
+        die "release fixture: per-ref base is not the published release tip"
+    [ "$(git -C "$ROOT" rev-list --count "$_relpr_pred..$_relpr_tip")" -eq 2 ] ||
+        die "release fixture: range is not just the branch's own commits"
     ROOT=$_saved_root
     MUST_CHECK_PUSH_REMOTE=$_saved_remote
 
@@ -2197,7 +2260,7 @@ SLOW_GIT
         die "committed-dispatcher-newer-than-running-script: the committed run_three_push_gates_parallel never ran (marker missing or wrong)"
     rm -rf "$_ncd_tmp"
 
-    echo "push-must-check: PASS — 33 ledger/budget/dispatcher/rebase/stale-merge fixtures checked"
+    echo "push-must-check: PASS — 34 ledger/budget/dispatcher/rebase/stale-merge fixtures checked"
     exit 0
 fi
 
