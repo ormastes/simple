@@ -179,15 +179,21 @@ pub fn rocm_tensor_download(ops: RocmOps, t: RocmTensor) -> Result<PureTensor, t
 # Weight upload straight from little-endian F32 bytes (e.g. the file buffer):
 # `bytes[offset .. offset + numel*4]` goes to the device with one bulk copy and
 # no per-element staging.
+# reason: ROCm tensor-op API passes raw device dims, element counts and handles that mirror HIP kernel scalars
+# @allow(primitive_api)
 pub fn rocm_tensor_upload_f32_bytes(ops: RocmOps, bytes: [u8], offset: i64, shape: [i64]) -> Result<RocmTensor, text>:
     val n = _numel(shape)
     val ptr = rocm_buffer_alloc(ops.dev, n)?
     rocm_buffer_upload_bytes(ops.dev, ptr, bytes, offset, n * 4)?
     Ok(RocmTensor(ptr: ptr, n: n, shape: shape))
 
+# reason: ROCm tensor-op API passes raw device dims, element counts and handles that mirror HIP kernel scalars
+# @allow(primitive_api)
 pub fn rocm_tensor_free(ops: RocmOps, t: RocmTensor) -> Result<i64, text>:
     rocm_buffer_free(ops.dev, t.ptr)
 
+# reason: ROCm tensor-op API passes raw device dims, element counts and handles that mirror HIP kernel scalars
+# @allow(primitive_api)
 pub fn rocm_tensor_numel(t: RocmTensor) -> i64:
     t.n
 
@@ -197,6 +203,8 @@ fn _out_like(ops: RocmOps, shape: [i64]) -> Result<RocmTensor, text>:
     Ok(RocmTensor(ptr: ptr, n: n, shape: shape))
 
 # Uninitialised device tensor of `shape` (e.g. a KV row buffer).
+# reason: ROCm tensor-op API passes raw device dims, element counts and handles that mirror HIP kernel scalars
+# @allow(primitive_api)
 pub fn rocm_buffer_alloc_tensor(ops: RocmOps, shape: [i64]) -> Result<RocmTensor, text>:
     _out_like(ops, shape)
 
@@ -209,6 +217,8 @@ pub fn rocm_tensor_matvec(ops: RocmOps, w: RocmTensor, x: RocmTensor) -> Result<
     rocm_launch(ops.dev, k, rows, 256, [w.ptr, x.ptr, out.ptr], [rows, cols])?
     Ok(out)
 
+# reason: ROCm tensor-op API passes raw device dims, element counts and handles that mirror HIP kernel scalars
+# @allow(primitive_api)
 pub fn rocm_tensor_rmsnorm(ops: RocmOps, x: RocmTensor, w: RocmTensor, eps: f64) -> Result<RocmTensor, text>:
     val k = rocm_kernel(ops.dev, "rmsnorm_f32", _SRC_RMSNORM)?
     val out = _out_like(ops, x.shape)?
@@ -234,6 +244,8 @@ pub fn rocm_tensor_silu(ops: RocmOps, x: RocmTensor) -> Result<RocmTensor, text>
     Ok(out)
 
 # Causal multi-head attention for one query against KV rows [0, n_pos).
+# reason: ROCm tensor-op API passes raw device dims, element counts and handles that mirror HIP kernel scalars
+# @allow(primitive_api)
 pub fn rocm_tensor_attention(ops: RocmOps, q: RocmTensor, k_buf: RocmTensor, v_buf: RocmTensor, n_pos: i64, n_heads: i64, head_dim: i64) -> Result<RocmTensor, text>:
     if n_pos > 1024 or n_pos < 1:
         return Err("ROCm attention: n_pos {n_pos} outside 1..1024")
@@ -244,6 +256,8 @@ pub fn rocm_tensor_attention(ops: RocmOps, q: RocmTensor, k_buf: RocmTensor, v_b
     Ok(out)
 
 # RoPE on a [n_heads * head_dim] vector at position `pos` (math of tensor_rope).
+# reason: ROCm tensor-op API passes raw device dims, element counts and handles that mirror HIP kernel scalars
+# @allow(primitive_api)
 pub fn rocm_tensor_rope(ops: RocmOps, x: RocmTensor, pos: i64, n_heads: i64, head_dim: i64, theta: f64) -> Result<RocmTensor, text>:
     val k = rocm_kernel(ops.dev, "rope_f32", _SRC_ROPE)?
     val out = _out_like(ops, x.shape)?
@@ -252,6 +266,8 @@ pub fn rocm_tensor_rope(ops: RocmOps, x: RocmTensor, pos: i64, n_heads: i64, hea
     Ok(out)
 
 # Copy the [dim] vector `row` into row `pos` of the [capacity, dim] buffer, in place.
+# reason: ROCm tensor-op API passes raw device dims, element counts and handles that mirror HIP kernel scalars
+# @allow(primitive_api)
 pub fn rocm_tensor_kv_write(ops: RocmOps, buf: RocmTensor, pos: i64, row: RocmTensor) -> Result<i64, text>:
     val dim = buf.shape[1]
     if pos < 0 or (pos + 1) * dim > buf.n or row.n != dim:
@@ -261,6 +277,8 @@ pub fn rocm_tensor_kv_write(ops: RocmOps, buf: RocmTensor, pos: i64, row: RocmTe
     Ok(0)
 
 # Row `row` of a [rows, cols] device buffer as a new [cols] device tensor.
+# reason: ROCm tensor-op API passes raw device dims, element counts and handles that mirror HIP kernel scalars
+# @allow(primitive_api)
 pub fn rocm_tensor_row(ops: RocmOps, table: RocmTensor, row: i64) -> Result<RocmTensor, text>:
     val cols = table.shape[1]
     if row < 0 or (row + 1) * cols > table.n:
@@ -271,6 +289,8 @@ pub fn rocm_tensor_row(ops: RocmOps, table: RocmTensor, row: i64) -> Result<Rocm
     Ok(out)
 
 # Index of the largest element (lowest index on ties). Only 4 bytes come back.
+# reason: ROCm tensor-op API passes raw device dims, element counts and handles that mirror HIP kernel scalars
+# @allow(primitive_api)
 pub fn rocm_tensor_argmax(ops: RocmOps, x: RocmTensor) -> Result<i64, text>:
     val k = rocm_kernel(ops.dev, "argmax_f32", _SRC_ARGMAX)?
     val out = rocm_buffer_alloc(ops.dev, 1)?
@@ -281,5 +301,7 @@ pub fn rocm_tensor_argmax(ops: RocmOps, x: RocmTensor) -> Result<i64, text>:
     Ok((raw[0] as i64) + (raw[1] as i64) * 256 + (raw[2] as i64) * 65536 + (raw[3] as i64) * 16777216)
 
 # Block until all launched kernels finished (ops are asynchronous).
+# reason: ROCm tensor-op API passes raw device dims, element counts and handles that mirror HIP kernel scalars
+# @allow(primitive_api)
 pub fn rocm_ops_sync(ops: RocmOps) -> Result<i64, text>:
     rocm_sync(ops.dev)
