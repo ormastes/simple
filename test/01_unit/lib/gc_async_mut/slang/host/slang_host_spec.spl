@@ -1,0 +1,89 @@
+"""
+## Purpose and audience
+Purpose: Pin slang's per-OS decisions (shim and ROCm library names, search
+directories, path joins, memory-probe parsing) as pure functions, so the Linux
+and macOS branches are checked on any host. Audience: engineers porting slang
+to a host they cannot boot.
+
+## Compatibility and limitations
+Pure functions take `os` explicitly; the real OS is only exercised by the
+wrapper checks, which assert the host's own answer. Importing the slang
+entrypoints must not load any native library (lazy first use).
+"""
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+
+use std.gc_async_mut.slang.host.slang_host.{ggml_lib_default, rocm_bin_default_for, hip_lib_names, hiprtc_lib_names, host_libc_name, host_join, parse_meminfo_bytes, parse_int_text, parse_vm_stat_used_pages, darwin_available_bytes, host_os_name}
+use std.gc_async_mut.slang.engine.llm_engine.{engine_loaded_model, engine_backend_available}
+use std.gc_async_mut.slang.entrypoints.openai.serving_models.{read_model_entry}
+
+val MEMINFO = "MemTotal:       16384000 kB\nMemFree:          100000 kB\nMemAvailable:    8192000 kB\nBuffers:           1000 kB\n"
+val VM_STAT = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                               5000.\nPages active:                            100000.\nPages inactive:                           90000.\nPages wired down:                         50000.\nPages occupied by compressor:             25000.\n"
+
+describe "slang host library names per OS":
+    it "names the ggml shim per OS":
+        expect(ggml_lib_default("windows")).to_equal("build/sffi/slang_ggml.dll")
+        expect(ggml_lib_default("linux")).to_equal("build/sffi/libslang_ggml.so")
+        expect(ggml_lib_default("macos")).to_equal("build/sffi/libslang_ggml.dylib")
+
+    it "names ROCm HIP and hipRTC per OS":
+        expect(rocm_bin_default_for("windows")).to_equal("C:\Program Files\AMD\ROCm\7.2\bin")
+        expect(rocm_bin_default_for("linux")).to_equal("/opt/rocm/lib")
+        expect(rocm_bin_default_for("macos")).to_equal("")
+        expect(hip_lib_names("windows")).to_equal(["amdhip64_7.dll"])
+        expect(hip_lib_names("linux")).to_equal(["libamdhip64.so", "libamdhip64.so.7"])
+        expect(hiprtc_lib_names("windows")).to_equal(["hiprtc0702.dll"])
+        expect(hiprtc_lib_names("linux")).to_equal(["libhiprtc.so", "libhiprtc.so.7"])
+        expect(hip_lib_names("macos").len()).to_equal(0)
+
+    it "picks the C library that provides malloc":
+        expect(host_libc_name("windows")).to_equal("ucrtbase.dll")
+        expect(host_libc_name("linux")).to_equal("libc.so.6")
+        expect(host_libc_name("macos")).to_equal("libSystem.B.dylib")
+
+    it "joins paths with the OS separator without doubling it":
+        expect(host_join("windows", "C:\rocm\bin", "a.dll")).to_equal("C:\rocm\bin\a.dll")
+        expect(host_join("windows", "C:\rocm\bin\\", "a.dll")).to_equal("C:\rocm\bin\a.dll")
+        expect(host_join("linux", "/opt/rocm/lib", "liba.so")).to_equal("/opt/rocm/lib/liba.so")
+        expect(host_join("linux", "/opt/rocm/lib/", "liba.so")).to_equal("/opt/rocm/lib/liba.so")
+        expect(host_join("linux", "", "liba.so")).to_equal("liba.so")
+
+describe "slang memory probe parsing":
+    it "reads MemAvailable and MemTotal from /proc/meminfo content":
+        expect(parse_meminfo_bytes(MEMINFO, "MemAvailable")).to_equal(8192000 * 1024)
+        expect(parse_meminfo_bytes(MEMINFO, "MemTotal")).to_equal(16384000 * 1024)
+
+    it "answers -1 for an absent key or empty content":
+        expect(parse_meminfo_bytes(MEMINFO, "SwapFree")).to_equal(-1)
+        expect(parse_meminfo_bytes("", "MemAvailable")).to_equal(-1)
+
+    it "parses a probe's integer stdout and rejects non-numbers":
+        expect(parse_int_text("27051000000\r\n")).to_equal(27051000000)
+        expect(parse_int_text("  17179869184\n")).to_equal(17179869184)
+        expect(parse_int_text("")).to_equal(-1)
+        expect(parse_int_text("error: no such key")).to_equal(-1)
+        expect(parse_int_text("0")).to_equal(-1)
+
+    it "sums vm_stat active + wired + compressor pages":
+        expect(parse_vm_stat_used_pages(VM_STAT)).to_equal(175000)
+        expect(parse_vm_stat_used_pages("nothing useful")).to_equal(-1)
+
+    it "derives macOS availability as total minus resident":
+        val total = 17179869184
+        expect(darwin_available_bytes(total, 16384, 175000)).to_equal(total - 175000 * 16384)
+        expect(darwin_available_bytes(total, 16384, 99999999)).to_equal(0)
+        expect(darwin_available_bytes(0, 16384, 1)).to_equal(-1)
+        expect(darwin_available_bytes(total, 16384, -1)).to_equal(-1)
+
+describe "slang host wrappers and lazy native loading":
+    it "reports a known host OS through SOSIX":
+        val os = host_os_name()
+        expect(os == "windows" or os == "linux" or os == "macos" or os == "freebsd").to_equal(true)
+
+    it "loads no native library when the entrypoints are imported":
+        step("Verify: import alone leaves the engine empty; availability is a file probe, not a dlopen")
+        expect(engine_loaded_model()).to_equal("")
+        val available = engine_backend_available()
+        expect(available == true or available == false).to_equal(true)
+        expect(engine_loaded_model()).to_equal("")

@@ -22,27 +22,36 @@ use std.nogc_sync_mut.sffi.dynamic.{spl_dlopen, spl_dlsym, spl_wffi_call_i64}
 use std.nogc_sync_mut.sffi.raw_bytes.{bytes_from_raw}
 use std.common.binary_io.{f32_to_bits}
 use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes}
-use std.io_runtime.{file_exists, env_get}
+use std.gc_async_mut.slang.host.slang_host.{host_os_name, host_env, host_file_exists, host_join, rocm_bin_default_for, hip_lib_names, hiprtc_lib_names, host_libc_name}
 
 @unsafe(reason: "passes a bounded caller-owned byte payload as one pointer argument", capabilities: [ffi, raw_ptr])
 extern fn spl_wffi_call_i64_with_bytes(fptr: i64, prefix_args: [i64], bytes: [u8], offset: i64, length: i64, suffix_args: [i64]) -> i64
 
-val ROCM_BIN_DEFAULT = "C:\\Program Files\\AMD\\ROCm\\7.2\\bin"
-val HIP_DLL = "amdhip64_7.dll"
-val HIPRTC_DLL = "hiprtc0702.dll"
 # Launch scratch layout: argv at 0, kernel-param pointer array at 1024, config at 2048.
 val LAUNCH_PARAMS_OFF = 1024
 val LAUNCH_CFG_OFF = 2048
 
-# ROCm bin directory: SLANG_ROCM_BIN when set, else the 7.2 install default.
+# ROCm directory: SLANG_ROCM_BIN when set, else the per-OS install default
+# (Windows 7.2 bin dir, /opt/rocm/lib on Linux). Nothing is loaded here; HIP and
+# hipRTC are dlopen'ed only by rocm_open_at, i.e. on first GPU use.
 pub fn rocm_bin_default() -> text:
-    val env_dir = env_get("SLANG_ROCM_BIN")
+    val env_dir = host_env("SLANG_ROCM_BIN")
     if env_dir != "":
         return env_dir
-    ROCM_BIN_DEFAULT
+    rocm_bin_default_for(host_os_name())
+
+# First candidate file name present in `bin_dir`, as a full path; "" when none.
+fn _find_lib(bin_dir: text, names: [text]) -> text:
+    val os = host_os_name()
+    for name in names:
+        val path = host_join(os, bin_dir, name)
+        if host_file_exists(path):
+            return path
+    ""
 
 pub fn rocm_available_at(bin_dir: text) -> bool:
-    file_exists(bin_dir + "\\" + HIP_DLL) and file_exists(bin_dir + "\\" + HIPRTC_DLL)
+    val os = host_os_name()
+    _find_lib(bin_dir, hip_lib_names(os)) != "" and _find_lib(bin_dir, hiprtc_lib_names(os)) != ""
 
 pub class RocmDevice:
     name: text
@@ -130,13 +139,16 @@ fn _text_at(addr: i64, cap: i64) -> text:
 
 # Load HIP + hipRTC from `bin_dir`, initialise HIP, and read the device name.
 pub fn rocm_open_at(bin_dir: text) -> Result<RocmDevice, text>:
-    if not rocm_available_at(bin_dir):
-        return Err("ROCm: {HIP_DLL}/{HIPRTC_DLL} not found in {bin_dir}")
-    val ucrt = spl_dlopen("ucrtbase.dll")
-    val hip = spl_dlopen(bin_dir + "\\" + HIP_DLL)
-    val rtc = spl_dlopen(bin_dir + "\\" + HIPRTC_DLL)
+    val os = host_os_name()
+    val hip_path = _find_lib(bin_dir, hip_lib_names(os))
+    val rtc_path = _find_lib(bin_dir, hiprtc_lib_names(os))
+    if hip_path == "" or rtc_path == "":
+        return Err("ROCm: HIP/hipRTC library not found in {bin_dir} for {os}")
+    val ucrt = spl_dlopen(host_libc_name(os))
+    val hip = spl_dlopen(hip_path)
+    val rtc = spl_dlopen(rtc_path)
     if ucrt == 0 or hip == 0 or rtc == 0:
-        return Err("ROCm: dlopen failed for ucrtbase, HIP or hipRTC")
+        return Err("ROCm: dlopen failed for libc, HIP or hipRTC")
     val f_init = _need(hip, "hipInit")?
     val f_name = _need(hip, "hipDeviceGetName")?
     val c_malloc = _need(ucrt, "malloc")?

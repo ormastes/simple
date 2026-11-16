@@ -15,8 +15,7 @@
 # reports the arithmetic it used. A refusal a caller can read is worth more than
 # a verdict it has to trust.
 
-use std.io_runtime.{read_file, host_os}
-use std.nogc_sync_mut.io.process_ops.{shell_int}
+use std.gc_async_mut.slang.host.slang_host.{host_os_name, host_file_read, host_run_int, host_run_text, parse_meminfo_bytes, parse_vm_stat_used_pages, darwin_available_bytes}
 
 # Bytes to leave for the OS, the page cache and whatever else shares this
 # machine. Deliberately generous: the cost of being wrong upward is a refused
@@ -44,23 +43,19 @@ fn default_headroom_bytes() -> i64:
 # Physical memory. Distinct from mem_available_bytes: this one never changes
 # under load, which is exactly what a reserve should be sized against.
 fn mem_total_bytes() -> i64:
-    val content = read_file("/proc/meminfo")
-    for line in content.split("\n"):
-        if line.starts_with("MemTotal:"):
-            for part in line.split(" "):
-                val t = part.trim()
-                if t != "" and t != "MemTotal:" and t != "kB":
-                    return t.to_i64() * 1024
-    if host_os() == "windows":
+    val os = host_os_name()
+    if os == "linux":
+        return parse_meminfo_bytes(host_file_read("/proc/meminfo"), "MemTotal")
+    if os == "windows":
         return _win32_os_kib("TotalVisibleMemorySize")
-    shell_int("sysctl -n hw.memsize", -1)
+    host_run_int("sysctl", ["-n", "hw.memsize"])
 
 # Windows has neither /proc/meminfo nor sysctl. Win32_OperatingSystem reports
 # TotalVisibleMemorySize in KiB (same PowerShell/CIM probe the test runner's
 # system_monitor uses). -1 when the probe fails, which check_fit turns into a
 # refusal.
 fn _win32_os_kib(field: text) -> i64:
-    val kib = shell_int("powershell -NoProfile -Command \"(Get-CimInstance Win32_OperatingSystem)." + field + "\"", -1)
+    val kib = host_run_int("powershell", ["-NoProfile", "-Command", "(Get-CimInstance Win32_OperatingSystem)." + field])
     if kib <= 0:
         return -1
     kib * 1024
@@ -77,7 +72,7 @@ fn _win32_os_kib(field: text) -> i64:
 # times are load noise (all three within 54-135 s), so the CIM class is chosen
 # over Get-Counter because it is not localised.
 fn _win32_available_bytes() -> i64:
-    val bytes = shell_int("powershell -NoProfile -Command \"(Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory).AvailableBytes\"", -1)
+    val bytes = host_run_int("powershell", ["-NoProfile", "-Command", "(Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory).AvailableBytes"])
     if bytes <= 0:
         return -1
     bytes
@@ -95,21 +90,13 @@ struct FitVerdict:
 # Returns -1 when the host's memory cannot be established at all. That is
 # deliberately not "assume it fits": `check_fit` turns -1 into a refusal.
 fn mem_available_bytes() -> i64:
-    val linux = _mem_available_linux()
-    if linux > 0:
-        return linux
-    if host_os() == "windows":
+    val os = host_os_name()
+    if os == "linux":
+        return parse_meminfo_bytes(host_file_read("/proc/meminfo"), "MemAvailable")
+    if os == "windows":
         return _win32_available_bytes()
-    _mem_available_darwin()
-
-fn _mem_available_linux() -> i64:
-    val content = read_file("/proc/meminfo")
-    for line in content.split("\n"):
-        if line.starts_with("MemAvailable:"):
-            for part in line.split(" "):
-                val t = part.trim()
-                if t != "" and t != "MemAvailable:" and t != "kB":
-                    return t.to_i64() * 1024
+    if os == "macos":
+        return _mem_available_darwin()
     -1
 
 # macOS has no /proc, so the Linux lane above returns -1 there and every load
@@ -124,21 +111,13 @@ fn _mem_available_linux() -> i64:
 # reclaimable and are counted as unavailable anyway — which errs toward refusing
 # a load that would have fitted, the safe direction for this gate.
 fn _mem_available_darwin() -> i64:
-    val total = shell_int("sysctl -n hw.memsize", 0)
-    if total <= 0:
+    val total = host_run_int("sysctl", ["-n", "hw.memsize"])
+    val page_size = host_run_int("sysctl", ["-n", "hw.pagesize"])
+    if total <= 0 or page_size <= 0:
         return -1
-    val page_size = shell_int("sysctl -n hw.pagesize", 0)
-    if page_size <= 0:
-        return -1
-    # One awk pass so a slow host is not probed three times; `gsub` strips the
-    # trailing '.' vm_stat prints after every page count.
-    val pages = shell_int("vm_stat | awk '/Pages active/ {a=$3} /Pages wired down/ {w=$4} /Pages occupied by compressor/ {c=$5} END {gsub(/\\./,\"\",a); gsub(/\\./,\"\",w); gsub(/\\./,\"\",c); print a+0+w+0+c+0}'", -1)
-    if pages < 0:
-        return -1
-    val used = pages * page_size
-    if used >= total:
-        return 0
-    total - used
+    # No shell pipe: vm_stat runs directly and slang_host parses its text.
+    val used_pages = parse_vm_stat_used_pages(host_run_text("vm_stat", []))
+    darwin_available_bytes(total, page_size, used_pages)
 
 fn _gib(bytes: i64) -> text:
     (bytes / (1024 * 1024 * 1024)).to_text() + " GiB"

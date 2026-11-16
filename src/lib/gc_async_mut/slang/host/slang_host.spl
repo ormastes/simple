@@ -1,0 +1,194 @@
+# @gc — module uses GC runtime
+#
+# slang host portability: per-OS names and probes in ONE module.
+#
+# Every decision is a pure function of an `os` text ("windows" | "macos" |
+# "linux" | ...) so the Linux and macOS branches are unit-testable on any host;
+# the thin `host_*` wrappers at the bottom bind the real OS and route host
+# access (env, file, dir, process) through SOSIX. Nothing else in slang
+# branches on the OS or calls a host primitive for those four.
+#
+# NOT routed through SOSIX because SOSIX has no accessor for it (see the
+# routing table in doc/00_llm_process/feature_expert/slang_local_inference):
+# dynamic library load (spl_dlopen/dlsym), file size, directory test, ranged
+# and byte reads, sha256.
+
+use std.nogc_async_mut.sosix.host_facade.{sosix_host_os, sosix_env_get, sosix_file_exists, sosix_file_read, sosix_dir_list_checked, sosix_run_bounded_checked}
+
+# ---------------------------------------------------------------- pure -----
+
+# Shim name build-slang-ggml-shim.shs emits for `os`.
+@allow(primitive_api)  # reason: OS name, file name, path and byte count are the contract of this host seam
+fn ggml_lib_default(os: text) -> text:
+    if os == "windows":
+        return "build/sffi/slang_ggml.dll"
+    if os == "macos":
+        return "build/sffi/libslang_ggml.dylib"
+    "build/sffi/libslang_ggml.so"
+
+# ROCm directory holding HIP/hipRTC. Windows ships a versioned bin dir; Linux
+# keeps the libraries in /opt/rocm/lib. "" = no ROCm on this OS (macOS).
+@allow(primitive_api)  # reason: OS name, file name, path and byte count are the contract of this host seam
+fn rocm_bin_default_for(os: text) -> text:
+    if os == "windows":
+        return "C:\Program Files\AMD\ROCm\7.2\bin"
+    if os == "linux":
+        return "/opt/rocm/lib"
+    ""
+
+# Candidate file names, most specific first. The unversioned Linux name is a
+# dev symlink that runtime-only installs lack, so the .so.7 soname follows.
+@allow(primitive_api)  # reason: OS name, file name, path and byte count are the contract of this host seam
+fn hip_lib_names(os: text) -> [text]:
+    if os == "windows":
+        return ["amdhip64_7.dll"]
+    if os == "linux":
+        return ["libamdhip64.so", "libamdhip64.so.7"]
+    []
+
+@allow(primitive_api)  # reason: OS name, file name, path and byte count are the contract of this host seam
+fn hiprtc_lib_names(os: text) -> [text]:
+    if os == "windows":
+        return ["hiprtc0702.dll"]
+    if os == "linux":
+        return ["libhiprtc.so", "libhiprtc.so.7"]
+    []
+
+# C library that provides malloc/free/memcpy for the byte-copy helpers.
+@allow(primitive_api)  # reason: OS name, file name, path and byte count are the contract of this host seam
+fn host_libc_name(os: text) -> text:
+    if os == "windows":
+        return "ucrtbase.dll"
+    if os == "macos":
+        return "libSystem.B.dylib"
+    "libc.so.6"
+
+# Directory + name with the OS separator, without doubling an existing one.
+@allow(primitive_api)  # reason: OS name, file name, path and byte count are the contract of this host seam
+fn host_join(os: text, dir: text, name: text) -> text:
+    if dir == "":
+        return name
+    if os == "windows":
+        if dir.ends_with("\\") or dir.ends_with("/"):
+            return dir + name
+        return dir + "\\" + name
+    if dir.ends_with("/"):
+        return dir + name
+    dir + "/" + name
+
+# `Key:   123 kB` from /proc/meminfo content -> bytes, -1 when absent/garbled.
+@allow(primitive_api)  # reason: OS name, file name, path and byte count are the contract of this host seam
+fn parse_meminfo_bytes(content: text, key: text) -> i64:
+    val prefix = key + ":"
+    for line in content.split("\n"):
+        if line.starts_with(prefix):
+            for part in line.split(" "):
+                val t = part.trim()
+                if t != "" and t != prefix and t != "kB":
+                    if t.to_i64() <= 0:
+                        return -1
+                    return t.to_i64() * 1024
+    -1
+
+# First line of a probe's stdout as a positive integer, -1 otherwise. Trims the
+# CR a Windows tool emits.
+@allow(primitive_api)  # reason: OS name, file name, path and byte count are the contract of this host seam
+fn parse_int_text(out: text) -> i64:
+    val t = out.trim()
+    var digits = ""
+    var i = 0
+    while i < t.len():
+        val ch = t[i:i + 1]
+        if ch >= "0" and ch <= "9":
+            digits = digits + ch
+        elif digits != "" or ch != " ":
+            break
+        i = i + 1
+    if digits == "":
+        return -1
+    val v = digits.to_i64()
+    if v <= 0:
+        return -1
+    v
+
+# `vm_stat` output -> active + wired + compressor pages, -1 when none of the
+# three labels is present. Counts end in '.'.
+@allow(primitive_api)  # reason: OS name, file name, path and byte count are the contract of this host seam
+fn parse_vm_stat_used_pages(out: text) -> i64:
+    var total: i64 = 0
+    var seen = 0
+    for line in out.split("\n"):
+        var label = ""
+        if line.starts_with("Pages active:"):
+            label = "Pages active:"
+        elif line.starts_with("Pages wired down:"):
+            label = "Pages wired down:"
+        elif line.starts_with("Pages occupied by compressor:"):
+            label = "Pages occupied by compressor:"
+        if label != "":
+            val n = parse_int_text(line[label.len():].replace(".", ""))
+            if n >= 0:
+                total = total + n
+                seen = seen + 1
+    if seen == 0:
+        return -1
+    total
+
+# Total minus resident (active + wired + compressed): conservative, see
+# memory_budget.spl. 0 when the resident set already reaches total.
+@allow(primitive_api)  # reason: OS name, file name, path and byte count are the contract of this host seam
+fn darwin_available_bytes(total: i64, page_size: i64, used_pages: i64) -> i64:
+    if total <= 0 or page_size <= 0 or used_pages < 0:
+        return -1
+    val used = used_pages * page_size
+    if used >= total:
+        return 0
+    total - used
+
+# ------------------------------------------------------ SOSIX wrappers -----
+
+@allow(primitive_api)  # reason: OS name, file name, path and byte count are the contract of this host seam
+fn host_os_name() -> text:
+    sosix_host_os()
+
+# "" when unset (same contract as the io_runtime env_get it replaces).
+@allow(primitive_api)  # reason: OS name, file name, path and byte count are the contract of this host seam
+fn host_env(key: text) -> text:
+    sosix_env_get(key)
+
+@allow(primitive_api)  # reason: OS name, file name, path and byte count are the contract of this host seam
+fn host_file_exists(path: text) -> bool:
+    sosix_file_exists(path)
+
+# "" when absent or unreadable (same contract as read_file).
+@allow(primitive_api)  # reason: OS name, file name, path and byte count are the contract of this host seam
+fn host_file_read(path: text) -> text:
+    sosix_file_read(path)
+
+# None when the directory cannot be listed (same contract as dir_list_optional).
+@allow(primitive_api)  # reason: OS name, file name, path and byte count are the contract of this host seam
+fn host_dir_list(path: text) -> [text]?:
+    match sosix_dir_list_checked(path):
+        case Ok(entries): entries
+        case Err(_): None
+
+# Runs `cmd args` with no timeout; stdout, or "" on a non-zero exit or any
+# failure. No timeout on purpose: the Windows CIM probe has measured 54-135 s
+# under load, and a tight bound would turn a slow probe into a refusal.
+@allow(primitive_api)  # reason: OS name, file name, path and byte count are the contract of this host seam
+fn host_run_text(cmd: text, args: [text]) -> text:
+    match sosix_run_bounded_checked(cmd, args, 0, 65536):
+        case Ok(run):
+            if run.exit_code != 0:
+                return ""
+            run.stdout
+        case Err(_): ""
+
+# `host_run_text` stdout as a positive integer, -1 on any failure.
+@allow(primitive_api)  # reason: OS name, file name, path and byte count are the contract of this host seam
+fn host_run_int(cmd: text, args: [text]) -> i64:
+    parse_int_text(host_run_text(cmd, args))
+
+export ggml_lib_default, rocm_bin_default_for, hip_lib_names, hiprtc_lib_names, host_libc_name
+export host_join, parse_meminfo_bytes, parse_int_text, parse_vm_stat_used_pages, darwin_available_bytes
+export host_os_name, host_env, host_file_exists, host_file_read, host_dir_list, host_run_text, host_run_int
