@@ -13,7 +13,7 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set, env_remove_process, file_read_nullable}
 use compiler.core.types.{int_to_str}
 use compiler.frontend.core.flat_pool_codec.*
-use compiler.common.data.attribute_schema_v1.{AttributeStoreV1, AttrPlacementV1, attr_placement_from_token_v1, attr_placement_token_v1, attr_layout_from_token_v1, attr_store_detached_v1}
+use compiler.common.data.attribute_schema_v1.{AttributeStoreV1, AttrI64StoreV1, attr_i64_store_v1, AttrPlacementV1, attr_placement_from_token_v1, attr_placement_token_v1, attr_layout_from_token_v1, attr_store_detached_v1}
 use compiler.common.data.data_schema_resolver.{data_attr_storage_resolve_v1, data_policy_rules_from_sdn_v1}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}  # explicit: a glob is not an import-origin for surface projection
 
@@ -392,7 +392,7 @@ pub fn expr_owner_right(idx: i64) -> i64: expr_right[idx]
 # once per expr_reset into the mode slot (an array slot, so the value persists
 # across interpreter calls).
 var expr_attr_extra_mode: [i64] = [0]
-var expr_attr_extra_stores: [AttributeStoreV1<i64>] = []
+var expr_attr_extra_stores: [AttrI64StoreV1] = []
 var expr_attr_s_val_mode: [i64] = [0]
 var expr_attr_s_val_stores: [AttributeStoreV1<text>] = []
 # Node attribute `op` (AttrId compiler.ast#op): the `i_val` slot of BINARY (7),
@@ -400,7 +400,7 @@ var expr_attr_s_val_stores: [AttributeStoreV1<text>] = []
 # sparse_hash is the placement choice; column is supported for parity only (it
 # wins only with a per-tag-family index). Other tags keep `i_val` in the array.
 var expr_attr_op_mode: [i64] = [0]
-var expr_attr_op_stores: [AttributeStoreV1<i64>] = []
+var expr_attr_op_stores: [AttrI64StoreV1] = []
 # 1 when op is placed off the array or access counting is on: the only extra
 # per-read cost of `expr_owner_int` on the default path is this slot read.
 var expr_attr_int_route: [i64] = [0]
@@ -472,16 +472,25 @@ fn expr_attr_placement_of(mode: i64) -> AttrPlacementV1:
 # Fail-closed gate: a native build can corrupt the generic store's payloads
 # (doc/08_tracking/bug/native_erased_generic_optional_return_2026-11-15.md),
 # so a non-direct placement is used only after a fresh store round-trips.
+# extra/op use the concrete AttrI64StoreV1 (no erased `T` payload); the check
+# exercises that same store, with a negative value for the x8 shape.
 fn expr_attr_i64_round_trips(placement: AttrPlacementV1) -> bool:
-    match attr_store_detached_v1<i64>("self_check", placement):
+    match attr_i64_store_v1("self_check", placement):
         case Ok(s):
             var store = s
             val _a = store.set(3, 9000000000)
             val _b = store.set(5, 7)
-            match store.get(3):
+            val _c = store.set(8, -5)
+            val g3: Result<i64, text> = store.get(3)
+            val g5: Result<i64, text> = store.get(5)
+            val g8: Result<i64, text> = store.get(8)
+            match g3:
                 case Ok(v3):
-                    match store.get(5):
-                        case Ok(v5): return v3 == 9000000000 and v5 == 7 and store.len() == 2
+                    match g5:
+                        case Ok(v5):
+                            match g8:
+                                case Ok(v8): return v3 == 9000000000 and v5 == 7 and v8 == -5 and store.len() == 3
+                                case Err(_): return false
                         case Err(_): return false
                 case Err(_): return false
         case Err(_): return false
@@ -548,7 +557,7 @@ pub fn expr_attr_apply_config(spec: text) -> Result<bool, text>:
     expr_attr_int_route[0] = expr_attr_count_on[0]
     expr_attr_op_stores.clear()
     if op_mode != 0:
-        match attr_store_detached_v1("op", expr_attr_placement_of(op_mode)):
+        match attr_i64_store_v1("op", expr_attr_placement_of(op_mode)):
             case Ok(store): expr_attr_op_stores.push(store)
             case Err(e): return Err(e)
         expr_attr_op_mode[0] = op_mode
@@ -565,7 +574,7 @@ pub fn expr_attr_apply_config(spec: text) -> Result<bool, text>:
     expr_attr_s_val_stores.clear()
     if extra_mode != 0:
         val placement = expr_attr_placement_of(extra_mode)
-        match attr_store_detached_v1("extra", placement):
+        match attr_i64_store_v1("extra", placement):
             case Ok(store): expr_attr_extra_stores.push(store)
             case Err(e): return Err(e)
         expr_attr_extra_mode[0] = extra_mode
@@ -642,7 +651,7 @@ pub fn expr_attr_extra_placement() -> text:
 pub fn expr_attr_extra_present() -> i64:
     if expr_attr_extra_mode[0] == 0: return -1
     # @workaround bug=phase2_mir_unresolved_field_receiver_2026-11-15
-    val extra_store: AttributeStoreV1<i64> = expr_attr_extra_stores[0]
+    val extra_store: AttrI64StoreV1 = expr_attr_extra_stores[0]
     extra_store.len()
 
 fn expr_extra_get(idx: i64) -> i64:
@@ -651,7 +660,7 @@ fn expr_extra_get(idx: i64) -> i64:
     if expr_attr_extra_mode[0] == 0:
         return expr_extra[idx]
     # @workaround bug=phase2_mir_unresolved_field_receiver_2026-11-15
-    val extra_store: AttributeStoreV1<i64> = expr_attr_extra_stores[0]
+    val extra_store: AttrI64StoreV1 = expr_attr_extra_stores[0]
     val extra_got: Result<i64, text> = extra_store.get(idx)
     match extra_got:
         case Ok(v): v
@@ -665,11 +674,11 @@ fn expr_extra_put(idx: i64, value: i64):
         return
     if value == -1:
         # @workaround bug=phase2_mir_unresolved_field_receiver_2026-11-15
-        val extra_store: AttributeStoreV1<i64> = expr_attr_extra_stores[0]
+        val extra_store: AttrI64StoreV1 = expr_attr_extra_stores[0]
         extra_store.retire(idx)
     else:
         # @workaround bug=phase2_mir_unresolved_field_receiver_2026-11-15
-        val extra_store: AttributeStoreV1<i64> = expr_attr_extra_stores[0]
+        val extra_store: AttrI64StoreV1 = expr_attr_extra_stores[0]
         extra_store.set(idx, value)
 
 # Dense array view for the pool snapshot codec.
@@ -689,7 +698,7 @@ fn expr_extra_load(values: [i64]):
         expr_extra = values
         return
     expr_attr_extra_stores.clear()
-    match attr_store_detached_v1("extra", expr_attr_placement_of(expr_attr_extra_mode[0])):
+    match attr_i64_store_v1("extra", expr_attr_placement_of(expr_attr_extra_mode[0])):
         case Ok(store): expr_attr_extra_stores.push(store)
         case Err(_):
             expr_attr_extra_mode[0] = 0
@@ -699,7 +708,7 @@ fn expr_extra_load(values: [i64]):
     while i < values.len():
         if values[i] != -1:
             # @workaround bug=phase2_mir_unresolved_field_receiver_2026-11-15
-            val extra_store: AttributeStoreV1<i64> = expr_attr_extra_stores[0]
+            val extra_store: AttrI64StoreV1 = expr_attr_extra_stores[0]
             extra_store.set(i, values[i])
         i = i + 1
 
@@ -782,7 +791,7 @@ pub fn expr_attr_op_placement() -> text:
 pub fn expr_attr_op_present() -> i64:
     if expr_attr_op_mode[0] == 0: return -1
     # @workaround bug=phase2_mir_unresolved_field_receiver_2026-11-15
-    val op_store: AttributeStoreV1<i64> = expr_attr_op_stores[0]
+    val op_store: AttrI64StoreV1 = expr_attr_op_stores[0]
     op_store.len()
 
 fn expr_is_op_tag(idx: i64) -> bool:
@@ -794,7 +803,7 @@ fn expr_int_raw_get(idx: i64) -> i64:
     if expr_attr_op_mode[0] == 0 or not expr_is_op_tag(idx):
         return expr_i_val[idx]
     # @workaround bug=phase2_mir_unresolved_field_receiver_2026-11-15
-    val op_store: AttributeStoreV1<i64> = expr_attr_op_stores[0]
+    val op_store: AttrI64StoreV1 = expr_attr_op_stores[0]
     val op_got: Result<i64, text> = op_store.get(idx)
     match op_got:
         case Ok(v): v
@@ -806,7 +815,7 @@ fn expr_int_raw_set(idx: i64, value: i64):
         return
     expr_i_val[idx] = 0
     # @workaround bug=phase2_mir_unresolved_field_receiver_2026-11-15
-    val op_store: AttributeStoreV1<i64> = expr_attr_op_stores[0]
+    val op_store: AttrI64StoreV1 = expr_attr_op_stores[0]
     op_store.set(idx, value)
 
 fn expr_op_or_int_get(idx: i64) -> i64:
@@ -836,7 +845,7 @@ fn expr_i_val_load(values: [i64]):
     if expr_attr_op_mode[0] == 0:
         return
     expr_attr_op_stores.clear()
-    match attr_store_detached_v1("op", expr_attr_placement_of(expr_attr_op_mode[0])):
+    match attr_i64_store_v1("op", expr_attr_placement_of(expr_attr_op_mode[0])):
         case Ok(store): expr_attr_op_stores.push(store)
         case Err(_):
             # values is dense (op included), so falling back to direct is lossless.
@@ -912,7 +921,7 @@ fn expr_owner_tag_set(idx: i64, value: i64):
     val v = expr_int_raw_get(idx)
     if expr_is_op_tag(idx):
         # @workaround bug=phase2_mir_unresolved_field_receiver_2026-11-15
-        val op_store: AttributeStoreV1<i64> = expr_attr_op_stores[0]
+        val op_store: AttrI64StoreV1 = expr_attr_op_stores[0]
         op_store.retire(idx)
     expr_tag[idx] = value
     expr_int_raw_set(idx, v)

@@ -96,3 +96,24 @@ staying on direct storage (...)` and keeps mode 0.
   `data_schema_resolver` and `data_schema_core_v1` (llc error: `'%lN' defined
   with type 'i64' but expected 'ptr'`). The same llc failure in `sha256` and
   `sdn.parser` reproduces on the pre-fix Stage 2 with a trivial importer.
+
+## Store-side workaround (2026-11-17) — verification-pending
+
+The codegen defect above stays **open**. The node-attr i64 attributes no longer
+go through the erased store:
+
+- `AttrI64StoreV1` (`src/compiler/00.common/data/attribute_schema_v1.spl`) is a
+  concrete, non-generic i64 store for column / array_index / sparse_hash. No
+  type parameter, no `[T?]` / `Dict<i64,T>` payload, no trait-object `T?`
+  return (array_index keeps its node→slot table in a plain `[i64]`, -1 = none).
+  Hash reads use `contains_key` + index per `dict_native_pitfalls.md`.
+- `nodes.spl` builds the `extra` and `op` stores with `attr_i64_store_v1`, and
+  `expr_attr_i64_round_trips` checks that same store (now also a `-5` value for
+  the ×8 shape). The gate stays fail-closed. `s_val` stays on the generic
+  `AttributeStoreV1<text>` (text was measured correct). Default stays OFF.
+- Interpreter regression: `test/01_unit/compiler/data/attribute_layouts_spec.spl`
+  ("concrete i64 node attribute store"), RED before the class existed, 11/11 GREEN after.
+
+Native verification needed: a Stage 2 rebuilt from this source run with
+`SIMPLE_NODE_ATTR=extra=sparse_hash,op=sparse_hash` must not print the
+`failed its round-trip self-check` line.
