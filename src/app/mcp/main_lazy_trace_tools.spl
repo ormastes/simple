@@ -1,10 +1,15 @@
 # MCP traceability tools — read-only `simple_trace` and `simple_test_query`.
 #
-#   simple_trace(profile, operation?, snapshot?, limit?, format?)
-#       runs `trace missing` over the requested snapshot and returns the
-#       rendered result with an explicit complete/incomplete status. An
-#       unbuildable or partial snapshot is `incomplete` (exit 2, isError), never
-#       an empty success.
+#   simple_trace(profile, operation?, snapshot?, limit?, format?, rows?, cols?,
+#                requirement?, base?, head?, evidence?)
+#       runs `trace missing|matrix|links|explain|diff|report` over the requested
+#       snapshot and returns the rendered result with an explicit status. The
+#       non-missing operations call the same executor as the CLI
+#       (`trace_cmd_execute_v1`); `missing` applies the CLI's shared verdict
+#       (`trace_command_verdict_v1`) so only the worktree profile can be
+#       complete. status: complete (exit 0), issues (exit 1: a link issue or an
+#       unknown id), incomplete (exit 2, isError): an unbuildable or partial
+#       snapshot or a non-worktree profile, never an empty success.
 #   simple_test_query(path, name, run_id?, limit?, cursor?)
 #       read-only typed attempt rows for one exact TestDB case.
 #
@@ -20,6 +25,8 @@
 # @req REQ-TRC-021 TESTDB-001
 
 use .main_lazy_json.{extract_field, make_tool_error, make_tool_result_status}
+use std.common.traceability.query_status_v1.{TraceCommandVerdictV1, trace_command_verdict_v1, trace_graph_completeness_v1}
+use std.common.traceability.query_missing_v1.{TraceGraphCompletenessV1}
 use std.common.traceability.profile_v1.{TraceProfile, trace_profile_name_v1, trace_profile_names_v1, trace_profile_parse_v1}
 use std.common.traceability.test_query.{TestCasePath, TestCaseName, TestCaseKey, TestRunId, TestPlannedCaseIdentity, TestAttemptIdentity, TestQueryStatus, TestQualification, TestQueryLimit, TestQueryCursor, TestQuery, TestQueryTruncation, TestQueryCoverage, TestQueryPage, TestQueryError, TestQueryErrorKind}
 
@@ -28,7 +35,7 @@ const TRACE_TOOL_MAX_LIMIT: i64 = 200
 const TEST_QUERY_TOOL_DEFAULT_LIMIT: i64 = 50
 const TEST_QUERY_TOOL_MAX_LIMIT: i64 = 1000
 const TRACE_TOOL_INCOMPLETE_EXIT: i64 = 2
-const TEST_QUERY_DB_FILE: text = "doc/08_tracking/test/test_db.sdn"
+const TEST_QUERY_DB_BASE: text = "doc/08_tracking/test/test_db"
 
 # The raw `tools/call` JSON body: the only text-typed boundary into this module.
 pub struct TraceToolBody:
@@ -46,6 +53,21 @@ pub struct TraceToolError:
 
 pub enum TraceToolOperation:
     Missing
+    Matrix
+    Links
+    Explain
+    Diff
+    Report
+
+# Operation-specific arguments, forwarded to the CLI parser, which owns their
+# validation. An empty field is absent.
+pub struct TraceToolOptions:
+    rows: text
+    cols: text
+    requirement: text
+    base: text
+    head: text
+    evidence: text
 
 pub struct TraceToolRevision:
     selector: text
@@ -64,6 +86,7 @@ pub struct TraceToolLimit:
 
 pub struct TraceToolRequest:
     operation: TraceToolOperation
+    options: TraceToolOptions
     profile: TraceProfile
     snapshot: TraceToolSnapshot
     format: TraceToolFormat
@@ -71,6 +94,7 @@ pub struct TraceToolRequest:
 
 pub enum TraceToolStatus:
     Complete
+    Issues
     Incomplete
 
 pub struct TraceToolExitCode:
@@ -84,6 +108,19 @@ pub struct TraceToolOutcome:
 
 pub struct TestQueryToolRequest:
     query: TestQuery
+
+const TRACE_TOOL_OPERATION_NAMES: [text] = ["missing", "matrix", "links", "explain", "diff", "report"]
+
+fn _operation_parse(name: text) -> TraceToolOperation?:
+    match name:
+        case "": Some(TraceToolOperation.Missing)
+        case "missing": Some(TraceToolOperation.Missing)
+        case "matrix": Some(TraceToolOperation.Matrix)
+        case "links": Some(TraceToolOperation.Links)
+        case "explain": Some(TraceToolOperation.Explain)
+        case "diff": Some(TraceToolOperation.Diff)
+        case "report": Some(TraceToolOperation.Report)
+        case _: None
 
 fn _arg_error(kind: TraceToolErrorKind, message: text) -> TraceToolError:
     TraceToolError(kind: kind, message: message)
@@ -118,8 +155,19 @@ pub fn trace_tool_parse_request(body: TraceToolBody) -> Result<TraceToolRequest,
         case Err(_): return Err(_arg_error(TraceToolErrorKind.UnknownProfile,
             "Unknown profile: " + profile_raw + " (one of " + trace_profile_names_v1().join(", ") + ")"))
     val operation_raw = extract_field(body.value, "operation")
-    if operation_raw != "" and operation_raw != "missing":
-        return Err(_arg_error(TraceToolErrorKind.UnsupportedOperation, "Unsupported operation: " + operation_raw + " (only: missing)"))
+    val operation = match _operation_parse(operation_raw):
+        case Some(parsed): parsed
+        case None: return Err(_arg_error(TraceToolErrorKind.UnsupportedOperation,
+            "Unsupported operation: " + operation_raw + " (one of " + TRACE_TOOL_OPERATION_NAMES.join(", ") + ")"))
+    val options = TraceToolOptions(rows: extract_field(body.value, "rows"), cols: extract_field(body.value, "cols"),
+        requirement: extract_field(body.value, "requirement"), base: extract_field(body.value, "base"),
+        head: extract_field(body.value, "head"), evidence: extract_field(body.value, "evidence"))
+    if operation == TraceToolOperation.Explain and options.requirement == "":
+        return Err(_arg_error(TraceToolErrorKind.MissingArgument, "Missing required parameter: requirement (explain)"))
+    if operation == TraceToolOperation.Diff and options.base == "":
+        return Err(_arg_error(TraceToolErrorKind.MissingArgument, "Missing required parameter: base (diff)"))
+    if operation == TraceToolOperation.Diff and extract_field(body.value, "snapshot") != "":
+        return Err(_arg_error(TraceToolErrorKind.InvalidArgument, "diff takes base and head, not snapshot"))
     val snapshot_raw = extract_field(body.value, "snapshot")
     var snapshot = TraceToolSnapshot.Worktree
     if snapshot_raw == "index":
@@ -135,10 +183,12 @@ pub fn trace_tool_parse_request(body: TraceToolBody) -> Result<TraceToolRequest,
     elif format_raw != "" and format_raw != "table":
         return Err(_arg_error(TraceToolErrorKind.InvalidArgument, "format must be table or sdn"))
     val limit = _int_arg(body, "limit", TRACE_TOOL_DEFAULT_LIMIT, 1, TRACE_TOOL_MAX_LIMIT)?
-    Ok(TraceToolRequest(operation: TraceToolOperation.Missing, profile: profile, snapshot: snapshot,
+    Ok(TraceToolRequest(operation: operation, options: options, profile: profile, snapshot: snapshot,
         format: format, limit: TraceToolLimit(value: limit)))
 
-# Argument vector for the existing `trace missing` option parser.
+# Argument vector for the CLI option parsers. `missing` keeps the P0 shape (the
+# profile is applied by the shared verdict, not an option); every other
+# operation carries `--profile` so the CLI's own verdict sees it.
 pub fn trace_tool_cli_args(request: TraceToolRequest) -> [text]:
     val snapshot = match request.snapshot:
         case TraceToolSnapshot.Worktree: "worktree"
@@ -147,12 +197,35 @@ pub fn trace_tool_cli_args(request: TraceToolRequest) -> [text]:
     val format = match request.format:
         case TraceToolFormat.Table: "table"
         case TraceToolFormat.Sdn: "sdn"
-    val args = ["missing", "--snapshot=" + snapshot, "--format=" + format, "--limit=" + request.limit.value.to_text()]
+    val shared = ["--format=" + format, "--limit=" + request.limit.value.to_text()]
+    val snap_arg = "--snapshot=" + snapshot
+    val profile_arg = "--profile=" + trace_profile_name_v1(request.profile)
+    val o = request.options
+    var args: [text] = []
+    match request.operation:
+        case TraceToolOperation.Missing:
+            args = ["missing", snap_arg] + shared
+        case TraceToolOperation.Matrix:
+            args = ["matrix", snap_arg] + shared + [profile_arg]
+            if o.rows != "": args.push("--rows=" + o.rows)
+            if o.cols != "": args.push("--cols=" + o.cols)
+        case TraceToolOperation.Links:
+            args = ["links", snap_arg] + shared + [profile_arg]
+        case TraceToolOperation.Explain:
+            args = ["explain", o.requirement, snap_arg] + shared + [profile_arg]
+        case TraceToolOperation.Diff:
+            args = ["diff"] + shared + [profile_arg, "--base=" + o.base]
+            if o.head != "": args.push("--head=" + o.head)
+        case TraceToolOperation.Report:
+            args = ["report", snap_arg] + shared + [profile_arg]
+    if request.operation != TraceToolOperation.Missing and o.evidence != "":
+        args.push("--evidence=" + o.evidence)
     args
 
 pub fn trace_tool_status_name(status: TraceToolStatus) -> text:
     match status:
         case TraceToolStatus.Complete: "complete"
+        case TraceToolStatus.Issues: "issues"
         case TraceToolStatus.Incomplete: "incomplete"
 
 # Incomplete is never an empty success: it carries the CLI-style failing exit.
@@ -162,6 +235,21 @@ pub fn trace_tool_outcome(profile: TraceProfile, status: TraceToolStatus, render
     TraceToolOutcome(profile: profile, status: TraceToolStatus.Incomplete,
         exit_code: TraceToolExitCode(value: TRACE_TOOL_INCOMPLETE_EXIT), rendered: rendered)
 
+# CLI exit code to outcome: 0 complete, 1 issues, anything else incomplete.
+pub fn trace_tool_outcome_from_exit(profile: TraceProfile, exit_code: TraceToolExitCode, rendered: text) -> TraceToolOutcome:
+    if exit_code.value == 0:
+        return trace_tool_outcome(profile, TraceToolStatus.Complete, rendered)
+    if exit_code.value == 1:
+        return TraceToolOutcome(profile: profile, status: TraceToolStatus.Issues, exit_code: TraceToolExitCode(value: 1), rendered: rendered)
+    trace_tool_outcome(profile, TraceToolStatus.Incomplete, rendered)
+
+# The CLI's shared verdict rule: a complete graph is Complete only under the
+# worktree profile; every other profile reports Incomplete.
+pub fn trace_tool_status_for(completeness: TraceGraphCompletenessV1, profile: TraceProfile) -> TraceToolStatus:
+    match trace_command_verdict_v1(completeness, profile):
+        case TraceCommandVerdictV1.Complete: TraceToolStatus.Complete
+        case TraceCommandVerdictV1.Incomplete: TraceToolStatus.Incomplete
+
 pub fn trace_tool_shape_result(outcome: TraceToolOutcome) -> text:
     "profile: " + trace_profile_name_v1(outcome.profile) + "\n" +
         "status: " + trace_tool_status_name(outcome.status) + "\n" +
@@ -170,12 +258,17 @@ pub fn trace_tool_shape_result(outcome: TraceToolOutcome) -> text:
 fn _trace_tool_is_failure(outcome: TraceToolOutcome) -> bool:
     match outcome.status:
         case TraceToolStatus.Complete: false
+        case TraceToolStatus.Issues: true
         case TraceToolStatus.Incomplete: true
 
 # Builds the snapshot in memory (same path as `simple trace missing`) and
 # renders the missing-requirements result. A snapshot that cannot be built or
 # whose graph is incomplete is reported Incomplete, never as an empty list.
 pub fn trace_tool_run(request: TraceToolRequest) -> TraceToolOutcome:
+    if request.operation != TraceToolOperation.Missing:
+        use app.traceability.query_cmds_main_v1.{trace_cmd_execute_v1}
+        val result = trace_cmd_execute_v1(trace_tool_cli_args(request))
+        return trace_tool_outcome_from_exit(request.profile, TraceToolExitCode(value: result.exit.value), result.output)
     use app.traceability.query_options_v1.{trace_query_options_parse_v1}
     use app.traceability.query_snapshot_v1.{trace_query_build_snapshot_v1}
     use app.traceability.query_render_v1.{trace_query_error_v1, TraceQueryCaptureV1}
@@ -191,7 +284,7 @@ pub fn trace_tool_run(request: TraceToolRequest) -> TraceToolOutcome:
         case Ok(value): value
         case Err(reason): return trace_tool_outcome(request.profile, TraceToolStatus.Incomplete, trace_query_error_v1(reason, options.snapshot, format, TraceQueryCaptureV1.Uncaptured))
     val missing = trace_missing_requirements_v1(build.graph, build.sidecar_references)
-    val status = if build.graph.complete: TraceToolStatus.Complete else: TraceToolStatus.Incomplete
+    val status = trace_tool_status_for(trace_graph_completeness_v1(build.graph), request.profile)
     trace_tool_outcome(request.profile, status, trace_query_render_missing_v1(build, missing, options))
 
 pub fn handle_simple_trace(id: text, body: text) -> text:
@@ -277,11 +370,15 @@ pub fn test_query_shape_result(page: TestQueryPage) -> text:
 
 # Read-only: an absent store is a typed error, not a cold-start database.
 pub fn test_query_tool_run(request: TestQueryToolRequest) -> Result<TestQueryPage, TestQueryError>:
+    test_query_tool_run_at(request, TEST_QUERY_DB_BASE)
+
+# `base` is the database path without its `.sdn` suffix.
+pub fn test_query_tool_run_at(request: TestQueryToolRequest, base: text) -> Result<TestQueryPage, TestQueryError>:
     use std.io_runtime.{file_exists}
     use std.nogc_sync_mut.test_runner.test_db_compat.{RunnerTestDb}
-    if not file_exists(TEST_QUERY_DB_FILE):
-        return Err(TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: "test database not found: " + TEST_QUERY_DB_FILE))
-    val db = match RunnerTestDb.load():
+    if not file_exists(base + ".sdn"):
+        return Err(TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: "test database not found: " + base + ".sdn"))
+    val db = match RunnerTestDb.load_at(base):
         case Ok(loaded): loaded
         case Err(reason): return Err(TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: reason))
     db.query_case_attempts(request.query)
