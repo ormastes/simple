@@ -2,7 +2,8 @@
 
 Status: defect A FIXED in source (`2498a42ee19`, seed MIR spec red 0/2 ->
 green 2/2), native confirmation pending the next integration Stage 2 build.
-Defects B and C are OPEN with committed red fixtures.
+Defects B (`24229da9238`) and C (`5deef7d3d5c`) FIXED in source, seed-verified;
+explicit `return <T?>` from `-> T` fixed (`29ec0f8506e`). Native pending.
 Every native claim below needs the next integration Stage 2 build to confirm it.
 
 Binaries:
@@ -122,8 +123,7 @@ Still open:
     returns pick's handle.
   - The Stage 3 build that miscompiled used the typed path (the gdb trace
     shows the per-arm `ensure_option_handle`).
-- An explicit `return <T?>` from `-> T` (`lower_return_expr`) is not covered or
-  tested.
+- Explicit `return <T?>` from `-> T`: fixed, see below.
 - The census SEGV sites are not shown to be this class.
   `binding_kind_type` (`20.hir/hir_lowering/statements.spl:112`) returns
   through explicit `return X ?? unknown`, not through a tail join. Re-census
@@ -163,9 +163,23 @@ Fixture: `test/fixtures/native_generic_enum_struct_payload_bind/main.spl`
 In the llvm disassembly, the Full arm calls `rt_enum_payload` and then returns
 an uninitialized stack slot. `item.id` is never emitted into the result.
 
-Suspect: `decode_declared_enum_payload_slot` decodes with the uninstantiated
-`T` (`switch_operators_calls.spl` about line 5076). Substitution to `Lid`
-(about line 5100) is metadata only.
+Root cause:
+- The single-binder enum arm (`switch_operators_calls.spl`, around line
+  5106) decodes the payload through the declared slot `T`.
+- The substitution to `Lid` (around line 5130) only remembers the HIR type.
+- Field access resolves its owner through `struct_value_syms`, which only the
+  Named decode sets.
+- So `item.id` lowered to a `GetField` with a Unit dest. The arm copied
+  nothing into the match result, as seed MIR shows.
+
+Fix (`24229da9238`): when the declared slot is a TypeParam and its
+instantiation is Named, re-run `decode_declared_enum_payload_slot` with the
+instantiated type. For a record word this emits no instruction; it only tags
+the owner. Scalar instantiations keep the `T` decode.
+
+Guard: `test/01_unit/compiler/mir/generic_enum_record_payload_field_bind_spec.spl`,
+seed 0/1 without the fix and 1/1 with it. The multi-binder path (around line
+5315) is not changed.
 
 ## Defect C: generic user-enum unit variant fails the identity check
 
@@ -173,6 +187,44 @@ Fixture: `test/fixtures/native_generic_enum_unit_variant_match/main.spl`
 
 `Box.Empty` (from `val e: Box<text> = Box.Empty`) panics with "total enum match
 fell through on 'Box'" on both backends. The seed prints `D <empty>`.
+
+Root cause, measured with gdb on the integ2 Stage 2 compiling the fixture:
+- `Full` goes through `lower_enum_construct_named("main.Box")`, then
+  `enum_runtime_id` takes the qualified branch and returns `0x69610c43`
+  (`hm_hash("main.Box")`). That is correct.
+- `Empty` goes through `lower_enum_construct_named("Box")`, then the bare
+  branch `val found = index.get(k); if found != None: return found`. It
+  returned `0x2af1b71`, which varies per run.
+- The Stage 2 code for that `return found` is `rt_value_unbox_int(<Option
+  handle>)`, not an unwrap.
+- Release MIR lowering of the same shape unwraps with `rt_unwrap_or_trap`
+  in both HIR modes on the seed. The miscompile is in the shipped Stage 2,
+  so it is fixed at the source.
+
+Fix (`5deef7d3d5c`): `enum_runtime_id` reads the bare map with `has()` and
+an index, as its own comment already requires. Census twin: `da943b32365`
+(`bitfield_type_sym_for`). Native red/green needs the Stage 2 rebuild; the
+seed already printed the right answer.
+
+## Explicit `return <T?>` from `-> T`
+
+`fn direct(n) -> Lid: return pick(n)` returned pick's Option handle. Fix
+`29ec0f8506e` applies the tail narrow in `lower_return_expr`:
+`rt_unwrap_or_trap`, so None aborts and nil is never widened. Seed spec goes
+from 3/4 to 4/4.
+
+## Census of compiler source (2026-11-16, awk heuristic)
+
+| class | hits |
+|---|---|
+| `-> T` whose tail `match`/`if` has an arm ending in a call to an unambiguously named `-> T?` function | `lower_expr_impl` only (CfgSelect and InlineAsmMatch arms, workaround `d648234f1fb`) |
+| `val x = d.get(k)` ... `return x` from a non-optional return | `enum_runtime_id` (`5deef7d3d5c`) and `bitfield_type_sym_for` (`da943b32365`) |
+
+- Validation: on the pre-workaround tree (`d648234f1fb~1`), the tail
+  heuristic finds the two known `lower_expr_impl` arms.
+- False positives, inspected and excluded: 3, all `val x = if ...` bindings.
+- Not covered: arms that are a `T?` local, arms calling ambiguously named
+  functions, and the `SIMPLE_BOOTSTRAP=1` shape.
 
 ## Separate, noted only
 
