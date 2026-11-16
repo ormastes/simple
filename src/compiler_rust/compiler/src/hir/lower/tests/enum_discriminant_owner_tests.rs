@@ -257,7 +257,7 @@ fn probe_ok(p: Probe6953) -> bool:\n    p.is_ok()\n";
 fn is_ok_on_a_user_enum_tests_its_own_declared_index() {
     let (_hir, mir) = lower_entry(&[], USER_OK);
     let function = mir.functions.iter().find(|f| f.name == "probe_ok").expect("probe_ok lowered");
-    let mut consts: Vec<i64> = function
+    let consts: Vec<i64> = function
         .blocks
         .iter()
         .flat_map(|block| block.instructions.iter())
@@ -266,7 +266,24 @@ fn is_ok_on_a_user_enum_tests_its_own_declared_index() {
             _ => None,
         })
         .collect();
-    // [Probe6953's enum id, tested discriminant]: the discriminant must be
-    // Probe6953.Ok's declared index 1, not the builtin Result.Ok's 0.
-    assert!(consts.contains(&1) && !consts.contains(&0), "consts {consts:?}");
+    // rt_enum_check_variant(p, <Probe6953's enum id>, <discriminant>): the
+    // discriminant must be Probe6953.Ok's declared index 1, not Result.Ok's 0.
+    let probe_id = i64::from(crate::codegen::shared::enum_runtime_type_id("Probe6953"));
+    assert_eq!(consts, vec![probe_id, 1]);
+}
+
+/// `quic_udp_socket.UdpResult` declares `Err` at 2. A module that sees it and
+/// handles an UNTYPED builtin Result (`r.is_err()`, `case Err(e):`) must still
+/// test the builtin Result's 1 -- an erased subject is not a user enum.
+const ERASED_BUILTIN_RESULT: &str = "enum UdpResult6953:\n    Pending6953\n    Sent6953\n    Err(code: i64)\n\n\
+fn erased_is_err() -> bool:\n    val xs = []\n    val r = xs[0]\n    r.is_err()\n\n\
+fn erased_is_ok() -> bool:\n    val xs = []\n    val r = xs[0]\n    r.is_ok()\n\n\
+fn erased_case() -> i64:\n    val xs = []\n    val r = xs[0]\n    match r:\n        case Ok(v): 0\n        case Err(e): 1\n";
+
+#[test]
+fn erased_subject_with_builtin_variant_names_tests_the_builtin_index() {
+    let (hir, _mir) = lower_entry(&[], ERASED_BUILTIN_RESULT);
+    assert_eq!(tested_discriminants(&hir, "erased_is_err"), vec![1]);
+    assert_eq!(tested_discriminants(&hir, "erased_is_ok"), vec![0]);
+    assert_eq!(tested_discriminants(&hir, "erased_case"), vec![0, 1]);
 }
