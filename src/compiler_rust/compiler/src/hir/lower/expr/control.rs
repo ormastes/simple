@@ -2819,9 +2819,7 @@ impl Lowerer {
             }
         };
         let condition = if result_like {
-            let err_disc: i64 = {
-                simple_runtime::value::hash_variant_discriminant("Err") as i64
-            };
+            let err_disc: i64 = self.owner_variant_discriminant(subject_ty, None, "Err", "hir result-like presence");
             let is_err = HirExpr {
                 kind: HirExprKind::BuiltinCall {
                     name: "rt_enum_check_variant".to_string(),
@@ -3785,10 +3783,9 @@ impl Lowerer {
             });
         }
 
-        // Hashed "Err" discriminant — same convention as match lowering.
-        let err_disc: i64 = {
-            simple_runtime::value::hash_variant_discriminant("Err") as i64
-        };
+        // The subject's own `Err` index (#6953): a typed user enum may declare
+        // `Err` anywhere; an unresolved subject is the builtin Result (1).
+        let err_disc: i64 = self.owner_variant_discriminant(subject_ty, None, "Err", "hir ? operator");
 
         let is_err = HirExpr {
             kind: HirExprKind::BuiltinCall {

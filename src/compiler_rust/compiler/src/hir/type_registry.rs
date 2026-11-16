@@ -309,7 +309,8 @@ impl TypeRegistry {
             "Some" | "None" => builtin_owner_discriminant("Option", variant),
             _ => None,
         };
-        if builtin.is_some() {
+        if let Some(index) = builtin {
+            self.report_builtin_assumed_over_user_enum(variant, index);
             return builtin;
         }
         let mut agreed: Option<i64> = None;
@@ -331,6 +332,33 @@ impl TypeRegistry {
             }
         }
         agreed
+    }
+
+    /// Non-fatal (strict-safe) note when an unresolved builtin variant name is
+    /// lowered as the builtin while a visible user enum declares it elsewhere,
+    /// e.g. a bare `case None:` beside `TraceLevel.None` = 0. Once per variant.
+    fn report_builtin_assumed_over_user_enum(&self, variant: &str, builtin: i64) {
+        static REPORTED: std::sync::OnceLock<dashmap::DashSet<String>> = std::sync::OnceLock::new();
+        let reported = REPORTED.get_or_init(dashmap::DashSet::new);
+        if reported.contains(variant) {
+            return;
+        }
+        let disagreeing = self.types.iter().find_map(|(id, ty)| match ty {
+            HirType::Enum { name, variants, .. } if !self.merged_enum_ids.contains(id) => {
+                simple_runtime::value::declared_variant_discriminant(variants.iter().map(|(n, _)| n.as_str()), variant)
+                    .filter(|&index| i64::from(index) != builtin)
+                    .map(|index| (name.clone(), index))
+            }
+            _ => None,
+        });
+        if let Some((enum_name, index)) = disagreeing {
+            if reported.insert(variant.to_string()) {
+                eprintln!(
+                    "warning[enum-discriminant-builtin-assumed]: variant `{variant}` with no resolvable owner lowered \
+                     as builtin ({builtin}); visible enum `{enum_name}` declares it at {index} (see #6953)"
+                );
+            }
+        }
     }
 
     fn declared_index_through(&self, ty: TypeId, variant: &str, depth: u8) -> Option<i64> {
