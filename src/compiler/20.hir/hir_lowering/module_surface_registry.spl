@@ -2,8 +2,11 @@ use compiler.common.library_mode_policy_v1.{library_mode_policy_v1}
 # Module-surface registry construction and compatibility lookup.
 
 use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.cache.visibility_manifest_read_v1.{VisibilityManifestEvidenceV1, VisibilityManifestReadV1}
+use compiler.common.cache.visibility_manifest_policy_v1.{VisibilityManifestPolicyV1}
+use compiler.common.dependency.visibility.{Visibility}
 use compiler.frontend.parser_types.*
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceBuilder, ModuleSurfacesByName, ModuleSurfaceCallable, ModuleSurfaceComposite, ModuleSurfaceEnum, ModuleSurfaceTrait, ModuleSurfaceTypeAlias, ModuleSurfaceConst, ModuleSurfaceImpl}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceBuilder, ModuleSurfacesByName, ModuleSurfaceCallable, ModuleSurfaceComposite, ModuleSurfaceEnum, ModuleSurfaceTrait, ModuleSurfaceTypeAlias, ModuleSurfaceConst, ModuleSurfaceImpl, ModuleSurfaceSelectedExportIndexV1, ModuleSurfaceExportOriginIndex, ModuleSurfaceExportOrigin, ModuleSurfaceDeclarationAuthorityIndex}
 use compiler.common.cache.native_resolution_trace.{NativeResolutionTraceV1}
 use compiler.hir.hir_lowering.module_surface_declarations.{module_surface_from_module}
 use compiler.hir.hir_lowering.module_surface_export_index.{module_surface_name_index_build}
@@ -34,6 +37,39 @@ enum ModuleSurfaceRoot:
     Impls([ModuleSurfaceImpl])
     Surface(ModuleSurface)
     Registry(ModuleSurfacesByName)
+    SelectedExports(ModuleSurfaceSelectedExportIndexV1)
+    ExportOrigins(ModuleSurfaceExportOriginIndex)
+    ExportOriginMap(Dict<text, ModuleSurfaceExportOrigin>)
+    DeclarationAuthority(ModuleSurfaceDeclarationAuthorityIndex)
+    TextIndex(Dict<text, i64>)
+    Visibilities([Visibility])
+    ManifestEvidence(VisibilityManifestEvidenceV1)
+    ManifestReads([VisibilityManifestReadV1])
+    ManifestPolicies([VisibilityManifestPolicyV1])
+    ManifestPolicy(VisibilityManifestPolicyV1)
+
+fn module_surface_manifest_roots_v1(evidence: VisibilityManifestEvidenceV1) -> [ModuleSurfaceRoot]:
+    var roots = [ModuleSurfaceRoot.ManifestEvidence(evidence),
+        ModuleSurfaceRoot.ManifestReads(evidence.reads),
+        ModuleSurfaceRoot.ManifestPolicies(evidence.policies),
+        ModuleSurfaceRoot.Texts([evidence.root, evidence.snapshot_id, evidence.reason])]
+    for read in evidence.reads:
+        roots.push(ModuleSurfaceRoot.Texts([read.source_path, read.directory_path,
+            read.manifest_path, read.content_sha256, read.snapshot_id]))
+    for policy in evidence.policies:
+        roots.push(ModuleSurfaceRoot.ManifestPolicy(policy))
+        roots.push(ModuleSurfaceRoot.Texts([policy.source_path, policy.directory_path,
+            policy.coverage_root, policy.content_sha256, policy.snapshot_id,
+            policy.dimension, policy.layer, policy.frontend_identity, policy.parser_provider_id,
+            policy.frontend_route, policy.advisory_policy, policy.advisory_identity,
+            policy.target_triple, policy.preprocessed_source_sha256, policy.cfg_source_identity,
+            policy.cfg_preprocessed_sha256, policy.cfg_decision_digest]))
+        for values in [policy.expose_paths, policy.child_names, policy.child_visibilities,
+                policy.child_modifiers, policy.friend_modules, policy.internal_exports,
+                policy.child_target_paths, policy.child_target_sha256, policy.child_target_kinds,
+                policy.child_resolution_outcomes]:
+            roots.push(ModuleSurfaceRoot.Texts(values))
+    roots
 
 fn module_surface_promote_roots(roots: [ModuleSurfaceRoot]) -> bool:
     val promoted = rt_transient_heap_promote(roots)
@@ -460,9 +496,6 @@ pub fn module_surfaces_from_modules(modules: Dict<text, ParserModule>, sources: 
             builder.surfaces[matching_index].canonical_name)
         if alias_result.is_err():
             return Err(alias_result.unwrap_err())
-    val origin_result = builder.resolve_export_origins()
-    if origin_result.is_err():
-        return Err(origin_result.unwrap_err())
     builder.finish()
 
 pub fn module_surface_promote(surface: ModuleSurface) -> bool:
@@ -497,9 +530,10 @@ pub fn module_surface_promote(surface: ModuleSurface) -> bool:
     roots.push(ModuleSurfaceRoot.Texts(origin_index.source_names))
     roots.push(ModuleSurfaceRoot.Texts(origin_index.resolution_kinds))
     roots.push(ModuleSurfaceRoot.Surface(surface))
+    for root in module_surface_manifest_roots_v1(surface.visibility_manifest_evidence_v1): roots.push(root)
     module_surface_promote_roots(roots)
 
-fn module_surface_promote_fields(surface: ModuleSurface):
+fn module_surface_promote_fields(surface: ModuleSurface) -> bool:
     """Promote every retained surface field. No per-field verdict is decidable.
 
     From `6a49e75efe0`: the 24-way `promote(a) or promote(b) or ...` chain this
@@ -532,12 +566,11 @@ fn module_surface_promote_fields(surface: ModuleSurface):
     on the very first field of the very first surface — measured on macOS run
     34 as `field composite_names of surface[0]`.
 
-    So the promotes are the work and stay; no per-field failure signal exists to
-    report. Fail-closed coverage is not lost: the registry root carrier below is
-    a freshly built `[ModuleSurfaceRoot]` whose promote verdict IS meaningful, and the driver
-    runs `module_surfaces_retained_alignment_error` AFTER
-    `_sffi_transient_array_scope_end()`, which reads the names back out of the
-    dead scope — the real post-condition, at the only moment it means anything.
+    Individual already-retained fields still do not supply a failure signal.
+    The batched fields carrier, however, is freshly allocated in this scope.
+    Its promotion result is meaningful and must reach the caller: the later
+    registry carrier can prune old parents and cannot prove these new children
+    survived. The driver also checks retained alignment after scope teardown.
 
     Linux S3-1 (2026-09-14, doc/08_tracking/bug/
     stage3_phase2_surface_stall_after_huffman_46gb_2026-09-14.md): on the real
@@ -563,6 +596,7 @@ fn module_surface_promote_fields(surface: ModuleSurface):
     `test/01_unit/compiler/hir/module_surface_promote_field_batching_spec.spl`.
     """
     var fields: [ModuleSurfaceRoot] = []
+    for root in module_surface_manifest_roots_v1(surface.visibility_manifest_evidence_v1): fields.push(root)
     fields.push(ModuleSurfaceRoot.Texts(surface.composite_names))
     fields.push(ModuleSurfaceRoot.Texts(surface.enum_names))
     fields.push(ModuleSurfaceRoot.Texts(surface.trait_names))
@@ -587,7 +621,31 @@ fn module_surface_promote_fields(surface: ModuleSurface):
     fields.push(ModuleSurfaceRoot.Ints(surface.export_route_target_indices))
     fields.push(ModuleSurfaceRoot.Texts(surface.export_route_target_names))
     fields.push(ModuleSurfaceRoot.Bools(surface.export_route_is_glob))
-    val _promoted = rt_transient_heap_promote(fields)
+    fields.push(ModuleSurfaceRoot.Ints(surface.export_route_rows_v1))
+    fields.push(ModuleSurfaceRoot.Ints(surface.export_route_items_v1))
+    # Freeze creates the selected projection and may extend old authority
+    # arrays. An already retained raw surface/class is not a traversal root
+    # for these new children; retain both carriers and their child owners.
+    val origins = surface.export_origin_index
+    fields.push(ModuleSurfaceRoot.ExportOrigins(origins))
+    fields.push(ModuleSurfaceRoot.ExportOriginMap(origins.origins))
+    fields.push(ModuleSurfaceRoot.TextIndex(origins.index_by_name))
+    fields.push(ModuleSurfaceRoot.Texts(origins.names))
+    fields.push(ModuleSurfaceRoot.Texts(origins.owner_modules))
+    fields.push(ModuleSurfaceRoot.Texts(origins.source_names))
+    fields.push(ModuleSurfaceRoot.Texts(origins.resolution_kinds))
+    val authority = surface.declaration_authority_index
+    fields.push(ModuleSurfaceRoot.DeclarationAuthority(authority))
+    fields.push(ModuleSurfaceRoot.TextIndex(authority.index_by_name))
+    fields.push(ModuleSurfaceRoot.TextIndex(authority.index_by_binding))
+    fields.push(ModuleSurfaceRoot.Texts(authority.names))
+    fields.push(ModuleSurfaceRoot.Texts(authority.declaring_modules))
+    fields.push(ModuleSurfaceRoot.Texts(authority.source_names))
+    fields.push(ModuleSurfaceRoot.Visibilities(authority.visibilities))
+    fields.push(ModuleSurfaceRoot.Texts(authority.source_modifiers))
+    fields.push(ModuleSurfaceRoot.Texts(authority.source_paths))
+    fields.push(ModuleSurfaceRoot.Texts(authority.projection_keys))
+    rt_transient_heap_promote(fields)
 
 fn module_surface_promote_scope_sentinel() -> bool:
     """Promote a freshly built carrier to tell a scope/linkage fault from a field fault.
@@ -631,10 +689,36 @@ pub fn module_surfaces_promote_reason(registry: ModuleSurfacesByName) -> text:
     var surface_index = 0
     while surface_index < registry.surfaces.len():
         val surface = registry.surfaces[surface_index]
-        module_surface_promote_fields(surface)
+        if not module_surface_promote_fields(surface):
+            return "surface field root carrier failed: index={surface_index}"
         module_surface_promote_freeze_names(surface)
         surface_index = surface_index + 1
     if registry.library_mode != "": roots.push(ModuleSurfaceRoot.Texts([registry.library_mode]))
+    val selected = registry.selected_exports_v1
+    roots.push(ModuleSurfaceRoot.SelectedExports(selected))
+    roots.push(ModuleSurfaceRoot.Ints(selected.source_surfaces))
+    roots.push(ModuleSurfaceRoot.Ints(selected.roles))
+    roots.push(ModuleSurfaceRoot.Texts(selected.categories))
+    roots.push(ModuleSurfaceRoot.Texts(selected.names))
+    roots.push(ModuleSurfaceRoot.Ints(selected.states))
+    roots.push(ModuleSurfaceRoot.Ints(selected.terminal_surfaces))
+    roots.push(ModuleSurfaceRoot.Texts(selected.terminal_names))
+    roots.push(ModuleSurfaceRoot.Texts(selected.terminal_projections))
+    roots.push(ModuleSurfaceRoot.Ints(selected.tiers))
+    roots.push(ModuleSurfaceRoot.Ints(selected.hop_starts))
+    roots.push(ModuleSurfaceRoot.Ints(selected.hop_counts))
+    roots.push(ModuleSurfaceRoot.Ints(selected.hop_sources))
+    roots.push(ModuleSurfaceRoot.Ints(selected.hop_kinds))
+    roots.push(ModuleSurfaceRoot.Ints(selected.hop_targets))
+    roots.push(ModuleSurfaceRoot.Ints(selected.hop_import_rows))
+    roots.push(ModuleSurfaceRoot.Ints(selected.hop_import_items))
+    roots.push(ModuleSurfaceRoot.Ints(selected.hop_export_rows))
+    roots.push(ModuleSurfaceRoot.Ints(selected.hop_export_items))
+    roots.push(ModuleSurfaceRoot.Ints(selected.hop_export_routes))
+    roots.push(ModuleSurfaceRoot.Texts(selected.lookup_keys))
+    roots.push(ModuleSurfaceRoot.Ints(selected.lookup_rows))
+    roots.push(ModuleSurfaceRoot.Texts(selected.surface_digests))
+    roots.push(ModuleSurfaceRoot.Texts([selected.route_generation, selected.snapshot_digest, registry.configured_route_generation_v1]))
     roots.push(ModuleSurfaceRoot.Registry(registry))
     if not module_surface_promote_roots(roots):
         return "registry root carrier (scope sentinel promote={sentinel}, surfaces={registry.surfaces.len()} names={registry.ordered_names.len()} indices={registry.ordered_indices.len()} dict={registry.index_by_name.len()})"

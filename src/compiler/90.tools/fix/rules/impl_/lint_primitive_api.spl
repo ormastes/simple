@@ -172,7 +172,7 @@ pub fn primitive_api_findings(file: text, lines: [text]) -> [PrimitiveApiFinding
         var seg_start = paren + 1
         for param in params:
             val param_type = _extract_param_type(param)
-            if _is_bare_primitive_type(param_type):
+            if _is_bare_primitive_type(param_type) or _is_domain_text(_extract_param_name(param), param_type):
                 val param_name = _extract_param_name(param)
                 val colon = param.find(":")
                 val ty_col = seg_start + colon + 1 + _leading_ws_len(param.slice(colon + 1))
@@ -183,7 +183,7 @@ pub fn primitive_api_findings(file: text, lines: [text]) -> [PrimitiveApiFinding
                 seen.push(_finding_key(f))
             seg_start = seg_start + param.len() + 1
 
-        if _is_bare_primitive_type(return_type):
+        if _is_bare_primitive_type(return_type) or _is_domain_text(item_name, return_type):
             val arrow = trimmed.find("->")
             val ty_col = arrow + 2 + _leading_ws_len(trimmed.slice(arrow + 2))
             val f = _finding(file, "{item_name}.return", item_name, return_type,
@@ -201,7 +201,7 @@ fn _finding(file: text, type_path: text, name: text, ty: text, line: i64, col0: 
     val symbol = type_path.slice(0, type_path.find("."))
     val span = Span.new(line_start + col0, line_start + col0 + ty.len(), line, col0 + 1)
     PrimitiveApiFinding(
-        code: "primitive_api",
+        code: if ty == "bool": "SPL-BOOL-001" else: if _is_text_family(ty): "SPL-TEXT-001" else: "primitive_api",
         file: file,
         symbol: symbol,
         type_path: type_path,
@@ -211,7 +211,7 @@ fn _finding(file: text, type_path: text, name: text, ty: text, line: i64, col0: 
         start: line_start + col0,
         end: line_start + col0 + ty.len(),
         message: message,
-        help: "replace '{ty}' with a semantic unit/domain type (e.g. `unit {_suggest_wrapper_name(symbol, ty)}: {ty}`), or add `@allow(primitive_api)` with a reason at an ABI/math boundary",
+        help: if _is_text_family(ty): _text_domain_help(name) else: "replace '{ty}' with a semantic unit/domain type (e.g. `unit {_suggest_wrapper_name(symbol, ty)}: {ty}`), or add `@allow(primitive_api)` with a reason at an ABI/math boundary",
         fixes: _ranked_type_fixes(file, type_path, name, ty, span)
     )
 
@@ -349,6 +349,9 @@ fn _all_same_primitive(types: [text]) -> bool:
     val first = types[0]
     if not _is_bare_primitive_type(first):
         return false
+    # SPL-BOOL-001: a public bool is never a pure-math shape.
+    if first == "bool":
+        return false
     for ty in types:
         if ty != first:
             return false
@@ -476,6 +479,35 @@ fn _extract_return_type(line: text) -> text:
     if colon_pos < 0:
         return after_arrow.trim()
     after_arrow.slice(0, colon_pos).trim()
+
+fn _is_text_family(ty: text) -> bool:
+    ty == "text" or ty == "str" or ty == "String"
+
+# SPL-TEXT-001 (name-based first version): [domain name, suggested domain type].
+# A public text param/return is flagged only when its NAME is one of these or
+# ends in `_<name>`; text with any other name is still not flagged.
+fn _text_domain_table() -> [[text]]:
+    [["url", "Url"], ["uri", "Url"], ["path", "Path"],
+     ["host", "HostName"], ["hostname", "HostName"],
+     ["sql", "SqlText"], ["query", "SqlText"], ["html", "HtmlText"],
+     ["digest", "Sha256Hex"], ["hash", "Sha256Hex"],
+     ["token", "Secret"], ["secret", "Secret"], ["password", "Secret"], ["key", "Secret"],
+     ["cmd", "CommandLine"], ["command", "CommandLine"]]
+
+fn _text_domain_of(name: text) -> [text]:
+    for row in _text_domain_table():
+        if name == row[0] or name.ends_with("_" + row[0]):
+            return row
+    []
+
+fn _is_domain_text(name: text, ty: text) -> bool:
+    _is_text_family(ty) and _text_domain_of(name).len() > 0
+
+fn _text_domain_help(name: text) -> text:
+    val row = _text_domain_of(name)
+    val domain = if row.len() > 0: row[0] else: "domain"
+    val ty = if row.len() > 0: row[1] else: "a domain type"
+    "SPL-TEXT-001 (name-based heuristic: '{name}' reads as a {domain}): use {ty} (or another std.common.types domain type / `unit X: text`) instead of bare text, or add `@allow(primitive_api)` with a reason"
 
 fn _is_bare_primitive_type(ty: text) -> bool:
     for primitive in primitive_api_types():

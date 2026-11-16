@@ -4,11 +4,11 @@
 # section 3.2. C `int`/`long` are resolved through the target ABI table
 # (c_scalar_underlying in 30.types/custom_primitive_info.spl), never hardcoded.
 #
-# Declaration form: an annotation line directly above the extern fn,
-#   @c_abi(DistanceKm: "int64_t", Flags: "unsigned int")
-# naming each unit used in the signature and the C scalar it carries. Not yet
-# wired into the lint registry because the target triple is an input, not a
-# source property.
+# Declaration form (owner decision 3B, 2026-11-16): the C type is declared on
+# the unit itself, `@c_abi("int32_t") unit Fd: i32 as fd` (or the decorator on
+# the line above), and checked at every `extern fn` line naming that unit.
+# Deprecated alias for one release: a separate `@c_abi(Unit: "ctype")` line
+# above the extern fn; sffi_abi_deprecation_notes reports each use.
 
 use compiler.semantics.lint.lint_text.{code_line_snapshot, CodeLine}
 use compiler.types.custom_primitive_info.{c_scalar_underlying, c_target_data_model}
@@ -77,6 +77,70 @@ fn _sam_compare(unit_name: text, unit_prim: text, c_type: text, c_prim: text, tr
         return head + " (signedness mismatch)"
     head + " (type class mismatch)"
 
+fn _sam_strip_decl_abi(line: text) -> [text]:
+    # `@c_abi("ctype") rest` -> ["ctype", rest]; `@c_abi("ctype")` alone -> ["ctype", ""].
+    # The alias form `@c_abi(Unit: "ctype")` is not this form -> [].
+    if not line.starts_with("@c_abi(\""):
+        return []
+    val close = line.find("\")")
+    if close < 8:
+        return []
+    val inner = line.substring(8, close)
+    if inner.contains(":") or inner.contains("\""):
+        return []
+    [inner, line.substring(close + 2, line.byte_len()).trim()]
+
+fn _sam_is_alias_line(t: text) -> bool:
+    t.starts_with("@c_abi(") and t.ends_with(")") and _sam_strip_decl_abi(t).len() == 0
+
+fn _sam_is_extern_line(t: text) -> bool:
+    t.starts_with("extern fn ") or t.starts_with("pub extern fn ")
+
+fn _sam_depth(line: text) -> i64:
+    # Net open `(`/`<` minus close `)`/`>`, ignoring the `->` arrow.
+    val s = line.replace("->", "  ")
+    var d = 0
+    var k = 0
+    while k < s.byte_len():
+        val c = s.substring(k, k + 1)
+        if c == "(" or c == "<":
+            d = d + 1
+        elif c == ")" or c == ">":
+            d = d - 1
+        k = k + 1
+    d
+
+fn _sam_ident_char(c: text) -> bool:
+    c != "" and "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".contains(c)
+
+fn _sam_has_word(line: text, word: text) -> bool:
+    var start = 0
+    val n = line.byte_len()
+    while start < n:
+        val rel = line.substring(start, n).find(word)
+        if rel < 0:
+            return false
+        val at = start + rel
+        val end = at + word.byte_len()
+        val before_ok = at == 0 or not _sam_ident_char(line.substring(at - 1, at))
+        val after_ok = end >= n or not _sam_ident_char(line.substring(end, end + 1))
+        if before_ok and after_ok:
+            return true
+        start = at + 1
+    false
+
+pub fn sffi_abi_deprecation_notes(source: text) -> [SffiAbiFinding]:
+    # The separate `@c_abi(Unit: "ctype")` line is a deprecated alias for one
+    # release (owner decision 3B, 2026-11-16); declare the C type on the unit.
+    var notes: [SffiAbiFinding] = []
+    val lines = code_line_snapshot(source).lines
+    var i = 0
+    while i < lines.len():
+        if _sam_is_alias_line(lines[i].trimmed):
+            notes.push(SffiAbiFinding(code: "SPL-SFFI-ABI-001", message: "deprecated `@c_abi(Unit: \"ctype\")` form: declare the C type on the unit, e.g. `@c_abi(\"int32_t\") unit Fd: i32 as fd`", line_num: i + 1))
+        i = i + 1
+    notes
+
 pub fn check_sffi_abi_mismatch(source: text, file_path: text, triple: text) -> [SffiAbiFinding]:
     var findings: [SffiAbiFinding] = []
     if file_path.contains("/vendor/"):
@@ -85,17 +149,67 @@ pub fn check_sffi_abi_mismatch(source: text, file_path: text, triple: text) -> [
     var unit_names: [text] = []
     var unit_prims: [text] = []
     var imported: [text] = []
+    # Units carrying their C type on the declaration (`@c_abi("ctype") unit ...`).
+    var abi_names: [text] = []
+    var abi_prims: [text] = []
+    var abi_ctypes: [text] = []
+    var pending_ctype = ""
     for line in lines:
         for n in _sam_import_names(line.trimmed):
             imported.push(n)
-        val d = _sam_unit_decl(line.trimmed)
+        var decl_line = line.trimmed
+        var ctype = ""
+        val deco = _sam_strip_decl_abi(decl_line)
+        if deco.len() == 2:
+            ctype = deco[0]
+            decl_line = deco[1]
+            if decl_line == "":
+                pending_ctype = ctype
+                continue
+        elif pending_ctype != "":
+            ctype = pending_ctype
+        if decl_line != "":
+            pending_ctype = ""
+        val d = _sam_unit_decl(decl_line)
         if d.len() == 2:
             unit_names.push(d[0])
             unit_prims.push(d[1])
+            if ctype != "":
+                abi_names.push(d[0])
+                abi_prims.push(d[1])
+                abi_ctypes.push(ctype)
     var i = 0
     while i < lines.len():
-        val t = lines[i].trimmed
-        if not t.starts_with("@c_abi(") or not t.ends_with(")"):
+        var t = lines[i].trimmed
+        if abi_names.len() > 0 and _sam_is_extern_line(t):
+            # Join a multi-line signature: until parens/angles balance and no
+            # `->` return type is pending on the next line.
+            val start = i
+            var depth = _sam_depth(t)
+            while i + 1 < lines.len() and (depth > 0 or t.ends_with("->") or lines[i + 1].trimmed.starts_with("->")):
+                i = i + 1
+                t = t + " " + lines[i].trimmed
+                depth = depth + _sam_depth(lines[i].trimmed)
+            val sig_end = i
+            i = start
+            if c_target_data_model(triple) == "":
+                findings.push(SffiAbiFinding(code: "SPL-SFFI-ABI-001", message: "unknown target `{triple}`: cannot resolve the C ABI, refusing to default", line_num: i + 1))
+                i = i + 1
+                continue
+            var a = 0
+            while a < abi_names.len():
+                if _sam_has_word(t, abi_names[a]):
+                    val c_prim = c_scalar_underlying(abi_ctypes[a], triple)
+                    if c_prim == "":
+                        findings.push(SffiAbiFinding(code: "SPL-SFFI-ABI-001", message: "C type `{abi_ctypes[a]}` for unit `{abi_names[a]}` is not a known scalar on {triple}", line_num: i + 1))
+                    else:
+                        val msg = _sam_compare(abi_names[a], abi_prims[a], abi_ctypes[a], c_prim, triple)
+                        if msg != "":
+                            findings.push(SffiAbiFinding(code: "SPL-SFFI-ABI-001", message: msg, line_num: i + 1))
+                a = a + 1
+            i = sig_end + 1
+            continue
+        if not _sam_is_alias_line(t):
             i = i + 1
             continue
         if c_target_data_model(triple) == "":

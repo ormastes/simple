@@ -1,0 +1,196 @@
+"""
+## Purpose and audience
+Purpose: Pin that `direction:rtl` keeps Latin text in its logical order and
+only changes alignment and anchoring, as Chrome 159 does (Unicode bidi).
+The engine used to reverse every glyph of an RTL run, so `ABC` painted as
+`CBA`. Right-to-left script is still reversed, and a neutral at a run edge
+takes the paragraph direction.
+Audience: browser-engine text paint, Draw IR and input overlay maintainers.
+
+Chrome oracle (Chrome 159, `--headless --dump-dom` + `--screenshot`,
+900x2000 / 300x200, 2026-11-16). Each line is a 96px block,
+`font:8px Arial`; x is `Range.getBoundingClientRect` per character:
+
+| line                    | Chrome 159 character x (logical order)   | visual order |
+|-------------------------|------------------------------------------|--------------|
+| `ABC`                   | A 0, B 5.33, C 10.67; ink 0..15           | ABC          |
+| `ABC`, rtl              | A 79.55, B 84.88, C 90.22; ink 79..95     | ABC          |
+| `ABC!`, rtl             | A 79.55, B 84.88, C 90.22, `!` 77.31      | !ABC         |
+| `אבC`, rtl              | א 90.97, ב 86.19, C 80.41                 | Cבא          |
+| `abé`, rtl, carets 0..3 | 82.64, 87.08, 91.53, 95.98 (ascending)    | abé          |
+
+A 60px rtl `<input value=ABCDE>` (border-box, 2px padding, 1px border)
+inks columns 29..56: logical order, end-aligned at the content right 57.
+
+Filed in doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(`rtl_latin_reversal`).
+"""
+
+"""
+Traceability: REQ-WEB-RENDER-001 — direction:rtl keeps Latin text in logical order.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_primitives.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.nogc_sync_mut.io.env_ops.{env_set}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir,
+    simple_web_layout_render_html_software_pixels
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels,
+    simple_web_render_html_to_readback_with_engine2d_backend,
+    simple_web_resolved_engine2d_backend_name
+}
+
+val W: i32 = 96
+val H: i32 = 64
+
+val PAGE: text = "<html><head><style>html,body{{margin:0;padding:0;background:#fff}}" +
+    " div{{font-family:Arial;font-size:8px;color:#111827;width:96px;height:12px}}" +
+    " .r{{direction:rtl}}" +
+    " input{{display:block;box-sizing:border-box;width:60px;height:16px;padding:2px;" +
+    "border:1px solid #fff;color:#111827;background:#fff;font-family:Arial;font-size:8px;outline:none}}" +
+    "</style></head><body><div id=l>ABC</div><div id=r class=r>ABC</div>" +
+    "<div id=e class=r>ABC!</div><div id=h class=r>אבC</div>" +
+    "<input id=q class=r value=ABCDE></body></html>"
+
+fn _texts() -> [text]:
+    val composition = simple_web_layout_render_html_draw_ir(PAGE, W, H)
+    var out: [text] = []
+    for c in composition.batches[0].commands:
+        if c.kind == "text":
+            out.push(c.text_value)
+    out
+
+fn _value_text(id: text) -> text:
+    val composition = simple_web_layout_render_html_draw_ir(PAGE, W, H)
+    for c in composition.batches[0].commands:
+        if c.component_id == id + "_value":
+            return c.text_value
+    "missing " + id + "_value"
+
+fn _dark(p: u32) -> bool:
+    ((p >> 8) & 0xFFu32) < 0xC0u32
+
+# Leftmost inked column in rows [y0, y0+h), or -1.
+fn _first_col(pixels: [u32], y0: i32, h: i32) -> i32:
+    var x = 0
+    while x < W:
+        var y = y0
+        while y < y0 + h:
+            if _dark(pixels[y * W + x]):
+                return x
+            y = y + 1
+        x = x + 1
+    -1
+
+fn _last_col(pixels: [u32], y0: i32, h: i32) -> i32:
+    var x = W - 1
+    while x >= 0:
+        var y = y0
+        while y < y0 + h:
+            if _dark(pixels[y * W + x]):
+                return x
+            y = y + 1
+        x = x - 1
+    -1
+
+# The rtl row's ink is the ltr row's ink moved right: every pixel matches
+# after shifting by the difference of the first inked columns. A reversed
+# `CBA` run fails this (different glyph order, same ink count). Columns
+# shifted past the viewport are not compared: the engine inks one column
+# past its measured run (ltr ink 1..16 for a 16px run), so an end-aligned
+# run loses that column at x=96.
+fn _same_shape_shifted(pixels: [u32], ltr_y: i32, rtl_y: i32, h: i32) -> bool:
+    val dx = _first_col(pixels, rtl_y, h) - _first_col(pixels, ltr_y, h)
+    if dx <= 0:
+        return false
+    var y = 0
+    while y < h:
+        var x = 0
+        while x < W:
+            val a = _dark(pixels[(ltr_y + y) * W + x])
+            val sx = x + dx
+            if sx < W and a != _dark(pixels[(rtl_y + y) * W + sx]):
+                return false
+            x = x + 1
+        y = y + 1
+    true
+
+fn _check_pixels(pixels: [u32]):
+    step("Chrome 159: rtl ABC = ltr ABC ink (0..15) moved to 79..95")
+    expect(_same_shape_shifted(pixels, 0, 12, 12)).to_equal(true)
+    expect(_last_col(pixels, 12, 12)).to_equal(95)
+    step("Chrome 159: rtl input ABCDE ink 29..56, end-aligned at content right 57")
+    # Engine 2026-11-16: ink 32..56 (5px bitmap cells; Chrome's Arial run
+    # is 27px, so it starts at 29).
+    expect(_first_col(pixels, 48, 16)).to_equal(32)
+    expect(_last_col(pixels, 48, 16)).to_equal(56)
+
+describe "direction:rtl keeps Latin text in logical order (Chrome 159)":
+    it "AC-1: an rtl Latin run keeps its logical glyph order":
+        step("Chrome 159: A 79.55 < B 84.88 < C 90.22")
+        val t = _texts()
+        expect(t[0]).to_equal("ABC")
+        expect(t[1]).to_equal("ABC")
+
+    it "AC-2: a neutral at the run edge takes the paragraph direction":
+        step("Chrome 159: `!` at 77.31, left of A 79.55 -> visual !ABC")
+        expect(_texts()[2]).to_equal("!ABC")
+
+    it "AC-3: right-to-left script is still reversed around a Latin run":
+        step("Chrome 159: C 80.41 < bet 86.19 < alef 90.97 -> visual C, bet, alef")
+        expect(_texts()[3]).to_equal("Cבא")
+
+    it "AC-4: an rtl input value keeps its logical order":
+        step("Chrome 159: rtl input ABCDE inks 29..56 in logical order")
+        expect(_value_text("q")).to_equal("ABCDE")
+
+    it "AC-5: the software raster and the Engine2D path paint Chrome's order":
+        # Glyph ORDER is under test here, not antialiasing. LCD subpixel text
+        # (lcd_subpixel_text_chrome159_spec) places the end-aligned rtl run on
+        # a quarter-pixel phase the ltr run does not share, so the shifted ink
+        # masks differ by AA alone. Pin the order on the grayscale raster.
+        env_set("SIMPLE_WEB_LCD_TEXT", "0")
+        _check_pixels(simple_web_layout_render_html_software_pixels(PAGE, W, H))
+        _check_pixels(simple_web_render_html_to_pixels(PAGE, W, H))
+        env_set("SIMPLE_WEB_LCD_TEXT", "1")
+
+describe "direction:rtl logical order on a real Vulkan device":
+    it "AC-6: a Vulkan device readback paints Chrome's order":
+        # Runs where a Vulkan ICD is installed (llvmpipe:
+        # VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json). Where none
+        # is, the row has nothing to drive and says so: it is NOT exercised.
+        if not file_exists("/usr/share/vulkan/icd.d/lvp_icd.json"):
+            print("[skip] AC-6: no llvmpipe ICD; this Vulkan row was not exercised")
+            return
+        # Glyph ORDER is under test here, not antialiasing: like AC-5 this pins
+        # the order on the grayscale raster (the ink-mask check in
+        # `_check_pixels` is AA-sensitive). AC-7 covers the LCD frame.
+        env_set("SIMPLE_WEB_LCD_TEXT", "0")
+        step("the request really resolved to Vulkan (no silent software fallback)")
+        expect(simple_web_resolved_engine2d_backend_name(W, H, "vulkan")).to_equal("vulkan")
+        val rb = simple_web_render_html_to_readback_with_engine2d_backend(PAGE, W, H, "vulkan")
+        expect(rb.source).to_equal("device_readback")
+        _check_pixels(rb.pixels)
+        # Div text on the Engine2D path differs from the legacy software
+        # raster (440 px here, independent of direction), so the device frame
+        # is compared with the Engine2D CPU frame it must reproduce.
+        step("the device frame equals the Engine2D CPU frame")
+        expect(rb.pixels).to_equal(simple_web_render_html_to_pixels(PAGE, W, H))
+        env_set("SIMPLE_WEB_LCD_TEXT", "1")
+
+    it "AC-7: with LCD text on, the Vulkan device frame equals the Engine2D CPU frame byte for byte":
+        # The rtl runs end flush against the right surface edge and the ltr run
+        # starts at x=0, so edge quads reach past the surface. The CPU LCD
+        # composite declines those quads (off-surface readback is not opaque)
+        # and paints them gray; the kernel must reproduce that, not LCD them.
+        if not file_exists("/usr/share/vulkan/icd.d/lvp_icd.json"):
+            print("[skip] AC-7: no llvmpipe ICD; this Vulkan row was not exercised")
+            return
+        env_set("SIMPLE_WEB_LCD_TEXT", "1")
+        expect(simple_web_resolved_engine2d_backend_name(W, H, "vulkan")).to_equal("vulkan")
+        val rb = simple_web_render_html_to_readback_with_engine2d_backend(PAGE, W, H, "vulkan")
+        expect(rb.source).to_equal("device_readback")
+        expect(rb.pixels).to_equal(simple_web_render_html_to_pixels(PAGE, W, H))

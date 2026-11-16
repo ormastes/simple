@@ -1,0 +1,38 @@
+# Parser-root tests only; resolved generic capture/facet qualification is separate.
+use std.spec.*
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module_checked_reference_v1}
+use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_class_draft_root_v2, module_surface_struct_draft_root_v2}
+
+fn generic_class_draft_test_v2(source: text, body: bool) -> text:
+    val parsed = parse_and_build_module_checked_reference_v1(source, "pkg/draft.spl").unwrap()
+    val value = module_surface_class_draft_root_v2(parsed.classes["Box"], body)
+    expect(value.len()).to_equal(64)
+    value
+
+fn generic_struct_draft_test_v2(source: text) -> text:
+    val parsed = parse_and_build_module_checked_reference_v1(source, "pkg/draft.spl").unwrap()
+    val value = module_surface_struct_draft_root_v2(parsed.structs["Box"])
+    expect(value.len()).to_equal(64)
+    value
+
+describe "Parser generic class and struct draft roots":
+    it "keeps ordinary class bodies outside the interface draft":
+        val source = "class Box<T>:\n    value: T\n    fn size(self) -> i64:\n        1\n"
+        val edit = source.replace("        1", "        2")
+        expect(generic_class_draft_test_v2(source, false)).to_equal(generic_class_draft_test_v2(edit, false))
+        expect(generic_class_draft_test_v2(source, true) == generic_class_draft_test_v2(edit, true)).to_equal(false)
+
+    it "captures actual class method signatures":
+        val source = "class Box<T>:\n    value: T\n    fn size(self) -> i64:\n        1\n"
+        expect(generic_class_draft_test_v2(source, false) == generic_class_draft_test_v2(source.replace("-> i64", "-> u64"), false)).to_equal(false)
+
+    it "captures struct defaults and field types":
+        val source = "struct Box<T>:\n    value: T\n    count: i64 = 1\n"
+        val base = generic_struct_draft_test_v2(source)
+        expect(base == generic_struct_draft_test_v2(source.replace("= 1", "= 2"))).to_equal(false)
+        expect(base == generic_struct_draft_test_v2(source.replace("count: i64", "count: u64"))).to_equal(false)
+
+    it "ignores unrelated declarations and moved spans":
+        val source = "struct Box<T>:\n    value: T\n"
+        val edited = "# unrelated comment\n\n" + source + "fn other() -> i64:\n    7\n"
+        expect(generic_struct_draft_test_v2(source)).to_equal(generic_struct_draft_test_v2(edited))

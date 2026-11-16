@@ -1117,11 +1117,25 @@ int64_t slang_ggml_request_eval_prompt(int64_t handle) {
         return SLANG_ERR_DECODE;
     }
     if (suffix_len > 0) {
+        /* The last prompt token is always decoded alone, on the cold path and
+         * the prefix-hit path alike, so its logits come from one batch shape
+         * (doc/08_tracking/bug/slang_prefix_cache_hit_output_drift_2026-11-14.md).
+         * Skipped while the first-micro-batch workaround needs a full batch. */
+        int64_t head = suffix_len > 1 && slang_request_first_ubatch(request) == 0
+                           ? suffix_len - 1 : suffix_len;
         struct llama_batch batch = llama_batch_get_one(
-            request->tok + request->eval_start, (int32_t)suffix_len);
+            request->tok + request->eval_start, (int32_t)head);
         if (llama_decode(request->ctx, batch) != 0) {
             slang_request_release_lease(request);
             return SLANG_ERR_DECODE;
+        }
+        if (head < suffix_len) {
+            struct llama_batch last = llama_batch_get_one(
+                request->tok + request->tok_len - 1, 1);
+            if (llama_decode(request->ctx, last) != 0) {
+                slang_request_release_lease(request);
+                return SLANG_ERR_DECODE;
+            }
         }
         if (suffix_len >= (int64_t)llama_n_ubatch(request->ctx)) request->warm = 1;
     }

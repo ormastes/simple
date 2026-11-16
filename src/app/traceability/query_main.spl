@@ -42,8 +42,8 @@ pub fn trace_query_error_exit_v1(reason: text) -> TraceExitCodeV1:
     if reason.starts_with("TRACE-QUERY-NOT-FOUND:"): TraceExitCodeV1(value: 1) else: TraceExitCodeV1(value: 2)
 
 # An incomplete graph is exit 2 (plan section 6), decided by the shared verdict rule.
-pub fn trace_query_completion_exit_v1(graph: TraceGraph) -> TraceExitCodeV1:
-    val verdict = trace_command_verdict_v1(trace_graph_completeness_v1(graph), TraceProfile.Worktree)
+pub fn trace_query_completion_exit_v1(graph: TraceGraph, profile: TraceProfile) -> TraceExitCodeV1:
+    val verdict = trace_command_verdict_v1(trace_graph_completeness_v1(graph), profile)
     if verdict == TraceCommandVerdictV1.Incomplete: TraceExitCodeV1(value: 2) else: TraceExitCodeV1(value: 0)
 
 pub fn run_trace_query_v1(args: [text]) -> TraceExitCodeV1:
@@ -53,7 +53,7 @@ pub fn run_trace_query_v1(args: [text]) -> TraceExitCodeV1:
         case Err(reason):
             # Even malformed SDN requests produce a structured error, not mixed stdout.
             val format = trace_query_format_name_v1(trace_query_sdn_requested_v1(args))
-            query_print_v1(trace_query_error_v1(reason, "unresolved", format))
+            query_print_v1(trace_query_error_v1(reason, "unresolved", format, TraceQueryCaptureV1.Uncaptured))
             return TraceExitCodeV1(value: 2)
     if options.help:
         query_print_v1(trace_query_help_v1())
@@ -61,13 +61,13 @@ pub fn run_trace_query_v1(args: [text]) -> TraceExitCodeV1:
     val build = match trace_query_build_snapshot_v1(options):
         case Ok(value): value
         case Err(reason):
-            query_print_v1(trace_query_error_v1(reason, options.snapshot, options.format))
+            query_print_v1(trace_query_error_v1(reason, options.snapshot, options.format, TraceQueryCaptureV1.Uncaptured))
             return TraceExitCodeV1(value: 2)
     if options.operation == "missing":
         val missing = trace_missing_requirements_v1(build.graph, build.sidecar_references)
         query_print_v1(trace_query_render_missing_v1(build, missing, options))
         query_diagnostics_to_stderr_v1(options, build.graph.diagnostics)
-        return trace_query_completion_exit_v1(build.graph)
+        return trace_query_completion_exit_v1(build.graph, options.profile)
     if options.operation == "refs" and options.kind == "file":
         val file_refs = match trace_query_file_refs_v1(build, options):
             case Ok(value): value
@@ -76,7 +76,7 @@ pub fn run_trace_query_v1(args: [text]) -> TraceExitCodeV1:
                 return trace_query_error_exit_v1(reason)
         query_print_v1(trace_query_render_refs_v1(build, file_refs, options))
         query_diagnostics_to_stderr_v1(options, file_refs.diagnostics)
-        return trace_query_completion_exit_v1(build.graph)
+        return trace_query_completion_exit_v1(build.graph, options.profile)
     if options.operation == "refs":
         val refs = match query_trace_references_v1(build.graph, TraceReferenceQueryV1(
             snapshot_id: build.graph.subject.snapshot_id, kind: options.kind,
@@ -102,7 +102,7 @@ pub fn run_trace_query_v1(args: [text]) -> TraceExitCodeV1:
             return TraceExitCodeV1(value: 2)
         query_print_v1(refs_output)
         query_diagnostics_to_stderr_v1(options, refs.diagnostics)
-        return trace_query_completion_exit_v1(build.graph)
+        return trace_query_completion_exit_v1(build.graph, options.profile)
     # Sidecar filters narrow bug nodes before paging; the filter identity is
     # folded into the visibility context so cursors bind it.
     var graph = build.graph
@@ -130,7 +130,7 @@ pub fn run_trace_query_v1(args: [text]) -> TraceExitCodeV1:
         return TraceExitCodeV1(value: 2)
     query_print_v1(output)
     query_diagnostics_to_stderr_v1(options, page.diagnostics)
-    trace_query_completion_exit_v1(build.graph)
+    trace_query_completion_exit_v1(build.graph, options.profile)
 
 pub fn trace_query_direct_args_v1(args: [text]) -> [text]:
     # The guide documents `simple trace <op> ...`; on the direct module route

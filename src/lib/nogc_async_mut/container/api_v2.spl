@@ -24,7 +24,10 @@ use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeOperati
 use std.common.contracts.container.backend_identity_v1.*
 use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
 use std.common.string_core.str_len
-use std.nogc_async_mut.container.providers.linux.simple_container_adapter_v2.LinuxSimpleContainerAdapterV2
+use std.nogc_async_mut.container.providers.linux.simple_container_adapter_v2.{LinuxSimpleContainerAdapterV2, LinuxAdapterAgentTurnV3}
+use std.nogc_async_mut.container.providers.linux.workspace_root_borrow_v3.LinuxWorkspaceRootBorrowV3
+use std.nogc_sync_mut.io.linux_service_native_identity_v3.LinuxServiceNativeIdentityBorrowV3
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.MachineFreshEpochRecordV1
 use std.nogc_async_mut.container.providers.windows.simple_container_adapter_v2.WindowsSimpleContainerAdapterV2
 
 pub enum SimpleContainerOwnerV2:
@@ -67,6 +70,111 @@ pub fn simple_container_open_fresh_v2(principal: MachineLocalProcessPrincipalV1,
     val scope = fresh.scope_v2()
     if scope.is_err(): return SimpleContainerFreshOpenV2(fresh_cleanup: Some(fresh), error: scope.unwrap_err())
     SimpleContainerFreshOpenV2(owner: Some(SimpleContainerOwnerV2.Linux(scope.unwrap(), adapter.unwrap())))
+
+# ---- milestone_0021 V4 agent API (3.3). Thin forwards: every turn retains the updated tagged owner. ----
+
+# Step 4 of the lent factory (few's linux_workspace_root_open_lent_v4 runs steps 1-3). On an adapter failure the
+# root loan is ended on the transfer and the fresh owner is returned as cleanup (`agent.fresh`).
+pub struct SimpleContainerLentOpenV4:
+    owner: Option<SimpleContainerOwnerV2> = None
+    root: Option<LinuxWorkspaceRootBorrowV3> = None
+    admission_cleanup: Option<MachineFreshEpochAdmissionOwnerV1> = None
+    fresh_cleanup: Option<LinuxFreshWorkloadOwnerV2> = None
+    error: text = ""
+
+pub fn simple_container_open_lent_v4(admission: MachineFreshEpochAdmissionOwnerV1,
+        native: LinuxServiceNativeIdentityBorrowV3, template: GroupProcessStreamLaunchV2) -> SimpleContainerLentOpenV4:
+    val opened = linux_workspace_root_open_lent_v4(admission, native, template)
+    if opened.fresh.is_none():
+        return SimpleContainerLentOpenV4(root: opened.root, admission_cleanup: opened.admission_cleanup, error: opened.error)
+    if opened.error != "":
+        return SimpleContainerLentOpenV4(root: opened.root, fresh_cleanup: opened.fresh, error: opened.error)
+    val fresh = opened.fresh.unwrap()
+    val adapter = LinuxSimpleContainerAdapterV2.open_fresh_v2(fresh)
+    if adapter.is_err():
+        val failed = linux_workspace_root_open_fresh_failed_v4(fresh, adapter.unwrap_err())
+        return SimpleContainerLentOpenV4(root: failed.root, fresh_cleanup: failed.fresh, error: failed.error)
+    val scope = fresh.scope_v2()
+    if scope.is_err():
+        val failed = linux_workspace_root_open_fresh_failed_v4(fresh, scope.unwrap_err())
+        return SimpleContainerLentOpenV4(root: failed.root, fresh_cleanup: failed.fresh, error: failed.error)
+    SimpleContainerLentOpenV4(owner: Some(SimpleContainerOwnerV2.Linux(scope.unwrap(), adapter.unwrap())))
+
+pub struct SimpleContainerAgentTurnV3:
+    owner: SimpleContainerOwnerV2
+    root: Option<LinuxWorkspaceRootBorrowV3> = None
+    native: Option<LinuxServiceNativeIdentityBorrowV3> = None
+    error: text = ""
+
+fn simple_container_agent_step_v3(owner: SimpleContainerOwnerV2, kind: text,
+        root: Option<LinuxWorkspaceRootBorrowV3> = None, native: Option<LinuxServiceNativeIdentityBorrowV3> = None,
+        value: text = "") -> SimpleContainerAgentTurnV3:
+    match owner:
+        case SimpleContainerOwnerV2.Linux(scope, adapter):
+            val turn = adapter.agent_step_v3(kind, root, native, value)
+            SimpleContainerAgentTurnV3(owner: SimpleContainerOwnerV2.Linux(scope, turn.owner), root: turn.root,
+                native: turn.native, error: turn.error)
+        case SimpleContainerOwnerV2.Windows(_, _):
+            SimpleContainerAgentTurnV3(owner: owner, root: root, native: native, error: "container-workspace-linux-required")
+
+pub fn simple_container_take_workspace_root_v3(owner: SimpleContainerOwnerV2) -> SimpleContainerAgentTurnV3:
+    simple_container_agent_step_v3(owner, "take-root")
+
+pub fn simple_container_end_workspace_root_loan_v3(owner: SimpleContainerOwnerV2, root: LinuxWorkspaceRootBorrowV3) -> SimpleContainerAgentTurnV3:
+    simple_container_agent_step_v3(owner, "end-root", Some(root))
+
+pub fn simple_container_end_service_loan_v3(owner: SimpleContainerOwnerV2, native: LinuxServiceNativeIdentityBorrowV3) -> SimpleContainerAgentTurnV3:
+    simple_container_agent_step_v3(owner, "end-service", None, Some(native))
+
+pub fn simple_container_adopt_lent_workspace_reader_v3(owner: SimpleContainerOwnerV2) -> SimpleContainerAgentTurnV3:
+    simple_container_agent_step_v3(owner, "adopt-reader")
+
+pub fn simple_container_advance_workload_v3(owner: SimpleContainerOwnerV2) -> SimpleContainerAgentTurnV3:
+    simple_container_agent_step_v3(owner, "advance")
+
+pub fn simple_container_set_lifecycle_root_v3(owner: SimpleContainerOwnerV2, root: text) -> SimpleContainerAgentTurnV3:
+    simple_container_agent_step_v3(owner, "lifecycle-root", None, None, root)
+
+pub fn simple_container_epoch_current_v3(owner: SimpleContainerOwnerV2) -> Result<MachineFreshEpochRecordV1, text>:
+    match owner:
+        case SimpleContainerOwnerV2.Linux(_, adapter): adapter.epoch_current_v3()
+        case SimpleContainerOwnerV2.Windows(_, _): Err("container-workspace-linux-required")
+
+pub fn simple_container_helper_dirs_v3(owner: SimpleContainerOwnerV2) -> Result<[text], text>:
+    match owner:
+        case SimpleContainerOwnerV2.Linux(_, adapter): adapter.helper_dirs_v3()
+        case SimpleContainerOwnerV2.Windows(_, _): Err("container-workspace-linux-required")
+
+pub fn simple_container_validate_helper_template_v3(owner: SimpleContainerOwnerV2, template: GroupProcessStreamLaunchV2) -> Result<(), text>:
+    match owner:
+        case SimpleContainerOwnerV2.Linux(_, adapter): adapter.validate_helper_template_v3(template)
+        case SimpleContainerOwnerV2.Windows(_, _): Err("container-workspace-linux-required")
+
+pub fn simple_container_settle_workspace_v3(owner: SimpleContainerOwnerV2) -> Result<(), text>:
+    match owner:
+        case SimpleContainerOwnerV2.Linux(_, adapter): adapter.settle_workspace_v3()
+        case SimpleContainerOwnerV2.Windows(_, _): Err("container-workspace-linux-required")
+
+# milestone_0021 PR3 (D19): the released machine-charge row digest of the current settled lifecycle.
+pub fn simple_container_released_charge_digest_v3(owner: SimpleContainerOwnerV2) -> Result<text, text>:
+    match owner:
+        case SimpleContainerOwnerV2.Linux(_, adapter): adapter.released_charge_digest_v3()
+        case SimpleContainerOwnerV2.Windows(_, _): Err("container-workspace-linux-required")
+
+pub fn simple_container_return_settled_workspace_source_v3(owner: SimpleContainerOwnerV2) -> Result<bool, text>:
+    match owner:
+        case SimpleContainerOwnerV2.Linux(_, adapter): adapter.return_settled_workspace_source_v3()
+        case SimpleContainerOwnerV2.Windows(_, _): Err("container-workspace-linux-required")
+
+pub fn simple_container_close_workload_v3(owner: SimpleContainerOwnerV2) -> Result<(), text>:
+    match owner:
+        case SimpleContainerOwnerV2.Linux(_, adapter): adapter.close_workload_v3()
+        case SimpleContainerOwnerV2.Windows(_, _): Err("container-workspace-linux-required")
+
+# 3.7 step 4: the amended transfer close_v2 (authority, R2, never-adopted R3, custody, phase closed). The root
+# must already be taken and its loan ended (step 2), and the service loan ended (step 3); close_v2 refuses otherwise.
+pub fn simple_container_close_epoch_v3(owner: SimpleContainerOwnerV2) -> SimpleContainerCloseV2:
+    simple_container_close_v2(owner)
 
 pub fn simple_container_close_v2(owner: SimpleContainerOwnerV2) -> SimpleContainerCloseV2:
     match owner:

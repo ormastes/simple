@@ -1,0 +1,172 @@
+# Unit values for the pure-Simple core interpreter.
+#
+# A suffixed numeric literal (`60_kmph`, `12_fbytes`) evaluates to a
+# `__unit__` struct carrying its numeric `value` and `suffix`. Methods mirror
+# the seed (interpreter_helpers/method_dispatch.rs, PR #9797):
+#   value() / to_text() / to_i64() / to_f64()   -- read the payload
+#   to_<sfx>()                                   -- scale conversion; returns a
+#                                                   new unit value, so chains
+#                                                   like .to_mps().to_kmph() work
+# Scales come from the exact unit-expression catalog (std.common.units).
+
+use compiler.core.ast.{expr_get}
+use compiler.core.interpreter.value.*
+use compiler.core.interpreter.eval.{eval_set_error}
+use std.common.units.engine.unit_expr.{parse_unit_expression}
+use std.common.units.model.world_units.{UnitExpression}
+use compiler.core.types.{unit_decl_count, unit_decl_short_symbol_at}
+use std.io_runtime.{dir_list_or_empty, file_exists}
+
+val UNIT_VALUE_TYPE: text = "__unit__"
+val UNIT_LIBRARY_ROOT: text = "src/unit/simple-lang"
+
+# Suffix scope: a suffix backed by a library unit module
+# (src/unit/simple-lang/<family>/<sfx>.spl) is usable only after
+# `use unit.<family>[.{sfx}|.*|.<sfx>]` or a same-file `unit X: T as sfx`.
+# Reset per core_interpret run via eval_init.
+var unit_scope_names: [text] = []
+var unit_scope_families: [text] = []
+var unit_family_cache_sfx: [text] = []
+var unit_family_cache_fam: [text] = []
+# The unit-decl registry is not reset between core_interpret runs; only decls
+# registered after this run's reset count as declared in scope.
+var unit_scope_decl_base: i64 = 0
+
+pub fn unit_scope_reset():
+    unit_scope_names = []
+    unit_scope_families = []
+    unit_scope_decl_base = unit_decl_count()
+
+pub fn unit_scope_record_use(module_path: text, imported_names: [text]):
+    """Record a `use unit.<...>` import. `{a, b}` scopes those suffixes;
+    a bare path or `.*` scopes its last segment as a family and as a suffix."""
+    if not module_path.starts_with("unit."): return
+    var path = module_path
+    if path.ends_with(".*"): path = path.substring(0, path.last_index_of("."))
+    val last = path.substring(path.last_index_of(".") + 1)
+    if imported_names.len() == 0 or imported_names.contains("*"):
+        unit_scope_families.push(last)
+        unit_scope_names.push(last)
+        return
+    for name in imported_names:
+        unit_scope_names.push(name)
+
+fn unit_library_families(suffix: text) -> text:
+    """Comma-joined sorted family dirs whose library unit module defines
+    `suffix` (a suffix may live in several, e.g. velocity and composite), or ""."""
+    var i = 0
+    while i < unit_family_cache_sfx.len():
+        if unit_family_cache_sfx[i] == suffix: return unit_family_cache_fam[i]
+        i = i + 1
+    var found: [text] = []
+    for fam in dir_list_or_empty(UNIT_LIBRARY_ROOT):
+        if file_exists(UNIT_LIBRARY_ROOT + "/" + fam + "/" + suffix + ".spl"):
+            found.push(fam)
+    val joined = found.sort().join(",")
+    unit_family_cache_sfx.push(suffix)
+    unit_family_cache_fam.push(joined)
+    joined
+
+fn unit_suffix_declared(suffix: text) -> bool:
+    var i = unit_scope_decl_base
+    while i < unit_decl_count():
+        if unit_decl_short_symbol_at(i) == suffix: return true
+        i = i + 1
+    false
+
+fn unit_suffix_scope_error(suffix: text) -> text:
+    """"" when `suffix` is in scope, else the diagnostic text."""
+    if unit_scope_names.contains(suffix): return ""
+    val joined = unit_library_families(suffix)
+    if joined == "": return ""
+    val families = joined.split(",")
+    for fam in families:
+        if unit_scope_families.contains(fam): return ""
+    if unit_suffix_declared(suffix): return ""
+    var hints: [text] = []
+    for fam in families:
+        hints.push("`use unit." + fam + ".{" + suffix + "}`")
+    "unit suffix '" + suffix + "' is not in scope; add " + hints.join(" or ") + " (or declare `unit X: T as " + suffix + "`)"
+
+fn unit_make(value: i64, suffix: text) -> i64:
+    var names: [text] = []
+    names.push("value")
+    names.push("suffix")
+    var values: [i64] = []
+    values.push(value)
+    values.push(val_make_text(suffix))
+    val_make_struct(UNIT_VALUE_TYPE, names, values)
+
+# @allow(primitive_api) core-interpreter value-arena handle: values are raw i64 ids across the whole core interpreter
+pub fn eval_suffixed_lit(eid: i64, float_value: f64) -> i64:
+    val node = expr_get(eid)
+    if node.extra == 2:
+        eval_set_error("string unit literals are not supported: _" + node.f_val)
+        return -1
+    val scope_err = unit_suffix_scope_error(node.s_val)
+    if scope_err != "":
+        eval_set_error(scope_err)
+        return -1
+    if node.extra == 1:
+        return unit_make(val_make_bool(node.i_val != 0), node.s_val)
+    if node.f_val != "":
+        return unit_make(val_make_float(float_value), node.s_val)
+    unit_make(val_make_int(node.i_val), node.s_val)
+
+# @allow(primitive_api) core-interpreter value-arena handle: values are raw i64 ids across the whole core interpreter
+pub fn val_is_unit(vid: i64) -> bool:
+    if val_get_kind(vid) != VAL_STRUCT: return false
+    val_get_struct_name(vid) == UNIT_VALUE_TYPE
+
+fn unit_canonical_symbol(suffix: text) -> text:
+    # Catalog spellings for metre-per-second; the parser knows `m/s`.
+    if suffix == "mps" or suffix == "m_per_s": return "m/s"
+    suffix
+
+fn unit_factor_exponent(e: UnitExpression, unit_id: text) -> i64:
+    for f in e.factors:
+        if f.unit_id == unit_id: return f.exponent
+    0
+
+fn unit_same_dimensions(a: UnitExpression, b: UnitExpression) -> bool:
+    if a.factors.len() != b.factors.len(): return false
+    for factor in a.factors:
+        if unit_factor_exponent(b, factor.unit_id) != factor.exponent:
+            return false
+    true
+
+fn unit_payload_f64(payload: i64) -> f64:
+    if val_get_kind(payload) == VAL_FLOAT: return val_get_float(payload)
+    val_get_int(payload) * 1.0
+
+# @allow(primitive_api) core-interpreter value-arena handle: values are raw i64 ids across the whole core interpreter
+pub fn eval_unit_method(receiver: i64, method_name: text) -> i64:
+    """Dispatch a zero-argument method on a unit value. Returns -2 when the
+    method is not a unit method, so the caller continues ordinary dispatch."""
+    val payload = val_struct_get_field(receiver, "value")
+    val suffix = val_get_text(val_struct_get_field(receiver, "suffix"))
+    if method_name == "value": return payload
+    # Flat Option encoding: `Some(u).unwrap()` is u itself.
+    if method_name == "unwrap": return receiver
+    if method_name == "to_text" or method_name == "to_string":
+        return val_make_text(val_to_text(payload))
+    if method_name == "to_i64" or method_name == "to_int":
+        if val_get_kind(payload) == VAL_FLOAT: return val_make_int(val_get_float(payload) as i64)
+        return payload
+    if method_name == "to_f64" or method_name == "to_float":
+        return val_make_float(unit_payload_f64(payload))
+    if not method_name.starts_with("to_"): return -2
+    val target = method_name.substring(3)
+    val from_p = parse_unit_expression(unit_canonical_symbol(suffix))
+    val to_p = parse_unit_expression(unit_canonical_symbol(target))
+    if not to_p.ok: return -2
+    if not from_p.ok:
+        eval_set_error("cannot convert unit '" + suffix + "' to '" + target + "': unknown source unit")
+        return -1
+    if not unit_same_dimensions(from_p.expression, to_p.expression):
+        eval_set_error("cannot convert unit '" + suffix + "' to '" + target + "': incompatible dimensions")
+        return -1
+    val fs = from_p.expression.scale
+    val ts = to_p.expression.scale
+    val factor = (fs.numerator * ts.denominator) * 1.0 / ((fs.denominator * ts.numerator) * 1.0)
+    unit_make(val_make_float(unit_payload_f64(payload) * factor), target)

@@ -101,7 +101,7 @@ EXCLUDE_RE='^(ast_reset_seq|par_prof_enabled_cached|par_initialization_generatio
 # plus the three names parse_module_body clears inline at its own top.
 # Names are matched case-INSENSITIVELY: EXTEND_TARGETS is uppercase, and the
 # original lowercase-only regex is exactly why it was missed.
-RESET_FNS='reset_all_pools|ast_reset|decl_metadata_pools_reset|macro_facts_reset|stmt_reset|expr_reset|parser_init_with_path|parser_diagnostic_source_set_v1|parser_reset_extend_enums|parser_reset_pending_vhdl_decorators|parser_reset_pending_sffi|lock_level_metadata_reset'
+RESET_FNS='reset_all_pools|ast_reset|decl_pools_ensure_v1|decl_pools_clear_v1|decl_metadata_pools_reset|macro_facts_reset|stmt_reset|expr_reset|parser_init_with_path|parser_diagnostic_source_set_v1|parser_reset_extend_enums|parser_reset_pending_vhdl_decorators|parser_reset_pending_sffi|lock_level_metadata_reset'
 
 # Cleared inline at the top of parse_module_body rather than in a named reset
 # function, so the body scan below cannot find them generically.
@@ -531,6 +531,23 @@ ALIAS_FIXTURE
     run_scan "$_tmp/i/pools.spl" "$_tmp/i/other_owner.spl"
     if [ "$SCAN_MISSING" != " qualified_pool(not-encoded,not-decoded) source_map(not-encoded,not-decoded)" ]; then
         echo "selftest: another owner must not satisfy ParserState codec coverage (missing=$SCAN_MISSING)"
+        _fail=1
+    fi
+
+    # Fixture J: delegated declaration lifecycle owners remain part of the
+    # source-derived oracle after ast_reset moves its concrete pool operations.
+    mkdir -p "$_tmp/j"
+    printf 'fn decl_pools_ensure_v1():\n    role_pool = []\nfn decl_pools_clear_v1():\n    role_pool.clear()\n' > "$_tmp/j/pools.spl"
+    printf 'fn flat_decl_pools_dump():\n    out = flat_pool_enc_text(role_pool)\nfn flat_decl_pools_restore():\n    role_pool = flat_pool_dec_text_into(role_pool, r)\n' > "$_tmp/j/codec.spl"
+    run_scan "$_tmp/j/pools.spl" "$_tmp/j/codec.spl"
+    if [ "$SCAN_CHECKED" -ne 1 ] || [ -n "$SCAN_MISSING" ]; then
+        echo "selftest: delegated declaration owners must be checked (checked=$SCAN_CHECKED missing=$SCAN_MISSING)"
+        _fail=1
+    fi
+    sed 's/flat_pool_dec_text_into(role_pool, r)/flat_pool_dec_text(r)/' "$_tmp/j/codec.spl" > "$_tmp/j/replaced.spl"
+    run_scan "$_tmp/j/pools.spl" "$_tmp/j/replaced.spl"
+    if [ "$SCAN_MISSING" != " role_pool(owner-replaced)" ]; then
+        echo "selftest: replacing delegated role owner must fail (missing=$SCAN_MISSING)"
         _fail=1
     fi
 

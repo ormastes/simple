@@ -282,6 +282,129 @@ pub fn attr_store_detached_v1<T>(attr: text, placement: AttrPlacementV1) -> Resu
         case _: pass
     Ok(attr_store_new_v1<T>(attr, placement, None, None))
 
+# Concrete (non-generic) i64 store for column / array_index / sparse_hash.
+# AttributeStoreV1<i64> corrupts i64 payloads in native builds: its erased body
+# stores tagged words (v<<3|tag) in Dict<i64,T> / [T?] while the concrete caller
+# decodes them raw (sparse_hash 9000000000 -> 1125000000, 7 -> 0). This store has
+# no type parameter, no Option payloads and no trait-object `T?` return: slots
+# are a plain [i64] with a parallel presence [bool], array_index keeps its node
+# slot table in a plain [i64] (-1 = none), and the hash is Dict<i64, i64> read
+# via contains_key + index (doc/07_guide/language/dict_native_pitfalls.md).
+# @workaround bug=native_erased_generic_optional_return_2026-11-15
+class AttrI64StoreV1:
+    attr: text
+    placement: AttrPlacementV1
+    vals: [i64]
+    live: [bool]
+    node_slot: [i64]
+    free: [i64]
+    hash: Dict<i64, i64>
+    present: i64
+
+pub fn attr_i64_store_v1(attr: text, placement: AttrPlacementV1) -> Result<AttrI64StoreV1, text>:
+    match placement:
+        case Embedded: return Err("attribute {attr}: embedded placement needs an owner")
+        case ArrayPointer: return Err(attr_pointer_unsupported_v1(attr, placement))
+        case HashPointer: return Err(attr_pointer_unsupported_v1(attr, placement))
+        case _: pass
+    val v: [i64] = []
+    val l: [bool] = []
+    val ns: [i64] = []
+    val f: [i64] = []
+    val h: Dict<i64, i64> = {}
+    Ok(AttrI64StoreV1(attr: attr, placement: placement, vals: v, live: l, node_slot: ns, free: f, hash: h, present: 0))
+
+impl AttrI64StoreV1:
+    fn placement_token() -> text:
+        attr_placement_token_v1(self.placement)
+
+    # Side-array index holding `node`, or -1.
+    fn slot_of(node: i64) -> i64:
+        if node < 0: return -1
+        match self.placement:
+            case Column:
+                if node < self.live.len() and self.live[node]: return node
+                return -1
+            case ArrayIndex:
+                if node < self.node_slot.len(): return self.node_slot[node]
+                return -1
+            case _: return -1
+
+    fn has(node: i64) -> bool:
+        match self.placement:
+            case SparseHash: return self.hash.contains_key(node)
+            case _: return self.slot_of(node) >= 0
+
+    fn get(node: i64) -> Result<i64, text>:
+        match self.placement:
+            case SparseHash:
+                if self.hash.contains_key(node):
+                    val hv: i64 = self.hash[node]
+                    return Ok(hv)
+            case _:
+                val s = self.slot_of(node)
+                if s >= 0:
+                    val sv: i64 = self.vals[s]
+                    return Ok(sv)
+        Err("absent: no {self.attr} entry for node {node}")
+
+    # False only for a negative node id.
+    me set(node: i64, value: i64) -> bool:
+        if node < 0: return false
+        match self.placement:
+            case SparseHash:
+                self.hash[node] = value
+                return true
+            case Column:
+                while self.vals.len() <= node:
+                    self.vals = self.vals.push(0)
+                    self.live = self.live.push(false)
+                if not self.live[node]:
+                    self.present = self.present + 1
+                self.vals[node] = value
+                self.live[node] = true
+                return true
+            case _:
+                val held = self.slot_of(node)
+                if held >= 0:
+                    self.vals[held] = value
+                    return true
+                var s = self.vals.len()
+                if self.free.len() > 0:
+                    s = self.free[self.free.len() - 1]
+                    val _f = self.free.pop()
+                    self.vals[s] = value
+                    self.live[s] = true
+                else:
+                    self.vals = self.vals.push(value)
+                    self.live = self.live.push(true)
+                while self.node_slot.len() <= node:
+                    self.node_slot = self.node_slot.push(-1)
+                self.node_slot[node] = s
+                self.present = self.present + 1
+                return true
+
+    me retire(node: i64) -> bool:
+        if not self.has(node): return false
+        match self.placement:
+            case SparseHash:
+                self.hash.remove(node)
+                return true
+            case Column:
+                self.live[node] = false
+            case _:
+                val s = self.node_slot[node]
+                self.live[s] = false
+                self.free = self.free.push(s)
+                self.node_slot[node] = -1
+        self.present = self.present - 1
+        true
+
+    fn len() -> i64:
+        match self.placement:
+            case SparseHash: self.hash.len()
+            case _: self.present
+
 # ---------------------------------------------------------------------------
 # Multi-field side array (`nfields` attributes of one type per row) in AoS or
 # SoA layout. Row = node id (column) or the node-held slot (array_index).

@@ -1,0 +1,148 @@
+# @req REQ-DTA-H1 REQ-DTA-H2 REQ-DTA-H3 REQ-DTA-H4
+# Structural store/callback fixtures, NOT production source-authority evidence.
+# The real source/SCV/category producer and D1 caller need separate integration tests.
+use std.spec.*
+use std.io_runtime.{env_get}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use compiler.driver.cache.directory_tldr_store_v2.*
+use compiler.driver.cache.directory_tldr_cache_gate_v2.*
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1}
+use compiler.common.cache_contract.directory_source_epoch_v2.{DirectorySourceEpochV2}
+use compiler.common.cache_contract.aspect_match_shard_v1.{DirectoryJoinPointFactsV1,
+    JoinPointFactV1, directory_join_point_facts_v1}
+use compiler.common.cache_contract.package_init_tld_v1.{PackageInitTldV1, package_init_tld_encode_v3}
+use compiler.common.cache_contract.physical_tld_v1.{PhysicalTldObjectV1, PhysicalTldHeaderV1,
+    TldPayloadRoleV1, TldSectionRefV1, physical_tld_section_table_digest_v1}
+
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+
+fn gate_root(name: text) -> text:
+    val base = env_get("SIMPLE_WORKTREE_STORAGE_ROOT").trim()
+    val prefix = if base == "": ".simple/storage" else: base
+    "{prefix}/directory-gate-v2/{rt_getpid()}/{name}"
+
+fn gate_fixture_expected() -> Result<DirectoryTldrExpectedV2, text>:
+    val root = sha256_text("structural fixture only")
+    val facts = directory_join_point_facts_v1("fixture", ["fixture/a.spl"],
+        [JoinPointFactV1(id: "fixture.f", kind: "forward", symbol: "f", attrs: ["tag"],
+            owner_file: "fixture/a.spl", base_body_digest: "")], [], true)
+    val package = PackageInitTldV1(package_id: "fixture", parent_scope_digest: nil,
+        membership_root_digest: root, ordered_member_ids: facts.sorted_member_files,
+        aspect_root_digest: root, trait_root_digest: root, macro_root_digest: root,
+        extension_root_digest: root, template_root_digest: root,
+        initializer_contract_digest: root, ordered_initializer_refs: [],
+        file_tldr_root_digest: Some(root), join_point_facts_digest: Some(facts.facts_key),
+        compiler_provider_id: Some("compiler/fixture"), active_guard_root_digest: Some(facts.active_guard_root),
+        inline_join_point_facts: Some(facts))
+    val variant = ConfigVariantKeyV1(target_triple: "x86_64-unknown-linux-gnu", backend: "llvm",
+        features: [], build_mode: "dev", language_abi: "simple-v1", normalized_options: [], environment_inputs: [])
+    Ok(DirectoryTldrExpectedV2(package: package, facts: facts, variant: variant,
+        source_epoch: DirectorySourceEpochV2(driver_identity: 1, generation: 1)))
+
+fn gate_fixture_rebuild() -> Result<PhysicalTldObjectV1, text>:
+    val bytes = package_init_tld_encode_v3(gate_fixture_expected().unwrap().package)
+    val digest = sha256_u8_hex(bytes)
+    val section = TldSectionRefV1(role: TldPayloadRoleV1.PackageInitTld, section_index: 0,
+        kind: "package_init_v1", semantic_object_digest: digest, offset: 0,
+        stored_bytes: bytes.len(), decoded_bytes: bytes.len(), encoding_profile: "raw-v1")
+    Ok(PhysicalTldObjectV1(header: PhysicalTldHeaderV1(schema: 1, role: TldPayloadRoleV1.PackageInitTld,
+        semantic_record_digest: digest, section_table_digest: physical_tld_section_table_digest_v1([section]),
+        payload_bytes: bytes.len(), sections: [section]), canonical_sections: [bytes]))
+
+fn gate_corrupt_rebuild() -> Result<PhysicalTldObjectV1, text>:
+    var object = gate_fixture_rebuild().unwrap()
+    object.canonical_sections[0][0] = 0u8
+    Ok(object)
+
+fn gate_forbidden_rebuild() -> Result<PhysicalTldObjectV1, text>:
+    fail("cache hit/missing authority must not rebuild")
+    Err("unexpected-rebuild")
+
+fn gate_missing_expected() -> Result<DirectoryTldrExpectedV2, text>: Err("incomplete category receipt")
+
+fn gate_changed_epoch() -> Result<DirectoryTldrExpectedV2, text>:
+    val expected = gate_fixture_expected().unwrap()
+    Ok(DirectoryTldrExpectedV2(..expected,
+        source_epoch: DirectorySourceEpochV2(driver_identity: 1, generation: 2)))
+
+fn gate_expect_pin(outcome: DirectoryTldrGateOutcomeV2) -> DirectoryTldrPinnedGenerationV2:
+    match outcome:
+        case DirectoryTldrGateOutcomeV2.Hit(pin): pin
+        case DirectoryTldrGateOutcomeV2.FullVisit(reason):
+            fail("expected store fixture hit: {reason}")
+
+fn gate_expect_full_visit(outcome: DirectoryTldrGateOutcomeV2):
+    match outcome:
+        case DirectoryTldrGateOutcomeV2.FullVisit(_): ()
+        case DirectoryTldrGateOutcomeV2.Hit(_): fail("unexpected admission")
+
+describe "Serial directory store gate owner":
+    it "rebuilds once then reads framed immutable bytes without rebuilding":
+        val root = gate_root("rebuild-hit")
+        val _ = rt_dir_remove_all(root)
+        val store = DirectoryTldrStoreV2.create(root, 1).unwrap()
+        val first = gate_expect_pin(directory_tldr_cache_gate_v2(store, gate_fixture_expected(),
+            gate_fixture_expected, gate_fixture_rebuild))
+        expect(store.validate_pin(first)).to_equal(true)
+        val second = gate_expect_pin(directory_tldr_cache_gate_v2(store, gate_fixture_expected(),
+            gate_fixture_expected, gate_forbidden_rebuild))
+        expect(second.generation).to_equal(first.generation)
+        expect(second.canonical_bytes_digest).to_equal(first.canonical_bytes_digest)
+        expect(second.pin_id == first.pin_id).to_equal(false)
+        expect(store.release_pin(first).is_ok()).to_equal(true)
+        expect(store.validate_pin(second)).to_equal(true)
+        expect(store.release_pin(second).is_ok()).to_equal(true)
+
+    it "never admits missing authority and refuses callback reentry":
+        val root = gate_root("missing")
+        val _ = rt_dir_remove_all(root)
+        val store = DirectoryTldrStoreV2.create(root, 1).unwrap()
+        gate_expect_full_visit(directory_tldr_cache_gate_v2(store, gate_missing_expected(),
+            gate_missing_expected, gate_forbidden_rebuild))
+        expect(store.held.len()).to_equal(0)
+        store.busy = true
+        gate_expect_full_visit(directory_tldr_cache_gate_v2(store, gate_fixture_expected(),
+            gate_fixture_expected, gate_forbidden_rebuild))
+        expect(store.held.len()).to_equal(0)
+        store.busy = false
+
+    it "rejects changed fresh epoch before publication and on hits":
+        val root = gate_root("epoch")
+        val _ = rt_dir_remove_all(root)
+        val store = DirectoryTldrStoreV2.create(root, 1).unwrap()
+        gate_expect_full_visit(directory_tldr_cache_gate_v2(store, gate_fixture_expected(),
+            gate_changed_epoch, gate_fixture_rebuild))
+        expect(store.held.len()).to_equal(0)
+        val pin = gate_expect_pin(directory_tldr_cache_gate_v2(store, gate_fixture_expected(),
+            gate_fixture_expected, gate_fixture_rebuild))
+        gate_expect_full_visit(directory_tldr_cache_gate_v2(store, gate_fixture_expected(),
+            gate_changed_epoch, gate_forbidden_rebuild))
+        expect(store.held.len()).to_equal(1)
+        expect(store.release_pin(pin).is_ok()).to_equal(true)
+
+    it "rejects nested view mutation but permits exact scalar terminal cleanup once":
+        val root = gate_root("mutation")
+        val _ = rt_dir_remove_all(root)
+        val store = DirectoryTldrStoreV2.create(root, 1).unwrap()
+        var pin = gate_expect_pin(directory_tldr_cache_gate_v2(store, gate_fixture_expected(),
+            gate_fixture_expected, gate_fixture_rebuild))
+        val forged = DirectoryTldrPinnedGenerationV2(..pin, generation: sha256_text("unrelated"))
+        expect(store.release_pin(forged).is_err()).to_equal(true)
+        pin.view.facts.sorted_join_points[0].attrs.push("changed")
+        expect(store.validate_pin(pin)).to_equal(false)
+        expect(store.release_pin(pin).is_ok()).to_equal(true)
+        expect(store.release_pin(pin).is_err()).to_equal(true)
+        expect(store.held.len()).to_equal(0)
+
+    it "refuses a corrupt rebuilt frame without poisoning the next valid publication":
+        val root = gate_root("corrupt-candidate")
+        val _ = rt_dir_remove_all(root)
+        val store = DirectoryTldrStoreV2.create(root, 1).unwrap()
+        gate_expect_full_visit(directory_tldr_cache_gate_v2(store, gate_fixture_expected(),
+            gate_fixture_expected, gate_corrupt_rebuild))
+        expect(store.held.len()).to_equal(0)
+        expect(store.flights.inflight_count()).to_equal(0)
+        val pin = gate_expect_pin(directory_tldr_cache_gate_v2(store, gate_fixture_expected(),
+            gate_fixture_expected, gate_fixture_rebuild))
+        expect(store.release_pin(pin).is_ok()).to_equal(true)

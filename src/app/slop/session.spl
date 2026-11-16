@@ -1,6 +1,7 @@
 #![allow(REQC004)]
 # Pure typed actions wrapped by the actual native UISession. No private graph writer.
 use std.common.traceability.model.{TraceGraph, TraceQuery, TraceQueryResult, SourceSlice, SnapshotInput}
+use std.common.traceability.trace_ids_v1.{TraceEntityIdV1, TracePageLimitV1, TraceQueryDirectionV1, TraceSnapshotIdV1}
 use std.common.traceability.query.{query_trace_graph}
 use std.common.traceability.evidence_model.{TraceQualification}
 use app.slop.evidence.{slop_evidence_text}
@@ -29,14 +30,14 @@ class SlopSession:
     ui: UISession
 
     static fn new(graph: TraceGraph, prefix: text) -> SlopSession:
-        val page = query_trace_graph(graph, TraceQuery(snapshot_id: graph.subject.snapshot_id,
-            selected_id: "", direction: "all", limit: 200, cursor: ""))
+        val page = query_trace_graph(graph, TraceQuery(snapshot_id: TraceSnapshotIdV1(value: graph.subject.snapshot_id),
+            selected_id: None, direction: TraceQueryDirectionV1.All, limit: TracePageLimitV1(value: 200), cursor: None))
         val aliases = slop_aliases(page, prefix)
         val source_status = "Select a source location; pinned source has not been requested"
         val evidence_status = "Execution qualification unavailable; graph links do not prove test execution"
         val tree = slop_build_tree(prefix, graph, page, aliases, [], "", nil, source_status, evidence_status)
         SlopSession(prefix: prefix, graph: graph, page: page,
-            active_query: TraceQuery(snapshot_id: graph.subject.snapshot_id, selected_id: "", direction: "all", limit: 200, cursor: ""),
+            active_query: TraceQuery(snapshot_id: TraceSnapshotIdV1(value: graph.subject.snapshot_id), selected_id: None, direction: TraceQueryDirectionV1.All, limit: TracePageLimitV1(value: 200), cursor: None),
             aliases: aliases, collapsed: [],
             selected_id: "", focused_alias: "", source: nil, source_status: source_status,
             source_pending: false, event_status: "",
@@ -97,7 +98,7 @@ class SlopSession:
         Ok(was_collapsed)
 
     me show_query(query: TraceQuery) -> Result<i64, text>:
-        if query.snapshot_id != me.graph.subject.snapshot_id:
+        if query.snapshot_id.value != me.graph.subject.snapshot_id:
             me.event_status = "Query rejected: snapshot mismatch; previous view retained"
             me.refresh()
             return Err("query snapshot mismatch")
@@ -245,19 +246,19 @@ class SlopSession:
             case UIEvent.Action(name):
                 if name == "slop.forward" or name == "slop.reverse" or name == "slop.all" or name == "slop.next":
                     var query = me.active_query
-                    query.cursor = ""
+                    query.cursor = None
                     if name == "slop.next":
                         if me.page.next_cursor == "":
                             return Err("no next page")
-                        query.cursor = me.page.next_cursor
+                        query.cursor = Some(me.page.next_cursor)
                     elif name == "slop.all":
-                        query.selected_id = ""
-                        query.direction = "all"
+                        query.selected_id = None
+                        query.direction = TraceQueryDirectionV1.All
                     else:
                         if me.selected_id == "":
                             return Err("select a node before tracing relations")
-                        query.selected_id = me.selected_id
-                        query.direction = if name == "slop.forward": "outgoing" else: "incoming"
+                        query.selected_id = Some(TraceEntityIdV1(value: me.selected_id))
+                        query.direction = if name == "slop.forward": TraceQueryDirectionV1.Outgoing else: TraceQueryDirectionV1.Incoming
                     match me.show_query(query):
                         case Ok(count): return Ok("Showing {count} nodes")
                         case Err(message): return Err(message)

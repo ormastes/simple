@@ -13,7 +13,8 @@ use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_v
 use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
 use std.common.base_encoding.utilities.base_encoding_text_to_bytes
 use std.common.build_manager.contracts.builder_digest_valid_v1
-use std.common.build_manager.group_process_stream_protocol_v2.{group_process_stream_template_decode_v3, group_process_stream_template_encode_v3}
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, group_process_stream_template_decode_v3,
+    group_process_stream_template_encode_v3}
 use std.common.crypto.sha256.sha256_text
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
@@ -26,6 +27,8 @@ pub struct HostLinuxServiceRecordsV4:
     credential: HostEnrollmentCredentialV1
     claim_digest: text
     authorized_at: i64
+    # milestone_0021 F15 (B): the statically checked, enrollment-pinned agent helper template.
+    agent_helper_template: Option<GroupProcessStreamLaunchV2> = None
 
 # Exact installed bytes, already acquired by the caller's protected reader.
 pub struct HostLinuxServiceRecordSourcesV4:
@@ -38,6 +41,7 @@ pub struct HostLinuxServiceRecordSourcesV4:
     credential: text
     claim: text
     root_record: text
+    agent_helper_template: text
 
 fn service_record_fields_v4(source: text, names: [text]) -> Result<Dict<text, SdnValue>, text>:
     if source.byte_len() == 0 or source.byte_len() > 16384: return Err("linux-host-service-record-size")
@@ -124,8 +128,9 @@ pub fn host_linux_service_records_verify_v4(root: text,
     host_linux_service_static_check_v4(binding, credential, metadata)?
     val claim_digest = host_linux_service_claim_check_v4(root, binding, credential, sources.claim, sources.root_record)?
     if host_local_context_v1(metadata.policy).grant_clock < claim_digest.1: return Err("linux-host-service-admission-clock-regressed")
-    val records = HostLinuxServiceRecordsV4(binding, metadata, credential, claim_digest.0, claim_digest.1)
+    var records = HostLinuxServiceRecordsV4(binding, metadata, credential, claim_digest.0, claim_digest.1)
     host_linux_service_enrollment_authorize_v4(records)?
+    records.agent_helper_template = Some(host_linux_service_agent_helper_template_v4(binding, sources.agent_helper_template)?)
     Ok(records)
 
 pub(package) fn host_linux_service_enrollment_authorize_v4(records: HostLinuxServiceRecordsV4) -> Result<(), text>:
@@ -184,6 +189,40 @@ fn host_linux_service_broker_template_v4(binding: HostLinuxServiceEnrollmentBind
         return Err("linux-host-service-broker-reserved-mismatch")
     Ok(template_bytes)
 
+# milestone_0021 F15 (B): the agent helper template, a sibling of the broker-policy loader above. Static checks
+# only, on every load: pin, strict canonical three-field SDN, canonical normalized template (deadline and transport
+# generation 0, enforced by the canonical encode), profile_v3 (the per-run binder refuses without it), args
+# ["version"] (the data-only base projection of the workspace bind) and a pinned root whose last component is at
+# most 200 bytes, so `<component>-<16 hex>-w<i>-<name>` stays under NAME_MAX. Budget and the runRoot relation are
+# checked by the HELD epoch after the factory (validate_helper_template_v3), never guessed here.
+pub fn host_linux_service_agent_helper_template_v4(binding: HostLinuxServiceEnrollmentBindingV3,
+        source: text) -> Result<GroupProcessStreamLaunchV2, text>:
+    if source.byte_len() == 0 or source.byte_len() > 1048576 or sha256_text(source) != binding.agent_helper_template_digest:
+        return Err("linux-host-service-agent-helper-template-pin")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 1048576, max_depth: 2,
+            max_nodes: 8, max_rows: 0, max_cells: 0, max_columns: 4)):
+        case Ok(value): value
+        case Err(issue): return Err("linux-host-service-agent-helper-template-syntax:" + issue.code)
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("linux-host-service-agent-helper-template-object")
+    if fields.len() != 3 or not fields.contains_key("template"): return Err("linux-host-service-agent-helper-template-fields")
+    val template_bytes = match fields["template"]:
+        case SdnValue.String(value): value
+        case _: return Err("linux-host-service-agent-helper-template-fields")
+    val expected: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("linux-host-service-agent-helper-template"),
+        "template": SdnValue.String(template_bytes)}
+    if sdn_encode_canonical(SdnValue.Dict(expected)) + "\n" != source: return Err("linux-host-service-agent-helper-template-canonical")
+    val template = group_process_stream_template_decode_v3(template_bytes)?
+    if group_process_stream_template_encode_v3(template)? != template_bytes or template.profile_v3.is_none():
+        return Err("linux-host-agent-helper-template-invalid")
+    val root = template.root
+    val slash = root.last_index_of("/")
+    if (template.request.args != ["version"] or not root.starts_with("/") or slash < 0 or
+            root.byte_len() - slash - 1 <= 0 or root.byte_len() - slash - 1 > 200):
+        return Err("linux-host-agent-helper-template-invalid")
+    Ok(template)
+
 # Sealed proof of one verified signed enrollment association. Every field is
 # private: only this module constructs it, and only in
 # linux_service_enrollment_verify_v1 after the signature check against the
@@ -199,6 +238,7 @@ pub class LinuxServiceVerifiedEnrollmentV1:
     engine_policy_bytes: text
     broker_policy_bytes: text
     authorized_at: i64
+    agent_helper_template_bytes: text = ""
 
     pub fn machine_parent() -> text: self.binding.machine_parent
     pub fn binding_digest() -> Result<text, text>: host_linux_service_enrollment_digest_v3(self.binding)
@@ -216,8 +256,9 @@ pub class LinuxServiceVerifiedEnrollmentV1:
 # wall clock, real Ed25519 issuer + approver signatures against `policy_bytes`.
 fn linux_service_enrollment_check_v1(policy_bytes: text, binding: HostLinuxServiceEnrollmentBindingV3,
         credential: HostEnrollmentCredentialV1, configuration_bytes: text, engine_policy_bytes: text,
-        broker_policy_bytes: text) -> Result<i64, text>:
+        broker_policy_bytes: text, agent_helper_template_bytes: text) -> Result<i64, text>:
     host_linux_service_enrollment_encode_v3(binding)?
+    val template = host_linux_service_agent_helper_template_v4(binding, agent_helper_template_bytes)?
     if sha256_text(policy_bytes) != binding.policy_digest: return Err("linux-service-enrollment-policy-pin")
     val metadata = host_linux_service_metadata_v4(binding, policy_bytes, configuration_bytes,
         engine_policy_bytes, broker_policy_bytes)?
@@ -231,12 +272,12 @@ fn linux_service_enrollment_check_v1(policy_bytes: text, binding: HostLinuxServi
 # the parent; the owner later re-verifies against its own writer-held bytes.
 pub fn linux_service_enrollment_verify_v1(policy_bytes: text, binding: HostLinuxServiceEnrollmentBindingV3,
         credential: HostEnrollmentCredentialV1, configuration_bytes: text, engine_policy_bytes: text,
-        broker_policy_bytes: text) -> Result<LinuxServiceVerifiedEnrollmentV1, text>:
+        broker_policy_bytes: text, agent_helper_template_bytes: text) -> Result<LinuxServiceVerifiedEnrollmentV1, text>:
     val at = linux_service_enrollment_check_v1(policy_bytes, binding, credential, configuration_bytes,
-        engine_policy_bytes, broker_policy_bytes)?
+        engine_policy_bytes, broker_policy_bytes, agent_helper_template_bytes)?
     Ok(LinuxServiceVerifiedEnrollmentV1(binding: binding, credential: credential, policy_bytes: policy_bytes,
         configuration_bytes: configuration_bytes, engine_policy_bytes: engine_policy_bytes,
-        broker_policy_bytes: broker_policy_bytes, authorized_at: at))
+        broker_policy_bytes: broker_policy_bytes, authorized_at: at, agent_helper_template_bytes: agent_helper_template_bytes))
 
 # Re-verification against INSTALLED bytes read by the storage owner through its
 # own writer descriptor. Fresh clock every call: an approval that expired while
@@ -246,7 +287,7 @@ pub fn linux_service_enrollment_installed_v1(proof: LinuxServiceVerifiedEnrollme
     if held_policy.is_none() or held_policy.unwrap() != proof.policy_bytes:
         return Err("linux-service-enrollment-installed-policy-mismatch")
     val at = linux_service_enrollment_check_v1(held_policy.unwrap(), proof.binding, proof.credential,
-        proof.configuration_bytes, proof.engine_policy_bytes, proof.broker_policy_bytes)?
+        proof.configuration_bytes, proof.engine_policy_bytes, proof.broker_policy_bytes, proof.agent_helper_template_bytes)?
     if at < proof.authorized_at: return Err("linux-service-enrollment-clock-regressed")
     Ok(())
 
@@ -265,9 +306,10 @@ pub fn linux_service_enrollment_fixed_files_v1(proof: LinuxServiceVerifiedEnroll
     Ok([(child + "/linux-service-enrollment-v3.sdn", host_linux_service_enrollment_encode_v3(proof.binding)?),
         (child + "/linux-service-enrollment-credential-v3.sdn", host_enrollment_credential_encode_v1(proof.credential)?),
         (child + "/authority-policy.sdn", proof.policy_bytes), (child + "/host-config.sdn", proof.configuration_bytes),
-        (child + "/engine-policy.sdn", proof.engine_policy_bytes), (child + "/broker-policy.sdn", proof.broker_policy_bytes)])
+        (child + "/engine-policy.sdn", proof.engine_policy_bytes), (child + "/broker-policy.sdn", proof.broker_policy_bytes),
+        (child + "/agent-helper-template.sdn", proof.agent_helper_template_bytes)])
 
-# Ordered fresh publication DATA: claim, six fixed children, root manifest last.
+# Ordered fresh publication DATA: claim, seven fixed children, root manifest last.
 # The nonce is drawn here; no caller chooses claim or manifest bytes.
 pub fn linux_service_enrollment_publication_v1(proof: LinuxServiceVerifiedEnrollmentV1) -> Result<[(text, text)], text>:
     val entropy = sosix_random_hex(32)

@@ -12,6 +12,7 @@ Delegates cryptographic operations to the hosted runtime via extern.
 use std.gc_async_mut.gpu.browser_engine.net.entity.tls_types.{TlsConfig, CertChain, TlsVersion}
 use std.gc_async_mut.gpu.browser_engine.shared.error.{BrowserError, network_error}
 use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger}
+use std.common.net.host_name.{HostName, HostIdentity, host_identity_parse}
 use std.nogc_sync_mut.io.browser_net_runtime.{
     browser_runtime_string_free,
     browser_tls_connect, browser_tls_connect_address,
@@ -84,6 +85,9 @@ pub class TlsManager:
     me handshake(host: text, port: i64) -> Result<TlsConnection, BrowserError>:
         self._handshake_target(host, host, port, 5000, false)
 
+    me handshake_name(host: HostName, port: i64) -> Result<TlsConnection, BrowserError>:
+        self._handshake_target(host.value, host.value, port, 5000, false)
+
     me handshake_address(
         address: text, host: text, port: i64, timeout_ms: i64
     ) -> Result<TlsConnection, BrowserError>:
@@ -114,6 +118,14 @@ pub class TlsManager:
 
         if host.len() == 0:
             return Err(network_error("TLS handshake: empty hostname"))
+
+        # Parse once at ingress: DNS names must be valid host names; numeric
+        # service identities (e.g. IPv6) are admitted as-is.
+        match host_identity_parse(host):
+            Err(reason):
+                return Err(network_error("TLS handshake: invalid hostname: {reason}"))
+            Ok(_):
+                pass_dn
 
         if port <= 0 or port > 65535:
             return Err(network_error("TLS handshake: invalid port {port}"))

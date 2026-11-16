@@ -1,0 +1,207 @@
+"""
+## Purpose and audience
+Structural pins for milestone_0021 PR2, the V4-native installed agent owner
+(`.spipe/simple_orchestrator/continuation_20261116/milestone_0021_agent_owner_v4/DESIGN.md`
+sections 2, 3.4 step 4, 3.6, 4 and the Route). Written for owners of the Linux
+Host service, the fresh-epoch machine authority and the container facade.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-16).
+## Compatibility and limitations
+Shape only. Simple does not enforce type or field privacy
+(doc/08_tracking/bug/field_and_type_privacy_unenforced_e1040_e1046_2026-11-16.md),
+so these pins are the fence for: the agent file's forbidden tokens (S40-AGENT-01/03),
+create-before-publish in the two begins (r7 X-04, scoped to eff and peff), the
+F21 source drop, the route placement (N-07) and the byte-unchanged bodies
+(S40-AGENT-05). Body pins hash the text from `fn NAME(` to the next
+declaration, trailing blank and comment lines trimmed; the constants were
+computed with the identical rule over BASE 10e5ca13c1f and equal the PR tree.
+## Verification guidance and troubleshooting
+A changed pinned body FAILS on purpose: re-read DESIGN section 3.2 before any
+re-pin. A token pin failing on a comment is still a failure (the pin is textual).
+"""
+use std.spec.{step, fail}
+use std.io.file_read_text
+use std.common.crypto.sha256.sha256_text
+
+fn s40_count(source: text, token: text) -> i64:
+    source.split(token).len() - 1
+
+# `fn NAME(` up to the next declaration marker; trailing blank/comment lines trimmed (twin of the pin generator).
+fn s40_body(source: text, name: text) -> text:
+    val start = source.index_of("fn " + name + "(")
+    if start < 0: return ""
+    val tail = source.substring(start + 3, source.byte_len())
+    var stop = tail.byte_len()
+    for marker in ["\n    pub fn ", "\n    fn ", "\npub fn ", "\nfn ", "\n    pub(package) fn ", "\npub(package) fn ",
+            "\nexport ", "\npub struct ", "\npub class ", "\nstruct "]:
+        val at = tail.index_of(marker)
+        if at >= 0 and at < stop: stop = at
+    var lines = source.substring(start, start + 3 + stop).split("\n")
+    while lines.len() > 0 and (lines[lines.len() - 1].trim() == "" or lines[lines.len() - 1].trim().starts_with("#")):
+        lines = lines[0:lines.len() - 1]
+    lines.join("\n")
+
+# The root assignment, then the exclusive create, then the bind, action_begin_v2 and the publish, in that order.
+fn s40_create_first(body: text, bind: text) -> bool:
+    val root = body.index_of("template.root = template.root + \"-\" + name")
+    val create = body.index_of("dir_create_private_exclusive_v1(template.root)?")
+    if root < 0 or create <= root: return false
+    for first in [bind, "state.action_begin_v2(", "workload_publish_v3(storage"]:
+        if body.index_of(first) <= create: return false
+    true
+
+fn s40_agent() -> text:
+    file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_agent_v4.spl")
+
+describe "V4 agent owner structural pins (milestone_0021 PR2)":
+    it "keeps every second-writer and provider-start token out of the agent file":
+        # @req S40-AGENT-01 (section 2 structural pin), S40-AGENT-03 (R-08)
+        val agent = s40_agent()
+        for token in ["host_capacity_owner_open_linux_v3", "linux_protected_root_reader_open_v1",
+                "machine_container_authority_open", "linux_installed_fresh_epoch_open_v1", "host_capacity_owner_begin_v1",
+                "start_provider_v1", "provider_process_current_v1", "continuity_proven ="]:
+            step("absent: " + token)
+            expect(s40_count(agent, token)).to_equal(0)
+        step("the only Host progress write is the associated settle")
+        expect(s40_count(agent, "host_capacity_owner_settle_associated_v3(")).to_equal(1)
+        expect(s40_count(agent, "daemon_operation_record_outcome_v2")).to_equal(0)
+        expect(s40_count(agent, "daemon_operation_begin_v2")).to_equal(0)
+        step("the agent module never imports the service owner (no import cycle)")
+        expect(s40_count(agent, "host_linux_service_current_v4")).to_equal(0)
+        step("nil is never used in the new agent code")
+        expect(s40_count(agent, " nil")).to_equal(0)
+
+    it "keeps the provider-start tokens off the lent transfer, the factory and the settle path":
+        # @req S40-AGENT-03 (R-08)
+        val ma = file_read_text("src/lib/nogc_sync_mut/container/machine_authority_v1.spl")
+        val few = file_read_text("src/lib/nogc_async_mut/container/providers/linux/fresh_epoch_workload_v2.spl")
+        val hco = file_read_text("src/lib/nogc_sync_mut/orchestration/host_capacity_owner_v1.spl")
+        for body in [s40_body(ma, "transfer_workload_lent_v3"), s40_body(few, "linux_workspace_root_open_lent_v4"),
+                s40_body(hco, "host_capacity_owner_settle_associated_v3")]:
+            expect(body.byte_len() > 0).to_equal(true)
+            expect(s40_count(body, "start_provider_v1")).to_equal(0)
+            expect(s40_count(body, "provider_process_current_v1")).to_equal(0)
+        step("the settle never begins, transitions-prepared or reserves")
+        val settle = s40_body(hco, "host_capacity_owner_settle_associated_v3")
+        expect(s40_count(settle, "daemon_operation_begin_v2")).to_equal(0)
+        expect(s40_count(settle, "host_transition_prepared_v1")).to_equal(0)
+        expect(s40_count(settle, "\"completed\", digest")).to_equal(1)
+
+    it "creates the helper directory between the root assignment and the first bind, begin or publish":
+        # @req S40-AGENT-08 (r7 X-04: eff and peff only, never a repo scan)
+        val eff = s40_body(file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workload_effects_v3.spl"),
+            "machine_fresh_workload_begin_v3")
+        val peff = s40_body(file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_probe_effects_v3.spl"),
+            "machine_fresh_probe_begin_v3")
+        expect(s40_create_first(eff, "machine_fresh_launch_bind_v3(")).to_equal(true)
+        expect(s40_create_first(peff, "linux_fresh_workload_probe_bind_v3(")).to_equal(true)
+
+    it "drops the source loan at stopping and never uses it after":
+        # @req S40-AGENT-06 (F21 structural pin)
+        val release = s40_body(s40_agent(), "host_agent_release_step_v4")
+        expect(s40_count(release, "state.source")).to_equal(1)
+        expect(release).to_contain("state.source = None")
+        val settle = s40_body(s40_agent(), "host_agent_host_settle_v4")
+        expect(s40_count(settle, ".source")).to_equal(0)
+
+    it "routes host-agent-invoke on the LinuxService arm only, leaving the V2 lists untouched":
+        # @req S40-AGENT-02 (Route, N-07)
+        val v2 = file_read_text("src/lib/nogc_sync_mut/orchestration/host_service_domain_v2.spl")
+        expect(s40_count(v2, "host-agent-invoke")).to_equal(0)
+        val v3 = file_read_text("src/lib/nogc_sync_mut/orchestration/host_service_domain_v3.spl")
+        val arm = v3.index_of("case HostLocalRootV3.LinuxService(local):")
+        val route = v3.index_of("if request.action == \"host-agent-invoke\":")
+        val validator = v3.index_of("val invalid = host_service_request_error_v2(request)\n            if invalid != \"\": return HostServiceTurnV3(owner, 1, host_service_error_payload_v2(request, invalid, false))\n            if request.action != \"host-status\"")
+        expect(arm >= 0 and route > arm and validator > route).to_equal(true)
+        expect(s40_count(v3, "\"host_agent_invoke_v4\"")).to_equal(1)
+        val cv4 = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl")
+        expect(cv4).to_contain("if action == \"host_agent_invoke_v4\": return host_linux_service_agent_invoke_v4(owner, source)")
+        step("the agent factory runs only inside the invoke glue")
+        expect(s40_count(cv4, "host_linux_service_agent_open_v4(")).to_equal(1)
+
+    it "keeps the root-borrow accessor caller and the provider imports fenced":
+        # @req S40-AGENT-07 (N-10: only ma reaches the storage alias; provider types only through std.container)
+        val agent = s40_agent()
+        val cv4 = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl")
+        expect(s40_count(agent, "linux_workspace_root_borrow_from_storage_v3")).to_equal(0)
+        expect(s40_count(cv4, "linux_workspace_root_borrow_from_storage_v3")).to_equal(0)
+        expect(s40_count(agent, "container.providers.")).to_equal(0)
+        expect(s40_count(cv4, "container.providers.")).to_equal(0)
+
+    it "keeps the pinned bodies and the V2 domain byte-unchanged":
+        # @req S40-AGENT-05 (blob pins; S40-LOAN-06 companion)
+        val ma = file_read_text("src/lib/nogc_sync_mut/container/machine_authority_v1.spl")
+        val eff = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workload_effects_v3.spl")
+        expect(sha256_text(s40_body(ma, "transfer_workload_v2"))).to_equal("28056310c831e2257707ef09312a0d8b5886d70c85b09acbc94d56a48fb63df3")
+        expect(sha256_text(s40_body(ma, "start_provider_v1"))).to_equal("43581ddaae2a62b002fffc43c6dae2844d95aa3e85dc2608afef4ecdfc98c51b")
+        expect(sha256_text(s40_body(ma, "settle_v2"))).to_equal("08f3bef06c205975a141b2af6704484be602bd818325878cab9e1c9d63532dee")
+        expect(sha256_text(s40_body(eff, "machine_fresh_workload_settle_cpu_v3"))).to_equal("4e64cf3cf9c9256703991d56c5f9f75cd81a7345c9af4d8f39baa76b56c692ac")
+        val v2 = file_read_text("src/lib/nogc_sync_mut/orchestration/host_service_domain_v2.spl")
+        expect(sha256_text(v2)).to_equal("00a3a7afc605f3146e9b071dc832492ec12eedd4d3666fae9bde005537b023b7")
+
+    it "checks the custody service uid against the selected uid before the root borrow is built":
+        # @req S40-AGENT-09 (N-09). Behaviour needs a real authority and custody: env-gated in
+        # test/03_system/lib/container/linux_service_agent_chain_v4_spec.spl.
+        val lend = s40_body(file_read_text("src/lib/nogc_sync_mut/container/machine_authority_v1.spl"), "lend_workspace_root_v1")
+        val uid = lend.index_of("observed.unwrap().service_uid != authority.selected_linux_uid:")
+        val refused = lend.index_of("error: \"machine-fresh-epoch-workspace-root-service-uid\")")
+        val borrow = lend.index_of("linux_workspace_root_borrow_from_storage_v3(")
+        expect(uid >= 0 and refused > uid and borrow > refused).to_equal(true)
+
+    it "runs gate 1b before the executing-only row gate for a matching settled or host-settle agent":
+        # @req S40-AGENT-02 (N-07/U-03 replay; P2R1-F1)
+        val agent = s40_agent()
+        val admit = s40_body(agent, "host_linux_service_agent_admit_v4")
+        expect(admit).to_contain("if row.state != \"executing\" and not (replay and row.state == \"completed\"): return Err(\"linux-host-agent-row-not-executing\")")
+        val cv4 = s40_body(file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl"),
+            "host_linux_service_agent_invoke_v4")
+        val replay = cv4.index_of("if val agent = owner.agent: replay = agent.stage == \"settled\" or agent.stage == \"host-settle\"")
+        val admitted = cv4.index_of("val manifest = host_linux_service_agent_admit_v4(")
+        expect(replay >= 0 and admitted > replay).to_equal(true)
+        step("the settled stage reaches host_agent_settled_v4 from the step dispatcher")
+        expect(s40_body(agent, "host_linux_service_agent_step_v4")).to_contain("if stage == \"settled\": return host_agent_settled_v4(agent, capacity, input)")
+
+    it "binds the probe provider to the signed enrollment value and retries the epoch close after the loan end":
+        # @req S40-AGENT-11 (P2R1-F3), S40-AGENT-07 (P2R1-F2)
+        val agent = s40_agent()
+        val source = s40_body(agent, "host_agent_source_step_v4")
+        expect(source).to_contain("capacity.ledger.capacity, container, input.expected_provider, input.service_scope,")
+        expect(s40_count(source, "provider_identity_digest")).to_equal(0)
+        val cv4 = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl")
+        expect(cv4).to_contain("owner.records.unwrap().binding.provider_identity_digest)")
+        val release = s40_body(agent, "host_linux_service_agent_release_v4")
+        val guarded = release.index_of("if not state.loan_ended:")
+        val marked = release.index_of("state.loan_ended = true")
+        val close = release.index_of("simple_container_close_epoch_v3(held)")
+        expect(guarded >= 0 and marked > guarded and close > marked).to_equal(true)
+
+    it "keeps the helper-root module off the sd-bus ABI with the same directory flag word":
+        # @req S40-AGENT-08 (P2R1-F4)
+        val root = file_read_text("src/lib/nogc_sync_mut/io/linux_helper_root_v1.spl")
+        expect(s40_count(root, "linux_fresh_workload_abi_v2")).to_equal(1)
+        expect(s40_count(root, "use std.nogc_sync_mut.io.linux_fresh_workload_abi_v2")).to_equal(0)
+        expect(s40_count(root, "linux_installed_supervisor_abi_v1")).to_equal(1)
+        val abi = s40_body(file_read_text("src/lib/nogc_sync_mut/io/linux_fresh_workload_abi_v2.spl"), "linux_workload_flags_v2")
+        val flags = s40_body(root, "linux_helper_root_directory_flags_v1")
+        expect(abi).to_contain("if directory: 720896 else: 657408")
+        expect(abi).to_contain("if directory: 573440 else: 559104")
+        expect(flags).to_contain("    720896\n")
+        expect(flags).to_contain("    573440\n")
+
+    it "limits the agent's journal artifact writes to the intent and the write-once observation":
+        # @req S40-AGENT-01 (P2R1-F5, deviation D25: the stage-create intent store mirrors V7 awe:411)
+        val agent = s40_agent()
+        expect(s40_count(agent, "host_execution_intent_store_owned_v3(")).to_equal(1)
+        expect(s40_count(agent, "host_execution_observation_store_owned_v3(")).to_equal(1)
+        expect(s40_count(agent, "distributed_operation_journal_write")).to_equal(0)
+        expect(s40_count(agent, "distributed_operation_journal_publish")).to_equal(0)
+
+    it "clears the agent slot only on the explicit not-found reason and carries the root on a lost transfer":
+        # @req S40-AGENT-02 (N-06/T-08; P2R1-F8), S40-AGENT-07 (N-05; P2R1-F6)
+        val cv4 = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl")
+        expect(s40_count(cv4, "distributed_operation_journal_lookup_v2")).to_equal(0)
+        expect(cv4).to_contain("if prior.is_err() and prior.unwrap_err() == \"OPERATION_NOT_FOUND\":")
+        expect(cv4).to_contain("val readback = daemon_operation_exact_v2(owner.capacity.unwrap().journal, owner.agent_operation.unwrap())")
+        val open = s40_body(s40_agent(), "host_linux_service_agent_open_v4")
+        expect(open).to_contain("return HostLinuxServiceAgentOpenV4(root: opened.root,")

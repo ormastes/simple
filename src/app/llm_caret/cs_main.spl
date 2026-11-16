@@ -16,7 +16,7 @@ use std.nogc_sync_mut.tui.terminal.{TerminalSize, terminal_stdin_is_tty,
     terminal_get_size}
 use std.sosix.pty.{sosix_pty_read as pty_read}
 use std.nogc_async_mut.sosix.host_facade.{sosix_platform, sosix_print_raw as print_raw}
-use app.llm_caret.cs_dashboard.{CsDashboard, cs_dashboard_new, cs_refresh,
+use app.llm_caret.cs_dashboard.{CsAgent, CsDashboard, cs_dashboard_new, cs_refresh,
     cs_render, cs_handle_command, cs_apply_action, cs_frame_rows,
     cs_poll_screens, cs_resize_agents, cs_agent_area}
 use app.llm_caret.workbench.capability_checklist.{capability_rows, capability_lines,
@@ -28,6 +28,7 @@ use app.llm_caret.workbench.leader_keys.{new_leader_state, LeaderState, LeaderAc
 use app.llm_caret.workbench.key_chunker.{split_complete_keys, flush_carry, terminal_key_step,
     toggle_focus, focus_label}
 use app.llm_caret.workbench.pane_binding.{PaneBinding, PaneBindingResult, resolve_pane_binding}
+use app.llm_caret.cs_gui.{CsGuiFrame, cs_render_gui_html, cs_render_gui_frame, cs_resolve_ui_mode}
 use app.llm_caret.workbench.session_contract.{SessionId, new_session_id}
 use app.llm_caret.workbench.session_source.{select_live_session, live_selected,
     publish_pane_binding, live_pane_bindings, live_pane_generation, observe_agent_generation,
@@ -70,7 +71,14 @@ fn cs_effective_size(cols: i64, rows: i64) -> (i64, i64):
 # and are ignored rather than being mistaken for a session.
 fn cs_session_from_args(args: [text]) -> text:
     var session = CS_DEFAULT_SESSION
+    var skip_next = false
     for arg in args:
+        if skip_next:
+            skip_next = false
+            continue
+        if arg == "--backend":
+            skip_next = true
+            continue
         if not arg.starts_with("-") and arg != "":
             session = arg
     session
@@ -527,10 +535,31 @@ fn cs_plain_io() -> CaretIo:
 fn cs_live_input_supported(platform: text, stdin_tty: bool, stdout_tty: bool) -> bool:
     platform == "posix" and stdin_tty and stdout_tty
 
+fn _cs_backend_from_args(args: [text]) -> text:
+    var i: i64 = 0
+    while i < args.len():
+        val a = args[i]
+        if a == "--backend" and i + 1 < args.len():
+            return args[i + 1]
+        if a.starts_with("--backend="):
+            return a[10:a.len()]
+        i = i + 1
+    "software"
+
 # A real terminal gets the live dashboard; a pipe, or a terminal that refuses
-# raw mode, gets the line loop.
+# raw mode, gets the line loop, unless GUI mode is explicitly requested.
 fn main() -> i64:
-    val session = cs_session_from_args(get_cli_args())
+    val args = get_cli_args()
+    val session = cs_session_from_args(args)
+    val ui_mode = cs_resolve_ui_mode(args)
+    if ui_mode == "gui_frame_once" or ui_mode == "gui":
+        val backend = _cs_backend_from_args(args)
+        val dash = cs_refresh(cs_dashboard_new(session))
+        val frame = cs_render_gui_frame(dash, 960, 600, backend)
+        print "cs-gui-frame: session={dash.session} backend={frame.resolved_backend} source={frame.readback_source} cpu_fallback={frame.cpu_fallback_used} width={frame.width} height={frame.height} checksum={frame.checksum}"
+        if frame.pixels.len() == 0:
+            return 1
+        return 0
     if cs_live_input_supported(sosix_platform(), terminal_stdin_is_tty(), terminal_stdout_is_tty()) and terminal_enter_raw_mode():
         if cs_run_live(session).ok:
             return 0
@@ -540,4 +569,4 @@ fn main() -> i64:
         return 0
     1
 
-export cs_terminal_keys_via, cs_live_input_supported, cs_run, cs_run_live, cs_live_paint, cs_session_from_args, cs_effective_size, cs_plain_io, CS_DEFAULT_SESSION
+export cs_terminal_keys_via, cs_live_input_supported, cs_run, cs_run_live, cs_live_paint, cs_session_from_args, cs_effective_size, cs_plain_io, CS_DEFAULT_SESSION, CsGuiFrame, cs_render_gui_html, cs_render_gui_frame, cs_resolve_ui_mode

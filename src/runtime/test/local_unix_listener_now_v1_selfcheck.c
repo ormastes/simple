@@ -56,7 +56,7 @@ int main(void) {
     int status;LuSlotV1* ls=lu_lock_v1(listener,&status);assert(ls&&status==0);
     LuSlotV1* cs=lu_lock_v1(connection,&status);assert(cs&&status==0);
     assert(pthread_mutex_lock(&lu_registry_v1)==0);
-    assert(!atomic_flag_test_and_set_explicit(&rt_core_immortal_registry_lock,memory_order_acquire));
+    for(size_t k=0;k<RT_CORE_IMMORTAL_SHARDS;k++) assert(!atomic_flag_test_and_set_explicit(&rt_core_immortal_shards[k].lock,memory_order_acquire)); /* every registry shard */
     pid_t child=fork();assert(child>=0);
     if(child==0) {
         alarm(3);
@@ -76,7 +76,7 @@ int main(void) {
         _exit(0);
     }
     assert(waitpid(child,&status,0)==child&&WIFEXITED(status)&&WEXITSTATUS(status)==0);
-    atomic_flag_clear_explicit(&rt_core_immortal_registry_lock,memory_order_release);
+    for(size_t k=0;k<RT_CORE_IMMORTAL_SHARDS;k++) atomic_flag_clear_explicit(&rt_core_immortal_shards[k].lock,memory_order_release);
     pthread_mutex_unlock(&lu_registry_v1);pthread_mutex_unlock(&cs->operation);pthread_mutex_unlock(&ls->operation);
     assert(lstat(child_path,&node)<0&&errno==ENOENT);
     a=rt_local_unix_shutdown_write_v1(connection);assert(lword(a,0)==0&&lword(a,1)==1);rt_array_free(a);

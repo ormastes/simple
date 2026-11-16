@@ -276,9 +276,13 @@ fn _append_semantic_api_results(
     val findings = check_semantic_api_decls_for_package(
         decls, semantic_api_module_stem(path), semantic_api_manifest_text_for(path))
     val critical = config.profile.? and config.profile.unwrap() == LintProfile.Critical
-    var reported_lines: Dict<text, bool> = {}
+    var reported_slots: Dict<text, bool> = {}
     for f in findings:
         if f.line > 0 and line_is_allowed(lines, f.line - 1, "primitive_api"):
+            continue
+        # A direct public bool slot is owned by the quick scanner (SPL-BOOL-001,
+        # its own lint name and tier); the semantic pass does not repeat it.
+        if f.leaf == "bool" and f.type_text == "bool" and not f.boundary:
             continue
         val code = if f.boundary: "primitive_api_boundary" else: "primitive_api"
         if f.boundary and not critical:
@@ -290,15 +294,38 @@ fn _append_semantic_api_results(
             .with_evidence_tier(LintEvidenceTier.ParsedStructural)
         results.push(LintRunResult.new(path, f.line, 0, lint))
         if not f.boundary:
-            reported_lines["{f.line}"] = true
-    if reported_lines.len() == 0:
+            reported_slots[api_slot_key_of_message(f.fmt())] = true
+    if reported_slots.len() == 0:
         return results
+    # One owner per type slot (file + symbol + type path): a quick-scanner
+    # finding for a slot the semantic pass reports is dropped. Semantic-owned
+    # results are the ones pushed above (they carry column 0).
     var deduped: [LintRunResult] = []
     for r in results:
-        if r.lint.code == "primitive_api" and r.lint.easy_fix.? and reported_lines.contains_key("{r.line}"):
+        val quick = (r.lint.code == "primitive_api" or r.lint.code == "bare_bool") and r.column > 0
+        if quick and reported_slots.contains_key(api_slot_key_of_message(r.lint.message)):
             continue
         deduped.push(r)
     deduped
+
+# "F.param.X" / "F.return" from either a quick-scanner or a semantic message
+# ("... API parameter 'X' of 'F' ...", "... API param 'X' of 'F' ...",
+# "... API return type of 'F' ...", "... API return of 'F' ..."); "" if neither.
+pub fn api_slot_key_of_message(msg: text) -> text:
+    val at = msg.find("public API ")
+    if at < 0:
+        return ""
+    val rest = msg.slice(at + 11)
+    val parts = rest.split("'")
+    if rest.starts_with("param"):
+        if parts.len() < 4:
+            return ""
+        return "{parts[3]}.param.{parts[1]}"
+    if rest.starts_with("return"):
+        if parts.len() < 2:
+            return ""
+        return "{parts[1]}.return"
+    ""
 
 fn lint_cli_append_parsed_results(
     linter: Linter, path: String, content: String, decls: [i64],
@@ -875,7 +902,9 @@ fn _run_lint_with_linter_source(
                     val effective_item = lint_run_result_drop_noop_fix(
                         lint_run_result_apply_cli_policy(lint_item, deny_all),
                         analyzed_source ?? "")
-                    val diag_key = "{effective_item.file_path}|{effective_item.line}|{effective_item.lint.code}"
+                    # The message is part of the key: two distinct sites on one
+                    # line (e.g. a bool param and a bool return) are two findings.
+                    val diag_key = "{effective_item.file_path}|{effective_item.line}|{effective_item.lint.code}|{effective_item.lint.message}"
                     if emitted_keys.contains_key(diag_key):
                         continue
                     emitted_keys[diag_key] = true

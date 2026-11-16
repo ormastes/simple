@@ -13,7 +13,7 @@
 use std.spec.step
 
 use std.spec.*
-use compiler.driver.cache.cas_store.{ActionManifest, cas_root, cas_open, cas_put, cas_get, cas_has, cas_blob_path, cas_action_path, cas_version_text, action_put, action_get, action_manifest_serialize}
+use compiler.driver.cache.cas_store.{ActionManifest, cas_root, cas_open, cas_put, cas_get, cas_get_bounded_v1, cas_has, cas_blob_path, cas_action_path, cas_version_text, action_put, action_get, action_manifest_serialize}
 use std.crypto.sha256.{sha256_text}
 
 extern fn rt_file_read_text(path: text) -> text?
@@ -214,3 +214,29 @@ describe "CAS nullable-read facade ownership":
         val result_parse_pos = source.index_of("val parsed = result_manifest_parse(content)", result_pos)
         expect(result_read_pos).to_be_greater_than(result_pos)
         expect(result_parse_pos).to_be_greater_than(result_read_pos)
+
+
+describe "bounded retained metadata CAS reads":
+    it "reads verified exact-limit UTF-8 bytes":
+        val root = fresh_root()
+        val content = "retained: 日本語"
+        val digest = cas_put(root, content)
+        expect(cas_get_bounded_v1(root, digest, content.byte_len()) ?? "missing").to_equal(content)
+        expect(cas_get_bounded_v1(root, digest, content.byte_len() - 1)).to_be_nil()
+
+    it "refuses corrupt content without mutating the prior cache path":
+        val root = fresh_root()
+        val digest = cas_put(root, "original")
+        val path = cas_blob_path(root, digest)
+        expect(rt_file_write_text(path, "modified")).to_equal(true)
+        expect(cas_get_bounded_v1(root, digest, 128)).to_be_nil()
+        expect(rt_file_exists(path)).to_equal(true)
+        expect(rt_file_read_text(path) ?? "missing").to_equal("modified")
+
+    it "rejects invalid digest paths and limits before reading":
+        val root = fresh_root()
+        val digest = cas_put(root, "data")
+        expect(cas_get_bounded_v1(root, "../other", 128)).to_be_nil()
+        expect(cas_get_bounded_v1(root, digest, 0)).to_be_nil()
+        expect(cas_get_bounded_v1(root, digest, 8388609)).to_be_nil()
+        expect(cas_get_bounded_v1("", digest, 128)).to_be_nil()

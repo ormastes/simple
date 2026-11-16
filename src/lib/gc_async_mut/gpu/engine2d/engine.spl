@@ -17,6 +17,7 @@
 
 use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, engine2d_readback_with_identity}
 use std.gpu.engine2d.color.{color_r, color_g, color_b, color_a, rgba}
+use std.gc_async_mut.gpu.engine2d.helpers.lcd_s32_tables.{engine2d_lcd_s32_tables}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_text_bg,
     emu_draw_ellipse, emu_draw_ellipse_filled,
@@ -256,6 +257,79 @@ pub fn engine2d_composite_region_milli(src: [u32], fb: [u32], fb_width: i32, fb_
             out[idx] = rgba(r, g, b, a)
             col = col + 1
         row = row + 1
+    out
+
+# LCD subpixel composite of one glyph quad over the destination pixels `dst`
+# (row-major w*h, read back from the frame). Returns w*h OPAQUE pixels, or []
+# when the quad carries no LCD cell or a destination pixel is not opaque (LCD
+# coverage needs a known opaque background; Chrome itself drops to grayscale
+# there), so the caller keeps the grayscale composite.
+#
+# Blend = Skia blend_lcd16 (Chrome 159): each channel's 8-bit coverage, scaled
+# by the text alpha, is cut to 5 bits like the LCD16 mask, upscaled 31 -> 32
+# (s + (s >> 4)), and mixed as dst + ((src - dst) * s >> 5) with a flooring
+# shift. Measured: black text over white gives exactly 255 - 8k per channel,
+# e.g. 0xf7 for s=1 and 0x07 for s=31.
+fn engine2d_lcd_quad_composite(atlas_pixels: [u32], atlas_width: i32, atlas_x: i32, atlas_y: i32,
+                               width: i32, height: i32, color: u32, dst: [u32]) -> [u32]:
+    val count = width.to_i64() * height.to_i64()
+    if width <= 0 or height <= 0 or dst.len() != count:
+        return []
+    val src_r = ((color >> 16) & 0xFFu32).to_i64()
+    val src_g = ((color >> 8) & 0xFFu32).to_i64()
+    val src_b = (color & 0xFFu32).to_i64()
+    # Coverage -> Skia s32 (0..32) per channel, preblend and text alpha folded
+    # in once per text colour, so the pixel loop is three lookups and blends.
+    val s_rgb = engine2d_lcd_s32_tables(color)
+    val atlas_w = atlas_width.to_i64()
+    val quad_w = width.to_i64()
+    # Full coverage with an opaque colour: every s32 is 32, so the blend
+    # returns the text colour exactly.
+    val solid_ok = s_rgb[255] == 32 and s_rgb[511] == 32 and s_rgb[767] == 32
+    val solid = 0xFF000000u32 | (color & 0x00FFFFFFu32)
+    var out: [u32] = [0u32; count]
+    var has_lcd = false
+    var row = 0
+    while row < height:
+        var col = 0
+        val out_row = row.to_i64() * quad_w
+        val atlas_row = (atlas_y + row).to_i64() * atlas_w + atlas_x.to_i64()
+        while col < width:
+            val i = out_row + col.to_i64()
+            val d = dst[i]
+            if ((d >> 24) & 0xFFu32) != 0xFFu32:
+                return []
+            val cell = atlas_pixels[atlas_row + col.to_i64()]
+            if cell == 0u32 or cell == 0x00FFFFFFu32:
+                # zero coverage (LCD or gray cell): every s32 is 0, so the
+                # blend returns d, which is already opaque
+                out[i] = d
+                col = col + 1
+                continue
+            if cell == 0xFFFFFFFFu32 and solid_ok:
+                out[i] = solid
+                col = col + 1
+                continue
+            val a = ((cell >> 24) & 0xFFu32).to_i64()
+            var cr = a
+            var cg = a
+            var cb = a
+            if (cell & 0x00FFFFFFu32) != 0x00FFFFFFu32:
+                has_lcd = true
+                cr = ((cell >> 16) & 0xFFu32).to_i64()
+                cg = ((cell >> 8) & 0xFFu32).to_i64()
+                cb = (cell & 0xFFu32).to_i64()
+            val dr = ((d >> 16) & 0xFFu32).to_i64()
+            val dg = ((d >> 8) & 0xFFu32).to_i64()
+            val db = (d & 0xFFu32).to_i64()
+            val r = dr + (((src_r - dr) * s_rgb[cr]) >> 5)
+            val g = dg + (((src_g - dg) * s_rgb[256 + cg]) >> 5)
+            val b = db + (((src_b - db) * s_rgb[512 + cb]) >> 5)
+            out[i] = 0xFF000000u32 | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
+            col = col + 1
+        row = row + 1
+    if not has_lcd:
+        return []
     out
 
 fn engine2d_font_atlas_subrect_pixels(atlas_pixels: [u32], atlas_width: i32, atlas_height: i32,
@@ -1101,6 +1175,10 @@ class Engine2D with DrawIrRenderTarget:
     last_font_execution_attempts: [text] = []
     last_font_execution_target: text = ""
     last_font_plan_admitted: bool = false
+    # LCD subpixel text (Chrome LCD16 parity). Off by default; the Draw IR
+    # web lane turns it on. Applies only on CPU-composited backends, whose
+    # font composite blends per channel (_draw_font_batch_cpu_suffix).
+    lcd_text: bool = false
     last_font_size_is_100: bool = false
     # Acceptance item 4 of
     # doc/08_tracking/bug/macos_vulkan_2d_vector_font_empty_batch_native_fault_2026-07-26.md:
@@ -2599,10 +2677,6 @@ class Engine2D with DrawIrRenderTarget:
         var quad_index = if submitted < 0 or submitted > batch.quads.len(): 0 else: submitted
         while quad_index < batch.quads.len():
             val quad = batch.quads[quad_index]
-            val pixels = engine2d_font_atlas_subrect_pixels(
-                batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
-                quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color
-            )
             # See doc/08_tracking/bug/font_render_batch_transform_identity_default_not_applied_2026-07-19.md
             # (BLOCKER B): the Option<i32>-returning font_destination_origin(...).?
             # round-trip decoded to a CONSTANT (1, 1) for every quad of every
@@ -2623,6 +2697,29 @@ class Engine2D with DrawIrRenderTarget:
                 dst_x_end >= -2147483648 and dst_x_end <= 2147483647 and
                 dst_y_i64 >= -2147483648 and dst_y_i64 <= 2147483647 and
                 dst_y_end >= -2147483648 and dst_y_end <= 2147483647)
+            # LCD first: the grayscale subrect below is built only when the LCD
+            # composite declines (no LCD cell, translucent destination, or a
+            # quad outside the atlas or the surface).
+            var lcd_drawn = false
+            if dst_in_range and self._lcd_text_active() and
+                    quad.atlas_x >= 0 and quad.atlas_y >= 0 and
+                    quad.atlas_x.to_i64() + quad.width.to_i64() <= batch.atlas_width.to_i64() and
+                    quad.atlas_y.to_i64() + quad.height.to_i64() <= batch.atlas_height.to_i64() and
+                    batch.atlas_pixels.len() >= batch.atlas_width.to_i64() * batch.atlas_height.to_i64():
+                val dst = self.read_pixels_region(dst_x_i64 as i32, dst_y_i64 as i32, quad.width, quad.height).pixels
+                val lcd_pixels = engine2d_lcd_quad_composite(
+                    batch.atlas_pixels, batch.atlas_width, quad.atlas_x, quad.atlas_y,
+                    quad.width, quad.height, quad.color, dst)
+                if lcd_pixels.len() > 0:
+                    self.draw_image_blend(dst_x_i64 as i32, dst_y_i64 as i32, quad.width, quad.height, lcd_pixels)
+                    lcd_drawn = true
+            if lcd_drawn:
+                quad_index = quad_index + 1
+                continue
+            val pixels = engine2d_font_atlas_subrect_pixels(
+                batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
+                quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color
+            )
             if _VEC_TEXT_PROBE and _vec_blit_probe_count < 8:
                 _vec_blit_probe_count = _vec_blit_probe_count + 1
                 var pnz = 0
@@ -2641,6 +2738,18 @@ class Engine2D with DrawIrRenderTarget:
                 self.draw_image_blend(dst_x_i64 as i32, dst_y_i64 as i32, quad.width, quad.height, pixels)
             quad_index = quad_index + 1
         quad_index
+
+    me set_lcd_text(enabled: bool):
+        """Request LCD subpixel text (Chrome's default for text <= 48 device
+        px). Takes effect only on CPU-composited backends; GPU font kernels
+        read one coverage alpha per atlas cell and keep grayscale."""
+        self.lcd_text = enabled
+
+    fn _lcd_text_active() -> bool:
+        if not self.lcd_text:
+            return false
+        val name = self.selected_backend_name
+        name == "cpu" or name == "cpu_simd" or name == "software" or name == "vulkan"
 
     me _font_batch_receipt(source: text, content_count: i64):
         """Print only when a staged batch lost its payload (see _font_batch_receipt_count)."""
@@ -2909,6 +3018,7 @@ class Engine2D with DrawIrRenderTarget:
         # nested in-place mutation form relies on reference semantics that the
         # interpreter lane does not guarantee for nested element receivers.
         var run_fonts = self.font_owner.active[0]
+        run_fonts.set_lcd_text(self._lcd_text_active())
         run_fonts.stage_glyph_run(run, color, font_size)
         self._install_active_fonts(run_fonts)
         self._font_batch_receipt("glyph-run", run.glyph_ids.len())
@@ -3000,6 +3110,7 @@ class Engine2D with DrawIrRenderTarget:
         self.last_font_plan_admitted = true
         self.ensure_font_renderer()
         var fonts: FontRenderer = self.font_owner.active[0]
+        fonts.set_lcd_text(self._lcd_text_active())
         fonts.stage_text_configured(text_val, color, config)
         self._install_active_fonts(fonts)
         self._font_batch_receipt("text", text_val.len())
@@ -3082,6 +3193,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         self.ensure_font_renderer()
         var fonts: FontRenderer = self.font_owner.active[0]
+        fonts.set_lcd_text(self._lcd_text_active())
         fonts.stage_text_with_advances_configured(text_val, advance_widths, color, config)
         self._install_active_fonts(fonts)
         self._font_batch_receipt("text-advances", text_val.len())
@@ -3116,6 +3228,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         self.ensure_font_renderer()
         var fonts: FontRenderer = self.font_owner.active[0]
+        fonts.set_lcd_text(self._lcd_text_active())
         fonts.stage_selected_glyph_run_configured(glyph_run, color, config)
         self._install_active_fonts(fonts)
         self._font_batch_receipt("shaped", glyph_run.glyph_ids.len())

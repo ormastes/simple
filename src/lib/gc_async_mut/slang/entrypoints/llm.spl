@@ -17,6 +17,7 @@
 
 use std.gc_async_mut.slang.engine.llm_engine.{engine_complete, engine_complete_chat, engine_backend_available, engine_lib_path, engine_set_lib_path, engine_set_n_ctx_text, engine_loaded_model, engine_unload}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel, scan_model_root}
+use std.common.string_core.{bytes_to_text, text_to_utf8_bytes}
 
 # One answer, plus the provenance a caller needs to know it was real. `backend`
 # names what produced the tokens, so a caller can never mistake a stubbed reply
@@ -61,13 +62,49 @@ fn slang_generate_chat(model_root: text, model_id: text, framed: text, max_token
     if framed.trim() == "":
         return SlangCompletion(content: "", model: model_id, backend: "none",
             is_error: true, error: "prompt is empty")
-    match engine_complete_chat(model_root, model_id, framed, max_tokens):
+    match engine_complete_chat(model_root, model_id, framed, _plain_prompt_from_frames(framed), max_tokens):
         Err(reason):
             SlangCompletion(content: "", model: model_id, backend: "none",
                 is_error: true, error: reason)
-        Ok(text_out):
-            SlangCompletion(content: text_out, model: model_id, backend: "ggml",
+        Ok(done):
+            SlangCompletion(content: done.content, model: model_id, backend: done.runner,
                 is_error: false, error: "")
+
+# Inverse of backend chat_frame ("<n>:<role><m>:<content>", byte counts) for
+# the pure runner, which has no chat template: the non-blank message contents
+# in order, one per line -- the plain prompt the HTTP lane builds with
+# chat_plain_prompt_from_body. "" when `framed` is malformed.
+fn _plain_prompt_from_frames(framed: text) -> text:
+    val bytes = text_to_utf8_bytes(framed)
+    var parts: [text] = []
+    var pos = 0
+    var is_content = false
+    while pos < bytes.len():
+        var n = 0
+        var digits = 0
+        while pos < bytes.len() and bytes[pos] as i64 >= 48 and bytes[pos] as i64 <= 57:
+            n = n * 10 + (bytes[pos] as i64 - 48)
+            digits = digits + 1
+            pos = pos + 1
+        if digits == 0 or pos >= bytes.len() or bytes[pos] as i64 != 58:
+            return ""
+        pos = pos + 1
+        if pos + n > bytes.len():
+            return ""
+        var field: [u8] = []
+        var i = 0
+        while i < n:
+            field.push(bytes[pos + i])
+            i = i + 1
+        pos = pos + n
+        if is_content:
+            val content = bytes_to_text(field)
+            if content.trim() != "":
+                parts.push(content)
+        is_content = not is_content
+    if is_content:
+        return ""
+    parts.join("\n")
 
 fn slang_release():
     engine_unload()

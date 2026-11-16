@@ -12,29 +12,37 @@ The `primitive_api` lint checks `pub fn` signatures only, so these are not
 flagged, but they break the "no primitive in public API" requirement:
 
 - `src/lib/common/traceability/model.spl` struct id/count fields still bare
-  `text`/`i64`: `TraceQuery`, `TraceLocator`, `TraceClaim`, `TracePolicy`,
-  `TraceEdge`, `SnapshotSubject`, `TraceDiagnostic`, `TraceNode`
-  (converted so far: `TraceEdgeOrigin`, `TraceQueryResult`, `TraceAuthority`,
-  `TraceDocument`, `TraceConventionRule`, `TraceOrigin`).
+  `text`/`i64`: `TraceLocator` (about 110 field-use sites in src+test, measured
+  2026-11-17, over the per-struct ceiling), `TraceClaim`, `TraceEdge`,
+  `SnapshotSubject`, `TraceDiagnostic`, `TraceNode`. Needs new wrappers for
+  blob ids and locator kinds (closed set: file, line, sdn-node, ...).
+  Converted so far: `TraceEdgeOrigin`, `TraceQueryResult`, `TraceAuthority`,
+  `TraceDocument`, `TraceConventionRule`, `TraceOrigin`, `TraceQuery`,
+  `TracePolicy`.
 - `TraceReverseIndexV1.by_key` is `Dict<text, [TraceEntityIdV1]>`.
 - Unblock: convert one struct per change, smallest use-site count first,
   unwrap at use sites, keep the SDN wire format byte-identical (codec specs).
 
 ## 3. MCP / ctx
-  23 lint errors (unchanged by waves 1–3).
-- `simple_ctx_purge` takes no lock; an append racing an applied purge can be
-  lost (documented in `doc/07_guide/app/mcp/mcp.md`).
-- Postings are rebuilt per store generation and only after 128 cache hits;
-  there is no incremental update on append.
-- `simple_trace` validates `profile` but does not change enforcement by it, and
-  exposes only `operation: missing`.
-- `simple_test_query`: the TestDB-absent (no cold start) path has no spec.
+
+- `simple_ctx_purge` is a compare-and-swap on the store generation key, but an
+  append that lands between the final key check and the rename still targets
+  the replaced file and is lost (`src/app/mcp/main_lazy_ctx_tools.spl`,
+  `ctx_purge_commit`). Unblock: an OS compare-and-rename, or appends that
+  re-check the generation after writing.
+- CLI `trace missing` ignores `--profile`: `run_trace_query_v1`
+  (`src/app/traceability/query_main.spl`) hardcodes `TraceProfile.Worktree` for
+  the missing path, while the MCP `simple_trace` applies the requested profile
+  through `trace_command_verdict_v1`. Unblock: parse `--profile` in the legacy
+  query options and pass it to `trace_query_completion_exit_v1`.
 
 ## 4. Test query and harness
 
-- `simple test query` spec rows use `@req TESTDB-011..016`, ids chosen by the
-  implementer; reconcile with the plan's TESTDB table.
-- `--cursor` is a plain row offset, not an opaque token.
+- The plan (sections 3.5, 9.1) lists `TESTDB-001`..`TESTDB-010` as one range and
+  defines no per-id rows. Specs now use the mapping in
+  `test_query_spec.spl` (001 exact query, 002 result variants, 003 provenance and
+  missing identity, 004 pagination/rejected/failed queries); 005..010 and an id
+  for read-only/no-write isolation remain undefined by the plan.
 
 ## Already recorded elsewhere
 

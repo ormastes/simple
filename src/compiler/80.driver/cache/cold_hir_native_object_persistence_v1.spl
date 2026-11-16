@@ -21,6 +21,46 @@ struct ColdHirNativeObjectArtifactV1:
     capsule_identity: text
     capsule_receipt_digest: text
 
+# The caller supplies an already accepted capsule identity and its owned output
+# path. This persists and rechecks bytes; it does not mint source/MIR authority.
+# Aggregate cold-HIR publication uses this same boundary; initializer receipt
+# capture may reuse it only after its own capsule admission.
+fn cold_hir_native_object_persist_v1(cache_root: text, module_identity: text,
+        path: text, accepted_capsule_identity: text
+) -> Result<ColdHirNativeObjectArtifactV1, text>:
+    if cache_root == "" or module_identity == "":
+        return Err("cold-object-inventory-incomplete")
+    if path == "" or accepted_capsule_identity == "":
+        return Err("cold-object-path-empty:{module_identity}")
+    val read = file_read_regular_no_follow_bounded_bytes(
+        path, BINARY_OBJECT_CAS_MAX_BYTES)
+    if read.is_err():
+        return Err("cold-object-read-failed:{module_identity}")
+    val bytes = read.unwrap()
+    val format = binary_object_magic_kind(bytes)
+    if format == "":
+        return Err("cold-object-format-invalid:{module_identity}")
+    val object_digest = sha256_u8_hex(bytes)
+    val receipt_read = file_read_regular_no_follow_bounded(
+        path + ".capsule-receipt", 65536)
+    if receipt_read.is_err():
+        return Err("cold-object-capsule-receipt-missing:{module_identity}")
+    val receipt_text = receipt_read.unwrap()
+    val lines = receipt_text.split("\n")
+    if lines.len() != 6 or lines[0] != "native-capsule-result-v1" or
+            lines[1] != accepted_capsule_identity or lines[2] != path or
+            (lines[3].to_i64() ?? -1) != bytes.len() or
+            lines[4] != object_digest or lines[5] != "":
+        return Err("cold-object-capsule-receipt-mismatch:{module_identity}")
+    # `binary_object_cas_put` verifies the staged bytes and the published
+    # digest on readback. One object is resident at a time; no byte array
+    # is retained in the returned artifact list.
+    if binary_object_cas_put(cache_root, bytes) != object_digest:
+        return Err("cold-object-cas-publication-failed:{module_identity}")
+    Ok(ColdHirNativeObjectArtifactV1(
+        module_identity, object_digest, bytes.len(), format,
+        lines[1], sha256_text(receipt_text)))
+
 fn cold_hir_native_objects_persist_v1(
     cache_root: text, receipts: [ColdHirTypedReceiptV1],
     object_paths: Dict<text, text>,
@@ -52,37 +92,11 @@ fn cold_hir_native_objects_persist_v1(
         val path = object_paths[module_identity]
         val accepted_capsule_identity =
             accepted_capsule_identities[module_identity]
-        if path == "" or accepted_capsule_identity == "":
-            return Err("cold-object-path-empty:{module_identity}")
-        val read = file_read_regular_no_follow_bounded_bytes(
-            path, BINARY_OBJECT_CAS_MAX_BYTES)
-        if read.is_err():
-            return Err("cold-object-read-failed:{module_identity}")
-        val bytes = read.unwrap()
-        val format = binary_object_magic_kind(bytes)
-        if format == "":
-            return Err("cold-object-format-invalid:{module_identity}")
-        val object_digest = sha256_u8_hex(bytes)
-        val receipt_read = file_read_regular_no_follow_bounded(
-            path + ".capsule-receipt", 65536)
-        if receipt_read.is_err():
-            return Err("cold-object-capsule-receipt-missing:{module_identity}")
-        val receipt_text = receipt_read.unwrap()
-        val lines = receipt_text.split("\n")
-        if lines.len() != 6 or lines[0] != "native-capsule-result-v1" or
-                lines[1] != accepted_capsule_identity or lines[2] != path or
-                (lines[3].to_i64() ?? -1) != bytes.len() or
-                lines[4] != object_digest or lines[5] != "":
-            return Err("cold-object-capsule-receipt-mismatch:{module_identity}")
-        # `binary_object_cas_put` verifies the staged bytes and the published
-        # digest on readback. One object is resident at a time; no byte array
-        # is retained in the returned artifact list.
-        if binary_object_cas_put(cache_root, bytes) != object_digest:
-            return Err("cold-object-cas-publication-failed:{module_identity}")
-        artifacts.push(ColdHirNativeObjectArtifactV1(
-            module_identity, object_digest, bytes.len(), format,
-            lines[1], sha256_text(receipt_text)))
+        val artifact = cold_hir_native_object_persist_v1(
+            cache_root, module_identity, path, accepted_capsule_identity)?
+        artifacts.push(artifact)
     Ok(artifacts)
 
 export ColdHirNativeObjectArtifactV1
+export cold_hir_native_object_persist_v1
 export cold_hir_native_objects_persist_v1

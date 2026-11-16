@@ -19,21 +19,35 @@ extern fn rt_host_disk_headroom_bytes_v1(path: text) -> i64
 
 # Bytes free to the caller on a volume. Constructed only at the extern
 # boundary from a positive measurement; sentinels never become a size.
-pub unit FreeBytes: i64 as fbytes
+# A plain typed struct, NOT a `unit` newtype: the seed's HIR lowering cannot
+# infer a `unit`'s field type ("cannot infer field type ... struct 'ANY'
+# field 'value'") — three accessor iterations (aef20082dbb, fd33def13ba,
+# 3db141dd8ac) still left disk_admission_decide_present failing the stage2
+# native build. An explicit i64 field is seed-safe end to end.
+pub struct FreeBytes:
+    value: i64
+    # Explicit accessor: the seed references the FreeBytes.value symbol (a
+    # closure-captured field access in the refusal print) but only emits its
+    # definition when the struct declares it; the removed `unit` form
+    # defined it implicitly. Without this the stage2 link fails with
+    # "undefined symbol: FreeBytes.value" under SIMPLE_NO_STUB_FALLBACK=1.
+    fn value() -> i64:
+        self.value
 
 # Boundary wrap: raw > 0 is a size; 0 (cannot measure) and < 0 (error) are
 # sentinels and return None so no caller can mistake them for headroom.
 pub fn disk_headroom_from_raw(raw: i64) -> FreeBytes?:
     if raw > 0:
-        return Some(FreeBytes(raw))
+        return Some(FreeBytes(value: raw))
     None
+
+fn disk_admission_decide_present(free: FreeBytes, write_bytes: i64, reserve: i64) -> bool:
+    disk_admission_decide(free.value, write_bytes, reserve)
 
 # Typed decision: unmeasured (None) admits.
 pub fn disk_admission_decide_free(free: FreeBytes?, write_bytes: i64, reserve: i64) -> bool:
     match free:
-        case Some(f):
-            val free_bytes: FreeBytes = f
-            disk_admission_decide(free_bytes.value, write_bytes, reserve)
+        case Some(f): disk_admission_decide_present(f, write_bytes, reserve)
         case None: true
 
 val DISK_ADMISSION_DEFAULT_RESERVE_BYTES: i64 = 2 * 1024 * 1024 * 1024
@@ -63,7 +77,16 @@ pub fn disk_publish_admitted(dir: text, write_bytes: i64) -> bool:
     val admitted = disk_admission_decide_free(free, write_bytes, disk_admission_reserve_bytes())
     if not admitted:
         if _disk_admission_refusals == 0:
-            print "[cache-admission] publish refused: {free.map(: f.value()).unwrap_or(0)} bytes free under {dir}, reserve {disk_admission_reserve_bytes()} (SIMPLE_CACHE_MIN_FREE_BYTES); cache writes are skipped, the build continues uncached"
+            # Refusal implies free is Some (None admits). A plain local keeps
+            # the interpolation a real expression; an inline lambda here was
+            # mis-escaped into a form-feed byte and printed as literal text.
+            var free_shown: i64 = 0
+            match free:
+                case Some(f):
+                    val free_bytes: FreeBytes = f
+                    free_shown = free_bytes.value()
+                case None: free_shown = 0
+            print "[cache-admission] publish refused: {free_shown} bytes free under {dir}, reserve {disk_admission_reserve_bytes()} (SIMPLE_CACHE_MIN_FREE_BYTES); cache writes are skipped, the build continues uncached"
         _disk_admission_refusals = _disk_admission_refusals + 1
     admitted
 

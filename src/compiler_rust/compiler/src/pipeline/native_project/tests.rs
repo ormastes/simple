@@ -10364,3 +10364,23 @@ fn text_opt_rewritten_when_source_unparseable() {
     assert_eq!(out, src.replace("text?", "text"));
     assert!(!out.contains("text?"));
 }
+
+#[test]
+fn file_phase_timing_line_names_phase_seconds_and_file() {
+    let line = super::compiler::phase_line("hir", 1.234, Path::new("a/b.spl"));
+    assert_eq!(line, "[native-file-phase] hir=1.23s a/b.spl");
+}
+
+#[test]
+fn file_phase_timer_only_advances_when_enabled() {
+    let file = Path::new("a/b.spl");
+    let mut off = super::compiler::FilePhaseTimer::with_enabled(file, false);
+    let off_start = off.last_for_tests();
+    off.mark("parse");
+    assert_eq!(off.last_for_tests(), off_start);
+    let mut on = super::compiler::FilePhaseTimer::with_enabled(file, true);
+    let on_start = on.last_for_tests();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    on.mark("parse");
+    assert!(on.last_for_tests() > on_start);
+}

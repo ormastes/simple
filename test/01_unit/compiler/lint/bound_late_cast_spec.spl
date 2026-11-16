@@ -360,3 +360,31 @@ describe "SPL-BOUND review follow-ups":
         step("Lint a raw i64 extern result passed through validation")
         val src = "extern fn c_size() -> i64\nfn a() -> i64:\n    val raw = c_size()\n    if raw < 0:\n        return 0\n    clamp_size(raw)\n"
         expect(check_bound_late_casts(src, "app/f.spl").len()).to_equal(0)
+
+describe "SPL-BOUND-002 origin-boundary cast (owner decision 2, 2026-11-16)":
+    """`raw as Unit` is the default unit construction; the generated SFFI facade
+    that receives the foreign value from its own `__raw_<fn>` extern is the
+    origin boundary and is not a late cast."""
+
+    it "accepts the generated facade cast of its own __raw_ extern":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a generated constrained-unit facade")
+        val src = "unit Port: i32 as Pt\nextern fn __raw_rt_net_port(fd: i32) -> i32\n\npub fn rt_net_port(fd: i32) -> Result<Port, ConstraintError>:\n    val raw = __raw_rt_net_port(fd)\n    if raw < 1 or raw > 65535:\n        return Err(ConstraintError.out_of_range(\"Port\", raw, \"1\", \"65535\"))\n    Ok(raw as Port)\n"
+        expect(check_bound_late_casts(src, "app/net/port_facade.spl").len()).to_equal(0)
+
+    it "still reports a `raw as Unit` late cast in an unrelated function":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a later function that casts another fn's __raw_ extern result")
+        val src = "unit Port: i32 as Pt\nextern fn __raw_rt_net_port(fd: i32) -> i32\nfn later(fd: i32) -> Port:\n    val raw = __raw_rt_net_port(fd)\n    raw as Port\n"
+        val fs = check_bound_late_casts(src, "app/net/client.spl")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].code).to_equal("SPL-BOUND-002")
+        expect(fs[0].line_num).to_equal(5)
+
+    it "still reports a `raw as Unit` late cast of an ordinary extern":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a safe function casting a raw extern result with `as`")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn f() -> Km:\n    val raw = c_read()\n    raw as Km\n"
+        val fs = check_bound_late_casts(src, "app/f.spl")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].code).to_equal("SPL-BOUND-002")

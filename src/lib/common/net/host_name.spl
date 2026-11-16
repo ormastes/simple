@@ -1,0 +1,114 @@
+# ============================================================================
+# common/net/host_name.spl — checked DNS host name and TLS host identity
+#
+# HostName: ASCII LDH DNS name (no IP literals). IDNA is out of scope:
+# callers must supply the punycode (A-label) form.
+# HostIdentity: a HostName or a parsed IpAddr (for numeric TLS identities).
+# ============================================================================
+
+use std.common.net.addr.{Ipv4Addr, Ipv6Addr, IpAddr}
+
+pub unit HostName: text
+
+pub enum HostIdentity:
+    Name(HostName)
+    Ip(IpAddr)
+
+fn _host_label_valid(label: text) -> bool:
+    if label.len() < 1 or label.len() > 63: return false
+    if label.starts_with("-") or label.ends_with("-"): return false
+    for ch in label:
+        if not "abcdefghijklmnopqrstuvwxyz0123456789-".contains(ch): return false
+    true
+
+fn _digits_only(label: text) -> bool:
+    if label == "": return false
+    for ch in label:
+        if not "0123456789".contains(ch): return false
+    true
+
+# Dotted all-numeric text is an IPv4 attempt, never a DNS name.
+fn _host_name_is_ip_literal(value: text) -> bool:
+    if value.contains(":"): return true
+    if value == "": return false
+    for label in value.split("."):
+        if not _digits_only(label): return false
+    true
+
+fn _parse_ipv4(value: text) -> Result<Ipv4Addr, text>:
+    val parts = value.split(".")
+    if parts.len() != 4: return Err("invalid IPv4 literal")
+    var octets: [u8] = []
+    for part in parts:
+        if not _digits_only(part) or part.len() > 3: return Err("invalid IPv4 literal")
+        val n = part.to_int()
+        if n > 255: return Err("invalid IPv4 literal")
+        octets = octets.push(n as u8)
+    Ok(Ipv4Addr(octets: octets))
+
+fn _hex_value(ch: text) -> i64:
+    val idx = "0123456789abcdef".index_of(ch.lower())
+    if idx == nil: return -1
+    idx.unwrap()
+
+fn _ipv6_group(group: text) -> Result<[u8], text>:
+    if group.len() < 1 or group.len() > 4: return Err("invalid IPv6 literal")
+    var v = 0
+    for ch in group:
+        val d = _hex_value(ch)
+        if d < 0: return Err("invalid IPv6 literal")
+        v = v * 16 + d
+    Ok([(v / 256) as u8, (v % 256) as u8])
+
+fn _ipv6_groups(side: text) -> Result<[u8], text>:
+    var out: [u8] = []
+    if side == "": return Ok(out)
+    for group in side.split(":"):
+        val bytes = _ipv6_group(group)?
+        out = out + bytes
+    Ok(out)
+
+fn _parse_ipv6(value: text) -> Result<Ipv6Addr, text>:
+    val halves = value.split("::")
+    if halves.len() > 2: return Err("invalid IPv6 literal")
+    var octets: [u8] = []
+    if halves.len() == 1:
+        octets = _ipv6_groups(halves[0])?
+        if octets.len() != 16: return Err("invalid IPv6 literal")
+    else:
+        val head = _ipv6_groups(halves[0])?
+        val tail = _ipv6_groups(halves[1])?
+        if head.len() + tail.len() > 14: return Err("invalid IPv6 literal")
+        octets = head
+        var fill = 16 - head.len() - tail.len()
+        while fill > 0:
+            octets = octets.push(0u8)
+            fill = fill - 1
+        octets = octets + tail
+    Ok(Ipv6Addr(octets: octets))
+
+pub fn host_name_parse(value: text) -> Result<HostName, text>:
+    if value == "": return Err("host name empty")
+    for ch in value:
+        if ch == " " or ch == "\t" or ch == "\r" or ch == "\n" or ch == "\0":
+            return Err("host name contains whitespace or control character")
+    if _host_name_is_ip_literal(value): return Err("host name is an IP literal")
+    val lowered = value.lower()
+    if lowered.byte_len() > 253: return Err("host name longer than 253 characters")
+    for ch in lowered:
+        if ch.byte_len() != 1: return Err("host name must be ASCII (IDNA unsupported)")
+    for label in lowered.split("."):
+        if not _host_label_valid(label): return Err("host name label invalid")
+    Ok(HostName(lowered))
+
+# Classify a TLS service identity: numeric literal -> Ip, otherwise a checked name.
+pub fn host_identity_parse(value: text) -> Result<HostIdentity, text>:
+    if value == "": return Err("host identity empty")
+    if value.contains(":"):
+        val v6 = _parse_ipv6(value)?
+        return Ok(HostIdentity.Ip(IpAddr.V6(v6)))
+    if _host_name_is_ip_literal(value):
+        val v4 = _parse_ipv4(value)?
+        return Ok(HostIdentity.Ip(IpAddr.V4(v4)))
+    val name = host_name_parse(value)?
+    Ok(HostIdentity.Name(name))

@@ -1,0 +1,28 @@
+# Join already authenticated complete inventory and exact snapshot manifest.
+# Authentication belongs to the SCV owners at both call sites.
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryV1, compile_source_inventory_path_valid_v1}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+
+pub fn visibility_manifest_inventory_maps_v1(snapshot_root: text,
+        inventory: CompileSourceInventoryV1, manifest: text
+) -> Result<(Dict<text, text>, Dict<text, text>), text>:
+    var complete: Dict<text, text> = {}
+    var records: Dict<text, text> = {}
+    for entry in inventory.entries:
+        val identity = entry.source_identity
+        if not compile_source_inventory_path_valid_v1(identity) or records.contains_key(identity) or
+                not builder_digest_valid_v1(entry.content_digest) or entry.byte_count < 0:
+            return Err("visibility-manifest-inventory-row-invalid")
+        records[identity] = "{identity}|sha256_{entry.content_digest}|{entry.byte_count}"
+        complete[snapshot_root + "/" + identity] = entry.content_digest
+    var selected: Dict<text, text> = {}
+    for row in manifest.split("\n"):
+        val fields = row.split("|")
+        if fields.len() != 3 or not records.contains_key(fields[0]) or records[fields[0]] != row:
+            return Err("visibility-manifest-snapshot-row-invalid")
+        val path = snapshot_root + "/" + fields[0]
+        if selected.contains_key(path): return Err("visibility-manifest-snapshot-duplicate")
+        selected[path] = complete[path]
+    Ok((complete, selected))
+
+export visibility_manifest_inventory_maps_v1

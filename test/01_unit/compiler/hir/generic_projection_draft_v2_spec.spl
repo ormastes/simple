@@ -1,0 +1,86 @@
+# Real parser-owner capture tests. The fixture provenance is structural input,
+# not an assertion that the driver full-parse/target/epoch gate has executed.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.frontend.parser_types.{parser_function_header}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module_checked_reference_v1}
+use compiler.hir.hir_lowering.module_surface_declarations.{ModuleSurfaceParserOwner}
+use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_trait_root_v2, module_surface_extension_root_v2}
+use compiler.hir.hir_lowering.generic_projection_draft_v2.{generic_projection_draft_from_owner_v2}
+use compiler.common.cache_contract.directory_source_epoch_v2.{DirectorySourceEpochV2}
+use compiler.common.cache_contract.directory_category_projection_v2.{DirectoryCategoryProjectionV2}
+use compiler.common.cache_contract.generic_category_projection_v2.{GenericProjectionDraftV2}
+
+fn generic_draft_fixture_v2(source: text) -> GenericProjectionDraftV2:
+    val parsed = parse_and_build_module_checked_reference_v1(source, "pkg/generic.spl").unwrap()
+    val input = DirectoryCategoryProjectionV2(
+        canonical_path: "pkg/generic.spl", source_identity: "pkg/generic.spl",
+        source_digest: sha256_text(source), target_triple: "aarch64-unknown-linux-gnu",
+        preprocessed_digest: sha256_text(source), cfg_decision_digest: sha256_text("fixture: no cfg declarations"),
+        environment_policy_digest: sha256_text("fixture: no environment overrides"),
+        trait_root: module_surface_trait_root_v2(parsed.traits), extension_root: module_surface_extension_root_v2(parsed.impls, parsed.extend_enums))
+    generic_projection_draft_from_owner_v2(ModuleSurfaceParserOwner.new(parsed), input, DirectorySourceEpochV2(driver_identity: 1, generation: 1), "pkg.generic").unwrap()
+
+describe "Generic category full-parse drafts v2":
+    it "recognizes ordinary non-generic enum alias struct and function inventories":
+        val draft = generic_draft_fixture_v2("enum State:\n    Ready\ntype Count = i64\nstruct Box:\n    count: Count\nfn read(x: Count) -> Count:\n    x\n")
+        expect(draft.inventory_complete).to_equal(true)
+        expect(draft.declarations.len()).to_equal(0)
+        expect(draft.inventory_digest.len()).to_equal(64)
+
+    it "captures real generic function signatures and separate body drafts":
+        val a = generic_draft_fixture_v2("fn identity<T>(x: T) -> T:\n    x\n")
+        val b = generic_draft_fixture_v2("fn identity<T>(x: T) -> T:\n    return x\n")
+        expect(a.inventory_complete).to_equal(true)
+        expect(a.declarations.len()).to_equal(1)
+        expect(a.declarations[0].parser_signature_digest).to_equal(b.declarations[0].parser_signature_digest)
+        expect(a.declarations[0].body_digest == b.declarations[0].body_digest).to_equal(false)
+        expect(a.declarations[0].declaration_identity).to_equal(b.declarations[0].declaration_identity)
+        expect(a.inventory_digest == b.inventory_digest).to_equal(false)
+
+    it "retains lexical generic method shadowing for the HIR binder owner":
+        val draft = generic_draft_fixture_v2("class Box<T>:\n    value: T\n    fn convert<T>(self, x: T) -> T:\n        x\n")
+        expect(draft.inventory_complete).to_equal(true)
+        expect(draft.declarations.len()).to_equal(2)
+        var checked = false
+        for row in draft.declarations:
+            if row.declaration_kind == "function":
+                expect(row.binders.len()).to_equal(2)
+                expect(row.binders[0].source_name).to_equal("T")
+                expect(row.binders[0].scope_depth).to_equal(0)
+                expect(row.binders[1].source_name).to_equal("T")
+                expect(row.binders[1].scope_depth).to_equal(1)
+                checked = true
+        expect(checked).to_equal(true)
+
+    it "keeps unsupported generic enums explicit rather than known empty":
+        val draft = generic_draft_fixture_v2("enum Maybe<T>:\n    Empty\n    Value(T)\n")
+        expect(draft.inventory_complete).to_equal(false)
+        expect(draft.declarations.len()).to_equal(1)
+        expect(draft.declarations[0].declaration_kind).to_equal("enum")
+        expect(draft.declarations[0].coverage_reason == "").to_equal(false)
+        expect(draft.declarations[0].declaration_identity).to_equal("")
+
+    it "includes field defaults in actual generic struct signature drafts":
+        val a = generic_draft_fixture_v2("struct Box<T>:\n    value: T\n    count: i64 = 1\n")
+        val b = generic_draft_fixture_v2("struct Box<T>:\n    value: T\n    count: i64 = 2\n")
+        expect(a.inventory_complete).to_equal(true)
+        expect(a.declarations[0].parser_signature_digest == b.declarations[0].parser_signature_digest).to_equal(false)
+        expect(a.declarations[0].has_body).to_equal(false)
+        expect(a.declarations[0].body_digest).to_equal("")
+
+    it "rejects header-only input instead of claiming a complete empty inventory":
+        val source = "fn ordinary() -> i64:\n    1\n"
+        val proof = generic_draft_fixture_v2(source)
+        val parsed = parse_and_build_module_checked_reference_v1(source, "pkg/generic.spl").unwrap()
+        var owner = ModuleSurfaceParserOwner.new(parsed)
+        owner.function_headers = {"ordinary": parser_function_header(parsed.functions["ordinary"])}
+        owner.functions = {}
+        expect(generic_projection_draft_from_owner_v2(owner, proof.source, proof.source_epoch, "pkg.generic").is_err()).to_equal(true)
+
+    it "rejects an absent source epoch even for an empty generic inventory":
+        val source = "fn ordinary() -> i64:\n    1\n"
+        val proof = generic_draft_fixture_v2(source)
+        val parsed = parse_and_build_module_checked_reference_v1(source, "pkg/generic.spl").unwrap()
+        val result = generic_projection_draft_from_owner_v2(ModuleSurfaceParserOwner.new(parsed), proof.source, DirectorySourceEpochV2(driver_identity: 0, generation: 0), "pkg.generic")
+        expect(result.is_err()).to_equal(true)

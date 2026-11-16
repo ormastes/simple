@@ -440,9 +440,10 @@ Honesty limits:
   plan matches the graph's snapshot. The committed TestDB has no trace run
   plans yet, so on it `verified: 0` is still the only value
   (`doc/08_tracking/bug/trace_cmds_no_passing_evidence_source_2026-11-15.md`).
-- `trace missing --profile=release` is rejected on the seed:
-  `ERROR TRACE-QUERY-INVALID: unknown option --profile` (exit 2), contrary to
-  the feature note. `--profile` worked on `report`. On the seed,
+- `trace missing --profile=<p>` (and the other legacy list/show/refs forms) now
+  accepts the same profile set as `report`; the default is `worktree`, a
+  non-`worktree` profile exits 2 like the shared verdict rule, and an unknown
+  value exits 2 with `TRACE-QUERY-INVALID`. On the seed,
   `traceability-check --profile=release` returned a `TRC-CONFIG-CAPTURE`
   incomplete result (exit 2), so its profile behaviour was not demonstrated.
 

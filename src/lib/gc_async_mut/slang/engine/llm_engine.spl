@@ -20,12 +20,21 @@ use std.gc_async_mut.slang.model_executor.paged_backend.{PhysicalModelSupport, P
 use std.gc_async_mut.slang.model_executor.paged_executor.{PagedGenerationRequest, paged_executor_error_text, paged_executor_active, paged_executor_pool, paged_executor_telemetry, paged_executor_bind_backend, paged_executor_clear_pending_backend, paged_executor_activate_config, paged_executor_configuration_text, paged_executor_shutdown, paged_executor_generate_observed_request}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel, describe_model, scan_model_root}
 use std.gc_async_mut.slang.model_executor.model_loader.memory_budget.{check_fit, default_headroom_bytes, estimate_runtime_overhead_bytes}
+use std.gc_async_mut.slang.engine.runner_dispatch.{RunnerKind, runner_kind_text, select_runner}
+use std.gc_async_mut.slang.engine.pure_lane.{PureLane, pure_lane_load, pure_lane_generate}
 use std.io_runtime.{file_exists, env_get, host_os}
 
 # Resident state. Module-level because the model IS the process's memory: two
 # engines in one process would mean two copies of a 46 GB tensor set.
 var ENGINE_LOADED_ID = ""
 var ENGINE_BACKEND: GgmlBackend? = nil
+# The pure runner's resident model + its one KvSession (kept across requests so
+# a request sharing a prefix re-uses it). At most one of ENGINE_BACKEND /
+# ENGINE_PURE is set: loading either unloads the other.
+var ENGINE_PURE: PureLane? = None
+var ENGINE_LAST_RUNNER = ""
+var ENGINE_PURE_LAST_REUSED = 0
+var ENGINE_PURE_LAST_EVALUATED = 0
 # Empty = resolve via engine_lib_path() (SLANG_GGML_LIB, then per-OS default).
 var ENGINE_LIB_PATH = ""
 # Non-empty once engine_preload pinned the resident model for a threaded server.
@@ -217,6 +226,7 @@ fn engine_physical_page_reason() -> text:
     physical_page_activation_text(engine_physical_page_activation())
 
 fn engine_unload() -> Result<(), text>:
+    ENGINE_PURE = None
     if ENGINE_BACKEND != nil:
         if paged_executor_active():
             match paged_executor_shutdown():
@@ -232,8 +242,40 @@ fn engine_unload() -> Result<(), text>:
 
 # Makes `model` the resident model, unloading whatever was resident first.
 # Err carries a caller-facing reason; every failure path leaves the engine with
-# no model rather than a half-open one.
+# no model rather than a half-open one. The runner is chosen by select_runner.
 fn engine_ensure_loaded(model: NativeModel) -> Result<(), text>:
+    match select_runner(model):
+        Err(reason):
+            return Err(reason)
+        Ok(kind):
+            match kind:
+                RunnerKind.Pure:
+                    return _ensure_pure_loaded(model)
+                RunnerKind.Ggml:
+                    return _ensure_ggml_loaded(model)
+
+fn _ensure_pure_loaded(model: NativeModel) -> Result<(), text>:
+    if ENGINE_LOADED_ID == model.id and ENGINE_PURE.?:
+        return Ok(())
+    if ENGINE_PINNED_ID != "" and model.id != ENGINE_PINNED_ID:
+        return Err("this server is pinned to model '" + ENGINE_PINNED_ID + "'; swapping models under concurrent requests is refused")
+    match engine_unload():
+        Err(reason): return Err("resident model is busy: " + reason)
+        Ok(_): ()
+    # The pure runner holds every weight as f64 (8 bytes per element), so a
+    # bf16/f32 checkpoint costs up to 4x its file size.
+    val fit = check_fit(model.bytes * 4, 0, default_headroom_bytes())
+    if not fit.fits:
+        return Err("refusing to load '" + model.id + "': " + fit.reason)
+    match pure_lane_load(model.root):
+        Err(reason):
+            return Err("pure runner load failed for '" + model.id + "': " + reason)
+        Ok(lane):
+            ENGINE_PURE = lane
+            ENGINE_LOADED_ID = model.id
+            Ok(())
+
+fn _ensure_ggml_loaded(model: NativeModel) -> Result<(), text>:
     if ENGINE_LOADED_ID == model.id and ENGINE_BACKEND != nil:
         return Ok(())
     if ENGINE_PINNED_ID != "" and model.id != ENGINE_PINNED_ID:
@@ -335,6 +377,8 @@ fn engine_media_caps_for(model_root: text, model_id: text) -> Result<i64, text>:
 # Chat completion whose frames carry media markers; `media` holds one encoded
 # file per marker, in order. Never uses the prefix cache.
 fn engine_complete_chat_media(model_id: text, framed: text, media: [MediaBlob], max_tokens: i64) -> Result<text, text>:
+    if ENGINE_PURE.?:
+        return Err("media is not available on the pure runner (text only); the request is not routed to another runner")
     if ENGINE_BACKEND == nil or ENGINE_LOADED_ID != model_id:
         return Err("model '" + model_id + "' is not resident")
     if ENGINE_MEDIA_CAPS <= 0:
@@ -355,6 +399,8 @@ fn engine_generate_observed_request(input: EngineGenerationRequest) -> Result<En
     if max_tokens == INVALID_NONNEGATIVE_I64_TEXT:
         return Err("max_tokens must be a nonnegative signed 64-bit integer")
     if ENGINE_BACKEND == nil:
+        if ENGINE_PURE.?:
+            return Err("model '" + ENGINE_LOADED_ID + "' is served by the pure runner; raw generate is ggml-only (use engine_complete_text)")
         return Err("no model is resident")
     var budget = max_tokens
     if budget <= 0:
@@ -426,29 +472,115 @@ fn engine_preload(model_root: text, model_id: text) -> Result<(), text>:
 # backend chat frames. The backend renders them through the model's own chat
 # template, so the model sees its system prompt and the whole history and
 # stops at its own end-of-turn token.
-fn engine_complete_chat(model_root: text, model_id: text, framed: text, max_tokens: i64) -> Result<text, text>:
+#
+# THE DISPATCH POINT: this is the one place a model id becomes a loaded model
+# and a generate call, and where select_runner picks the runner. `plain_prompt`
+# is the same conversation as plain text for a runner with no chat template
+# (see pure_lane.spl); the ggml lane ignores it.
+struct EngineChatResult:
+    content: text
+    prompt_tokens: i64
+    completion_tokens: i64
+    runner: text
+
+fn engine_complete_chat(model_root: text, model_id: text, framed: text, plain_prompt: text, max_tokens: i64) -> Result<EngineChatResult, text>:
+    _engine_dispatch(model_root, model_id, framed, plain_prompt, max_tokens, true)
+
+# Legacy /v1/completions: the raw prompt, no chat template, through the same
+# dispatch (and the same usage counts) as chat.
+fn engine_complete_text(model_root: text, model_id: text, prompt: text, max_tokens: i64) -> Result<EngineChatResult, text>:
+    _engine_dispatch(model_root, model_id, prompt, prompt, max_tokens, false)
+
+fn _engine_dispatch(model_root: text, model_id: text, framed: text, plain_prompt: text, max_tokens: i64, chat: bool) -> Result<EngineChatResult, text>:
+    ENGINE_LAST_RUNNER = ""
     var found: NativeModel? = nil
     for m in scan_model_root(model_root, engine_backend_available()):
         if m.id == model_id:
             found = m
     if found == nil:
         return Err("model '" + model_id + "' was not found under " + model_root)
+    var kind = RunnerKind.Ggml
+    match select_runner(found!):
+        Err(reason):
+            return Err(reason)
+        Ok(k):
+            kind = k
+    # The pure runner has no chat template: it generates from `plain_prompt`
+    # alone, so an empty one would silently produce an unconditioned answer.
+    if runner_kind_text(kind) == "pure" and plain_prompt.trim() == "":
+        return Err("model '" + model_id + "' is served by the pure runner, which needs a plain-text prompt; none was given")
     match engine_ensure_loaded(found!):
         Err(reason):
             return Err(reason)
         Ok(_): ()
+    ENGINE_LAST_RUNNER = runner_kind_text(kind)
+    match kind:
+        RunnerKind.Pure:
+            return _complete_pure(plain_prompt, max_tokens)
+        RunnerKind.Ggml:
+            return _complete_ggml(framed, max_tokens, chat)
+
+fn _complete_pure(prompt: text, max_tokens: i64) -> Result<EngineChatResult, text>:
+    if not ENGINE_PURE.?:
+        return Err("no pure model is resident")
+    match pure_lane_generate(ENGINE_PURE!, prompt, max_tokens):
+        Err(reason): Err(reason)
+        Ok(done):
+            ENGINE_PURE = done.lane
+            ENGINE_PURE_LAST_REUSED = done.reused_positions
+            ENGINE_PURE_LAST_EVALUATED = done.evaluated_positions
+            Ok(EngineChatResult(content: done.output, prompt_tokens: done.prompt_tokens,
+                completion_tokens: done.completion_tokens, runner: "pure"))
+
+fn _complete_ggml(framed: text, max_tokens: i64, chat: bool) -> Result<EngineChatResult, text>:
     if paged_executor_active():
-        return Err("chat templating is not available on the physical page executor")
+        return Err("chat templating and usage counts are not available on the physical page executor")
     var budget = max_tokens
     if budget <= 0:
         budget = 256
     match generate_observed_request(BackendGenerationRequest(
-          max_tokens: budget.to_text(), prompt: framed, backend: ENGINE_BACKEND!, chat: true)):
+          max_tokens: budget.to_text(), prompt: framed, backend: ENGINE_BACKEND!, chat: chat)):
         Err(e): Err(backend_error_text(e))
-        Ok(observed): Ok(observed.output)
+        Ok(observed):
+            Ok(EngineChatResult(content: observed.output, prompt_tokens: observed.prompt_tokens,
+                completion_tokens: parse_nonnegative_i64_text_exact(observed.generated_tokens), runner: "ggml"))
 
+# The ggml lane of engine_complete_chat with the backend's generated-token
+# count kept (no plain-text prompt: a pure runner would be given an empty one,
+# so this is for models known to be GGUF, e.g. the model variety spec).
+fn engine_complete_chat_observed(model_root: text, model_id: text, framed: text, max_tokens: i64) -> Result<EngineGenerationObservation, text>:
+    match engine_complete_chat(model_root, model_id, framed, "", max_tokens):
+        Err(reason): Err(reason)
+        Ok(done):
+            if done.runner != "ggml":
+                return Err("engine_complete_chat_observed serves the ggml lane; model '" + model_id + "' was served by the " + done.runner + " runner")
+            Ok(EngineGenerationObservation(output: done.content, generated_tokens: done.completion_tokens.to_text()))
+
+# Runner that served the most recent chat request ("" before the first).
+fn engine_last_runner() -> text:
+    ENGINE_LAST_RUNNER
+
+# Pure runner prefix-reuse evidence for the most recent request: positions
+# re-used from the resident KvSession and positions actually evaluated, plus the
+# session's lifetime evaluated total. None when no pure model is resident.
+struct PureRunnerStats:
+    last_reused_positions: i64
+    last_evaluated_positions: i64
+    total_evaluated_positions: i64
+    requests: i64
+
+fn engine_pure_stats() -> PureRunnerStats?:
+    if not ENGINE_PURE.?:
+        return None
+    val lane = ENGINE_PURE!
+    PureRunnerStats(last_reused_positions: ENGINE_PURE_LAST_REUSED,
+        last_evaluated_positions: ENGINE_PURE_LAST_EVALUATED,
+        total_evaluated_positions: lane.session.positions_evaluated,
+        requests: lane.requests)
+
+export engine_complete_text, EngineChatResult, engine_last_runner, engine_pure_stats, PureRunnerStats
 export engine_set_lib_path, engine_set_gpu_layers_text, engine_gpu_offload_status, engine_set_n_ctx_text, engine_set_matched_cpu_threads_text, engine_set_physical_pages_config, engine_set_prefix_cache_limits, engine_lib_path, engine_backend_available
-export engine_preload, engine_complete_chat, engine_complete_chat_media, engine_media_caps, engine_media_caps_for
+export engine_preload, engine_complete_chat, engine_complete_chat_observed, engine_complete_chat_media, engine_media_caps, engine_media_caps_for
 export engine_loaded_model, engine_prefix_cache_stats, engine_unload, engine_ensure_loaded, engine_generate, engine_complete
 export EngineGenerationObservation, EngineGenerationRequest, engine_generate_observed, engine_generate_observed_request
 export engine_physical_page_allocated_bytes, engine_physical_page_bytes

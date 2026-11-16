@@ -2139,3 +2139,61 @@ fn callable_or_type_value_never_lowers_into_an_enum_slot() {
     let same_named_variant = "enum Token:\n    Token\n    Other\n\nfn tok(t: Token) -> i64:\n    1\n\nfn pair(n: i64, k: Token) -> i64:\n    n\n\nfn main():\n    val t: Token = Token.Token\n    print(tok(Token.Token))\n    print(pair(k: Token.Other, n: 2))\n";
     parse_and_lower(same_named_variant).expect("a variant named like its enum is not a type reference");
 }
+
+/// A one-field record unit (`unit Name: T`) is erased to its scalar for HIR/JIT:
+/// `.value` must not hit "cannot infer field type ... struct 'ANY'", and the
+/// constructor must lower to the bare scalar rather than a class value.
+#[test]
+fn record_unit_is_erased_to_scalar() {
+    let src = "unit Length: i64\n\nfn dbl(x: Length) -> i64:\n    x.value * 2\n\nfn add(a: Length, b: Length) -> Length:\n    a + b\n\nfn lt(a: Length, b: Length) -> bool:\n    a < b\n\nfn mk() -> Length:\n    Length(value: 3)\n\nfn mk2() -> Length:\n    Length(4)\n";
+    let module = parse_and_lower(src).expect("record unit must lower without demotion");
+    for name in ["dbl", "add", "lt", "mk", "mk2"] {
+        assert!(module.functions.iter().any(|f| f.name == name), "{name} missing");
+    }
+    let mk = module.functions.iter().find(|f| f.name == "mk").unwrap();
+    assert_eq!(mk.return_type, TypeId::I64, "unit return is the scalar type");
+    let has_struct_init = mk
+        .body
+        .iter()
+        .any(|s| matches!(s, HirStmt::Return(Some(e)) if matches!(e.kind, HirExprKind::StructInit { .. })));
+    assert!(!has_struct_init, "unit constructor must not build a class value");
+}
+
+/// SPL-UNIT-002 must survive scalar erasure: HIR keeps unit identity through
+/// checking, so the JIT path denies what the interpreter denies.
+#[test]
+fn record_unit_spl_unit_002_denied_through_hir() {
+    let decls = "unit A: i64\nunit B: i64\n\n";
+    let denied = [
+        "fn f(x: A, y: B) -> i64:\n    (x + y).value\n",
+        "fn f(x: A, y: B) -> bool:\n    x < y\n",
+        "fn f(x: A) -> A:\n    x + 5\n",
+        "fn f(x: A) -> A:\n    x - 1\n",
+        "fn f(x: A) -> A:\n    x % 2\n",
+        "fn f(x: A) -> bool:\n    x < 5\n",
+        "fn f(x: A) -> bool:\n    x == 5\n",
+        "fn f(n: i64, x: A) -> A:\n    n + x\n",
+        "fn g(y: B) -> i64:\n    y.value\n\nfn f(x: A) -> i64:\n    g(x)\n",
+    ];
+    for body in denied {
+        let err = parse_and_lower(&format!("{decls}{body}")).expect_err(&format!("must deny:\n{body}"));
+        let text = format!("{err}");
+        assert!(text.contains("SPL-UNIT-002") && text.contains("SIMPLE_JIT_STRICT"), "{body}\n{text}");
+    }
+    let allowed = [
+        "fn f(x: A, y: A) -> A:\n    x + y\n",
+        "fn f(x: A, y: A) -> A:\n    x - y\n",
+        "fn f(x: A, y: A) -> i64:\n    (x * y).value\n",
+        "fn f(x: A, y: A) -> i64:\n    (x / y).value\n",
+        "fn f(x: A) -> A:\n    x * 3\n",
+        "fn f(x: A) -> A:\n    3 * x\n",
+        "fn f(x: A) -> A:\n    x / 2\n",
+        "fn f(x: A, y: A) -> bool:\n    x < y\n",
+        "fn f(x: A) -> bool:\n    x.value < 5\n",
+        "fn f(x: A) -> i64:\n    x.value + 1\n",
+        "fn g(y: A) -> i64:\n    y.value\n\nfn f(x: A) -> i64:\n    g(x)\n",
+    ];
+    for body in allowed {
+        parse_and_lower(&format!("{decls}{body}")).unwrap_or_else(|e| panic!("must lower:\n{body}\n{e}"));
+    }
+}
