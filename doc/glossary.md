@@ -1217,3 +1217,29 @@ one `enter|exit <name>` line per edge. **Profile** is `XraySpyV1.profile()`,
 which folds the same drained events with `trace_profile_fold_v1`. Both share
 one implementation and run unchanged on either OS; the spy's adapter takes the
 backend leaf's sled kind (`Llvm` or native `Simple`).
+
+## Node attribute
+
+A named, typed field of a tree node (AST `extra`, `s_val`, `op`) whose storage
+is chosen apart from the node record and read through `AttributeStoreV1<T>`.
+Default off (`direct`). Switches: `SIMPLE_NODE_ATTR`, `SIMPLE_NODE_ATTR_SDN`,
+`SIMPLE_NODE_ATTR_COUNT`. Spec: `doc/07_guide/language/attributes/node_attribute_layouts.md`.
+
+## Node attribute backing layout
+
+How a node attribute value is stored. The token is resolved once at construction:
+- **embedded** (`direct`): on the main node.
+- **column**: a side array indexed by node id.
+- **array index** (`array_index`): the node holds a slot index into a compact side array.
+- **hashmap** (`sparse_hash`): a keyed side table.
+- **array-index pointer** (`array_ptr`) and **hash pointer** (`hash_ptr`): the node
+  holds a pointer to an array slot or a hash entry. Both fail fast: there is no safe
+  reference that survives growth or rehash.
+
+## AoS / SoA (node attribute data layout)
+
+The `AttrLayoutV1` layout of a multi-field side array (`AttrGroupStoreV1`):
+- **AoS** (array of structs): one interleaved array.
+- **SoA** (struct of arrays): one array per field. This is the default.
+
+Applies to `column` and `array_index` only. Selected by `layout=aos|soa` in `SIMPLE_NODE_ATTR`.

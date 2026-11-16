@@ -13,7 +13,7 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set, env_remove_process, file_read_nullable}
 use compiler.core.types.{int_to_str}
 use compiler.frontend.core.flat_pool_codec.*
-use compiler.common.data.attribute_schema_v1.{AttributeStoreV1, AttrPlacementV1, attr_placement_from_token_v1, attr_store_detached_v1}
+use compiler.common.data.attribute_schema_v1.{AttributeStoreV1, AttrPlacementV1, attr_placement_from_token_v1, attr_placement_token_v1, attr_layout_from_token_v1, attr_store_detached_v1}
 use compiler.common.data.data_schema_resolver.{data_attr_storage_resolve_v1, data_policy_rules_from_sdn_v1}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}  # explicit: a glob is not an import-origin for surface projection
 
@@ -412,6 +412,9 @@ var expr_attr_counts: [i64] = [0, 0, 0, 0, 0, 0]
 # Driver latch (C.2): [SIMPLE_NODE_ATTR, SIMPLE_NODE_ATTR_SDN, SIMPLE_NODE_ATTR_COUNT]
 # captured once by expr_attr_driver_latch; empty = read the env at each expr_reset.
 var expr_attr_latch: [text] = []
+# Side-array data layout (0 = soa, 1 = aos) from `layout=`; single-field stores
+# answer identically in both, multi-field AttrGroupStoreV1 stores honour it.
+var expr_attr_side_layout_mode: [i64] = [0]
 
 fn expr_attr_mode_of(token: text) -> Result<i64, text>:
     match attr_placement_from_token_v1(token):
@@ -420,7 +423,22 @@ fn expr_attr_mode_of(token: text) -> Result<i64, text>:
                 case Embedded: Ok(0)
                 case Column: Ok(1)
                 case SparseHash: Ok(2)
+                case ArrayIndex: Ok(3)
+                case _: Err("node-attr: {token} is unsupported: no safe element reference survives side-array growth or hash rehash")
         case Err(e): Err(e)
+
+fn expr_attr_layout_mode_of(token: text) -> Result<i64, text>:
+    match attr_layout_from_token_v1(token):
+        case Ok(l):
+            match l:
+                case Soa: Ok(0)
+                case Aos: Ok(1)
+        case Err(e): Err(e)
+
+# Side-array data layout selected by `layout=` (aos | soa); soa when unset.
+pub fn expr_attr_side_layout() -> text:
+    if expr_attr_side_layout_mode[0] == 1: return "aos"
+    "soa"
 
 fn expr_attr_nil_guard():
     if expr_attr_extra_mode == nil or expr_attr_extra_mode.len() == 0:
@@ -443,9 +461,13 @@ fn expr_attr_nil_guard():
         expr_attr_counts = [0, 0, 0, 0, 0, 0]
     if expr_attr_latch == nil:
         expr_attr_latch = []
+    if expr_attr_side_layout_mode == nil or expr_attr_side_layout_mode.len() == 0:
+        expr_attr_side_layout_mode = [0]
 
 fn expr_attr_placement_of(mode: i64) -> AttrPlacementV1:
-    if mode == 1: AttrPlacementV1.Column else: AttrPlacementV1.SparseHash
+    if mode == 1: return AttrPlacementV1.Column
+    if mode == 3: return AttrPlacementV1.ArrayIndex
+    AttrPlacementV1.SparseHash
 
 # Fail-closed gate: a native build can corrupt the generic store's payloads
 # (doc/08_tracking/bug/native_erased_generic_optional_return_2026-11-15.md),
@@ -475,32 +497,40 @@ fn expr_attr_text_round_trips(placement: AttrPlacementV1) -> bool:
         case Err(_): return false
 
 fn expr_attr_self_check_failed(mode: i64):
-    val token = if mode == 1: "column" else: "sparse_hash"
+    val token = attr_placement_token_v1(expr_attr_placement_of(mode))
     eprint("node-attr: {token} store failed its round-trip self-check on this build; staying on direct storage (see doc/08_tracking/bug/native_erased_generic_optional_return_2026-11-15.md)")
 
-# Config text: comma list of `<attr>=<direct|column|sparse_hash>` for attr in
-# extra, s_val, op. Unknown attrs are ignored; an unknown token turns everything off.
+# Config text: comma list of `<attr>=<direct|column|array_index|sparse_hash>` for
+# attr in extra, s_val, op, plus `layout=<aos|soa>` for multi-field side arrays
+# (default soa). Unknown attrs are ignored; an unknown or unsupported token
+# (array_ptr, hash_ptr) turns everything off.
 pub fn expr_attr_apply_config(spec: text) -> Result<bool, text>:
     expr_attr_nil_guard()
+    expr_attr_side_layout_mode[0] = 0
     var extra_mode = 0
     var s_mode = 0
     var op_mode = 0
+    var layout_mode = 0
     for part in spec.split(","):
         val kv = part.trim().split("=")
         if kv.len() != 2:
             continue
         val key = kv[0].trim()
-        if key != "extra" and key != "s_val" and key != "op":
+        if key != "extra" and key != "s_val" and key != "op" and key != "layout":
             continue
-        match expr_attr_mode_of(kv[1].trim()):
+        val parsed = if key == "layout": expr_attr_layout_mode_of(kv[1].trim()) else: expr_attr_mode_of(kv[1].trim())
+        match parsed:
             case Ok(m):
-                if key == "extra":
+                if key == "layout":
+                    layout_mode = m
+                elif key == "extra":
                     extra_mode = m
                 elif key == "op":
                     op_mode = m
                 else:
                     s_mode = m
             case Err(e):
+                expr_attr_side_layout_mode[0] = 0
                 expr_attr_extra_mode[0] = 0
                 expr_attr_s_val_mode[0] = 0
                 expr_attr_op_mode[0] = 0
@@ -534,17 +564,18 @@ pub fn expr_attr_apply_config(spec: text) -> Result<bool, text>:
     expr_attr_extra_stores.clear()
     expr_attr_s_val_stores.clear()
     if extra_mode != 0:
-        val placement = if extra_mode == 1: AttrPlacementV1.Column else: AttrPlacementV1.SparseHash
+        val placement = expr_attr_placement_of(extra_mode)
         match attr_store_detached_v1("extra", placement):
             case Ok(store): expr_attr_extra_stores.push(store)
             case Err(e): return Err(e)
         expr_attr_extra_mode[0] = extra_mode
     if s_mode != 0:
-        val placement = if s_mode == 1: AttrPlacementV1.Column else: AttrPlacementV1.SparseHash
+        val placement = expr_attr_placement_of(s_mode)
         match attr_store_detached_v1("s_val", placement):
             case Ok(store): expr_attr_s_val_stores.push(store)
             case Err(e): return Err(e)
         expr_attr_s_val_mode[0] = s_mode
+    expr_attr_side_layout_mode[0] = layout_mode
     Ok(true)
 
 pub val EXPR_ATTR_TREE: text = "compiler.ast"
@@ -604,6 +635,7 @@ fn expr_attr_apply_env() -> Result<bool, text>:
 pub fn expr_attr_extra_placement() -> text:
     if expr_attr_extra_mode[0] == 1: return "column"
     if expr_attr_extra_mode[0] == 2: return "sparse_hash"
+    if expr_attr_extra_mode[0] == 3: return "array_index"
     "direct"
 
 # Entries held by the extra store; -1 when the switch is off (no store exists).
@@ -648,7 +680,7 @@ fn expr_extra_load(values: [i64]):
         expr_extra = values
         return
     expr_attr_extra_stores.clear()
-    match attr_store_detached_v1("extra", if expr_attr_extra_mode[0] == 1: AttrPlacementV1.Column else: AttrPlacementV1.SparseHash):
+    match attr_store_detached_v1("extra", expr_attr_placement_of(expr_attr_extra_mode[0])):
         case Ok(store): expr_attr_extra_stores.push(store)
         case Err(_):
             expr_attr_extra_mode[0] = 0
@@ -663,6 +695,7 @@ fn expr_extra_load(values: [i64]):
 pub fn expr_attr_s_val_placement() -> text:
     if expr_attr_s_val_mode[0] == 1: return "column"
     if expr_attr_s_val_mode[0] == 2: return "sparse_hash"
+    if expr_attr_s_val_mode[0] == 3: return "array_index"
     "direct"
 
 pub fn expr_attr_s_val_present() -> i64:
@@ -705,7 +738,7 @@ fn expr_s_val_load(values: [text]):
         expr_s_val = values
         return
     expr_attr_s_val_stores.clear()
-    match attr_store_detached_v1("s_val", if expr_attr_s_val_mode[0] == 1: AttrPlacementV1.Column else: AttrPlacementV1.SparseHash):
+    match attr_store_detached_v1("s_val", expr_attr_placement_of(expr_attr_s_val_mode[0])):
         case Ok(store): expr_attr_s_val_stores.push(store)
         case Err(_):
             expr_attr_s_val_mode[0] = 0
@@ -720,6 +753,7 @@ fn expr_s_val_load(values: [text]):
 pub fn expr_attr_op_placement() -> text:
     if expr_attr_op_mode[0] == 1: return "column"
     if expr_attr_op_mode[0] == 2: return "sparse_hash"
+    if expr_attr_op_mode[0] == 3: return "array_index"
     "direct"
 
 # Entries held by the op store (one per op-family node); -1 when op is direct.
