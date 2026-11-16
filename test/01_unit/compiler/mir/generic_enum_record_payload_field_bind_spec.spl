@@ -43,14 +43,28 @@ fn get_field_dest(mir: text) -> text:
     val dest_tail = rest.substring(rest.index_of("\"dest\":") + 7, rest.len())
     dest_tail.substring(0, dest_tail.index_of(","))
 
-val SOURCE: text = "struct Lid:\n    id: i64\n\n" +
+# Two fields so a field-0 fallback (`pad`) cannot pass for `id`.
+val SOURCE: text = "struct Lid:\n    pad: i64\n    id: i64\n\n" +
     "enum Box<T>:\n    Full(item: T)\n    Empty\n\n" +
-    "fn free_first(b: Box<Lid>) -> i64:\n    match b:\n        case Full(item): item.id\n        case Empty: -1\n"
+    "enum Two<A, B>:\n    Both(a: A, b: B)\n    Neither\n\n" +
+    "fn free_first(b: Box<Lid>) -> i64:\n    match b:\n        case Full(item): item.id\n        case Empty: -1\n\n" +
+    "fn multi_first(t: Two<Lid, i64>) -> i64:\n    match t:\n        case Both(a, b): a.id\n        case Neither: -1\n\n" +
+    "fn multi_second(t: Two<i64, Lid>) -> i64:\n    match t:\n        case Both(a, b): b.id\n        case Neither: -1\n"
+
+fn expect_reads_id(mir: text):
+    val dest = get_field_dest(mir)
+    expect(dest != "").to_equal(true)
+    expect(mir).to_contain("\"field\":1}")
+    expect(mir.contains("\"field\":0}")).to_equal(false)
+    expect(mir).to_contain("\"id\":{dest},\"name\":null,\"type\":\"I64\"")
+    expect(mir).to_contain("\"src\":{dest}")
 
 describe "record payload of a user generic enum":
     it "reads the field as i64 and copies it into the arm result":
-        val mir = lower_module_json(SOURCE)["free_first"] ?? ""
-        val dest = get_field_dest(mir)
-        expect(dest != "").to_equal(true)
-        expect(mir).to_contain("\"id\":{dest},\"name\":null,\"type\":\"I64\"")
-        expect(mir).to_contain("\"src\":{dest}")
+        expect_reads_id(lower_module_json(SOURCE)["free_first"] ?? "")
+
+    it "tags the first binder of a multi-slot generic variant":
+        expect_reads_id(lower_module_json(SOURCE)["multi_first"] ?? "")
+
+    it "tags the second binder of a multi-slot generic variant":
+        expect_reads_id(lower_module_json(SOURCE)["multi_second"] ?? "")

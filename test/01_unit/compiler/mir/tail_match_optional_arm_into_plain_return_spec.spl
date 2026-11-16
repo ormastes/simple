@@ -66,6 +66,24 @@ val METHOD_SOURCE: text = "struct Lid:\n    id: i64\n\n" +
     "class Low:\n    next: i64\n\n" +
     "    me lower_sel(n: i64) -> Lid?:\n        if n < 0:\n            return None\n        Some(Lid(id: n))\n\n" +
     "    me lower_impl(k: EK) -> Lid:\n        match k:\n            case IntLit(v):\n                Lid(id: v)\n            case Sel(n):\n                self.lower_sel(n)\n            case _:\n                Lid(id: 0)\n"
+# A tuple `T?` payload is a tuple pointer word, not an i64 to decode.
+val TUPLE_SOURCE: text = "fn pick_pair(n: i64) -> (i64, text)?:\n    if n < 0:\n        return None\n    Some((n, \"x\"))\n\n" +
+    "fn tup_ret(n: i64) -> (i64, text):\n    return pick_pair(n)\n"
+
+fn returned_local_type(mir: text) -> text:
+    val ret_at = mir.index_of("\"Return\":")
+    if ret_at < 0:
+        return ""
+    val ret_tail = mir.substring(ret_at, mir.len())
+    val operand = ret_tail.substring(ret_tail.index_of("\"Copy\":") + 7, ret_tail.len())
+    val id = operand.substring(0, operand.index_of("}"))
+    val local_at = mir.index_of("\"id\":" + id + ",\"name\":")
+    if local_at < 0:
+        return ""
+    val local_tail = mir.substring(local_at, mir.len())
+    val type_tail = local_tail.substring(local_tail.index_of("\"type\":") + 7, local_tail.len())
+    type_tail.substring(0, type_tail.index_of(",\"kind\""))
+
 
 describe "tail match with an optional arm into a plain declared return":
     it "does not return the joined Option handle as the plain record":
@@ -87,3 +105,10 @@ describe "tail match with an optional arm into a plain declared return":
         val mir = lower_module_json(SOURCE)["direct"] ?? ""
         expect(mir.len() > 0).to_equal(true)
         expect(returns_unwrapped_payload(mir)).to_equal(true)
+
+    it "keeps a tuple payload a tuple when narrowing return of (A, B)? into -> (A, B)":
+        val mir = lower_module_json(TUPLE_SOURCE)["tup_ret"] ?? ""
+        expect(mir).to_contain("rt_unwrap_or_trap")
+        val ret_type = returned_local_type(mir)
+        expect(ret_type != "").to_equal(true)
+        expect(ret_type == "\"I64\"").to_equal(false)
