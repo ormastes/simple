@@ -19,7 +19,7 @@
 #
 # Design: doc/05_design/ui/web_diff/compare_view_inspection.md
 
-use common.ui.compare_view.{CompareViewSize, compare_view_mode_parse, compare_view_screen_parse, compare_view_plan_diff, compare_view_html_diff, compare_view_diff_argb, compare_view_diff_count, compare_view_browser_args, compare_view_file_url, compare_view_slug, compare_view_argb_from_rgba8}
+use common.ui.compare_view.{CompareViewSize, compare_view_mode_parse, compare_view_screen_parse, compare_view_plan_panes, compare_view_html, compare_view_html_rich, compare_view_diff_argb, compare_view_heatmap_argb, compare_view_visual_diff_with_stats, compare_view_browser_args_offset, compare_view_file_url, compare_view_slug, compare_view_argb_from_rgba8}
 use common.image.png_encode.{encode_argb_to_png}
 use std.io_runtime.{env_get, cwd, host_os, file_exists, file_write, file_write_bytes, dir_create_all, process_run, process_spawn_async, process_kill}
 use std.nogc_sync_mut.io.time_ops.{sleep_ms}
@@ -62,6 +62,14 @@ pub fn compare_view_host_screen() -> CompareViewSize:
         val r = process_run("powershell", ["-NoProfile", "-Command",
             "Add-Type -AssemblyName System.Windows.Forms; $a=[System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea; Write-Output ('' + $a.Width + 'x' + $a.Height)"])
         return compare_view_screen_parse(r.0)
+    if os == "macos" or os == "darwin":
+        val r = process_run("osascript", ["-e", "tell application \"Finder\" to get bounds of window of desktop"])
+        val parts = r.0.trim().split(",")
+        if parts.len() == 4:
+            val sz = compare_view_screen_parse(parts[2].trim() + "x" + parts[3].trim())
+            if sz.w > 0 and sz.h > 0:
+                return sz
+        return CompareViewSize(w: 1440, h: 900)
     if os == "linux" or os == "freebsd":
         # "Screen 0: minimum 8 x 8, current 1920 x 1080, maximum ..."
         val r = process_run("xrandr", ["--current"])
@@ -79,7 +87,7 @@ pub fn compare_view_host_screen() -> CompareViewSize:
 # no-viewer:<page> | spawn-failed:<page> | open:<page> | closed:<page>
 pub fn compare_view_inspect_with(mode: text, screen_w: i32, screen_h: i32, browser: text, auto_ms: i64,
         raw_name: text, label_a: text, a: [u32], aw: i32, ah: i32, label_b: text, b: [u32], bw: i32, bh: i32) -> text:
-    if mode != "auto" and mode != "stay":
+    if mode != "auto" and mode != "stay" and mode != "html":
         return "off"
     if aw <= 0 or ah <= 0 or a.len() != (aw as i64) * (ah as i64):
         return "bad-buffer:" + label_a
@@ -100,21 +108,32 @@ pub fn compare_view_inspect_with(mode: text, screen_w: i32, screen_h: i32, brows
         return "write-failed:" + dir + "/a.png"
     if not file_write_bytes(dir + "/b.png", encode_argb_to_png(b, bw, bh)):
         return "write-failed:" + dir + "/b.png"
-    var diff_src = ""
-    var diff_n: i64 = 0
+    var panes: i32 = 2
+    var page_html = ""
     if aw == bw and ah == bh:
-        diff_n = compare_view_diff_count(a, b)
+        panes = 3
+        val vdiff = compare_view_visual_diff_with_stats(a, b)
         if not file_write_bytes(dir + "/diff.png", encode_argb_to_png(compare_view_diff_argb(a, b), aw, ah)):
             return "write-failed:" + dir + "/diff.png"
-        diff_src = "diff.png"
-    if not file_write(page, compare_view_html_diff(name, label_a, "a.png", Length(value: aw), Length(value: ah), label_b, "b.png", Length(value: bw), Length(value: bh), diff_src, Count(value: diff_n))):
+        if not file_write_bytes(dir + "/delta.png", encode_argb_to_png(vdiff.pixels, aw, ah)):
+            return "write-failed:" + dir + "/delta.png"
+        if not file_write_bytes(dir + "/heatmap.png", encode_argb_to_png(compare_view_heatmap_argb(a, b, 4), aw, ah)):
+            return "write-failed:" + dir + "/heatmap.png"
+        page_html = compare_view_html_rich(name, label_a, "a.png", aw, ah, label_b, "b.png", bw, bh, "delta.png", "heatmap.png", vdiff.stats)
+    else:
+        page_html = compare_view_html(name, label_a, "a.png", Length(value: aw as i64), Length(value: ah as i64), label_b, "b.png", Length(value: bw as i64), Length(value: bh as i64))
+    if not file_write(page, page_html):
         return "write-failed:" + page
+    if mode == "html":
+        print("compare-view: wrote " + page)
+        return "written:" + page
     if browser == "":
         print("compare-view: no viewer found; open " + page)
         return "no-viewer:" + page
-    val plan = compare_view_plan_diff(Length(value: screen_w), Length(value: screen_h), Length(value: aw), Length(value: ah), Length(value: bw), Length(value: bh), Length(value: if diff_src != "": aw else: 0))
+    val plan = compare_view_plan_panes(screen_w, screen_h, aw, ah, bw, bh, panes)
     val root = cwd().replace("\\", "/")
-    val args = compare_view_browser_args(compare_view_file_url(root + "/" + page), plan, root + "/" + _CV_ROOT + "/.profile")
+    val win_idx = (_cv_names.len() - 1).to_i32()
+    val args = compare_view_browser_args_offset(compare_view_file_url(root + "/" + page), plan, root + "/" + dir + "/.profile", win_idx)
     val layout = if plan.side_by_side: "side-by-side" elif plan.needs_fit: "tabs+fit" else: "tabs"
     print("compare-view: " + name + " (" + layout + ") " + page)
     if mode == "auto":

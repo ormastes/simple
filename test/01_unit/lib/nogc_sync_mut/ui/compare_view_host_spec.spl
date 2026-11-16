@@ -11,8 +11,8 @@ available. Written for rendering-parity test owners.
 viewer; this spec never does.
 """
 use std.spec.*
-use std.io_runtime.{file_exists, file_read, file_size, dir_remove_all}
-use std.nogc_sync_mut.ui.compare_view_host.{compare_view_inspect_with, compare_view_inspect, compare_view_find_browser}
+use std.io_runtime.{file_exists, file_read, file_size, dir_remove_all, host_os}
+use std.nogc_sync_mut.ui.compare_view_host.{compare_view_inspect_with, compare_view_inspect, compare_view_find_browser, compare_view_host_screen}
 
 fn _solid(n: i64, argb: u32) -> [u32]:
     var px: [u32] = []
@@ -64,3 +64,46 @@ describe "compare_view host":
 
     it "treats a missing viewer path as no viewer":
         expect(compare_view_find_browser("definitely/not/a/browser.exe")).to_equal("")
+
+    it "writes a.png, b.png, diff.png, heatmap.png, and index.html in html mode":
+        dir_remove_all("build/compare_view/host_spec_html")
+        val status = compare_view_inspect_with("html", 1920, 1040, "/usr/bin/true", 0,
+            "host spec html", "simple", _solid(12, 0xFFFF0000u32), 4, 3, "chrome", _solid(12, 0xFFFF0200u32), 4, 3)
+        expect(status).to_start_with("written:")
+        expect(status).to_end_with("build/compare_view/host_spec_html/index.html")
+        expect(file_size("build/compare_view/host_spec_html/a.png") > 0).to_equal(true)
+        expect(file_size("build/compare_view/host_spec_html/b.png") > 0).to_equal(true)
+        expect(file_size("build/compare_view/host_spec_html/diff.png") > 0).to_equal(true)
+        expect(file_size("build/compare_view/host_spec_html/heatmap.png") > 0).to_equal(true)
+        val html = file_read("build/compare_view/host_spec_html/index.html")
+        expect(html).to_contain("DIFF: 12 px differ")
+        expect(html).to_contain("match: 0.00%")
+        expect(html).to_contain("SMALL BUFFER")
+        expect(file_size("build/compare_view/host_spec_html/delta.png") > 0).to_equal(true)
+        expect(html).to_contain("color: 12 px")
+
+    it "writes IDENTICAL status and delta.png for identical buffers and shape/alpha breakdown for mixed diffs":
+        dir_remove_all("build/compare_view/host_spec_identical")
+        val same_px = _solid(12, 0xFF1E50C8u32)
+        val st_same = compare_view_inspect_with("html", 1920, 1040, "", 0,
+            "host spec identical", "simple", same_px, 4, 3, "skia", same_px, 4, 3)
+        expect(st_same).to_start_with("written:")
+        expect(file_size("build/compare_view/host_spec_identical/delta.png") > 0).to_equal(true)
+        val html_same = file_read("build/compare_view/host_spec_identical/index.html")
+        expect(html_same).to_contain("IDENTICAL (0 color diff, 0 shape/alpha diff, max Δ=0)")
+
+        dir_remove_all("build/compare_view/host_spec_mixed")
+        val a_px: [u32] = [0x00000000u32, 0xFF1E50C8u32, 0xFF1E50C8u32, 0x00000000u32]
+        val b_px: [u32] = [0x00000000u32, 0x00000000u32, 0xFFC83C1Eu32, 0x00000000u32]
+        val st_mix = compare_view_inspect_with("html", 1920, 1040, "", 0,
+            "host spec mixed", "winding", a_px, 2, 2, "evenodd", b_px, 2, 2)
+        expect(st_mix).to_start_with("written:")
+        expect(file_size("build/compare_view/host_spec_mixed/delta.png") > 0).to_equal(true)
+        val html_mix = file_read("build/compare_view/host_spec_mixed/index.html")
+        expect(html_mix).to_contain("shape/alpha: 1 px (gold=A, cyan=B) | color: 1 px")
+
+    it "resolves a non-zero screen size on macOS":
+        val os = host_os()
+        if os == "macos" or os == "darwin":
+            val sz = compare_view_host_screen()
+            expect(sz.w > 0 and sz.h > 0).to_equal(true)
