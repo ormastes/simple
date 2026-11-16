@@ -165,8 +165,9 @@ describe "direction:rtl logical order on a real Vulkan device":
         if not file_exists("/usr/share/vulkan/icd.d/lvp_icd.json"):
             print("[skip] AC-6: no llvmpipe ICD; this Vulkan row was not exercised")
             return
-        # Vulkan text is still grayscale (doc/08_tracking/bug/vulkan_font_lcd_subpixel_text_not_implemented_2026-11-16.md),
-        # so the device frame must equal the grayscale Engine2D CPU frame.
+        # Glyph ORDER is under test here, not antialiasing: like AC-5 this pins
+        # the order on the grayscale raster (the ink-mask check in
+        # `_check_pixels` is AA-sensitive). AC-7 covers the LCD frame.
         env_set("SIMPLE_WEB_LCD_TEXT", "0")
         step("the request really resolved to Vulkan (no silent software fallback)")
         expect(simple_web_resolved_engine2d_backend_name(W, H, "vulkan")).to_equal("vulkan")
@@ -179,3 +180,17 @@ describe "direction:rtl logical order on a real Vulkan device":
         step("the device frame equals the Engine2D CPU frame")
         expect(rb.pixels).to_equal(simple_web_render_html_to_pixels(PAGE, W, H))
         env_set("SIMPLE_WEB_LCD_TEXT", "1")
+
+    it "AC-7: with LCD text on, the Vulkan device frame equals the Engine2D CPU frame byte for byte":
+        # The rtl runs end flush against the right surface edge and the ltr run
+        # starts at x=0, so edge quads reach past the surface. The CPU LCD
+        # composite declines those quads (off-surface readback is not opaque)
+        # and paints them gray; the kernel must reproduce that, not LCD them.
+        if not file_exists("/usr/share/vulkan/icd.d/lvp_icd.json"):
+            print("[skip] AC-7: no llvmpipe ICD; this Vulkan row was not exercised")
+            return
+        env_set("SIMPLE_WEB_LCD_TEXT", "1")
+        expect(simple_web_resolved_engine2d_backend_name(W, H, "vulkan")).to_equal("vulkan")
+        val rb = simple_web_render_html_to_readback_with_engine2d_backend(PAGE, W, H, "vulkan")
+        expect(rb.source).to_equal("device_readback")
+        expect(rb.pixels).to_equal(simple_web_render_html_to_pixels(PAGE, W, H))

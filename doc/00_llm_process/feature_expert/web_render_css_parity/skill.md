@@ -2179,8 +2179,20 @@ Code path:
 - `FontRenderer._lcd_glyph` produces atlas cells `(avg<<24)|(r<<16)|(g<<8)|b`.
 - `_lcd_apply_pen_phases` swaps a quad to a phase cell (glyph_index `-1 - phase`) when the exact milli pen (`_text_pen_milli`, shared with `measure_text_advances`) rounds to a non-zero quarter.
 - `engine2d_lcd_quad_composite` (`engine.spl`) applies the preblend tables and the Skia blend on an opaque destination. A non-opaque destination falls back to the grayscale blend.
-- `_lcd_text_active` restricts all of this to `cpu`/`cpu_simd`/`software`. Vulkan stays grayscale; see `doc/08_tracking/bug/vulkan_font_lcd_subpixel_text_not_implemented_2026-11-16.md`.
-- Spec: `test/01_unit/browser_engine/lcd_subpixel_text_chrome159_spec.spl` (AC-1..5).
+- `_lcd_text_active` admits `cpu`/`cpu_simd`/`software` and, since 2026-11-17, `vulkan` (below).
+- Spec: `test/01_unit/browser_engine/lcd_subpixel_text_chrome159_spec.spl` (AC-1..5 CPU, AC-6..7 Vulkan device).
+
+### Vulkan LCD (2026-11-17)
+
+The packed font kernel (`shaders/font_atlas_batch.comp`, blob `backend_vulkan_font_spirv.spl`, pin `check-font-atlas-batch-spirv-pinned.shs`) now has an LCD branch that reproduces `engine2d_lcd_quad_composite` byte for byte. Facts a maintainer needs:
+- **Decision is per QUAD, like the CPU.** LCD math only if the quad holds an LCD cell (host scan, `_vulkan_font_quad_has_lcd_cell`) AND every destination pixel of the quad is opaque and on the surface (kernel gate). Otherwise the whole quad takes the old gray "over" blend. Inside an LCD quad a GRAY cell (rgb 0xFFFFFF) is blended through the s32 tables with cr = cg = cb = alpha, NOT through the over blend.
+- **One workgroup per quad.** The opacity gate needs the whole quad, so an LCD batch dispatches X = 1 (the kernel strides over the quad's pixels); gray batches keep one group per 64 pixels.
+- **Tables travel in the params buffer, not a 4th binding.** The seed fixes the pipeline layout at bindings 0..2 (`interpreter_extern/gpu.rs` ~5054). The glyph record stays 7 words (Metal parity, `VULKAN_FONT_PACKED_MAX_BYTES == 114720`). Header word 7 bit 31 marks an opt-in trailer after the glyph records: `G` table indices (0xFFFFFFFF = no LCD) then one 768-word s32 table per distinct LCD text colour (cap 32; more is refused, not drawn gray). Tables come from `engine2d_lcd_s32_tables` (`helpers/lcd_s32_tables.spl`, moved out of `engine.spl`, not duplicated). The pooled params buffers are `VULKAN_FONT_PACKED_POOL_BYTES` (max + trailer).
+- **Trap: the 5x7 bitmap atlas has rgb = 0**, which the LCD-cell test would read as "LCD cell, zero coverage" and blank the text. The packer skips LCD for `VULKAN_BITMAP_FONT_CONFIG_IDENTITY` batches.
+- **Trap: clip trimming hides surface overhang.** Draw IR clips each text box, so `vulkan_bitmap_text_clip_quads` bakes the clip into the quad and the kernel only sees the on-surface part. The CPU reads the UNTRIMMED quad back (off-surface reads as 0, not opaque) and paints an overhanging quad (a glyph at x=0 or flush right, because LCD padding reaches 1 px out) gray. `vulkan_font_lcd_veto_keys` records those trimmed quads on `VulkanBackend.font_lcd_veto_keys` and the packer draws them gray. Without it a page with margin:0 text differs on the first/last glyph.
+- **`runtime-glsl` keeps the legacy layout.** The packer only emits the trailer and the X = 1 grid when `pipeline.artifact_mode == "precompiled-spirv"`; the common gray GLSL has no stride loop and would draw 64 pixels per glyph.
+- **Cost:** LCD on Vulkan is about 60 % slower steady (cold several times) than gray on a 900x760 text page; gray is unchanged within ~5 %. See the bug record, open items 5-6, for numbers and an unexplained RSS drop.
+- Reference for device parity is `simple_web_render_html_to_pixels` (default backend) or `cpu_simd` on vector-font pages; `cpu_simd` on 8px Arial form-control pages takes the bitmap lane and differs from Vulkan with LCD off too.
 
 Gates and remaining gaps:
 - Catalog 1x went from 2.88/5.25/5.85/6.80/6.08/6.75/1.72/0.68 to 2.53/5.14/4.74/5.68/5.17/4.93/1.07/0.71 (overview, html, css-layout, css-paint, forms-media, animation, evidence, tab-bar).
