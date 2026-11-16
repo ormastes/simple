@@ -1,5 +1,11 @@
 """
 ## Purpose and audience
+Requirement ids: the plan (sections 3.5 and 9.1) names TESTDB-001..010 without
+defining each one; this spec uses the mapping stated in
+test/01_unit/lib/common/traceability/test_query_spec.spl (001 exact query, 002 result
+variants, 003 provenance/missing identity, 004 pagination, rejected and failed
+queries). Read-only/no-write isolation has no individually numbered plan id.
+
 Executable contract for the read-only `simple test query` and `simple test
 explain` subcommands. Argument parsing and rendering are pure functions over
 domain types (limit, cursor, format, exit decision); the only I/O case opens a
@@ -65,7 +71,7 @@ fn _usage_error_of(args: [text]) -> text:
 
 describe "test query argument parsing":
     it "parses a case with run, limit, cursor and format":
-        # @req TESTDB-011
+        # @req TESTDB-001
         step("Parse a full query command line")
         val request = _request(["query", "test/a_spec.spl::adds", "--run", "run_7", "--limit", "5", "--cursor=10", "--format", "sdn"])
         step("Every typed field carries the supplied value")
@@ -76,14 +82,14 @@ describe "test query argument parsing":
             case Some(run): expect(run.value).to_equal("run_7")
             case None: fail("run id was dropped")
         match request.query.cursor:
-            case Some(cursor): expect(cursor.offset).to_equal(10)
+            case Some(cursor): expect(cursor.token).to_equal("10")
             case None: fail("cursor was dropped")
         match request.format:
             case TestQueryFormat.Sdn: pass
             case TestQueryFormat.Table: fail("format sdn parsed as table")
 
     it "defaults to table format, limit 50 and no run or cursor":
-        # @req TESTDB-011
+        # @req TESTDB-001
         step("Parse the minimal command line")
         val request = _request(["query", "test/a_spec.spl::adds"])
         expect(request.query.limit.value).to_equal(50)
@@ -91,7 +97,7 @@ describe "test query argument parsing":
         expect(request.query.cursor.?).to_equal(false)
 
     it "rejects a bad limit, a missing case separator and other malformed input":
-        # @req TESTDB-011
+        # @req TESTDB-004
         # @capture(statistics): usage error text for each malformed command line
         step("A non-numeric limit is a usage error naming the flag")
         expect(_usage_error_of(["query", "a::b", "--limit", "many"])).to_contain("--limit needs an integer")
@@ -108,7 +114,7 @@ describe "test query argument parsing":
         expect(_usage_error_of(["explain", "a::b", "--cursor", "3"])).to_contain("explain does not take --cursor")
 
     it "recognises only the query and explain subcommands":
-        # @req TESTDB-011
+        # @req TESTDB-001
         step("Plain test arguments are not claimed by the query facade")
         expect(test_query_subcommand_args(["query", "a::b"]).len() > 0).to_equal(true)
         expect(test_query_subcommand_args(["explain", "a::b"]).len() > 0).to_equal(true)
@@ -121,7 +127,7 @@ describe "test query argument parsing":
 
 describe "test query rendering":
     it "renders typed rows in table form with qualification":
-        # @req TESTDB-012
+        # @req TESTDB-002
         step("Render one failed and one passed attempt")
         val page = _page([
             _row(TestQueryStatus.Failed, TestQualification.NotPass, _ordinal(0), _planned()),
@@ -135,7 +141,7 @@ describe "test query rendering":
         expect(out.contains("partial")).to_equal(false)
 
     it "renders sdn form":
-        # @req TESTDB-012
+        # @req TESTDB-002
         step("Render one row as SDN")
         val page = _page([_row(TestQueryStatus.Passed, TestQualification.Pass, _ordinal(0), _planned())],
             TestQueryTruncation.Complete, TestQueryCoverage.Full)
@@ -144,17 +150,17 @@ describe "test query rendering":
         expect(out).to_contain("    run_1, case_9, 0, passed, pass")
 
     it "announces truncation with a partial marker and the next cursor":
-        # @req TESTDB-013
+        # @req TESTDB-004
         step("Render a truncated page")
         val page = _page([_row(TestQueryStatus.Passed, TestQualification.Pass, _ordinal(0), _planned())],
-            TestQueryTruncation.Truncated(next: TestQueryCursor(offset: 1)), TestQueryCoverage.Full)
+            TestQueryTruncation.Truncated(next: TestQueryCursor(token: "tq1:abc:1")), TestQueryCoverage.Full)
         val out = render_test_query_page(page, TestQueryFormat.Table)
         step("The cut is never silent")
         expect(out).to_contain("partial: truncated")
-        expect(out).to_contain("next cursor: 1")
+        expect(out).to_contain("next cursor: tq1:abc:1")
 
     it "marks unfinished or identity-less attempts as partial":
-        # @req TESTDB-013
+        # @req TESTDB-003 TESTDB-004
         step("Render a partial-coverage page with a missing attempt identity")
         val page = _page([_row(TestQueryStatus.Passed, TestQualification.Pass, TestAttemptIdentity.Missing, TestPlannedCaseIdentity.Missing)],
             TestQueryTruncation.Complete, TestQueryCoverage.Partial)
@@ -164,7 +170,7 @@ describe "test query rendering":
 
 describe "test explain":
     it "explains why a passed attempt qualifies and a skipped one does not":
-        # @req TESTDB-014
+        # @req TESTDB-002
         step("Explain a passed and a skipped attempt")
         val page = _page([
             _row(TestQueryStatus.Passed, TestQualification.Pass, _ordinal(0), _planned()),
@@ -178,7 +184,7 @@ describe "test explain":
         expect(out).to_contain("identity: complete")
 
     it "never qualifies cached, blocked or unknown statuses":
-        # @req TESTDB-014
+        # @req TESTDB-002
         step("Explain cached, blocked and unrecognised attempts")
         val page = _page([
             _row(TestQueryStatus.Cached, TestQualification.NotPass, _ordinal(0), _planned()),
@@ -192,7 +198,7 @@ describe "test explain":
         expect(out.contains("qualifies as PASS")).to_equal(false)
 
     it "says explicitly when identity fields are missing":
-        # @req TESTDB-014
+        # @req TESTDB-003
         step("Explain an attempt with neither planned case nor attempt identity")
         val page = _page([_row(TestQueryStatus.Passed, TestQualification.Pass, TestAttemptIdentity.Missing, TestPlannedCaseIdentity.Missing)],
             TestQueryTruncation.Complete, TestQueryCoverage.Partial)
@@ -202,7 +208,7 @@ describe "test explain":
 
 describe "test query exit decisions":
     it "maps outcomes to the documented exit codes":
-        # @req TESTDB-015
+        # @req TESTDB-004
         step("Rows found is 0, no rows is 1, usage and unreadable store are 2")
         val request = _request(["query", "test/a_spec.spl::adds"])
         val found = render_test_query_outcome(request, Ok(_page([_row(TestQueryStatus.Passed, TestQualification.Pass, _ordinal(0), _planned())], TestQueryTruncation.Complete, TestQueryCoverage.Full)))
@@ -218,7 +224,7 @@ describe "test query exit decisions":
 
 describe "test query against a real database file":
     it "leaves the database, its wal and its directory byte-for-byte unchanged":
-        # @req TESTDB-016
+        # @req TESTDB-001
         step("Save a scratch database with one run of the queried case")
         dir_remove_all(SCRATCH_DIR)
         dir_create_all(SCRATCH_DIR)
@@ -249,7 +255,7 @@ describe "test query against a real database file":
         dir_remove_all(SCRATCH_DIR)
 
     it "reports a missing or corrupt database as exit 2 and creates nothing":
-        # @req TESTDB-016
+        # @req TESTDB-004
         step("A missing database is a typed error and is not cold-started")
         dir_remove_all(SCRATCH_DIR)
         dir_create_all(SCRATCH_DIR)
@@ -266,4 +272,50 @@ describe "test query against a real database file":
         expect(test_query_exit_code(broken.decision).value).to_equal(2)
         expect(broken.text).to_contain("test database unreadable")
         expect(file_read(corrupt.value)).to_equal("")
+        dir_remove_all(SCRATCH_DIR)
+
+describe "test query cursor binding":
+    it "pages with an opaque cursor and rejects plain integers, tampering and another query":
+        # @req TESTDB-004
+        step("Save a scratch database with three attempts of one case")
+        dir_remove_all(SCRATCH_DIR)
+        dir_create_all(SCRATCH_DIR)
+        val db_path = SCRATCH_DIR + "/test_db.sdn"
+        var owner = RunnerTestDb(db: TestDatabaseExtended.create(db_path), current_run_id: "")
+        val run_id = owner.start_run()
+        var events: [TraceCaseEvent] = []
+        for i in 0..3:
+            events.push(TraceCaseEvent("adds", "started", "not_finished"))
+            events.push(TraceCaseEvent("adds", "finished", "passed"))
+        match owner.db.record_trace_case_events(run_id, "test/a_spec.spl", events):
+            case Ok(_): pass
+            case Err(reason): fail("fixture events rejected: {reason}")
+        match owner.save():
+            case Ok(_): pass
+            case Err(reason): fail("fixture save failed: {reason}")
+        val path = TestDbFilePath(value: db_path)
+        step("Page one announces an opaque next cursor")
+        val first = execute_test_query(_request(["query", "test/a_spec.spl::adds", "--limit", "1"]), path)
+        expect(test_query_exit_code(first.decision).value).to_equal(0)
+        val marker = "next cursor: "
+        val at = first.text.index_of(marker) ?? -1
+        expect(at >= 0).to_equal(true)
+        val rest = first.text.substring(at + marker.byte_len(), first.text.byte_len())
+        val token = (rest.split(" "))[0].trim()
+        expect(token.starts_with("tq1:")).to_equal(true)
+        step("Feeding the token back returns the next page with exit 0")
+        val second = execute_test_query(_request(["query", "test/a_spec.spl::adds", "--limit", "1", "--cursor", token]), path)
+        expect(test_query_exit_code(second.decision).value).to_equal(0)
+        step("A plain integer cursor is a usage-class error, exit 2")
+        val plain = execute_test_query(_request(["query", "test/a_spec.spl::adds", "--limit", "1", "--cursor", "1"]), path)
+        expect(test_query_exit_code(plain.decision).value).to_equal(2)
+        expect(plain.text).to_contain("invalid query")
+        step("A tampered token is exit 2")
+        val tampered = execute_test_query(_request(["query", "test/a_spec.spl::adds", "--limit", "1", "--cursor", token + "9"]), path)
+        expect(test_query_exit_code(tampered.decision).value).to_equal(2)
+        step("A token from a different query (limit 2, other case) is exit 2")
+        val other_limit = execute_test_query(_request(["query", "test/a_spec.spl::adds", "--limit", "2", "--cursor", token]), path)
+        expect(test_query_exit_code(other_limit.decision).value).to_equal(2)
+        val other_case = execute_test_query(_request(["query", "test/a_spec.spl::other", "--limit", "1", "--cursor", token]), path)
+        expect(test_query_exit_code(other_case.decision).value).to_equal(2)
         dir_remove_all(SCRATCH_DIR)
