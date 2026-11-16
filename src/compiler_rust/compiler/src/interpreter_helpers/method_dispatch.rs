@@ -1039,6 +1039,31 @@ pub(crate) fn call_method_on_value(
         return Ok(Value::Bool(matched));
     }
 
+    // Unit receivers in chained position (`opt.unwrap().value()`): mirror the
+    // value/suffix/family/to_string/to_text arms of handle_unit_methods and
+    // forward builtin numeric methods (`to_i64`, `abs`, ...) to the inner value.
+    if let Value::Unit { value, suffix, family } = &recv_val {
+        match method {
+            "value" => return Ok((**value).clone()),
+            "suffix" => return Ok(Value::text(suffix.to_string())),
+            "family" => return Ok(family.clone().map_or(Value::Nil, Value::text_owned)),
+            "to_string" => return Ok(Value::text(format!("{}_{}", value.to_display_string(), suffix))),
+            "to_text" => return Ok(Value::text(value.to_display_string())),
+            _ => {
+                return call_method_on_value(
+                    (**value).clone(),
+                    method,
+                    _args,
+                    _env,
+                    _functions,
+                    _classes,
+                    _enums,
+                    _impl_methods,
+                );
+            }
+        }
+    }
+
     if std::env::var("SIMPLE_DEBUG_NESTED_DISPATCH").is_ok() {
         let variant = match &recv_val {
             Value::Object { class, .. } => format!("Object(class={})", class),

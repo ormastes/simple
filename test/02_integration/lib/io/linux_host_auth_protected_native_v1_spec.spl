@@ -1,0 +1,182 @@
+# AUTHORED_NOT_RUN. Real Linux main-thread/native fixture, no fake authority or
+# secret supplied. This publishes immutable files; use disposable prepared root.
+use std.spec.*
+use std.io_runtime.env_get_nullable
+use std.io.tcp.TcpListener
+use std.common.crypto.sha256.sha256_text
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_admit_v2
+use std.common.task_runner.distributed_operation_journal_v2.*
+use std.nogc_sync_mut.io.host_service_auth_setup_v1.*
+use std.nogc_sync_mut.io.host_service_auth_listener_publication_v6.*
+use std.nogc_sync_mut.io.host_service_ready_reader_v1.*
+use std.nogc_sync_mut.io.linux_protected_root_reader_v1.*
+
+var linux_auth_setup_owner_v1: Option<HostServiceAuthSetupOwnerV1> = nil
+var linux_auth_publisher_v1: Option<HostServiceAuthListenerPublicationV6> = nil
+var linux_auth_reader_v1: Option<HostServiceReadyReaderV1> = nil
+var linux_auth_input_v1: Option<LinuxProtectedRootReaderV1> = nil
+var linux_auth_listener_v1: Option<TcpListener> = nil
+var linux_auth_journal_v1: Option<DistributedOperationJournalV2> = nil
+var linux_auth_pending_v1: [DistributedOperationJournalOpenCleanupV2] = []
+
+fn linux_auth_drain_v1() -> bool:
+    # Save every returned owner before inspecting error/completed fields.
+    for turn in 0..2048:
+        if linux_auth_publisher_v1.is_some() and linux_auth_journal_v1.is_some():
+            val closed = host_service_auth_listener_publication_close_v6(linux_auth_publisher_v1.unwrap(), linux_auth_journal_v1.unwrap())
+            linux_auth_journal_v1 = Some(closed.journal)
+            linux_auth_publisher_v1 = closed.owner
+        elif linux_auth_reader_v1.is_some():
+            val closed = host_service_ready_reader_close_v1(linux_auth_reader_v1.unwrap())
+            linux_auth_reader_v1 = closed.owner
+        elif linux_auth_setup_owner_v1.is_some():
+            val closed = host_service_auth_setup_close_v1(linux_auth_setup_owner_v1.unwrap())
+            linux_auth_setup_owner_v1 = closed.owner
+        elif linux_auth_input_v1.is_some():
+            val closed = linux_protected_root_reader_close_v1(linux_auth_input_v1.unwrap())
+            linux_auth_input_v1 = closed.owner
+        elif linux_auth_listener_v1.is_some():
+            var listener = linux_auth_listener_v1.unwrap()
+            val closed = listener.close()
+            linux_auth_listener_v1 = nil
+            if closed.is_err(): return false
+        elif linux_auth_journal_v1.is_some():
+            val closed = distributed_operation_journal_close_owned_v2(linux_auth_journal_v1.unwrap())
+            linux_auth_journal_v1 = nil
+            if val pending = closed.cleanup: linux_auth_pending_v1.push(pending)
+        elif linux_auth_pending_v1.len() > 0:
+            val closed = distributed_operation_journal_open_cleanup_v2(linux_auth_pending_v1[0])
+            if val pending = closed.cleanup: linux_auth_pending_v1[0] = pending
+            else: linux_auth_pending_v1 = linux_auth_pending_v1[1:linux_auth_pending_v1.len()]
+        else: return true
+    false
+
+fn linux_auth_open_journal_v1(root: text, authority: text, nonce: text) -> Result<DistributedOperationJournalV2, text>:
+    match distributed_operation_journal_open_linux_v3(root, authority, nonce, 64):
+        case DistributedOperationJournalOpenV2.Ready(owner): Ok(owner)
+        case DistributedOperationJournalOpenV2.Rejected(error): Err(error)
+        case DistributedOperationJournalOpenV2.CleanupRequired(pending, error):
+            linux_auth_pending_v1.push(pending)
+            Err(error)
+
+# @req REQ-LINUX-AUTH-REAL-CUSTODY
+describe "actual Linux protected setup, single journal publication and reader":
+    after_each:
+        expect(linux_auth_drain_v1()).to_equal(true)
+
+    it "publishes from actual entropy and listener, refuses a competing writer and stale reader after lease replacement":
+        step("Require a disposable current-user0700 root with an existing deployment0700 child")
+        if not linux_auth_drain_v1(): panic("prior actual Linux fixture cleanup remains retained")
+        val fixture = env_get_nullable("SIMPLE_LINUX_HOST_AUTH_FIXTURE")
+        if fixture.is_none(): panic("required disposable protected Linux fixture unavailable")
+        val deployment = fixture.unwrap() + "/deployment"
+        val setup_path = fixture.unwrap() + "/credentials/setup.sdn"
+        val authority = sha256_text("linux-auth-storage-fixture-domain")
+        var setup = host_service_auth_setup_open_v1(setup_path)
+        linux_auth_setup_owner_v1 = setup.owner
+        for phase in 0..512:
+            if linux_auth_setup_owner_v1.is_some():
+                setup = host_service_auth_setup_step_v1(linux_auth_setup_owner_v1.unwrap())
+                linux_auth_setup_owner_v1 = setup.owner
+        expect(setup.completed and setup.error == "").to_equal(true)
+        val opened = linux_auth_open_journal_v1(deployment + "/journal", authority, sha256_text("first-fixture-epoch"))
+        if opened.is_err(): panic("actual protected journal unavailable; pending owner retained")
+        var journal = opened.unwrap()
+        linux_auth_journal_v1 = Some(journal)
+        val competitor = linux_auth_open_journal_v1(deployment + "/journal", authority, sha256_text("competitor-epoch"))
+        if competitor.is_ok():
+            # Preserve unexpected actual ownership before failing assertions.
+            val unexpected = distributed_operation_journal_close_owned_v2(competitor.unwrap())
+            if val pending = unexpected.cleanup: linux_auth_pending_v1.push(pending)
+        expect(competitor.is_err()).to_equal(true)
+        expect(distributed_operation_journal_linux_current_v3(journal).is_ok()).to_equal(true)
+        # Storage-transition DATA only, no signed grant, resource reservation,
+        # native execution, or authentication authority is claimed by this row.
+        val row = OperationEnvelopeV2(2, "storage-fixture-row", sha256_text("fixture-payload"),
+            "fixture", "fixture", "fixture", "storage_observation", sha256_text("fixture-environment"), 1, 0, 1, 1, 1)
+        val admitted = daemon_operation_admit_v2(journal, row).unwrap()
+        journal = admitted.journal
+        linux_auth_journal_v1 = Some(journal)
+        expect(journal.sequence).to_equal(1)
+        expect(distributed_operation_journal_publish_v3(journal, "fixture-proof/unchanged.sdn", "first\n").unwrap()).to_equal(true)
+        expect(distributed_operation_journal_publish_v3(journal, "fixture-proof/unchanged.sdn", "replacement\n").unwrap()).to_equal(false)
+        expect(distributed_operation_journal_read_required_v3(journal, "fixture-proof/unchanged.sdn", 64).unwrap()).to_equal("first\n")
+        val bound = TcpListener.bind("127.0.0.1:0")
+        if bound.is_err(): panic("actual loopback listener unavailable")
+        val listener = bound.unwrap()
+        linux_auth_listener_v1 = Some(listener)
+        val incarnation = "d".repeat(32)
+        var publication = host_service_auth_listener_publication_begin_v6(listener, journal, setup_path, setup.setup_digest, incarnation)
+        linux_auth_journal_v1 = Some(publication.journal)
+        linux_auth_publisher_v1 = publication.owner
+        for phase in 0..512:
+            if linux_auth_publisher_v1.is_some():
+                publication = host_service_auth_listener_publication_step_v6(listener, linux_auth_publisher_v1.unwrap(), linux_auth_journal_v1.unwrap())
+                linux_auth_journal_v1 = Some(publication.journal)
+                linux_auth_publisher_v1 = publication.owner
+        expect(publication.completed and publication.error == "").to_equal(true)
+        val reader = host_service_ready_reader_open_v1(setup_path, setup.setup_digest, deployment, authority, setup.publication_uid)
+        linux_auth_reader_v1 = reader.owner
+        if not reader.ready or reader.owner.is_none(): panic("actual retained ready-reader admission failed")
+        val alias = reader.owner.unwrap()
+        expect(host_service_ready_reader_endpoint_v1(alias).unwrap()).to_equal(listener.local_addr().unwrap())
+        expect(host_service_ready_reader_incarnation_v1(alias).unwrap()).to_equal(incarnation)
+        expect(host_service_ready_reader_ready_digest_v1(alias).unwrap()).to_equal(publication.ready_digest)
+        expect(host_service_ready_reader_host_lease_digest_v1(alias).unwrap()).to_equal(journal.lease_digest)
+        expect(host_service_ready_reader_expected_service_pid_v1(alias).unwrap()).to_be_greater_than(0)
+        # Same protected original root, new writer epoch; no saved PID adoption.
+        var closed = distributed_operation_journal_close_owned_v2(journal)
+        linux_auth_journal_v1 = nil
+        for turn in 0..512:
+            if closed.cleanup.is_some(): closed = distributed_operation_journal_open_cleanup_v2(closed.cleanup.unwrap())
+        if val pending = closed.cleanup: linux_auth_pending_v1.push(pending)
+        expect(closed.closed and closed.error == "").to_equal(true)
+        val replacement = linux_auth_open_journal_v1(deployment + "/journal", authority, sha256_text("replacement-fixture-epoch"))
+        if replacement.is_err(): panic("replacement protected journal unavailable")
+        journal = replacement.unwrap()
+        linux_auth_journal_v1 = Some(journal)
+        expect(journal.sequence).to_equal(1)
+        expect(journal.operations.contains_key("storage-fixture-row")).to_equal(true)
+        expect(distributed_operation_journal_read_required_v3(journal, "fixture-proof/unchanged.sdn", 64).unwrap()).to_equal("first\n")
+        expect(host_service_ready_reader_current_v1(alias).is_err()).to_equal(true)
+        val closing = host_service_ready_reader_close_v1(alias)
+        linux_auth_reader_v1 = closing.owner
+        expect(host_service_ready_reader_current_v1(alias).is_err()).to_equal(true)
+        expect(distributed_operation_journal_linux_current_v3(journal).is_ok()).to_equal(true)
+
+    it "retains a genuine readonly original input and refuses its copied alias after close":
+        step("Use an administrator-prepared private input.sdn under a current-user0700 root")
+        if not linux_auth_drain_v1(): panic("prior actual Linux fixture cleanup remains retained")
+        val fixture = env_get_nullable("SIMPLE_LINUX_HOST_AUTH_INPUT_FIXTURE")
+        if fixture.is_none(): panic("required actual protected input fixture unavailable")
+        val opened = linux_protected_root_reader_open_v1(fixture.unwrap())
+        linux_auth_input_v1 = opened.owner
+        if not opened.ready or opened.owner.is_none(): panic("actual protected input root unavailable")
+        val alias = opened.owner.unwrap()
+        val bytes = linux_protected_root_reader_read_v1(alias, "input.sdn", 512)
+        expect(bytes.is_ok() and bytes.unwrap().is_some()).to_equal(true)
+        # Second read must take the actual retained-file cache-hit branch.
+        # It exposes bytes only after its own full root/ancestry postcheck;
+        # this caller does not repair the contract with a later current call.
+        val cached = linux_protected_root_reader_read_v1(alias, "input.sdn", 512)
+        expect(cached.is_ok() and cached.unwrap() == bytes.unwrap()).to_equal(true)
+        expect(linux_protected_root_reader_current_v1(alias).is_ok()).to_equal(true)
+        val closed = linux_protected_root_reader_close_v1(alias)
+        linux_auth_input_v1 = closed.owner
+        expect(linux_protected_root_reader_current_v1(alias).is_err()).to_equal(true)
+
+    it "distinguishes actual ENOENT from a substituted unsafe target without falling back":
+        step("Require a private input fixture with unsafe.sdn as an administrator-planted symlink")
+        if not linux_auth_drain_v1(): panic("prior actual Linux fixture cleanup remains retained")
+        val fixture = env_get_nullable("SIMPLE_LINUX_HOST_AUTH_INPUT_FIXTURE")
+        if fixture.is_none(): panic("required actual protected input fixture unavailable")
+        val opened = linux_protected_root_reader_open_v1(fixture.unwrap())
+        linux_auth_input_v1 = opened.owner
+        if not opened.ready or opened.owner.is_none(): panic("actual protected input root unavailable")
+        val owner = opened.owner.unwrap()
+        val absent = linux_protected_root_reader_read_v1(owner, "definitely-absent.sdn", 512)
+        expect(absent.is_ok() and absent.unwrap().is_none()).to_equal(true)
+        val unsafe_file = linux_protected_root_reader_read_v1(owner, "unsafe.sdn", 512)
+        expect(unsafe_file.is_err()).to_equal(true)
+        expect(linux_protected_root_reader_current_v1(owner).is_err()).to_equal(true)

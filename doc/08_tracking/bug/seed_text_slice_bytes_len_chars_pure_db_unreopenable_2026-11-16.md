@@ -1,6 +1,6 @@
 # Seed: `text.len()` counts chars but `text.slice()` cuts bytes; non-ASCII makes a pure-SQL file DB unreopenable
 
-Status: open
+Status: verification-pending
 Date: 2026-11-16
 Area: seed interpreter text ops / `src/lib/nogc_sync_mut/database/pure_sql/_PureDatabase/row_value_helpers.spl`
 
@@ -43,3 +43,21 @@ measured.
 
 Found by the bridge_worker HTTP delivery lane (`work/bridge-worker-http-shared-20261116`).
 The shipped spec there drains an in-memory store, so it does not depend on this bug.
+
+## Resolution (2026-11-16, `work/pure-db-multibyte-escape-20261116`)
+The seed is not wrong. The owner decision of 2026-11-07
+(`doc/07_guide/quick_reference/syntax_quick_reference.md`, "Length and slicing
+units") makes `len()` count code points and `slice`/`substring`/`byte_at` take
+byte offsets. The bug was in the pure-DB codec, which bounded byte scans by
+`len()`. Fix: every scan and length frame in the v3 codec now uses
+`byte_len()` (`_pdb_v2_unescape`, `_serialize_row_v2`, `_deserialize_row_v2`,
+`_pdb_v3_row_encoding_is_canonical`, `_pdb_decimal_parse_strict`, and the
+envelope length in `pure_database.spl`). `_pdb_v2_unescape` copies whole runs
+between `%` escapes, so a multi-byte character is never cut. Files written
+before the fix that hold non-ASCII text could not be reopened anyway. ASCII
+files are byte-identical.
+
+Spec: `test/01_unit/lib/database/pure_sql_reopen_multibyte_text_spec.spl`
+(Korean, `é`, emoji round trip; a damaged non-ASCII file returns `Err`).
+Not yet checked: native build. `PureSqlMessagingStore.open` still unwraps the
+open result. That is a separate safe-code panic and was not changed here.

@@ -1,0 +1,39 @@
+# The pure-Simple HIR interpreter (engine behind the native CLI `run`/`test`)
+# must let a std.spec `it` body (a closure) `return` early, and must find a
+# method of an imported type although its SymbolId is the caller module's.
+#
+# @cover src/compiler/70.backend/backend/interpreter_calls.spl
+#
+# doc/08_tracking/bug/native_cli_test_cannot_run_std_spec_2026-11-15.md
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.backend.backend_types.*
+use compiler.backend.interpreter.{InterpreterBackendImpl}
+use compiler.backend.interpreter_calls.{interp_method_key}
+use compiler.common.config.{Logger}
+
+fn ws3_run(src: text) -> text:
+    val module = parse_full_frontend(src, "ws3_main.spl", "ws3_main", Logger(level: 0))
+    var lowering = HirLowering.with_filename("ws3_main.spl")
+    val hir = lowering.lower_module(module)
+    var backend = InterpreterBackendImpl.new()
+    match backend.interpret_hir_module(hir):
+        case Ok(BackendResult.Value(Value.String(s))): "string:" + s
+        case Ok(BackendResult.Value(Value.Int(n))): "int:" + n.to_text()
+        case Ok(BackendResult.Value(Value.Bool(b))): "bool:" + b.to_text()
+        case Ok(_): "other"
+        case Err(e): "error:" + e.message
+
+describe "HIR interpreter slice 3: closures and imported methods":
+    it "returns from a closure body without leaving the caller":
+        expect(ws3_run("fn apply(f: fn(i64) -> i64, x: i64) -> i64:\n    f(x) + 1000\n\nfn main() -> i64:\n    val early = apply(\\x:\n        if x > 0:\n            return x * 2\n        -1\n    , 5)\n    early + 100\n")).to_equal("int:1110")
+
+    it "keys an imported method by its type and method name":
+        expect(interp_method_key("a.b.Counter::start")).to_equal("Counter::start")
+        expect(interp_method_key("Counter::start")).to_equal("Counter::start")
+        expect(interp_method_key("start")).to_equal("")

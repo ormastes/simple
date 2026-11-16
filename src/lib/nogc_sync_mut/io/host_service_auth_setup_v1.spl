@@ -20,7 +20,13 @@ use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
 use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes}
 use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
-    distributed_operation_journal_read_required_v3, distributed_operation_journal_publish_v3}
+    distributed_operation_journal_read_required_v3, distributed_operation_journal_publish_v3,
+    distributed_operation_journal_linux_current_v3}
+use std.nogc_sync_mut.io.linux_protected_storage_v1.{LinuxProtectedStorageResourcesV1, linux_protected_storage_resources_v1}
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_machine_policy_abi_v1.getpid
+@end
 @when(os="windows"):
 use std.nogc_sync_mut.io.windows_pty_abi.GetCurrentProcessId
 @end
@@ -86,13 +92,18 @@ struct AuthPublicationStateV1:
     closing: bool = false
     closed: bool = false
     busy: bool = false
+    linux_resources: Option<LinuxProtectedStorageResourcesV1> = nil
 
 var auth_publications_v1: [AuthPublicationStateV1] = []
 var auth_publications_active_v1: i64 = 0
 
 fn auth_publication_entry_v1() -> Result<(), text>:
     process_capture_native_mode_check_v1()?
+    @when(os="linux"):
+    unsafe(capabilities: [ffi, raw_ptr]): linux_machine_process_origin_check_v1()
+    @else:
     windows_command_thread_check_v2()
+    @end
 
 fn auth_publication_fail_v1(before: AuthPublicationStateV1, reason: text) -> AuthPublicationStateV1:
     var state = before
@@ -114,6 +125,9 @@ fn auth_publication_open_v1(path: text, mode: i64, digest: text,
     auth_publication_entry_v1()?
     # Derived setup/ready/stage leaf lengths checked before root/entropy effects.
     val names = host_service_auth_setup_path_v1(path)?
+    @when(os="linux"):
+    if names.parent + "/" + names.setup_leaf != path: return Err("host-auth-linux-setup-path-spelling")
+    @end
     if mode == 1:
         if (not host_service_hex_shape_v6(digest, 64) or not host_service_hex_shape_v6(incarnation, 32) or
                 not host_service_auth_endpoint_valid_v1(endpoint)): return Err("host-auth-ready-admission-shape")
@@ -127,6 +141,9 @@ fn auth_publication_open_v1(path: text, mode: i64, digest: text,
     Ok(slot)
 
 fn auth_publication_current_v1(state: AuthPublicationStateV1) -> bool:
+    @when(os="linux"):
+    return state.linux_resources.is_some() and state.linux_resources.unwrap().current_v1().is_ok()
+    @end
     if state.mode == 1: return state.reader_root.is_some() and state.reader_root.unwrap().security_current()
     if state.writer.is_none() or state.reader_root.is_none(): return false
     if not state.writer.unwrap().security_current() or not state.reader_root.unwrap().security_current(): return false
@@ -137,6 +154,15 @@ fn auth_publication_setup_current_v1(slot: i64) -> Result<(), text>:
     var state = auth_publications_v1[slot]
     if not auth_publication_current_v1(state): return Err("host-auth-publication-root-changed")
     if state.mode == 0: return Ok(())
+    @when(os="linux"):
+    var resources = state.linux_resources.unwrap()
+    val read = resources.read_v1(state.names.setup_leaf, 512, true)?
+    if read.is_none() or not retained_credential_bytes_equal_v2(text_to_utf8_bytes(read.unwrap()), state.original_bytes):
+        return Err("host-auth-publication-setup-bytes-changed")
+    val validated = host_service_auth_setup_validate_v1(text_to_utf8_bytes(read.unwrap()), state.expected_digest, state.uid)?
+    resources.current_v1()?
+    return Ok(())
+    @end
     if state.original_setup.is_none() or not state.original_setup.unwrap().security_current():
         return Err("host-auth-publication-setup-changed")
     var file = state.original_setup.unwrap()
@@ -151,6 +177,18 @@ fn auth_publication_setup_current_v1(slot: i64) -> Result<(), text>:
 
 fn auth_publication_read_setup_v1(slot: i64) -> Result<(), text>:
     var state = auth_publications_v1[slot]
+    @when(os="linux"):
+    var resources = state.linux_resources.unwrap()
+    val read = resources.read_v1(state.names.setup_leaf, 512, true)?
+    if read.is_none(): return Err("host-auth-publication-setup-absent")
+    val bytes = text_to_utf8_bytes(read.unwrap())
+    val actual = host_service_auth_setup_validate_v1(bytes, state.expected_digest)?
+    state.original_bytes = bytes
+    state.uid = actual.publication_uid
+    state.digest = actual.setup_digest
+    auth_publications_v1[slot] = state
+    return auth_publication_setup_current_v1(slot)
+    @end
     val opened = state.reader_root.unwrap().open_file(state.names.setup_leaf, 512u64)
     if opened.is_err():
         val failure = opened.unwrap_err()
@@ -176,6 +214,10 @@ fn auth_publication_read_setup_v1(slot: i64) -> Result<(), text>:
 # unpublished stage may use discard; published/unknown targets are preserved.
 fn auth_publication_cleanup_v1(slot: i64):
     var state = auth_publications_v1[slot]
+    @when(os="linux"):
+    auth_publication_cleanup_linux_v1(slot, state)
+    return
+    @end
     var attempted = false
     var failed = false
     if state.published.is_some():
@@ -265,6 +307,10 @@ fn auth_publication_advance_v1(slot: i64):
     if state.closing:
         auth_publication_cleanup_v1(slot)
         return
+    @when(os="linux"):
+    auth_publication_advance_linux_v1(slot)
+    return
+    @end
     match state.phase:
         case "root":
             val opened = windows_private_root_open_v1(state.names.parent)
@@ -418,6 +464,9 @@ pub fn host_service_auth_setup_close_v1(owner: HostServiceAuthSetupOwnerV1) -> H
 # Read the EXISTING actual journal's selector through its genuine owner. The
 # journal remains with the caller/Host domain, including native publish pending.
 fn auth_ready_snapshot_v1(journal: DistributedOperationJournalV2) -> Result<HostServiceAuthLeaseV1, text>:
+    @when(os="linux"):
+    distributed_operation_journal_linux_current_v3(journal)?
+    @end
     val bytes = distributed_operation_journal_read_required_v3(journal, "parent.lease", 512)?
     val selected = host_service_auth_lease_validate_v1(text_to_utf8_bytes(bytes), journal.authority_digest)?
     if selected.lease_digest != journal.lease_digest: return Err("host-ready-journal-selector-mismatch")
@@ -443,6 +492,10 @@ fn auth_ready_advance_v1(slot: i64, journal: DistributedOperationJournalV2):
         return
     match state.phase:
         case "read-root":
+            @when(os="linux"):
+            auth_publication_linux_root_v1(slot, false)
+            return
+            @end
             val opened = windows_private_read_root_open_v2(state.names.parent)
             if opened.is_err():
                 val failure = opened.unwrap_err()
@@ -461,7 +514,11 @@ fn auth_ready_advance_v1(slot: i64, journal: DistributedOperationJournalV2):
                 @when(os="windows"):
                 val pid = GetCurrentProcessId() as i64
                 @else:
+                @when(os="linux"):
+                val pid = unsafe(capabilities: [ffi]): getpid() as i64
+                @else:
                 val pid: i64 = 0
+                @end
                 @end
                 val record = host_service_auth_ready_record_v1(state.uid, state.digest, state.endpoint, pid,
                     state.incarnation, state.journal_lease, state.journal_authority)
@@ -566,3 +623,86 @@ pub(package) fn host_service_auth_ready_publish_step_v1(owner: HostServiceAuthRe
 pub fn host_service_auth_ready_publish_close_v1(owner: HostServiceAuthReadyPublishOwnerV1,
         journal: DistributedOperationJournalV2) -> HostServiceAuthReadyPublishTurnV1:
     host_service_auth_ready_publish_step_v1(owner, journal, true)
+
+# Registry-free Linux resource work, still within the existing publication slot.
+fn auth_publication_linux_root_v1(slot: i64, writer: bool):
+    var state = auth_publications_v1[slot]
+    var resources = linux_protected_storage_resources_v1(state.names.parent)
+    state.linux_resources = Some(resources)
+    auth_publications_v1[slot] = state
+    val opened = resources.open_v1(writer, writer)
+    if opened.is_err(): state = auth_publication_fail_v1(state, opened.unwrap_err())
+    else: state.phase = if writer: "entropy" else: "read-setup"
+    auth_publications_v1[slot] = state
+
+fn auth_publication_advance_linux_v1(slot: i64):
+    var state = auth_publications_v1[slot]
+    if state.phase == "root":
+        auth_publication_linux_root_v1(slot, true)
+        return
+    if not auth_publication_current_v1(state):
+        auth_publications_v1[slot] = auth_publication_fail_v1(state, "host-auth-publication-root-changed")
+        return
+    match state.phase:
+        case "entropy":
+            val uid = sosix_random_hex(16)
+            val secret = sosix_random_hex(32)
+            if uid.is_none() or secret.is_none(): state = auth_publication_fail_v1(state, "host-auth-os-entropy-unavailable")
+            else:
+                state.uid = uid.unwrap()
+                val record = host_service_auth_setup_record_v1(uid.unwrap(), secret.unwrap())
+                if record.is_err(): state = auth_publication_fail_v1(state, "host-auth-setup-encoding")
+                else:
+                    state.content = record.unwrap()
+                    state.digest = sha256_text(bytes_to_text(state.content))
+                    state.phase = "publish"
+        case "publish":
+            state.publication = "unknown"
+            auth_publications_v1[slot] = state
+            var resources = state.linux_resources.unwrap()
+            val published = resources.publish_v1(state.names.setup_leaf, bytes_to_text(state.content))
+            if published.is_err(): state = auth_publication_fail_v1(state, published.unwrap_err())
+            elif not published.unwrap():
+                state.publication = "conflict"
+                state = auth_publication_fail_v1(state, "host-auth-publication-conflict")
+            else:
+                state.publication = "published"
+                state.phase = "verify"
+        case "verify":
+            var resources = state.linux_resources.unwrap()
+            val read = resources.read_v1(state.names.setup_leaf, 512, true)
+            if (read.is_err() or read.unwrap().is_none() or
+                    not retained_credential_bytes_equal_v2(text_to_utf8_bytes(read.unwrap().unwrap()), state.content) or
+                    resources.current_v1().is_err()):
+                state = auth_publication_fail_v1(state, "host-auth-publication-readback-rejected")
+            else:
+                state.chain_valid = true
+                state.closing = true
+                state.phase = "cleanup"
+        case _: state = auth_publication_fail_v1(state, "host-auth-publication-phase")
+    auth_publications_v1[slot] = state
+
+fn auth_publication_cleanup_linux_v1(slot: i64, before: AuthPublicationStateV1):
+    var state = before
+    if val held = state.linux_resources:
+        var resources = held
+        val closed = resources.close_step_v1()
+        if closed.is_err() and state.error == "": state.error = closed.unwrap_err()
+        if closed.is_ok() and closed.unwrap():
+            state.linux_resources = nil
+            auth_publications_v1[slot] = state
+            val disposed = resources.dispose_closed_v1()
+            if disposed.is_err() and state.error == "": state.error = disposed.unwrap_err()
+    else:
+        state.closed = true
+        state.content = []
+        state.original_bytes = []
+        state.endpoint = ""
+        state.incarnation = ""
+        state.expected_digest = ""
+        state.names = HostServiceReadyPathV1(parent: "", setup_leaf: "")
+        state.journal_authority = ""
+        state.journal_lease = ""
+        state.phase = if state.chain_valid and state.error == "": "completed" else: "closed-with-recovery"
+        auth_publications_active_v1 = auth_publications_active_v1 - 1
+    auth_publications_v1[slot] = state
