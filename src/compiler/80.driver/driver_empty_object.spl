@@ -23,6 +23,25 @@ fn _eo_push_le(bytes: [u8], value: i64, width: i64) -> [u8]:
 fn _eo_elf_machine(target: text) -> i64:
     if target.starts_with("x86_64-"): return 62
     if target.starts_with("aarch64-"): return 183
+    if target.starts_with("riscv64"): return 243       # EM_RISCV
+    if _eo_is_elf32_target(target): return _eo_elf32_machine(target)
+    0
+
+fn _eo_is_elf32_target(target: text) -> bool:
+    target.starts_with("i686-") or target.starts_with("i586-") or target.starts_with("i386-") or target.starts_with("armv7-")
+
+fn _eo_elf32_machine(target: text) -> i64:
+    if target.starts_with("armv7-"): return 40          # EM_ARM
+    3                                                  # EM_386
+
+# e_flags: RISC-V lp64d = EF_RISCV_RVC (1) | EF_RISCV_FLOAT_ABI_DOUBLE (4);
+# ARM EABI5 hard-float = EF_ARM_EABI_VER5 0x05000000 | EF_ARM_ABI_FLOAT_HARD 0x400.
+fn _eo_elf_flags(target: text) -> i64:
+    if target.starts_with("riscv64"): return 5
+    if target.starts_with("armv7-"):
+        # soft-float gnueabi (no hf suffix) is EABI5 only; everything else hard-float
+        if target.ends_with("eabi"): return 83886080       # 0x05000000
+        return 83887104                                    # 0x05000400
     0
 
 fn _eo_coff_machine(target: text) -> i64:
@@ -52,6 +71,8 @@ fn driver_empty_object_target(explicit_target: text, host_os: text, host_arch: t
 
 fn driver_empty_object_bytes(target: text, symbol: text) -> [u8]?:
     if _eo_is_elf(target):
+        if _eo_is_elf32_target(target):
+            return _eo_elf32_bytes(target)
         return _eo_elf_bytes(target)
     if _eo_is_coff(target) and symbol != "":
         return _eo_coff_bytes(target, symbol)
@@ -109,7 +130,7 @@ fn _eo_elf_bytes(target: text) -> [u8]:
     b = _eo_push_le(b, 0, 8)                         # e_entry
     b = _eo_push_le(b, 0, 8)                         # e_phoff
     b = _eo_push_le(b, 80, 8)                        # e_shoff
-    b = _eo_push_le(b, 0, 4)                         # e_flags
+    b = _eo_push_le(b, _eo_elf_flags(target), 4)     # e_flags
     b = _eo_push_le(b, 64, 2)                        # e_ehsize
     b = _eo_push_le(b, 0, 2)                         # e_phentsize
     b = _eo_push_le(b, 0, 2)                         # e_phnum
@@ -136,4 +157,40 @@ fn _eo_elf_bytes(target: text) -> [u8]:
     b = _eo_push_le(b, 0, 4)    # info
     b = _eo_push_le(b, 1, 8)    # addralign
     b = _eo_push_le(b, 0, 8)    # entsize
+    b
+
+# ELF32 relocatable: 52-byte header, 16-byte .shstrtab at 52, two 40-byte
+# section headers at 68 (null + .shstrtab) = 148 bytes.
+fn _eo_elf32_bytes(target: text) -> [u8]:
+    var b: [u8] = [127, 69, 76, 70, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    b = _eo_push_le(b, 1, 2)                         # e_type ET_REL
+    b = _eo_push_le(b, _eo_elf32_machine(target), 2) # e_machine
+    b = _eo_push_le(b, 1, 4)                         # e_version
+    b = _eo_push_le(b, 0, 4)                         # e_entry
+    b = _eo_push_le(b, 0, 4)                         # e_phoff
+    b = _eo_push_le(b, 68, 4)                        # e_shoff
+    b = _eo_push_le(b, _eo_elf_flags(target), 4)     # e_flags
+    b = _eo_push_le(b, 52, 2)                        # e_ehsize
+    b = _eo_push_le(b, 0, 2)                         # e_phentsize
+    b = _eo_push_le(b, 0, 2)                         # e_phnum
+    b = _eo_push_le(b, 40, 2)                        # e_shentsize
+    b = _eo_push_le(b, 2, 2)                         # e_shnum
+    b = _eo_push_le(b, 1, 2)                         # e_shstrndx
+    val strtab: [u8] = [0, 46, 115, 104, 115, 116, 114, 116, 97, 98, 0, 0, 0, 0, 0, 0]
+    for c in strtab:
+        b.push(c)
+    var i = 0
+    while i < 40:
+        b.push(0)
+        i = i + 1
+    b = _eo_push_le(b, 1, 4)    # sh_name
+    b = _eo_push_le(b, 3, 4)    # SHT_STRTAB
+    b = _eo_push_le(b, 0, 4)    # flags
+    b = _eo_push_le(b, 0, 4)    # addr
+    b = _eo_push_le(b, 52, 4)   # offset
+    b = _eo_push_le(b, 11, 4)   # size
+    b = _eo_push_le(b, 0, 4)    # link
+    b = _eo_push_le(b, 0, 4)    # info
+    b = _eo_push_le(b, 1, 4)    # addralign
+    b = _eo_push_le(b, 0, 4)    # entsize
     b
