@@ -57,3 +57,37 @@ These are the same class upstream's frozen-Phase-2 workaround lane is
 clearing one module at a time (cf. 9ad81615fc1, #9360). Each fixed layer
 exposes the next; the mcp/test_runner tool binaries and the caret suite are
 the current verification surfaces.
+
+
+## 2026-11-16 experiment addendum: five source-level workarounds attempted, all fail — the defect is structural to this MIR shape
+
+Round-2 filing's Instance 1 (ctx_postings ptr-to-double) was attacked with
+five semantics-preserving source restructurings, each verified by a warm
+incremental stage2 build of the mcp closure (~12 min each; all still fail
+with "unsupported LLVM value conversion from ptr to double" in
+ctx_scores_by_postings / ctx_scores_by_scan):
+
+1. CtxAvgLength by-value struct argument -> scalar f64 parameter (hoisted
+   avg.bytes at both call sites). FAIL.
+2. Call inside the element assignment (`scores[i] = scores[i] + f(...)`)
+   -> hoisted `val delta = f(...); scores[i] = scores[i] + delta`. FAIL.
+3. Struct-param array element read (`lengths.bytes[i]`) -> hoisted
+   `val body_lens = lengths.bytes` local. FAIL.
+4. Arrays extracted from the `_ctx_empty_board` result struct
+   (`var scores = board.scores`) -> fresh push-grown local arrays. FAIL.
+5. Module-level `const f64` globals (_CTX_K1/_CTX_B) referenced inside the
+   callee -> inlined literals. FAIL.
+
+After (1)-(5) the failing functions contain only: `for p in plist`
+iteration over [CtxPosting] with NESTED newtype field accesses
+(`p.slot.index`, `p.freq.count` — CtxDocSlot/CtxTermFreq one-field wraps),
+`continue` in nested loops, i64/f64 math, and f64 array element RMW on
+fresh locals. Every eliminated construct class is used elsewhere in the
+tree under the candidate without this failure, so the trigger is the
+composition (most plausibly the nested-newtype loop-variable materialization
+or the iteration+continue shape) — an owner with IR access should be able to
+bisect in one session.
+
+The mcp server binary and the phase-3 matrix mcp row remain gated on this
+single module. All five workaround states are preserved in the lane's
+parity-wa worktree history for reproduction.
