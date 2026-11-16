@@ -1108,6 +1108,8 @@ impl MirLowering:
         # None arm trapped. The i64 ABI slot is unchanged: the handle is a word.
         # doc/08_tracking/bug/stage2_implicit_tail_optional_return_takes_scalar_arm_2026-11-15.md
         var tail_return_type: HirType = fn_.return_type
+        # The declared non-optional return, unerased when the symbol knows it.
+        var tail_plain_expected: HirType = fn_.return_type
         var fn_tail_into_trait = false
         # A declared `-> Trait` is erased the same way; without it the tail
         # was never converted to a (data, table) object and the caller's
@@ -1122,6 +1124,8 @@ impl MirLowering:
                     if self.native_trait_owner_for_type(declared_tail_return) != "":
                         tail_return_type = declared_tail_return
                         fn_tail_into_trait = true
+                    else:
+                        tail_plain_expected = declared_tail_return
         match tail_return_type.kind:
             case HirTypeKind.Optional(tail_optional_inner):
                 if hir_type_is_plain_scalar(tail_optional_inner) and fn_.body.has and fn_.body.value != None:
@@ -1184,6 +1188,18 @@ impl MirLowering:
                 var returned_tail_local = tail_local
                 if fn_.body.has:
                     returned_tail_local = self.coerce_native_trait_object(tail_local, fn_.body.value, tail_return_type)
+                # A declared plain `-> T` (record/text/collection) whose tail
+                # lowered to a `T?` handle: a conditional with one `T?` arm
+                # joins to `T?` (typed HIR: every arm through
+                # ensure_option_handle; untyped: join_untyped_optional_arms).
+                # Returning the handle as `T` made Stage 3 read the RtCoreEnum
+                # header word as LocalId.id (every LLVM operand `%l4`).
+                # Unwrap (trap on None) and decode the payload as `T`.
+                # doc/08_tracking/bug/stage2_payload_bind_and_tail_option_wrap_2026-11-16.md
+                if not fn_tail_into_trait and hir_type_is_plain_payload_sink_v1(tail_plain_expected):
+                    if val tail_optional_hir = self.find_local_hir_type(returned_tail_local.id):
+                        if val narrowed_tail = self.option_payload_for_plain_sink(returned_tail_local, tail_optional_hir):
+                            returned_tail_local = narrowed_tail
                 match tail_return_type.kind:
                     case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
                         # `-> Any` and `-> T` (erased generic) share the tagged

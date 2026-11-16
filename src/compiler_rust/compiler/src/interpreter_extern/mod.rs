@@ -1719,6 +1719,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_get_cwd", file_io::rt_get_cwd);
     insert_simple!("rt_get_host_target_code", file_io::rt_get_host_target_code);
     insert_simple!("rt_getpid", file_io::rt_getpid);
+    insert_simple!("rt_win_compare_object_handles", file_io::rt_win_compare_object_handles);
     insert_simple!("rt_gui_get_glyph_8x16", conversion::rt_gui_get_glyph_8x16_fn);
     insert_simple!("rt_intern_symbol", file_io::rt_intern_symbol);
     insert_simple!("__rt_hashmap_clear", collections::__rt_hashmap_clear);

@@ -2038,3 +2038,32 @@ never cache an answer computed while exhausted) —
 - **`absolute_containing_h` is the PADDING-box height** (`content_height_limit + pad_t + pad_b` at every call site), while `containing_w` is the CONTENT width and callers add the padding back. Mixing the two up gives the wrong stretch only when the parent has padding, so the spec includes a padded parent.
 - Absolute boxes now take their margins in `absolute_child_x/y` and in the width stretch. Before this an abs box with `margin:1px` sat at the inset with no offset, which no catalog page exercised.
 - **Trap — per-call-site variable names:** the five `absolute_child_style` call sites name the child `c`, `fc`, `fc_wrap` and `flex_c`. A blanket `nodes[c]` replace only fails with `variable c not found` when a flex absolute child is actually laid out. `layout_renderer_box_geometry_chrome159_spec` ("flex row/col abs child") caught it, and nothing at load time did.
+
+## 2026-11-16 — absolute static position
+
+- The static y of an auto-inset absolute box is `cy + prev_margin_b + margin-top`, not `cy`. The previous sibling's bottom margin is still pending in `prev_margin_b` (it has not been added to `cy` yet), and Chrome places the box after it.
+
+## 2026-11-16 — percentage flex-basis
+
+- A percentage that is only known at layout lives in its own Style field with default `-1` (`flex_basis_permille`), so none of the giant `Style(...)` constructors need editing. Only the decl_apply constructor passes it, and `copy_from` copies it. `flex_item_percent_style` (called at every ROW flex item site) resolves it into `flex_basis_px` and resets it to -1. The column path at the `flex_c` loop deliberately does not call it, so a column percent basis stays auto (it needs a definite height).
+
+## 2026-11-16 — flex min-width freeze
+
+- The §9.7 freeze loop for zero-basis items already existed. It keyed on `zero_floor_w` (the automatic minimum), which returned the bare frame when `min-width` was set. Making the floor the declared min-width was enough: no new loop.
+
+## 2026-11-16 — column flex grow and shrink
+
+- **The column path had no grow/shrink at all** (row-only Flexbox 9.7). `col_flex_target_heights` returns per-child outer targets in SIBLING order (-1 = untouched, empty = nothing to do), and the item loop indexes it with a `col_k` counter bumped on every child, absolute and `display:none` included. Keep the two loops walking the same `first_child`/`next_sibling` chain.
+- **The natural-first rule** applies only to auto-height items with children: lay out once with the original style, and keep that result if it is at least the target. It costs a second layout only in that case. Explicit-height items take the target directly, which is what lets a 40px text item shrink to its line height.
+- **The natural pass and floats:** `layout_with_style` APPENDS floats (`float_ctx_add`), while line boxes are indexed per node and get overwritten. So the second (target) layout first calls `float_ctx_truncate` back to the count from before the natural pass and restores `g_float_max_y1`.
+- **Bail rather than guess:** an auto-height item with element children returns base -1 and the helper returns `[]` for the whole container, which keeps the old layout. A one-line estimate there made siblings shrink or grow wrongly (review finding), which is worse than doing nothing.
+- **Perf:** the helper returns early unless the container has a height, max-height or min-height. Measured on `layout_renderer_box_geometry_chrome159_spec` with the seed 59635056 B (2026-11-14 09:32): 16.3 / 15.9 s and 428 MB on head vs 15.4 / 15.6 s and 428 MB on base.
+- **Trap:** a merged Chrome oracle page shifts every y. Re-measure the COMBINED page, never add offsets by hand.
+
+## 2026-11-16 — single-line row flex cross alignment
+
+- The wrap path aligned items per line after layout, but the single-line path had no such pass: stretch, center and end there only used `st.height_px`. The fix is the wrap path's loop run once with `max_child_h` as the line. Stretch only raises `out_bh`, since block content stays at the top; center and end move the subtree with `offset_layout_subtree`.
+
+## 2026-11-16 — background shorthand after the size group
+
+- `_parse_background_shorthand` is a token state machine. `after_slash` must END at the first non-size token, or every box, attachment or colour keyword after `pos / size` fails the whole layer closed. Its regression partner is `layout_renderer_background_and_grid_decls_spec` "refuses a malformed position/size slash": `center / 1px 2px 3px` must stay invalid, which is why a position token after the slash returns empty.

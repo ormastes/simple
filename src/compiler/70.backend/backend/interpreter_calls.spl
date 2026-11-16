@@ -140,6 +140,28 @@ fn lookup_builtin_tag(name: text) -> BuiltinTag:
         return BuiltinTag.EnvSet
     BuiltinTag.Unknown
 
+fn interp_method_key(qualified: text) -> text:
+    """`Type::method` of a method symbol name, dropping any module prefix
+    (`a.b.Type::method` -> `Type::method`); "" when it is not a method name."""
+    val sep = qualified.index_of("::")
+    if sep < 0:
+        return ""
+    val owner = qualified.substring(0, sep)
+    val dot = owner.last_index_of(".")
+    val type_name = if dot >= 0: owner.substring(dot + 1, owner.len()) else: owner
+    "{type_name}{qualified.substring(sep, qualified.len())}"
+
+fn interp_find_method(pm: HirModule, key: text) -> HirFunction?:
+    """The function of `pm` whose symbol or own name has method key `key`."""
+    for pf_ in pm.functions.values():
+        val pf: HirFunction = pf_
+        if interp_method_key(pf.name) == key:
+            return Some(pf)
+        if val psym = pm.symbols.get_symbol_raw(pf.symbol.id):
+            if interp_method_key(psym.name) == key:
+                return Some(pf)
+    None
+
 impl InterpreterBackendImpl:
     fn resolve_function_by_name(name: text, ctx: EvalContext) -> HirFunction?:
         if ctx.fn_by_name.has(name):
@@ -164,6 +186,10 @@ impl InterpreterBackendImpl:
         if not ctx.has_fn_owner or not ctx.fn_owner.has(name):
             return None
         val owner: HirModule = ctx.fn_owner[name]
+        Some(self.module_context(owner, ctx))
+
+    fn module_context(owner: HirModule, ctx: EvalContext) -> EvalContext:
+        """Context that evaluates in `owner`, sharing the caller's env."""
         var names_map: Dict<i64, text> = {}
         for osym_ in owner.symbols.symbols.values():
             val os: HirSymbol = osym_
@@ -173,7 +199,7 @@ impl InterpreterBackendImpl:
         for ofn_ in owner.functions.values():
             val of: HirFunction = ofn_
             fn_index[of.name] = of
-        Some(EvalContext(env: ctx.env, module: owner, backend: ctx.backend, names: names_map, fn_by_name: fn_index, has_fn_index: true, fn_owner: ctx.fn_owner, has_fn_owner: true, strict_mem: ctx.strict_mem))
+        EvalContext(env: ctx.env, module: owner, backend: ctx.backend, names: names_map, fn_by_name: fn_index, has_fn_index: true, fn_owner: ctx.fn_owner, has_fn_owner: true, strict_mem: ctx.strict_mem)
 
     fn call_function(fn_value: Value, args: [Value], ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
         itrace("[CF] call_function enter")
@@ -281,9 +307,39 @@ impl InterpreterBackendImpl:
             val f: HirFunction = f_
             if f.symbol.id == method_id.id:
                 return self.call_hir_function(f, args, ctx)
-        Err(BackendError.runtime_error("function not found by symbol ID", Some(span)))
+        # SymbolIds are per module: a method of an imported type carries the
+        # caller module's id for it, never the provider's. Resolve it by its
+        # `Type::method` name in the module that defines it instead.
+        var qname = ""
+        var defining = ""
+        if val sym = ctx.module.symbols.get_symbol_raw(method_id.id):
+            qname = sym.name
+            defining = sym.defining_module ?? ""
+        if val found = self.call_method_by_key(interp_method_key(qname), args, ctx):
+            return found
+        val shown = if qname != "": qname else: "<unnamed>"
+        Err(BackendError.runtime_error("function '{shown}' not found by symbol ID {method_id.id} (defined in '{defining}') at {span.file}:{span.line}:{span.col}", Some(span)))
+
+    fn call_method_by_key(key: text, args: [Value], ctx: EvalContext) -> Result<Value, BackendError>?:
+        """Call the `Type::method` function from the entry module or the
+        imported module that defines it; None when no module has it."""
+        if key == "":
+            return None
+        if val own_fn = interp_find_method(ctx.module, key):
+            return Some(self.call_hir_function(own_fn, args, ctx))
+        if not ctx.has_fn_owner:
+            return None
+        var seen: Dict<text, bool> = {}
+        for pm_ in ctx.fn_owner.values():
+            val pm: HirModule = pm_
+            if not seen.has(pm.name):
+                seen[pm.name] = true
+                if val owner_fn = interp_find_method(pm, key):
+                    return Some(self.call_hir_function(owner_fn, args, self.module_context(pm, ctx)))
+        None
 
     fn call_closure(closure: ClosureValue, args: [Value], ctx: EvalContext) -> Result<Value, BackendError>:
+        val frame_depth = ctx.env.scope_depth()
         ctx.env.push_scope()
 
         # Captures already use the environment's stable text keys.
@@ -300,9 +356,18 @@ impl InterpreterBackendImpl:
 
             ctx.env.define(param.name, value)
 
-        # Evaluate body
-        val result = self.eval_expr(closure.body, ctx)?
+        # Evaluate body. A `return` (or a `?` early exit) inside the body ends
+        # the closure itself, not the function that called it.
+        var result: Value = Value.Nil
+        match self.eval_expr(closure.body, ctx):
+            case Ok(v): result = v
+            case Err(e):
+                if e.kind == BackendErrorKind.ControlFlow and e.message == "return":
+                    result = e.ctl_value ?? Value.Nil
+                else:
+                    return Err(e)
 
+        ctx.env.truncate_scopes(frame_depth + 1)
         ctx.env.pop_scope()
         Ok(result)
 
@@ -337,13 +402,16 @@ impl InterpreterBackendImpl:
                     val arg: Value = args[0]
                     itrace("[BUILTIN] Print arg bound nil={arg == nil}")
                     # @workaround bug=riscv64_interp_enum_check_discriminant_shift_2026_11_06 reason=in the riscv64 in-guest build every `case Value.X` pattern test lowers to rt_enum_check_variant whose baked discriminant operand arrives one nibble shifted (ctor stamps the unshifted hash), so the match always falls through and strings print as <unknown>. Identity-check against a freshly constructed String probe (both discriminants come from rt_enum_new at runtime and therefore agree) and print the raw payload; non-enum values answer -1 and never match the probe. See doc/08_tracking/bug/riscv64_interp_enum_check_discriminant_shift_2026-11-06.md.
+                    # `print` ends the line like the language statement does;
+                    # rt_print_value wrote no newline, so native runs printed
+                    # every line glued together.
                     if rt_enum_discriminant(arg) == rt_enum_discriminant(backend_value_string_v1("")):
-                        rt_print_value(rt_enum_payload(arg))
+                        rt_println_value(rt_enum_payload(arg))
                     else:
                         match arg:
                             case Value.RuntimeValue(ptr):
                                 itrace("[BUILTIN] Print RuntimeValue case")
-                                rt_print_value(ptr)
+                                rt_println_value(ptr)
                             # Pure-Simple print path for scalars: the
                             # rt_value_int -> rt_print_value pointer round-trip
                             # SEGVs on stage4 ("[BUILTIN] Print ptr done" then
