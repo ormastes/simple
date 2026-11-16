@@ -1,3 +1,8 @@
+#![allow(primitive_api)]
+# primitive_api: reviewed protected-storage/broker ABI keeps byte bounds, phases, deadlines and flags as i64/bool (milestone_0011 broker-stack review r1).
+friend lib.nogc_sync_mut.io
+internal_export OperationJournalLinuxStorageBorrowV1
+internal_export operation_broker_claim_current_v1
 # Private process-local health for actual journal generations, not another WAL.
 # One process-lifetime gate; no I/O, native lifetime observation, or callbacks
 # under it. Busy tickets remain held while the journal releases this gate for I/O.
@@ -5,6 +10,11 @@ use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new_gate, mutex_lock_gate, 
 use std.nogc_sync_mut.io.file_lock_owned_v2.FileLockOwnerV2
 use std.nogc_sync_mut.io.windows_journal_store_v1.WindowsJournalStoreV1
 use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.nogc_sync_mut.io.linux_protected_storage_v1.{LinuxProtectedStorageResourcesV1, linux_protected_storage_resources_v1}
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+use std.nogc_sync_mut.io.linux_protected_broker_state_v1.LinuxProtectedBrokerStorageTurnV1
+use std.nogc_sync_mut.io.host_linux_service_records_v4.{LinuxServiceVerifiedEnrollmentV1, linux_service_enrollment_installed_v1,
+    linux_service_enrollment_existing_v1, linux_service_enrollment_fixed_files_v1, linux_service_enrollment_publication_v1}
 
 struct OperationJournalHealthTurnV2:
     owner_id: i64
@@ -18,6 +28,10 @@ struct OperationJournalHealthSlotV2:
     bound: bool = false
     reason: text = ""
     failing_digest: text = ""
+    linux_reserved: bool = false
+    linux_resources: Option<LinuxProtectedStorageResourcesV1> = nil
+    broker_parent: i64 = 0
+    broker_entries: Dict<text, OperationJournalBrokerEntryV1> = {}
 
 # The bound includes opening, quarantined and cleanup-pending registrations.
 # Logical IDs/tickets never recycle into copied values, including after close.
@@ -82,6 +96,7 @@ fn operation_health_bind_held_v2(turn: OperationJournalHealthTurnV2,
     if val held = lock:
         if held.token <= 0: return Err("OPERATION_JOURNAL_HEALTH_IDENTITY_INVALID")
     var slot = operation_health_slots_v2[turn.owner_id]
+    if slot.linux_reserved: return Err("OPERATION_JOURNAL_PROTECTED_BINDING_REQUIRED")
     if slot.bound: return Err("OPERATION_JOURNAL_HEALTH_ALREADY_BOUND")
     if val reserved = slot.store:
         if store.is_none() or not reserved.same_owner(store.unwrap()):
@@ -105,6 +120,7 @@ fn operation_health_begin_held_v2(id: i64, lock: Option<FileLockOwnerV2>,
         cleanup: bool) -> Result<OperationJournalHealthTurnV2, text>:
     if not operation_health_slots_v2.contains_key(id): return Err("OPERATION_JOURNAL_HEALTH_UNKNOWN")
     var slot = operation_health_slots_v2[id]
+    if slot.linux_reserved: return Err("OPERATION_JOURNAL_PROTECTED_BINDING_REQUIRED")
     if not slot.bound or not operation_health_same_v2(slot, lock, store) or slot.binding != binding:
         return Err("OPERATION_JOURNAL_HEALTH_IDENTITY_INVALID")
     if slot.busy != 0: return Err("OPERATION_JOURNAL_OWNER_BUSY")
@@ -147,6 +163,8 @@ fn operation_health_end_held_v2(turn: OperationJournalHealthTurnV2,
         retire: bool) -> Result<bool, text>:
     if not operation_health_turn_valid_v2(turn): return Err("OPERATION_JOURNAL_HEALTH_TICKET_INVALID")
     if retire:
+        if operation_health_slots_v2[turn.owner_id].linux_resources.is_some():
+            return Err("OPERATION_JOURNAL_HEALTH_NATIVE_OWNER_RETAINED")
         operation_health_slots_v2.remove(turn.owner_id)
     else:
         var slot = operation_health_slots_v2[turn.owner_id]
@@ -162,10 +180,571 @@ fn operation_health_end_v2(turn: OperationJournalHealthTurnV2,
 fn operation_health_cancel_held_v2(turn: OperationJournalHealthTurnV2) -> Result<bool, text>:
     if not operation_health_turn_valid_v2(turn): return Err("OPERATION_JOURNAL_HEALTH_TICKET_INVALID")
     val slot = operation_health_slots_v2[turn.owner_id]
-    if slot.bound or slot.lock.is_some() or slot.store.is_some():
+    if slot.bound or slot.lock.is_some() or slot.store.is_some() or slot.linux_resources.is_some():
         return Err("OPERATION_JOURNAL_HEALTH_NATIVE_OWNER_RETAINED")
     operation_health_end_held_v2(turn, true)
 
 fn operation_health_cancel_v2(turn: OperationJournalHealthTurnV2) -> Result<bool, text>:
     if mutex_lock_gate(operation_health_gate_v2).is_none(): return Err("OPERATION_JOURNAL_HEALTH_GATE_UNAVAILABLE")
     operation_health_gate_finish_v2(operation_health_cancel_held_v2(turn))
+
+# Linux resource identity is this SAME oracle slot, not another store registry.
+class OperationJournalLinuxStorageOwnerV1:
+    identity: i64
+    pub fn same_owner(other: OperationJournalLinuxStorageOwnerV1) -> bool: self.identity == other.identity
+    pub fn matches_health_id_v1(id: i64) -> bool: self.identity == id
+
+class OperationJournalLinuxStorageBorrowV1:
+    turn: OperationJournalHealthTurnV2
+    pub(friend) fn broker_finish_v1() -> Result<bool, text>:
+        unsafe(capabilities: [ffi, raw_ptr]): linux_machine_process_origin_check_v1()?
+        operation_health_end_v2(self.turn)
+    pub(friend) fn broker_acquire_v1(installed: OperationJournalLinuxStorageOwnerV1, installed_binding: text,
+            key: text, claim: text, root: text, binding: text, origin_ms: i64, deadline_ms: i64,
+            offered: Option<OperationJournalLinuxStorageOwnerV1>) -> OperationJournalBrokerAcquireV1:
+        operation_broker_acquire_v1(self.turn, installed, installed_binding, key, claim, root, binding, origin_ms, deadline_ms, offered)
+    pub(friend) fn broker_release_v1(installed: OperationJournalLinuxStorageOwnerV1, installed_binding: text,
+            key: text, claim: text) -> OperationJournalBrokerAcquireV1:
+        operation_broker_release_v1(self.turn, key, claim, installed, installed_binding)
+    pub(friend) fn broker_control_v1(claim: OperationJournalBrokerClaimV1, action: text,
+            identity: text, deadline: i64, generation: i64, request_digest: text, payload: text) -> LinuxProtectedBrokerStorageTurnV1:
+        if action != "step" and deadline != claim.deadline_ms:
+            return LinuxProtectedBrokerStorageTurnV1(error: "BROKER_ORIGINAL_DEADLINE_MISMATCH")
+        val checked = operation_broker_claim_current_v1(claim, OperationJournalLinuxStorageOwnerV1(self.turn.owner_id))
+        if checked.is_err(): return LinuxProtectedBrokerStorageTurnV1(error: checked.unwrap_err())
+        val acquired = operation_health_linux_resources_v1(self.turn)
+        if acquired.is_err(): return LinuxProtectedBrokerStorageTurnV1(error: acquired.unwrap_err())
+        var resources = acquired.unwrap()
+        var result = resources.broker_control_v1(action, identity, deadline, generation, request_digest, payload)
+        val after = operation_broker_claim_current_v1(claim, OperationJournalLinuxStorageOwnerV1(self.turn.owner_id))
+        if after.is_err(): result.error = after.unwrap_err()
+        result
+    pub fn read(relative: text, maximum: i64, retain: bool = false) -> Result<Option<text>, text>:
+        var resources = operation_health_linux_resources_v1(self.turn)?
+        resources.read_v1(relative, maximum, retain)
+    pub fn publish(relative: text, payload: text) -> Result<bool, text>:
+        var resources = operation_health_linux_resources_v1(self.turn)?
+        resources.publish_v1(relative, payload)
+    pub fn compare_replace(relative: text, payload: text, expected: Option<text>) -> Result<bool, text>:
+        var resources = operation_health_linux_resources_v1(self.turn)?
+        resources.publish_v1(relative, payload, expected)
+    pub fn replace(relative: text, payload: text) -> Result<bool, text>:
+        val previous = self.read(relative, 8388608)?
+        self.compare_replace(relative, payload, previous)
+    pub fn current() -> Result<(), text>:
+        val resources = operation_health_linux_resources_v1(self.turn)?
+        resources.current_v1()
+
+struct OperationJournalLinuxStorageOpenV1:
+    owner: Option<OperationJournalLinuxStorageOwnerV1>
+    turn: Option<OperationJournalHealthTurnV2>
+    error: text
+
+fn operation_health_linux_resources_v1(turn: OperationJournalHealthTurnV2) -> Result<LinuxProtectedStorageResourcesV1, text>:
+    unsafe(capabilities: [ffi, raw_ptr]): linux_machine_process_origin_check_v1()?
+    if mutex_lock_gate(operation_health_gate_v2).is_none(): return Err("OPERATION_JOURNAL_HEALTH_GATE_UNAVAILABLE")
+    if not operation_health_turn_valid_v2(turn):
+        return operation_health_gate_finish_v2(Err("OPERATION_JOURNAL_HEALTH_TICKET_INVALID"))
+    val slot = operation_health_slots_v2[turn.owner_id]
+    if not slot.linux_reserved or slot.store.is_some() or slot.lock.is_some() or slot.linux_resources.is_none():
+        return operation_health_gate_finish_v2(Err("OPERATION_JOURNAL_PROTECTED_BINDING_REQUIRED"))
+    operation_health_gate_finish_v2(Ok(slot.linux_resources.unwrap()))
+
+fn operation_health_linux_open_v1(root: text, binding: text,
+        writer: bool = true, create_final: bool = true) -> OperationJournalLinuxStorageOpenV1:
+    val origin = unsafe(capabilities: [ffi, raw_ptr]): linux_machine_process_origin_check_v1()
+    if origin.is_err(): return OperationJournalLinuxStorageOpenV1(nil, nil, origin.unwrap_err())
+    val reserved = operation_health_reserve_v2(nil, binding)
+    if reserved.is_err(): return OperationJournalLinuxStorageOpenV1(nil, nil, reserved.unwrap_err())
+    val turn = reserved.unwrap()
+    val owner = OperationJournalLinuxStorageOwnerV1(identity: turn.owner_id)
+    # Allocation has no descriptors yet. The slot receives the stable cell
+    # before open_v1 can perform any filesystem acquisition or validation.
+    var resources = linux_protected_storage_resources_v1(root)
+    if mutex_lock_gate(operation_health_gate_v2).is_none():
+        val drained = resources.close_step_v1()
+        if drained.is_ok() and drained.unwrap():
+            val disposed = resources.dispose_closed_v1()
+        return OperationJournalLinuxStorageOpenV1(Some(owner), Some(turn), "OPERATION_JOURNAL_HEALTH_GATE_UNAVAILABLE")
+    var slot = operation_health_slots_v2[turn.owner_id]
+    slot.linux_reserved = true
+    slot.linux_resources = Some(resources)
+    operation_health_slots_v2[turn.owner_id] = slot
+    val unlocked = operation_health_gate_finish_v2(Ok(true))
+    if unlocked.is_err(): return OperationJournalLinuxStorageOpenV1(Some(owner), Some(turn), unlocked.unwrap_err())
+    val opened = resources.open_v1(writer, create_final)
+    OperationJournalLinuxStorageOpenV1(Some(owner), Some(turn), if opened.is_err(): opened.unwrap_err() else: "")
+
+fn operation_health_linux_borrow_v1(owner: OperationJournalLinuxStorageOwnerV1,
+        turn: OperationJournalHealthTurnV2) -> Result<OperationJournalLinuxStorageBorrowV1, text>:
+    unsafe(capabilities: [ffi, raw_ptr]): linux_machine_process_origin_check_v1()?
+    if owner.identity != turn.owner_id: return Err("OPERATION_JOURNAL_PROTECTED_BINDING_MISMATCH")
+    val resources = operation_health_linux_resources_v1(turn)?
+    resources.current_v1()?
+    Ok(OperationJournalLinuxStorageBorrowV1(turn: turn))
+
+fn operation_health_linux_bind_v1(owner: OperationJournalLinuxStorageOwnerV1,
+        turn: OperationJournalHealthTurnV2) -> Result<bool, text>:
+    val actual = operation_health_linux_borrow_v1(owner, turn)?
+    if mutex_lock_gate(operation_health_gate_v2).is_none(): return Err("OPERATION_JOURNAL_HEALTH_GATE_UNAVAILABLE")
+    if not operation_health_turn_valid_v2(turn): return operation_health_gate_finish_v2(Err("OPERATION_JOURNAL_HEALTH_TICKET_INVALID"))
+    var slot = operation_health_slots_v2[turn.owner_id]
+    if slot.bound: return operation_health_gate_finish_v2(Err("OPERATION_JOURNAL_HEALTH_ALREADY_BOUND"))
+    slot.bound = true
+    operation_health_slots_v2[turn.owner_id] = slot
+    operation_health_gate_finish_v2(Ok(true))
+
+fn operation_health_linux_begin_v1(owner: OperationJournalLinuxStorageOwnerV1,
+        binding: text, cleanup: bool = false) -> Result<OperationJournalHealthTurnV2, text>:
+    operation_health_linux_begin_with_parent_v1(owner, binding, cleanup, nil)
+
+pub(package) fn operation_health_linux_begin_with_parent_v1(owner: OperationJournalLinuxStorageOwnerV1,
+        binding: text, cleanup: bool, parent_turn: Option<OperationJournalHealthTurnV2>) -> Result<OperationJournalHealthTurnV2, text>:
+    unsafe(capabilities: [ffi, raw_ptr]): linux_machine_process_origin_check_v1()?
+    if mutex_lock_gate(operation_health_gate_v2).is_none(): return Err("OPERATION_JOURNAL_HEALTH_GATE_UNAVAILABLE")
+    if not operation_health_slots_v2.contains_key(owner.identity): return operation_health_gate_finish_v2(Err("OPERATION_JOURNAL_HEALTH_UNKNOWN"))
+    var slot = operation_health_slots_v2[owner.identity]
+    if cleanup and slot.broker_parent != 0:
+        if parent_turn.is_none() or not operation_health_turn_valid_v2(parent_turn.unwrap()) or parent_turn.unwrap().owner_id != slot.broker_parent:
+            return operation_health_gate_finish_v2(Err("BROKER_CHILD_RETAINED_BY_JOURNAL"))
+    if (not slot.linux_reserved or slot.store.is_some() or slot.lock.is_some() or slot.binding != binding or
+            (not cleanup and (not slot.bound or slot.linux_resources.is_none()))):
+        return operation_health_gate_finish_v2(Err("OPERATION_JOURNAL_PROTECTED_BINDING_REQUIRED"))
+    if slot.busy != 0: return operation_health_gate_finish_v2(Err("OPERATION_JOURNAL_OWNER_BUSY"))
+    if not cleanup and slot.reason != "": return operation_health_gate_finish_v2(Err("OPERATION_JOURNAL_QUARANTINED:" + slot.reason))
+    if operation_health_next_ticket_v2 >= 9223372036854775807:
+        return operation_health_gate_finish_v2(Err("OPERATION_JOURNAL_HEALTH_GENERATION_EXHAUSTED"))
+    val ticket = operation_health_next_ticket_v2
+    operation_health_next_ticket_v2 = ticket + 1
+    slot.busy = ticket
+    operation_health_slots_v2[owner.identity] = slot
+    operation_health_gate_finish_v2(Ok(OperationJournalHealthTurnV2(owner.identity, ticket)))
+
+struct OperationJournalLinuxCloseV1:
+    closed: bool
+    error: text
+
+# Does not require currentness; consumes only exact held native resources.
+# Caller keeps the existing oracle ticket until each cleanup step is persisted.
+fn operation_health_linux_close_step_v1(owner: OperationJournalLinuxStorageOwnerV1,
+        turn: OperationJournalHealthTurnV2) -> Result<OperationJournalLinuxCloseV1, text>:
+    operation_health_linux_close_with_parent_v1(owner, turn, nil)
+
+pub(package) fn operation_health_linux_close_with_parent_v1(owner: OperationJournalLinuxStorageOwnerV1,
+        turn: OperationJournalHealthTurnV2, parent_turn: Option<OperationJournalHealthTurnV2>) -> Result<OperationJournalLinuxCloseV1, text>:
+    unsafe(capabilities: [ffi, raw_ptr]): linux_machine_process_origin_check_v1()?
+    if owner.identity != turn.owner_id: return Err("OPERATION_JOURNAL_PROTECTED_BINDING_MISMATCH")
+    if mutex_lock_gate(operation_health_gate_v2).is_none(): return Err("OPERATION_JOURNAL_HEALTH_GATE_UNAVAILABLE")
+    if not operation_health_slots_v2.contains_key(turn.owner_id): return operation_health_gate_finish_v2(Err("OPERATION_JOURNAL_HEALTH_UNKNOWN"))
+    if not operation_health_turn_valid_v2(turn): return operation_health_gate_finish_v2(Err("OPERATION_JOURNAL_HEALTH_TICKET_INVALID"))
+    val before = operation_health_slots_v2[turn.owner_id]
+    if before.broker_parent != 0:
+        if parent_turn.is_none() or not operation_health_turn_valid_v2(parent_turn.unwrap()) or parent_turn.unwrap().owner_id != before.broker_parent:
+            return operation_health_gate_finish_v2(Err("BROKER_CHILD_RETAINED_BY_JOURNAL"))
+    if before.linux_resources.is_none() and not before.bound and before.lock.is_none() and before.store.is_none():
+        val retired = operation_health_end_held_v2(turn, true)
+        if retired.is_err(): return operation_health_gate_finish_v2(Err(retired.unwrap_err()))
+        val unlocked = operation_health_gate_finish_v2(Ok(true))
+        return Ok(OperationJournalLinuxCloseV1(true, if unlocked.is_err(): unlocked.unwrap_err() else: ""))
+    val released = operation_health_gate_finish_v2(Ok(true))
+    if released.is_err(): return Err(released.unwrap_err())
+    val children = operation_broker_children_close_v1(turn)?
+    if not children: return Ok(OperationJournalLinuxCloseV1(false, ""))
+    var resources = operation_health_linux_resources_v1(turn)?
+    val closed = resources.close_step_v1()
+    if closed.is_err(): return Ok(OperationJournalLinuxCloseV1(false, closed.unwrap_err()))
+    if not closed.unwrap(): return Ok(OperationJournalLinuxCloseV1(false, resources.failure_v1()))
+    val diagnostic = resources.failure_v1()
+    if mutex_lock_gate(operation_health_gate_v2).is_none(): return Err("OPERATION_JOURNAL_HEALTH_GATE_UNAVAILABLE")
+    if not operation_health_turn_valid_v2(turn): return operation_health_gate_finish_v2(Err("OPERATION_JOURNAL_HEALTH_TICKET_INVALID"))
+    var slot = operation_health_slots_v2[turn.owner_id]
+    slot.linux_resources = nil
+    slot.bound = false
+    operation_health_slots_v2[turn.owner_id] = slot
+    val retired = operation_health_end_held_v2(turn, true)
+    if retired.is_err(): return operation_health_gate_finish_v2(Err(retired.unwrap_err()))
+    val unlocked = operation_health_gate_finish_v2(Ok(true))
+    # Actual retirement is conclusive even if metadata unlock reports error.
+    # No canonical slot can now reach the resource cell, so free it exactly once.
+    val disposed = resources.dispose_closed_v1()
+    var error = diagnostic
+    if error == "" and unlocked.is_err(): error = unlocked.unwrap_err()
+    if error == "" and disposed.is_err(): error = disposed.unwrap_err()
+    Ok(OperationJournalLinuxCloseV1(true, error))
+
+fn operation_stored_result_v2<T>(result: Result<T, text>,
+        turn: Option<OperationJournalHealthTurnV2>, digest: text) -> Result<T, text>:
+    # Only authoritative stored-read/validation boundaries call this helper.
+    # Failure to validate is sticky even when the I/O error is unstructured.
+    # Caller validation and unreachable publication failures never call it.
+    if result.is_err():
+        if val held = turn:
+            val poisoned = operation_health_poison_v2(held, result.unwrap_err(), digest)
+            if poisoned.is_err(): return Err(poisoned.unwrap_err())
+    result
+
+# Original journal health-slot association; no independent authority registry.
+pub(package) struct OperationJournalBrokerEntryV1:
+    claim: text
+    installed: OperationJournalLinuxStorageOwnerV1
+    installed_binding: text
+    root: text
+    binding: text
+    origin_ms: i64
+    deadline_ms: i64
+    child: Option<OperationJournalLinuxStorageOwnerV1> = nil
+    opening: Option<OperationJournalHealthTurnV2> = nil
+    ready: bool = false
+    retired: bool = false
+    error: text = ""
+
+pub class OperationJournalBrokerClaimV1:
+    parent: OperationJournalLinuxStorageOwnerV1
+    parent_binding: text
+    key: text
+    claim: text
+    child: OperationJournalLinuxStorageOwnerV1
+    deadline_ms: i64
+
+pub struct OperationJournalBrokerAcquireV1:
+    binding: text = ""
+    claim: Option<OperationJournalBrokerClaimV1> = nil
+    child: Option<OperationJournalLinuxStorageOwnerV1> = nil
+    opening: Option<OperationJournalHealthTurnV2> = nil
+    ready: bool = false
+    adopted_offered: bool = false
+    completed: bool = false
+    origin_ms: i64 = 0
+    deadline_ms: i64 = 0
+    error: text = ""
+
+# Gate must be held. Result captures custody even when entry.error is nonempty.
+pub(package) fn operation_broker_result_v1(parent: OperationJournalHealthTurnV2, key: text,
+        entry: OperationJournalBrokerEntryV1, offered: Option<OperationJournalLinuxStorageOwnerV1>) -> OperationJournalBrokerAcquireV1:
+    var result = OperationJournalBrokerAcquireV1(binding: entry.binding, child: entry.child, opening: entry.opening,
+        ready: entry.ready and not entry.retired and entry.opening.is_none(), completed: entry.retired,
+        origin_ms: entry.origin_ms, deadline_ms: entry.deadline_ms, error: entry.error)
+    if val child = entry.child:
+        result.claim = Some(OperationJournalBrokerClaimV1(OperationJournalLinuxStorageOwnerV1(parent.owner_id),
+            operation_health_slots_v2[parent.owner_id].binding, key, entry.claim, child, entry.deadline_ms))
+        if val supplied = offered: result.adopted_offered = child.same_owner(supplied)
+    result
+
+pub(package) fn operation_broker_entry_v1(turn: OperationJournalHealthTurnV2, key: text) -> Result<OperationJournalBrokerEntryV1, text>:
+    unsafe(capabilities: [ffi, raw_ptr]): linux_machine_process_origin_check_v1()?
+    if mutex_lock_gate(operation_health_gate_v2).is_none(): return Err("OPERATION_JOURNAL_HEALTH_GATE_UNAVAILABLE")
+    if not operation_health_turn_valid_v2(turn): return operation_health_gate_finish_v2(Err("OPERATION_JOURNAL_HEALTH_TICKET_INVALID"))
+    val slot = operation_health_slots_v2[turn.owner_id]
+    if not slot.broker_entries.contains_key(key): return operation_health_gate_finish_v2(Err("BROKER_CLAIM_UNKNOWN"))
+    operation_health_gate_finish_v2(Ok(slot.broker_entries[key]))
+
+pub(package) fn operation_broker_store_v1(turn: OperationJournalHealthTurnV2, key: text,
+        entry: OperationJournalBrokerEntryV1) -> Result<(), text>:
+    if mutex_lock_gate(operation_health_gate_v2).is_none(): return Err("OPERATION_JOURNAL_HEALTH_GATE_UNAVAILABLE")
+    if not operation_health_turn_valid_v2(turn): return operation_health_gate_finish_v2(Err("OPERATION_JOURNAL_HEALTH_TICKET_INVALID"))
+    var slot = operation_health_slots_v2[turn.owner_id]
+    # Commit returned custody before any subsequent child validation/error.
+    slot.broker_entries[key] = entry
+    operation_health_slots_v2[turn.owner_id] = slot
+    if val child = entry.child:
+        if not operation_health_slots_v2.contains_key(child.identity):
+            return operation_health_gate_finish_v2(Err("BROKER_CHILD_UNKNOWN"))
+        var child_slot = operation_health_slots_v2[child.identity]
+        if child_slot.broker_parent != 0 and child_slot.broker_parent != turn.owner_id:
+            return operation_health_gate_finish_v2(Err("BROKER_CHILD_ALREADY_ADOPTED"))
+        child_slot.broker_parent = turn.owner_id
+        operation_health_slots_v2[child.identity] = child_slot
+    operation_health_gate_finish_v2(Ok(()))
+
+pub(package) fn operation_broker_acquire_v1(turn: OperationJournalHealthTurnV2,
+        installed: OperationJournalLinuxStorageOwnerV1, installed_binding: text,
+        key: text, claim: text, root: text, binding: text, origin_ms: i64, deadline_ms: i64,
+        offered: Option<OperationJournalLinuxStorageOwnerV1>) -> OperationJournalBrokerAcquireV1:
+    val writer = operation_health_linux_resources_v1(turn)
+    if writer.is_err(): return OperationJournalBrokerAcquireV1(error: writer.unwrap_err())
+    val current = writer.unwrap().broker_writer_current_v1()
+    if current.is_err(): return OperationJournalBrokerAcquireV1(error: current.unwrap_err())
+    if not builder_digest_valid_v1(key) or not builder_digest_valid_v1(claim) or not builder_digest_valid_v1(binding):
+        return OperationJournalBrokerAcquireV1(error: "BROKER_CLAIM_SHAPE")
+    if mutex_lock_gate(operation_health_gate_v2).is_none(): return OperationJournalBrokerAcquireV1(error: "OPERATION_JOURNAL_HEALTH_GATE_UNAVAILABLE")
+    if not operation_health_turn_valid_v2(turn):
+        val ended = operation_health_gate_finish_v2(Ok(true))
+        return OperationJournalBrokerAcquireV1(error: "OPERATION_JOURNAL_HEALTH_TICKET_INVALID")
+    var slot = operation_health_slots_v2[turn.owner_id]
+    if slot.broker_entries.contains_key(key):
+        val prior = slot.broker_entries[key]
+        var result = operation_broker_result_v1(turn, key, prior, offered)
+        if prior.claim != claim or not prior.installed.same_owner(installed) or prior.installed_binding != installed_binding or prior.root != root or prior.binding != binding:
+            result.ready = false
+            result.error = "BROKER_CLAIM_REPLAY_MISMATCH"
+        val ended = operation_health_gate_finish_v2(Ok(true))
+        if ended.is_err(): result.error = ended.unwrap_err()
+        return result
+    for prior_key in slot.broker_entries.keys():
+        if slot.broker_entries[prior_key].root == root:
+            val ended = operation_health_gate_finish_v2(Ok(true))
+            return OperationJournalBrokerAcquireV1(error: "BROKER_ROOT_ALREADY_CLAIMED")
+    if slot.broker_entries.len() >= 64 or origin_ms < 0 or deadline_ms <= origin_ms or deadline_ms - origin_ms > 86400000:
+        val ended = operation_health_gate_finish_v2(Ok(true))
+        return OperationJournalBrokerAcquireV1(error: "BROKER_CLAIM_BOUND")
+    if val child = offered:
+        if not operation_health_slots_v2.contains_key(child.identity) or child.identity == turn.owner_id:
+            val ended = operation_health_gate_finish_v2(Ok(true))
+            return OperationJournalBrokerAcquireV1(error: "BROKER_OFFERED_OWNER_INVALID")
+        val existing = operation_health_slots_v2[child.identity]
+        if existing.binding != binding or existing.broker_parent != 0 or existing.busy != 0 or not existing.bound:
+            val ended = operation_health_gate_finish_v2(Ok(true))
+            return OperationJournalBrokerAcquireV1(error: "BROKER_OFFERED_OWNER_UNAVAILABLE")
+    var entry = OperationJournalBrokerEntryV1(claim, installed, installed_binding, root, binding, origin_ms, deadline_ms)
+    # Reservation precedes external acquisition. Failed openings are not retried.
+    slot.broker_entries[key] = entry
+    operation_health_slots_v2[turn.owner_id] = slot
+    val reserved = operation_health_gate_finish_v2(Ok(true))
+    if reserved.is_err(): return OperationJournalBrokerAcquireV1(error: reserved.unwrap_err())
+    var opened = OperationJournalLinuxStorageOpenV1(offered, nil, "")
+    if offered.is_none(): opened = operation_health_linux_open_v1(root, binding, false, false)
+    else:
+        val borrowed = operation_health_linux_begin_v1(offered.unwrap(), binding)
+        if borrowed.is_err(): opened.error = borrowed.unwrap_err()
+        else:
+            val checked = operation_health_linux_borrow_v1(offered.unwrap(), borrowed.unwrap())
+            val ended = operation_health_end_v2(borrowed.unwrap())
+            if checked.is_err(): opened.error = checked.unwrap_err()
+            if ended.is_err():
+                opened.turn = Some(borrowed.unwrap())
+                if opened.error == "": opened.error = ended.unwrap_err()
+    entry.child = opened.owner
+    entry.opening = opened.turn
+    entry.error = opened.error
+    val stored = operation_broker_store_v1(turn, key, entry)
+    if stored.is_err():
+        return OperationJournalBrokerAcquireV1(binding: entry.binding, child: opened.owner, opening: opened.turn,
+            adopted_offered: offered.is_some(), origin_ms: origin_ms, deadline_ms: deadline_ms, error: stored.unwrap_err())
+    if opened.error == "" and opened.owner.is_some():
+        if val opening = opened.turn:
+            val bound = operation_health_linux_bind_v1(opened.owner.unwrap(), opening)
+            if bound.is_err(): entry.error = bound.unwrap_err()
+            else:
+                val ended = operation_health_end_v2(opening)
+                if ended.is_err(): entry.error = ended.unwrap_err()
+                else: entry.opening = nil
+        entry.ready = entry.error == ""
+    elif entry.error == "": entry.error = "BROKER_CHILD_OPEN_NO_OWNER"
+    val committed = operation_broker_store_v1(turn, key, entry)
+    if committed.is_err(): entry.error = committed.unwrap_err()
+    if mutex_lock_gate(operation_health_gate_v2).is_none():
+        return OperationJournalBrokerAcquireV1(binding: entry.binding, child: entry.child, opening: entry.opening, origin_ms: entry.origin_ms, deadline_ms: entry.deadline_ms, error: "OPERATION_JOURNAL_HEALTH_GATE_UNAVAILABLE")
+    var result = operation_broker_result_v1(turn, key, entry, offered)
+    val ended = operation_health_gate_finish_v2(Ok(true))
+    if ended.is_err(): result.error = ended.unwrap_err()
+    result
+
+pub(package) fn operation_broker_reader_current_v1(owner: OperationJournalLinuxStorageOwnerV1, binding: text) -> Result<(), text>:
+    val turn = operation_health_linux_begin_v1(owner, binding)?
+    val checked = operation_health_linux_borrow_v1(owner, turn)
+    val ended = operation_health_end_v2(turn)
+    if ended.is_err(): return Err(ended.unwrap_err())
+    if checked.is_err(): return Err(checked.unwrap_err())
+    Ok(())
+
+pub(friend) fn operation_broker_claim_current_v1(claim: OperationJournalBrokerClaimV1,
+        child: OperationJournalLinuxStorageOwnerV1) -> Result<(), text>:
+    unsafe(capabilities: [ffi, raw_ptr]): linux_machine_process_origin_check_v1()?
+    if not claim.child.same_owner(child): return Err("BROKER_CLAIM_CHILD_MISMATCH")
+    val turn = operation_health_linux_begin_v1(claim.parent, claim.parent_binding)?
+    val entry = operation_broker_entry_v1(turn, claim.key)
+    var result: Result<(), text> = if entry.is_err(): Err(entry.unwrap_err()) else: Ok(())
+    if entry.is_ok():
+        val value = entry.unwrap()
+        if value.claim != claim.claim or value.child.is_none() or not value.child.unwrap().same_owner(child) or not value.ready or value.retired:
+            result = Err("BROKER_CLAIM_NOT_CURRENT")
+        else:
+            val resources = operation_health_linux_resources_v1(turn)
+            result = if resources.is_err(): Err(resources.unwrap_err()) else: resources.unwrap().broker_writer_current_v1()
+            if result.is_ok(): result = operation_broker_reader_current_v1(value.installed, value.installed_binding)
+    val ended = operation_health_end_v2(turn)
+    if ended.is_err(): return Err(ended.unwrap_err())
+    result
+
+pub(package) fn operation_broker_release_v1(turn: OperationJournalHealthTurnV2, key: text,
+        claim: text, installed: OperationJournalLinuxStorageOwnerV1,
+        installed_binding: text, parent_cleanup: bool = false) -> OperationJournalBrokerAcquireV1:
+    val loaded = operation_broker_entry_v1(turn, key)
+    if loaded.is_err(): return OperationJournalBrokerAcquireV1(error: loaded.unwrap_err())
+    var entry = loaded.unwrap()
+    if not parent_cleanup and (entry.claim != claim or not entry.installed.same_owner(installed) or entry.installed_binding != installed_binding):
+        return OperationJournalBrokerAcquireV1(error: "BROKER_RELEASE_CLAIM_MISMATCH")
+    if entry.child.is_some() and not entry.retired:
+        val child = entry.child.unwrap()
+        val acquired = if entry.opening.is_some(): Ok(entry.opening.unwrap()) else:
+            operation_health_linux_begin_with_parent_v1(child, entry.binding, true, Some(turn))
+        if acquired.is_err(): return OperationJournalBrokerAcquireV1(binding: entry.binding, child: entry.child, opening: entry.opening, origin_ms: entry.origin_ms, deadline_ms: entry.deadline_ms, error: acquired.unwrap_err())
+        entry.opening = Some(acquired.unwrap())
+        entry.ready = false
+        val saved = operation_broker_store_v1(turn, key, entry)
+        if saved.is_err(): return OperationJournalBrokerAcquireV1(binding: entry.binding, child: entry.child, opening: entry.opening, origin_ms: entry.origin_ms, deadline_ms: entry.deadline_ms, error: saved.unwrap_err())
+        val closed = operation_health_linux_close_with_parent_v1(child, acquired.unwrap(), Some(turn))
+        if closed.is_err(): return OperationJournalBrokerAcquireV1(binding: entry.binding, child: entry.child, opening: entry.opening, origin_ms: entry.origin_ms, deadline_ms: entry.deadline_ms, error: closed.unwrap_err())
+        if closed.unwrap().closed:
+            entry.retired = true
+            entry.ready = false
+            entry.child = nil
+            entry.opening = nil
+        if entry.error == "": entry.error = closed.unwrap().error
+    else:
+        entry.retired = true
+        entry.ready = false
+    val stored = operation_broker_store_v1(turn, key, entry)
+    if stored.is_err(): return OperationJournalBrokerAcquireV1(binding: entry.binding, child: entry.child, opening: entry.opening, origin_ms: entry.origin_ms, deadline_ms: entry.deadline_ms, error: stored.unwrap_err())
+    if mutex_lock_gate(operation_health_gate_v2).is_none(): return OperationJournalBrokerAcquireV1(binding: entry.binding, child: entry.child, opening: entry.opening, origin_ms: entry.origin_ms, deadline_ms: entry.deadline_ms, error: "OPERATION_JOURNAL_HEALTH_GATE_UNAVAILABLE")
+    var result = operation_broker_result_v1(turn, key, entry, nil)
+    val ended = operation_health_gate_finish_v2(Ok(true))
+    if ended.is_err(): result.error = ended.unwrap_err()
+    result
+
+# One child cleanup step per parent cleanup call. Tombstones are not recycled.
+pub(package) fn operation_broker_children_close_v1(turn: OperationJournalHealthTurnV2) -> Result<bool, text>:
+    if mutex_lock_gate(operation_health_gate_v2).is_none(): return Err("OPERATION_JOURNAL_HEALTH_GATE_UNAVAILABLE")
+    if not operation_health_turn_valid_v2(turn): return operation_health_gate_finish_v2(Err("OPERATION_JOURNAL_HEALTH_TICKET_INVALID"))
+    val entries = operation_health_slots_v2[turn.owner_id].broker_entries
+    val ended = operation_health_gate_finish_v2(Ok(true))
+    if ended.is_err(): return Err(ended.unwrap_err())
+    for key in entries.keys():
+        val entry = entries[key]
+        if entry.retired: continue
+        val result = operation_broker_release_v1(turn, key, entry.claim, entry.installed, entry.installed_binding, true)
+        if not result.completed and result.error != "": return Err(result.error)
+        return Ok(false)
+    Ok(true)
+
+# Signed Linux service installation (signing step 5). The ONLY public route
+# from outside io to a protected parent writer, and it requires the sealed
+# verifier proof. The private open/borrow/begin/close_step stay private; this
+# entry fixes writer=true and create_final=false (never provisions the parent)
+# and re-verifies the proof against `authority-policy.sdn` read through the
+# writer's own descriptor before and after every publication.
+pub struct OperationHealthLinuxInstallV1:
+    cleanup: Option<OperationHealthLinuxInstallCleanupV1>
+    installed: bool
+    duplicate: bool
+    closed: bool
+    phase: text
+    error: text
+    close_error: text
+
+# Opaque continuation for a partial close only: private fields, constructed
+# only here, admits only install_close_v1. It can never publish.
+pub class OperationHealthLinuxInstallCleanupV1:
+    held: OperationJournalLinuxStorageOwnerV1
+    binding: text
+    turn: Option<OperationJournalHealthTurnV2>
+
+pub struct OperationHealthLinuxInstallCloseV1:
+    cleanup: Option<OperationHealthLinuxInstallCleanupV1>
+    closed: bool
+    error: text
+
+fn operation_health_linux_install_current_v1(proof: LinuxServiceVerifiedEnrollmentV1,
+        store: OperationJournalLinuxStorageBorrowV1) -> Result<(), text>:
+    val held = store.read("authority-policy.sdn", 1048576, true)?
+    linux_service_enrollment_installed_v1(proof, held)?
+    store.current()
+
+fn operation_health_linux_install_exact_v1(store: OperationJournalLinuxStorageBorrowV1, name: text,
+        expected: text) -> Result<(), text>:
+    val actual = store.read(name, 1048576)?
+    if actual.is_none() or actual.unwrap() != expected: return Err("linux-service-install-fixed-file-mismatch:" + name)
+    Ok(())
+
+fn operation_health_linux_install_phase_v1(index: i64, count: i64, name: text) -> text:
+    if index == 0: return "claim-publication-attempted"
+    if index == count - 1: return "root-manifest-publication-attempted"
+    val slash = name.last_index_of("/")
+    "fixed-child-publication-attempted:" + (if slash >= 0: name.substring(slash + 1) else: name)
+
+fn operation_health_linux_install_body_v1(proof: LinuxServiceVerifiedEnrollmentV1,
+        store: OperationJournalLinuxStorageBorrowV1) -> (text, Result<bool, text>):
+    val before = operation_health_linux_install_current_v1(proof, store)
+    if before.is_err(): return ("parent-opening-attempted", Err(before.unwrap_err()))
+    val prior = store.read(proof.claim_name(), 16384)
+    if prior.is_err(): return ("parent-opening-attempted", Err(prior.unwrap_err()))
+    if prior.unwrap().is_some():
+        # Exact duplicate reads the original nonce/timestamp from the real
+        # protected records. No entropy, no new admission, no republication.
+        val child = proof.child()
+        if child.is_err(): return ("checking-existing", Err(child.unwrap_err()))
+        val root_bytes = store.read(child.unwrap() + "/linux-service-root-v3.sdn", 16384)
+        if root_bytes.is_err(): return ("checking-existing", Err(root_bytes.unwrap_err()))
+        if root_bytes.unwrap().is_none(): return ("checking-existing", Err("linux-service-install-partial-existing-claim"))
+        val same = linux_service_enrollment_existing_v1(proof, prior.unwrap().unwrap(), root_bytes.unwrap().unwrap())
+        if same.is_err(): return ("checking-existing", Err(same.unwrap_err()))
+        val fixed = linux_service_enrollment_fixed_files_v1(proof)
+        if fixed.is_err(): return ("checking-existing", Err(fixed.unwrap_err()))
+        for item in fixed.unwrap():
+            val checked = operation_health_linux_install_exact_v1(store, item.0, item.1)
+            if checked.is_err(): return ("checking-existing", Err(checked.unwrap_err()))
+        val after = operation_health_linux_install_current_v1(proof, store)
+        if after.is_err(): return ("checking-existing", Err(after.unwrap_err()))
+        return ("installed-existing", Ok(true))
+    val items = linux_service_enrollment_publication_v1(proof)
+    if items.is_err(): return ("parent-opening-attempted", Err(items.unwrap_err()))
+    val publication = items.unwrap()
+    var index: i64 = 0
+    for item in publication:
+        val phase = operation_health_linux_install_phase_v1(index, publication.len(), item.0)
+        val current = operation_health_linux_install_current_v1(proof, store)
+        if current.is_err(): return (phase, Err(current.unwrap_err()))
+        # No-replace linkat in the actual storage owner; an existing target is
+        # never converted to compare/replace.
+        val published = store.publish(item.0, item.1)
+        if published.is_err(): return (phase, Err(published.unwrap_err()))
+        if not published.unwrap(): return (phase, Err("linux-service-install-target-already-present:" + item.0))
+        val exact = operation_health_linux_install_exact_v1(store, item.0, item.1)
+        if exact.is_err(): return (phase, Err(exact.unwrap_err()))
+        val after = operation_health_linux_install_current_v1(proof, store)
+        if after.is_err(): return (phase, Err(after.unwrap_err()))
+        index = index + 1
+    ("installed", Ok(false))
+
+pub fn operation_health_linux_install_v1(proof: LinuxServiceVerifiedEnrollmentV1) -> OperationHealthLinuxInstallV1:
+    val token = proof.install_token()
+    if token.is_err():
+        return OperationHealthLinuxInstallV1(None, false, false, true, "parent-opening-attempted", token.unwrap_err(), "")
+    # The health slot adopts the resource cell before the first native
+    # acquisition; the same oracle owns busy-ticket exclusion and disposal.
+    val opened = operation_health_linux_open_v1(proof.machine_parent(), token.unwrap(), true, false)
+    if opened.owner.is_none():
+        return OperationHealthLinuxInstallV1(None, false, false, true, "parent-opening-attempted",
+            if opened.error == "": "linux-service-install-opening-carrier-missing" else: opened.error, "")
+    val cleanup = OperationHealthLinuxInstallCleanupV1(held: opened.owner.unwrap(), binding: token.unwrap(), turn: opened.turn)
+    var phase = "parent-opening-attempted"
+    var outcome: Result<bool, text> = Err(opened.error)
+    if opened.error == "":
+        if opened.turn.is_none():
+            outcome = Err("linux-service-install-opening-ticket-missing")
+        else:
+            val borrowed = operation_health_linux_borrow_v1(opened.owner.unwrap(), opened.turn.unwrap())
+            if borrowed.is_err():
+                outcome = Err(borrowed.unwrap_err())
+            else:
+                val applied = operation_health_linux_install_body_v1(proof, borrowed.unwrap())
+                phase = applied.0
+                outcome = applied.1
+    # Drain exact owned descriptors on every path. Published claims/records are
+    # durable residue: a failed install is never rolled back by guessed deletes.
+    val closed = operation_health_linux_install_close_v1(cleanup)
+    OperationHealthLinuxInstallV1(closed.cleanup, outcome.is_ok(), if outcome.is_ok(): outcome.unwrap() else: false,
+        closed.closed, phase, if outcome.is_err(): outcome.unwrap_err() else: "", closed.error)
+
+pub fn operation_health_linux_install_close_v1(cleanup: OperationHealthLinuxInstallCleanupV1) -> OperationHealthLinuxInstallCloseV1:
+    val acquired = if cleanup.turn.is_some(): Ok(cleanup.turn.unwrap()) else:
+        operation_health_linux_begin_v1(cleanup.held, cleanup.binding, true)
+    if acquired.is_err(): return OperationHealthLinuxInstallCloseV1(Some(cleanup), false, acquired.unwrap_err())
+    val latest = OperationHealthLinuxInstallCleanupV1(held: cleanup.held, binding: cleanup.binding, turn: Some(acquired.unwrap()))
+    val closed = operation_health_linux_close_step_v1(latest.held, acquired.unwrap())
+    if closed.is_err():
+        # UNKNOWN: the slot was positively retired; a stale carrier is dropped.
+        return OperationHealthLinuxInstallCloseV1(if closed.unwrap_err() == "OPERATION_JOURNAL_HEALTH_UNKNOWN": None else: Some(latest),
+            false, closed.unwrap_err())
+    val actual = closed.unwrap()
+    OperationHealthLinuxInstallCloseV1(if actual.closed: None else: Some(latest), actual.closed, actual.error)

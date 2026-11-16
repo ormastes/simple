@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Queues two outbox requests, starts a loopback server on the shared Simple
+# HTTP server, runs `bridge_worker --once`, then drains an in-memory outbox
+# (routed, unrouted, refused port) against the same server and prints states.
+# Usage: bridge_worker_http_probe.shs interp|native
+# interp: SIMPLE_BIN runs bridge_worker.spl from source.
+# native: BRIDGE_WORKER_EXE is a native-built bridge_worker.
+set -uo pipefail
+mode=${1:-interp}
+root=$(cd "$(dirname "$0")/../../../../../.." && pwd)
+fx="$root/test/01_unit/app/llm_caret/messaging/fixtures"
+simple_bin=${SIMPLE_BIN:-$root/bin/simple}
+work=$(mktemp -d)
+server_pid=
+cleanup() { [ -n "$server_pid" ] && kill "$server_pid" 2>/dev/null; rm -rf "$work"; }
+trap cleanup EXIT
+port=$((40900 + $$ % 800))
+db="$work/messaging.db"
+case "$mode" in
+  interp) bridge=("$simple_bin" run "$root/src/app/llm_caret/messaging/bridge_worker.spl") ;;
+  native)
+    [ -x "${BRIDGE_WORKER_EXE:-}" ] || { echo "native bridge_worker exe missing"; exit 2; }
+    bridge=("$BRIDGE_WORKER_EXE") ;;
+  *) echo "unknown mode: $mode"; exit 2 ;;
+esac
+"$simple_bin" run "$fx/bridge_outbox_fixture.spl" queue "$port" "$db" | grep '^queued:'
+"$simple_bin" run "$fx/bridge_http_server_fixture.spl" "$port" > "$work/server.out" 2>&1 &
+server_pid=$!
+for _ in $(seq 1 120); do grep -q '^listening' "$work/server.out" && break; sleep 1; done
+grep -q '^listening' "$work/server.out" || { echo "server did not start"; tail -3 "$work/server.out"; exit 2; }
+sleep 1
+SIMPLE_SECRET_BRIDGE_PROBE=probe-token LLM_CARET_MESSAGING_DB="$db" "${bridge[@]}" --once > "$work/bridge.out" 2>&1
+rc=$?
+echo "bridge_exit: $rc"
+grep '^{"handled' "$work/bridge.out" | sed 's/^/bridge: /'
+SIMPLE_SECRET_BRIDGE_PROBE=probe-token "$simple_bin" run "$fx/bridge_outbox_fixture.spl" drain "$port" | grep -E '^(drain|state) '
+exit 0

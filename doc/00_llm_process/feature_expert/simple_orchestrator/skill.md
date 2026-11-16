@@ -147,3 +147,54 @@ remain open. Follow the host identity guide's ordered generation/pin/profile/
 exchange flow; pending public registration grants no login authority. Windows
 external SSH key-path projection fails closed until its separate capability is
 available. These source paths and their manuals remain NOT_RUN.
+
+## Linux service V4 host composition — service 40 (2026-11-16)
+
+- **Owner module:** `src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl` (#9745, #9747, #9754).
+  Spec: `test/01_unit/lib/orchestration/host_linux_service_current_v4_spec.spl`. Fixture:
+  `test/fixtures/orchestration/host_linux_service_verifier_fixture_v1.spl` (`..._ops_v1`, `..._sign_v1`).
+  Both PRs are SOURCE_AUTHORED and NOT_RUN.
+- **Order is structural.**
+  - Startup uses `records_load_v4` through the protected readers with a fresh clock. It checks the sealed proof
+    against the installed binding and credential, using policy re-read through the reader and never the proof's
+    own bytes.
+  - It compares the actual native borrow, mints a service-incarnation scope, and opens the journal with
+    `host_capacity_owner_open_linux_v3` at the installed `journalRoot`.
+  - The current record is published (no-replace) and read back before `published`.
+  - `status_v4()` is the only ready/status producer, and `current_v4()` always rechecks everything.
+- **Prepare/execute.** Signed prepare uses the landed `prepare_v1`; a same-ID replay keeps the original deadline,
+  and both renewal and late retry are refused. The association is published scope-fenced and read back before the
+  prepared reply. Execute requires the stored association bytes, fresh signatures and a live receipt.
+- **Execution commit** (#9754): `host_capacity_owner_begin_associated_v3` binds the payload to the association
+  itself, requires a Linux-protected current journal plus `continuity_proven`, re-authorizes with a fresh context,
+  and runs ONE begin on the original reservation. `host_linux_service_execute_v4` handles three cases:
+  - an identical archived packet is replayed with no effect;
+  - a conflicting packet is refused;
+  - otherwise it archives the packet (no-replace) and commits.
+  It replies `execution-admitted`; the native launch is not composed.
+- **Arm** (#9755): `HostLocalRootV3.LinuxService` is handled at all 11 exhaustive matches. Through the shared
+  domain only status and close reach it; every other route refuses it. The 26 Windows-only wildcard matches
+  already refuse.
+- **Custody fix** (#9751): no panic after acquisition or after a committed begin in host execution.
+- **Still blocked** (details in `.spipe/simple_orchestrator/continuation_20261116/milestone_0018_service40_execution/DESIGN.md`):
+  - Listener/startup: nothing in production builds the LinuxService domain. The native identity borrow needs the
+    machine policy reader plus the fresh-epoch successor custody that `machine_container_authority_open_fresh_epoch_v1`
+    retains, which needs an owner decision. The smux startup v4 draft also needs the fenced cut-4 `server.spl` factory.
+  - Assembly remainder (service7/wireR2/wireR3/driver3/wire_redaction_test8): most of it has no production caller
+    until cut 4, and cut 4 needs authR2's `host_service_ready_reader_v1`. Cut 1 is held under the
+    no-unused-code rule.
+  - Reconciliation, which needs the upper Linux provider inventory. The owner stays quarantined.
+  - The epoch digest, which has no landed producer, so the caller supplies it.
+
+### Traps
+- Never reconcile a Linux journal from ledger flags alone. The capacity owner requires native inventory/quarantine
+  completion before admission. An empty projected ledger proves nothing (review P1, #9747).
+- The verifier proof's fields are private. Pin it by `binding_digest()` and `credential_digest()`, never by struct
+  equality.
+- A caller-supplied journal opener is an authority-substitution surface. Open the protected journal inside the
+  owner, at the installed root (review P1, #9745).
+- Pure Ed25519 in the interpreter is slow. Expiry specs need a margin of 20 s or more plus a clock poll, never a
+  1–3 s window.
+- An import is not a caller. Before landing a staged unit, check production reachability, not just import
+  closure. Specs do not count (wire v7 cut 1 was held for this, 2026-11-16).
+- `std.spec` `fail()` records the failure and returns. Code after it still runs, so return explicitly.

@@ -13,6 +13,10 @@ use std.nogc_async_mut.container.observation_v2.container_observation_validate_v
 # The single Simple Container API routes actual platform owners, never a fake
 # trait probe. Returned turns retain the updated tagged owner after every call.
 use std.common.contracts.container.execution_v2.*
+pub use std.common.contracts.container.execution_stats_v1.{ContainerExecutionStatsObservationV1,
+    ContainerStatsCounterV1, ContainerStatsIoV1, ContainerStatsIoCountersV1}
+use std.common.contracts.container.execution_stats_v1.container_execution_stats_observation_validate_v1
+use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
 use std.common.contracts.container.execution_evidence_v2.*
 use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
 use std.common.contracts.container.control_deadline_v1.ContainerControlDeadlineV1
@@ -94,6 +98,44 @@ pub fn simple_container_fresh_cleanup_v2(original: SimpleContainerFreshOpenV2) -
 pub struct ContainerOperationTurnV2:
     owner: SimpleContainerOwnerV2
     operation: RuntimeOperationV1
+
+pub struct ContainerExecutionStatsTurnV1:
+    owner: SimpleContainerOwnerV2
+    observation: Option<ContainerExecutionStatsObservationV1>
+    error: text
+
+# Typed observations only. No spawn/action/WAL path and no unsupported fallback.
+pub fn simple_container_stats_observe_v1(owner: SimpleContainerOwnerV2,
+        original_request: ContainerExecutionRequestV2) -> ContainerExecutionStatsTurnV1:
+    match owner:
+        case SimpleContainerOwnerV2.Windows(_, _):
+            return ContainerExecutionStatsTurnV1(owner: owner, observation: None,
+                error: "optional-capability-unavailable:stats:windows-docker")
+        case SimpleContainerOwnerV2.Linux(scope, adapter):
+            val started = time_sample_monotonic_nanos_or_failure()
+            if started <= 0: return ContainerExecutionStatsTurnV1(owner, None, "container-stats-monotonic-clock")
+            val checked = container_api_request_scope_v2("linux-podman", scope, original_request)
+            if checked.is_err(): return ContainerExecutionStatsTurnV1(owner, None, checked.unwrap_err())
+            val result = adapter.stats_v1(original_request)
+            val retained = SimpleContainerOwnerV2.Linux(scope, adapter)
+            if result.is_err(): return ContainerExecutionStatsTurnV1(retained, None, result.unwrap_err())
+            var observed = result.unwrap()
+            val expected_scope = container_host_scope_bytes_v2(scope)
+            val actual_scope = container_host_scope_bytes_v2(observed.scope)
+            if (expected_scope.is_err() or actual_scope.is_err() or expected_scope.unwrap() != actual_scope.unwrap() or
+                    observed.request_digest != original_request.plan.request_digest or
+                    observed.runtime.pod_uid != original_request.plan.workload_uid or
+                    observed.runtime.attempt != original_request.plan.attempt or
+                    observed.runtime.operation_id != original_request.plan.operation_id):
+                return ContainerExecutionStatsTurnV1(retained, None, "container-stats-api-binding")
+            val finished = time_sample_monotonic_nanos_or_failure()
+            if (observed.sample_started_monotonic_ns < started or finished < observed.sample_finished_monotonic_ns or
+                    finished < started): return ContainerExecutionStatsTurnV1(retained, None, "container-stats-monotonic-clock")
+            observed.sample_started_monotonic_ns = started
+            observed.sample_finished_monotonic_ns = finished
+            val shape = container_execution_stats_observation_validate_v1(observed)
+            if shape.is_err(): return ContainerExecutionStatsTurnV1(retained, None, shape.unwrap_err())
+            ContainerExecutionStatsTurnV1(retained, Some(observed), "")
 
 pub struct ContainerExecutionConfigurationTurnV1:
     owner: SimpleContainerOwnerV2

@@ -6626,6 +6626,13 @@ int64_t rt_unwrap_or_self(int64_t value) {
 #define RT_DISC_NONE 2371748697u
 #define RT_RESULT_ENUM_ID 0u
 #define RT_OPTION_ENUM_ID 1u
+/* Result is id 0 from compiled code and id 2 from rt_result_ok/err, with
+ * positional Ok=0/Err=1 (legacy hashed tags still accepted). A user enum's
+ * declared index is 0/1 for its first variants (#6953), so Ok/Err may only be
+ * read under these ids. */
+static inline int rt_is_result_enum_id(uint32_t id) { return id == 0u || id == 2u; }
+static inline int rt_result_disc_is_ok(uint32_t d) { return d == 0u || d == RT_DISC_OK; }
+static inline int rt_result_disc_is_err(uint32_t d) { return d == 1u || d == RT_DISC_ERR; }
 
 int64_t rt_unwrap_or_value(int64_t value, int64_t default_val) {
     RtCoreEnum* e = rt_core_as_enum(value);
@@ -6637,9 +6644,9 @@ int64_t rt_unwrap_or_value(int64_t value, int64_t default_val) {
         return value;
     }
 
-    if (e->enum_id == RT_RESULT_ENUM_ID) {
-        if (e->discriminant == RT_DISC_OK) return e->payload;
-        if (e->discriminant == RT_DISC_ERR) return default_val;
+    if (rt_is_result_enum_id(e->enum_id)) {
+        if (rt_result_disc_is_ok(e->discriminant)) return e->payload;
+        if (rt_result_disc_is_err(e->discriminant)) return default_val;
     }
 
     /* Arbitrary user enum: preserve the pre-existing "return self" fallback. */
@@ -6674,6 +6681,9 @@ int8_t rt_is_some(int64_t value) {
  * doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md */
 int8_t rt_is_present(int64_t value) {
     if (rt_is_none(value)) return 0;
+    /* `Err(e).?` is absent, as in the Rust twin and the interpreter. */
+    RtCoreEnum* result = rt_core_as_enum(value);
+    if (result && rt_is_result_enum_id(result->enum_id) && rt_result_disc_is_err(result->discriminant)) return 0;
     int64_t payload = rt_unwrap_or_self(value);
     if (payload == rt_core_nil()) return 0;
     RtCoreString* s = rt_core_as_string(payload);
@@ -11686,6 +11696,76 @@ int64_t spl_wffi_try_call_i64_out(int64_t fptr, int64_t args_value,
     return SPL_WFFI_OK;
 }
 
+/* Copies an all-int Simple array into raw[*count..]; 0 on a non-int array. */
+static int spl_wffi_append_int_args(int64_t value, int64_t* raw, int64_t* count) {
+    RtCoreArray* array = rt_core_as_array(value);
+    if (!array || (array->flags & RT_CORE_ARRAY_FLAG_BYTES)) return 0;
+    if (array->len > 0 && !array->data) return 0;
+    for (int64_t i = 0; i < array->len; i++) {
+        int64_t item = ((int64_t*)array->data)[i];
+        if (!rt_core_is_int(item)) return 0;
+        if (*count >= 8) { (*count)++; continue; }
+        raw[(*count)++] = rt_core_as_int(item);
+    }
+    return 1;
+}
+
+/* Byte-descriptor dispatch, twin of the Rust runtime's
+ * spl_wffi_call_i64_with_bytes_checked: the callee receives
+ * prefix..., ptr, len, suffix... (at most 8 foreign args); ptr is NULL when
+ * len == 0 and is valid only for the duration of the call. */
+int64_t spl_wffi_call_i64_with_bytes_checked(int64_t fptr, int64_t prefix_args,
+                                             int64_t bytes, int64_t offset,
+                                             int64_t length, int64_t suffix_args) {
+    if (fptr == 0) return spl_wffi_i64_checked_result(SPL_WFFI_NULL_FUNCTION, 0);
+    RtCoreArray* owner = rt_core_as_array(bytes);
+    if (!owner || !(owner->flags & RT_CORE_ARRAY_FLAG_BYTES) || offset < 0 || length < 0 ||
+        offset > INT64_MAX - length || offset + length > owner->len ||
+        (length > 0 && !owner->data)) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+    }
+    int64_t raw[10] = {0};
+    int64_t count = 0;
+    if (!spl_wffi_append_int_args(prefix_args, raw, &count)) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+    }
+    int64_t prefix_count = count;
+    int64_t suffix_raw[8] = {0};
+    int64_t suffix_count = 0;
+    if (!spl_wffi_append_int_args(suffix_args, suffix_raw, &suffix_count)) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+    }
+    if (prefix_count + 2 + suffix_count > 8) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_UNSUPPORTED_SIGNATURE, 0);
+    }
+    raw[count++] = length == 0 ? 0 : (int64_t)(uintptr_t)((uint8_t*)owner->data + offset);
+    raw[count++] = length;
+    for (int64_t i = 0; i < suffix_count; i++) raw[count++] = suffix_raw[i];
+    SplArray* packed = rt_array_new(count);
+    if (!packed) return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+    for (int64_t i = 0; i < count; i++) {
+        if (!rt_array_push(packed, rt_value_int(raw[i]))) {
+            rt_array_free(packed);
+            return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+        }
+    }
+    int64_t value = spl_wffi_call_i64(fptr, (int64_t)(uintptr_t)packed, count);
+    rt_array_free(packed);
+    return spl_wffi_i64_checked_result(SPL_WFFI_OK, value);
+}
+
+int64_t spl_wffi_call_i64_with_bytes(int64_t fptr, int64_t prefix_args, int64_t bytes,
+                                     int64_t offset, int64_t length, int64_t suffix_args) {
+    int64_t checked = spl_wffi_call_i64_with_bytes_checked(fptr, prefix_args, bytes,
+                                                           offset, length, suffix_args);
+    RtCoreArray* pair = rt_core_as_array(checked);
+    if (!pair || pair->len != 2 || !pair->data) return 0;
+    int64_t status = rt_core_as_int(((int64_t*)pair->data)[0]);
+    int64_t value = rt_core_as_int(((int64_t*)pair->data)[1]);
+    rt_array_free((SplArray*)(uintptr_t)checked);
+    return status == SPL_WFFI_OK ? value : 0;
+}
+
 int64_t rt_array_header_ptr(SplArray* a) {
     RtCoreArray* array = rt_core_array_ptr(a);
     return array ? (int64_t)(uintptr_t)array : 0;
@@ -12230,7 +12310,10 @@ int8_t rt_try_is_absent(int64_t value, int64_t expected_enum_id, int64_t err_dis
     int64_t discriminant = (int64_t)e->discriminant;
     if ((int64_t)e->enum_id == RT_OPTION_ENUM_ID && (discriminant == 1 || discriminant == RT_DISC_NONE)) return 1;
     if (discriminant != err_discriminant) return 0;
-    return expected_enum_id == 0 || e->enum_id == 0 || (int64_t)e->enum_id == expected_enum_id;
+    /* Erased `?` (expected id 0): only a builtin Result's Err is absent; a
+     * user enum's declared index 1 must not return early (#6953). */
+    if (expected_enum_id == 0) return rt_is_result_enum_id(e->enum_id);
+    return e->enum_id == 0 || (int64_t)e->enum_id == expected_enum_id;
 }
 
 int64_t rt_enum_payload(int64_t value) {
@@ -12750,16 +12833,16 @@ int64_t rt_option_map(int64_t value, int64_t closure_value) {
     if (rt_is_none(value)) return value;
     RtCoreEnum* e = rt_core_as_enum(value);
     int result_ok = 0;
-    if (e && e->enum_id == RT_RESULT_ENUM_ID) {
-        if (e->discriminant == RT_DISC_ERR) return value;
-        result_ok = e->discriminant == RT_DISC_OK;
+    if (e && rt_is_result_enum_id(e->enum_id)) {
+        if (rt_result_disc_is_err(e->discriminant)) return value;
+        result_ok = rt_result_disc_is_ok(e->discriminant);
     }
     int64_t payload = rt_enum_payload(value);
     int64_t func_ptr = rt_closure_func_ptr(closure_value);
     if (!func_ptr) return rt_core_nil();
     RtArrayElemFn func = (RtArrayElemFn)(uintptr_t)func_ptr;
     int64_t mapped = func(closure_value, payload);
-    if (result_ok) return rt_enum_new(RT_RESULT_ENUM_ID, RT_DISC_OK, mapped);
+    if (result_ok) return rt_enum_new((int32_t)e->enum_id, (int32_t)e->discriminant, mapped);
     return rt_enum_new(1, 0, mapped);
 }
 
@@ -21088,6 +21171,53 @@ int64_t rt_io_udp_recv_from(int64_t fd, int64_t size) {
     rt_tuple_set(tuple, 0, (int64_t)(uintptr_t)arr);
     rt_tuple_set(tuple, 1, address);
     return tuple;
+}
+
+/* browser_net_runtime.spl: rt_dns_lookup(hostname: text) -> text. Not in
+ * text_arg_indices, so the hostname is one tagged text value and the result a
+ * tagged text: the de-duplicated numeric addresses joined by ',' in resolver
+ * order, empty on any failure (Rust twin: value/net_tcp.rs rt_dns_lookup).
+ * Blocking getaddrinfo; the Rust twin's resolve timeout is not mirrored. */
+int64_t rt_dns_lookup(int64_t hostname_value) {
+    uint64_t host_len = 0;
+    const uint8_t* host_bytes = rt_core_string_bytes(hostname_value, &host_len);
+    if (!host_bytes || host_len == 0 || host_len >= 1024) return rt_string_new(NULL, 0);
+    char host[1024];
+    memcpy(host, host_bytes, (size_t)host_len);
+    host[host_len] = '\0';
+#if defined(_WIN32)
+    if (!InitOnceExecuteOnce(&ws_compat_init_once, ws_compat_init_cb, NULL, NULL)) return rt_string_new(NULL, 0);
+#endif
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo* results = NULL;
+    if (getaddrinfo(host, NULL, &hints, &results) != 0 || !results) return rt_string_new(NULL, 0);
+    char joined[4096];
+    size_t used = 0;
+    joined[0] = '\0';
+    for (struct addrinfo* it = results; it; it = it->ai_next) {
+        char ip[INET6_ADDRSTRLEN];
+        const void* addr = NULL;
+        if (it->ai_family == AF_INET) addr = &((const struct sockaddr_in*)it->ai_addr)->sin_addr;
+        else if (it->ai_family == AF_INET6) addr = &((const struct sockaddr_in6*)it->ai_addr)->sin6_addr;
+        if (!addr || !inet_ntop(it->ai_family, addr, ip, sizeof(ip))) continue;
+        size_t ip_len = strlen(ip);
+        int seen = 0;
+        for (const char* p = joined; *p && !seen;) {
+            const char* end = strchr(p, ',');
+            size_t len = end ? (size_t)(end - p) : strlen(p);
+            if (len == ip_len && memcmp(p, ip, ip_len) == 0) seen = 1;
+            p = end ? end + 1 : p + len;
+        }
+        if (seen || used + ip_len + 2 > sizeof(joined)) continue;
+        if (used) joined[used++] = ',';
+        memcpy(joined + used, ip, ip_len + 1);
+        used += ip_len;
+    }
+    freeaddrinfo(results);
+    return rt_string_new((const uint8_t*)joined, (uint64_t)used);
 }
 
 #if defined(_WIN32)

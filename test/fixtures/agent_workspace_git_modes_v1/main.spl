@@ -1,0 +1,151 @@
+# Compiled fixture AGENT primary, executed ONLY through the actual qualified
+# Simple Container+Host bootstrap path with the adjacent loose-object dataset.
+# NOT_RUN. This program cannot itself qualify containment; no bare-host driver.
+use std.cli.cli_util.get_cli_args
+use std.common.process.observation_v4.*
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.nogc_sync_mut.io.process_observation_v4.*
+use std.nogc_sync_mut.io.retained_file.{retained_directory_open_trusted_v1, RetainedDirectoryOwnerV1}
+use std.nogc_sync_mut.io.env_ops.cwd
+use std.nogc_sync_mut.io.time_ops.sleep_ms
+use std.nogc_async_mut.container.providers.linux.agent_workspace_bootstrap_git_v1.{agent_git_environment_v1, agent_git_version_supported_v1}
+
+pub const FIXTURE_REVISION_V1: text = "8cbe4ff1bfa2da42a6d4728367f8bbf6460e0cfc"
+pub const FIXTURE_INDEX_V1: text = "100755 039e4d0069c5c26909f86c505b9de66182e6d1f3 0\texecutable\0" +
+    "160000 5fc2dec4f6afe2b119ae56279a5ab3801025db68 0\tsubmodule\0" +
+    "120000 d7b06e88d0fc9d31d57d06210168545bc272e5c0 0\ttracked-link\0"
+
+fn fixture_digest_hex_v1(bytes: [u8]) -> text:
+    val digits = "0123456789abcdef"
+    var result = ""
+    for byte in bytes:
+        val value = byte as i64
+        result = result + digits.substring(value / 16, value / 16 + 1) + digits.substring(value % 16, value % 16 + 1)
+    result
+
+# Unknown helper custody keeps this primary and its actual local owner alive
+# for genuine outer Host workload control. Never drop a live/uncertain lease.
+fn fixture_hold_for_host_v1() -> Result<[u8], text>:
+    while true: sleep_ms(100)
+    Err("unreachable-host-control-required")
+
+fn fixture_git_v1(pin: OwnedExecutablePin, cwd_pin: OwnedCwdPinV4, root: text,
+        capabilities: ProcessObservationCapabilitiesV4, args: [text], expected_exit: i64) -> Result<[u8], text>:
+    val base = ["/usr/bin/git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+        "-c", "core.attributesFile=/dev/null", "-c", "submodule.recurse=false", "-c", "protocol.allow=never"]
+    val argv = if args == ["--version"]: ["/usr/bin/git", "--version"] else: base + args
+    val request = ProcessObservationRequestV4(argv: argv, environment: agent_git_environment_v1(root, "fixture-private"),
+        canonical_cwd: root, canonical_pinned_directory: root, executable_pin: 0, executable_digest: [],
+        cwd_pin_claim: 0, cwd_identity_digest: [], capability_bits: capabilities.capability_bits,
+        wall_budget_ns: 5000000000, term_grace_ns: 100000000, cleanup_budget_ns: 1000000000,
+        stdout_limit_bytes: 65536, stderr_limit_bytes: 65536, memory_limit_bytes: 268435456,
+        enforcement_kind: ProcessObservationEnforcementKindV4.RlimitAs,
+        descendant_policy: ProcessObservationDescendantPolicyV4.ProcessGroup, max_clock_resolution_ns: 1000000)
+    val started = process_observation_start_pinned_v4(pin, cwd_pin, request)
+    if started.is_err(): return fixture_hold_for_host_v1()
+    var lease = started.unwrap().lease
+    if started.unwrap().receipt.packet.status == ProcessObservationStatusV4.Rejected:
+        return Err("fixture-helper-rejected")
+    while true:
+        val collected = lease.collect(1000000)
+        if collected.is_err(): return fixture_hold_for_host_v1()
+        val receipt = collected.unwrap()
+        if receipt.packet.packet_kind == ProcessObservationPacketKindV4.CleanupFrozen:
+            if not receipt.packet.tree_empty: return fixture_hold_for_host_v1()
+            val cleanup = freeze_process_observation_cleanup_receipt_v4(receipt)
+            if cleanup.is_err(): return fixture_hold_for_host_v1()
+            if lease.acknowledge_cleanup(cleanup.unwrap()).is_err(): return fixture_hold_for_host_v1()
+            return Err("fixture-helper-cleanup-failure")
+        if receipt.packet.packet_kind == ProcessObservationPacketKindV4.Frozen:
+            if (not receipt.packet.tree_empty or not receipt.packet.tree_control_available or
+                    receipt.packet.tree_empty_ns < receipt.packet.process_started_ns): return fixture_hold_for_host_v1()
+            val frozen = freeze_process_observation_receipt_v4(receipt)
+            if frozen.is_err(): return fixture_hold_for_host_v1()
+            val valid = (receipt.packet.exit_code == expected_exit and receipt.packet.signal_number == 0 and
+                not receipt.packet.term_attempted and not receipt.packet.kill_attempted and
+                receipt.packet.failure_reason == ProcessObservationFailureReasonV4.Unknown and
+                receipt.packet.stdout.state == ProcessObservationStreamStateV4.Eof and
+                receipt.packet.stderr.state == ProcessObservationStreamStateV4.Eof and
+                receipt.packet.stdout.seen_bytes == receipt.packet.stdout.delivered_bytes and
+                receipt.packet.stderr.seen_bytes == receipt.packet.stderr.delivered_bytes)
+            if lease.acknowledge(frozen.unwrap()).is_err(): return fixture_hold_for_host_v1()
+            if not valid: return Err("fixture-helper-command-failed")
+            return Ok(receipt.stdout)
+        sleep_ms(1)
+    Err("unreachable")
+
+fn fixture_assert_worktree_v1(root: RetainedDirectoryOwnerV1, pin: OwnedExecutablePin,
+        cwd_pin: OwnedCwdPinV4, path: text, caps: ProcessObservationCapabilitiesV4) -> Result<(), text>:
+    val version = fixture_git_v1(pin, cwd_pin, path, caps, ["--version"], 0)?
+    if not utf8_bytes_valid(version) or not agent_git_version_supported_v1(bytes_to_text(version)): return Err("fixture-git-version")
+    val head = fixture_git_v1(pin, cwd_pin, path, caps, ["rev-parse", "--verify", "HEAD"], 0)?
+    if bytes_to_text(head) != FIXTURE_REVISION_V1 + "\n": return Err("fixture-exact-detached-commit")
+    val symbolic = fixture_git_v1(pin, cwd_pin, path, caps, ["symbolic-ref", "--quiet", "HEAD"], 1)?
+    if symbolic.len() != 0: return Err("fixture-head-is-symbolic")
+    val index = fixture_git_v1(pin, cwd_pin, path, caps, ["ls-files", "--stage", "-z"], 0)?
+    if not utf8_bytes_valid(index) or bytes_to_text(index) != FIXTURE_INDEX_V1: return Err("fixture-ordinary-git-modes")
+    val difference = fixture_git_v1(pin, cwd_pin, path, caps, ["diff-files", "--raw", "-z", "--", "executable", "tracked-link"], 0)?
+    if difference.len() != 0: return Err("fixture-checkout-differs-from-index")
+    var executable = root.open_file("executable", 1024u64)?
+    val metadata = executable.security_metadata_v1()
+    val content = executable.read_stage_input_v1(1024)
+    val closed = executable.close()
+    if not closed or metadata.is_err() or content.is_err(): return Err("fixture-executable-read")
+    if (metadata.unwrap().mode & 64u32) == 0 or bytes_to_text(content.unwrap()) != "#!/bin/sh\nexit 0\n":
+        return Err("fixture-regular-executable-mode-or-content")
+    val link = root.open_file("tracked-link", 1024u64)
+    if link.is_ok():
+        var unexpected = link.unwrap()
+        val consumed = unexpected.close()
+        return Err("fixture-followed-tracked-symlink")
+    var submodule = root.stage_directory_v1("submodule", false)?
+    val empty = submodule.directory_is_empty_v1()
+    val consumed = submodule.close()
+    if not consumed or empty.is_err() or not empty.unwrap(): return Err("fixture-gitlink-was-initialized")
+    val host_path = retained_directory_open_trusted_v1("/__simple_unmounted_host_fixture__")
+    if host_path.is_ok():
+        var unexpected = host_path.unwrap()
+        val consumed = unexpected.close()
+        return Err("fixture-host-sentinel-directory-visible")
+    Ok(())
+
+fn main() -> i32:
+    val arguments = get_cli_args()
+    if arguments.len() != 1: return 2
+    val path = cwd()
+    val opened_root = retained_directory_open_trusted_v1(path)
+    if opened_root.is_err(): return 1
+    var root = opened_root.unwrap()
+    val pinned = OwnedExecutablePin.pin("/usr/bin/git")
+    if pinned.is_err():
+        val consumed = root.close()
+        return 1
+    var pin = pinned.unwrap()
+    val digest = pin.digest()
+    if digest.is_err() or fixture_digest_hex_v1(digest.unwrap()) != arguments[0]:
+        val closed_pin = pin.close()
+        val closed_root = root.close()
+        if closed_pin.is_err():
+            val held = fixture_hold_for_host_v1()
+        return 1
+    val pinned_cwd = OwnedCwdPinV4.pin(path)
+    if pinned_cwd.is_err():
+        val closed_pin = pin.close()
+        val closed_root = root.close()
+        if closed_pin.is_err():
+            val held = fixture_hold_for_host_v1()
+        return 1
+    var cwd_pin = pinned_cwd.unwrap()
+    val caps = process_observation_capabilities_v4()
+    var success = false
+    if caps.is_ok():
+        val actual = caps.unwrap()
+        if (actual.available and actual.runtime_error == 0 and process_observation_monitor_group_gap_v4(actual.capability_bits) == "" and
+                (actual.capability_bits & (POV4_CAP_PINNED_EXEC | POV4_CAP_PTRACE_EXEC | POV4_CAP_RLIMIT_AS)) == 69):
+            success = fixture_assert_worktree_v1(root, pin, cwd_pin, path, actual).is_ok()
+    val cwd_closed = cwd_pin.close()
+    val pin_closed = pin.close()
+    val root_closed = root.close()
+    if cwd_closed.is_err() or pin_closed.is_err():
+        val held = fixture_hold_for_host_v1()
+    if success and root_closed: 0 else: 1

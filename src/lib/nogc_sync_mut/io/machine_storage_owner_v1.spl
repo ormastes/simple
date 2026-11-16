@@ -141,6 +141,43 @@ pub enum MachineStorageOpenV1:
     CleanupRequired(owner: MachineStorageOwnerV1, reason: text)
     Ready(owner: MachineStorageOwnerV1)
 
+# Wraps one existing Linux storage capability after checking its actual
+# installed policy. This performs no open, writer acquisition, WAL read, or
+# native effect; failures return the same raw storage owner for its caller.
+pub struct MachineLinuxStorageUpcastTurnV3:
+    owner: Option<MachineStorageOwnerV1>
+    retained: Option<LinuxMachineStorageV1>
+    error: text
+
+fn machine_linux_storage_upcast_error_v3(actual: LinuxMachineStorageV1,
+        reason: text) -> MachineLinuxStorageUpcastTurnV3:
+    MachineLinuxStorageUpcastTurnV3(owner: None, retained: Some(actual), error: reason)
+
+pub fn machine_storage_from_linux_v3(actual: LinuxMachineStorageV1) -> MachineLinuxStorageUpcastTurnV3:
+    val policy_bytes = match actual.policy_bytes_v1():
+        case Ok(value): value
+        case Err(reason): return machine_linux_storage_upcast_error_v3(actual, reason)
+    if not utf8_bytes_valid(policy_bytes):
+        return machine_linux_storage_upcast_error_v3(actual, "machine-storage-linux-policy-utf8")
+    val source = bytes_to_text(policy_bytes)
+    val policy = match machine_container_policy_decode_v1(source):
+        case Ok(value): value
+        case Err(reason): return machine_linux_storage_upcast_error_v3(actual, reason)
+    var linux_providers = 0
+    for provider in policy.providers:
+        if provider.backend == "linux-podman": linux_providers = linux_providers + 1
+    if linux_providers != 1:
+        return machine_linux_storage_upcast_error_v3(actual, "machine-storage-linux-provider-selection")
+    val capacity = match actual.physical_capacity_v1():
+        case Ok(value): value
+        case Err(reason): return machine_linux_storage_upcast_error_v3(actual, reason)
+    if (capacity.0 <= 0 or capacity.1 <= 0 or
+            policy.cpu_millis > capacity.0 or policy.memory_bytes > capacity.1):
+        return machine_linux_storage_upcast_error_v3(actual, "machine-storage-linux-policy-capacity")
+    MachineLinuxStorageUpcastTurnV3(
+        owner: Some(MachineStorageOwnerV1(backend: MachineStorageBackendV1.Linux(actual))),
+        retained: None, error: "")
+
 fn machine_storage_fresh_check_v1(storage: MachineStorageOwnerV1, epoch: LinuxInstalledFreshEpochOwnerV1,
         record: MachineFreshEpochRecordV1) -> Result<(), text>:
     val valid = machine_fresh_epoch_record_validate_v1(record)?

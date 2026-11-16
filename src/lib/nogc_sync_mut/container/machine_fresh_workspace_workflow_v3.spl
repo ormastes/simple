@@ -1,0 +1,149 @@
+# Bounded continuation cursor over the EXISTING distributed V2 action oracle.
+# This is not another journal or grant. Every effect still publishes its same-
+# writer intent/readback and canonically consumes the original launch permit.
+use std.nogc_sync_mut.container.machine_fresh_workload_lifecycle_v2.*
+use std.nogc_sync_mut.container.machine_fresh_workload_effects_v3.*
+use std.nogc_sync_mut.container.machine_fresh_workload_dispatch_v3.*
+use std.nogc_sync_mut.container.machine_fresh_workload_native_dispatch_v3.*
+use std.nogc_sync_mut.container.machine_fresh_workload_inspect_v2.*
+use std.nogc_sync_mut.container.machine_fresh_workload_record_v2.*
+use std.nogc_sync_mut.io.machine_storage_owner_v1.MachineStorageOwnerV1
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_owner_v1.LinuxFreshEpochSuccessorCustodyV1
+use std.nogc_sync_mut.io.linux_container_containment_v1.LinuxContainerContainmentPopulationV1
+use std.common.contracts.container.workspace_action_v3.*
+use std.common.contracts.container.linux_fresh_workload_v2.*
+use std.common.contracts.container.runtime_v1.*
+use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
+
+fn workspace_workflow_reply_v3(state: MachineFreshWorkloadLifecycleV2, action: text,
+        phase: text, result: MachineFreshWorkloadActionResultV2) -> Result<Option<RuntimeOperationV1>, text>:
+    val record = state.record_v3()?
+    val identity = machine_fresh_record_runtime_v3(record, state.native_id_v2()?)?
+    val finished = state.workflow_finish_v3()?
+    Ok(Some(RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: action,
+        command: RuntimeCommandV1(action, result.program, result.arguments),
+        state: RuntimeStateV1(phase, identity, -1, "actual-fresh-workspace"),
+        exit_code: result.exit_code, stdout: result.output, stderr: "", reason: "actual-fresh-workspace")))
+
+# Internal exact effect mapping. Callers cannot choose argv, format or permit.
+fn workspace_workflow_effect_v3(action: ContainerWorkspaceActionV3, stage: i64) -> Option<(LinuxFreshWorkloadActionV2, text)>:
+    match action:
+        case ContainerWorkspaceActionV3.Create:
+            if stage == 0: return Some((LinuxFreshWorkloadActionV2.PullImage, "pull-image"))
+            if stage == 1: return Some((LinuxFreshWorkloadActionV2.Create, "create"))
+            if stage == 2: return Some((LinuxFreshWorkloadActionV2.Inspect, "inspect-created"))
+            if stage == 3: return Some((LinuxFreshWorkloadActionV2.ConfigurationBefore, "configuration-before"))
+            if stage == 4: return Some((LinuxFreshWorkloadActionV2.ConfigurationImage, "configuration-image"))
+            if stage == 5: return Some((LinuxFreshWorkloadActionV2.ConfigurationAfter, "configuration-after"))
+        case ContainerWorkspaceActionV3.Start:
+            if stage == 0: return Some((LinuxFreshWorkloadActionV2.Start, "start"))
+            if stage == 1: return Some((LinuxFreshWorkloadActionV2.Inspect, "inspect"))
+            if stage == 3: return Some((LinuxFreshWorkloadActionV2.Inspect, "inspect-confirm"))
+        case ContainerWorkspaceActionV3.Configuration:
+            if stage == 0: return Some((LinuxFreshWorkloadActionV2.ConfigurationBefore, "configuration-before"))
+            if stage == 1: return Some((LinuxFreshWorkloadActionV2.ConfigurationImage, "configuration-image"))
+            if stage == 2: return Some((LinuxFreshWorkloadActionV2.ConfigurationAfter, "configuration-after"))
+        case ContainerWorkspaceActionV3.InputConfiguration:
+            if stage == 0: return Some((LinuxFreshWorkloadActionV2.InputConfigurationBefore, "input-configuration-before"))
+            if stage == 1: return Some((LinuxFreshWorkloadActionV2.InputConfigurationImage, "input-configuration-image"))
+            if stage == 2: return Some((LinuxFreshWorkloadActionV2.InputConfigurationAfter, "input-configuration-after"))
+        case ContainerWorkspaceActionV3.Stop:
+            if stage == 0: return Some((LinuxFreshWorkloadActionV2.Stop, "stop"))
+        case ContainerWorkspaceActionV3.Destroy:
+            if stage == 0: return Some((LinuxFreshWorkloadActionV2.Stop, "stop"))
+            if stage == 1: return Some((LinuxFreshWorkloadActionV2.Remove, "remove"))
+            if stage == 2: return Some((LinuxFreshWorkloadActionV2.Absence, "absence"))
+        case _: pass
+    nil
+
+fn workspace_workflow_step_inner_v3(storage: MachineStorageOwnerV1,
+        custody: LinuxFreshEpochSuccessorCustodyV1, state: MachineFreshWorkloadLifecycleV2,
+        generation: i64) -> Result<Option<RuntimeOperationV1>, text>:
+    val active = state.workflow_current_v3()?
+    if active.3: return Err("machine-fresh-workspace-workflow-cancelled")
+    val action = active.0
+    val stage = active.1
+    val record = state.record_v3()?
+    val view = machine_fresh_record_view_v3(record)
+    if state.helper_pending_v3()?:
+        val progressed = machine_fresh_workload_progress_v3(storage, custody, state)?
+        if progressed.is_some():
+            val advanced = state.workflow_advance_v3()?
+        return Ok(nil)
+    val effect = workspace_workflow_effect_v3(action, stage)
+    if val selected = effect:
+        # Destroy may follow an independently completed signed Stop; this does
+        # not manufacture a second Stop result or reconsume its native permit.
+        val prior = state.action_state_v2(selected.1)
+        if action == ContainerWorkspaceActionV3.Destroy and stage == 0 and prior.is_ok() and prior.unwrap().state == "completed":
+            val advanced = state.workflow_advance_v3()?
+            return Ok(nil)
+        val name = state.name_v2(selected.1)?
+        val begun = machine_fresh_workload_begin_v3(storage, custody, state, generation, selected.0, name, active.2)
+        if begun.is_err():
+            val retained = state.after_action_v2(Err(begun.unwrap_err()))
+            return Err(begun.unwrap_err())
+        return Ok(nil)
+    if action == ContainerWorkspaceActionV3.Prepare:
+        return workspace_workflow_reply_v3(state, "prepare", RUNTIME_PHASE_PREPARED, MachineFreshWorkloadActionResultV2(true, "", 0, ""))
+    if action == ContainerWorkspaceActionV3.Create:
+        val verified = state.configuration_v2(LinuxFreshWorkloadActionV2.ConfigurationAfter, state.history_v2()?.epoch)?
+        return workspace_workflow_reply_v3(state, "create", RUNTIME_PHASE_CREATED, state.completed_result_v3("create")?)
+    if action == ContainerWorkspaceActionV3.Configuration or action == ContainerWorkspaceActionV3.InputConfiguration:
+        val kind = if action == ContainerWorkspaceActionV3.InputConfiguration: LinuxFreshWorkloadActionV2.InputConfigurationAfter else: LinuxFreshWorkloadActionV2.ConfigurationAfter
+        val actual = state.configuration_v2(kind, state.history_v2()?.epoch)?
+        return workspace_workflow_reply_v3(state, container_workspace_action_name_v3(action), RUNTIME_PHASE_CREATED,
+            MachineFreshWorkloadActionResultV2(true, actual, 0, ""))
+    if action == ContainerWorkspaceActionV3.Start:
+        val id = state.native_id_v2()?
+        val before = machine_fresh_record_inspect_v3(record, id, state.output_v2("inspect")?)?
+        if stage == 2:
+            val captured = state.capture_subject_v2(before, sha256_text(machine_fresh_record_id_v3(record)? + "\n" + id + "\n" + state.output_v2("inspect")?))?
+            val advanced = state.workflow_advance_v3()?
+            return Ok(nil)
+        if stage == 4:
+            val after = machine_fresh_record_inspect_v3(record, id, state.output_v2("inspect-confirm")?)?
+            val command = machine_fresh_record_command_v3(record, LinuxFreshWorkloadActionV2.Inspect, id)?
+            val evidence = state.validate_subject_v2(custody, command, before, after)?
+            val published = workload_publish_v3(storage, state, machine_fresh_record_association_entries_v3(record, id, evidence, time_sample_unix_micros_or_failure() / 1000)?)?
+            val associated = state.associated_v2()?
+            val advanced = state.workflow_advance_v3()?
+            return Ok(nil)
+        # Association was published in an earlier continuation turn. Recheck
+        # the SAME actual retained subject at delivery; cached success is not a
+        # current Running observation if the payload exited between turns.
+        val current_command = machine_fresh_record_command_v3(record, LinuxFreshWorkloadActionV2.Inspect, id)?
+        val current = state.running_v2(custody, current_command)?
+        if current.state != LinuxContainerContainmentPopulationV1.Populated: return Err("machine-fresh-workspace-running-unproven")
+        return workspace_workflow_reply_v3(state, "start", RUNTIME_PHASE_RUNNING, state.completed_result_v3("start")?)
+    val command = machine_fresh_record_command_v3(record, LinuxFreshWorkloadActionV2.Inspect, state.native_id_v2()?)?
+    if action == ContainerWorkspaceActionV3.Inspect or action == ContainerWorkspaceActionV3.Stop:
+        val native = state.running_v2(custody, command)?
+        val populated = native.state == LinuxContainerContainmentPopulationV1.Populated
+        if action == ContainerWorkspaceActionV3.Stop and populated: return Err("machine-fresh-workspace-stop-unproven")
+        return workspace_workflow_reply_v3(state, container_workspace_action_name_v3(action),
+            if populated: RUNTIME_PHASE_RUNNING else: RUNTIME_PHASE_STOPPED,
+            if action == ContainerWorkspaceActionV3.Stop: state.completed_result_v3("stop")? else: MachineFreshWorkloadActionResultV2(true, "", 0, ""))
+    if action == ContainerWorkspaceActionV3.Destroy:
+        val absent = machine_fresh_absence_observe_v3(custody, record, state.workspace_binding_option_v3()?,
+            machine_fresh_record_command_v3(record, LinuxFreshWorkloadActionV2.Absence, state.native_id_v2()?)?)?
+        val correlated = state.validate_closure_v2(absent)?
+        # OCI absence is observed; execution/storage settlement remains a
+        # separate genuine retained-source transaction. No charge is refunded.
+        return workspace_workflow_reply_v3(state, "destroy", RUNTIME_PHASE_DESTROYED, state.completed_result_v3("remove")?)
+    Err("machine-fresh-workspace-workflow-stage")
+
+pub(package) fn machine_workspace_workflow_step_v3(storage: MachineStorageOwnerV1,
+        custody: LinuxFreshEpochSuccessorCustodyV1, state: MachineFreshWorkloadLifecycleV2,
+        generation: i64) -> Result<Option<RuntimeOperationV1>, text>:
+    # Copied/repeated completed-step calls refuse before touching canonical
+    # failure state. A real active-step failure retains Unknown and cannot be
+    # retried into a successful publication or another launch permission.
+    val active = state.workflow_current_v3()?
+    val result = workspace_workflow_step_inner_v3(storage, custody, state, generation)
+    if result.is_err():
+        val retained = state.unknown_v2(result.unwrap_err())?
+        return Err(state.diagnostic_v2()?)
+    result

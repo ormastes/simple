@@ -1,0 +1,95 @@
+# AUTHORED/NOT_RUN. Pure DATA and source boundaries only. No native fixture or
+# partial owner is opened inside a short-lived test worker.
+use std.nogc_sync_mut.orchestration.host_service_agent_installed_v7.host_agent_installed_scope_match_v7
+use std.nogc_sync_mut.orchestration.host_runtime_exec_no_begin_cancel_evidence_v3.host_runtime_exec_no_begin_presence_data_v3
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, ContainerHostObservationV2}
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+
+fn installed_scope_data_v7() -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "host-a", service_scope_id: "service-a", boot_id: "boot-a",
+        provider_generation: 1, native_machine_id: "machine-a", continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot-a")
+
+fn installed_observation_data_v7() -> ContainerHostObservationV2:
+    ContainerHostObservationV2(backend: "linux-podman", native_machine_id: "machine-a", native_boot_id: "boot-a",
+        provider_identity_digest: "a".repeat(64), execution_os: "linux", architecture: "x86_64",
+        continuity_assurance: "native-boot-incarnation-v1", boot_observation: "")
+
+describe "protected Agent installed opener DATA and source boundaries":
+    it "matches exact scope DATA without granting acquisition or launch":
+        val scope = installed_scope_data_v7()
+        expect(host_agent_installed_scope_match_v7(scope, scope, installed_observation_data_v7(), "a".repeat(64)).unwrap()).to_equal(true)
+
+    it "rejects changed scope generation service identity and provider observation":
+        val expected = installed_scope_data_v7()
+        var actual = expected
+        actual.provider_generation = 2
+        expect(host_agent_installed_scope_match_v7(expected, actual, installed_observation_data_v7(), "a".repeat(64)).is_err()).to_equal(true)
+        actual = expected
+        actual.service_scope_id = "different-service"
+        expect(host_agent_installed_scope_match_v7(expected, actual, installed_observation_data_v7(), "a".repeat(64)).is_err()).to_equal(true)
+        actual = expected
+        actual.native_machine_id = "different-machine"
+        expect(host_agent_installed_scope_match_v7(expected, actual, installed_observation_data_v7(), "a".repeat(64)).is_err()).to_equal(true)
+        var observed = installed_observation_data_v7()
+        observed.provider_identity_digest = "b".repeat(64)
+        expect(host_agent_installed_scope_match_v7(expected, expected, observed, "a".repeat(64)).is_err()).to_equal(true)
+        observed = installed_observation_data_v7()
+        observed.native_boot_id = "different-boot"
+        expect(host_agent_installed_scope_match_v7(expected, expected, observed, "a".repeat(64)).is_err()).to_equal(true)
+
+    it "holds partial actual acquisitions before error checks and avoids legacy graph opening":
+        val source = file_read_regular_no_follow_bounded("src/lib/nogc_sync_mut/orchestration/host_service_agent_installed_v7.spl", 262144).unwrap()
+        expect(source.contains("host_local_runtime_open_v1(")).to_equal(false)
+        expect(source.contains("simple_container_open_v2(")).to_equal(false)
+        expect(source.contains("simple_container_observe_v2(")).to_equal(false)
+        expect(source.contains("owner.root_reader = opened.owner\n    if not opened.ready")).to_equal(true)
+        expect(source.contains("owner.parent_reader = parent.owner\n    if not parent.ready")).to_equal(true)
+        expect(source.contains("owner.workspace = Some(workspace)\n    if workspace.error")).to_equal(true)
+        expect(source.contains("owner.journal_cleanup = Some(cleanup)\n            return installed_error_v7")).to_equal(true)
+
+    it "uses protected journal evidence and retains unknown cleanup instead of closing by absence":
+        val source = file_read_regular_no_follow_bounded("src/lib/nogc_sync_mut/orchestration/host_linux_completion_evidence_v3.spl", 262144).unwrap()
+        expect(source.contains("distributed_operation_journal_linux_current_v3(journal)?")).to_equal(true)
+        expect(source.contains("file_read_regular_no_follow_bounded")).to_equal(false)
+        expect(source.contains("host_cleanup_receipt_match_v1(")).to_equal(true)
+        expect(source.contains("host_cleanup_intent_match_v1(")).to_equal(true)
+        expect(source.contains("host_primary_connection_completion_evidence_v2(journal, operation)")).to_equal(true)
+        val opener = file_read_regular_no_follow_bounded("src/lib/nogc_sync_mut/orchestration/host_service_agent_installed_v7.spl", 262144).unwrap()
+        expect(opener.contains("if owner.cleanup_uncertain: return installed_error_v7(owner, owner.error)")).to_equal(true)
+        expect(opener.contains("owner.workspace = closed.retained\n        if closed.retained.is_none() and not closed.closed: owner.cleanup_uncertain = true")).to_equal(true)
+        expect(opener.contains("owner.root_reader = closed.owner\n        if closed.owner.is_none() and not closed.completed: owner.cleanup_uncertain = true")).to_equal(true)
+
+    it "distinguishes protected positive absence from unknown read errors":
+        expect(host_runtime_exec_no_begin_presence_data_v3(Ok(nil)).unwrap()).to_equal(false)
+        expect(host_runtime_exec_no_begin_presence_data_v3(Ok(Some(""))).unwrap()).to_equal(true)
+        expect(host_runtime_exec_no_begin_presence_data_v3(Ok(Some("receipt"))).unwrap()).to_equal(true)
+        for reason in ["protected-storage-inaccessible", "protected-storage-held-changed", "protected-storage-read-bound"]:
+            expect(host_runtime_exec_no_begin_presence_data_v3(Err(reason)).unwrap_err()).to_equal(reason)
+
+    it "routes every protected child and no-begin historical reader through the same journal":
+        val child = file_read_regular_no_follow_bounded("src/lib/nogc_sync_mut/orchestration/host_runtime_exec_projection_v3.spl", 262144).unwrap()
+        for role in ["host-runtime-exec-requests/", "reservation-payloads/", "host-execute-packets/"]:
+            expect(child.contains("distributed_operation_journal_read_required_v3(journal, \"" + role)).to_equal(true)
+        expect(child.contains("if journal.linux_storage.is_some(): host_execution_intent_load_owned_v3(journal, parent.id)?")).to_equal(true)
+        expect(child.contains("if journal.linux_storage.is_some(): host_execution_observation_load_owned_v3(journal, parent.id)?")).to_equal(true)
+        val cancellation = file_read_regular_no_follow_bounded("src/lib/nogc_sync_mut/orchestration/host_runtime_exec_no_begin_cancel_evidence_v3.spl", 262144).unwrap()
+        val presence = cancellation.split("fn no_begin_entry_present_v3(")[1].split("pub fn host_runtime_exec_no_begin_cancel_load_v3(")[0]
+        expect(presence.contains("if journal.linux_storage.is_some():")).to_equal(true)
+        expect(presence.contains("return host_runtime_exec_no_begin_presence_data_v3(distributed_operation_journal_read_v3(")).to_equal(true)
+        expect(cancellation.contains("distributed_operation_journal_read_required_v3(journal, \"host-runtime-exec-no-begin-cancellations/")).to_equal(true)
+        expect(cancellation.contains("history.revision_endpoints[receipt.before_commit_digest] != receipt.before_sequence")).to_equal(true)
+        expect(cancellation.contains("edge.last_from_state != \"admitted\"")).to_equal(true)
+
+    it "quarantines every refused incoming actual local without granting its authority":
+        val source = file_read_regular_no_follow_bounded("src/lib/nogc_sync_mut/orchestration/host_service_agent_installed_v7.spl", 262144).unwrap()
+        val retain = source.split("pub fn host_service_agent_installed_retain_v7(")[1].split("fn installed_rejected_local_v7(")[0]
+        val refusals = retain.split("owner.local = Some(local)")[0]
+        expect(refusals.contains("return installed_error_v7(")).to_equal(false)
+        expect(refusals.contains("installed_rejected_local_v7(owner, local, \"host-agent-installed-not-live\")")).to_equal(true)
+        expect(refusals.contains("installed_rejected_local_v7(owner, local, \"host-agent-installed-returned-owner-mismatch\")")).to_equal(true)
+        val rejected = source.split("fn installed_rejected_local_v7(")[1].split("pub fn host_service_agent_installed_retain_rejected_v7(")[0]
+        expect(rejected.contains("turn.rejected_local = Some(HostAgentInstalledRejectedLocalV7(incoming))")).to_equal(true)
+        val opaque = source.split("pub class HostAgentInstalledRejectedLocalV7:")[1].split("pub struct HostAgentInstalledTurnV7:")[0]
+        expect(opaque.contains("pub fn")).to_equal(false)
+        expect(opaque.contains("pub me")).to_equal(false)
+        expect(source.contains("host_service_agent_installed_retain_v7(owner, rejected.local)")).to_equal(true)

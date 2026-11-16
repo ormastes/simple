@@ -1,0 +1,163 @@
+# Closed versioned DATA dispatch for the SAME canonical workload lifecycle.
+# No writer/native/source owner is constructed or exposed by this projection.
+use std.nogc_sync_mut.container.machine_fresh_workload_record_v2.*
+use std.nogc_sync_mut.container.machine_fresh_workspace_record_v3.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.linux_fresh_workload_v2.*
+use std.nogc_async_mut.container.providers.linux.request_v1.LinuxOciRequestV1
+use std.common.contracts.distributed_operation_state_v2.DistributedOperationStateV2
+use std.nogc_sync_mut.database.wal.WalEntry
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.container.machine_fresh_workload_settlement_v2.*
+
+pub enum MachineFreshWorkloadRecordDispatchV3:
+    CpuV2(record: MachineFreshWorkloadRecordV2)
+    WorkspaceV3(record: MachineFreshWorkspaceRecordV3)
+
+pub struct MachineFreshWorkloadRecordViewV3:
+    epoch_digest: text
+    initial_commit: text
+    scope: ContainerHostScopeV2
+    request: ContainerExecutionRequestV2
+    principal_digest: text
+    principal_id: text
+    cpu_millis: i64
+    memory_bytes: i64
+    helper_cpu_millis: i64
+    helper_memory_bytes: i64
+    remaining_cpu_millis: i64
+    remaining_memory_bytes: i64
+
+pub fn machine_fresh_record_view_v3(record: MachineFreshWorkloadRecordDispatchV3) -> MachineFreshWorkloadRecordViewV3:
+    match record:
+        case MachineFreshWorkloadRecordDispatchV3.CpuV2(value):
+            MachineFreshWorkloadRecordViewV3(epoch_digest: value.epoch_digest,
+                initial_commit: value.initial_commit,
+                scope: value.scope,
+                request: value.request,
+                principal_digest: value.principal_digest,
+                principal_id: value.principal_id,
+                cpu_millis: value.cpu_millis,
+                memory_bytes: value.memory_bytes,
+                helper_cpu_millis: value.helper_cpu_millis,
+                helper_memory_bytes: value.helper_memory_bytes,
+                remaining_cpu_millis: value.remaining_cpu_millis,
+                remaining_memory_bytes: value.remaining_memory_bytes)
+        case MachineFreshWorkloadRecordDispatchV3.WorkspaceV3(value):
+            MachineFreshWorkloadRecordViewV3(epoch_digest: value.epoch_digest,
+                initial_commit: value.initial_commit,
+                scope: value.scope,
+                request: value.request,
+                principal_digest: value.principal_digest,
+                principal_id: value.principal_id,
+                cpu_millis: value.cpu_millis,
+                memory_bytes: value.memory_bytes,
+                helper_cpu_millis: value.helper_cpu_millis,
+                helper_memory_bytes: value.helper_memory_bytes,
+                remaining_cpu_millis: value.remaining_cpu_millis,
+                remaining_memory_bytes: value.remaining_memory_bytes)
+
+pub fn machine_fresh_record_cpu_v3(record: MachineFreshWorkloadRecordDispatchV3) -> Result<MachineFreshWorkloadRecordV2, text>:
+    match record:
+        case MachineFreshWorkloadRecordDispatchV3.CpuV2(value): Ok(value)
+        case _: Err("machine-fresh-workspace-explicit-v3-port-required")
+
+pub fn machine_fresh_record_workspace_v3(record: MachineFreshWorkloadRecordDispatchV3) -> Result<MachineFreshWorkspaceRecordV3, text>:
+    match record:
+        case MachineFreshWorkloadRecordDispatchV3.WorkspaceV3(value): Ok(value)
+        case _: Err("machine-fresh-workload-workspace-mode-required")
+
+pub fn machine_fresh_record_bytes_v3(record: MachineFreshWorkloadRecordDispatchV3) -> Result<text, text>:
+    match record:
+        case MachineFreshWorkloadRecordDispatchV3.CpuV2(value): machine_fresh_workload_bytes_v2(value)
+        case MachineFreshWorkloadRecordDispatchV3.WorkspaceV3(value): machine_fresh_workspace_bytes_v3(value)
+
+pub fn machine_fresh_record_id_v3(record: MachineFreshWorkloadRecordDispatchV3) -> Result<text, text>:
+    Ok(sha256_text(machine_fresh_record_bytes_v3(record)?))
+
+pub fn machine_fresh_record_request_v3(record: MachineFreshWorkloadRecordDispatchV3) -> Result<LinuxOciRequestV1, text>:
+    match record:
+        case MachineFreshWorkloadRecordDispatchV3.CpuV2(value): machine_fresh_workload_request_v2(value.scope, value.request)
+        case MachineFreshWorkloadRecordDispatchV3.WorkspaceV3(value): machine_fresh_workspace_request_v3(value.scope, value.request, value.binding)
+
+pub fn machine_fresh_record_command_v3(record: MachineFreshWorkloadRecordDispatchV3,
+        action: LinuxFreshWorkloadActionV2, native_id: text, observed_image_id: text = "") -> Result<LinuxFreshWorkloadCommandV2, text>:
+    match record:
+        case MachineFreshWorkloadRecordDispatchV3.CpuV2(value): machine_fresh_workload_command_v2(value, action, native_id, observed_image_id)
+        case MachineFreshWorkloadRecordDispatchV3.WorkspaceV3(value):
+            val workspace = machine_fresh_workspace_command_v3(value, action, native_id, observed_image_id)?
+            Ok(workspace.command)
+
+pub fn machine_fresh_record_reserve_entries_v3(record: MachineFreshWorkloadRecordDispatchV3,
+        at: i64) -> Result<[WalEntry], text>:
+    match record:
+        case MachineFreshWorkloadRecordDispatchV3.CpuV2(value): machine_fresh_workload_reserve_entries_v2(value, at)
+        case MachineFreshWorkloadRecordDispatchV3.WorkspaceV3(value): machine_fresh_workspace_reserve_entries_v3(value, at)
+
+pub fn machine_fresh_record_action_initial_v3(record: MachineFreshWorkloadRecordDispatchV3,
+        action: text, generation: i64) -> Result<DistributedOperationStateV2, text>:
+    match record:
+        case MachineFreshWorkloadRecordDispatchV3.CpuV2(value): machine_fresh_workload_action_initial_v2(value, action, generation)
+        case MachineFreshWorkloadRecordDispatchV3.WorkspaceV3(value): machine_fresh_workspace_action_initial_v3(value, action, generation)
+
+pub fn machine_fresh_record_action_entries_v3(record: MachineFreshWorkloadRecordDispatchV3,
+        state: DistributedOperationStateV2, native_id: text, evidence: text, at: i64) -> Result<[WalEntry], text>:
+    match record:
+        case MachineFreshWorkloadRecordDispatchV3.CpuV2(value): machine_fresh_workload_action_entries_v2(value, state, native_id, evidence, at)
+        case MachineFreshWorkloadRecordDispatchV3.WorkspaceV3(value): machine_fresh_workspace_action_entries_v3(value, state, native_id, evidence, at)
+
+pub fn machine_fresh_record_settle_entries_v3(record: MachineFreshWorkloadRecordDispatchV3,
+        terminal: DistributedOperationStateV2, at: i64) -> Result<[WalEntry], text>:
+    match record:
+        case MachineFreshWorkloadRecordDispatchV3.CpuV2(value): machine_fresh_workload_settle_entries_v2(value, terminal, at)
+        case MachineFreshWorkloadRecordDispatchV3.WorkspaceV3(value): machine_fresh_workspace_settle_entries_v3(value, terminal, at)
+
+pub fn machine_fresh_record_association_entries_v3(record: MachineFreshWorkloadRecordDispatchV3,
+        native_id: text, evidence_digest: text, at: i64) -> Result<[WalEntry], text>:
+    match record:
+        case MachineFreshWorkloadRecordDispatchV3.CpuV2(value): machine_fresh_workload_association_entries_v2(value, native_id, evidence_digest, at)
+        case MachineFreshWorkloadRecordDispatchV3.WorkspaceV3(value): machine_fresh_workspace_association_entries_v3(value, native_id, evidence_digest, at)
+
+pub fn machine_fresh_record_action_batch_entries_v3(record: MachineFreshWorkloadRecordDispatchV3,
+        states: [DistributedOperationStateV2], native_id: text, evidence: text, at: i64) -> Result<[WalEntry], text>:
+    match record:
+        case MachineFreshWorkloadRecordDispatchV3.CpuV2(value): machine_fresh_workload_action_batch_entries_v2(value, states, native_id, evidence, at)
+        case MachineFreshWorkloadRecordDispatchV3.WorkspaceV3(value): machine_fresh_workspace_action_batch_entries_v3(value, states, native_id, evidence, at)
+
+pub fn machine_fresh_record_runtime_v3(record: MachineFreshWorkloadRecordDispatchV3, native_id: text) -> Result<RuntimeIdentityV1, text>:
+    val value = machine_fresh_record_view_v3(record)
+    Ok(RuntimeIdentityV1(pod_uid: value.request.plan.workload_uid, attempt: value.request.plan.attempt,
+        provider_generation: value.scope.provider_generation, operation_id: value.request.plan.operation_id,
+        engine: "podman", native_id: native_id, node_boot_id: container_scope_fence_id_v2(value.scope)?))
+
+pub fn machine_fresh_record_reservation_stage_v3(progress: MachineFreshWorkloadReservationProgressV2,
+        record: MachineFreshWorkloadRecordDispatchV3) -> Result<MachineFreshWorkloadReservationProgressV2, text>:
+    if progress.phase != "empty" or progress.record_digest != "": return Err("machine-fresh-workload-reservation-already-staged")
+    Ok(MachineFreshWorkloadReservationProgressV2("staged", machine_fresh_record_id_v3(record)?))
+
+pub fn machine_fresh_record_reservation_confirm_v3(progress: MachineFreshWorkloadReservationProgressV2,
+        record: MachineFreshWorkloadRecordDispatchV3) -> Result<MachineFreshWorkloadReservationProgressV2, text>:
+    if progress.phase != "publication-unknown" or progress.record_digest != machine_fresh_record_id_v3(record)?:
+        return Err("machine-fresh-workload-reservation-publication-unproven")
+    Ok(MachineFreshWorkloadReservationProgressV2("admitted", progress.record_digest))
+
+pub fn machine_fresh_record_reservation_require_v3(progress: MachineFreshWorkloadReservationProgressV2,
+        record: MachineFreshWorkloadRecordDispatchV3) -> Result<(), text>:
+    if progress.phase != "admitted" or progress.record_digest != machine_fresh_record_id_v3(record)?:
+        return Err("machine-fresh-workload-reservation-publication-unproven")
+    Ok(())
+
+pub fn machine_fresh_record_prepare_settlement_v3(progress: MachineFreshWorkloadSettlementProgressV2,
+        record: MachineFreshWorkloadRecordDispatchV3, terminal: DistributedOperationStateV2,
+        at: i64) -> Result<(MachineFreshWorkloadSettlementProgressV2, [WalEntry]), text>:
+    match record:
+        case MachineFreshWorkloadRecordDispatchV3.CpuV2(value): machine_fresh_workload_prepare_settlement_v2(progress, value, terminal, at)
+        case MachineFreshWorkloadRecordDispatchV3.WorkspaceV3(value):
+            if (not progress.associated or not progress.helper_retired or not progress.native_retained or
+                    not progress.absence_completed or progress.uncertain or progress.settled or progress.phase != "idle"):
+                return Err("machine-fresh-workload-settlement-ineligible")
+            var reserved = progress
+            reserved.phase = "settlement-reserved"
+            val rows = machine_fresh_workspace_settle_entries_v3(value, terminal, at)?
+            Ok((reserved, rows))
