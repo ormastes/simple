@@ -32,6 +32,7 @@ Traceability: REQ-WEB-RENDER-001 — direction:rtl keeps Latin text in logical o
 # @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_primitives.spl 1%
 use std.spec.*
 use std.io_runtime.{file_exists}
+use std.nogc_sync_mut.io.env_ops.{env_set}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_draw_ir,
     simple_web_layout_render_html_software_pixels
@@ -147,8 +148,14 @@ describe "direction:rtl keeps Latin text in logical order (Chrome 159)":
         expect(_value_text("q")).to_equal("ABCDE")
 
     it "AC-5: the software raster and the Engine2D path paint Chrome's order":
+        # Glyph ORDER is under test here, not antialiasing. LCD subpixel text
+        # (lcd_subpixel_text_chrome159_spec) places the end-aligned rtl run on
+        # a quarter-pixel phase the ltr run does not share, so the shifted ink
+        # masks differ by AA alone. Pin the order on the grayscale raster.
+        env_set("SIMPLE_WEB_LCD_TEXT", "0")
         _check_pixels(simple_web_layout_render_html_software_pixels(PAGE, W, H))
         _check_pixels(simple_web_render_html_to_pixels(PAGE, W, H))
+        env_set("SIMPLE_WEB_LCD_TEXT", "1")
 
 describe "direction:rtl logical order on a real Vulkan device":
     it "AC-6: a Vulkan device readback paints Chrome's order":
@@ -158,6 +165,9 @@ describe "direction:rtl logical order on a real Vulkan device":
         if not file_exists("/usr/share/vulkan/icd.d/lvp_icd.json"):
             print("[skip] AC-6: no llvmpipe ICD; this Vulkan row was not exercised")
             return
+        # Vulkan text is still grayscale (doc/08_tracking/bug/vulkan_font_lcd_subpixel_text_not_implemented_2026-11-16.md),
+        # so the device frame must equal the grayscale Engine2D CPU frame.
+        env_set("SIMPLE_WEB_LCD_TEXT", "0")
         step("the request really resolved to Vulkan (no silent software fallback)")
         expect(simple_web_resolved_engine2d_backend_name(W, H, "vulkan")).to_equal("vulkan")
         val rb = simple_web_render_html_to_readback_with_engine2d_backend(PAGE, W, H, "vulkan")
@@ -168,3 +178,4 @@ describe "direction:rtl logical order on a real Vulkan device":
         # is compared with the Engine2D CPU frame it must reproduce.
         step("the device frame equals the Engine2D CPU frame")
         expect(rb.pixels).to_equal(simple_web_render_html_to_pixels(PAGE, W, H))
+        env_set("SIMPLE_WEB_LCD_TEXT", "1")
