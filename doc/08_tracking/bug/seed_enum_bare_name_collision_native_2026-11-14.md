@@ -96,9 +96,17 @@ Open, recorded rather than fixed:
   ("called unwrap on Err"): every Stage 2 llvm native-build failed with
   `E-BACKEND-LLVM-CONST-GARBAGE` (base d63d23935b6: old seed llvm `hello 42`,
   fixed seed garbage; struct-key/transient merges not involved). Both now
-  require enum id 0 or 2, matching the C twin. Still open: `rt_try_is_absent`
-  with `expected_enum_id == 0` (erased `?`) and `rt_enum_check_variant` id-0
-  wildcard callers match any enum at the Err/Ok index.
+  require enum id 0 or 2, matching the C twin. Round 3: `rt_try_is_absent`
+  with `expected_enum_id == 0` (erased `?`) now counts only a Result's Err, and
+  `rt_unwrap_or_value` / `rt_is_present` / `rt_option_map` accept id 2 (Rust
+  and C). `?` takes Err from the subject's owner. By design still open:
+  `rt_enum_check_variant`'s id-0 wildcard (erased user `case` arms rely on it,
+  so untyped `is_ok`/`is_err` match any enum at 0/1), and a user enum whose
+  FNV runtime id lands on 2 reads as a Result (~1 in 2^31).
+- The integ lane's `stage2-runtime-authority/libsimple_native_all.a` is the
+  pinned tree's own `src/compiler_rust/target/bootstrap` build (integ5: same
+  sha256), so the runtime fix reaches a lane through its source tree; the
+  frozen hosted rlib and compiler backfill define none of the changed symbols.
 - **native -> interpreter enums are not bridged at all:**
   `runtime_bridge.rs` `runtime_to_value_inner` (~442) has no
   `HeapObjectType::Enum` arm, so a native enum value crossing back into the
