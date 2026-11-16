@@ -50,34 +50,78 @@ fn _layout_block_node(node: BeDomNode, x: f64, y: f64, avail_w: f64, avail_h: f6
 
     # Element node
     val style = node.style
-    val self_w = if style.width > 0.0: style.width else: avail_w
     val px = style.padding_left + style.padding_right + style.border_width * 2.0
     val py = style.padding_top + style.padding_bottom + style.border_width * 2.0
+    val border_box = style.box_sizing == "border-box"
+
+    # An explicit width is the content-box width unless box-sizing:border-box
+    # (CSS Box Sizing 3 §4); a border box never shrinks below its insets.
+    var self_w = avail_w
+    if style.width > 0.0:
+        self_w = style.width
+        if not border_box:
+            self_w = style.width + px
+        if self_w < px:
+            self_w = px
 
     var box = BeLayoutBox.block_for(node, x, y, self_w, 0.0)
 
-    # Layout children top-down
+    # Layout children top-down. Adjoining sibling margins collapse in block
+    # flow only (CSS 2.2 §8.3.1); flex items never collapse (CSS Flexbox 1
+    # §4.2). Parent/child collapse is not modelled: the first child's top and
+    # last child's bottom margins stay inside this box's content height.
+    val collapse = style.display != "flex" and style.display != "inline-flex"
     val inner_x = x + style.padding_left + style.border_width
-    var cursor_y = y + style.padding_top + style.border_width
+    val content_top = y + style.padding_top + style.border_width
+    # cursor_y = bottom border edge of the previous child (or content top)
+    var cursor_y = content_top
     val inner_w = self_w - px
+    var prev_mb = 0.0
+    var has_prev = false
 
     var i = 0
     val child_count = node.children.len()
     while i < child_count:
-        val child_box = _layout_block_node(node.children[i], inner_x, cursor_y, inner_w, avail_h)
-        val child_h = child_box.height + child_box.margin_top + child_box.margin_bottom
-        cursor_y = cursor_y + child_h
+        val child = node.children[i]
+        val child_mt = if child.is_text(): 0.0 else: child.style.margin_top
+        var gap = prev_mb + child_mt
+        if has_prev and collapse:
+            gap = _collapse_margins(prev_mb, child_mt)
+        val child_box = _layout_block_node(child, inner_x, cursor_y + gap, inner_w, avail_h)
+        cursor_y = cursor_y + gap + child_box.height
+        prev_mb = child_box.margin_bottom
+        has_prev = true
         box.children.push(child_box)
         i = i + 1
+    cursor_y = cursor_y + prev_mb
 
-    # Determine self height
-    val content_h = cursor_y - y - style.padding_top - style.border_width
-    val self_h = if style.height > 0.0: style.height else: content_h + py
-    box.height = self_h
+    # Determine self height: an explicit height is the content height unless
+    # box-sizing:border-box; the content height never goes below 0.
+    var content_h = cursor_y - content_top
+    if style.height > 0.0:
+        content_h = style.height
+        if border_box:
+            content_h = style.height - py
+    if content_h < 0.0:
+        content_h = 0.0
+    box.height = content_h + py
     # Re-sync the stored content height with the resolved border-box height
     # (block_for baked it against the provisional 0.0 height).
-    box.content_height = self_h - py
+    box.content_height = content_h
     box
+
+fn _collapse_margins(a: f64, b: f64) -> f64:
+    """Collapse two adjoining vertical margins (CSS 2.2 §8.3.1): the larger
+    positive one, the most negative one, or their sum when the signs differ."""
+    if a >= 0.0 and b >= 0.0:
+        if a > b:
+            return a
+        return b
+    if a < 0.0 and b < 0.0:
+        if a < b:
+            return a
+        return b
+    a + b
 
 fn layout_node(node: BeDomNode, container: BeLayoutBox, parent_style: StyleProps) -> BeLayoutBox:
     """Lay out a single node within a container box and computed parent style.
