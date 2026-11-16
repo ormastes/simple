@@ -20,6 +20,7 @@
 
 use app.wm_compare_host.fb_driver.{FramebufferDriver, FbColor}
 use app.wm_compare_host.browser_compositor_backend.{BrowserCompositorBackend}
+use std.nogc_sync_mut.ui.compare_view_host.{compare_view_inspect}
 
 # ============================================================================
 # Public result type
@@ -175,13 +176,7 @@ fn render_framebuffer_baseline_via_methods(scene: ParityScene) -> [u32]:
 # ============================================================================
 
 fn _new_buffer(w: u32, h: u32) -> [u32]:
-    var buf: [u32] = []
-    var i: u32 = 0
-    val total = w * h
-    while i < total:
-        buf = buf + [0u32]
-        i = i + 1
-    buf
+    [0u32; (w * h).to_i64()]
 
 fn _software_put(buf: [u32], w: u32, h: u32, x: u32, y: u32, c: u32) -> [u32]:
     """Return buf with pixel (x,y) set to c.
@@ -320,7 +315,7 @@ fn render_browser_shell(scene: ParityScene) -> [u32]:
 
     Note on types: BrowserCompositorBackend's trait surface uses `i32`
     coordinates (top-left origin), whereas ParityOp uses `u32`. The u32
-    → i32 casts are safe because parity scenes are all 32x16."""
+    → i32 casts are safe because parity scenes are 320x160."""
     var bcb = BrowserCompositorBackend.new(scene.width.to_i32(), scene.height.to_i32())
     # Match render_framebuffer_baseline/render_software_reference preamble: start from a fully-zeroed buffer so
     # pre-clear ops behave identically on all three paths.
@@ -386,7 +381,7 @@ fn render_electron_reference(scene: ParityScene) -> [u32]:
     exact compositor electron reference would use in production without requiring a live
     Electron runtime inside the interpreter.
 
-    Note: u32 → i32 casts are safe because parity scenes are all 32x16."""
+    Note: u32 → i32 casts are safe because parity scenes are 320x160."""
     var bcb = BrowserCompositorBackend.new(scene.width.to_i32(), scene.height.to_i32())
     # Match the framebuffer/software/browser preamble: start from a fully-zeroed buffer so
     # pre-clear ops behave identically on all four paths.
@@ -428,6 +423,12 @@ fn _abs_diff(a: u32, b: u32) -> u32:
 fn diff_buffers(name: text, w: u32, h: u32, baseline: [u32], reference: [u32]) -> ParityResult:
     """Compute per-channel max delta and a 1/100-of-a-percent perceptual
     score across two ARGB8888 buffers."""
+    val expected_len = (w * h).to_i64()
+    if w > 0u32 and h > 0u32 and baseline.len() == expected_len and reference.len() == expected_len:
+        val _inspect = compare_view_inspect(
+            "backend_parity_" + name,
+            "baseline", baseline, w.to_i32(), h.to_i32(),
+            "reference", reference, w.to_i32(), h.to_i32())
     var max_delta: u32 = 0
     var differing: u32 = 0
     val total = w * h
@@ -520,17 +521,17 @@ fn scene_solid_fill() -> ParityScene:
     val ops: [ParityOp] = [
         op_clear(255u8, 0x11u8, 0x22u8, 0x33u8),
     ]
-    make_scene("solid_fill", 32u32, 16u32, ops)
+    make_scene("solid_fill", 320u32, 160u32, ops)
 
 fn scene_fill_rect_row_edge() -> ParityScene:
     """Clear, then fill_rect that touches the right column. Exercises the
     half-open `[x, x+w)` edge contract on both backends."""
     val ops: [ParityOp] = [
         op_clear(255u8, 0u8, 0u8, 0u8),
-        op_fill_rect(0u32, 0u32, 32u32, 1u32, 255u8, 0xAAu8, 0xBBu8, 0xCCu8),
-        op_fill_rect(0u32, 15u32, 32u32, 1u32, 255u8, 0xCCu8, 0xBBu8, 0xAAu8),
+        op_fill_rect(0u32, 0u32, 320u32, 1u32, 255u8, 0xAAu8, 0xBBu8, 0xCCu8),
+        op_fill_rect(0u32, 159u32, 320u32, 1u32, 255u8, 0xCCu8, 0xBBu8, 0xAAu8),
     ]
-    make_scene("fill_rect_row_edge", 32u32, 16u32, ops)
+    make_scene("fill_rect_row_edge", 320u32, 160u32, ops)
 
 fn scene_text_with_bg() -> ParityScene:
     """fill_rect background + draw_char(0x20) on top. The parity runner
@@ -539,7 +540,7 @@ fn scene_text_with_bg() -> ParityScene:
     like the software reference stub. This locks the text-bg cell contract."""
     val ops: [ParityOp] = [
         op_clear(255u8, 0x20u8, 0x20u8, 0x20u8),
-        op_fill_rect(0u32, 0u32, 32u32, 16u32, 255u8, 0x10u8, 0x10u8, 0x50u8),
+        op_fill_rect(0u32, 0u32, 320u32, 160u32, 255u8, 0x10u8, 0x10u8, 0x50u8),
         op_draw_char(0u32, 0u32, 0x20u8,
                      255u8, 0xFFu8, 0xFFu8, 0xFFu8,
                      255u8, 0x10u8, 0x10u8, 0x50u8),
@@ -547,16 +548,16 @@ fn scene_text_with_bg() -> ParityScene:
                      255u8, 0xFFu8, 0xFFu8, 0xFFu8,
                      255u8, 0x10u8, 0x10u8, 0x50u8),
     ]
-    make_scene("text_with_bg", 32u32, 16u32, ops)
+    make_scene("text_with_bg", 320u32, 160u32, ops)
 
 fn scene_glass_blend() -> ParityScene:
     """Solid base + a translucent rect — exercises the blend math both
     backends share, the glass-blend degradation path."""
     val ops: [ParityOp] = [
         op_clear(255u8, 0x20u8, 0x40u8, 0x60u8),
-        op_blend_rect(4u32, 4u32, 24u32, 8u32, 255u8, 0xFFu8, 0xFFu8, 0xFFu8, 96u8),
+        op_blend_rect(40u32, 40u32, 240u32, 80u32, 255u8, 0xFFu8, 0xFFu8, 0xFFu8, 96u8),
     ]
-    make_scene("glass_blend", 32u32, 16u32, ops)
+    make_scene("glass_blend", 320u32, 160u32, ops)
 
 fn all_parity_scenes() -> [ParityScene]:
     [scene_solid_fill(), scene_fill_rect_row_edge(), scene_text_with_bg(), scene_glass_blend()]

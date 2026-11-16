@@ -1,16 +1,24 @@
-# `simple build sources [<lib dir>]` — print a library unit's source
+# `simple build sources [--digest] [<lib dir>]` — print a library unit's source
 # inventory: one path per line, relative to <lib dir>, sorted, deduplicated.
-# Selection goes through source_inventory_resolve_unit_v1 so this command and
-# the library-unit build agree on membership. Seam: the include set is the
-# default `**/*.spl` until the simple.sdn unit parser lands.
+# Include/exclude globs come from `<lib dir>/simple.sdn` (project.sources) via
+# library_unit_manifest_parse_v1; an absent manifest means every `.spl`. An
+# invalid manifest exits 2. Listing goes through source_inventory_scan_resolve_v1
+# so this command and the library-unit build agree on membership. `--digest`
+# prints the library unit source digest after the listing.
 
-use app.io.mod.{dir_walk, is_dir}
+use app.io.mod.{is_dir, file_exists, file_read, file_hash_sha256}
 use compiler.driver.driver_build.source_inventory_glob_v1.{source_inventory_resolve_unit_v1}
+use compiler.driver.driver_build.source_inventory_scan_v1.{source_inventory_scan_resolve_v1}
+use compiler.driver.driver_build.library_unit_manifest_v1.{library_unit_manifest_parse_v1}
+use compiler.driver.driver_build.library_unit_digest_v1.{library_unit_source_digest_v1}
+use compiler.driver.driver_build.source_inventory_v1.{SourceInventoryFileV1}
 
 # Returns the lib dir, or "" on a usage error.
 fn _sources_parse_dir(args: [text]) -> text:
     var dir = ""
     for a in args:
+        if a == "--digest":
+            continue
         if a.starts_with("-"):
             return ""
         if dir != "":
@@ -22,7 +30,13 @@ fn _sources_parse_dir(args: [text]) -> text:
         dir = dir[0:dir.len() - 1]
     dir
 
-fn _sources_relative_paths(dir: text, walked: [text]) -> [text]:
+fn _sources_wants_digest(args: [text]) -> bool:
+    for a in args:
+        if a == "--digest":
+            return true
+    false
+
+fn _sources_relative_paths(dir: text, walked: [text], includes: [text], excludes: [text]) -> [text]:
     val prefix = if dir == ".": "" else: dir + "/"
     var rel: [text] = []
     for p in walked:
@@ -31,30 +45,65 @@ fn _sources_relative_paths(dir: text, walked: [text]) -> [text]:
             q = q[2:]
         if prefix == "" or q.starts_with(prefix):
             rel.push(q[prefix.len():])
-    source_inventory_resolve_unit_v1(["**/*.spl"], [], rel)
+    source_inventory_resolve_unit_v1(includes, excludes, rel)
 
-# Pure core: argv + walked paths -> printed inventory ("" on usage error or
-# empty inventory; run_build_sources distinguishes the two).
+fn _sources_join(paths: [text]) -> text:
+    var out = ""
+    for p in paths:
+        out = out + p + "\n"
+    out
+
+# Pure core with the default include set: argv + walked paths -> printed
+# inventory ("" on usage error or empty inventory).
 @allow(primitive_api)  # CLI argv boundary: raw argv and walked fs paths
 pub fn build_sources_output(args: [text], walked: [text]) -> text:
     val dir = _sources_parse_dir(args)
     if dir == "":
         return ""
-    var out = ""
-    for p in _sources_relative_paths(dir, walked):
-        out = out + p + "\n"
-    out
+    _sources_join(_sources_relative_paths(dir, walked, ["**/*.spl"], []))
+
+# Pure core driven by manifest text ("" = no simple.sdn: default globs).
+@allow(primitive_api)  # CLI boundary: manifest text and walked fs paths
+pub fn build_sources_output_for_manifest(dir: text, manifest: text, walked: [text]) -> Result<text, text>:
+    if manifest == "":
+        return Ok(_sources_join(_sources_relative_paths(dir, walked, ["**/*.spl"], [])))
+    val m = match library_unit_manifest_parse_v1(dir, manifest):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    Ok(_sources_join(_sources_relative_paths(dir, walked, m.includes, m.excludes)))
 
 @allow(primitive_api)  # CLI argv boundary: argv in, process exit code out
 pub fn run_build_sources(args: [text]) -> i64:
     val dir = _sources_parse_dir(args)
     if dir == "":
-        print("usage: simple build sources [<lib dir>]")
+        print("usage: simple build sources [--digest] [<lib dir>]")
         return 2
     if not is_dir(dir):
         print("build-sources-error: not a directory: {dir}")
         return 2
-    val text_out = build_sources_output(args, dir_walk(dir))
+    var includes = ["**/*.spl"]
+    var excludes: [text] = []
+    val manifest_path = dir + "/simple.sdn"
+    if file_exists(manifest_path):
+        val content = file_read(manifest_path) ?? ""
+        match library_unit_manifest_parse_v1(dir, content):
+            case Ok(m):
+                includes = m.includes
+                excludes = m.excludes
+            case Err(e):
+                print("build-sources-error: {e}")
+                return 2
+    val paths = source_inventory_scan_resolve_v1(dir, includes, excludes)
+    val text_out = _sources_join(paths)
     if text_out.len() > 0:
         print(text_out[0:text_out.len() - 1])
+    if _sources_wants_digest(args):
+        var files: [SourceInventoryFileV1] = []
+        for p in paths:
+            val h = file_hash_sha256(dir + "/" + p) ?? ""
+            if h == "":
+                print("build-sources-error: cannot hash {p}")
+                return 2
+            files.push(SourceInventoryFileV1(path: p, digest: h))
+        print("digest: {library_unit_source_digest_v1(files)}")
     0

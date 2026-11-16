@@ -1,0 +1,116 @@
+# Read-only supporting recovery custody, never launch/PID/stream authority.
+# Original actual reader stays in its Host owner on every outcome. This view
+# owns no resources, has no registry/close, and never reopens a pathname.
+use std.nogc_sync_mut.io.linux_protected_root_reader_v1.{LinuxProtectedRootReaderV1,
+    linux_protected_root_reader_read_v1,
+    linux_protected_root_reader_require_root_v1}
+use std.nogc_sync_mut.io.group_process_owner.{GroupProcessStreamOwnerV2, group_process_stream_owner_validate_v2}
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2,
+    group_process_stream_launch_encode_profiled_v3, group_process_stream_launch_decode_profiled_v3,
+    group_process_stream_unlaunched_encode_v2}
+use std.common.build_manager.group_process_protocol.{group_process_observation_decode_v1, group_process_memory_receipt_v1}
+use std.common.build_manager.group_process_stream_profile_v3.group_process_stream_resource_receipt_v3
+use std.common.build_manager.group_process_stream_reap_v3.*
+use std.common.build_manager.grouped_execution_contract.{GroupedActionLeaseV1, GroupedReapReceiptV1}
+use std.common.crypto.sha256.sha256_text
+
+pub class GroupProcessStreamRecoveryOwnerV3:
+    reader: LinuxProtectedRootReaderV1
+    launch_source: text
+    identity: text
+
+    pub fn current_v3() -> Result<(), text>:
+        val launch = recovery_expected_v3(self)?
+        linux_protected_root_reader_require_root_v1(self.reader, launch.root)?
+        val claim = recovery_required_v3(self, "broker.claim", 128)?
+        if claim != self.identity: return Err("stream broker claim differs from retained owner")
+        val request = recovery_required_v3(self, "broker.request.sdn", 16777216)?
+        if request != self.launch_source: return Err("stream broker immutable request differs from retained owner")
+        linux_protected_root_reader_require_root_v1(self.reader, launch.root)?
+        Ok(())
+
+    pub fn cleanup_proof_v3() -> Result<text, text>:
+        self.current_v3()?
+        val launch = recovery_expected_v3(self)?
+        val unlaunched = linux_protected_root_reader_read_v1(self.reader, "broker.stream.unlaunched.sdn", 4096)?
+        if unlaunched.is_some():
+            val expected = group_process_stream_unlaunched_encode_v2(self.identity,
+                launch.transport_generation, launch.request.child_argv_digest)
+            if expected == "" or unlaunched.unwrap() != expected:
+                return Err("stream no-child admission proof differs")
+            self.current_v3()?
+            return Ok(unlaunched.unwrap())
+        val terminal = recovery_required_v3(self, "broker.tree.sdn", 4096)?
+        val observed = group_process_observation_decode_v1(self.identity, terminal)?
+        if not observed.terminal or not observed.leader_reaped or not observed.tree_empty or observed.active_processes != 0:
+            return Err("stream group collected terminal proof remains incomplete")
+        val resources = recovery_resources_v3(self, launch)?
+        self.current_v3()?
+        Ok(terminal)
+
+    # Returns DATA from actual retained proof; only the separate trusted Host
+    # verifier may authorize fixed no-replace publication. No missing artifact
+    # is repaired or interpreted as successful reaping here.
+    pub fn prospective_reap_bytes_v3(lease: GroupedActionLeaseV1) -> Result<text, text>:
+        self.current_v3()?
+        val launch = recovery_expected_v3(self)?
+        group_process_stream_reap_lease_validate_v3(launch, lease)?
+        val terminal = self.cleanup_proof_v3()?
+        var memory = ""
+        var resources = ""
+        if not terminal.starts_with("SIMPLE-GROUP-STREAM-UNLAUNCHED-2\n"):
+            val observed = group_process_observation_decode_v1(self.identity, terminal)?
+            memory = recovery_required_v3(self, "broker-memory.sdn", 4096)?
+            val expected_memory = group_process_memory_receipt_v1(self.identity,
+                launch.memory_policy, launch.memory_limit_bytes, observed.memory_peak_bytes, "linux")?
+            if memory != expected_memory: return Err("stream memory receipt differs from admitted owner")
+            resources = recovery_resources_v3(self, launch)?
+        val expected = group_process_stream_reap_bytes_v3(launch, self.identity, lease, terminal, memory, resources)?
+        self.current_v3()?
+        Ok(expected)
+
+    pub fn validate_reap_v3(lease: GroupedActionLeaseV1) -> Result<GroupedReapReceiptV1, text>:
+        self.current_v3()?
+        val launch = recovery_expected_v3(self)?
+        group_process_stream_reap_lease_validate_v3(launch, lease)?
+        # Preserve legacy read-only ordering: a stored exact archive is still
+        # mandatory for validation, and no prospective bytes publish it.
+        val stored = recovery_required_v3(self, "tree-reaped.sdn", 16384)?
+        val expected = self.prospective_reap_bytes_v3(lease)?
+        if stored != expected: return Err("stream terminal evidence is already bound to another lease")
+        self.current_v3()?
+        Ok(GroupedReapReceiptV1(lease.group_id, lease.action_id, lease.worker_id,
+            lease.generation, lease.lease_id, lease.snapshot_digest, lease.cache_identity, sha256_text(stored)))
+
+fn recovery_expected_v3(owner: GroupProcessStreamRecoveryOwnerV3) -> Result<GroupProcessStreamLaunchV2, text>:
+    val launch = group_process_stream_launch_decode_profiled_v3(owner.launch_source)?
+    val invalid = group_process_stream_owner_validate_v2(GroupProcessStreamOwnerV2(launch: launch, identity_digest: owner.identity))
+    if invalid != "": return Err(invalid)
+    Ok(launch)
+
+fn recovery_required_v3(owner: GroupProcessStreamRecoveryOwnerV3, name: text, maximum: i64) -> Result<text, text>:
+    # Every name is selected inside this module; there is no public file port.
+    val value = linux_protected_root_reader_read_v1(owner.reader, name, maximum)?
+    if value.is_none(): return Err("stream recovery required artifact missing:" + name)
+    Ok(value.unwrap())
+
+fn recovery_resources_v3(owner: GroupProcessStreamRecoveryOwnerV3,
+        launch: GroupProcessStreamLaunchV2) -> Result<text, text>:
+    match launch.profile_v3:
+        case None: Ok("")
+        case Some(profile):
+            val expected = group_process_stream_resource_receipt_v3(owner.identity, profile)
+            if expected == "": return Err("invalid stream resource receipt identity")
+            val actual = recovery_required_v3(owner, "broker.resources.sdn", 4096)?
+            if actual != expected: return Err("stream resource receipt differs from admitted profile")
+            Ok(actual)
+
+pub fn group_process_stream_recover_owned_v3(actual_reader: LinuxProtectedRootReaderV1,
+        expected_launch: GroupProcessStreamLaunchV2, expected_identity: text) -> Result<GroupProcessStreamRecoveryOwnerV3, text>:
+    # Reader mechanism is genuine; administrative root selection is a distinct
+    # required Host producer. Archive root text alone never authorizes opening.
+    linux_protected_root_reader_require_root_v1(actual_reader, expected_launch.root)?
+    val source = group_process_stream_launch_encode_profiled_v3(expected_launch)
+    val candidate = GroupProcessStreamRecoveryOwnerV3(reader: actual_reader, launch_source: source, identity: expected_identity)
+    candidate.current_v3()?
+    Ok(candidate)

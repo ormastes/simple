@@ -45,37 +45,77 @@ fn _encode_png(pixels: [u32], width: i32, height: i32, color_type: i64) -> [u8]:
     val idat = _zlib_store(raw)
 
     # IHDR data: width BE, height BE, bit depth 8, color type, 0, 0, 0
-    var ihdr: [u8] = []
-    ihdr = _extend(ihdr, _u32_be(width.to_i64()))
-    ihdr = _extend(ihdr, _u32_be(height.to_i64()))
-    ihdr.push(8u8)                  # bit depth
-    ihdr.push((color_type & 0xFF).to_u8())
-    ihdr.push(0u8)                  # compression method
-    ihdr.push(0u8)                  # filter method
-    ihdr.push(0u8)                  # interlace method
+    val w_be = _u32_be(width.to_i64())
+    val h_be = _u32_be(height.to_i64())
+    val ihdr: [u8] = [
+        w_be[0], w_be[1], w_be[2], w_be[3],
+        h_be[0], h_be[1], h_be[2], h_be[3],
+        8u8,
+        (color_type & 0xFF).to_u8(),
+        0u8,
+        0u8,
+        0u8
+    ]
 
-    # Signature + chunks
-    var out: [u8] = [137u8, 80u8, 78u8, 71u8, 13u8, 10u8, 26u8, 10u8]
-    out = _extend(out, _chunk("IHDR", ihdr))
-    out = _extend(out, _chunk("IDAT", idat))
+    val c_ihdr = _chunk("IHDR", ihdr)
+    val c_idat = _chunk("IDAT", idat)
     var no_data: [u8] = []
-    out = _extend(out, _chunk("IEND", no_data))
+    val c_iend = _chunk("IEND", no_data)
+
+    val n_ihdr = c_ihdr.len()
+    val n_idat = c_idat.len()
+    val n_iend = c_iend.len()
+    var out: [u8] = [0u8; 8 + n_ihdr + n_idat + n_iend]
+    out[0] = 137u8
+    out[1] = 80u8
+    out[2] = 78u8
+    out[3] = 71u8
+    out[4] = 13u8
+    out[5] = 10u8
+    out[6] = 26u8
+    out[7] = 10u8
+    var pos: i64 = 8
+    var i: i64 = 0
+    while i < n_ihdr:
+        out[pos] = c_ihdr[i]
+        pos = pos + 1
+        i = i + 1
+    i = 0
+    while i < n_idat:
+        out[pos] = c_idat[i]
+        pos = pos + 1
+        i = i + 1
+    i = 0
+    while i < n_iend:
+        out[pos] = c_iend[i]
+        pos = pos + 1
+        i = i + 1
     out
 
 fn _filtered_scanlines(pixels: [u32], width: i32, height: i32, color_type: i64) -> [u8]:
     """Serialize pixels as scanlines, each prefixed with filter byte 0 (None)."""
-    var out: [u8] = []
-    var y: i32 = 0
-    while y < height:
-        out.push(0u8)  # filter type: None
-        var x: i32 = 0
-        while x < width:
-            val px = pixels[y * width + x].to_i64()
-            out.push(((px >> 16) & 0xFF).to_u8())      # R
-            out.push(((px >> 8) & 0xFF).to_u8())       # G
-            out.push((px & 0xFF).to_u8())              # B
+    val w64 = width.to_i64()
+    val h64 = height.to_i64()
+    val bpp: i64 = if color_type == 6: 4 else: 3
+    val row_stride: i64 = 1 + w64 * bpp
+    var out: [u8] = [0u8; h64 * row_stride]
+    var pos: i64 = 0
+    var y: i64 = 0
+    while y < h64:
+        out[pos] = 0u8  # filter type: None
+        pos = pos + 1
+        val row_off = y * w64
+        var x: i64 = 0
+        while x < w64:
+            val px = pixels[row_off + x].to_i64()
+            out[pos] = ((px >> 16) & 0xFF).to_u8()      # R
+            out[pos + 1] = ((px >> 8) & 0xFF).to_u8()   # G
+            out[pos + 2] = (px & 0xFF).to_u8()          # B
             if color_type == 6:
-                out.push(((px >> 24) & 0xFF).to_u8())  # A
+                out[pos + 3] = ((px >> 24) & 0xFF).to_u8()  # A
+                pos = pos + 4
+            else:
+                pos = pos + 3
             x = x + 1
         y = y + 1
     out
@@ -85,10 +125,22 @@ fn _zlib_store(data: [u8]) -> [u8]:
 
     0x78 0x01 = CM 8 (deflate), 32K window, no dict, FCHECK valid.
     """
-    var out: [u8] = [0x78u8, 0x01u8]
     var deflated = deflate_stored(ByteSpan.new(data))
-    out = _extend(out, deflated.buf)
-    out = _extend(out, _u32_be(adler32(data)))
+    val dbuf = deflated.buf
+    val dlen = dbuf.len()
+    val ad = _u32_be(adler32(data))
+    var out: [u8] = [0u8; 2 + dlen + 4]
+    out[0] = 0x78u8
+    out[1] = 0x01u8
+    var i: i64 = 0
+    while i < dlen:
+        out[2 + i] = dbuf[i]
+        i = i + 1
+    val tail = 2 + dlen
+    out[tail] = ad[0]
+    out[tail + 1] = ad[1]
+    out[tail + 2] = ad[2]
+    out[tail + 3] = ad[3]
     out
 
 fn _chunk(type_name: text, data: [u8]) -> [u8]:
@@ -101,12 +153,33 @@ fn _chunk(type_name: text, data: [u8]) -> [u8]:
     flat-array free functions are the documented safe cross-module shape.
     """
     val type_bytes = type_name.bytes()
-    var out = _u32_be(data.len())
-    out = _extend(out, type_bytes)
-    out = _extend(out, data)
-    var crc_input = _extend([], type_bytes)
-    crc_input = _extend(crc_input, data)
-    out = _extend(out, _u32_be(gzip_crc32(crc_input).to_i64()))
+    val dlen = data.len()
+    val len_be = _u32_be(dlen)
+    var crc_input: [u8] = [0u8; 4 + dlen]
+    crc_input[0] = type_bytes[0]
+    crc_input[1] = type_bytes[1]
+    crc_input[2] = type_bytes[2]
+    crc_input[3] = type_bytes[3]
+    var i: i64 = 0
+    while i < dlen:
+        crc_input[4 + i] = data[i]
+        i = i + 1
+    val crc_be = _u32_be(gzip_crc32(crc_input).to_i64())
+    var out: [u8] = [0u8; 8 + dlen + 4]
+    out[0] = len_be[0]
+    out[1] = len_be[1]
+    out[2] = len_be[2]
+    out[3] = len_be[3]
+    i = 0
+    val clen = crc_input.len()
+    while i < clen:
+        out[4 + i] = crc_input[i]
+        i = i + 1
+    val tail = 4 + clen
+    out[tail] = crc_be[0]
+    out[tail + 1] = crc_be[1]
+    out[tail + 2] = crc_be[2]
+    out[tail + 3] = crc_be[3]
     out
 
 fn _u32_be(v: i64) -> [u8]:
@@ -116,9 +189,3 @@ fn _u32_be(v: i64) -> [u8]:
         ((v >> 8) & 0xFF).to_u8(),
         (v & 0xFF).to_u8()
     ]
-
-fn _extend(dst: [u8], src: [u8]) -> [u8]:
-    var out = dst
-    for b in src:
-        out.push(b)
-    out
