@@ -1,0 +1,431 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""2D Showcase Parity Spec: Chrome GPU Skia vs Skia Vulkan vs Engine2D Vulkan at 640x480."""
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{
+    env_get, env_set, process_run, host_os, cwd,
+    dir_create_all, file_exists, file_write, file_read
+}
+use std.skia.entity.geometry.{SkRect, sk_rrect_make}
+use std.skia.entity.paint.{sk_paint_fill, sk_paint_stroke}
+use std.skia.entity.path.{SkPath, sk_path_new}
+use std.skia.entity.enums.{SkPathFillType}
+use std.skia.entity.font.{sk_font_default}
+use std.skia.entity.canvas.{sk_canvas_make}
+use std.skia.entity.color.{sk_color_argb}
+use std.skia.entity.picture.{SkPicture}
+use std.skia.backend.cpu.backend.{cpu_backend_new}
+use std.skia.backend.vulkan.backend.{vk_backend_new}
+use std.skia.bridge.engine2d_bridge.{skia_picture_to_vulkan_base, skia_picture_to_engine2d_parity}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.helpers_availability.{backend_canonical_name}
+use std.nogc_sync_mut.ui.compare_view_host.{compare_view_find_browser, compare_view_inspect}
+
+val SCENE_W: i32 = 640
+val SCENE_H: i32 = 480
+val EXPECTED_PIXELS: i64 = 307200
+val ARTIFACT_DIR: text = "build/test-artifacts/02_integration/rendering/skia_vs_simple_2d_showcase_parity"
+
+val COL_BG_HEX: text = "#101522"
+val COL_TOP_HEX: text = "#1e293b"
+val COL_CRIMSON_HEX: text = "#ef4444"
+val COL_EMERALD_HEX: text = "#22c55e"
+val COL_AMBER_HEX: text = "#f59e0b"
+val COL_SKY_HEX: text = "#38bdf8"
+val COL_PURPLE_HEX: text = "#6366f1"
+val COL_TEAL_HEX: text = "#14b8a6"
+
+val COL_BG_U32: u32 = 0xFF101522u32
+val COL_TOP_U32: u32 = 0xFF1E293Bu32
+val COL_CRIMSON_U32: u32 = 0xFFEF4444u32
+val COL_EMERALD_U32: u32 = 0xFF22C55Eu32
+val COL_AMBER_U32: u32 = 0xFFF59E0Bu32
+val COL_SKY_U32: u32 = 0xFF38BDF8u32
+val COL_PURPLE_U32: u32 = 0xFF6366F1u32
+val COL_TEAL_U32: u32 = 0xFF14B8A6u32
+
+fn _sk_col(r: i64, g: i64, b: i64) -> i64:
+    sk_color_argb(255, r, g, b)
+
+fn _abs_i32(v: i32) -> i32:
+    if v < 0: 0 - v else: v
+
+fn _max_rgb_diff(a: u32, b: u32) -> i32:
+    val ar = ((a >> 16) & 0xFFu32) as i32
+    val ag = ((a >> 8) & 0xFFu32) as i32
+    val ab = (a & 0xFFu32) as i32
+    val br = ((b >> 16) & 0xFFu32) as i32
+    val bg = ((b >> 8) & 0xFFu32) as i32
+    val bb = (b & 0xFFu32) as i32
+    val dr = _abs_i32(ar - br)
+    val dg = _abs_i32(ag - bg)
+    val db = _abs_i32(ab - bb)
+    var m = if dr > dg: dr else: dg
+    if db > m:
+        m = db
+    m
+
+fn _pixel_at(pixels: [u32], x: i32, y: i32) -> u32:
+    val idx = (y as i64) * (SCENE_W as i64) + (x as i64)
+    pixels[idx]
+
+fn _rect_interior_matches(pixels: [u32], x0: i32, y0: i32, w: i32, h: i32, expected: u32, tol: i32) -> i64:
+    var mismatches: i64 = 0
+    var y = y0
+    while y < y0 + h:
+        var x = x0
+        while x < x0 + w:
+            val px = _pixel_at(pixels, x, y)
+            if _max_rgb_diff(px, expected) > tol:
+                mismatches = mismatches + 1
+            x = x + 4
+        y = y + 4
+    mismatches
+
+fn _frame_similarity_pct(a: [u32], b: [u32], tol: i32) -> i64:
+    val total = a.len().to_i64()
+    if total == 0 or b.len().to_i64() != total:
+        return 0
+    var matched: i64 = 0
+    var i: i64 = 0
+    while i < total:
+        if _max_rgb_diff(a[i], b[i]) <= tol:
+            matched = matched + 1
+        i = i + 1
+    (matched * 100) / total
+
+fn _build_showcase_html() -> text:
+    var html = "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\n<style>\n"
+    html = html + "  html, body {{ margin: 0; padding: 0; width: 640px; height: 480px; background-color: " + COL_BG_HEX + "; overflow: hidden; }}\n"
+    html = html + "  .scene {{ position: relative; width: 640px; height: 480px; background-color: " + COL_BG_HEX + "; }}\n"
+    html = html + "  .top-card {{ position: absolute; left: 32px; top: 28px; width: 576px; height: 84px; background-color: " + COL_TOP_HEX + "; }}\n"
+    html = html + "  .left-rect {{ position: absolute; left: 48px; top: 136px; width: 160px; height: 140px; background-color: " + COL_CRIMSON_HEX + "; }}\n"
+    html = html + "  .center-rrect {{ position: absolute; left: 240px; top: 136px; width: 160px; height: 140px; background-color: " + COL_EMERALD_HEX + "; border-radius: 18px; }}\n"
+    html = html + "  .right-circle {{ position: absolute; left: 444px; top: 138px; width: 136px; height: 136px; background-color: " + COL_AMBER_HEX + "; border-radius: 50%; }}\n"
+    html = html + "  .bottom-bar {{ position: absolute; left: 48px; top: 320px; width: 544px; height: 112px; background-color: " + COL_SKY_HEX + "; }}\n"
+    html = html + "  .inner-purple {{ position: absolute; left: 80px; top: 344px; width: 220px; height: 64px; background-color: " + COL_PURPLE_HEX + "; }}\n"
+    html = html + "  .inner-teal-oval {{ position: absolute; left: 360px; top: 336px; width: 200px; height: 80px; background-color: " + COL_TEAL_HEX + "; border-radius: 50%; }}\n"
+    html = html + "</style></head><body>\n"
+    html = html + "<div class=\"scene\">\n"
+    html = html + "  <div class=\"top-card\"></div>\n"
+    html = html + "  <div class=\"left-rect\"></div>\n"
+    html = html + "  <div class=\"center-rrect\"></div>\n"
+    html = html + "  <div class=\"right-circle\"></div>\n"
+    html = html + "  <div class=\"bottom-bar\"></div>\n"
+    html = html + "  <div class=\"inner-purple\"></div>\n"
+    html = html + "  <div class=\"inner-teal-oval\"></div>\n"
+    html = html + "</div></body></html>\n"
+    html
+
+fn _build_showcase_sk_picture() -> SkPicture:
+    val bounds = SkRect(left: 0.0, top: 0.0, right: 640.0, bottom: 480.0)
+    val p_bg = sk_paint_fill(_sk_col(0x10, 0x15, 0x22)).with_anti_alias(false)
+    val p_top = sk_paint_fill(_sk_col(0x1E, 0x29, 0x3B)).with_anti_alias(false)
+    val p_crimson = sk_paint_fill(_sk_col(0xEF, 0x44, 0x44)).with_anti_alias(false)
+    val p_emerald = sk_paint_fill(_sk_col(0x22, 0xC5, 0x5E)).with_anti_alias(false)
+    val p_amber = sk_paint_fill(_sk_col(0xF5, 0x9E, 0x0B)).with_anti_alias(false)
+    val p_sky = sk_paint_fill(_sk_col(0x38, 0xBD, 0xF8)).with_anti_alias(false)
+    val p_purple = sk_paint_fill(_sk_col(0x63, 0x66, 0xF1)).with_anti_alias(false)
+    val p_teal = sk_paint_fill(_sk_col(0x14, 0xB8, 0xA6)).with_anti_alias(false)
+
+    val rrect = sk_rrect_make(SkRect(left: 240.0, top: 136.0, right: 400.0, bottom: 276.0), 18.0, 18.0)
+
+    sk_canvas_make(SCENE_W as i64, SCENE_H as i64)
+        .begin_recording(bounds)
+        .draw_rect(bounds, p_bg)
+        .draw_rect(SkRect(left: 32.0, top: 28.0, right: 608.0, bottom: 112.0), p_top)
+        .draw_rect(SkRect(left: 48.0, top: 136.0, right: 208.0, bottom: 276.0), p_crimson)
+        .draw_rrect(rrect, p_emerald)
+        .draw_circle(512.0, 206.0, 68.0, p_amber)
+        .draw_rect(SkRect(left: 48.0, top: 320.0, right: 592.0, bottom: 432.0), p_sky)
+        .draw_rect(SkRect(left: 80.0, top: 344.0, right: 300.0, bottom: 408.0), p_purple)
+        .draw_oval(SkRect(left: 360.0, top: 336.0, right: 560.0, bottom: 416.0), p_teal)
+        .end_recording()
+
+fn _chrome_hw_gpu_extra_args() -> text:
+    val os_name = host_os().trim().lower()
+    if os_name == "macos" or os_name == "darwin":
+        return "--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --use-angle=metal --enable-gpu-rasterization --ignore-gpu-blocklist"
+    "--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE --use-angle=vulkan --enable-gpu-rasterization --ignore-gpu-blocklist"
+
+fn _parse_chrome_argb_json(json_text: text) -> [u32]:
+    val marker = "\"pixels\":["
+    val marker_pos = json_text.index_of(marker)
+    if marker_pos < 0:
+        return []
+    val start_idx = marker_pos + marker.len()
+    val rest = json_text.substring(start_idx, json_text.len())
+    val end_idx = rest.index_of("]")
+    if end_idx <= 0:
+        return []
+    val body = rest.substring(0, end_idx)
+    val parts = body.split(",")
+    var out: [u32] = [0u32; parts.len()]
+    var i = 0
+    while i < parts.len():
+        val parsed = parts[i].parse_int() ?? 0
+        out[i] = (parsed & 0xFFFFFFFF).to_u32()
+        i = i + 1
+    out
+
+fn _verify_showcase_parity():
+    step("Record 640x480 SkPicture and verify Skia Vulkan command buffer submission")
+    val pic = _build_showcase_sk_picture()
+    val bounds = SkRect(left: 0.0, top: 0.0, right: 640.0, bottom: 480.0)
+    var sk_vk = vk_backend_new()
+    val cb = sk_vk.render_picture(pic, bounds)
+    val sr = sk_vk.submit(cb)
+    expect(sr.ok).to_equal(true)
+    expect(sr.draw_commands).to_equal(8)
+
+    step("Render SkPicture through primary skia_picture_to_vulkan_base device readback")
+    val skia_vk_res = skia_picture_to_vulkan_base(pic, SCENE_W, SCENE_H)
+    var skia_ok = false
+    if val Ok(_res) = skia_vk_res:
+        skia_ok = true
+    expect(skia_ok).to_equal(true)
+    val skia_bridge = match skia_vk_res:
+        Ok(res): res
+        Err(reason):
+            print("skia_picture_to_vulkan_base failed: " + reason)
+            return
+    expect(skia_bridge.report.readback_source).to_equal("device_readback")
+    expect(skia_bridge.report.complete).to_equal(true)
+    expect(skia_bridge.report.skipped).to_equal(0)
+    expect(skia_bridge.pixels.len().to_i64()).to_equal(EXPECTED_PIXELS)
+
+    step("Render matching 2D showcase directly on Engine2D Vulkan device readback")
+    val eng_res = Engine2D.create_vulkan_backend(SCENE_W, SCENE_H)
+    var eng_ok = false
+    if val Ok(_created) = eng_res:
+        eng_ok = true
+    expect(eng_ok).to_equal(true)
+    var eng = match eng_res:
+        Ok(created): created
+        Err(reason):
+            print("Engine2D.create_vulkan_backend failed: " + reason)
+            return
+    expect(backend_canonical_name(eng.backend_name())).to_equal("vulkan")
+    eng.clear(COL_BG_U32)
+    eng.draw_rect_filled(32, 28, 576, 84, COL_TOP_U32)
+    eng.draw_rect_filled(48, 136, 160, 140, COL_CRIMSON_U32)
+    eng.draw_rounded_rect(240, 136, 160, 140, 18, COL_EMERALD_U32)
+    eng.draw_circle_filled(512, 206, 68, COL_AMBER_U32)
+    eng.draw_rect_filled(48, 320, 544, 112, COL_SKY_U32)
+    eng.draw_rect_filled(80, 344, 220, 64, COL_PURPLE_U32)
+    eng.draw_ellipse_filled(460, 376, 100, 40, COL_TEAL_U32)
+    val e2d_rb = eng.read_pixels_with_source()
+    eng.present()
+    eng.shutdown()
+    expect(e2d_rb.source).to_equal("device_readback")
+    expect(e2d_rb.backend_handle).to_be_greater_than(0)
+    expect(e2d_rb.device_identity).to_be_greater_than(0)
+    expect(e2d_rb.pixels.len().to_i64()).to_equal(EXPECTED_PIXELS)
+
+    step("Verify exact pixel parity between Skia Vulkan and Engine2D Vulkan")
+    val cv_skia_vs_e2d = compare_view_inspect(
+        "skia_vs_simple_2d_skia_vulkan_vs_engine2d_vulkan",
+        "skia_vulkan", skia_bridge.pixels, SCENE_W, SCENE_H,
+        "engine2d_vulkan", e2d_rb.pixels, SCENE_W, SCENE_H
+    )
+    print("parity_cv_skia_vs_e2d=" + cv_skia_vs_e2d)
+    expect(skia_bridge.pixels).to_equal(e2d_rb.pixels)
+
+    step("Capture Chrome GPU Skia bitmap via tools/chrome-live-bitmap/capture_html_argb.js")
+    dir_create_all(ARTIFACT_DIR)
+    val root = cwd()
+    val html_path = root + "/" + ARTIFACT_DIR + "/showcase_640x480.html"
+    val argb_json_path = root + "/" + ARTIFACT_DIR + "/chrome_argb.json"
+    val proof_json_path = root + "/" + ARTIFACT_DIR + "/chrome_proof.json"
+    val geom_json_path = root + "/" + ARTIFACT_DIR + "/chrome_geometry.json"
+    expect(file_write(html_path, _build_showcase_html())).to_equal(true)
+
+    val env_chrome = env_get("CHROME_CAPTURE_BIN") ?? ""
+    val browser_bin = compare_view_find_browser(env_chrome)
+    expect(browser_bin.len()).to_be_greater_than(0)
+
+    expect(env_set("CHROME_CAPTURE_HTML", html_path)).to_equal(true)
+    expect(env_set("CHROME_CAPTURE_WIDTH", "640")).to_equal(true)
+    expect(env_set("CHROME_CAPTURE_HEIGHT", "480")).to_equal(true)
+    expect(env_set("CHROME_CAPTURE_OUTPUT", argb_json_path)).to_equal(true)
+    expect(env_set("CHROME_CAPTURE_PROOF_PATH", proof_json_path)).to_equal(true)
+    expect(env_set("CHROME_CAPTURE_GEOMETRY_OUTPUT", geom_json_path)).to_equal(true)
+    expect(env_set("CHROME_CAPTURE_BIN", browser_bin)).to_equal(true)
+    expect(env_set("CHROME_CAPTURE_DISABLE_GPU", "false")).to_equal(true)
+    expect(env_set("CHROME_CAPTURE_EXTRA_ARGS", _chrome_hw_gpu_extra_args())).to_equal(true)
+
+    val (cap_out, cap_err, cap_code) = process_run("node", [root + "/tools/chrome-live-bitmap/capture_html_argb.js"])
+    print("chrome_capture_exit=" + cap_code.to_text())
+    if cap_out != "":
+        print(cap_out.trim())
+    if cap_err != "":
+        print("chrome_capture_err=" + cap_err.trim())
+    expect(cap_code).to_equal(0)
+    expect(cap_out).to_contain("chrome_capture_status=pass")
+    expect(file_exists(proof_json_path)).to_equal(true)
+    val proof_text = file_read(proof_json_path)
+    expect(proof_text).to_contain("\"status\":\"pass\"")
+    expect(proof_text).to_contain("\"blur_or_tolerance_used\":false")
+    expect(file_exists(argb_json_path)).to_equal(true)
+    val chrome_pixels = _parse_chrome_argb_json(file_read(argb_json_path))
+    expect(chrome_pixels.len().to_i64()).to_equal(EXPECTED_PIXELS)
+
+    step("Verify Chrome GPU Skia vs Skia Vulkan and Engine2D Vulkan parity and artifacts")
+    val cv_chrome_vs_skia = compare_view_inspect(
+        "skia_vs_simple_2d_chrome_vs_skia_vulkan",
+        "chrome_gpu_skia", chrome_pixels, SCENE_W, SCENE_H,
+        "skia_vulkan", skia_bridge.pixels, SCENE_W, SCENE_H
+    )
+    val cv_chrome_vs_e2d = compare_view_inspect(
+        "skia_vs_simple_2d_chrome_vs_engine2d_vulkan",
+        "chrome_gpu_skia", chrome_pixels, SCENE_W, SCENE_H,
+        "engine2d_vulkan", e2d_rb.pixels, SCENE_W, SCENE_H
+    )
+    print("parity_cv_chrome_vs_skia=" + cv_chrome_vs_skia)
+    print("parity_cv_chrome_vs_e2d=" + cv_chrome_vs_e2d)
+    if (env_get("SIMPLE_COMPARE_VIEW") ?? "").trim().lower() == "html":
+        expect(cv_skia_vs_e2d.starts_with("written:")).to_equal(true)
+        expect(cv_chrome_vs_skia.starts_with("written:")).to_equal(true)
+        expect(cv_chrome_vs_e2d.starts_with("written:")).to_equal(true)
+
+    # Verify exact interior solid colors across Chrome GPU Skia, Skia Vulkan, and Engine2D Vulkan.
+    expect(_rect_interior_matches(chrome_pixels, 8, 8, 16, 16, COL_BG_U32, 4)).to_equal(0)
+    expect(_rect_interior_matches(chrome_pixels, 40, 36, 560, 68, COL_TOP_U32, 4)).to_equal(0)
+    expect(_rect_interior_matches(chrome_pixels, 56, 144, 144, 124, COL_CRIMSON_U32, 4)).to_equal(0)
+    expect(_rect_interior_matches(chrome_pixels, 268, 164, 104, 84, COL_EMERALD_U32, 4)).to_equal(0)
+    expect(_rect_interior_matches(chrome_pixels, 480, 174, 64, 64, COL_AMBER_U32, 4)).to_equal(0)
+    expect(_rect_interior_matches(chrome_pixels, 310, 328, 36, 96, COL_SKY_U32, 4)).to_equal(0)
+    expect(_rect_interior_matches(chrome_pixels, 88, 352, 204, 48, COL_PURPLE_U32, 4)).to_equal(0)
+    expect(_rect_interior_matches(chrome_pixels, 420, 360, 80, 32, COL_TEAL_U32, 4)).to_equal(0)
+
+    expect(_max_rgb_diff(_pixel_at(skia_bridge.pixels, 320, 206), COL_EMERALD_U32)).to_equal(0)
+    expect(_max_rgb_diff(_pixel_at(skia_bridge.pixels, 512, 206), COL_AMBER_U32)).to_equal(0)
+    expect(_max_rgb_diff(_pixel_at(skia_bridge.pixels, 460, 376), COL_TEAL_U32)).to_equal(0)
+
+    val sim_skia_pct = _frame_similarity_pct(chrome_pixels, skia_bridge.pixels, 16)
+    val sim_e2d_pct = _frame_similarity_pct(chrome_pixels, e2d_rb.pixels, 16)
+    print("parity_chrome_vs_skia_pct=" + sim_skia_pct.to_text())
+    print("parity_chrome_vs_e2d_pct=" + sim_e2d_pct.to_text())
+    expect(sim_skia_pct).to_be_greater_than(97)
+    expect(sim_e2d_pct).to_be_greater_than(97)
+
+fn _bitmap_to_u32_argb(bmp: [u8], w: i32, h: i32) -> [u32]:
+    val total = (w as i64) * (h as i64)
+    var out: [u32] = [0u32; total]
+    var i: i64 = 0
+    while i < total:
+        val base = i * 4
+        val r = bmp[base] as i64
+        val g = bmp[base + 1] as i64
+        val b = bmp[base + 2] as i64
+        val a = bmp[base + 3] as i64
+        val sr = if a == 255 or a == 0: r else: (r * 255 + a / 2) / a
+        val sg = if a == 255 or a == 0: g else: (g * 255 + a / 2) / a
+        val sb = if a == 255 or a == 0: b else: (b * 255 + a / 2) / a
+        val cr = if sr > 255: 255 else: sr
+        val cg = if sg > 255: 255 else: sg
+        val cb = if sb > 255: 255 else: sb
+        out[i] = ((a << 24) | (cr << 16) | (cg << 8) | cb) as u32
+        i = i + 1
+    out
+
+fn _build_star_path(cx: f64, cy: f64, r_out: f64, r_in: f64) -> SkPath:
+    # Exact 5-point star centered at (cx, cy) starting at top (-90 deg).
+    val p = sk_path_new()
+        .with_fill_type(SkPathFillType.Winding)
+        .move_to(cx, cy - r_out)
+        .line_to(cx + r_in * 0.587785, cy - r_in * 0.809017)
+        .line_to(cx + r_out * 0.951057, cy - r_out * 0.309017)
+        .line_to(cx + r_in * 0.951057, cy + r_in * 0.309017)
+        .line_to(cx + r_out * 0.587785, cy + r_out * 0.809017)
+        .line_to(cx, cy + r_in)
+        .line_to(cx - r_out * 0.587785, cy + r_out * 0.809017)
+        .line_to(cx - r_in * 0.951057, cy + r_in * 0.309017)
+        .line_to(cx - r_out * 0.951057, cy - r_out * 0.309017)
+        .line_to(cx - r_in * 0.587785, cy - r_in * 0.809017)
+        .close()
+    p
+
+fn _verify_enhanced_showcase_card_parity():
+    val bounds = SkRect(left: 0.0, top: 0.0, right: 640.0, bottom: 480.0)
+    val p_bg = sk_paint_fill(_sk_col(0x10, 0x15, 0x22)).with_anti_alias(false)
+    val p_card = sk_paint_fill(_sk_col(0x1E, 0x29, 0x3B)).with_anti_alias(true)
+    val p_border = sk_paint_stroke(_sk_col(0x38, 0xBD, 0xF8), 2.0)
+    val p_star = sk_paint_fill(_sk_col(0xF5, 0x9E, 0x0B))
+    val p_circle = sk_paint_fill(_sk_col(0x14, 0xB8, 0xA6))
+    val p_ring = sk_paint_stroke(_sk_col(0xFF, 0xFF, 0xFF), 4.0)
+    val card_rr = sk_rrect_make(SkRect(left: 40.0, top: 40.0, right: 600.0, bottom: 420.0), 18.0, 18.0)
+    val star_path = _build_star_path(180.0, 210.0, 72.0, 30.0)
+
+    val pic = sk_canvas_make(SCENE_W as i64, SCENE_H as i64)
+        .begin_recording(bounds)
+        .draw_rect(bounds, p_bg)
+        .draw_rrect(card_rr, p_card)
+        .draw_rrect(card_rr, p_border)
+        .draw_path(star_path, p_star)
+        .draw_circle(390.0, 210.0, 68.0, p_circle)
+        .draw_circle(390.0, 210.0, 42.0, p_ring)
+        .end_recording()
+
+    val cpu_bmp = cpu_backend_new().render_picture(pic, bounds)
+    val skia_pixels = _bitmap_to_u32_argb(cpu_bmp.pixels, SCENE_W, SCENE_H)
+
+    var used_backend = "software"
+    var bridge_pixels: [u32] = []
+    var bridge_complete = false
+    match skia_picture_to_vulkan_base(pic, SCENE_W, SCENE_H):
+        Ok(res):
+            used_backend = "vulkan"
+            bridge_pixels = res.pixels
+            bridge_complete = res.report.complete
+        Err(_):
+            val sw_res = skia_picture_to_engine2d_parity(pic, SCENE_W, SCENE_H, "software")
+            match sw_res:
+                Ok(res):
+                    used_backend = "software"
+                    bridge_pixels = res.pixels
+                    bridge_complete = res.report.complete
+                Err(reason):
+                    expect(reason).to_equal("")
+
+    expect(bridge_complete).to_equal(true)
+    expect(bridge_pixels.len().to_i64()).to_equal(EXPECTED_PIXELS)
+
+    # Also verify Engine2D TrueType SFNT vector text renders crisp non-background glyphs cleanly.
+    var eng = Engine2D.create_with_backend(SCENE_W, SCENE_H, used_backend)
+    eng.clear(COL_BG_U32)
+    eng.draw_rounded_rect(40, 40, 560, 380, 18, COL_TOP_U32)
+    eng.draw_text_sfnt_baseline_aa(72, 110, "HEFILTB AO80", 0xFFFFFFFFu32, 32.0, "")
+    eng.draw_text_sfnt_baseline_aa(72, 160, "SFNT VECTOR SHOWCASE", COL_SKY_U32, 22.0, "assets/fonts/google-fonts/ofl/bungee/Bungee-Regular.ttf")
+    val text_rb = eng.read_pixels_with_source()
+    eng.present()
+    eng.shutdown()
+    var lit_text_px = 0
+    for px in text_rb.pixels:
+        if px != COL_BG_U32 and px != COL_TOP_U32:
+            lit_text_px = lit_text_px + 1
+    expect(lit_text_px).to_be_greater_than(300)
+
+    val cv = compare_view_inspect(
+        "skia_vs_simple_2d_enhanced_showcase_card",
+        "skia_cpu", skia_pixels, SCENE_W, SCENE_H,
+        "engine2d_bridge_" + used_backend, bridge_pixels, SCENE_W, SCENE_H
+    )
+    print("enhanced_showcase_cv=" + cv)
+    val sim = _frame_similarity_pct(skia_pixels, bridge_pixels, 8)
+    print("enhanced_showcase_similarity_pct=" + sim.to_text() + " backend=" + used_backend)
+    expect(sim).to_be_greater_than(98)
+
+describe "Skia Vulkan vs Simple Engine2D Vulkan vs Chrome GPU Skia 2D showcase parity":
+    # @manual scenario evidence
+    it "matches Chrome GPU Skia, Skia Vulkan, and Simple Engine2D Vulkan at 640x480":
+        # @req REQ-SSPEC-INTEGRATION
+        _verify_showcase_parity()
+
+    it "matches enhanced showcase cards, crisp circles, 5-point star, and pixel-level SFNT text":
+        # @req REQ-SSPEC-INTEGRATION
+        _verify_enhanced_showcase_card_parity()

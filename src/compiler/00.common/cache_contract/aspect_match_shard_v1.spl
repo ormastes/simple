@@ -98,10 +98,13 @@ pub struct WeavePlanDeltaV1:
     reweave: [text]
     reuse: [text]
 
+# Identity schema v2: every text field uses its UTF-8 byte width, including
+# the nested point record. Explicit domains invalidate ambiguous legacy keys.
+# Public V1 API/type names are retained; no serialized layout changes here.
 fn _framed(domain: text, parts: [text]) -> text:
     var framed = "{domain}\u0000"
     for p in parts:
-        framed = framed + "{p.len()}:{p}\u0000"
+        framed = framed + "{p.byte_len()}:{p}\u0000"
     framed
 
 # PERSISTED identity: sha256 (written into shards, receipts, apply keys).
@@ -145,13 +148,14 @@ fn _sorted_points(values: [JoinPointFactV1]) -> [JoinPointFactV1]:
 fn _join(values: [text]) -> text:
     var s = ""
     for v in values:
-        s = s + "{v.len()}:{v};"
+        s = s + "{v.byte_len()}:{v};"
     s
 
 fn _point_fact_text(p: JoinPointFactV1) -> text:
     # Selector-visible facts only; the base body digest is an AdviceApplyKey
     # input, so a body-only edit cannot dirty the match shard.
-    "{p.id}|{p.kind}|{p.symbol}|{p.owner_file}|{_join(_sorted_texts(p.attrs))}"
+    _framed("aop-point-fact/v2", [p.id, p.kind, p.symbol, p.owner_file,
+        _join(_sorted_texts(p.attrs))])
 
 # Negative/completeness witness: the full sorted id universe of this scope.
 # Any add/delete/rename changes it even when no old positive match existed.
@@ -159,13 +163,13 @@ fn _negative_root(scope_id: text, files: [text], points: [JoinPointFactV1], comp
     var ids: [text] = []
     for p in points:
         ids.push(p.id)
-    _h("aop-dir-negative/v1", [scope_id, _join(files), _join(ids), "{complete}"])
+    _h("aop-dir-negative/v2", [scope_id, _join(files), _join(ids), "{complete}"])
 
 pub fn directory_facts_key_v1(f: DirectoryJoinPointFactsV1) -> text:
     var facts: [text] = []
     for p in f.sorted_join_points:
         facts.push(_point_fact_text(p))
-    _h("aop-dir-facts/v1", [f.scope_id, _join(f.sorted_member_files), _join(facts),
+    _h("aop-dir-facts/v2", [f.scope_id, _join(f.sorted_member_files), _join(facts),
         _join(f.sorted_child_roots), f.negative_root, f.active_guard_root, "{f.complete}"])
 
 # No static guard consulted: equivalent to an empty, complete ActiveGuardRoot.
@@ -302,7 +306,7 @@ fn _parse_or(cs: [text], nodes: [PointcutSelNodeV1], pos: i64) -> _SelParseV1:
 
 fn _canon(nodes: [PointcutSelNodeV1], i: i64) -> text:
     val n = nodes[i]
-    if n.op == "atom": return "{n.form}({n.operand.len()}:{n.operand})"
+    if n.op == "atom": return "{n.form}({n.operand.byte_len()}:{n.operand})"
     if n.op == "not": return "not({_canon(nodes, n.left)})"
     "{n.op}({_canon(nodes, n.left)},{_canon(nodes, n.right)})"
 
@@ -321,7 +325,7 @@ pub fn pointcut_selector_parse_v1(source: text) -> PointcutSelectorV1:
     if not ok:
         return PointcutSelectorV1(source: source, form: "unsupported", operand: source.trim(),
             supported: false, nodes: [], root: -1, needs_universe: true,
-            selector_digest: _h("aop-selector/v1", ["unsupported", source.trim()]))
+            selector_digest: _h("aop-selector/v2", ["unsupported", source.trim()]))
     val root = r.nodes[r.node]
     var form = "expr"
     var operand = _canon(r.nodes, r.node)
@@ -330,7 +334,7 @@ pub fn pointcut_selector_parse_v1(source: text) -> PointcutSelectorV1:
         operand = root.operand
     PointcutSelectorV1(source: source, form: form, operand: operand, supported: true,
         nodes: r.nodes, root: r.node, needs_universe: _needs_universe(r.nodes),
-        selector_digest: _h("aop-selector/v1", [_canon(r.nodes, r.node)]))
+        selector_digest: _h("aop-selector/v2", [_canon(r.nodes, r.node)]))
 
 fn _dir_of(path: text) -> text:
     val i = path.rfind("/")
@@ -356,23 +360,31 @@ fn _selector_matches(sel: PointcutSelectorV1, p: JoinPointFactV1) -> bool:
     _node_matches(sel.nodes, sel.root, p)
 
 pub fn pointcut_match_key_v1(sel: PointcutSelectorV1, f: DirectoryJoinPointFactsV1) -> text:
-    _local_key("aop-match/v1", [sel.selector_digest, f.facts_key])
+    if f.facts_key != directory_facts_key_v1(f): return ""
+    _local_key("aop-match/v2", [sel.selector_digest, f.facts_key])
 
 # PERSISTED identity of the same (selector, facts) pair: sha256, for the .rr v2
 # read manifest (implied sha256). Never use the local key there.
 pub fn pointcut_match_identity_v1(sel: PointcutSelectorV1, f: DirectoryJoinPointFactsV1) -> text:
-    _h("aop-match/v1", [sel.selector_digest, f.facts_key])
+    if f.facts_key != directory_facts_key_v1(f): return ""
+    _h("aop-match/v2", [sel.selector_digest, f.facts_key])
 
 pub fn pointcut_match_shard_compute_v1(sel: PointcutSelectorV1,
         f: DirectoryJoinPointFactsV1) -> PointcutMatchShardV1:
+    _pointcut_match_shard_compute_known_v2(sel, f, f.facts_key == directory_facts_key_v1(f))
+
+# The private cache path already recomputed the key. Reuse that observation
+# rather than rehashing the whole directory for every lookup/miss.
+fn _pointcut_match_shard_compute_known_v2(sel: PointcutSelectorV1,
+        f: DirectoryJoinPointFactsV1, facts_current: bool) -> PointcutMatchShardV1:
     var ids: [text] = []
     for p in f.sorted_join_points:
         if _selector_matches(sel, p):
             ids.push(p.id)
-    val complete = sel.supported and f.complete
+    val complete = sel.supported and f.complete and facts_current
     PointcutMatchShardV1(selector_digest: sel.selector_digest, dir_facts_key: f.facts_key,
         sorted_matching_ids: ids, complete: complete,
-        match_digest: _h("aop-match-result/v1", [sel.selector_digest, f.facts_key, _join(ids),
+        match_digest: _h("aop-match-result/v2", [sel.selector_digest, f.facts_key, _join(ids),
             "{complete}"]))
 
 pub fn pointcut_match_cache_new_v1() -> PointcutMatchCacheV1:
@@ -386,16 +398,16 @@ pub fn pointcut_match_cache_acquire_v1(cache: PointcutMatchCacheV1, sel: Pointcu
         f: DirectoryJoinPointFactsV1) -> PointcutMatchAcquireV1:
     val key = pointcut_match_key_v1(sel, f)
     val cacheable = sel.supported and f.complete and aop_digest_known_v1(sel.selector_digest) and
-        aop_digest_known_v1(f.facts_key)
+        aop_digest_known_v1(f.facts_key) and key != ""
     if key == "":
-        return PointcutMatchAcquireV1(cache: cache, key: key, shard: pointcut_match_shard_compute_v1(sel, f),
+        return PointcutMatchAcquireV1(cache: cache, key: key, shard: _pointcut_match_shard_compute_known_v2(sel, f, key != ""),
             hit: false, cacheable: false)
     if cacheable and cache.shards.contains_key(key):
         val cached = cache.shards[key]
         if cached.selector_digest == sel.selector_digest and cached.dir_facts_key == f.facts_key:
             return PointcutMatchAcquireV1(cache: cache, key: key, shard: cached,
                 hit: true, cacheable: true)
-    val shard = pointcut_match_shard_compute_v1(sel, f)
+    val shard = _pointcut_match_shard_compute_known_v2(sel, f, key != "")
     if not cacheable:
         return PointcutMatchAcquireV1(cache: cache, key: key, shard: shard, hit: false,
             cacheable: false)
@@ -414,7 +426,7 @@ pub fn aspect_advice_mode_cacheable_v1(mode: text, activation: text) -> bool:
 # signature/effects/body, and the immutable BASE body of the join point.
 pub fn advice_apply_key_v1(match_digest: text, advice: AdviceFacetsV1,
         base_body_digest: text) -> text:
-    _h("aop-apply/v1", [match_digest, advice.advice_fn, advice.mode, advice.activation,
+    _h("aop-apply/v2", [match_digest, advice.advice_fn, advice.mode, advice.activation,
         advice.signature_digest, advice.effects_digest, advice.body_digest, "{advice.order}",
         base_body_digest])
 
@@ -496,8 +508,9 @@ pub fn pointcut_match_universe_v1(sel: PointcutSelectorV1, dirs: [DirectoryJoinP
     var reason = ""
     if not sel.supported: reason = "unsupported-selector"
     for f in dirs:
-        if not f.complete and reason == "": reason = "incomplete-directory:{f.scope_id}"
-        for id in pointcut_match_shard_compute_v1(sel, f).sorted_matching_ids:
+        val shard = pointcut_match_shard_compute_v1(sel, f)
+        if not shard.complete and reason == "": reason = "incomplete-directory:{f.scope_id}"
+        for id in shard.sorted_matching_ids:
             ids.push(id)
     if reason == "" and sel.needs_universe and not universe_complete:
         reason = "universe-incomplete"

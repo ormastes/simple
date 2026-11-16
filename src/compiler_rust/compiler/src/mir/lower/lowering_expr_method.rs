@@ -440,8 +440,22 @@ impl<'a> MirLowerer<'a> {
                         || self.enum_has_variant_for_method_receiver(effective_ty, variant_name)
                         || self.receiver_is_builtin_result_or_option(receiver.ty, Some(effective_ty))
                     {
+                        // #6953: a user enum declaring `Ok`/`Err` answers its
+                        // own index; the builtin Result its fixed ABI value.
+                        let owned = self.type_registry.and_then(|registry| {
+                            registry
+                                .owned_variant_discriminant(receiver.ty, None, variant_name)
+                                .or_else(|| registry.owned_variant_discriminant(effective_ty, None, variant_name))
+                        });
+                        let disc = owned.unwrap_or_else(|| {
+                            if self.receiver_is_builtin_result_or_option(receiver.ty, Some(effective_ty)) {
+                                Self::enum_variant_discriminant(variant_name)
+                            } else {
+                                crate::hir::name_only_variant_discriminant("mir is_ok/is_err", variant_name)
+                            }
+                        });
                         let expected = HirExpr {
-                            kind: crate::hir::HirExprKind::Integer(Self::enum_variant_discriminant(variant_name)),
+                            kind: crate::hir::HirExprKind::Integer(disc),
                             ty: TypeId::I64,
                         };
                         let expected_enum_id = HirExpr {
