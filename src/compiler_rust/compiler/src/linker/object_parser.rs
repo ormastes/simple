@@ -117,7 +117,15 @@ impl ParsedObject {
                     Some(DataSectionKind::Mutable),
                 ),
                 SectionKind::ReadOnlyData | SectionKind::ReadOnlyDataWithRel | SectionKind::ReadOnlyString => {
-                    (SectionType::RoData, SECTION_FLAG_READ, Some(DataSectionKind::ReadOnly))
+                    if section.relocations().next().is_some() {
+                        // SMF relocations address the flattened code buffer
+                        // only. Read-only data that carries relocations (a
+                        // COFF `.rdata$<sub>` pointer table) is laid into that
+                        // buffer so its relocations stay representable.
+                        (SectionType::Code, SECTION_FLAG_READ, None)
+                    } else {
+                        (SectionType::RoData, SECTION_FLAG_READ, Some(DataSectionKind::ReadOnly))
+                    }
                 }
                 SectionKind::UninitializedData => {
                     section_data.resize(section.size() as usize, 0);
@@ -154,11 +162,28 @@ impl ParsedObject {
             .map(|index| (index as u16) + 1);
         let mut code_offset = 0u64;
         let mut code_layout = HashMap::new();
-        for (index, section) in parsed.sections.iter().enumerate() {
-            if section.section_type == SectionType::Code {
-                code_layout.insert(index, code_offset);
-                code_offset += section.data.len() as u64;
+        let mut previous_code: Option<usize> = None;
+        for index in 0..parsed.sections.len() {
+            if parsed.sections[index].section_type != SectionType::Code {
+                continue;
             }
+            // Promoted read-only data (no EXEC flag) is aligned inside the
+            // flat buffer by padding the previous code section; real code
+            // sections keep the existing as-is concatenation.
+            let is_promoted_data = parsed.sections[index].flags & SECTION_FLAG_EXEC == 0;
+            let align = if is_promoted_data { u64::from(parsed.sections[index].alignment.max(1)) } else { 1 };
+            let pad = (align - code_offset % align) % align;
+            if pad > 0 {
+                if let Some(prev) = previous_code {
+                    let fill = if parsed.sections[prev].flags & SECTION_FLAG_EXEC != 0 { 0xcc } else { 0 };
+                    let new_len = parsed.sections[prev].data.len() + pad as usize;
+                    parsed.sections[prev].data.resize(new_len, fill);
+                    code_offset += pad;
+                }
+            }
+            code_layout.insert(index, code_offset);
+            code_offset += parsed.sections[index].data.len() as u64;
+            previous_code = Some(index);
         }
 
         // Phase 2: Parse symbols
@@ -685,6 +710,64 @@ mod tests {
             parsed.symbols[reloc.symbol_index as usize].name, "rt_print",
             "relocation must be redirected to the real symbol"
         );
+    }
+
+    #[test]
+    fn coff_rdata_subsection_with_relocation_is_laid_into_code_buffer() {
+        // Windows COFF: a pointer table emitted into `.rdata$<sub>` carries a
+        // DIR64 relocation. Seed `compile` of disk_admission.spl failed with
+        // "relocation source section .rdata$subsection is not executable code".
+        use object::write::{Object as WriteObject, Relocation, Symbol, SymbolSection};
+        use object::{
+            Architecture, BinaryFormat, Endianness, RelocationEncoding, RelocationFlags, RelocationKind, SymbolFlags,
+            SymbolScope,
+        };
+
+        let mut object = WriteObject::new(BinaryFormat::Coff, Architecture::X86_64, Endianness::Little);
+        let text = object.add_section(Vec::new(), b".text".to_vec(), SectionKind::Text);
+        object.append_section_data(text, &[0xc3, 0x90, 0x90], 1); // 3 bytes: forces alignment padding
+        let func = object.add_symbol(Symbol {
+            name: b"f".to_vec(),
+            value: 0,
+            size: 1,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Linkage,
+            weak: false,
+            section: SymbolSection::Section(text),
+            flags: SymbolFlags::None,
+        });
+        let rdata = object.add_section(Vec::new(), b".rdata$subsection".to_vec(), SectionKind::ReadOnlyData);
+        object.append_section_data(rdata, &[0u8; 8], 8);
+        object
+            .add_relocation(
+                rdata,
+                Relocation {
+                    offset: 0,
+                    symbol: func,
+                    addend: 0,
+                    flags: RelocationFlags::Generic {
+                        kind: RelocationKind::Absolute,
+                        encoding: RelocationEncoding::Generic,
+                        size: 64,
+                    },
+                },
+            )
+            .unwrap();
+
+        let bytes = object.write().unwrap();
+        let parsed = ParsedObject::parse(&bytes).expect("rdata relocation must parse");
+
+        let rdata_section = parsed
+            .sections
+            .iter()
+            .find(|s| s.name == ".rdata$subsection")
+            .expect("rdata section kept");
+        assert_eq!(rdata_section.section_type, SectionType::Code, "relocated rdata joins the code buffer");
+        let text_len = parsed.sections.iter().find(|s| s.name == ".text").unwrap().data.len();
+        assert_eq!(text_len % 8, 0, "previous code section padded to rdata alignment");
+        let reloc = parsed.relocations.first().expect("data relocation kept");
+        assert_eq!(reloc.offset, text_len as u64, "relocation offset is rdata's flattened position");
+        assert_eq!(parsed.symbols[reloc.symbol_index as usize].name, "f");
     }
 
     #[test]
