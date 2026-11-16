@@ -1,0 +1,140 @@
+# Fixed actual Podman5.2.5 inspect fields for workspace TTY; DATA, never a grant.
+use std.common.contracts.container.linux_fresh_workspace_v3.*
+use std.common.contracts.container.linux_fresh_workload_v2.*
+use std.common.contracts.container.linux_fresh_workload_inspect_v2.*
+use std.common.contracts.container.linux_workspace_profile_v1.*
+use std.common.contracts.container.linux_agent_workspace_profile_v1.*
+use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use std.common.json.value.*
+
+pub fn linux_fresh_workspace_inspect_format_v3() -> text:
+    val base = linux_fresh_workload_inspect_format_v2()
+    base.substring(0, base.byte_len() - 1) + ",\"tty\":{{{{json .Config.Tty}}}},\"open_stdin\":{{{{json .Config.OpenStdin}}}},\"stdin_once\":{{{{json .Config.StdinOnce}}}},\"userns_mode\":{{{{json .HostConfig.UsernsMode}}}}}"
+
+pub fn linux_fresh_workspace_inspect_fields_v3(raw: text) -> Result<JsonValue, text>:
+    if raw.byte_len() < 1 or raw.byte_len() > 1048576: return Err("fresh-workspace-inspect-size")
+    var quoted = false
+    var escaped = false
+    var depth = 0
+    for byte in raw.bytes():
+        if quoted:
+            if escaped: escaped = false
+            elif byte == 92: escaped = true
+            elif byte == 34: quoted = false
+        else:
+            if byte == 34: quoted = true
+            elif byte == 123 or byte == 91:
+                depth = depth + 1
+                if depth > 4: return Err("fresh-workspace-inspect-depth")
+            elif byte == 125 or byte == 93: depth = depth - 1
+    val parsed = match json_parse_value_strict(raw):
+        case Ok(value): value
+        case Err(_): return Err("fresh-workspace-inspect-json")
+    val expected = linux_fresh_workspace_inspect_field_names_v3()
+    val keys = json_value_keys(parsed)
+    if keys.len() != expected.len(): return Err("fresh-workspace-inspect-fields")
+    for key in expected:
+        if not keys.contains(key): return Err("fresh-workspace-inspect-fields")
+    Ok(parsed)
+
+fn workspace_empty_array_v3(value: JsonValue, key: text) -> Result<(), text>:
+    match linux_fresh_workload_inspect_member_v2(value, key)?:
+        case JsonValue.Null: Ok(())
+        case JsonValue.Array(values):
+            if values.len() == 0: Ok(()) else: Err("fresh-workspace-unrequested-array")
+        case _: Err("fresh-workspace-array-type")
+
+fn workspace_mount_options_v3(values: [text], binds: bool) -> Result<(), text>:
+    if values.len() > 8: return Err("fresh-workspace-mount-options-bound")
+    var seen: [text] = []
+    for value in values:
+        if seen.contains(value) or not ["rw", "rprivate", "rbind", "bind", "nosuid", "nodev", "noexec"].contains(value):
+            return Err("fresh-workspace-mount-option-unsupported")
+        if not binds and (value == "rw" or value == "rprivate"): return Err("fresh-workspace-inspect-mount-option-shape")
+        seen.push(value)
+    if not seen.contains("bind") and not seen.contains("rbind"): return Err("fresh-workspace-bind-option-required")
+    if not seen.contains("nosuid") or not seen.contains("nodev"): return Err("fresh-workspace-nosuid-nodev-required")
+    if binds and (not seen.contains("rw") or not seen.contains("rprivate")): return Err("fresh-workspace-private-writable-bind-required")
+    Ok(())
+
+fn workspace_created_mount_v3(value: JsonValue, workspace: LinuxWorkspaceInstalledProfileV1) -> Result<(), text>:
+    val values = match linux_fresh_workload_inspect_member_v2(value, "mounts")?:
+        case JsonValue.Array(found): found
+        case _: return Err("fresh-workspace-mount-array-required")
+    if values.len() != 1: return Err("fresh-workspace-one-mounted-root-required")
+    val mount = values[0]
+    val keys = json_value_keys(mount)
+    val expected = ["Type", "Source", "Destination", "Driver", "Mode", "Options", "RW", "Propagation"]
+    if keys.len() != 8 and keys.len() != 9: return Err("fresh-workspace-created-mount-fields")
+    for key in expected:
+        if not keys.contains(key): return Err("fresh-workspace-created-mount-fields")
+    if keys.len() == 9 and (not keys.contains("Name") or linux_fresh_workload_inspect_text_v2(mount, "Name")? != ""):
+        return Err("fresh-workspace-named-volume-unavailable")
+    val source = linux_workspace_source_root_v1(workspace)
+    for pair in [("Type", "bind"), ("Source", source), ("Destination", workspace.guest_root), ("Driver", ""), ("Mode", ""), ("Propagation", "rprivate")]:
+        if linux_fresh_workload_inspect_text_v2(mount, pair.0)? != pair.1: return Err("fresh-workspace-created-mount-mapping")
+    if linux_fresh_workload_inspect_member_v2(mount, "RW")? != JsonValue.Bool(true): return Err("fresh-workspace-created-mount-not-writable")
+    val options = linux_fresh_workload_inspect_strings_v2(mount, "Options", 8)?
+    workspace_mount_options_v3(options, false)?
+    val binds = linux_fresh_workload_inspect_strings_v2(value, "binds", 1)?
+    if binds.len() != 1: return Err("fresh-workspace-exact-bind-required")
+    val fields = binds[0].split(":")
+    if fields.len() != 3 or fields[0] != source or fields[1] != workspace.guest_root:
+        return Err("fresh-workspace-bind-mapping")
+    val bind_options = fields[2].split(",")
+    workspace_mount_options_v3(bind_options, true)?
+    if bind_options.len() != options.len() + 2: return Err("fresh-workspace-bind-option-correspondence")
+    for option in options:
+        if not bind_options.contains(option): return Err("fresh-workspace-bind-option-correspondence")
+    Ok(())
+
+pub fn linux_fresh_workspace_created_config_validate_v3(workspace: LinuxWorkspaceInstalledProfileV1,
+        agent: LinuxAgentWorkspaceProfileV1, invocation_digest: text, uid: i64, gid: i64,
+        value: LinuxFreshWorkspaceCommandV3, raw: text) -> Result<(), text>:
+    linux_fresh_workspace_command_validate_v3(value, workspace, agent, invocation_digest, uid, gid)?
+    val command = value.command
+    if command.action != LinuxFreshWorkloadActionV2.Inspect: return Err("fresh-workspace-created-inspect-required")
+    val observed = linux_fresh_workspace_inspect_fields_v3(raw)?
+    val plan = command.request.plan
+    for pair in [("id", command.native_id), ("pod_uid", plan.workload_uid), ("attempt", str(plan.attempt)),
+            ("node_boot_id", container_scope_fence_id_v2(command.scope)?), ("provider_generation", str(command.scope.provider_generation)),
+            ("operation_id", plan.operation_id), ("status", "created"), ("manager", "cgroupfs"), ("cgroup_mode", "private"),
+            ("pid_mode", "private"), ("cgroups", "default"), ("network_mode", "none"), ("userns_mode", "private"),
+            ("workdir", workspace.guest_root), ("configured_user", str(uid) + ":" + str(gid)),
+            ("image_name", agent.image), ("image_digest", "sha256:" + agent.image.split("@sha256:")[1]), ("path", agent.bootstrap_program)]:
+        if linux_fresh_workload_inspect_text_v2(observed, pair.0)? != pair.1: return Err("fresh-workspace-created-config-correspondence")
+    for pair in [("pid", 0), ("effective_caps", 0), ("bounding_caps", 0), ("cpu_period", 100000),
+            ("cpu_quota", command.cpu_millis * 100), ("memory_bytes", command.memory_bytes),
+            ("memory_swap", command.memory_bytes), ("pids_limit", command.pid_limit)]:
+        if linux_fresh_workload_inspect_integer_v2(observed, pair.0)? != pair.1: return Err("fresh-workspace-created-resource-correspondence")
+    for pair in [("privileged", false), ("readonly_rootfs", true), ("no_new_privileges", true), ("tty", true), ("open_stdin", true), ("stdin_once", false)]:
+        if linux_fresh_workload_inspect_member_v2(observed, pair.0)? != JsonValue.Bool(pair.1): return Err("fresh-workspace-created-security-tty-correspondence")
+    if not ["crun", "runc", "/usr/bin/crun", "/usr/bin/runc"].contains(linux_fresh_workload_inspect_text_v2(observed, "runtime")?):
+        return Err("fresh-workspace-qualified-runtime-required")
+    if linux_fresh_workload_inspect_strings_v2(observed, "args", 2)? != ["--invocation-manifest-sha256", invocation_digest]:
+        return Err("fresh-workspace-created-bootstrap-argv")
+    val env = linux_fresh_workload_inspect_strings_v2(observed, "environment", 256)?
+    workspace_created_mount_v3(observed, workspace)?
+    workspace_empty_array_v3(observed, "volumes_from")?
+    match linux_fresh_workload_inspect_member_v2(observed, "tmpfs")?:
+        case JsonValue.Null: pass
+        case JsonValue.Object(keys, _):
+            if keys.len() != 0: return Err("fresh-workspace-unrequested-tmpfs")
+        case _: return Err("fresh-workspace-tmpfs-type")
+    linux_fresh_workload_standard_devices_validate_v2(observed)?
+    linux_fresh_workload_annotations_validate_v2(observed, "config_annotations")?
+    linux_fresh_workload_annotations_validate_v2(observed, "host_annotations")?
+    val security = linux_fresh_workload_inspect_strings_v2(observed, "security_options", 8)?
+    if not security.contains("no-new-privileges"): return Err("fresh-workspace-created-nnp-required")
+    for option in security:
+        if option.contains("unconfined") or option == "label=disable": return Err("fresh-workspace-created-security-weakened")
+    val create = linux_fresh_workload_inspect_strings_v2(observed, "create_command", 65)?
+    if create.len() < 1:
+        return Err("fresh-workspace-created-command-unavailable")
+    val parent = linux_fresh_workload_inspect_text_v2(observed, "cgroup_parent")?
+    if not parent.starts_with("/"):
+        return Err("fresh-workspace-created-cgroup-parent-unavailable")
+    Ok(())
+
+pub fn linux_fresh_workspace_inspect_field_names_v3() -> [text]:
+    linux_fresh_workload_inspect_field_names_v2() + ["tty", "open_stdin", "stdin_once", "userns_mode"]

@@ -1,0 +1,36 @@
+# AUTHORED_NOT_RUN. Production wire DATA validators only, no fake owner/ack.
+use std.spec.{describe, it, expect, step}
+use std.common.build_manager.group_process_stream_cancel_protocol_v3.*
+use std.common.build_manager.group_process_protocol.{GroupProcessPollV1, group_process_observation_encode_v1}
+
+describe "Closed actual broker cancel wire DATA":
+    it "encodes exactly the existing three-line cancel request without trailing newline":
+        step("A request is DATA until the genuine installed Host control chain acts")
+        val identity = "a".repeat(64)
+        val request = group_process_stream_cancel_request_v3(identity, "n0123456789abcdef").unwrap()
+        expect(request).to_equal(identity + "\nn0123456789abcdef\ncancel")
+        expect(group_process_stream_cancel_request_validate_v3(request).unwrap()).to_equal((identity, "n0123456789abcdef"))
+        for malformed in [request + "\n", request.replace("cancel", "probe"), identity + "\ninvalid/nonce\ncancel", "short\nnonce\ncancel"]:
+            expect(group_process_stream_cancel_request_validate_v3(malformed).is_err()).to_equal(true)
+
+    it "accepts only a canonical matching fresh nonterminal cancelled observation":
+        step("Acknowledgement never attests an empty/reaped tree or quota release")
+        val identity = "a".repeat(64)
+        val request = group_process_stream_cancel_request_v3(identity, "nonce_1").unwrap()
+        val observed = GroupProcessPollV1(false, false, false, 1, -1, false, true, 1048576, 1024, true)
+        val payload = group_process_observation_encode_v1(identity, observed)
+        expect(group_process_stream_cancel_response_v3(request, request + "\n" + payload).unwrap().unwrap()).to_equal(observed)
+        val old = group_process_stream_cancel_request_v3(identity, "nonce_0").unwrap()
+        expect(group_process_stream_cancel_response_v3(request, old + "\n" + payload).unwrap().is_none()).to_equal(true)
+        expect(group_process_stream_cancel_response_v3(request, request + "\nmalformed").is_err()).to_equal(true)
+        val not_cancelled = GroupProcessPollV1(false, false, false, 1, -1, false, false, 1048576, 1024, true)
+        expect(group_process_stream_cancel_response_v3(request, request + "\n" + group_process_observation_encode_v1(identity, not_cancelled)).unwrap().is_none()).to_equal(true)
+
+    it "requires separate durable cleanup even for an otherwise canonical terminal response":
+        step("The actual broker terminal branch writes broker.tree instead of a challenge ack")
+        val identity = "a".repeat(64)
+        val request = group_process_stream_cancel_request_v3(identity, "nonce_1").unwrap()
+        val terminal = GroupProcessPollV1(true, true, true, 0, 0, false, true, 1048576, 0, false)
+        val payload = group_process_observation_encode_v1(identity, terminal)
+        expect(group_process_stream_cancel_response_v3(request, request + "\n" + payload).unwrap_err()).to_equal("terminal group observation lacks durable collected receipt")
+        expect(group_process_stream_cancel_response_v3(request, "x".repeat(8193)).is_err()).to_equal(true)

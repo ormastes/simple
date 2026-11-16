@@ -1217,3 +1217,19 @@ one `enter|exit <name>` line per edge. **Profile** is `XraySpyV1.profile()`,
 which folds the same drained events with `trace_profile_fold_v1`. Both share
 one implementation and run unchanged on either OS; the spy's adapter takes the
 backend leaf's sled kind (`Llvm` or native `Simple`).
+
+**Aspect containers** (`src/lib/nogc_sync_mut/trace/xray_container_v1.spl`):
+- **Profile container**: collects raw edges and folds them into per-function
+  calls and inclusive/exclusive ns.
+- **Logging container**: writes paired `enter|exit <name>` lines. An exit
+  that does not close the innermost logged entry is counted in
+  `unpaired_exits` and is not logged.
+- **Static mode**: the instrumentation is compiled in and calls
+  `hook_enter`/`hook_exit`; no sled is patched.
+- **Dynamic mode** (XRay-based): `apply()` enables the spy (the leaf patches
+  the sleds or flag guards) when a container goes active, and unpatches on Off.
+  `pump()` delivers the drained events.
+- **Container switch**: `XrayContainerSwitchV1.switch_to` / `apply` enables a
+  container, disables (Off), or swaps containers at run time. Off records
+  nothing: in static mode a hook returns at its first compare, and in dynamic
+  mode no sled is patched.

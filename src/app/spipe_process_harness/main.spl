@@ -9,7 +9,7 @@ use std.nogc_async_mut.spipe_process_harness.core.{
     normalize_provider, feature_dir, state_path, event_log_path, hook_jsonl,
     gate_from_state, render_state, render_hud, deploy_snippets
 }
-use std.nogc_async_mut.spipe_process_harness.types.{GateVerdict, HookSessionId, ModelName, FeatureSlug, HudSnapshot}
+use std.nogc_async_mut.spipe_process_harness.types.{GateVerdict, ApprovalRequirement, UserApproval, HookSessionId, ModelName, FeatureSlug, HudSnapshot}
 use std.nogc_async_mut.spipe_process_harness.goal.{
     GoalExit, GoalResumeVerdict, default_registry_path, goal_exit_code, parse_goal_id,
     goal_receipt_path, parse_goal_skills_request, plan_goal_skills, evaluate_goal_resume, resume_exit
@@ -89,11 +89,11 @@ fn write_state(args: [text], as_json: bool, progress: text) -> i64:
     val feature = FeatureSlug(value: option(args, "--feature", "spipe-process-harness"))
     val request = option(args, "--request", "SPipe production-level process harness")
     val goal = option(args, "--goal", "Common hook, deploy, HUD, and prevention infra for Codex, Claude, and Gemini")
-    val approved = has_flag(args, "--approved")
+    val approval = if has_flag(args, "--approved"): UserApproval.Approved else: UserApproval.Unapproved
     val path = state_path(feature)
     dir_create(".spipe", true)
     dir_create(".spipe/{feature.value}", true)
-    if file_write(path, render_state(feature, request, goal, approved)):
+    if file_write(path, render_state(feature, request, goal, approval)):
         if progress != "summary" and not as_json:
             val progress_line = render_progress(progress, 1, 1, "spipe-process-harness")
             if progress_line != "":
@@ -108,13 +108,13 @@ fn write_state(args: [text], as_json: bool, progress: text) -> i64:
 fn run_hook(args: [text]) -> i64:
     val provider = normalize_provider(option(args, "--provider", env_get("SPIPE_PROVIDER")))
     val feature = FeatureSlug(value: option(args, "--feature", env_get("SPIPE_FEATURE")))
-    val require_approval = env_get("SPIPE_REQUIRE_APPROVAL") == "1" or has_flag(args, "--require-approval")
+    val approval = if env_get("SPIPE_REQUIRE_APPROVAL") == "1" or has_flag(args, "--require-approval"): ApprovalRequirement.Required else: ApprovalRequirement.NotRequired
     val payload = read_hook_stdin()
     val event = first_non_empty(extract_str(payload, "hook_event_name"), extract_str(payload, "event"))
     val session_id = HookSessionId(value: first_non_empty(extract_str(payload, "session_id"), env_get("SPIPE_SESSION_ID")))
     val model = ModelName(value: first_non_empty(extract_str(payload, "model"), env_get("SPIPE_MODEL")))
     val state = if file_exists(state_path(feature)): file_read_text(state_path(feature)) else: ""
-    val gate = gate_from_state(state, require_approval)
+    val gate = gate_from_state(state, approval)
     dir_create(".spipe", true)
     dir_create(".spipe/{feature_dir(feature)}", true)
     append_raw_jsonl(event_log_path(feature), hook_jsonl(provider, event, session_id, model, payload))
@@ -124,9 +124,9 @@ fn run_hook(args: [text]) -> i64:
 
 fn run_gate(args: [text]) -> i64:
     val feature = FeatureSlug(value: option(args, "--feature", "spipe-process-harness"))
-    val require_approval = not has_flag(args, "--no-approval")
+    val approval = if has_flag(args, "--no-approval"): ApprovalRequirement.NotRequired else: ApprovalRequirement.Required
     val state = if file_exists(state_path(feature)): file_read_text(state_path(feature)) else: ""
-    val gate = gate_from_state(state, require_approval)
+    val gate = gate_from_state(state, approval)
     print gate.reason
     verdict_exit_code(gate.verdict)
 

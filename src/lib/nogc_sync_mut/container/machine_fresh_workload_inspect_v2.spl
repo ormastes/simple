@@ -1,9 +1,12 @@
 # Strict native-inspect DATA; only the actual retained containment owner and
 # successor can establish workload placement/security after this decoding.
 use std.nogc_sync_mut.container.machine_fresh_workload_record_v2.*
+use std.nogc_sync_mut.container.machine_fresh_workspace_record_v3.*
+use std.nogc_sync_mut.container.machine_fresh_workload_dispatch_v3.*
+use std.common.contracts.container.linux_fresh_workspace_inspect_v3.linux_fresh_workspace_inspect_fields_v3
 use std.common.contracts.container.linux_fresh_workload_inspect_v2.{linux_fresh_workload_inspect_identity_v2, linux_fresh_workload_inspect_field_names_v2}
 use std.common.contracts.container.linux_fresh_workload_v2.LinuxFreshWorkloadActionV2
-use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use std.common.contracts.container.execution_v2.{container_scope_fence_id_v2, ContainerExecutionRequestV2, ContainerHostScopeV2}
 use std.common.json.value.{JsonValue, json_value_get, json_value_as_text, json_value_keys}
 use std.common.build_manager.contracts.builder_digest_valid_v1
 use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.native_inspect_definitively_not_found
@@ -27,13 +30,19 @@ pub fn machine_fresh_workload_inspect_v2(record: MachineFreshWorkloadRecordV2,
     if not builder_digest_valid_v1(native_id): return Err("machine-fresh-workload-full-native-id")
     val command = machine_fresh_workload_command_v2(record, LinuxFreshWorkloadActionV2.Inspect, native_id)?
     val value = linux_fresh_workload_inspect_identity_v2(command, output)?
-    val p = record.request.plan
-    if (json_value_keys(value).len() != linux_fresh_workload_inspect_field_names_v2().len() or workload_inspect_text_v2(value, "id")? != native_id or
+    workload_inspect_value_v3(record.request, record.scope, native_id, value, linux_fresh_workload_inspect_field_names_v2().len())
+
+# Shared exact identity/security decoding; native placement remains a separate
+# genuine retained-owner operation. CPU wrapper still uses its original42 guard.
+fn workload_inspect_value_v3(request: ContainerExecutionRequestV2, scope: ContainerHostScopeV2,
+        native_id: text, value: JsonValue, expected_fields: i64) -> Result<MachineFreshWorkloadInspectV2, text>:
+    val p = request.plan
+    if (json_value_keys(value).len() != expected_fields or workload_inspect_text_v2(value, "id")? != native_id or
             workload_inspect_text_v2(value, "pod_uid")? != p.workload_uid or
             workload_inspect_text_v2(value, "attempt")? != str(p.attempt) or
             workload_inspect_text_v2(value, "operation_id")? != p.operation_id or
             workload_inspect_text_v2(value, "provider_generation")? != str(p.provider_generation) or
-            workload_inspect_text_v2(value, "node_boot_id")? != container_scope_fence_id_v2(record.scope)? or
+            workload_inspect_text_v2(value, "node_boot_id")? != container_scope_fence_id_v2(scope)? or
             workload_inspect_text_v2(value, "status")? != "running" or
             workload_inspect_text_v2(value, "manager")? != "cgroupfs" or
             workload_inspect_text_v2(value, "cgroup_mode")? != "private" or
@@ -55,3 +64,16 @@ pub fn machine_fresh_workload_inspect_v2(record: MachineFreshWorkloadRecordV2,
 
 pub fn machine_fresh_workload_absence_v2(exit_code: i64, output: text) -> bool:
     native_inspect_definitively_not_found("podman", exit_code, output)
+
+pub fn machine_fresh_record_inspect_v3(record: MachineFreshWorkloadRecordDispatchV3,
+        native_id: text, output: text) -> Result<MachineFreshWorkloadInspectV2, text>:
+    match record:
+        case MachineFreshWorkloadRecordDispatchV3.CpuV2(value): machine_fresh_workload_inspect_v2(value, native_id, output)
+        case MachineFreshWorkloadRecordDispatchV3.WorkspaceV3(value):
+            val checked = machine_fresh_workspace_record_validate_v3(value)?
+            if not builder_digest_valid_v1(native_id): return Err("machine-fresh-workload-full-native-id")
+            val parsed = linux_fresh_workspace_inspect_fields_v3(output)?
+            for key in ["tty", "open_stdin"]:
+                if workload_inspect_field_v2(parsed, key)? != JsonValue.Bool(true): return Err("machine-fresh-workspace-terminal-config")
+            if workload_inspect_field_v2(parsed, "stdin_once")? != JsonValue.Bool(false): return Err("machine-fresh-workspace-terminal-config")
+            workload_inspect_value_v3(value.request, value.scope, native_id, parsed, 46)

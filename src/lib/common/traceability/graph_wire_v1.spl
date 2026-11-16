@@ -2,6 +2,7 @@
 use std.common.sdn.value.{SdnValue}
 use std.common.sdn.encode.{sdn_encode_canonical, sdn_encoded_text_size_v1}
 use std.common.traceability.graph_types_v1.*
+use std.common.traceability.envelope_types_v1.{TraceGraphByteCountV1}
 
 pub fn trace_graph_headers_v1(section: text) -> [text]:
     match section:
@@ -44,24 +45,24 @@ pub fn trace_graph_envelope_v1(document: TraceGraphV1) -> text:
     "schema: {name: simple.trace.graph, version: 1}\nsnapshot: " + sdn_encode_canonical(snapshot) +
         "\nmanifest: " + sdn_encode_canonical(manifest) + "\n"
 
-pub fn trace_graph_envelope_size_v1(document: TraceGraphV1) -> i64:
+pub fn trace_graph_envelope_size_v1(document: TraceGraphV1) -> TraceGraphByteCountV1:
     # Fixed names, punctuation and line endings; booleans and text are exact.
     val fixed = "schema: {name: simple.trace.graph, version: 1}\nsnapshot: {complete: , id: , kind: }\nmanifest: {complete: , extractor_version: , input_set_id: , policy_id: , rules_version: }\n"
     var size = fixed.len() + (if document.snapshot.complete: 4 else: 5) + (if document.manifest.complete: 4 else: 5)
     for item in [document.snapshot.id, document.snapshot.kind, document.manifest.extractor_version,
         document.manifest.input_set_id, document.manifest.policy_id, document.manifest.rules_version]:
         size = size + sdn_encoded_text_size_v1(item)
-    size
+    TraceGraphByteCountV1(value: size)
 
 fn trace_graph_text_sizes_v1(fields: [text]) -> i64:
     var size = 0
     for item in fields: size = size + sdn_encoded_text_size_v1(item)
     size
 
-pub fn trace_graph_output_size_v1(document: TraceGraphV1) -> i64:
+pub fn trace_graph_output_size_v1(document: TraceGraphV1) -> TraceGraphByteCountV1:
     # Caller first enforces hard record/text limits. Consequently the sum is
     # bounded below 128MiB, far below i64 overflow. No SDN row/key is allocated.
-    var size = trace_graph_envelope_size_v1(document)
+    var size = trace_graph_envelope_size_v1(document).value
     for section in ["inputs", "nodes", "test_definitions", "edges", "edge_origins", "locators"]:
         size = size + section.len() + 4 + trace_graph_headers_v1(section).join(", ").len()
     for item in document.inputs:
@@ -77,9 +78,9 @@ pub fn trace_graph_output_size_v1(document: TraceGraphV1) -> i64:
             (if item.declaration_path_available: 4 else: 5) + (if item.span_available: 4 else: 5) + item.line.to_text().len() + item.column.to_text().len()
     for item in document.locators:
         size = size + 13 + trace_graph_text_sizes_v1([item.entity_id, item.path, item.locator_kind, item.locator]) + (if item.path_available: 4 else: 5)
-    size
+    TraceGraphByteCountV1(value: size)
 
-pub fn trace_graph_row_size_v1(row: [SdnValue]) -> i64:
+pub fn trace_graph_row_size_v1(row: [SdnValue]) -> TraceGraphByteCountV1:
     var size = 5 + 2 * (row.len() - 1)
     for cell in row:
         match cell:
@@ -87,7 +88,7 @@ pub fn trace_graph_row_size_v1(row: [SdnValue]) -> i64:
             case Bool(item): size = size + (if item: 4 else: 5)
             case Int(item): size = size + item.to_text().len()
             case _: size = size + sdn_encode_canonical(cell).len()
-    size
+    TraceGraphByteCountV1(value: size)
 
 pub fn trace_graph_tuple_key_v1(fields: [text]) -> text:
     # Length prefixes are unambiguous even when UTF8 paths contain delimiters.
