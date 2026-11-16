@@ -1836,7 +1836,12 @@ impl MirLowering:
                             if self.local_hir_type_resource_state(init_local.id) == 1:
                                 self.consumed_resource_locals[init_local.id] = true
                                 self.resource_owned_locals.push(smove_local)
-                        elif (bf_sym != None or struct_sym != None) and not initializer_is_short:
+                        elif (bf_sym != None or struct_sym != None) and not initializer_is_short and not mir_expr_kind_is_place(let_init.kind):
+                            # Alias only a FRESH aggregate. A place read that reaches
+                            # here (a class, which keeps reference semantics, or a
+                            # bitfield word) needs its own local: aliasing the SOURCE
+                            # binding's local made `var t = a; t = b` overwrite `a`
+                            # (bug stage2_class_var_place_alias_clobbers_source_2026-11-16).
                             self.bind_local(symbol_value_id, init_local)
                         else:
                             # Bug #186: array-typed place-read local-alias fix
@@ -1857,9 +1862,12 @@ impl MirLowering:
                                 self.builder = b
                                 self.bind_local(symbol_value_id, local)
                                 self.copy_assignment_short_provenance(init_local, local)
-                                if initializer_is_short and struct_sym != None:
+                                # Short initializers and place reads of a class /
+                                # bitfield both land here with a known record or
+                                # bitfield owner; the fresh local keeps it.
+                                if struct_sym != None:
                                     self.struct_value_syms[local.id] = struct_sym ?? ""
-                                if initializer_is_short and bf_sym != None:
+                                if bf_sym != None:
                                     self.bitfield_value_syms[local.id] = bf_sym ?? -1
                                 if self.runtime_array_locals.contains(init_local.id):
                                     self.runtime_array_locals[local.id] = true
@@ -2195,7 +2203,7 @@ impl MirLowering:
                         val struct_copy2 = self.maybe_copy_struct_value(init_local, struct_sym, init_is_place)
                         if val copy_local2 = struct_copy2:
                             self.bind_local(symbol_id, copy_local2)
-                        elif bf_sym != None or struct_sym != None:
+                        elif (bf_sym != None or struct_sym != None) and not init_is_place:
                             self.bind_local(symbol_id, init_local)
                         else:
                             # Bug #186: same array-value-copy guard as the
@@ -2210,6 +2218,10 @@ impl MirLowering:
                                 val local = b.new_local(None, effective_type, LocalKind.Var)
                                 self.builder = b
                                 self.bind_local(symbol_id, local)
+                                if struct_sym != None:
+                                    self.struct_value_syms[local.id] = struct_sym ?? ""
+                                if bf_sym != None:
+                                    self.bitfield_value_syms[local.id] = bf_sym ?? -1
                                 if has_init and self.runtime_array_locals.contains(init_local.id):
                                     self.runtime_array_locals[local.id] = true
                                 if has_init and self.runtime_dict_locals.contains(init_local.id):
