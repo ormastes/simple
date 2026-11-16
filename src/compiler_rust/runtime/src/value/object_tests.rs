@@ -648,7 +648,9 @@ fn arr_with_one() -> RuntimeValue {
 }
 
 /// `rt_try_is_absent` must be exactly `rt_is_none || rt_enum_check_variant`
-/// for every value shape `?` can see (falsy-present payloads included).
+/// for every value shape `?` can see (falsy-present payloads included) -- except
+/// that an erased `?` (expected id 0) only counts a real Result's Err (#6953:
+/// `rt_enum_check_variant` keeps its id-0 wildcard for erased user case arms).
 #[test]
 fn try_is_absent_equals_is_none_or_err_check() {
     use super::{hash_variant_discriminant, rt_enum_new, rt_is_none, rt_try_is_absent};
@@ -671,7 +673,9 @@ fn try_is_absent_equals_is_none_or_err_check() {
         for expected_id in [0i64, 1, 7] {
             assert_eq!(
                 rt_try_is_absent(v, expected_id, err),
-                rt_is_none(v) || rt_enum_check_variant(v, expected_id, err),
+                rt_is_none(v)
+                    || (rt_enum_check_variant(v, expected_id, err)
+                        && (expected_id != 0 || super::is_result_enum_id(super::rt_enum_id(v) as u32))),
                 "value {:#x} expected_id {expected_id}",
                 v.0
             );

@@ -726,7 +726,7 @@ pub extern "C" fn rt_unwrap_or_value(value: RuntimeValue, default: RuntimeValue)
         return value;
     }
 
-    if enum_id == RESULT_ENUM_ID {
+    if is_result_enum_id(enum_id) {
         if discriminant == hash_variant_discriminant("Ok") {
             return payload;
         }
@@ -814,8 +814,14 @@ pub extern "C" fn rt_try_is_absent(value: RuntimeValue, expected_enum_id: i64, e
         {
             return true;
         }
+        // An erased `?` (expected id 0) is a builtin Result's Err only: a user
+        // enum's declared index 1 (#6953) must not return early.
         discriminant as i64 == err_discriminant
-            && (expected_enum_id == 0 || enum_id == 0 || enum_id as i64 == expected_enum_id)
+            && if expected_enum_id == 0 {
+                is_result_enum_id(enum_id)
+            } else {
+                enum_id == 0 || enum_id as i64 == expected_enum_id
+            }
     })
 }
 
@@ -897,7 +903,7 @@ pub extern "C" fn rt_is_present(value: RuntimeValue) -> bool {
     // decides (seed_jit_dotq_coalesce_parity_2026-11-06).
     if let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) {
         let (enum_id, discriminant) = unsafe { ((*p).enum_id, (*p).discriminant) };
-        if enum_id == RESULT_ENUM_ID && discriminant == hash_variant_discriminant("Err") {
+        if is_result_enum_id(enum_id) && discriminant == hash_variant_discriminant("Err") {
             return false;
         }
     }
@@ -922,15 +928,15 @@ pub extern "C" fn rt_option_map(value: RuntimeValue, closure: RuntimeValue) -> R
         return value;
     }
 
-    let mut result_ok_discriminant = None;
+    let mut result_ok = None;
     if let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) {
         let (enum_id, discriminant) = unsafe { ((*p).enum_id, (*p).discriminant) };
-        if enum_id == RESULT_ENUM_ID {
+        if is_result_enum_id(enum_id) {
             if discriminant == hash_variant_discriminant("Err") {
                 return value;
             }
             if discriminant == hash_variant_discriminant("Ok") {
-                result_ok_discriminant = Some(discriminant);
+                result_ok = Some((enum_id, discriminant));
             }
         }
     }
@@ -949,8 +955,8 @@ pub extern "C" fn rt_option_map(value: RuntimeValue, closure: RuntimeValue) -> R
     let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(func_ptr) };
     let result = func(closure, payload);
 
-    match result_ok_discriminant {
-        Some(discriminant) => rt_enum_new(RESULT_ENUM_ID, discriminant, result),
+    match result_ok {
+        Some((enum_id, discriminant)) => rt_enum_new(enum_id, discriminant, result),
         None => rt_option_some(result),
     }
 }
