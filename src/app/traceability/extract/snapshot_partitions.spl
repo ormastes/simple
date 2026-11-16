@@ -3,6 +3,7 @@
 # Cross-file identities and locators are resolved only after all partitions merge.
 # @req REQ-TRC-017
 use std.common.traceability.model.*
+use std.common.traceability.trace_ids_v1.{TraceOverridePermissionV1}
 use std.common.traceability.incremental.*
 use std.common.traceability.schema.{trace_path_parse_v1}
 use std.common.traceability.sdn_codec.{decode_trace_declarations}
@@ -40,6 +41,16 @@ pub struct TraceSnapshotPartitionUpdate:
     invalidation: TraceInvalidation
     reused_paths: [text]
 
+fn authority_review_wire(authority: TraceAuthority) -> text:
+    if authority.review_id.is_some():
+        return authority.review_id.unwrap().value
+    ""
+
+fn authority_expiry_wire(authority: TraceAuthority) -> text:
+    if authority.expires_snapshot_id.is_some():
+        return authority.expires_snapshot_id.unwrap().value
+    ""
+
 fn partition_digest(value: text) -> text:
     var bytes: [u8] = []
     for byte in value.bytes(): bytes.push(byte)
@@ -68,7 +79,7 @@ fn partition_fact_digest(facts: TraceFacts) -> text:
     var claims: [SdnValue] = []
     for item in facts.claims: claims.push(partition_sdn_strings(["id", "from_id", "relation", "to_id", "origin_id", "operation", "rule_id", "scope_id"], [item.id, item.from_id, relation_name(item.relation), item.to_id, item.origin_id, claim_operation_name(item.operation), item.rule_id, item.scope_id]))
     var origins: [SdnValue] = []
-    for item in facts.origins: origins.push(partition_sdn_strings(["id", "kind", "owner_path", "locator", "rule_version"], [item.id, origin_kind_name(item.kind), item.owner_path, item.locator, item.rule_version]))
+    for item in facts.origins: origins.push(partition_sdn_strings(["id", "kind", "owner_path", "locator", "rule_version"], [item.id.value, origin_kind_name(item.kind), item.owner_path.value, item.locator, item.rule_version.value]))
     var locators: [SdnValue] = []
     for item in facts.locators: locators.push(partition_sdn_strings(["entity_id", "path", "locator_kind", "locator", "blob_id"], [item.entity_id, item.path, item.locator_kind, item.locator, item.blob_id]))
     var diagnostics: [SdnValue] = []
@@ -110,13 +121,13 @@ pub fn trace_snapshot_policy_binding(policy: TracePolicy) -> text:
     var rules: [SdnValue] = []
     for rule in policy.conventions:
         rules.push(partition_record(["id", "source_root", "target_root", "source_suffix", "target_suffix", "relation", "version"],
-            [rule.id, rule.source_root, rule.target_root, rule.source_suffix, rule.target_suffix, relation_name(rule.relation), rule.version]))
+            [rule.id.value, rule.source_root.value, rule.target_root.value, rule.source_suffix.value, rule.target_suffix.value, relation_name(rule.relation), rule.version.value]))
     var authorities: [SdnValue] = []
     for authority in policy.authorities:
         var row: Dict<text, SdnValue> = {}
         row["declaration"] = partition_record(["origin_id", "relation", "scope_id", "owner_path", "review_id", "reason", "expires_snapshot_id"],
-            [authority.origin_id, relation_name(authority.relation), authority.scope_id, authority.owner_path, authority.review_id, authority.reason, authority.expires_snapshot_id])
-        row["allow_override"] = SdnValue.Bool(authority.allow_override)
+            [authority.origin_id.value, relation_name(authority.relation), authority.scope_id.value, authority.owner_path.value, authority_review_wire(authority), authority.reason, authority_expiry_wire(authority)])
+        row["allow_override"] = SdnValue.Bool(authority.override_permission == TraceOverridePermissionV1.Allowed)
         authorities.push(SdnValue.Dict(row))
     var fields: Dict<text, SdnValue> = {}
     fields["schema"] = SdnValue.String("simple.trace.policy-binding/v1")

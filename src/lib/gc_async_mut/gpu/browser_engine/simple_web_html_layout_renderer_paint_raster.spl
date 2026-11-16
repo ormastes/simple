@@ -369,7 +369,10 @@ fn input_text_prefix(value: text, max_glyphs: i32) -> text:
         glyph_index = glyph_index + 1
     value.substring(0, byte_index)
 
-fn input_text_for_paint(nd: HNode, max_glyphs: i32) -> text:
+# The whole value is painted; the caller clips it at the content box. Chrome
+# 159 keeps an overflowing value intact (scrollWidth 56 for an 11-char 8px
+# Arial value in a 36px content box) and clips it, it never truncates it.
+fn input_text_for_paint(nd: HNode) -> text:
     val input_type = attr_value(nd.attrs_raw, "type").trim().lower()
     val declared_value = attr_value(nd.attrs_raw, "value")
     if not text_is_valid_utf8(declared_value):
@@ -383,11 +386,8 @@ fn input_text_for_paint(nd: HNode, max_glyphs: i32) -> text:
         else:
             value = attr_value(nd.attrs_raw, "placeholder")
     if input_type == "password" and declared_value != "":
-        var count = text_codepoint_len(declared_value)
-        if count > max_glyphs:
-            count = max_glyphs
-        return "*".repeat(count)
-    input_text_prefix(value, max_glyphs)
+        return "*".repeat(text_codepoint_len(declared_value))
+    value
 
 # Shared resolved input text geometry used by the CPU pixel painter and the
 # Draw IR producer. It contains only durable layout semantics: the executor
@@ -541,8 +541,8 @@ fn _input_text_content_clip(ancestor_clip: ClipRect, x: i32, y: i32, w: i32, h: 
         y1 = raw_clip.y0
     ClipRect(x0: raw_clip.x0, y0: raw_clip.y0, x1: x1, y1: y1)
 
-pub fn input_text_paint_plan(nd: HNode, st: Style, x: i32, y: i32, w: i32, h: i32, ancestor_clip: ClipRect, max_glyphs: i32) -> InputTextPaintPlan:
-    val raw_text = input_text_for_paint(nd, max_glyphs)
+pub fn input_text_paint_plan(nd: HNode, st: Style, x: i32, y: i32, w: i32, h: i32, ancestor_clip: ClipRect) -> InputTextPaintPlan:
+    val raw_text = input_text_for_paint(nd)
     val transformed_text = apply_text_transform_for_paint(
         raw_text, st.text_transform
     )
@@ -570,6 +570,14 @@ pub fn input_text_paint_plan(nd: HNode, st: Style, x: i32, y: i32, w: i32, h: i3
         input_type == "reset"
     ):
         content_x + (content_w - measured_width) / 2
+    elif measured_width > content_w and st.direction_rtl:
+        # An overflowing value is start-aligned whatever text-align says
+        # (CSS Text 3 §6.1). Chrome 159: a centered 56px value in a 36px
+        # content box paints ink columns 3..38, the same as start alignment;
+        # RTL center/start/left overflow paint identical columns too.
+        content_x + content_w - measured_width
+    elif measured_width > content_w:
+        content_x
     else:
         text_line_aligned_x(
             content_x, content_w, measured_width, st, 0, 1
@@ -613,18 +621,12 @@ pub fn input_text_paint_plan_with_overlay(
     ancestor_clip: ClipRect, overlay: BrowserTextInputOverlay
 ) -> InputTextPaintPlan:
     if overlay.target_key == "":
-        val content_w = w - st.border_l - st.border_r - st.pad_l - st.pad_r
-        val advance = style_text_advance(st)
-        val glyph_advance = if advance > 0: advance else: 1
-        return input_text_paint_plan(
-            nd, st, x, y, w, h, ancestor_clip,
-            content_w / glyph_advance + 1
-        )
+        return input_text_paint_plan(nd, st, x, y, w, h, ancestor_clip)
     val visual_map = input_text_visual_map(nd, st)
     if visual_map.source_boundary_bytes.len() == 0:
-        return input_text_paint_plan(
-            nd, st, x, y, w, h, ancestor_clip, 0
-        )
+        # Only an invalid-UTF-8 value has no boundaries; the static plan
+        # paints nothing for it.
+        return input_text_paint_plan(nd, st, x, y, w, h, ancestor_clip)
     var view_index = _input_text_boundary_index(
         visual_map, overlay.view_start_byte
     )
@@ -678,10 +680,8 @@ pub fn input_text_paint_plan_with_overlay(
         visual_map.display_text, 0, visual_map.display_text.byte_len(),
         st, advance, space_advance
     )
-    val glyph_advance = if advance > 0: advance else: 1
     val static_plan = input_text_paint_plan(
-        nd, st, x, y, w, h, ancestor_clip,
-        content_w / glyph_advance + 1
+        nd, st, x, y, w, h, ancestor_clip
     )
     val baseline_x = if view_index == 0:
         static_plan.baseline_x
@@ -1117,11 +1117,8 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
             val space_adv = style_space_advance(st)
             val content_w = w - st.border_l - st.border_r - st.pad_l - st.pad_r
             if content_w > 0:
-                val glyph_advance = if adv > 0: adv else: 1
-                val max_glyphs = content_w / glyph_advance + 1
                 val plan = input_text_paint_plan(
-                    nd, st, x, y, w, h, paint_clip_at(clip_cache, i),
-                    max_glyphs
+                    nd, st, x, y, w, h, paint_clip_at(clip_cache, i)
                 )
                 if plan.text_value != "" and plan.baseline_y < fbh:
                     val use_ttf = (not web_bitmap_paint_lane()) and st.font_size > 8 and fb_text_ttf_available(st.resolved_font_identity, st.font_family, st.bold, st.font_style_italic)

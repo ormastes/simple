@@ -96,6 +96,11 @@ pub class LinuxFreshEpochSuccessorCustodyV1:
         fresh_workload_absence_v2(self.slot, self.generation, command)
     pub fn observe_probe_absence_v3(command: LinuxFreshWorkloadProbeCommandV3) -> Result<LinuxFreshWorkloadProbeAbsenceV3, text>:
         fresh_probe_absence_v3(self.slot, self.generation, command)
+    # Offline read of the held fresh-epoch provider store (milestone_0019 M1):
+    # only while the successor custody is ready, with the provider masked and
+    # never started; any store entry refuses.
+    pub fn observe_store_inventory_v1() -> Result<LinuxFreshEpochObservationV1, text>:
+        fresh_epoch_store_inventory_v1(self.slot, self.generation)
     pub fn observe_workload_stats_v1(owner: LinuxContainerContainmentOwnerV1, command: LinuxFreshWorkloadCommandV2) -> Result<LinuxFreshWorkloadStatsCountersV1, text>:
         fresh_workload_stats_v1(self.slot, self.generation, owner, command)
     pub fn close_v1() -> LinuxFreshEpochSuccessorCloseTurnV1:
@@ -286,6 +291,19 @@ fn fresh_probe_absence_v3(slot: i64, generation: i64, command: LinuxFreshWorkloa
         service_uid: installed.profile.number_v1("serviceUid")?, subuid_start: installed.profile.number_v1("subuidStart")?,
         subuid_count: installed.profile.number_v1("subuidCount")?, owner_generation: after.owner_generation,
         sample_started_monotonic_ns: started, sample_finished_monotonic_ns: finished))
+
+fn fresh_epoch_store_inventory_v1(slot: i64, generation: i64) -> Result<LinuxFreshEpochObservationV1, text>:
+    val before = fresh_epoch_current_v1(slot, generation, true)?
+    val state = fresh_epoch_state_v1(slot, generation)?
+    # A non-empty or racy store refuses and leaves custody usable (the
+    # reconcile refuses; the journal stays quarantined). A descriptor-close
+    # failure puts the native slot into cleanup, failing this custody closed.
+    val store = state.native.unwrap().observe_store_inventory_v1()?
+    val after = fresh_epoch_current_v1(slot, generation, true)?
+    if (before != after or store.store_identity_digest != after.store_identity_digest or
+            store.partition_identity_digest != after.partition_identity_digest):
+        return Err("fresh-epoch-store-inventory-custody-changed")
+    Ok(after)
 
 fn fresh_workload_absence_v2(slot: i64, generation: i64, command: LinuxFreshWorkloadCommandV2) -> Result<LinuxFreshWorkloadClosureV2, text>:
     val state = fresh_workload_scope_v2(slot, generation, command)?

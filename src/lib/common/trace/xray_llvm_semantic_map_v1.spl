@@ -1,0 +1,164 @@
+# Cold decoder for compiler pcsections rows. Bytes must be copied from the
+# registered main image by its owner before this runs; the ELF section may be
+# writable and may be byte-aligned. Never cast it to a native row struct.
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_native_map_v1.{TraceImageRangeV1}
+use std.common.text_bytes.{utf8_bytes_valid, bytes_to_text}
+
+pub struct XrayLlvmSemanticRowV1:
+    key: text
+    owner: text
+    address: u64
+    size: u64
+
+pub struct XrayLlvmFunctionAddressV1:
+    llvm_id: i64
+    address: u64
+
+pub struct XrayLlvmBindingV1:
+    function_id: u32
+    site_id: u32
+    llvm_id: i64
+    row: XrayLlvmSemanticRowV1
+
+pub struct XrayLlvmBoundManifestV1:
+    module_instance: u64
+    incarnation: u64
+    build_id: [u8]
+    bindings: [XrayLlvmBindingV1]
+
+fn xray_semantic_word_v1(bytes: [u8], at: i64, count: i64) -> u64:
+    var value: u64 = 0
+    for index in 0..count:
+        value = value | ((bytes[at + index] as u64) << (index * 8))
+    value
+
+fn xray_semantic_text_v1(bytes: [u8], at: i64, count: i64) -> Result<text, TraceFailureV1>:
+    var copied: [u8] = []
+    for index in 0..count:
+        val byte = bytes[at + index]
+        if byte == 0: return Err(TraceFailureV1.InvalidMap)
+        copied.push(byte)
+    if not utf8_bytes_valid(copied): return Err(TraceFailureV1.InvalidMap)
+    Ok(bytes_to_text(copied))
+
+# Ranges contain loaded absolute addresses, supplied by the registered image
+# owner from PT_LOAD. No raw caller address is accepted by the public facade.
+fn xray_semantic_executable_v1(ranges: [TraceImageRangeV1], address: u64, size: u64) -> bool:
+    if size == 0 or address > 18446744073709551615u64 - size: return false
+    for range in ranges:
+        if range.readable and range.executable and not range.writable and address >= range.offset:
+            val delta = address - range.offset
+            if delta <= range.size and size <= range.size - delta: return true
+    false
+
+pub fn xray_llvm_semantic_decode_v1(bytes: [u8], section_address: u64,
+        image_ranges: [TraceImageRangeV1]) -> Result<[XrayLlvmSemanticRowV1], TraceFailureV1>:
+    # Bounds are both memory and cold-work budgets, not implicit growth limits.
+    if bytes.len() == 0: return Err(TraceFailureV1.InstrumentationAbsent)
+    if bytes.len() > 8388608 or image_ranges.len() == 0 or image_ranges.len() > 128:
+        return Err(TraceFailureV1.ResourceExhausted)
+    if section_address == 0 or section_address > 18446744073709551615u64 - (bytes.len() as u64):
+        return Err(TraceFailureV1.InvalidMap)
+    for range in image_ranges:
+        if range.size == 0 or range.offset > 18446744073709551615u64 - range.size:
+            return Err(TraceFailureV1.InvalidMap)
+    var rows: [XrayLlvmSemanticRowV1] = []
+    var at: i64 = 0
+    while at < bytes.len():
+        if rows.len() >= 4096: return Err(TraceFailureV1.ResourceExhausted)
+        if bytes.len() - at < 40: return Err(TraceFailureV1.InvalidMap)
+        val row_bytes = xray_semantic_word_v1(bytes, at + 20, 4) as i64
+        val key_bytes = xray_semantic_word_v1(bytes, at + 24, 4) as i64
+        val owner_bytes = xray_semantic_word_v1(bytes, at + 28, 4) as i64
+        if (xray_semantic_word_v1(bytes, at + 8, 8) != 3552587323878299731u64 or
+                xray_semantic_word_v1(bytes, at + 16, 4) != 1u64 or
+                xray_semantic_word_v1(bytes, at + 32, 8) != 0u64 or
+                key_bytes < 1 or key_bytes > 4096 or owner_bytes < 1 or owner_bytes > 1024):
+            return Err(TraceFailureV1.InvalidMap)
+        val needed = ((40 + key_bytes + owner_bytes + 7) / 8) * 8
+        if row_bytes != needed or row_bytes > 8192 or row_bytes > bytes.len() - at:
+            return Err(TraceFailureV1.InvalidMap)
+        val relative = xray_semantic_word_v1(bytes, at, 4)
+        val entry = section_address + (at as u64)
+        var address: u64 = 0
+        if relative >= 2147483648u64:
+            val magnitude = 4294967296u64 - relative
+            if magnitude >= entry: return Err(TraceFailureV1.InvalidMap)
+            address = entry - magnitude
+        else:
+            if relative > 18446744073709551615u64 - entry: return Err(TraceFailureV1.InvalidMap)
+            address = entry + relative
+        val size = xray_semantic_word_v1(bytes, at + 4, 4)
+        if address == 0 or size == 0 or not xray_semantic_executable_v1(image_ranges, address, size):
+            return Err(TraceFailureV1.InvalidMap)
+        val key = xray_semantic_text_v1(bytes, at + 40, key_bytes)?
+        val owner = xray_semantic_text_v1(bytes, at + 40 + key_bytes, owner_bytes)?
+        for padding in (40 + key_bytes + owner_bytes)..row_bytes:
+            if bytes[at + padding] != 0: return Err(TraceFailureV1.InvalidMap)
+        for existing in rows:
+            if existing.address == address or (existing.key == key and existing.owner == owner):
+                return Err(TraceFailureV1.InvalidMap)
+        rows.push(XrayLlvmSemanticRowV1(key: key, owner: owner, address: address, size: size))
+        at = at + row_bytes
+    Ok(rows)
+
+# Bind exact actual LLVM addresses, never LLVM ordinal order or a symbol-name
+# guess. Canonical IDs index this issued manifest only, not a future rebuild.
+pub fn xray_llvm_semantic_bind_v1(rows: [XrayLlvmSemanticRowV1],
+        actual: [XrayLlvmFunctionAddressV1], build_id: [u8], module_instance: u64,
+        incarnation: u64) -> Result<XrayLlvmBoundManifestV1, TraceFailureV1>:
+    if build_id.len() != 20: return Err(TraceFailureV1.UnsupportedProfile)
+    if module_instance == 0 or incarnation == 0 or rows.len() == 0:
+        return Err(TraceFailureV1.InvalidMap)
+    if rows.len() > 4096 or actual.len() > 65536: return Err(TraceFailureV1.ResourceExhausted)
+    # Canonical IDs depend on semantic keys, not linker input order. Copy the
+    # bounded input before sorting so caller-owned manifests remain untouched.
+    var ordered: [XrayLlvmSemanticRowV1] = []
+    for row in rows:
+        val key_bytes = row.key.bytes()
+        val owner_bytes = row.owner.bytes()
+        if (row.address == 0 or row.size == 0 or row.address > 18446744073709551615u64 - row.size or
+                key_bytes.len() == 0 or key_bytes.len() > 4096 or
+                owner_bytes.len() == 0 or owner_bytes.len() > 1024 or
+                not utf8_bytes_valid(key_bytes) or not utf8_bytes_valid(owner_bytes)):
+            return Err(TraceFailureV1.InvalidMap)
+        for byte in key_bytes:
+            if byte == 0: return Err(TraceFailureV1.InvalidMap)
+        for byte in owner_bytes:
+            if byte == 0: return Err(TraceFailureV1.InvalidMap)
+        ordered.push(row)
+        var position = ordered.len() - 1
+        while position > 0:
+            val left = ordered[position - 1]
+            val right = ordered[position]
+            if left.owner < right.owner or (left.owner == right.owner and left.key <= right.key): break
+            ordered[position - 1] = right
+            ordered[position] = left
+            position = position - 1
+    # Build a cold exact-address index once; no O(rows * functions) scan and no
+    # runtime hashing in the callback. A duplicate physical address is an alias
+    # whose semantic identity this v1 manifest cannot disambiguate.
+    var by_address: Dict<u64, i64> = {}
+    var previous_id: i64 = 0
+    for candidate in actual:
+        if candidate.llvm_id <= previous_id or candidate.llvm_id > 16777215 or candidate.address == 0:
+            return Err(TraceFailureV1.InvalidMap)
+        previous_id = candidate.llvm_id
+        if by_address.contains_key(candidate.address): return Err(TraceFailureV1.InvalidMap)
+        by_address[candidate.address] = candidate.llvm_id
+    var bindings: [XrayLlvmBindingV1] = []
+    for row in ordered:
+        if not by_address.contains_key(row.address): return Err(TraceFailureV1.InstrumentationAbsent)
+        val found = by_address[row.address]
+        for binding in bindings:
+            if binding.llvm_id == found or binding.row.address == row.address or
+                    (binding.row.key == row.key and binding.row.owner == row.owner):
+                return Err(TraceFailureV1.InvalidMap)
+        val canonical = (bindings.len() + 1) as u32
+        bindings.push(XrayLlvmBindingV1(function_id: canonical, site_id: canonical,
+            llvm_id: found, row: row))
+    var identity: [u8] = []
+    for byte in build_id: identity.push(byte)
+    Ok(XrayLlvmBoundManifestV1(module_instance: module_instance,
+        incarnation: incarnation, build_id: identity, bindings: bindings))
