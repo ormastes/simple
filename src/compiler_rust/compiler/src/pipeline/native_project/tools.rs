@@ -609,6 +609,8 @@ fn build_c_runtime_library(
         // failed with undefined _simple_contract_check (2026-07-30).
         "runtime_contracts.c",
         "runtime_font.c",
+        // rt_db_* fast in-memory DB: self-contained C, sole definition of these symbols.
+        "runtime_db.c",
         // Canonical OS-thread and closure-pool provider. runtime_thread.c owns
         // both rt_thread_* and rt_pool_*; compiling runtime_pool.c beside it
         // would create duplicate pool definitions.
