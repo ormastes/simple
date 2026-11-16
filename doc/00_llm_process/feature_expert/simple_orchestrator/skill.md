@@ -195,15 +195,25 @@ available. These source paths and their manuals remain NOT_RUN.
     in phase `admitted`. While it is active, `end_service_loan_v1`, `transfer_workload_v2`, `start_provider_v1`
     and `close_v1` all refuse. `close_v4` ends it first.
   - **M3 release rule:** released rows release by receipt, and never-begun rows (admitted, or abort receipt) by
-    absence. A begun row needs a plan for this boot and generation with any `epoch-`+64hex scope; the store roots
-    are fixed per install, so an empty read covers every epoch.
-- **Open (owner decision):** a begun row whose plan names a previous boot keeps the service quarantined
-  permanently, and there is no recovery path. The boot check is not needed for soundness. Receipts:
-  `.spipe/simple_orchestrator/continuation_20261116/milestone_0019_service40_inventory/` (host-local).
-- **The Agent V7 wire (assembly cuts 1-4) is not landed** (E-cuts r2 CHANGES_REQUIRED). In the held cut bytes,
-  nothing ever sets `ServiceSlotV5.installed` (E2-1), so invoke always refuses, and invoke is the only creator of
-  `session.workspace`. Plan: milestone_0018 DESIGN.md section I (A2), which reapplies the E-r1 fixes on top of the
-  installed slot. The serving path it depended on has landed (#9798).
+    absence. A begun row needs a plan for THIS native machine with an `epoch-`+64hex scope. The plan's boot and
+    generation are not compared (owner decision 2026-11-16, after an independent soundness review): the graph root
+    is persistent, preparation proved both roots empty and censused the service uid range, and the provider units stay
+    masked, so a plan from an earlier boot or process cannot be live. The generation is a process-local counter.
+    Repro spec: S40-RECONCILE-12.
+  - The provider start is refused for a lent or once-lent epoch (S40-LOAN-06, hermetic).
+- **Open owner items (pre-existing):** SB-P1, no check ties a plan's objects to the observed roots ("fixed per
+  install" is asserted, not verified); SB-P2, helper and child-barrier rows never release after a reboot.
+  Receipts: `.spipe/simple_orchestrator/continuation_20261116/milestone_0020_service40_section_i/` (host-local).
+- **The Agent V7 wire (assembly cuts 1-4) is not landed, and it is blocked on a coordinator decision.**
+  - In the held cut bytes, nothing ever sets `ServiceSlotV5.installed` (E2-1). Invoke therefore always refuses, and
+    invoke is the only creator of `session.workspace`.
+  - The installed slot cannot be filled from the Linux-service startup. `HostAgentInstalledOwnerV7`:
+    - reads a linux-podman `enrollment-binding.sdn`, which a linux-service root does not have;
+    - opens its own journal at `root/journal`, the same path the V4 owner holds;
+    - starts the container provider, which M1 keeps masked for the whole fresh epoch;
+    - flips `continuity_proven` from ledger flags (Host21).
+  - Options: (A) a V4-native agent owner; (B) a separate linux-podman install main; (C) retire the wire.
+    See milestone_0020 DESIGN.md.
 
 ### Traps
 - Never reconcile a Linux journal from ledger flags alone. The capacity owner requires native inventory/quarantine
