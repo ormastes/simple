@@ -47,6 +47,10 @@ The seed interpreter passes every row.
 ## Workaround
 
 `d[k]` after `contains_key` (Stage 3 lane branch
-`work/stage3-payload-const-wa-20261116`). `if val v = d.get(k)` on a bool dict
+`work/stage3-payload-const-wa-20261116`): the HIR site (`10d0db7161c`) and six
+MIR sites in `switch_operators_calls.spl` (`4d79cd8180d`). With only the HIR
+site worked around, MIR `lower_enum_lit` read `generic_payload` and
+`not generic_payload` both as true and rejected `E.V([])` (parser_types,
+parser_types_expr). `if val v = d.get(k)` on a bool dict
 was also wrong natively; the spec does not pin it, so whether this fix covers
 it is unverified (open).
