@@ -119,6 +119,15 @@ pub fn hir_type_is_plain_scalar(type_: HirType) -> bool:
         case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char: true
         case _: false
 
+pub fn hir_type_is_plain_payload_sink_v1(type_: HirType) -> bool:
+    """A declared non-optional slot whose payload decode is total: a record,
+    text or collection. Scalars keep option_payload_for_int_sink; Int is also
+    what SIMPLE_BOOTSTRAP=1 erases `T?` to, so it never proves "not optional".
+    Optional/Any/TypeParam/Unit stay with their existing paths."""
+    match type_.kind:
+        case HirTypeKind.Named(_, _) | HirTypeKind.Str | HirTypeKind.Array(_, _) | HirTypeKind.Slice(_) | HirTypeKind.Dict(_, _) | HirTypeKind.Tuple(_): true
+        case _: false
+
 fn hir_block_is_static_scalar(block: HirBlock, depth: i64) -> bool:
     if not block.has:
         return false
@@ -950,6 +959,27 @@ impl MirLowering:
             self.remember_local_hir_type(payload_local.id, payload_type, 0, 0)
             self.static_scalar_locals[payload_local.id] = true
         payload_local
+
+    me option_payload_for_plain_sink(local: LocalId, value_type: HirType) -> LocalId?:
+        """A `T?` value flowing into a declared plain `T` slot (a function tail
+        whose conditional joined to `T?`): unwrap with rt_unwrap_or_trap so
+        None aborts instead of escaping as the handle, then decode the payload
+        word as `T`. None when value_type is not Optional of a decodable T.
+        doc/08_tracking/bug/stage2_payload_bind_and_tail_option_wrap_2026-11-16.md"""
+        match value_type.kind:
+            case HirTypeKind.Optional(inner):
+                if not hir_type_is_plain_payload_sink_v1(inner):
+                    return None
+                var b = self.builder
+                val unwrap_fn = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_unwrap_or_trap"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                ), call_origin: MirCallOrigin.Runtime)
+                val unwrapped = b.emit_call(unwrap_fn, [mir_operand_copy(local)], MirType.i64())
+                self.builder = b
+                val word = unwrapped ?? local
+                Some(self.decode_declared_enum_payload_slot(word, inner))
+            case _: None
 
     me option_payload_for_int_sink(local: LocalId, sink_type: HirType) -> LocalId:
         """Payload-typed USE of an Optional local in a declared INTEGER sink

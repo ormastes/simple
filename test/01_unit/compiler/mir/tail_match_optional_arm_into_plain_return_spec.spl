@@ -44,11 +44,24 @@ val SOURCE: text = "struct Lid:\n    id: i64\n\n" +
     "fn lower_impl(k: EK) -> Lid:\n    match k:\n        case IntLit(v):\n            make(v)\n        case Sel(n):\n            pick(n)\n        case _:\n            make(0)\n"
 
 describe "tail match with an optional arm into a plain declared return":
-    it "does not promote the plain arms to Option handles":
+    it "does not return the joined Option handle as the plain record":
         val fns = lower_module_json(SOURCE)
         val mir = fns["lower_impl"] ?? ""
         expect(mir.len() > 0).to_equal(true)
-        expect(mir.contains("rt_enum_id")).to_equal(false)
+        # The tail join may still build `Lid?`; the Return must carry its unwrap.
+        val unwrap_at = mir.index_of("\"rt_unwrap_or_trap\"")
+        expect(unwrap_at >= 0).to_equal(true)
+        val head = mir.substring(0, unwrap_at)
+        val dest_at = head.rfind("\"dest\":")
+        val dest_tail = head.substring(dest_at + 7, head.len())
+        val dest = dest_tail.substring(0, dest_tail.index_of(","))
+        # `"Return":` is the terminator; the _return local reads `"Return"}`.
+        val ret_at = mir.index_of("\"Return\":")
+        expect(ret_at >= 0).to_equal(true)
+        val ret_tail = mir.substring(ret_at, mir.len())
+        val copy_at = ret_tail.index_of("\"Copy\":")
+        val ret_operand = ret_tail.substring(copy_at + 7, ret_tail.len())
+        expect(ret_operand.substring(0, ret_operand.index_of("}"))).to_equal(dest)
 
     it "narrows the optional arm to its payload, trapping on None":
         val fns = lower_module_json(SOURCE)
