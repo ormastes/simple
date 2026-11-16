@@ -264,6 +264,13 @@ Red specs are in `83f6dae5031`. Seed: generic 3/4 -> 4/4, tail 6/8 -> 8/8.
   pointer a second time. The seed spec pipeline is untyped and cannot show
   this. The typed path is guarded in code; native confirmation waits for the
   next Stage 2.
+- Typed HIR also threads `expr.type_` into value-position if/match
+  (`expr_dispatch.spl`, `expected_if_type` / `expected_match_type`). The arm
+  narrow therefore also fires outside return position when that type is a
+  plain tuple. It traps on None instead of returning a silent wrong value.
+- Not covered: a non-return conditional that typed HIR joins to `(A, B)?`
+  still sends its raw tuple arm through `ensure_option_handle`. That is the
+  same headerless-normalise hazard, and this change does not fix it.
 - Guards with no red phase, green before and after the fix:
   - the `tup_ret` assertion now checks Return <- Copy <- Cast to Ptr(Tuple)
   - the `(f32, i64)?` fatal path

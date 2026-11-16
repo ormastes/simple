@@ -1155,10 +1155,14 @@ impl MirLowering:
         var fn_tail_conditional_into_plain_tuple = false
         if fn_.body.has and fn_.body.value != None:
             fn_tail_conditional_into_plain_tuple = self.is_plain_tuple_conditional_return_v1(tail_plain_expected, fn_.body.value)
-        val result = if fn_tail_conditional_into_plain_tuple:
-            self.lower_block_expected(fn_.body, Some(tail_plain_expected))
-        elif fn_returns_bool or fn_tail_conditional_into_scalar_optional or fn_tail_int_literal_into_float or fn_tail_into_trait:
-            self.lower_block_expected(fn_.body, tail_return_type)
+        # Pick the threaded type first and keep the two-arm value `if`
+        # below: this is a hot site, and an if/elif over `LocalId?` arms is
+        # the construct class this bug doc is about.
+        var tail_block_expected: HirType = tail_return_type
+        if fn_tail_conditional_into_plain_tuple:
+            tail_block_expected = tail_plain_expected
+        val result = if fn_tail_conditional_into_plain_tuple or fn_returns_bool or fn_tail_conditional_into_scalar_optional or fn_tail_int_literal_into_float or fn_tail_into_trait:
+            self.lower_block_expected(fn_.body, tail_block_expected)
         else:
             self.lower_block(fn_.body)
         self.current_fn_returns_bool = previous_fn_returns_bool
@@ -2055,8 +2059,10 @@ impl MirLowering:
                     case HirTypeKind.Optional(_):
                         local = self.ensure_option_handle(local, found_expected)
                     case HirTypeKind.Tuple(_):
-                        # A declared plain tuple slot (threaded only by
-                        # is_plain_tuple_conditional_return_v1): narrow an
+                        # A plain tuple slot (a declared return threaded by
+                        # is_plain_tuple_conditional_return_v1, or, in typed
+                        # HIR, a value-position if/match whose expr.type_ is a
+                        # plain tuple, expr_dispatch.spl): narrow an
                         # `(A, B)?` arm here, before the join, trapping on
                         # None. A conditional arm already narrowed its own
                         # arms and is typed `(A, B)` by its join. In typed
