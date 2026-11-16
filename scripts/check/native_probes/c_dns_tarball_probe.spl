@@ -1,0 +1,56 @@
+# Native probe for the C runtime twins of rt_dns_lookup (resolve deadline) and
+# rt_package_{create,extract}_tarball. Build with `native-build`, run, expect
+# "PROBE RESULT: pass".
+@unsafe(reason: "raw hosted DNS deadline ABI; empty text is failure or deadline", capabilities: [ffi])
+extern fn rt_dns_lookup(hostname: text) -> text
+@unsafe(reason: "raw hosted DNS deadline ABI; empty text is failure or deadline", capabilities: [ffi])
+extern fn rt_dns_lookup_timeout_ms(hostname: text, ms: i64) -> text
+@unsafe(reason: "raw package archive ABI", capabilities: [ffi])
+extern fn rt_package_create_tarball(source_dir: text, output_path: text) -> i32
+@unsafe(reason: "raw package extraction ABI", capabilities: [ffi])
+extern fn rt_package_extract_tarball(tarball_path: text, dest_dir: text) -> i32
+@unsafe(reason: "raw package dir ABI", capabilities: [ffi])
+extern fn rt_package_mkdir_all(dir_path: text) -> i32
+@unsafe(reason: "raw package dir ABI", capabilities: [ffi])
+extern fn rt_package_remove_dir_all(dir_path: text) -> i32
+@unsafe(reason: "raw file ABI", capabilities: [ffi])
+extern fn rt_file_write_text(path: text, content: text) -> bool
+@unsafe(reason: "raw file ABI", capabilities: [ffi])
+extern fn rt_file_read_text(path: text) -> text?
+
+var failures = 0
+
+fn check(name: text, ok: bool):
+    if ok:
+        print "ok   {name}"
+    else:
+        print "FAIL {name}"
+        failures = failures + 1
+
+fn main():
+    val root = "build/probe_pkg"
+    unsafe(capabilities: [ffi]):
+        rt_package_remove_dir_all(root)
+        rt_package_mkdir_all("{root}/src/sub")
+        rt_file_write_text("{root}/src/a.txt", "alpha")
+        rt_file_write_text("{root}/src/sub/b.txt", "beta-content")
+
+        # DNS: normal lookup answers; a spent budget answers empty without resolving.
+        check("dns_lookup_localhost_nonempty", rt_dns_lookup("localhost").len() > 0)
+        check("dns_lookup_timeout_generous_budget_resolves", rt_dns_lookup_timeout_ms("localhost", 5000).len() > 0)
+        check("dns_lookup_timeout_zero_budget_is_empty", rt_dns_lookup_timeout_ms("localhost", 0).len() == 0)
+
+        # Tarball round trip.
+        val created = rt_package_create_tarball("{root}/src", "{root}/out.tar.gz")
+        check("tarball_create_status_zero", created == 0)
+        val extracted = rt_package_extract_tarball("{root}/out.tar.gz", "{root}/dest")
+        check("tarball_extract_status_zero", extracted == 0)
+        check("tarball_roundtrip_a", rt_file_read_text("{root}/dest/a.txt") == Some("alpha"))
+        check("tarball_roundtrip_nested_b", rt_file_read_text("{root}/dest/sub/b.txt") == Some("beta-content"))
+        check("tarball_extract_missing_archive_fails", rt_package_extract_tarball("{root}/nope.tar.gz", "{root}/dest2") == -1)
+        rt_package_remove_dir_all(root)
+
+    if failures == 0:
+        print "PROBE RESULT: pass"
+    else:
+        print "PROBE RESULT: fail ({failures})"
