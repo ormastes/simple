@@ -2471,6 +2471,103 @@ pub fn reverse_text_for_paint(value: text) -> text:
         i = j
     out
 
+# Strong right-to-left codepoints (UAX #9 bidi class R / AL): Hebrew, Arabic,
+# Syriac, Thaana, NKo, Samaritan, Mandaic, their presentation forms, and the
+# supplementary RTL blocks.
+fn _bidi_cp_is_rtl(cp: i64) -> bool:
+    (cp >= 0x0590 and cp <= 0x08FF) or (cp >= 0xFB1D and cp <= 0xFDFF) or
+        (cp >= 0xFE70 and cp <= 0xFEFF) or (cp >= 0x10800 and cp <= 0x10FFF) or
+        (cp >= 0x1E800 and cp <= 0x1EFFF)
+
+# No strong direction: ASCII spaces and punctuation, Latin-1 punctuation and
+# signs, General Punctuation (incl. U+2022). Letters and digits are strong.
+fn _bidi_cp_is_neutral(cp: i64) -> bool:
+    if cp < 0x80:
+        val alnum = (cp >= 48 and cp <= 57) or (cp >= 65 and cp <= 90) or (cp >= 97 and cp <= 122)
+        return not alnum
+    (cp >= 0xA0 and cp <= 0xBF) or cp == 0xD7 or cp == 0xF7 or (cp >= 0x2000 and cp <= 0x206F)
+
+# reason: plain text in, bool out — a predicate over arbitrary UTF-8 text, no domain unit
+# @allow(primitive_api)
+pub fn text_has_rtl_strong(value: text) -> bool:
+    for cp in text_codepoints(value):
+        if _bidi_cp_is_rtl(cp):
+            return true
+    false
+
+# Visual order of `value` in a `direction:rtl` paragraph — a reduced UAX #9:
+# one embedding level, no explicit controls, no mirroring. A left-to-right
+# run (letters and digits, plus the neutrals BETWEEN two of them) keeps its
+# logical order. Runs, right-to-left characters and neutrals at a run edge
+# are laid out right to left. Chrome 159: `ABC` under direction:rtl paints
+# A, B, C left to right (the same ink as `ABC`, end-aligned), not `CBA`.
+# reason: text in, text out — a visual reordering of arbitrary UTF-8 text, no domain unit
+# @allow(primitive_api)
+pub fn bidi_visual_text_for_rtl(value: text) -> text:
+    val cps = text_codepoints(value)
+    val n = cps.len()
+    if n == 0:
+        return value
+    if not text_has_rtl_strong(value) and not _bidi_cp_is_neutral(cps[0]) and
+            not _bidi_cp_is_neutral(cps[n - 1]):
+        return value
+    # Byte span of each codepoint, as in reverse_text_for_paint.
+    val vb = value.bytes()
+    val nb = value.byte_len()
+    var starts: [i64] = []
+    var ends: [i64] = []
+    var span_count: i64 = 0
+    var i: i64 = 0
+    while i < nb:
+        var j = i + 1
+        while j < nb and vb[j] >= 128 and vb[j] < 192:
+            j = j + 1
+        starts.push(i)
+        ends.push(j)
+        span_count = span_count + 1
+        i = j
+    if span_count != n:
+        return reverse_text_for_paint(value)
+    # prev_l[k] / next_l[k]: the nearest strong class before / after k is L.
+    var prev_l: [bool] = []
+    var last_strong_l = false
+    var k: i64 = 0
+    while k < n:
+        prev_l.push(last_strong_l)
+        if not _bidi_cp_is_neutral(cps[k]):
+            last_strong_l = not _bidi_cp_is_rtl(cps[k])
+        k = k + 1
+    var next_l: [bool] = [false; n]
+    var following_l = false
+    k = n - 1
+    while k >= 0:
+        next_l[k] = following_l
+        if not _bidi_cp_is_neutral(cps[k]):
+            following_l = not _bidi_cp_is_rtl(cps[k])
+        k = k - 1
+    var ltr: [bool] = []
+    k = 0
+    while k < n:
+        val cp = cps[k]
+        if _bidi_cp_is_neutral(cp):
+            ltr.push(prev_l[k] and next_l[k])
+        else:
+            ltr.push(not _bidi_cp_is_rtl(cp))
+        k = k + 1
+    var out = ""
+    k = n - 1
+    while k >= 0:
+        if ltr[k]:
+            var s = k
+            while s > 0 and ltr[s - 1]:
+                s = s - 1
+            out = out + value.substring(starts[s], ends[k])
+            k = s - 1
+        else:
+            out = out + value.substring(starts[k], ends[k])
+            k = k - 1
+    out
+
 fn fb_glyph_sparse(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color: u32, italic: bool) -> [u32]:
     var out = fb
     var ry = 0
