@@ -1,0 +1,101 @@
+// Packed Vulkan font atlas batch compositor (gray "over" blend + LCD subpixel).
+//
+// Provenance: grown from test/09_baselines/engine2d_vulkan/font_atlas_packed.comp
+// (gray-only, SPIR-V sha256 4b5f44e2...; that file stays as the C-bench
+// baseline kernel). The gray branch below is that kernel's math unchanged.
+//
+// LCD branch: byte-for-byte the CPU composite `engine2d_lcd_quad_composite`
+// (src/lib/gc_async_mut/gpu/engine2d/engine.spl), Skia blend_lcd16 style:
+//   per channel  c' = d + (((src - d) * s32[cov]) >> 5)     (signed, flooring)
+// with the s32 tables (3 x 256 per text colour, preblend and text alpha folded
+// in) built on the host by `_engine2d_lcd_s32_tables` and shipped inside the
+// params buffer, so the descriptor layout stays at three bindings.
+//
+// The decision is per QUAD, exactly like the CPU: LCD math only when the quad
+// holds an LCD cell (host flag = table index != 0xFFFFFFFF) AND every
+// destination pixel of the quad is opaque and on the surface; otherwise the
+// whole quad takes the gray branch. The opacity scan needs one workgroup per
+// quad, so the host dispatches X = 1 whenever the LCD trailer is present.
+//
+// Params words: [0..7] header, word 7 bit 31 = LCD trailer present;
+//   [8 + glyph*7 ..] 7 words per glyph (unchanged);
+//   trailer at W0 = 8 + 7*G: G table indices (0xFFFFFFFF = no LCD), then the
+//   tables at W0 + G + index*768 (R 0..255, G 256..511, B 512..767).
+#version 450
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(std430, binding = 0) readonly buffer AtlasBuffer { uint atlas[]; };
+layout(std430, binding = 1) buffer DestinationBuffer { uint dst[]; };
+layout(std430, binding = 2) readonly buffer ParamsBuffer { uint words[]; } p;
+shared uint quad_opaque;
+void main() {
+    uint lid = gl_LocalInvocationID.x, glyph = gl_GlobalInvocationID.y;
+    uint nw = p.words.length();
+    if (nw < 8u || glyph >= p.words[6]) return;
+    uint base = 8u + glyph * 7u;
+    if (base + 6u >= nw) return;
+    uint aw=p.words[0], ah=p.words[1], ac=p.words[2];
+    uint dw=p.words[3], dh=p.words[4], dc=p.words[5];
+    uint ax=p.words[base], ay=p.words[base+1u];
+    uint qw=p.words[base+2u], qh=p.words[base+3u];
+    int dx0=int(p.words[base+4u]), dy0=int(p.words[base+5u]);
+    uint color=p.words[base+6u], count=qw*qh;
+    if (aw*ah != ac || dw*dh != dc) return;
+    // Table offset of this glyph's LCD s32 tables; 0 = gray-only quad.
+    uint tbl = 0u;
+    if ((p.words[7] & 0x80000000u) != 0u) {
+        uint gc = p.words[6];
+        uint idx_at = 8u + gc * 7u + glyph;
+        if (idx_at < nw) {
+            uint t = p.words[idx_at];
+            if (t < 4096u) {
+                uint off = 8u + gc * 8u + t * 768u;
+                if (off + 768u <= nw) tbl = off;
+            }
+        }
+    }
+    bool lcd = tbl != 0u;
+    if (lcd) {
+        // Quad-level gate: all destination pixels opaque and on the surface.
+        if (lid == 0u) quad_opaque = 1u;
+        memoryBarrierShared();
+        barrier();
+        for (uint k = lid; k < count; k += 64u) {
+            int kx = dx0 + int(k % qw), ky = dy0 + int(k / qw);
+            if (kx < 0 || ky < 0 || kx >= int(dw) || ky >= int(dh) ||
+                (dst[uint(ky) * dw + uint(kx)] >> 24u) != 255u)
+                atomicAnd(quad_opaque, 0u);
+        }
+        memoryBarrierShared();
+        barrier();
+        lcd = quad_opaque != 0u;
+    }
+    uint stride = gl_NumWorkGroups.x * 64u;
+    for (uint pixel = gl_GlobalInvocationID.x; pixel < count; pixel += stride) {
+        uint lx=pixel%qw, ly=pixel/qw, si=(ay+ly)*aw+ax+lx;
+        int dx=dx0+int(lx), dy=dy0+int(ly);
+        if (si>=ac || dx<0 || dy<0 || dx>=int(dw) || dy>=int(dh)) continue;
+        uint di=uint(dy)*dw+uint(dx);
+        uint cell=atlas[si];
+        uint d=dst[di];
+        if (lcd) {
+            // Gray cell (rgb 0xFFFFFF): coverage is alpha in all channels.
+            // LCD cell: per-channel coverage in rgb.
+            uint a=cell>>24u, cr=a, cg=a, cb=a;
+            if ((cell&0xFFFFFFu)!=0xFFFFFFu) { cr=(cell>>16u)&255u; cg=(cell>>8u)&255u; cb=cell&255u; }
+            int sr=int((color>>16u)&255u), sg=int((color>>8u)&255u), sb=int(color&255u);
+            int dr=int((d>>16u)&255u), dg=int((d>>8u)&255u), db=int(d&255u);
+            int r=dr+(((sr-dr)*int(p.words[tbl+cr]))>>5);
+            int g=dg+(((sg-dg)*int(p.words[tbl+256u+cg]))>>5);
+            int b=db+(((sb-db)*int(p.words[tbl+512u+cb]))>>5);
+            dst[di]=0xFF000000u|(uint(r)<<16u)|(uint(g)<<8u)|uint(b);
+        } else {
+            uint sa=((cell>>24u)*(color>>24u)+127u)/255u;
+            if(sa==0u)continue;
+            uint da=d>>24u,dwgt=da*(255u-sa)/255u,oa=sa+dwgt;
+            uint r=(((color>>16u)&255u)*sa+((d>>16u)&255u)*dwgt)/oa;
+            uint g=(((color>>8u)&255u)*sa+((d>>8u)&255u)*dwgt)/oa;
+            uint b=((color&255u)*sa+(d&255u)*dwgt)/oa;
+            dst[di]=(oa<<24u)|(r<<16u)|(g<<8u)|b;
+        }
+    }
+}

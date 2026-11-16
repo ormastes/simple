@@ -32,7 +32,11 @@ Traceability: REQ-WEB-TEXT-LCD-001 — Draw IR text at <= 48 device px paints Ch
 # @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 1%
 use std.spec.*
 use std.io_runtime.{file_exists}
-use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend,
+    simple_web_render_html_to_readback_result_with_engine2d_backend,
+    simple_web_resolved_engine2d_backend_name
+}
 
 val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
 val W: i32 = 64
@@ -126,3 +130,43 @@ describe "LCD subpixel text against Chrome 159":
         step("Chrome white-on-black l, row 6, x=1..4: 071f57 afe7f7 d7973f 0f0000 (an unboosted mask gives ~001040 a0e0f0 d07830)")
         val chrome: [u32] = [0x071f57u32, 0xafe7f7u32, 0xd7973fu32, 0x0f0000u32]
         expect(_worst_delta(px, 6, chrome) <= TOL).to_be(true)
+
+describe "LCD subpixel text on a real Vulkan device":
+    # Runs where a Vulkan ICD is installed (llvmpipe:
+    # VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json). Where none is,
+    # the rows have nothing to drive and say so: they are NOT exercised.
+    it "AC-6: the Vulkan font kernel paints the cpu_simd LCD frame byte for byte":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        if not file_exists("/usr/share/vulkan/icd.d/lvp_icd.json"):
+            print("[skip] AC-6: no llvmpipe ICD; this Vulkan row was not exercised")
+            return
+        step("the request really resolved to Vulkan (no silent software fallback)")
+        expect(simple_web_resolved_engine2d_backend_name(W, H, "vulkan")).to_equal("vulkan")
+        val cpu = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE_L16, W, H, "cpu_simd")
+        val res = simple_web_render_html_to_readback_result_with_engine2d_backend(PAGE_L16, W, H, "vulkan")
+        expect(res.resolved_backend).to_equal("vulkan")
+        expect(res.readback.source).to_equal("device_readback")
+        step("the Vulkan font kernel drew the text, not the CPU suffix")
+        expect(res.vector_font_device_executed).to_be(true)
+        expect(res.vector_font_execution_target).to_equal("vulkan")
+        step("the frame has LCD fringes and equals the cpu_simd frame")
+        expect(_fringe_count(res.readback.pixels) > 0).to_be(true)
+        expect(res.readback.pixels).to_equal(cpu)
+
+    it "AC-7: quarter-pixel phases and light-on-dark text also match byte for byte":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        if not file_exists("/usr/share/vulkan/icd.d/lvp_icd.json"):
+            print("[skip] AC-7: no llvmpipe ICD; this Vulkan row was not exercised")
+            return
+        expect(simple_web_resolved_engine2d_backend_name(W, H, "vulkan")).to_equal("vulkan")
+        for page in [PAGE_LLL, PAGE_WB]:
+            val cpu = simple_web_render_html_to_pixels_with_engine2d_backend(page, W, H, "cpu_simd")
+            val res = simple_web_render_html_to_readback_result_with_engine2d_backend(page, W, H, "vulkan")
+            expect(res.readback.source).to_equal("device_readback")
+            expect(res.vector_font_device_executed).to_be(true)
+            expect(res.vector_font_execution_target).to_equal("vulkan")
+            expect(res.readback.pixels).to_equal(cpu)

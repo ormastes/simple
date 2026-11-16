@@ -1,0 +1,263 @@
+#!/bin/sh
+# check-font-atlas-batch-spirv-pinned.shs -- the checked-in packed font batch SPIR-V
+# words must be exactly what glslangValidator produces from the checked-in GLSL.
+#
+#   sh scripts/check/check-font-atlas-batch-spirv-pinned.shs [--selftest]
+#
+# Why this exists: `backend_vulkan_font_spirv.spl` carries ~12 KB of
+# hand-unreadable hex (head + tail halves). Nothing else in the tree can tell
+# whether those bytes still correspond to `shaders/font_atlas_batch.comp` -- a
+# GLSL edit that is not regenerated, or a regeneration that is not committed,
+# both leave a tree that builds, tests green on the host path, and silently
+# runs the WRONG kernel on the device (here: LCD text drawn with stale math).
+#
+# Mechanism: recompile the .comp (`glslangValidator -V`, no --target-env: that
+# is how the blob was always generated, and its sha256 is the pinned identity),
+# transcribe it with scripts/tool/spirv-to-spl-words.shs, and compare against the
+# committed .spl: the byte body (head and tail concatenated), the
+# `# SPIR-V SHA-256:` header, the `FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256`
+# value the runtime trusts, and the `# Source SHA-256:` header against the
+# sha256 of the .comp itself.
+#
+# Verdict is the LAST line of stdout, same convention as the pre-push guards:
+#   PASS  -- <n> byte(s) compared, ...            exit 0
+#   FAIL  -- ...                                  exit 1
+#   ERROR -- nothing was checked (<reason>)       exit 2
+# Non-vacuity is absolute: a run that compared 0 bytes is ERROR, and a host with
+# no glslangValidator is ERROR, never a pass.
+set -eu
+
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+comp="$repo_root/src/lib/gc_async_mut/gpu/engine2d/shaders/font_atlas_batch.comp"
+spl="$repo_root/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_spirv.spl"
+words_tool="$repo_root/scripts/tool/spirv-to-spl-words.shs"
+
+fail() { echo "FAIL — $1"; exit 1; }
+oops() { echo "ERROR — nothing was checked ($1)"; exit 2; }
+
+find_glslang() {
+    if [ -n "${GLSLANG:-}" ]; then echo "$GLSLANG"; return; fi
+    for cand in /opt/homebrew/bin/glslangValidator /usr/local/bin/glslangValidator \
+                /usr/bin/glslangValidator "$HOME/.local/bin/glslangValidator"; do
+        if [ -x "$cand" ]; then echo "$cand"; return; fi
+    done
+    command -v glslangValidator 2>/dev/null || true
+}
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
+
+# Extract the `0xNN` bytes of the array bodies from a generated .spl, in order.
+# (`#` comments are stripped first: prose elsewhere in a module may
+# legitimately contain 0x-prefixed hex that is not blob data.)
+extract_spl_bytes() {
+    sed 's/#.*$//' "$1" | grep -o '0x[0-9A-Fa-f][0-9A-Fa-f]' | sed 's/^0x//' | tr 'A-F' 'a-f'
+}
+extract_header_sha() {   # $1 = file, $2 = header label ("SPIR-V" or "Source")
+    grep -m1 "^# $2 SHA-256: " "$1" | awk '{print $4}'
+}
+extract_val_sha() {
+    grep -m1 '^pub val FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256: text = "' "$1" | sed 's/^.*= "\([0-9a-f]*\)".*$/\1/'
+}
+
+# ---------------------------------------------------------------------------
+# Core comparison, factored so --selftest can point it at fixtures.
+# Sets CMP_BYTES (bytes compared) and CMP_REASON; returns 0 pass, 1 mismatch,
+# 2 could-not-check.
+# ---------------------------------------------------------------------------
+compare_pair() {
+    _comp="$1"; _spl="$2"; _glslang="$3"
+    CMP_BYTES=0; CMP_REASON=""
+    [ -f "$_comp" ] || { CMP_REASON="missing GLSL: $_comp"; return 2; }
+    [ -f "$_spl" ]  || { CMP_REASON="missing blob module: $_spl"; return 2; }
+
+    _tmp="${TMPDIR:-/tmp}/font_atlas_batch_pin.$$.$(date +%s%N 2>/dev/null || date +%s)"
+    mkdir -p "$_tmp"
+
+    if ! "$_glslang" -V -o "$_tmp/a.spv" "$_comp" >"$_tmp/log" 2>&1; then
+        CMP_REASON="glslangValidator failed on $_comp: $(head -3 "$_tmp/log" | tr '\n' ' ')"
+        rm -rf "$_tmp"; return 2
+    fi
+
+    if ! sh "$words_tool" "$_tmp/a.spv" 8 > "$_tmp/words" 2>"$_tmp/werr"; then
+        CMP_REASON="transcription failed: $(head -2 "$_tmp/werr" | tr '\n' ' ')"
+        rm -rf "$_tmp"; return 2
+    fi
+
+    _fresh_sha=$(head -1 "$_tmp/words" | awk '{print $3}')
+    tail -n +2 "$_tmp/words" | grep -o '0x[0-9A-Fa-f][0-9A-Fa-f]' \
+        | sed 's/^0x//' | tr 'A-F' 'a-f' > "$_tmp/fresh_bytes"
+    extract_spl_bytes "$_spl" > "$_tmp/spl_bytes"
+
+    _nf=$(wc -l < "$_tmp/fresh_bytes" | tr -d ' ')
+    _ns=$(wc -l < "$_tmp/spl_bytes" | tr -d ' ')
+    if [ "$_nf" -eq 0 ]; then
+        CMP_REASON="freshly compiled module transcribed to 0 bytes"
+        rm -rf "$_tmp"; return 2
+    fi
+    if [ "$_ns" -eq 0 ]; then
+        CMP_REASON="no 0xNN bytes found in $_spl"
+        rm -rf "$_tmp"; return 2
+    fi
+    CMP_BYTES="$_nf"
+
+    _pinned_spv=$(extract_header_sha "$_spl" "SPIR-V")
+    _pinned_src=$(extract_header_sha "$_spl" "Source")
+    _pinned_val=$(extract_val_sha "$_spl")
+    if [ -z "$_pinned_spv" ] || [ -z "$_pinned_src" ] || [ -z "$_pinned_val" ]; then
+        CMP_REASON="$_spl lacks a '# SPIR-V SHA-256:', '# Source SHA-256:' or FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256 pin"
+        rm -rf "$_tmp"; return 2
+    fi
+
+    if [ "$_nf" -ne "$_ns" ]; then
+        CMP_REASON="byte count differs: committed $_ns, freshly compiled $_nf"
+        rm -rf "$_tmp"; return 1
+    fi
+    if ! cmp -s "$_tmp/fresh_bytes" "$_tmp/spl_bytes"; then
+        _off=$(cmp "$_tmp/fresh_bytes" "$_tmp/spl_bytes" 2>&1 | head -1)
+        _first=$(diff "$_tmp/spl_bytes" "$_tmp/fresh_bytes" | head -4 | tr '\n' ' ')
+        CMP_REASON="committed words differ from freshly compiled GLSL ($_off; first diff: $_first)"
+        rm -rf "$_tmp"; return 1
+    fi
+    if [ "$_pinned_spv" != "$_fresh_sha" ]; then
+        CMP_REASON="'# SPIR-V SHA-256' $_pinned_spv != freshly compiled $_fresh_sha"
+        rm -rf "$_tmp"; return 1
+    fi
+    if [ "$_pinned_val" != "$_fresh_sha" ]; then
+        CMP_REASON="FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256 $_pinned_val != freshly compiled $_fresh_sha"
+        rm -rf "$_tmp"; return 1
+    fi
+    _comp_sha=$(sha256_of "$_comp")
+    if [ "$_pinned_src" != "$_comp_sha" ]; then
+        CMP_REASON="'# Source SHA-256' $_pinned_src != sha256 of $_comp ($_comp_sha)"
+        rm -rf "$_tmp"; return 1
+    fi
+    rm -rf "$_tmp"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Selftest: fatal, runs before every real scan.
+# ---------------------------------------------------------------------------
+write_fixture_spl() {   # $1 comp, $2 spv, $3 out spl
+    _src=$(sha256_of "$1")
+    _spv=$(sha256_of "$2")
+    {
+        echo "# Source SHA-256: $_src"
+        echo "# SPIR-V SHA-256: $_spv"
+        echo "pub val FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256: text = \"$_spv\""
+        echo "fn head() -> [u8]:"
+        echo "    ["
+        sh "$words_tool" "$2" 8 | tail -n +2
+        echo "    ]"
+    } > "$3"
+}
+
+selftest() {
+    _g="$1"
+    _t="${TMPDIR:-/tmp}/font_atlas_batch_pin_selftest.$$"
+    mkdir -p "$_t"
+
+    # Fixture GLSL is written HERE, not copied from the tree: coupling the
+    # selftest to the real .comp would make it abort the moment someone edits
+    # that file, which is precisely when the guard must still work.
+    cat > "$_t/ok.comp" <<'FIXTURE'
+#version 450
+layout(local_size_x = 16) in;
+layout(set = 0, binding = 0) buffer Out { uint data[]; } o;
+layout(push_constant) uniform PC { int n; } pc;
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint acc = 0u;
+    for (int k = 0; k < pc.n; ++k) {
+        acc = acc * 3u + uint(k);
+    }
+    o.data[idx] = acc;
+}
+FIXTURE
+
+    # Fixture 1 -- an honestly regenerated pair must PASS.
+    "$_g" -V -o "$_t/ok.spv" "$_t/ok.comp" >/dev/null 2>&1 \
+        || { echo "selftest: could not compile fixture 1" >&2; rm -rf "$_t"; return 2; }
+    write_fixture_spl "$_t/ok.comp" "$_t/ok.spv" "$_t/ok.spl"
+    if ! compare_pair "$_t/ok.comp" "$_t/ok.spl" "$_g"; then
+        echo "selftest FIXTURE 1 (clean pair must PASS) failed: $CMP_REASON" >&2
+        rm -rf "$_t"; return 1
+    fi
+
+    # Fixture 2 -- ONE tampered word must FAIL.
+    sed 's/0x11/0x12/' "$_t/ok.spl" > "$_t/tampered.spl"
+    if cmp -s "$_t/ok.spl" "$_t/tampered.spl"; then
+        echo "selftest FIXTURE 2 could not tamper any word" >&2
+        rm -rf "$_t"; return 1
+    fi
+    _rc=0; compare_pair "$_t/ok.comp" "$_t/tampered.spl" "$_g" || _rc=$?
+    if [ "$_rc" -ne 1 ]; then
+        echo "selftest FIXTURE 2 (tampered word must FAIL with 1) returned $_rc" >&2
+        rm -rf "$_t"; return 1
+    fi
+
+    # Fixture 3 -- a GLSL edit that changes the kernel must FAIL against the old
+    # words. This is the real regression: the shader moved, the blob did not.
+    sed 's/for (int k = 0; k < pc.n; ++k)/for (int k = pc.n - 1; k >= 0; --k)/' \
+        "$_t/ok.comp" > "$_t/reversed.comp"
+    if cmp -s "$_t/ok.comp" "$_t/reversed.comp"; then
+        echo "selftest FIXTURE 3 could not edit the GLSL loop" >&2
+        rm -rf "$_t"; return 1
+    fi
+    _rc=0; compare_pair "$_t/reversed.comp" "$_t/ok.spl" "$_g" || _rc=$?
+    if [ "$_rc" -ne 1 ]; then
+        echo "selftest FIXTURE 3 (stale blob vs edited GLSL must FAIL with 1) returned $_rc" >&2
+        rm -rf "$_t"; return 1
+    fi
+
+    # Fixture 4 -- a .spl with no bytes at all must be ERROR, never a pass.
+    printf '# Source SHA-256: 00\n# SPIR-V SHA-256: 00\n' > "$_t/empty.spl"
+    _rc=0; compare_pair "$_t/ok.comp" "$_t/empty.spl" "$_g" || _rc=$?
+    if [ "$_rc" -ne 2 ]; then
+        echo "selftest FIXTURE 4 (empty blob must ERROR with 2) returned $_rc" >&2
+        rm -rf "$_t"; return 1
+    fi
+
+    # Fixture 5 -- a comment-only GLSL edit leaves the words identical but
+    # changes the source: the `# Source SHA-256` pin must catch it.
+    { cat "$_t/ok.comp"; echo "// edited"; } > "$_t/commented.comp"
+    _rc=0; compare_pair "$_t/commented.comp" "$_t/ok.spl" "$_g" || _rc=$?
+    if [ "$_rc" -ne 1 ]; then
+        echo "selftest FIXTURE 5 (stale '# Source SHA-256' must FAIL with 1) returned $_rc" >&2
+        rm -rf "$_t"; return 1
+    fi
+
+    # Fixture 6 -- the runtime-trusted val must agree with the header.
+    sed 's/^pub val FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256: text = "./&0/' "$_t/ok.spl" > "$_t/valdrift.spl"
+    _rc=0; compare_pair "$_t/ok.comp" "$_t/valdrift.spl" "$_g" || _rc=$?
+    if [ "$_rc" -ne 1 ]; then
+        echo "selftest FIXTURE 6 (drifted trusted-sha val must FAIL with 1) returned $_rc" >&2
+        rm -rf "$_t"; return 1
+    fi
+
+    rm -rf "$_t"
+    return 0
+}
+
+glslang=$(find_glslang)
+[ -n "$glslang" ] || oops "glslangValidator not found; set GLSLANG=/path/to/glslangValidator"
+
+st=0
+selftest "$glslang" || st=$?
+if [ "$st" -eq 2 ]; then oops "selftest could not run"; fi
+if [ "$st" -ne 0 ]; then fail "selftest failed (fatal; the guard cannot be trusted)"; fi
+
+if [ "${1:-}" = "--selftest" ]; then
+    echo "PASS — 6 selftest fixture(s) checked, selftest only (no tree scan requested)"
+    exit 0
+fi
+
+rc=0
+compare_pair "$comp" "$spl" "$glslang" || rc=$?
+if [ "$rc" -eq 2 ]; then oops "$CMP_REASON"; fi
+if [ "$rc" -eq 1 ]; then fail "$CMP_BYTES byte(s) compared: $CMP_REASON"; fi
+[ "$CMP_BYTES" -gt 0 ] || oops "0 bytes compared"
+echo "PASS — $CMP_BYTES byte(s) compared, 6 selftest fixture(s) checked, backend_vulkan_font_spirv.spl matches shaders/font_atlas_batch.comp (spirv sha256 $(extract_header_sha "$spl" "SPIR-V"))"

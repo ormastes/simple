@@ -58,7 +58,8 @@ use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostLinuxServic
     host_agent_invoke_request_decode_v4, host_linux_service_agent_execute_v4, host_linux_service_agent_admit_v4,
     host_linux_service_agent_input_v4, host_linux_service_agent_budget_v4, host_linux_service_agent_open_v4,
     host_linux_service_agent_step_v4, host_linux_service_agent_reply_v4, host_linux_service_agent_epoch_v4,
-    host_linux_service_agent_close_v4, host_linux_service_agent_release_v4}
+    host_linux_service_agent_close_v4, host_linux_service_agent_release_v4, host_linux_service_agent_request_cancel_v4,
+    host_agent_cancel_request_decode_v4, host_agent_cancel_archive_check_v4, host_linux_service_agent_cancel_authorize_v4}
 use std.container.LinuxWorkspaceRootBorrowV3
 use std.nogc_sync_mut.orchestration.host_linux_service_reconcile_v4.host_linux_service_reconcile_flip_v4
 use std.nogc_sync_mut.io.linux_fresh_epoch_store_inventory_v1.LinuxFreshEpochStoreInventoryBorrowV1
@@ -568,20 +569,28 @@ pub fn host_linux_service_prepare_v4(original: HostLinuxServiceCurrentV4, source
         val slot = linux_service_agent_slot_v4(owner, operation.id, host_local_context_v1(policy).monotonic_ms)
         owner = slot.owner
         if slot.error != "": return slot
-        owner.agent_operation_id = operation.id
-        owner.agent_operation = Some(operation)
+        # P2R2-F1: record only into an EMPTY slot, so a same-id re-prepare with a different signed envelope never
+        # replaces the admitted one (prepare_v1 refuses it with OPERATION_PAYLOAD_MISMATCH below).
+        if owner.agent_operation_id == "":
+            owner.agent_operation_id = operation.id
+            owner.agent_operation = Some(operation)
     val admitted = host_capacity_owner_prepare_v1(owner.capacity.unwrap(), intent, operation, grant.unwrap(), host_local_context_v1(policy))
     # An error may follow a committed admission: report it as attempted. The slot is cleared only when the
     # journal has no row for this operation (refused before the charge).
     if admitted.is_err():
         # P2R1-F8: cleared only on the explicit not-found reason; any other lookup error keeps the slot (fail closed).
-        if agent_draft:
+        # P2R2-F1: and only when the slot holds exactly this envelope.
+        if agent_draft and linux_service_agent_slot_exact_v4(owner.agent_operation, operation):
             val prior = daemon_operation_exact_v2(owner.capacity.unwrap().journal, operation)
             if prior.is_err() and prior.unwrap_err() == "OPERATION_NOT_FOUND":
                 owner.agent_operation_id = ""
                 owner.agent_operation = None
         return linux_service_reply_v4(owner, "", admitted.unwrap_err(), true)
     owner.capacity = Some(admitted.unwrap())
+    # P3R1-F2: an Ok admission means the journal row is exactly THIS envelope (prepare_v1 refuses a mismatched one
+    # when a row exists), so the slot always names the admitted envelope, even after an earlier lookup-error prepare
+    # kept a different one.
+    if agent_draft: owner.agent_operation = Some(operation)
     val receipt = host_capacity_owner_prepared_receipt_v1(owner.capacity.unwrap(), intent, operation, grant.unwrap(),
         host_local_context_v1(policy))
     if receipt.is_err(): return linux_service_reply_v4(owner, "", receipt.unwrap_err(), true)
@@ -700,6 +709,11 @@ pub fn host_linux_service_execute_v4(original: HostLinuxServiceCurrentV4, source
     if begun.error != "": return linux_service_reply_v4(owner, "", begun.error, true)
     linux_service_admitted_reply_v4(owner, prepare.operation.id, digest.unwrap(), true)
 
+# P2R2-F1: the slot holds exactly this signed envelope (whole-value equality), not merely its operation id.
+fn linux_service_agent_slot_exact_v4(slot: Option<OperationEnvelopeV2>, operation: OperationEnvelopeV2) -> bool:
+    if slot.is_none(): return false
+    slot.unwrap() == operation
+
 # N-06/T-08/U-05 slot check for an agent-draft prepare, before any charge. Busy when the incarnation's agent
 # is consumed, or the slot names an admitted (unexpired) or executing row of another operation. An admitted
 # slot row past its prepare deadline (the hco:288-290 monotonic rule) is expired through the SAME journal
@@ -817,12 +831,74 @@ pub fn host_linux_service_agent_invoke_v4(original: HostLinuxServiceCurrentV4, s
     owner.capacity = Some(turn.capacity)
     linux_service_reply_v4(owner, turn.response, turn.error, turn.effect_attempted)
 
-# Accepted-connection dispatch: the two associated actions and the agent invoke (milestone_0021 PR2).
+# Agent cancel glue (milestone_0021 PR3a, D21). The request is a CONTROLLER-SIGNED cancel packet (review P3R1-F1),
+# verified like the associated execute: the held run, the archived signed execute and its association digest, the
+# derived cancel operation, issuer == the configured controller, and issuer + approver signatures under the
+# installed policy snapshot (host_linux_service_agent_cancel_authorize_v4). The verified packet is archived
+# no-replace and read back before the agent changes: an exact-bytes retry is answered without a second
+# verification, a different packet for the same run is a conflict. Cancel is a state transition only; Destroy
+# and the 3.6 settle run on later host-agent-invoke calls through the step driver. Same reconcile gate as invoke.
+pub fn host_linux_service_agent_cancel_v4(original: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
+    var owner = original
+    val metadata = owner.current_v4()
+    if metadata.is_err(): return linux_service_reply_v4(owner, "", metadata.unwrap_err(), false)
+    if not owner.capacity.unwrap().ledger.continuity_proven:
+        return linux_service_reply_v4(owner, "", "linux-host-service-startup-quarantine", false)
+    if owner.reconcile_error != "" or not owner.inventory_returned:
+        return linux_service_reply_v4(owner, "", "linux-host-agent-before-reconcile", false)
+    val cancel = host_agent_cancel_request_decode_v4(source)
+    if cancel.is_err(): return linux_service_reply_v4(owner, "", cancel.unwrap_err(), false)
+    if owner.agent.is_none(): return linux_service_reply_v4(owner, "", "linux-host-agent-cancel-unstarted", false)
+    val agent = owner.agent.unwrap()
+    val operation_id = cancel.unwrap().operation_id
+    if agent.operation_id != operation_id: return linux_service_reply_v4(owner, "", "linux-host-agent-incarnation-consumed", false)
+    val scope = owner.scope.unwrap()
+    val journal = owner.capacity.unwrap().journal
+    val execute_path = linux_service_execute_relative_v4(scope, operation_id)
+    if execute_path.is_err(): return linux_service_reply_v4(owner, "", execute_path.unwrap_err(), false)
+    val archived_execute = distributed_operation_journal_read_v3(journal, execute_path.unwrap(), 2097152)
+    if archived_execute.is_err(): return linux_service_reply_v4(owner, "", archived_execute.unwrap_err(), false)
+    val execute = host_linux_service_agent_execute_v4(archived_execute.unwrap(), operation_id)
+    if execute.is_err(): return linux_service_reply_v4(owner, "", execute.unwrap_err(), false)
+    val association = host_execution_association_digest_v3(execute.unwrap().association)
+    if association.is_err(): return linux_service_reply_v4(owner, "", association.unwrap_err(), false)
+    val cancel_path = linux_service_cancel_relative_v4(scope, operation_id)
+    if cancel_path.is_err(): return linux_service_reply_v4(owner, "", cancel_path.unwrap_err(), false)
+    val prior = distributed_operation_journal_read_v3(journal, cancel_path.unwrap(), 131072)
+    if prior.is_err(): return linux_service_reply_v4(owner, "", prior.unwrap_err(), false)
+    val retained = host_agent_cancel_archive_check_v4(prior.unwrap(), source)
+    if retained.is_err(): return linux_service_reply_v4(owner, "", retained.unwrap_err(), false)
+    # An archived packet was fully verified before it was archived; only a first sighting verifies.
+    if not retained.unwrap():
+        val policy = metadata.unwrap().policy
+        val grant = host_linux_service_agent_cancel_authorize_v4(policy.snapshot, metadata.unwrap().configuration.controller_ref,
+            cancel.unwrap(), execute.unwrap().operation, association.unwrap(), agent.operation_id, agent.association_digest,
+            host_local_context_v1(policy))
+        if grant.is_err(): return linux_service_reply_v4(owner, "", grant.unwrap_err(), false)
+    # Pure transition computed BEFORE the archive, so a refused stage never archives a cancel.
+    val cancelled = host_linux_service_agent_request_cancel_v4(agent, sha256_text(source))
+    if cancelled.error != "": return linux_service_reply_v4(owner, "", cancelled.error, cancelled.effect_attempted)
+    if not retained.unwrap():
+        # No-replace: an existing archive must be these exact bytes.
+        val saved = distributed_operation_journal_publish_v3(journal, cancel_path.unwrap(), source)
+        if saved.is_err(): return linux_service_reply_v4(owner, "", saved.unwrap_err(), true)
+        val readback = distributed_operation_journal_read_required_v3(journal, cancel_path.unwrap(), 131072)
+        if readback.is_err(): return linux_service_reply_v4(owner, "", readback.unwrap_err(), true)
+        if readback.unwrap() != source: return linux_service_reply_v4(owner, "", "linux-host-agent-cancel-packet-conflict", true)
+    owner.agent = Some(cancelled.agent)
+    linux_service_reply_v4(owner, cancelled.response, "", cancelled.effect_attempted)
+
+fn linux_service_cancel_relative_v4(scope: ContainerHostScopeV2, operation_id: text) -> Result<text, text>:
+    Ok("host-agent-cancel/" + sha256_text(container_scope_fence_id_v2(scope)? + "\n" + operation_id) + ".sdn")
+
+# Accepted-connection dispatch: the two associated actions, the agent invoke (milestone_0021 PR2) and the agent
+# cancel (PR3).
 pub fn host_linux_service_dispatch_v4(owner: HostLinuxServiceCurrentV4, action: text, source: text,
         project: fn(ContainerExecutionDraftV3) -> Result<ContainerExecutionRequestV2, text>) -> HostLinuxServiceReplyV4:
     if action == "host_prepare_associated_v3": return host_linux_service_prepare_v4(owner, source, project)
     if action == "host_execute_associated_v3": return host_linux_service_execute_v4(owner, source)
     if action == "host_agent_invoke_v4": return host_linux_service_agent_invoke_v4(owner, source)
+    if action == "host_agent_cancel_v4": return host_linux_service_agent_cancel_v4(owner, source)
     linux_service_reply_v4(owner, "", "linux-host-service-action-unknown", false)
 
 # The workload scope of this service's lending epoch: the bound host (the same
@@ -983,4 +1059,4 @@ export host_linux_service_close_v4
 export host_linux_service_start_v4, host_linux_service_prepare_v4, host_linux_service_execute_authorize_v4
 export host_linux_service_open_installed_v4, host_linux_service_anchor_parent_v4
 export host_linux_service_dispatch_v4, host_linux_service_execute_v4, host_linux_service_dispatch_installed_v4
-export host_linux_service_agent_invoke_v4
+export host_linux_service_agent_invoke_v4, host_linux_service_agent_cancel_v4
