@@ -64,7 +64,7 @@ Not in scope: new keywords for text/casts/build; global replacement of every `te
 
 | Area | Evidence | Finding | Required work |
 |---|---|---|---|
-| Primitive classification | `35.semantics/lint/primitive_types.spl`, `semantic_api/tag_walk.spl` | Numeric/bool leaves flagged; `text`/`char` classified but not flagged by default | Keep; add contextual boundary findings, no blanket `text` ban |
+| Primitive classification | `35.semantics/lint/primitive_types.spl`, `semantic_api/tag_walk.spl` | Numeric/bool leaves flagged; `text`/`char` classified but not flagged by default | Keep; add contextual boundary findings, no blanket `text` ban. **Updated 2026-11-16:** semantic-domain public `text` is flagged (SPL-TEXT-001) and public `bool` incl. `is_*` is not exempt (SPL-BOOL-001), see [unit_semantic_text_bool_public_api_plan_2026-11-16.md](unit_semantic_text_bool_public_api_plan_2026-11-16.md) |
 | Public API traversal | `semantic_api/exported_graph.spl` | Exported graph over interned tags, visibility, nested types; re-export limits noted | Add build-unit policy + semantic-origin facts |
 | Primitive autofix | `90.tools/fix/rules/impl_/lint_primitive_api.spl` | No-op EasyFix already removed; ranked substitutions are review-required | Add boundary-move multi-file actions |
 | Diagnostic policy | `00.common/diagnostics/diagnostic_rule_policy.spl`, `config/policy/diagnostic_policy.sdn` | Per-rule/profile edition+date severity; dates illustrative | Add origin/cast/boundary rules (done: see log); ratify schedule |
