@@ -30,6 +30,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <signal.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -170,6 +171,86 @@ int32_t rt_package_chmod(const uint8_t* path, uint64_t path_len, int32_t mode) {
     buffer[path_len] = '\0';
     return chmod(buffer, (mode_t)mode) == 0 ? 0 : -1;
 #endif
+}
+
+/* Rest of the package_sffi.spl family (Rust twin: runtime value/sffi/package.rs).
+ * Text args arrive as (ptr,len) pairs: every name below is in text_arg_indices
+ * (src/compiler/50.mir/text_extern_abi.spl). Status returns follow the Rust
+ * twin: 0 ok / -1 error; exists/is_dir answer 1/0, -1 for a null path. Each
+ * body delegates to the long-path-aware file primitive in runtime_native.c. */
+int64_t rt_package_sha256(const uint8_t* path, uint64_t path_len) {
+    return rt_file_hash_sha256(path, path_len);
+}
+
+int64_t rt_package_file_size(const uint8_t* path, uint64_t path_len) {
+    return rt_file_size(path, path_len);
+}
+
+int32_t rt_package_copy_file(const uint8_t* src, uint64_t src_len,
+                             const uint8_t* dst, uint64_t dst_len) {
+    return rt_file_copy(src, src_len, dst, dst_len) ? 0 : -1;
+}
+
+int32_t rt_package_mkdir_all(const uint8_t* path, uint64_t path_len) {
+    return rt_dir_create_all(path, path_len) ? 0 : -1;
+}
+
+int32_t rt_package_remove_dir_all(const uint8_t* path, uint64_t path_len) {
+    return rt_dir_remove_all(path, path_len) ? 0 : -1;
+}
+
+int32_t rt_package_exists(const uint8_t* path, uint64_t path_len) {
+    if (!path) return -1;
+    return rt_file_exists(path, path_len) ? 1 : 0;
+}
+
+int32_t rt_package_is_dir(const uint8_t* path, uint64_t path_len) {
+    if (!path) return -1;
+    return rt_dir_exists(path, path_len) ? 1 : 0;
+}
+
+int32_t rt_package_create_symlink(const uint8_t* target, uint64_t target_len,
+                                  const uint8_t* link, uint64_t link_len) {
+    if (!target || !link || target_len == 0 || link_len == 0 ||
+        target_len >= 4096 || link_len >= 4096) return -1;
+    char target_buf[4096];
+    char link_buf[4096];
+    memcpy(target_buf, target, (size_t)target_len);
+    target_buf[target_len] = '\0';
+    memcpy(link_buf, link, (size_t)link_len);
+    link_buf[link_len] = '\0';
+#if defined(_WIN32)
+    /* Windows does not translate '/' when following a reparse point; store
+     * native separators (same rule as the Rust twin's symlink_file). */
+    for (char* p = target_buf; *p; p++) if (*p == '/') *p = (char)92;
+    wchar_t target_w[4096];
+    wchar_t link_w[4096];
+    if (MultiByteToWideChar(CP_UTF8, 0, target_buf, -1, target_w, 4096) == 0) return -1;
+    if (MultiByteToWideChar(CP_UTF8, 0, link_buf, -1, link_w, 4096) == 0) return -1;
+    return CreateSymbolicLinkW(link_w, target_w, SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) ? 0 : -1;
+#else
+    return symlink(target_buf, link_buf) == 0 ? 0 : -1;
+#endif
+}
+
+/* gzip tarballs need a deflate codec this C runtime does not carry. The Rust
+ * twin without Cargo feature `packaging-compression` answers the same way:
+ * a diagnostic and -1 (fail closed, never a silent success). */
+static int32_t core_host_package_compression_unavailable(const char* name) {
+    fprintf(stderr, "Runtime error: %s is unavailable in this runtime build (no packaging compression codec)\n", name);
+    return -1;
+}
+
+int32_t rt_package_create_tarball(const uint8_t* src, uint64_t src_len,
+                                  const uint8_t* out, uint64_t out_len) {
+    (void)src; (void)src_len; (void)out; (void)out_len;
+    return core_host_package_compression_unavailable("rt_package_create_tarball");
+}
+
+int32_t rt_package_extract_tarball(const uint8_t* tarball, uint64_t tarball_len,
+                                   const uint8_t* dest, uint64_t dest_len) {
+    (void)tarball; (void)tarball_len; (void)dest; (void)dest_len;
+    return core_host_package_compression_unavailable("rt_package_extract_tarball");
 }
 
 /* ================================================================

@@ -21160,6 +21160,53 @@ int64_t rt_io_udp_recv_from(int64_t fd, int64_t size) {
     return tuple;
 }
 
+/* browser_net_runtime.spl: rt_dns_lookup(hostname: text) -> text. Not in
+ * text_arg_indices, so the hostname is one tagged text value and the result a
+ * tagged text: the de-duplicated numeric addresses joined by ',' in resolver
+ * order, empty on any failure (Rust twin: value/net_tcp.rs rt_dns_lookup).
+ * Blocking getaddrinfo; the Rust twin's resolve timeout is not mirrored. */
+int64_t rt_dns_lookup(int64_t hostname_value) {
+    uint64_t host_len = 0;
+    const uint8_t* host_bytes = rt_core_string_bytes(hostname_value, &host_len);
+    if (!host_bytes || host_len == 0 || host_len >= 1024) return rt_string_new(NULL, 0);
+    char host[1024];
+    memcpy(host, host_bytes, (size_t)host_len);
+    host[host_len] = '\0';
+#if defined(_WIN32)
+    if (!InitOnceExecuteOnce(&ws_compat_init_once, ws_compat_init_cb, NULL, NULL)) return rt_string_new(NULL, 0);
+#endif
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo* results = NULL;
+    if (getaddrinfo(host, NULL, &hints, &results) != 0 || !results) return rt_string_new(NULL, 0);
+    char joined[4096];
+    size_t used = 0;
+    joined[0] = '\0';
+    for (struct addrinfo* it = results; it; it = it->ai_next) {
+        char ip[INET6_ADDRSTRLEN];
+        const void* addr = NULL;
+        if (it->ai_family == AF_INET) addr = &((const struct sockaddr_in*)it->ai_addr)->sin_addr;
+        else if (it->ai_family == AF_INET6) addr = &((const struct sockaddr_in6*)it->ai_addr)->sin6_addr;
+        if (!addr || !inet_ntop(it->ai_family, addr, ip, sizeof(ip))) continue;
+        size_t ip_len = strlen(ip);
+        int seen = 0;
+        for (const char* p = joined; *p && !seen;) {
+            const char* end = strchr(p, ',');
+            size_t len = end ? (size_t)(end - p) : strlen(p);
+            if (len == ip_len && memcmp(p, ip, ip_len) == 0) seen = 1;
+            p = end ? end + 1 : p + len;
+        }
+        if (seen || used + ip_len + 2 > sizeof(joined)) continue;
+        if (used) joined[used++] = ',';
+        memcpy(joined + used, ip, ip_len + 1);
+        used += ip_len;
+    }
+    freeaddrinfo(results);
+    return rt_string_new((const uint8_t*)joined, (uint64_t)used);
+}
+
 #if defined(_WIN32)
 #undef F_GETFL
 #undef F_SETFL
