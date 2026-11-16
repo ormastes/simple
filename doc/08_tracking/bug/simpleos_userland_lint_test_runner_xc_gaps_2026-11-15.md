@@ -29,3 +29,21 @@
    - No 32-bit crt0, libc build or sysroot exists.
    - `check-simpleos-x86-32-user-elf.shs` assembles a hand-written ELF32 payload; it is not compiler output.
 6. **The in-guest smoke cannot run.** `check-simpleos-hello-world-in-guest-ovmf.shs` (x86_64, OVMF) has no override for staging an arbitrary user ELF, and no artifact exists to stage.
+
+## Update 2026-11-16 (verification-pending)
+- **Gap 1 (aarch64/riscv64 user link path): verification-pending.** The canonical `aarch64-unknown-simpleos` and `riscv64gc-unknown-simpleos` triples now take a user lane, `link_simpleos_user_64` in `simpleos_native_linkers.spl`. The `-none*` and filename-selected kernel builds keep their old lanes. The new lane links:
+  - the sysroot `crt0.o` (aarch64 only; riscv64's linker script `INPUT()`s it)
+  - the entry shim, plus a `--wrap=__simple_call_module_inits` module-init caller
+  - the user objects
+  - `--start-group [core] libsimpleos_all.a --end-group`
+  - `share/simpleos/simpleos.ld` through `ld.lld`
+
+  The argv builder is `simpleos_user_link_args_for_arch`. Spec: `test/01_unit/compiler/backend/simpleos_userland_link_plan_spec.spl`.
+- **The sysroot builds were broken as well.** Two fixes:
+  - `runtime_native.c` calls `mkstemp()`, which the SimpleOS libc lacked. It is now implemented in `simpleos_fs.c` (O_CREAT|O_EXCL, retries on EEXIST, EINVAL on a bad template) and declared in `stdlib.h`. Test: `test/01_unit/os/libc/simpleos_mkstemp_test.c`, red before / green after.
+  - The riscv64 crt0 used a pc-relative `la` on undefined weak hooks. From the 0x100000000 base that overflows (R_RISCV_PCREL_HI20), so the hooks are now loaded from an absolute literal pool.
+- **Evidence (WSL, clang/ld.lld 18).** Both sysroots built (rc=0). A hello C `main` was linked with the emitted argv shape:
+  - aarch64: `ELF 64-bit LSB executable, ARM aarch64, statically linked`, entry 0x50000000
+  - riscv64: `ELF 64-bit LSB executable, UCB RISC-V, RVC, double-float ABI, statically linked`, entry 0x100000000
+- **Not yet proven.** No ELF has been compiled by the compiler itself: that needs a redeployed phase-2 compiler, and riscv64 is also blocked by gap 2b. No QEMU boot either: there is no aarch64/riscv64 lane that can stage a user ELF (gap 6, still open). This is a board-runnable gap.
+- **Gap 5 (32-bit): fail-closed.** `backend_aot_simpleos_32bit_user_target` covers `{i686,i386,armv7*,riscv32*}-*simpleos*`. The link orchestrator now returns an explicit error for these instead of falling through to the RV32 UART-stub kernel lane. `TODO(simpleos_32bit_userland)`: a crt0, libc arch bits, a sysroot and a link path for i686, armv7 and riscv32. The spec asserts only the refusal.

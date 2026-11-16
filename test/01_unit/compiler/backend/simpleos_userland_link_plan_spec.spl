@@ -1,0 +1,97 @@
+use std.spec.*
+use compiler.backend.simpleos_native_symbols.{simpleos_user_link_arch, simpleos_user_sysroot_default, simpleos_user_link_args_for_arch, simpleos_user_entry_clang_target}
+use compiler.backend.aot_target_normalization.{backend_aot_simpleos_32bit_user_target, backend_aot_simpleos_32bit_user_target_error}
+
+# Bug: doc/08_tracking/bug/simpleos_userland_lint_test_runner_xc_gaps_2026-11-15.md
+# gaps 1 and 5. Only the canonical `*-simpleos` triple is a filesystem-launched
+# user process; `*-none*` and filename-selected builds stay on the kernel lane.
+
+fn _has(args: [text], value: text) -> bool:
+    for a in args:
+        if a == value:
+            return true
+    false
+
+fn _count(args: [text], value: text) -> i64:
+    var n = 0
+    for a in args:
+        if a == value:
+            n = n + 1
+    n
+
+describe "SimpleOS userland link plan":
+    it "selects the user lane only for canonical simpleos triples":
+        # @req REQ-SSPEC-UNIT
+        step("selects the user lane only for canonical simpleos triples")
+        expect(simpleos_user_link_arch("x86_64-unknown-simpleos")).to_equal("x86_64")
+        expect(simpleos_user_link_arch("aarch64-unknown-simpleos")).to_equal("aarch64")
+        expect(simpleos_user_link_arch("aarch64-simpleos")).to_equal("aarch64")
+        expect(simpleos_user_link_arch("aarch64-unknown-simpleos-elf")).to_equal("aarch64")
+        expect(simpleos_user_link_arch("riscv64gc-unknown-simpleos")).to_equal("riscv64")
+        expect(simpleos_user_link_arch("riscv64-unknown-simpleos")).to_equal("riscv64")
+        expect(simpleos_user_link_arch("aarch64-unknown-none-elf")).to_equal("")
+        expect(simpleos_user_link_arch("riscv64gc-unknown-none-elf")).to_equal("")
+        expect(simpleos_user_link_arch("")).to_equal("")
+
+    it "defaults each 64-bit user sysroot to its own directory":
+        # @req REQ-SSPEC-UNIT
+        step("defaults each 64-bit user sysroot to its own directory")
+        expect(simpleos_user_sysroot_default("aarch64")).to_equal("build/os/sysroot-aarch64")
+        expect(simpleos_user_sysroot_default("riscv64")).to_equal("build/os/sysroot-riscv64")
+
+    it "links an aarch64 user ELF from the sysroot crt0, libc archive and script":
+        # @req REQ-SSPEC-UNIT
+        step("links an aarch64 user ELF from the sysroot crt0, libc archive and script")
+        val sr = "build/os/sysroot-aarch64"
+        val r = simpleos_user_link_args_for_arch("aarch64", sr, "", "entry.o", "init.o", "", ["user.o"], "out.elf")
+        expect(r.is_ok()).to_be(true)
+        val args = r.unwrap()
+        expect(_has(args, "{sr}/share/simpleos/simpleos.ld")).to_be(true)
+        expect(_count(args, "{sr}/lib/crt0.o")).to_equal(1)
+        expect(_has(args, "{sr}/lib/libsimpleos_all.a")).to_be(true)
+        expect(_has(args, "-static")).to_be(true)
+        expect(_has(args, "--wrap=__simple_call_module_inits")).to_be(true)
+        expect(_has(args, "user.o")).to_be(true)
+        expect(_has(args, "--start-group")).to_be(true)
+        expect(_has(args, "--end-group")).to_be(true)
+
+    it "never double-lists riscv64 crt0, which the sysroot script INPUT()s":
+        # @req REQ-SSPEC-UNIT
+        step("never double-lists riscv64 crt0, which the sysroot script INPUT()s")
+        val sr = "build/os/sysroot-riscv64"
+        val r = simpleos_user_link_args_for_arch("riscv64", sr, "", "entry.o", "", "core.a", ["user.o"], "out.elf")
+        expect(r.is_ok()).to_be(true)
+        val args = r.unwrap()
+        expect(_count(args, "{sr}/lib/crt0.o")).to_equal(0)
+        expect(_has(args, "elf64lriscv")).to_be(true)
+        expect(_has(args, "core.a")).to_be(true)
+        expect(_has(args, "--wrap=__simple_call_module_inits")).to_be(false)
+
+    it "honours an explicit linker script":
+        # @req REQ-SSPEC-UNIT
+        step("honours an explicit linker script")
+        val r = simpleos_user_link_args_for_arch("aarch64", "sr", "custom.ld", "e.o", "", "", [], "o")
+        expect(_has(r.unwrap(), "custom.ld")).to_be(true)
+        expect(_has(r.unwrap(), "sr/share/simpleos/simpleos.ld")).to_be(false)
+
+    it "rejects an unknown user arch instead of guessing":
+        # @req REQ-SSPEC-UNIT
+        step("rejects an unknown user arch instead of guessing")
+        expect(simpleos_user_link_args_for_arch("i686", "sr", "", "e.o", "", "", [], "o").is_err()).to_be(true)
+
+    it "compiles the entry shim with the user ABI":
+        # @req REQ-SSPEC-UNIT
+        step("compiles the entry shim with the user ABI")
+        expect(simpleos_user_entry_clang_target("aarch64")).to_equal("aarch64-unknown-none-elf")
+        expect(simpleos_user_entry_clang_target("riscv64")).to_equal("riscv64-unknown-elf")
+
+    it "fails closed on 32-bit SimpleOS user triples":
+        # @req REQ-SSPEC-UNIT
+        step("fails closed on 32-bit SimpleOS user triples")
+        expect(backend_aot_simpleos_32bit_user_target("i686-unknown-simpleos")).to_be(true)
+        expect(backend_aot_simpleos_32bit_user_target("armv7-unknown-simpleos")).to_be(true)
+        expect(backend_aot_simpleos_32bit_user_target("armv7a-unknown-simpleos-eabi")).to_be(true)
+        expect(backend_aot_simpleos_32bit_user_target("riscv32imac-unknown-simpleos")).to_be(true)
+        expect(backend_aot_simpleos_32bit_user_target("riscv32imac-unknown-none-elf")).to_be(false)
+        expect(backend_aot_simpleos_32bit_user_target("x86_64-unknown-simpleos")).to_be(false)
+        expect(backend_aot_simpleos_32bit_user_target_error("i686-unknown-simpleos")).to_contain("simpleos_32bit_userland")

@@ -52,6 +52,7 @@ int   unsetenv(const char *name);
 int   putenv(char *string);
 int   system(const char *command);
 char *realpath(const char *path, char *resolved);
+int   mkstemp(char *tmpl);
 
 /* Integer arithmetic */
 int       abs(int j);

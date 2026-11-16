@@ -106,6 +106,79 @@ fn is_simpleos_riscv32_link_for_target(target: text, user_objects: [text], outpu
 fn is_simpleos_riscv32_target(target: text) -> bool:
     target == "riscv32imac-simpleos" or target == "riscv32imac-unknown-simpleos" or target == "riscv32imac-unknown-simpleos-elf" or target == "riscv32imac-unknown-none" or target == "riscv32imac-unknown-none-elf" or target == "riscv32-unknown-none" or target == "riscv32-unknown-none-elf"
 
+# Canonical `*-simpleos` triple -> user-process arch. `*-none*` and
+# filename-selected builds return "" and keep their kernel link lanes.
+pub fn simpleos_user_link_arch(target: text) -> text:
+    match target:
+        case "simpleos" | "simpleos-x86_64" | "x86_64-simpleos" | "x86_64-unknown-simpleos" | "x86_64-unknown-simpleos-elf":
+            "x86_64"
+        case "aarch64-simpleos" | "aarch64-unknown-simpleos" | "aarch64-unknown-simpleos-elf":
+            "aarch64"
+        case "riscv64-simpleos" | "riscv64gc-simpleos" | "riscv64-unknown-simpleos" | "riscv64gc-unknown-simpleos" | "riscv64-unknown-simpleos-elf" | "riscv64gc-unknown-simpleos-elf":
+            "riscv64"
+        case _: ""
+
+pub fn simpleos_user_sysroot_default(arch: text) -> text:
+    match arch:
+        case "aarch64": "build/os/sysroot-aarch64"
+        case "riscv64": "build/os/sysroot-riscv64"
+        case _: "build/os/sysroot"
+
+# Per-arch env override, then the shared SIMPLEOS_SYSROOT the
+# simpleos-native-build-{aarch64,riscv64}.shs lanes export, then the default.
+pub fn simpleos_user_sysroot(arch: text) -> text:
+    val key = if arch == "aarch64": "SIMPLEOS_SYSROOT_AARCH64" else: "SIMPLEOS_SYSROOT_RISCV64"
+    val per_arch = env_get(key) ?? ""
+    if per_arch != "":
+        return per_arch
+    val shared = env_get("SIMPLEOS_SYSROOT") ?? ""
+    if shared != "":
+        return shared
+    simpleos_user_sysroot_default(arch)
+
+pub fn simpleos_user_entry_clang_target(arch: text) -> text:
+    if arch == "riscv64": "riscv64-unknown-elf" else: "aarch64-unknown-none-elf"
+
+pub fn simpleos_user_c_flags(arch: text) -> [text]:
+    if arch == "riscv64":
+        return ["--target=riscv64-unknown-elf", "-march=rv64gc", "-mabi=lp64d", "-mcmodel=medany", "-ffreestanding", "-nostdlib", "-O2"]
+    ["--target=aarch64-unknown-none-elf", "-ffreestanding", "-nostdlib", "-O2"]
+
+# ld.lld argv for a filesystem-launched SimpleOS user ELF (aarch64/riscv64).
+# riscv64's sysroot script INPUT()s crt0.o itself, so it is never listed here.
+pub fn simpleos_user_link_args_for_arch(arch: text, sysroot: text, linker_script: text,
+        entry_o: text, init_o: text, core_archive: text, user_objects: [text], output: text) -> Result<[text], text>:
+    if arch != "aarch64" and arch != "riscv64":
+        return Err("SimpleOS user link: unsupported arch '{arch}' (aarch64 and riscv64 only; x86_64 has its own lane)")
+    val script = if linker_script != "": linker_script else: "{sysroot}/share/simpleos/simpleos.ld"
+    var args: [text] = []
+    if arch == "riscv64":
+        args.push("-m")
+        args.push("elf64lriscv")
+        args.push("--no-relax")
+    for a in ["-T", script, "-nostdlib", "-static", "--gc-sections", "-o", output]:
+        args.push(a)
+    if arch == "aarch64":
+        args.push("{sysroot}/lib/crt0.o")
+    args.push(entry_o)
+    if init_o != "":
+        args.push("--wrap=__simple_call_module_inits")
+        args.push(init_o)
+    for obj in user_objects:
+        args.push(obj)
+    args.push("--start-group")
+    if core_archive != "":
+        args.push(core_archive)
+    args.push("{sysroot}/lib/libsimpleos_all.a")
+    args.push("--end-group")
+    Ok(args)
+
+pub fn simpleos_user_link_inputs_for_arch(arch: text, sysroot: text) -> [text]:
+    var inputs: [text] = ["{sysroot}/lib/libsimpleos_all.a"]
+    if arch == "aarch64":
+        inputs.push("{sysroot}/lib/crt0.o")
+    inputs
+
 pub fn simpleos_x86_64_c_flags(opt_level: i64) -> [text]:
     var opt = "-O2"
     if opt_level <= 0:
