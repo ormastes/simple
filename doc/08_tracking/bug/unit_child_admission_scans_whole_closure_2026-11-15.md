@@ -7,7 +7,7 @@ Every per-file unit child ran `worker_admitted_edges_v1` over the full inventory
 The fix sits behind `SIMPLE_UNIT_ORDER_INDEX=1`, which is off by default. The first unit publishes `<hir_queue>/unit_order.idx` and later units decode it. The spec `test/01_unit/compiler/driver/unit_order_index_spec.spl` shows 0 resolutions per unit at both N=20 and N=400, compared with N when the switch is off.
 
 Still open:
-- phase 1 still reads every source file, and the TLDR-freshness skip is not implemented;
+- phase 1 still reads every source file; a content-hash skip-fresh of picks is now behind `SIMPLE_UNIT_ORDER_SKIP_FRESH=1` (verification-pending, spec `unit_order_skip_fresh_spec.spl` 5/5), but the TLDR-freshness skip is not implemented;
 - the advice scan covers all contents;
 - the pick stats ledger files for every entry that is already taken.
 

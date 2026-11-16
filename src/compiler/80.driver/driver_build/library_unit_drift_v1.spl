@@ -1,0 +1,62 @@
+# Library-unit drift check (plan section 4.2 of
+# doc/03_plan/release/1.0.0/robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md).
+#
+# Pure: compares a unit's declared inventory (recorded path list) with the
+# actual resolved source set. Fail-closed: any added/removed path is drift
+# (exit 1); comparing two empty sets is ERROR (exit 2), never a pass.
+
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+
+struct LibraryUnitDriftV1:
+    added: [text]
+    removed: [text]
+    checked: i64
+
+fn _drift_unique_sorted_v1(paths: [text]) -> [text]:
+    var seen: {text: bool} = {}
+    var out: [text] = []
+    for p in paths:
+        if not seen.contains_key(p):
+            seen[p] = true
+            out.push(p)
+    canonical_identity_sort_texts(out)
+
+pub fn library_unit_drift_v1(declared: [text], actual: [text]) -> LibraryUnitDriftV1:
+    val decl = _drift_unique_sorted_v1(declared)
+    val act = _drift_unique_sorted_v1(actual)
+    var in_decl: {text: bool} = {}
+    for p in decl:
+        in_decl[p] = true
+    var in_act: {text: bool} = {}
+    for p in act:
+        in_act[p] = true
+    var added: [text] = []
+    for p in act:
+        if not in_decl.contains_key(p):
+            added.push(p)
+    var removed: [text] = []
+    for p in decl:
+        if not in_act.contains_key(p):
+            removed.push(p)
+    val checked = decl.len() + added.len()
+    LibraryUnitDriftV1(added: added, removed: removed, checked: checked)
+
+pub fn library_unit_drift_exit_code_v1(d: LibraryUnitDriftV1) -> i64:
+    if d.checked == 0:
+        return 2
+    if d.added.len() > 0 or d.removed.len() > 0:
+        return 1
+    0
+
+pub fn library_unit_drift_verdict_v1(d: LibraryUnitDriftV1) -> text:
+    val code = library_unit_drift_exit_code_v1(d)
+    if code == 2:
+        return "ERROR — nothing was checked (declared and actual inventories are both empty)"
+    if code == 0:
+        return "PASS — {d.checked} checked, 0 added, 0 removed"
+    var parts: [text] = []
+    if d.added.len() > 0:
+        parts.push("added: " + d.added.join(", "))
+    if d.removed.len() > 0:
+        parts.push("removed: " + d.removed.join(", "))
+    "FAIL — {d.checked} checked, {d.added.len()} added, {d.removed.len()} removed; " + parts.join("; ")

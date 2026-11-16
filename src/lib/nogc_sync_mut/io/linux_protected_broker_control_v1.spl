@@ -1,0 +1,129 @@
+# Fixed effect mechanisms; only the original protected resource owner invokes
+# these under its actual health ticket. No public root/reader factory exists.
+use std.nogc_sync_mut.io.linux_protected_broker_state_v1.*
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.build_manager.group_process_stream_cancel_protocol_v3.*
+use std.common.crypto.sha256.sha256_text
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_protected_broker_cell_v1.*
+use std.nogc_sync_mut.io.linux_protected_broker_io_v1.*
+use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
+
+fn broker_control_refused_v1(cell: i64, reason: text) -> LinuxProtectedBrokerStorageTurnV1:
+    var result = broker_cell_turn_v1(cell)
+    result.error = reason
+    result
+
+@unsafe(reason: "original canonical cell owns one fixed cancellation", capabilities: [ffi, raw_ptr])
+pub(package) fn broker_control_begin_v1(cell: i64, root_fd: i64, uid: i64,
+        identity: text, deadline: i64, current: fn() -> Result<(), text>) -> Result<LinuxProtectedBrokerStorageTurnV1, text>:
+    current()?
+    if not builder_digest_valid_v1(identity) or identity.byte_len() != 64:
+        return Ok(broker_control_refused_v1(cell, "broker-control-identity"))
+    val phase = broker_cell_int_v1(cell, 0)
+    if phase != BROKER_CONTROL_IDLE_V1:
+        val stored_identity = broker_cell_text_v1(cell, 64, 64)?
+        val replay = linux_broker_control_replay_v1(phase, stored_identity, broker_cell_int_v1(cell, 16), identity, deadline)
+        if replay != "": return Ok(broker_control_refused_v1(cell, replay))
+        # Exact retry observes the same transaction. Never publish or poll here.
+        return Ok(broker_cell_turn_v1(cell))
+    val now = broker_now_ms_v1()?
+    if not linux_broker_control_deadline_valid_v1(now, deadline):
+        return Ok(broker_control_refused_v1(cell, "broker-control-deadline-invalid"))
+    # Canonical reservation precedes entropy and all native file effects.
+    broker_cell_set_int_v1(cell, 0, BROKER_CONTROL_RESERVED_V1)
+    broker_cell_set_int_v1(cell, 8, 1)
+    broker_cell_set_int_v1(cell, 16, deadline)
+    broker_cell_set_text_v1(cell, 64, identity, 64)?
+    val nonce = sosix_random_hex(16)
+    if nonce.is_none(): return Ok(broker_cell_fail_v1(cell, "broker-control-entropy", true))
+    val packet = group_process_stream_cancel_request_v3(identity, "n" + nonce.unwrap())?
+    broker_cell_set_text_v1(cell, 144, packet, 4096)?
+    broker_cell_set_int_v1(cell, 0, BROKER_CONTROL_PREPARED_V1)
+    val published = broker_fixed_publish_v1(cell, root_fd, uid, packet, deadline, false, current)
+    if published.is_err():
+        val retained = broker_cell_fail_v1(cell, published.unwrap_err(), true)
+        return Err(published.unwrap_err())
+    broker_cell_set_int_v1(cell, 0, BROKER_CONTROL_WAITING_V1)
+    current()?
+    Ok(broker_cell_turn_v1(cell))
+
+@unsafe(reason: "same generation once-consumes exact echoed cancellation", capabilities: [ffi, raw_ptr])
+pub(package) fn broker_control_step_v1(cell: i64, root_fd: i64, uid: i64,
+        generation: i64, request_digest: text,
+        current: fn() -> Result<(), text>) -> Result<LinuxProtectedBrokerStorageTurnV1, text>:
+    current()?
+    val packet = broker_cell_text_v1(cell, 144, 4096)?
+    if generation <= 0 or generation != broker_cell_int_v1(cell, 8) or
+            request_digest != sha256_text(packet) or packet == "":
+        return Ok(broker_control_refused_v1(cell, "broker-control-loan-stale"))
+    val phase = broker_cell_int_v1(cell, 0)
+    if phase != BROKER_CONTROL_WAITING_V1:
+        return Ok(broker_control_refused_v1(cell, if phase == BROKER_CONTROL_CONSUMED_V1:
+            "broker-control-response-consumed" else: "broker-control-not-waiting"))
+    if broker_now_ms_v1()? >= broker_cell_int_v1(cell, 16):
+        broker_cell_set_int_v1(cell, 0, BROKER_CONTROL_EXPIRED_V1)
+        return Ok(broker_cell_fail_v1(cell, "broker-control-deadline-expired", false))
+    val read = broker_fixed_read_v1(cell, root_fd, uid, "broker.control.response", 8192, true, current)?
+    if read.state != "Value": return Ok(broker_cell_turn_v1(cell))
+    if broker_now_ms_v1()? >= broker_cell_int_v1(cell, 16):
+        broker_cell_set_int_v1(cell, 0, BROKER_CONTROL_EXPIRED_V1)
+        return Ok(broker_cell_fail_v1(cell, "broker-control-deadline-expired", false))
+    val checked = group_process_stream_cancel_response_v3(packet, read.value)
+    if checked.is_err():
+        broker_cell_set_int_v1(cell, 0, BROKER_CONTROL_DURABLE_V1)
+        if checked.unwrap_err() == "terminal group observation lacks durable collected receipt":
+            return Ok(broker_cell_turn_v1(cell))
+        return Ok(broker_cell_fail_v1(cell, "broker-control-matching-response-invalid", false))
+    if checked.unwrap().is_none(): return Ok(broker_cell_turn_v1(cell))
+    # Every matching observation is consumed BEFORE escaping this original cell,
+    # including a later oracle-end failure. It is not a reap/release receipt.
+    broker_cell_set_int_v1(cell, 0, BROKER_CONTROL_CONSUMED_V1)
+    var result = broker_cell_turn_v1(cell)
+    result.observation = checked.unwrap()
+    result.consumed = true
+    current()?
+    Ok(result)
+
+@unsafe(reason: "separate fixed reap publication after actual Host proof", capabilities: [ffi, raw_ptr])
+pub(package) fn broker_control_reap_v1(cell: i64, root_fd: i64, uid: i64,
+        identity: text, payload: text, deadline: i64,
+        current: fn() -> Result<(), text>) -> Result<LinuxProtectedBrokerStorageTurnV1, text>:
+    current()?
+    if not builder_digest_valid_v1(identity) or identity.byte_len() != 64 or payload.byte_len() < 1 or payload.byte_len() > 16384:
+        return Ok(broker_control_refused_v1(cell, "broker-reap-shape"))
+    val phase = broker_cell_int_v1(cell, 0)
+    if phase != BROKER_CONTROL_IDLE_V1:
+        if broker_cell_text_v1(cell, 64, 64)? != identity or broker_cell_int_v1(cell, 16) != deadline:
+            return Ok(broker_control_refused_v1(cell, "broker-control-replay-mismatch"))
+    else:
+        # Existing exact proof can be verified after expiry; no new write can.
+        if deadline <= 0: return Ok(broker_control_refused_v1(cell, "broker-control-deadline-invalid"))
+        broker_cell_set_int_v1(cell, 16, deadline)
+        broker_cell_set_text_v1(cell, 64, identity, 64)?
+    val prior_payload = broker_cell_text_v1(cell, 4800, 16384)?
+    if prior_payload != "" and prior_payload != payload:
+        return Ok(broker_control_refused_v1(cell, "broker-reap-payload-mismatch"))
+    if broker_cell_int_v1(cell, 32) == 2:
+        return Ok(broker_control_refused_v1(cell, "broker-reap-publication-uncertain"))
+    if broker_cell_int_v1(cell, 32) == 0:
+        broker_cell_set_text_v1(cell, 4800, payload, 16384)?
+        broker_cell_set_int_v1(cell, 32, 1)
+        broker_cell_set_int_v1(cell, 8, 2)
+        broker_cell_set_int_v1(cell, 0, BROKER_CONTROL_REAP_V1)
+    val published = broker_fixed_publish_v1(cell, root_fd, uid, payload, deadline, true, current)
+    if published.is_err():
+        val retained = broker_cell_fail_v1(cell, published.unwrap_err(), true)
+        return Err(published.unwrap_err())
+    broker_cell_set_int_v1(cell, 32, 3)
+    broker_cell_set_int_v1(cell, 0, BROKER_CONTROL_REAP_V1)
+    var result = broker_cell_turn_v1(cell)
+    result.publication = published.unwrap()
+    result.verified = true
+    result.pending = false
+    # A prior cancel refusal remains in the original diagnostic cell; it does
+    # not turn a newly verified existing durable receipt into a failed publish.
+    result.error = ""
+    current()?
+    Ok(result)
+@end
