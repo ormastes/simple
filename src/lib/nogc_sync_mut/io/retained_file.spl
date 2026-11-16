@@ -4,6 +4,13 @@
 # finish. Unsupported host owners fail closed, never fall back to path reads.
 use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32, volatile_read_u64, volatile_write_u8, volatile_write_u16}
 use std.common.base_encoding.utilities.{base_encoding_text_to_bytes}
+@when(os="linux"):
+use std.nogc_sync_mut.io.retained_directory_stage_v1.{retained_stage_directory_fd_v1, retained_stage_file_bytes_v1, retained_stage_leaf_v1}
+use std.nogc_sync_mut.io.anchored_io_linux_v1.anchored_linux_metadata_v1
+use std.nogc_sync_mut.io.retained_directory_empty_v1.retained_directory_empty_fd_v1
+use std.nogc_sync_mut.io.retained_directory_process_cwd_v1.{retained_directory_birth_v1, retained_directory_cwd_duplicate_v1, retained_directory_cwd_enter_v1}
+@end
+use std.nogc_sync_mut.io.retained_file_flags_v1.{retained_linux_directory_flags_v1 as _retained_linux_directory_flags_v1, retained_linux_file_flags_v1 as _retained_linux_file_flags_v1}
 pub use std.nogc_sync_mut.io.retained_private_credential_types_v1.*
 @when(os="windows"):
 use std.nogc_sync_mut.io.retained_file_abi.*
@@ -45,6 +52,21 @@ class RetainedFile:
         if not retained_file_identity_unchanged(self)?:
             return Err("SCVDB_FILE_CHANGED")
         Ok(bytes)
+
+    #[allow(primitive_api)] reviewed fd-level stage mechanism bound/flag (milestone_0012 groupB)
+    pub me read_stage_input_v1(maximum: i64) -> Result<[u8], text>:
+        @when(os="linux"):
+        if self.closed or self.writable: return Err("stage-input-owner")
+        val before = anchored_linux_metadata_v1(self.handle, "", true)?
+        if (before.mode & 61440u32) != 32768u32 or before.links != 1: return Err("stage-input-single-regular-file")
+        val bytes = self.read_all_bounded_v1(maximum)?
+        val after = anchored_linux_metadata_v1(self.handle, "", true)?
+        if before.identity != after.identity or before.revision != after.revision or after.links != 1:
+            return Err("stage-input-changed")
+        Ok(bytes)
+        @else:
+        Err("stage-host-unsupported")
+        @end
 
     @unsafe(reason: "reads at most one MiB through retained native handle", capabilities: [ffi, raw_ptr])
     me read(maximum: i64) -> Result<[u8], text>:
@@ -124,11 +146,93 @@ class RetainedFile:
 pub class RetainedDirectoryOwnerV1:
     var handle: i64
     var closed: bool
+    birth_identity: [u8] = []
+
+    # Borrowed input stays with caller; partial duplicate always carries its native fd.
+    @unsafe(reason: "duplicates privately producer-bound directory with retained partial cleanup", capabilities: [ffi, raw_ptr])
+    pub(package) fn duplicate_as_process_cwd_v1() -> (Option<RetainedDirectoryOwnerV1>, text):
+        if self.closed or self.handle < 0: return (nil, "SCVDB_DIR_CLOSED")
+        @when(os="linux"):
+        val (fd, diagnostic) = retained_directory_cwd_duplicate_v1(self.handle, self.birth_identity)
+        (if fd < 0: nil else: Some(RetainedDirectoryOwnerV1(handle: fd, closed: false, birth_identity: self.birth_identity)), diagnostic)
+        @else:
+        (nil, "linux-replace-platform-unsupported")
+        @end
+
+    @unsafe(reason: "enters actual private retained directory after birth revalidation", capabilities: [ffi, raw_ptr])
+    pub(package) fn enter_as_process_cwd_v1() -> Result<(), text>:
+        if self.closed or self.handle < 0: return Err("SCVDB_DIR_CLOSED")
+        @when(os="linux"):
+        retained_directory_cwd_enter_v1(self.handle, self.birth_identity)
+        @else:
+        Err("linux-replace-platform-unsupported")
+        @end
 
     @unsafe(reason: "opens a fixed nofollow regular file beneath the retained directory", capabilities: [ffi, raw_ptr])
     pub fn open_file(name: text, maximum: u64) -> Result<RetainedFile, text>:
         if self.closed or self.handle < 0: return Err("SCVDB_DIR_CLOSED")
         _retained_file_open_at_v1(self.handle, name, maximum)
+
+    # Mechanisms only: callers must hold their own actual installed mutation policy.
+    # This API does not mint workspace or per-invocation authority.
+    #[allow(primitive_api)] reviewed fd-level stage mechanism bound/flag (milestone_0012 groupB)
+    pub fn stage_directory_v1(name: text, create_exclusive: bool) -> Result<RetainedDirectoryOwnerV1, text>:
+        if self.closed or self.handle < 0: return Err("SCVDB_DIR_CLOSED")
+        @when(os="linux"):
+        val fd = retained_stage_directory_fd_v1(self.handle, name, create_exclusive)?
+        Ok(RetainedDirectoryOwnerV1(handle: fd, closed: false, birth_identity: retained_directory_birth_v1(fd)))
+        @else:
+        Err("stage-host-unsupported")
+        @end
+
+    pub fn stage_file_v1(name: text, bytes: [u8]) -> Result<(), text>:
+        if self.closed or self.handle < 0: return Err("SCVDB_DIR_CLOSED")
+        @when(os="linux"):
+        val identity = retained_stage_file_bytes_v1(self.handle, name, bytes)?
+        Ok(())
+        @else:
+        Err("stage-host-unsupported")
+        @end
+
+    pub fn directory_is_empty_v1() -> Result<bool, text>:
+        if self.closed or self.handle < 0: return Err("SCVDB_DIR_CLOSED")
+        @when(os="linux"):
+        retained_directory_empty_fd_v1(self.handle)
+        @else:
+        Err("directory-empty-host-unsupported")
+        @end
+
+    # Identity DATA only, never writable policy or a raw descriptor accessor.
+    pub fn stage_identity_v1() -> Result<[u8], text>:
+        if self.closed or self.handle < 0: return Err("SCVDB_DIR_CLOSED")
+        @when(os="linux"):
+        val metadata = anchored_linux_metadata_v1(self.handle, "", true)?
+        Ok(metadata.identity)
+        @else:
+        Err("stage-host-unsupported")
+        @end
+
+    # Actual named-child correspondence from BOTH original retained handles.
+    pub fn stage_child_match_v1(name: text, child: RetainedDirectoryOwnerV1) -> Result<(), text>:
+        if self.closed or self.handle < 0 or child.closed or child.handle < 0: return Err("SCVDB_DIR_CLOSED")
+        @when(os="linux"):
+        if not retained_stage_leaf_v1(name): return Err("stage-child-name")
+        val held = anchored_linux_metadata_v1(child.handle, "", true)?
+        val named = anchored_linux_metadata_v1(self.handle, name, false)?
+        if ((held.mode & 61440u32) != 16384u32 or (named.mode & 61440u32) != 16384u32 or held.identity != named.identity):
+            return Err("stage-child-retained-binding-differs")
+        Ok(())
+        @else:
+        Err("stage-host-unsupported")
+        @end
+
+    pub fn stage_file_identified_v1(name: text, bytes: [u8]) -> Result<[u8], text>:
+        if self.closed or self.handle < 0: return Err("SCVDB_DIR_CLOSED")
+        @when(os="linux"):
+        retained_stage_file_bytes_v1(self.handle, name, bytes)
+        @else:
+        Err("stage-host-unsupported")
+        @end
 
     @unsafe(reason: "invalidates retained directory owner before closing its descriptor", capabilities: [ffi])
     pub me close() -> bool:
@@ -313,34 +417,6 @@ fn _retained_directory_owner_allowed_v1(metadata: RetainedDirectorySecurityMetad
     if (metadata.mode & 18u32) == 0u32: return true
     allow_root_sticky and metadata.owner_uid == 0u32 and (metadata.mode & 512u32) != 0u32
 
-# Linux file and directory flags are part of the target syscall ABI. Keep these
-# words in one place so legacy path APIs and retained-owner APIs cannot drift.
-fn _retained_linux_directory_flags_v1() -> i32:
-    var flags: i32 = 0
-    @when(os="linux"):
-    @when(arch="aarch64"):
-    flags = 573440 # O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY
-    @elif(arch="x86_64"):
-    flags = 720896 # O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY
-    @else:
-    flags = 0
-    @end
-    @end
-    flags
-
-fn _retained_linux_file_flags_v1() -> i32:
-    var flags: i32 = 0
-    @when(os="linux"):
-    @when(arch="aarch64"):
-    flags = 559104 # O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC
-    @elif(arch="x86_64"):
-    flags = 657408 # O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC
-    @else:
-    flags = 0
-    @end
-    @end
-    flags
-
 @unsafe(reason: "walks trusted directory components through nofollow native descriptors", capabilities: [ffi, raw_ptr])
 pub fn retained_directory_open_trusted_v1(path: text) -> Result<RetainedDirectoryOwnerV1, text>:
     @when(os="linux"):
@@ -404,7 +480,7 @@ pub fn retained_directory_open_trusted_v1(path: text) -> Result<RetainedDirector
             return Err("SCVDB_DIR_PARENT_CLOSE")
         current = next
         index = index + 1
-    Ok(RetainedDirectoryOwnerV1(handle: current, closed: false))
+    Ok(RetainedDirectoryOwnerV1(handle: current, closed: false, birth_identity: retained_directory_birth_v1(current)))
     @else:
     Err("SCVDB_DIR_HOST_UNSUPPORTED")
     @end
