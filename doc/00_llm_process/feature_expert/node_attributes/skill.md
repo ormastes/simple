@@ -36,8 +36,13 @@ reads. `00.common/data/async_init_registry_v1.spl` wraps the existing
 type check (`E_ASYNC_INIT_TYPE`), an epoch fence (`E_ASYNC_INIT_STALE`) and a
 zero-slot guarantee for nodes with no pending field. Specs:
 `test/01_unit/compiler/data/async_init_registry_v1_spec.spl`,
-`test/01_unit/compiler/hir/async_ctor_arg_parse_spec.spl`. Open: readiness
-analysis (`E_ATTR_NOT_READY`), scheduler waiters, Rust seed parser.
+`test/01_unit/compiler/hir/async_ctor_arg_parse_spec.spl`. `E_ATTR_NOT_READY` (2026-11-15): an unawaited read `n.f` of a field bound with
+`f: async <expr>` at a construction of local `n` in the same function; error in
+every gate mode; implemented in the `RequiredInitCollectorV1` visitor of
+`required_field_init_v1.spl`, spec `test/01_unit/compiler/hir/attr_not_ready_v1_spec.spl`.
+Open (see `doc/08_tracking/bug/immutable_async_open_questions_2026-11-15.md`):
+non-await readiness
+proofs, alias flow, scheduler waiters, Rust seed parser.
 ## Immutable<T> read-only view (P2a, 2026-11-14)
 `Immutable<T>` lowers to `T`; the declaring param/local symbol is recorded in
 `HirLowering.immutable_view_symbols` and a field/index write rooted at it is
@@ -53,3 +58,18 @@ directly from a revision/frozen handle is `E_FROZEN_ALIAS`. Spec:
 `test/01_unit/compiler/semantics/revision_frozen_immutable_spec.spl`. W8 still
 owns revision lease/cache identity, class detached-copy producers and the frozen
 codec kind.
+
+## Revision hooks and capability escape (2026-11-15)
+REV-02: the pointer-free frozen payload is `FileAstV1` via
+`canonical_file_ast_encode_v1`/`decode_v1`; round-trip, determinism and rejection
+pinned by `test/01_unit/compiler/cache/rev02_frozen_file_ast_codec_spec.spl`
+(5/5; the codec had no spec before). REV-01: reclamation hook is the SCV reader
+lease (`scv_compile_snapshot_lease_*`); `test/01_unit/lib/scv/rev01_pinned_revision_lease_spec.spl`
+is 1 GREEN, 1 RED (a process holds one lease, so several pinned revisions are
+not protected; bug `rev01_one_lease_per_process_blocks_multi_revision_pin_2026-11-15`).
+`E_INIT_CAPABILITY_ESCAPE` (owner rule 2026-11-15): the `async_init(...)` producer
+may only receive IMMUTABLE input. Default off, `SIMPLE_INIT_CAPABILITY_ESCAPE=on`
+rejects any `var` binding, `mut T` parameter, `me`-method `self`, `Ref`/`Ptr`-typed
+binding or closure capture of those, nested anywhere in the argument
+(`InitCapabilityScanV1`; `init_capability_escape_v1_spec`, 12/12). `val x = counter`
+then `async_init(x)` is accepted.

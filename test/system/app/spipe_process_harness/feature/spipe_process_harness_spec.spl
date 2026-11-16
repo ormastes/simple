@@ -9,7 +9,7 @@ use std.nogc_async_mut.spipe_process_harness.core.{
     normalize_provider, provider_hook_events, hook_jsonl, gate_from_state,
     render_state, render_hud, deploy_snippets
 }
-use std.nogc_async_mut.spipe_process_harness.types.{HudSnapshot}
+use std.nogc_async_mut.spipe_process_harness.types.{ApprovalRequirement, UserApproval, Provider, GateVerdict, HookSessionId, ModelName, FeatureSlug, HudSnapshot}
 use std.spec.{describe, it, expect, step}
 
 describe "SPipe process harness feature":
@@ -28,22 +28,22 @@ describe "SPipe process harness feature":
     # @req REQ-001
             # @req REQ-SSPEC-SYSTEM
             step("normalizes supported provider names")
-            expect(normalize_provider("Claude")).to_equal("claude")
-            expect(normalize_provider("Codex")).to_equal("codex")
-            expect(normalize_provider("Gemini")).to_equal("gemini")
+            expect(normalize_provider("Claude")).to_equal(Provider.Claude)
+            expect(normalize_provider("Codex")).to_equal(Provider.Codex)
+            expect(normalize_provider("Gemini")).to_equal(Provider.Gemini)
 
         it "defines hook lifecycle events for each supported provider":
             # @req REQ-SSPEC-SYSTEM
             step("defines hook lifecycle events for each supported provider")
-            expect(provider_hook_events("claude")).to_contain("PreToolUse")
-            expect(provider_hook_events("codex")).to_contain("tool_start")
-            expect(provider_hook_events("gemini")).to_contain("prompt_submit")
+            expect(provider_hook_events(Provider.Claude)).to_contain("PreToolUse")
+            expect(provider_hook_events(Provider.Codex)).to_contain("tool_start")
+            expect(provider_hook_events(Provider.Gemini)).to_contain("prompt_submit")
 
     describe "REQ-002: normalized hook envelope":
         it "preserves provider event session model and raw payload":
             # @req REQ-SSPEC-SYSTEM
             step("preserves provider event session model and raw payload")
-            val line = hook_jsonl("Claude", "SessionStart", "sid", "sonnet", "{\"ok\":true}")
+            val line = hook_jsonl(normalize_provider("Claude"), "SessionStart", HookSessionId(value: "sid"), ModelName(value: "sonnet"), "{\"ok\":true}")
             expect(line).to_contain("\"provider\":\"claude\"")
             expect(line).to_contain("\"event\":\"SessionStart\"")
             expect(line).to_contain("\"session_id\":\"sid\"")
@@ -55,7 +55,7 @@ describe "SPipe process harness feature":
             # @req REQ-SSPEC-SYSTEM
             step("renders deploy snippets for all providers")
             val snippets = deploy_snippets()
-            expect(snippets.len()).to_equal(3)  # oracle: expected value 3 is the behavior asserted by this regression spec
+            expect(snippets.len()).to_equal(4)  # oracle: expected value 3 is the behavior asserted by this regression spec
             expect(snippets[0].path).to_contain(".spipe/hook-deploy/")
             expect(snippets[1].path).to_contain(".spipe/hook-deploy/")
             expect(snippets[2].path).to_contain(".spipe/hook-deploy/")
@@ -76,18 +76,18 @@ describe "SPipe process harness feature":
         it "blocks state without approval":
             # @req REQ-SSPEC-SYSTEM
             step("blocks state without approval")
-            val state = render_state("f", "r", "g", false)
-            expect(gate_from_state(state, true).allowed).to_equal(false)
+            val state = render_state(FeatureSlug(value: "f"), "r", "g", UserApproval.Unapproved)
+            expect(gate_from_state(state, ApprovalRequirement.Required).verdict).to_equal(GateVerdict.Block)
 
         it "allows approved state":
             # @req REQ-SSPEC-SYSTEM
             step("allows approved state")
-            val state = render_state("f", "r", "g", true)
-            expect(gate_from_state(state, true).allowed).to_equal(true)
+            val state = render_state(FeatureSlug(value: "f"), "r", "g", UserApproval.Approved)
+            expect(gate_from_state(state, ApprovalRequirement.Required).verdict).to_equal(GateVerdict.Allow)
 
         it "blocks explicit prevention marker":
             # @req REQ-SSPEC-SYSTEM
             step("blocks explicit prevention marker")
-            val decision = gate_from_state("User Approved: true\nPrevent: block\n", true)
-            expect(decision.allowed).to_equal(false)
+            val decision = gate_from_state("User Approved: true\nPrevent: block\n", ApprovalRequirement.Required)
+            expect(decision.verdict).to_equal(GateVerdict.Block)
 

@@ -1,0 +1,188 @@
+# Pure read-only TestDB query model: typed rows, qualification and pagination.
+# Rows describe unverified framework observations; only a Passed status can
+# qualify, and every absent identity is an explicit Missing variant.
+use std.common.traceability.case_events.{TraceCaseEvent}
+
+val TEST_QUERY_MAX_LIMIT: i64 = 1000
+
+pub struct TestCasePath:
+    value: text
+
+pub struct TestCaseName:
+    value: text
+
+pub struct TestCaseKey:
+    path: TestCasePath
+    name: TestCaseName
+
+pub struct TestRunId:
+    value: text
+
+pub struct TestPlannedCaseId:
+    value: text
+
+pub enum TestPlannedCaseIdentity:
+    Recorded(id: TestPlannedCaseId)
+    Missing
+
+pub struct TestAttemptOrdinal:
+    value: i64
+
+pub enum TestAttemptIdentity:
+    StreamOrder(ordinal: TestAttemptOrdinal)
+    Missing
+
+pub enum TestQueryStatus:
+    Passed
+    Failed
+    Skipped
+    Ignored
+    QualifiedIgnore
+    Pending
+    InDevelopment
+    FeatureGated
+    Blocked
+    NotFinished
+    Cached
+    Unknown(raw: text)
+
+pub enum TestQualification:
+    Pass
+    NotPass
+
+pub enum TestEvidenceProvenance:
+    UnverifiedFrameworkObservation
+
+pub struct TestQueryLimit:
+    value: i64
+
+pub struct TestQueryCursor:
+    offset: i64
+
+pub struct TestQuery:
+    case_key: TestCaseKey
+    run_id: TestRunId?
+    limit: TestQueryLimit
+    cursor: TestQueryCursor?
+
+pub struct TestQueryRow:
+    case_key: TestCaseKey
+    run_id: TestRunId
+    planned_case: TestPlannedCaseIdentity
+    attempt: TestAttemptIdentity
+    status: TestQueryStatus
+    qualification: TestQualification
+    provenance: TestEvidenceProvenance
+
+pub enum TestQueryTruncation:
+    Complete
+    Truncated(next: TestQueryCursor)
+
+pub enum TestQueryCoverage:
+    Full
+    Partial
+
+pub struct TestQueryPage:
+    rows: [TestQueryRow]
+    truncation: TestQueryTruncation
+    coverage: TestQueryCoverage
+
+pub enum TestQueryErrorKind:
+    InvalidQuery
+    UnknownRun
+    StoreUnreadable
+
+pub struct TestQueryError:
+    kind: TestQueryErrorKind
+    detail: text
+
+pub fn parse_test_query_status(raw: text) -> TestQueryStatus:
+    match raw:
+        case "passed": TestQueryStatus.Passed
+        case "failed": TestQueryStatus.Failed
+        case "skipped": TestQueryStatus.Skipped
+        case "ignored": TestQueryStatus.Ignored
+        case "qualifiedignore": TestQueryStatus.QualifiedIgnore
+        case "pending": TestQueryStatus.Pending
+        case "in_development": TestQueryStatus.InDevelopment
+        case "in-development": TestQueryStatus.InDevelopment
+        case "feature_gated": TestQueryStatus.FeatureGated
+        case "blocked": TestQueryStatus.Blocked
+        case "not_finished": TestQueryStatus.NotFinished
+        case "cached": TestQueryStatus.Cached
+        case _: TestQueryStatus.Unknown(raw: raw)
+
+# Only an executed-and-passed observation qualifies; skipped, gated, blocked,
+# cached and unrecognised statuses are never PASS.
+pub fn qualify_test_query_status(status: TestQueryStatus) -> TestQualification:
+    match status:
+        case TestQueryStatus.Passed: TestQualification.Pass
+        case _: TestQualification.NotPass
+
+fn _row(key: TestCaseKey, run_id: TestRunId, planned: TestPlannedCaseIdentity,
+        attempt: TestAttemptIdentity, status: TestQueryStatus) -> TestQueryRow:
+    TestQueryRow(case_key: key, run_id: run_id, planned_case: planned, attempt: attempt,
+        status: status, qualification: qualify_test_query_status(status),
+        provenance: TestEvidenceProvenance.UnverifiedFrameworkObservation)
+
+# Each started event opens an attempt, closed by the next finished event of the
+# same case. An unclosed attempt is NotFinished; a finished event without an
+# open attempt has a Missing attempt identity. Attempts never merge.
+pub fn project_run_case_rows(key: TestCaseKey, run_id: TestRunId,
+        planned: TestPlannedCaseIdentity, events: [TraceCaseEvent]) -> [TestQueryRow]:
+    var rows: [TestQueryRow] = []
+    var open = false
+    var ordinal = 0
+    for event in events:
+        if event.case_name != key.name.value:
+            continue
+        if event.phase == "started":
+            if open:
+                rows.push(_row(key, run_id, planned, TestAttemptIdentity.StreamOrder(ordinal: TestAttemptOrdinal(value: ordinal)), TestQueryStatus.NotFinished))
+                ordinal = ordinal + 1
+            open = true
+        else:
+            val status = parse_test_query_status(event.outcome)
+            if open:
+                rows.push(_row(key, run_id, planned, TestAttemptIdentity.StreamOrder(ordinal: TestAttemptOrdinal(value: ordinal)), status))
+                ordinal = ordinal + 1
+                open = false
+            else:
+                rows.push(_row(key, run_id, planned, TestAttemptIdentity.Missing, status))
+    if open:
+        rows.push(_row(key, run_id, planned, TestAttemptIdentity.StreamOrder(ordinal: TestAttemptOrdinal(value: ordinal)), TestQueryStatus.NotFinished))
+    rows
+
+fn _test_query_invalid(detail: text) -> TestQueryError:
+    TestQueryError(kind: TestQueryErrorKind.InvalidQuery, detail: detail)
+
+fn _row_is_partial(row: TestQueryRow) -> bool:
+    match row.status:
+        case TestQueryStatus.NotFinished: true
+        case _:
+            match row.attempt:
+                case TestAttemptIdentity.Missing: true
+                case TestAttemptIdentity.StreamOrder(_): false
+
+pub fn paginate_test_query_rows(rows: [TestQueryRow], query: TestQuery) -> Result<TestQueryPage, TestQueryError>:
+    val limit = query.limit.value
+    if limit < 1 or limit > TEST_QUERY_MAX_LIMIT:
+        return Err(_test_query_invalid("limit must be between 1 and 1000"))
+    val start = match query.cursor:
+        case Some(cursor): cursor.offset
+        case None: 0
+    if start < 0 or start > rows.len():
+        return Err(_test_query_invalid("cursor is outside the result rows"))
+    var end = start + limit
+    var truncation = TestQueryTruncation.Complete
+    if end < rows.len():
+        truncation = TestQueryTruncation.Truncated(next: TestQueryCursor(offset: end))
+    else:
+        end = rows.len()
+    var page: [TestQueryRow] = []
+    var coverage = TestQueryCoverage.Full
+    for i in start..end:
+        page.push(rows[i])
+        if _row_is_partial(rows[i]):
+            coverage = TestQueryCoverage.Partial
+    Ok(TestQueryPage(rows: page, truncation: truncation, coverage: coverage))

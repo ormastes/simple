@@ -7,6 +7,10 @@ use std.common.build_manager.contracts.builder_digest_valid_v1
 use std.common.crypto.sha256.sha256_text
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read_regular_no_follow_bounded, file_exists}
 use std.nogc_sync_mut.io_runtime.dir_create
+use std.nogc_sync_mut.orchestration.desired_input_objects_v1.controller_storage_owner_check_v3
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_relative_v3, distributed_operation_journal_read_required_v3,
+    distributed_operation_journal_publish_v3}
 
 fn assignment_object_put_v1(root: text, digest: text, suffix: text,
         bytes: text, maximum: i64) -> Result<bool, text>:
@@ -41,4 +45,44 @@ pub fn assignment_objects_read_v1(root: text, digest: text) -> Result<Controller
     val reference = controller_assignment_decode_reference_v1(manifest)?
     val intent = file_read_regular_no_follow_bounded(base + reference.host_intent_digest + ".sdn", 65536)?
     val envelope = file_read_regular_no_follow_bounded(base + reference.host_envelope_digest + ".frame", 65536)?
+    controller_assignment_restore_v1(reference, intent, envelope)
+
+# The existing journal owns both platforms. Root text is never storage
+# authority here; native relative-path bounds preserve existing digest names.
+fn assignment_object_put_owned_v3(journal: DistributedOperationJournalV2, digest: text,
+        suffix: text, bytes: text, maximum: i64) -> Result<bool, text>:
+    if not builder_digest_valid_v1(digest) or sha256_text(bytes) != digest or bytes.byte_len() > maximum:
+        return Err("assignment-object-invalid")
+    val relative = "assignment-objects/" + digest + suffix
+    if not distributed_operation_journal_relative_v3(relative): return Err("assignment-object-record-path-bounds")
+    val published = distributed_operation_journal_publish_v3(journal, relative, bytes)?
+    val retained = distributed_operation_journal_read_required_v3(journal, relative, maximum)?
+    if retained != bytes: return Err("assignment-object-publication-mismatch")
+    Ok(true)
+
+pub fn assignment_objects_retain_owned_v3(journal: DistributedOperationJournalV2,
+        binding: ControllerAssignmentBindingV1) -> Result<text, text>:
+    val current = controller_storage_owner_check_v3(journal)?
+    if journal.windows_store.is_none(): return assignment_objects_retain_v1(journal.root, binding)
+    val manifest = controller_assignment_bytes_v1(binding)?
+    val reference = controller_assignment_decode_reference_v1(manifest)?
+    val intent = host_reservation_encode_intent_v1(binding.host_intent)?
+    val envelope = distributed_encode_operation_v2(binding.host_operation)?
+    val intent_saved = assignment_object_put_owned_v3(journal, reference.host_intent_digest, ".sdn", intent, 65536)?
+    val envelope_saved = assignment_object_put_owned_v3(journal, reference.host_envelope_digest, ".frame", envelope, 65536)?
+    val digest = sha256_text(manifest)
+    val manifest_saved = assignment_object_put_owned_v3(journal, digest, ".sdn", manifest, 4096)?
+    Ok(digest)
+
+pub fn assignment_objects_read_owned_v3(journal: DistributedOperationJournalV2,
+        digest: text) -> Result<ControllerAssignmentBindingV1, text>:
+    val current = controller_storage_owner_check_v3(journal)?
+    if journal.windows_store.is_none(): return assignment_objects_read_v1(journal.root, digest)
+    if not builder_digest_valid_v1(digest): return Err("assignment-object-digest-invalid")
+    val base = "assignment-objects/"
+    val manifest = distributed_operation_journal_read_required_v3(journal, base + digest + ".sdn", 4096)?
+    if sha256_text(manifest) != digest: return Err("assignment-object-digest-mismatch")
+    val reference = controller_assignment_decode_reference_v1(manifest)?
+    val intent = distributed_operation_journal_read_required_v3(journal, base + reference.host_intent_digest + ".sdn", 65536)?
+    val envelope = distributed_operation_journal_read_required_v3(journal, base + reference.host_envelope_digest + ".frame", 65536)?
     controller_assignment_restore_v1(reference, intent, envelope)

@@ -1,0 +1,40 @@
+"""
+## Purpose and audience
+Regression oracles for two host leaves smux_client reaches natively:
+`std.sosix.host.sosix_file_read` (re-exported from its real owner
+`io_runtime`; the old route through `io.file_ops`, which only imports it
+privately, left the symbol unresolved in the native link) and
+`file_system.permissions.file_set_mode` (now backed by
+`io.file_ops.package_chmod` instead of the whole `sffi.host` hub, which linked
+28 aborting stubs such as `rt_db_*` into smux_client.exe).
+## Operator workflow
+bin/simple test test/01_unit/lib/sosix/host_file_chmod_owner_spec.spl
+## Compatibility and limitations
+Hosted lanes only. The Windows chmod runtime answers success without changing
+mode bits, so only the success result is asserted, not the resulting mode.
+## Verification guidance and troubleshooting
+A read mismatch means `sosix_file_read` lost its io_runtime owner.
+"""
+# doc-path: doc/05_design/runtime/sosix_runtime_unification_design.md
+
+use std.spec.{describe, it, expect, step}
+use std.sosix.host.{sosix_file_read, sosix_file_write}
+use std.nogc_sync_mut.file_system.permissions.{file_set_mode}
+use std.nogc_sync_mut.io_runtime.{file_delete}
+
+describe "std.sosix.host file leaves used by smux_client":
+
+    it "reads back exactly what sosix_file_write stored":
+        step("Write a marker file and read it through the capsule")
+        val path = "build/host_file_chmod_owner_spec_read.txt"
+        expect(sosix_file_write(path, "smux-owner 127.0.0.1:1 tok\n")).to_equal(true)
+        expect(sosix_file_read(path)).to_equal("smux-owner 127.0.0.1:1 tok\n")
+        file_delete(path)
+
+    it "sets the mode of an existing file and rejects a missing one":
+        step("chmod an existing file to 0o644, then a path that does not exist")
+        val path = "build/host_file_chmod_owner_spec_mode.txt"
+        expect(sosix_file_write(path, "x")).to_equal(true)
+        expect(file_set_mode(path, 420)).to_equal(true)
+        expect(file_set_mode("build/host_file_chmod_owner_spec_missing.txt", 420)).to_equal(false)
+        file_delete(path)

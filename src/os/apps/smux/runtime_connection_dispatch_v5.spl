@@ -1,0 +1,212 @@
+#![allow(REQC004)]
+# Called only after retained service credential authentication. Peer bytes carry
+# requests and signed proofs, never an issuer, endpoint, root, or native owner.
+use os.apps.smux.runtime_connection_owner_v5.*
+use os.apps.smux.runtime_connection_request_v5.{SmuxRuntimeConnectionRequestV5,
+    smux_runtime_connection_request_from_token_v5}
+use os.apps.smux.runtime_primary_request_v4.smux_runtime_primary_request_decode_v4
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.HostServiceRequestV2
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.{host_helper_request_decode_v1,
+    host_helper_execution_proof_decode_v1}
+use std.common.contracts.container.stream_v2.ContainerOutputResourcesV2
+use std.common.contracts.container.primary_connection_v2.container_primary_connection_plan_bytes_v2
+use std.nogc_async_mut.container.terminal_primary_write_v2.ContainerPrimaryInputDispositionV2
+use std.nogc_sync_mut.orchestration.host_primary_geometry_record_v1.host_primary_geometry_receipt_encode_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct SmuxRuntimeConnectionDispatchV5:
+    owner: SmuxRuntimeConnectionOwnerV5
+    response: text
+
+fn fields_v5(source: text, keys: [text]) -> Result<Dict<text, SdnValue>, text>:
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 2097152,
+        max_depth: 2, max_nodes: 48, max_rows: 0, max_cells: 0, max_columns: 16))
+    if parsed.is_err(): return Err("runtime-connection-payload-syntax")
+    val fields = match parsed.unwrap().value:
+        case SdnValue.Dict(value): value
+        case _: return Err("runtime-connection-payload-object")
+    if fields.len() != keys.len(): return Err("runtime-connection-payload-fields")
+    for key in keys:
+        if not fields.contains_key(key): return Err("runtime-connection-payload-fields")
+    if sdn_encode_canonical(SdnValue.Dict(fields)) != source: return Err("runtime-connection-payload-canonical")
+    Ok(fields)
+
+fn text_v5(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("runtime-connection-payload-text")
+
+fn int_v5(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("runtime-connection-payload-integer")
+
+fn response_v5(action: text, uid: text, error: text, payload: SdnValue) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(5), "kind": SdnValue.String("smux-runtime-connection-reply"),
+        "action": SdnValue.String(action), "bindingUid": SdnValue.String(uid), "error": SdnValue.String(error), "result": payload}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+fn turn_v5(request: SmuxRuntimeConnectionRequestV5, turn: SmuxRuntimeConnectionTurnV5) -> SmuxRuntimeConnectionDispatchV5:
+    var result: Dict<text, SdnValue> = {"response": SdnValue.String(turn.response)}
+    var error = turn.error
+    if val plan = turn.plan:
+        val bytes = container_primary_connection_plan_bytes_v2(plan)
+        if bytes.is_ok(): result["plan"] = SdnValue.String(bytes.unwrap())
+        else: error = bytes.unwrap_err()
+    if val receipt = turn.prepared:
+        val prepared: Dict<text, SdnValue> = {"operationId": SdnValue.String(receipt.operation_id),
+            "envelopeDigest": SdnValue.String(receipt.envelope_digest), "intentDigest": SdnValue.String(receipt.intent_digest),
+            "preparedRevision": SdnValue.Int(receipt.prepared_revision), "receiptDigest": SdnValue.String(receipt.receipt_digest)}
+        result["preparedReceipt"] = SdnValue.Dict(prepared)
+    SmuxRuntimeConnectionDispatchV5(turn.owner, response_v5(request.action, request.binding_uid, error, SdnValue.Dict(result)))
+
+fn input_turn_v5(request: SmuxRuntimeConnectionRequestV5, turn: SmuxRuntimeConnectionInputTurnV5) -> SmuxRuntimeConnectionDispatchV5:
+    var result: Dict<text, SdnValue> = {"revision": SdnValue.Int(turn.revision), "nonce": SdnValue.String(turn.nonce)}
+    if val receipt = turn.receipt:
+        val status = match receipt.disposition:
+            case ContainerPrimaryInputDispositionV2.Rejected: "rejected"
+            case ContainerPrimaryInputDispositionV2.Queued: "queued"
+            case ContainerPrimaryInputDispositionV2.Completed: "completed"
+            case ContainerPrimaryInputDispositionV2.Unknown: "unknown"
+        result["disposition"] = SdnValue.String(status)
+        result["attempt"] = SdnValue.Int(receipt.attempt)
+        result["acceptedBytes"] = SdnValue.Int(receipt.accepted_bytes)
+        result["nativeError"] = SdnValue.String(receipt.error)
+    SmuxRuntimeConnectionDispatchV5(turn.owner, response_v5(request.action, request.binding_uid, turn.error, SdnValue.Dict(result)))
+
+fn geometry_turn_v5(request: SmuxRuntimeConnectionRequestV5, turn: SmuxRuntimeConnectionGeometryTurnV5) -> SmuxRuntimeConnectionDispatchV5:
+    var fields: Dict<text, SdnValue> = {"revision": SdnValue.Int(turn.revision), "nonce": SdnValue.String(turn.nonce)}
+    var error = turn.error
+    if val receipt = turn.receipt:
+        val encoded = host_primary_geometry_receipt_encode_v1(receipt)
+        if encoded.is_ok(): fields["receipt"] = SdnValue.String(encoded.unwrap())
+        else: error = encoded.unwrap_err()
+    SmuxRuntimeConnectionDispatchV5(turn.owner, response_v5(request.action, request.binding_uid, error, SdnValue.Dict(fields)))
+
+# Every fallible decode precedes owner invocation. Once effects can occur, only
+# owner-bearing turns return, including refusal and malformed-result paths.
+fn dispatch_v5(owner: SmuxRuntimeConnectionOwnerV5,
+        request: SmuxRuntimeConnectionRequestV5) -> Result<SmuxRuntimeConnectionDispatchV5, text>:
+    val uid = request.binding_uid
+    if request.action == "capabilities":
+        val actual = smux_runtime_connection_capabilities_v5(owner)
+        val fields: Dict<text, SdnValue> = {"available": SdnValue.Bool(actual.available),
+            "primaryConnection": SdnValue.Bool(actual.available), "inputLease": SdnValue.Bool(actual.input_allowed),
+            "geometryLease": SdnValue.Bool(actual.geometry_allowed), "cooperativeExecution": SdnValue.Bool(actual.available),
+            "localContainer": SdnValue.Bool(false)}
+        return Ok(SmuxRuntimeConnectionDispatchV5(owner, response_v5(request.action, "", "", SdnValue.Dict(fields))))
+    if request.action == "geometry-observe":
+        return Ok(geometry_turn_v5(request, smux_runtime_connection_geometry_observe_v5(owner, uid)))
+    if request.action == "geometry-cancel":
+        return Ok(geometry_turn_v5(request, smux_runtime_connection_geometry_cancel_v5(owner, uid, nil)))
+    if request.action == "geometry-revoke":
+        val fields = fields_v5(request.payload, ["revision"])?
+        val revision = int_v5(fields, "revision")?
+        return Ok(geometry_turn_v5(request, smux_runtime_connection_geometry_cancel_v5(owner, uid, Some(revision))))
+    if request.action == "geometry-resolve":
+        val fields = fields_v5(request.payload, ["clientId", "attachmentToken", "columns", "rows"])?
+        val client = text_v5(fields, "clientId")?
+        val token = text_v5(fields, "attachmentToken")?
+        val columns = int_v5(fields, "columns")?
+        val rows = int_v5(fields, "rows")?
+        val actual = smux_runtime_connection_geometry_resolve_v5(owner, uid, client, token, columns, rows)
+        var result: Dict<text, SdnValue> = {}
+        if actual.is_ok():
+            result["targetDigest"] = SdnValue.String(actual.unwrap().target_digest)
+            result["wireDigest"] = SdnValue.String(actual.unwrap().wire_digest)
+        return Ok(SmuxRuntimeConnectionDispatchV5(owner, response_v5(request.action, uid,
+            if actual.is_err(): actual.unwrap_err() else: "", SdnValue.Dict(result))))
+    if request.action == "geometry-issue":
+        val fields = fields_v5(request.payload, ["clientId", "attachmentToken", "revision", "targetDigest"])?
+        val client = text_v5(fields, "clientId")?
+        val token = text_v5(fields, "attachmentToken")?
+        val revision = int_v5(fields, "revision")?
+        val digest = text_v5(fields, "targetDigest")?
+        return Ok(geometry_turn_v5(request, smux_runtime_connection_geometry_issue_v5(owner, uid, client, token, revision, digest)))
+    if request.action == "geometry-resize":
+        val fields = fields_v5(request.payload, ["clientId", "attachmentToken", "nonce", "revision", "attempt", "columns", "rows", "wireDigest"])?
+        val client = text_v5(fields, "clientId")?
+        val token = text_v5(fields, "attachmentToken")?
+        val nonce = text_v5(fields, "nonce")?
+        val revision = int_v5(fields, "revision")?
+        val attempt = int_v5(fields, "attempt")?
+        val columns = int_v5(fields, "columns")?
+        val rows = int_v5(fields, "rows")?
+        val wire = text_v5(fields, "wireDigest")?
+        return Ok(geometry_turn_v5(request, smux_runtime_connection_geometry_resize_v5(owner, uid, client, token,
+            nonce, revision, attempt, columns, rows, wire)))
+    if request.action == "host-progress" or request.action == "host-cancel":
+        val current = if request.action == "host-cancel": smux_runtime_connection_host_cancel_v5(owner) else: owner
+        val observed = smux_runtime_connection_host_progress_v5(current)
+        val result: Dict<text, SdnValue> = {"operationId": SdnValue.String(observed.operation_id),
+            "pending": SdnValue.Bool(observed.pending), "response": SdnValue.String(observed.response),
+            "exitCode": SdnValue.Int(observed.exit_code)}
+        return Ok(SmuxRuntimeConnectionDispatchV5(current, response_v5(request.action, "", observed.error, SdnValue.Dict(result))))
+    if request.action == "host":
+        val fields = fields_v5(request.payload, ["action", "operationId", "payload"])?
+        val host = HostServiceRequestV2(text_v5(fields, "action")?, text_v5(fields, "operationId")?, text_v5(fields, "payload")?)
+        return Ok(turn_v5(request, smux_runtime_connection_host_v5(owner, host)))
+    if request.action == "plan":
+        val fields = fields_v5(request.payload, ["request", "cpuMillis", "memoryBytes", "clientId", "attachmentToken"])?
+        val plan = smux_runtime_primary_request_decode_v4(text_v5(fields, "request")?)?
+        if plan.target.binding_uid != uid: return Err("runtime-connection-binding-mismatch")
+        val resources = ContainerOutputResourcesV2(int_v5(fields, "cpuMillis")?, int_v5(fields, "memoryBytes")?)
+        val client = text_v5(fields, "clientId")?
+        val token = text_v5(fields, "attachmentToken")?
+        return Ok(turn_v5(request, smux_runtime_connection_plan_v5(owner, plan, resources, client, token)))
+    if request.action == "prepare":
+        val helper = host_helper_request_decode_v1(request.payload)?
+        return Ok(turn_v5(request, smux_runtime_connection_prepare_v5(owner, uid, helper)))
+    if request.action == "bind":
+        val fields = fields_v5(request.payload, ["request", "proof"])?
+        val helper = host_helper_request_decode_v1(text_v5(fields, "request")?)?
+        val proof = host_helper_execution_proof_decode_v1(helper, text_v5(fields, "proof")?)?
+        return Ok(turn_v5(request, smux_runtime_connection_bind_v5(owner, uid, helper, proof.signed, proof.approval)))
+    if request.action == "progress" or request.action == "cancel":
+        return Ok(turn_v5(request, smux_runtime_connection_progress_v5(owner, uid, request.action == "cancel")))
+    if request.action == "release": return Ok(turn_v5(request, smux_runtime_connection_release_v5(owner, uid)))
+    if request.action == "input-observe": return Ok(input_turn_v5(request, smux_runtime_connection_input_observe_v5(owner, uid)))
+    if request.action == "input-revoke":
+        val fields = fields_v5(request.payload, ["revision"])?
+        val revision = int_v5(fields, "revision")?
+        return Ok(input_turn_v5(request, smux_runtime_connection_input_revoke_v5(owner, uid, revision)))
+    if request.action == "input-resolve":
+        val fields = fields_v5(request.payload, ["clientId", "attachmentToken"])?
+        val client = text_v5(fields, "clientId")?
+        val token = text_v5(fields, "attachmentToken")?
+        val resolved = smux_runtime_connection_input_resolve_v5(owner, uid, client, token)
+        return Ok(SmuxRuntimeConnectionDispatchV5(owner, response_v5(request.action, uid,
+            if resolved.is_err(): resolved.unwrap_err() else: "", SdnValue.String(if resolved.is_ok(): resolved.unwrap() else: ""))))
+    if request.action == "input-issue":
+        val fields = fields_v5(request.payload, ["clientId", "attachmentToken", "revision", "targetDigest"])?
+        val client = text_v5(fields, "clientId")?
+        val token = text_v5(fields, "attachmentToken")?
+        val revision = int_v5(fields, "revision")?
+        val digest = text_v5(fields, "targetDigest")?
+        return Ok(input_turn_v5(request, smux_runtime_connection_input_issue_v5(owner, uid, client, token, revision, digest)))
+    if request.action == "input-write":
+        val fields = fields_v5(request.payload, ["clientId", "attachmentToken", "nonce", "revision", "attempt", "frameSequence", "data", "offset", "maxBytes"])?
+        val client = text_v5(fields, "clientId")?
+        val token = text_v5(fields, "attachmentToken")?
+        val nonce = text_v5(fields, "nonce")?
+        val revision = int_v5(fields, "revision")?
+        val attempt = int_v5(fields, "attempt")?
+        val frame = int_v5(fields, "frameSequence")?
+        val payload = text_v5(fields, "data")?
+        val offset = int_v5(fields, "offset")?
+        val maximum = int_v5(fields, "maxBytes")?
+        return Ok(input_turn_v5(request, smux_runtime_connection_input_write_v5(owner, uid, client, token,
+            nonce, revision, attempt, frame, payload, offset, maximum)))
+    Err("runtime-connection-action-unsupported")
+
+pub fn smux_runtime_connection_dispatch_v5(owner: SmuxRuntimeConnectionOwnerV5,
+        token: text) -> SmuxRuntimeConnectionDispatchV5:
+    val request = smux_runtime_connection_request_from_token_v5(token)
+    if request.is_err(): return SmuxRuntimeConnectionDispatchV5(owner, response_v5("", "", request.unwrap_err(), SdnValue.String("")))
+    val turn = dispatch_v5(owner, request.unwrap())
+    if turn.is_err(): return SmuxRuntimeConnectionDispatchV5(owner, response_v5(request.unwrap().action,
+        request.unwrap().binding_uid, turn.unwrap_err(), SdnValue.String("")))
+    turn.unwrap()

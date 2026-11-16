@@ -17,13 +17,19 @@
 # findings discriminate. It does NOT grep any source file for a symbol -- see
 # .claude/skills/spipe.md 'Source-text assertions are not evidence'.
 #
-# Four fixtures, so a pass cannot be vacuous:
+# Six fixtures, so a pass cannot be vacuous:
 #   clean fixture -> must reach the "Lint passed" verdict and emit NO
 #                    "Found N error(s), M warning(s)" line with M > 0
 #   dirty fixture -> must emit RAW-RT-001 for a raw `extern fn rt_*` declaration
 #   dup fixture   -> must emit unnamed_duplicate_typed_args for two positional
 #                    calls of a duplicate-typed signature
 #   ui fixture    -> must emit UI001 for a raw string WidgetNode kind
+#   layer fixture -> a `use compiler.X.*` file in a repo-shaped tree must reach
+#                    a lint verdict (W0406 numbered-layer resolution route)
+#   tracked fixture -> src/compiler/80.driver/driver_pipeline.spl must reach
+#                    a lint verdict
+# Any fixture whose output carries "error: semantic:" (the linter itself
+# aborted) is named as a linter-semantic-error defect.
 # A run where a dirty fixture comes back clean is the false-green this guard
 # exists to catch, and is a FAIL, never a pass.
 #
@@ -83,6 +89,14 @@ printf 'fn add(a: i64, b: i64) -> i64:\n    a + b\n' > "$CLEAN"
 printf 'extern fn rt_file_write_text(a: text, b: text) -> bool\n\nfn go() -> bool:\n    rt_file_write_text("a", "b")\n' > "$DIRTY"
 printf 'fn area(width: i64, height: i64) -> i64:\n    width * height\n\nfn main():\n    print area(2, 3)\n    print area(4, 5)\n' > "$DUP"
 printf 'fn build():\n    val node = WidgetNode.new("root", "panel")\n    node\n' > "$UI"
+# Repo-shaped tree: a `use compiler.X.*` star import makes the W0406 fixer walk
+# numbered layer dirs (src/compiler/NN.seg). That route crashed every lint of a
+# src/compiler file while tmp fixtures stayed green
+# (seed_nested_call_rfind_missing_2026-11-15).
+mkdir -p "$WORK/src/compiler/20.hir" "$WORK/src/app/demo"
+LAYER="$WORK/src/app/demo/layer_fixture.spl"
+printf 'pub fn hir_area(w: i64) -> i64:\n    w * w\n' > "$WORK/src/compiler/20.hir/hir_shapes.spl"
+printf 'use compiler.hir.hir_shapes.*\n\nfn f() -> i64:\n    hir_area(3)\n' > "$LAYER"
 
 # Run the pure-Simple lint program directly, not the host binary's own `lint`
 # subcommand: on the Rust seed those are different code paths, and only this one
@@ -104,6 +118,15 @@ note_crash() {
     fi
 }
 
+# An interpreter error inside the linter itself (e.g. a private fn imported by
+# the lint pipeline, or a method the seed cannot dispatch) aborts the run with
+# rc=1 before any verdict. Name it instead of folding it into "missed rule".
+note_semantic() {
+    case "$2" in
+        *"error: semantic:"*) FAILURES="$FAILURES $1-fixture-linter-semantic-error" ;;
+    esac
+}
+
 CLEAN_OUT=$(run_lint "$CLEAN")
 CLEAN_RC=$?
 CHECKED=$((CHECKED + 1))
@@ -114,6 +137,7 @@ if [ "$CLEAN_RC" -eq 124 ] || [ "$CLEAN_RC" -eq 137 ]; then
 fi
 
 note_crash clean "$CLEAN_RC"
+note_semantic clean "$CLEAN_OUT"
 case "$CLEAN_OUT" in
     *"Lint passed"*) : ;;
     *) FAILURES="$FAILURES clean-fixture-no-passed-verdict" ;;
@@ -132,6 +156,7 @@ if [ "$DIRTY_RC" -eq 124 ] || [ "$DIRTY_RC" -eq 137 ]; then
 fi
 
 note_crash dirty "$DIRTY_RC"
+note_semantic dirty "$DIRTY_OUT"
 case "$DIRTY_OUT" in
     *"RAW-RT-001"*) : ;;
     *) FAILURES="$FAILURES dirty-fixture-missed-RAW-RT-001" ;;
@@ -147,6 +172,7 @@ if [ "$DUP_RC" -eq 124 ] || [ "$DUP_RC" -eq 137 ]; then
 fi
 
 note_crash dup "$DUP_RC"
+note_semantic dup "$DUP_OUT"
 case "$DUP_OUT" in
     *"unnamed_duplicate_typed_args"*) : ;;
     *) FAILURES="$FAILURES dup-fixture-missed-unnamed_duplicate_typed_args" ;;
@@ -162,9 +188,49 @@ if [ "$UI_RC" -eq 124 ] || [ "$UI_RC" -eq 137 ]; then
 fi
 
 note_crash ui "$UI_RC"
+note_semantic ui "$UI_OUT"
 case "$UI_OUT" in
     *"UI001"*) : ;;
     *) FAILURES="$FAILURES ui-fixture-missed-UI001" ;;
+esac
+
+LAYER_OUT=$(run_lint "$LAYER")
+LAYER_RC=$?
+CHECKED=$((CHECKED + 1))
+
+if [ "$LAYER_RC" -eq 124 ] || [ "$LAYER_RC" -eq 137 ]; then
+    printf 'ERROR - nothing was checked (layer fixture timed out; host may be saturated)\n'
+    exit 2
+fi
+
+note_crash layer "$LAYER_RC"
+note_semantic layer "$LAYER_OUT"
+case "$LAYER_OUT" in
+    *"Lint passed"*|*"error(s), "*) : ;;
+    *) FAILURES="$FAILURES layer-fixture-no-verdict" ;;
+esac
+
+# A real tracked src/compiler file (6 lines, compiler.* star imports only):
+# lint must reach a verdict on the actual tree, not just on tmp fixtures.
+TRACKED="src/compiler/80.driver/driver_pipeline.spl"
+if [ ! -f "$TRACKED" ]; then
+    printf 'ERROR - nothing was checked (tracked fixture %s missing)\n' "$TRACKED"
+    exit 2
+fi
+TRACKED_OUT=$(run_lint "$TRACKED")
+TRACKED_RC=$?
+CHECKED=$((CHECKED + 1))
+
+if [ "$TRACKED_RC" -eq 124 ] || [ "$TRACKED_RC" -eq 137 ]; then
+    printf 'ERROR - nothing was checked (tracked fixture timed out; host may be saturated)\n'
+    exit 2
+fi
+
+note_crash tracked "$TRACKED_RC"
+note_semantic tracked "$TRACKED_OUT"
+case "$TRACKED_OUT" in
+    *"Lint passed"*|*"error(s), "*) : ;;
+    *) FAILURES="$FAILURES tracked-fixture-no-verdict" ;;
 esac
 
 if [ "$SELFTEST" -eq 1 ]; then

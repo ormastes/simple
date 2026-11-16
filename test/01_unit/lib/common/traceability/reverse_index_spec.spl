@@ -1,0 +1,185 @@
+"""
+# Trace Reverse Index and Generation Cache Specification
+
+**Requirements:** TRACE-009 (reverse links match a complete scan), REQ-TRC-017 (every incremental result is reproducible by a complete scan), CTX-006 (stale cache cannot certify)
+
+## Purpose
+
+Audience: maintainers of the traceability query paths (`trace missing`,
+`trace show --reverse`, MCP trace tools).
+
+A reverse index maps `(relation, target)` to the sorted, de-duplicated list of
+source ids, built in ONE pass over the graph edges so a lookup never scans all
+edges. The index is cached per snapshot under a typed generation key (path,
+presence, byte length, SHA-256 digest). Only an identical key reuses the cache;
+mtime is never part of the key and an unusable digest is never a hit.
+
+## Behavior
+
+- For every node (and for dangling or unknown targets) the indexed answer equals
+  a brute-force scan of the edge list, for each relation.
+- Duplicate edges collapse to one source; order is the canonical id order.
+- Identical key = hit; changed digest, length, path, missing digest, deleted or
+  created snapshot = rebuild.
+"""
+
+# @feature trace_reverse_index
+# tag: unit
+
+use std.spec
+use std.common.traceability.model.*
+use std.common.traceability.reverse_index_v1.*
+use std.common.traceability.trace_ids_v1.{TraceEntityIdV1}
+use std.common.traceability.reverse_index_cache_v1.*
+
+const _DIGEST_A: text = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+const _DIGEST_B: text = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+fn _node(id: text, kind: TraceNodeKind) -> TraceNode:
+    TraceNode(id: id, kind: kind, title: id)
+
+fn _edge(from_id: text, relation: TraceRelation, to_id: text) -> TraceEdge:
+    TraceEdge(id: from_id + ">" + to_id, from_id: from_id, relation: relation, to_id: to_id)
+
+fn _graph(nodes: [TraceNode], edges: [TraceEdge]) -> TraceGraph:
+    TraceGraph(subject: SnapshotSubject(repository_id: "r", snapshot_id: "s1", kind: "git", revision_id: "rev", tree_id: "tree", object_format: "sha1"),
+        input_manifest_id: "m", nodes: nodes, test_definitions: [], claims: [], edges: edges, edge_origins: [], origins: [], locators: [],
+        diagnostics: [], generation_id: "g1", complete: true)
+
+fn _relations() -> [TraceRelation]:
+    [TraceRelation.VerifiedBy, TraceRelation.ImplementedBy, TraceRelation.DependsOn, TraceRelation.Specifies]
+
+# Brute-force oracle: scan every edge, sort and de-duplicate.
+fn _scan(graph: TraceGraph, relation: TraceRelation, target: text) -> [text]:
+    var raw: [text] = []
+    for edge in graph.edges:
+        if edge.relation == relation and edge.to_id == target:
+            raw.push(edge.from_id)
+    val ordered = trace_sorted_ids(raw)
+    var out: [text] = []
+    for id in ordered:
+        if out.len() == 0 or out[out.len() - 1] != id:
+            out.push(id)
+    out
+
+fn _indexed(index: TraceReverseIndexV1, relation: TraceRelation, target: text) -> [text]:
+    var out: [text] = []
+    for id in trace_reverse_lookup_v1(index, relation, TraceEntityIdV1(value: target)):
+        out.push(id.value)
+    out
+
+# Count of (relation, target) pairs where index and scan disagree, over every
+# node id plus the extra probe ids.
+fn _mismatches(graph: TraceGraph, extra: [text]) -> i64:
+    val index = trace_reverse_index_build_v1(graph)
+    var probes: [text] = extra
+    for node in graph.nodes:
+        probes.push(node.id)
+    var bad = 0
+    for relation in _relations():
+        for target in probes:
+            if _indexed(index, relation, target) != _scan(graph, relation, target):
+                bad = bad + 1
+    bad
+
+fn _key(path: text, length: i64, digest: text) -> TraceGenerationKeyV1:
+    trace_generation_key_present_v1(TraceSnapshotPathV1(value: path), TraceSnapshotLengthV1(bytes: length), TraceSnapshotDigestV1(sha256: digest))
+
+fn _decide(cached: TraceGenerationKeyV1, current: TraceGenerationKeyV1) -> text:
+    trace_cache_decision_label_v1(trace_cache_decide_v1(Some(cached), current))
+
+fn _many_to_many() -> TraceGraph:
+    _graph([_node("REQ-1", TraceNodeKind.Requirement), _node("REQ-2", TraceNodeKind.Requirement), _node("T-a", TraceNodeKind.TestCase),
+            _node("T-b", TraceNodeKind.TestCase), _node("src/x", TraceNodeKind.SourceFile)],
+        [_edge("REQ-1", TraceRelation.VerifiedBy, "T-a"), _edge("REQ-2", TraceRelation.VerifiedBy, "T-a"),
+         _edge("REQ-1", TraceRelation.VerifiedBy, "T-b"), _edge("REQ-1", TraceRelation.ImplementedBy, "src/x"),
+         _edge("REQ-2", TraceRelation.ImplementedBy, "src/x"), _edge("T-b", TraceRelation.DependsOn, "src/x")])
+
+describe "Trace reverse index parity with a complete scan":
+    it "agrees on an empty graph":
+        # @req TRACE-009
+        step("an empty graph has no nodes and no edges")
+        val g = _graph([], [])
+        step("probing an unknown target returns an empty answer")
+        expect(_mismatches(g, ["REQ-9"])).to_equal(0)
+        expect(_indexed(trace_reverse_index_build_v1(g), TraceRelation.VerifiedBy, "REQ-9").len()).to_equal(0)
+
+    it "agrees on a single edge":
+        # @req TRACE-009
+        step("one verified_by edge REQ-1 -> T-a")
+        val g = _graph([_node("REQ-1", TraceNodeKind.Requirement), _node("T-a", TraceNodeKind.TestCase)], [_edge("REQ-1", TraceRelation.VerifiedBy, "T-a")])
+        expect(_mismatches(g, [])).to_equal(0)
+        step("the reverse answer for T-a is exactly REQ-1")
+        expect(_indexed(trace_reverse_index_build_v1(g), TraceRelation.VerifiedBy, "T-a")).to_equal(["REQ-1"])
+        step("the same target under another relation stays empty")
+        expect(_indexed(trace_reverse_index_build_v1(g), TraceRelation.ImplementedBy, "T-a").len()).to_equal(0)
+
+    it "agrees on a many-to-many graph and returns canonical order":
+        # @req TRACE-009
+        step("two requirements share one test, one requirement owns two tests")
+        val g = _many_to_many()
+        expect(_mismatches(g, [])).to_equal(0)
+        expect(_indexed(trace_reverse_index_build_v1(g), TraceRelation.VerifiedBy, "T-a")).to_equal(["REQ-1", "REQ-2"])
+        expect(_indexed(trace_reverse_index_build_v1(g), TraceRelation.ImplementedBy, "src/x")).to_equal(["REQ-1", "REQ-2"])
+
+    it "collapses duplicate edges to one source":
+        # @req TRACE-009
+        step("the same edge is present three times plus a second source")
+        val g = _graph([_node("REQ-1", TraceNodeKind.Requirement), _node("REQ-2", TraceNodeKind.Requirement), _node("T-a", TraceNodeKind.TestCase)],
+            [_edge("REQ-2", TraceRelation.VerifiedBy, "T-a"), _edge("REQ-1", TraceRelation.VerifiedBy, "T-a"),
+             _edge("REQ-1", TraceRelation.VerifiedBy, "T-a"), _edge("REQ-1", TraceRelation.VerifiedBy, "T-a")])
+        expect(_mismatches(g, [])).to_equal(0)
+        expect(_indexed(trace_reverse_index_build_v1(g), TraceRelation.VerifiedBy, "T-a")).to_equal(["REQ-1", "REQ-2"])
+
+    it "indexes a dangling target that has no node":
+        # @req TRACE-009
+        step("an edge points at a target id absent from the node list")
+        val g = _graph([_node("REQ-1", TraceNodeKind.Requirement)], [_edge("REQ-1", TraceRelation.VerifiedBy, "T-gone")])
+        expect(_mismatches(g, ["T-gone"])).to_equal(0)
+        expect(_indexed(trace_reverse_index_build_v1(g), TraceRelation.VerifiedBy, "T-gone")).to_equal(["REQ-1"])
+        step("a never-referenced id is not invented")
+        expect(_indexed(trace_reverse_index_build_v1(g), TraceRelation.VerifiedBy, "T-other").len()).to_equal(0)
+
+describe "Trace reverse index cache decisions":
+    it "hits only for an identical key":
+        # @req CTX-006
+        step("same path, length and digest")
+        expect(_decide(_key("g.sdn", 10, _DIGEST_A), _key("g.sdn", 10, _DIGEST_A))).to_equal("hit")
+        step("cold start has no cached key")
+        expect(trace_cache_decision_label_v1(trace_cache_decide_v1(None, _key("g.sdn", 10, _DIGEST_A)))).to_equal("cold_start")
+
+    it "rebuilds when digest, length or path changes":
+        # @req CTX-006
+        step("same length but different digest means rewritten")
+        expect(_decide(_key("g.sdn", 10, _DIGEST_A), _key("g.sdn", 10, _DIGEST_B))).to_equal("snapshot_rewritten")
+        step("longer and shorter snapshots rebuild")
+        expect(_decide(_key("g.sdn", 10, _DIGEST_A), _key("g.sdn", 11, _DIGEST_A))).to_equal("snapshot_grew")
+        expect(_decide(_key("g.sdn", 10, _DIGEST_A), _key("g.sdn", 9, _DIGEST_A))).to_equal("snapshot_shrank")
+        step("a different path rebuilds")
+        expect(_decide(_key("g.sdn", 10, _DIGEST_A), _key("h.sdn", 10, _DIGEST_A))).to_equal("snapshot_moved")
+
+    it "never treats a missing or short digest as a hit":
+        # @req CTX-006
+        step("a present snapshot without a digest")
+        expect(_decide(_key("g.sdn", 10, ""), _key("g.sdn", 10, ""))).to_equal("digest_unavailable")
+        expect(_decide(_key("g.sdn", 10, _DIGEST_A), _key("g.sdn", 10, "abc"))).to_equal("digest_unavailable")
+        step("deleted and created snapshots rebuild")
+        val gone = trace_generation_key_missing_v1(TraceSnapshotPathV1(value: "g.sdn"))
+        expect(_decide(_key("g.sdn", 10, _DIGEST_A), gone)).to_equal("snapshot_deleted")
+        expect(_decide(gone, _key("g.sdn", 10, _DIGEST_A))).to_equal("snapshot_created")
+
+describe "Trace reverse index cache reuse":
+    it "reuses the cached index on a hit and rebuilds on a changed key":
+        # @req CTX-006
+        step("seed the cache from a single-edge graph")
+        val old_graph = _graph([_node("REQ-1", TraceNodeKind.Requirement)], [_edge("REQ-1", TraceRelation.VerifiedBy, "T-a")])
+        val seeded = trace_reverse_index_cached_v1(None, _key("g.sdn", 10, _DIGEST_A), old_graph)
+        expect(trace_cache_decision_label_v1(seeded.decision)).to_equal("cold_start")
+        step("a hit with a different graph returns the cached answer, proving no rebuild")
+        val reused = trace_reverse_index_cached_v1(Some(seeded.entry), _key("g.sdn", 10, _DIGEST_A), _many_to_many())
+        expect(trace_cache_decision_label_v1(reused.decision)).to_equal("hit")
+        expect(_indexed(reused.entry.index, TraceRelation.VerifiedBy, "T-a")).to_equal(["REQ-1"])
+        step("a changed digest rebuilds and sees the new graph")
+        val rebuilt = trace_reverse_index_cached_v1(Some(seeded.entry), _key("g.sdn", 10, _DIGEST_B), _many_to_many())
+        expect(trace_cache_decision_label_v1(rebuilt.decision)).to_equal("snapshot_rewritten")
+        expect(_indexed(rebuilt.entry.index, TraceRelation.VerifiedBy, "T-a")).to_equal(["REQ-1", "REQ-2"])

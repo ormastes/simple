@@ -1,0 +1,89 @@
+# Explicit administrator APPROVAL policy. No observed qualification or effect
+# authority comes from decoding/hash matching these DATA values.
+use std.common.contracts.container.linux_agent_workspace_profile_v1.*
+use std.common.contracts.container.agent_executable_profile_v1.*
+use std.common.contracts.container.agent_workspace_manifest_v1.AgentWorkspaceManifestV1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.crypto.sha256.sha256_text
+
+pub struct LinuxAgentWorkspaceProfileV2:
+    base: LinuxAgentWorkspaceProfileV1
+    bootstrap_profile: text
+    approved_layout: text
+    approved_layout_digest: text
+    executable_profile: AgentExecutableProfileV1
+
+fn agent_profile_dict_v2(source: text) -> Result<Dict<text, SdnValue>, text>:
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 16384,
+            max_depth: 2, max_nodes: 48, max_rows: 0, max_cells: 0, max_columns: 24)):
+        case Ok(value): value.value
+        case Err(_): return Err("agent-profile-v2-syntax")
+    match parsed:
+        case SdnValue.Dict(fields): Ok(fields)
+        case _: Err("agent-profile-v2-object")
+
+pub fn linux_agent_workspace_layout_digest_v2(base: LinuxAgentWorkspaceProfileV1, executable_profile: AgentExecutableProfileV1) -> Result<text, text>:
+    val checked = linux_agent_workspace_profile_encode_v1(base)?
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-agent-image-layout-approval"), "version": SdnValue.Int(1),
+        "bootstrapProfile": SdnValue.String("linux-agent-worktree-bootstrap-v1"),
+        "approvedLayout": SdnValue.String("reserved-workspace-immutable-assets-v1"),
+        "workspaceProfileDigest": SdnValue.String(base.workspace_profile_digest), "image": SdnValue.String(base.image),
+        "imageConfigId": SdnValue.String(base.image_config_id), "bootstrapProgram": SdnValue.String(base.bootstrap_program),
+        "bootstrapDigest": SdnValue.String(base.bootstrap_digest), "gitProgram": SdnValue.String("/usr/bin/git"),
+        "gitDigest": SdnValue.String(base.git_digest), "agentProgram": SdnValue.String(base.agent_program),
+        "agentDigest": SdnValue.String(base.agent_digest), "emptyGitTemplate": SdnValue.String("/opt/simple/empty-git-template"),
+        "executableProfile": SdnValue.String(agent_executable_profile_encode_v1(executable_profile)?)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"))
+
+pub fn linux_agent_workspace_profile_encode_v2(value: LinuxAgentWorkspaceProfileV2) -> Result<text, text>:
+    var compiled_floor = 0
+    for cost in [268435456, 67108864, 1048576, 70400, 131072]:
+        if compiled_floor > 9223372036854775807 - cost: return Err("agent-profile-v2-bootstrap-floor-overflow")
+        compiled_floor = compiled_floor + cost
+    if value.executable_profile.bootstrap_memory_bytes <= compiled_floor:
+        return Err("agent-profile-v2-bootstrap-memory-floor")
+    if (value.bootstrap_profile != "linux-agent-worktree-bootstrap-v1" or value.approved_layout != "reserved-workspace-immutable-assets-v1" or
+            value.approved_layout_digest != linux_agent_workspace_layout_digest_v2(value.base, value.executable_profile)?):
+        return Err("agent-profile-v2-explicit-approval-policy")
+    var fields = agent_profile_dict_v2(linux_agent_workspace_profile_encode_v1(value.base)?)?
+    fields["kind"] = SdnValue.String("linux-agent-worktree-bootstrap-profile")
+    fields["version"] = SdnValue.Int(2)
+    fields["bootstrapProfile"] = SdnValue.String(value.bootstrap_profile)
+    fields["approvedLayout"] = SdnValue.String(value.approved_layout)
+    fields["approvedLayoutDigest"] = SdnValue.String(value.approved_layout_digest)
+    fields["executableProfile"] = SdnValue.String(agent_executable_profile_encode_v1(value.executable_profile)?)
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn linux_agent_workspace_profile_decode_v2(source: text) -> Result<LinuxAgentWorkspaceProfileV2, text>:
+    val fields = agent_profile_dict_v2(source)?
+    if (fields.len() != 20 or not fields.contains_key("kind") or not fields.contains_key("version") or
+            fields["kind"] != SdnValue.String("linux-agent-worktree-bootstrap-profile") or fields["version"] != SdnValue.Int(2)):
+        return Err("agent-profile-v2-kind-version-fields")
+    # Decode the exact old sixteen-field schema once through its unchanged
+    # canonical codec; the old public V1 decoder continues to reject V2 bytes.
+    var base_fields: Dict<text, SdnValue> = {}
+    for key in fields.keys():
+        if not ["bootstrapProfile", "approvedLayout", "approvedLayoutDigest", "executableProfile"].contains(key): base_fields[key] = fields[key]
+    base_fields["kind"] = SdnValue.String("linux-agent-workspace-profile")
+    base_fields["version"] = SdnValue.Int(1)
+    val base = linux_agent_workspace_profile_decode_v1(sdn_encode_canonical(SdnValue.Dict(base_fields)) + "\n")?
+    val value = LinuxAgentWorkspaceProfileV2(base: base,
+        bootstrap_profile: agent_profile_text_v2(fields, "bootstrapProfile")?,
+        approved_layout: agent_profile_text_v2(fields, "approvedLayout")?,
+        approved_layout_digest: agent_profile_text_v2(fields, "approvedLayoutDigest")?,
+        executable_profile: agent_executable_profile_decode_v1(agent_profile_text_v2(fields, "executableProfile")?)?)
+    if linux_agent_workspace_profile_encode_v2(value)? != source: return Err("agent-profile-v2-noncanonical")
+    Ok(value)
+
+fn agent_profile_text_v2(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    if not fields.contains_key(key): return Err("agent-profile-v2-field:" + key)
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("agent-profile-v2-text:" + key)
+
+pub fn linux_agent_workspace_profile_match_v2(value: LinuxAgentWorkspaceProfileV2, manifest: AgentWorkspaceManifestV1) -> Result<(), text>:
+    val checked = linux_agent_workspace_profile_encode_v2(value)?
+    linux_agent_workspace_profile_match_v1(value.base, manifest)

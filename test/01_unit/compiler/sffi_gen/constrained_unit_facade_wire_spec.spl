@@ -1,0 +1,65 @@
+use std.spec.*
+use std.spec.step
+use compiler.tools.sffi_gen.constrained_unit_scan.{generate_constrained_unit_facades}
+
+val DECLS = "unit Port: i32 as Pt\nunit Millis: i64 as Ms\n# @unit_range Port 1..65535\nextern fn rt_net_port(fd: i32) -> Port\nextern fn rt_clock_ms() -> Millis\nextern fn rt_plain(x: i64) -> i64\n"
+
+# @manual_section: constrained_unit_wire
+describe "SFFI constrained unit declarations":
+    """A unit with a declared range yields a checked facade from source text."""
+
+    it "emits a checked facade for a ranged unit extern":
+        # @req: RB-SFFI-02
+        step("Scan declarations with one ranged unit")
+        val r = generate_constrained_unit_facades(DECLS)
+        expect(r.diagnostic).to_equal("")
+        expect(r.source).to_contain("extern fn __raw_rt_net_port(fd: i32) -> i32")
+        expect(r.source).to_contain("pub fn rt_net_port(fd: i32) -> Result<Port, ConstraintError>:")
+        expect(r.source).to_contain("val raw = __raw_rt_net_port(fd)")
+        expect(r.source).to_contain("if raw < 1 or raw > 65535:")
+
+    it "projects an unranged unit extern directly":
+        # @req: RB-SFFI-02
+        step("Scan declarations with an unranged unit extern")
+        val r = generate_constrained_unit_facades(DECLS)
+        expect(r.source).to_contain("extern fn rt_clock_ms() -> Millis")
+
+    it "ignores externs that do not return a declared unit":
+        # @req: RB-SFFI-02
+        step("Scan declarations with a plain i64 extern")
+        val r = generate_constrained_unit_facades(DECLS)
+        expect(r.source.contains("rt_plain")).to_equal(false)
+
+    it "supports half-open ranges":
+        # @req: RB-SFFI-02
+        step("Scan a minimum-only range")
+        val r = generate_constrained_unit_facades("unit Count: i64 as Cn\n# @unit_range Count 0..\nextern fn rt_count() -> Count\n")
+        expect(r.source).to_contain("if raw < 0:")
+        expect(r.source.contains("raw >")).to_equal(false)
+
+    it "reports SPL-SFFI-RANGE-001 for a range on a non-integer unit":
+        # @req: RB-SFFI-02
+        step("Scan a ranged f64 unit")
+        val r = generate_constrained_unit_facades("unit Celsius: f64 as C\n# @unit_range Celsius 0..100\nextern fn rt_temp() -> Celsius\n")
+        expect(r.diagnostic).to_contain("SPL-SFFI-RANGE-001")
+        expect(r.source).to_equal("")
+
+    it "accepts repeated spaces inside the range annotation":
+        # @req: RB-SFFI-02
+        step("Scan an annotation with two spaces before the range")
+        val r = generate_constrained_unit_facades("unit Port: i32 as Pt\n# @unit_range Port  1..2\nextern fn rt_p() -> Port\n")
+        expect(r.diagnostic).to_equal("")
+        expect(r.source).to_contain("if raw < 1 or raw > 2:")
+
+    it "strips a trailing comment from the extern return type":
+        # @req: RB-SFFI-02
+        step("Scan an extern whose return type carries a comment")
+        val r = generate_constrained_unit_facades("unit Port: i32 as Pt\n# @unit_range Port 1..2\nextern fn rt_p() -> Port  # the port\n")
+        expect(r.source).to_contain("pub fn rt_p() -> Result<Port, ConstraintError>:")
+
+    it "imports ConstraintError exactly once":
+        # @req: RB-SFFI-02
+        step("Scan two ranged externs")
+        val r = generate_constrained_unit_facades("unit Port: i32 as Pt\n# @unit_range Port 1..2\nextern fn rt_a() -> Port\nextern fn rt_b() -> Port\n")
+        expect(r.source).to_contain("use std.common.constraint_error.{{ConstraintError}}\n")
+        expect(r.source.split("use std.common.constraint_error").len()).to_equal(2)

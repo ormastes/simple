@@ -1,0 +1,42 @@
+"""
+## Purpose and audience
+Purpose: Pin that a text command's Draw IR `line-height` is the element's
+computed CSS line-height, not the resolved face's normal line height, when
+the author sets one (longhand or inside the `font` shorthand).
+Audience: browser-engine Draw IR maintainers.
+
+Chrome 159 getComputedStyle (2026-11-16): `font-size:11px;line-height:20px`
+-> lineHeight 20px; `font:italic 700 11.5px / 20px serif` -> 20px.
+The resolved-font merge in `_html_draw_ir_resolved_text_command` replaced
+the CSS value with the face metric (11), one cause of the red row
+"preserves cascaded font families in text Draw IR computed style".
+Engine2D only checks that `line-height` is present (draw_ir_adv.spl).
+"""
+
+"""
+Traceability: REQ-WEB-RENDER-001 — text Draw IR carries the computed CSS line-height.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_draw_ir}
+
+val PAGE: text = "<html><body><div><span style='font-size:11px;line-height:20px'>Long</span> <span style='font:italic 700 11.5px   /   20px   serif'>Short</span> <span>Plain</span></div></body></html>"
+
+fn _line_height(value: text) -> text:
+    for c in simple_web_layout_render_html_draw_ir(PAGE, 400, 100).batches[0].commands:
+        if c.kind == "text" and c.text_value == value:
+            for kv in c.computed_style:
+                if kv.key == "line-height":
+                    return kv.value
+    "missing"
+
+describe "text Draw IR line-height":
+    it "AC-1: longhand line-height":
+        expect(_line_height("Long")).to_equal("20")
+
+    it "AC-2: line-height inside the font shorthand":
+        expect(_line_height("Short")).to_equal("20")
+
+    it "AC-3: normal line-height matches the line box":
+        step("Chrome 159 and layout: an unstyled div holding Plain is 18 tall; base reported the face metric 16")
+        expect(_line_height("Plain")).to_equal("18")

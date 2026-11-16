@@ -1,0 +1,66 @@
+use std.spec
+use compiler.driver.driver_build.library_unit_manifest_v1.{
+    LibraryUnitManifestV1, library_unit_manifest_parse_v1}
+
+# Typed simple.sdn unit manifest for the library-unit source inventory.
+# Pure: the caller supplies the manifest text; nothing touches the filesystem.
+
+fn err_of(r: Result<LibraryUnitManifestV1, text>) -> text:
+    match r:
+        case Ok(_): ""
+        case Err(e): e
+
+describe "library_unit_manifest_parse_v1":
+    it "reads name, version, type, deps and source globs":
+        val content = "project:\n  name: simple-std\n  version: 1.0.0-rc.1\n  type: library\n  dependencies:\n    - project: ../compiler_rust\n  sources:\n    include:\n      - common/**/*.spl\n      - nogc_sync_mut/**/*.spl\n    exclude:\n      - \"**/*_spec.spl\"\n"
+        match library_unit_manifest_parse_v1("src/lib", content):
+            case Ok(m):
+                expect(m.name).to_equal("simple-std")
+                expect(m.version).to_equal("1.0.0-rc.1")
+                expect(m.kind).to_equal("library")
+                expect(m.dir).to_equal("src/lib")
+                expect(m.deps.len()).to_equal(1)
+                expect(m.deps[0]).to_equal("src/compiler_rust")
+                expect(m.includes.len()).to_equal(2)
+                expect(m.includes[0]).to_equal("common/**/*.spl")
+                expect(m.includes[1]).to_equal("nogc_sync_mut/**/*.spl")
+                expect(m.excludes.len()).to_equal(1)
+                expect(m.excludes[0]).to_equal("**/*_spec.spl")
+            case Err(e):
+                expect(e).to_equal("")
+
+    it "defaults to every .spl under the unit when no sources block is given":
+        match library_unit_manifest_parse_v1("src/runtime", "project:\n  name: rt\n  version: 1\n  type: runtime\n"):
+            case Ok(m):
+                expect(m.includes.len()).to_equal(1)
+                expect(m.includes[0]).to_equal("**/*.spl")
+                expect(m.excludes.len()).to_equal(0)
+            case Err(e):
+                expect(e).to_equal("")
+
+    it "fails closed on a missing version":
+        val e = err_of(library_unit_manifest_parse_v1("src/x", "project:\n  name: x\n  type: library\n"))
+        expect(e).to_contain("project.version is missing")
+
+    it "fails closed on missing name or type via the shared decl parser":
+        expect(err_of(library_unit_manifest_parse_v1("src/x", "project:\n  version: 1\n  type: library\n"))).to_contain("project.name is missing")
+        expect(err_of(library_unit_manifest_parse_v1("src/x", "project:\n  name: x\n  version: 1\n"))).to_contain("project.type is missing")
+
+    it "fails closed on a sources block that is not include/exclude lists":
+        val bad_include = "project:\n  name: x\n  version: 1\n  type: library\n  sources:\n    include: common\n"
+        expect(err_of(library_unit_manifest_parse_v1("src/x", bad_include))).to_contain("project.sources.include is not a list")
+        val bad_exclude = "project:\n  name: x\n  version: 1\n  type: library\n  sources:\n    include:\n      - a/*.spl\n    exclude: b\n"
+        expect(err_of(library_unit_manifest_parse_v1("src/x", bad_exclude))).to_contain("project.sources.exclude is not a list")
+
+    it "fails closed on a sources block with no include list":
+        val no_include = "project:\n  name: x\n  version: 1\n  type: library\n  sources:\n    exclude:\n      - a/*.spl\n"
+        expect(err_of(library_unit_manifest_parse_v1("src/x", no_include))).to_contain("project.sources.include is missing")
+
+    it "fails closed on absolute or escaping glob patterns":
+        val abs = "project:\n  name: x\n  version: 1\n  type: library\n  sources:\n    include:\n      - /etc/*.spl\n"
+        expect(err_of(library_unit_manifest_parse_v1("src/x", abs))).to_contain("must be unit-relative")
+        val up = "project:\n  name: x\n  version: 1\n  type: library\n  sources:\n    include:\n      - ../other/*.spl\n"
+        expect(err_of(library_unit_manifest_parse_v1("src/x", up))).to_contain("must be unit-relative")
+
+    it "fails closed on a malformed document":
+        expect(err_of(library_unit_manifest_parse_v1("src/x", "project:\n  name: [unclosed\n"))).to_contain("src/x/simple.sdn")

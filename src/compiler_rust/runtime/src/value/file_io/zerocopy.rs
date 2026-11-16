@@ -41,8 +41,10 @@ pub extern "C" fn native_sendfile(out_fd: i64, in_fd: i64, offset: u64, count: u
         use libc::sendfile;
 
         unsafe {
-            let mut off = offset as i64;
-            let result = sendfile(out_fd as RawFd, in_fd as RawFd, &mut off as *mut i64, count as usize);
+            let Ok(mut off) = libc::off_t::try_from(offset) else {
+                return RuntimeValue::NIL;
+            };
+            let result = sendfile(out_fd as RawFd, in_fd as RawFd, &mut off as *mut libc::off_t, count as usize);
 
             if result < 0 {
                 return RuntimeValue::NIL;

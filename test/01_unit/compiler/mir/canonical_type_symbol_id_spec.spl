@@ -1,0 +1,57 @@
+"""
+## Canonical type symbol ids are order independent
+
+The id of a canonical type key is a digest of the key, not an insertion
+counter, so the same unit lowered with modules visited in any order gets the
+same ids. Collisions are resolved by re-hashing.
+"""
+
+use std.spec.*
+use compiler.mir.canonical_type_symbol_id_v1.{canonical_type_symbol_id_v1}
+
+fn build_table(keys: [text]) -> Dict<text, i64>:
+    var names: Dict<i64, text> = {}
+    var out: Dict<text, i64> = {}
+    for key in keys:
+        val id = canonical_type_symbol_id_v1(key, names)
+        names[id] = key
+        out[key] = id
+    out
+
+describe "canonical type symbol ids":
+    # @req library-unit-build slice F prerequisite 2
+    it "is identical for shuffled insertion order":
+        step("build the table in two visit orders")
+        val a = build_table(["app.Foo", "app.Bar", "lib.Baz", "lib.Qux", "std.Opt"])
+        val b = build_table(["std.Opt", "lib.Qux", "app.Foo", "lib.Baz", "app.Bar"])
+        step("every key maps to the same id")
+        for key in ["app.Foo", "app.Bar", "lib.Baz", "lib.Qux", "std.Opt"]:
+            expect(a[key]).to_equal(b[key])
+
+    it "keeps ids in the canonical range and distinct":
+        step("ids are >= 1000000000 and unique")
+        val t = build_table(["a.A", "a.B", "a.C", "a.D"])
+        var seen: Dict<i64, bool> = {}
+        for key in ["a.A", "a.B", "a.C", "a.D"]:
+            expect(t[key] >= 1000000000).to_equal(true)
+            expect(t[key] < 2147483648).to_equal(true)
+            expect(seen.has(t[key])).to_equal(false)
+            seen[t[key]] = true
+
+    it "returns the same id when the key is already present":
+        step("re-asking for a minted key is idempotent")
+        var names: Dict<i64, text> = {}
+        val first = canonical_type_symbol_id_v1("app.Foo", names)
+        names[first] = "app.Foo"
+        expect(canonical_type_symbol_id_v1("app.Foo", names)).to_equal(first)
+
+    it "re-hashes when a different key owns the slot":
+        step("seed the slot of app.Foo with another owner")
+        var names: Dict<i64, text> = {}
+        val natural = canonical_type_symbol_id_v1("app.Foo", names)
+        names[natural] = "other.Owner"
+        val moved = canonical_type_symbol_id_v1("app.Foo", names)
+        expect(moved != natural).to_equal(true)
+        expect(moved >= 1000000000).to_equal(true)
+        step("the moved id is itself deterministic")
+        expect(canonical_type_symbol_id_v1("app.Foo", names)).to_equal(moved)

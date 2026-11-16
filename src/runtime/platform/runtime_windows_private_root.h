@@ -24,6 +24,11 @@ typedef struct {
     LARGE_INTEGER size;
     HANDLE pending_handles[WP_PENDING_V1];
     HLOCAL pending_memory[WP_PENDING_V1];
+    /* Discard V2 records acquisition identity, never a caller's later path
+     * claim. Disposition state survives failed close in this same owner. */
+    wchar_t original_stage_name[256];
+    FILE_ID_INFO original_stage_identity;
+    int original_stage_identity_ready, stage_disposition_set, stage_publication_confirmed;
 } WpEntryV1;
 static WpEntryV1 wp_entries_v1[WP_CAPACITY_V1];
 static SRWLOCK wp_lock_v1=SRWLOCK_INIT;
@@ -205,14 +210,65 @@ static int64_t wp_reject_v1(WpRootV1 *lease) {
 }
 static int64_t wp_root_open_profile_v2(int64_t raw_path,int read_only) {
     const wchar_t *path=(const wchar_t*)(intptr_t)raw_path;
-    if (!path || wcslen(path)<4 || wcslen(path)>32760 ||
-        !((path[0]>=L'A'&&path[0]<=L'Z')||(path[0]>=L'a'&&path[0]<=L'z')) ||
-        path[1]!=L':' || path[2]!=L'\\') return -1;
-    wchar_t volume[4]={path[0],L':',L'\\',0};
-    if (GetDriveTypeW(volume)!=DRIVE_FIXED) return -1;
+    if (!path) return -1;
+    size_t path_length=wcslen(path);
+    int global=path_length>=10 && !wcsncmp(path,L"\\GLOBAL??\\",10);
+    const wchar_t *drive=path+(global?10:0);
+    if (path_length>32760 || path_length<(global?14u:4u) ||
+        !((drive[0]>=L'A'&&drive[0]<=L'Z')||(drive[0]>=L'a'&&drive[0]<=L'z')) ||
+        drive[1]!=L':' || drive[2]!=L'\\') return -1;
+    if (global) {
+        /* ProgramData may contain Unicode. Reject malformed UTF16 rather
+         * than narrowing legitimate OS-known paths to ASCII. Child names
+         * still pass the existing strict no-traversal wp_name_v1 policy. */
+        for (size_t index=13;index<path_length;index++) {
+            unsigned unit=(unsigned)path[index];
+            if (unit>=0xd800 && unit<=0xdbff) {
+                unsigned next=(unsigned)path[index+1];
+                if (next<0xdc00 || next>0xdfff) return -1;
+                index++;
+            } else if (unit>=0xdc00 && unit<=0xdfff) return -1;
+        }
+    }
+    wchar_t volume[4]={drive[0],L':',L'\\',0};
+    if (!global && GetDriveTypeW(volume)!=DRIVE_FIXED) return -1;
     WpRootV1 *lease=(WpRootV1*)calloc(1,sizeof(*lease)); if (!lease) return -1;
-    lease->directory=CreateFileW(volume,READ_CONTROL|FILE_READ_ATTRIBUTES|FILE_LIST_DIRECTORY|
-        (read_only?FILE_TRAVERSE:0),read_only?FILE_SHARE_READ|FILE_SHARE_WRITE:FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,NULL);
+    lease->directory=INVALID_HANDLE_VALUE;
+    if (global) {
+        /* Resolve the global DOS device map explicitly, never the caller's
+         * per-logon drive map. RootDirectory=NULL is the native absolute
+         * namespace; all later components use only retained relative opens. */
+        HMODULE library=GetModuleHandleW(L"ntdll.dll");
+        WpCreateV1 open=library?(WpCreateV1)GetProcAddress(library,"NtCreateFile"):NULL;
+        if (!open) {free(lease);return -1;}
+        wchar_t native_volume[14];memcpy(native_volume,path,13*sizeof(wchar_t));native_volume[13]=0;
+        UNICODE_STRING string;string.Buffer=native_volume;
+        string.Length=13*sizeof(wchar_t);string.MaximumLength=string.Length;
+        OBJECT_ATTRIBUTES attributes;memset(&attributes,0,sizeof(attributes));
+        attributes.Length=sizeof(attributes);attributes.ObjectName=&string;
+        attributes.Attributes=OBJ_CASE_INSENSITIVE;
+        IO_STATUS_BLOCK observed;memset(&observed,0,sizeof(observed));HANDLE acquired=NULL;
+        NTSTATUS status=open(&acquired,READ_CONTROL|FILE_READ_ATTRIBUTES|FILE_LIST_DIRECTORY|SYNCHRONIZE|
+            (read_only?FILE_TRAVERSE:0),&attributes,&observed,NULL,FILE_ATTRIBUTE_NORMAL,
+            read_only?FILE_SHARE_READ|FILE_SHARE_WRITE:FILE_SHARE_READ,
+            1,0x00200000|0x20|1,NULL,0);
+        /* Retain even a valid output accompanying failed/uncertain status.
+         * Failed CloseHandle remains on the original acquiring generation. */
+        if (acquired && acquired!=INVALID_HANDLE_VALUE) lease->directory=acquired;
+        if (status!=0 || observed.Status!=0 || lease->directory==INVALID_HANDLE_VALUE) return wp_reject_v1(lease);
+        typedef NTSTATUS (NTAPI *WpQueryVolumeV2)(HANDLE,PIO_STATUS_BLOCK,PVOID,ULONG,ULONG);
+        WpQueryVolumeV2 query=(WpQueryVolumeV2)GetProcAddress(library,"NtQueryVolumeInformationFile");
+        struct {ULONG DeviceType;ULONG Characteristics;} device;
+        memset(&device,0,sizeof(device));memset(&observed,0,sizeof(observed));
+        /* FileFsDeviceInformation=4 is two ULONGs. Check the actual retained
+         * device, not GetDriveTypeW's lookup through a local drive mapping. */
+        if (!query || sizeof(device)!=8 ||
+            query(lease->directory,&observed,&device,8,4)!=0 || observed.Status!=0 ||
+            observed.Information!=8 || device.DeviceType!=7 || (device.Characteristics&0x10)) return wp_reject_v1(lease);
+    } else {
+        lease->directory=CreateFileW(volume,READ_CONTROL|FILE_READ_ATTRIBUTES|FILE_LIST_DIRECTORY|
+            (read_only?FILE_TRAVERSE:0),read_only?FILE_SHARE_READ|FILE_SHARE_WRITE:FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,NULL);
+    }
     if (lease->directory==INVALID_HANDLE_VALUE) {free(lease);return -1;}
     if (!wp_kind_v1(lease->directory,1,0) || !wp_security_v1(lease->directory,0)) return wp_reject_v1(lease);
     /* A substituted drive could hide unvalidated ancestors. Require the DOS
@@ -221,7 +277,7 @@ static int64_t wp_root_open_profile_v2(int64_t raw_path,int read_only) {
     DWORD count=GetFinalPathNameByHandleW(lease->directory,final,128,FILE_NAME_NORMALIZED|VOLUME_NAME_GUID);
     wchar_t *end=count && count<128?wcsrchr(final,L'}'):NULL;
     if (!end || end[1]!=L'\\' || end[2]!=0) return wp_reject_v1(lease);
-    const wchar_t *cursor=path+3;
+    const wchar_t *cursor=drive+3;
     unsigned depth=1;
     while (*cursor) {
         if (++depth>WP_DEPTH_V1) return wp_reject_v1(lease);
@@ -294,7 +350,7 @@ static int64_t wp_publish_impl_v1(int64_t raw,WpEntryV1 *entry,int64_t raw_name)
     /* This is the effect linearization point. The exclusive IO lock remains
      * held, and every alias observes publication consumed even if a subsequent
      * security query, temporary release or identity snapshot fails. */
-    if (ok) entry->phase=2;
+    if (ok) {entry->phase=2;entry->stage_publication_confirmed=1;}
     DWORD error=GetLastError();free(rename);
     if (!ok) return error==ERROR_ALREADY_EXISTS || error==ERROR_FILE_EXISTS?1:-1;
     return wp_check_impl_v1(file,INT64_MAX)?0:-1;
@@ -385,6 +441,12 @@ int64_t rt_windows_private_file_v1(int64_t root,int64_t name,int64_t create,int6
         entry->maximum=maximum;entry->root_token=root;entry->phase=create?0:1;entry->created_stage=create!=0;
         int64_t handle=wp_root_valid_v1(parent)?wp_file_impl_v1((int64_t)(intptr_t)parent->owner,name,create,maximum):-1;
         token=wp_finish_open_v1(token,handle);
+        if (token!=-1 && handle!=-1 && create) {
+            wcscpy(entry->original_stage_name,(const wchar_t*)(intptr_t)name);
+            entry->original_stage_identity_ready=GetFileInformationByHandleEx((HANDLE)entry->owner,
+                FileIdInfo,&entry->original_stage_identity,sizeof(entry->original_stage_identity));
+            if (!entry->original_stage_identity_ready) entry->phase=3;
+        }
         if (token!=-1 && handle!=-1 && !create && !wp_snapshot_v1(entry)) entry->phase=3;
     }
     wp_active_v1=NULL;ReleaseSRWLockExclusive(&wp_lock_v1);return token;
@@ -638,4 +700,6 @@ int64_t rt_windows_private_adopt_published_read_v2(int64_t root,int64_t stage,in
 #include <stdlib.h>
 int64_t rt_windows_private_alloc_v1(int64_t size) {return size>0 && size<=2097168?(int64_t)(intptr_t)calloc(1,(size_t)size):0;}
 void rt_windows_private_free_v1(int64_t memory) {free((void*)(intptr_t)memory);}
+#include "runtime_windows_journal_store_v1.h"
+#include "runtime_windows_private_stage_discard_v2.h"
 #endif

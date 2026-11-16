@@ -1,0 +1,184 @@
+# MCP progressive-hint tools: simple_help, simple_capabilities, simple_hint_status.
+#
+# Plan 2026-11-14 section 7. State lives in main_session_state.spl (one
+# HintState per session x capability); the decision is the pure `decide_hint`.
+# The wall clock is read here, at the MCP boundary, and passed in.
+#
+# Perf: no file I/O. Handlers touch only the in-process hint map and, when a
+# hint is rendered, the in-memory static tool manifest (no disk, no process).
+# Quiet responses read neither.
+#
+#   simple_help(topic?, session_id?)          -> always full guidance
+#   simple_capabilities(topic?, session_id?)  -> a capability use: full/brief/quiet
+#   simple_hint_status(topic?, session_id?)   -> stored state, never mutates
+
+use std.io_runtime.{time_now_unix_micros}
+use std.common.llm.hint_policy.{HintLevel, HintEvent, HintState, HintTimestamp, HintSchemaVersion, decide_hint}
+use .main_lazy_json.{extract_field, make_tool_result, make_tool_error}
+use .main_session_state.{McpSessionId, HintCapability, mcp_hint_state, mcp_hint_store}
+use .main_static_tools.{_mcp_static_tool_table}
+
+fn _hint_schema_version() -> HintSchemaVersion:
+    HintSchemaVersion(id: "mcp-hints-1")
+
+fn _hint_now() -> HintTimestamp:
+    HintTimestamp(seconds: time_now_unix_micros() / 1000000)
+
+fn _session_of(body: text) -> McpSessionId:
+    val raw = extract_field(body, "session_id")
+    if raw == "":
+        return McpSessionId(value: "default")
+    McpSessionId(value: raw)
+
+"""Every capability a hint can describe, in listing order."""
+pub fn hint_all_capabilities() -> [HintCapability]:
+    [HintCapability.Quickstart, HintCapability.Testing, HintCapability.Debug,
+        HintCapability.Traceability, HintCapability.Skills]
+
+fn _capability_key(capability: HintCapability) -> text:
+    match capability:
+        case HintCapability.Quickstart: "quickstart"
+        case HintCapability.Testing: "testing"
+        case HintCapability.Debug: "debug"
+        case HintCapability.Traceability: "traceability"
+        case HintCapability.Skills: "skills"
+
+fn _capability_from_key(key: text) -> HintCapability?:
+    for capability in hint_all_capabilities():
+        if _capability_key(capability) == key:
+            return Some(capability)
+    None
+
+fn _capability_purpose(capability: HintCapability) -> text:
+    match capability:
+        case HintCapability.Quickstart: "Start here: discover capabilities, read code, run tests."
+        case HintCapability.Testing: "Run and check tests, lint and diagnostics."
+        case HintCapability.Debug: "Debug a program with breakpoints, stepping and stack traces."
+        case HintCapability.Traceability: "Find symbols, references, dependencies and context in the codebase."
+        case HintCapability.Skills: "Discover guidance and the task-skill catalog."
+
+"""Names of the real tools a hint for this capability points at."""
+pub fn hint_capability_tool_names(capability: HintCapability) -> [text]:
+    match capability:
+        case HintCapability.Quickstart: ["simple_help", "simple_capabilities", "simple_hint_status", "simple_read", "simple_search", "simple_test"]
+        case HintCapability.Testing: ["simple_test", "simple_check", "simple_lint", "simple_diagnostics"]
+        case HintCapability.Debug: ["debug_create_session", "debug_set_breakpoint", "debug_continue", "debug_stack_trace", "debug_close_session"]
+        case HintCapability.Traceability: ["simple_search", "simple_symbols", "simple_dependencies", "simple_context"]
+        case HintCapability.Skills: ["simple_help", "simple_capabilities"]
+
+"""The subset of `names` that is absent from the registered tool manifest."""
+pub fn hint_missing_tools(names: [text]) -> [text]:
+    val manifest = _mcp_static_tool_table()
+    var missing: [text] = []
+    for name in names:
+        var found = false
+        for tool in manifest:
+            if tool.name == name:
+                found = true
+        if not found:
+            missing.push(name)
+    missing
+
+fn _manifest_description(name: text) -> text:
+    for tool in _mcp_static_tool_table():
+        if tool.name == name:
+            return tool.desc
+    ""
+
+fn _level_key(level: HintLevel) -> text:
+    match level:
+        case HintLevel.Full: "full"
+        case HintLevel.Brief: "brief"
+        case HintLevel.Corrective: "corrective"
+        case HintLevel.Quiet: "quiet"
+
+# Full hints describe each tool with its manifest description, so a tool absent
+# from the manifest contributes nothing; the spec guards the name lists too.
+fn _hint_text(capability: HintCapability, level: HintLevel) -> text:
+    val names = hint_capability_tool_names(capability)
+    match level:
+        case HintLevel.Quiet:
+            ""
+        case HintLevel.Brief:
+            "Tip: " + _capability_purpose(capability) + " Tools: " + names.join(", ")
+        case HintLevel.Corrective:
+            "Repeated failures with this capability. Check arguments with simple_help (topic " +
+                _capability_key(capability) + "). Tools: " + names.join(", ")
+        case HintLevel.Full:
+            var lines: [text] = [_capability_purpose(capability)]
+            for name in names:
+                val desc = _manifest_description(name)
+                if desc != "":
+                    lines.push("- " + name + ": " + desc)
+            lines.join("\n")
+
+fn _decide_and_store(session: McpSessionId, capability: HintCapability, event: HintEvent) -> HintLevel:
+    val before = mcp_hint_state(session, capability)
+    val (level, after) = decide_hint(before, event, _hint_now(), _hint_schema_version())
+    mcp_hint_store(session, capability, after)
+    level
+
+fn _render(capability: HintCapability, level: HintLevel) -> text:
+    val head = "capability: " + _capability_key(capability) + "\nhint_level: " + _level_key(level)
+    val body = _hint_text(capability, level)
+    if body == "":
+        return head
+    head + "\n" + body
+
+fn _topic_or_default(body: text, fallback: HintCapability) -> HintCapability?:
+    val topic = extract_field(body, "topic")
+    if topic == "":
+        return Some(fallback)
+    _capability_from_key(topic)
+
+fn _unknown_topic(id: text, body: text) -> text:
+    make_tool_error(id, -32602, "Unknown topic: " + extract_field(body, "topic"))
+
+# Explicit help request: always full, overrides suppression.
+pub fn handle_simple_help(id: text, body: text) -> text:
+    val topic = _topic_or_default(body, HintCapability.Quickstart)
+    match topic:
+        case None:
+            _unknown_topic(id, body)
+        case Some(capability):
+            val level = _decide_and_store(_session_of(body), capability, HintEvent.HelpRequested)
+            make_tool_result(id, _render(capability, level))
+
+# A capability use: first call full, second brief, then quiet. Without a
+# topic it lists the capabilities and records nothing.
+pub fn handle_simple_capabilities(id: text, body: text) -> text:
+    if extract_field(body, "topic") == "":
+        var lines: [text] = []
+        for capability in hint_all_capabilities():
+            lines.push(_capability_key(capability) + ": " + _capability_purpose(capability))
+        return make_tool_result(id, lines.join("\n"))
+    val topic = _topic_or_default(body, HintCapability.Quickstart)
+    match topic:
+        case None:
+            _unknown_topic(id, body)
+        case Some(capability):
+            val level = _decide_and_store(_session_of(body), capability, HintEvent.ToolSucceeded)
+            make_tool_result(id, _render(capability, level))
+
+fn _status_text(session: McpSessionId, capability: HintCapability) -> text:
+    val state = mcp_hint_state(session, capability)
+    var last = "none"
+    if val Some(t) = state.last_hint_time:
+        last = str(t.seconds)
+    "capability: " + _capability_key(capability) + "\nseen_count: " + str(state.seen_count.value) +
+        "\nsuccess_count: " + str(state.success_count.value) + "\nlast_hint: " + last
+
+# Reports the stored state; never calls decide_hint, never mutates.
+pub fn handle_simple_hint_status(id: text, body: text) -> text:
+    val session = _session_of(body)
+    if extract_field(body, "topic") == "":
+        var blocks: [text] = []
+        for capability in hint_all_capabilities():
+            blocks.push(_status_text(session, capability))
+        return make_tool_result(id, blocks.join("\n\n"))
+    val topic = _topic_or_default(body, HintCapability.Quickstart)
+    match topic:
+        case None:
+            _unknown_topic(id, body)
+        case Some(capability):
+            make_tool_result(id, _status_text(session, capability))

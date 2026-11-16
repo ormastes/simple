@@ -1,0 +1,77 @@
+# Pure invocation/signature fixture DATA. Not installed authority or an opaque
+# probe/source owner. No native workload or staging is fabricated by this file.
+use test.fixtures.orchestration.host_execution_envelope_fixture_v2.*
+use test.fixtures.daemon_sdk.distributed_authority_verification_fixture_v2.*
+use std.common.contracts.orchestration.agent_workspace_invocation_v1.*
+use std.common.contracts.orchestration.agent_workspace_invocation_packet_v1.*
+use std.common.contracts.orchestration.agent_task_use_v1.AgentTaskUseBindingV1
+use std.common.contracts.orchestration.agent_invocation_binding_v1.AgentTaskInputV1
+use std.common.contracts.orchestration.desired_input_v1.controller_desired_input_select_v1
+use std.common.contracts.container.agent_workspace_manifest_v1.*
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_host_scope_bytes_v2}
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_encode_grant_v2}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostReservationAuthorizationContextV1
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.nogc_sync_mut.orchestration.host_agent_workspace_execution_v1.host_agent_workspace_invocation_operation_v1
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_authority_snapshot_create_v2
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.crypto.sha256.sha256_text
+
+pub struct AgentWorkspaceInvocationFixtureV1:
+    packet: AgentWorkspaceInvocationPacketV1
+    policy: LocalAuthorityPolicyV1
+    scope: ContainerHostScopeV2
+    context: HostReservationAuthorizationContextV1
+
+pub fn agent_workspace_invocation_fixture_v1(permit_invocation: bool = true) -> AgentWorkspaceInvocationFixtureV1:
+    val base = host_execution_envelope_fixture_v2()
+    val source = file_read_regular_no_follow_bounded("test/fixtures/orchestration/caret_agent_session.sdn", 65536).unwrap().replace("reviewed-input-revision", "b".repeat(40))
+    val catalog = file_read_regular_no_follow_bounded("test/fixtures/orchestration/caret_policy_catalog.sdn", 65536).unwrap()
+    val desired = controller_desired_input_select_v1("controller", "workload", source, "caret", "review-simple").unwrap()
+    val task = AgentTaskInputV1(ns: "caret", reference: "task-immutable-42", content: "Review literal -\r\n", content_digest: sha256_text("Review literal -\r\n"))
+    val use_binding = AgentTaskUseBindingV1(controller_id: "controller", session_uid: "workload", attempt: 1,
+        ns: task.ns, task_ref: task.reference, task_digest: task.content_digest, source_digest: sha256_text(source),
+        catalog_digest: sha256_text(catalog), provider: "codex", adapter_id: "codex-root-start-0.169.0-v1", model: "",
+        host_scope_digest: sha256_text(container_host_scope_bytes_v2(base.scope).unwrap()))
+    val files = [AgentWorkspaceFileV1(source_name: "commit-object", relative_path: "repo/objects/aa/" + "a".repeat(38),
+        digest: sha256_text("object"), size_bytes: 6)]
+    val workspace = AgentWorkspaceManifestV1(profile_digest: "1".repeat(64), repository_ref: "simple-approved",
+        revision_oid: "b".repeat(40), object_format: "sha1", source_manifest_digest: agent_workspace_files_digest_v1(files, "sha1").unwrap(),
+        slot_binding_digest: "2".repeat(64), attempt_leaf: "attempt-1", bootstrap_digest: "3".repeat(64),
+        git_digest: "4".repeat(64), agent_digest: "5".repeat(64), files: files)
+    val manifest = AgentWorkspaceInvocationManifestV1(operation_id: base.common.operation.id, task_use: use_binding,
+        desired: desired, desired_source: source, catalog: catalog, task: task, workspace_manifest: agent_workspace_manifest_encode_v1(workspace).unwrap(),
+        selection_binding_digest: "6".repeat(64), interactive_intent_digest: "7".repeat(64), image_config_id: "sha256:" + "8".repeat(64),
+        inner_argv: ["/usr/bin/codex", "--", task.content], credential_refs: [], not_after: 170, preparation_budget_ms: 1,
+        workload_duration_ms: base.common.operation.duration_ms)
+    val context = HostReservationAuthorizationContextV1(grant_clock: 100, monotonic_ms: 10,
+        policy_revision: 4, revocation_epoch: 2, session_generation: 3)
+    var issuer = verification_fixture().issuer
+    var approver = verification_fixture().approver
+    issuer.operations = if permit_invocation: ["host_execute_v1", "agent_session_invoke_v1"] else: ["host_execute_v1"]
+    approver.operations = issuer.operations
+    val policy = LocalAuthorityPolicyV1(snapshot: distributed_authority_snapshot_create_v2([issuer, approver], 7, 4, 2).unwrap(),
+        session_generation: 3, source_digest: base.policy.source_digest)
+    val operation = host_agent_workspace_invocation_operation_v1(manifest, base.common.operation, policy, base.scope, context).unwrap()
+    val signed = agent_workspace_fixture_sign_v1(operation)
+    val approval = agent_workspace_fixture_approve_v1(operation, signed)
+    AgentWorkspaceInvocationFixtureV1(packet: AgentWorkspaceInvocationPacketV1(host: base.common, manifest: manifest,
+        signed: signed, approval: approval), policy: policy, scope: base.scope, context: context)
+
+pub fn agent_workspace_fixture_sign_v1(operation: OperationEnvelopeV2) -> DistributedSignedGrantV2:
+    var signed = verification_fixture().signed
+    signed.grant.environment_digest = operation.environment_digest
+    signed.grant.operations = ["agent_session_invoke_v1"]
+    signed.signature = pure_ed25519_sign_from_seed_v1(verification_seed(1), distributed_grant_signature_message_v2(signed).unwrap()).signature
+    signed
+
+pub fn agent_workspace_fixture_approve_v1(operation: OperationEnvelopeV2, signed: DistributedSignedGrantV2) -> DistributedSignedApprovalV2:
+    var approval = verification_fixture().approval
+    approval.grant_digest = sha256_text(distributed_encode_grant_v2(signed.grant).unwrap())
+    approval.request_digest = sha256_text(distributed_encode_operation_v2(operation).unwrap())
+    approval.signature = pure_ed25519_sign_from_seed_v1(verification_seed(65), distributed_approval_signature_message_v2(approval).unwrap()).signature
+    approval

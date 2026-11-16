@@ -235,6 +235,9 @@ pub extern "C" fn native_file_seek(handle: i64, offset: i64, whence: i64) -> Run
                 _ => return RuntimeValue::NIL,
             };
 
+            let Ok(offset) = libc::off_t::try_from(offset) else {
+                return RuntimeValue::NIL;
+            };
             let result = lseek(fd, offset, whence_val);
 
             if result < 0 {

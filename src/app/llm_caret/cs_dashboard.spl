@@ -25,6 +25,8 @@ use app.llm_caret.cs_container.{CsContainerRequest, cs_container_request, cs_con
     cs_container_name, cs_container_reap, cs_container_real_path,
     cs_container_present, cs_container_reap_session, cs_container_instance,
     cs_container_mark_launched, cs_container_launched}
+use app.llm_caret.workbench.session_contract.{SessionId, new_session_id}
+use app.llm_caret.workbench.roster_order.{roster_order}
 use app.llm_caret.harness_spec.{parse_harness_spec, harness_spec_display}
 use app.llm_caret.pane_backend.{Pane, pane_backend_name,
     pane_list, pane_select, pane_zoom, pane_spawn_at, pane_resize, pane_kill,
@@ -52,15 +54,94 @@ struct CsDashboard:
     # What the SELECTED agent's pane child printed, oldest first; empty when
     # nothing is selected or the backend could not capture it.
     screen: [text]
+    # Roster ordering inputs (agent ids): pinned first, then `mru` (most
+    # recently selected first).
+    pins: [text]
+    mru: [text]
 
 fn cs_dashboard_new(session: text) -> CsDashboard:
     CsDashboard(session: session, manager_status: "unknown: not polled yet",
-        agents: [], selected: -1, input: "", log: [], screen: [])
+        agents: [], selected: -1, input: "", log: [], screen: [], pins: [], mru: [])
 
 fn _dash(d: CsDashboard, status: text, agents: [CsAgent], selected: i64,
         log: [text]) -> CsDashboard:
     CsDashboard(session: d.session, manager_status: status, agents: agents,
-        selected: selected, input: d.input, log: log, screen: d.screen)
+        selected: selected, input: d.input, log: log, screen: d.screen,
+        pins: d.pins, mru: d.mru)
+
+fn _with_roster(d: CsDashboard, pins: [text], mru: [text]) -> CsDashboard:
+    CsDashboard(session: d.session, manager_status: d.manager_status,
+        agents: d.agents, selected: d.selected, input: d.input, log: d.log,
+        screen: d.screen, pins: pins, mru: mru)
+
+# Indices into d.agents in display order (pinned, then MRU, then launch order).
+fn _roster_indices(d: CsDashboard) -> [i64]:
+    var ids: [SessionId] = []
+    for a in d.agents:
+        ids = ids + [new_session_id(a.agent_id)]
+    var out: [i64] = []
+    for s in roster_order(ids, d.pins, d.mru):
+        var i = 0
+        while i < d.agents.len():
+            if d.agents[i].agent_id == s.value:
+                out = out + [i]
+            i = i + 1
+    out
+
+# Display row of the selected agent within the roster, or -1.
+fn _selected_position(d: CsDashboard) -> i64:
+    var pos = 0
+    for i in _roster_indices(d):
+        if i == d.selected:
+            return pos
+        pos = pos + 1
+    -1
+
+fn _bump_mru(mru: [text], id: text) -> [text]:
+    var out = [id]
+    for m in mru:
+        if m != id:
+            out = out + [m]
+    out
+
+fn _lower_subsequence(query: text, label: text) -> bool:
+    var q: [char] = []
+    for c in query.lower().chars():
+        q = q + [c]
+    var qi = 0
+    for c in label.lower().chars():
+        if qi < q.len() and c == q[qi]:
+            qi = qi + 1
+    qi == q.len()
+
+fn _all_digits(s: text) -> bool:
+    for c in s.chars():
+        if c < '0' or c > '9':
+            return false
+    s != ""
+
+# Exact id / 1-based number first (existing behaviour); otherwise a fuzzy label
+# match. Returns the matching indices: one = resolved, several = ambiguous.
+fn _resolve_fuzzy(d: CsDashboard, key: text) -> [i64]:
+    val exact = _resolve(d, key)
+    if exact >= 0:
+        return [exact]
+    if key == "" or _all_digits(key):
+        return []
+    var out: [i64] = []
+    var i = 0
+    while i < d.agents.len():
+        val a = d.agents[i]
+        if _lower_subsequence(key, a.agent_id + " " + a.spec):
+            out = out + [i]
+        i = i + 1
+    out
+
+fn _candidates_text(d: CsDashboard, idxs: [i64]) -> text:
+    var out = ""
+    for i in idxs:
+        out = out + " " + d.agents[i].agent_id + " (" + d.agents[i].spec + ")"
+    out
 
 fn _logged(d: CsDashboard, entry: text) -> [text]:
     d.log + [entry]
@@ -81,7 +162,8 @@ fn cs_help_text() -> text:
         "    --container-mount <src>:<dst>[:ro|rw]  --container-network host|none|private",
         "    --container-env KEY=VALUE   (e.g. GIT_AUTHOR_NAME, GIT_COMMITTER_EMAIL)",
         "/reap            remove EVERY container on this session, any cs's (after a killed cs)",
-        "/switch <n|id>   select an agent and focus its pane",
+        "/switch <n|id|query>  select an agent (fuzzy label match) and focus its pane",
+        "/pin [n|id]  /unpin [n|id]   keep an agent at the top of the roster",
         "/max             maximize the selected agent's pane",
         "/key <name>      press enter|esc|tab|space|up|down|left|right|ctrl-c in its pane",
         "/kill <n|id>     kill an agent's pane",
@@ -129,14 +211,19 @@ fn _agent_list_text(d: CsDashboard) -> text:
     if d.agents.len() == 0:
         return "(no agents)\n"
     var out = ""
-    var i = 0
-    while i < d.agents.len():
+    for i in _roster_indices(d):
         val a = d.agents[i]
         val marker = if i == d.selected: ">" else: " "
-        out = out + marker + " " + (i + 1).to_text() + " " + a.agent_id + "  " +
+        val pin = if _is_pinned(d, a.agent_id): "*" else: " "
+        out = out + marker + pin + (i + 1).to_text() + " " + a.agent_id + "  " +
             a.spec + "  " + a.status + "\n"
-        i = i + 1
     out
+
+fn _is_pinned(d: CsDashboard, id: text) -> bool:
+    for p in d.pins:
+        if p == id:
+            return true
+    false
 
 fn _with_status(d: CsDashboard, idx: i64, status: text) -> [CsAgent]:
     var out: [CsAgent] = []
@@ -203,15 +290,36 @@ fn cs_handle_command(d: CsDashboard, line: text) -> (CsDashboard, text):
         return (next, "launch:" + agent_id + " " + shown)
 
     if cmd == "/switch":
-        val idx = _resolve(d, arg)
-        if idx < 0:
+        val found = _resolve_fuzzy(d, arg)
+        if found.len() == 0:
             return (d, "no such agent: " + arg)
-        val next = _dash(d, d.manager_status, d.agents, idx,
+        if found.len() > 1:
+            return (d, "ambiguous: " + arg + " matches" + _candidates_text(d, found) +
+                " - use a number or id")
+        val idx = found[0]
+        val picked = _dash(d, d.manager_status, d.agents, idx,
             _logged(d, "switch to " + d.agents[idx].agent_id))
+        val next = _with_roster(picked, d.pins, _bump_mru(d.mru, d.agents[idx].agent_id))
         if d.agents[idx].pane_id == "":
             return (next, "selected " + d.agents[idx].agent_id +
                 ": no pane yet, nothing to focus")
         return (next, "pane:select " + d.agents[idx].pane_id)
+
+    if cmd == "/pin" or cmd == "/unpin":
+        val key = if arg == "" and d.selected >= 0: d.agents[d.selected].agent_id else: arg
+        val found = _resolve_fuzzy(d, key)
+        if found.len() == 0:
+            return (d, "no such agent: " + key)
+        if found.len() > 1:
+            return (d, "ambiguous: " + key + " matches" + _candidates_text(d, found))
+        val id = d.agents[found[0]].agent_id
+        var pins: [text] = []
+        for p in d.pins:
+            if p != id:
+                pins = pins + [p]
+        if cmd == "/pin":
+            return (_with_roster(d, pins + [id], d.mru), "pinned " + id)
+        return (_with_roster(d, pins, d.mru), "unpinned " + id)
 
     if cmd == "/max":
         if d.selected < 0:
@@ -454,7 +562,8 @@ fn cs_frame_rows(d: CsDashboard, cols: i64, rows: i64, clock: text,
     val right_w = cols - left_w - 1
     val mid = rows - CS_CHROME_ROWS
     val screen = _screen_lines(d, mid)
-    val selected_row = if d.selected >= 0: 2 + d.selected else: -1
+    val position = _selected_position(d)
+    val selected_row = if position >= 0: 2 + position else: -1
     val divider = if styled_out: styled(CS_DIVIDER, muted) else: CS_DIVIDER
     var out: [text] = [_paint(_header(d, clock), cols, header_style, styled_out)]
     var i = 0
@@ -561,7 +670,7 @@ fn _with_screen(d: CsDashboard) -> CsDashboard:
             screen = pane_capture_styled(d.session, pane_id, CS_SCREEN_LINES)
     CsDashboard(session: d.session, manager_status: d.manager_status,
         agents: d.agents, selected: d.selected, input: d.input, log: d.log,
-        screen: screen)
+        screen: screen, pins: d.pins, mru: d.mru)
 
 # Cheap per-tick poll: re-captures the selected agent's screen and, on smux,
 # drains every other agent's PTY as well. A smux child's output is only read

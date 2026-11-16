@@ -1,0 +1,92 @@
+# Explicit installed workspace CLI DATA; only the genuine bound successor plus
+# private same-writer admission can cause execution. CPU V2 remains unchanged.
+use std.common.contracts.container.linux_fresh_workspace_v3.*
+use std.common.contracts.container.linux_fresh_workload_v2.*
+use std.common.contracts.container.linux_workspace_profile_v1.*
+use std.common.contracts.container.linux_agent_workspace_profile_v1.*
+use std.common.contracts.container.linux_fresh_epoch_v1.LinuxFreshEpochProfileV1
+use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use std.common.contracts.container.linux_fresh_workspace_inspect_v3.linux_fresh_workspace_inspect_format_v3
+use std.common.contracts.container.configuration_inspect_query_v1.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, group_process_child_argv_digest_v2}
+
+pub fn linux_fresh_workspace_project_launch_v3(epoch: LinuxFreshEpochProfileV1, workspace: LinuxWorkspaceInstalledProfileV1,
+        agent: LinuxAgentWorkspaceProfileV1, invocation_digest: text, uid: i64, gid: i64,
+        base: GroupProcessStreamLaunchV2, value: LinuxFreshWorkspaceCommandV3) -> Result<GroupProcessStreamLaunchV2, text>:
+    linux_fresh_workspace_command_validate_v3(value, workspace, agent, invocation_digest, uid, gid)?
+    val command = value.command
+    if base.profile_v3.is_none(): return Err("fresh-workspace-helper-profile-required")
+    val profile = base.profile_v3.unwrap()
+    if profile.helper_cpu.cpu_millis != command.helper_cpu_millis or base.memory_limit_bytes != command.helper_memory_bytes:
+        return Err("fresh-workspace-helper-subcharge-mismatch")
+    val cpu = epoch.number_v1("partitionCpuMillis")? - epoch.number_v1("reservedCpuMillis")?
+    val memory = epoch.number_v1("partitionMemoryBytes")? - epoch.number_v1("reservedMemoryBytes")?
+    if (command.helper_cpu_millis > cpu or command.cpu_millis > cpu - command.helper_cpu_millis or
+            command.helper_memory_bytes > memory or command.memory_bytes > memory - command.helper_memory_bytes):
+        return Err("fresh-workspace-request-plus-helper-exceeds-usable")
+    val args = linux_fresh_workspace_argv_v3(epoch, workspace, agent, invocation_digest, uid, gid, value)?
+    var result = base
+    var request = base.request
+    request.args = args
+    request.timeout_ms = command.timeout_ms # CLI budget; never primary lifetime.
+    request.child_argv_digest = group_process_child_argv_digest_v2(request.program, args)
+    result.request = request
+    Ok(result)
+
+pub fn linux_fresh_workspace_argv_v3(epoch: LinuxFreshEpochProfileV1, workspace: LinuxWorkspaceInstalledProfileV1,
+        agent: LinuxAgentWorkspaceProfileV1, invocation_digest: text, uid: i64, gid: i64,
+        value: LinuxFreshWorkspaceCommandV3) -> Result<[text], text>:
+    linux_fresh_workspace_command_validate_v3(value, workspace, agent, invocation_digest, uid, gid)?
+    val command = value.command
+    val plan = command.request.plan
+    val fence = container_scope_fence_id_v2(command.scope)?
+    var args = linux_fresh_workspace_engine_prefix_v3(epoch)?
+    match command.action:
+        case LinuxFreshWorkloadActionV2.PullImage: args = args + ["pull", "--quiet", "--", command.image]
+        case LinuxFreshWorkloadActionV2.Create:
+            args = args + ["create", "--quiet", "--pull=never", "--name", "simple-" + plan.workload_uid + "-" + str(plan.attempt),
+                "--label", "io.simpleorch.pod_uid=" + plan.workload_uid, "--label", "io.simpleorch.attempt=" + str(plan.attempt),
+                "--label", "io.simpleorch.node_boot_id=" + fence,
+                "--label", "io.simpleorch.provider_generation=" + str(command.scope.provider_generation),
+                "--label", "io.simpleorch.operation_id=" + plan.operation_id,
+                "--cpu-period=100000", "--cpu-quota=" + str(command.cpu_millis * 100),
+                "--memory=" + str(command.memory_bytes), "--memory-swap=" + str(command.memory_bytes),
+                "--pids-limit=" + str(command.pid_limit), "--network=none", "--read-only", "--read-only-tmpfs=false",
+                "--security-opt=no-new-privileges", "--cap-drop=ALL", "--cgroups=enabled", "--cgroupns=private", "--pid=private",
+                "--privileged=false", "--http-proxy=false", "--cgroup-parent=" + epoch.text_v1("delegatedCgroup")?,
+                "--tty", "--interactive", "--userns=keep-id", "--user=" + str(uid) + ":" + str(gid),
+                "--workdir", workspace.guest_root, "--mount", "type=bind,src=" + linux_workspace_source_root_v1(workspace) +
+                    ",dst=" + workspace.guest_root + ",rw,nosuid,nodev,bind-propagation=rprivate",
+                "--entrypoint", command.entrypoint[0], "--", command.image]
+            for at in 1..command.entrypoint.len(): args.push(command.entrypoint[at])
+            args = args + command.args
+        case LinuxFreshWorkloadActionV2.Start: args = args + ["start", "--", command.native_id]
+        case LinuxFreshWorkloadActionV2.Inspect:
+            args = args + ["container", "inspect", "--format", linux_fresh_workspace_inspect_format_v3(), "--", command.native_id]
+        case LinuxFreshWorkloadActionV2.Stop: args = args + ["stop", "--time", str((command.timeout_ms + 999) / 1000), "--", command.native_id]
+        case LinuxFreshWorkloadActionV2.Remove: args = args + ["rm", "--", command.native_id]
+        case LinuxFreshWorkloadActionV2.Absence: args = args + ["container", "inspect", "--format", "{{{{.Id}}}}", "--", command.native_id]
+        case _:
+            val kind = workspace_query_kind_v3(command.action)?
+            val expected = RuntimeIdentityV1(engine: "podman", native_id: command.native_id, pod_uid: plan.workload_uid,
+                attempt: plan.attempt, node_boot_id: fence, provider_generation: command.scope.provider_generation, operation_id: plan.operation_id)
+            val query = container_configuration_inspect_command_v1(kind, expected, false, command.observed_image_id)?
+            if query.program != "podman": return Err("fresh-workspace-shared-query-program")
+            args = args + query.args
+    if args.len() > 64: return Err("fresh-workspace-projected-argv-bound")
+    Ok(args)
+
+fn workspace_query_kind_v3(action: LinuxFreshWorkloadActionV2) -> Result<ContainerConfigurationInspectKindV1, text>:
+    match action:
+        case LinuxFreshWorkloadActionV2.ConfigurationBefore: Ok(ContainerConfigurationInspectKindV1.ConfigurationBefore)
+        case LinuxFreshWorkloadActionV2.ConfigurationImage: Ok(ContainerConfigurationInspectKindV1.ConfigurationImage)
+        case LinuxFreshWorkloadActionV2.ConfigurationAfter: Ok(ContainerConfigurationInspectKindV1.ConfigurationAfter)
+        case LinuxFreshWorkloadActionV2.InputConfigurationBefore: Ok(ContainerConfigurationInspectKindV1.InputConfigurationBefore)
+        case LinuxFreshWorkloadActionV2.InputConfigurationImage: Ok(ContainerConfigurationInspectKindV1.InputConfigurationImage)
+        case LinuxFreshWorkloadActionV2.InputConfigurationAfter: Ok(ContainerConfigurationInspectKindV1.InputConfigurationAfter)
+        case _: Err("fresh-workspace-closed-action-required")
+
+pub fn linux_fresh_workspace_engine_prefix_v3(epoch: LinuxFreshEpochProfileV1) -> Result<[text], text>:
+    Ok(["--remote=false", "--log-level=error", "--cgroup-manager=cgroupfs", "--root", epoch.text_v1("graphRoot")?,
+        "--runroot", epoch.text_v1("runRoot")?, "--storage-driver", "vfs", "--tmpdir", epoch.text_v1("runRoot")? + "/tmp"])

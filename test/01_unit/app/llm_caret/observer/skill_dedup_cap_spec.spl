@@ -1,0 +1,28 @@
+# Purpose and audience: the skill replay-dedup list must stay bounded per session, for the caret team.
+# @req CU-006
+
+use std.spec.*
+use app.llm_caret.observer.observer_log.{observer_reset, observer_record_skill, observer_skill_uses}
+
+fn _payload(name: text) -> text:
+    "{\"tool_name\":\"Skill\",\"tool_input\":{\"skill\":\"" + name + "\"}}"
+
+describe "observer_record_skill dedup cap":
+    it "evicts the oldest seen entry once a session exceeds 256":
+        observer_reset()
+        for i in 0..257:
+            observer_record_skill("claude", "builder", "PreToolUse", _payload("s{i}"), "e{i}")
+        step("newest entry still dedups")
+        observer_record_skill("claude", "builder", "PreToolUse", _payload("s256"), "e256")
+        expect(observer_skill_uses("builder", "s256")).to_equal(1)
+        step("oldest entry was evicted, so its replay counts again")
+        observer_record_skill("claude", "builder", "PreToolUse", _payload("s0"), "e0")
+        expect(observer_skill_uses("builder", "s0")).to_equal(2)
+
+    it "does not evict another session's entries":
+        observer_reset()
+        observer_record_skill("claude", "other", "PreToolUse", _payload("keep"), "k1")
+        for i in 0..300:
+            observer_record_skill("claude", "builder", "PreToolUse", _payload("s{i}"), "e{i}")
+        observer_record_skill("claude", "other", "PreToolUse", _payload("keep"), "k1")
+        expect(observer_skill_uses("other", "keep")).to_equal(1)
