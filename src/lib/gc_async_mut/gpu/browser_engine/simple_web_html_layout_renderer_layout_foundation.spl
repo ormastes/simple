@@ -836,6 +836,10 @@ val FORM_CONTROL_UA_FONT_DEN: i32 = 3
 # Largest size the font resolver accepts is 512 px.
 val FORM_CONTROL_MEASURE_MAX_PX: i32 = 512
 val FORM_CONTROL_MEASURE_OVERSAMPLE: i32 = 10
+# Finer oversample for the fractional (milli-px) label width: 1/36 px steps at
+# the UA 13.333 px font keep a four-button row within Chrome's edge rounding
+# (1/30 px steps drifted a fifth button's left edge over the .5 boundary).
+val FORM_CONTROL_MILLI_OVERSAMPLE: i32 = 12
 
 fn form_control_label_width_px(st: Style, label: text) -> i32:
     """Width, in whole px rounded UP, of one control label (`<option>` or
@@ -868,6 +872,34 @@ fn form_control_label_width_px(st: Style, label: text) -> i32:
         return st.resolved_font_width
     val scale = den * over
     (metrics.width + scale - 1) / scale
+
+fn form_control_label_width_milli_px(st: Style, label: text) -> i32:
+    """Width of one control label in milli-px (1/1000 px), NOT rounded up:
+    the fractional width Chrome keeps in LayoutUnit (1/64 px steps). Falls back to the whole
+    -pixel `form_control_label_width_px` times 1000 where no real-size
+    measurement exists."""
+    if label.len() == 0:
+        return 0
+    if st.resolved_font_identity == "" or st.resolved_font_width <= 0:
+        return form_control_label_width_px(st, label) * 1000
+    var num = st.font_size
+    var den = 1
+    if st.font_size == FORM_CONTROL_UA_FONT_TRUNCATED_PX:
+        num = FORM_CONTROL_UA_FONT_NUM
+        den = FORM_CONTROL_UA_FONT_DEN
+    var over = FORM_CONTROL_MILLI_OVERSAMPLE
+    if num * over > FORM_CONTROL_MEASURE_MAX_PX:
+        over = FORM_CONTROL_MEASURE_MAX_PX / num
+    if over < 1:
+        return st.resolved_font_width * 1000
+    val family = browser_font_family_for_style(st.font_family, st.bold, st.font_style_italic)
+    val metrics = resolve_font_metrics_with_language(family, label, num * over, "")
+    if not metrics.valid or metrics.width <= 0:
+        return st.resolved_font_width * 1000
+    val scale = den * over
+    # Floor to Chrome's LayoutUnit (1/64 px), then to milli-px. Flooring (not
+    # rounding) offsets the small upward bias of the oversampled measurement.
+    ((metrics.width * 64) / scale) * 1000 / 64
 
 fn form_control_widest_option_label_px(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, select_i: i32) -> i32:
     """Widest `<option>` label of a `<select>`, including options nested in an
@@ -910,6 +942,21 @@ fn form_control_button_label_correction_px(nodes: [HNode], styles: [Style], chil
                 extra = extra + real_w - styles[t].resolved_font_width
         t = child_index.next_sibling[t]
     extra
+
+fn form_control_button_frac_delta_milli_px(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, button_i: i32) -> i32:
+    """How far a `<button>`'s fractional label width (milli-px) sits below the
+    whole-pixel width the intrinsic sizing used (`form_control_button_label_correction_px`
+    rounds each label UP). 0 or negative. A flex row accumulates this so item
+    edges follow Chrome's LayoutUnit positions instead of drifting right."""
+    var delta = 0
+    var t = child_index.first_child[button_i]
+    while t >= 0:  # cpu-lane-loop-ok: one pass over one button's direct children; bound is that child list
+        if nodes[t].tag == "#text" and styles[t].resolved_font_width > 0:
+            val real_w = form_control_label_width_px(styles[t], nodes[t].text_trimmed)
+            val used_w = if real_w > styles[t].resolved_font_width: real_w else: styles[t].resolved_font_width
+            delta = delta + form_control_label_width_milli_px(styles[t], nodes[t].text_trimmed) - used_w * 1000
+        t = child_index.next_sibling[t]
+    delta
 
 # Inline-start inset of a <select>'s label inside its content box: the 20 px
 # interior is 4 px of start padding and a 16 px arrow column. Chrome 159 paints
