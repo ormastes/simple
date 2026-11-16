@@ -1,7 +1,7 @@
 # Feature expert: slang local inference
 
 **Feature:** running a local LLM through slang, and reaching it from caret.
-**Last updated:** 2026-09-04
+**Last updated:** 2026-11-15
 
 ## The one-sentence shape
 
@@ -57,9 +57,28 @@ Caret side: providers `slang` (HTTP) and `slang_local` (in-process) in
   ggml-backed path announces itself separately with `"stub":false` and
   `"backend":"ggml"`.
 
+## OpenAI HTTP surface: supported vs not (live-verified 2026-11-15, Windows, Qwen2.5-1.5B)
+
+Specs: `test/03_system/lib/slang/feature/slang_openai_conformance_live_spec.spl` (passing),
+`..._in_development_spec.spl` (expected red; bug
+`doc/08_tracking/bug/slang_openai_stop_stream_finish_reason_unimplemented_2026-11-15.md`).
+
+| Feature | Status |
+|---|---|
+| `POST /v1/chat/completions` non-stream, system/multi-turn messages | works |
+| `POST /v1/completions` (raw prompt, `text_completion`, no usage) | works |
+| `GET /v1/models`, `GET /health` | works |
+| 400 malformed/missing messages, 404 `model_not_found` / `not_found`, 405 | works (OpenAI error envelope) |
+| temperature 0 repeat identical, two concurrent connections | works |
+| `finish_reason: "length"` on `max_tokens` | no: always `stop` |
+| `stop` sequences | no: ignored |
+| `stream: true` (SSE) | no: 400 |
+| `temperature`/`top_p`/`seed`/`n` | ignored (greedy) |
+| usage token counts | always 0 (own bug) |
+
 ## Current limits
 
-- GGUF only. safetensors (BF16, NVFP4) is recognised and refused.
+- ggml lane: GGUF only. Safetensors Llama (MHA) is served by the pure runner (see Runner dispatch); other safetensors (BF16, NVFP4, GQA) is recognised and refused.
 - One model, one context, greedy sampling, one request at a time.
 - No continuous batching (master plan A5). Prefix caching DOES exist: the
   serial exact-prefix snapshot cache (S1-S3, shim `slang_prefix_*`) is on by
@@ -68,12 +87,45 @@ Caret side: providers `slang` (HTTP) and `slang_local` (in-process) in
   `test/03_system/lib/slang/feature/slang_kv_cache_live_spec.spl` and the
   2026-11-14 table in `test/05_perf/slang_kv_cache/README.md` (Qwen2.5-1.5B,
   CPU: exact repeat re-prefills 1 of 988 prompt tokens, ~40x faster request).
-  A hit's output may drift from a full prefill (first differing byte 2-42; ggml batch
-  shape, `doc/08_tracking/bug/slang_prefix_cache_hit_output_drift_2026-11-14.md`).
+  A hit is byte-identical to a full prefill: the shim decodes the last prompt
+  token alone on the cold and hit path alike (`slang_ggml_request_eval_prompt`),
+  so its logits come from one batch shape (fixed drift,
+  `doc/08_tracking/bug/slang_prefix_cache_hit_output_drift_2026-11-14.md`).
   The physical paged-KV lane needs a llama.cpp with `include/llama-slang-paged.h`.
 - The HTTP path is unreachable on the bootstrap seed; see
   `doc/08_tracking/bug/seed_jit_cannot_resolve_text_dot_from_char_code_2026-09-04.md`
   and `doc/08_tracking/bug/seed_http_server_handle_connection_dispatch_2026-09-04.md`.
+
+## Runner dispatch: pure runner or llama.cpp wrapper (2026-11-15)
+
+```
+slang -> pure LLM runner    src/lib/gc_async_mut/slang/model_executor/pure/   (safetensors Llama)
+slang -> llama.cpp wrapper  model_executor/backend.spl + slang_ggml shim       (GGUF)
+```
+
+- **Dispatch point:** `engine_complete_chat` in `engine/llm_engine.spl` (and
+  `engine_ensure_loaded` for preload) calls `select_runner`
+  (`engine/runner_dispatch.spl`). GGUF -> `RunnerKind.Ggml`; safetensors whose
+  `config.json` is `LlamaForCausalLM` with MHA (no GQA) and a single
+  `model.safetensors` + `tokenizer.json` -> `RunnerKind.Pure`. `SLANG_RUNNER=pure|ggml`
+  forces; an impossible forced choice (pure on GGUF, ggml on safetensors) or any
+  other value is an explicit 503 `model_not_runnable`, never a fallback.
+- **Pure lane** (`engine/pure_lane.spl`): `llm_engine` owns one `PureLane`
+  (model + tokenizer + ONE `KvSession`) across requests, so a request sharing a
+  token prefix re-uses cached K/V rows. `engine_pure_stats()` exposes the last
+  request's reused / evaluated positions; `engine_last_runner()` says which
+  runner served the last chat. Loading either lane unloads the other.
+- **No chat template on the pure lane:** the prompt is the non-empty message
+  contents joined by newlines (`chat_plain_prompt_from_body`); a single message
+  is passed as-is. Greedy only; generation is bounded by the model's context.
+- **Usage counts are real** for both runners (`EngineChatResult.prompt_tokens` /
+  `completion_tokens`; the ggml count comes from `BackendGeneration.prompt_tokens`).
+- **GPU seam:** a GPU variant of the pure runner plugs in at `RunnerKind.Pure`
+  / `pure_lane_load`; `pure_runner_unsupported_reason` is its load gate.
+- Evidence: `test/03_system/lib/slang/feature/slang_runner_dispatch_live_spec.spl`
+  (`SLANG_LIVE=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi/slang_ggml.dll`).
+  The seed interpreter runs the pure lane at ~0.1 token/s; set
+  `SIMPLE_TIMEOUT_SECONDS=3600`.
 
 ## Upgrade path to pure Simple
 
@@ -184,6 +236,12 @@ Measured on the seed interpreter, stories15M, "Once upon a time": generated
 text matches llama.cpp greedy; about 0.12 tokens/s. Fixture
 `test/fixtures/slang_pure/stories15m_generate.spl`; system spec
 `slang_pure_kv_cache_spec.spl`.
+
+### Sampling, stop, generation loop (pure runner)
+- `sampler.spl`: `sampler_sample(cfg, state, logits, recent)` -> token + next state. Order penalty -> temperature -> top-k -> top-p -> draw; temperature <= 0 is `tensor_argmax`. PRNG = minstd in `SamplerState` (seed -> same tokens, no globals). top-k = insertion selection (no vocab sort); top-p alone = log-prob bucket histogram + sort of the boundary bucket only (an earlier growing-top-K version took ~300 s/token on a flat 32000 vocab; fixed). Measured on the seed, vocab 32000: top-k 40 ~0.3 s/token, top-p 0.9 ~1.0 s, plain temperature ~0.6 s.
+- `stop.spl`: EOS ids, token budget, stop strings on decoded text; `stop_scan` truncates before the earliest match and reports `hold_back` (trailing units that may start a stop string; never stream them). Offsets are `len()/substring()/index_of()` units (code points on the current seed), stop strings assumed ASCII.
+- `generate.spl`: `gen_begin` (Err on empty/oversize prompt; prefix reuse, last prompt token always re-evaluated) + `gen_next` (one token, `delta` = text safe to stream) + `generate` (loop; returns `pieces`, `finish_reason` "stop"|"length", prompt/completion token counts, positions evaluated/reused). At temperature 0 ids equal `kv_generate_greedy` (EOS id included, no text). `kv_cache.spl` untouched.
+- Specs: unit `sampler_spec`, `stop_spec`, `generate_spec` (tiny synthetic model); system `slang_pure_sampling_spec.spl` (stories15M, gated on the model dir).
 Seed pitfalls found: an f64 carried through `Result` + `?` is mis-unboxed (parse
 numbers after the `?`); tokenizer.json escapes include `\r`.
 
@@ -255,3 +313,34 @@ SLANG_LIVE=1 SLANG_GPU=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi
 - **Runner trap:** `skip(...)` inside an example is counted as PASSED
   (`skipped=0`); the live spec records `SKIPPED:` lines to `build/probe/mm_answers.txt`.
 - **Live spec timeout knob:** `SLANG_RUN_TIMEOUT_MS` (default 600000) bounds each child in `caret_slang_local_hello_system_spec.spl`; the 3-model gate (`check-slang-ggml-inference.shs`, 9 dirs) took 34m50s on a loaded Windows host, so set e.g. 3300000 with `SIMPLE_TIMEOUT_SECONDS=3600`.
+
+## Model variety live spec (2026-11-15, Windows, llvm-mingw shim)
+
+`test/03_system/lib/slang/feature/slang_model_variety_live_spec.spl` loads each model under
+`SLANG_MODEL_ROOT` through `engine_ensure_loaded` + `engine_complete_chat_observed` (chat template,
+greedy) and asserts a Paris / `def ` answer; absent models print SKIPPED_BY_ABSENCE and skip.
+`SLANG_GPU=1` selects the Vulkan pass (shim built with `LLAMA_BUILD_DIR=.../build-mingw-vulkan`)
+and asserts the shim reports offload. 7/7 pass on CPU and GPU. Qwen3-ASR-0.6B is NOT refused: it
+answers as a chat model (`language English<asr_text>The capital of France is Paris.`). Prompt
+tokens are not exposed by the engine observation (column n/a). Load time is 64-120 s per model
+for every size (`doc/08_tracking/bug/slang_model_load_fixed_overhead_70_100s_windows_2026-11-15.md`).
+Tokens/s below is meaningless for 1-2 token answers.
+
+| device | model | load ms | gen tok | gen ms | tok/s | answer |
+|---|---|---|---|---|---|---|
+| cpu | Qwen2.5-1.5B Q4_K_M | 88015 | 1 | 1505 | 0.6 | Paris |
+| cpu | Qwen2.5-Coder-7B (capital) | 67198 | 1 | 16561 | 0.0 | Paris |
+| cpu | Qwen2.5-Coder-7B (python) | 97686 | 96 | 40345 | 2.3 | ```python def add_numbers |
+| cpu | gemma-3-270m Q8_0 | 85433 | 2 | 1218 | 1.6 | Paris |
+| cpu | Llama-3.2-1B Q4_K_M | 73767 | 2 | 1312 | 1.5 | Paris. |
+| cpu | SmolVLM2-256M Q8_0 | 120456 | 24 | 325 | 73.8 | The capital of France is Paris... |
+| cpu | Qwen3-ASR-0.6B Q8_0 | 76604 | 10 | 2986 | 3.3 | language English<asr_text>...Paris. |
+| gpu | Qwen2.5-1.5B Q4_K_M | 87879 | 1 | 1306 | 0.7 | Paris |
+| gpu | Qwen2.5-Coder-7B (capital) | 74007 | 1 | 759 | 1.3 | Paris |
+| gpu | Qwen2.5-Coder-7B (python) | 64216 | 96 | 2874 | 33.4 | ```python def add_numbers |
+| gpu | gemma-3-270m Q8_0 | 76606 | 2 | 3271 | 0.6 | Paris |
+| gpu | Llama-3.2-1B Q4_K_M | 86591 | 2 | 494 | 4.0 | Paris. |
+| gpu | SmolVLM2-256M Q8_0 | 83498 | 24 | 199 | 120.6 | The capital of France is Paris... |
+| gpu | Qwen3-ASR-0.6B Q8_0 | 95035 | 10 | 424 | 23.5 | language English<asr_text>...Paris. |
+- Device forward pass (2026-11-15): `pure/llama_forward_rocm.spl` runs the stories15M Llama forward on the Radeon 8065S: `rocm_llama_load` (F32 byte-range upload once), `llama_step_rocm` (hidden state and per-layer K/V rows stay on the device; intermediates freed every step), `rocm_generate_greedy` (same prefix-reuse rule as `kv_cache.spl`, shared via `kv_reuse_len`; counts `positions_evaluated`). New device kernels in `tensor_ops_rocm.spl`: rope, kv_write (in place), row lookup, argmax (one i32 readback, never the 32000 logits). Spec: `slang_pure_rocm_generate_spec.spl` (GPU ids == CPU ids, reference text, prefix reuse, perf table in the log; needs `--timeout 3600` because the CPU leg is minutes on the seed). KV capacity is `min(max_position_embeddings, 1024)` (attention keeps scores in shared memory). `hip_compute.rocm_kernel` now destroys the hipRTC program on every path; the code-object buffer is deliberately kept (HIP docs do not say whether `hipModuleLoadData` copies it). `env_get` returns "" when unset, not None: `?? default` never fires.
+- Integration (2026-11-16): `/v1/completions` goes through the same dispatch as chat (`engine_complete_text`) and returns real usage counts; a media request to a pure-runner model is refused (text only), never routed to ggml. Pure/dispatch/variety system specs append evidence and `SKIPPED: <why>` lines to `build/probe/*_evidence.txt` because the runner counts skip() as passed (bug records in doc/08_tracking/bug).

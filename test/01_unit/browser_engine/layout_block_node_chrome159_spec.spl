@@ -19,7 +19,17 @@ Chrome oracle: the same pages and numbers as
 | a-width | `width:100px;margin-left:10px;margin-right:20px;height:30px` | 10,0,100,30 | 30 |
 | a-nested | parent `border:5px solid`; n1 `height:20px;margin-left:7px` > n2 `height:10px;margin:0 4px 0 3px;padding:2px` | n1 12,5,293,20; n2 15,5,286,14 | 30 |
 | f | `height:20px` + `display:none;height:99px;margin-top:40px` + `height:30px` | f3 at y=20 | 50 |
-| f-collapse | `height:20px;margin-bottom:10px` + `display:none;margin-top:50px` + `height:30px;margin-top:15px` | g3 at y=35 | 65 | `width:100px;padding:10px;height:20px` | 0,0,120,40 | 40 |
+| f-collapse | `height:20px;margin-bottom:10px` + `display:none;margin-top:50px` + `height:30px;margin-top:15px` | g3 at y=35 | 65 |
+| b | `width:100px;padding:10px;height:20px` | 0,0,120,40 | 40 |
+| auto-both | `width:100px;margin:0 auto;height:30px` | 100,0,100,30 | 30 |
+| auto-left | `width:100px;margin-left:auto;margin-right:20px;height:30px` | 180,0,100,30 | 30 |
+| auto-right | `width:100px;margin-left:10px;margin-right:auto;height:30px` | 10,0,100,30 | 30 |
+| auto-width | `margin:auto;height:30px` | 0,0,300,30 | 30 |
+| auto-single | `width:100px;margin:auto;height:30px` | 100,0,100,30 | 30 |
+| auto-overconstrained | `width:400px;margin:0 auto;height:30px` | 0,0,400,30 | 30 |
+| auto-nested | parent `border:5px solid`; child `width:100px;margin-left:auto;margin-right:auto;padding:10px;height:20px` | 95,5,120,40 | 50 |
+| auto-4value | `width:100px;margin:5px auto 0 20px;height:30px` | x=20, w=100 (y not pinned: Chrome collapses the 5px top margin through the parent) | 30 |
+| none-root | root `display:none;width:300px;height:40px;margin:0 auto` | root 0,0,0,0 | — |
 | c | `height:50px;padding:5px` | 0,0,300,60 | 60 |
 | d | `height:20px;margin-bottom:10px` + `height:30px;margin-top:15px` | d2 at y=35 | 65 |
 | e | `height:20px` + `height:30px` | e2 at y=20 | 50 |
@@ -35,9 +45,17 @@ f and f-collapse were red before the 2026-11-16 fix (engine gave a at
 0,0,300,30; a-nested n2 at 5,5,300; f and f-collapse kept the hidden child as a
 third box, parent heights 189 and 115).
 
-Not covered here (open `_layout_block_node` divergences): `margin:auto`
-centering (auto margins parse to 0), parent/child margin collapse, and a
-`display:none` layout root.
+The auto-* and none-root rows were measured with the same Chrome binary and
+page setup on 2026-11-16. auto-both, auto-left, auto-single, auto-nested,
+auto-parse and none-root were red before the 2026-11-16 `margin:auto` fix (auto
+margins parsed to 0 with no flag; a display:none root was laid out in full).
+auto-right, auto-width, auto-overconstrained and auto-4value already passed,
+because an auto margin that computes to 0 matches the old parse-as-0; they stay
+as regression guards for the new auto path.
+
+Not covered here (open `_layout_block_node` divergences): parent/child margin
+collapse, the layout root's own margins, and `width:0`/percent widths with auto
+margins (width 0 means auto here, so they never centre).
 """
 
 """
@@ -221,3 +239,130 @@ describe "layout_tree block box model (Chrome 159)":
         expect(box_.children.len()).to_equal(2)
         expect(box_.children[1].y).to_equal(35.0)
         expect(box_.height).to_equal(65.0)
+
+    it "auto-both: width:100px;margin:0 auto centres the block (leftover split equally)":
+        var p = _parent()
+        var c = _child("30px")
+        c.set_style("width", "100px")
+        c.set_style("margin", "0 auto")
+        p.add_child(c)
+        val box_ = _lay(p)
+        expect(box_.children[0].x).to_equal(100.0)
+        expect(box_.children[0].y).to_equal(0.0)
+        expect(box_.children[0].width).to_equal(100.0)
+        expect(box_.height).to_equal(30.0)
+
+    it "auto-left: only margin-left auto takes all the leftover space":
+        var p = _parent()
+        var c = _child("30px")
+        c.set_style("width", "100px")
+        c.set_style("margin-left", "auto")
+        c.set_style("margin-right", "20px")
+        p.add_child(c)
+        val box_ = _lay(p)
+        expect(box_.children[0].x).to_equal(180.0)
+        expect(box_.children[0].width).to_equal(100.0)
+
+    it "auto-right: only margin-right auto leaves the block at margin-left":
+        var p = _parent()
+        var c = _child("30px")
+        c.set_style("width", "100px")
+        c.set_style("margin-left", "10px")
+        c.set_style("margin-right", "auto")
+        p.add_child(c)
+        val box_ = _lay(p)
+        expect(box_.children[0].x).to_equal(10.0)
+        expect(box_.children[0].width).to_equal(100.0)
+
+    it "auto-width: auto margins on an auto-width block compute to 0":
+        var p = _parent()
+        var c = _child("30px")
+        c.set_style("margin", "auto")
+        p.add_child(c)
+        val box_ = _lay(p)
+        expect(box_.children[0].x).to_equal(0.0)
+        expect(box_.children[0].y).to_equal(0.0)
+        expect(box_.children[0].width).to_equal(300.0)
+        expect(box_.height).to_equal(30.0)
+
+    it "auto-single: margin:auto with an explicit width centres like 0 auto":
+        var p = _parent()
+        var c = _child("30px")
+        c.set_style("width", "100px")
+        c.set_style("margin", "auto")
+        p.add_child(c)
+        val box_ = _lay(p)
+        expect(box_.children[0].x).to_equal(100.0)
+        expect(box_.children[0].y).to_equal(0.0)
+
+    it "auto-overconstrained: a block wider than its container gets 0 auto margins":
+        var p = _parent()
+        var c = _child("30px")
+        c.set_style("width", "400px")
+        c.set_style("margin", "0 auto")
+        p.add_child(c)
+        val box_ = _lay(p)
+        expect(box_.children[0].x).to_equal(0.0)
+        expect(box_.children[0].width).to_equal(400.0)
+
+    it "auto-nested: a padded block centres inside a bordered parent's content box":
+        var p = _parent()
+        p.style.border_width = 5.0
+        var c = _child("20px")
+        c.set_style("width", "100px")
+        c.set_style("margin-left", "auto")
+        c.set_style("margin-right", "auto")
+        c.set_style("padding", "10px")
+        p.add_child(c)
+        val box_ = _lay(p)
+        expect(box_.children[0].x).to_equal(95.0)
+        expect(box_.children[0].y).to_equal(5.0)
+        expect(box_.children[0].width).to_equal(120.0)
+        expect(box_.children[0].height).to_equal(40.0)
+        expect(box_.height).to_equal(50.0)
+
+    it "auto-4value: margin:5px auto 0 20px keeps the 20px left and the right auto":
+        var p = _parent()
+        var c = _child("30px")
+        c.set_style("width", "100px")
+        c.set_style("margin", "5px auto 0 20px")
+        p.add_child(c)
+        val box_ = _lay(p)
+        expect(box_.children[0].x).to_equal(20.0)
+        expect(box_.children[0].width).to_equal(100.0)
+
+    it "auto-parse: the margin shorthand and longhands record auto per side":
+        var a = BeDomNode.element("div")
+        a.set_style("margin", "0 auto")
+        expect(a.style.margin_left_auto).to_equal(true)
+        expect(a.style.margin_right_auto).to_equal(true)
+        var b = BeDomNode.element("div")
+        b.set_style("margin", "1px 2px 3px 4px")
+        expect(b.style.margin_left_auto).to_equal(false)
+        expect(b.style.margin_right_auto).to_equal(false)
+        expect(b.style.margin_top).to_equal(1.0)
+        expect(b.style.margin_right).to_equal(2.0)
+        expect(b.style.margin_bottom).to_equal(3.0)
+        expect(b.style.margin_left).to_equal(4.0)
+        var c = BeDomNode.element("div")
+        c.set_style("margin-left", "auto")
+        c.set_style("margin-right", "7")
+        expect(c.style.margin_left_auto).to_equal(true)
+        expect(c.style.margin_right_auto).to_equal(false)
+        expect(c.style.margin_right).to_equal(7.0)
+        c.set_style("margin-left", "3px")
+        expect(c.style.margin_left_auto).to_equal(false)
+        expect(c.style.margin_left).to_equal(3.0)
+
+    it "none-root: a display:none layout root generates a 0x0 box with no children":
+        var r = BeDomNode.element("div")
+        r.set_style("display", "none")
+        r.set_style("width", "300px")
+        r.set_style("height", "40px")
+        r.add_child(_child("20px"))
+        val box_ = _lay(r)
+        expect(box_.x).to_equal(0.0)
+        expect(box_.y).to_equal(0.0)
+        expect(box_.width).to_equal(0.0)
+        expect(box_.height).to_equal(0.0)
+        expect(box_.children.len()).to_equal(0)

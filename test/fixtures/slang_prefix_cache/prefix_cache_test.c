@@ -246,10 +246,12 @@ int main(void) {
     /* The full-first-micro-batch rule is off for a model with no offloaded
      * layers: nothing is warmed up and no reuse is given back. */
     mock_llama_set_n_ubatch(4);
+    /* A cold prompt is two decodes: everything but the last token, then the
+     * last token alone (same batch shape as a prefix hit). No warm-up decode. */
     int64_t decodes = mock_llama_decode_calls();
     int64_t cpu_tiny = slang_ggml_request_create(32);
     request_prefill(cpu_tiny, "ab", 0);
-    assert(mock_llama_decode_calls() == decodes + 1);
+    assert(mock_llama_decode_calls() == decodes + 2);
     assert(slang_ggml_request_close(cpu_tiny) == 0);
     int64_t cpu_seeded = slang_ggml_request_create(32);
     request_prefill(cpu_seeded, "warmup", 0);
@@ -298,7 +300,7 @@ int main(void) {
     decodes = mock_llama_decode_calls();
     int64_t whole = slang_ggml_request_create(32);
     request_prefill(whole, "zz", 0);
-    assert(mock_llama_decode_calls() == decodes + 1);
+    assert(mock_llama_decode_calls() == decodes + 2);
     assert(slang_ggml_request_close(whole) == 0);
     mock_llama_set_n_ubatch(1);
     assert(slang_ggml_free() == 0);
@@ -312,7 +314,7 @@ int main(void) {
     decodes = mock_llama_decode_calls();
     int64_t no_gpu_tiny = slang_ggml_request_create(32);
     request_prefill(no_gpu_tiny, "ab", 0);
-    assert(mock_llama_decode_calls() == decodes + 1);
+    assert(mock_llama_decode_calls() == decodes + 2);
     assert(slang_ggml_request_close(no_gpu_tiny) == 0);
     int64_t no_gpu_seeded = slang_ggml_request_create(32);
     request_prefill(no_gpu_seeded, "warmup", 0);

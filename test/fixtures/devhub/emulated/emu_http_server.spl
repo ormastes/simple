@@ -23,6 +23,7 @@
 #   header-assert: Name=exact | Name^prefix | !Name (must be absent) | @sigv4=AK:SECRET:REGION
 #   body-assert:   any | none | eq:<text> | has:<a> ;; <b>
 #   body:          @relative/file | literal text; __EMU_BASE__ -> http://host:port
+#                  hex:<xx xx ..> sends those raw bytes (non-UTF-8 bodies)
 #   mode:          - | truncate (Content-Length past the real body) | drop (close, no bytes)
 # POST /__emu/shutdown ends the process.
 
@@ -199,16 +200,28 @@ fn reason_phrase(status: i64) -> text:
     "Emulator Mismatch"
 
 fn send_response(stream: TcpStream, status: i64, resp_headers: [text], body: text, mode: text):
+    send_response_bytes(stream, status, resp_headers, text_to_utf8_bytes(body), mode)
+
+fn send_response_bytes(stream: TcpStream, status: i64, resp_headers: [text], body: [u8], mode: text):
     if mode == "drop":
         return
-    val body_len = text_to_utf8_bytes(body).len()
+    val body_len = body.len()
     val declared = if mode == "truncate": body_len + 4096 else: body_len
     var head = "HTTP/1.1 {status} {reason_phrase(status)}\r\n"
     for h in resp_headers:
         head = head + h + "\r\n"
     head = head + "Content-Length: {declared}\r\nConnection: close\r\n\r\n"
-    val _ = stream.write_text(head + body)
+    val _ = stream.write_all(text_to_utf8_bytes(head) + body)
     val _f = stream.flush()
+
+fn hex_bytes(spec: text) -> [u8]:
+    """Raw response bytes from space-separated hex pairs, for bodies text cannot carry."""
+    val digits = "0123456789abcdef"
+    var out: [u8] = []
+    for pair in spec.split(" "):
+        if pair.len() == 2:
+            out = out + [(digits.find(pair[0:1]) * 16 + digits.find(pair[1:2])).to_u8()]
+    out
 
 fn load_body(field: text, fixtures: text, origin: text) -> text:
     if field == "-" or field == "":
@@ -271,6 +284,9 @@ fn serve_one(stream: TcpStream, state: State, script_path: text, fixtures: text)
         for failure in failures:
             state.note("MISMATCH\t{gen_id}\t{index}\t{failure}")
         send_response(stream, 599, [], "emu: client request mismatch", "-")
+        return true
+    if row[6].starts_with("hex:"):
+        send_response_bytes(stream, row[4].to_i64(), split_list(row[5]), hex_bytes(row[6][4:]), row[7])
         return true
     send_response(stream, row[4].to_i64(), split_list(row[5]), load_body(row[6], fixtures, origin), row[7])
     true

@@ -1,0 +1,216 @@
+"""
+## Purpose and audience
+Pins milestone_0021 PR2, the V4-native installed agent owner
+(`.spipe/simple_orchestrator/continuation_20261116/milestone_0021_agent_owner_v4/DESIGN.md`):
+the workspace-root loan and lent transfer on the fresh-epoch admission owner
+(`src/lib/nogc_sync_mut/container/machine_authority_v1.spl`, DESIGN 3.1/3.2/3.2a),
+the signed agent fields of the draft and association (section 4), the
+enrollment-pinned agent helper template (F15 (B)), the associated Host settle
+(3.6) and the `host_agent_invoke_v4` owner gates (section 2). Written for owners
+of the Linux Host service and the fresh-epoch machine authority.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-16).
+## Compatibility and limitations
+Every lender here is DATA: each case returns before `current_v1`, a reader open
+or any native slot is touched, exactly as S40-LOAN-06 does. Cases that need a
+genuine admitted epoch, installed roots and a real runtime are S40-AGENT-10
+(test/03_system/lib/container/linux_service_agent_chain_v4_spec.spl) or the
+structural pins in host_linux_service_agent_v4_structure_spec.spl.
+## Verification guidance and troubleshooting
+Each refusal names the exact error. A case that reaches a native slot fails
+with a stale/closed slot error instead of the named refusal: that is a gate
+ORDER regression, not a flake.
+"""
+use std.spec.{step, fail}
+use test.fixtures.orchestration.host_linux_service_verifier_fixture_v1.*
+use std.nogc_sync_mut.container.machine_authority_v1.{MachineFreshEpochAdmissionOwnerV1, MachineFreshWorkloadTransferV2}
+use std.nogc_sync_mut.container.machine_fresh_epoch_lifecycle_v1.MachineFreshEpochLifecycleV1
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.MachineFreshEpochRecordV1
+use std.nogc_sync_mut.container.machine_fresh_workload_lifecycle_v2.MachineFreshWorkloadLifecycleV2
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.{LinuxMachinePolicyOwnerV1, LinuxMachineStorageV1}
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_owner_v1.LinuxFreshEpochSuccessorCustodyV1
+use std.nogc_sync_mut.io.linux_service_native_identity_v3.{LinuxServiceNativeIdentityBorrowV3, LinuxServiceNativeIdentitySnapshotV3}
+use std.nogc_async_mut.container.providers.linux.workspace_root_borrow_v3.LinuxWorkspaceRootBorrowV3
+use std.common.contracts.container.execution_draft_v3.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.orchestration.host_execution_association_v3.*
+use std.common.contracts.orchestration.host_linux_service_enrollment_v3.*
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.{HostServiceDomainV3, host_service_domain_turn_v3}
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.{HostServiceRequestV2, host_service_request_error_v2}
+use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.HostLinuxServiceCurrentV4
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostAgentInvokeRequestV4,
+    host_agent_invoke_request_encode_v4, host_agent_invoke_request_decode_v4}
+
+fn a40_record() -> MachineFreshEpochRecordV1:
+    MachineFreshEpochRecordV1(authority_id: "machine_1", physical_host_id: "host_1",
+        native_machine_id: "linux-machine-id-v1:1234", epoch_id: "installed_epoch_1", epoch_generation: 7,
+        profile_digest: "a".repeat(64), machine_policy_digest: "b".repeat(64), process_identity_digest: "c".repeat(64),
+        principal_id: "linux:uid:20001", service_uid: 20001, service_gid: 20001, manager_unique_name: ":1.23",
+        partition_identity_digest: "d".repeat(64), store_identity_digest: "e".repeat(64),
+        provider_policy_digest: "f".repeat(64), provider_identity_digest: "1".repeat(64),
+        capacity_cpu_millis: 8000, capacity_memory_bytes: 8192, observed_cpu_millis: 4000, observed_memory_bytes: 4096,
+        reserved_cpu_millis: 500, reserved_memory_bytes: 512, outside_cpu_millis: 4000, outside_memory_bytes: 4096,
+        usable_cpu_millis: 3500, usable_memory_bytes: 3584)
+
+# DATA lender: no authority, a synthetic custody handle, an unopened lifecycle slot.
+fn a40_lender(service_loaned: bool, store_loaned: bool, root_loaned: bool) -> MachineFreshEpochAdmissionOwnerV1:
+    var lender = MachineFreshEpochAdmissionOwnerV1(authority: None,
+        custody: Some(LinuxFreshEpochSuccessorCustodyV1(slot: 4, generation: 1)),
+        record: a40_record(), initial_commit: "", custody_generation: 1,
+        lifecycle: MachineFreshEpochLifecycleV1(slot: -1, generation: 0), error: "",
+        service_reader: Some(LinuxMachinePolicyOwnerV1(slot: 3, generation: 1)), service_loaned: service_loaned)
+    lender.store_inventory_loaned = store_loaned
+    lender.workspace_root_loaned = root_loaned
+    lender
+
+fn a40_native(reader_generation: i64) -> LinuxServiceNativeIdentityBorrowV3:
+    val fixture = linux_service_verifier_fixture_v1()
+    LinuxServiceNativeIdentityBorrowV3(reader: LinuxMachinePolicyOwnerV1(slot: 3, generation: reader_generation),
+        successor: LinuxFreshEpochSuccessorCustodyV1(slot: 4, generation: 1),
+        expected: LinuxServiceNativeIdentitySnapshotV3(native_machine_id: fixture.binding.native_machine_id,
+            native_boot_id: "native-boot", architecture: "x86_64", owner_generation: 41, process_identity_digest: "e".repeat(64),
+            process_generation: 2, authority_namespace_id: "namespace_1"))
+
+fn a40_root() -> LinuxWorkspaceRootBorrowV3:
+    LinuxWorkspaceRootBorrowV3(reader: LinuxMachinePolicyOwnerV1(slot: 9, generation: 1),
+        storage: LinuxMachineStorageV1(slot: 5, generation: 1))
+
+fn a40_draft() -> ContainerExecutionDraftV3:
+    ContainerExecutionDraftV3("linux-podman", "workload_1", 1, "operation_2", "a".repeat(64), "requestBytes: 1\n")
+
+describe "V4 agent owner: lender, transfer and signed fields (milestone_0021 PR2)":
+    it "lends the workspace root only inside the service loan, after the handoff, once":
+        # @req S40-AGENT-01 (second lend while loaned), S40-AGENT-07 (gate order before any reader open)
+        step("no service loan")
+        expect(a40_lender(false, false, false).lend_workspace_root_v1().error).to_equal("machine-fresh-epoch-workspace-root-service-loan-inactive")
+        step("the store inventory is still lent (before the PR1 handoff)")
+        expect(a40_lender(true, true, false).lend_workspace_root_v1().error).to_equal("machine-fresh-epoch-store-inventory-loan-active")
+        step("a second lend while loaned")
+        val second = a40_lender(true, false, true).lend_workspace_root_v1()
+        expect(second.error).to_equal("machine-fresh-epoch-workspace-root-loan-active")
+        expect(second.root.is_none()).to_equal(true)
+        step("a retained R3 from a failed lend is not retryable")
+        var retained = a40_lender(true, false, false)
+        retained.workspace_reader = Some(LinuxMachinePolicyOwnerV1(slot: 9, generation: 1))
+        expect(retained.lend_workspace_root_v1().error).to_equal("machine-fresh-epoch-workspace-root-loan-consumed")
+        step("a consumed lender (no authority)")
+        expect(a40_lender(true, false, false).lend_workspace_root_v1().error).to_equal("machine-fresh-epoch-service-loan-lender-consumed")
+        step("a second service lend while loaned is still refused (S40-LOAN-06 unchanged)")
+        expect(a40_lender(true, false, false).lend_service_identity_v1().error).to_equal("machine-fresh-epoch-service-loan-active")
+
+    it "ends the workspace-root loan only with the exact lent borrow":
+        # @req S40-AGENT-07 (N-05/U-06 loan end)
+        val inactive = a40_lender(true, false, false).end_workspace_root_loan_v1(a40_root())
+        expect(inactive.error).to_equal("machine-fresh-epoch-workspace-root-loan-inactive")
+        expect(inactive.root.is_some()).to_equal(true)
+        val lenderless = a40_lender(true, false, true).end_workspace_root_loan_v1(a40_root())
+        expect(lenderless.error).to_equal("machine-fresh-epoch-service-loan-lender-consumed")
+        expect(lenderless.owner.workspace_root_loaned).to_equal(true)
+        expect(lenderless.root.is_some()).to_equal(true)
+
+    it "refuses the lent transfer without the loans or with a foreign identity borrow":
+        # @req S40-AGENT-03 (transfer gates), S40-AGENT-01 (once-lent provider start unchanged)
+        expect(a40_lender(false, false, true).transfer_workload_lent_v3(a40_native(1)).error).to_equal("machine-fresh-epoch-service-loan-inactive")
+        expect(a40_lender(true, true, true).transfer_workload_lent_v3(a40_native(1)).error).to_equal("machine-fresh-epoch-store-inventory-loan-active")
+        expect(a40_lender(true, false, false).transfer_workload_lent_v3(a40_native(1)).error).to_equal("machine-fresh-epoch-workspace-root-loan-required")
+        val foreign = a40_lender(true, false, true).transfer_workload_lent_v3(a40_native(2))
+        expect(foreign.error).to_equal("machine-fresh-epoch-service-loan-foreign-borrow")
+        expect(foreign.owner.is_none()).to_equal(true)
+        expect(foreign.retained.unwrap().workspace_root_loaned).to_equal(true)
+        step("the V7 transfer still refuses every lent or once-lent owner")
+        expect(a40_lender(true, false, true).transfer_workload_v2().error).to_equal("machine-fresh-epoch-service-loan-active")
+
+    it "keeps every loan blocking the epoch and transfer closes":
+        # @req S40-AGENT-01 (transfer close_v2 refused while N is lent), S40-AGENT-07
+        val epoch_close = a40_lender(false, false, true).close_v1()
+        expect(epoch_close.error).to_equal("machine-fresh-epoch-workspace-root-loan-active")
+        expect(epoch_close.closed).to_equal(false)
+        val transfer = MachineFreshWorkloadTransferV2(admission: a40_lender(true, false, false),
+            state: MachineFreshWorkloadLifecycleV2(slot: -1, generation: 0), error: "")
+        expect(transfer.close_v2().error).to_equal("machine-fresh-epoch-service-loan-active")
+        var rooted = transfer
+        rooted.admission.service_loaned = false
+        rooted.admission.workspace_root_loaned = true
+        expect(rooted.close_v2().error).to_equal("machine-fresh-epoch-workspace-root-loan-active")
+        step("the epoch gate of a transfer reads the epoch only and refuses a consumed owner")
+        expect(transfer.epoch_current_v3().unwrap_err()).to_equal("machine-fresh-workload-owner-closing")
+
+    it "signs the read-only root and both agent digests only when set, keeping legacy bytes":
+        # @req S40-AGENT-05 (codec round trip and legacy digest pin)
+        val legacy = a40_draft()
+        val legacy_bytes = container_execution_draft_encode_v3(legacy).unwrap()
+        expect(legacy_bytes.contains("readonlyRootfs")).to_equal(false)
+        expect(legacy_bytes.contains("agentInvocationManifestDigest")).to_equal(false)
+        expect(container_execution_draft_decode_v3(legacy_bytes).unwrap().readonly_rootfs).to_equal(false)
+        var agent = legacy
+        agent.readonly_rootfs = true
+        agent.agent_invocation_manifest_digest = "b".repeat(64)
+        agent.agent_probe_list_digest = "c".repeat(64)
+        val agent_bytes = container_execution_draft_encode_v3(agent).unwrap()
+        val decoded = container_execution_draft_decode_v3(agent_bytes).unwrap()
+        expect(decoded.readonly_rootfs).to_equal(true)
+        expect(decoded.agent_invocation_manifest_digest).to_equal("b".repeat(64))
+        expect(decoded.agent_probe_list_digest).to_equal("c".repeat(64))
+        expect(container_execution_draft_digest_v3(agent).unwrap() != container_execution_draft_digest_v3(legacy).unwrap()).to_equal(true)
+        step("an invalid set digest is refused; a present default key is non-canonical")
+        var bad = legacy
+        bad.agent_probe_list_digest = "short"
+        expect(container_execution_draft_encode_v3(bad).unwrap_err()).to_equal("associated-agent-digest")
+        val stuffed = legacy_bytes.replace("attempt: 1", "agentProbeListDigest: \"\"\n  attempt: 1")
+        expect(container_execution_draft_decode_v3(stuffed).is_err()).to_equal(true)
+
+    it "requires the enrollment-pinned agent helper template digest":
+        # @req S40-AGENT-08 (F15 (B) signed field)
+        val binding = linux_service_verifier_fixture_v1().binding
+        expect(binding.agent_helper_template_digest.byte_len()).to_equal(64)
+        val bytes = host_linux_service_enrollment_encode_v3(binding).unwrap()
+        expect(bytes.contains("agentHelperTemplateDigest")).to_equal(true)
+        expect(host_linux_service_enrollment_decode_v3(bytes).unwrap().agent_helper_template_digest).to_equal(binding.agent_helper_template_digest)
+        var unpinned = binding
+        unpinned.agent_helper_template_digest = ""
+        expect(host_linux_service_enrollment_encode_v3(unpinned).unwrap_err()).to_equal("linux-host-service-enrollment-digest-invalid")
+        val stripped = bytes.replace("  agentHelperTemplateDigest: \"" + binding.agent_helper_template_digest + "\"\n", "")
+        expect(host_linux_service_enrollment_decode_v3(stripped).is_err()).to_equal(true)
+
+fn a40_unpublished_domain() -> HostServiceDomainV3:
+    HostServiceDomainV3(HostLocalRootV3.LinuxService(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service")))
+
+fn a40_invoke(operation_id: text) -> text:
+    host_agent_invoke_request_encode_v4(HostAgentInvokeRequestV4(operation_id: operation_id, manifest: "manifest: 1\n")).unwrap()
+
+describe "V4 agent owner: invoke wire and route (milestone_0021 PR2)":
+    it "round-trips the canonical invoke request and refuses malformed ones":
+        # @req S40-AGENT-02 (signed-request wire)
+        val decoded = host_agent_invoke_request_decode_v4(a40_invoke("op_1")).unwrap()
+        expect(decoded.operation_id).to_equal("op_1")
+        expect(decoded.manifest).to_equal("manifest: 1\n")
+        expect(host_agent_invoke_request_encode_v4(HostAgentInvokeRequestV4(operation_id: "", manifest: "m")).is_err()).to_equal(true)
+        expect(host_agent_invoke_request_encode_v4(HostAgentInvokeRequestV4(operation_id: "op_1", manifest: "")).is_err()).to_equal(true)
+        expect(host_agent_invoke_request_decode_v4("version: 3\n").is_err()).to_equal(true)
+
+    it "routes host-agent-invoke on the LinuxService arm only and validates it before any effect":
+        # @req S40-AGENT-02 (N-07 route; unsigned/foreign action), S40-AGENT-04 (refused before a current owner)
+        step("the V2 validator, used first by the V2 Linux and Windows arms, still refuses the action")
+        expect(host_service_request_error_v2(HostServiceRequestV2("host-agent-invoke", "op_1", a40_invoke("op_1")))).to_equal("host-service-action-unsupported")
+        step("bad operation id, empty payload and a payload naming another operation are plain refusals (1)")
+        val bad = host_service_domain_turn_v3(a40_unpublished_domain(), HostServiceRequestV2("host-agent-invoke", "", a40_invoke("op_1")))
+        expect(bad.exit_code).to_equal(1)
+        expect(bad.response.contains("host-service-operation-invalid")).to_equal(true)
+        val empty = host_service_domain_turn_v3(a40_unpublished_domain(), HostServiceRequestV2("host-agent-invoke", "op_1", ""))
+        expect(empty.exit_code).to_equal(1)
+        expect(empty.response.contains("host-service-payload-size")).to_equal(true)
+        val foreign = host_service_domain_turn_v3(a40_unpublished_domain(), HostServiceRequestV2("host-agent-invoke", "op_1", a40_invoke("op_2")))
+        expect(foreign.exit_code).to_equal(1)
+        expect(foreign.response.contains("host-service-agent-invoke-operation-mismatch")).to_equal(true)
+        step("a valid request over an owner that is not current needs recovery (2) and returns the same owner")
+        val unpublished = host_service_domain_turn_v3(a40_unpublished_domain(), HostServiceRequestV2("host-agent-invoke", "op_1", a40_invoke("op_1")))
+        expect(unpublished.exit_code).to_equal(2)
+        expect(unpublished.response.contains("linux-host-service-current-unpublished")).to_equal(true)
+        match unpublished.owner.local:
+            case HostLocalRootV3.LinuxService(owner):
+                expect(owner.root).to_equal("/nonexistent/linux-service")
+                expect(owner.agent.is_none()).to_equal(true)
+            case _: expect("other-arm").to_equal("linux-service")

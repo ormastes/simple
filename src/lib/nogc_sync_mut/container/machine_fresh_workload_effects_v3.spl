@@ -28,6 +28,7 @@ use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure, time_samp
 use std.nogc_sync_mut.io.process_ops.{process_spawn_piped_owned_v2, PipedProcessOwnedSpawnV2}
 use std.nogc_sync_mut.io.group_process_owner.{group_process_stream_poll_v2, group_process_stream_terminal_v2}
 use std.nogc_sync_mut.database.wal.WalEntry
+use std.nogc_sync_mut.io.dir_entry_ops.dir_create_private_exclusive_v1
 
 pub(package) fn workload_publish_v3(storage: MachineStorageOwnerV1, state: MachineFreshWorkloadLifecycleV2,
         entries: [WalEntry]) -> Result<(), text>:
@@ -60,6 +61,10 @@ pub(package) fn machine_fresh_workload_begin_v3(storage: MachineStorageOwnerV1,
     val command = state.command_v2(action, name)?
     var template = state.template_v2()?
     template.root = template.root + "-" + name
+    # milestone_0021 3.4 step 4 (r7 X-01): the begin itself creates (or adopts an empty private) action directory
+    # BEFORE the bind, action_begin_v2 and the publish, so a refusal is a pre-row Err (nothing published, not Unknown).
+    dir_create_private_exclusive_v1(template.root)?
+    state.record_helper_dir_v3(template.root)?
     val binding = state.workspace_binding_option_v3()?
     var launch = machine_fresh_launch_bind_v3(custody, record, binding, command, template)?
     val valid = machine_fresh_launch_validate_v3(custody, record, binding, command, launch)?
@@ -183,6 +188,24 @@ pub(package) fn machine_fresh_workload_settle_cpu_v3(storage: MachineStorageOwne
     if state.settled_v2()?: return Ok(())
     val record = state.record_v3()?
     val cpu_only = machine_fresh_record_cpu_v3(record)?
+    val absence = state.action_state_v2("absence")?
+    if absence.state != "completed": return Err("machine-fresh-workload-absence-unproven")
+    val command = machine_fresh_record_command_v3(record, LinuxFreshWorkloadActionV2.Absence, state.native_id_v2()?)?
+    val native = machine_fresh_absence_observe_v3(custody, record, state.workspace_binding_option_v3()?, command)?
+    val bound = state.validate_closure_v2(native)?
+    val committed = workload_publish_v3(storage, state, state.prepare_settlement_v2(record, absence, time_sample_unix_micros_or_failure() / 1000)?)?
+    state.mark_settled_v2()
+
+
+# T-01 sibling of machine_fresh_workload_settle_cpu_v3 (which stays byte-unchanged): the same body with the CpuV2
+# requirement replaced by a WorkspaceV3 one. prepare_settlement_v2 dispatches WorkspaceV3 to the workspace settle
+# entries; the gates (absence completed and re-observed, associated, helper retired, native retained, not
+# uncertain, permit idle) are all in this body or the dispatch.
+pub(package) fn machine_fresh_workload_settle_workspace_v3(storage: MachineStorageOwnerV1,
+        custody: LinuxFreshEpochSuccessorCustodyV1, state: MachineFreshWorkloadLifecycleV2) -> Result<(), text>:
+    if state.settled_v2()?: return Ok(())
+    val record = state.record_v3()?
+    if machine_fresh_record_workspace_v3(record).is_err(): return Err("machine-fresh-workspace-settle-not-workspace")
     val absence = state.action_state_v2("absence")?
     if absence.state != "completed": return Err("machine-fresh-workload-absence-unproven")
     val command = machine_fresh_record_command_v3(record, LinuxFreshWorkloadActionV2.Absence, state.native_id_v2()?)?

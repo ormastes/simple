@@ -1,0 +1,47 @@
+# Native benchmark driver for the internal ELF linker (jobs/RSS budget lane).
+# Built and run by test/05_perf/compiler/linker/elf_link_rss_budget.shs.
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
+
+use compiler.backend.linker.elf.elf_static_link.{ElfLinkRequest, elf_link, ELF_LINK_STATIC_EXEC}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_read_bytes, file_write_bytes, env_get, time_now_monotonic_ms}
+use compiler.backend.linker.elf.byte_buffers.{elf_u8_from_i64, elf_i64_from_u8}
+
+fn arch_of(a: text) -> RelocArch:
+    if a == "aarch64": return RelocArch.AArch64
+    if a == "riscv64": return RelocArch.Riscv64
+    if a == "i686" or a == "i686pic": return RelocArch.I386
+    if a == "armv7" or a == "armv7soft": return RelocArch.Arm32
+    RelocArch.X86_64
+
+fn main():
+    val dir = env_get("LDIR")
+    val out = env_get("LOUT")
+    val jobs = if env_get("LJOBS") == "": 1 else: env_get("LJOBS").to_int() ?? 1
+    val reps = if env_get("LREPS") == "": 1 else: env_get("LREPS").to_int() ?? 1
+    for a in env_get("LARCHS").split(","):
+        var objs: [[i64]] = []
+        val inputs = env_get("LINPUTS")
+        if inputs == "":
+            objs.push(elf_i64_from_u8(file_read_bytes("{dir}/hello.{a}.o")))
+            objs.push(elf_i64_from_u8(file_read_bytes("{dir}/helper.{a}.o")))
+        else:
+            for p in inputs.split(","): objs.push(elf_i64_from_u8(file_read_bytes(p)))
+        var best: i64 = 999999999
+        var img: [i64] = []
+        var rep: i64 = 0
+        while rep < reps:
+            val t0 = time_now_monotonic_ms()
+            val r = elf_link(ElfLinkRequest(objects: objs, archives: [], shared: [], entry: "_start",
+                target: arch_of(a), mode: ELF_LINK_STATIC_EXEC, interp: "", jobs: jobs))
+            val t1 = time_now_monotonic_ms()
+            if r.is_err():
+                print("LINK-ERR {a}: {r.unwrap_err()}")
+                return
+            img = r.unwrap()
+            if t1 - t0 < best: best = t1 - t0
+            rep = rep + 1
+        file_write_bytes("{out}/int.j{jobs}.{a}", elf_u8_from_i64(img))
+        print("LINK-OK {a} jobs={jobs} bytes={img.len()} best_ms={best}")
+
+main()

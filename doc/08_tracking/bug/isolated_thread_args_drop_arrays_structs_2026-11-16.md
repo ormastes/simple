@@ -1,6 +1,6 @@
 # Isolated threads cannot carry arrays/structs as arguments or struct results (2026-11-16)
 
-Status: open (workaround in place)
+Status: open — interpreter only (native verified working 2026-11-16)
 
 ## Defect
 
@@ -42,3 +42,22 @@ through `join`, and the owner merges the results in range order.
 
 Deep-copy (or move) array/struct arguments into the isolated worker, and
 transfer struct/array results and channel messages the same way.
+
+## Native re-check (2026-11-16, after #9843)
+
+I built the probes natively with the seed `native-build` on Windows x86_64 and ran them:
+
+| probe | native result |
+|---|---|
+| `thread_spawn_with_args([1,2,3,4], 7, worker)` | `[10, 7, 4]` (works) |
+| struct arg `Box2(xs: [5,6], name: "abc")` | `[11, 9, 3]` (works) |
+| 4 workers return a struct `{[i64], text, [[u8]]}` through `extern rt_thread_join(h) -> Box2?` | all four arrive intact (works) |
+
+The C spawn path shares the argument words, so arrays and structs go into
+and come back from native isolated threads. The defect remains only in the
+interpreter (`InterpreterThreadState::capture`). In the interpreter,
+`elf_par_run` returns Err and the linker falls back to serial. Probes:
+`build/elfpar/argprobe.spl`, `build/elfpar/argprobe2.spl` (local).
+
+The ELF linker does not use parallel object parsing. Parse takes 0.24 s of
+a 6–9 s link, and the interpreter would still run it serially.

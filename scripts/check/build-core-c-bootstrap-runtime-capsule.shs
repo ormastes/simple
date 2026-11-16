@@ -600,6 +600,25 @@ grep -q '^SELFCHECK PASSED (0 failures)$' "$PROMOTE_SHARE_SELF_CHECK_LOG" ||
     die "rt-transient-promote-share-selfcheck-receipt-missing"
 record_check
 
+# Lock-free sharded heap-registry reads under concurrent writers. The probe
+# #includes runtime_native.c, so it links standalone (no archive) with dead
+# code stripped, like check-allocation-registry-churn.shs.
+REGISTRY_LOCKFREE_SELF_CHECK_BIN="$TMP_DIR/rt_immortal_registry_lockfree_read_selfcheck"
+REGISTRY_LOCKFREE_SELF_CHECK_LOG="$TMP_DIR/rt_immortal_registry_lockfree_read_selfcheck.out"
+REGISTRY_LOCKFREE_STRIP="-Wl,--gc-sections"
+[ "$PLATFORM" != "Darwin" ] || REGISTRY_LOCKFREE_STRIP="-Wl,-dead_strip"
+# shellcheck disable=SC2086
+"$CC_PATH" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+    "$RUNTIME_DIR/test/rt_immortal_registry_lockfree_read_selfcheck.c" \
+    $REGISTRY_LOCKFREE_STRIP $SELF_CHECK_LIBS -o "$REGISTRY_LOCKFREE_SELF_CHECK_BIN" \
+    >"$TMP_DIR/rt_immortal_registry_lockfree_read_selfcheck.link.out" 2>&1 ||
+    die "rt-immortal-registry-lockfree-read-selfcheck-link-failed"
+"$REGISTRY_LOCKFREE_SELF_CHECK_BIN" >"$REGISTRY_LOCKFREE_SELF_CHECK_LOG" 2>&1 ||
+    die "rt-immortal-registry-lockfree-read-selfcheck-failed"
+grep -q '^PASS: lock-free registry reads' "$REGISTRY_LOCKFREE_SELF_CHECK_LOG" ||
+    die "rt-immortal-registry-lockfree-read-selfcheck-receipt-missing"
+record_check
+
 ENUM_UNIT_SINGLETON_SELF_CHECK_BIN="$TMP_DIR/rt_enum_unit_variant_scope_singleton_selfcheck"
 ENUM_UNIT_SINGLETON_SELF_CHECK_LOG="$TMP_DIR/rt_enum_unit_variant_scope_singleton_selfcheck.out"
 # shellcheck disable=SC2086
@@ -687,7 +706,7 @@ record_check
 # A run that reached here having executed fewer checks than the capsule
 # declares is a vacuous pass, not a pass. The floor is raised whenever a
 # check is added; it is never lowered to make a run green.
-CHECKS_EXPECTED=67
+CHECKS_EXPECTED=68
 [ "$CHECKS_RUN" = "$CHECKS_EXPECTED" ] ||
     die "checks-executed-below-floor:$CHECKS_RUN/$CHECKS_EXPECTED"
 
@@ -745,6 +764,7 @@ MANIFEST="$TMP_DIR/capsule.manifest"
     echo "rt_transient_heap_scope_selfcheck=pass"
     echo "rt_transient_heap_scope_selfcheck_output_sha256=$(hash_file "$TRANSIENT_SELF_CHECK_LOG")"
     echo "rt_transient_promote_share_selfcheck=pass"
+    echo "rt_immortal_registry_lockfree_read_selfcheck=pass"
     echo "rt_enum_unit_variant_scope_singleton_selfcheck=pass"
     echo "rt_transient_heap_thread_affinity_selfcheck=pass"
     echo "rt_transient_heap_thread_affinity_selfcheck_output_sha256=$(hash_file "$THREAD_AFFINITY_SELF_CHECK_LOG")"

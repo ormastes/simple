@@ -24,6 +24,8 @@ pub struct LinuxServiceVerifierFixtureV1:
     configuration: text
     engine_policy: text
     broker_policy: text
+    # milestone_0021 F15 (B): installed agent-helper-template.sdn bytes, pinned by binding.agent_helper_template_digest.
+    agent_helper_template: text
 
 fn linux_verifier_seed_v1(offset: i64) -> [u8]:
     var seed: [u8] = []
@@ -89,6 +91,27 @@ fn linux_verifier_broker_v1() -> text:
         "template": SdnValue.String(group_process_stream_template_encode_v3(launch).unwrap())}
     sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
 
+# Agent helper template: canonical, normalized (the template encode zeroes the dynamic fields), profiled,
+# args ["version"], pinned root prefix under the run root's launch- namespace.
+pub fn linux_verifier_agent_helper_template_v1() -> text:
+    val program = "/opt/helper"
+    val args = ["version"]
+    val request = GroupProcessStreamRequestV2(program: program, producer_digest: "a".repeat(64),
+        args: args, environment: [], directory: "/work", inputs: [], timeout_ms: 5000,
+        broker_program: "/opt/broker", broker_digest: "b".repeat(64),
+        child_argv_digest: group_process_child_argv_digest_v2(program, args), launch_deadline_unix_ms: 0)
+    val profile = GroupProcessStreamProfileV3(helper_cpu: GroupProcessCpuQuotaV3(25, 2500, 100000),
+        broker: GroupProcessBrokerBudgetV3("/sys/fs/cgroup/service/broker", 11, 22, 3,
+            "c".repeat(64), 250000, 1000000, 250, 67108864, 134217728),
+        child_image_mode: "trusted-local-admin-image-fd-v1")
+    val launch = GroupProcessStreamLaunchV2(root: "/run/simple/launch-agent", worker_id: "worker_1", generation: 7,
+        snapshot_digest: "d".repeat(64), cache_identity: "e".repeat(64), memory_limit_bytes: 1048576,
+        request: request, delegated_cgroup_path: "/sys/fs/cgroup/service", transport_generation: 0,
+        profile_v3: Some(profile))
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("linux-host-service-agent-helper-template"),
+        "template": SdnValue.String(group_process_stream_template_encode_v3(launch).unwrap())}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
 fn linux_verifier_binding_v1(policy: text, configuration: text, engine_policy: text,
         broker_policy: text, parent: text) -> HostLinuxServiceEnrollmentBindingV3:
     HostLinuxServiceEnrollmentBindingV3(physical_host_id: "worker_1", service_scope_id: "service_1",
@@ -96,7 +119,8 @@ fn linux_verifier_binding_v1(policy: text, configuration: text, engine_policy: t
         native_machine_id: "linux-machine-id-v1:0123456789abcdef", provider_identity_digest: "a".repeat(64),
         engine_policy_digest: sha256_text(engine_policy), machine_parent: parent,
         broker_policy_digest: sha256_text(broker_policy), physical_cpu_millis: 2000, physical_memory_bytes: 536870912,
-        reserved_cpu_millis: 250, reserved_memory_bytes: 134217728)
+        reserved_cpu_millis: 250, reserved_memory_bytes: 134217728,
+        agent_helper_template_digest: sha256_text(linux_verifier_agent_helper_template_v1()))
 
 # Real signatures by the seeds; `approval_expires_at` is the only clock input.
 pub fn linux_service_verifier_credential_v1(binding: HostLinuxServiceEnrollmentBindingV3, issuer_offset: i64,
@@ -141,7 +165,8 @@ pub fn linux_service_verifier_fixture_ops_v1(issuer_offset: i64, approver_offset
     val binding = linux_verifier_binding_v1(policy, configuration, engine_policy, broker_policy, parent)
     LinuxServiceVerifierFixtureV1(binding: binding,
         credential: linux_service_verifier_credential_v1(binding, issuer_offset, approver_offset, approval_expires_at),
-        policy: policy, configuration: configuration, engine_policy: engine_policy, broker_policy: broker_policy)
+        policy: policy, configuration: configuration, engine_policy: engine_policy, broker_policy: broker_policy,
+        agent_helper_template: linux_verifier_agent_helper_template_v1())
 
 pub fn linux_service_verifier_fixture_v1() -> LinuxServiceVerifierFixtureV1:
     linux_service_verifier_fixture_with_v1(1, 65, LINUX_VERIFIER_FAR_V1)

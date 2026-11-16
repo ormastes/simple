@@ -5,8 +5,8 @@
 # device math vs f64 CPU math).
 
 use std.gc_async_mut.gpu.rocm.hip_compute.{rocm_available_at, rocm_bin_default}
-use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values, tensor_matvec, tensor_rmsnorm, tensor_add, tensor_mul, tensor_silu, tensor_attention}
-use std.gc_async_mut.slang.model_executor.pure.tensor_ops_rocm.{rocm_ops_open, rocm_ops_device_name, rocm_tensor_upload, rocm_tensor_download, rocm_tensor_matvec, rocm_tensor_rmsnorm, rocm_tensor_add, rocm_tensor_mul, rocm_tensor_silu, rocm_tensor_attention}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values, tensor_matvec, tensor_rmsnorm, tensor_add, tensor_mul, tensor_silu, tensor_attention, tensor_rope, tensor_kv_write, tensor_row, tensor_argmax}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops_rocm.{rocm_ops_open, rocm_ops_device_name, rocm_tensor_upload, rocm_tensor_download, rocm_tensor_matvec, rocm_tensor_rmsnorm, rocm_tensor_add, rocm_tensor_mul, rocm_tensor_silu, rocm_tensor_attention, rocm_tensor_rope, rocm_tensor_kv_write, rocm_tensor_row, rocm_tensor_argmax}
 
 fn rocm_present() -> bool:
     if rocm_available_at(rocm_bin_default()):
@@ -97,6 +97,44 @@ describe "pure ROCm ops provider":
             val vb = rand_tensor([32, 288], 9)
             val y = rocm_tensor_download(ops, rocm_tensor_attention(ops, rocm_tensor_upload(ops, q).unwrap(), rocm_tensor_upload(ops, kb).unwrap(), rocm_tensor_upload(ops, vb).unwrap(), 20, 6, 48).unwrap()).unwrap()
             expect(rel_err(y, tensor_attention(q, kb, vb, 20, 6, 48)) < 0.0001).to_equal(true)
+
+    it "rope matches the CPU op":
+        if rocm_present():
+            val ops = rocm_ops_open().unwrap()
+            val x = rand_tensor([288], 10)
+            val y = rocm_tensor_download(ops, rocm_tensor_rope(ops, rocm_tensor_upload(ops, x).unwrap(), 7, 6, 48, 10000.0).unwrap()).unwrap()
+            expect(rel_err(y, tensor_rope(x, 7, 6, 48, 10000.0)) < 0.0001).to_equal(true)
+
+    it "kv_write writes one row in place like the CPU op":
+        if rocm_present():
+            val ops = rocm_ops_open().unwrap()
+            val buf = rand_tensor([4, 6], 11)
+            val row = rand_tensor([6], 12)
+            val dbuf = rocm_tensor_upload(ops, buf).unwrap()
+            rocm_tensor_kv_write(ops, dbuf, 2, rocm_tensor_upload(ops, row).unwrap()).unwrap()
+            expect(rel_err(rocm_tensor_download(ops, dbuf).unwrap(), tensor_kv_write(buf, 2, row)) < 0.0001).to_equal(true)
+            expect(rocm_tensor_kv_write(ops, dbuf, 4, rocm_tensor_upload(ops, row).unwrap()).is_err()).to_equal(true)
+
+    it "row lookup matches the CPU op":
+        if rocm_present():
+            val ops = rocm_ops_open().unwrap()
+            val table = rand_tensor([5, 6], 13)
+            val y = rocm_tensor_download(ops, rocm_tensor_row(ops, rocm_tensor_upload(ops, table).unwrap(), 3).unwrap()).unwrap()
+            expect(rel_err(y, tensor_row(table, 3)) < 0.0001).to_equal(true)
+
+    it "argmax returns the CPU index, lowest index on ties":
+        if rocm_present():
+            val ops = rocm_ops_open().unwrap()
+            var vals = rand_values(32000, 14)
+            vals[31337] = 5.0
+            val unique = tensor_from_values(vals, [32000])
+            expect(rocm_tensor_argmax(ops, rocm_tensor_upload(ops, unique).unwrap()).unwrap()).to_equal(31337)
+            vals[31337] = 0.5
+            vals[20000] = 7.0
+            vals[100] = 7.0
+            val tied = tensor_from_values(vals, [32000])
+            expect(rocm_tensor_argmax(ops, rocm_tensor_upload(ops, tied).unwrap()).unwrap()).to_equal(tensor_argmax(tied))
+            expect(tensor_argmax(tied)).to_equal(100)
 
     it "reports a HIP error as Err, not a crash":
         if rocm_present():
