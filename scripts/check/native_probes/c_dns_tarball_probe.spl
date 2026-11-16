@@ -17,6 +17,8 @@ extern fn rt_package_remove_dir_all(dir_path: text) -> i32
 extern fn rt_file_write_text(path: text, content: text) -> bool
 @unsafe(reason: "raw file ABI", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text?
+@unsafe(reason: "raw clock ABI", capabilities: [ffi])
+extern fn rt_time_now_unix_millis() -> i64
 
 var failures = 0
 
@@ -48,6 +50,29 @@ fn main():
         check("tarball_roundtrip_a", rt_file_read_text("{root}/dest/a.txt") == Some("alpha"))
         check("tarball_roundtrip_nested_b", rt_file_read_text("{root}/dest/sub/b.txt") == Some("beta-content"))
         check("tarball_extract_missing_archive_fails", rt_package_extract_tarball("{root}/nope.tar.gz", "{root}/dest2") == -1)
+
+        # Real tar.gz fixtures written by Windows bsdtar: fixed-Huffman and dynamic-Huffman deflate.
+        val fx = "test/fixtures/c_tarball"
+        check("gzip_fixed_huffman_extract_status_zero", rt_package_extract_tarball("{fx}/fixed_small.tar.gz", "{root}/fx_fixed") == 0)
+        check("gzip_fixed_huffman_content", rt_file_read_text("{root}/fx_fixed/a.txt") == Some("alpha"))
+        check("gzip_dynamic_huffman_extract_status_zero", rt_package_extract_tarball("{fx}/dynamic_tree.tar.gz", "{root}/fx_dyn") == 0)
+        check("gzip_dynamic_huffman_small_member", rt_file_read_text("{root}/fx_dyn/a.txt") == Some("alpha"))
+        val big = rt_file_read_text("{root}/fx_dyn/sub/big.txt") ?? ""
+        check("gzip_dynamic_huffman_big_member_length", big.len() == 3406)
+        check("gzip_dynamic_huffman_big_member_first_line", big.starts_with("line 1: the quick brown fox jumps over the lazy dog 828"))
+        check("gzip_dynamic_huffman_big_member_final_line", big.contains("line 60: the quick brown fox jumps over the lazy dog 554"))
+
+        # A `../../evil.txt` member must be rejected and must not escape the destination.
+        check("tarball_dotdot_entry_rejected", rt_package_extract_tarball("{fx}/dotdot.tar.gz", "{root}/dd/inner") == -1)
+        check("tarball_dotdot_entry_not_written", rt_file_read_text("{root}/evil.txt") == None)
+
+        # Unresolvable name: empty answer, inside the budget.
+        val t0 = rt_time_now_unix_millis()
+        val bad = rt_dns_lookup_timeout_ms("no-such-host.invalid", 3000)
+        val spent = rt_time_now_unix_millis() - t0
+        check("dns_invalid_host_is_empty", bad.len() == 0)
+        check("dns_invalid_host_within_budget", spent < 4500)
+        check("dns_empty_hostname_is_empty", rt_dns_lookup_timeout_ms("", 3000).len() == 0)
         rt_package_remove_dir_all(root)
 
     if failures == 0:
