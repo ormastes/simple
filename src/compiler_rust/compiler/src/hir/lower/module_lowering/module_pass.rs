@@ -473,6 +473,13 @@ impl Lowerer {
                 }
             }
             Node::Function(f) => {
+                self.fn_sig_type_names.insert(
+                    f.name.clone(),
+                    (
+                        f.params.iter().map(|p| p.ty.as_ref().and_then(Self::simple_type_name)).collect(),
+                        f.return_type.as_ref().and_then(Self::simple_type_name),
+                    ),
+                );
                 let ret_ty = self.resolve_type_opt(&f.return_type)?;
                 // Same symbol `lower_function` emits the body under, so a
                 // cross-module same-named function keeps its own return type.

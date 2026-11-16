@@ -43,6 +43,7 @@ impl Lowerer {
         right: &Expr,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        self.check_unit_binary(op, left, right, ctx)?;
         let left_hir = Box::new(self.lower_expr(left, ctx)?);
         let right_hir = Box::new(self.lower_expr(right, ctx)?);
 

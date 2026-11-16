@@ -43,6 +43,7 @@ impl Lowerer {
             if let Some(erased) = self.lower_record_unit_ctor(name, args, ctx)? {
                 return Ok(erased);
             }
+            self.check_unit_call_args(name, args, ctx)?;
             if let Some((type_name, "new")) = name.rsplit_once('.') {
                 if let Some(type_id) = self.module.types.lookup(type_name) {
                     if matches!(self.module.types.get(type_id), Some(HirType::Bitfield { .. })) {

@@ -1195,6 +1195,9 @@ impl Lowerer {
                 param.inject,
             );
             self.record_optional_trait_payload(param.ty.as_ref(), param_index, &mut ctx);
+            if let Some(kind) = param.ty.as_ref().and_then(Self::simple_type_name).and_then(|n| self.unit_kind_of_type_name(&n)) {
+                ctx.local_unit_kinds.insert(param.name.clone(), kind);
+            }
         }
 
         let params: Vec<LocalVar> = ctx.locals.clone();
