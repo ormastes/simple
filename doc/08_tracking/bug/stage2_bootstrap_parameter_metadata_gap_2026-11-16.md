@@ -42,3 +42,29 @@ pre-metadata sources.
    tree-wide (codemod) or gate it behind an opt-in for frozen closures.
 2. Extend #9813's ptr<->float coverage to the ctx_postings iteration shape
    (residual construct set recorded in the round-2 parity doc).
+
+## Addendum 2026-11-17 — root cause + fix (verification-pending)
+
+**Status:** verification-pending (fixed in source; needs a Stage 2 rebuild of
+`test_runner_build` / the mcp closure to confirm all 248 sites clear).
+
+Root cause: `bootstrap_fn_param_defaults_register`
+(`src/compiler/50.mir/mir_data.spl`, the `if not any_default: ... return`
+branch, ~L2971-2993 before the fix) recorded a callee's `[HirParam]` only when
+at least one param had a default. 47562a7feaf made `named_call_slots_v1`
+(`_MirLowering/named_call_arguments_v1.spl:33-50`) require that row for EVERY
+named call in bootstrap mode. So a named argument to a callee with no defaults
+(`_config_file_read_text(path: path)`, `env_set(key:, value:)`,
+`parse_dotenv(content:)`, `run_tests_parallel_mode(...)`) always missed. No
+codemod is needed.
+
+Fix: register params for every function. Ambiguity and owner checks are
+unchanged. The trailing-default pad (`switch_operators_calls.spl`) already
+refuses to pad a missing non-default param, so a row for a no-default fn adds
+no padding. The 47562a7feaf gate and misbind fix stay as they are. Binding by
+position on a miss was rejected because named args may be reordered
+(`f(value: v, key: k)`).
+
+Spec: `test/01_unit/compiler/mir/named_call_bootstrap_metadata_spec.spl`
+(fails 0/2 before the fix with the exact production error, passes 2/2 after);
+`call_argument_slots_v1_spec.spl` 4/4.
