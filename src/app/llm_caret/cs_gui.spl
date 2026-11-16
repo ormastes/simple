@@ -1,0 +1,468 @@
+# LLM Caret - pure Caret Suite dashboard data structures and CPU/Vulkan GUI renderers.
+#
+# Deliberately has zero dependencies on `app.llm_caret.pane_backend` or
+# `os.apps.smux` so GUI rendering and HTML/layout verification can run standalone
+# without pulling multiplexer/container/Linux-broker modules into startup.
+
+use app.llm_caret.workbench.session_contract.{
+    SessionId, SessionView, ComposerDraft, Delivery, InputMode, ProcessLifecycle,
+    AgentTurn, Transport, CapabilityEvidence, new_session_id}
+use app.llm_caret.workbench.gui_layout.{
+    WorkbenchMode, SessionUiState, workbench_mode_for_width}
+use app.llm_caret.workbench.gui_page.{render_workbench_page_with_output}
+use app.llm_caret.workbench.roster_order.{roster_order}
+use std.io_runtime.{env_get}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D, engine2d_sfnt_resolve_path}
+use std.gc_async_mut.gpu.engine2d.color.{rgb, rgba}
+
+# cpu_pct/rss_mb use -1 as the UNMEASURED sentinel; 0 would be a real idle
+# reading and must stay distinguishable from "we never got a number".
+struct CsAgent:
+    agent_id: text
+    spec: text
+    status: text
+    pid: i64
+    pane_id: text
+    cpu_pct: f64
+    rss_mb: i64
+    detail: text
+
+struct CsDashboard:
+    session: text
+    manager_status: text
+    agents: [CsAgent]
+    selected: i64
+    input: text
+    log: [text]
+    # What the SELECTED agent's pane child printed, oldest first; empty when
+    # nothing is selected or the backend could not capture it.
+    screen: [text]
+    # Roster ordering inputs (agent ids): pinned first, then `mru` (most
+    # recently selected first).
+    pins: [text]
+    mru: [text]
+
+fn cs_dashboard_new(session: text) -> CsDashboard:
+    CsDashboard(session: session, manager_status: "unknown: not polled yet",
+        agents: [], selected: -1, input: "", log: [], screen: [], pins: [], mru: [])
+
+struct CsGuiFrame:
+    pixels: [u32]
+    width: i32
+    height: i32
+    resolved_backend: text
+    readback_source: text
+    cpu_fallback_used: bool
+    cpu_fallback_reason: text
+    checksum: i64
+    agent_count: i64
+    selected_agent: text
+
+fn _cs_fit_text(s: text, max_chars: i64) -> text:
+    if max_chars <= 0:
+        return ""
+    if s.len() <= max_chars:
+        return s
+    if max_chars <= 3:
+        return s[0:max_chars]
+    s[0:max_chars - 3] + "..."
+
+fn _cs_gui_draw_text(eng: Engine2D, sfnt_path: text, x: i32, y: i32, txt: text, color: u32, size_px: i32):
+    if txt == "":
+        return
+    if sfnt_path != "":
+        val baseline_y = y + (size_px * 4) / 5 + 2
+        eng.draw_text_sfnt_baseline_aa(x, baseline_y, txt, color, size_px as f64, sfnt_path)
+    else:
+        eng.draw_text(x, y, txt, color, size_px)
+
+fn _cs_gui_is_pinned(pins: [text], id: text) -> bool:
+    for p in pins:
+        if p == id:
+            return true
+    false
+
+fn _cs_gui_roster_indices(d: CsDashboard) -> [i64]:
+    var ids: [SessionId] = []
+    for a in d.agents:
+        ids = ids + [new_session_id(a.agent_id)]
+    var pin_ids: [SessionId] = []
+    for p in d.pins:
+        pin_ids = pin_ids + [new_session_id(p)]
+    var mru_ids: [SessionId] = []
+    for m in d.mru:
+        mru_ids = mru_ids + [new_session_id(m)]
+    val ordered = roster_order(ids, pin_ids, mru_ids)
+    var out: [i64] = []
+    for oid in ordered:
+        var i: i64 = 0
+        while i < d.agents.len():
+            if d.agents[i].agent_id == oid.value:
+                out = out + [i]
+                break
+            i = i + 1
+    out
+
+fn _cs_agent_to_session_view(a: CsAgent, mgr_status: text) -> SessionView:
+    val st = a.status.to_lower()
+    var lifecycle = ProcessLifecycle.NotStarted
+    var turn = AgentTurn.Unknown
+    var transport = Transport.Connecting
+    var needs_attention = false
+    if st == "running" or st == "active" or st == "ready":
+        lifecycle = ProcessLifecycle.Running
+        turn = AgentTurn.Idle
+        transport = Transport.Ready
+    elif st == "working" or st == "busy":
+        lifecycle = ProcessLifecycle.Running
+        turn = AgentTurn.Working
+        transport = Transport.Ready
+    elif st == "idle":
+        lifecycle = ProcessLifecycle.Running
+        turn = AgentTurn.Idle
+        transport = Transport.Ready
+    elif st == "waiting_approval":
+        lifecycle = ProcessLifecycle.Running
+        turn = AgentTurn.WaitingApproval
+        transport = Transport.Ready
+        needs_attention = true
+    elif st == "waiting_answer":
+        lifecycle = ProcessLifecycle.Running
+        turn = AgentTurn.WaitingAnswer
+        transport = Transport.Ready
+        needs_attention = true
+    elif st == "starting":
+        lifecycle = ProcessLifecycle.Starting
+        turn = AgentTurn.Queued
+        transport = Transport.Connecting
+    elif st == "exited" or st == "stopped" or st == "completed":
+        lifecycle = ProcessLifecycle.Exited
+        turn = AgentTurn.Completed
+        transport = Transport.Disconnected
+    elif st == "failed" or st == "error":
+        lifecycle = ProcessLifecycle.Failed
+        turn = AgentTurn.Failed
+        transport = Transport.Closed
+    elif st == "lost":
+        lifecycle = ProcessLifecycle.Lost
+        turn = AgentTurn.Unknown
+        transport = Transport.Stale
+    if mgr_status.to_lower().contains("disconnected") or mgr_status.to_lower().contains("error"):
+        if transport == Transport.Ready:
+            transport = Transport.Stale
+    SessionView(
+        id: new_session_id(a.agent_id),
+        label: a.agent_id + " (" + a.spec + ")",
+        provider: a.spec,
+        lifecycle: lifecycle,
+        turn: turn,
+        transport: transport,
+        evidence: CapabilityEvidence.Probed,
+        needs_attention: needs_attention
+    )
+
+fn cs_render_gui_html(d: CsDashboard, width: i64, height: i64) -> text:
+    var w = if width <= 0: 960 else: width
+    var h = if height <= 0: 600 else: height
+    var views: [SessionView] = []
+    var states: [SessionUiState] = []
+    var selected_id = new_session_id(d.session)
+    var pane_id = d.session
+    val ordered = _cs_gui_roster_indices(d)
+    var i: i64 = 0
+    for idx in ordered:
+        val a = d.agents[idx]
+        val view = _cs_agent_to_session_view(a, d.manager_status)
+        views = views + [view]
+        val is_sel = idx == d.selected or (d.selected < 0 and i == 0)
+        if is_sel:
+            selected_id = view.id
+            pane_id = if a.pane_id != "": a.pane_id else: a.agent_id
+        val draft = ComposerDraft(
+            target: view.id,
+            mode: InputMode.Message,
+            body: if is_sel: d.input else: "",
+            delivery: Delivery.Draft
+        )
+        states = states + [SessionUiState(session: view.id, draft: draft, scroll_offset: 0, follow: true)]
+        i = i + 1
+    var pane_lines = d.screen
+    if pane_lines.len() == 0 and d.log.len() > 0:
+        pane_lines = d.log
+    if pane_lines.len() == 0:
+        pane_lines = [
+            "Caret Suite session: " + d.session,
+            "Manager status: " + d.manager_status,
+            "Use /launch <spec> to start an agent or type a message below."
+        ]
+    val mode = workbench_mode_for_width(w)
+    val page = render_workbench_page_with_output(views, selected_id, states, mode, pane_id, pane_lines)
+    page.replace("<div class='workbench ", "<div data-viewport='" + w.to_text() + "x" + h.to_text() + "' class='workbench ")
+
+fn _cs_status_badge_fill(status_txt: text) -> u32:
+    val st = status_txt.to_lower()
+    if st == "running" or st == "ready" or st == "idle" or st == "working" or st == "active":
+        return rgba(22, 101, 52, 220)
+    if st == "waiting_approval" or st == "waiting_answer" or st == "starting":
+        return rgba(146, 64, 14, 220)
+    if st == "failed" or st == "error" or st == "lost":
+        return rgba(127, 29, 29, 220)
+    rgba(51, 65, 85, 220)
+
+fn _cs_agent_usage_line(a: CsAgent) -> text:
+    if a.rss_mb < 0:
+        return "cpu -  rss -"
+    "cpu " + a.cpu_pct.to_text() + "%  rss " + a.rss_mb.to_text() + "MB"
+
+fn cs_render_gui_frame(d: CsDashboard, width: i32, height: i32, backend: text) -> CsGuiFrame:
+    val w = if width < 640: 640 else: width
+    val h = if height < 420: 420 else: height
+    var eng = Engine2D.create_with_backend(w, h, backend)
+    val sfnt_path = engine2d_sfnt_resolve_path("")
+
+    val bg_root = rgb(11, 16, 32)
+    val bg_sidebar = rgb(17, 24, 39)
+    val bg_card = rgba(21, 27, 46, 228)
+    val bg_card_sel = rgba(31, 42, 68, 240)
+    val bg_input = rgba(15, 23, 42, 240)
+    val border_col = rgb(51, 65, 85)
+    val accent_blue = rgb(96, 165, 250)
+    val primary_btn = rgb(37, 99, 235)
+    val txt_main = rgb(238, 242, 255)
+    val txt_muted = rgb(148, 163, 184)
+    val txt_green = rgb(134, 239, 172)
+    val txt_amber = rgb(251, 191, 36)
+
+    eng.clear(bg_root)
+
+    # Top dashboard header bar
+    val header_h: i32 = 48
+    eng.draw_rect_filled(0, 0, w, header_h, bg_sidebar)
+    eng.draw_rect_filled(0, header_h - 1, w, 1, border_col)
+    _cs_gui_draw_text(eng, sfnt_path, 16, 12, "Caret Suite", txt_main, 18)
+    _cs_gui_draw_text(eng, sfnt_path, 146, 15, "session: " + _cs_fit_text(d.session, 24), txt_muted, 13)
+
+    val mgr_lower = d.manager_status.to_lower()
+    val mgr_ok = mgr_lower.contains("ok") or mgr_lower.contains("ready") or mgr_lower.contains("running") or mgr_lower.contains("connected")
+    val badge_dot = if mgr_ok: txt_green else: txt_amber
+    val status_w: i32 = 250
+    val status_x: i32 = w - status_w - 16
+    eng.draw_rounded_rect(status_x, 10, status_w, 28, 6, rgba(30, 41, 59, 225))
+    eng.draw_rounded_rect_outline(status_x, 10, status_w, 28, 6, border_col, 1)
+    eng.draw_rounded_rect(status_x + 10, 20, 8, 8, 4, badge_dot)
+    eng.set_clip(status_x + 24, 10, status_w - 30, 28)
+    _cs_gui_draw_text(eng, sfnt_path, status_x + 24, 15, _cs_fit_text(d.manager_status, 28), txt_main, 12)
+    eng.clear_clip()
+
+    # Global footer strip
+    val footer_h: i32 = 28
+    val footer_y: i32 = h - footer_h
+    eng.draw_rect_filled(0, footer_y, w, footer_h, rgb(15, 23, 42))
+    eng.draw_rect_filled(0, footer_y, w, 1, border_col)
+
+    # Left agent roster sidebar
+    val sidebar_w: i32 = if w >= 900: 276 else: 228
+    val body_y: i32 = header_h
+    val body_h: i32 = footer_y - body_y
+    eng.draw_rect_filled(0, body_y, sidebar_w, body_h, bg_sidebar)
+    eng.draw_rect_filled(sidebar_w - 1, body_y, 1, body_h, border_col)
+    _cs_gui_draw_text(eng, sfnt_path, 14, body_y + 12, "AGENTS ROSTER (" + d.agents.len().to_text() + ")", txt_muted, 11)
+
+    val ordered = _cs_gui_roster_indices(d)
+    var sel_idx: i64 = d.selected
+    if (sel_idx < 0 or sel_idx >= d.agents.len()) and ordered.len() > 0:
+        sel_idx = ordered[0]
+    var sel_agent_name = d.session
+
+    eng.set_clip(8, body_y + 32, sidebar_w - 16, body_h - 40)
+    if ordered.len() == 0:
+        eng.draw_rounded_rect(12, body_y + 38, sidebar_w - 24, 72, 8, bg_card)
+        eng.draw_rounded_rect_outline(12, body_y + 38, sidebar_w - 24, 72, 8, border_col, 1)
+        _cs_gui_draw_text(eng, sfnt_path, 22, body_y + 52, "No agents active", txt_main, 13)
+        _cs_gui_draw_text(eng, sfnt_path, 22, body_y + 74, "Run /launch <spec>", txt_muted, 11)
+    else:
+        var card_y: i32 = body_y + 34
+        val card_h: i32 = 58
+        for idx in ordered:
+            if card_y + card_h > footer_y - 8:
+                break
+            val a = d.agents[idx]
+            val is_sel = idx == sel_idx
+            if is_sel:
+                sel_agent_name = a.agent_id
+            val card_fill = if is_sel: bg_card_sel else: bg_card
+            val card_border = if is_sel: accent_blue else: border_col
+            eng.draw_rounded_rect(12, card_y, sidebar_w - 24, card_h, 8, card_fill)
+            eng.draw_rounded_rect_outline(12, card_y, sidebar_w - 24, card_h, 8, card_border, 1)
+            if is_sel:
+                eng.draw_rect_filled(12, card_y + 8, 4, card_h - 16, accent_blue)
+            val pin_prefix = if _cs_gui_is_pinned(d.pins, a.agent_id): "* " else: ""
+            val title_txt = _cs_fit_text(pin_prefix + a.agent_id, 18)
+            _cs_gui_draw_text(eng, sfnt_path, 24, card_y + 10, title_txt, txt_main, 13)
+            val pill_w: i32 = 76
+            val pill_x: i32 = sidebar_w - 20 - pill_w
+            eng.draw_rounded_rect(pill_x, card_y + 8, pill_w, 20, 5, _cs_status_badge_fill(a.status))
+            _cs_gui_draw_text(eng, sfnt_path, pill_x + 7, card_y + 11, _cs_fit_text(a.status, 9), txt_main, 10)
+            _cs_gui_draw_text(eng, sfnt_path, 24, card_y + 34, _cs_fit_text(a.spec, 26), txt_muted, 11)
+            card_y = card_y + card_h + 8
+    eng.clear_clip()
+
+    # Right workspace geometry
+    val main_x: i32 = sidebar_w
+    val main_w: i32 = w - sidebar_w
+    val comp_h: i32 = 54
+    val comp_y: i32 = footer_y - comp_h
+    val prev_h: i32 = 104
+    val prev_y: i32 = comp_y - prev_h
+    val pane_h: i32 = prev_y - body_y
+
+    # Main active agent output pane
+    val card_x: i32 = main_x + 14
+    val card_w: i32 = main_w - 28
+    val pane_card_y: i32 = body_y + 12
+    val pane_card_h: i32 = pane_h - 22
+    eng.draw_rounded_rect(card_x, pane_card_y, card_w, pane_card_h, 8, bg_card)
+    eng.draw_rounded_rect_outline(card_x, pane_card_y, card_w, pane_card_h, 8, border_col, 1)
+
+    val pane_hdr_h: i32 = 38
+    eng.draw_rect_filled(card_x + 1, pane_card_y + pane_hdr_h, card_w - 2, 1, border_col)
+    var header_title = "Session: " + d.session
+    var header_meta = d.manager_status
+    if sel_idx >= 0 and sel_idx < d.agents.len():
+        val sel_a = d.agents[sel_idx]
+        sel_agent_name = sel_a.agent_id
+        header_title = sel_a.agent_id + "  [" + sel_a.spec + "]"
+        header_meta = _cs_agent_usage_line(sel_a)
+    _cs_gui_draw_text(eng, sfnt_path, card_x + 14, pane_card_y + 10, _cs_fit_text(header_title, 44), txt_main, 14)
+    _cs_gui_draw_text(eng, sfnt_path, card_x + card_w - 178, pane_card_y + 12, _cs_fit_text(header_meta, 24), txt_muted, 11)
+
+    var out_lines = d.screen
+    if out_lines.len() == 0 and d.log.len() > 0:
+        out_lines = d.log
+    if out_lines.len() == 0:
+        out_lines = [
+            "Caret Suite Workbench GUI active for session '" + d.session + "'",
+            "Manager: " + d.manager_status,
+            "Type a chat message or /launch <spec> below and click Send."
+        ]
+    val max_line_chars: i64 = ((card_w - 28) / 8) as i64
+    var line_y: i32 = pane_card_y + pane_hdr_h + 12
+    eng.set_clip(card_x + 10, pane_card_y + pane_hdr_h + 4, card_w - 20, pane_card_h - pane_hdr_h - 10)
+    for ln in out_lines:
+        if line_y + 18 > pane_card_y + pane_card_h - 8:
+            break
+        _cs_gui_draw_text(eng, sfnt_path, card_x + 14, line_y, _cs_fit_text(ln, max_line_chars), txt_main, 13)
+        line_y = line_y + 20
+    eng.clear_clip()
+
+    # Preview strip
+    eng.draw_rect_filled(main_x, prev_y, main_w, prev_h, rgba(15, 23, 42, 220))
+    eng.draw_rect_filled(main_x, prev_y, main_w, 1, border_col)
+    _cs_gui_draw_text(eng, sfnt_path, card_x, prev_y + 8, "PREVIEWS & RECENT EVENTS", txt_muted, 11)
+
+    var preview_titles: [text] = []
+    var preview_bodies: [text] = []
+    for idx in ordered:
+        if idx != sel_idx and preview_titles.len() < 3:
+            val pa = d.agents[idx]
+            preview_titles = preview_titles + [pa.agent_id + " (" + pa.status + ")"]
+            val desc = if pa.detail != "": pa.detail else: pa.spec
+            preview_bodies = preview_bodies + [desc]
+    var log_i: i64 = 0
+    while preview_titles.len() < 2 and log_i < d.log.len():
+        preview_titles = preview_titles + ["Event #" + (log_i + 1).to_text()]
+        preview_bodies = preview_bodies + [d.log[log_i]]
+        log_i = log_i + 1
+    if preview_titles.len() == 0:
+        preview_titles = ["Session Status", "Command Hint"]
+        preview_bodies = [d.manager_status, "/launch <harness>  /switch <n>"]
+
+    val pcount: i32 = preview_titles.len() as i32
+    val gap_px: i32 = 10
+    val pcard_w: i32 = (card_w - (pcount - 1) * gap_px) / pcount
+    val pcard_y: i32 = prev_y + 26
+    val pcard_h: i32 = prev_h - 34
+    var pi: i64 = 0
+    while pi < preview_titles.len():
+        val px = card_x + (pi as i32) * (pcard_w + gap_px)
+        eng.draw_rounded_rect(px, pcard_y, pcard_w, pcard_h, 6, bg_card)
+        eng.draw_rounded_rect_outline(px, pcard_y, pcard_w, pcard_h, 6, border_col, 1)
+        eng.set_clip(px + 8, pcard_y + 4, pcard_w - 16, pcard_h - 8)
+        _cs_gui_draw_text(eng, sfnt_path, px + 10, pcard_y + 10, _cs_fit_text(preview_titles[pi], 24), txt_main, 12)
+        _cs_gui_draw_text(eng, sfnt_path, px + 10, pcard_y + 34, _cs_fit_text(preview_bodies[pi], 28), txt_muted, 11)
+        eng.clear_clip()
+        pi = pi + 1
+
+    # Bottom composer box
+    eng.draw_rect_filled(main_x, comp_y, main_w, comp_h, bg_sidebar)
+    eng.draw_rect_filled(main_x, comp_y, main_w, 1, border_col)
+    val btn_w: i32 = 82
+    val inp_x: i32 = card_x
+    val inp_w: i32 = card_w - btn_w - 10
+    val inp_y: i32 = comp_y + 10
+    val inp_h: i32 = 34
+    eng.draw_rounded_rect(inp_x, inp_y, inp_w, inp_h, 6, bg_input)
+    eng.draw_rounded_rect_outline(inp_x, inp_y, inp_w, inp_h, 6, accent_blue, 1)
+    val prompt_txt = if d.input != "": d.input else: "Message " + sel_agent_name + " or enter /command..."
+    val prompt_col = if d.input != "": txt_main else: txt_muted
+    eng.set_clip(inp_x + 8, inp_y + 4, inp_w - 16, inp_h - 8)
+    _cs_gui_draw_text(eng, sfnt_path, inp_x + 10, inp_y + 9, _cs_fit_text(prompt_txt, 56), prompt_col, 13)
+    eng.clear_clip()
+
+    val btn_x: i32 = inp_x + inp_w + 10
+    eng.draw_rounded_rect(btn_x, inp_y, btn_w, inp_h, 6, primary_btn)
+    _cs_gui_draw_text(eng, sfnt_path, btn_x + 22, inp_y + 9, "Send", rgb(255, 255, 255), 13)
+
+    # Global footer text
+    val footer_msg = "Caret Suite GUI  |  Selected: " + _cs_fit_text(sel_agent_name, 20) + "  |  Layout: Workbench"
+    _cs_gui_draw_text(eng, sfnt_path, 14, footer_y + 7, footer_msg, txt_muted, 11)
+
+    val rb = eng.read_pixels_with_source()
+    var fallback_used = false
+    var fallback_reason = ""
+    if val Some(vb) = eng.vulkan_backend:
+        fallback_used = vb.cpu_fallback_used
+        fallback_reason = vb.cpu_fallback_reason
+    val resolved = eng.backend_name()
+    eng.present()
+    eng.shutdown()
+    CsGuiFrame(
+        pixels: rb.pixels,
+        width: w,
+        height: h,
+        resolved_backend: resolved,
+        readback_source: rb.source,
+        cpu_fallback_used: fallback_used,
+        cpu_fallback_reason: fallback_reason,
+        checksum: rb.checksum,
+        agent_count: d.agents.len(),
+        selected_agent: sel_agent_name
+    )
+
+fn cs_resolve_ui_mode(args: [text]) -> text:
+    var i: i64 = 0
+    var has_gui = false
+    var has_frame_once = false
+    while i < args.len():
+        val a = args[i]
+        if a == "--tui":
+            return "tui"
+        if a == "--gui-frame-once":
+            return "gui_frame_once"
+        if a == "--gui":
+            has_gui = true
+        if a == "--frame-once":
+            has_frame_once = true
+        i = i + 1
+    if has_gui and has_frame_once:
+        return "gui_frame_once"
+    if has_gui:
+        return "gui"
+    val env_mode = (env_get("CARET_SUITE_MODE") ?? "").to_lower()
+    if env_mode == "gui":
+        if has_frame_once:
+            return "gui_frame_once"
+        return "gui"
+    "tui"
+
+export CsAgent, CsDashboard, cs_dashboard_new, CsGuiFrame, cs_render_gui_html, cs_render_gui_frame, cs_resolve_ui_mode

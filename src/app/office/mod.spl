@@ -12,7 +12,7 @@ use app.office.slides.slide.{Slide, slide_count, blank_slide, add_text_box, slid
 use app.office.mail.mail_app.{MailApp}
 use app.office.planner.planner_app.{PlannerApp}
 use app.office.counter.{CounterApp}
-use app.office.gui.{office_gui_frame, office_gui_frame_width, office_gui_frame_height, office_gui_non_background_pixel_count, sheet_gui_view, office_gui_sheet_pixels, chart_gui_view, office_gui_chart_pixels, pivot_gui_view, office_gui_pivot_pixels, SheetGuiSession, session_new, session_select, session_edit, session_click, session_key, session_scroll, sheet_gui_view_with_selection, office_gui_sheet_session_pixels, sheet_gui_cell_click_point, pivot_session_new, pivot_session_view, pivot_session_set_agg, pivot_session_swap_fields, pivot_session_field_letters, chart_session_new, chart_session_view, chart_session_set_value_range, chart_session_set_title, slide_session_new, slide_session_view, slide_gui_step, office_gui_slide_pixels, sheet_gui_view_with_formats, office_gui_sheet_cf_pixels, sheet_gui_view_full, session_edit_validated, history_new, session_edit_undoable, session_undo, session_redo}
+use app.office.gui.{office_gui_frame, office_gui_frame_width, office_gui_frame_height, office_gui_non_background_pixel_count, office_gui_render_engine2d_frame, sheet_gui_view, office_gui_sheet_pixels, chart_gui_view, office_gui_chart_pixels, pivot_gui_view, office_gui_pivot_pixels, SheetGuiSession, session_new, session_select, session_edit, session_click, session_key, session_scroll, sheet_gui_view_with_selection, office_gui_sheet_session_pixels, sheet_gui_cell_click_point, pivot_session_new, pivot_session_view, pivot_session_set_agg, pivot_session_swap_fields, pivot_session_field_letters, chart_session_new, chart_session_view, chart_session_set_value_range, chart_session_set_title, slide_session_new, slide_session_view, slide_gui_step, office_gui_slide_pixels, sheet_gui_view_with_formats, office_gui_sheet_cf_pixels, sheet_gui_view_full, session_edit_validated, history_new, session_edit_undoable, session_undo, session_redo}
 use app.office.sheets.cond_format.{CondRule}
 use app.office.sheets.cell_format.{SheetFormats, empty_sheet_formats, sheet_set_number_format}
 use app.office.sheets.validation.{ValidationRules, empty_validation_rules, validation_add}
@@ -834,22 +834,62 @@ fn _run_office_publisher_demo() -> i32:
     print "office-publisher: frames={nframes} f1=[{ft1}] f2=[{ft2}]"
     return 0
 
-fn run_office(args: [text]) -> i32:
+fn _office_has_gui_flag(args: [text]) -> bool:
+    for a in args:
+        if a == "--gui" or a == "--frame-once":
+            return true
+    false
+
+fn _office_backend_flag(args: [text]) -> text:
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if a == "--backend" and i + 1 < args.len():
+            return args[i + 1]
+        if a.starts_with("--backend="):
+            return a[10:a.len()]
+        i = i + 1
+    "software"
+
+fn _run_office_engine2d_gui_command(app_name: text, args: [text]) -> i32:
+    val backend = _office_backend_flag(args)
+    val frame = office_gui_render_engine2d_frame(app_name, 960, 600, backend)
+    if frame.pixels.len() == 0:
+        print "Error: office GUI render produced an empty frame for {app_name}"
+        return 1
+    print "office-gui: {app_name} backend={frame.resolved_backend} source={frame.readback_source} cpu_fallback={frame.cpu_fallback_used} frame {frame.width}x{frame.height} checksum={frame.checksum}"
+    0
+
+# @allow(primitive_api): CLI/GUI entrypoint returns POSIX i32 exit code
+pub fn run_office(args: [text]) -> i32:
     """Dispatch to the requested office app or show the launcher."""
     val cmd = if args.len() > 0: args[0] else: "launcher"
     match cmd:
         "launcher" =>
+            if _office_has_gui_flag(args):
+                return _run_office_engine2d_gui_command("launcher", args)
             val store = RecentFileStore.new(20)
             val recent = store.get_recent(10)
             val ui = build_launcher_ui(recent)
             print "Simple Office Launcher loaded (root={ui.root_id}, recent={recent.len()})"
             return 0
         "word" =>
+            if _office_has_gui_flag(args):
+                return _run_office_engine2d_gui_command("word", args)
+            val app = WordApp.new()
+            val ui = app.build_ui()
+            print "Simple Word loaded (root={ui.root_id}, words={app.word_count()}, modified={app.modified})"
+            return 0
+        "writer" =>
+            if _office_has_gui_flag(args):
+                return _run_office_engine2d_gui_command("writer", args)
             val app = WordApp.new()
             val ui = app.build_ui()
             print "Simple Word loaded (root={ui.root_id}, words={app.word_count()}, modified={app.modified})"
             return 0
         "sheets" =>
+            if _office_has_gui_flag(args):
+                return _run_office_engine2d_gui_command("sheets", args)
             val app = SheetsApp.new()
             val ui = app.build_ui()
             val active_ref = cell_ref_to_string(app.active_cell)
@@ -858,12 +898,19 @@ fn run_office(args: [text]) -> i32:
         "calc" =>
             var in_path = "untitled.csv"
             var tui_mode = false
+            var gui_mode = false
             var access_port = 0
             var access_requested = false
             var i = 1
             while i < args.len():
                 if args[i] == "--tui":
                     tui_mode = true
+                elif args[i] == "--gui" or args[i] == "--frame-once":
+                    gui_mode = true
+                elif args[i] == "--backend" and i + 1 < args.len():
+                    i = i + 1
+                elif args[i].starts_with("--backend="):
+                    pass_do_nothing("backend flag handled by _office_backend_flag")
                 elif args[i] == "--ui-access-port":
                     if i + 1 >= args.len():
                         print "Error: --ui-access-port requires a port"
@@ -878,6 +925,8 @@ fn run_office(args: [text]) -> i32:
                 else:
                     in_path = args[i]
                 i = i + 1
+            if gui_mode and not access_requested and not tui_mode:
+                return _run_office_engine2d_gui_command("calc", args)
             if tui_mode:
                 if access_requested:
                     return run_calc_access_server(access_port, in_path)
@@ -885,23 +934,29 @@ fn run_office(args: [text]) -> i32:
             print "Usage: simple office calc [file.csv|.ods|.xlsx] --tui [--ui-access-port N]"
             return 1
         "slides" =>
+            if _office_has_gui_flag(args):
+                return _run_office_engine2d_gui_command("slides", args)
             val app = SlidesApp.new()
             val ui = app.build_ui()
             print "Simple Slides loaded (root={ui.root_id}, slides={slide_count(app.presentation)}, modified={app.modified})"
             return 0
         "mail" =>
+            if _office_has_gui_flag(args):
+                return _run_office_engine2d_gui_command("mail", args)
             val app = MailApp.new()
             val ui = app.build_ui()
             print "Simple Mail loaded (root={ui.root_id}, emails={app.emails.len()}, unread={app.unread_count()})"
             return 0
         "planner" =>
+            if _office_has_gui_flag(args):
+                return _run_office_engine2d_gui_command("planner", args)
             val app = PlannerApp.new()
             val ui = app.build_ui()
             print "Simple Planner loaded (root={ui.root_id}, tasks={app.project.tasks.len()}, view={app.active_view})"
             return 0
         "counter" =>
-            if args.len() > 1 and args[1] == "--gui":
-                return _run_office_gui_command("counter")
+            if _office_has_gui_flag(args):
+                return _run_office_engine2d_gui_command("counter", args)
             val app = CounterApp.new()
             val ui = app.build_ui()
             print "Simple Counter loaded (root={ui.root_id}, value={app.value}, modified={app.modified})"
