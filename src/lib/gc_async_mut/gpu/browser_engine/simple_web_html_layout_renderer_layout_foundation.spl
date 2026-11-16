@@ -19,6 +19,8 @@ use std.nogc_sync_mut.text_layout.font_renderer.{browser_normal_line_height_px}
 use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{svg_view_box_milli}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
 
 pub val SIMPLE_WEB_SUMMARY_MARKER_INLINE_WIDTH: i32 = 16
 
@@ -2333,15 +2335,16 @@ fn style_with_resolved_percent_min_max(st: Style, containing_w: i32, containing_
     out
 
 fn constrained_outer_width(node: HNode, st: Style, candidate_width: i32) -> i32:
+    # CSS 2.1 10.4: max-width first, then min-width, so min wins a conflict.
     var out = candidate_width
-    if st.min_width_px > 0:
-        val min_outer = css_outer_width(node, st, st.min_width_px)
-        if out < min_outer:
-            out = min_outer
     if st.max_width_px > 0:
         val max_outer = css_outer_width(node, st, st.max_width_px)
         if out > max_outer:
             out = max_outer
+    if st.min_width_px > 0:
+        val min_outer = css_outer_width(node, st, st.min_width_px)
+        if out < min_outer:
+            out = min_outer
     if out < 1:
         # `width:0` (no padding/border) is a definite 0-wide box.
         out = if st.width_zero and out == 0: 0 else: 1
@@ -2577,7 +2580,7 @@ fn absolute_outer_width(nodes: [HNode], styles: [Style], child_index: HtmlChildI
     # `inset:0` stays 300 wide, a `<div>` or `<input>` stretches).
     if st.width_px == 0 and not st.width_zero and not authored_st.left_auto and st.right_px >= 0 and not absolute_replaced_tag(node.tag):
         val padding_box_w = containing_w + parent.pad_l + parent.pad_r
-        var stretched = padding_box_w - st.left_px - st.right_px
+        var stretched = padding_box_w - st.left_px - st.right_px - absolute_margin_x(st, padding_box_w)
         if stretched < 1:
             stretched = 1
         return constrained_outer_width(node, st, stretched)
@@ -2658,14 +2661,14 @@ fn absolute_child_x(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex
     # the ancestor-anchored absolute formula below can fire.
     if child.position_fixed:
         if child.right_px >= 0:
-            return viewport_w - absolute_outer_width(nodes, styles, child_index, child_i, parent, child_node, child, containing_w) - child.right_px
-        return child.left_px
+            return viewport_w - absolute_outer_width(nodes, styles, child_index, child_i, parent, child_node, child, containing_w) - child.right_px - absolute_margin_r(child, viewport_w)
+        return child.left_px + absolute_margin_l(child, viewport_w)
     # CSS 2.2 10.1: with no positioned ancestor the containing block is the
     # initial containing block at the layout origin, so an authored `left`
     # is not measured from the (static) parent. `left: auto` keeps the
     # parent-relative static-position approximation below.
     if not child.left_auto and not absolute_has_positioned_ancestor(nodes, styles, child_i):
-        return child.left_px
+        return child.left_px + absolute_margin_l(child, containing_w + parent.pad_l + parent.pad_r)
     # Both insets with a definite width over-constrain the box; `right` is
     # ignored when the containing block is ltr and `left` when it is rtl
     # (CSS 2.2 10.3.7). With `width:auto` the box stretches instead and
@@ -2673,8 +2676,8 @@ fn absolute_child_x(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex
     val definite_w = child.width_px != 0 or child.width_zero
     if child.right_px >= 0 and (child.left_auto or (definite_w and absolute_containing_block_rtl(nodes, styles, child_i))):
         val padding_box_w = containing_w + parent.pad_l + parent.pad_r
-        return parent_x + parent.border_l + padding_box_w - absolute_outer_width(nodes, styles, child_index, child_i, parent, child_node, child, containing_w) - child.right_px
-    parent_x + parent.border_l + child.left_px
+        return parent_x + parent.border_l + padding_box_w - absolute_outer_width(nodes, styles, child_index, child_i, parent, child_node, child, containing_w) - child.right_px - absolute_margin_r(child, padding_box_w)
+    parent_x + parent.border_l + child.left_px + absolute_margin_l(child, containing_w + parent.pad_l + parent.pad_r)
 
 fn absolute_replaced_tag(tag: text) -> bool:
     tag == "canvas" or tag == "img" or tag == "video" or tag == "svg" or tag == "iframe" or tag == "embed" or tag == "object" or tag == "audio"
@@ -2709,18 +2712,18 @@ fn absolute_child_y(nodes: [HNode], styles: [Style], child_i: i32, parent_y: i32
     # the viewport height, not the nearest ancestor's content height.
     if child.position_fixed:
         if child.bottom_px >= 0:
-            return viewport_h - absolute_outer_height(child_node, child, containing_h) - child.bottom_px
-        return child.top_px
+            return viewport_h - absolute_outer_height(child_node, child, containing_h) - child.bottom_px - absolute_margin_b(child)
+        return child.top_px + absolute_margin_t(child)
     # Same initial-containing-block rule as absolute_child_x for `top`.
     if not child.top_auto and not absolute_has_positioned_ancestor(nodes, styles, child_i):
-        return child.top_px
+        return child.top_px + absolute_margin_t(child)
     # Both insets with a definite height over-constrain the box; `bottom`
     # is ignored (CSS 2.2 10.6.4).
     if child.bottom_px >= 0 and child.top_auto:
-        return parent_y + parent.border_t + containing_h - absolute_outer_height(child_node, child, containing_h) - child.bottom_px
-    parent_y + parent.border_t + child.top_px
+        return parent_y + parent.border_t + containing_h - absolute_outer_height(child_node, child, containing_h) - child.bottom_px - absolute_margin_b(child)
+    parent_y + parent.border_t + child.top_px + absolute_margin_t(child)
 
-fn absolute_child_style(parent: Style, child: Style, containing_w: i32, containing_h: i32) -> Style:
+fn absolute_child_style(parent: Style, child: Style, containing_w: i32, containing_h: i32, tag: text) -> Style:
     # Percentages of an abspos box are of the containing block's padding box.
     val padding_box_w = containing_w + parent.pad_l + parent.pad_r
     var resolved_child = style_with_resolved_percent_min_max(child, padding_box_w, containing_h)
@@ -2730,7 +2733,35 @@ fn absolute_child_style(parent: Style, child: Style, containing_w: i32, containi
     val child_height_px = resolve_percent_height_px(child.height_px, containing_h)
     if child_height_px > 0 and child_height_px != resolved_child.height_px:
         resolved_child = style_with_height(resolved_child, child_height_px)
+    # `top` and `bottom` with an auto height stretch the box over the
+    # containing padding box (CSS 2.2 10.6.4); a replaced element keeps its
+    # intrinsic height, as it keeps its width in absolute_outer_width.
+    if child.height_auto and child.height_px == 0 and not child.top_auto and child.bottom_px >= 0 and not absolute_replaced_tag(tag):
+        val outer_h = containing_h - child.top_px - child.bottom_px - absolute_margin_t(child) - absolute_margin_b(child)
+        val frame_h = child.pad_t + child.pad_b + child.border_t + child.border_b
+        var stretched_h = if child.border_box: outer_h else: outer_h - frame_h
+        if stretched_h < 1:
+            stretched_h = 1
+        resolved_child = style_with_height(resolved_child, stretched_h)
     resolved_child
+
+# Used margins of an absolute box (CSS 2.2 10.3.7 / 10.6.4): `auto` is 0
+# here, a percentage is of the containing block width. ponytail: vh vertical
+# margins resolve to 0 (no viewport here); thread viewport_h when needed.
+fn absolute_margin_l(st: Style, cb_w: i32) -> i32:
+    if st.margin_l_auto: 0 else: resolve_horizontal_margin_px(st.margin_l, cb_w)
+
+fn absolute_margin_r(st: Style, cb_w: i32) -> i32:
+    if st.margin_r_auto: 0 else: resolve_horizontal_margin_px(st.margin_r, cb_w)
+
+fn absolute_margin_x(st: Style, cb_w: i32) -> i32:
+    absolute_margin_l(st, cb_w) + absolute_margin_r(st, cb_w)
+
+fn absolute_margin_t(st: Style) -> i32:
+    if st.margin_t_auto: 0 else: resolve_vertical_margin_px(st.margin_t, 0)
+
+fn absolute_margin_b(st: Style) -> i32:
+    if st.margin_b_auto: 0 else: resolve_vertical_margin_px(st.margin_b, 0)
 
 # Resolves a normalized track list (space-separated "Npx" / "Nfr" tokens,
 # see normalized_grid_track_list in

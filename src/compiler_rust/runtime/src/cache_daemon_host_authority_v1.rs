@@ -148,7 +148,7 @@ mod linux {
         {
             return None;
         }
-        Some((stat.st_dev as u64, stat.st_ino as u64, stat.st_size))
+        Some((stat.st_dev as u64, stat.st_ino as u64, stat.st_size as i64))
     }
     fn lower_hex(bytes: &[u8], length: usize) -> bool {
         bytes.len() == length
@@ -835,8 +835,8 @@ mod linux {
             && (stat.st_mode & libc::S_IFMT) == libc::S_IFREG
             && stat.st_nlink == 1
             && stat.st_uid == libc::geteuid()
-            && stat.st_size >= expected_bytes
-            && stat.st_size <= expected_bytes + append_len;
+            && stat.st_size as i64 >= expected_bytes
+            && stat.st_size as i64 <= expected_bytes + append_len;
         if !valid {
             libc::close(fd);
             libc::close(root_fd);
@@ -847,7 +847,7 @@ mod linux {
             libc::close(root_fd);
             return 0;
         }
-        let present = stat.st_size - expected_bytes;
+        let present = stat.st_size as i64 - expected_bytes;
         if present > 0 {
             let mut prior = vec![0u8; present as usize];
             if !pread_range(fd, expected_bytes, &mut prior) || prior.as_slice() != &append[..present as usize] {
@@ -874,7 +874,7 @@ mod linux {
             offset += count as usize;
         }
         let durable =
-            libc::ftruncate(fd, expected_bytes + append_len) == 0 && libc::fsync(fd) == 0 && libc::fsync(root_fd) == 0;
+            libc::off_t::try_from(expected_bytes + append_len).is_ok_and(|len| libc::ftruncate(fd, len) == 0) && libc::fsync(fd) == 0 && libc::fsync(root_fd) == 0;
         libc::close(fd);
         libc::close(root_fd);
         if !durable {
@@ -941,14 +941,14 @@ mod linux {
             && before.st_nlink == 1
             && before.st_uid == libc::geteuid()
             && before.st_size >= 0
-            && before.st_size <= size_limit;
+            && before.st_size as i64 <= size_limit;
         if !valid {
             libc::close(fd);
             return INVALID;
         }
         if out_capacity == 0 {
             libc::close(fd);
-            return before.st_size;
+            return before.st_size as i64;
         }
         let out = std::slice::from_raw_parts_mut(out_ptr, before.st_size as usize);
         let ok = pread_range(fd, 0, out);
@@ -961,7 +961,7 @@ mod linux {
             && before.st_ctime == after.st_ctime;
         libc::close(fd);
         if ok && stable {
-            before.st_size
+            before.st_size as i64
         } else {
             INVALID
         }

@@ -1746,8 +1746,8 @@ never cache an answer computed while exhausted) —
   before claiming a GPU ran. `feature_showcase.spl` is the place where the
   primitive runs on a real `VulkanBackend` (byte-identical, 38 primitives).
 - **cpu_simd vs Vulkan (llvmpipe), 900x760: 62 pixels over all 8 pages**,
-  all text ink: some glyphs one row lower on Vulkan (per glyph, root cause
-  not found); Chrome mismatch identical per page. Record + 25 px repro:
+  all text ink: some glyphs one row lower on Vulkan; Chrome mismatch
+  identical per page. FIXED the same day (see the next section). Record + 25 px repro:
   `doc/08_tracking/bug/web_vulkan_lane_control_text_one_row_past_clip_2026-11-15.md`.
 - **Hardware Vulkan 4K (NVIDIA GB10, driver 580.173.02,
   `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json`, strict
@@ -1757,9 +1757,24 @@ never cache an answer computed while exhausted) —
   RSS 4.5 GB: the interpreted page pipeline dominates, not the device. Run
   with `--baseline <nonexistent>` so it is compared, not judged against the
   llvmpipe file. The RenderDoc layer still cannot load on this driver.
-- **Perf note (not fixed):** on llvmpipe at 900x760 `font_atlas_pack_u32_to_u8`
-  is 54 s of forms-media's 76 s render (byte-lane atlas repack; the typed
-  `SIMPLE_VK_FONT_UPLOAD=u32` lane is opt-in).
+- **Perf note (superseded 2026-11-15):** the "54 s of 76 s" `font_atlas_pack_u32_to_u8`
+  figure is stale. On tree `7b88ee7874a` with the same seed, forms-media renders
+  in 13-17 s and the pack was 0.8-1.5 s (21 packs, ~60 ms each); the drop came
+  from upstream source, not from the binary. 12 of those packs were full
+  repacks caused by the atlas being wiped on every text-size change, fixed in
+  `doc/08_tracking/bug/font_atlas_wiped_on_size_change_full_vulkan_repacks_2026-11-15.md`
+  (12 -> 3 full packs). The opt-in `SIMPLE_VK_FONT_UPLOAD=u32` lane renders a
+  DIFFERENT pixel sum (`2697956136642868` vs `2697697746427296`) and must not
+  become the default until that is explained. Checked 2026-11-15: it is already
+  so on base `b8b14272484`; disabling the #9435 `clipped-out` return leaves the
+  u32 sum byte-identical, so that is NOT the cause; draining the deferred u32
+  upload at once moves it only to `2697952473848308`, and this branch (atlas kept
+  across sizes) gives `2697955134348331`: the lane depends on atlas layout and
+  upload order. The gap is the sum-equivalent of ~15.4k black-to-white pixels
+  (no framebuffer diff yet); cause open. RESOLVED: the deferred u32 copy
+  declined under the compiled array ABI after the dispatch was recorded, so
+  the lane drew no text; see
+  `doc/08_tracking/bug/vulkan_font_u32_lane_draws_no_text_compiled_abi_2026-11-15.md`.
 - Gradient paint cost, same seed: 300 x 900x100 120deg boxes 1.02 s -> 0.39 s
   wall (startup 0.24 s), RSS +4 MB; 6000 12x6 boxes 0.25 s -> 0.25 s, +5 MB
   (boxes under 1025 px skip the table; a table per box cost +87 MB).
@@ -1854,3 +1869,206 @@ never cache an answer computed while exhausted) —
   instead dropped `top:10px`. Auto main margins and `order` are not
   modelled (filed). Next cluster: flex-wrap line stretch under a definite
   height (align-content stretch; Chrome items 45 tall, Simple 24).
+
+## 2026-11-15 — Vulkan text clip: cpu_simd and Vulkan byte-identical
+
+- Root cause of the 62 px: `VulkanBackend.composite_font_batch` (the
+  vector-face path behind `draw_text_with_advances`) ignored `set_clip`; only
+  the bitmap path baked the clip into its quads. Draw IR clips control text to
+  its box, so descenders spilled below `<input>`/`<select>` on Vulkan only.
+  Fixed by clipping the quads on the host; a fully clipped batch is the
+  admitted status `clipped-out`. Record:
+  `doc/08_tracking/bug/web_vulkan_lane_control_text_one_row_past_clip_2026-11-15.md`;
+  RenderDoc params-buffer evidence in the simple_renderdoc skill.
+- 900x760: all 8 catalog pages `cmp`-identical cpu_simd vs Vulkan (llvmpipe).
+- `draw_ir_adv_branch_coverage_spec` hostile-advance row expected 8 skips,
+  but the executor now paints such runs with the font's own advances
+  (`text-advance-arity` fallback; no code emits `text-font-advances` any more,
+  only a stale comment at `draw_ir_adv.spl:555`). Row re-pinned to 9 rendered /
+  0 skipped plus a pixel row proving hostile advances paint exactly like no
+  advances.
+- `engine2d_software_offscreen_dispatch_spec` (0/3) asserts a software rung
+  that `engine.spl` todo 303 says does not exist; filed, not edited:
+  `doc/08_tracking/bug/engine2d_software_offscreen_dispatch_spec_asserts_missing_rung_2026-11-15.md`.
+- Hosts without `/usr/share/vulkan/icd.d/lvp_icd.json` do NOT exercise the
+  Vulkan rows of `vulkan_text_advances_clip_parity_spec` or AC-13 of
+  `linear_gradient_angle_draw_ir_chrome159_spec`: each prints a
+  `[skip] ... was not exercised` line and returns. Read the log, not the
+  pass count, before citing them as Vulkan evidence.
+- Draw IR advances are applied only when they sum to the command width;
+  otherwise the run silently paints with the font's own advances. A test of
+  "advances applied" must set the width to the sum (see the `7,7` row).
+
+## 2026-11-15 — wrapped flex lines size their items; the headless shell is not the oracle
+
+- **Trap — the gates must run FULL Chrome.** With no `CHROME_BIN`, the
+  harvester (`check-chrome-layout-geometry-diff.shs --print-chrome`) prefers
+  the Playwright headless shell, which resolves `monospace` to DejaVu Sans
+  Mono through fontconfig: every `<code>` line box is 1px shorter and the
+  matrix reports 28 NEW ids (127 cells) at an untouched base. Full Chrome
+  (`CHROME_BIN=$HOME/.cache/ms-playwright/chromium-1255/chrome-linux-arm64/chrome
+  CHROME_NO_SANDBOX=1`) gives the recorded 102. Never baseline those ids;
+  cross-check any hand measurement of text from the headless shell.
+- **Fonts on both sides (audit).** Simple's Linux face set is Liberation
+  Sans / Serif / Mono (`browser_host_has_measured_linux_face_set`). Chrome is
+  not handed that file: it resolves the generics through fontconfig to its
+  Arial / Times New Roman / Courier New defaults, which this host aliases to
+  the same Liberation files -- same face by host configuration only. The
+  catalog uses 16px / 24px text and no `@font-face`; no fixture enlarges
+  text to hide a mismatch. High-DPI comparison (owner rule: >= 300 dpi or a
+  shared 1px bitmap font) is blocked on a device scale the renderer does not
+  have: `doc/08_tracking/bug/web_render_no_device_scale_hidpi_gate_2026-11-15.md`.
+- **Wrapped lines align their items.** The wrap branch placed each line at
+  its align-content-stretched offset but laid every item out at content
+  height. After the line loop, each in-flow item is aligned inside its line
+  (CSS Flexbox 9.4 step 11): an auto-height `stretch` item (not replaced,
+  no max-height, no auto cross margin) grows to the line's cross size, an
+  `end`/`flex-end`/`center` item moves down by the free space
+  (`offset_layout_subtree`). The line cross size is the larger of the
+  stretched estimate and the tallest real item, and the next line starts
+  below the REAL items (`line_heights` estimates an auto-height item as one
+  line box, so `aa<br>bb` used to overlap the next line). `wrap-reverse`
+  keeps the old placement. Matrix 102 -> 95 cells (21 `cc-fx-fw-wrap-*`
+  ids). Spec: `flex_wrap_line_stretch_chrome159_spec.spl`.
+
+## 2026-11-15 — `simple_web_renderer_spec` was red from a stale snapshot; the matrix gate picks full Chrome
+
+- **Trap — a red main spec can be a lost harness, not a lost feature.**
+  `88aac2ffe28` (release/1.0 transplant) replaced the spec with an older copy:
+  five helpers, three rows, ten imports and the head of the content-visibility
+  row vanished, so 9 rows died on `function/variable ... not found`. Before
+  triaging a value, grep the spec for every `_helper(` it calls and diff the
+  row against `88aac2ffe28^`. Restored: 111 -> 114 rows, 83 -> 92 passing;
+  the 22 left are classed in
+  `doc/08_tracking/bug/simple_web_renderer_spec_red_rows_2026-11-15.md`.
+- **The matrix gate no longer takes the headless shell.** Without
+  `CHROME_BIN` it uses a system Chrome, else the newest Playwright
+  `chromium-*/chrome-linux*/chrome`; a headless shell (found or passed) is an
+  ERROR naming the reason (`full_chrome_in`, `is_headless_shell`; selftest 11
+  -> 14 fixtures). The geometry differ's own preference for the shell is
+  unchanged.
+- Batch 1 (`71ff31154d5`) catalog 900 px: every page equal to its row
+  (worst css-paint 6.80); `html` 216.2 s vs 226.6 s at base, `css-layout`
+  266.0 s vs 274.3 s, same seed.
+
+### Batch 3a (2026-11-15): host-dependent renderer rows, numeric Playwright pick
+
+- **Playwright build is picked by number, not by glob order.** Both the
+  matrix gate (`full_chrome_in`) and the catalog gate
+  (`newest_playwright_chrome`) parse the `chromium-<n>` build and keep the
+  largest, so `chromium-999` can no longer shadow `chromium-1255`. Each gate's
+  selftest has a 999/1255/1200 fixture expecting 1255.
+- **A backend-name row is host-dependent, not a regression.** The resolver
+  probes the real device and honestly falls back to `software`
+  (`9970185d1de` surfaced the reason). Expect the canonical name only where an
+  independent `Engine2D.probe_backend` initializes; check aliases with
+  `backend_canonical_name`. On this aarch64 host: cuda/vulkan/cpu_simd
+  initialize; hip, opencl and metal ("Metal requires macOS") do not.
+- **Chrome pixel probe without ImageMagick:** screenshot with full Chrome,
+  then load the PNG into a canvas in a second headless page
+  (`--allow-file-access-from-files --disable-web-security`) and print
+  `getImageData` through `--dump-dom`.
+- **Chrome samples a vertical 2-stop ramp at row centres.** Measured
+  2026-11-15, Chrome 159: a 4 px `#000 -> #fff` ramp gives 1F/60/9F/DF, and a
+  16 px one gives 08 at the top row and F7 at the bottom. The CPU raster's
+  endpoint-exact `mix_channel_gradient_centered` (t = pos/(span-1)) is wrong
+  against this; Draw IR already samples centres (AC-12 in
+  `linear_gradient_angle_draw_ir_chrome159_spec`).
+
+### Batch 3b/3c (2026-11-15): opacity composite, paint order, ink rows
+
+- **A group-opacity composite must honour the child's own alpha.**
+  `engine2d_composite_region_milli` (`engine.spl`) blended the child at a
+  constant alpha since `ece10b378c8`; with a full-viewport opacity layer every
+  transparent pixel darkened the page (`0x807c7d7e`). Effective alpha is now
+  `src_a * a8 / 255`.
+- **Positioned z-auto boxes paint after in-flow content.** The Draw IR paint
+  order (`_html_draw_ir_node_paint_order`) groups positioned boxes with
+  `z-index >= 0` after their context's in-flow members.
+- **8 px text has no exact-colour pixels in Chrome.** Assert ink, not the
+  text colour, for small text; exact-colour counts only describe the 5x7
+  bitmap face.
+- **Never pair a probe with a create to gate a GPU row.** The GPU is shared;
+  take name and reason from one `..._resolved_backend_name_with_reason` call.
+- **Put a seed probe inside the worktree it tests** (e.g. an ignored
+  `build/wr_probe/`): from a scratch dir, `std.*` can fail to resolve
+  root ("resolves from the project stdlib roots only").
+- **Old trees do not run on the current seed** (HIR lowering errors before
+  ~2026-11-14), so find introducing commits from the code and `git log -S`.
+
+## Gradient ramps (2026-11-15)
+
+- **Chrome never paints a stop colour exactly on a vertical ramp.** It samples
+  row centres, `t = (2*row+1)/(2*h)`, then dithers per device pixel with Skia's
+  8x8 ordered matrix: `X = x`, `Y = y ^ x`, `M` interleaves the low 3 bits
+  (`Y&1<<5 | X&1<<4 | Y&2<<2 | X&2<<1 | Y&4>>1 | X&4>>2`), stored
+  `floor(v + (2M+1)/128)`. `gradient_dither_threshold` returns `M`.
+- **Fit before porting.** Replay a candidate model in a scratch awk script
+  against every Chrome pixel you have (`cpixel.shs`) and port only on an exact
+  match. Pins that hit stop colours exactly were never Chrome values.
+- Dither uses DEVICE coordinates; within one row only `x & 7` matters, so the
+  painter computes 8 phase colours per row and merges equal runs.
+
+## 2026-11-16 — min-width beats max-width
+
+- **Order matters:** CSS 2.1 10.4 applies `max-width` first, then `min-width`, so `min-width` wins a conflict. `constrained_outer_width` (`..._layout_foundation.spl`) clamped in the opposite order, and the auto-margin centring clamp (`..._layout_engine.spl`) never consulted `min-width`. `width:50%;max-width:300px;min-width:500px` was 300 wide; Chrome 159 makes it 500.
+- **Trap — running the gates by hand:** both Chrome gates need `SIMPLE_BIN` (seed path) and `CHROME_BIN` (full Chrome) in the environment; without them they print `ERROR — nothing was checked` and exit 2, which is easy to miss in a chained script.
+- **Gates at the fix:** matrix 95/979 (no change), catalog 900 worst 6.80 (no change).
+
+## 2026-11-16 — rem uses the root font-size
+
+- **Root font is cascade state:** `css_cascade_root_font_set` is set to 16 at the start of `compute_styles_with_material`, set to the `html` node's computed `font_size` once that node is stored, and reset at pass end. Every `rem` reads it (`css_cascade_root_font_px()` in `..._decl_apply.spl`, `_css_cascade_root_font_px` in `..._declarations.spl`). The root's own `font-size:Nrem` still uses 16, which is the initial value.
+- **Trap — two dispatchers:** `margin-left` is parsed in BOTH `_apply_decls_dispatch` (`..._declarations.spl`, fast path) and `_apply_decls_without_grid_inner` (`..._decl_apply.spl`). Fixing one leaves the spec red; grep both for any longhand you touch.
+
+## 2026-11-16 — box-sizing:inherit
+
+- **`inherit` on a non-inherited property** needs the parent's value carried on the child Style, as `inherit_font_size` is. `inherit_border_box` is set in `inherit_from`, copied in `copy_from`, and added to `inherited_digest`. Skip the digest and the cascade memo can hand a child the style computed under a different parent.
+- **Trap — CSS braces in spec literals:** write `body{{margin:0}}`. A bare `{margin:0}` inside a `"..."` literal is interpolation and fails with `variable margin not found`; `{margin:0;font:...}` only happens to survive.
+
+## 2026-11-16 — compound selectors in any order
+
+- **One splitter, four consumers.** `_compound_base_tokens` feeds `parse_selector_part` (ParsedSel), `base_selector_matches` (text path, the debug oracle's other side), `selector_bucket_kind/value_from_base` (rule candidate buckets), and `_part_specificity`. If a bucket key is wrong, the rule is never a candidate. The matcher alone cannot show this: `.a#t` matched once parsed, but it sat in the `a#t` class bucket.
+
+## 2026-11-16 — :first/last/only-of-type
+
+- **A new structural pseudo-class needs SIX touch points** in `..._core_selectors.spl`: the `PSEUDO_*` code, `_pseudo_code_for`, the text-path allow-list in `simple_match` (the `pseudo != ...` chain), the text-path ctx branch, the parsed-path ctx branch, and `_option_needs_ctx` (without it, `:not(X)` is evaluated with no siblings). Miss the allow-list and the text path returns false while the parsed path matches; `web_selector_parsed_equivalence_spec` catches that.
+
+## 2026-11-16 — absolute height stretch and margins
+
+- **`absolute_containing_h` is the PADDING-box height** (`content_height_limit + pad_t + pad_b` at every call site), while `containing_w` is the CONTENT width and callers add the padding back. Mixing the two up gives the wrong stretch only when the parent has padding, so the spec includes a padded parent.
+- Absolute boxes now take their margins in `absolute_child_x/y` and in the width stretch. Before this an abs box with `margin:1px` sat at the inset with no offset, which no catalog page exercised.
+- **Trap — per-call-site variable names:** the five `absolute_child_style` call sites name the child `c`, `fc`, `fc_wrap` and `flex_c`. A blanket `nodes[c]` replace only fails with `variable c not found` when a flex absolute child is actually laid out. `layout_renderer_box_geometry_chrome159_spec` ("flex row/col abs child") caught it, and nothing at load time did.
+
+## 2026-11-16 — absolute static position
+
+- The static y of an auto-inset absolute box is `cy + prev_margin_b + margin-top`, not `cy`. The previous sibling's bottom margin is still pending in `prev_margin_b` (it has not been added to `cy` yet), and Chrome places the box after it.
+
+## 2026-11-16 — percentage flex-basis
+
+- A percentage that is only known at layout lives in its own Style field with default `-1` (`flex_basis_permille`), so none of the giant `Style(...)` constructors need editing. Only the decl_apply constructor passes it, and `copy_from` copies it. `flex_item_percent_style` (called at every ROW flex item site) resolves it into `flex_basis_px` and resets it to -1. The column path at the `flex_c` loop deliberately does not call it, so a column percent basis stays auto (it needs a definite height).
+
+## 2026-11-16 — flex min-width freeze
+
+- The §9.7 freeze loop for zero-basis items already existed. It keyed on `zero_floor_w` (the automatic minimum), which returned the bare frame when `min-width` was set. Making the floor the declared min-width was enough: no new loop.
+
+## 2026-11-16 — column flex grow and shrink
+
+- **The column path had no grow/shrink at all** (row-only Flexbox 9.7). `col_flex_target_heights` returns per-child outer targets in SIBLING order (-1 = untouched, empty = nothing to do), and the item loop indexes it with a `col_k` counter bumped on every child, absolute and `display:none` included. Keep the two loops walking the same `first_child`/`next_sibling` chain.
+- **The natural-first rule** applies only to auto-height items with children: lay out once with the original style, and keep that result if it is at least the target. It costs a second layout only in that case. Explicit-height items take the target directly, which is what lets a 40px text item shrink to its line height.
+- **The natural pass and floats:** `layout_with_style` APPENDS floats (`float_ctx_add`), while line boxes are indexed per node and get overwritten. So the second (target) layout first calls `float_ctx_truncate` back to the count from before the natural pass and restores `g_float_max_y1`.
+- **Bail rather than guess:** an auto-height item with element children returns base -1 and the helper returns `[]` for the whole container, which keeps the old layout. A one-line estimate there made siblings shrink or grow wrongly (review finding), which is worse than doing nothing.
+- **Perf:** the helper returns early unless the container has a height, max-height or min-height. Measured on `layout_renderer_box_geometry_chrome159_spec` with the seed 59635056 B (2026-11-14 09:32): 16.3 / 15.9 s and 428 MB on head vs 15.4 / 15.6 s and 428 MB on base.
+- **Trap:** a merged Chrome oracle page shifts every y. Re-measure the COMBINED page, never add offsets by hand.
+
+## 2026-11-16 — single-line row flex cross alignment
+
+- The wrap path aligned items per line after layout, but the single-line path had no such pass: stretch, center and end there only used `st.height_px`. The fix is the wrap path's loop run once with `max_child_h` as the line. Stretch only raises `out_bh`, since block content stays at the top; center and end move the subtree with `offset_layout_subtree`.
+
+## 2026-11-16 — background shorthand after the size group
+
+- `_parse_background_shorthand` is a token state machine. `after_slash` must END at the first non-size token, or every box, attachment or colour keyword after `pos / size` fails the whole layer closed. Its regression partner is `layout_renderer_background_and_grid_decls_spec` "refuses a malformed position/size slash": `center / 1px 2px 3px` must stay invalid, which is why a position token after the slash returns empty.
+
+## 2026-11-16 — text Draw IR line-height
+
+- `_html_draw_ir_resolved_text_command` merges the resolved-font props over the CSS computed style. `line-height` must stay the CSS value (`style_line_h`); the face metric only stands in for `normal`, and `style_line_h` already answers that. Nothing in Engine2D reads the value, only its presence.
+- Narrow Draw IR fixtures drop text that starts past the surface edge. Spans with no whitespace between them never wrap, so a fixture that once fit with bitmap metrics culls once real faces are wider. Widen the surface; don't relax the expect.

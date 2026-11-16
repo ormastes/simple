@@ -8,7 +8,10 @@ use nogc_sync_mut.database.bug.{load_bug_database, BugTokenReading, BugTokenCoun
     bug_token_category_to_string}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.log.{error}
-use app.bug_resolve.close_gate.{bug_close_gate}
+use app.bug_resolve.closure_cli.{BugDbPathV1, BugClosureRequestV1, bug_closure_state_of_v1, bug_closure_cli_evaluate, bug_closure_argument_problem_v1, bug_closure_render_v1}
+use app.bug.closure_gate.{BugIdV1, SnapshotDigestV1, TestCaseIdV1, ClosureRationaleV1, BugClosureDispositionV1, BugClosureKindV1, BugClosureVerdictV1, bug_closure_disposition_parse_v1, bug_closure_disposition_text_v1, bug_closure_disposition_kind_v1}
+use app.bug.workaround_autoretire.{AutoRetireVerdictV1}
+use app.bug.workaround_autoretire_cli.{workaround_auto_retire_print_v1}
 
 val BUG_DB_PATH = "doc/08_tracking/bug/bug_db.sdn"
 
@@ -29,6 +32,10 @@ fn print_help():
     print "  --knowledge=<path|none>               Required knowledge link above 2x average"
     print "  --reproducer=<spec>                   Existing reproducer _spec.spl (required to close)"
     print "  --prevention=<spec>                   Existing prevention/generalization _spec.spl (required, distinct)"
+    print "  --disposition=<d>                     fixed (default), closed, triage, duplicate, invalid, wontfix, deferred; non-fix needs --rationale and is not a verified fix"
+    print "  --rationale=<text>                    Required for a non-fix disposition"
+    print "  --source-head=<rev>                   Source snapshot the closure is pinned to (default: git HEAD)"
+    print "  --auto-retire                         After resolving, list live workaround sites (path:line); exits 1 while any remain (default off, edits nothing)"
     print "  --json         Output as JSON"
     for line in log_options_help():
         print "  {line}"
@@ -147,6 +154,14 @@ fn main() -> i64:
             return 1
 
     val timestamp = date_str
+    val disposition_raw = parse_flag(args, "--disposition=")
+    var disposition = BugClosureDispositionV1.Fixed
+    if disposition_raw != "":
+        match bug_closure_disposition_parse_v1(disposition_raw):
+            case Some(value): disposition = value
+            case None:
+                print "Error: --disposition must be one of fixed, closed, triage, duplicate, invalid, wontfix, deferred"
+                return 1
 
     val db_opt = load_bug_database(BUG_DB_PATH)
     var db = match db_opt:
@@ -155,6 +170,11 @@ fn main() -> i64:
             print "Error: could not load bug database at {BUG_DB_PATH}"
             return 1
 
+    val bug_state = match db.get_bug(id):
+        case Some(found): bug_closure_state_of_v1(found)
+        case None:
+            print "Error: bug '{id}' not found in database"
+            return 1
     val token_category = match db.token_category_for_bug(id):
         case Some(value): value
         case None:
@@ -181,12 +201,34 @@ fn main() -> i64:
 
     val reproducer = parse_flag(args, "--reproducer=")
     val prevention = parse_flag(args, "--prevention=")
-    val gate_error = bug_close_gate(reproducer, prevention,
-        reproducer != "" and file_exists(reproducer), prevention != "" and file_exists(prevention))
-    if gate_error != "":
-        print "Error: close rejected: {gate_error}"
+    val rationale = parse_flag(args, "--rationale=")
+    val verified_fix = bug_closure_disposition_kind_v1(disposition) == BugClosureKindV1.VerifiedFix
+    val source_head_raw = parse_flag(args, "--source-head=")
+    val source_head: SnapshotDigestV1? = if source_head_raw == "": None else: Some(SnapshotDigestV1(value: source_head_raw))
+    val reproducer_case: TestCaseIdV1? = if reproducer == "": None else: Some(TestCaseIdV1(value: reproducer))
+    val prevention_case: TestCaseIdV1? = if prevention == "": None else: Some(TestCaseIdV1(value: prevention))
+    val request = BugClosureRequestV1(bug: BugIdV1(value: id), disposition: disposition,
+        reproducer: reproducer_case, prevention: prevention_case,
+        rationale: ClosureRationaleV1(value: rationale), source_head: source_head, bug_state: bug_state)
+    val argument_problem = bug_closure_argument_problem_v1(request)
+    if argument_problem != "":
+        print "Error: close rejected: {argument_problem}"
         return 1
-    db.add_investigation_log(id, "close_evidence reproducer={reproducer} prevention={prevention}")
+    # The evaluator is the single source of the verdict; nothing is written before it is Allowed.
+    val evaluation = match bug_closure_cli_evaluate(request, BugDbPathV1(value: BUG_DB_PATH)):
+        case Ok(value): value
+        case Err(reason):
+            print "Error: close rejected: {reason}"
+            return 1
+    if evaluation.receipt.verdict != BugClosureVerdictV1.Allowed:
+        print "Error: close rejected by the closure gate"
+        for line in bug_closure_render_v1(evaluation):
+            print line
+        return 1
+    if verified_fix:
+        db.add_investigation_log(id, "close_evidence reproducer={reproducer} prevention={prevention} run_evidence=not_observed head={evaluation.receipt.head.value}")
+    else:
+        db.add_investigation_log(id, "close_disposition disposition={bug_closure_disposition_text_v1(disposition)} kind=non_fix_disposition not_a_verified_fix rationale={rationale}")
 
     val category_text = bug_token_category_to_string(token_category)
     val token_receipt = "token_usage category={category_text} provider={token_provider_raw} input={input_tokens} output={output_tokens} cache_read={cache_read_tokens} cache_create={cache_create_tokens} total={bug_token_reading_text(total)} source={token_source} comparable_average={bug_token_reading_text(average)} knowledge={knowledge}"
@@ -224,4 +266,6 @@ fn main() -> i64:
         print "{\"command\":\"bug-resolve\",\"status\":\"ok\",\"id\":\"" + id + "\",\"updated_at\":\"" + timestamp + "\"}"
     else:
         print "Resolved bug {id} (status: Closed, updated_at: {timestamp})"
+    if args.contains("--auto-retire") and workaround_auto_retire_print_v1(BugIdV1(value: id)) != AutoRetireVerdictV1.NothingToRetire:
+        return 1
     0

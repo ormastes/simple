@@ -15,11 +15,11 @@
 # one model and refuses a switch it cannot afford, rather than letting an HTTP
 # handler decide.
 
-use std.gc_async_mut.slang.model_executor.backend.{GgmlBackend, BackendError, BackendGenerationRequest, PrefixCacheStats, INVALID_NONNEGATIVE_I64_TEXT, parse_nonnegative_i64_text_exact, backend_error_text, open_backend, load_model, configure_matched_cpu_context, open_context, generate_observed_request, configure_prefix_cache, prefix_cache_stats, gpu_offload_supported, model_offloaded, physical_page_provider_status, physical_page_allocated_bytes, physical_page_bytes, close_backend}
+use std.gc_async_mut.slang.model_executor.backend.{MediaBlob, BackendMediaGenerationRequest, generate_media_request, load_mmproj, GgmlBackend, BackendError, BackendGenerationRequest, PrefixCacheStats, INVALID_NONNEGATIVE_I64_TEXT, parse_nonnegative_i64_text_exact, backend_error_text, open_backend, load_model, configure_matched_cpu_context, open_context, generate_observed_request, configure_prefix_cache, prefix_cache_stats, gpu_offload_supported, model_offloaded, physical_page_provider_status, physical_page_allocated_bytes, physical_page_bytes, close_backend}
 use std.gc_async_mut.slang.model_executor.paged_backend.{PhysicalModelSupport, PhysicalPageActivation, KvExecutionMode, physical_page_activation, kv_execution_mode, kv_execution_mode_text, physical_page_activation_text}
 use std.gc_async_mut.slang.model_executor.paged_executor.{PagedGenerationRequest, paged_executor_error_text, paged_executor_active, paged_executor_pool, paged_executor_telemetry, paged_executor_bind_backend, paged_executor_clear_pending_backend, paged_executor_activate_config, paged_executor_configuration_text, paged_executor_shutdown, paged_executor_generate_observed_request}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel, describe_model, scan_model_root}
-use std.gc_async_mut.slang.model_executor.model_loader.memory_budget.{check_fit, default_headroom_bytes}
+use std.gc_async_mut.slang.model_executor.model_loader.memory_budget.{check_fit, default_headroom_bytes, estimate_runtime_overhead_bytes}
 use std.io_runtime.{file_exists, env_get, host_os}
 
 # Resident state. Module-level because the model IS the process's memory: two
@@ -30,6 +30,10 @@ var ENGINE_BACKEND: GgmlBackend? = nil
 var ENGINE_LIB_PATH = ""
 # Non-empty once engine_preload pinned the resident model for a threaded server.
 var ENGINE_PINNED_ID = ""
+# Media the resident model can take: 1 = images, 2 = audio, 0 = text only. Set
+# when a projector (NativeModel.mmproj_path) loaded through a shim built with
+# mtmd, so it reports what actually works, not what the directory holds.
+var ENGINE_MEDIA_CAPS = 0
 var ENGINE_N_CTX = 4096
 var ENGINE_MATCHED_CPU_THREADS = -1
 # -1 = offload every layer (default); 0 = keep the model on the CPU.
@@ -212,13 +216,6 @@ fn engine_kv_execution_mode_text() -> text:
 fn engine_physical_page_reason() -> text:
     physical_page_activation_text(engine_physical_page_activation())
 
-# KV cache and activations for a context of this size. A per-token-per-layer
-# estimate would need the model's own hyperparameters, which are not read until
-# the backend opens the file; this is a deliberately conservative flat figure
-# used only for admission, never for allocation.
-fn _runtime_overhead_bytes() -> i64:
-    6 * 1024 * 1024 * 1024
-
 fn engine_unload() -> Result<(), text>:
     if ENGINE_BACKEND != nil:
         if paged_executor_active():
@@ -230,6 +227,7 @@ fn engine_unload() -> Result<(), text>:
             Ok(_): ()
         ENGINE_BACKEND = nil
     ENGINE_LOADED_ID = ""
+    ENGINE_MEDIA_CAPS = 0
     Ok(())
 
 # Makes `model` the resident model, unloading whatever was resident first.
@@ -250,7 +248,7 @@ fn engine_ensure_loaded(model: NativeModel) -> Result<(), text>:
     match engine_unload():
         Err(reason): return Err("resident model is busy: " + reason)
         Ok(_): ()
-    val fit = check_fit(model.bytes, _runtime_overhead_bytes(), default_headroom_bytes())
+    val fit = check_fit(model.bytes, estimate_runtime_overhead_bytes(model.bytes, ENGINE_N_CTX), default_headroom_bytes())
     if not fit.fits:
         return Err("refusing to load '" + model.id + "': " + fit.reason)
     val lib_path = engine_lib_path()
@@ -306,9 +304,50 @@ fn engine_ensure_loaded(model: NativeModel) -> Result<(), text>:
                             return Err("context failed for '" + model.id + "': " + backend_error_text(e))
                         Ok(_):
                             configure_prefix_cache(b, ENGINE_PREFIX_CACHE_ENTRIES, ENGINE_PREFIX_CACHE_BYTES)
+                            # A projector that cannot be attached (shim built
+                            # without mtmd, or a projector the model rejects)
+                            # leaves the model text-only; it never fails the load.
+                            if model.mmproj_path != "":
+                                match load_mmproj(b, model.mmproj_path):
+                                    Ok(caps): ENGINE_MEDIA_CAPS = caps
+                                    Err(_): ENGINE_MEDIA_CAPS = 0
                             ENGINE_BACKEND = b
                             ENGINE_LOADED_ID = model.id
                             Ok(())
+
+# Media kinds the resident model takes right now: bit 1 images, bit 2 audio.
+fn engine_media_caps() -> i64:
+    ENGINE_MEDIA_CAPS
+
+# Loads `model_id` (as engine_complete_chat does) and reports what media it can
+# take: Ok(0) is a text-only model.
+fn engine_media_caps_for(model_root: text, model_id: text) -> Result<i64, text>:
+    var found: NativeModel? = nil
+    for m in scan_model_root(model_root, engine_backend_available()):
+        if m.id == model_id:
+            found = m
+    if found == nil:
+        return Err("model '" + model_id + "' was not found under " + model_root)
+    match engine_ensure_loaded(found!):
+        Err(reason): Err(reason)
+        Ok(_): Ok(ENGINE_MEDIA_CAPS)
+
+# Chat completion whose frames carry media markers; `media` holds one encoded
+# file per marker, in order. Never uses the prefix cache.
+fn engine_complete_chat_media(model_id: text, framed: text, media: [MediaBlob], max_tokens: i64) -> Result<text, text>:
+    if ENGINE_BACKEND == nil or ENGINE_LOADED_ID != model_id:
+        return Err("model '" + model_id + "' is not resident")
+    if ENGINE_MEDIA_CAPS <= 0:
+        return Err("the resident model has no media projector attached")
+    if paged_executor_active():
+        return Err("media is not available on the physical page executor")
+    var budget = max_tokens
+    if budget <= 0:
+        budget = 256
+    match generate_media_request(BackendMediaGenerationRequest(
+          max_tokens: budget.to_text(), prompt: framed, backend: ENGINE_BACKEND!, media: media)):
+        Err(e): Err(backend_error_text(e))
+        Ok(observed): Ok(observed.output)
 
 fn engine_generate_observed_request(input: EngineGenerationRequest) -> Result<EngineGenerationObservation, text>:
     val prompt = input.prompt
@@ -408,8 +447,8 @@ fn engine_complete_chat(model_root: text, model_id: text, framed: text, max_toke
         Err(e): Err(backend_error_text(e))
         Ok(observed): Ok(observed.output)
 
-export engine_preload, engine_complete_chat
 export engine_set_lib_path, engine_set_gpu_layers_text, engine_gpu_offload_status, engine_set_n_ctx_text, engine_set_matched_cpu_threads_text, engine_set_physical_pages_config, engine_set_prefix_cache_limits, engine_lib_path, engine_backend_available
+export engine_preload, engine_complete_chat, engine_complete_chat_media, engine_media_caps, engine_media_caps_for
 export engine_loaded_model, engine_prefix_cache_stats, engine_unload, engine_ensure_loaded, engine_generate, engine_complete
 export EngineGenerationObservation, EngineGenerationRequest, engine_generate_observed, engine_generate_observed_request
 export engine_physical_page_allocated_bytes, engine_physical_page_bytes

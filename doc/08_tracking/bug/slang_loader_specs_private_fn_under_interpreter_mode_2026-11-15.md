@@ -1,5 +1,7 @@
 # slang model_loader specs error under `--mode=interpreter --clean` (private fn not visible)
 
+**FIXED 2026-11-15**: the specs import fns the loader modules never exported; `loader.spl` and `transport.spl` now carry explicit `export` lines (module style of `core/page_manager.spl`). All four specs pass (7/7, 4/4, 3/3, 5/5) under `--mode=interpreter --clean`; readiness gate `STATUS: PASS`.
+
 Found 2026-11-15 on Windows seed (`/c/dev/simple/bin/simple.exe`, 37622272 bytes).
 
 `check-llm-runtime-slang-local-readiness.shs` runs each sub-spec with
@@ -12,8 +14,8 @@ Found 2026-11-15 on Windows seed (`/c/dev/simple/bin/simple.exe`, 37622272 bytes
 
 The same specs PASS (11/11, 4/4, 3/3, 5/5) without `--mode=interpreter --clean`, so the
 readiness gate (and the native-streaming-evidence / setup-contract gates that nest it)
-cannot go green on this host regardless of timing. Not fixed here: needs a decision on
-whether the specs import a private fn (spec fix) or interpreter mode should honour the
+cannot go green on this host regardless of timing. (Decision taken: spec imports are valid, export the fns;
+the seed visibility check is left as is.) Original question:
 visibility used by the default mode (seed fix).
 
 ## Timeout measurement (same session)

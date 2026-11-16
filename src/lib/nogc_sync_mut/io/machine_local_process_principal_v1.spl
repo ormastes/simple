@@ -1,0 +1,50 @@
+# Zero-caller-identity direct local process capability. A daemon must use an
+# independent authenticated peer owner rather than substituting this identity.
+use std.common.contracts.container.local_principal_v1.MachineLocalPrincipalSnapshotV1
+use std.nogc_sync_mut.io.windows_local_process_principal_v1.*
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.{LinuxMachinePolicyOwnerV1,
+    LinuxMachinePolicyOpenV1, linux_machine_policy_open_v1}
+
+enum MachineLocalPrincipalNativeV1:
+    Windows(WindowsLocalProcessPrincipalV1)
+    Linux(LinuxMachinePolicyOwnerV1)
+
+pub class MachineLocalProcessPrincipalV1:
+    native: MachineLocalPrincipalNativeV1
+
+    pub fn current_v1() -> Result<MachineLocalPrincipalSnapshotV1, text>:
+        match self.native:
+            case MachineLocalPrincipalNativeV1.Windows(owner): owner.current_v1()
+            case MachineLocalPrincipalNativeV1.Linux(owner): owner.actual_process_principal_v1()
+
+    pub fn close_v1() -> text:
+        match self.native:
+            case MachineLocalPrincipalNativeV1.Windows(owner): owner.close_v1()
+            case MachineLocalPrincipalNativeV1.Linux(owner): owner.close_v1()
+
+pub enum MachineLocalProcessPrincipalOpenV1:
+    Rejected(reason: text)
+    CleanupRequired(owner: MachineLocalProcessPrincipalV1, reason: text)
+    Ready(owner: MachineLocalProcessPrincipalV1)
+
+pub fn machine_local_process_principal_open_v1() -> MachineLocalProcessPrincipalOpenV1:
+    @when(os="windows"):
+    match windows_local_process_principal_open_v1():
+        case WindowsLocalProcessPrincipalOpenV1.Rejected(reason): MachineLocalProcessPrincipalOpenV1.Rejected(reason)
+        case WindowsLocalProcessPrincipalOpenV1.CleanupRequired(owner, reason):
+            MachineLocalProcessPrincipalOpenV1.CleanupRequired(MachineLocalProcessPrincipalV1(native: MachineLocalPrincipalNativeV1.Windows(owner)), reason)
+        case WindowsLocalProcessPrincipalOpenV1.Ready(owner):
+            MachineLocalProcessPrincipalOpenV1.Ready(MachineLocalProcessPrincipalV1(native: MachineLocalPrincipalNativeV1.Windows(owner)))
+    @elif(os="linux"):
+    match linux_machine_policy_open_v1():
+        case LinuxMachinePolicyOpenV1.Rejected(reason): MachineLocalProcessPrincipalOpenV1.Rejected(reason)
+        case LinuxMachinePolicyOpenV1.CleanupRequired(owner, reason):
+            MachineLocalProcessPrincipalOpenV1.CleanupRequired(MachineLocalProcessPrincipalV1(native: MachineLocalPrincipalNativeV1.Linux(owner)), reason)
+        case LinuxMachinePolicyOpenV1.Ready(owner):
+            val principal = MachineLocalProcessPrincipalV1(native: MachineLocalPrincipalNativeV1.Linux(owner))
+            val current = principal.current_v1()
+            if current.is_err(): return MachineLocalProcessPrincipalOpenV1.CleanupRequired(principal, current.unwrap_err())
+            MachineLocalProcessPrincipalOpenV1.Ready(principal)
+    @else:
+    MachineLocalProcessPrincipalOpenV1.Rejected("machine-local-process-principal-host-unsupported")
+    @end

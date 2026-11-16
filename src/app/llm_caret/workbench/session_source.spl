@@ -26,6 +26,7 @@ use app.llm_caret.workbench.fleet_transport.{fleet_declare_host, fleet_poll_all,
     fleet_clear, fleet_encode_snapshot, fleet_is_remote}
 use app.llm_caret.workbench.pane_binding.{PaneBinding, PaneBindingResult,
     input_target_allowed}
+use app.llm_caret.workbench.key_resolver.{KeyFocus}
 
 # ============================================================================
 # State mapping
@@ -250,7 +251,18 @@ pub fn publish_fleet_sessions():
     for v in _live_sessions:
         if not fleet_is_remote(v.id.value):
             kept.push(v)
-    _live_sessions = kept + remote
+    _live_sessions = _attention_first(kept + remote)
+
+# Stable partition: rows needing attention first, original order otherwise.
+fn _attention_first(views: [SessionView]) -> [SessionView]:
+    var hot: [SessionView] = []
+    var quiet: [SessionView] = []
+    for v in views:
+        if v.needs_attention:
+            hot.push(v)
+        else:
+            quiet.push(v)
+    hot + quiet
 
 # Writes this host's LOCAL rows (never relayed remote rows) for a peer to poll.
 pub fn export_fleet_snapshot(path: text) -> bool:
@@ -275,6 +287,23 @@ pub fn live_selected() -> SessionId:
         if v.id.value == _live_selected:
             return v.id
     new_session_id(_live_selected)
+
+# Provider of the selected session ("" when none is selected/known).
+pub fn live_selected_provider() -> text:
+    for v in _live_sessions:
+        if v.id.value == _live_selected:
+            return v.provider
+    ""
+
+# Focused pane kind, published by the workbench key loop so extension `when`
+# clauses can see it.
+var _live_focus: KeyFocus = KeyFocus.NativeView
+
+pub fn publish_live_focus(focus: KeyFocus):
+    _live_focus = focus
+
+pub fn live_focus() -> KeyFocus:
+    _live_focus
 
 pub fn clear_live_sessions():
     var empty: [SessionView] = []
@@ -339,6 +368,7 @@ export AgentProviderHint, SessionLedgerEntry, provider_for_agent, hints_declare,
     ledger_generation, send_draft_guarded, declare_agent_provider
 export publish_pane_binding, live_pane_bindings, live_pane_generation
 export publish_manager_sessions, select_live_session, live_sessions,
-    live_selected, clear_live_sessions
+    live_selected, clear_live_sessions, live_selected_provider,
+    publish_live_focus, live_focus
 export declare_fleet_host, publish_fleet_sessions, export_fleet_snapshot
 export publish_pane_output, live_pane_id, live_pane_lines, clear_pane_output

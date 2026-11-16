@@ -1,0 +1,73 @@
+# @req HOST-STORE-01 HOST-SERVICE-01
+# AUTHORED_NOT_RUN. Actual Linux IO cases and pure input guards, not Windows
+# native privacy, signed startup, reconciliation or service readiness evidence.
+use std.spec.{describe, it, expect, step}
+use std.common.task_runner.distributed_operation_journal_v2.*
+use std.nogc_sync_mut.orchestration.host_service_command_v3.host_service_command_shape_v3
+use std.nogc_sync_mut.database.wal.{WalEntry, WalEntryType}
+use std.nogc_sync_mut.database.wal_segmented.*
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_sync_mut.io_runtime.{dir_remove, dir_list_optional}
+
+fn storage_journal_fixture_v3(root: text) -> Result<DistributedOperationJournalV2, text>:
+    match distributed_operation_journal_open_owned_v2(root, "a".repeat(64), "b".repeat(64), 32):
+        case DistributedOperationJournalOpenV2.Ready(owner): return Ok(owner)
+        case DistributedOperationJournalOpenV2.CleanupRequired(cleanup, error):
+            val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+            expect(closed.closed).to_equal(true)
+            return Err(error)
+        case DistributedOperationJournalOpenV2.Rejected(error): return Err(error)
+
+describe "retained Host journal storage and service input boundary":
+    it "admits bounded relative records and refuses path escapes before storage":
+        step("admits bounded relative records and refuses path escapes before storage")
+        for path in ["parent.lease", "database-wal/CURRENT", "reservation-payloads/" + "a".repeat(64) + ".sdn"]:
+            expect(distributed_operation_journal_relative_v3(path)).to_equal(true)
+        for path in ["", "/parent.lease", "C:/journal/CURRENT", "../CURRENT", "a/../b", "a//b", "a\\b",
+                "a:b", "a/b/c/d/e", "a".repeat(129), "a\u{0}b"]:
+            expect(distributed_operation_journal_relative_v3(path)).to_equal(false)
+
+    it "uses one CLI shape for genuine Linux and Windows installed owners":
+        step("uses one CLI shape for genuine Linux and Windows installed owners")
+        expect(host_service_command_shape_v3(["host-service", "linux-podman", "/installed/host", "-", "-", "host-status", "-"])).to_equal("")
+        expect(host_service_command_shape_v3(["host-service", "windows-docker-process", "C:/Installed/Host", "a".repeat(64),
+            "binding.sdn", "host-status", "-"])).to_equal("")
+        expect(host_service_command_shape_v3(["host-service", "windows-docker-process", "C:/Installed/Host", "a".repeat(64),
+            "binding.sdn", "host-prepare", "op-1", "request.sdn"])).to_equal("")
+
+    it "refuses missing Windows anchors and unsupported effects before opening owners":
+        step("refuses missing Windows anchors and unsupported effects before opening owners")
+        expect(host_service_command_shape_v3(["host-service", "windows-docker-process", "C:/Installed/Host", "-", "-",
+            "host-status", "-"])).to_equal("host-service-windows-anchor-fields")
+        expect(host_service_command_shape_v3(["host-service", "linux-podman", "/installed/host", "-", "-",
+            "host-cleanup", "op-1", "request.sdn"])).to_equal("host-service-action-unsupported")
+        expect(host_service_command_shape_v3(["host-service", "docker", "/installed/host", "-", "-",
+            "host-status", "-"])).to_equal("host-service-backend")
+
+    it "preserves immutable Linux records on identical and changed publication replay":
+        step("preserves immutable Linux records on identical and changed publication replay")
+        val root = secure_temp_dir("build", "host-storage-record").unwrap()
+        val owner = storage_journal_fixture_v3(root).unwrap()
+        val relative = "reservation-payloads/" + "c".repeat(64) + ".sdn"
+        expect(distributed_operation_journal_publish_v3(owner, relative, "original\n").unwrap()).to_equal(true)
+        expect(distributed_operation_journal_publish_v3(owner, relative, "original\n").unwrap()).to_equal(false)
+        expect(distributed_operation_journal_publish_v3(owner, relative, "changed\n").unwrap()).to_equal(false)
+        expect(distributed_operation_journal_read_required_v3(owner, relative, 64).unwrap()).to_equal("original\n")
+        # Regression: successful publication must not accumulate private stages.
+        expect(dir_list_optional(root + "/reservation-payloads").unwrap().len()).to_equal(1)
+        expect(distributed_operation_journal_read_v3(owner, "missing", 64).unwrap().is_none()).to_equal(true)
+        expect(distributed_operation_journal_close_owned_v2(owner).closed).to_equal(true)
+        expect(distributed_operation_journal_publish_v3(owner, relative, "stale\n").is_err()).to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "keeps the legacy WAL parser and compare publication behavior without a Windows store":
+        step("keeps the legacy WAL parser and compare publication behavior without a Windows store")
+        val root = secure_temp_dir("build", "host-storage-wal").unwrap()
+        val identity = "d".repeat(64)
+        val entries = [WalEntry(0, WalEntryType.Insert, "records", "row", "payload", 0)]
+        val revision = database_wal_commit_v1(root, identity, "", entries).unwrap()
+        expect(database_wal_current_v1(root, identity).unwrap()).to_equal(revision.digest)
+        expect(database_wal_segment_read_strict_v1(root, revision).unwrap().len()).to_equal(1)
+        expect(database_wal_commit_v1(root, identity, "", entries).is_err()).to_equal(true)
+        expect(database_wal_current_v1(root, identity).unwrap()).to_equal(revision.digest)
+        expect(dir_remove(root, true)).to_equal(true)

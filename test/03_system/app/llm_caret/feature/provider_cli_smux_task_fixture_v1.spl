@@ -1,0 +1,27 @@
+# AUTHORED_NOT_RUN. Requires an actual V5 owner already retaining this exact
+# signed execution and restriction. No synthetic native owner/grant is created.
+use std.spec.{expect, step}
+use std.common.contracts.container.pre_start_constraint_v1.{ContainerPreStartConstraintV1,
+    container_pre_start_constraint_copy_v1}
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.HostServiceRequestV2
+use os.apps.smux.runtime_connection_owner_v5.{SmuxRuntimeConnectionOwnerV5, SmuxRuntimeConnectionTurnV5,
+    smux_runtime_connection_host_constrained_v5, smux_runtime_connection_host_v5}
+
+pub fn check_real_smux_retained_constraint_replay_v1(owner: SmuxRuntimeConnectionOwnerV5,
+        original_request: HostServiceRequestV2, original_constraint: ContainerPreStartConstraintV1,
+        expected_response: text, expected_error: text) -> SmuxRuntimeConnectionTurnV5:
+    step("Replay the original actual retained request without changing its continuation or result")
+    val replay = smux_runtime_connection_host_constrained_v5(owner, original_request, Some(original_constraint))
+    expect(replay.response).to_equal(expected_response)
+    expect(replay.error).to_equal(expected_error)
+    step("Reject changed complete restriction and nil versus Some under the same signed operation")
+    var changed = container_pre_start_constraint_copy_v1(original_constraint)
+    changed.working_directory = original_constraint.working_directory + "/changed"
+    val denied = smux_runtime_connection_host_constrained_v5(replay.owner, original_request, Some(changed))
+    expect(denied.error).to_equal("runtime-host-execution-constraint-changed")
+    val legacy = smux_runtime_connection_host_v5(denied.owner, original_request)
+    expect(legacy.error).to_equal("runtime-host-execution-constraint-changed")
+    val unchanged = smux_runtime_connection_host_constrained_v5(legacy.owner, original_request, Some(original_constraint))
+    expect(unchanged.response).to_equal(expected_response)
+    expect(unchanged.error).to_equal(expected_error)
+    unchanged

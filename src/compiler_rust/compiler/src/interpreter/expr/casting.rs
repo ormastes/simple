@@ -83,6 +83,11 @@ fn cast_to_simple_type(val: Value, type_name: &str) -> Result<Value, CompileErro
             let actual_type = val.type_name();
             if actual_type == other {
                 Ok(val)
+            } else if let Some(suffix) = crate::interpreter_unit::standalone_unit_suffix(other) {
+                // `raw as Unit` for a standalone `unit Name: T as sfx`.
+                crate::interpreter_unit::construct_standalone_unit(other, &suffix, val).map_err(|msg| {
+                    CompileError::semantic_with_context(msg, ErrorContext::new().with_code(codes::TYPE_MISMATCH))
+                })
             } else {
                 let ctx = ErrorContext::new().with_code(codes::TYPE_MISMATCH).with_help(format!(
                     "cannot convert {} to {} through type assertion",

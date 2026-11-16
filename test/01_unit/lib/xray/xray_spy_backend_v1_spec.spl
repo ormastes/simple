@@ -34,10 +34,11 @@ class FakeLinuxLeaf:
     context: u64
     module_instance: u64
     clock: u64
+    kind: TraceBackendV1
 
 impl XrayLlvmLeafV1 for FakeLinuxLeaf:
     fn sled_kind() -> TraceBackendV1:
-        TraceBackendV1.Llvm
+        self.kind
     fn max_function_id() -> i64:
         self.slots.len()
     me install(arena: i64, generation: u64, context: u64, module_instance: u64) -> i64:
@@ -100,7 +101,7 @@ fn fake_dll(names: [text], ring_capacity: i64) -> FakeWinDll:
     val descriptor = rt_alloc(8 + n * 8)
     val table = rt_alloc(8 + n * 8)
     val hook = rt_alloc(8)
-    val ring = rt_alloc(24 + ring_capacity * 24)
+    val ring = rt_alloc(24 + ring_capacity * 32)
     unsafe(capabilities: [ffi]):
         rt_ptr_write_i64(descriptor, 0, n)
         rt_ptr_write_i64(table, 0, n)
@@ -111,19 +112,21 @@ fn fake_dll(names: [text], ring_capacity: i64) -> FakeWinDll:
             rt_ptr_write_i64(descriptor, 8 + i * 8, slot)
             rt_ptr_write_i64(table, 8 + i * 8, c_string(names[i]))
         rt_ptr_write_i64(ring, 0, ring_capacity)
-        for i in 0..(2 + ring_capacity * 3):
+        for i in 0..(2 + ring_capacity * 4):
             rt_ptr_write_i64(ring, 8 + i * 8, 0)
     FakeWinDll(descriptor: descriptor, names: table, hook: hook, ring: ring)
 
 # Replays the emitted guard in ring mode: load slot, append to the ring if set.
+# Ring ABI v2 record {site, kind, pad, seq, ts}; the model counter ticks 10 per edge.
 fn win_fire(dll: FakeWinDll, site: i64, kind: i64):
     unsafe(capabilities: [ffi]):
         if rt_ptr_read_u8(rt_ptr_read_i64(dll.descriptor, 8 + site * 8), 0) == 0: return
         val i = rt_ptr_read_i64(dll.ring, 8)
         rt_ptr_write_i64(dll.ring, 8, i + 1)
-        rt_ptr_write_i64(dll.ring, 24 + i * 24, site)
-        rt_ptr_write_i64(dll.ring, 32 + i * 24, kind)
-        rt_ptr_write_i64(dll.ring, 40 + i * 24, i + 1)
+        rt_ptr_write_i64(dll.ring, 24 + i * 32, site)
+        rt_ptr_write_i64(dll.ring, 32 + i * 32, kind)
+        rt_ptr_write_i64(dll.ring, 48 + i * 32, (i + 1) * 10)
+        rt_ptr_write_i64(dll.ring, 40 + i * 32, i + 1)
 
 fn config_v1() -> TraceConfigV1:
     TraceConfigV1(instrumentation: TraceInstrumentationV1.Dynamic,
@@ -145,7 +148,7 @@ val SCRIPT_KINDS: [i64] = [0, 0, 0, 1, 1, 1, 0]
 
 fn run_linux() -> XraySpyV1:
     var leaf = FakeLinuxLeaf(slots: [0, 0, 0], arena: 0, generation: 0u64, context: 0u64,
-        module_instance: 0u64, clock: 0u64)
+        module_instance: 0u64, clock: 0u64, kind: TraceBackendV1.Llvm)
     var spy = XraySpyV1.create(XrayBackendV1.linux(leaf, NAMES), 1u64, 64)
     expect(spy.enable(config_v1(), selection_v1([1, 2])).is_ok()).to_equal(true)
     for i in 0..6:
@@ -157,7 +160,11 @@ fn run_linux() -> XraySpyV1:
 
 fn run_windows() -> XraySpyV1:
     val dll = fake_dll(NAMES, 16)
-    var spy = XraySpyV1.create(XrayBackendV1.windows(XrayWinFlagLeafV1.bind(dll)), 1u64, 64)
+    var leaf = XrayWinFlagLeafV1.bind(dll)
+    val backend = XrayBackendV1.windows(leaf)
+    # Model ticks are ns: pin 1 GHz over the calibrated rdtsc rate.
+    leaf.set_tick_hz(1000000000)
+    var spy = XraySpyV1.create(backend, 1u64, 64)
     expect(spy.enable(config_v1(), selection_v1([1, 2])).is_ok()).to_equal(true)
     for i in 0..6:
         win_fire(dll, SCRIPT_SITES[i], SCRIPT_KINDS[i])
@@ -197,11 +204,28 @@ describe "XRay shared wrapper: spy and profile over both backends":
         val row = trace_profile_function_v1(run_linux().profile(), 1u32)
         expect(row.unwrap().inclusive_ns).to_equal(30u64)
 
-    # RED by design: Windows ring records carry no time (bug
-    # xray_win_ring_edges_unstamped_profile_time_zero_2026-11-15).
+    # Repro for bug xray_win_ring_edges_unstamped_profile_time_zero_2026-11-15:
+    # ring ABI v2 carries the edge's own ts and drain() forwards it.
     it "every drained edge is stamped on both backends":
         expect(stamped(run_linux())).to_equal(4)
         expect(stamped(run_windows())).to_equal(4)
+
+    # @req REQ-XRAY-V1-API-01
+    it "drained timestamps are monotonic within a thread and time the profile":
+        """Generalisation of the stamp bug: one thread's ring records are
+        claimed in program order, so the drained ts sequence must be
+        non-decreasing and the profile must use the edge time, not drain time."""
+        var spy = run_windows()
+        step("one thread: each drained ts is >= the previous one")
+        var prev = 0u64
+        var monotonic = true
+        for event in spy.events:
+            if event.timestamp < prev: monotonic = false
+            prev = event.timestamp
+        expect(monotonic).to_equal(true)
+        step("main entry ts 10 .. exit ts 40 (model ticks): inclusive 30, same as Linux")
+        val row = trace_profile_function_v1(spy.profile(), 1u32)
+        expect(row.unwrap().inclusive_ns).to_equal(30u64)
 
     it "re-enable reuses the one channel arena and poll buffer":
         val dll = fake_dll(NAMES, 16)
@@ -223,3 +247,52 @@ describe "XRay shared wrapper: spy and profile over both backends":
         var spy = run_windows()
         expect(spy.collect()).to_equal(0)
         expect(spy.adapter.state_code()).to_equal(XRAY_LLVM_STATE_IDLE_V1)
+
+# A second synthetic edge stream (all three sites selected, main calls work
+# twice, work calls idle once), replayed identically on both backends.
+val PARITY_SITES: [i64] = [0, 1, 1, 1, 2, 2, 1, 0]
+val PARITY_KINDS: [i64] = [0, 0, 1, 0, 0, 1, 1, 1]
+
+fn parity_linux(kind: TraceBackendV1) -> XraySpyV1:
+    var leaf = FakeLinuxLeaf(slots: [0, 0, 0], arena: 0, generation: 0u64, context: 0u64,
+        module_instance: 0u64, clock: 0u64, kind: kind)
+    var spy = XraySpyV1.create(XrayBackendV1.linux(leaf, NAMES), 1u64, 64)
+    var config = config_v1()
+    config.backend = kind
+    expect(spy.enable(config, selection_v1([1, 2, 3])).is_ok()).to_equal(true)
+    for i in 0..PARITY_SITES.len():
+        leaf.fire(PARITY_SITES[i], PARITY_KINDS[i])
+    expect(spy.disable().is_ok()).to_equal(true)
+    spy
+
+fn parity_windows() -> XraySpyV1:
+    val dll = fake_dll(NAMES, 16)
+    var spy = XraySpyV1.create(XrayBackendV1.windows(XrayWinFlagLeafV1.bind(dll)), 1u64, 64)
+    expect(spy.enable(config_v1(), selection_v1([1, 2, 3])).is_ok()).to_equal(true)
+    for i in 0..PARITY_SITES.len():
+        win_fire(dll, PARITY_SITES[i], PARITY_KINDS[i])
+    expect(spy.disable().is_ok()).to_equal(true)
+    spy
+
+val PARITY_LOG: [text] = ["enter main", "enter work", "exit work", "enter work", "enter idle",
+    "exit idle", "exit work", "exit main"]
+
+describe "XRay shared wrapper: one edge stream, identical spy on both backends":
+    it "log_lines are identical for the same synthetic edge stream":
+        step("replay one nested stream on the Linux and the Windows backend")
+        val linux = parity_linux(TraceBackendV1.Llvm).log_lines()
+        expect(linux).to_equal(PARITY_LOG)
+        expect(parity_windows().log_lines()).to_equal(linux)
+
+    it "profile shape is identical for the same synthetic edge stream":
+        val linux = profile_shape(parity_linux(TraceBackendV1.Llvm).profile())
+        expect(linux).to_equal("events=8 unmatched=0 open=0 f1:calls=1:depth=1 f2:calls=2:depth=2 f3:calls=1:depth=3")
+        expect(profile_shape(parity_windows().profile())).to_equal(linux)
+
+    # @req REQ-XRAY-V1-API-01: the native Simple sled leaf (sled kind Simple)
+    # rides the same spy; the adapter takes the backend leaf's sled kind.
+    it "the spy drives a Simple-sled Linux leaf with the same output":
+        step("a leaf reporting sled kind Simple, config backend simple")
+        val simple = parity_linux(TraceBackendV1.Simple)
+        expect(simple.log_lines()).to_equal(PARITY_LOG)
+        expect(profile_shape(simple.profile())).to_equal(profile_shape(parity_windows().profile()))

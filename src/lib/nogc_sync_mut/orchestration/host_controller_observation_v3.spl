@@ -1,0 +1,179 @@
+# Controller-facing facts from an actual retained Host domain. These records
+# are data, never substitutes for the signed reservation/execution authority.
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.HostServiceDomainV3
+use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
+use std.nogc_sync_mut.orchestration.host_windows_local_root_v3.HostWindowsLocalRootV3
+use std.nogc_sync_mut.orchestration.host_service_enrollment_v2.host_service_enrollment_payload_digest_v2
+use std.nogc_sync_mut.orchestration.host_execution_envelope_v2.{HostExecutionEnvelopeV2, host_execution_decode_v2}
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.*
+use std.nogc_sync_mut.orchestration.host_execution_intent_v1.host_execution_intent_load_owned_v3
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.nogc_async_mut.container.api_v2.simple_container_project_v2
+use std.nogc_async_mut.container.execution_progress_v4.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.{RuntimeOperationV1, RUNTIME_STATUS_OK}
+use std.common.contracts.orchestration.host_capacity_v1.host_available_capacity_v1
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.task_runner.distributed_operation_journal_v2.*
+use std.nogc_sync_mut.io.windows_private_file_v1.WindowsJournalStoreV1
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.contracts.orchestration.host_controller_status_v3.*
+use std.nogc_sync_mut.io.windows_command_owner_v2.windows_command_thread_check_v2
+
+# This guard conveys only the existing native caller origin. Cancellation uses
+# the retained operation owner and must remain possible after launch-policy
+# expiry; it does not acquire a new execution grant or refresh that policy.
+pub fn host_controller_retained_origin_v3(domain: HostServiceDomainV3) -> Result<bool, text>:
+    match domain.local:
+        case HostLocalRootV3.Windows(_):
+            windows_command_thread_check_v2()?
+            Ok(true)
+        case _: Err("controller-retained-host-backend-unsupported")
+
+pub fn host_controller_status_v3(domain: HostServiceDomainV3) -> Result<HostControllerStatusV3, text>:
+    val local = match domain.local:
+        case HostLocalRootV3.Windows(value): value
+        case _: return Err("controller-retained-host-backend-unsupported")
+    val metadata = local.current_v3()?
+    val ledger = local.capacity_v3().ledger
+    val available = host_available_capacity_v1(ledger)?
+    val binding = local.binding_v3()
+    Ok(HostControllerStatusV3(local.scope_v3(), ledger.capacity.authority_id,
+        host_service_enrollment_payload_digest_v2(binding)?, binding.provider_identity_digest,
+        ledger.revision, ledger.capacity.cpu_millis, ledger.capacity.memory_bytes,
+        available.cpu_millis, available.memory_bytes, ledger.reservations.len(), local.ready_v3()))
+
+pub class HostControllerInspectionV3:
+    request: HostExecutionEnvelopeV2
+    original: HostExecutionObservationV2
+    progress: ContainerExecutionProgressV4
+    store: WindowsJournalStoreV1
+    lease_digest: text
+
+pub struct HostControllerInspectionTurnV3:
+    domain: HostServiceDomainV3
+    inspection: Option<HostControllerInspectionV3>
+    observation: Option<HostExecutionObservationV2>
+    prepared: bool
+    error: text
+
+fn controller_host_archive_v3(local: HostWindowsLocalRootV3,
+        operation_id: text, execute_request_digest: text) -> Result<HostExecutionEnvelopeV2, text>:
+    val current = local.current_v3()?
+    if not builder_identifier_valid_v1(operation_id) or not builder_digest_valid_v1(execute_request_digest):
+        return Err("controller-host-inspect-operation")
+    val journal = local.capacity_v3().journal
+    val bytes = distributed_operation_journal_read_required_v3(journal,
+        "host-execute-packets/" + sha256_text(operation_id) + ".sdn", 2097152)?
+    # Compare the original exact execute packet, including its signatures. A
+    # journal reservation alone cannot authenticate an arbitrary execute digest.
+    if sha256_text(operation_id + "\n" + bytes) != execute_request_digest:
+        return Err("controller-host-inspect-execute-request-mismatch")
+    val packet = host_execution_decode_v2(bytes, local.scope_v3())?
+    if packet.operation.id != operation_id: return Err("controller-host-inspect-packet-mismatch")
+    val row = daemon_operation_exact_v2(journal, packet.operation)?
+    if not ["executing", "outcome-unknown", "completed", "failed", "cancelled"].contains(row.state):
+        return Err("controller-host-inspect-no-execution")
+    val projection = simple_container_project_v2(local.container_v3(), packet.execution)?
+    if (projection.operation_id != operation_id or projection.request_digest != packet.execution.plan.request_digest or
+            projection.cpu_millis != packet.intent.reservation.cpu_millis or
+            projection.memory_bytes != packet.intent.reservation.memory_bytes):
+        return Err("controller-host-inspect-projection")
+    Ok(packet)
+
+fn controller_host_original_v3(local: HostWindowsLocalRootV3,
+        packet: HostExecutionEnvelopeV2) -> Result<HostExecutionObservationV2, text>:
+    val journal = local.capacity_v3().journal
+    val original = host_execution_observation_load_owned_v3(journal, packet.operation.id)?
+    val birth = host_execution_intent_load_owned_v3(journal, packet.operation.id)?
+    if (original.operation_digest != sha256_text(distributed_encode_operation_v2(packet.operation)?) or
+            original.plan_digest != packet.intent.plan_digest or original.request_digest != packet.execution.plan.request_digest or
+            original.grant_id != packet.signed.grant.id or original.principal != packet.signed.grant.principal or
+            original.issuer_id != packet.signed.issuer_id or original.approver_id != packet.approval.approver_id or
+            original.provider_identity_digest != local.binding_v3().provider_identity_digest or
+            container_scope_fence_id_v2(original.scope)? != container_scope_fence_id_v2(local.scope_v3())? or
+            birth.native_id != original.runtime.native_id or birth.operation_id != original.runtime.operation_id or
+            birth.pod_uid != original.runtime.pod_uid or birth.attempt != original.runtime.attempt or
+            birth.engine != original.runtime.engine or birth.node_boot_id != original.runtime.node_boot_id or
+            birth.provider_generation != original.runtime.provider_generation):
+        return Err("controller-host-inspect-original-mismatch")
+    Ok(original)
+
+fn controller_host_inspection_record_v3(local: HostWindowsLocalRootV3,
+        original: HostExecutionObservationV2, operation: RuntimeOperationV1) -> Result<HostExecutionObservationV2, text>:
+    val checked = local.current_v3()?
+    if operation.status != RUNTIME_STATUS_OK: return Err("controller-host-inspect-runtime:" + operation.reason)
+    if operation.state.identity != original.runtime or not builder_digest_valid_v1(operation.state.identity.native_id):
+        return Err("controller-host-inspect-runtime-mismatch")
+    val clock = local.context_v3()
+    if (clock.grant_clock <= 0 or clock.grant_clock < original.observed_unix_ms or
+            clock.monotonic_ms < original.observed_monotonic_ms): return Err("controller-host-inspect-clock")
+    var observed = original
+    observed.phase = operation.state.phase
+    observed.inspect_status = operation.status
+    observed.reason = operation.reason
+    observed.observed_unix_ms = clock.grant_clock
+    observed.observed_monotonic_ms = clock.monotonic_ms
+    val bytes = host_execution_observation_encode_v2(observed)?
+    # Immutable content-addressed observations reuse the same writer. No mutable
+    # CURRENT replacement or cached observation grants native launch authority.
+    val relative = "host-inspection-objects-v3/" + sha256_text(bytes) + ".sdn"
+    val published = distributed_operation_journal_publish_v3(local.capacity_v3().journal, relative, bytes)?
+    if distributed_operation_journal_read_required_v3(local.capacity_v3().journal, relative, 65536)? != bytes:
+        return Err("controller-host-inspect-readback")
+    Ok(observed)
+
+fn controller_host_inspection_accept_v3(domain: HostServiceDomainV3,
+        packet: HostExecutionEnvelopeV2, original: HostExecutionObservationV2,
+        next: ContainerExecutionProgressTurnV4) -> HostControllerInspectionTurnV3:
+    var local = match domain.local:
+        case HostLocalRootV3.Windows(value): value
+        case _: return HostControllerInspectionTurnV3(domain, nil, nil, false, "controller-host-inspect-backend")
+    val journal = local.capacity_v3().journal
+    val retained = local.retain_v3(local.capacity_v3(), next.owner)
+    val updated = HostServiceDomainV3(HostLocalRootV3.Windows(local))
+    var pending: Option<HostControllerInspectionV3> = nil
+    if next.progress.is_some():
+        pending = Some(HostControllerInspectionV3(packet, original, next.progress.unwrap(),
+            journal.windows_store.unwrap(), journal.lease_digest))
+    if retained.is_err(): return HostControllerInspectionTurnV3(updated, pending, nil, false, retained.unwrap_err())
+    if next.error != "": return HostControllerInspectionTurnV3(updated, pending, nil, false, next.error)
+    if pending.is_some(): return HostControllerInspectionTurnV3(updated, pending, nil, false, "")
+    if next.operation.is_none(): return HostControllerInspectionTurnV3(updated, nil, nil, false, "controller-host-inspect-result-unknown")
+    val observed = controller_host_inspection_record_v3(local, original, next.operation.unwrap())
+    if observed.is_err(): return HostControllerInspectionTurnV3(updated, nil, nil, false, observed.unwrap_err())
+    HostControllerInspectionTurnV3(updated, nil, Some(observed.unwrap()), false, "")
+
+pub fn host_controller_inspection_begin_v3(domain: HostServiceDomainV3,
+        operation_id: text, execute_request_digest: text) -> HostControllerInspectionTurnV3:
+    val local = match domain.local:
+        case HostLocalRootV3.Windows(value): value
+        case _: return HostControllerInspectionTurnV3(domain, nil, nil, false, "controller-host-inspect-backend")
+    val current = local.current_v3()
+    if current.is_err(): return HostControllerInspectionTurnV3(domain, nil, nil, false, current.unwrap_err())
+    val packet = controller_host_archive_v3(local, operation_id, execute_request_digest)
+    if packet.is_err(): return HostControllerInspectionTurnV3(domain, nil, nil, false, packet.unwrap_err())
+    val original = controller_host_original_v3(local, packet.unwrap())
+    if original.is_err(): return HostControllerInspectionTurnV3(domain, nil, nil, false, original.unwrap_err())
+    val next = simple_container_inspection_begin_v4(local.container_v3(), packet.unwrap().execution)
+    controller_host_inspection_accept_v3(domain, packet.unwrap(), original.unwrap(), next)
+
+pub fn host_controller_inspection_step_v3(domain: HostServiceDomainV3,
+        inspection: HostControllerInspectionV3, cancel: bool) -> HostControllerInspectionTurnV3:
+    val local = match domain.local:
+        case HostLocalRootV3.Windows(value): value
+        case _: return HostControllerInspectionTurnV3(domain, Some(inspection), nil, false, "controller-host-inspect-backend")
+    val journal = local.capacity_v3().journal
+    if (journal.windows_store.is_none() or not journal.windows_store.unwrap().same_owner(inspection.store) or
+            journal.lease_digest != inspection.lease_digest or local.scope_v3() != inspection.original.scope):
+        return HostControllerInspectionTurnV3(domain, Some(inspection), nil, false, "controller-host-inspect-owner-mismatch")
+    val current = local.current_v3()
+    val next = if cancel or current.is_err(): simple_container_execution_cancel_v4(local.container_v3(), inspection.progress)
+        else: simple_container_execution_step_v4(local.container_v3(), inspection.progress, false)
+    var turn = controller_host_inspection_accept_v3(domain, inspection.request, inspection.original, next)
+    if current.is_err(): turn.error = current.unwrap_err()
+    elif cancel: turn.error = "controller-host-inspect-cancelled"
+    turn
+
+export HostControllerStatusV3, host_controller_status_encode_v3

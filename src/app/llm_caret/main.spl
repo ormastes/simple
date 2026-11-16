@@ -64,7 +64,7 @@ use app.llm_caret.config.{load_config, config_loaded,
     config_glm_base_url, config_glm_model, config_glm_api_key,
     config_slang_base_url, config_slang_model, config_slang_api_key, config_slang_model_root,
     config_image_read_api_key}
-use app.llm_caret.provider.{LLMResponse, dispatch_send, is_valid_provider, list_providers, new_llm_error}
+use app.llm_caret.provider.{LLMResponse, dispatch_send, dispatch_slang_local_chat, is_valid_provider, list_providers, new_llm_error}
 use app.llm_caret.image_profile.{configured_image_profile_v1}
 use app.llm_caret.multimodal_types.{ModelProfileV1, validate_model_profile_v1}
 use app.llm_caret.multimodal_provider.{complete_multimodal_wire_v1}
@@ -72,6 +72,7 @@ use app.llm_caret.tools.{PermissionPolicy, ModelResponse,
     default_policy, allow_all_policy, parse_tool_use_blocks, parse_tool_use_tags,
     new_model_text, new_model_tools}
 use app.llm_caret.types.{Message, new_user_message}
+use std.gc_async_mut.slang.model_executor.backend.{chat_frame}
 use app.llm_caret.chat.{run_agent_loop, AgentResult}
 use app.llm_caret.chat_tui.{
     make_chat_tui_with_status,
@@ -107,6 +108,7 @@ use std.sffi.io.{file_write_text}
 use app.llm_caret.messaging.cli.{run_messaging_cli}
 use app.llm_caret.workspace_cli.{run_workspace_cli}
 use app.llm_caret.orchestrator_client.{run_orchestrator_cli}
+use app.cli.orchestrator_entry_v1.cli_orchestrator_entry_v1
 use app.llm_caret.orchestrator_execution_client_v2.run_orchestrator_execution_cli_v2
 
 # ============================================================================
@@ -522,6 +524,18 @@ fn _render_agent_transcript(msgs: [Message]) -> text:
     # so it must continue; _dispatch_slang_local strips the closing tag.
     out + "assistant: <think>\n"
 
+# slang_local: the conversation as chat frames, system prompt first, so the
+# backend applies the model's own chat template (and stops at its end-of-turn
+# token) instead of continuing the flat transcript above.
+fn _chat_frames(msgs: [Message]) -> text:
+    var out = ""
+    if RT_SYSTEM_PROMPT != "":
+        out = chat_frame("system", RT_SYSTEM_PROMPT)
+    for m in msgs:
+        if m.content.trim() != "":
+            out = out + chat_frame(m.role, m.content)
+    out
+
 # Tool protocol for providers with no wire tool-call format: the system prompt
 # teaches the tag form, parse_tool_use_tags reads it back.
 fn local_agent_tool_prompt() -> text:
@@ -551,8 +565,12 @@ fn _messages_json(msgs: [Message]) -> text:
 # the pure build_model_response tests; this just threads the running
 # transcript + session id through provider.dispatch_send.
 fn main_responder(msgs: [Message]) -> ModelResponse:
+    if RT_PROVIDER == "slang_local":
+        val slang_resp = dispatch_slang_local_chat(
+            RT_BASE_URL, RT_MODEL, _chat_frames(msgs), RT_MAX_TOKENS, RT_CLI_PATH)
+        return build_model_response(slang_resp)
     var prompt = _last_user_content(msgs)
-    if RT_PROVIDER == "slang_local" or RT_PROVIDER == "local_torch":
+    if RT_PROVIDER == "local_torch":
         prompt = _render_agent_transcript(msgs)
     var messages_json = _messages_json(msgs)
     # The compat-transport dispatch (openai_compat/slang/kimi/glm/deepseek)
@@ -798,7 +816,7 @@ fn bearer_ok(auth_header: text, required: text) -> bool:
     val prefix = "Bearer "
     if not auth_header.starts_with(prefix):
         return false
-    auth_header.substring(prefix.len()) == required
+    auth_header.substring(prefix.byte_len()) == required
 
 # Pure gate: auth -> size cap -> rate limit, ahead of routing. Returns
 # (allowed, status_code, body); status/body only meaningful when allowed is
@@ -1322,6 +1340,10 @@ fn _build_session_hooks(active_session_id: text) -> SessionHooks:
 
 fn run_main_args(raw_args: [text]) -> i64:
     if raw_args.len() > 0 and raw_args[0] == "orchestrator":
+        if raw_args.len() > 1 and ["server-resolve", "server-request"].contains(raw_args[1]):
+            val routed = raw_args.slice(1, raw_args.len())
+            if routed.len() < 3 or routed[2] != "caret": return 2
+            return cli_orchestrator_entry_v1(routed)
         if raw_args.len() > 2 and ["dispatch", "resume-execution", "inspect-execution"].contains(raw_args[2]):
             return run_orchestrator_execution_cli_v2(raw_args)
         return run_orchestrator_cli(raw_args)

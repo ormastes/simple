@@ -1,0 +1,137 @@
+# Versioned noninteractive probe custody in the ORIGINAL lifecycle slot.
+# No writer, spawn, request reset, pane witness or caller no-pane flag.
+use std.common.contracts.provider_cli.adapter_types_v1.ProviderCliProviderV1
+use std.common.contracts.provider_cli.adapter_v1.{provider_cli_probe_argv_v1, provider_cli_probe_count_v1}
+use std.nogc_sync_mut.container.machine_fresh_workload_record_v2.*
+use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, ContainerHostScopeV2}
+use std.nogc_sync_mut.container.machine_fresh_probe_record_v3.machine_fresh_probe_selection_require_v3
+use std.nogc_sync_mut.io.profiled_combined_capture_v1.*
+use std.common.build_manager.group_process_stream_protocol_v2.GroupProcessStreamLaunchV2
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.common.crypto.sha256.sha256_text
+
+pub(package) class MachineFreshProbeCustodyV3:
+    provider: ProviderCliProviderV1
+    index: i64
+    request_digest: text
+    capture: Option<ProfiledCombinedCaptureOwnerV1> = nil
+    capture_record: Option<ProfiledCombinedCaptureOwnerV1> = nil
+    evidence: Option<ProfiledCombinedCaptureEvidenceV1> = nil
+    name: text = ""
+    program: text = ""
+    arguments: [text] = []
+    phase: text = "selection-staged"
+    error: text = ""
+
+    pub(package) fn profile_match_v3(provider: ProviderCliProviderV1, index: i64, digest: text) -> Result<(), text>:
+        val admitted = self.admitted_v3()?
+        if provider != self.provider or index != self.index or digest != self.request_digest:
+            return Err("machine-probe-selected-profile-mismatch")
+        Ok(())
+
+    pub(package) fn selection_published_v3() -> Result<MachineFreshProbeCustodyV3, text>:
+        if self.phase != "selection-staged": return Err("machine-probe-selection-phase")
+        var retained = self
+        retained.phase = "selected"
+        Ok(retained)
+
+    pub(package) fn admitted_v3() -> Result<(), text>:
+        machine_fresh_probe_selection_require_v3(self.phase)
+
+    pub(package) fn begin_v3(name: text, launch: GroupProcessStreamLaunchV2) -> Result<MachineFreshProbeCustodyV3, text>:
+        if self.capture.is_some() or not ["selected", "published"].contains(self.phase): return Err("machine-probe-helper-owned")
+        if not ["probe-wait", "probe-logs"].contains(name): return Err("machine-probe-action")
+        var retained = self
+        retained.name = name
+        retained.phase = "spawn-unresolved"
+        retained.evidence = nil
+        retained.capture_record = nil
+        retained.program = launch.request.program
+        retained.arguments = launch.request.args
+        Ok(retained)
+
+    pub(package) fn capture_v3(turn: ProfiledCombinedCaptureTurnV1) -> MachineFreshProbeCustodyV3:
+        var retained = self
+        retained.capture = turn.owner
+        if turn.owner.is_some(): retained.capture_record = turn.owner
+        if turn.evidence.is_some(): retained.evidence = turn.evidence
+        if retained.error == "" and turn.error != "": retained.error = turn.error
+        retained.phase = if turn.owner.is_some(): "capturing" else: "native-retired"
+        retained
+
+    pub(package) fn step_v3(cancel: bool) -> MachineFreshProbeCustodyV3:
+        if self.capture.is_none(): return self
+        # No raw transfer/ref escapes: the actual capture producer owns spawn,
+        # both combined streams, terminal, original deadline and retirement.
+        self.capture_v3(profiled_combined_capture_step_v1(self.capture.unwrap(), cancel))
+
+    pub(package) fn result_v3() -> Result<(text, i64), text>:
+        if self.phase != "native-retired" or self.capture.is_some() or self.capture_record.is_none() or self.evidence.is_none():
+            return Err("machine-probe-complete-capture-required")
+        if self.error != "": return Err(self.error)
+        val evidence = self.evidence.unwrap()
+        val actual = profiled_combined_capture_evidence_matches_v1(self.capture_record.unwrap(), evidence)?
+        if evidence.exit_code_v1() != 0: return Err("machine-probe-helper-exit-failed")
+        val bytes = evidence.transcript_bytes_v1()
+        if not utf8_bytes_valid(bytes): return Err("machine-probe-output-utf8")
+        Ok((bytes_to_text(bytes), evidence.exit_code_v1()))
+
+    pub(package) fn published_v3() -> Result<MachineFreshProbeCustodyV3, text>:
+        val complete = self.result_v3()?
+        var retained = self
+        retained.phase = "published"
+        Ok(retained)
+
+    pub(package) fn evidence_v3() -> Result<ProfiledCombinedCaptureEvidenceV1, text>:
+        if self.name != "probe-logs" or self.phase != "published": return Err("machine-probe-logs-not-published")
+        val complete = self.result_after_publication_v3()?
+        Ok(self.evidence.unwrap())
+
+    fn result_after_publication_v3() -> Result<(), text>:
+        if self.capture_record.is_none() or self.evidence.is_none() or self.capture.is_some() or self.error != "":
+            return Err("machine-probe-capture-unresolved")
+        profiled_combined_capture_evidence_matches_v1(self.capture_record.unwrap(), self.evidence.unwrap())
+
+    pub(package) fn reserve_settlement_v3() -> Result<MachineFreshProbeCustodyV3, text>:
+        val actual_logs = self.evidence_v3()?
+        var retained = self
+        retained.phase = "settlement-reserved"
+        Ok(retained)
+
+    pub(package) fn finalize_settlement_v3() -> Result<MachineFreshProbeCustodyV3, text>:
+        if self.phase != "settlement-reserved": return Err("machine-probe-settlement-not-reserved")
+        var retained = self
+        retained.phase = "settled"
+        Ok(retained)
+
+    pub(package) fn settlement_reserved_v3() -> bool: self.phase == "settlement-reserved"
+
+    pub(package) fn native_retired_v3() -> bool:
+        ["native-retired", "published", "settlement-reserved", "settled"].contains(self.phase) and self.capture.is_none()
+
+    pub(package) fn retained_v3() -> bool: self.capture.is_some() or self.phase == "spawn-unresolved"
+    pub(package) fn diagnostic_v3() -> text: self.error
+    pub(package) fn name_v3() -> text: self.name
+    pub(package) fn published_phase_v3() -> bool: self.phase == "published"
+    pub(package) fn launch_result_v3() -> (text, [text]): (self.program, self.arguments)
+
+pub(package) fn machine_fresh_probe_select_v3(record: MachineFreshWorkloadRecordV2,
+        provider: ProviderCliProviderV1, index: i64) -> Result<MachineFreshProbeCustodyV3, text>:
+    val valid = machine_fresh_probe_request_validate_v3(record.scope, record.request, provider, index)?
+    Ok(MachineFreshProbeCustodyV3(provider: provider, index: index, request_digest: record.request.plan.request_digest))
+
+# Pure request check before reserving resources. Success is only DATA: actual
+# reserve still authenticates the original principal under the SAME writer.
+pub fn machine_fresh_probe_request_validate_v3(scope: ContainerHostScopeV2,
+        original: ContainerExecutionRequestV2, provider: ProviderCliProviderV1, index: i64) -> Result<(), text>:
+    val expected = provider_cli_probe_argv_v1(provider, index)?
+    val request = machine_fresh_workload_request_v2(scope, original)?
+    # Closed compiled probe tail, no mounts, terminal, caller environment,
+    # host path/bundle or request user mutation. Image/runtime remain admitted
+    # by the original actual CPU request and installed successor/profile.
+    if (request.command.len() != 1 or not request.command[0].starts_with("/") or request.args != expected or
+            request.terminal_mode != "none" or request.mounts.len() != 0 or request.environment.len() != 0 or
+            request.bundle_path != "" or request.build_input_root != "" or request.build_output_root != "" or
+            not request.replace_entrypoint or request.filesystem_policy != "read-only"):
+        return Err("machine-probe-compiled-cpu-profile-required")
+    Ok(())

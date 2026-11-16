@@ -7,9 +7,41 @@ extern fn rt_value_as_int(value: i64) -> i64
 @unsafe(reason: "raw tagged float constructor ABI; contract: exact f64 parameter and tagged value result", capabilities: [ffi])
 extern fn rt_value_float(value: f64) -> i64
 
-@always_inline
+# Pure-Simple IEEE-754 decode (same algorithm as core_string /
+# std.common.binary_io f64_from_bits). `f64.from_bits` is a primitive static
+# call the pure-Simple compiler does not resolve (HIR: `unresolved name: f64`),
+# and simple-core links no C runtime, so no extern decoder exists either.
+# Names are file-private: each simple_core file is its own --no-mangle part.
+fn _sffi_core_any_ops_pow2(n: i64) -> f64:
+    # exponentiation by squaring: |n| <= 1074, so at most 11 squarings
+    var result = 1.0
+    var base = if n < 0: 0.5 else: 2.0
+    var e = if n < 0: 0 - n else: n
+    while e > 0:
+        if (e & 1) == 1:
+            result = result * base
+        base = base * base
+        e = e >> 1
+    result
+
 fn _sffi_core_any_ops_bits_to_f64(bits: i64) -> f64:
-    f64.from_bits(bits)
+    val exp = (bits >> 52) & 0x7FF
+    val frac = bits & 0xFFFFFFFFFFFFF
+    var result = 0.0
+    if exp == 0x7FF:
+        val inf = 1.0e308 * 10.0
+        result = if frac == 0: inf else: inf - inf
+    elif exp == 0:
+        if frac == 0:
+            if bits < 0:
+                return -0.0
+            return 0.0
+        result = ((frac as f64) / 4503599627370496.0) * _sffi_core_any_ops_pow2(-1022)
+    else:
+        result = (1.0 + (frac as f64) / 4503599627370496.0) * _sffi_core_any_ops_pow2(exp - 1023)
+    if bits < 0:
+        return 0.0 - result
+    result
 
 @always_inline
 fn _sffi_core_any_ops_value_int(value: i64) -> i64:

@@ -83,7 +83,7 @@ fn view() -> BugTestDbViewV1:
     view_with(runs)
 
 fn policy() -> BugClosurePolicyV1:
-    BugClosurePolicyV1(required_backends: [backend("interp")])
+    BugClosurePolicyV1(required_backends: [backend("interp")], run_evidence: BugRunEvidenceV1.Observed)
 
 fn clean_index() -> WorkaroundIndex:
     WorkaroundIndex(revision: HEAD, complete: true,
@@ -115,7 +115,7 @@ describe "bug closure gate: verified fix admission":
     it "requires GREEN on every required backend, not just one":
         # @req BUG-003
         step("Two required backends, both GREEN: allowed")
-        val two = BugClosurePolicyV1(required_backends: [backend("interp"), backend("native")])
+        val two = BugClosurePolicyV1(required_backends: [backend("interp"), backend("native")], run_evidence: BugRunEvidenceV1.Observed)
         var runs = [pre_fix_red()]
         for r in green_runs("interp"): runs.push(r)
         for r in green_runs("native"): runs.push(r)
@@ -194,7 +194,7 @@ describe "bug closure gate: blocked diagnostics":
             run("adjacent_case", "interp", BugRunPhaseV1.PostFix, BugRunOutcomeV1.Cached, HEAD)])
         expect(codes(bug_closure_evaluate_v1(candidate(), bug(), policy(), skipped, clean_index()))).to_equal("E-BUG-EVIDENCE-003,E-BUG-EVIDENCE-003")
         step("Adverse: a policy naming no backend cannot certify anything")
-        val empty = BugClosurePolicyV1(required_backends: [])
+        val empty = BugClosurePolicyV1(required_backends: [], run_evidence: BugRunEvidenceV1.Observed)
         expect(codes(bug_closure_evaluate_v1(candidate(), bug(), empty, view(), clean_index()))).to_equal("E-BUG-EVIDENCE-003")
 
     it "blocks while a workaround for the bug is live or coverage is incomplete":
@@ -260,3 +260,35 @@ describe "bug closure gate: non-fix dispositions":
         val raced = BugTestDbViewV1(head: digest(OTHER_HEAD), bug_state: digest("state-7"),
             known_bugs: view().known_bugs, known_cases: [], known_requirements: [], runs: [])
         expect(codes(bug_closure_evaluate_v1(dup, bug(), policy(), raced, clean_index()))).to_equal("E-BUG-RACE-006")
+
+describe "bug closure gate: run evidence mode and disposition vocabulary":
+    it "NotObserved skips run checks, still enforces workaround and links, and says so":
+        # @req BUG-001
+        # @req BUG-003
+        # @req BUG-004
+        step("No run source: the policy marks run evidence as not observed")
+        val unobserved = BugClosurePolicyV1(required_backends: [], run_evidence: BugRunEvidenceV1.NotObserved)
+        val ok = bug_closure_evaluate_v1(candidate(), bug(), unobserved, view_with([]), clean_index())
+        expect(ok.verdict == BugClosureVerdictV1.Allowed).to_equal(true)
+        expect(bug_closure_run_evidence_text_v1(ok.run_evidence)).to_equal("not_observed")
+        step("Adverse: a live workaround for the bug still blocks without run evidence")
+        val live = WorkaroundIndex(revision: HEAD, complete: true,
+            links: [WorkaroundLink(bug_id: "bug_parser_nesting", path: "src/a.spl", line: 9, recover: "", reason: "temp")])
+        expect(codes(bug_closure_evaluate_v1(candidate(), bug(), unobserved, view_with([]), live))).to_equal("E-BUG-WR-004")
+        step("Adverse: an unknown test case still blocks as a broken link")
+        val no_cases = BugTestDbViewV1(head: digest(HEAD), bug_state: digest("state-7"),
+            known_bugs: view().known_bugs, known_cases: [], known_requirements: view().known_requirements, runs: [])
+        expect(codes(bug_closure_evaluate_v1(candidate(), bug(), unobserved, no_cases, clean_index()))).to_equal("E-BUG-LINK-005,E-BUG-LINK-005")
+
+    it "round-trips every disposition name and rejects an unknown one":
+        # @req BUG-001
+        step("Every disposition parses from its own text")
+        for name in ["fixed", "closed", "triage", "duplicate", "invalid", "wontfix", "deferred"]:
+            match bug_closure_disposition_parse_v1(name):
+                case Some(parsed): expect(bug_closure_disposition_text_v1(parsed)).to_equal(name)
+                case None: expect(name).to_equal("parsed")
+        step("Adverse: an unknown disposition is None, not a default")
+        expect(bug_closure_disposition_parse_v1("resolved").?).to_equal(false)
+        step("Only fixed and closed are verified-fix kinds")
+        expect(bug_closure_disposition_kind_v1(BugClosureDispositionV1.Wontfix) == BugClosureKindV1.NonFixDisposition).to_equal(true)
+        expect(bug_closure_disposition_kind_v1(BugClosureDispositionV1.Closed) == BugClosureKindV1.VerifiedFix).to_equal(true)

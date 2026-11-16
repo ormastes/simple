@@ -23,7 +23,7 @@ disagreement means one side stopped consulting the shared table.
 """
 
 use std.spec
-use compiler.core.types.{reset_all_pools, TYPE_U64, TYPE_I64, unit_decl_register, unit_decl_register_origin}
+use compiler.core.types.{reset_all_pools, TYPE_U64, TYPE_I64, TYPE_F64, unit_decl_register, unit_decl_register_origin}
 use compiler.core.parser.{parser_init_with_path, parser_has_errors}
 use compiler.core.parser_decls.{parse_module_body}
 use compiler.types.units.unit_ops.{
@@ -54,6 +54,7 @@ fn spec_declare_world():
     unit_decl_register("Timestamp", "point", "ts", TYPE_U64, "DurationMs")
     unit_decl_register("ByteIndex", "index", "bi", TYPE_U64, "")
     unit_decl_register("Lba", "nominal", "lba", TYPE_U64, "")
+    unit_decl_register("Meters", "nominal", "m", TYPE_F64, "")
 
 fn verdict_text(v: UnitOpVerdict) -> text:
     match v:
@@ -83,6 +84,8 @@ fn infer_text(ctx: HmInferContext, op: HirBinOp, l: HirType, r: HirType) -> text
         case Ok(t):
             match t.kind:
                 case Bool: "ok:bool"
+                case Int(bits, signed): "ok:int" + "{bits}" + (if signed: "s" else: "u")
+                case Float(bits): "ok:float" + "{bits}"
                 case Named(sym, _):
                     match ctx.symbol_names.get(sym.id):
                         case Some(n): "ok:" + n
@@ -124,13 +127,23 @@ describe "Unit operator matrix (section 3.1)":
             step("raw numerics never reach the matrix")
             expect(allow_of("add", "int", "int")).to_equal("notunit")
 
-        it "same-unit counts add and subtract, ratio and bitwise are denied":
+        it "same-unit counts add, subtract, multiply and divide; bitwise and modulo are denied":
             # @req REQ-UNIT-OPS-01
             spec_declare_world()
             expect(allow_of("add", "ByteCount", "ByteCount")).to_equal("allow:ByteCount")
             expect(allow_of("sub", "ByteCount", "ByteCount")).to_equal("allow:ByteCount")
-            expect(allow_of("div", "ByteCount", "ByteCount")).to_equal("deny")
-            expect(allow_of("mul", "ByteCount", "ByteCount")).to_equal("deny")
+            # owner decision 2026-11-15: U*U and U/U are allowed and yield the underlying scalar
+            expect(allow_of("div", "ByteCount", "ByteCount")).to_equal("allow:u64")
+            expect(allow_of("mul", "ByteCount", "ByteCount")).to_equal("allow:u64")
+            expect(allow_of("mul", "Meters", "Meters")).to_equal("allow:f64")
+            expect(allow_of("div", "Meters", "Meters")).to_equal("allow:f64")
+            expect(allow_of("mul", "ByteCount", "BitCount")).to_equal("deny")
+            expect(allow_of("div", "ByteCount", "BitCount")).to_equal("deny")
+            expect(allow_of("mul", "ByteIndex", "ByteIndex")).to_equal("deny")
+            expect(allow_of("div", "Timestamp", "Timestamp")).to_equal("deny")
+            expect(allow_of("pow", "ByteCount", "ByteCount")).to_equal("deny")
+            expect(allow_of("add", "ByteCount", "int")).to_equal("deny")
+            expect(allow_of("cmp", "ByteCount", "int")).to_equal("deny")
             expect(allow_of("bit", "ByteCount", "ByteCount")).to_equal("deny")
             expect(allow_of("mod", "ByteCount", "ByteCount")).to_equal("deny")
             expect(allow_of("cmp", "ByteCount", "ByteCount")).to_equal("allow:bool")
@@ -181,6 +194,12 @@ describe "Unit operator matrix (section 3.1)":
             expect(infer_text(ctx, HirBinOp.Sub, tys[2], tys[2])).to_equal("ok:DurationMs")
             expect(infer_text(ctx, HirBinOp.Lt, tys[0], tys[0])).to_equal("ok:bool")
             expect(infer_text(ctx, HirBinOp.Mul, tys[4], tys[4])).to_equal("ok:Width")
+            step("same-unit multiply and divide yield the underlying scalar, not the unit")
+            expect(infer_text(ctx, HirBinOp.Mul, tys[0], tys[0])).to_equal("ok:int64u")
+            expect(infer_text(ctx, HirBinOp.Div, tys[0], tys[0])).to_equal("ok:int64u")
+            expect(infer_text(ctx, HirBinOp.Div, tys[4], tys[4])).to_equal("ok:Width")
+            expect(infer_text(ctx, HirBinOp.Mul, tys[0], tys[1])).to_equal("deny")
+            expect(infer_text(ctx, HirBinOp.Mod, tys[0], tys[0])).to_equal("deny")
             step("a unit plus a raw int is denied, not unified")
             val int_ty = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
             expect(infer_text(ctx, HirBinOp.Add, tys[0], int_ty)).to_equal("deny")
@@ -207,6 +226,9 @@ describe "Unit operator matrix (section 3.1)":
             expect(value_text(unit_value_binop("add", "", "ByteCount", 12, "ByteCount", 30))).to_equal("ByteCount=42")
             expect(value_text(unit_value_binop("sub", "", "Timestamp", 50, "Timestamp", 20))).to_equal("DurationMs=30")
             expect(value_text(unit_value_binop("mul", "", "ByteCount", 6, "int", 7))).to_equal("ByteCount=42")
+            expect(value_text(unit_value_binop("mul", "", "ByteCount", 6, "ByteCount", 7))).to_equal("u64=42")
+            expect(value_text(unit_value_binop("div", "", "ByteCount", 84, "ByteCount", 2))).to_equal("u64=42")
+            expect(value_text(unit_value_binop("div", "", "Width", 84, "Width", 2))).to_equal("Width=42")
             expect(value_text(unit_value_binop("cmp", "lt", "ByteCount", 1, "ByteCount", 2))).to_equal("true")
             step("denied ops are SPL-UNIT-002, the same code the compiler emits")
             expect(value_text(unit_value_binop("add", "", "ByteCount", 1, "BitCount", 2))).to_equal("deny")
@@ -222,13 +244,16 @@ describe "Unit operator matrix (section 3.1)":
             expect(value_text(unit_value_binop("add", "", "ByteCount", big, "ByteCount", 1))).to_equal("deny")
             expect(value_text(unit_value_binop("mul", "", "ByteCount", big, "int", 2))).to_equal("deny")
             expect(value_text(unit_value_binop("div", "", "ByteCount", 5, "int", 0))).to_equal("deny")
+            expect(value_text(unit_value_binop("div", "", "ByteCount", 5, "ByteCount", 0))).to_equal("deny")
+            expect(value_text(unit_value_binop("mul", "", "ByteCount", big, "ByteCount", 2))).to_equal("deny")
+            expect(value_text(unit_value_binop("mul", "", "ByteCount", 6, "BitCount", 7))).to_equal("deny")
 
         it "compiler and interpreter agree on every matrix row":
             # @req REQ-UNIT-OPS-05
             # @capture(statistics): row-by-row agreement count
             spec_declare_world()
             val ops: [text] = ["add", "sub", "mul", "div"]
-            val names: [text] = ["ByteCount", "BitCount", "Timestamp", "DurationMs", "ByteIndex", "Width", "int"]
+            val names: [text] = ["ByteCount", "BitCount", "Timestamp", "DurationMs", "ByteIndex", "Width", "int"]  # includes U*U / U/U rows
             var rows = 0
             var agree = 0
             for op in ops:

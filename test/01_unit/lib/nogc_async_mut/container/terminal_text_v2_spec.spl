@@ -1,0 +1,193 @@
+# AUTHORED SOURCE-ONLY NOT_RUN. Actual pure adapter calls; no native IO fixture.
+use std.spec.*
+use std.common.contracts.container.primary_connection_v2.ContainerTerminalChunkV2
+use std.common.contracts.container.terminal_text_v2.*
+use std.common.text_bytes.boxed_text_bytes_checked
+
+fn terminal_text_chunk_v2(stream: text, bytes: [u8]) -> ContainerTerminalChunkV2:
+    ContainerTerminalChunkV2(stream: stream, bytes: bytes)
+
+fn terminal_text_bytes_v2(value: text) -> [u8]:
+    boxed_text_bytes_checked(value).unwrap()
+
+fn terminal_text_slice_v2(bytes: [u8], offset: i64, count: i64) -> [u8]:
+    var out = [0u8; count]
+    for index in 0..count: out[index] = bytes[offset + index]
+    out
+
+describe "Container incremental terminal presentation text":
+    it "retains an incomplete scalar and counts each newly delivered byte once":
+        step("Carry two bytes of a euro scalar into the next read without emitting replacements")
+        val first = container_terminal_text_feed_v2(ContainerTerminalTextStateV2(),
+            [terminal_text_chunk_v2("stdout", [226u8, 130u8])], false).unwrap()
+        expect(terminal_text_bytes_v2(first.text)).to_equal([])
+        expect(first.native_bytes).to_equal(2)
+        expect(first.state.stdout_pending).to_equal([226u8, 130u8])
+        expect(first.state.finished).to_equal(false)
+        val second = container_terminal_text_feed_v2(first.state,
+            [terminal_text_chunk_v2("stdout", [172u8, 65u8])], false).unwrap()
+        expect(terminal_text_bytes_v2(second.text)).to_equal([226u8, 130u8, 172u8, 65u8])
+        expect(second.native_bytes).to_equal(2)
+        expect(second.state.stdout_pending).to_equal([])
+        expect(first.state.stdout_pending).to_equal([226u8, 130u8])
+
+    it "completes a four-byte scalar across every internal split boundary":
+        step("Feed each incomplete prefix of a supplementary scalar and then only its suffix")
+        val scalar: [u8] = [240u8, 159u8, 152u8, 128u8]
+        for split in 1..4:
+            val prefix = terminal_text_slice_v2(scalar, 0, split)
+            val suffix = terminal_text_slice_v2(scalar, split, scalar.len() - split)
+            val first = container_terminal_text_feed_v2(ContainerTerminalTextStateV2(),
+                [terminal_text_chunk_v2("tty", prefix)], false).unwrap()
+            expect(terminal_text_bytes_v2(first.text)).to_equal([])
+            expect(first.native_bytes).to_equal(split)
+            expect(first.state.tty_pending).to_equal(prefix)
+            val second = container_terminal_text_feed_v2(first.state,
+                [terminal_text_chunk_v2("tty", suffix)], false).unwrap()
+            expect(terminal_text_bytes_v2(second.text)).to_equal(scalar)
+            expect(second.native_bytes).to_equal(4 - split)
+            expect(second.state.tty_pending).to_equal([])
+
+    it "carries prefixes between chunks within the same feed call":
+        step("Complete a three-byte scalar from separate chunks before emitting following ASCII")
+        val turn = container_terminal_text_feed_v2(ContainerTerminalTextStateV2(), [
+            terminal_text_chunk_v2("stdout", [226u8]),
+            terminal_text_chunk_v2("stdout", [130u8]),
+            terminal_text_chunk_v2("stdout", [172u8, 90u8])], false).unwrap()
+        expect(terminal_text_bytes_v2(turn.text)).to_equal([226u8, 130u8, 172u8, 90u8])
+        expect(turn.native_bytes).to_equal(4)
+        expect(turn.state.stdout_pending).to_equal([])
+
+    it "keeps stdout stderr and tty prefixes independent while respecting completed chunk order":
+        step("Interleave three partial channels and finish stderr before stdout and tty")
+        val first = container_terminal_text_feed_v2(ContainerTerminalTextStateV2(), [
+            terminal_text_chunk_v2("stdout", [226u8, 130u8]),
+            terminal_text_chunk_v2("stderr", [194u8]),
+            terminal_text_chunk_v2("tty", [240u8, 159u8, 152u8])], false).unwrap()
+        expect(terminal_text_bytes_v2(first.text)).to_equal([])
+        expect(first.native_bytes).to_equal(6)
+        expect(first.state.stdout_pending).to_equal([226u8, 130u8])
+        expect(first.state.stderr_pending).to_equal([194u8])
+        expect(first.state.tty_pending).to_equal([240u8, 159u8, 152u8])
+        val second = container_terminal_text_feed_v2(first.state, [
+            terminal_text_chunk_v2("stderr", [162u8]),
+            terminal_text_chunk_v2("stdout", [172u8]),
+            terminal_text_chunk_v2("tty", [128u8])], false).unwrap()
+        expect(terminal_text_bytes_v2(second.text)).to_equal([
+            194u8, 162u8, 226u8, 130u8, 172u8, 240u8, 159u8, 152u8, 128u8])
+        expect(second.native_bytes).to_equal(3)
+        expect(second.state.stdout_pending).to_equal([])
+        expect(second.state.stderr_pending).to_equal([])
+        expect(second.state.tty_pending).to_equal([])
+
+    it "replaces malformed bytes using the shared decoder while preserving NUL":
+        step("Render invalid leads and continuations as replacements without normalizing an embedded zero byte")
+        val turn = container_terminal_text_feed_v2(ContainerTerminalTextStateV2(),
+            [terminal_text_chunk_v2("stdout", [255u8, 128u8, 65u8, 0u8, 195u8, 40u8])], false).unwrap()
+        expect(terminal_text_bytes_v2(turn.text)).to_equal([
+            239u8, 191u8, 189u8, 239u8, 191u8, 189u8, 65u8, 0u8, 239u8, 191u8, 189u8, 40u8])
+        expect(turn.native_bytes).to_equal(6)
+        expect(turn.state.stdout_pending).to_equal([])
+
+    it "does not retain impossible UTF8 prefixes as if they could become valid scalars":
+        step("Reject an overlong prefix immediately and use shared scalar replacement for a complete surrogate")
+        val invalid_prefix = container_terminal_text_feed_v2(ContainerTerminalTextStateV2(),
+            [terminal_text_chunk_v2("stdout", [224u8, 128u8])], false).unwrap()
+        expect(terminal_text_bytes_v2(invalid_prefix.text)).to_equal([239u8, 191u8, 189u8, 239u8, 191u8, 189u8])
+        expect(invalid_prefix.native_bytes).to_equal(2)
+        expect(invalid_prefix.state.stdout_pending).to_equal([])
+        val surrogate = container_terminal_text_feed_v2(ContainerTerminalTextStateV2(),
+            [terminal_text_chunk_v2("stderr", [237u8, 160u8, 128u8])], false).unwrap()
+        expect(terminal_text_bytes_v2(surrogate.text)).to_equal([239u8, 191u8, 189u8])
+        expect(surrogate.native_bytes).to_equal(3)
+        expect(surrogate.state.stderr_pending).to_equal([])
+
+    it "flushes an incomplete prefix at EOF with one replacement per unconsumed byte":
+        step("Flush two retained bytes through the shared decoder without recounting native bytes")
+        val first = container_terminal_text_feed_v2(ContainerTerminalTextStateV2(),
+            [terminal_text_chunk_v2("stdout", [226u8, 130u8])], false).unwrap()
+        val end = container_terminal_text_feed_v2(first.state, [], true).unwrap()
+        expect(terminal_text_bytes_v2(end.text)).to_equal([239u8, 191u8, 189u8, 239u8, 191u8, 189u8])
+        expect(end.native_bytes).to_equal(0)
+        expect(end.state.stdout_pending).to_equal([])
+        expect(end.state.stderr_pending).to_equal([])
+        expect(end.state.tty_pending).to_equal([])
+        expect(end.state.finished).to_equal(true)
+
+    it "flushes final chunks at EOF and refuses all subsequent feeds":
+        step("Render final ASCII and an incomplete scalar before sealing the presentation state")
+        val end = container_terminal_text_feed_v2(ContainerTerminalTextStateV2(),
+            [terminal_text_chunk_v2("tty", [65u8, 240u8, 159u8])], true).unwrap()
+        expect(terminal_text_bytes_v2(end.text)).to_equal([65u8, 239u8, 191u8, 189u8, 239u8, 191u8, 189u8])
+        expect(end.native_bytes).to_equal(3)
+        expect(end.state.tty_pending).to_equal([])
+        expect(end.state.finished).to_equal(true)
+        expect(container_terminal_text_feed_v2(end.state, [], true).unwrap_err()).to_equal("terminal-text-after-eof")
+        expect(container_terminal_text_feed_v2(end.state,
+            [terminal_text_chunk_v2("tty", [66u8])], false).unwrap_err()).to_equal("terminal-text-after-eof")
+
+    it "preserves incomplete state during a pending read with no new chunks":
+        step("Do not emit a replacement or count retained bytes when the transport has no new data")
+        val first = container_terminal_text_feed_v2(ContainerTerminalTextStateV2(),
+            [terminal_text_chunk_v2("stderr", [194u8])], false).unwrap()
+        val pending = container_terminal_text_feed_v2(first.state, [], false).unwrap()
+        expect(terminal_text_bytes_v2(pending.text)).to_equal([])
+        expect(pending.native_bytes).to_equal(0)
+        expect(pending.state.stderr_pending).to_equal([194u8])
+        expect(pending.state.finished).to_equal(false)
+
+    it "accepts exactly the native byte cap and rejects oversized individual or aggregate turns":
+        step("Count original bytes at the 65536-byte limit independently of rendered text")
+        val state = ContainerTerminalTextStateV2()
+        val body = [65u8; 65536]
+        val maximum = container_terminal_text_feed_v2(state,
+            [terminal_text_chunk_v2("stdout", body)], false).unwrap()
+        expect(maximum.native_bytes).to_equal(65536)
+        expect(terminal_text_bytes_v2(maximum.text)).to_equal(body)
+        expect(maximum.state.stdout_pending).to_equal([])
+        expect(container_terminal_text_feed_v2(state,
+            [terminal_text_chunk_v2("stdout", [65u8; 65537])], false).unwrap_err()).to_equal("terminal-text-turn-bound")
+        expect(container_terminal_text_feed_v2(state, [
+            terminal_text_chunk_v2("stdout", [65u8; 32768]),
+            terminal_text_chunk_v2("stderr", [66u8; 32769])], false).unwrap_err()).to_equal("terminal-text-turn-bound")
+        expect(state.stdout_pending).to_equal([])
+        expect(state.stderr_pending).to_equal([])
+        expect(state.finished).to_equal(false)
+
+    it "bounds chunk count including empty chunks without consuming presentation state":
+        step("Permit 1024 empty chunks but refuse a larger bounded-turn description")
+        val empty = terminal_text_chunk_v2("stdout", [])
+        val state = ContainerTerminalTextStateV2()
+        val maximum = container_terminal_text_feed_v2(state, [empty; 1024], false).unwrap()
+        expect(terminal_text_bytes_v2(maximum.text)).to_equal([])
+        expect(maximum.native_bytes).to_equal(0)
+        expect(maximum.state.stdout_pending).to_equal([])
+        expect(container_terminal_text_feed_v2(state, [empty; 1025], false).unwrap_err()).to_equal("terminal-text-chunk-bound")
+        expect(state.finished).to_equal(false)
+
+    it "refuses unknown channels without consuming an earlier valid prefix completion in that failed turn":
+        step("Fail after a valid chunk then retry from the unchanged retained prefix")
+        val first = container_terminal_text_feed_v2(ContainerTerminalTextStateV2(),
+            [terminal_text_chunk_v2("stdout", [226u8, 130u8])], false).unwrap()
+        expect(container_terminal_text_feed_v2(first.state, [
+            terminal_text_chunk_v2("stdout", [172u8]),
+            terminal_text_chunk_v2("stdin", [65u8])], false).unwrap_err()).to_equal("terminal-text-stream")
+        expect(first.state.stdout_pending).to_equal([226u8, 130u8])
+        val retry = container_terminal_text_feed_v2(first.state,
+            [terminal_text_chunk_v2("stdout", [172u8])], false).unwrap()
+        expect(terminal_text_bytes_v2(retry.text)).to_equal([226u8, 130u8, 172u8])
+        expect(retry.native_bytes).to_equal(1)
+        expect(retry.state.stdout_pending).to_equal([])
+
+    it "rejects oversized retained prefixes on every channel before decoding":
+        step("Bound caller-supplied state and leave its bytes intact on refusal")
+        for stream in ["stdout", "stderr", "tty"]:
+            var state = ContainerTerminalTextStateV2()
+            if stream == "stdout": state.stdout_pending = [240u8, 159u8, 152u8, 128u8]
+            elif stream == "stderr": state.stderr_pending = [240u8, 159u8, 152u8, 128u8]
+            else: state.tty_pending = [240u8, 159u8, 152u8, 128u8]
+            expect(container_terminal_text_feed_v2(state, [], true).unwrap_err()).to_equal("terminal-text-state-bound")
+            expect(state.finished).to_equal(false)
+            if stream == "stdout": expect(state.stdout_pending.len()).to_equal(4)
+            elif stream == "stderr": expect(state.stderr_pending.len()).to_equal(4)
+            else: expect(state.tty_pending.len()).to_equal(4)

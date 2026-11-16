@@ -58,6 +58,9 @@ typedef long off_t;
 #ifndef O_CREAT
 #define O_CREAT 0x0040
 #endif
+#ifndef O_NOFOLLOW
+#define O_NOFOLLOW 0x20000   /* must match include/fcntl.h */
+#endif
 
 /* Forward declarations for functions defined in other libc .c files
    or later in this file. Needed because we don't include full headers. */
@@ -305,7 +308,7 @@ ssize_t read(int fd, void *buf, size_t count) {
 int open(const char *path, int flags, ...) {
     size_t pathlen = strlen(path);
     int64_t r = simpleos_syscall(30, (int64_t)(uintptr_t)path, (int64_t)pathlen,
-                                  (int64_t)flags, 0, 0);
+                                  (int64_t)(flags & ~O_NOFOLLOW), 0, 0);
     if (r < 0) return set_errno(r);
     return (int)r;
 }

@@ -1,0 +1,51 @@
+# AUTHORED_NOT_RUN: pure request correspondence only, not capability fixtures.
+use std.spec.*
+use std.nogc_async_mut.container.providers.linux.workspace_mount_owner_v1.linux_workspace_source_request_match_v1
+use std.nogc_async_mut.container.providers.linux.workspace_installed_profile_v1.*
+use std.nogc_async_mut.container.providers.linux.request_v1.LinuxOciRequestV1
+use std.common.contracts.container.execution_v2.ContainerMountProjectionV2
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.linux_container_leaf_fixture_v2
+
+fn source_profile_fixture_v1() -> LinuxWorkspaceInstalledProfileV1:
+    LinuxWorkspaceInstalledProfileV1(machine_policy_digest: "a".repeat(64), provider_policy_digest: "b".repeat(64),
+        containment_profile_digest: "c".repeat(64), protected_parent: "/srv/simple-workspaces", leaf_name: "fixed",
+        expected_pool_id: "xfs:pool", expected_workspace_id: "inode:workspace", quota_id: 42,
+        hard_bytes: 1048576, guest_root: "/work", read_only: false)
+
+fn source_request_fixture_v1() -> LinuxOciRequestV1:
+    var request = linux_container_leaf_fixture_v2()
+    request.mounts = [ContainerMountProjectionV2(host_root: "/srv/simple-workspaces/fixed", guest_root: "/work", read_only: false)]
+    request.containment_profile_digest = "c".repeat(64)
+    request.user_uid = 1000
+    request.user_gid = 1001
+    request.user_namespace_mode = "keep-id"
+    request.replace_entrypoint = true
+    request.working_directory = "/work"
+    request
+
+describe "supporting workspace source request correspondence":
+    it "matches the exact configured root and mapping as data":
+        val digest = linux_workspace_source_request_match_v1(source_profile_fixture_v1(), source_request_fixture_v1(), 1000).unwrap()
+        expect(digest.len()).to_equal(64)
+
+    it "rejects nested sources, changed permissions, and extra mounts":
+        var request = source_request_fixture_v1()
+        request.mounts = [ContainerMountProjectionV2(host_root: "/srv/simple-workspaces/fixed/nested", guest_root: "/work", read_only: false)]
+        expect(linux_workspace_source_request_match_v1(source_profile_fixture_v1(), request, 1000).unwrap_err()).to_equal("workspace-source-request-mapping-mismatch")
+        request = source_request_fixture_v1()
+        request.mounts = [ContainerMountProjectionV2(host_root: "/srv/simple-workspaces/fixed", guest_root: "/work", read_only: true)]
+        expect(linux_workspace_source_request_match_v1(source_profile_fixture_v1(), request, 1000).unwrap_err()).to_equal("workspace-source-request-mapping-mismatch")
+        request.mounts = []
+        expect(linux_workspace_source_request_match_v1(source_profile_fixture_v1(), request, 1000).unwrap_err()).to_equal("workspace-source-one-exact-root-required")
+
+    it "rejects host networking, wrong user, image command fallback and foreign containment":
+        var request = source_request_fixture_v1()
+        request.network_policy = "bridge"
+        expect(linux_workspace_source_request_match_v1(source_profile_fixture_v1(), request, 1000).unwrap_err()).to_equal("workspace-source-request-profile-unsupported")
+        request = source_request_fixture_v1()
+        expect(linux_workspace_source_request_match_v1(source_profile_fixture_v1(), request, 1002).unwrap_err()).to_equal("workspace-source-request-profile-unsupported")
+        request.replace_entrypoint = false
+        expect(linux_workspace_source_request_match_v1(source_profile_fixture_v1(), request, 1000).unwrap_err()).to_equal("workspace-source-exact-command-required")
+        request = source_request_fixture_v1()
+        request.containment_profile_digest = "d".repeat(64)
+        expect(linux_workspace_source_request_match_v1(source_profile_fixture_v1(), request, 1000).unwrap_err()).to_equal("workspace-source-containment-binding-mismatch")

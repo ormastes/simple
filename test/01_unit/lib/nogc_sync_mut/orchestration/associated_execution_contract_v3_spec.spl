@@ -1,0 +1,124 @@
+# PURE CODEC DATA ONLY, SOURCE_AUTHORED_NOT_RUN. Literal scopes, budgets and
+# integrity receipts below are NOT Host facts, admitted capacity or signatures.
+# No private key/signing helper, native owner or fake authenticated reply exists.
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.container.execution_draft_v3.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.orchestration.host_prepare_associated_v3.*
+use std.common.contracts.orchestration.host_execution_association_v3.*
+use std.common.contracts.orchestration.host_execute_associated_v3.*
+use std.common.contracts.orchestration.host_prepare_request_v1.HostPrepareRequestV1
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_grant_digest_v2, distributed_encode_operation_v2}
+use std.common.crypto.sha256.sha256_text
+
+fn associated_shape_reply_v3() -> HostPreparedAssociatedReplyV3:
+    val draft = ContainerExecutionDraftV3("linux-podman", "workload", 1, "operation", "a".repeat(64), "opaque-codec-DATA")
+    val service = ContainerHostScopeV2(physical_host_id: "host", service_scope_id: "service", boot_id: "",
+        provider_generation: 3, native_machine_id: "linux-machine-id-v1:abcd", continuity_mode: "service-incarnation-v1",
+        continuity_id: "linux-service-incarnation-v3:beef")
+    val service_intent = container_execution_draft_bind_v3(draft, service).unwrap()
+    val intent = host_reservation_bind_intent_v1(HostReservationIntentV1(physical_host_id: "host",
+        fence: HostLedgerFenceV1("host-authority", container_scope_fence_id_v2(service).unwrap(), 3, 7),
+        plan_digest: container_execution_plan_digest_v2(service_intent.plan).unwrap(),
+        reservation: HostReservationV1("reservation", "operation", "0".repeat(64), "service", 1, "nonce", 2000, 4096, [], 100000,
+            HostReservationStateV1.Prepared))).unwrap()
+    val operation = OperationEnvelopeV2(2, "operation", intent.reservation.payload_digest, "user", "project", "host", "host_reservation_v1",
+        "b".repeat(64), 1, 0, 3, 4096, 100)
+    val grant = ExecutionGrantV2("grant", "user", "project", "host", ["host_reservation_v1"], "b".repeat(64), 1, 0, 99999, 8192, 1000)
+    var shape_signature: [u8] = []
+    for index in 0..64: shape_signature.push(0u8)
+    val signed = DistributedSignedGrantV2(grant, "issuer", 1, shape_signature)
+    val approval = DistributedSignedApprovalV2("approver", 1, distributed_grant_digest_v2(grant).unwrap(),
+        sha256_text(distributed_encode_operation_v2(operation).unwrap()), 1, 3, 99999, shape_signature)
+    val prepare = HostPrepareAssociatedRequestV3(HostPrepareRequestV1(intent, operation, signed, approval), draft, service)
+    # Integrity-only constructor; production must obtain the receipt through
+    # the actual canonical Host signed-prepare path instead.
+    val receipt = host_reservation_receipt_v1(intent, operation).unwrap()
+    val epoch = "c".repeat(64)
+    val native_scope = ContainerHostScopeV2(physical_host_id: "host", service_scope_id: "epoch-" + epoch,
+        boot_id: "native-boot", provider_generation: 41, native_machine_id: service.native_machine_id,
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "native-boot")
+    val association = HostExecutionAssociationV3("d".repeat(64), service, sha256_text(host_reservation_encode_intent_v1(intent).unwrap()),
+        receipt.receipt_digest, receipt.prepared_revision, epoch, "e".repeat(64), container_execution_draft_bind_v3(draft, native_scope).unwrap())
+    HostPreparedAssociatedReplyV3(prepare, receipt, association)
+
+fn associated_shape_execute_v3(reply: HostPreparedAssociatedReplyV3) -> HostExecuteAssociatedRequestV3:
+    val operation = host_execute_associated_operation_v3(reply.prepare.prepare.operation, reply.association).unwrap()
+    var grant = reply.prepare.prepare.signed.grant
+    grant.operations = ["host_execute_associated_v3"]
+    var signed = reply.prepare.prepare.signed
+    signed.grant = grant
+    var approval = reply.prepare.prepare.approval
+    approval.grant_digest = distributed_grant_digest_v2(grant).unwrap()
+    approval.request_digest = sha256_text(distributed_encode_operation_v2(operation).unwrap())
+    HostExecuteAssociatedRequestV3(reply.prepare, reply.receipt, reply.association, operation, signed, approval)
+
+describe "scope-free draft and explicit prepared execution association DATA":
+    it "round trips the draft while pure binding cannot change its exact provider request":
+        step("A draft digest is not a substitute for actual provider semantic validation")
+        val reply = associated_shape_reply_v3()
+        val draft = reply.prepare.draft
+        val source = container_execution_draft_encode_v3(draft).unwrap()
+        expect(container_execution_draft_encode_v3(container_execution_draft_decode_v3(source).unwrap()).unwrap()).to_equal(source)
+        expect(reply.association.execution.request_bytes).to_equal(draft.request_bytes)
+        expect(reply.association.execution.plan.request_digest).to_equal(draft.request_digest)
+        expect(reply.association.execution.plan.provider_generation).to_equal(41)
+        expect(reply.association.execution.plan.provider_generation == reply.prepare.service_scope.provider_generation).to_equal(false)
+
+    it "round trips prepare association reply and explicit new-action execute without claiming authority":
+        step("Service intent and native execution remain distinct typed scope bindings")
+        val reply = associated_shape_reply_v3()
+        val source = host_prepared_associated_reply_encode_v3(reply).unwrap()
+        expect(host_prepared_associated_reply_encode_v3(host_prepared_associated_reply_decode_v3(source).unwrap()).unwrap()).to_equal(source)
+        val execute = associated_shape_execute_v3(reply)
+        val encoded = host_execute_associated_encode_v3(execute).unwrap()
+        expect(host_execute_associated_encode_v3(host_execute_associated_decode_v3(encoded).unwrap()).unwrap()).to_equal(encoded)
+        expect(execute.operation.operation).to_equal("host_execute_associated_v3")
+        expect(execute.operation.payload_digest).to_equal(host_execution_association_digest_v3(reply.association).unwrap())
+
+    it "refuses changed epoch process receipt and request identity association":
+        step("The original intent and receipt bind the exact draft without predicting native epoch")
+        val reply = associated_shape_reply_v3()
+        var changed = reply.association
+        changed.epoch_record_digest = "f".repeat(64)
+        expect(host_execution_association_encode_v3(changed).is_err()).to_equal(true)
+        changed = reply.association
+        changed.execution.plan.continuity_id = "other-boot"
+        expect(host_execution_association_encode_v3(changed).is_err()).to_equal(true)
+        changed = reply.association
+        changed.prepared_receipt_digest = "f".repeat(64)
+        expect(host_execution_association_match_v3(changed, reply.prepare, reply.receipt).is_err()).to_equal(true)
+        changed = reply.association
+        changed.execution.request_bytes = "changed-codec-DATA"
+        expect(host_execution_association_match_v3(changed, reply.prepare, reply.receipt).is_err()).to_equal(true)
+
+    it "refuses legacy execute grants and changes to original envelope fields":
+        step("Only explicit associated action and association-bound approval fit the new codec")
+        var execute = associated_shape_execute_v3(associated_shape_reply_v3())
+        execute.signed.grant.operations = ["host_execute_v1"]
+        expect(host_execute_associated_encode_v3(execute).is_err()).to_equal(true)
+        execute = associated_shape_execute_v3(associated_shape_reply_v3())
+        execute.operation.project = "other-project"
+        expect(host_execute_associated_encode_v3(execute).is_err()).to_equal(true)
+        execute = associated_shape_execute_v3(associated_shape_reply_v3())
+        execute.association.service_process_identity_digest = "f".repeat(64)
+        expect(host_execute_associated_encode_v3(execute).is_err()).to_equal(true)
+
+    it "rejects unknown duplicate noncanonical versions and route oversize before admission":
+        step("Pure codec size and actual associated transport bounds are separate")
+        val reply = associated_shape_reply_v3()
+        val source = host_prepare_associated_encode_v3(reply.prepare).unwrap()
+        val head = source.slice(0, source.byte_len() - 2)
+        expect(host_prepare_associated_decode_v3(head + ", extra: true}\n").is_err()).to_equal(true)
+        expect(host_prepare_associated_decode_v3(head + ", version: 3}\n").is_err()).to_equal(true)
+        expect(host_prepare_associated_decode_v3(source + "\n").is_err()).to_equal(true)
+        expect(host_prepare_associated_decode_v3(source.replace("host-prepare-associated-request", "host-prepare-request")).is_err()).to_equal(true)
+        expect(host_prepare_associated_transport_v3(reply.prepare).unwrap()).to_equal(true)
+        var bigger = reply.prepare
+        bigger.draft.request_bytes = "x".repeat(8193)
+        expect(container_execution_draft_encode_v3(bigger.draft).is_ok()).to_equal(true)
+        expect(host_prepare_associated_transport_v3(bigger).unwrap_err()).to_equal("associated-transport-draft-bound")

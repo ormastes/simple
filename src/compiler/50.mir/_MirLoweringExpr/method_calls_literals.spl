@@ -1240,6 +1240,20 @@ impl MirLowering:
         b_merge.switch_to_block(merge_block)
         self.builder = b_merge
         self.remember_local_hir_type(result_local.id, payload_type, 0, 0)
+        # `.ok` / `.err` (nil fallback) yields a decoded payload-or-nil word
+        # typed by the payload; the variant tag is its presence. A scalar
+        # payload cannot answer presence by value (Ok(3) is the nil word).
+        # doc/08_tracking/bug/native_if_val_presence_test_dropped_2026-11-15.md
+        if val projection_default = default_expr:
+            match projection_default.kind:
+                case HirExprKind.NilLit:
+                    match payload_type.kind:
+                        case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char | HirTypeKind.Str:
+                            self.presence_word_locals[result_local.id] = has_payload.id
+                            if is_text:
+                                self.mark_decoded_text_option_local(result_local.id)
+                        case _: ()
+                case _: ()
         if result_is_optional:
             self.option_value_locals[result_local.id] = true
             self.mark_runtime_value_local(result_local.id)
@@ -2295,7 +2309,10 @@ impl MirLowering:
             end_local = b_end.emit_const_int(9223372036854775807)
             self.builder = b_end
         var b_slice = self.builder
-        val handle = b_slice.emit_cast(mir_operand_copy(tagged), MirType.i64())
+        # The receiver HANDLE word is a reinterpret (Bitcast): a text -> i64
+        # Cast is `int(text)` to Cranelift and fed rt_slice a parsed number
+        # (stage-2 class A, second instance). start/finish are real widenings.
+        val handle = b_slice.emit_bitcast(mir_operand_copy(tagged), MirType.i64())
         val start = b_slice.emit_cast(mir_operand_copy(start_local), MirType.i64())
         val finish = b_slice.emit_cast(mir_operand_copy(end_local), MirType.i64())
         val step = b_slice.emit_const_int(1)
@@ -2330,7 +2347,7 @@ impl MirLowering:
             val len_callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("rt_len"),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))), call_origin: MirCallOrigin.Runtime)
             end_local = b_slice.emit_call_value(len_callee, [mir_operand_copy(receiver_local)], MirType.i64())
-        val handle = b_slice.emit_cast(mir_operand_copy(receiver_local), MirType.i64())
+        val handle = b_slice.emit_bitcast(mir_operand_copy(receiver_local), MirType.i64())
         val start = b_slice.emit_cast(mir_operand_copy(start_local), MirType.i64())
         val finish = b_slice.emit_cast(mir_operand_copy(end_local), MirType.i64())
         val step = b_slice.emit_const_int(1)
@@ -2353,7 +2370,7 @@ impl MirLowering:
         # result metadata owner. rt_slice is O(k), allocates a new container,
         # and preserves BYTES/U64_PACKED storage flags.
         var b_slice = self.builder
-        val handle = b_slice.emit_cast(mir_operand_copy(receiver_local), MirType.i64())
+        val handle = b_slice.emit_bitcast(mir_operand_copy(receiver_local), MirType.i64())
         val start = b_slice.emit_cast(mir_operand_copy(start_local), MirType.i64())
         val finish = b_slice.emit_cast(mir_operand_copy(end_local), MirType.i64())
         val step = b_slice.emit_const_int(1)

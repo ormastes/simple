@@ -56,6 +56,7 @@ use nogc_sync_mut.database.codec.sqlcipher4_keys.{
     sqlcipher4_key_session_open_typed, sqlcipher4_key_session_open_profile,
     sqlcipher4_hmac_salt_from_file_salt, sqlcipher4_key_error_text
 }
+use nogc_sync_mut.database.codec.sqlcipher4_page.{Sqlcipher4PageNo}
 use nogc_sync_mut.database.codec.sqlcipher4_page.{
     SQLCIPHER4_PAGE_SIZE, SQLCIPHER4_PAGE_BODY_BYTES, SQLCIPHER4_PAGE1_SALT_BYTES,
     SQLCIPHER4_IV_OFFSET, SQLCIPHER4_HMAC_OFFSET, SQLCIPHER4_SESSION_MATERIAL_BYTES,
@@ -272,7 +273,7 @@ describe "decrypt coverage A: key unwrap success and failure":
 describe "decrypt coverage B: page decode geometry and authentication":
 
     it "round-trips page 1 and a later page to the identical 4016-byte body":
-        match sqlcipher4_encode_page(1, _body_page1(), _iv(0x10), _aes_key(), _hmac_key()):
+        match sqlcipher4_encode_page(Sqlcipher4PageNo(value: 1), _body_page1(), _iv(0x10), _aes_key(), _hmac_key()):
             case Ok(p1):
                 match sqlcipher4_decode_page(1, p1, _aes_key(), _hmac_key()):
                     case Ok(out):
@@ -281,7 +282,7 @@ describe "decrypt coverage B: page decode geometry and authentication":
                         fail("page 1 decode failed: {sqlcipher4_error_code(e)}")
             case Err(e):
                 fail("page 1 encode failed: {sqlcipher4_error_code(e)}")
-        match sqlcipher4_encode_page(7, _body_pageN(7), _iv(0x70), _aes_key(), _hmac_key()):
+        match sqlcipher4_encode_page(Sqlcipher4PageNo(value: 7), _body_pageN(7), _iv(0x70), _aes_key(), _hmac_key()):
             case Ok(p7):
                 match sqlcipher4_decode_page(7, p7, _aes_key(), _hmac_key()):
                     case Ok(out):
@@ -296,7 +297,7 @@ describe "decrypt coverage B: page decode geometry and authentication":
         var ok = true
         while pg <= 4:
             val body = _body_for_page(pg)
-            match sqlcipher4_encode_page(pg, body, _iv(pg), _aes_key(), _hmac_key()):
+            match sqlcipher4_encode_page(Sqlcipher4PageNo(value: pg), body, _iv(pg), _aes_key(), _hmac_key()):
                 case Ok(page):
                     match sqlcipher4_decode_page(pg, page, _aes_key(), _hmac_key()):
                         case Ok(out):
@@ -342,12 +343,12 @@ describe "decrypt coverage B: page decode geometry and authentication":
                 fail("33-byte HMAC key: expected InvalidPageGeometry, got {other}")
 
     it "encode rejects a short body and a short IV with InvalidPageGeometry":
-        match sqlcipher4_encode_page(7, _seq_u8(4015, 0), _iv(1), _aes_key(), _hmac_key()):
+        match sqlcipher4_encode_page(Sqlcipher4PageNo(value: 7), _seq_u8(4015, 0), _iv(1), _aes_key(), _hmac_key()):
             case Err(Sqlcipher4Error.InvalidPageGeometry(_)):
                 pass
             case other:
                 fail("4015-byte body: expected InvalidPageGeometry, got {other}")
-        match sqlcipher4_encode_page(7, _body_pageN(2), _seq_u8(15, 0), _aes_key(), _hmac_key()):
+        match sqlcipher4_encode_page(Sqlcipher4PageNo(value: 7), _body_pageN(2), _seq_u8(15, 0), _aes_key(), _hmac_key()):
             case Err(Sqlcipher4Error.InvalidPageGeometry(_)):
                 pass
             case other:
@@ -373,29 +374,29 @@ describe "decrypt coverage B: page decode geometry and authentication":
         _expect_err_auth(sqlcipher4_decode_page(1, _seq_u8(SQLCIPHER4_PAGE_SIZE, 9), _aes_key(), _hmac_key()), "garbage page 1")
 
     it "tampered ciphertext, IV, and stored HMAC each fail AuthenticationFailed":
-        match sqlcipher4_encode_page(7, _body_pageN(5), _iv(0x70), _aes_key(), _hmac_key()):
+        match sqlcipher4_encode_page(Sqlcipher4PageNo(value: 7), _body_pageN(5), _iv(0x70), _aes_key(), _hmac_key()):
             case Ok(base):
                 _expect_err_auth(sqlcipher4_decode_page(7, _flip(base, 100), _aes_key(), _hmac_key()), "ct tamper")
             case Err(e):
                 fail("encode for ct tamper failed: {sqlcipher4_error_code(e)}")
-        match sqlcipher4_encode_page(7, _body_pageN(6), _iv(0x70), _aes_key(), _hmac_key()):
+        match sqlcipher4_encode_page(Sqlcipher4PageNo(value: 7), _body_pageN(6), _iv(0x70), _aes_key(), _hmac_key()):
             case Ok(base):
                 _expect_err_auth(sqlcipher4_decode_page(7, _flip(base, SQLCIPHER4_IV_OFFSET + 3), _aes_key(), _hmac_key()), "IV tamper")
             case Err(e):
                 fail("encode for IV tamper failed: {sqlcipher4_error_code(e)}")
-        match sqlcipher4_encode_page(7, _body_pageN(7), _iv(0x70), _aes_key(), _hmac_key()):
+        match sqlcipher4_encode_page(Sqlcipher4PageNo(value: 7), _body_pageN(7), _iv(0x70), _aes_key(), _hmac_key()):
             case Ok(base):
                 _expect_err_auth(sqlcipher4_decode_page(7, _flip(base, SQLCIPHER4_HMAC_OFFSET + 20), _aes_key(), _hmac_key()), "HMAC tamper")
             case Err(e):
                 fail("encode for HMAC tamper failed: {sqlcipher4_error_code(e)}")
 
     it "wrong HMAC key fails authentication; wrong AES key on page 1 fails the structural guard":
-        match sqlcipher4_encode_page(7, _body_pageN(8), _iv(0x70), _aes_key(), _hmac_key()):
+        match sqlcipher4_encode_page(Sqlcipher4PageNo(value: 7), _body_pageN(8), _iv(0x70), _aes_key(), _hmac_key()):
             case Ok(p7):
                 _expect_err_auth(sqlcipher4_decode_page(7, p7, _aes_key(), _wrong_key()), "wrong HMAC key p7")
             case Err(e):
                 fail("encode p7 for wrong-key failed: {sqlcipher4_error_code(e)}")
-        match sqlcipher4_encode_page(1, _body_page1(), _iv(0x10), _aes_key(), _hmac_key()):
+        match sqlcipher4_encode_page(Sqlcipher4PageNo(value: 1), _body_page1(), _iv(0x10), _aes_key(), _hmac_key()):
             case Ok(p1):
                 match sqlcipher4_decode_page(1, p1, _wrong_key(), _hmac_key()):
                     case Ok(_):
@@ -408,7 +409,7 @@ describe "decrypt coverage B: page decode geometry and authentication":
                 fail("encode p1 for wrong-AES failed: {sqlcipher4_error_code(e)}")
 
     it "decoding page-7 bytes as page 8 fails the page-number binding":
-        match sqlcipher4_encode_page(7, _body_pageN(9), _iv(0x70), _aes_key(), _hmac_key()):
+        match sqlcipher4_encode_page(Sqlcipher4PageNo(value: 7), _body_pageN(9), _iv(0x70), _aes_key(), _hmac_key()):
             case Ok(p7):
                 _expect_err_auth(sqlcipher4_decode_page(8, p7, _aes_key(), _hmac_key()), "page-number swap")
             case Err(e):
@@ -420,7 +421,7 @@ describe "decrypt coverage B: page decode geometry and authentication":
         expect(sqlcipher4_constant_time_eq([1, 2, 3], [1, 2, 3, 4])).to_equal(false)
 
     it "page1_salt returns the leading 16 bytes or rejects wrong geometry":
-        match sqlcipher4_encode_page(1, _body_page1(), _iv(0x10), _aes_key(), _hmac_key()):
+        match sqlcipher4_encode_page(Sqlcipher4PageNo(value: 1), _body_page1(), _iv(0x10), _aes_key(), _hmac_key()):
             case Ok(p1):
                 match sqlcipher4_page1_salt(p1):
                     case Ok(salt):
@@ -476,7 +477,7 @@ describe "decrypt coverage C: key sessions, SecretRef resolution, registry fns":
                 expect(session.open).to_equal(true)
                 expect(session.codec_id).to_equal("sqlcipher4")
                 expect(session.secret_material.len()).to_equal(SQLCIPHER4_SESSION_MATERIAL_BYTES)
-                match sqlcipher4_encode_page(7, _body_pageN(11), _iv(0x70), _aes_key(), _hmac_key()):
+                match sqlcipher4_encode_page(Sqlcipher4PageNo(value: 7), _body_pageN(11), _iv(0x70), _aes_key(), _hmac_key()):
                     case Ok(p7):
                         pass
                     case Err(e):
@@ -525,7 +526,7 @@ describe "decrypt coverage C: key sessions, SecretRef resolution, registry fns":
         val material = _session_material()
         val session = CodecSessionV1(codec_id: "sqlcipher4", open: true, secret_material: material)
         # Page/HMAC keys inside material are (0x11-seeded, 0xA1-seeded).
-        match sqlcipher4_encode_page(7, _body_pageN(21), _iv(0x70), _aes_key(), _hmac_key()):
+        match sqlcipher4_encode_page(Sqlcipher4PageNo(value: 7), _body_pageN(21), _iv(0x70), _aes_key(), _hmac_key()):
             case Ok(p7):
                 match sqlcipher4_page_decode_with_session(7, p7, session):
                     case Ok(out):

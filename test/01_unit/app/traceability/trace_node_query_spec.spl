@@ -2,11 +2,12 @@
 # @req REQ-TRC-021 REQ-TRC-023
 use std.spec.*
 use std.common.traceability.model.*
+use std.common.traceability.trace_ids_v1.{TracePageCompletenessV1}
 use std.common.traceability.query_nodes_v1.{TraceNodeQueryV1, query_trace_nodes_v1}
 use std.common.traceability.query_missing_v1.{TraceLinkStatus, TraceGraphCompletenessV1, TraceMissingEntryV1, TraceMissingResultV1, trace_link_status_name_v1, trace_missing_requirements_v1}
 use std.common.traceability.sidecar_v1.{TraceSidecarReferenceV1}
 use std.spec.step
-use app.traceability.query_options_v1.{trace_query_options_parse_v1, TraceQueryOptionsV1, trace_query_sdn_requested_v1}
+use app.traceability.query_options_v1.{trace_query_options_parse_v1, TraceQueryOptionsV1, trace_query_sdn_requested_v1, trace_query_format_name_v1}
 use app.traceability.query_render_v1.{trace_query_render_v1, trace_query_table_diagnostics_v1}
 use app.traceability.extract.snapshot_pipeline.{TraceSnapshotScope, TraceSnapshotBuild}
 use app.cli.command_registry.{cli_registry_payload_text_v1}
@@ -31,19 +32,19 @@ describe "P0 typed node projection":
         val first = query_trace_nodes_v1(graph, node_list_query(1)).unwrap()
         expect(first.nodes.len()).to_equal(1)
         expect(first.nodes[0].id).to_equal("feature:a")
-        expect(first.total_count).to_equal(2)
-        expect(first.complete).to_be(false)
+        expect(first.total_count.value).to_equal(2)
+        expect(first.complete == TracePageCompletenessV1.Complete).to_be(false)
         var query = node_list_query(1)
-        query.cursor = first.next_cursor
+        query.cursor = first.next_cursor.value
         val second = query_trace_nodes_v1(graph, query).unwrap()
         expect(second.nodes[0].id).to_equal("feature:z")
-        expect(second.complete).to_be(true)
+        expect(second.complete == TracePageCompletenessV1.Complete).to_be(true)
         expect(second.edges.len()).to_equal(0)
 
     it "binds cursors to limit filter kind generation snapshot and visibility":
         # @ac AC-TRC-044
         val graph = node_query_graph()
-        val cursor = query_trace_nodes_v1(graph, node_list_query(1)).unwrap().next_cursor
+        val cursor = query_trace_nodes_v1(graph, node_list_query(1)).unwrap().next_cursor.value
         var query = node_list_query(1)
         query.cursor = cursor
         query.limit = 2
@@ -82,7 +83,7 @@ describe "P0 typed node projection":
         var query = node_list_query(200)
         query.id_prefix = "feature:z"
         val filtered = query_trace_nodes_v1(node_query_graph(), query).unwrap()
-        expect(filtered.total_count).to_equal(1)
+        expect(filtered.total_count.value).to_equal(1)
         expect(filtered.nodes[0].id).to_equal("feature:z")
         query.id_prefix = ""
         query.kind = "bugs"
@@ -96,7 +97,7 @@ describe "P0 typed node projection":
         val build = TraceSnapshotBuild(graph: graph, scope: TraceSnapshotScope(selected_roots: ["doc/test.sdn"],
             authority_id: "", closure_kind: "selected_scope"), admission_eligible: false)
         val output = trace_query_render_v1(build, page, TraceQueryOptionsV1())
-        expect(page.complete).to_be(true)
+        expect(page.complete == TracePageCompletenessV1.Complete).to_be(true)
         expect(output).to_contain("Graph complete: false; page complete: true")
         expect(output).to_contain("First?spoof")
         expect(output).to_contain("Qualification: unverified")
@@ -145,10 +146,10 @@ describe "P0 options and registry":
         val separate = ["list", "features", "--format", "sdn", "--limit", "0"]
         expect(trace_query_options_parse_v1(equals).is_err()).to_be(true)
         expect(trace_query_options_parse_v1(separate).is_err()).to_be(true)
-        expect(trace_query_sdn_requested_v1(equals)).to_be(true)
-        expect(trace_query_sdn_requested_v1(separate)).to_be(true)
-        expect(trace_query_sdn_requested_v1(["list", "features", "--format", "table", "--limit", "0"])).to_be(false)
-        expect(trace_query_sdn_requested_v1(["list", "features", "--format"])).to_be(false)
+        expect(trace_query_format_name_v1(trace_query_sdn_requested_v1(equals))).to_equal("sdn")
+        expect(trace_query_format_name_v1(trace_query_sdn_requested_v1(separate))).to_equal("sdn")
+        expect(trace_query_format_name_v1(trace_query_sdn_requested_v1(["list", "features", "--format", "table", "--limit", "0"]))).to_equal("table")
+        expect(trace_query_format_name_v1(trace_query_sdn_requested_v1(["list", "features", "--format"]))).to_equal("table")
 
 fn missing_graph() -> TraceGraph:
     var graph = node_query_graph()

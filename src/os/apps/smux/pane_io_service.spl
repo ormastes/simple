@@ -3,7 +3,9 @@
 # returns the exact state and result, including committed failure-side updates.
 use os.apps.smux.contract.{MuxCapture, SmuxMetrics}
 use os.apps.smux.service.{ServiceState, PaneRecord}
-use std.nogc_async_mut.container.terminal_session_v1.container_terminal_reference_v1
+use std.nogc_async_mut.container.terminal_session_v2.{container_terminal_reference_v2,
+    container_terminal_read_v2, container_terminal_transport_active_v2}
+use std.common.contracts.container.terminal_text_v2.container_terminal_text_feed_v2
 use os.apps.smux.frame_snapshot.{smux_frame_validate, smux_frame_from_state}
 use os.apps.smux.vt_screen.{vt_new, vt_feed}
 use os.apps.smux.vt_capture.{vt_legacy_capture_lost}
@@ -102,7 +104,9 @@ pub fn pane_release_best_effort(pr: PaneRecord):
 
 fn _child_alive(pr: PaneRecord) -> bool:
     if pr.helper_cleaned_awaiting_release: return false
-    if pr.owned_terminal_session != nil and pr.terminal_ref == nil: return false
+    if val terminal = pr.owned_terminal_session:
+        val active = container_terminal_transport_active_v2(terminal)
+        return active.is_ok() and active.unwrap()
     if val reference = pr.terminal_ref:
         val alive = sosix_process_is_piped_alive_ref_v1(reference)
         return alive.is_ok() and alive.unwrap()
@@ -232,17 +236,43 @@ fn _drain_bounded_no_flush(pr0: PaneRecord, limit: int, closing: bool) -> PaneRe
     if closing:
         return pr0
     var pr = pr0
-    if val terminal = pr.owned_terminal_session:
-        val reference = container_terminal_reference_v1(terminal)
-        if not pr.helper_cleaned_awaiting_release and (reference.is_err() or not pr.same_terminal_ref(reference.unwrap())):
-            pr.terminal_read_error = "owned terminal transport reference mismatch"
-            return pr.without_replies()
+    if not pr.helper_cleaned_awaiting_release:
+        if val terminal = pr.owned_terminal_session:
+            val reference = container_terminal_reference_v2(terminal)
+            if reference.is_err():
+                pr.terminal_read_error = "owned terminal transport reference mismatch"
+                return pr.without_replies()
+            val matches = match reference.unwrap():
+                case Some(value): pr.same_terminal_ref(value)
+                case None: pr.terminal_ref == nil
+            if not matches:
+                pr.terminal_read_error = "owned terminal transport reference mismatch"
+                return pr.without_replies()
     var reads = 0
     var more = (_has_child(pr) and not pr.helper_cleaned_awaiting_release and
         not pr.terminal_eof and pr.terminal_read_error == "")
     while more and reads < limit and pr.can_ingest():
         var chunk = ""
-        if val reference = pr.terminal_ref:
+        var native_progress = false
+        if val terminal = pr.owned_terminal_session:
+            val read = container_terminal_read_v2(terminal)
+            # The returned owner includes consumed HTTP leftover and native
+            # progress even on error. Never retain an older session snapshot.
+            pr.owned_terminal_session = Some(read.session)
+            if read.error != "": pr.terminal_read_error = read.error
+            else:
+                val decoded = container_terminal_text_feed_v2(pr.terminal_text_state, read.chunks, read.eof)
+                if decoded.is_err(): pr.terminal_read_error = decoded.unwrap_err()
+                else:
+                    val delivered = decoded.unwrap()
+                    pr.terminal_text_state = delivered.state
+                    chunk = delivered.text
+                    val previous_sequence = pr.ingestion_sequence
+                    if chunk != "": pr = pr.feed_screen(chunk)
+                    pr.ingestion_sequence = previous_sequence + (delivered.native_bytes as u64)
+                    native_progress = delivered.native_bytes > 0
+                    if read.eof: pr.terminal_eof = true
+        elif val reference = pr.terminal_ref:
             val read = sosix_process_read_stdout_ref_v1(reference)
             if read.is_err():
                 if read.unwrap_err() == "process_stdout_eof":
@@ -260,7 +290,7 @@ fn _drain_bounded_no_flush(pr0: PaneRecord, limit: int, closing: bool) -> PaneRe
             chunk = process_read_stdout(pr.child_pid)
             if chunk != "":
                 pr = pr.ingest_pipe(chunk, _clean_output(chunk))
-        more = chunk != ""
+        more = (chunk != "" or native_progress) and not pr.terminal_eof and pr.terminal_read_error == ""
         reads = reads + 1
     # Query replies share the ordered input queue. Overflow is a typed input
     # failure; clear the reply accumulator instead of retaining an unbounded
@@ -361,11 +391,18 @@ pub fn pane_alive_state(before: ServiceState, closing: bool, session_id: text, w
     if pane.helper_cleaned_awaiting_release:
         return PaneBoolUpdate(state: state, commit: commit, result: Err("terminal helper cleaned; host release pending"))
     if val terminal = pane.owned_terminal_session:
-        val reference = container_terminal_reference_v1(terminal)
-        if reference.is_err() or not pane.same_terminal_ref(reference.unwrap()):
+        val reference = container_terminal_reference_v2(terminal)
+        if reference.is_err():
+            return PaneBoolUpdate(state: state, commit: commit, result: Err("owned terminal transport reference mismatch"))
+        val matches = match reference.unwrap():
+            case Some(value): pane.same_terminal_ref(value)
+            case None: pane.terminal_ref == nil
+        if not matches:
             return PaneBoolUpdate(state: state, commit: commit, result: Err("owned terminal transport reference mismatch"))
     if pane.terminal_read_error != "":
         return PaneBoolUpdate(state: state, commit: commit, result: Err("terminal transport read failed; cleanup required"))
+    if val terminal = pane.owned_terminal_session:
+        return PaneBoolUpdate(state: state, commit: commit, result: container_terminal_transport_active_v2(terminal))
     if val reference = pane.terminal_ref:
         return PaneBoolUpdate(state: state, commit: commit, result: sosix_process_is_piped_alive_ref_v1(reference))
     return PaneBoolUpdate(state: state, commit: commit, result: Ok(_child_alive(pane)))

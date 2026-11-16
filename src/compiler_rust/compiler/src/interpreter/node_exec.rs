@@ -942,7 +942,18 @@ pub(crate) fn exec_node(
         // literals silently fall back to the preloaded on-disk unit tree.
         Node::Unit(u) => {
             register_standalone_unit_locals(u);
-            env.insert(u.name.clone(), Value::Nil);
+            if let Some(class) = crate::interpreter_unit::unit_constructor_class(u) {
+                crate::interpreter_unit::register_record_unit_class(&u.name);
+                classes.insert(u.name.clone(), Arc::new(class));
+                env.insert(
+                    u.name.clone(),
+                    Value::Constructor {
+                        class_name: u.name.clone(),
+                    },
+                );
+            } else {
+                env.insert(u.name.clone(), Value::Nil);
+            }
             Ok(Control::Next)
         }
         Node::UnitFamily(uf) => {
@@ -984,6 +995,7 @@ pub(crate) fn exec_node(
                 type_bindings: std::collections::HashMap::new(),
                 is_value_type: false,
             };
+            crate::interpreter_unit::register_record_unit_class(&nt.name);
             classes.insert(nt.name.clone(), Arc::new(synth_class));
             env.insert(
                 nt.name.clone(),

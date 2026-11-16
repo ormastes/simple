@@ -1,0 +1,45 @@
+# AUTHORED_NOT_RUN. Production DATA parser, no fake capture/receipt handles.
+use std.spec.{describe, it, expect, step}
+use std.nogc_async_mut.llm.provider_cli_profiled_probe_v2.{provider_cli_profiled_transcript_validate_v2,
+    provider_cli_profiled_probe_begun_phase_v2, provider_cli_profiled_probe_cancel_call_v2}
+use std.nogc_sync_mut.container.machine_fresh_probe_owner_v3.MachineFreshProbeCallV3
+use std.common.contracts.container.linux_fresh_workload_probe_v3.LinuxFreshWorkloadProbeActionV3
+
+fn cancel_route_v2(phase: text) -> text:
+    match provider_cli_profiled_probe_cancel_call_v2(phase):
+        case MachineFreshProbeCallV3.Step(action, cancel):
+            if not cancel: return "step-without-cancel"
+            if action == LinuxFreshWorkloadProbeActionV3.Wait: "step-wait-cancel" else: "step-logs-cancel"
+        case MachineFreshProbeCallV3.WorkflowCancel: "workflow-cancel"
+        case _: "other"
+
+describe "Opt-in combined provider probe transcript policy":
+    it "preserves actual complete text without inventing a stderr-empty fact":
+        step("Invoke the same parser used after actual capture current validation")
+        val text = "codex-cli 0.169.0\n"
+        expect(provider_cli_profiled_transcript_validate_v2(text.bytes()).unwrap()).to_equal(text)
+    it "refuses diagnostics, controls and empty transcripts without stripping them":
+        for text in ["", "Warning: partial\nUsage: codex exec ", "ERROR: failed", "fatal: failure", "permission denied", "panic: crashed"]:
+            expect(provider_cli_profiled_transcript_validate_v2(text.bytes()).is_err()).to_equal(true)
+        expect(provider_cli_profiled_transcript_validate_v2([27, 91, 51, 49, 109]).is_err()).to_equal(true)
+        expect(provider_cli_profiled_transcript_validate_v2([0]).is_err()).to_equal(true)
+    # PROBE-UPPER-CANCEL-02. Pure routing only: original first_error preservation
+    # (by construction in the collector), owner-side retirement via Pending and
+    # native partial-begin faults are NOT covered here.
+    it "routes cancel after a Wait/Logs begin error through the exact capture Step":
+        step("Feed an Err begin reply, then ask the production closing route")
+        val failed: Result<(), text> = Err("profiled-combined-capture-cleanup-required")
+        val wait_phase = provider_cli_profiled_probe_begun_phase_v2("wait-begin", failed)
+        val logs_phase = provider_cli_profiled_probe_begun_phase_v2("logs-begin", failed)
+        expect(wait_phase).to_equal("wait-begin-unresolved")
+        expect(logs_phase).to_equal("logs-begin-unresolved")
+        expect(cancel_route_v2(wait_phase)).to_equal("step-wait-cancel")
+        expect(cancel_route_v2(logs_phase)).to_equal("step-logs-cancel")
+        val begun: Result<(), text> = Ok(())
+        expect(provider_cli_profiled_probe_begun_phase_v2("wait-begin", begun)).to_equal("wait-step")
+        expect(cancel_route_v2("wait-step")).to_equal("step-wait-cancel")
+        expect(cancel_route_v2("logs-step")).to_equal("step-logs-cancel")
+    it "keeps WorkflowCancel when no Wait/Logs Begin was issued":
+        step("Expiry before Begin must not fabricate a capture cleanup")
+        for phase in ["wait-begin", "logs-begin", "before-begin", "before-step", "after-begin", "after-step", "evidence"]:
+            expect(cancel_route_v2(phase)).to_equal("workflow-cancel")

@@ -1,0 +1,93 @@
+# AUTHORED_NOT_RUN. Pure DATA comparison tests, never actual creation/admission
+# evidence. The Host effect paths must call this checker on their own producer.
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.container.pre_start_constraint_v1.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.execution_configuration_v1.{ContainerExecutionConfigurationObservationV1,
+    ContainerExecutionMountObservationV1}
+use std.common.crypto.sha256.sha256_text
+
+fn pre_start_data_scope_v1() -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "data-host", service_scope_id: "data-service", boot_id: "data-boot",
+        provider_generation: 3, native_machine_id: "data-machine", continuity_mode: "native-boot-incarnation-v1",
+        continuity_id: "data-boot")
+
+fn pre_start_data_request_v1(scope: ContainerHostScopeV2) -> ContainerExecutionRequestV2:
+    ContainerExecutionRequestV2(plan: ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: "data-workload",
+        attempt: 1, operation_id: "data-operation", request_digest: sha256_text("data-request"),
+        physical_host_id: scope.physical_host_id, service_scope_id: scope.service_scope_id, boot_id: scope.boot_id,
+        provider_generation: scope.provider_generation, native_machine_id: scope.native_machine_id,
+        continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id), request_bytes: "data-only")
+
+fn pre_start_data_constraint_v1(scope: ContainerHostScopeV2,
+        request: ContainerExecutionRequestV2) -> ContainerPreStartConstraintV1:
+    ContainerPreStartConstraintV1(request_digest: request.plan.request_digest,
+        scope_bytes: container_host_scope_bytes_v2(scope).unwrap(), provider_generation: scope.provider_generation,
+        requested_image_ref: "sha256:" + sha256_text("data-image"), requested_image_kind: "image-config-id",
+        image_config_id: sha256_text("data-image"), primary_argv: ["/opt/provider", "--help"],
+        working_directory: "/workspace", configured_user: "1000", environment_digest: sha256_text("data-env"),
+        mounts: [], require_readonly_rootfs: true)
+
+fn pre_start_data_observation_v1(scope: ContainerHostScopeV2, request: ContainerExecutionRequestV2,
+        constraint: ContainerPreStartConstraintV1) -> ContainerExecutionConfigurationObservationV1:
+    val runtime = RuntimeIdentityV1(pod_uid: request.plan.workload_uid, attempt: request.plan.attempt,
+        provider_generation: scope.provider_generation, operation_id: request.plan.operation_id, engine: "podman",
+        native_id: sha256_text("data-native"), node_boot_id: container_scope_fence_id_v2(scope).unwrap())
+    ContainerExecutionConfigurationObservationV1(scope: scope, runtime: runtime, request_digest: constraint.request_digest,
+        requested_image_ref: constraint.requested_image_ref, requested_image_kind: constraint.requested_image_kind,
+        runtime_image_id: "sha256:" + constraint.image_config_id, image_config_id: constraint.image_config_id,
+        image_repo_digests: [], primary_argv: ["/opt/provider", "--help"], working_directory: "/workspace",
+        configured_user: "1000", readonly_rootfs: true, mounts: [], environment_digest: constraint.environment_digest,
+        environment_names: [], image_default_environment_digest: constraint.environment_digest,
+        image_default_environment_names: [], configuration_digest: sha256_text("data-config"))
+
+describe "Restrictive pre-start comparison DATA":
+    it "matches exact configuration DATA and refuses image, argv, environment, runtime and generation changes":
+        step("Run the production checker without claiming a native birth or admission grant")
+        val scope = pre_start_data_scope_v1()
+        val request = pre_start_data_request_v1(scope)
+        val constraint = pre_start_data_constraint_v1(scope, request)
+        val observed = pre_start_data_observation_v1(scope, request, constraint)
+        expect(container_pre_start_constraint_check_v1(constraint, request, scope, observed.runtime, observed).is_ok()).to_equal(true)
+        var changed = pre_start_data_observation_v1(scope, request, constraint)
+        changed.primary_argv = ["/opt/other", "--help"]
+        expect(container_pre_start_constraint_check_v1(constraint, request, scope, observed.runtime, changed).is_err()).to_equal(true)
+        changed = pre_start_data_observation_v1(scope, request, constraint)
+        changed.image_config_id = sha256_text("other-image")
+        expect(container_pre_start_constraint_check_v1(constraint, request, scope, observed.runtime, changed).is_err()).to_equal(true)
+        changed = pre_start_data_observation_v1(scope, request, constraint)
+        changed.environment_digest = sha256_text("other-env")
+        expect(container_pre_start_constraint_check_v1(constraint, request, scope, observed.runtime, changed).is_err()).to_equal(true)
+        changed = pre_start_data_observation_v1(scope, request, constraint)
+        changed.working_directory = "/other-workspace"
+        expect(container_pre_start_constraint_check_v1(constraint, request, scope, observed.runtime, changed).is_err()).to_equal(true)
+        changed = pre_start_data_observation_v1(scope, request, constraint)
+        changed.configured_user = "0"
+        expect(container_pre_start_constraint_check_v1(constraint, request, scope, observed.runtime, changed).is_err()).to_equal(true)
+        changed = pre_start_data_observation_v1(scope, request, constraint)
+        changed.mounts = [ContainerExecutionMountObservationV1(kind: "bind", source: "/outside", destination: "/opt", read_only: false)]
+        expect(container_pre_start_constraint_check_v1(constraint, request, scope, observed.runtime, changed).is_err()).to_equal(true)
+        changed = pre_start_data_observation_v1(scope, request, constraint)
+        changed.readonly_rootfs = false
+        expect(container_pre_start_constraint_check_v1(constraint, request, scope, observed.runtime, changed).is_err()).to_equal(true)
+        changed = pre_start_data_observation_v1(scope, request, constraint)
+        changed.runtime.native_id = sha256_text("other-native")
+        expect(container_pre_start_constraint_check_v1(constraint, request, scope, observed.runtime, changed).is_err()).to_equal(true)
+        var wrong_generation = container_pre_start_constraint_copy_v1(constraint)
+        wrong_generation.provider_generation = 4
+        expect(container_pre_start_constraint_validate_v1(wrong_generation, request, scope).is_err()).to_equal(true)
+
+    it "copies retained argv DATA before caller mutation can loosen a continuation restriction":
+        step("Change the caller's original array after the production defensive copy")
+        val scope = pre_start_data_scope_v1()
+        val request = pre_start_data_request_v1(scope)
+        var constraint = pre_start_data_constraint_v1(scope, request)
+        constraint.mounts = [ContainerExecutionMountObservationV1(kind: "bind", source: "/source", destination: "/data", read_only: true)]
+        val retained = container_pre_start_constraint_copy_v1(constraint)
+        constraint.primary_argv[0] = "/replacement"
+        constraint.mounts[0] = ContainerExecutionMountObservationV1(kind: "bind", source: "/replacement", destination: "/opt", read_only: false)
+        expect(retained.primary_argv).to_equal(["/opt/provider", "--help"])
+        expect(retained.mounts[0].source).to_equal("/source")
+        expect(retained.mounts[0].destination).to_equal("/data")
+        expect(retained.mounts[0].read_only).to_equal(true)

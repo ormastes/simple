@@ -1,0 +1,87 @@
+# `trace diff --base --head`: requirement status changes between two snapshots. Pure.
+# Either graph being incomplete makes the diff incomplete: a status that moved
+# to or from Unknown proves nothing about the revision pair.
+# @req REQ-TRC-021
+use std.common.traceability.model.*
+use std.common.traceability.sidecar_v1.{TraceSidecarReferenceV1}
+use std.common.traceability.profile_v1.{TraceProfile}
+use std.common.traceability.query_missing_v1.{TraceLinkStatus, TraceRequirementIdV1, TraceSnapshotIdV1,
+    TraceGraphCompletenessV1}
+use std.common.traceability.query_status_v1.{TracePassingEvidenceV1, TraceCommandVerdictV1,
+    trace_requirement_statuses_v1, trace_requirement_overall_v1, trace_command_verdict_v1}
+
+pub enum TraceDiffChangeV1:
+    Added
+    Removed
+    Regressed
+    Improved
+
+pub struct TraceDiffEntryV1:
+    requirement_id: TraceRequirementIdV1
+    change: TraceDiffChangeV1
+    base: TraceLinkStatus    # Missing when the requirement is absent from the base
+    head: TraceLinkStatus    # Missing when the requirement is absent from the head
+
+pub struct TraceDiffResultV1:
+    base_snapshot_id: TraceSnapshotIdV1
+    head_snapshot_id: TraceSnapshotIdV1
+    entries: [TraceDiffEntryV1]    # changed requirements only, sorted by id
+    completeness: TraceGraphCompletenessV1
+    verdict: TraceCommandVerdictV1
+
+pub fn trace_diff_change_name_v1(change: TraceDiffChangeV1) -> text:
+    match change:
+        case TraceDiffChangeV1.Added: "added"
+        case TraceDiffChangeV1.Removed: "removed"
+        case TraceDiffChangeV1.Regressed: "regressed"
+        case TraceDiffChangeV1.Improved: "improved"
+
+# Higher is better; Unknown ranks with Missing so a loss of knowledge never reads as an improvement.
+fn diff_rank_v1(status: TraceLinkStatus) -> i64:
+    match status:
+        case TraceLinkStatus.Verified: 2
+        case TraceLinkStatus.Linked: 1
+        case _: 0
+
+fn diff_overall_map_v1(graph: TraceGraph, sidecar: [TraceSidecarReferenceV1],
+    evidence: [TracePassingEvidenceV1]) -> Dict<text, TraceLinkStatus>:
+    var out: Dict<text, TraceLinkStatus> = {}
+    for status in trace_requirement_statuses_v1(graph, sidecar, evidence):
+        out[status.requirement_id.value] = trace_requirement_overall_v1(status)
+    out
+
+fn diff_entry_v1(id: text, change: TraceDiffChangeV1, base: TraceLinkStatus, head: TraceLinkStatus) -> TraceDiffEntryV1:
+    TraceDiffEntryV1(requirement_id: TraceRequirementIdV1(value: id), change: change, base: base, head: head)
+
+pub fn trace_diff_v1(base: TraceGraph, base_sidecar: [TraceSidecarReferenceV1], base_evidence: [TracePassingEvidenceV1],
+    head: TraceGraph, head_sidecar: [TraceSidecarReferenceV1], head_evidence: [TracePassingEvidenceV1],
+    profile: TraceProfile) -> TraceDiffResultV1:
+    """Compare overall requirement status; Linked to Verified is Improved, the reverse Regressed."""
+    val before = diff_overall_map_v1(base, base_sidecar, base_evidence)
+    val after = diff_overall_map_v1(head, head_sidecar, head_evidence)
+    var ids: [text] = []
+    var by_id: Dict<text, TraceDiffEntryV1> = {}
+    for node in base.nodes:
+        if before.contains_key(node.id) and not ids.contains(node.id): ids.push(node.id)
+    for node in head.nodes:
+        if after.contains_key(node.id) and not ids.contains(node.id): ids.push(node.id)
+    var changed: [text] = []
+    for id in ids:
+        if not before.contains_key(id):
+            by_id[id] = diff_entry_v1(id, TraceDiffChangeV1.Added, TraceLinkStatus.Missing, after[id])
+            changed.push(id)
+        elif not after.contains_key(id):
+            by_id[id] = diff_entry_v1(id, TraceDiffChangeV1.Removed, before[id], TraceLinkStatus.Missing)
+            changed.push(id)
+        elif before[id] != after[id]:
+            val change = if diff_rank_v1(after[id]) > diff_rank_v1(before[id]): TraceDiffChangeV1.Improved else: TraceDiffChangeV1.Regressed
+            by_id[id] = diff_entry_v1(id, change, before[id], after[id])
+            changed.push(id)
+    var entries: [TraceDiffEntryV1] = []
+    for id in trace_sorted_ids(changed):
+        entries.push(by_id[id])
+    val completeness = if base.complete and head.complete: TraceGraphCompletenessV1.Complete else: TraceGraphCompletenessV1.Incomplete
+    TraceDiffResultV1(base_snapshot_id: TraceSnapshotIdV1(value: base.subject.snapshot_id),
+        head_snapshot_id: TraceSnapshotIdV1(value: head.subject.snapshot_id), entries: entries,
+        completeness: completeness, verdict: trace_command_verdict_v1(completeness, profile))
+

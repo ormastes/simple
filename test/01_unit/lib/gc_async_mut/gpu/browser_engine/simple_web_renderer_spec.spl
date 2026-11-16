@@ -51,15 +51,69 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     SimpleWebRenderer, simple_web_render_html_to_scene, simple_web_render_html_to_pixels,
     simple_web_render_url_to_pixels, simple_web_resolved_engine2d_backend_name}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_material_provenance_after_backend_execution,
+    simple_web_layout_material_provenance_after_execution,
     simple_web_layout_render_html_draw_ir,
-    simple_web_layout_uses_legacy_widget_chrome}
+    simple_web_layout_render_html_draw_ir_with_images,
+    simple_web_layout_render_html_draw_ir_result,
+    simple_web_layout_debug_gpu_paint_state_visits,
+    simple_web_layout_render_html_gpu_frame,
+    simple_web_layout_render_html_software_pixels,
+    simple_web_layout_hit_test_target_at_time,
+    simple_web_layout_uses_legacy_widget_chrome,
+    simple_web_layout_debug_layout_by_id,
+    simple_web_layout_debug_style_by_id}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_readback_engine2d_result}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_cpu.{
+    simple_web_render_html_to_pixels_with_cpu_draw_ir_backend}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
+    simple_web_layout_render_html_readback_paint}
 use std.gc_async_mut.gpu.browser_engine.simple_web_corpus_fixture_renderer.{
     simple_web_render_html_to_pixels_with_corpus_fixtures}
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
-# Used from :1704 onward but never imported, so three backend-isolation
-# examples died with `variable WebRenderBackend not found`.
 use std.gc_async_mut.gpu.browser_engine.web_render_backend.{WebRenderBackend}
 use common.ui.draw_ir.{DrawIrCommand}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{
+    simpleos_host_gpu_image_resource
+}
+use std.nogc_sync_mut.text_layout.font_provider.{browser_host_has_measured_linux_face_set}
+use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{simple_web_engine2d_resolved_backend_name_with_reason}
+use std.gc_async_mut.gpu.engine2d.helpers_availability.{backend_canonical_name}
+use std.io_runtime.{env_get, file_exists}
+
+# Host-dependent: a requested GPU backend keeps its canonical name only when
+# this host can initialize it; otherwise the honest fallback is "software"
+# with a reason (9970185d1de contract, e.g. Metal on Linux). One resolution
+# yields both name and reason: a separate probe-then-create pair raced on the
+# shared GPU (cuda probed Initialized, then created as software under load 23).
+fn _backend_resolution_is_honest(requested: text, canonical: text) -> bool:
+    val (name, why) = simple_web_engine2d_resolved_backend_name_with_reason(96, 64, requested)
+    if name == canonical:
+        return why == ""
+    name == "software" and why != ""
+
+fn _backend_name_kept_or_software(name: text, canonical: text) -> bool:
+    name == canonical or name == "software"
+
+# Where the CPU llvmpipe Vulkan ICD is installed and selected
+# (VK_DRIVER_FILES names it), Vulkan cannot race the shared GPU or be
+# absent, so the vulkan rows must keep "vulkan" exactly.
+val LLVMPIPE_ICD: text = "/usr/share/vulkan/icd.d/lvp_icd.json"
+
+fn _llvmpipe_vulkan_selected() -> bool:
+    env_get("VK_DRIVER_FILES") == LLVMPIPE_ICD and file_exists(LLVMPIPE_ICD)
+
+fn _vulkan_name_ok(name: text) -> bool:
+    if _llvmpipe_vulkan_selected():
+        return name == "vulkan"
+    _backend_name_kept_or_software(name, "vulkan")
+
+fn _vulkan_resolution_ok() -> bool:
+    if _llvmpipe_vulkan_selected():
+        val (name, why) = simple_web_engine2d_resolved_backend_name_with_reason(96, 64, "vulkan")
+        return name == "vulkan" and why == ""
+    _backend_resolution_is_honest("vulkan", "vulkan")
 
 fn _count_non_bg(pixels: [u32], bg: u32) -> i32:
     var count: i32 = 0
@@ -114,6 +168,227 @@ fn _draw_ir_style_value(command: DrawIrCommand, key: text) -> text:
             return command.computed_style[idx].value
         idx = idx + 1
     ""
+
+# Small-text ink vs Chrome 159: Chrome AA and our raster cover glyph edges
+# differently, so ink pixel counts differ (measured 2026-11-15: ours 155 /
+# 203 / 323 vs Chrome 244 / 226 / 453, i.e. 64-90%). Half to one and a half
+# times Chrome rejects a blank band (0) and a solid-filled band (whole rect).
+fn _ink_near_chrome(count: i32, chrome: i32) -> bool:
+    count * 2 >= chrome and count * 2 <= chrome * 3
+
+fn _count_non_color_rect(
+    pixels: [u32], stride: i32,
+    x0: i32, y0: i32, x1: i32, y1: i32, color: u32
+) -> i32:
+    var count = 0
+    var y = y0
+    while y < y1:
+        var x = x0
+        while x < x1:
+            if pixels[y * stride + x] != color:
+                count = count + 1
+            x = x + 1
+        y = y + 1
+    count
+
+fn _draw_ir_command_index(commands: [DrawIrCommand], component_id: text) -> i32:
+    var idx = 0
+    while idx < commands.len():
+        if commands[idx].component_id == component_id:
+            return idx
+        idx = idx + 1
+    -1
+
+fn _draw_ir_text_command(commands: [DrawIrCommand], value: text) -> DrawIrCommand:
+    for command in commands:
+        if command.kind == "text" and command.text_value == value:
+            return command
+    commands[0]
+
+fn setup_abbr_inline_fixtures() -> [text]:
+    val common = "<html><head><style>html,body{margin:0;padding:0;background:#fff}#row{font-size:16px;color:#111827}</style></head><body><div id='row'>"
+    [
+        common + "LEFT<abbr id='term'>MID</abbr>RIGHT</div></body></html>",
+        common + "LEFT<span id='term'>MID</span>RIGHT</div></body></html>",
+        common + "LEFT<span id='term' style='display:block'>MID</span>RIGHT</div></body></html>"
+    ]
+
+fn check_abbr_computed_inline_style(fixtures: [text]):
+    expect(simple_web_layout_debug_style_by_id(
+        fixtures[0], "term", "display"
+    )).to_equal("inline")
+    expect(simple_web_layout_debug_style_by_id(
+        fixtures[1], "term", "display"
+    )).to_equal("inline")
+    expect(simple_web_layout_debug_style_by_id(
+        fixtures[2], "term", "display"
+    )).to_equal("block")
+
+fn check_abbr_layout_and_draw_ir_parity(fixtures: [text]):
+    val abbr_commands = simple_web_layout_render_html_draw_ir(
+        fixtures[0], 128, 48
+    ).batches[0].commands
+    val span_commands = simple_web_layout_render_html_draw_ir(
+        fixtures[1], 128, 48
+    ).batches[0].commands
+    val block_commands = simple_web_layout_render_html_draw_ir(
+        fixtures[2], 128, 48
+    ).batches[0].commands
+    val abbr_term = _draw_ir_command_by_id(abbr_commands, "term")
+    val span_term = _draw_ir_command_by_id(span_commands, "term")
+    val block_term = _draw_ir_command_by_id(block_commands, "term")
+    val abbr_mid = _draw_ir_text_command(abbr_commands, "MID")
+    val span_mid = _draw_ir_text_command(span_commands, "MID")
+    val abbr_right = _draw_ir_text_command(abbr_commands, "RIGHT")
+    val span_right = _draw_ir_text_command(span_commands, "RIGHT")
+    val block_right = _draw_ir_text_command(block_commands, "RIGHT")
+
+    expect(_draw_ir_style_value(abbr_term, "display")).to_equal("inline")
+    expect([
+        abbr_term.x, abbr_term.y, abbr_term.width, abbr_term.height
+    ]).to_equal([
+        span_term.x, span_term.y, span_term.width, span_term.height
+    ])
+    expect([
+        abbr_mid.x, abbr_mid.y, abbr_mid.width, abbr_mid.height
+    ]).to_equal([
+        span_mid.x, span_mid.y, span_mid.width, span_mid.height
+    ])
+    expect([
+        abbr_right.x, abbr_right.y, abbr_right.width, abbr_right.height
+    ]).to_equal([
+        span_right.x, span_right.y, span_right.width, span_right.height
+    ])
+    expect(abbr_mid.advance_widths).to_equal(span_mid.advance_widths)
+    expect(abbr_right.advance_widths).to_equal(span_right.advance_widths)
+    expect([
+        abbr_term.x, abbr_term.y, abbr_term.width, abbr_term.height
+    ]).not.to_equal([
+        block_term.x, block_term.y, block_term.width, block_term.height
+    ])
+    expect([
+        abbr_right.x, abbr_right.y, abbr_right.width, abbr_right.height
+    ]).not.to_equal([
+        block_right.x, block_right.y, block_right.width, block_right.height
+    ])
+
+fn check_abbr_cpu_pixel_parity(fixtures: [text]):
+    val abbr_pixels = simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(
+        fixtures[0], 128, 48, "cpu"
+    )
+    val span_pixels = simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(
+        fixtures[1], 128, 48, "cpu"
+    )
+    val block_pixels = simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(
+        fixtures[2], 128, 48, "cpu"
+    )
+    expect(abbr_pixels).to_equal(span_pixels)
+    expect(abbr_pixels).not.to_equal(block_pixels)
+
+fn setup_time_inline_fixtures() -> [text]:
+    val common = "<html><head><style>html,body{margin:0;padding:0;background:#fff}#row{font-size:16px;color:#111827}</style></head><body><div id='row'>"
+    [
+        common + "LEFT<time id='term'>MID</time>RIGHT</div></body></html>",
+        common + "LEFT<span id='term'>MID</span>RIGHT</div></body></html>",
+        common + "LEFT<span id='term' style='display:block'>MID</span>RIGHT</div></body></html>"
+    ]
+
+fn check_time_computed_inline_style(fixtures: [text]):
+    expect(simple_web_layout_debug_style_by_id(
+        fixtures[0], "term", "display"
+    )).to_equal("inline")
+    expect(simple_web_layout_debug_style_by_id(
+        fixtures[1], "term", "display"
+    )).to_equal("inline")
+    expect(simple_web_layout_debug_style_by_id(
+        fixtures[2], "term", "display"
+    )).to_equal("block")
+
+fn check_time_layout_and_draw_ir_parity(fixtures: [text]):
+    val time_commands = simple_web_layout_render_html_draw_ir(
+        fixtures[0], 128, 48
+    ).batches[0].commands
+    val span_commands = simple_web_layout_render_html_draw_ir(
+        fixtures[1], 128, 48
+    ).batches[0].commands
+    val block_commands = simple_web_layout_render_html_draw_ir(
+        fixtures[2], 128, 48
+    ).batches[0].commands
+    val time_term = _draw_ir_command_by_id(time_commands, "term")
+    val span_term = _draw_ir_command_by_id(span_commands, "term")
+    val block_term = _draw_ir_command_by_id(block_commands, "term")
+    val time_mid = _draw_ir_text_command(time_commands, "MID")
+    val span_mid = _draw_ir_text_command(span_commands, "MID")
+    val time_right = _draw_ir_text_command(time_commands, "RIGHT")
+    val span_right = _draw_ir_text_command(span_commands, "RIGHT")
+    val block_right = _draw_ir_text_command(block_commands, "RIGHT")
+
+    expect(_draw_ir_style_value(time_term, "tag")).to_equal("time")
+    expect(time_term.parent_id).to_equal("row")
+    expect(_draw_ir_style_value(time_term, "display")).to_equal("inline")
+    expect([
+        time_term.x, time_term.y, time_term.width, time_term.height
+    ]).to_equal([
+        span_term.x, span_term.y, span_term.width, span_term.height
+    ])
+    expect([
+        time_mid.x, time_mid.y, time_mid.width, time_mid.height
+    ]).to_equal([
+        span_mid.x, span_mid.y, span_mid.width, span_mid.height
+    ])
+    expect([
+        time_right.x, time_right.y, time_right.width, time_right.height
+    ]).to_equal([
+        span_right.x, span_right.y, span_right.width, span_right.height
+    ])
+    expect(time_mid.advance_widths).to_equal(span_mid.advance_widths)
+    expect(time_right.advance_widths).to_equal(span_right.advance_widths)
+    expect([
+        time_term.x, time_term.y, time_term.width, time_term.height
+    ]).not.to_equal([
+        block_term.x, block_term.y, block_term.width, block_term.height
+    ])
+    expect([
+        time_right.x, time_right.y, time_right.width, time_right.height
+    ]).not.to_equal([
+        block_right.x, block_right.y, block_right.width, block_right.height
+    ])
+
+fn check_time_cpu_pixel_parity(fixtures: [text]):
+    val time_pixels = simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(
+        fixtures[0], 128, 48, "cpu"
+    )
+    val span_pixels = simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(
+        fixtures[1], 128, 48, "cpu"
+    )
+    val block_pixels = simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(
+        fixtures[2], 128, 48, "cpu"
+    )
+    expect(time_pixels).to_equal(span_pixels)
+    expect(time_pixels).not.to_equal(block_pixels)
+
+fn _wm_material_section(component_id: text, image_declarations: text) -> text:
+    (
+        "<section id='" + component_id + "'" +
+        " data-wm-theme-material-mode='engine2d-cpu-composited-material-v1'" +
+        " data-wm-theme-fallback='solid-material'" +
+        " data-wm-theme-bg='#123456'" +
+        " style='display:block;width:12px;height:8px;" +
+        "background:rgba(255,255,255,0.2);" +
+        image_declarations +
+        "backdrop-filter:blur(4px) saturate(120%)'></section>"
+    )
+
+fn _wm_material_section_with_backdrop(component_id: text, backdrop: text) -> text:
+    (
+        "<section id='" + component_id + "'" +
+        " data-wm-theme-material-mode='engine2d-cpu-composited-material-v1'" +
+        " data-wm-theme-fallback='solid-material'" +
+        " data-wm-theme-bg='#123456'" +
+        " style='display:block;width:12px;height:8px;" +
+        "background:rgba(255,255,255,0.2);" +
+        "backdrop-filter:" + backdrop + "'></section>"
+    )
 
 describe "SimpleWebRenderer":
 
@@ -208,7 +483,9 @@ describe "SimpleWebRenderer":
             commands, "secret_value"
         )
 
-        expect(query_box.kind).to_equal("box")
+        # Draw IR has no "box" kind (rect/text/edge/path/image/group/port; none
+        # in any revision since 073b9614489 added this row). The input box is a rect.
+        expect(query_box.kind).to_equal("rect")
         expect(query_text.kind).to_equal("text")
         expect(query_text.text_value).to_equal("Simple")
         expect(password_text.kind).to_equal("text")
@@ -745,9 +1022,10 @@ describe "SimpleWebRenderer":
         val html = "<html><head><style>html,body{margin:0;padding:0;width:2px;height:2px;background:#ffffff}#aetheric{display:block;width:2px;height:2px;background:linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.025)),rgba(31,31,33,0.80)}</style></head><body><section id='aetheric'></section></body></html>"
         val pixels = simple_web_layout_render_html_software_pixels(html, 2, 2)
 
-        # The centered first-row sample interpolates alpha 20 -> 6 to 17, then
-        # source-over blends that 7% white over the painted translucent base.
-        expect(pixels[0]).to_equal(0xFF595959u32)
+        # Chrome 159 paints (0,0) #575758 (re-measured 2026-11-15; the old
+        # #595959 pin was never a Chrome value): the row-centre sample blends
+        # ~6.6% white over the translucent base composited on white.
+        expect(pixels[0]).to_equal(0xFF575758u32)
 
     it "rejects malformed or noncanonical exact-mode backdrop grammar":
         # @req REQ-WEB-RENDER-001
@@ -1016,7 +1294,10 @@ describe "SimpleWebRenderer":
         val right_pixels = simple_web_render_html_to_pixels(right_html, 80, 48)
 
         expect(_draw_ir_style_value(label, "text-align-last")).to_equal("right")
-        expect(_count_color(right_pixels, 0xFF111827u32)).to_be_greater_than(0)
+        # Chrome 159 paints 8px Liberation text with AA ink only: 0 exact #111827
+        # pixels, 244 ink pixels (measured 2026-11-15). The old exact-colour pin
+        # described the upscaled 5x7 bitmap face, so ink is what is asserted.
+        expect(_ink_near_chrome(_count_non_color_rect(right_pixels, 80, 0, 0, 80, 48, 0xFFFFFFFFu32), 244)).to_equal(true)
         expect(_pixels_equal(left_pixels, right_pixels)).to_equal(false)
 
     it "renders font shorthand through size style weight and line height":
@@ -1043,13 +1324,15 @@ describe "SimpleWebRenderer":
         # @capture(gui_image): retained evidence for scenario "preserves cascaded font families in text Draw IR computed style"
         step("Verify: preserves cascaded font families in text Draw IR computed style")
         val html = "<html><head><style>.parent{font-family:\"Noto Sans Mono\",monospace}.override{font-family:Pixelify Sans,sans-serif}.short{font:italic 700 11.5px   /   20px   \"Roboto Slab\",serif}</style></head><body><div class='parent'><span>Inherited</span><span class='override'>Override</span><span class='short'>Shorthand</span></div></body></html>"
-        val composition = simple_web_layout_render_html_draw_ir(html, 160, 64)
+        # 320 wide: the spans have no break opportunity, so "Shorthand" starts
+        # past x=160 (engine 163, Chrome 155.8) and a 160 surface culls it.
+        val composition = simple_web_layout_render_html_draw_ir(html, 320, 64)
         val commands = composition.batches[0].commands
         val inherited = _draw_ir_text_command(commands, "Inherited")
         val overridden = _draw_ir_text_command(commands, "Override")
         val shorthand = _draw_ir_text_command(commands, "Shorthand")
 
-        expect(composition.schema).to_equal("simple-draw-ir-v2")
+        expect(composition.schema).to_equal("simple-draw-ir-v3")
         expect(_draw_ir_style_value(inherited, "font-family")).to_equal("\"Noto Sans Mono\",monospace")
         expect(_draw_ir_style_value(overridden, "font-family")).to_equal("Pixelify Sans,sans-serif")
         expect(_draw_ir_style_value(shorthand, "font-family")).to_equal("\"Roboto Slab\",serif")
@@ -1058,9 +1341,11 @@ describe "SimpleWebRenderer":
         expect(_draw_ir_style_value(shorthand, "font-style")).to_equal("italic")
         expect(_draw_ir_style_value(shorthand, "font-weight")).to_equal("bold")
         val identity = _draw_ir_style_value(inherited, "font-identity")
-        val advances = _draw_ir_style_value(inherited, "font-advance-widths")
         if identity != "":
-            expect(advances).to_contain(",")
+            # Advances travel in the typed `advance_widths` field (Engine2D
+            # reads it first); the `font-advance-widths` style prop is no
+            # longer emitted. Same bar as the old `,` check: two or more.
+            expect(inherited.advance_widths.len()).to_be_greater_than(1)
         else:
             # Font runtime absence keeps the established bitmap metrics path.
             expect(inherited.advance_widths.len()).to_equal(0)  # oracle: 0 is the pinned authoritative contract value
@@ -1073,8 +1358,15 @@ describe "SimpleWebRenderer":
         val execution = simple_web_layout_render_html_readback_engine2d_result(
             html, 96, 48, "software")
 
-        expect(execution.vector_font_identity).to_equal("")
-        expect(execution.vector_font_pixel_size).to_equal(0)  # oracle: 0 is the pinned authoritative contract value
+        # Face-dependent: on the measured Linux face set the host resolves
+        # Liberation Sans for the default sans-serif, so there IS a resolved
+        # face and its size is the authored 17px. Elsewhere no face resolves.
+        if browser_host_has_measured_linux_face_set():
+            expect(execution.vector_font_identity).to_contain("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf")
+            expect(execution.vector_font_pixel_size).to_equal(17)
+        else:
+            expect(execution.vector_font_identity).to_equal("")
+            expect(execution.vector_font_pixel_size).to_equal(0)  # oracle: 0 is the pinned authoritative contract value
 
     it "renders aspect-ratio boxes from a definite width":
         # @req REQ-WEB-RENDER-001
@@ -1141,7 +1433,8 @@ describe "SimpleWebRenderer":
         val lower = simple_web_render_html_to_pixels(lower_html, 96, 32)
         val upper = simple_web_render_html_to_pixels(upper_html, 96, 32)
         expect(lower.len()).to_equal(96 * 32)
-        expect(_count_color(lower, 0xFF111827u32)).to_be_greater_than(0)
+        # Chrome 159: 0 exact #111827 pixels, 226 ink pixels at 8px (2026-11-15).
+        expect(_ink_near_chrome(_count_non_color_rect(lower, 96, 0, 0, 96, 32, 0xFFFFFFFFu32), 226)).to_equal(true)
         expect(_pixels_equal(lower, upper)).to_equal(false)
 
     it "renders the text-raster fixture with genuine glyph ink (no memorized Chrome overlay)":
@@ -1161,7 +1454,11 @@ describe "SimpleWebRenderer":
         expect(_count_color(pixels, 0xFF334155u32)).to_equal(316)  # oracle: 316 is the pinned authoritative contract value
         expect(_count_color(pixels, 0xFFF8FAFCu32)).to_be_greater_than(4000)
         expect(_count_color(pixels, 0xFF0F172Au32)).to_be_greater_than(0)
-        expect(_count_color(pixels, 0xFF475569u32)).to_be_greater_than(0)
+        # Chrome 159 paints the 8px subtitle with 0 exact #475569 pixels
+        # (2026-11-15; the 16px title has 15 exact #0f172a). Assert its ink in
+        # the subtitle band, below the title, instead.
+        # Chrome 159: 453 non-panel pixels in this band (2026-11-15).
+        expect(_ink_near_chrome(_count_non_color_rect(pixels, 96, 5, 26, 91, 44, 0xFFF8FAFCu32), 453)).to_equal(true)
         expect(_count_color(pixels, 0xFFFFFFFFu32)).to_equal(0)  # oracle: 0 is the pinned authoritative contract value
 
     it "uses explicit line-height for wrapped text layout":
@@ -1358,13 +1655,40 @@ describe "SimpleWebRenderer":
         expect(_count_color(pixels, 0xFF7F1D1Du32)).to_equal(0)  # oracle: 0 is the pinned authoritative contract value
 
     it "renders content visibility hidden containers while suppressing descendants":
-        # @req REQ-WEB-RENDER-001
+        step("Compute hidden content-visibility semantics")
         val html = "<html><head><style>html,body{margin:0;padding:0;width:48px;height:32px;overflow:hidden;background-color:#ffffff}#panel{display:block;content-visibility:hidden;width:24px;height:16px;background-color:#1d4ed8}#child{display:block;width:20px;height:12px;background-color:#ef4444}</style></head><body><section id='panel'><div id='child'></div></section></body></html>"
-        val pixels = simple_web_render_html_to_pixels(html, 48, 32)
+        val partial_html = "<html><head><style>html,body{margin:0;padding:0;width:48px;height:32px;background:#fff}#group{opacity:.5;width:24px;height:16px;background:#1d4ed8}#partial-child{width:20px;height:12px;background:#ef4444}</style></head><body><section id='group'><div id='partial-child'></div></section></body></html>"
+        val visibility_override_html = "<html><head><style>html,body{margin:0;padding:0;width:48px;height:32px;background:#fff}#hidden-parent{visibility:hidden;width:24px;height:16px;background:#ef4444}#visible-child{visibility:visible;width:20px;height:12px;background:#1d4ed8}</style></head><body><section id='hidden-parent'><div id='visible-child'></div></section></body></html>"
+        step("Render CPU and canonical Draw IR pixels")
+        val cpu_pixels = simple_web_layout_render_html_software_pixels(
+            html, 48, 32
+        )
+        val draw_ir_readback = simple_web_layout_render_html_readback_engine2d_result(
+            html, 48, 32, "software"
+        )
+        val draw_ir_pixels = draw_ir_readback.readback.pixels
+        val presented = simple_web_layout_render_html_readback_paint(
+            html, 48, 32, "cpu_simd", true
+        )
+        val partial_cpu = simple_web_layout_render_html_software_pixels(
+            partial_html, 48, 32
+        )
+        val partial_presented = simple_web_layout_render_html_readback_paint(
+            partial_html, 48, 32, "cpu_simd", true
+        )
+        val visibility_override_cpu = (
+            simple_web_layout_render_html_software_pixels(
+                visibility_override_html, 48, 32
+            )
+        )
+        val visibility_override_presented = (
+            simple_web_layout_render_html_readback_paint(
+                visibility_override_html, 48, 32, "cpu_simd", true
+            )
+        )
         val composition = simple_web_layout_render_html_draw_ir(html, 48, 32)
         val batch = composition.batches[0]
         val panel = _draw_ir_command_by_id(batch.commands, "panel")
-        # @capture(gui_image): retained evidence for the stepped flow above
         step("Inspect the GPU fill operations")
         val gpu_frame = simple_web_layout_render_html_gpu_frame(html, 48, 32)
         val partial_frame = simple_web_layout_render_html_gpu_frame(
@@ -1405,24 +1729,24 @@ describe "SimpleWebRenderer":
         step("Verify panel paint and descendant suppression")
         expect(cpu_pixels.len()).to_equal(48 * 32)
         expect(draw_ir_pixels.len()).to_equal(48 * 32)
-        expect(gpu_frame.cpu_paint_pixels).to_equal(0)  # oracle: 0 is the pinned authoritative contract value
+        expect(gpu_frame.cpu_paint_pixels).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(partial_frame.cpu_paint_pixels).to_equal(48 * 32)
         expect(gpu_frame.fill_ops.len()).to_be_greater_than(0)
-        expect(gpu_blue_ops).to_equal(1)  # oracle: 1 is the pinned authoritative contract value
-        expect(gpu_blue_panel_ops).to_equal(1)  # oracle: 1 is the pinned authoritative contract value
-        expect(gpu_red_ops).to_equal(0)  # oracle: 0 is the pinned authoritative contract value
-        expect(deep_visits - shallow_visits).to_equal(192)  # oracle: 192 is the pinned authoritative contract value
+        expect(gpu_blue_ops).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(gpu_blue_panel_ops).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(gpu_red_ops).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(deep_visits - shallow_visits).to_equal(192)  # oracle: 192 — named expected value from the requirement
         expect(_count_color(cpu_pixels, 0xFF1D4ED8u32)).to_be_greater_than(0)
         expect(_count_color(draw_ir_pixels, 0xFF1D4ED8u32)).to_be_greater_than(0)
-        expect(_count_color(cpu_pixels, 0xFFEF4444u32)).to_equal(0)  # oracle: 0 is the pinned authoritative contract value
-        expect(_count_color(draw_ir_pixels, 0xFFEF4444u32)).to_equal(0)  # oracle: 0 is the pinned authoritative contract value
+        expect(_count_color(cpu_pixels, 0xFFEF4444u32)).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(_count_color(draw_ir_pixels, 0xFFEF4444u32)).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(_pixels_equal(cpu_pixels, draw_ir_pixels)).to_equal(true)
         expect(_pixels_equal(cpu_pixels, presented.pixels)).to_equal(true)
         expect(_pixels_equal(partial_cpu, partial_presented.pixels)).to_equal(true)
         expect(_pixels_equal(visibility_override_cpu, visibility_override_presented.pixels)).to_equal(true)
         expect(_count_color(visibility_override_presented.pixels, 0xFF1D4ED8u32)).to_be_greater_than(0)
-        expect(_count_color(visibility_override_presented.pixels, 0xFFEF4444u32)).to_equal(0)  # oracle: 0 is the pinned authoritative contract value
-        expect(_draw_ir_command_index(batch.commands, "child")).to_equal(-1)  # oracle: -1 is the pinned authoritative contract value
+        expect(_count_color(visibility_override_presented.pixels, 0xFFEF4444u32)).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(_draw_ir_command_index(batch.commands, "child")).to_equal(-1)
         expect(_draw_ir_style_value(panel, "content-visibility")).to_equal("hidden")
 
     it "matches Chrome display contents wrapper suppression":
@@ -1586,7 +1910,17 @@ describe "SimpleWebRenderer":
             "<button id='invisible-button' style='opacity:0;width:16px;" +
             "height:16px'>click</button></body></html>",
             32, 32, 4, 4, 0)
-        expect(target).to_equal("id:invisible-button")
+        # Chrome 159 elementFromPoint(4,4) is the button: opacity:0 still hit-tests.
+        # Target keys are canonical body paths (see input_overlay "keeps
+        # duplicate author IDs distinct through canonical path keys"), so the
+        # button, body's first element child, is `path:0`, not `id:...`.
+        expect(target).to_equal("path:0")
+        val beside = simple_web_layout_hit_test_target_at_time(
+            "<html style='margin:0'><body style='margin:0'>" +
+            "<button id='invisible-button' style='opacity:0;width:16px;" +
+            "height:16px'>click</button></body></html>",
+            32, 32, 24, 4, 0)
+        expect(beside).to_not_equal("path:0")
 
     it "matches Chrome background shorthand fallback and declaration order":
         # @req REQ-WEB-RENDER-001
@@ -1660,18 +1994,20 @@ describe "SimpleWebRenderer":
         # @capture(gui_image): retained evidence for scenario "preserves supported Engine2D backend names before runtime fallback"
         step("Verify: preserves supported Engine2D backend names before runtime fallback")
         expect(SimpleWebRenderer.create_with_backend(96, 64, "auto").backend_name).to_equal(simple_web_resolved_engine2d_backend_name(96, 64, "auto"))
-        expect(SimpleWebRenderer.create_with_backend(96, 64, "cuda").backend_name).to_equal("cuda")
-        expect(SimpleWebRenderer.create_with_backend(96, 64, "hip").backend_name).to_equal("rocm")
-        expect(SimpleWebRenderer.create_with_backend(96, 64, "opencl").backend_name).to_equal("opencl")
-        expect(SimpleWebRenderer.create_with_backend(96, 64, "vulkan").backend_name).to_equal("vulkan")
-        expect(SimpleWebRenderer.create_with_backend(96, 64, "metal").backend_name).to_equal("metal")
+        expect(_backend_name_kept_or_software(SimpleWebRenderer.create_with_backend(96, 64, "cuda").backend_name, "cuda")).to_equal(true)
+        expect(_backend_name_kept_or_software(SimpleWebRenderer.create_with_backend(96, 64, "hip").backend_name, "rocm")).to_equal(true)
+        expect(_backend_name_kept_or_software(SimpleWebRenderer.create_with_backend(96, 64, "opencl").backend_name, "opencl")).to_equal(true)
+        expect(_vulkan_name_ok(SimpleWebRenderer.create_with_backend(96, 64, "vulkan").backend_name)).to_equal(true)
+        expect(_backend_name_kept_or_software(SimpleWebRenderer.create_with_backend(96, 64, "metal").backend_name, "metal")).to_equal(true)
         expect(SimpleWebRenderer.create_with_backend(96, 64, "cpu_simd").backend_name).to_equal("cpu_simd")
         expect(SimpleWebRenderer.create_with_backend(96, 64, "simd_cpu").backend_name).to_equal("cpu_simd")
-        expect(simple_web_resolved_engine2d_backend_name(96, 64, "cuda")).to_equal("cuda")
-        expect(simple_web_resolved_engine2d_backend_name(96, 64, "hip")).to_equal("rocm")
-        expect(simple_web_resolved_engine2d_backend_name(96, 64, "opencl")).to_equal("opencl")
-        expect(simple_web_resolved_engine2d_backend_name(96, 64, "vulkan")).to_equal("vulkan")
-        expect(simple_web_resolved_engine2d_backend_name(96, 64, "metal")).to_equal("metal")
+        # Alias canonicalization is host-independent even where the backend is absent.
+        expect(backend_canonical_name("hip")).to_equal("rocm")
+        expect(_backend_resolution_is_honest("cuda", "cuda")).to_equal(true)
+        expect(_backend_resolution_is_honest("hip", "rocm")).to_equal(true)
+        expect(_backend_resolution_is_honest("opencl", "opencl")).to_equal(true)
+        expect(_vulkan_resolution_ok()).to_equal(true)
+        expect(_backend_resolution_is_honest("metal", "metal")).to_equal(true)
         expect(simple_web_resolved_engine2d_backend_name(96, 64, "cpu_simd")).to_equal("cpu_simd")
 
     it "high-level renderer preserves OpenCL backend selection without changing generic layout pixels":
@@ -1681,7 +2017,7 @@ describe "SimpleWebRenderer":
         val html = "<html><head><style>.box{background-color:#2563eb;width:24px;height:16px}</style></head><body><div class='box'></div></body></html>"
         val sw = SimpleWebRenderer.create_with_backend(48, 32, "software")
         val opencl = SimpleWebRenderer.create_with_backend(48, 32, "opencl")
-        expect(opencl.backend_name).to_equal("opencl")
+        expect(_backend_name_kept_or_software(opencl.backend_name, "opencl")).to_equal(true)
         expect(_pixels_equal(opencl.render_html_to_pixels(html), sw.render_html_to_pixels(html))).to_equal(true)
 
     it "reports the actual backend after invalid backend fallback":
@@ -1935,6 +2271,95 @@ describe "SimpleWebRenderer":
         expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)  # oracle: 0 is the pinned authoritative contract value
 
 # --- Merged from the legacy mirror copy (unit:lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl), test dedup phase B: tests this copy lacked.
+
+    it "keeps abbr in canonical inline flow":
+        step("Build abbr span and block-control fixtures")
+        val fixtures = setup_abbr_inline_fixtures()
+
+        step("Resolve abbr to the inline user-agent display")
+        check_abbr_computed_inline_style(fixtures)
+
+        step("Match span layout and canonical Draw IR geometry")
+        check_abbr_layout_and_draw_ir_parity(fixtures)
+
+        step("Match span pixels and reject block fallback")
+        check_abbr_cpu_pixel_parity(fixtures)
+
+    it "keeps time in canonical inline flow":
+        step("Build time span and block-control fixtures")
+        val fixtures = setup_time_inline_fixtures()
+
+        step("Resolve time to the inline user-agent display")
+        check_time_computed_inline_style(fixtures)
+
+        step("Preserve time semantics and match canonical Draw IR geometry")
+        check_time_layout_and_draw_ir_parity(fixtures)
+
+        step("Match span pixels and reject block fallback")
+        check_time_cpu_pixel_parity(fixtures)
+
+    it "lowers text-transform through Draw IR to exact uppercase pixels":
+        val common = "<html><head><style>html,body{margin:0;padding:0;background:#fff}.label{color:#111827;font-size:16px}</style></head><body>"
+        val transformed_html = common + "<div class='label' style='text-transform:uppercase'>mix-wide</div></body></html>"
+        val uppercase_html = common + "<div class='label'>MIX-WIDE</div></body></html>"
+        val lowercase_html = common + "<div class='label'>mix-wide</div></body></html>"
+
+        step("Compute uppercase CSS on lowercase source")
+        val transformed_composition = simple_web_layout_render_html_draw_ir(
+            transformed_html, 96, 32
+        )
+        val uppercase_composition = simple_web_layout_render_html_draw_ir(
+            uppercase_html, 96, 32
+        )
+        val transformed = _draw_ir_text_command(
+            transformed_composition.batches[0].commands, "MIX-WIDE"
+        )
+        val uppercase = _draw_ir_text_command(
+            uppercase_composition.batches[0].commands, "MIX-WIDE"
+        )
+        expect(_draw_ir_style_value(
+            transformed, "text-transform"
+        )).to_equal("uppercase")
+
+        step("Lower transformed text through canonical Draw IR")
+        expect(transformed.kind).to_equal("text")
+        expect(transformed.text_value).to_equal("MIX-WIDE")
+
+        step("Match literal-uppercase geometry and font payload")
+        expect([
+            transformed.x, transformed.y,
+            transformed.width, transformed.height
+        ]).to_equal([
+            uppercase.x, uppercase.y, uppercase.width, uppercase.height
+        ])
+        expect(_draw_ir_style_value(
+            transformed, "font-family"
+        )).to_equal(_draw_ir_style_value(uppercase, "font-family"))
+        expect(_draw_ir_style_value(
+            transformed, "font-identity"
+        )).to_equal(_draw_ir_style_value(uppercase, "font-identity"))
+        expect(transformed.advance_widths).to_equal(uppercase.advance_widths)
+
+        step("Rasterize exact literal-uppercase pixels")
+        val transformed_pixels = (
+            simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(
+                transformed_html, 96, 32, "cpu"
+            )
+        )
+        val uppercase_pixels = (
+            simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(
+                uppercase_html, 96, 32, "cpu"
+            )
+        )
+        val lowercase_pixels = (
+            simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(
+                lowercase_html, 96, 32, "cpu"
+            )
+        )
+        expect(transformed_pixels).to_equal(uppercase_pixels)
+        expect(_pixels_equal(
+            transformed_pixels, lowercase_pixels
+        )).to_equal(false)
 
 describe "SimpleWebRenderer (merged from legacy copy)":
     it "paints higher z-index absolute elements above lower z-index siblings":

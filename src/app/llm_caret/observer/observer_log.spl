@@ -8,7 +8,8 @@
 use app.llm_caret.observer.observation_builder.*
 use app.llm_caret.observer.attention_inbox.*
 use app.llm_caret.observer.stall_classifier.{policy_default}
-use app.llm_caret.observer.provider_adapters.{provider_events, claude_loaded_skill}
+use app.llm_caret.observer.provider_adapters.{provider_events, claude_loaded_skill, codex_loaded_skill, codex_requested_skills}
+use app.llm_caret.observer.skill_hint.{SKILL_HINT_DECAY_USES}
 
 # Ponytail: 256 events per session is far beyond what the classifier folds
 # (it only needs the latest tool/approval/heartbeat facts) and bounds memory
@@ -21,9 +22,17 @@ var _inbox: AttentionInbox = attention_inbox_new()
 var _seq: i64 = 0
 # Provider-reported loaded skills as "session<TAB>skill", first report wins.
 var _skills: [text] = []
+var _requested: [text] = []
+# One "session<TAB>skill" entry per use, kept only up to DECAY+1 per key (past
+# that the hint is decayed and the count no longer matters).
+var _skill_uses: [text] = []
+var _skill_events: [text] = []
 
 fn observer_reset():
     _skills = []
+    _skill_uses = []
+    _skill_events = []
+    _requested = []
     _events = []
     _inbox = attention_inbox_new()
     _seq = 0
@@ -77,16 +86,57 @@ fn observer_record_hook(provider: text, session: text, generation: i64, event_id
     if added:
         _inbox = observe_session(_inbox, _events, session, generation, at_ms, policy_default()).inbox
 
-# Receive point for the loaded-skill fact: only a provider Skill call records one.
-fn observer_record_skill(provider: text, session: text, hook_name: text, payload: text):
-    if provider != "claude":
+# Keep only the last OBSERVER_RING_CAP seen-event entries of a session.
+fn _trim_skill_events(session: text):
+    val prefix = session + "\t"
+    var n = 0
+    for s in _skill_events:
+        if s.starts_with(prefix):
+            n = n + 1
+    var drop = n - OBSERVER_RING_CAP
+    if drop <= 0:
         return
-    val skill = claude_loaded_skill(hook_name, payload)
+    var out: [text] = []
+    for s in _skill_events:
+        if drop > 0 and s.starts_with(prefix):
+            drop = drop - 1
+        else:
+            out = out + [s]
+    _skill_events = out
+
+# Receive point for the loaded-skill fact: only a provider Skill call records one.
+fn observer_record_skill(provider: text, session: text, hook_name: text, payload: text, event_id: text):
+    if provider == "codex":
+        for r in codex_requested_skills(hook_name, payload):
+            if not _requested.contains(r):
+                _requested = _requested + [r]
+    var skill = ""
+    if provider == "claude":
+        skill = claude_loaded_skill(hook_name, payload)
+    elif provider == "codex":
+        skill = codex_loaded_skill(hook_name, payload)
     if skill == "":
         return
     val key = session + "\t" + skill
+    # A replayed hook event (same id) counts once, like observer_record_hook.
+    if event_id != "":
+        val seen = key + "\t" + event_id
+        if _skill_events.contains(seen):
+            return
+        _skill_events = _skill_events + [seen]
+        _trim_skill_events(session)
+    if observer_skill_uses(session, skill) <= SKILL_HINT_DECAY_USES:
+        _skill_uses = _skill_uses + [key]
     if not _skills.contains(key):
         _skills = _skills + [key]
+
+fn observer_skill_uses(session: text, skill: text) -> i64:
+    val key = session + "\t" + skill
+    var n = 0
+    for k in _skill_uses:
+        if k == key:
+            n = n + 1
+    n
 
 fn observer_loaded_skills(session: text) -> [text]:
     var out: [text] = []
@@ -105,4 +155,9 @@ fn observer_all_loaded_skills() -> [text]:
             out = out + [name]
     out
 
-export OBSERVER_RING_CAP, OBSERVER_HOOK_GENERATION, observer_reset, observer_events, observer_inbox, observer_record_hook, observer_record_skill, observer_loaded_skills, observer_all_loaded_skills
+# Distinct skills a provider prompt requested (Codex `$name`).
+fn observer_all_requested_skills() -> [text]:
+    _requested
+
+
+export observer_all_requested_skills, OBSERVER_RING_CAP, OBSERVER_HOOK_GENERATION, observer_reset, observer_events, observer_inbox, observer_record_hook, observer_record_skill, observer_skill_uses, observer_loaded_skills, observer_all_loaded_skills

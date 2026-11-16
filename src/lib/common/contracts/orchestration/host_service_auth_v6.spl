@@ -1,0 +1,76 @@
+# Pure transcript/MAC helpers, not a ready-reader, transport, keystore or grant.
+# Key/nonce shape does NOT prove entropy, freshness, OS origin or admission.
+use std.common.contracts.orchestration.host_service_operation_v6.{host_service_hex_shape_v6,
+    host_service_operation_decode_v6, HOST_SERVICE_OPERATION_MAX_BYTES_V6}
+use std.common.crypto.sha256.sha256_text
+use std.common.crypto.hmac.hmac_sha256
+use std.common.crypto.constant_time.black_box
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub const HOST_SERVICE_AUTH_REPLY_MAX_BYTES_V6: i64 = 1048576
+
+pub struct HostServiceAuthContextV6:
+    service_incarnation: text
+    client_nonce: text
+    server_nonce: text
+    command_digest: text
+
+pub fn host_service_auth_context_validate_v6(context: HostServiceAuthContextV6) -> Result<bool, text>:
+    if not host_service_hex_shape_v6(context.service_incarnation, 32): return Err("host-auth-incarnation-shape")
+    if not host_service_hex_shape_v6(context.client_nonce, 64): return Err("host-auth-client-nonce-shape")
+    if not host_service_hex_shape_v6(context.server_nonce, 64): return Err("host-auth-server-nonce-shape")
+    if not host_service_hex_shape_v6(context.command_digest, 64): return Err("host-auth-command-digest-shape")
+    Ok(true)
+
+pub fn host_service_auth_transcript_v6(role: text, context: HostServiceAuthContextV6,
+        body: text) -> Result<text, text>:
+    val valid = host_service_auth_context_validate_v6(context)?
+    if not ["challenge", "request", "reply"].contains(role): return Err("host-auth-role-unsupported")
+    if role == "challenge":
+        if body != "": return Err("host-auth-challenge-body-forbidden")
+    elif role == "request":
+        if body.byte_len() < 1 or body.byte_len() > HOST_SERVICE_OPERATION_MAX_BYTES_V6:
+            return Err("host-auth-request-body-size")
+    elif body.byte_len() > HOST_SERVICE_AUTH_REPLY_MAX_BYTES_V6:
+        return Err("host-auth-reply-body-size")
+    val payload_digest = sha256_text(body)
+    if role == "request":
+        if payload_digest != context.command_digest: return Err("host-auth-request-command-mismatch")
+        val request = host_service_operation_decode_v6(body)?
+        if request.service_incarnation != context.service_incarnation: return Err("host-auth-request-incarnation-mismatch")
+    # Body bytes are bound by their digest and UTF-8 byte count. They are not
+    # embedded/escaped into this small fixed transcript a second time.
+    val fields: Dict<text, SdnValue> = {"role": SdnValue.String(role),
+        "serviceIncarnation": SdnValue.String(context.service_incarnation),
+        "clientNonce": SdnValue.String(context.client_nonce), "serverNonce": SdnValue.String(context.server_nonce),
+        "commandDigest": SdnValue.String(context.command_digest), "payloadDigest": SdnValue.String(payload_digest),
+        "payloadBytes": SdnValue.Int(body.byte_len())}
+    Ok("SIMPLE-HOST-SERVICE-AUTH-V6\n" + sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn host_service_auth_tag_v6(key: text, role: text, context: HostServiceAuthContextV6,
+        body: text) -> Result<text, text>:
+    # Deliberate TEXT key encoding: existing pure HMAC consumes these exact
+    # 64 lowercase ASCII hex bytes; no implicit binary-hex decoding occurs.
+    if not host_service_hex_shape_v6(key, 64): return Err("host-auth-key-shape")
+    Ok(hmac_sha256(key, host_service_auth_transcript_v6(role, context, body)?))
+
+# Single shared tag comparison. Fixed valid width, all 64 positions, XOR/OR
+# accumulator and the existing explicit optimization barrier. Source alone
+# establishes no native constant-time or side-channel qualification.
+fn host_service_auth_tag_equal_v6(expected: text, supplied: text) -> bool:
+    if not host_service_hex_shape_v6(expected, 64) or not host_service_hex_shape_v6(supplied, 64): return false
+    var diff: i64 = 0
+    for index in 0..64:
+        diff = diff | ((expected.byte_at(index) as i64) ^ (supplied.byte_at(index) as i64))
+    black_box(diff) == 0
+
+pub fn host_service_auth_verify_v6(key: text, role: text, context: HostServiceAuthContextV6,
+        body: text, tag: text) -> Result<bool, text>:
+    if not host_service_hex_shape_v6(tag, 64): return Err("host-auth-tag-shape")
+    val expected = host_service_auth_tag_v6(key, role, context, body)?
+    Ok(host_service_auth_tag_equal_v6(expected, tag))
+
+export HostServiceAuthContextV6, HOST_SERVICE_AUTH_REPLY_MAX_BYTES_V6
+export host_service_auth_context_validate_v6, host_service_auth_transcript_v6
+export host_service_auth_tag_v6, host_service_auth_verify_v6
