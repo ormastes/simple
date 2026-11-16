@@ -43,7 +43,15 @@ fn _uoi_header_v1(paths: [text], stamp: text) -> text:
 fn _uoi_clean_v1(s: text) -> text:
     s.replace("\n", " ").replace("\r", " ").replace("\t", " ")
 
-pub fn unit_order_index_encode_v1(paths: [text], stamp: text, graph: WorkerAdmittedGraphV1) -> text:
+# Per-source content hashes, stored as an optional third row column so phase 1
+# can tell which sources are unchanged since the build that wrote the index.
+pub fn unit_order_content_hashes_v1(contents: [text]) -> [text]:
+    var out: [text] = []
+    for c in contents: out.push(sha256_text(c))
+    out
+
+pub fn unit_order_index_encode_v1(paths: [text], stamp: text, graph: WorkerAdmittedGraphV1,
+        hashes: [text] = []) -> text:
     var lines: [text] = [_uoi_header_v1(paths, stamp)]
     var i = 0
     while i < paths.len():
@@ -51,7 +59,8 @@ pub fn unit_order_index_encode_v1(paths: [text], stamp: text, graph: WorkerAdmit
         if i < graph.edges.len():
             for d in graph.edges[i]: deps.push("{d}")
         val err = if i < graph.errors.len(): _uoi_clean_v1(graph.errors[i]) else: ""
-        lines.push("{deps.join(",")}\t{err}")
+        val hash_col = if hashes.len() == paths.len(): "\t{hashes[i]}" else: ""
+        lines.push("{deps.join(",")}\t{err}{hash_col}")
         i = i + 1
     lines.join("\n")
 
@@ -66,7 +75,7 @@ pub fn unit_order_index_decode_v1(paths: [text], stamp: text, content: text) -> 
     var i = 1
     while i < lines.len():
         val cols = lines[i].split("\t")
-        if cols.len() != 2:
+        if cols.len() != 2 and cols.len() != 3:
             return Err("unit order index row {i} malformed")
         val dep_text = cols[0]
         var deps: [i64] = []
@@ -89,12 +98,13 @@ pub fn unit_order_index_load_v1(queue: text, paths: [text], stamp: text) -> Resu
 
 # Temp + atomic rename: a concurrent reader sees the old file or the whole new
 # one. A lost race publishes identical bytes, so either winner is correct.
-pub fn unit_order_index_publish_v1(queue: text, paths: [text], stamp: text, graph: WorkerAdmittedGraphV1) -> bool:
+pub fn unit_order_index_publish_v1(queue: text, paths: [text], stamp: text, graph: WorkerAdmittedGraphV1,
+        hashes: [text] = []) -> bool:
     if queue == "":
         return false
     val target = unit_order_index_path_v1(queue)
     val tmp = "{target}.{getpid()}.tmp"
-    if not file_write(tmp, unit_order_index_encode_v1(paths, stamp, graph)):
+    if not file_write(tmp, unit_order_index_encode_v1(paths, stamp, graph, hashes)):
         return false
     if file_rename(tmp, target):
         return true
@@ -113,9 +123,60 @@ pub fn unit_admitted_graph_v1(enabled: bool, queue: text, paths: [text], content
         return hit
     val computed = worker_admitted_edges_v1(paths, contents, names, roots, library_mode)
     if computed.is_ok():
-        val _published = unit_order_index_publish_v1(queue, paths, stamp, computed.unwrap())
+        val _published = unit_order_index_publish_v1(queue, paths, stamp, computed.unwrap(),
+            unit_order_content_hashes_v1(contents))
     computed
 
+# Phase 1 skip-fresh (SIMPLE_UNIT_ORDER_SKIP_FRESH=1, requires the index).
+pub const UNIT_ORDER_SKIP_FRESH_ENV_V1: text = "SIMPLE_UNIT_ORDER_SKIP_FRESH"
+
+pub fn unit_order_skip_fresh_enabled_v1(skip_raw: text, index_raw: text) -> bool:
+    skip_raw == "1" and unit_order_index_enabled_v1(index_raw)
+
+# The HIR artifact of `path`: its ledger terminal must be a PASS for exactly
+# this path whose HIR was stored in the cache.
+fn _uosf_hir_artifact_ok_v1(queue: text, path: text) -> bool:
+    val terminal = "{queue}/{sha256_text(path)}.terminal"
+    if not file_exists(terminal):
+        return false
+    val f = file_read(terminal).split("\n")
+    f.len() == 6 and f[0] == "PASS" and f[2] == path and f[4] == "CACHE_STORED"
+
+# fresh[i] is true only when the previous index (same magic, count and path
+# digest; its stamp may differ because other sources changed) carries a hash
+# row equal to sha256(contents[i]) and the HIR artifact exists. Must be read
+# BEFORE unit_admitted_graph_v1 republishes the index. Any doubt -> false.
+pub fn unit_order_fresh_flags_v1(enabled: bool, queue: text, paths: [text], contents: [text]) -> [bool]:
+    var fresh: [bool] = []
+    for _p in paths: fresh.push(false)
+    if not enabled or queue == "" or contents.len() != paths.len():
+        return fresh
+    val path = unit_order_index_path_v1(queue)
+    if not file_exists(path):
+        return fresh
+    val lines = file_read(path).split("\n")
+    if lines.len() != paths.len() + 1:
+        return fresh
+    val want = "{UNIT_ORDER_INDEX_MAGIC_V1} n={paths.len()} digest={unit_order_index_digest_v1(paths)} stamp="
+    if not lines[0].starts_with(want):
+        return fresh
+    var i = 0
+    while i < paths.len():
+        val cols = lines[i + 1].split("\t")
+        if cols.len() == 3 and cols[2] == sha256_text(contents[i]) and _uosf_hir_artifact_ok_v1(queue, paths[i]):
+            fresh[i] = true
+        i = i + 1
+    fresh
+
+pub fn unit_order_skip_fresh_order_v1(order: [i64], fresh: [bool]) -> [i64]:
+    var out: [i64] = []
+    for at in order:
+        if at < 0 or at >= fresh.len() or not fresh[at]:
+            out.push(at)
+    out
+
+export UNIT_ORDER_SKIP_FRESH_ENV_V1, unit_order_skip_fresh_enabled_v1, unit_order_fresh_flags_v1
+export unit_order_skip_fresh_order_v1, unit_order_content_hashes_v1
 export unit_admitted_graph_v1
 export UNIT_ORDER_INDEX_ENV_V1, unit_order_index_enabled_v1, unit_order_index_path_v1
 export unit_order_index_digest_v1, unit_order_index_stamp_v1,unit_order_index_encode_v1, unit_order_index_decode_v1

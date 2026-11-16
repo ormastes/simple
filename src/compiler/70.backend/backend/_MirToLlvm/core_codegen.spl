@@ -28,6 +28,14 @@ use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_funct
     bootstrap_mir_static_alignment_at, bootstrap_mir_static_visibility_at, bootstrap_mir_static_external_at}
 # Records in the Windows XRay ring-mode ring (__simple_xray_ring_v2); 32 B each.
 const XRAY_RING_CAPACITY_V2: i64 = 65536
+
+# MSVC export list for the flag-guard data symbols (no auto-export on MSVC).
+fn xray_msvc_export_directives(ring_wrap: bool) -> [text]:
+    var out = ["/EXPORT:__simple_xray_descriptor_v1,DATA", "/EXPORT:__simple_xray_names_v1,DATA",
+        "/EXPORT:__simple_xray_hook_v1,DATA", "/EXPORT:__simple_xray_ring_v2,DATA"]
+    if ring_wrap:
+        out = out.push("/EXPORT:__simple_xray_ring_wrap_v2,DATA")
+    out
 # These implementation helpers belong to the SSA transform owner. The public
 # facade also exports them; its separate native-resolution regression remains
 # covered by mir_opt_facade_ssa_owner_spec.spl.
@@ -574,11 +582,8 @@ impl MirTextCodegen for MirToLlvm:
             self.xray_flag_guard = self.target_os.starts_with("windows")
             if not self.xray_flag_guard and not self.target_os.starts_with("linux"):
                 self.codegen_error("XRAY-E-UNSUPPORTED-TARGET: LLVM XRay sleds are admitted for Linux and Windows triples only (target os '{self.target_os}')")
-            # MSVC (clang-cl / --msvc): link.exe has no auto-export, so the
-            # descriptor/names/hook/ring data symbols are not exported from the
-            # DLL and the flag-guard leaf cannot bind. Fail fast (reversible).
-            if self.xray_flag_guard and self.target_env == "msvc":
-                self.codegen_error("XRAY-E-UNSUPPORTED-TARGET: LLVM XRay is not supported on windows-msvc: MSVC link has no auto-export, so the __simple_xray_* data symbols would not be exported (use the llvm-mingw windows-gnu target)")
+            # MSVC (clang-cl / --msvc) has no auto-export: emit_xray_flag_guard_globals
+            # writes an explicit `/EXPORT:<sym>,DATA` list into .drectve instead.
             if self.bootstrap_string_globals_active:
                 self.codegen_error("XRAY-E-UNSUPPORTED-TARGET: LLVM XRay is not supported on the bootstrap translation path")
             for fn_mode in mir_module_functions_sorted(module):
@@ -1186,6 +1191,14 @@ impl MirTextCodegen for MirToLlvm:
         # No dllexport: one explicit export turns MinGW lld auto-export off and
         # the DLL loses every function export (bug
         # xray_win_flag_guard_dllexport_disables_mingw_auto_export_2026-11-15).
+        # MSVC link has no auto-export: export the data symbols by an explicit
+        # list in the object's .drectve (read by lld-link, link.exe and the
+        # in-house COFF linker). MinGW keeps auto-export (no list, no dllexport).
+        if self.target_env == "msvc":
+            self.builder.emit("module asm \".section .drectve,\\22yn\\22\"")
+            for directive in xray_msvc_export_directives(module.xray_ring_wrap):
+                self.builder.emit("module asm \".ascii \\22 {directive}\\22\"")
+            self.builder.emit("module asm \".text\"")
         for slot_name in slot_names:
             self.builder.emit("{slot_name} = internal global i8 0")
         self.builder.emit("@__simple_xray_descriptor_v1 = constant {{ i64, [{slots.len()} x ptr] }} {{ i64 {slots.len()}, [{slots.len()} x ptr] [{slots.join(", ")}] }}")
