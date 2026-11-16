@@ -232,6 +232,31 @@ fn test_user_enum_with_ordinal_zero_or_one_is_not_a_result() {
     }
 }
 
+/// #6953 round 3: an erased `?` passes expected id 0 and Err index 1. Only a
+/// real Result (id 0 or 2) is absent there; a user enum's index-1 variant
+/// (`MirConstValue.Float`) is a present value, not an early return.
+#[test]
+fn test_erased_try_treats_only_result_ids_as_err() {
+    let user = rt_enum_new(851_885_673, 1, RuntimeValue::from_int(40));
+    assert!(!super::rt_try_is_absent(user, 0, 1));
+    for result_id in [super::RESULT_ENUM_ID, 2] {
+        assert!(super::rt_try_is_absent(rt_enum_new(result_id, 1, RuntimeValue::NIL), 0, 1));
+        assert!(!super::rt_try_is_absent(rt_enum_new(result_id, 0, RuntimeValue::NIL), 0, 1));
+    }
+}
+
+/// The C runtime builds Result with id 2; the id-0-only readers mis-handled
+/// its Err (`.unwrap_or(d)` returned the enum, `.?` said present).
+#[test]
+fn test_result_readers_accept_the_c_result_id() {
+    let err = rt_enum_new(2, 1, RuntimeValue::from_int(9));
+    let ok = rt_enum_new(2, 0, RuntimeValue::from_int(42));
+    assert_eq!(super::rt_unwrap_or_value(err, RuntimeValue::from_int(7)).as_int(), 7);
+    assert_eq!(super::rt_unwrap_or_value(ok, RuntimeValue::from_int(7)).as_int(), 42);
+    assert!(!super::rt_is_present(err));
+    assert_eq!(super::rt_option_map(err, RuntimeValue::NIL), err);
+}
+
 #[test]
 fn test_option_unwrap_returns_positional_payload() {
     let result = rt_enum_new(super::OPTION_ENUM_ID, 0, RuntimeValue::from_int(42));
