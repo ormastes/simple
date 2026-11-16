@@ -48,6 +48,17 @@ fn _layout_block_node(node: BeDomNode, x: f64, y: f64, avail_w: f64, avail_h: f6
         val w = if est_w < avail_w: est_w else: avail_w
         return BeLayoutBox.text_box(node, node.data, x, y, w, font_size * 1.5)
 
+    # display:none generates no box (CSS Display 3 §2.5). A parent skips such a
+    # child; a display:none root still has to return a box, so it is 0x0 with
+    # no children, matching Chrome's getBoundingClientRect() of 0,0,0,0.
+    if node.style.display == "none":
+        var none_box = BeLayoutBox.block_for(node, x, y, 0.0, 0.0)
+        none_box.content_x = x
+        none_box.content_y = y
+        none_box.content_width = 0.0
+        none_box.content_height = 0.0
+        return none_box
+
     # Element node
     val style = node.style
     val px = style.padding_left + style.padding_right + style.border_width * 2.0
@@ -94,13 +105,20 @@ fn _layout_block_node(node: BeDomNode, x: f64, y: f64, avail_w: f64, avail_h: f6
             gap = _collapse_margins(prev_mb, child_mt)
         # Horizontal margins (CSS 2.2 §10.3.3): the child's margin box spans the
         # content width, so its border box starts at margin-left and an auto
-        # width fills what the two margins leave.
-        val child_ml = if child.is_text(): 0.0 else: child.style.margin_left
-        val child_mr = if child.is_text(): 0.0 else: child.style.margin_right
+        # width fills what the two margins leave. Auto margins take the
+        # leftover space of an explicit-width block.
+        var child_ml = 0.0
+        var child_mr = 0.0
+        if not child.is_text():
+            val used = _used_horizontal_margins(child.style, inner_w)
+            child_ml = used[0]
+            child_mr = used[1]
         var child_w = inner_w - child_ml - child_mr
         if child_w < 0.0:
             child_w = 0.0
-        val child_box = _layout_block_node(child, inner_x + child_ml, cursor_y + gap, child_w, avail_h)
+        var child_box = _layout_block_node(child, inner_x + child_ml, cursor_y + gap, child_w, avail_h)
+        child_box.margin_left = child_ml
+        child_box.margin_right = child_mr
         cursor_y = cursor_y + gap + child_box.height
         prev_mb = child_box.margin_bottom
         has_prev = true
@@ -121,6 +139,36 @@ fn _layout_block_node(node: BeDomNode, x: f64, y: f64, avail_w: f64, avail_h: f6
     # (block_for baked it against the provisional 0.0 height).
     box.content_height = content_h
     box
+
+fn _used_horizontal_margins(style: StyleProps, inner_w: f64) -> [f64]:
+    """Used [margin-left, margin-right] of a block in normal flow (CSS 2.2
+    §10.3.3). With an auto width, auto margins are 0. With an explicit width,
+    auto margins share the leftover space equally (one auto side takes all of
+    it); a negative leftover (over-constrained) makes them 0."""
+    var ml = style.margin_left
+    var mr = style.margin_right
+    if style.margin_left_auto:
+        ml = 0.0
+    if style.margin_right_auto:
+        mr = 0.0
+    if style.width <= 0.0:
+        return [ml, mr]
+    if not style.margin_left_auto and not style.margin_right_auto:
+        return [ml, mr]
+    val px = style.padding_left + style.padding_right + style.border_width * 2.0
+    var border_w = style.width
+    if style.box_sizing != "border-box":
+        border_w = style.width + px
+    if border_w < px:
+        border_w = px
+    val leftover = inner_w - ml - mr - border_w
+    if leftover <= 0.0:
+        return [ml, mr]
+    if style.margin_left_auto and style.margin_right_auto:
+        return [leftover / 2.0, leftover / 2.0]
+    if style.margin_left_auto:
+        return [leftover, mr]
+    [ml, leftover]
 
 fn _collapse_margins(a: f64, b: f64) -> f64:
     """Collapse two adjoining vertical margins (CSS 2.2 §8.3.1): the larger
