@@ -1,0 +1,700 @@
+#![allow(primitive_api)]
+# primitive_api: reviewed protected-storage/broker ABI keeps byte bounds, phases, deadlines and flags as i64/bool (milestone_0011 broker-stack review r1).
+friend lib.common.task_runner
+internal_export LinuxProtectedStorageResourcesV1
+# Registry-free retained resources. The existing journal/auth canonical owner
+# alone stores/advances this value; every fallible me-call leaves its custody
+# with that owner. No FD getter, path fallback or native runtime export.
+# Unsafe implementation mechanism only: safe consumers use opaque root/journal/
+# auth-reader handles. They must never copy/dispose these cells independently.
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text, utf8_bytes_valid}
+use std.nogc_sync_mut.io.retained_private_credential_protocol_v2.retained_credential_bytes_equal_v2
+use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
+use std.nogc_sync_mut.io.linux_protected_broker_state_v1.*
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_protected_storage_abi_v1.*
+use std.nogc_sync_mut.io.linux_protected_broker_control_v1.*
+use std.nogc_sync_mut.io.linux_protected_broker_cell_v1.*
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_write_u8, volatile_read_u32, volatile_read_u64, volatile_write_u64}
+@end
+
+pub fn linux_protected_relative_v1(relative: text) -> bool:
+    if relative.byte_len() < 1 or relative.byte_len() > 2048 or relative.contains("\0"): return false
+    val parts = relative.split("/")
+    if parts.len() < 1 or parts.len() > 8: return false
+    for part in parts:
+        if part == "" or part == "." or part == ".." or part.byte_len() > 240: return false
+        for code in part.bytes():
+            if not ((code >= 48u8 and code <= 57u8) or (code >= 65u8 and code <= 90u8) or
+                    (code >= 97u8 and code <= 122u8) or code == 45u8 or code == 46u8 or code == 95u8): return false
+    true
+
+pub class LinuxProtectedStorageResourcesV1:
+    path: text
+    cell: i64 = 0
+    uid: i64 = -1
+    root_index: i64 = -1
+    fds: [i64] = []
+    parents: [i64] = []
+    names: [text] = []
+    identities: [[u8]] = []
+    directories: [bool] = []
+    private_dirs: [bool] = []
+    revisions: [[u8]] = []
+    writer_fd: i64 = -1
+    writer_identity: [u8] = []
+    transient_fd: i64 = -1
+    stage_fd: i64 = -1
+    stage_parent: i64 = -1
+    stage_name: text = ""
+    stage_identity: [u8] = []
+    ready: bool = false
+    closing: bool = false
+    closed: bool = false
+    error: text = ""
+
+    @unsafe(reason: "read only the same resource cell diagnostic before canonical retirement", capabilities: [ffi, raw_ptr])
+    pub fn failure_v1() -> text:
+        @when(os="linux"):
+        if self.cell == 0: return ""
+        var actual = self
+        actual.refresh_v1()
+        actual.error
+        @else:
+        "protected-storage-linux-required"
+        @end
+
+    @unsafe(reason: "canonical owner retains and consumes exact bounded Linux resource custody", capabilities: [ffi, raw_ptr])
+    pub fn current_v1() -> Result<(), text>:
+        @when(os="linux"):
+        linux_machine_process_origin_check_v1()?
+        if self.cell == 0: return Err("protected-storage-memory")
+        var actual = self
+        actual.refresh_v1()
+        val result = actual.current_body_v1()
+        if result.is_err() and actual.error == "":
+            actual.error = result.unwrap_err()
+            actual.ready = false
+            actual.closing = true
+            actual.persist_v1()
+        result
+        @else:
+        Err("protected-storage-linux-required")
+        @end
+
+    @unsafe(reason: "canonical owner retains and consumes exact bounded Linux resource custody", capabilities: [ffi, raw_ptr])
+    fn current_body_v1() -> Result<(), text>:
+        @when(os="linux"):
+        linux_machine_process_origin_check_v1()?
+        if not self.ready or self.closing or self.closed or self.error != "": return Err("protected-storage-not-current")
+        if geteuid() as i64 != self.uid: return Err("protected-storage-principal-changed")
+        if self.writer_fd >= 0:
+            val held = anchored_linux_metadata_v1(self.writer_fd, "", true)?
+            val named = anchored_linux_metadata_v1(self.fds[self.root_index], "parent.lock", false)?
+            if (not self.file_valid_v1(held, 512) or not retained_credential_bytes_equal_v2(held.identity, self.writer_identity) or
+                    not retained_credential_bytes_equal_v2(named.identity, self.writer_identity)):
+                return Err("protected-storage-writer-changed")
+        for at in 0..self.fds.len():
+            if self.fds[at] < 0: return Err("protected-storage-consumed-slot")
+            val held = anchored_linux_metadata_v1(self.fds[at], "", true)?
+            if not retained_credential_bytes_equal_v2(held.identity, self.identities[at]): return Err("protected-storage-held-changed")
+            if self.directories[at]:
+                if not self.directory_valid_v1(held, self.private_dirs[at]): return Err("protected-storage-directory-changed")
+            else:
+                if not self.file_valid_v1(held, 16777216): return Err("protected-storage-file-changed")
+                if not retained_credential_bytes_equal_v2(held.revision, self.revisions[at]): return Err("protected-storage-file-revision-changed")
+            if self.parents[at] >= 0:
+                val named = anchored_linux_metadata_v1(self.parents[at], self.names[at], false)?
+                if not retained_credential_bytes_equal_v2(named.identity, held.identity): return Err("protected-storage-name-substituted")
+        Ok(())
+        @else:
+        Err("protected-storage-linux-required")
+        @end
+
+    @unsafe(reason: "same held resource cell fixed broker transaction under journal ticket", capabilities: [ffi, raw_ptr])
+    pub(friend) fn broker_writer_current_v1() -> Result<(), text>:
+        @when(os="linux"):
+        self.current_v1()?
+        var actual = self
+        actual.refresh_v1()
+        if actual.writer_fd < 0: return Err("protected-broker-original-writer-required")
+        Ok(())
+        @else:
+        Err("protected-storage-linux-required")
+        @end
+
+    @unsafe(reason: "restricted fixed effect uses original resource custody only", capabilities: [ffi, raw_ptr])
+    pub(friend) me broker_control_v1(action: text, identity: text, deadline: i64,
+            generation: i64, request_digest: text, payload: text) -> LinuxProtectedBrokerStorageTurnV1:
+        @when(os="linux"):
+        val origin = linux_machine_process_origin_check_v1()
+        if origin.is_err(): return LinuxProtectedBrokerStorageTurnV1(error: origin.unwrap_err())
+        if self.cell == 0: return LinuxProtectedBrokerStorageTurnV1(error: "protected-storage-memory")
+        self.refresh_v1()
+        val checked = self.current_v1()
+        if checked.is_err(): return LinuxProtectedBrokerStorageTurnV1(error: checked.unwrap_err())
+        # Previously retained mutable files cannot be silently converted into
+        # transient control reads or treated as immutable response evidence.
+        for at in 0..self.fds.len():
+            if self.parents[at] == self.fds[self.root_index] and linux_broker_control_mutable_name_v1(self.names[at]):
+                return LinuxProtectedBrokerStorageTurnV1(error: "protected-broker-mutable-name-already-retained")
+        val held = self
+        val current = fn() -> Result<(), text>: held.current_v1()
+        val result = if action == "begin":
+            broker_control_begin_v1(self.cell, self.fds[self.root_index], self.uid, identity, deadline, current)
+        elif action == "step":
+            broker_control_step_v1(self.cell, self.fds[self.root_index], self.uid, generation, request_digest, current)
+        elif action == "reap":
+            broker_control_reap_v1(self.cell, self.fds[self.root_index], self.uid, identity, payload, deadline, current)
+        else: Err("protected-broker-fixed-action-required")
+        # Native helpers attached every transient descriptor to this cell.
+        # Reload before persisting so a copied wrapper never drops that custody.
+        self.refresh_v1()
+        if result.is_err():
+            if self.error == "": self.error = result.unwrap_err()
+            self.ready = false
+            self.closing = true
+            self.persist_v1()
+            var retained = broker_cell_turn_v1(self.cell)
+            retained.error = result.unwrap_err()
+            return retained
+        result.unwrap()
+        @else:
+        LinuxProtectedBrokerStorageTurnV1(error: "protected-storage-linux-required")
+        @end
+
+    @unsafe(reason: "canonical owner retains and consumes exact bounded Linux resource custody", capabilities: [ffi, raw_ptr])
+    pub me open_v1(writer: bool, create_final: bool = false) -> Result<(), text>:
+        @when(os="linux"):
+        linux_machine_process_origin_check_v1()?
+        if self.cell == 0: return Err("protected-storage-memory")
+        self.refresh_v1()
+        val result = self.open_body_v1(writer, create_final)
+        if result.is_err() and self.error == "":
+            self.error = result.unwrap_err()
+            self.ready = false
+            self.closing = true
+        self.persist_v1()
+        result
+        @else:
+        Err("protected-storage-linux-required")
+        @end
+
+    @unsafe(reason: "canonical owner retains and consumes exact bounded Linux resource custody", capabilities: [ffi, raw_ptr])
+    me open_body_v1(writer: bool, create_final: bool = false) -> Result<(), text>:
+        @when(os="linux"):
+        linux_machine_process_origin_check_v1()?
+        if self.fds.len() != 0 or self.closed or self.path.byte_len() > 4096 or not self.path.starts_with("/") or self.path.contains("\0"):
+            return Err("protected-storage-open-shape")
+        val components = self.path.split("/")
+        if components.len() < 2 or components.len() > 129: return Err("protected-storage-root-bound")
+        for at in 1..components.len():
+            if components[at] == "" or components[at] == "." or components[at] == ".." or components[at].byte_len() > 255:
+                return Err("protected-storage-root-component")
+        if anchored_linux_directory_flags_v1() == 0 or anchored_linux_file_flags_v1() == 0:
+            return Err("protected-storage-architecture-unavailable")
+        self.uid = geteuid() as i64
+        val root_name = anchored_linux_name_v1("/")
+        if root_name == 0: return Err("protected-storage-name-memory")
+        val first = openat(-100, root_name, anchored_linux_directory_flags_v1(), 0u32) as i64
+        free(root_name)
+        if first < 0: return Err("protected-storage-root-open")
+        self.track_v1(first, -1, "", true, false)
+        self.validate_last_v1()?
+        var parent = first
+        for at in 1..components.len():
+            val name = anchored_linux_name_v1(components[at])
+            if name == 0: return Err("protected-storage-name-memory")
+            var fd = openat(parent as i32, name, anchored_linux_directory_flags_v1(), 0u32) as i64
+            val code = if fd < 0: volatile_read_u32(__errno_location()) else: 0
+            if fd < 0 and code == 2 and create_final and at == components.len() - 1:
+                if mkdirat(parent as i32, name, 448u32) != 0:
+                    free(name)
+                    return Err("protected-storage-directory-create")
+                if fsync(parent as i32) != 0:
+                    free(name)
+                    return Err("protected-storage-directory-sync")
+                fd = openat(parent as i32, name, anchored_linux_directory_flags_v1(), 0u32) as i64
+            free(name)
+            if fd < 0: return Err("protected-storage-directory-open")
+            self.track_v1(fd, parent, components[at], true, at == components.len() - 1)
+            self.validate_last_v1()?
+            parent = fd
+        self.root_index = self.fds.len() - 1
+        if writer:
+            val name = anchored_linux_name_v1("parent.lock")
+            if name == 0: return Err("protected-storage-name-memory")
+            val fd = openat(parent as i32, name, anchored_linux_file_flags_v1() | 66, 384u32) as i64
+            free(name)
+            if fd < 0: return Err("protected-storage-writer-open")
+            self.writer_fd = fd
+            self.persist_v1()
+            val meta = anchored_linux_metadata_v1(fd, "", true)?
+            if not self.file_valid_v1(meta, 512): return Err("protected-storage-writer-metadata")
+            self.writer_identity = meta.identity
+            if flock(fd as i32, 6) != 0: return Err("protected-storage-writer-held")
+        self.ready = true
+        self.persist_v1()
+        self.current_v1()
+        @else:
+        Err("protected-storage-linux-required")
+        @end
+
+    @unsafe(reason: "canonical owner retains and consumes exact bounded Linux resource custody", capabilities: [ffi, raw_ptr])
+    pub me read_v1(relative: text, maximum: i64, retain: bool = false) -> Result<Option<text>, text>:
+        @when(os="linux"):
+        linux_machine_process_origin_check_v1()?
+        if self.cell == 0: return Err("protected-storage-memory")
+        self.refresh_v1()
+        if broker_cell_int_v1(self.cell, 0) != 0 and linux_broker_control_mutable_name_v1(relative):
+            return Err("protected-storage-control-name-reserved")
+        val result = self.read_body_v1(relative, maximum, retain)
+        if result.is_err() and self.error == "":
+            self.error = result.unwrap_err()
+            self.ready = false
+            self.closing = true
+        self.persist_v1()
+        result
+        @else:
+        Err("protected-storage-linux-required")
+        @end
+
+    @unsafe(reason: "canonical owner retains and consumes exact bounded Linux resource custody", capabilities: [ffi, raw_ptr])
+    me read_body_v1(relative: text, maximum: i64, retain: bool = false) -> Result<Option<text>, text>:
+        @when(os="linux"):
+        self.current_v1()?
+        if maximum < 1 or maximum > 16777216: return Err("protected-storage-read-bound")
+        val selected = self.parent_v1(relative, false)
+        if selected.is_err():
+            if selected.unwrap_err() == "protected-storage-parent-absent":
+                self.current_v1()?
+                return Ok(nil)
+            return Err(selected.unwrap_err())
+        val pair = selected.unwrap()
+        for at in 0..self.fds.len():
+            if not self.directories[at] and self.parents[at] == pair.0 and self.names[at] == pair.1:
+                val value = self.read_fd_v1(self.fds[at], pair.0, pair.1, maximum)?
+                # A cached leaf check cannot establish original ancestry after
+                # IO. Expose bytes only after the full retained-root postcheck.
+                self.current_v1()?
+                return Ok(Some(value))
+        val name = anchored_linux_name_v1(pair.1)
+        if name == 0: return Err("protected-storage-name-memory")
+        val fd = openat(pair.0 as i32, name, anchored_linux_file_flags_v1(), 0u32) as i64
+        val code = if fd < 0: volatile_read_u32(__errno_location()) else: 0
+        free(name)
+        if fd < 0:
+            if code == 2:
+                self.current_v1()?
+                return Ok(nil)
+            return Err("protected-storage-file-open")
+        if retain:
+            if self.fds.len() >= 256:
+                self.transient_fd = fd
+                self.persist_v1()
+                return Err("protected-storage-fd-bound")
+            self.track_v1(fd, pair.0, pair.1, false, false)
+            self.validate_last_v1()?
+            val value = self.read_fd_v1(fd, pair.0, pair.1, maximum)?
+            self.current_v1()?
+            return Ok(Some(value))
+        self.transient_fd = fd
+        self.persist_v1()
+        val value = self.read_fd_v1(fd, pair.0, pair.1, maximum)
+        self.transient_fd = -1
+        self.persist_v1()
+        val consumed = close(fd as i32)
+        if consumed != 0: return Err("protected-storage-close-consumed-unconfirmed")
+        self.current_v1()?
+        match value:
+            case Ok(text): Ok(Some(text))
+            case Err(reason): Err(reason)
+        @else:
+        Err("protected-storage-linux-required")
+        @end
+
+    @unsafe(reason: "canonical owner retains and consumes exact bounded Linux resource custody", capabilities: [ffi, raw_ptr])
+    pub me publish_v1(relative: text, payload: text, expected: Option<text> = nil) -> Result<bool, text>:
+        @when(os="linux"):
+        linux_machine_process_origin_check_v1()?
+        if self.cell == 0: return Err("protected-storage-memory")
+        self.refresh_v1()
+        val result = self.publish_body_v1(relative, payload, expected)
+        if result.is_err() and self.error == "":
+            self.error = result.unwrap_err()
+            self.ready = false
+            self.closing = true
+        self.persist_v1()
+        result
+        @else:
+        Err("protected-storage-linux-required")
+        @end
+
+    @unsafe(reason: "canonical owner retains and consumes exact bounded Linux resource custody", capabilities: [ffi, raw_ptr])
+    me publish_body_v1(relative: text, payload: text, expected: Option<text> = nil) -> Result<bool, text>:
+        @when(os="linux"):
+        self.current_v1()?
+        if self.writer_fd < 0: return Err("protected-storage-writer-required")
+        if payload.byte_len() < 1 or payload.byte_len() > 8388608: return Err("protected-storage-payload-bound")
+        if self.stage_fd >= 0 or self.stage_name != "": return Err("protected-storage-stage-pending")
+        val target = self.parent_v1(relative, true)?
+        if val prior = expected:
+            val current = self.read_v1(relative, 8388608)?
+            if current.is_none() or current.unwrap() != prior: return Ok(false)
+        val random = sosix_random_hex(16)
+        if random.is_none(): return Err("protected-storage-entropy")
+        val stage_name = ".protected-stage-" + random.unwrap()
+        val stage = anchored_linux_name_v1(stage_name)
+        if stage == 0: return Err("protected-storage-name-memory")
+        val fd = openat(target.0 as i32, stage, anchored_linux_file_flags_v1() | 194, 384u32) as i64
+        free(stage)
+        if fd < 0: return Err("protected-storage-stage-create")
+        self.stage_fd = fd
+        self.stage_parent = target.0
+        self.stage_name = stage_name
+        self.persist_v1()
+        val initial = anchored_linux_metadata_v1(fd, "", true)?
+        self.stage_identity = initial.identity
+        self.persist_v1()
+        if fchmod(fd as i32, 384u32) != 0: return Err("protected-storage-stage-mode")
+        val private_meta = anchored_linux_metadata_v1(fd, "", true)?
+        if not self.file_valid_v1(private_meta, 8388608) or not retained_credential_bytes_equal_v2(initial.identity, private_meta.identity):
+            return Err("protected-storage-stage-mode")
+        val bytes: [u8] = text_to_utf8_bytes(payload)
+        val buffer = malloc((bytes.len() + 1) as u64)
+        if buffer == 0: return Err("protected-storage-memory")
+        for at in 0..bytes.len(): volatile_write_u8(buffer + at, bytes[at] as i64)
+        var at: i64 = 0
+        var error = false
+        while at < bytes.len():
+            val count = write(fd as i32, buffer + at, (bytes.len() - at) as u64)
+            if count <= 0:
+                error = true
+                break
+            at = at + count
+        free(buffer)
+        if error or fsync(fd as i32) != 0: return Err("protected-storage-stage-write-or-sync")
+        if self.read_fd_v1(fd, target.0, stage_name, 8388608)? != payload: return Err("protected-storage-stage-bytes")
+        self.current_v1()?
+        val stage_now = anchored_linux_metadata_v1(fd, "", true)?
+        val stage_named = anchored_linux_metadata_v1(target.0, stage_name, false)?
+        if (not retained_credential_bytes_equal_v2(stage_now.identity, self.stage_identity) or
+                not retained_credential_bytes_equal_v2(stage_named.identity, self.stage_identity)):
+            return Err("protected-storage-stage-substituted")
+        if val prior = expected:
+            val still = self.read_v1(relative, 8388608)?
+            if still.is_none() or still.unwrap() != prior:
+                self.cleanup_stage_v1()?
+                return Ok(false)
+        val source = anchored_linux_name_v1(stage_name)
+        val destination = anchored_linux_name_v1(target.1)
+        if source == 0 or destination == 0:
+            if source != 0: free(source)
+            if destination != 0: free(destination)
+            return Err("protected-storage-name-memory")
+        val published = if expected.is_some(): renameat(target.0 as i32, source, target.0 as i32, destination) else:
+            linkat(target.0 as i32, source, target.0 as i32, destination, 0)
+        val code = if published != 0: volatile_read_u32(__errno_location()) else: 0
+        free(source)
+        free(destination)
+        if published != 0 and code != 17: return Err("protected-storage-publication-uncertain")
+        if expected.is_some() and published == 0:
+            self.stage_name = ""
+            self.persist_v1()
+        self.cleanup_stage_v1()?
+        if published != 0:
+            val existing = self.read_v1(relative, 8388608)?
+            if existing.is_none(): return Err("protected-storage-existing-unavailable")
+            return Ok(false)
+        if fsync(target.0 as i32) != 0: return Err("protected-storage-publication-sync-uncertain")
+        val actual = self.read_v1(relative, 8388608)?
+        if actual.is_none() or actual.unwrap() != payload: return Err("protected-storage-publication-readback")
+        self.current_v1()?
+        Ok(true)
+        @else:
+        Err("protected-storage-linux-required")
+        @end
+
+    @unsafe(reason: "canonical owner retains and consumes exact bounded Linux resource custody", capabilities: [ffi, raw_ptr])
+    pub me close_step_v1() -> Result<bool, text>:
+        @when(os="linux"):
+        linux_machine_process_origin_check_v1()?
+        if self.cell == 0: return Ok(true)
+        self.refresh_v1()
+        val result = self.close_step_body_v1()
+        if result.is_err() and self.error == "":
+            self.error = result.unwrap_err()
+            self.ready = false
+            self.closing = true
+        self.persist_v1()
+        result
+        @else:
+        Err("protected-storage-linux-required")
+        @end
+
+    @unsafe(reason: "canonical owner retains and consumes exact bounded Linux resource custody", capabilities: [ffi, raw_ptr])
+    me close_step_body_v1() -> Result<bool, text>:
+        @when(os="linux"):
+        linux_machine_process_origin_check_v1()?
+        self.ready = false
+        self.closing = true
+        self.persist_v1()
+        if self.stage_fd >= 0 or self.stage_name != "":
+            self.cleanup_stage_v1()?
+            return Ok(false)
+        if self.transient_fd >= 0:
+            val fd = self.transient_fd
+            self.transient_fd = -1
+            self.persist_v1()
+            if close(fd as i32) != 0: return Err("protected-storage-close-consumed-unconfirmed")
+            return Ok(false)
+        if self.writer_fd >= 0:
+            val fd = self.writer_fd
+            self.writer_fd = -1
+            self.persist_v1()
+            if close(fd as i32) != 0: return Err("protected-storage-close-consumed-unconfirmed")
+            return Ok(false)
+        var at = self.fds.len() - 1
+        while at >= 0:
+            if self.fds[at] >= 0:
+                val fd = self.fds[at]
+                self.fds[at] = -1
+                self.persist_v1()
+                if close(fd as i32) != 0: return Err("protected-storage-close-consumed-unconfirmed")
+                return Ok(false)
+            at = at - 1
+        self.closed = true
+        Ok(true)
+        @else:
+        Err("protected-storage-linux-required")
+        @end
+
+    @when(os="linux"):
+    # One private stable cell belongs to the existing canonical owner. Copies
+    # share descriptor-consumption facts even if a later oracle gate fails.
+    # No resource cell or descriptor is returned by any Host/journal facade.
+    @unsafe(reason: "canonical owner retains and consumes exact bounded Linux resource custody", capabilities: [ffi, raw_ptr])
+    fn blob_v1(offset: i64, maximum: i64) -> [u8]:
+        val count = volatile_read_u64(self.cell + offset)
+        var bytes: [u8] = []
+        if count < 0 or count > maximum: return bytes
+        for at in 0..count: bytes.push(volatile_read_u8(self.cell + offset + 8 + at) as u8)
+        bytes
+
+    # Called only after the containing canonical slot has removed this value.
+    # Public Host/store owners carry an oracle identity, never this cell.
+    @unsafe(reason: "canonical owner retains and consumes exact bounded Linux resource custody", capabilities: [ffi, raw_ptr])
+    pub me dispose_closed_v1() -> Result<(), text>:
+        linux_machine_process_origin_check_v1()?
+        if self.cell == 0: return Ok(())
+        self.refresh_v1()
+        if not self.closed: return Err("protected-storage-native-owner-retained")
+        val cell = self.cell
+        self.cell = 0
+        free(cell)
+        Ok(())
+
+    @unsafe(reason: "canonical owner retains and consumes exact bounded Linux resource custody", capabilities: [ffi, raw_ptr])
+    fn put_blob_v1(offset: i64, bytes: [u8], maximum: i64):
+        val count = if bytes.len() <= maximum: bytes.len() else: 0
+        volatile_write_u64(self.cell + offset, count)
+        for at in 0..count: volatile_write_u8(self.cell + offset + 8 + at, bytes[at] as i64)
+
+    @unsafe(reason: "canonical owner retains and consumes exact bounded Linux resource custody", capabilities: [ffi, raw_ptr])
+    me refresh_v1():
+        self.uid = volatile_read_u64(self.cell)
+        self.root_index = volatile_read_u64(self.cell + 8)
+        self.writer_fd = volatile_read_u64(self.cell + 16)
+        self.stage_fd = volatile_read_u64(self.cell + 24)
+        self.stage_parent = volatile_read_u64(self.cell + 32)
+        self.transient_fd = volatile_read_u64(self.cell + 40)
+        self.ready = volatile_read_u64(self.cell + 48) == 1
+        self.closing = volatile_read_u64(self.cell + 56) == 1
+        self.closed = volatile_read_u64(self.cell + 64) == 1
+        self.stage_name = bytes_to_text(self.blob_v1(128, 120))
+        self.stage_identity = self.blob_v1(256, 120)
+        self.writer_identity = self.blob_v1(384, 120)
+        self.error = bytes_to_text(self.blob_v1(512, 480))
+        self.fds = []
+        self.parents = []
+        self.names = []
+        self.identities = []
+        self.revisions = []
+        self.directories = []
+        self.private_dirs = []
+        val count = volatile_read_u64(self.cell + 104)
+        if count < 0 or count > 256:
+            self.ready = false
+            self.closing = true
+            return
+        for at in 0..count:
+            val base = 1024 + at * 1024
+            self.fds.push(volatile_read_u64(self.cell + base))
+            self.parents.push(volatile_read_u64(self.cell + base + 8))
+            self.directories.push(volatile_read_u64(self.cell + base + 16) == 1)
+            self.private_dirs.push(volatile_read_u64(self.cell + base + 24) == 1)
+            self.names.push(bytes_to_text(self.blob_v1(base + 64, 256)))
+            self.identities.push(self.blob_v1(base + 384, 120))
+            self.revisions.push(self.blob_v1(base + 512, 120))
+
+    @unsafe(reason: "canonical owner retains and consumes exact bounded Linux resource custody", capabilities: [ffi, raw_ptr])
+    fn persist_v1():
+        volatile_write_u64(self.cell, self.uid)
+        volatile_write_u64(self.cell + 8, self.root_index)
+        volatile_write_u64(self.cell + 16, self.writer_fd)
+        volatile_write_u64(self.cell + 24, self.stage_fd)
+        volatile_write_u64(self.cell + 32, self.stage_parent)
+        volatile_write_u64(self.cell + 40, self.transient_fd)
+        volatile_write_u64(self.cell + 48, if self.ready: 1 else: 0)
+        volatile_write_u64(self.cell + 56, if self.closing: 1 else: 0)
+        volatile_write_u64(self.cell + 64, if self.closed: 1 else: 0)
+        self.put_blob_v1(128, text_to_utf8_bytes(self.stage_name), 120)
+        self.put_blob_v1(256, self.stage_identity, 120)
+        self.put_blob_v1(384, self.writer_identity, 120)
+        self.put_blob_v1(512, text_to_utf8_bytes(self.error), 480)
+        for at in 0..self.fds.len():
+            val base = 1024 + at * 1024
+            volatile_write_u64(self.cell + base, self.fds[at])
+            volatile_write_u64(self.cell + base + 8, self.parents[at])
+            volatile_write_u64(self.cell + base + 16, if self.directories[at]: 1 else: 0)
+            volatile_write_u64(self.cell + base + 24, if self.private_dirs[at]: 1 else: 0)
+            self.put_blob_v1(base + 64, text_to_utf8_bytes(self.names[at]), 256)
+            self.put_blob_v1(base + 384, self.identities[at], 120)
+            self.put_blob_v1(base + 512, self.revisions[at], 120)
+        volatile_write_u64(self.cell + 104, self.fds.len())
+
+    fn directory_valid_v1(meta: AnchoredLinuxMetadataV1, require_private: bool) -> bool:
+        if meta.identity.len() > 120 or meta.revision.len() > 120: return false
+        if (meta.mode & 61440u32) != 16384u32: return false
+        if require_private: return meta.uid as i64 == self.uid and (meta.mode & 4095u32) == 448u32
+        (meta.uid as i64 == self.uid or meta.uid == 0u32) and (meta.mode & 18u32) == 0u32
+
+    fn file_valid_v1(meta: AnchoredLinuxMetadataV1, maximum: i64) -> bool:
+        (meta.identity.len() <= 120 and meta.revision.len() <= 120 and (meta.mode & 61440u32) == 32768u32 and meta.uid as i64 == self.uid and
+            (meta.mode & 4095u32) == 384u32 and meta.size >= 0 and meta.size <= maximum and meta.links == 1)
+
+    @unsafe(reason: "canonical owner retains and consumes exact bounded Linux resource custody", capabilities: [ffi, raw_ptr])
+    me track_v1(fd: i64, parent: i64, name: text, directory: bool, require_private: bool):
+        self.fds.push(fd)
+        self.parents.push(parent)
+        self.names.push(name)
+        self.directories.push(directory)
+        self.private_dirs.push(require_private)
+        self.identities.push([])
+        self.revisions.push([])
+        self.persist_v1()
+
+    @unsafe(reason: "canonical owner retains and consumes exact bounded Linux resource custody", capabilities: [ffi, raw_ptr])
+    me validate_last_v1() -> Result<(), text>:
+        val at = self.fds.len() - 1
+        val meta = anchored_linux_metadata_v1(self.fds[at], "", true)?
+        if self.directories[at]:
+            if not self.directory_valid_v1(meta, self.private_dirs[at]): return Err("protected-storage-directory-metadata")
+        else:
+            if not self.file_valid_v1(meta, 16777216): return Err("protected-storage-file-metadata")
+        self.identities[at] = meta.identity
+        self.revisions[at] = meta.revision
+        self.persist_v1()
+        Ok(())
+
+    @unsafe(reason: "canonical owner retains and consumes exact bounded Linux resource custody", capabilities: [ffi, raw_ptr])
+    me parent_v1(relative: text, create: bool) -> Result<(i64, text), text>:
+        if not linux_protected_relative_v1(relative) or self.root_index < 0: return Err("protected-storage-relative")
+        val parts = relative.split("/")
+        var parent = self.fds[self.root_index]
+        for at in 0..(parts.len() - 1):
+            var found: i64 = -1
+            for index in 0..self.fds.len():
+                if self.directories[index] and self.parents[index] == parent and self.names[index] == parts[at]: found = index
+            if found < 0:
+                if self.fds.len() >= 256: return Err("protected-storage-fd-bound")
+                val name = anchored_linux_name_v1(parts[at])
+                if name == 0: return Err("protected-storage-name-memory")
+                var fd = openat(parent as i32, name, anchored_linux_directory_flags_v1(), 0u32) as i64
+                val code = if fd < 0: volatile_read_u32(__errno_location()) else: 0
+                if fd < 0 and code == 2 and create:
+                    if mkdirat(parent as i32, name, 448u32) != 0:
+                        free(name)
+                        return Err("protected-storage-child-create")
+                    if fsync(parent as i32) != 0:
+                        free(name)
+                        return Err("protected-storage-child-sync")
+                    fd = openat(parent as i32, name, anchored_linux_directory_flags_v1(), 0u32) as i64
+                free(name)
+                if fd < 0: return Err(if code == 2: "protected-storage-parent-absent" else: "protected-storage-child-open")
+                self.track_v1(fd, parent, parts[at], true, true)
+                self.validate_last_v1()?
+                found = self.fds.len() - 1
+            parent = self.fds[found]
+        Ok((parent, parts[parts.len() - 1]))
+
+    @unsafe(reason: "canonical owner retains and consumes exact bounded Linux resource custody", capabilities: [ffi, raw_ptr])
+    fn read_fd_v1(fd: i64, parent: i64, name: text, maximum: i64) -> Result<text, text>:
+        val before = anchored_linux_metadata_v1(fd, "", true)?
+        if not self.file_valid_v1(before, maximum): return Err("protected-storage-read-metadata")
+        val buffer = malloc((before.size + 1) as u64)
+        if buffer == 0: return Err("protected-storage-memory")
+        var count: i64 = 0
+        var error = false
+        while count < before.size:
+            val got = pread(fd as i32, buffer + count, (before.size - count) as u64, count)
+            if got <= 0:
+                error = true
+                break
+            count = count + got
+        var bytes: [u8] = []
+        if not error:
+            for at in 0..count: bytes.push(volatile_read_u8(buffer + at) as u8)
+        free(buffer)
+        if error or not utf8_bytes_valid(bytes): return Err("protected-storage-read-text")
+        val after = anchored_linux_metadata_v1(fd, "", true)?
+        val named = anchored_linux_metadata_v1(parent, name, false)?
+        if (not retained_credential_bytes_equal_v2(before.identity, after.identity) or
+                not retained_credential_bytes_equal_v2(before.revision, after.revision) or
+                not retained_credential_bytes_equal_v2(after.identity, named.identity)):
+            return Err("protected-storage-read-changed")
+        Ok(bytes_to_text(bytes))
+
+    @unsafe(reason: "canonical owner retains and consumes exact bounded Linux resource custody", capabilities: [ffi, raw_ptr])
+    me cleanup_stage_v1() -> Result<(), text>:
+        if self.stage_name != "":
+            val held = anchored_linux_metadata_v1(self.stage_fd, "", true)?
+            val named = anchored_linux_metadata_v1(self.stage_parent, self.stage_name, false)?
+            if (not retained_credential_bytes_equal_v2(held.identity, self.stage_identity) or
+                    not retained_credential_bytes_equal_v2(named.identity, self.stage_identity)):
+                return Err("protected-storage-stage-substituted")
+            val pointer = anchored_linux_name_v1(self.stage_name)
+            if pointer == 0: return Err("protected-storage-name-memory")
+            val result = unlinkat(self.stage_parent as i32, pointer, 0)
+            free(pointer)
+            if result != 0: return Err("protected-storage-stage-unlink")
+            self.stage_name = ""
+            self.persist_v1()
+            if fsync(self.stage_parent as i32) != 0: return Err("protected-storage-stage-unlink-sync")
+        if self.stage_fd >= 0:
+            val fd = self.stage_fd
+            self.stage_fd = -1
+            self.persist_v1()
+            if close(fd as i32) != 0: return Err("protected-storage-close-consumed-unconfirmed")
+        Ok(())
+    @else:
+    pub me dispose_closed_v1() -> Result<(), text>:
+        Err("protected-storage-linux-required")
+    @end
+
+@unsafe(reason: "canonical owner retains and consumes exact bounded Linux resource custody", capabilities: [ffi, raw_ptr])
+pub fn linux_protected_storage_resources_v1(root: text) -> LinuxProtectedStorageResourcesV1:
+    @when(os="linux"):
+    var owner = LinuxProtectedStorageResourcesV1(path: root)
+    if linux_machine_process_origin_check_v1().is_err(): return owner
+    val cell = malloc((BROKER_CONTROL_CELL_OFFSET_V1 + BROKER_CONTROL_CELL_BYTES_V1) as u64)
+    if cell == 0: return owner
+    owner.cell = cell
+    for at in 0..BROKER_CONTROL_CELL_BYTES_V1:
+        volatile_write_u8(cell + BROKER_CONTROL_CELL_OFFSET_V1 + at, 0)
+    owner.persist_v1()
+    owner
+    @else:
+    LinuxProtectedStorageResourcesV1(path: root)
+    @end
