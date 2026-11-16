@@ -130,3 +130,142 @@ fn constructor_carries_the_owning_enums_declared_index_into_mir() {
         .collect();
     assert_eq!(carried, vec![2], "construction must agree with the match arms' owner index");
 }
+
+/// `case Wrap(Copy(d) | Move(d)):` -- the or-pattern sits in a PAYLOAD slot,
+/// so its binding guard must be typed by the payload field type, not erased.
+const NESTED_OR_BINDING: &str = "enum Inst6953:\n    Copy6953(v: i64)\n    Move6953(v: i64)\n\n\
+enum Shadow6953:\n    Nop6953\n    Pad6953\n    Copy6953(v: i64)\n    Move6953(v: i64)\n\n\
+enum Box6953:\n    Wrap6953(inner: Inst6953)\n\n\
+fn inner_of(b: Box6953) -> i64:\n    match b:\n        case Wrap6953(Copy6953(d) | Move6953(d)): d\n";
+
+#[test]
+fn nested_or_pattern_binding_guards_use_the_payload_field_type() {
+    let (hir, _mir) = lower_entry(&[], NESTED_OR_BINDING);
+    let tested = tested_discriminants(&hir, "inner_of");
+    assert!(!tested.is_empty(), "nested or-pattern must be tested");
+    assert!(
+        tested.iter().all(|disc| (0..2).contains(disc)),
+        "every test must use a declared index (Wrap6953=0, Copy6953=0, Move6953=1), got {tested:?}"
+    );
+}
+
+/// `backend_types.OptimizationLevel` vs `mir_opt.OptLevel`: DIFFERENTLY named
+/// enums sharing `Speed6953` at 5 and 2 -- the actual integ4 pair.
+const OPTIMIZATION_LEVEL: &str = "enum OptimizationLevel6953:\n    None6953\n    Debug6953\n    Basic6953\n    Size6953\n    Standard6953\n    Speed6953\n    Aggressive6953\n";
+const OPT_LEVEL: &str = "enum OptLevel6953:\n    NoOpt6953\n    Size6953\n    Speed6953\n    Aggressive6953\n";
+const TWO_NAMES_ENTRY: &str = "use backend_types.{OptimizationLevel6953}\nuse mir_opt.{OptLevel6953}\n\n\
+fn backend_speed() -> OptimizationLevel6953:\n    OptimizationLevel6953.Speed6953\n\n\
+fn opt_speed() -> OptLevel6953:\n    OptLevel6953.Speed6953\n\n\
+fn pass_rank(level: OptLevel6953) -> i64:\n    match level:\n        case NoOpt6953: 0\n        case Size6953: 1\n        case Speed6953: 2\n        case Aggressive6953: 3\n";
+
+#[test]
+fn differently_named_enums_sharing_a_variant_keep_their_own_indexes() {
+    pre_resolve_wide_order_in_this_process();
+    let (hir, mir) = lower_entry(
+        &[("backend_types.spl", OPTIMIZATION_LEVEL), ("mir_opt.spl", OPT_LEVEL)],
+        TWO_NAMES_ENTRY,
+    );
+    assert_eq!(tested_discriminants(&hir, "pass_rank"), vec![0, 1, 2, 3]);
+    let carried = |function: &str| -> Vec<u32> {
+        mir.functions
+            .iter()
+            .find(|f| f.name == function)
+            .unwrap_or_else(|| panic!("{function} lowered"))
+            .blocks
+            .iter()
+            .flat_map(|block| block.instructions.iter())
+            .filter_map(|inst| match inst {
+                crate::mir::MirInst::EnumUnit { discriminant, .. } => Some(*discriminant),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(carried("backend_speed"), vec![5]);
+    assert_eq!(carried("opt_speed"), vec![2]);
+}
+
+/// native_project's merged-name guard: a same-named enum seeded from the
+/// global (union) table and marked merged must never answer an index, while
+/// the same shape unmarked answers its declared index.
+#[test]
+fn merged_global_enum_never_answers_an_index() {
+    use crate::hir::{HirType, TypeRegistry};
+    let union = HirType::Enum {
+        name: "Level6953".to_string(),
+        variants: ["NoOpt6953", "Debug6953", "Size6953", "Speed6953"].iter().map(|v| (v.to_string(), None)).collect(),
+        generic_params: vec![],
+        is_generic_template: false,
+        type_bindings: std::collections::HashMap::new(),
+    };
+    let mut registry = TypeRegistry::new();
+    let id = registry.register_named("Level6953".to_string(), union);
+    assert_eq!(registry.owned_or_unique_variant_discriminant(id, Some("Level6953"), "Speed6953"), Some(3));
+    registry.mark_merged_enum(id);
+    assert_eq!(registry.owned_or_unique_variant_discriminant(id, Some("Level6953"), "Speed6953"), None);
+    assert_eq!(registry.owned_or_unique_variant_discriminant(crate::hir::TypeId::ANY, None, "Speed6953"), None);
+}
+
+/// `TraceLevel` (80.driver/trace_config.spl) declares `None` at 0. A user
+/// enum's `None` is NOT the builtin Option's 1.
+const TRACE: &str = "enum Trace6953:\n    None\n    Functions6953\n";
+
+fn install_interpreter_enum(source: &str) {
+    let ast = Parser::new(source).parse().expect("parse enum");
+    for item in ast.items {
+        if let simple_parser::Node::Enum(def) = item {
+            crate::interpreter::GLOBAL_ENUMS.with(|cell| cell.borrow_mut().insert(def.name.clone(), std::sync::Arc::new(def)));
+        }
+    }
+}
+
+fn interp_enum(enum_name: &str, variant: &str) -> crate::value::Value {
+    crate::value::Value::Enum { enum_name: enum_name.to_string(), variant: variant.to_string(), payload: None }
+}
+
+/// An interpreter-fallback fn returning `OptLevel.Speed` through
+/// `compile_interp_call`: the bridge must box the OWNER's index, which the
+/// native `case Speed:` tests.
+#[test]
+fn interpreter_bridge_boxes_the_owning_enums_declared_index() {
+    pre_resolve_wide_order_in_this_process();
+    install_interpreter_enum(NARROW);
+    install_interpreter_enum(TRACE);
+    let boxed = crate::runtime_bridge::value_to_runtime(&interp_enum("Level6953", "Speed6953"));
+    assert_eq!(simple_runtime::value::rt_enum_discriminant(boxed), 2);
+    let boxed = crate::runtime_bridge::value_to_runtime(&interp_enum("Trace6953", "None"));
+    assert_eq!(simple_runtime::value::rt_enum_discriminant(boxed), 0, "user `None` is its owner's index");
+    let boxed = crate::runtime_bridge::value_to_runtime(&interp_enum("Option", "None"));
+    assert_eq!(simple_runtime::value::rt_enum_discriminant(boxed), 1, "builtin Option.None keeps its ABI value");
+}
+
+#[test]
+fn interpreter_rt_enum_discriminant_answers_the_owning_enums_declared_index() {
+    use crate::interpreter::interpreter_extern::enum_sffi::rt_enum_discriminant_fn;
+    pre_resolve_wide_order_in_this_process();
+    install_interpreter_enum(NARROW);
+    install_interpreter_enum(TRACE);
+    assert_eq!(rt_enum_discriminant_fn(&[interp_enum("Level6953", "Speed6953")]).unwrap(), crate::value::Value::Int(2));
+    assert_eq!(rt_enum_discriminant_fn(&[interp_enum("Trace6953", "None")]).unwrap(), crate::value::Value::Int(0));
+}
+
+/// `.is_ok()` on a USER enum that declares `Ok` must test that enum's index,
+/// not the builtin Result's 0.
+const USER_OK: &str = "enum Probe6953:\n    Pending6953\n    Ok\n    Err\n\n\
+fn probe_ok(p: Probe6953) -> bool:\n    p.is_ok()\n";
+
+#[test]
+fn is_ok_on_a_user_enum_tests_its_own_declared_index() {
+    let (_hir, mir) = lower_entry(&[], USER_OK);
+    let function = mir.functions.iter().find(|f| f.name == "probe_ok").expect("probe_ok lowered");
+    let mut consts: Vec<i64> = function
+        .blocks
+        .iter()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|inst| match inst {
+            crate::mir::MirInst::ConstInt { value, .. } => Some(*value),
+            _ => None,
+        })
+        .collect();
+    consts.sort();
+    assert_eq!(consts, vec![0, 1], "enum id wildcard 0 + Probe6953.Ok's declared index 1");
+}
