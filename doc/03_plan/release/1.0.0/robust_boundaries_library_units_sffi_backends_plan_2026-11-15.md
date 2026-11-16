@@ -94,6 +94,8 @@ Not in scope: new keywords for text/casts/build; global replacement of every `te
 
 Checked domain constructors on genuine Simple-origin data stay legal. The restriction is: foreign-origin semantic assertions only at approved, auditable trust boundaries.
 
+**Owner decision 2 (2026-11-16) — unit construction form.** The default way to build a unit from a raw primitive is the cast `raw as Unit`. The constructor form `Unit(raw)` is allowed only (a) when manipulating/deriving a value, or (b) at the same-location origin boundary (the SFFI facade / generated adapter that receives the foreign value). `sffi_gen` constrained-unit facades emit `Ok(raw as Unit)`. SPL-BOUND-002 treats a generated facade `fn N` that casts the value of its own `extern fn __raw_N` as the origin boundary (no finding); a cast of a foreign value anywhere else, in either form, is still a late cast.
+
 ## 3. Boundary and SFFI contracts
 
 SFFI decision matrix:
@@ -190,3 +192,4 @@ P0 baseline + inventory + manifest drift; P1 shared diagnostics (scaffold landed
 | 2026-11-16 | SPL-BOUND-001 false positives (lane rb4-boundfp) | `35.semantics/lint/bound_late_cast.spl`: SPL-BOUND-001 keyed only on externs whose declared return is a raw numeric primitive; already-safe returns (`text?`, `[u8]?`, Option, Result, bool, unit) pass through without a finding. stdlib re-census 465 -> 249 findings (144 -> 93 files) = false-positive correction, not conversions | `bound_late_cast_spec` 47/47 (+3), `bound_cross_file_spec` 5/5, `robust_boundary_stdlib_census_2026-11-15.md` |
 | 2026-11-16 | unitcmp (bug fix, lane rb4-unitcmp) | Seed `interpreter/expr/ops.rs`: unit/unit comparison (`== != < <= > >=`) returns plain bool instead of `true_fbytes`; pure-Simple `unit_ops.spl` already types comparisons as bool. Bug: seed_unit_comparison_returns_unit_wrapped_bool_2026-11-16 (verification-pending) | `test/01_unit/compiler/interpreter/unit_comparison_plain_bool_spec.spl` 7/7 on rebuilt seed (1/7 on deployed) |
 | 2026-11-16 | Library Units: build sources wired (lane rb5-srcwire) | `simple build sources [--digest] [dir]` now reads `<dir>/simple.sdn` via `library_unit_manifest_parse_v1` (invalid -> exit 2; absent -> default globs), lists via `source_inventory_scan_resolve_v1`, `--digest` prints `library_unit_source_digest_v1`. Spec 14/14. |
+| 2026-11-16 | Unit cast form (lane rb6-unitcast, owner decision 2) | `sffi_gen/constrained_unit_gen.spl` facade emits `Ok(raw as Unit)` instead of `Ok(Unit(raw))`; `35.semantics/lint/bound_late_cast.spl` treats `fn N` casting its own `extern fn __raw_N` value as origin boundary; late `as` casts elsewhere still reported. Rule recorded in §2 | `constrained_unit_return_spec` 11/11, `constrained_unit_facade_wire_spec` 9/9, `bound_late_cast_spec` 50/50 |
