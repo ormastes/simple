@@ -249,8 +249,10 @@ impl InterpreterBackendImpl:
             for pm2_ in providers.values():
                 val pm2: HirModule = pm2_
                 if pm2.name != module.name:
-                    self.bind_module_constants(pm2, ctx)?
-        self.bind_module_constants(module, ctx)?
+                    # Evaluate in the provider's own scope: its initializers
+                    # name the provider's structs and functions.
+                    self.bind_module_constants(pm2, self.module_context(pm2, ctx), ctx)?
+        self.bind_module_constants(module, ctx, ctx)?
 
         for fn_ in module.functions.values():
             val f: HirFunction = fn_
@@ -262,10 +264,13 @@ impl InterpreterBackendImpl:
                 return Ok(BackendResult.Value(result))
         Err(BackendError.runtime_error("module has no main function", nil))
 
-    fn bind_module_constants(m: HirModule, ctx: EvalContext) -> Result<(), BackendError>:
+    fn bind_module_constants(m: HirModule, eval_ctx: EvalContext, ctx: EvalContext) -> Result<(), BackendError>:
+        """Bind `m`'s module-level val/var: evaluate in `eval_ctx` (the scope of
+        `m`, which names its own structs/functions), define in `ctx`'s env
+        (EvalContext.env is a value, so a copied context cannot define)."""
         for c_ in m.constants.values():
             val c: HirConst = c_
-            val cv: Value = self.eval_expr(c.value, ctx)?
+            val cv: Value = self.eval_expr(c.value, eval_ctx)?
             ctx.env.define_global(c.name, cv)
         Ok(())
 
@@ -336,6 +341,54 @@ impl InterpreterBackendImpl:
         # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
         Some(backend_value_struct_v1(type_name, fields))
 
+    fn struct_with_field(stype: text, sf: Dict<text, Value>, field: text, value: Value) -> Value:
+        """Copy of a value-type struct with one field replaced (the original is untouched)."""
+        var out: Dict<text, Value> = {}
+        for k in sf.keys():
+            val key: text = k
+            out[key] = sf[key]
+        out[field] = value
+        # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
+        backend_value_struct_v1(stype, out)
+
+    fn store_place(place: HirExpr, value: Value, ctx: EvalContext, span: Span) -> Result<(), BackendError>:
+        """Write `value` to an assignable place: a variable, or a field of a
+        class instance / value-type struct (nested struct fields are rebuilt
+        outward until a variable or a class instance owns them)."""
+        if interp_enum_discriminant_raw(place.kind) == 21232742:  # hash("Field")
+            match place.kind:
+                case HirExprKind.Field(pbase, pfield, _):
+                    val pb: HirExpr = pbase
+                    val pf: text = pfield
+                    val owner = self.eval_expr(pb, ctx)?
+                    match owner:
+                        case Value.Object(objv):
+                            val ov: ObjectValue = objv
+                            ctx.env.store.set_field(ov.handle, pf, value)
+                            return Ok(())
+                        case Value.Struct(stype, sfields):
+                            val sf: Dict<text, Value> = sfields
+                            return self.store_place(pb, self.struct_with_field(stype, sf, pf, value), ctx, span)
+                        case _:
+                            return Err(BackendError.not_implemented("field assignment target must be a class instance"))
+                case _:
+                    pass
+        val place_kind: HirExprKind = place.kind
+        var name: text = ""
+        match place_kind:
+            case HirExprKind.NamedVar(_psym, pname):
+                name = pname
+            case HirExprKind.Var(psym2):
+                name = resolve_sym_name(psym2, ctx)
+            case _:
+                name = ""
+        if name == "":
+            return Err(BackendError.not_implemented("assignment target not implemented"))
+        ctx.env.assign(name, value)
+        if ctx.strict_mem:
+            ctx.env.clear_uninit(name)
+        Ok(())
+
     fn exec_stmt(stmt: HirStmt, ctx: EvalContext) -> Result<(), BackendError>:
         # LOAD-BEARING: explicitly materialize stmt.kind's discriminant BEFORE the
         # match. `Expr`/`Block` are struct-shadowed variant names whose pattern
@@ -399,6 +452,15 @@ impl InterpreterBackendImpl:
                                     else:
                                         ctx.env.store.set_field(ov.handle, afld, new_value)
                                     return Ok(())
+                                case Value.Struct(stype, sfields):
+                                    # Value-type struct: rebuild it with the
+                                    # field replaced and store it back into
+                                    # the place it was read from.
+                                    val sf: Dict<text, Value> = sfields
+                                    if not sf.has(afld):
+                                        return Err(BackendError.runtime_error("no such field: {afld}", Some(stmt.span)))
+                                    val fval = if op.?: self.apply_assign_op(op.unwrap(), sf[afld], new_value, stmt.span)? else: new_value
+                                    return self.store_place(ab, self.struct_with_field(stype, sf, afld, fval), ctx, stmt.span)
                                 case _:
                                     return Err(BackendError.not_implemented("field assignment target must be a class instance"))
                         case _:

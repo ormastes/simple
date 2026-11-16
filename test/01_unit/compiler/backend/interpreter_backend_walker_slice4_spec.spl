@@ -1,0 +1,78 @@
+# The pure-Simple HIR interpreter (engine behind the native CLI `run`/`test`)
+# must assign a field of a value-type struct held in a variable (`s.x = v`,
+# also nested `o.inner.x = v`), and must read a text constant that an
+# imported module defines (std.spec passes such a constant to `env_get`).
+#
+# @cover src/compiler/70.backend/backend/interpreter.spl
+#
+# doc/08_tracking/bug/native_cli_test_cannot_run_std_spec_2026-11-15.md
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.backend.backend_types.*
+use compiler.backend.interpreter.{InterpreterBackendImpl}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+
+fn ws4_lower(src: text, path: text, module_name: text) -> HirModule:
+    val module = parse_full_frontend(src, path, module_name, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    lowering.lower_module(module)
+
+fn ws4_lower_importing(src: text, path: text, module_name: text, dep_src: text, dep_path: text, dep_name: text) -> HirModule:
+    val log = Logger(level: 0)
+    val dep_module = parse_full_frontend(dep_src, dep_path, dep_name, log)
+    val module = parse_full_frontend(src, path, module_name, log)
+    var modules: Dict<text, Module> = {}
+    modules[dep_name] = dep_module
+    modules[module_name] = module
+    val sources = [SourceFile(path: dep_path, content: dep_src, module_name: dep_name), SourceFile(path: path, content: src, module_name: module_name)]
+    var lowering = hirlowering_for_module(path, module_surfaces_from_modules(modules, sources).unwrap())
+    lowering.lower_module(module)
+
+fn ws4_text(result: Result<BackendResult, BackendError>) -> text:
+    match result:
+        case Ok(BackendResult.Value(Value.String(s))): "string:" + s
+        case Ok(BackendResult.Value(Value.Int(n))): "int:" + n.to_text()
+        case Ok(_): "other"
+        case Err(e): "error:" + e.message
+
+fn ws4_run(src: text) -> text:
+    var backend = InterpreterBackendImpl.new()
+    ws4_text(backend.interpret_hir_module(ws4_lower(src, "ws4_main.spl", "ws4_main")))
+
+describe "HIR interpreter slice 4: struct field writes and imported constants":
+    it "updates a field of a struct held in a variable":
+        expect(ws4_run("struct P:\n    x: i64\n    y: i64\n\nfn main() -> i64:\n    var p = P(x: 1, y: 2)\n    p.x = 40\n    p.y += 5\n    p.x + p.y\n")).to_equal("int:47")
+
+    it "updates a field of a struct nested inside another struct":
+        expect(ws4_run("struct In:\n    v: i64\n\nstruct Out:\n    inner: In\n    tag: i64\n\nfn main() -> i64:\n    var o = Out(inner: In(v: 1), tag: 3)\n    o.inner.v = 30\n    o.inner.v + o.tag\n")).to_equal("int:33")
+
+    it "keeps the original struct unchanged when a copy is updated":
+        expect(ws4_run("struct P:\n    x: i64\n\nfn main() -> i64:\n    val a = P(x: 1)\n    var b = a\n    b.x = 9\n    a.x * 10 + b.x\n")).to_equal("int:19")
+
+    it "reads a text constant defined in an imported module":
+        val dep_src = "pub val NAME_ENV: text = \"SIMPLE_WS4_NAME\"\n"
+        val provider = ws4_lower(dep_src, "ws4_b.spl", "ws4_b")
+        val entry = ws4_lower_importing("use ws4_b.\{NAME_ENV\}\n\nfn main() -> text:\n    \"[\" + NAME_ENV + \"]\"\n", "ws4_a.spl", "ws4_a", dep_src, "ws4_b.spl", "ws4_b")
+        var providers: Dict<text, HirModule> = {}
+        providers["ws4_b"] = provider
+        val no_ownership_providers: Dict<text, HirModule> = {}
+        var backend = InterpreterBackendImpl.new()
+        expect(ws4_text(backend.interpret_hir_module_with_live_providers(entry, no_ownership_providers, providers))).to_equal("string:[SIMPLE_WS4_NAME]")
+
+    it "builds an imported module's variable from that module's own struct":
+        val dep_src = "struct Holder:\n    n: i64\n\nfn seed_n() -> i64:\n    41\n\nvar _holder = Holder(seed_n())\n\npub fn holder_n() -> i64:\n    _holder.n + 1\n"
+        val provider = ws4_lower(dep_src, "ws4_c.spl", "ws4_c")
+        val entry = ws4_lower_importing("use ws4_c.\{holder_n\}\n\nfn main() -> i64:\n    holder_n()\n", "ws4_d.spl", "ws4_d", dep_src, "ws4_c.spl", "ws4_c")
+        var providers: Dict<text, HirModule> = {}
+        providers["ws4_c"] = provider
+        val no_ownership_providers: Dict<text, HirModule> = {}
+        var backend = InterpreterBackendImpl.new()
+        expect(ws4_text(backend.interpret_hir_module_with_live_providers(entry, no_ownership_providers, providers))).to_equal("int:42")
