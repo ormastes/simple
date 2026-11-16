@@ -39,3 +39,16 @@ Against the source as it was before the fix, all 3 cases fail. With the fix, all
 Rerun the Stage 2 compiler tests on a commit that includes this fix. `compiler_cli_build` must get past these files.
 
 The `test_runner_build` row is still blocked by a separate bug: `named call lacks bootstrap parameter metadata`. That is the owner-lane bug recorded in `d06ba38f018`, and it is not addressed here.
+
+## Correction (2026-11-17)
+
+An earlier note claimed that `parse_module` accepts `f()?.0` while the native Stage 2 route rejects it. That claim was wrong.
+
+An isolated probe gave this result:
+
+- `parse_module_silent_checked("fn f():\n    val a = g()?.0\n")` returns true and reports `expected Ident, got IntLit '0'`. That is the same error the native Stage 2 parser gives.
+- The canonical `(g()?).0` parses cleanly.
+
+The apparent pass came from the whole-file `parse_module` + `parser_has_errors()` pair, which loses its error flag. That is a known false-pass problem; see `brace_import_parse_errors_silent_2026-11-09.md` and the comment above `parse_module_silent_checked` in `parser.spl`.
+
+There is no parser-route inconsistency, so no separate bug was filed.
