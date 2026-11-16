@@ -1,0 +1,32 @@
+# NOT_RUN here (no runnable simple binary in this lane). Red on release: the old
+# token was owner_nonce:generation, so the forged token equals the second lease token.
+use std.spec.*
+use os.apps.smux.client_leases.{smux_leases_new, smux_lease_admit, smux_lease_check,
+    smux_lease_heartbeat, client_lease_token_valid}
+
+describe "client attachment token binding":
+    it "refuses a token whose generation digits were swapped to another lease":
+        step("Admit two leases from one owner nonce")
+        val owner = smux_leases_new("0123456789abcdef0123456789abcdef").unwrap()
+        val first = smux_lease_admit(owner, "s", "c1", 100).unwrap()
+        val second = smux_lease_admit(first.state, "s", "c2", 100).unwrap()
+        val token = first.lease.token
+        expect(client_lease_token_valid(token)).to_equal(true)
+        expect(token.starts_with("0123456789abcdef0123456789abcdef")).to_equal(false)
+        step("Keep the first token's hex half and claim the second lease's generation")
+        val forged = token[0:33] + second.lease.generation.to_text()
+        expect(client_lease_token_valid(forged)).to_equal(true)
+        expect(forged == second.lease.token).to_equal(false)
+        expect(smux_lease_check(second.state, "s", "c2", forged, 200).is_err()).to_equal(true)
+        expect(smux_lease_heartbeat(second.state, "s", "c2", forged, 200).is_err()).to_equal(true)
+        step("The genuine tokens still authorize their own leases")
+        expect(smux_lease_check(second.state, "s", "c1", token, 200).unwrap()).to_equal(true)
+        expect(smux_lease_check(second.state, "s", "c2", second.lease.token, 200).unwrap()).to_equal(true)
+
+    it "binds the same generation to its session and client":
+        step("Equal generations under different targets mint different tokens")
+        val owner = smux_leases_new("0123456789abcdef0123456789abcdef").unwrap()
+        val a = smux_lease_admit(owner, "s", "c", 100).unwrap()
+        val b = smux_lease_admit(owner, "t", "c", 100).unwrap()
+        expect(a.lease.generation).to_equal(b.lease.generation)
+        expect(a.lease.token == b.lease.token).to_equal(false)

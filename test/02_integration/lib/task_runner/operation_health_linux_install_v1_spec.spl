@@ -1,0 +1,54 @@
+"""
+## Purpose and audience
+Pins the proof-gated protected-parent install entry in
+`src/lib/common/task_runner/distributed_operation_owner_health_v2.spl`:
+`operation_health_linux_install_v1` is the only public route to a parent writer,
+it requires the sealed `LinuxServiceVerifiedEnrollmentV1`, it never provisions
+a missing parent, and the private open/borrow/begin/close_step stay private.
+## Operator workflow
+Run this one file with the self-hosted runner on Linux and read
+`SPEC FILE VERDICT`. Status: AUTHORED, NOT_RUN (no runnable binary, 2026-11-16).
+## Compatibility and limitations
+A positive install needs an administrator-provisioned protected parent and is
+covered by the installer fixture, not here. The refusal case uses a private
+temp directory and must leave the missing final component absent.
+## Verification guidance and troubleshooting
+If the absent parent appears after the call, the entry provisioned it
+(create_final=true) and is a P0 regression.
+"""
+use std.spec.step
+use test.fixtures.orchestration.host_linux_service_verifier_fixture_v1.*
+use std.nogc_sync_mut.io.host_linux_service_records_v4.linux_service_enrollment_verify_v1
+use std.common.task_runner.distributed_operation_owner_health_v2.{operation_health_linux_install_v1, OperationHealthLinuxInstallV1}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_exists, file_read_regular_no_follow_bounded}
+
+describe "Proof-gated protected parent install entry V1":
+    it "refuses a missing machine parent without provisioning it and leaves nothing to close":
+        # @req LINUX-SERVICE-VERIFIER-06
+        # @capture(statistics): install outcome flags and whether the absent parent was created
+        step("verify a genuine association whose machine parent does not exist")
+        val base = secure_temp_dir("/tmp", "simple-ohinstall-").unwrap()
+        val parent = base + "/absent-parent"
+        val fixture = linux_service_verifier_fixture_at_v1(parent)
+        val proof = linux_service_enrollment_verify_v1(fixture.policy, fixture.binding, fixture.credential,
+            fixture.configuration, fixture.engine_policy, fixture.broker_policy).unwrap()
+        step("the entry refuses and drains its own descriptors")
+        val result: OperationHealthLinuxInstallV1 = operation_health_linux_install_v1(proof)
+        expect(result.installed).to_equal(false)
+        expect(result.duplicate).to_equal(false)
+        expect(result.error.starts_with("protected-storage-")).to_equal(true)
+        expect(result.cleanup.is_none()).to_equal(true)
+        step("the missing final component is still missing")
+        expect(file_exists(parent)).to_equal(false)
+
+    it "keeps every protected open, borrow, begin and close step private":
+        # @req LINUX-SERVICE-VERIFIER-07
+        # @capture(statistics): visibility of the private owner_health storage steps
+        step("scan the owner source for widened private storage steps")
+        val source = file_read_regular_no_follow_bounded("src/lib/common/task_runner/distributed_operation_owner_health_v2.spl", 4194304).unwrap()
+        for name in ["operation_health_linux_open_v1(", "operation_health_linux_borrow_v1(", "operation_health_linux_begin_v1(",
+                "operation_health_linux_close_step_v1(", "operation_health_linux_resources_v1("]:
+            expect(source.contains("\nfn " + name)).to_equal(true)
+            expect(source.contains("pub fn " + name)).to_equal(false)
+        expect(source.contains("\nclass OperationJournalLinuxStorageBorrowV1:")).to_equal(true)
+        expect(source.contains("pub fn operation_health_linux_install_v1(proof: LinuxServiceVerifiedEnrollmentV1)")).to_equal(true)

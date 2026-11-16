@@ -1,0 +1,55 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# TLDR summary surfaces carry the admitted row's full identity
+
+Regression for "[hir-shard] inventory publication failed: closure identity
+differs" on every cross lint/test-runner build (2026-11-16). The HIR closure
+digest (hir_cache_closure_digest, content rows) folds each surface's
+rel path | content hash | length | module_name | logical_name. A HIR shard
+worker registers a row as a parsed surface, an empty placeholder, or (unit
+TLDR, `summaries>0`) a summary surface. Placeholders and parsed surfaces take
+module_name / logical_name from the row; summary surfaces kept the names of
+their synthetic `<module/id>.spl` path, so every worker with summaries computed
+a slice-dependent digest and the frozen inventory refused it.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:driver
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_bind_row_identity,
+    module_surface_content_hash}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_blocked_reason_v1}
+
+describe "module_surface_bind_row_identity":
+    it "gives a summary-named surface and a placeholder the same closure-row identity":
+        val path = "src/lib/common/text_fx.spl"
+        val content = "fn a() -> i64: 1\n"
+        var summary: ModuleSurface = ModuleSurface.empty("")
+        summary.module_name = "std.text_fx"
+        summary.logical_name = "std.text_fx"
+        summary.canonical_name = "lib.text_fx"
+        val a = module_surface_bind_row_identity(summary, path, "/abs/" + path, "lib.common.text_fx", 7, content)
+        val b = module_surface_bind_row_identity(ModuleSurface.empty(""), path, "/abs/" + path, "lib.common.text_fx", 7, content)
+        expect(a.module_name).to_equal(b.module_name)
+        expect(a.logical_name).to_equal(b.logical_name)
+        expect(a.canonical_name).to_equal(b.canonical_name)
+        expect(a.package_name).to_equal(b.package_name)
+        expect(a.canonical_path).to_equal("/abs/" + path)
+        expect(a.source_index).to_equal(7)
+        expect(a.content_length).to_equal(content.byte_len())
+        expect(a.content_hash).to_equal(module_surface_content_hash(content))
+
+    it "the inventory mismatch reaches the BLOCKED record and the aggregate failure line":
+        val lowering = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
+        expect(lowering).to_contain(r"HIR frozen inventory publication failed: {inventory_why}")
+        val main = file_read("src/app/cli/native_build_main.spl")
+        expect(main).to_contain("hir_shard_recovery_blocked_reason_v1(mir_ledger)")
+        expect(hir_shard_recovery_blocked_reason_v1("")).to_equal("")
+
+    it "is used by the streaming TLDR row registration":
+        val stream = file_read("src/compiler/80.driver/driver_source_parse_streaming.spl")
+        expect(stream).to_contain("module_surface_bind_row_identity(tldr_surface")

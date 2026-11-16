@@ -70,6 +70,7 @@ static void check(int ok, const char *name) {
 static int64_t *arena_new(int64_t generation, int64_t context) {
     size_t bytes = (size_t)(128 + CAPACITY * 96);
     int64_t *base = aligned_alloc(64, bytes); /* resident until exit, by contract */
+    if (base == NULL) { fputs("FAIL arena allocation\n", stderr); exit(1); }
     memset(base, 0, bytes);
     base[1] = generation;
     base[2] = context;
@@ -164,7 +165,11 @@ static int sret_ok(void) {
     return q.w[0] == 40 && q.w[1] == 41 && q.w[2] == 42 && q.w[3] == 43;
 }
 
-int main(void) {
+#include "xray_adapter_resident_case.h"
+
+int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "--resident") == 0) return resident_case();
+    if (argc != 1) return 2;
     int64_t max_id = simple_xray_llvm_max_function_id();
     int32_t id_a = id_of((void *)xray_target_a, max_id);
     int32_t id_b = id_of((void *)xray_target_b, max_id);

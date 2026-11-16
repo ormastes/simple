@@ -1,145 +1,44 @@
+# Orchestration half of the Linux service records (split in signing step 5).
+# The verifier, records DATA and the sealed proof live in the single io owner
+# std.nogc_sync_mut.io.host_linux_service_records_v4. This half keeps only what
+# needs the protected root reader or the journal, both of which import
+# owner_health and therefore cannot be imported by the io verifier.
 # Actual retained-reader acquisition; returned metadata remains DATA. Neither a
 # record nor a signed enrollment credential constructs a native provider owner.
 use std.common.contracts.orchestration.host_linux_service_enrollment_v3.*
 use std.nogc_sync_mut.io.linux_protected_root_reader_v1.*
-use std.nogc_sync_mut.orchestration.host_private_metadata_v2.*
-use std.nogc_sync_mut.orchestration.host_enrollment_v1.{HostEnrollmentCredentialV1, host_enrollment_credential_decode_v1, host_enrollment_credential_encode_v1}
-use std.nogc_sync_mut.orchestration.local_authority_policy_v1.local_authority_policy_decode_v1
-use std.nogc_sync_mut.orchestration.host_local_root_v1.host_local_context_v1
-use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
-use std.common.base_encoding.utilities.base_encoding_text_to_bytes
+use std.nogc_sync_mut.io.host_linux_service_records_v4.{HostLinuxServiceRecordsV4, HostLinuxServiceRecordSourcesV4,
+    host_linux_service_records_verify_v4, host_linux_service_claim_name_v4}
 use std.common.build_manager.contracts.builder_digest_valid_v1
 use std.nogc_sync_mut.io.linux_service_native_identity_v3.LinuxServiceNativeIdentitySnapshotV3
 use std.common.task_runner.distributed_operation_journal_v2.DistributedOperationJournalV2
 use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_host_scope_bytes_v2}
-use std.common.build_manager.group_process_stream_protocol_v2.{group_process_stream_template_decode_v3, group_process_stream_template_encode_v3}
-use std.common.crypto.sha256.sha256_text
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
-use std.common.sdn.strict_v1.sdn_parse_strict_v1
-use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
-
-pub struct HostLinuxServiceRecordsV4:
-    binding: HostLinuxServiceEnrollmentBindingV3
-    metadata: HostPrivateMetadataV2
-    credential: HostEnrollmentCredentialV1
-    claim_digest: text
-    authorized_at: i64
 
 pub(package) fn host_linux_service_read_v4(reader: LinuxProtectedRootReaderV1, relative: text) -> Result<text, text>:
     val source = linux_protected_root_reader_read_v1(reader, relative, 1048576)?
     if source.is_none(): return Err("linux-host-service-record-missing:" + relative)
     Ok(source.unwrap())
 
-fn service_record_fields_v4(source: text, names: [text]) -> Result<Dict<text, SdnValue>, text>:
-    if source.byte_len() == 0 or source.byte_len() > 16384: return Err("linux-host-service-record-size")
-    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 16384, max_depth: 2,
-            max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 16)):
-        case Ok(value): value
-        case Err(issue): return Err("linux-host-service-record-syntax:" + issue.code)
-    if sdn_encode_canonical(parsed.value) + "\n" != source: return Err("linux-host-service-record-noncanonical")
-    val fields = match parsed.value:
-        case SdnValue.Dict(value): value
-        case _: return Err("linux-host-service-record-object-required")
-    for name in names:
-        if not fields.contains_key(name): return Err("linux-host-service-record-missing-field:" + name)
-    for name in fields.keys():
-        if not names.contains(name): return Err("linux-host-service-record-unknown-field:" + name)
-    Ok(fields)
-
-pub fn host_linux_service_root_path_v4(binding: HostLinuxServiceEnrollmentBindingV3) -> Result<text, text>:
-    Ok(binding.machine_parent + "/host-root-" + host_linux_service_enrollment_digest_v3(binding)?)
-
-# DATA encoders only. The signed installer acquires original protected parent
-# resources and verifies current signatures BEFORE it publishes these bytes.
-pub fn host_linux_service_claim_bytes_v4(binding: HostLinuxServiceEnrollmentBindingV3,
-        credential: HostEnrollmentCredentialV1, nonce: text, authorized_at: i64) -> Result<text, text>:
-    if nonce.byte_len() != 64 or not builder_digest_valid_v1(nonce): return Err("linux-host-service-claim-nonce")
-    if authorized_at <= 0: return Err("linux-host-service-admission-clock")
-    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("linux-host-service-claim"),
-        "root": SdnValue.String(host_linux_service_root_path_v4(binding)?),
-        "bindingDigest": SdnValue.String(host_linux_service_enrollment_digest_v3(binding)?),
-        "operationId": SdnValue.String(credential.operation.id), "nativeMachineId": SdnValue.String(binding.native_machine_id),
-        "nonce": SdnValue.String(nonce), "credentialDigest": SdnValue.String(sha256_text(host_enrollment_credential_encode_v1(credential)?)),
-        "authorizedAtUnixMs": SdnValue.Int(authorized_at)}
-    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
-
-pub fn host_linux_service_root_bytes_v4(binding: HostLinuxServiceEnrollmentBindingV3,
-        credential: HostEnrollmentCredentialV1, nonce: text, authorized_at: i64) -> Result<text, text>:
-    val claim = host_linux_service_claim_bytes_v4(binding, credential, nonce, authorized_at)?
-    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("linux-host-service-root"),
-        "root": SdnValue.String(host_linux_service_root_path_v4(binding)?),
-        "bindingDigest": SdnValue.String(host_linux_service_enrollment_digest_v3(binding)?),
-        "operationId": SdnValue.String(credential.operation.id),
-        "claimPath": SdnValue.String(binding.machine_parent + "/linux-service-claim-" + sha256_text(binding.native_machine_id) + ".sdn"),
-        "claimDigest": SdnValue.String(sha256_text(claim)), "nonce": SdnValue.String(nonce),
-        "credentialDigest": SdnValue.String(sha256_text(host_enrollment_credential_encode_v1(credential)?)),
-        "authorizedAtUnixMs": SdnValue.Int(authorized_at)}
-    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
-
-pub(package) fn host_linux_service_claim_check_v4(root: text, binding: HostLinuxServiceEnrollmentBindingV3,
-        credential: HostEnrollmentCredentialV1, claim_bytes: text, root_bytes: text) -> Result<(text, i64), text>:
-    if root != host_linux_service_root_path_v4(binding)?: return Err("linux-host-service-root-parent-mismatch")
-    val claim = service_record_fields_v4(claim_bytes, ["version", "kind", "root", "bindingDigest", "operationId", "nativeMachineId", "nonce", "credentialDigest", "authorizedAtUnixMs"])?
-    val nonce = match claim["nonce"]:
-        case SdnValue.String(value): value
-        case _: return Err("linux-host-service-claim-nonce")
-    val authorized_at = match claim["authorizedAtUnixMs"]:
-        case SdnValue.Int(value): value
-        case _: return Err("linux-host-service-admission-clock")
-    if claim_bytes != host_linux_service_claim_bytes_v4(binding, credential, nonce, authorized_at)?: return Err("linux-host-service-claim-mismatch")
-    if root_bytes != host_linux_service_root_bytes_v4(binding, credential, nonce, authorized_at)?: return Err("linux-host-service-root-record-mismatch")
-    Ok((sha256_text(claim_bytes), authorized_at))
-
 pub(package) fn host_linux_service_records_load_v4(root: text, reader: LinuxProtectedRootReaderV1,
         parent: LinuxProtectedRootReaderV1) -> Result<HostLinuxServiceRecordsV4, text>:
     linux_protected_root_reader_current_v1(reader)?
     linux_protected_root_reader_current_v1(parent)?
-    val binding = host_linux_service_enrollment_decode_v3(host_linux_service_read_v4(reader, "linux-service-enrollment-v3.sdn")?)?
-    val metadata = host_private_metadata_decode_v2(HostPrivateMetadataPinsV2(binding.policy_digest, binding.config_digest,
-        binding.engine_policy_digest, binding.broker_policy_digest),
-        base_encoding_text_to_bytes(host_linux_service_read_v4(reader, "authority-policy.sdn")?),
-        base_encoding_text_to_bytes(host_linux_service_read_v4(reader, "host-config.sdn")?),
-        base_encoding_text_to_bytes(host_linux_service_read_v4(reader, "engine-policy.sdn")?),
-        base_encoding_text_to_bytes(host_linux_service_read_v4(reader, "broker-policy.sdn")?))?
-    val parent_policy = local_authority_policy_decode_v1(host_linux_service_read_v4(parent, "authority-policy.sdn")?)?
-    if parent_policy.source_digest != binding.policy_digest: return Err("linux-host-service-installed-parent-policy-mismatch")
-    val credential = host_enrollment_credential_decode_v1(host_linux_service_read_v4(reader, "linux-service-enrollment-credential-v3.sdn")?)?
-    host_linux_service_static_check_v4(binding, credential, metadata)?
-    val claim = host_linux_service_read_v4(parent, "linux-service-claim-" + sha256_text(binding.native_machine_id) + ".sdn")?
-    val claim_digest = host_linux_service_claim_check_v4(root, binding, credential, claim, host_linux_service_read_v4(reader, "linux-service-root-v3.sdn")?)?
+    val enrollment = host_linux_service_read_v4(reader, "linux-service-enrollment-v3.sdn")?
+    val binding = host_linux_service_enrollment_decode_v3(enrollment)?
+    val sources = HostLinuxServiceRecordSourcesV4(enrollment: enrollment,
+        policy: host_linux_service_read_v4(reader, "authority-policy.sdn")?,
+        configuration: host_linux_service_read_v4(reader, "host-config.sdn")?,
+        engine_policy: host_linux_service_read_v4(reader, "engine-policy.sdn")?,
+        broker_policy: host_linux_service_read_v4(reader, "broker-policy.sdn")?,
+        parent_policy: host_linux_service_read_v4(parent, "authority-policy.sdn")?,
+        credential: host_linux_service_read_v4(reader, "linux-service-enrollment-credential-v3.sdn")?,
+        claim: host_linux_service_read_v4(parent, host_linux_service_claim_name_v4(binding))?,
+        root_record: host_linux_service_read_v4(reader, "linux-service-root-v3.sdn")?)
     linux_protected_root_reader_current_v1(reader)?
     linux_protected_root_reader_current_v1(parent)?
-    if host_local_context_v1(metadata.policy).grant_clock < claim_digest.1: return Err("linux-host-service-admission-clock-regressed")
-    Ok(HostLinuxServiceRecordsV4(binding, metadata, credential, claim_digest.0, claim_digest.1))
-
-pub(package) fn host_linux_service_enrollment_authorize_v4(records: HostLinuxServiceRecordsV4) -> Result<(), text>:
-    host_linux_service_static_check_v4(records.binding, records.credential, records.metadata)?
-    val context = host_local_context_v1(records.metadata.policy)
-    if context.grant_clock <= 0 or context.monotonic_ms < 0: return Err("linux-host-service-clock-invalid")
-    val verified = distributed_verify_grant_approval_from_snapshot_v2(records.metadata.policy.snapshot,
-        records.credential.signed, records.credential.approval, records.credential.operation,
-        context.grant_clock, records.metadata.policy.snapshot.generation, context.policy_revision,
-        context.revocation_epoch, context.session_generation)?
-    Ok(())
-
-pub(package) fn host_linux_service_static_check_v4(binding: HostLinuxServiceEnrollmentBindingV3,
-        credential: HostEnrollmentCredentialV1, metadata: HostPrivateMetadataV2) -> Result<(), text>:
-    val broker = host_linux_service_broker_template_v4(binding, metadata)?
-    if sha256_text(metadata.engine_policy_bytes) != binding.engine_policy_digest: return Err("linux-host-service-engine-policy-pin")
-    val config = metadata.configuration
-    if (metadata.policy.source_digest != binding.policy_digest or
-            metadata.policy.snapshot.policy_revision != binding.policy_revision or config.physical_host_id != binding.physical_host_id or
-            config.service_scope_id != binding.service_scope_id or config.runtime_class_ref != "podman-rootless" or
-            config.journal_root != "journal" or config.exclusive_device_ids.len() != 0 or
-            config.cpu_ceiling_millis != binding.physical_cpu_millis or config.memory_ceiling_bytes != binding.physical_memory_bytes):
-        return Err("linux-host-service-installed-binding-mismatch")
-    val operation = credential.operation
-    if (operation.operation != "host_enroll_v1" or operation.payload_digest != host_linux_service_enrollment_digest_v3(binding)? or
-            operation.host_id != binding.physical_host_id or operation.memory_bytes != binding.physical_memory_bytes or
-            operation.environment_digest != binding.provider_identity_digest or credential.signed.issuer_id != config.controller_ref):
-        return Err("linux-host-service-enrollment-credential-mismatch")
-    Ok(())
+    host_linux_service_records_verify_v4(root, sources)
 
 pub(package) fn linux_service_current_bytes_v4(binding: HostLinuxServiceEnrollmentBindingV3, scope: ContainerHostScopeV2,
         native: LinuxServiceNativeIdentitySnapshotV3, epoch_digest: text, claim_digest: text,
@@ -157,31 +56,3 @@ pub(package) fn linux_service_current_bytes_v4(binding: HostLinuxServiceEnrollme
         "authorityNamespaceId": SdnValue.String(native.authority_namespace_id), "initialEpochDigest": SdnValue.String(epoch_digest),
         "journalLeaseDigest": SdnValue.String(journal.lease_digest), "journalAuthorityDigest": SdnValue.String(journal.authority_digest)}
     Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
-
-# Signed wrapper digest and inner planning-template digest are separate domains.
-# This validates DATA; native current-template and reservation measurements are
-# independently compared by the actual Root owner before activation/effects.
-pub(package) fn host_linux_service_broker_template_v4(binding: HostLinuxServiceEnrollmentBindingV3,
-        metadata: HostPrivateMetadataV2) -> Result<text, text>:
-    val source = metadata.broker_policy_bytes
-    if source.byte_len() == 0 or source.byte_len() > 1048576 or sha256_text(source) != binding.broker_policy_digest:
-        return Err("linux-host-service-broker-policy-pin")
-    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 1048576, max_depth: 2,
-            max_nodes: 8, max_rows: 0, max_cells: 0, max_columns: 4)):
-        case Ok(value): value
-        case Err(issue): return Err("linux-host-service-broker-policy-syntax:" + issue.code)
-    val fields = match parsed.value:
-        case SdnValue.Dict(value): value
-        case _: return Err("linux-host-service-broker-policy-object")
-    if fields.len() != 3 or not fields.contains_key("template"): return Err("linux-host-service-broker-policy-fields")
-    val template_bytes = match fields["template"]:
-        case SdnValue.String(value): value
-        case _: return Err("linux-host-service-broker-policy-template")
-    val expected: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("linux-host-service-broker-policy"), "template": SdnValue.String(template_bytes)}
-    if sdn_encode_canonical(SdnValue.Dict(expected)) + "\n" != source: return Err("linux-host-service-broker-policy-canonical")
-    val template = group_process_stream_template_decode_v3(template_bytes)?
-    if group_process_stream_template_encode_v3(template)? != template_bytes or template.profile_v3.is_none(): return Err("linux-host-service-broker-template-canonical")
-    val broker = template.profile_v3.unwrap().broker
-    if broker.reserved_cpu_millis != binding.reserved_cpu_millis or broker.reserved_memory_bytes != binding.reserved_memory_bytes:
-        return Err("linux-host-service-broker-reserved-mismatch")
-    Ok(template_bytes)

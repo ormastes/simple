@@ -1,0 +1,138 @@
+"""
+## Purpose and audience
+Pins the single signed Linux service enrollment verifier in
+`src/lib/nogc_sync_mut/io/host_linux_service_records_v4.spl`: the sealed
+`LinuxServiceVerifiedEnrollmentV1` proof exists only after real Ed25519 issuer
+and approver signatures verify, and every later re-verification uses the
+INSTALLED policy bytes and a fresh wall clock. Written for owners of the
+protected-storage owner_health entry and the signed Linux installer.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-16).
+## Compatibility and limitations
+Pure bytes: no protected root, writer, native identity or provider. The
+compile-time construction seal is pinned by a source scan here; the matching
+compile-fail check needs a deployed compiler and is NOT_RUN.
+## Verification guidance and troubleshooting
+A failing refusal names the exact verifier error. `APPROVAL_EXPIRED` after a
+valid first proof is the intended owner decision (2026-11-16): an approval that
+expired while the service was down is refused after restart.
+"""
+use std.spec.step
+use test.fixtures.orchestration.host_linux_service_verifier_fixture_v1.*
+use std.nogc_sync_mut.io.host_linux_service_records_v4.*
+use std.nogc_sync_mut.io.local_authority_policy_v1.{local_authority_policy_decode_v1, host_local_context_v1}
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.nogc_sync_mut.io.thread.thread_sleep_ms
+use std.common.contracts.orchestration.host_linux_service_enrollment_v3.{host_linux_service_enrollment_digest_v3, host_linux_service_enrollment_encode_v3}
+use std.nogc_sync_mut.io.host_enrollment_v1.host_enrollment_credential_encode_v1
+
+fn verifier_proof_v1(fixture: LinuxServiceVerifierFixtureV1) -> Result<LinuxServiceVerifiedEnrollmentV1, text>:
+    linux_service_enrollment_verify_v1(fixture.policy, fixture.binding, fixture.credential,
+        fixture.configuration, fixture.engine_policy, fixture.broker_policy)
+
+describe "Signed Linux service enrollment verifier V1":
+    it "issues a proof only for a real signed association and re-verifies it against the same installed policy":
+        # @req LINUX-SERVICE-VERIFIER-01
+        # @capture(statistics): proof binding digest, install token and ordered publication names
+        step("verify the genuine association signed by the installed issuer and approver keys")
+        val fixture = linux_service_verifier_fixture_v1()
+        val proof = verifier_proof_v1(fixture).unwrap()
+        expect(proof.binding_digest().unwrap()).to_equal(host_linux_service_enrollment_digest_v3(fixture.binding).unwrap())
+        expect(proof.machine_parent()).to_equal("/var/lib/simple/hosts")
+        step("re-verify against installed bytes held by the storage owner")
+        expect(linux_service_enrollment_installed_v1(proof, Some(fixture.policy)).is_ok()).to_equal(true)
+        step("publication DATA is claim, six fixed children, then the root manifest")
+        val items = linux_service_enrollment_publication_v1(proof).unwrap()
+        expect(items.len()).to_equal(8)
+        expect(items[0].0).to_equal(proof.claim_name())
+        expect(items[7].0).to_equal(proof.child().unwrap() + "/linux-service-root-v3.sdn")
+        step("an exact duplicate of this association returns its original admission time")
+        val at = linux_service_enrollment_existing_v1(proof, items[0].1, items[7].1).unwrap()
+        expect(at > 0).to_equal(true)
+
+    it "refuses an approval that already expired, and refuses a valid proof once its approval expires":
+        # @req LINUX-SERVICE-VERIFIER-02
+        # @capture(statistics): refusal reason for the expired approval before and after a restart-equivalent wait
+        step("an approval that expired before verification never yields a proof")
+        val expired = linux_service_verifier_fixture_with_v1(1, 65, 1)
+        expect(verifier_proof_v1(expired).unwrap_err()).to_equal("APPROVAL_EXPIRED")
+        step("an approval valid at admission is refused by a later re-verification after it expires")
+        val policy = local_authority_policy_decode_v1(linux_service_verifier_policy_v1(1, 65)).unwrap()
+        val deadline = host_local_context_v1(policy).grant_clock + 20000
+        val short = linux_service_verifier_fixture_with_v1(1, 65, deadline)
+        val proof = verifier_proof_v1(short).unwrap()
+        var waited: i64 = 0
+        while host_local_context_v1(policy).grant_clock <= deadline and waited < 60000:
+            thread_sleep_ms(500)
+            waited = waited + 500
+        expect(host_local_context_v1(policy).grant_clock > deadline).to_equal(true)
+        expect(linux_service_enrollment_installed_v1(proof, Some(short.policy)).unwrap_err()).to_equal("APPROVAL_EXPIRED")
+
+    it "refuses a proof whose association differs from the installed or existing records":
+        # @req LINUX-SERVICE-VERIFIER-03
+        # @capture(statistics): refusal reasons for wrong installed policy and wrong existing association
+        val fixture = linux_service_verifier_fixture_v1()
+        val proof = verifier_proof_v1(fixture).unwrap()
+        step("installed policy bytes other than the verified ones are refused before any signature work")
+        expect(linux_service_enrollment_installed_v1(proof, Some(fixture.policy + "\n")).unwrap_err()).to_equal("linux-service-enrollment-installed-policy-mismatch")
+        expect(linux_service_enrollment_installed_v1(proof, None).unwrap_err()).to_equal("linux-service-enrollment-installed-policy-mismatch")
+        step("an existing claim of a different association is not a duplicate of this proof")
+        var other = fixture
+        other.binding.native_machine_id = "linux-machine-id-v1:fedcba9876543210"
+        other.credential = linux_service_verifier_credential_v1(other.binding, 1, 65, 4102444800000)
+        val other_proof = verifier_proof_v1(other).unwrap()
+        val other_items = linux_service_enrollment_publication_v1(other_proof).unwrap()
+        expect(linux_service_enrollment_existing_v1(proof, other_items[0].1, other_items[7].1).is_err()).to_equal(true)
+        step("a credential bound to another association is refused at verification")
+        var swapped = fixture
+        swapped.credential = other.credential
+        expect(verifier_proof_v1(swapped).unwrap_err()).to_equal("linux-host-service-enrollment-credential-mismatch")
+
+    it "refuses forged issuer keys and forged signatures":
+        # @req LINUX-SERVICE-VERIFIER-04
+        # @capture(statistics): refusal reasons for an attacker policy and an attacker signature
+        val genuine = linux_service_verifier_fixture_v1()
+        step("an attacker policy with its own keys yields a proof that the INSTALLED policy refuses")
+        val forged = linux_service_verifier_fixture_with_v1(101, 165, 4102444800000)
+        val forged_proof = verifier_proof_v1(forged).unwrap()
+        expect(linux_service_enrollment_installed_v1(forged_proof, Some(genuine.policy)).unwrap_err()).to_equal("linux-service-enrollment-installed-policy-mismatch")
+        step("an attacker-signed credential against the genuine installed policy is refused")
+        var resigned = genuine
+        resigned.credential = linux_service_verifier_credential_v1(genuine.binding, 101, 65, 4102444800000)
+        expect(verifier_proof_v1(resigned).unwrap_err()).to_equal("ISSUER_SIGNATURE_INVALID")
+        resigned.credential = linux_service_verifier_credential_v1(genuine.binding, 1, 165, 4102444800000)
+        expect(verifier_proof_v1(resigned).unwrap_err()).to_equal("APPROVAL_SIGNATURE_INVALID")
+        step("a policy digest pin that does not match the supplied policy bytes is refused")
+        var repinned = genuine
+        repinned.policy = forged.policy
+        expect(verifier_proof_v1(repinned).unwrap_err()).to_equal("linux-service-enrollment-policy-pin")
+
+    it "seals the proof: private fields and exactly one constructor, inside the verifier":
+        # @req LINUX-SERVICE-VERIFIER-05
+        # @capture(statistics): proof field visibility and constructor occurrences in the verifier source
+        step("scan the single verifier owner source")
+        val source = file_read_regular_no_follow_bounded("src/lib/nogc_sync_mut/io/host_linux_service_records_v4.spl", 1048576).unwrap()
+        val start = source.index_of("pub class LinuxServiceVerifiedEnrollmentV1:")
+        expect(start >= 0).to_equal(true)
+        val body = source.substring(start, source.index_of("\n\n", start))
+        for line in body.split("\n"):
+            if line.starts_with("    ") and not line.starts_with("    pub fn ") and not line.starts_with("        "):
+                expect(line.starts_with("    pub ")).to_equal(false)
+        expect(source.split("LinuxServiceVerifiedEnrollmentV1(binding:").len()).to_equal(2)
+
+    it "refuses at startup installed records whose approval expired while the service was down":
+        # @req LINUX-SERVICE-VERIFIER-02
+        # @capture(statistics): startup loader verdict for intact installed records with an expired approval
+        step("assemble byte-exact installed records for an association whose approval has expired")
+        val expired = linux_service_verifier_fixture_with_v1(1, 65, 1)
+        val nonce = "f".repeat(64)
+        val sources = HostLinuxServiceRecordSourcesV4(enrollment: host_linux_service_enrollment_encode_v3(expired.binding).unwrap(),
+            policy: expired.policy, configuration: expired.configuration, engine_policy: expired.engine_policy,
+            broker_policy: expired.broker_policy, parent_policy: expired.policy,
+            credential: host_enrollment_credential_encode_v1(expired.credential).unwrap(),
+            claim: host_linux_service_claim_bytes_v4(expired.binding, expired.credential, nonce, 1000).unwrap(),
+            root_record: host_linux_service_root_bytes_v4(expired.binding, expired.credential, nonce, 1000).unwrap())
+        step("the startup byte verifier re-authorizes with a fresh clock and refuses")
+        val root = host_linux_service_root_path_v4(expired.binding).unwrap()
+        expect(host_linux_service_records_verify_v4(root, sources).unwrap_err()).to_equal("APPROVAL_EXPIRED")

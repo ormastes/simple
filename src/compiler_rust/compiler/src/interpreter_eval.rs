@@ -2098,6 +2098,9 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
         // automatic entry call below (unit/nil -> 0), matching the default
         // engine's run-once, value-propagating behavior.
         let result = await_value(result)?;
+        if main_to_run.as_deref().is_some_and(main_declares_unit_return) {
+            return Ok(0);
+        }
         return match &result {
             Value::Tuple(t) if t.is_empty() => Ok(0),
             Value::Nil => Ok(0),
@@ -2117,6 +2120,13 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
         )?;
         // Await the result if it's a Promise (async function)
         let result = await_value(result)?;
+        // A unit-typed `main` (`-> ()` / `-> Nil`) exits 0 whatever its tail
+        // expression evaluated to: the interpreter returns the implicit tail
+        // value, which leaked (`describe(...)` -> true -> exit 1). Bug:
+        // seed_unit_main_leaks_tail_value_as_exit_code_2026-11-16.
+        if main_declares_unit_return(&main_func) {
+            return Ok(0);
+        }
         // If main returns unit/tuple (void), treat it as exit code 0
         return match &result {
             Value::Tuple(t) if t.is_empty() => Ok(0),
@@ -2131,4 +2141,13 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
     let main_val = await_value(main_val)?;
     let main_val = main_val.as_int()? as i32;
     Ok(main_val)
+}
+
+/// True when `main` explicitly declares a unit return type (`()` or `Nil`).
+fn main_declares_unit_return(main_func: &FunctionDef) -> bool {
+    match &main_func.return_type {
+        Some(Type::Tuple(elems)) => elems.is_empty(),
+        Some(Type::Simple(name)) => name == "Nil" || name == "()",
+        _ => false,
+    }
 }

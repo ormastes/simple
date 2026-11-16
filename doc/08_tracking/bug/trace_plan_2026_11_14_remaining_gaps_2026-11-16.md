@@ -12,24 +12,15 @@ The `primitive_api` lint checks `pub fn` signatures only, so these are not
 flagged, but they break the "no primitive in public API" requirement:
 
 - `src/lib/common/traceability/model.spl` struct id/count fields still bare
-  `text`/`i64`: `TraceAuthority`, `TraceDocument`, `TraceConventionRule`,
-  `TraceOrigin`, `TraceQuery`, `TraceLocator`, `TraceClaim`, `TracePolicy`,
+  `text`/`i64`: `TraceQuery`, `TraceLocator`, `TraceClaim`, `TracePolicy`,
   `TraceEdge`, `SnapshotSubject`, `TraceDiagnostic`, `TraceNode`
-  (converted so far: `TraceEdgeOrigin`, `TraceQueryResult`).
-- `TraceQueryResult.snapshot_id` is still `text`: `TraceSnapshotIdV1` lives in
-  `query_missing_v1.spl`, which imports `model.spl`, so it must move to
-  `trace_ids_v1.spl` first (import cycle otherwise).
-- `src/lib/common/traceability/evidence.spl`: `trace_same_observation`,
-  `trace_observation_admitted`, `trace_run_binding_matches` return `bool`
-  (3 `primitive_api` findings).
-- `src/lib/common/traceability/query_nodes_v1.spl`: 1 `primitive_api` finding.
+  (converted so far: `TraceEdgeOrigin`, `TraceQueryResult`, `TraceAuthority`,
+  `TraceDocument`, `TraceConventionRule`, `TraceOrigin`).
 - `TraceReverseIndexV1.by_key` is `Dict<text, [TraceEntityIdV1]>`.
 - Unblock: convert one struct per change, smallest use-site count first,
   unwrap at use sites, keep the SDN wire format byte-identical (codec specs).
 
 ## 3. MCP / ctx
-
-- `src/app/mcp/main_lazy_ctx_tools.spl` keeps 12 `primitive_api` findings and
   23 lint errors (unchanged by waves 1–3).
 - `simple_ctx_purge` takes no lock; an append racing an applied purge can be
   lost (documented in `doc/07_guide/app/mcp/mcp.md`).

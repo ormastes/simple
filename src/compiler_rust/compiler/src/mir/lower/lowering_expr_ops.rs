@@ -155,6 +155,7 @@ impl<'a> MirLowerer<'a> {
                             .and_then(|tr| tr.get(right.ty))
                             .is_some_and(|ty| matches!(ty, HirType::Enum { .. }));
                     if let (true, Some((enum_name, variant_name))) = (is_enum_rhs, enum_variant) {
+                        let discriminant = self.owned_variant_discriminant(enum_name, variant_name, right.ty);
                         let left_reg = self.lower_expr(left)?;
                         return self.with_func(|func, current_block| {
                             let dest = func.new_vreg();
@@ -165,6 +166,7 @@ impl<'a> MirLowerer<'a> {
                                 pattern: crate::mir::MirPattern::Variant {
                                     enum_name: enum_name.to_string(),
                                     variant_name: variant_name.to_string(),
+                                    discriminant,
                                     payload: None,
                                 },
                             });

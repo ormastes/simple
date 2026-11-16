@@ -14,6 +14,8 @@
 #
 # Design: doc/05_design/ui/web_diff/compare_view_inspection.md
 
+use common.types.{Count, Length}
+
 val COMPARE_VIEW_GAP: i32 = 8          # px between the two images
 val COMPARE_VIEW_BAR_H: i32 = 36       # px tab/label bar
 val COMPARE_VIEW_DECOR_W: i32 = 20     # window border allowance
@@ -32,20 +34,33 @@ struct CompareViewPlan:
     window_w: i32
     window_h: i32
 
+struct CompareViewDiffStats:
+    total_diff: i64
+    color_only_diff: i64
+    alpha_or_shape_diff: i64
+    max_channel_delta: i32
+
 fn _cv_max(a: i32, b: i32) -> i32:
     if a > b: a else: b
 
 fn _cv_min(a: i32, b: i32) -> i32:
     if a < b: a else: b
 
-# "off" (default) | "auto" (open, then close by itself) | "stay" (open, leave open)
+# "off" (default) | "auto" (open, then close by itself) | "stay" (open, leave open) | "html" (write files only)
 pub fn compare_view_mode_parse(value: text) -> text:
     val v = value.trim().lower()
     if v == "auto":
         return "auto"
     if v == "stay" or v == "1" or v == "on":
         return "stay"
+    if v == "html" or v == "dump" or v == "files":
+        return "html"
     "off"
+
+# reason: pixel dimensions predicate over raw i32 framebuffer extent
+# @allow(primitive_api)
+pub fn compare_view_is_comparable_size(w: i32, h: i32) -> bool:
+    w >= 128 and h >= 96
 
 # "1920x1040" -> size; anything else -> 0x0 (unknown)
 pub fn compare_view_screen_parse(value: text) -> CompareViewSize:
@@ -58,16 +73,46 @@ pub fn compare_view_screen_parse(value: text) -> CompareViewSize:
         return CompareViewSize(w: 0, h: 0)
     CompareViewSize(w: w.to_i32(), h: h.to_i32())
 
-pub fn compare_view_plan(screen_w: i32, screen_h: i32, aw: i32, ah: i32, bw: i32, bh: i32) -> CompareViewPlan:
-    compare_view_plan_diff(screen_w, screen_h, aw, ah, bw, bh, 0)
+pub fn compare_view_plan(screen_w: Length, screen_h: Length, aw: Length, ah: Length, bw: Length, bh: Length) -> CompareViewPlan:
+    compare_view_plan_panes(screen_w.value.to_i32(), screen_h.value.to_i32(), aw.value.to_i32(), ah.value.to_i32(), bw.value.to_i32(), bh.value.to_i32(), 2)
 
 # dw > 0: a diff pane of width dw sits beside A and B when side by side.
-pub fn compare_view_plan_diff(screen_w: i32, screen_h: i32, aw: i32, ah: i32, bw: i32, bh: i32, dw: i32) -> CompareViewPlan:
+pub fn compare_view_plan_diff(screen_w_len: Length, screen_h_len: Length, aw_len: Length, ah_len: Length, bw_len: Length, bh_len: Length, dw_len: Length) -> CompareViewPlan:
+    val screen_w = screen_w_len.value
+    val screen_h = screen_h_len.value
+    val aw = aw_len.value
+    val ah = ah_len.value
+    val bw = bw_len.value
+    val bh = bh_len.value
+    val dw = dw_len.value
     val max_h = _cv_max(ah, bh)
     val diff_w = if dw > 0: dw + COMPARE_VIEW_GAP else: 0
     val side_w = aw + bw + COMPARE_VIEW_GAP + diff_w + COMPARE_VIEW_DECOR_W
     val tab_w = _cv_max(aw, bw) + COMPARE_VIEW_DECOR_W
     val need_h = max_h + COMPARE_VIEW_BAR_H + COMPARE_VIEW_DECOR_H
+    if screen_w <= 0 or screen_h <= 0:
+        return CompareViewPlan(side_by_side: false, needs_fit: false, maximized: true,
+            window_w: _cv_max(side_w, COMPARE_VIEW_MIN_W), window_h: _cv_max(need_h, COMPARE_VIEW_MIN_H))
+    val side = side_w <= screen_w and need_h <= screen_h
+    val want_w = if side: side_w else: tab_w
+    val fit = (not side) and (tab_w > screen_w or need_h > screen_h)
+    CompareViewPlan(
+        side_by_side: side,
+        needs_fit: fit,
+        maximized: false,
+        window_w: _cv_min(_cv_max(want_w, COMPARE_VIEW_MIN_W), screen_w),
+        window_h: _cv_min(_cv_max(need_h, COMPARE_VIEW_MIN_H), screen_h)
+    )
+
+# reason: pane layout geometry calculator over i32 screen/image pixel dimensions
+# @allow(primitive_api)
+pub fn compare_view_plan_panes(screen_w: i32, screen_h: i32, aw: i32, ah: i32, bw: i32, bh: i32, panes: i32) -> CompareViewPlan:
+    val extra = if panes > 2: panes - 2 else: 0
+    val extra_h = if panes > 2: 20 else: 0
+    val max_h = _cv_max(ah, bh)
+    val side_w = aw + bw + COMPARE_VIEW_GAP + extra * (aw + COMPARE_VIEW_GAP) + COMPARE_VIEW_DECOR_W
+    val tab_w = _cv_max(aw, bw) + COMPARE_VIEW_DECOR_W
+    val need_h = max_h + COMPARE_VIEW_BAR_H + extra_h + COMPARE_VIEW_DECOR_H
     if screen_w <= 0 or screen_h <= 0:
         return CompareViewPlan(side_by_side: false, needs_fit: false, maximized: true,
             window_w: _cv_max(side_w, COMPARE_VIEW_MIN_W), window_h: _cv_max(need_h, COMPARE_VIEW_MIN_H))
@@ -96,11 +141,223 @@ val _CV_SIDE_CSS: text = r"{nav:before{display:none}.pane{display:block!importan
 # Script-free inspection page. Tabs are radio inputs, fit-to-window is a
 # checkbox, scrollbars are plain overflow:auto, and the side-by-side layout is
 # a media query whose thresholds are the two image sizes.
-pub fn compare_view_html(title: text, label_a: text, src_a: text, aw: i32, ah: i32, label_b: text, src_b: text, bw: i32, bh: i32) -> text:
-    compare_view_html_diff(title, label_a, src_a, aw, ah, label_b, src_b, bw, bh, "", 0)
+pub fn compare_view_html(title: text, label_a: text, src_a: text, aw: Length, ah: Length, label_b: text, src_b: text, bw: Length, bh: Length) -> text:
+    compare_view_html_diff(title, label_a, src_a, aw, ah, label_b, src_b, bw, bh, "", Count(value: 0))
+
+fn _cv_match_pct_text(total_px: i64, diff_count: i64) -> text:
+    if total_px <= 0:
+        return "0.00%"
+    val clamped = if diff_count < 0: 0 else: if diff_count > total_px: total_px else: diff_count
+    val matched = total_px - clamped
+    val x100 = (matched * 10000) / total_px
+    val whole = x100 / 100
+    val frac = x100 % 100
+    val frac_s = if frac < 10: "0" + frac.to_text() else: frac.to_text()
+    whole.to_text() + "." + frac_s + "%"
+
+fn _cv_dim_grey(p: u32) -> u32:
+    val g = (((p >> 16) & 0xFFu32) + ((p >> 8) & 0xFFu32) + (p & 0xFFu32)) / 12u32
+    0xFF000000u32 | (g << 16) | (g << 8) | g
+
+fn _cv_u8_diff(a: u32, b: u32, shift: i32) -> i32:
+    val ca = ((a >> shift) & 0xFFu32).to_i32()
+    val cb = ((b >> shift) & 0xFFu32).to_i32()
+    if ca >= cb: ca - cb else: cb - ca
+
+fn _cv_argb_max_delta(a: u32, b: u32) -> i32:
+    var d = _cv_u8_diff(a, b, 16)
+    val dg = _cv_u8_diff(a, b, 8)
+    val db = _cv_u8_diff(a, b, 0)
+    val da = _cv_u8_diff(a, b, 24)
+    if dg > d: d = dg
+    if db > d: d = db
+    if da > d: d = da
+    d
+
+struct CompareViewVisualDiffResult:
+    stats: CompareViewDiffStats
+    pixels: [u32]
+
+fn _cv_abs_i32(x: i32) -> i32:
+    if x < 0: -x else: x
+
+fn _cv_comp240(c: i32, a: i32) -> i32:
+    (c * a + 240 * (255 - a)) / 255
+
+fn _cv_corner_dist(p: u32, ref_r: i32, ref_g: i32, ref_b: i32) -> i32:
+    val a = ((p >> 24) & 0xFFu32).to_i32()
+    val cr = _cv_comp240(((p >> 16) & 0xFFu32).to_i32(), a)
+    val cg = _cv_comp240(((p >> 8) & 0xFFu32).to_i32(), a)
+    val cb = _cv_comp240((p & 0xFFu32).to_i32(), a)
+    var d = _cv_abs_i32(cr - ref_r)
+    val dg = _cv_abs_i32(cg - ref_g)
+    val db = _cv_abs_i32(cb - ref_b)
+    if dg > d: d = dg
+    if db > d: d = db
+    d
+
+fn _cv_amp_ch(d: i32) -> u32:
+    if d <= 0:
+        return 24u32
+    val v = 64 + (d * 191) / 255
+    val clamped = if v > 255: 255 else: v
+    clamped.to_u32()
+
+fn _cv_compute_visual_diff(a: [u32], b: [u32], need_pixels: bool) -> CompareViewVisualDiffResult:
+    val n = if a.len() < b.len(): a.len() else: b.len()
+    var out: [u32] = if need_pixels: [0u32; n] else: []
+    var total_diff: i64 = 0
+    var color_only_diff: i64 = 0
+    var alpha_or_shape_diff: i64 = 0
+    var max_channel_delta: i32 = 0
+    if n <= 0:
+        return CompareViewVisualDiffResult(
+            stats: CompareViewDiffStats(total_diff: 0, color_only_diff: 0, alpha_or_shape_diff: 0, max_channel_delta: 0),
+            pixels: out
+        )
+    val a0 = a[0]
+    val aa0 = ((a0 >> 24) & 0xFFu32).to_i32()
+    val ar0 = _cv_comp240(((a0 >> 16) & 0xFFu32).to_i32(), aa0)
+    val ag0 = _cv_comp240(((a0 >> 8) & 0xFFu32).to_i32(), aa0)
+    val ab0 = _cv_comp240((a0 & 0xFFu32).to_i32(), aa0)
+    val b0 = b[0]
+    val ba0 = ((b0 >> 24) & 0xFFu32).to_i32()
+    val br0 = _cv_comp240(((b0 >> 16) & 0xFFu32).to_i32(), ba0)
+    val bg0 = _cv_comp240(((b0 >> 8) & 0xFFu32).to_i32(), ba0)
+    val bb0 = _cv_comp240((b0 & 0xFFu32).to_i32(), ba0)
+    var i: i64 = 0
+    while i < n:
+        val p = a[i]
+        val q = b[i]
+        if p == q:
+            if need_pixels:
+                val pa = ((p >> 24) & 0xFFu32).to_i32()
+                val cr = _cv_comp240(((p >> 16) & 0xFFu32).to_i32(), pa)
+                val cg = _cv_comp240(((p >> 8) & 0xFFu32).to_i32(), pa)
+                val cb = _cv_comp240((p & 0xFFu32).to_i32(), pa)
+                val lum = (cr * 77 + cg * 150 + cb * 29) >> 8
+                val g = (38 + lum / 5).to_u32()
+                out[i] = 0xFF000000u32 | (g << 16) | (g << 8) | g
+        else:
+            total_diff = total_diff + 1
+            val pa = ((p >> 24) & 0xFFu32).to_i32()
+            val pr = ((p >> 16) & 0xFFu32).to_i32()
+            val pg = ((p >> 8) & 0xFFu32).to_i32()
+            val pb = (p & 0xFFu32).to_i32()
+            val qa = ((q >> 24) & 0xFFu32).to_i32()
+            val qr = ((q >> 16) & 0xFFu32).to_i32()
+            val qg = ((q >> 8) & 0xFFu32).to_i32()
+            val qb = (q & 0xFFu32).to_i32()
+            val da_raw = _cv_abs_i32(pa - qa)
+            val dr_raw = _cv_abs_i32(pr - qr)
+            val dg_raw = _cv_abs_i32(pg - qg)
+            val db_raw = _cv_abs_i32(pb - qb)
+            var max_d = dr_raw
+            if dg_raw > max_d: max_d = dg_raw
+            if db_raw > max_d: max_d = db_raw
+            if da_raw > max_d: max_d = da_raw
+            if max_d > max_channel_delta:
+                max_channel_delta = max_d
+            val dist_a = _cv_corner_dist(p, ar0, ag0, ab0)
+            val dist_b = _cv_corner_dist(q, br0, bg0, bb0)
+            val only_a = (pa - qa > 16) or (da_raw <= 16 and dist_b <= 8 and dist_a > 24)
+            val only_b = (not only_a) and ((qa - pa > 16) or (da_raw <= 16 and dist_a <= 8 and dist_b > 24))
+            if only_a:
+                alpha_or_shape_diff = alpha_or_shape_diff + 1
+                if need_pixels:
+                    val og = (155 + (max_d * 80) / 255).to_u32()
+                    out[i] = 0xFFFF0014u32 | (og << 8)
+            elif only_b:
+                alpha_or_shape_diff = alpha_or_shape_diff + 1
+                if need_pixels:
+                    val cg_out = (180 + (max_d * 75) / 255).to_u32()
+                    out[i] = 0xFF1400FFu32 | (cg_out << 8)
+            else:
+                color_only_diff = color_only_diff + 1
+                if need_pixels:
+                    if dr_raw == 0 and dg_raw == 0 and db_raw == 0:
+                        val ca = _cv_amp_ch(da_raw)
+                        out[i] = 0xFF000018u32 | (ca << 16) | (ca << 8)
+                    else:
+                        val cr_out = _cv_amp_ch(dr_raw)
+                        val cg_out = _cv_amp_ch(dg_raw)
+                        val cb_out = _cv_amp_ch(db_raw)
+                        out[i] = 0xFF000000u32 | (cr_out << 16) | (cg_out << 8) | cb_out
+        i = i + 1
+    CompareViewVisualDiffResult(
+        stats: CompareViewDiffStats(
+            total_diff: total_diff,
+            color_only_diff: color_only_diff,
+            alpha_or_shape_diff: alpha_or_shape_diff,
+            max_channel_delta: max_channel_delta
+        ),
+        pixels: out
+    )
+
+# Compute both diff stats and visual diff buffer in a single pass.
+pub fn compare_view_visual_diff_with_stats(a: [u32], b: [u32]) -> CompareViewVisualDiffResult:
+    _cv_compute_visual_diff(a, b, true)
+
+# Compute summary counts separating alpha/shape differences from same-shape color differences.
+pub fn compare_view_diff_stats(a: [u32], b: [u32]) -> CompareViewDiffStats:
+    _cv_compute_visual_diff(a, b, false).stats
+
+# Visual diff image distinguishing A-only shape (gold), B-only shape (cyan), and RGB color delta.
+pub fn compare_view_visual_diff_argb(a: [u32], b: [u32]) -> [u32]:
+    _cv_compute_visual_diff(a, b, true).pixels
+
+# Rich inspection page with checkerboard transparency backdrop, status breakdown, and HEAT tab.
+# reason: HTML renderer takes i32 pixel buffer dimensions matching existing compare_view_html API
+# @allow(primitive_api)
+pub fn compare_view_html_rich(title: text, label_a: text, src_a: text, aw: i32, ah: i32, label_b: text, src_b: text, bw: i32, bh: i32, src_d: text, src_heat: text, stats: CompareViewDiffStats) -> text:
+    val has_d = src_d != ""
+    val has_h = src_heat != ""
+    val extra_w = if has_d: aw + COMPARE_VIEW_GAP else: 0
+    val side_w = (aw + bw + COMPARE_VIEW_GAP + extra_w).to_text()
+    val header_h = 50
+    val side_h = (_cv_max(ah, bh) + header_h).to_text()
+    val cap_a = "A: " + _cv_escape(label_a) + " " + aw.to_text() + "x" + ah.to_text()
+    val cap_b = "B: " + _cv_escape(label_b) + " " + bw.to_text() + "x" + bh.to_text()
+    var css = _CV_CSS + r"nav{height:28px;font-size:12px}nav label{padding:0 8px}.pane.a,.pane.b{background:#202020 repeating-conic-gradient(#2b2b2b 0% 25%,#202020 0% 50%) 50%/16px 16px}#th:checked~nav label[for=th]{background:#f59e0b;color:#000}#th:checked~main .h{display:block}.h{border-color:#f59e0b}.cv-meta{display:flex;align-items:center;gap:8px;height:22px;padding:0 10px;background:#141414;border-bottom:1px solid #2b2b2b;font-size:11px;white-space:nowrap;overflow:hidden}.cv-match{margin-left:auto;font-weight:bold;color:#e5e7eb}"
+    css = css + "@media (min-width:" + side_w + "px) and (min-height:" + side_h + "px){nav:before{display:none}.pane.a,.pane.b,.pane.d{display:block!important}#th:checked~main .d{display:none!important}#th:checked~main .h{display:block!important}nav label[for=ta]{background:#f97316!important;color:#000!important;cursor:default;border-left:0}nav label[for=tb]{background:#06b6d4!important;color:#000!important;cursor:default;border-left:0}nav label[for=td]{background:#d946ef!important;color:#000!important;cursor:pointer;border-left:0}#th:checked~nav label[for=td]{background:#2a2a2a!important;color:#888!important}nav label[for=fit]{position:static}nav{gap:8px;background:#facc15}main{gap:8px;background:#facc15}}"
+    var html = "<!doctype html><meta charset=utf-8><title>" + _cv_escape(title) + "</title><style>" + css + "</style>"
+    html = html + "<input type=radio name=t id=ta checked><input type=radio name=t id=tb>"
+    if has_d:
+        html = html + "<input type=radio name=t id=td>"
+    if has_h:
+        html = html + "<input type=radio name=t id=th>"
+    html = html + "<input type=checkbox id=fit checked>"
+    html = html + "<nav><label for=ta>" + cap_a + "</label><label for=tb>" + cap_b + "</label>"
+    if has_d:
+        html = html + "<label for=td>DIFF: " + stats.total_diff.to_text() + " px differ</label>"
+    if has_h:
+        html = html + "<label for=th>HEAT</label>"
+    html = html + "<label for=fit>fit (off = 1:1)</label></nav>"
+    html = html + "<div class=cv-meta>"
+    if aw == bw and ah == bh and aw > 0 and ah > 0:
+        val total_px = aw.to_i64() * ah.to_i64()
+        if stats.total_diff == 0:
+            html = html + "<span class=cv-ident style='background:#16a34a;color:#fff;padding:1px 6px;border-radius:3px;font-weight:bold'>IDENTICAL (0 color diff, 0 shape/alpha diff, max Δ=0)</span>"
+        else:
+            html = html + "<span class=cv-stat style='background:#333;color:#f3f4f6;padding:1px 6px;border-radius:3px'>max Δ=" + stats.max_channel_delta.to_text() + " | shape/alpha: " + stats.alpha_or_shape_diff.to_text() + " px (gold=A, cyan=B) | color: " + stats.color_only_diff.to_text() + " px</span>"
+        html = html + "<span class=cv-match>match: " + _cv_match_pct_text(total_px, stats.total_diff) + "</span>"
+    val small_buf = (not compare_view_is_comparable_size(aw, ah)) or (not compare_view_is_comparable_size(bw, bh))
+    if small_buf:
+        html = html + "<span class=cv-warn style='background:#f59e0b;color:#111;padding:1px 6px;border-radius:3px;font-weight:bold'>SMALL BUFFER (&lt;128x96)</span>"
+    html = html + "</div>"
+    html = html + "<main><div class='pane a'><img src=" + src_a + " alt=A></div><div class='pane b'><img src=" + src_b + " alt=B></div>"
+    if has_d:
+        html = html + "<div class='pane d'><img src=" + src_d + " alt=diff></div>"
+    if has_h:
+        html = html + "<div class='pane h'><img src=" + src_heat + " alt=heatmap></div>"
+    html + "</main>"
 
 # Same page plus a third DIFF tab/pane when src_d != "" (same-size pairs only).
-pub fn compare_view_html_diff(title: text, label_a: text, src_a: text, aw: i32, ah: i32, label_b: text, src_b: text, bw: i32, bh: i32, src_d: text, diff_count: i64) -> text:
+pub fn compare_view_html_diff(title: text, label_a: text, src_a: text, aw_len: Length, ah_len: Length, label_b: text, src_b: text, bw_len: Length, bh_len: Length, src_d: text, diff_count: Count) -> text:
+    val aw = aw_len.value
+    val ah = ah_len.value
+    val bw = bw_len.value
+    val bh = bh_len.value
     val has_d = src_d != ""
     val bar = COMPARE_VIEW_BAR_H.to_text()
     val extra_w = if has_d: aw + COMPARE_VIEW_GAP else: 0
@@ -117,8 +374,16 @@ pub fn compare_view_html_diff(title: text, label_a: text, src_a: text, aw: i32, 
     html = html + "<input type=checkbox id=fit checked>"
     html = html + "<nav><label for=ta>" + cap_a + "</label><label for=tb>" + cap_b + "</label>"
     if has_d:
-        html = html + "<label for=td>DIFF: " + diff_count.to_text() + " px differ</label>"
-    html = html + "<label for=fit>fit (off = 1:1)</label></nav>"
+        html = html + "<label for=td>DIFF: " + diff_count.value.to_text() + " px differ</label>"
+    html = html + "<label for=fit>fit (off = 1:1)</label>"
+    val show_match = (has_d or diff_count.value > 0) and aw == bw and ah == bh and aw > 0 and ah > 0
+    if show_match:
+        val total_px = aw.to_i64() * ah.to_i64()
+        html = html + "<span class=cv-match>match: " + _cv_match_pct_text(total_px, diff_count.value) + "</span>"
+    val small_buf = (not compare_view_is_comparable_size(aw.to_i32(), ah.to_i32())) or (not compare_view_is_comparable_size(bw.to_i32(), bh.to_i32()))
+    if small_buf:
+        html = html + "<span class=cv-warn style='background:#f59e0b;color:#111;padding:2px 6px;border-radius:3px;font-weight:bold'>SMALL BUFFER (&lt;128x96)</span>"
+    html = html + "</nav>"
     html = html + "<main><div class='pane a'><img src=" + src_a + " alt=A></div><div class='pane b'><img src=" + src_b + " alt=B></div>"
     if has_d:
         html = html + "<div class='pane d'><img src=" + src_d + " alt=diff></div>"
@@ -126,15 +391,39 @@ pub fn compare_view_html_diff(title: text, label_a: text, src_a: text, aw: i32, 
 
 # Diff image: differing pixels magenta, equal pixels a dim grey of A.
 pub fn compare_view_diff_argb(a: [u32], b: [u32]) -> [u32]:
-    var out: [u32] = []
+    val n = if a.len() < b.len(): a.len() else: b.len()
+    var out: [u32] = [0u32; n]
     var i = 0
-    while i < a.len() and i < b.len():
+    while i < n:
         val p = a[i]
         if p == b[i]:
-            val g = (((p >> 16) & 0xFFu32) + ((p >> 8) & 0xFFu32) + (p & 0xFFu32)) / 12u32
-            out.push(0xFF000000u32 | (g << 16) | (g << 8) | g)
+            out[i] = _cv_dim_grey(p)
         else:
-            out.push(0xFFFF00FFu32)
+            out[i] = 0xFFFF00FFu32
+        i = i + 1
+    out
+
+# Heatmap diff image: 0 delta dim grey, 1..tolerance yellow, tolerance+1..32 orange, >32 magenta.
+# reason: pixel buffer diff utility takes i32 channel tolerance matching ARGB buffer comparators
+# @allow(primitive_api)
+pub fn compare_view_heatmap_argb(a: [u32], b: [u32], tolerance: i32) -> [u32]:
+    val n = if a.len() < b.len(): a.len() else: b.len()
+    var out: [u32] = [0u32; n]
+    val tol = if tolerance < 0: 0 else: tolerance
+    var i = 0
+    while i < n:
+        val p = a[i]
+        val q = b[i]
+        if p == q:
+            out[i] = _cv_dim_grey(p)
+        else:
+            val delta = _cv_argb_max_delta(p, q)
+            if delta <= tol:
+                out[i] = 0xFFFFCC00u32
+            elif delta <= 32:
+                out[i] = 0xFFFF6600u32
+            else:
+                out[i] = 0xFFFF00FFu32
         i = i + 1
     out
 
@@ -147,16 +436,25 @@ pub fn compare_view_diff_count(a: [u32], b: [u32]) -> i64:
         i = i + 1
     n
 
-# Chromium-family app-window arguments. A private profile directory makes the
-# spawned process own the window, so killing that pid closes it (auto mode).
-pub fn compare_view_browser_args(url: text, plan: CompareViewPlan, profile_dir: text) -> [text]:
+# Chromium-family app-window arguments with cascade offset so multiple stay windows don't stack.
+# reason: browser window launcher takes i32 window index matching compare_view_browser_args
+# @allow(primitive_api)
+pub fn compare_view_browser_args_offset(url: text, plan: CompareViewPlan, profile_dir: text, win_index: i32) -> [text]:
     var args: [text] = ["--app=" + url, "--user-data-dir=" + profile_dir, "--no-first-run", "--no-default-browser-check"]
     if plan.maximized:
         args.push("--start-maximized")
     else:
+        val idx = if win_index < 0: 0 else: win_index
+        val pos_x = (idx * 36) % 280
+        val pos_y = (idx * 32) % 192
         args.push("--window-size=" + plan.window_w.to_text() + "," + plan.window_h.to_text())
-        args.push("--window-position=0,0")
+        args.push("--window-position=" + pos_x.to_text() + "," + pos_y.to_text())
     args
+
+# Chromium-family app-window arguments. A private profile directory makes the
+# spawned process own the window, so killing that pid closes it (auto mode).
+pub fn compare_view_browser_args(url: text, plan: CompareViewPlan, profile_dir: text) -> [text]:
+    compare_view_browser_args_offset(url, plan, profile_dir, 0)
 
 pub fn compare_view_file_url(path: text) -> text:
     val p = path.replace("\\", "/")
@@ -173,16 +471,21 @@ pub fn compare_view_slug(name: text) -> text:
 
 # Skia CPU bitmaps are RGBA8 bytes; the viewer and PNG encoder take ARGB words.
 pub fn compare_view_argb_from_rgba8(bytes: [u8]) -> [u32]:
-    var out: [u32] = []
-    var i = 0
-    while i + 3 < bytes.len():
+    val count = bytes.len() / 4
+    var out: [u32] = [0u32; count]
+    var k: i64 = 0
+    while k < count:
+        val i = k * 4
         val r = bytes[i] as u32
         val g = bytes[i + 1] as u32
         val b = bytes[i + 2] as u32
         val a = bytes[i + 3] as u32
-        out.push((a << 24) | (r << 16) | (g << 8) | b)
-        i = i + 4
+        out[k] = (a << 24) | (r << 16) | (g << 8) | b
+        k = k + 1
     out
 
-export CompareViewSize, CompareViewPlan
+export CompareViewSize, CompareViewPlan, CompareViewDiffStats, CompareViewVisualDiffResult
 export COMPARE_VIEW_GAP, COMPARE_VIEW_BAR_H, COMPARE_VIEW_DECOR_W, COMPARE_VIEW_DECOR_H, COMPARE_VIEW_MIN_W, COMPARE_VIEW_MIN_H
+export compare_view_is_comparable_size, compare_view_heatmap_argb
+export compare_view_diff_stats, compare_view_visual_diff_argb, compare_view_visual_diff_with_stats
+export compare_view_plan_diff, compare_view_plan_panes, compare_view_browser_args_offset, compare_view_html_rich

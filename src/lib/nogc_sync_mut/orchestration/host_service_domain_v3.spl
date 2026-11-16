@@ -4,6 +4,9 @@ use std.common.contracts.container.pre_start_constraint_v1.ContainerPreStartCons
 # One service request vocabulary and one retained Host writer. Platform startup
 # differs; Linux V2 dispatch and Windows signed preparation share their owners.
 use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
+use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.{HostLinuxServiceCurrentV4, host_linux_service_close_v4,
+    host_linux_service_dispatch_installed_v4,
+    host_linux_service_open_installed_v4}
 use std.nogc_sync_mut.orchestration.host_windows_local_root_v3.*
 use std.nogc_sync_mut.orchestration.host_windows_deployment_v2.*
 use std.nogc_sync_mut.orchestration.host_service_enrollment_v2.*
@@ -32,6 +35,7 @@ pub struct HostServiceTurnV3:
 pub enum HostServiceCleanupV3:
     Linux(DistributedOperationJournalOpenCleanupV2)
     Windows(HostWindowsLocalCleanupV3)
+    LinuxService(HostLinuxServiceCurrentV4)
 
 pub enum HostServiceDomainOpenV3:
     Ready(HostServiceDomainV3)
@@ -51,6 +55,15 @@ pub fn host_service_domain_open_linux_v3(root: text) -> HostServiceDomainOpenV3:
         case HostServiceDomainOpenV2.Rejected(error): HostServiceDomainOpenV3.Rejected(error)
         case HostServiceDomainOpenV2.CleanupRequired(cleanup, error):
             HostServiceDomainOpenV3.CleanupRequired(HostServiceCleanupV3.Linux(cleanup), error)
+
+# Installed signed-enrollment Linux service. `anchor` is the administrator's
+# installed child root. The one service owner carries every acquired owner,
+# including the lending fresh-epoch admission; a failed start is its cleanup.
+pub fn host_service_domain_open_linux_service_v3(anchor: text) -> HostServiceDomainOpenV3:
+    val started = host_linux_service_open_installed_v4(anchor)
+    if started.error != "":
+        return HostServiceDomainOpenV3.CleanupRequired(HostServiceCleanupV3.LinuxService(started.owner), started.error)
+    HostServiceDomainOpenV3.Ready(HostServiceDomainV3(HostLocalRootV3.LinuxService(started.owner)))
 
 # anchor is administrator-installed configuration, never a remote request field.
 # The deployment factory verifies actual ACLs, signed enrollment and pinned bytes.
@@ -84,6 +97,14 @@ pub fn host_service_cleanup_v3(cleanup: HostServiceCleanupV3) -> HostServiceClos
             val closed = host_windows_local_cleanup_v3(original)
             val pending = if closed.cleanup.is_some(): Some(HostServiceCleanupV3.Windows(closed.cleanup.unwrap())) else: nil
             HostServiceCloseV3(pending, closed.closed, closed.error)
+        case HostServiceCleanupV3.LinuxService(original): service_linux_close_v3(original)
+
+# The retained Linux service owner IS its cleanup carrier until every
+# owner-bearing part is released; a sticky earlier failure stays in error.
+fn service_linux_close_v3(original: HostLinuxServiceCurrentV4) -> HostServiceCloseV3:
+    val closed = host_linux_service_close_v4(original)
+    val pending = if closed.released_all: None else: Some(HostServiceCleanupV3.LinuxService(closed.owner))
+    HostServiceCloseV3(pending, closed.released_all, closed.error)
 
 pub fn host_service_domain_close_v3(owner: HostServiceDomainV3) -> HostServiceCloseV3:
     match owner.local:
@@ -95,6 +116,7 @@ pub fn host_service_domain_close_v3(owner: HostServiceDomainV3) -> HostServiceCl
             val closed = host_windows_local_close_v3(local)
             val pending = if closed.cleanup.is_some(): Some(HostServiceCleanupV3.Windows(closed.cleanup.unwrap())) else: nil
             HostServiceCloseV3(pending, closed.closed, closed.error)
+        case HostLocalRootV3.LinuxService(local): service_linux_close_v3(local)
 
 fn service_windows_status_v3(local: HostWindowsLocalRootV3) -> Result<text, text>:
     val checked = local.current_v3()?
@@ -113,11 +135,41 @@ fn service_windows_status_v3(local: HostWindowsLocalRootV3) -> Result<text, text
         "durabilityProfile": SdnValue.String("process-crash-v1")}
     Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
 
+# The dispatch returns the same owner on every path; it is put back into the
+# domain before any refusal is reported. An attempted effect needs recovery (2).
+fn service_linux_prepare_v3(local: HostLinuxServiceCurrentV4, request: HostServiceRequestV2) -> HostServiceTurnV3:
+    val reply = host_linux_service_dispatch_installed_v4(local, "host_prepare_associated_v3", request.payload)
+    val domain = HostServiceDomainV3(HostLocalRootV3.LinuxService(reply.owner))
+    if reply.error != "":
+        return HostServiceTurnV3(domain, if reply.effect_attempted: 2 else: 1,
+            host_service_error_payload_v2(request, reply.error, reply.effect_attempted))
+    if reply.response.byte_len() > HOST_SERVICE_MAX_RESPONSE_BYTES_V2:
+        return HostServiceTurnV3(domain, 2, host_service_error_payload_v2(request, "host-service-response-size", true))
+    HostServiceTurnV3(domain, 0, reply.response)
+
 pub fn host_service_domain_turn_v3(owner: HostServiceDomainV3, request: HostServiceRequestV2) -> HostServiceTurnV3:
     match owner.local:
         case HostLocalRootV3.Linux(local):
             val turn = host_service_domain_turn_v2(HostServiceDomainV2(local), request)
             HostServiceTurnV3(HostServiceDomainV3(HostLocalRootV3.Linux(turn.owner.local)), turn.exit_code, turn.response)
+        case HostLocalRootV3.LinuxService(local):
+            # Status, and associated prepare through the installed dispatch.
+            # Execute is host_service_execution_v4's route; validate, inspect,
+            # wait and cancel stay explicit refusals.
+            val invalid = host_service_request_error_v2(request)
+            if invalid != "": return HostServiceTurnV3(owner, 1, host_service_error_payload_v2(request, invalid, false))
+            if request.action != "host-status" and request.action != "host-prepare":
+                return HostServiceTurnV3(owner, 1, host_service_error_payload_v2(request, "host-linux-service-action-route", false))
+            # Mirror Windows: a failed current check needs recovery (2); a
+            # status refusal over a current owner is a plain refusal (1).
+            val current = local.current_v4()
+            if current.is_err(): return HostServiceTurnV3(owner, 2, host_service_error_payload_v2(request, current.unwrap_err(), true))
+            if request.action == "host-prepare": return service_linux_prepare_v3(local, request)
+            val status = local.status_v4()
+            if status.is_err(): return HostServiceTurnV3(owner, 1, host_service_error_payload_v2(request, status.unwrap_err(), false))
+            if status.unwrap().byte_len() > HOST_SERVICE_MAX_RESPONSE_BYTES_V2:
+                return HostServiceTurnV3(owner, 2, host_service_error_payload_v2(request, "host-service-response-size", true))
+            HostServiceTurnV3(owner, 0, status.unwrap())
         case HostLocalRootV3.Windows(original):
             var local = original
             val invalid = host_service_request_error_v2(request)
@@ -209,6 +261,8 @@ fn host_service_domain_effect_restricted_turn_v3(owner: HostServiceDomainV3,
             local.container = turn.container
             service_execution_reply_v3(HostServiceDomainV3(HostLocalRootV3.Linux(local)), request,
                 turn.observation, turn.recovery_required, turn.error)
+        case HostLocalRootV3.LinuxService(_):
+            HostServiceTurnV3(owner, 1, host_service_error_payload_v2(request, "host-linux-service-execution-route", false))
         case HostLocalRootV3.Windows(original):
             var local = original
             val decoded = host_execution_decode_v2(request.payload, local.scope_v3())

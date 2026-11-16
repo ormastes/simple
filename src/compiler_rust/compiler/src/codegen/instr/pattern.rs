@@ -81,17 +81,15 @@ pub(crate) fn compile_pattern_test<M: Module>(
         },
         MirPattern::Binding(_) => builder.ins().iconst(types::I8, 1),
         MirPattern::Variant {
-            enum_name,
-            variant_name,
-            ..
+            enum_name, discriminant, ..
         } => {
             // All enums now use rt_enum_new format consistently.
             // rt_enum_discriminant extracts the discriminant.
             let disc = call_runtime_1(ctx, builder, "rt_enum_discriminant", subject_val);
             let enum_id = call_runtime_1(ctx, builder, "rt_enum_id", subject_val);
 
-            // All enums use hashed variant name discriminants consistently
-            let expected_disc = calculate_variant_discriminant(variant_name) as i64;
+            // The owning enum's declared index, fixed at MIR lowering (#6953).
+            let expected_disc = i64::from(*discriminant);
             let expected_val = builder.ins().iconst(types::I64, expected_disc);
             let disc_matches = builder
                 .ins()
@@ -168,19 +166,13 @@ pub(crate) fn compile_pattern_bind<M: Module>(
     ctx.vreg_values.insert(dest, current);
 }
 
-/// Calculate discriminant for enum variant (stub - returns hash of name)
-fn calculate_variant_discriminant(variant_name: &str) -> u32 {
-    simple_runtime::value::hash_variant_discriminant(variant_name) as u32
-}
-
 pub(crate) fn compile_enum_unit<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
     enum_name: &str,
-    variant_name: &str,
+    disc: u32,
 ) {
-    let disc = calculate_variant_discriminant(variant_name);
     let disc_val = builder.ins().iconst(types::I32, disc as i64);
     let enum_id = builder.ins().iconst(
         types::I32,
@@ -197,10 +189,9 @@ pub(crate) fn compile_enum_with<M: Module>(
     builder: &mut FunctionBuilder,
     dest: VReg,
     enum_name: &str,
-    variant_name: &str,
+    disc: u32,
     payload: VReg,
 ) {
-    let disc = calculate_variant_discriminant(variant_name);
     let disc_val = builder.ins().iconst(types::I32, disc as i64);
     let enum_id = builder.ins().iconst(
         types::I32,
