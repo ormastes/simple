@@ -533,6 +533,17 @@ impl Lowerer {
         for item in items {
             self.preregister_imported_type_placeholder(item);
         }
+        // Scalar record units (`unit Name: T`) erase to `T`, as in the module
+        // pass. Register them for ALL items before structs/functions resolve,
+        // so an imported `Pin.digest: Sha256Hex` or `-> FreeBytes?` keeps the
+        // scalar type and `.value` hits the erased-unit identity instead of
+        // failing as `struct 'ANY' field 'value'`.
+        // doc/08_tracking/bug/seed_unit_value_field_hir_2026-11-17.md
+        for item in items {
+            if let Node::Unit(unit_def) = item {
+                self.register_record_unit_scalar(unit_def);
+            }
+        }
 
         let declared_aliases = Self::declared_type_aliases(items);
         // Intra-file Pass 1: Full registration of imported symbols with field resolution
