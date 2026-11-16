@@ -3858,7 +3858,21 @@ impl MirLowering:
                 case Some(slot_fn): self.resolved_call_hir_return_type(slot_fn.symbol)
                 case None: None
             if val slot_return_type = slot_return:
-                result = self.lower_expr_for_slot(rv, slot_return_type)
+                if self.is_plain_tuple_conditional_return_v1(slot_return_type, rv):
+                    # `return if c: pick_ok(n) else: (0, false)` from
+                    # `-> (i64, bool)`: narrow each `(A, B)?` arm before the
+                    # join, exactly as the implicit tail does.
+                    match rv.kind:
+                        case HirExprKind.If(cond, then_, else_):
+                            result = self.lower_if(cond, then_, else_, Some(slot_return_type))
+                        case HirExprKind.IfChain(arms, else_):
+                            result = self.lower_if_chain(arms, else_, Some(slot_return_type))
+                        case HirExprKind.MatchCase(scrutinee, arms):
+                            result = self.lower_match_case(scrutinee, arms, Some(slot_return_type))
+                        case _:
+                            result = self.lower_expr_for_slot(rv, slot_return_type)
+                else:
+                    result = self.lower_expr_for_slot(rv, slot_return_type)
             else:
                 result = self.lower_expr(rv)
             # The return payload is evaluated before control transfers; only

@@ -971,6 +971,27 @@ impl MirLowering:
         native trait (a `-> Trait` return is coerced to a (data, table) object)."""
         hir_type_is_plain_payload_sink_v1(declared) and self.native_trait_owner_for_type(declared) == ""
 
+    me is_plain_tuple_payload_slot_v1(declared: HirType) -> bool:
+        """A declared plain tuple `-> (A, B)`: the one sink whose `T?` arms
+        must be narrowed per arm, before the join. A native tuple is a
+        headerless N-word allocation, so the join cannot normalise a raw
+        tuple arm into `T?` at runtime (rt_enum_id would read element 0)."""
+        match declared.kind:
+            case HirTypeKind.Tuple(_): self.is_plain_payload_return_v1(declared)
+            case _: false
+
+    me is_plain_tuple_conditional_return_v1(declared: HirType, value: HirExpr) -> bool:
+        """The one gate, shared by the implicit tail and lower_return_expr,
+        for lowering a conditional value against a declared plain tuple
+        return, so each `(A, B)?` arm is narrowed (lower_block_expected)."""
+        if not self.is_plain_tuple_payload_slot_v1(declared):
+            return false
+        match value.kind:
+            case HirExprKind.If(_, _, else_): else_ != None
+            case HirExprKind.IfChain(_, else_): else_ != None
+            case HirExprKind.MatchCase(_, _): true
+            case _: false
+
     me option_payload_for_plain_sink(local: LocalId, value_type: HirType) -> LocalId?:
         """A `T?` value flowing into a declared plain `T` slot (a function tail
         whose conditional joined to `T?`): unwrap with rt_unwrap_or_trap so

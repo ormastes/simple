@@ -231,6 +231,43 @@ asserts `"field":1`.
 - `f8f1a4adf61`: the tail and explicit-return paths now share one trait guard,
   `is_plain_payload_return_v1`.
 
+## Second review: two more silent wrong values (pre-existing)
+
+Red specs are in `83f6dae5031`. Seed: generic 3/4 -> 4/4, tail 6/8 -> 8/8.
+
+- Concrete record slot in a generic variant. `case M(a, l): l.id` over
+  `Mix<i64>` (`M(a: T, l: Lid)`) read field 0 (pad) into a Unit dest.
+  `decode_instantiated_enum_payload_slot_v1` only re-decoded a `TypeParam`
+  slot. It now also tags a slot declared as a concrete Struct/Class.
+  Concrete enum, text and collection slots in generic owners are left as
+  they were. They may have the same gap, but it is not measured.
+- Tuple `T?` if-join into `-> T`. Two shapes:
+  - tail: `fn tok_tail(n, k) -> (i64, bool): if k > 0: pick_ok(n) else: (0, false)`
+  - explicit: `return if ...` of the same `if`
+
+  Neither emitted `rt_unwrap_or_trap`. The join saw a bare tuple arm, so
+  `optional_join_bare_payload_ok` was false and the slot never got a `T?`
+  type. Normalising the join at runtime is unsafe for tuples: a native tuple
+  is a headerless N-word allocation, so `rt_enum_id` would read element 0.
+  The fix narrows each `(A, B)?` arm before the join:
+  - `is_plain_tuple_conditional_return_v1` threads the declared tuple into
+    the tail and into `lower_return_expr`.
+  - `lower_block_expected` narrows the arm with `option_payload_for_plain_sink`.
+
+  Only tuples are threaded. Record tails keep the normalise-then-narrow path.
+  A/B on tuple tails with no `T?` arm: the only MIR change is that the
+  dominating `Const 0 : I64` default def of the tuple join slot is gone.
+  Both arms already define the slot.
+- Typed HIR (Stage 2) records `value.type_ = (A, B)?` on the narrowed arm and
+  on the join. `lower_block_expected` therefore skips that record once it has
+  narrowed (`tail_tuple_narrowed`), so the tail cannot unwrap the raw tuple
+  pointer a second time. The seed spec pipeline is untyped and cannot show
+  this. The typed path is guarded in code; native confirmation waits for the
+  next Stage 2.
+- Guards with no red phase, green before and after the fix:
+  - the `tup_ret` assertion now checks Return <- Copy <- Cast to Ptr(Tuple)
+  - the `(f32, i64)?` fatal path
+
 ## Census of compiler source (2026-11-16, awk heuristic)
 
 | class | hits |

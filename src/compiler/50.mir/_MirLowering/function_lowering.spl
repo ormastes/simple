@@ -1149,7 +1149,15 @@ impl MirLowering:
                             fn_tail_int_literal_into_float = true
                         case _: ()
             case _: ()
-        val result = if fn_returns_bool or fn_tail_conditional_into_scalar_optional or fn_tail_int_literal_into_float or fn_tail_into_trait:
+        # ... and for a declared plain tuple `-> (A, B)` whose tail is a
+        # conditional: an `(A, B)?` arm is narrowed per arm (the join cannot
+        # normalise a raw tuple arm, see is_plain_tuple_payload_slot_v1).
+        var fn_tail_conditional_into_plain_tuple = false
+        if fn_.body.has and fn_.body.value != None:
+            fn_tail_conditional_into_plain_tuple = self.is_plain_tuple_conditional_return_v1(tail_plain_expected, fn_.body.value)
+        val result = if fn_tail_conditional_into_plain_tuple:
+            self.lower_block_expected(fn_.body, Some(tail_plain_expected))
+        elif fn_returns_bool or fn_tail_conditional_into_scalar_optional or fn_tail_int_literal_into_float or fn_tail_into_trait:
             self.lower_block_expected(fn_.body, tail_return_type)
         else:
             self.lower_block(fn_.body)
@@ -2041,10 +2049,36 @@ impl MirLowering:
             if self.builder.current_block_has_explicit_terminator():
                 return None
             var tail_trait_converted = false
+            var tail_tuple_narrowed = false
             if val found_expected = expected_type:
                 match found_expected.kind:
                     case HirTypeKind.Optional(_):
                         local = self.ensure_option_handle(local, found_expected)
+                    case HirTypeKind.Tuple(_):
+                        # A declared plain tuple slot (threaded only by
+                        # is_plain_tuple_conditional_return_v1): narrow an
+                        # `(A, B)?` arm here, before the join, trapping on
+                        # None. A conditional arm already narrowed its own
+                        # arms and is typed `(A, B)` by its join. In typed
+                        # HIR value.type_ is still `(A, B)?` for both, so it
+                        # must not be recorded over the narrowed local, or
+                        # the tail would unwrap the raw tuple pointer again.
+                        if self.is_plain_tuple_payload_slot_v1(found_expected):
+                            var arm_hir: HirType? = self.find_local_hir_type(local.id)
+                            if arm_hir == None and value.has_type_:
+                                arm_hir = Some(value.type_)
+                            if val arm_type = arm_hir:
+                                match arm_type.kind:
+                                    case HirTypeKind.Optional(arm_inner):
+                                        if hir_types_equal(arm_inner, found_expected):
+                                            if val narrowed_arm = self.option_payload_for_plain_sink(local, arm_type):
+                                                local = narrowed_arm
+                                                tail_tuple_narrowed = true
+                                    case _: ()
+                            match value.kind:
+                                case HirExprKind.If(_, _, _) | HirExprKind.IfChain(_, _) | HirExprKind.MatchCase(_, _):
+                                    tail_tuple_narrowed = true
+                                case _: ()
                     case _:
                         # A `-> Trait` tail (threaded by lower_function) converts
                         # each concrete arm here; a conditional's arms already
@@ -2066,7 +2100,7 @@ impl MirLowering:
             # the rt_is_some predicate, not the `T?` that value.type_ names, and
             # recording the stale Option type would mislead every downstream
             # consumer of local_hir_types (option handling, field resolution).
-            if value.has_type_ and not tail_coerced_to_bool and not tail_float_coerced and not tail_trait_converted:
+            if value.has_type_ and not tail_coerced_to_bool and not tail_float_coerced and not tail_trait_converted and not tail_tuple_narrowed:
                 self.remember_local_hir_type(local.id, value.type_, 0, 0)
             if trace_enabled:
                 print "[mir-lower] block:value-lowered"
