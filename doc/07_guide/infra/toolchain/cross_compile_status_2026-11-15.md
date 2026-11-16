@@ -138,6 +138,25 @@ Gaps:
 | simpleos x86_64/aarch64/riscv64 | `scripts/os/build-simpleos-*.shs` | not recorded | none | none | SimpleOS lane investigating |
 | simpleos 32-bit | none | none | none | none | no triples (only `scripts/check/check-simpleos-x86-32-user-elf.shs`) |
 
+### Bare-metal NVMe FW slice (`fw_xc`, 2026-11-16)
+
+Built with `simple-p2 native-build --emit-object`, a clang crt0 and `ld.lld -T`.
+No GCC. ELF headers are pinned by `scripts/check/check-nvme-fw-xc-elf.shs`.
+Details are in `doc/00_llm_process/feature_expert/nvme_firmware/skill.md`.
+
+| target | linked ELF | readelf -h | boot |
+|---|---|---|---|
+| i686-unknown-none-elf | [V] | ELF32 80386 0x0 [V] | build-only; no IA32 OVMF (bug `baremetal_i686_no_real_firmware_boot_lane_2026_11_16`) |
+| x86_64-unknown-none-elf | [V] | ELF64 X86-64 0x0 [V] | OVMF -> EFI app, serial PASS [V] |
+| thumbv7em-none-eabihf | [V] | ELF32 ARM 0x5000400 [V] | mps2-an386 reset vector, serial PASS [V] |
+| aarch64-unknown-none-elf | [V] | ELF64 AArch64 0x0 [V] | AAVMF -> EFI app, serial PASS [V] |
+| riscv32imac-unknown-none-elf | [V] | ELF32 RISC-V 0x1 [V] | virt `-bios <elf>` M-mode, serial PASS [V] |
+| riscv64gc-unknown-none-elf | [V] (lp64 workaround) | 0x1, pinned 0x5: RED [V] | virt `-bios <elf>` M-mode, serial PASS [V] |
+
+Open: Simple bare-metal RISC-V objects are base ISA (`rv32i`/`rv64i`, soft-float),
+tracked as bug `baremetal_riscv_target_contract_not_applied_2026_11_16`. thumbv7em needs the
+TODO env workaround from bug `native_build_target_flag_not_propagated_to_env_target_2026_11_16`. No board run.
+
 ## Landed fixes (all verification-pending [U])
 
 - #9373: Windows ARM64 mingw backend (hosted_mingw_clang_target, CC reuse,
