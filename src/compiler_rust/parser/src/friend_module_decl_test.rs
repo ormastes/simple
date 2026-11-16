@@ -32,3 +32,35 @@ mod friend_module_decl {
         assert_eq!(parse_items(src).unwrap(), 3);
     }
 }
+
+#[cfg(test)]
+mod module_access_directives {
+    use crate::Parser;
+
+    fn dump(src: &str) -> String {
+        format!("{:?}", Parser::new(src).parse().unwrap().items)
+    }
+
+    #[test]
+    fn internal_export_directive_parses_as_no_op() {
+        // pure-Simple frontend: `internal_export NAME` (enum_module_body.spl).
+        let src = "internal_export helper_v1\ninternal_export TypeV1\nfn f() -> i64:\n    1\n";
+        let d = dump(src);
+        assert!(!d.contains("\"internal_export\""), "parsed as a call: {d}");
+        assert_eq!(Parser::new(src).parse().unwrap().items.len(), 3);
+    }
+
+    #[test]
+    fn layer_directive_parses_as_no_op() {
+        let src = "layer domain\nlayer app uses domain, infra\nval x = 1\n";
+        let d = dump(src);
+        assert!(!d.contains("\"layer\""), "parsed as a call: {d}");
+        assert_eq!(Parser::new(src).parse().unwrap().items.len(), 3);
+    }
+
+    #[test]
+    fn directive_words_remain_usable_as_identifiers() {
+        let src = "val layer = 3\nval n = layer + 1\nlayer(n)\nval internal_export = 2\nval m = internal_export and layer\ninternal_export(m)\n";
+        assert_eq!(Parser::new(src).parse().unwrap().items.len(), 6);
+    }
+}

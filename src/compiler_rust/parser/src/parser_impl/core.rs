@@ -907,11 +907,12 @@ impl<'a> Parser<'a> {
             // `security <name>:` or `security gate ...`; anything else
             // (`security.x = v`, `security = s`, `security(...)`) is an
             // ordinary expression/assignment.
-            // `friend <pkg.path>` is a module access directive handled by the
+            // `friend <pkg.path>`, `internal_export <name>` and `layer <name> [uses ..]`
+            // are module directives handled by the
             // pure-Simple frontend; the seed has no visibility graph, so it is
-            // consumed as a no-op (same node as bare `export`). `friend` stays
+            // consumed as a no-op (same node as bare `export`). The word stays
             // an ordinary identifier unless an identifier follows on the line.
-            TokenKind::Identifier { name, .. } if name == "friend" => {
+            TokenKind::Identifier { name, .. } if matches!(name.as_str(), "friend" | "internal_export" | "layer") => {
                 if matches!(self.peek_next().kind, TokenKind::Identifier { .. }) {
                     let start_span = self.current.span;
                     while !self.check(&TokenKind::Newline) && !self.check(&TokenKind::Dedent) && !self.is_at_end() {
