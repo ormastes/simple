@@ -1,0 +1,56 @@
+# Rendering for `trace missing`: same envelope as node pages, one row per requirement.
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.traceability.query_missing_v1.{TraceMissingResultV1, TraceGraphCompletenessV1, trace_link_status_name_v1}
+use app.traceability.extract.snapshot_pipeline.{TraceSnapshotBuild}
+use app.traceability.query_options_v1.{TraceQueryOptionsV1}
+use app.traceability.query_render_v1.{trace_query_ingestion_line_v1, trace_query_ingestion_sdn_v1}
+
+fn missing_cell_v1(value: text) -> text:
+    var out = ""
+    for ch in value.chars():
+        if ch == "\t" or ch == "\n" or ch == "\r": out = out + " "
+        else: out = out + ch
+    out
+
+pub fn trace_query_render_missing_v1(build: TraceSnapshotBuild, result: TraceMissingResultV1,
+    options: TraceQueryOptionsV1) -> text:
+    val graph = build.graph
+    val graph_complete = result.completeness == TraceGraphCompletenessV1.Complete
+    val total = result.total_requirements.value
+    val shown = if result.entries.len() > options.limit: options.limit else: result.entries.len()
+    if options.format == "sdn":
+        var rows: [SdnValue] = []
+        for index in 0..shown:
+            val entry = result.entries[index]
+            rows.push(SdnValue.Dict({"id": SdnValue.String(entry.requirement_id.value),
+                "title": SdnValue.String(entry.title),
+                "implementation": SdnValue.String(trace_link_status_name_v1(entry.implementation)),
+                "verification": SdnValue.String(trace_link_status_name_v1(entry.verification))}))
+        val ingestion = trace_query_ingestion_sdn_v1(build)
+        return sdn_encode_canonical(SdnValue.Dict({
+            "schema": SdnValue.String("simple.trace.missing-query/v1"),
+            "snapshot": SdnValue.String(result.snapshot_id.value),
+            "snapshot_kind": SdnValue.String(graph.subject.kind),
+            "generation": SdnValue.String(graph.generation_id),
+            "ingestion": ingestion["ingestion"], "sidecar_sources": ingestion["sidecar_sources"],
+            "qualification": SdnValue.String("unverified"), "admission_eligible": SdnValue.Bool(false),
+            "operation": SdnValue.String("missing"), "kind": SdnValue.String("requirements"),
+            "graph_complete": SdnValue.Bool(graph_complete),
+            "total_requirements": SdnValue.Int(total),
+            "missing_count": SdnValue.Int(result.entries.len()),
+            "shown": SdnValue.Int(shown), "truncated": SdnValue.Bool(shown < result.entries.len()),
+            "requirements": SdnValue.Array(rows)}))
+    var output = "Snapshot: " + graph.subject.snapshot_id + "\n"
+    output = output + trace_query_ingestion_line_v1(build)
+    output = output + "Graph complete: " + graph_complete.to_text() + "\n"
+    output = output + "Qualification: unverified; admission eligible: false\n"
+    output = output + "ID\tIMPLEMENTATION\tVERIFICATION\tTITLE\n"
+    for index in 0..shown:
+        val entry = result.entries[index]
+        output = output + missing_cell_v1(entry.requirement_id.value) + "\t" +
+            trace_link_status_name_v1(entry.implementation) + "\t" +
+            trace_link_status_name_v1(entry.verification) + "\t" + missing_cell_v1(entry.title) + "\n"
+    output = output + "Requirements: " + total.to_text() + "; with a missing link: " +
+        result.entries.len().to_text() + "; shown: " + shown.to_text() + "\n"
+    output

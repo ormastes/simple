@@ -246,8 +246,15 @@ pub fn table_distribute_auto_columns(
         return widths
 
     if available > sum_max:
-        val extra = available - sum_max
-        var assigned = 0
+        # Each column BOUNDARY is the exact fractional one rounded half up,
+        # and a width is the difference of two boundaries, so the tracks sum
+        # EXACTLY to `available` and every edge lands where Chrome snaps it.
+        # Handing the integer-division leftover to the leading columns
+        # instead moved Chrome's 170.38px column edge to 171
+        # (table_collapsed_border_paint_chrome159_spec.spl).
+        val extra = (available - sum_max) as i64
+        var cum_hi: i64 = 0
+        var prev_edge = 0
         i = 0
         while i < n:
             var hi = col_max[i]
@@ -255,21 +262,15 @@ pub fn table_distribute_auto_columns(
                 hi = col_min[i]
             if hi < 0:
                 hi = 0
-            val share = if sum_max > 0:
-                extra * hi / sum_max
+            cum_hi = cum_hi + hi as i64
+            val cum_share = if sum_max > 0:
+                (extra * cum_hi * 2 + sum_max as i64) / (sum_max as i64 * 2)
             else:
-                extra / n
-            widths.push(hi + share)
-            assigned = assigned + hi + share
+                (extra * (i + 1) as i64 * 2 + n as i64) / (n as i64 * 2)
+            val edge = (cum_hi + cum_share) as i32
+            widths.push(edge - prev_edge)
+            prev_edge = edge
             i = i + 1
-        # Integer division loses at most n-1 px; hand it to the leading
-        # columns so the tracks always sum EXACTLY to `available`.
-        var leftover = available - assigned
-        var k = 0
-        while leftover > 0 and k < n:
-            widths[k] = widths[k] + 1
-            leftover = leftover - 1
-            k = k + 1
         return widths
 
     if available <= sum_min:

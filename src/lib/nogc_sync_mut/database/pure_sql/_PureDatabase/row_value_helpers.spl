@@ -163,15 +163,19 @@ fn _pdb_v2_escape(value: text) -> text:
 fn _pdb_v2_unescape(value: text) -> text?:
     if value.contains("|") or value.contains("\t") or value.contains("\r") or value.contains("\n"):
         return nil
+    # Byte scan bounded by byte_len(); unescaped runs are copied whole so a
+    # multi-byte UTF-8 character is never cut ('%' is ASCII, so run ends are
+    # always character boundaries).
+    val n = value.byte_len() as i32
     var out = ""
+    var run_start: i32 = 0
     var i: i32 = 0
-    while i < value.len() as i32:
-        val ch = value.slice(i, i + 1)
-        if ch != "%":
-            out = out + ch
+    while i < n:
+        if value.byte_at(i) != 37:
             i = i + 1
             continue
-        if i + 3 > value.len() as i32:
+        out = out + value.slice(run_start, i)
+        if i + 3 > n:
             return nil
         val escape = value.slice(i, i + 3)
         if escape == "%25": out = out + "%"
@@ -181,7 +185,8 @@ fn _pdb_v2_unescape(value: text) -> text?:
         elif escape == "%0A": out = out + "\n"
         else: return nil
         i = i + 3
-    Some(out)
+        run_start = i
+    Some(out + value.slice(run_start, n))
 
 fn _serialize_row_v2(values: [DbValue]) -> text:
     var result = ""
@@ -208,7 +213,7 @@ fn _serialize_row_v2(values: [DbValue]) -> text:
                 # length was stored and reopen produced an empty Blob.
                 kind = "X"
                 payload = inner.len().to_text()
-        result = result + kind + payload.len().to_text() + ":" + payload
+        result = result + kind + payload.byte_len().to_text() + ":" + payload
     result
 
 # Strict, fallible decimal parse over char_code_at only. This deliberately does
@@ -228,12 +233,12 @@ fn _pdb_decimal_parse_strict(value: text) -> i32?:
     if value.starts_with("-"):
         negative = true
         start = 1
-    val digits: i32 = value.len() as i32 - start
+    val digits: i32 = value.byte_len() as i32 - start
     if digits < 1 or digits > 10: return nil
     if digits > 1 and value.char_code_at(start) == 48: return nil
     var magnitude: i64 = 0
     var i: i32 = start
-    while i < value.len() as i32:
+    while i < value.byte_len() as i32:
         val code = value.char_code_at(i)
         if code < 48 or code > 57: return nil
         magnitude = magnitude * 10 + (code - 48) as i64
@@ -251,18 +256,18 @@ fn _pdb_v2_decimal_length(value: text) -> i32?:
 fn _deserialize_row_v2(data: text) -> [DbValue]?:
     var result: [DbValue] = []
     var cursor: i32 = 0
-    while cursor < data.len() as i32:
+    while cursor < data.byte_len() as i32:
         val kind = data.slice(cursor, cursor + 1)
         cursor = cursor + 1
         val length_start = cursor
-        while cursor < data.len() as i32 and data.slice(cursor, cursor + 1) != ":":
+        while cursor < data.byte_len() as i32 and data.slice(cursor, cursor + 1) != ":":
             cursor = cursor + 1
-        if cursor >= data.len() as i32: return nil
+        if cursor >= data.byte_len() as i32: return nil
         val length = _pdb_v2_decimal_length(data.slice(length_start, cursor))
         if length.is_none(): return nil
         cursor = cursor + 1
         val payload_length = length.unwrap()
-        if payload_length > data.len() as i32 - cursor: return nil
+        if payload_length > data.byte_len() as i32 - cursor: return nil
         val payload = data.slice(cursor, cursor + payload_length)
         cursor = cursor + payload_length
         if kind == "I":
@@ -293,20 +298,20 @@ fn _deserialize_row_v2(data: text) -> [DbValue]?:
 # the decoded empty Blob value.
 fn _pdb_v3_row_encoding_is_canonical(data: text) -> bool:
     var cursor: i32 = 0
-    while cursor < data.len() as i32:
+    while cursor < data.byte_len() as i32:
         val kind = data.slice(cursor, cursor + 1)
         cursor = cursor + 1
         val length_start = cursor
-        while cursor < data.len() as i32 and data.slice(cursor, cursor + 1) != ":":
+        while cursor < data.byte_len() as i32 and data.slice(cursor, cursor + 1) != ":":
             cursor = cursor + 1
-        if cursor >= data.len() as i32:
+        if cursor >= data.byte_len() as i32:
             return false
         val length = _pdb_v2_decimal_length(data.slice(length_start, cursor))
         if length.is_none():
             return false
         cursor = cursor + 1
         val payload_length = length.unwrap()
-        if payload_length > data.len() as i32 - cursor:
+        if payload_length > data.byte_len() as i32 - cursor:
             return false
         val payload = data.slice(cursor, cursor + payload_length)
         cursor = cursor + payload_length

@@ -1,0 +1,124 @@
+# Pure operation envelope. Shape/digests confer no service, journal, grant,
+# network or OS authority. Native routing/admission belongs to retained owners.
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.{sdn_encode_canonical, sdn_encoded_text_size_v1}
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub const HOST_SERVICE_OPERATION_MAX_BYTES_V6: i64 = 2097152
+
+pub struct HostServiceOperationRequestV6:
+    action: text
+    service_incarnation: text
+    operation_id: text
+    scope_digest: text
+    request_digest: text
+    payload: text
+
+pub fn host_service_hex_shape_v6(value: text, width: i64) -> bool:
+    if value.byte_len() != width: return false
+    for index in 0..width:
+        val code = value.byte_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+    true
+
+# Count exact canonical punctuation, safe fixed keys, scalar spellings and
+# escaped string lengths BEFORE constructing the encoded/escaped envelope.
+fn host_service_operation_size_v6(request: HostServiceOperationRequestV6) -> i64:
+    val keys = ["version", "kind", "action", "serviceIncarnation", "operationId", "scopeDigest", "requestDigest", "payload"]
+    # Braces + final newline; ': ' per field; ', ' between fields; integer 6.
+    var total: i64 = 3 + 2 * 8 + 2 * 7 + 1
+    for key in keys: total = total + key.byte_len()
+    total = total + sdn_encoded_text_size_v1("host-operation-request")
+    for value in [request.action, request.service_incarnation, request.operation_id, request.scope_digest, request.request_digest, request.payload]:
+        total = total + sdn_encoded_text_size_v1(value)
+    total
+
+pub fn host_service_operation_request_digest_v6(operation_id: text, payload: text) -> Result<text, text>:
+    if not builder_identifier_valid_v1(operation_id): return Err("host-operation-id-invalid")
+    if payload.byte_len() < 1 or payload.byte_len() > HOST_SERVICE_OPERATION_MAX_BYTES_V6:
+        return Err("host-operation-payload-size")
+    Ok(sha256_text(operation_id + "\n" + payload))
+
+pub fn host_service_operation_validate_v6(request: HostServiceOperationRequestV6) -> Result<bool, text>:
+    if not ["status", "validate", "prepare", "execute", "inspect", "progress", "cancel", "service-stop"].contains(request.action):
+        return Err("host-operation-action-unsupported")
+    if not host_service_hex_shape_v6(request.service_incarnation, 32): return Err("host-operation-incarnation-shape")
+    if request.payload.byte_len() > HOST_SERVICE_OPERATION_MAX_BYTES_V6: return Err("host-operation-payload-size")
+    if request.action == "status":
+        if request.operation_id != "" or request.scope_digest != "" or request.request_digest != "" or request.payload != "":
+            return Err("host-operation-status-fields")
+    elif request.action == "service-stop":
+        if request.operation_id != "" or request.request_digest != "" or request.payload != "":
+            return Err("host-operation-service-stop-fields")
+        if not host_service_hex_shape_v6(request.scope_digest, 64): return Err("host-operation-scope-shape")
+    else:
+        if not builder_identifier_valid_v1(request.operation_id): return Err("host-operation-id-invalid")
+        if not host_service_hex_shape_v6(request.scope_digest, 64): return Err("host-operation-scope-shape")
+        if not host_service_hex_shape_v6(request.request_digest, 64): return Err("host-operation-request-digest-shape")
+        if ["validate", "prepare", "execute"].contains(request.action):
+            if request.payload.byte_len() < 1: return Err("host-operation-payload-required")
+        elif request.payload != "": return Err("host-operation-query-payload-forbidden")
+    if host_service_operation_size_v6(request) > HOST_SERVICE_OPERATION_MAX_BYTES_V6:
+        return Err("host-operation-encoded-size")
+    if ["validate", "prepare", "execute"].contains(request.action):
+        if request.request_digest != host_service_operation_request_digest_v6(request.operation_id, request.payload)?:
+            return Err("host-operation-request-digest-mismatch")
+    # Inspect/progress/cancel carry the ORIGINAL execute digest. Service-stop
+    # carries only the current service/scope tuple; actual retained owners must
+    # establish historical association or guarded stop authority respectively.
+    Ok(true)
+
+pub fn host_service_operation_encode_v6(request: HostServiceOperationRequestV6) -> Result<text, text>:
+    val valid = host_service_operation_validate_v6(request)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(6), "kind": SdnValue.String("host-operation-request"),
+        "action": SdnValue.String(request.action), "serviceIncarnation": SdnValue.String(request.service_incarnation),
+        "operationId": SdnValue.String(request.operation_id), "scopeDigest": SdnValue.String(request.scope_digest),
+        "requestDigest": SdnValue.String(request.request_digest), "payload": SdnValue.String(request.payload)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if source.byte_len() > HOST_SERVICE_OPERATION_MAX_BYTES_V6: return Err("host-operation-encoded-size")
+    Ok(source)
+
+fn host_service_operation_text_v6(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    if not fields.contains_key(key): return Err("host-operation-field-missing:" + key)
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("host-operation-field-type:" + key)
+
+pub fn host_service_operation_decode_v6(source: text) -> Result<HostServiceOperationRequestV6, text>:
+    if source.byte_len() < 1 or source.byte_len() > HOST_SERVICE_OPERATION_MAX_BYTES_V6:
+        return Err("host-operation-source-size")
+    val limits = SdnStrictLimitsV1(max_source_bytes: HOST_SERVICE_OPERATION_MAX_BYTES_V6, max_depth: 2,
+        max_nodes: 24, max_rows: 0, max_cells: 0, max_columns: 8)
+    val document = match sdn_parse_strict_v1(source, limits):
+        case Ok(value): value
+        case Err(issue): return Err("host-operation-sdn:" + issue.code)
+    val fields = match document.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("host-operation-object-required")
+    val known = ["version", "kind", "action", "serviceIncarnation", "operationId", "scopeDigest", "requestDigest", "payload"]
+    if fields.len() != 8: return Err("host-operation-field-count")
+    for key in fields.keys():
+        if not known.contains(key): return Err("host-operation-field-unknown:" + key)
+    if not fields.contains_key("version"): return Err("host-operation-version")
+    match fields["version"]:
+        case SdnValue.Int(value):
+            if value != 6: return Err("host-operation-version")
+        case _: return Err("host-operation-version")
+    if host_service_operation_text_v6(fields, "kind")? != "host-operation-request": return Err("host-operation-kind")
+    val request = HostServiceOperationRequestV6(action: host_service_operation_text_v6(fields, "action")?,
+        service_incarnation: host_service_operation_text_v6(fields, "serviceIncarnation")?,
+        operation_id: host_service_operation_text_v6(fields, "operationId")?,
+        scope_digest: host_service_operation_text_v6(fields, "scopeDigest")?,
+        request_digest: host_service_operation_text_v6(fields, "requestDigest")?, payload: host_service_operation_text_v6(fields, "payload")?)
+    if host_service_operation_encode_v6(request)? != source: return Err("host-operation-noncanonical")
+    Ok(request)
+
+pub fn host_service_operation_command_digest_v6(request: HostServiceOperationRequestV6) -> Result<text, text>:
+    Ok(sha256_text(host_service_operation_encode_v6(request)?))
+
+export HostServiceOperationRequestV6, HOST_SERVICE_OPERATION_MAX_BYTES_V6
+export host_service_operation_validate_v6, host_service_operation_encode_v6, host_service_operation_decode_v6
+export host_service_operation_command_digest_v6, host_service_operation_request_digest_v6, host_service_hex_shape_v6

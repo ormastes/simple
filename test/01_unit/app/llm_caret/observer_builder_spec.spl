@@ -1,0 +1,137 @@
+# Purpose and audience: executable evidence that recorded observer event streams fold into the stall classifier's facts and the attention inbox without turning silence or screen text into failures or approvals.
+
+"""
+Caret observer builder, provider adapters and status text.
+"""
+
+use std.spec.*
+use app.llm_caret.observer.state_axes.*
+use app.llm_caret.observer.stall_classifier.*
+use app.llm_caret.observer.attention_inbox.*
+use app.llm_caret.observer.observation_builder.*
+use app.llm_caret.observer.provider_adapters.*
+use app.llm_caret.observer.status_text.*
+
+fn _ev(seq: i64, at_ms: i64, kind: ObserverEventKind) -> ObserverEvent:
+    observer_event("s1", 1, "op1", seq, at_ms, kind, "recorded")
+
+fn _run(events: [ObserverEvent], now_ms: i64) -> SessionObservation:
+    observe_session(attention_inbox_new(), events, "s1", 1, now_ms, policy_default())
+
+fn _kind(o: SessionObservation) -> ClassKind:
+    o.classification.kind
+
+describe "observer builder":
+    it "keeps a 10 minute silent terminal with an advancing heartbeat WorkingQuiet":
+        # @req REQ-CARET-OBS-001
+        step("replay: alive, one output burst, then heartbeats every 60s for 10 minutes")
+        var events: [ObserverEvent] = [_ev(1, 0, ObserverEventKind.ProcessAlive), _ev(2, 0, ObserverEventKind.OutputActivity)]
+        var t = 60000
+        var seq = 3
+        while t <= 590000:
+            events = events + [_ev(seq, t, ObserverEventKind.JobHeartbeat)]
+            t = t + 60000
+            seq = seq + 1
+        val o = _run(events, 600000)
+        expect(_kind(o) == ClassKind.WorkingQuiet).to_equal(true)
+        expect(attention_unread(o.inbox).len()).to_equal(0)
+        expect(classification_status_text(o.classification)).to_equal("quiet -- job heartbeat advancing while output is silent (observed)")
+
+    it "stays Unknown when there are no events":
+        # @req REQ-CARET-OBS-001
+        step("fold an empty stream")
+        val o = _run([], 1000)
+        expect(_kind(o) == ClassKind.Unknown).to_equal(true)
+
+    it "creates exactly one approval entry and dedupes a replay":
+        # @req REQ-CARET-OBS-002
+        step("approval then the same approval replayed")
+        val a = _ev(1, 10, ObserverEventKind.StructuredApproval)
+        val once = _run([a], 20)
+        val twice = observe_session(once.inbox, [a, a], "s1", 1, 30, policy_default())
+        expect(_kind(once) == ClassKind.NeedsUser).to_equal(true)
+        expect(attention_unread(twice.inbox).len()).to_equal(1)
+        expect(attention_unread(twice.inbox)[0].kind == Attention.Approval).to_equal(true)
+
+    it "creates exactly one question entry of kind Question":
+        # @req REQ-CARET-OBS-002
+        step("structured question")
+        val o = _run([_ev(1, 10, ObserverEventKind.StructuredQuestion)], 20)
+        expect(attention_unread(o.inbox).len()).to_equal(1)
+        expect(attention_unread(o.inbox)[0].kind == Attention.Question).to_equal(true)
+
+    it "never raises NeedsUser or an entry from screen text alone":
+        # @req REQ-CARET-OBS-002
+        step("alive process with a prompt-looking screen")
+        val o = _run([_ev(1, 0, ObserverEventKind.ProcessAlive), _ev(2, 5, ObserverEventKind.ScreenPrompt)], 10)
+        expect(_kind(o) == ClassKind.NeedsUser).to_equal(false)
+        expect(attention_unread(o.inbox).len()).to_equal(0)
+
+    it "clears a pending approval when the tool starts":
+        # @req REQ-CARET-OBS-002
+        step("approval then tool start")
+        val o = _run([_ev(1, 10, ObserverEventKind.StructuredApproval), _ev(2, 20, ObserverEventKind.ToolStart)], 30)
+        expect(_kind(o) == ClassKind.NeedsUser).to_equal(false)
+
+    it "gives CLI exit, child crash, rate limit, waiting children and disconnect distinct outcomes":
+        # @req REQ-CARET-OBS-003
+        step("replay one stream per condition")
+        val exit_o = _run([_ev(1, 0, ObserverEventKind.ProcessAlive), _ev(2, 5, ObserverEventKind.ProcessExit)], 10)
+        val crash_o = _run([_ev(1, 0, ObserverEventKind.ProcessAlive), _ev(2, 5, ObserverEventKind.ChildCrash)], 10)
+        val rate_o = _run([_ev(1, 0, ObserverEventKind.ProcessAlive), _ev(2, 5, ObserverEventKind.RateLimitReset)], 10)
+        val kids_o = _run([_ev(1, 0, ObserverEventKind.ProcessAlive), _ev(2, 5, ObserverEventKind.ChildStarted)], 10)
+        val down_o = _run([_ev(1, 0, ObserverEventKind.ProcessAlive), _ev(2, 5, ObserverEventKind.TransportDisconnected)], 10)
+        expect(_kind(exit_o) == ClassKind.Failure).to_equal(true)
+        expect(exit_o.classification.reason).to_contain("exit")
+        expect(_kind(crash_o) == ClassKind.Failure).to_equal(true)
+        expect(_kind(rate_o) == ClassKind.QuotaWait).to_equal(true)
+        expect(_kind(kids_o) == ClassKind.WaitingChildren).to_equal(true)
+        expect(_kind(down_o) == ClassKind.StateUnknown).to_equal(true)
+        expect(attention_unread(exit_o.inbox)[0].kind == Attention.Error).to_equal(true)
+        expect(attention_unread(down_o.inbox).len()).to_equal(0)
+
+    it "ends WaitingChildren when the last child finishes":
+        # @req REQ-CARET-OBS-003
+        step("child start then finish")
+        val o = _run([_ev(1, 0, ObserverEventKind.ProcessAlive), _ev(2, 5, ObserverEventKind.ChildStarted), _ev(3, 6, ObserverEventKind.ChildFinished)], 10)
+        expect(_kind(o) == ClassKind.WaitingChildren).to_equal(false)
+
+    it "marks a tool past its deadline as SuspectedStall":
+        # @req REQ-CARET-OBS-001
+        step("tool with 1s deadline observed 5s later")
+        val o = _run([_ev(1, 0, ObserverEventKind.ProcessAlive), tool_start_event("s1", 1, "op1", 2, 0, 1000, "build")], 5000)
+        expect(_kind(o) == ClassKind.SuspectedStall).to_equal(true)
+
+    it "makes a fresh attention key after a restart":
+        # @req REQ-CARET-OBS-002
+        step("same approval in generation 1 then generation 2")
+        val g1 = observer_event("s1", 1, "op1", 1, 10, ObserverEventKind.StructuredApproval, "recorded")
+        val g2 = observer_event("s1", 2, "op1", 1, 10, ObserverEventKind.StructuredApproval, "recorded")
+        val first = observe_session(attention_inbox_new(), [g1, g2], "s1", 1, 20, policy_default())
+        val second = observe_session(first.inbox, [g1, g2], "s1", 2, 20, policy_default())
+        expect(attention_unread(second.inbox).len()).to_equal(2)
+
+describe "observer provider adapters":
+    it "maps Claude hooks that exist into structured events":
+        # @req REQ-CARET-OBS-001
+        step("PermissionRequest -> approval; Notification -> nothing")
+        val perm = claude_hook_events("s1", 1, "op1", 1, 10, "PermissionRequest")
+        expect(perm.len()).to_equal(1)
+        expect(perm[0].kind == ObserverEventKind.StructuredApproval).to_equal(true)
+        expect(claude_hook_events("s1", 1, "op1", 2, 11, "Notification").len()).to_equal(0)
+        expect(claude_hook_events("s1", 1, "op1", 3, 12, "Stop").len()).to_equal(0)
+
+    it "maps Codex waiting_input and yields nothing for unmapped notifications":
+        # @req REQ-CARET-OBS-001
+        step("turn/waiting_input -> approval; turn/failed -> nothing")
+        val w = codex_notification_events("s1", 1, "op1", 1, 10, "turn/waiting_input")
+        expect(w.len()).to_equal(1)
+        expect(codex_notification_events("s1", 1, "op1", 2, 11, "turn/failed").len()).to_equal(0)
+        expect(provider_events("gemini", "s1", 1, "op1", 3, 12, "BeforeTool").len()).to_equal(0)
+
+    it "drives an approval entry end to end from a recorded Claude hook stream":
+        # @req REQ-CARET-OBS-002
+        step("PreToolUse, PermissionRequest")
+        val evs = claude_hook_events("s1", 1, "op1", 1, 10, "PreToolUse") + claude_hook_events("s1", 1, "op1", 2, 20, "PermissionRequest")
+        val o = _run(evs, 30)
+        expect(attention_unread(o.inbox).len()).to_equal(1)

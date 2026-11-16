@@ -1,0 +1,43 @@
+# NOT_RUN: pure contract cases; no process/file/environment effects.
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.stdin_command_contract_v1.{stdin_command_digest_valid_v1, stdin_command_path_valid_v1,
+    stdin_command_store_root_valid_v1}
+
+describe "Generic counted-stdin command admission values":
+    it "accepts only exact lowercase SHA256 executable identity":
+        expect(stdin_command_digest_valid_v1("a".repeat(64))).to_equal(true)
+        expect(stdin_command_digest_valid_v1("0123456789abcdef".repeat(4))).to_equal(true)
+        for invalid in ["", "a".repeat(63), "a".repeat(65), "A".repeat(64), "g".repeat(64), "sha256:" + "a".repeat(64)]:
+            expect(stdin_command_digest_valid_v1(invalid)).to_equal(false)
+
+    it "accepts safe POSIX and drive absolute paths through the same contract":
+        expect(stdin_command_path_valid_v1("/usr/bin/ssh")).to_equal(true)
+        expect(stdin_command_path_valid_v1("C:/Windows/System32/OpenSSH/ssh.exe")).to_equal(true)
+        expect(stdin_command_path_valid_v1("d:/simple/journal/pin.hosts")).to_equal(true)
+
+    it "rejects relative UNC ADS shell options and traversal before effects":
+        for invalid in ["ssh", "C:ssh.exe", "C:/", "/", "//server/share/ssh.exe", "C:/ssh.exe:stream",
+                "C:/../ssh.exe", "C:/./ssh.exe", "/usr//bin/ssh", "/usr/bin/ssh -oProxyCommand=id",
+                "/usr/bin/ssh;id", "/usr/bin/ssh\0extra", "/usr/bin/ssh\nextra", "C:\\Windows\\ssh.exe"]:
+            expect(stdin_command_path_valid_v1(invalid)).to_equal(false)
+
+    it "keeps private native namespace shape distinct from external executable paths":
+        val root = "\\GLOBAL??\\C:\\ProgramData\\Simple"
+        expect(stdin_command_store_root_valid_v1(root)).to_equal(true)
+        expect(stdin_command_path_valid_v1(root)).to_equal(false)
+        expect(stdin_command_store_root_valid_v1("C:/ProgramData/Simple")).to_equal(true)
+        expect(stdin_command_store_root_valid_v1("/home/service/identity")).to_equal(true)
+        for invalid in ["\\GLOBALROOT\\Device\\HarddiskVolume3", "\\global??\\C:\\Simple",
+                "\\GLOBAL??\\C:\\..\\Simple", "C:/Simple/", "/home/service\\identity"]:
+            expect(stdin_command_store_root_valid_v1(invalid)).to_equal(false)
+
+    it "checks complete Unicode and control suffixes using byte slice bounds":
+        expect(stdin_command_path_valid_v1("/usr/bin/ssh")).to_equal(true)
+        for suffix in ["λ", "😀", "λ\n", "😀\u0000"]:
+            expect(stdin_command_path_valid_v1("/usr/bin/ssh" + suffix)).to_equal(false)
+            expect(stdin_command_path_valid_v1("C:/Windows/ssh.exe" + suffix)).to_equal(false)
+        expect(stdin_command_store_root_valid_v1("C:/Simple/λ")).to_equal(true)
+        expect(stdin_command_store_root_valid_v1("\\GLOBAL??\\C:\\Simple\\😀")).to_equal(true)
+        for suffix in ["λ\n", "😀\u0000", "λ|", "😀:"]:
+            expect(stdin_command_store_root_valid_v1("C:/Simple/" + suffix)).to_equal(false)
+            expect(stdin_command_store_root_valid_v1("\\GLOBAL??\\C:\\Simple\\" + suffix)).to_equal(false)

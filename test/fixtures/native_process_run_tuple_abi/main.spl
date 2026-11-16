@@ -1,0 +1,43 @@
+# Native fixture: a stdlib `extern fn rt_process_run*` call must return its
+# (stdout, stderr, exit code) result, not words of the runtime array header.
+#
+# Bug: on the Cranelift AOT lane the stdlib externs (call origin Foreign)
+# skipped the `*_tuple` result facades that only runtime-origin calls took,
+# so the tuple destructure read the SplArray header: shell_output("uname -m")
+# was "", exit codes were wrong, and host_arch() fell back to "x86_64" on an
+# aarch64 host.
+#
+# Expected stdout (the seed interpreter is the reference; <arch> is the
+# output of `uname -m`, normalized arm64 -> aarch64 / amd64 -> x86_64):
+#   echo out=[hi] err=[] code=0
+#   exit3 code=3
+#   stderr=[oops] code=0
+#   spaces=[a b c  d] code=0
+#   bounded out=[bounded] code=0
+#   timeout out=[timed] code=0
+#   shell_output=[so]
+#   shell_bool true=true false=false
+#   host_arch=[<arch>]
+#
+# Run from a copy of this directory outside test/ (closure builds exclude
+# fixture trees): `native-build main.spl --backend=<cranelift|llvm>
+# --entry-closure`, then compare its stdout with
+# `SIMPLE_EXECUTION_MODE=interpret <seed> run main.spl`.
+use std.io_runtime.{shell, shell_output, shell_bool, process_run, process_run_bounded, process_run_timeout, host_arch}
+
+fn main():
+    val (out, err, code) = process_run("/bin/echo", ["hi"])
+    print "echo out=[{out.trim()}] err=[{err}] code={code}"
+    val failing = shell("exit 3")
+    print "exit3 code={failing.exit_code}"
+    val noisy = shell("echo oops 1>&2")
+    print "stderr=[{noisy.stderr.trim()}] code={noisy.exit_code}"
+    val (spaced, _spaced_err, spaced_code) = process_run("/bin/echo", ["a b", "c  d"])
+    print "spaces=[{spaced.trim()}] code={spaced_code}"
+    val (bout, _berr, bcode) = process_run_bounded("/bin/echo", ["bounded"], 5000, 4096)
+    print "bounded out=[{bout.trim()}] code={bcode}"
+    val (tout, _terr, tcode) = process_run_timeout("/bin/echo", ["timed"], 5000)
+    print "timeout out=[{tout.trim()}] code={tcode}"
+    print "shell_output=[{shell_output("echo so")}]"
+    print "shell_bool true={shell_bool("true")} false={shell_bool("false")}"
+    print "host_arch=[{host_arch()}]"

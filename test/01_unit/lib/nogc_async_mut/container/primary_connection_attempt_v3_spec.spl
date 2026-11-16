@@ -1,0 +1,176 @@
+# @req HOST-03 MUX-02 CTR-02
+# AUTHORED_NOT_RUN. Pure production codec assertions, not native absence proof.
+use std.spec.*
+use std.common.contracts.container.primary_connection_attempt_v3.*
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+fn attempt_fixture_v3(disposition: text = "not-opened") -> ContainerPrimaryConnectionAttemptEvidenceV3:
+    ContainerPrimaryConnectionAttemptEvidenceV3("a".repeat(64), "b".repeat(64), disposition,
+        if disposition == "not-opened": None else: Some(7),
+        if disposition == "not-opened": None else: Some(19))
+
+fn attempt_fields_v3(disposition: text = "not-opened") -> Dict<text, SdnValue>:
+    val source = container_primary_connection_attempt_encode_v3(attempt_fixture_v3(disposition)).unwrap()
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 4096,
+        max_depth: 2, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 16)).unwrap()
+    match parsed.value:
+        case SdnValue.Dict(fields): fields
+        case _: fail("attempt evidence must encode a dictionary")
+
+fn attempt_wire_v3(fields: Dict<text, SdnValue>) -> text:
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+describe "Terminal connection attempt metadata":
+    it "roundtrips both dispositions without inventing a closed flag":
+        step("Preserve request and consumption identity while keeping absence and pipe closure distinct")
+        for disposition in ["not-opened", "pipe-closed"]:
+            val evidence = attempt_fixture_v3(disposition)
+            val source = container_primary_connection_attempt_encode_v3(evidence).unwrap()
+            val decoded = container_primary_connection_attempt_decode_v3(source).unwrap()
+            expect(decoded.request_digest).to_equal(evidence.request_digest)
+            expect(decoded.consumption_digest).to_equal(evidence.consumption_digest)
+            expect(decoded.disposition).to_equal(disposition)
+            expect(decoded.pipe_slot).to_equal(evidence.pipe_slot)
+            expect(decoded.pipe_generation).to_equal(evidence.pipe_generation)
+            expect(container_primary_connection_attempt_encode_v3(decoded).unwrap()).to_equal(source)
+            val fields = attempt_fields_v3(disposition)
+            expect(fields.keys().len()).to_equal(11)
+            expect(fields.contains_key("closed")).to_equal(false)
+            expect(fields["version"]).to_equal(SdnValue.Int(3))
+            expect(fields["resourceDomain"]).to_equal(SdnValue.String("engine-attach-attempt"))
+            expect(fields["provider"]).to_equal(SdnValue.String("windows-docker-process"))
+            expect(fields["readPending"]).to_equal(SdnValue.Bool(false))
+            expect(fields["writePending"]).to_equal(SdnValue.Bool(false))
+        val unopened = attempt_fields_v3()
+        expect(unopened["pipeSlot"]).to_equal(SdnValue.Null)
+        expect(unopened["pipeGeneration"]).to_equal(SdnValue.Null)
+
+    it "rejects any pipe identity on a never-opened attempt":
+        step("Reject fabricated zero and nonzero native identities even when only one field is supplied")
+        for slot in [None, Some(0), Some(7)]:
+            for generation in [None, Some(1), Some(19)]:
+                if slot.is_some() or generation.is_some():
+                    var evidence = attempt_fixture_v3()
+                    evidence.pipe_slot = slot
+                    evidence.pipe_generation = generation
+                    expect(container_primary_connection_attempt_encode_v3(evidence).is_err()).to_equal(true)
+        for key in ["pipeSlot", "pipeGeneration"]:
+            var fields = attempt_fields_v3()
+            fields[key] = SdnValue.Int(1)
+            expect(container_primary_connection_attempt_decode_v3(attempt_wire_v3(fields)).is_err()).to_equal(true)
+
+    it "requires both closed-pipe identity fields and preserves exact boundaries":
+        step("Require real identity metadata rather than nullable closed-pipe placeholders")
+        for key in ["pipeSlot", "pipeGeneration"]:
+            var fields = attempt_fields_v3("pipe-closed")
+            fields[key] = SdnValue.Null
+            expect(container_primary_connection_attempt_decode_v3(attempt_wire_v3(fields)).is_err()).to_equal(true)
+            var evidence = attempt_fixture_v3("pipe-closed")
+            if key == "pipeSlot": evidence.pipe_slot = None
+            else: evidence.pipe_generation = None
+            expect(container_primary_connection_attempt_encode_v3(evidence).is_err()).to_equal(true)
+        for slot in [0, 2147483647]:
+            for generation in [1, 9223372036854775807]:
+                var evidence = attempt_fixture_v3("pipe-closed")
+                evidence.pipe_slot = Some(slot)
+                evidence.pipe_generation = Some(generation)
+                val wire = container_primary_connection_attempt_encode_v3(evidence).unwrap()
+                val decoded = container_primary_connection_attempt_decode_v3(wire).unwrap()
+                expect(decoded.pipe_slot.unwrap()).to_equal(slot)
+                expect(decoded.pipe_generation.unwrap()).to_equal(generation)
+
+    it "rejects native identity overflow and nonpositive generation":
+        step("Refuse invalid numeric identity before narrowing or publication")
+        for slot in [-1, 2147483648, 9223372036854775807]:
+            var evidence = attempt_fixture_v3("pipe-closed")
+            evidence.pipe_slot = Some(slot)
+            expect(container_primary_connection_attempt_encode_v3(evidence).is_err()).to_equal(true)
+            var fields = attempt_fields_v3("pipe-closed")
+            fields["pipeSlot"] = SdnValue.Int(slot)
+            expect(container_primary_connection_attempt_decode_v3(attempt_wire_v3(fields)).is_err()).to_equal(true)
+        for generation in [-1, 0]:
+            var evidence = attempt_fixture_v3("pipe-closed")
+            evidence.pipe_generation = Some(generation)
+            expect(container_primary_connection_attempt_encode_v3(evidence).is_err()).to_equal(true)
+            var fields = attempt_fields_v3("pipe-closed")
+            fields["pipeGeneration"] = SdnValue.Int(generation)
+            expect(container_primary_connection_attempt_decode_v3(attempt_wire_v3(fields)).is_err()).to_equal(true)
+
+    it "requires lowercase 64hex request and consumption digests":
+        step("Reject malformed correlation values on encoding and decoding")
+        for key in ["requestDigest", "consumptionDigest"]:
+            for invalid in ["", "a".repeat(63), "a".repeat(65), "A".repeat(64), "g".repeat(64)]:
+                var evidence = attempt_fixture_v3()
+                if key == "requestDigest": evidence.request_digest = invalid
+                else: evidence.consumption_digest = invalid
+                expect(container_primary_connection_attempt_encode_v3(evidence).is_err()).to_equal(true)
+                var fields = attempt_fields_v3()
+                fields[key] = SdnValue.String(invalid)
+                expect(container_primary_connection_attempt_decode_v3(attempt_wire_v3(fields)).is_err()).to_equal(true)
+
+    it "rejects missing and extra fields including fabricated authority":
+        step("Require the closed schema and refuse claimed proof or old closed-connection fields")
+        val original = attempt_fields_v3()
+        for missing in original.keys():
+            var fields: Dict<text, SdnValue> = {}
+            for key in original.keys():
+                if key != missing: fields[key] = original[key]
+            expect(container_primary_connection_attempt_decode_v3(attempt_wire_v3(fields)).is_err()).to_equal(true)
+        for key in ["closed", "nativeProof", "identityDigest", "authorized"]:
+            var fields = attempt_fields_v3()
+            fields[key] = SdnValue.Bool(true)
+            expect(container_primary_connection_attempt_decode_v3(attempt_wire_v3(fields)).is_err()).to_equal(true)
+
+    it "rejects pending IO and all scalar type coercions":
+        step("Do not coerce text numbers, booleans, floats or incomplete IO into terminal evidence")
+        for key in ["readPending", "writePending"]:
+            for invalid in [SdnValue.Bool(true), SdnValue.Int(0), SdnValue.String("false"), SdnValue.Null]:
+                var fields = attempt_fields_v3()
+                fields[key] = invalid
+                expect(container_primary_connection_attempt_decode_v3(attempt_wire_v3(fields)).is_err()).to_equal(true)
+        for key in ["pipeSlot", "pipeGeneration"]:
+            for invalid in [SdnValue.String("1"), SdnValue.Float(1.0), SdnValue.Bool(true)]:
+                var fields = attempt_fields_v3("pipe-closed")
+                fields[key] = invalid
+                expect(container_primary_connection_attempt_decode_v3(attempt_wire_v3(fields)).is_err()).to_equal(true)
+        for key in ["kind", "resourceDomain", "provider", "requestDigest", "consumptionDigest", "disposition"]:
+            var fields = attempt_fields_v3()
+            fields[key] = SdnValue.Int(1)
+            expect(container_primary_connection_attempt_decode_v3(attempt_wire_v3(fields)).is_err()).to_equal(true)
+
+    it "refuses foreign versions domains providers and dispositions":
+        step("Keep old pipe-closed evidence and external runtime claims outside the attempt schema")
+        for version in [SdnValue.Int(2), SdnValue.Int(4), SdnValue.String("3"), SdnValue.Float(3.0)]:
+            var fields = attempt_fields_v3()
+            fields["version"] = version
+            expect(container_primary_connection_attempt_decode_v3(attempt_wire_v3(fields)).is_err()).to_equal(true)
+        for key in ["kind", "resourceDomain", "provider"]:
+            var fields = attempt_fields_v3()
+            fields[key] = SdnValue.String("foreign")
+            expect(container_primary_connection_attempt_decode_v3(attempt_wire_v3(fields)).is_err()).to_equal(true)
+        for disposition in ["", "running", "unknown", "closed"]:
+            var evidence = attempt_fixture_v3()
+            evidence.disposition = disposition
+            expect(container_primary_connection_attempt_encode_v3(evidence).is_err()).to_equal(true)
+            var fields = attempt_fields_v3()
+            fields["disposition"] = SdnValue.String(disposition)
+            expect(container_primary_connection_attempt_decode_v3(attempt_wire_v3(fields)).is_err()).to_equal(true)
+
+    it "rejects duplicate keys and noncanonical equivalent source":
+        step("Bind retained evidence to exactly one canonical byte sequence")
+        val source = container_primary_connection_attempt_encode_v3(attempt_fixture_v3()).unwrap()
+        for changed in [source + "\n", source.substring(0, source.len() - 1), "# note\n" + source,
+                " " + source, source.replace("\n", "\r\n")]:
+            expect(container_primary_connection_attempt_decode_v3(changed).is_err()).to_equal(true)
+        val duplicate = "{version: 3, " + source.substring(1, source.len())
+        expect(container_primary_connection_attempt_decode_v3(duplicate).is_err()).to_equal(true)
+
+    it "bounds UTF8 bytes and rejects malformed or nonobject documents":
+        step("Apply byte and structural limits before evidence construction")
+        for source in ["", " ".repeat(4097), "é".repeat(2049)]:
+            expect(container_primary_connection_attempt_decode_v3(source).unwrap_err()).to_equal("primary-connection-attempt-source-bound")
+        for source in ["{", "[]\n", "null\n", "true\n", "[1, 2]\n"]:
+            expect(container_primary_connection_attempt_decode_v3(source).is_err()).to_equal(true)

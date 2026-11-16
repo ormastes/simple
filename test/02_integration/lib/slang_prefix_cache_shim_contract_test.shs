@@ -3,7 +3,26 @@ set -eu
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd)"
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
-"${CC:-clang}" -std=c11 -Wall -Wextra -Werror -Wno-unused-but-set-variable \
+CC_BIN="${CC:-}"
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        # Windows: bare `clang` may be an MSVC-target clang; use llvm-mingw like build-slang-ggml-shim.shs.
+        if [ -z "$CC_BIN" ]; then
+            if [ -n "${SIMPLE_MINGW_ROOT:-}" ] && [ -x "$SIMPLE_MINGW_ROOT/bin/clang.exe" ]; then
+                CC_BIN=$SIMPLE_MINGW_ROOT/bin/clang.exe
+            else
+                for cand in $(ls -d "$HOME"/.simple/toolchains/llvm-mingw-*-ucrt-x86_64/bin 2>/dev/null | sort -r); do
+                    CC_BIN=$cand/clang.exe
+                    break
+                done
+            fi
+        fi
+        case "$("${CC_BIN:-clang}" -dumpmachine 2>/dev/null)" in
+            *-w64-mingw32*|*-windows-gnu*) ;;
+            *) echo "ERROR -- nothing was checked (${CC_BIN:-clang} does not target mingw; set SIMPLE_MINGW_ROOT or CC to llvm-mingw clang)"; exit 2 ;;
+        esac ;;
+esac
+"${CC_BIN:-clang}" -std=c11 -Wall -Wextra -Werror -Wno-unused-but-set-variable \
   -I"$ROOT/test/fixtures/slang_prefix_cache" \
   "$ROOT/src/runtime/slang_ggml_shim.c" \
   "$ROOT/test/fixtures/slang_prefix_cache/mock_llama.c" \

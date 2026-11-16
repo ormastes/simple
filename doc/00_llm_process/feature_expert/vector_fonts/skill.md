@@ -161,9 +161,20 @@ read at the wrong shift" shape, different call sites.
   hoc driver) and the interpreter test lane (spec above, 4/4 green,
   sabotage-verified — forcing the lookup loop to `if false:` flips 3 of 4
   cases red).
+- **Key trap (fixed 2026-11-15):** the key is `"{raster_identity};cp;fs"`, and
+  a renderer with no rasterizer used to send identity "" for EVERY fallback
+  tier, so the vector-tier `'A'` (7 px) was served to a bitmap-tier renderer
+  (8x16). With no rasterizer the identity is now `fallback=ttf:<h>|vector|bitmap|none`.
+  Row: `font_renderer_spec` "keeps vector and bitmap fallback tiers apart".
 
 ## Gotchas
 
+- Registered-only (handle-free) shaping needs `shaper_with_registered_ot_font`
+  with the pinned digest. Plain `shaper_with_ot_font` never yields a valid run:
+  canonical layout is gated on a live handle or that registered binding
+  (f119f8b7120 dropped the binding; restored 2026-11-15).
+- Fallback-layout quads carry UTF-8 BYTE offsets (since 2026-11-15; they
+  used to count codepoints). `font_batch_apply_advances` accepts both.
 - A fix that works hosted (interpreter/JIT) says nothing about the
   freestanding native lane — all 8 recipes above are freestanding-only.
   Re-probe via serial / gated `_probe_debug()` output after any change to
@@ -194,6 +205,13 @@ Measured with `SIMPLE_INTERP_SAMPLE=1` on
   is ~4.8x faster than an indexed `while` with `.to_i64()`. `[u32].sum()`
   returns 0 on the interpreter, and `i64 + u32` without a cast gives a wrong
   sum there.
+
+- Selected-asset validation on the interpreter lane hashes with
+  `rt_tls13_sha256` through `_font_interp_digest_hex`
+  (`std.common.encoding.font_registry`). The pure-Simple `sha256_bytes` route ran
+  at ~22 KB/s: 77 s for the 1.7 MB NotoSansMono, now 11 ms. It is kept only as
+  the fallback when the accelerator returns no 32-byte digest.
+  `doc/08_tracking/bug/font_registry_interp_digest_22kbps_2026-11-15.md`.
 
 ## Update Rule
 

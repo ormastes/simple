@@ -1,0 +1,104 @@
+# Requirements lacking an implementing or verifying link. Pure; reads one graph.
+# Orientation: for implemented_by and verified_by the REQUIREMENT is the `from`
+# end (schema.spl trace_endpoint_relation_v1), so only outgoing edges count.
+# @req REQ-TRC-021
+use std.common.traceability.model.*
+use std.common.traceability.sidecar_v1.{TraceSidecarReferenceV1}
+
+pub enum TraceLinkStatus:
+    Linked
+    Tested
+    Verified
+    Missing
+    Stale
+    Unknown
+    Blocked
+    NotApplicableReviewed
+
+pub struct TraceRequirementIdV1:
+    value: text
+
+pub struct TraceSnapshotIdV1:
+    value: text
+
+pub struct TraceRequirementCountV1:
+    value: i64
+
+pub enum TraceGraphCompletenessV1:
+    Complete
+    Incomplete
+
+pub struct TraceMissingEntryV1:
+    requirement_id: TraceRequirementIdV1
+    title: text    # display text copied from the node; not an id, count or flag
+    implementation: TraceLinkStatus
+    verification: TraceLinkStatus
+
+pub struct TraceMissingResultV1:
+    snapshot_id: TraceSnapshotIdV1
+    entries: [TraceMissingEntryV1]
+    total_requirements: TraceRequirementCountV1
+    completeness: TraceGraphCompletenessV1
+
+pub fn trace_link_status_name_v1(status: TraceLinkStatus) -> text:
+    match status:
+        case TraceLinkStatus.Linked: "linked"
+        case TraceLinkStatus.Tested: "tested"
+        case TraceLinkStatus.Verified: "verified"
+        case TraceLinkStatus.Missing: "missing"
+        case TraceLinkStatus.Stale: "stale"
+        case TraceLinkStatus.Unknown: "unknown"
+        case TraceLinkStatus.Blocked: "blocked"
+        case TraceLinkStatus.NotApplicableReviewed: "not_applicable_reviewed"
+
+pub fn trace_missing_requirements_v1(graph: TraceGraph, sidecar: [TraceSidecarReferenceV1]) -> TraceMissingResultV1:
+    """List requirements with no implementing and/or no verifying link, sorted by id.
+
+    A structural verifying link (a direct verified_by edge, a decomposed criterion
+    with an accepted_by/verified_by edge, or a spec-header verified_by sidecar row)
+    yields Linked, never Verified or Tested: this function has no run evidence, and
+    a link is not an execution result. A requirement is omitted only when both
+    implementation and verification are Linked. In an incomplete graph an absent
+    link is Unknown, never Missing: absence proves nothing about unread inputs.
+    """
+    var implemented: Dict<text, bool> = {}
+    var verified: Dict<text, bool> = {}
+    var criterion_verified: Dict<text, bool> = {}
+    for edge in graph.edges:
+        if edge.relation == TraceRelation.ImplementedBy:
+            implemented[edge.from_id] = true
+        elif edge.relation == TraceRelation.VerifiedBy:
+            verified[edge.from_id] = true
+        elif edge.relation == TraceRelation.AcceptedBy:
+            criterion_verified[edge.from_id] = true
+    for edge in graph.edges:
+        if edge.relation == TraceRelation.DecomposesTo and criterion_verified.contains_key(edge.to_id):
+            verified[edge.from_id] = true
+    for row in sidecar:
+        if row.relation == "verified_by":
+            verified[row.from_id] = true
+    val absent = if graph.complete: TraceLinkStatus.Missing else: TraceLinkStatus.Unknown
+    var by_id: Dict<text, TraceMissingEntryV1> = {}
+    var ids: [text] = []
+    var total = 0
+    for node in graph.nodes:
+        if node.kind != TraceNodeKind.Requirement:
+            continue
+        total = total + 1
+        val implementation = if implemented.contains_key(node.id): TraceLinkStatus.Linked else: absent
+        val verification = if verified.contains_key(node.id): TraceLinkStatus.Linked else: absent
+        if implementation == TraceLinkStatus.Linked and verification == TraceLinkStatus.Linked:
+            continue
+        by_id[node.id] = TraceMissingEntryV1(requirement_id: TraceRequirementIdV1(value: node.id), title: node.title,
+            implementation: implementation, verification: verification)
+        ids.push(node.id)
+    var entries: [TraceMissingEntryV1] = []
+    for id in trace_sorted_ids(ids):
+        entries.push(by_id[id])
+    val completeness = if graph.complete: TraceGraphCompletenessV1.Complete else: TraceGraphCompletenessV1.Incomplete
+    TraceMissingResultV1(snapshot_id: TraceSnapshotIdV1(value: graph.subject.snapshot_id), entries: entries,
+        total_requirements: TraceRequirementCountV1(value: total), completeness: completeness)
+
+export TraceLinkStatus, TraceMissingEntryV1, TraceMissingResultV1
+export TraceRequirementIdV1, TraceSnapshotIdV1, TraceRequirementCountV1, TraceGraphCompletenessV1
+export trace_link_status_name_v1, trace_missing_requirements_v1

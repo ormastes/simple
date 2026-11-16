@@ -1,0 +1,64 @@
+# SOURCE_AUTHORED_NOT_RUN. DATA validation only, never launch/worktree qualification.
+use std.spec.{describe, it, expect}
+use std.common.contracts.container.agent_workspace_manifest_v1.*
+use std.nogc_async_mut.container.providers.linux.agent_workspace_profile_v1.*
+use std.common.contracts.storage.linux_workspace_identity_v1.*
+
+fn fixture_manifest_v1() -> AgentWorkspaceManifestV1:
+    val files = [AgentWorkspaceFileV1(source_name: "object-one", relative_path: "repo/objects/ab/" + "c".repeat(38),
+        digest: "d".repeat(64), size_bytes: 128)]
+    AgentWorkspaceManifestV1(profile_digest: "a".repeat(64), repository_ref: "repository-one", revision_oid: "b".repeat(40),
+        object_format: "sha1", source_manifest_digest: agent_workspace_files_digest_v1(files, "sha1").unwrap(),
+        slot_binding_digest: "e".repeat(64), attempt_leaf: "attempt-one", bootstrap_digest: "1".repeat(64),
+        git_digest: "2".repeat(64), agent_digest: "3".repeat(64), files: files)
+
+describe "Bounded agent workspace staging manifest":
+    it "REQ-AGENT-STAGE-001 preserves the exact canonical finite object set":
+        val encoded = agent_workspace_manifest_encode_v1(fixture_manifest_v1()).unwrap()
+        val decoded = agent_workspace_manifest_decode_v1(encoded).unwrap()
+        expect(decoded.files[0].relative_path).to_equal("repo/objects/ab/" + "c".repeat(38))
+        expect(decoded.revision_oid).to_equal("b".repeat(40))
+        expect(agent_workspace_manifest_encode_v1(decoded).unwrap()).to_equal(encoded)
+        expect(agent_workspace_manifest_decode_v1(encoded + "\n").is_err()).to_equal(true)
+
+    it "REQ-AGENT-STAGE-002 refuses traversal, config, hooks, packs and source aliases":
+        for path in ["../repo", "repo/config", "repo/hooks/post-checkout", "repo/objects/../config",
+                "repo/objects/pack/pack-a.pack", "repo/objects/ab/" + "C".repeat(38)]:
+            expect(agent_workspace_object_path_v1(path, "sha1")).to_equal(false)
+        for name in ["..", ".", "a/b", "a\\b", "a\u0000b", "x".repeat(129)]:
+            expect(agent_workspace_component_v1(name)).to_equal(false)
+
+    it "REQ-AGENT-STAGE-003 binds file content metadata, ordering and total bounds":
+        val fixture = fixture_manifest_v1()
+        val entry = fixture.files[0]
+        expect(agent_workspace_files_value_v1([entry, entry], "sha1").is_err()).to_equal(true)
+        val oversized = AgentWorkspaceFileV1(source_name: "object", relative_path: entry.relative_path,
+            digest: entry.digest, size_bytes: 1048577)
+        expect(agent_workspace_files_value_v1([oversized], "sha1").is_err()).to_equal(true)
+        expect(agent_workspace_files_value_v1([], "sha1").is_err()).to_equal(true)
+        val changed = AgentWorkspaceFileV1(source_name: entry.source_name, relative_path: entry.relative_path,
+            digest: "f".repeat(64), size_bytes: entry.size_bytes)
+        expect(agent_workspace_files_digest_v1([changed], "sha1").unwrap() ==
+            agent_workspace_files_digest_v1([entry], "sha1").unwrap()).to_equal(false)
+
+    it "REQ-AGENT-STAGE-004 rejects implicit latest revisions and invalid installed roots":
+        val encoded = agent_workspace_manifest_encode_v1(fixture_manifest_v1()).unwrap()
+        expect(agent_workspace_manifest_decode_v1(encoded.replace("b".repeat(40), "main")).is_err()).to_equal(true)
+        for root in ["/", "relative", "/tmp/../outside", "/tmp//asset", "/tmp/asset/"]:
+            expect(linux_agent_workspace_absolute_v1(root)).to_equal(false)
+
+    it "REQ-AGENT-STAGE-006 rejects retained root B with native identity A":
+        # Pure tuple regression, NOT a genuine native quota fixture.
+        val root_a = [42u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8]
+        val root_b = [43u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8]
+        expect(linux_workspace_retained_native_match_v1(root_a, "inode:1:42:7:1000").is_ok()).to_equal(true)
+        expect(linux_workspace_retained_native_match_v1(root_b, "inode:1:42:7:1000").is_err()).to_equal(true)
+        expect(linux_workspace_retained_native_match_v1(root_a, "inode:2:42:7:1000").is_err()).to_equal(true)
+        expect(linux_workspace_retained_native_match_v1([], "inode:1:42:7:1000").is_err()).to_equal(true)
+        expect(linux_workspace_identity_decimal_v1("18446744073709551615").unwrap()).to_equal(0xffffffffffffffffu64)
+        for number in ["18446744073709551616", "01", "-1", ""]:
+            expect(linux_workspace_identity_decimal_v1(number).is_err()).to_equal(true)
+
+    it "REQ-AGENT-STAGE-007 preserves high Linux device major and minor bits":
+        val identity = [42u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 16u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8]
+        expect(linux_workspace_retained_native_match_v1(identity, "inode:17592187092992:42:7:1000").is_ok()).to_equal(true)

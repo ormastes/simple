@@ -1,0 +1,84 @@
+# SOURCE_AUTHORED_NOT_RUN. Pure data/shape cases, not OS entropy/file authority.
+use std.spec.*
+use std.nogc_sync_mut.io.host_service_ready_protocol_v1.*
+use std.common.crypto.sha256.sha256_text
+use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes}
+
+fn setup_data_v1() -> [u8]:
+    host_service_auth_setup_record_v1("a".repeat(32), "b".repeat(64)).unwrap()
+
+fn setup_pin_v1() -> text: sha256_text(bytes_to_text(setup_data_v1()))
+fn host_authority_v1() -> text: "c".repeat(64)
+fn host_lease_v1() -> text:
+    sha256_text("DISTRIBUTED-OPERATION-LEASE-V2\n" + "e".repeat(64) + "\n" + host_authority_v1() + "\n")
+
+describe "V6-only private setup and public ready data contracts":
+    it "preserves native GLOBAL and Unicode parent spelling exactly":
+        step("Split at the last separator without rewriting the namespace prefix")
+        val names = host_service_auth_setup_path_v1("\\GLOBAL??\\C:\\ProgramData\\키\\host.auth-v6.sdn").unwrap()
+        expect(names.parent).to_equal("\\GLOBAL??\\C:\\ProgramData\\키")
+        expect(names.setup_leaf).to_equal("host.auth-v6.sdn")
+
+    it "rejects invalid derived names before root acquisition or entropy":
+        step("Enforce bounded safe setup and ready leaves")
+        for path in ["C:\\key.ready", "C:\\private\\.ready", "C:\\private\\..ready", "C:\\private\\bad:stream.ready",
+                "C:\\private\\bad name.ready", "C:\\private\\key\0.ready", "C:\\private\\" + "a".repeat(221) + ".ready"]:
+            expect(host_service_auth_setup_path_v1(path).is_err()).to_equal(true)
+        expect(host_service_auth_setup_path_v1("C:\\private\\key.ready").is_err()).to_equal(true)
+
+    it "pins the exact canonical eight-field private setup including final newline":
+        step("Format known caller data without claiming it came from an OS CSPRNG")
+        val record = setup_data_v1()
+        val observed = host_service_auth_setup_validate_v1(record, setup_pin_v1(), "a".repeat(32)).unwrap()
+        expect(observed.publication_uid).to_equal("a".repeat(32))
+        expect(observed.setup_digest).to_equal(setup_pin_v1())
+        expect(host_service_auth_setup_validate_v1(record, "c".repeat(64)).is_err()).to_equal(true)
+        expect(host_service_auth_setup_record_v1("a".repeat(32), "b".repeat(32)).is_err()).to_equal(true)
+
+    it "rejects legacy, noncanonical and altered generator records even under their own digest":
+        step("Validate exact new-mode schema instead of accepting a legacy bearer shape")
+        val original = bytes_to_text(setup_data_v1())
+        for source in ["a".repeat(32) + " " + "b".repeat(64) + "\n", original + " ",
+                original.replace("sosix-os-csprng", "caller-claimed"), original.replace("secretBytes: 32", "secretBytes: 16")]:
+            expect(host_service_auth_setup_validate_v1(text_to_utf8_bytes(source), sha256_text(source)).is_err()).to_equal(true)
+
+    it "publishes only nine metadata fields and never a plaintext secret in ready":
+        step("Use the actual production secret-free ready encoder")
+        val ready = host_service_auth_ready_record_v1("a".repeat(32), setup_pin_v1(), "127.0.0.1:12345", 42, "d".repeat(32), host_lease_v1(), host_authority_v1()).unwrap()
+        expect(bytes_to_text(ready).contains("secret:")).to_equal(false)
+        val observed = host_service_ready_validate_v1(ready, setup_data_v1(), setup_pin_v1(), host_lease_v1(), host_authority_v1()).unwrap()
+        expect(observed.endpoint).to_equal("127.0.0.1:12345")
+        expect(observed.service_pid).to_equal(42)
+        expect(observed.incarnation).to_equal("d".repeat(32))
+
+    it "rejects a ready record associated with another actual setup pin or UID":
+        step("Keep cross-file association separate from syntax validity")
+        val ready = host_service_auth_ready_record_v1("a".repeat(32), setup_pin_v1(), "127.0.0.1:12345", 42, "d".repeat(32), host_lease_v1(), host_authority_v1()).unwrap()
+        val other = host_service_auth_setup_record_v1("e".repeat(32), "f".repeat(64)).unwrap()
+        expect(host_service_ready_validate_v1(ready, other, sha256_text(bytes_to_text(other)), host_lease_v1(), host_authority_v1()).is_err()).to_equal(true)
+        expect(host_service_ready_validate_v1(ready, setup_data_v1(), setup_pin_v1(), host_lease_v1(), host_authority_v1(), "e".repeat(32)).is_err()).to_equal(true)
+
+    it "refuses non-loopback and ambiguous port spellings without DNS or shell lookup":
+        step("Check exact local endpoint shape while leaving liveness to the transport")
+        for endpoint in ["localhost:1234", "127.0.0.1:0", "127.0.0.1:0123", "127.0.0.1:65536", "0.0.0.0:1234", "[::1]:1234"]:
+            expect(host_service_auth_endpoint_valid_v1(endpoint)).to_equal(false)
+        expect(host_service_auth_endpoint_valid_v1("127.0.0.1:65535")).to_equal(true)
+
+    it "accepts only exact existing parent lease bytes and expected Host authority":
+        step("Decode actual-owner input data without treating it as a liveness claim")
+        val source = "DISTRIBUTED-OPERATION-LEASE-V2\n" + "e".repeat(64) + "\n" + host_authority_v1() + "\n"
+        expect(host_service_auth_lease_validate_v1(text_to_utf8_bytes(source), host_authority_v1()).unwrap().lease_digest).to_equal(host_lease_v1())
+        for bad in [source.trim(), source + "\n", source.replace("LEASE-V2", "LEASE-V1"), source.replace("e".repeat(64), "E".repeat(64))]:
+            expect(host_service_auth_lease_validate_v1(text_to_utf8_bytes(bad), host_authority_v1()).is_err()).to_equal(true)
+        expect(host_service_auth_lease_validate_v1(text_to_utf8_bytes(source), "f".repeat(64)).is_err()).to_equal(true)
+
+    it "selects a distinct immutable ready key for each exact Host lease":
+        step("Use only fixed journal namespace and a bounded lowercase digest leaf")
+        val first = host_service_auth_ready_relative_v1(host_lease_v1()).unwrap()
+        val other = sha256_text("DISTRIBUTED-OPERATION-LEASE-V2\n" + "f".repeat(64) + "\n" + host_authority_v1() + "\n")
+        expect(first).to_equal("host-service-ready-v6/" + host_lease_v1() + ".sdn")
+        expect(host_service_auth_ready_relative_v1(other).unwrap() == first).to_equal(false)
+        expect(host_service_auth_ready_relative_v1("../old.ready").is_err()).to_equal(true)
+        val ready = host_service_auth_ready_record_v1("a".repeat(32), setup_pin_v1(), "127.0.0.1:12345", 42,
+            "d".repeat(32), host_lease_v1(), host_authority_v1()).unwrap()
+        expect(host_service_ready_validate_v1(ready, setup_data_v1(), setup_pin_v1(), other, host_authority_v1()).is_err()).to_equal(true)

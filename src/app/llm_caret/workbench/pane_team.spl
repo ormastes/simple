@@ -39,9 +39,12 @@ use app.llm_caret.multi_caret_manager.{MultiCaretManager,
     multi_caret_manager_of, reconcile_multi_caret_manager,
     settle_multi_caret_manager}
 use app.llm_caret.workbench.session_source.{publish_manager_sessions,
-    live_selected, select_live_session}
+    live_selected, select_live_session, live_sessions, declare_agent_provider,
+    clear_pane_output, publish_fleet_sessions, export_fleet_snapshot}
+use app.io.mod.{env_get}
+use app.llm_caret.workbench.fleet_transport.{fleet_is_remote, fleet_send}
 use app.llm_caret.workbench.session_contract.{new_session_id}
-use app.llm_caret.workbench.pane_source.{refresh_active_pane}
+use app.llm_caret.workbench.pane_source.{refresh_bound_pane}
 use os.apps.smux.api.{smux_create_session, smux_list_windows, smux_list_panes,
     smux_split_pane, smux_pane_spawn, smux_pane_alive, smux_send_command,
     smux_close_pane}
@@ -166,6 +169,9 @@ pub fn launch_pane_team(manager_id: text, requests: [AgentLaunchRequest],
                         agents.push(PaneAgent(agent_id: aid, pane_id: pane_id,
                             pid: -1, status: "error", reason: "spawn_failed"))
                     else:
+                        # The pane's child IS this provider's agent: declare the
+                        # real provider so the roster never shows a guess.
+                        declare_agent_provider(aid, plan.provider)
                         agents.push(PaneAgent(agent_id: aid, pane_id: pane_id,
                             pid: spawned.unwrap(), status: "started",
                             reason: "pane_child_spawned"))
@@ -258,6 +264,9 @@ pub fn pid_for_agent(team: PaneTeam, agent_id: text) -> i64:
 # that agent. A pane with no child is a typed error inside smux, not a silent
 # local append.
 pub fn send_to_agent(team: PaneTeam, agent_id: text, line: text) -> bool:
+    # A peer host's agent has no local pane: forward over that host's transport.
+    if fleet_is_remote(agent_id):
+        return fleet_send(agent_id, line)
     val pane_id = pane_id_for_agent(team, agent_id)
     if pane_id == "":
         return false
@@ -268,6 +277,11 @@ pub fn send_to_agent(team: PaneTeam, agent_id: text, line: text) -> bool:
 # `caret_gui_html()` and `render_live_workbench` show real agents.
 pub fn publish_pane_team(team: PaneTeam) -> bool:
     publish_manager_sessions(team.manager)
+    # Peer hosts' rows join the roster; export this host's local rows for them.
+    publish_fleet_sessions()
+    val export_path = env_get("LLM_CARET_FLEET_EXPORT") ?? ""
+    if export_path != "":
+        export_fleet_snapshot(export_path)
     var selected = live_selected().value
     if selected == "" or selected == "none":
         if team.agents.len() > 0:
@@ -276,7 +290,21 @@ pub fn publish_pane_team(team: PaneTeam) -> bool:
     val pane_id = pane_id_for_agent(team, selected)
     if pane_id == "":
         return false
-    refresh_active_pane(team.session_id, team.window_id, pane_id, 20).ok
+    # Bind the pane to the selected session's CURRENT (id, generation). The
+    # pane's only identity smux reports is its child pid, and the session
+    # generation is bumped exactly when that pid changes (session_source ledger),
+    # so the pane generation is the session generation. A selected agent whose
+    # child never spawned has no pane identity: leave the terminal Unbound
+    # (cleared output) rather than invent a generation.
+    if pid_for_agent(team, selected) <= 0:
+        clear_pane_output()
+        return false
+    for v in live_sessions():
+        if v.id.value == selected:
+            return refresh_bound_pane(v.id, team.session_id, team.window_id,
+                pane_id, 20, v.id.generation).ok
+    clear_pane_output()
+    false
 
 export PaneAgent, PaneTeam
 export launch_pane_team, poll_pane_team, stop_pane_team

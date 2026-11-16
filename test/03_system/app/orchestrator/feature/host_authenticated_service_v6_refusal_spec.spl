@@ -1,0 +1,40 @@
+# AUTHORED_NOT_RUN. Actual dispatcher early refusal only; no fake native owner.
+use app.orchestrator.command.orchestrator_command_v1
+use app.orchestrator.host_authenticated_service_v6.host_authenticated_service_shape_v6
+use std.spec.{describe, it, expect, step}
+
+describe "Explicit authenticated Host service command refuses before opening owners":
+    it "routes the explicit V6 command and rejects its missing installed inputs":
+        step("Call the actual command dispatcher without opening a Host or credential")
+        val reply = orchestrator_command_v1(["host-authenticated-service"])
+        expect(reply.exit_code).to_equal(2)
+        expect(reply.output.contains("host-authenticated-service-usage")).to_equal(true)
+        expect(reply.primary_service_recovery.is_none()).to_equal(true)
+
+    it "does not treat the legacy command as authenticated startup":
+        step("Keep the explicit mode shape separate from default V5")
+        expect(host_authenticated_service_shape_v6(["host-primary-service"])).to_equal("host-authenticated-service-usage")
+
+    it "rejects an unsupported installed backend through the existing factory shape":
+        step("Use the real installed configuration validator before any native startup")
+        val reply = orchestrator_command_v1(["host-authenticated-service", "unrecognized",
+            "anchor", "-", "-", "127.0.0.1:0", "setup.sdn", "a".repeat(64)])
+        expect(reply.exit_code).to_equal(2)
+        expect(reply.primary_service_recovery.is_none()).to_equal(true)
+        expect(reply.output.contains("host-authenticated-service")).to_equal(true)
+
+    it "rejects extra inputs without silently selecting another credential mode":
+        step("Refuse ambiguous arity before native setup and preserve an empty recovery carrier")
+        val reply = orchestrator_command_v1(["host-authenticated-service", "windows-docker",
+            "anchor", "-", "binding", "127.0.0.1:0", "setup.sdn", "a".repeat(64), "legacy"])
+        expect(reply.exit_code).to_equal(2)
+        expect(reply.output.contains("host-authenticated-service-usage")).to_equal(true)
+        expect(reply.primary_service_recovery.is_none()).to_equal(true)
+
+    it "exposes administrative setup only with an explicit target and no credential input":
+        step("Refuse missing and extra setup arguments before opening the protected store")
+        for args in [["host-auth-setup"], ["host-auth-setup", "setup.sdn", "legacy-secret"]]:
+            val reply = orchestrator_command_v1(args)
+            expect(reply.exit_code).to_equal(2)
+            expect(reply.output).to_equal("host-auth-setup-usage\n")
+            expect(reply.host_auth_setup_cleanup.is_none()).to_equal(true)

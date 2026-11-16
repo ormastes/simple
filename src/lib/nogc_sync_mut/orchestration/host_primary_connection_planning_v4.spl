@@ -1,0 +1,111 @@
+# Cooperative read-only connection planning. Inspection owns a real bounded
+# command continuation; no attach grant is fabricated to perform a read.
+use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
+use std.nogc_sync_mut.orchestration.host_windows_local_root_v3.HostWindowsLocalRootV3
+use std.nogc_sync_mut.orchestration.host_primary_connection_parent_v2.host_primary_connection_parent_v2
+use std.nogc_sync_mut.orchestration.host_parent_budget_v1.host_parent_budget_load_owned_v2
+use std.nogc_sync_mut.orchestration.host_service_enrollment_v2.host_service_enrollment_payload_digest_v2
+use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
+use std.common.contracts.container.execution_v2.ContainerExecutionRequestV2
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RUNTIME_STATUS_OK}
+use std.common.contracts.container.stream_v2.{ContainerOutputIdentityV2, ContainerOutputResourcesV2}
+use std.common.contracts.container.primary_connection_v2.ContainerPrimaryConnectionPlanV2
+use std.nogc_async_mut.container.execution_progress_v4.{ContainerExecutionProgressV4,
+    simple_container_inspection_begin_v4, simple_container_execution_step_v4}
+use std.nogc_async_mut.container.primary_connection_observed_v3.simple_container_primary_connection_plan_observed_v3
+use std.nogc_async_mut.container.providers.windows.docker_policy_codec_v1.windows_docker_policy_decode_v1
+
+pub class HostPrimaryConnectionPlanningV4:
+    parent_operation_id: text
+    helper_operation_id: text
+    budget_digest: text
+    binding_digest: text
+    resources: ContainerOutputResourcesV2
+    terminal_mode: text
+    progress: ContainerExecutionProgressV4?
+    error: text
+
+pub struct HostPrimaryConnectionPlanningTurnV4:
+    local: HostLocalRootV3
+    planning: HostPrimaryConnectionPlanningV4?
+    plan: ContainerPrimaryConnectionPlanV2?
+    error: text
+
+struct PlanningInputsV4:
+    execution: ContainerExecutionRequestV2
+    runtime: RuntimeIdentityV1
+    identity: ContainerOutputIdentityV2
+    installation_digest: text
+    journal_lease_digest: text
+    timeout_ms: i64
+
+fn inputs_v4(root: HostWindowsLocalRootV3, task: HostPrimaryConnectionPlanningV4) -> Result<PlanningInputsV4, text>:
+    if not root.ready_v3(): return Err("host-primary-startup-quarantine")
+    val metadata = root.current_v3()?
+    val retained = root
+    val refresh = fn() -> HostReservationAuthorizationContextV1: retained.context_v3()
+    val budget = host_parent_budget_load_owned_v2(root.capacity_v3(), root.scope_v3(), metadata.policy,
+        task.budget_digest, task.parent_operation_id, root.context_v3(), refresh)?
+    val parent = host_primary_connection_parent_v2(root, task.parent_operation_id)?
+    val policy = windows_docker_policy_decode_v1(metadata.engine_policy_bytes)?
+    val installation = host_service_enrollment_payload_digest_v2(root.binding_v3())?
+    val limits = budget.proof.budget
+    val identity = ContainerOutputIdentityV2(task.helper_operation_id, task.parent_operation_id,
+        limits.parent_operation_digest, limits.parent_assignment_digest, task.budget_digest, task.binding_digest)
+    Ok(PlanningInputsV4(parent.execution, parent.runtime, identity, installation,
+        root.capacity_v3().journal.lease_digest, policy.timeout_ms))
+
+fn complete_v4(root: HostWindowsLocalRootV3, task: HostPrimaryConnectionPlanningV4) -> HostPrimaryConnectionPlanningTurnV4:
+    var local = root
+    val inputs = inputs_v4(local, task)
+    if inputs.is_err(): return HostPrimaryConnectionPlanningTurnV4(HostLocalRootV3.Windows(local), nil, nil, inputs.unwrap_err())
+    val source = inputs.unwrap()
+    val planned = simple_container_primary_connection_plan_observed_v3(local.container_v3(), source.execution, source.runtime,
+        source.identity, task.resources, source.installation_digest, source.journal_lease_digest, task.terminal_mode, source.timeout_ms)
+    val saved = local.retain_v3(local.capacity_v3(), planned.owner)
+    if saved.is_err(): return HostPrimaryConnectionPlanningTurnV4(HostLocalRootV3.Windows(local), nil, nil, saved.unwrap_err())
+    HostPrimaryConnectionPlanningTurnV4(HostLocalRootV3.Windows(local), nil, planned.plan, planned.error)
+
+pub fn host_primary_connection_plan_begin_v4(local: HostLocalRootV3, parent_operation_id: text,
+        helper_operation_id: text, budget_digest: text, binding_digest: text,
+        resources: ContainerOutputResourcesV2, terminal_mode: text) -> HostPrimaryConnectionPlanningTurnV4:
+    var task = HostPrimaryConnectionPlanningV4(parent_operation_id, helper_operation_id, budget_digest,
+        binding_digest, resources, terminal_mode, nil, "")
+    match local:
+        case HostLocalRootV3.Windows(original):
+            var root = original
+            val inputs = inputs_v4(root, task)
+            if inputs.is_err(): return HostPrimaryConnectionPlanningTurnV4(local, nil, nil, inputs.unwrap_err())
+            val begun = simple_container_inspection_begin_v4(root.container_v3(), inputs.unwrap().execution)
+            task.progress = begun.progress
+            task.error = begun.error
+            val saved = root.retain_v3(root.capacity_v3(), begun.owner)
+            if saved.is_err(): task.error = saved.unwrap_err()
+            if task.progress != nil: return HostPrimaryConnectionPlanningTurnV4(HostLocalRootV3.Windows(root), Some(task), nil, task.error)
+            if task.error != "": return HostPrimaryConnectionPlanningTurnV4(HostLocalRootV3.Windows(root), nil, nil, task.error)
+            if begun.operation == nil or begun.operation.unwrap().status != RUNTIME_STATUS_OK:
+                return HostPrimaryConnectionPlanningTurnV4(HostLocalRootV3.Windows(root), nil, nil, "host-primary-inspection-failed")
+            complete_v4(root, task)
+        case _: HostPrimaryConnectionPlanningTurnV4(local, nil, nil, "host-primary-connection-provider-unsupported")
+
+pub fn host_primary_connection_plan_step_v4(local: HostLocalRootV3, original: HostPrimaryConnectionPlanningV4,
+        cancel: bool = false) -> HostPrimaryConnectionPlanningTurnV4:
+    var task = original
+    match local:
+        case HostLocalRootV3.Windows(original_root):
+            var root = original_root
+            if task.progress == nil: return HostPrimaryConnectionPlanningTurnV4(local, nil, nil, "host-primary-inspection-progress-required")
+            if cancel and task.error == "": task.error = "host-primary-inspection-cancelled"
+            val current = root.current_v3()
+            if current.is_err() and task.error == "": task.error = current.unwrap_err()
+            val next = simple_container_execution_step_v4(root.container_v3(), task.progress.unwrap(), task.error != "")
+            task.progress = next.progress
+            if next.error != "" and task.error == "": task.error = next.error
+            val saved = root.retain_v3(root.capacity_v3(), next.owner)
+            if saved.is_err() and task.error == "": task.error = saved.unwrap_err()
+            if task.progress != nil: return HostPrimaryConnectionPlanningTurnV4(HostLocalRootV3.Windows(root), Some(task), nil, task.error)
+            if task.error != "": return HostPrimaryConnectionPlanningTurnV4(HostLocalRootV3.Windows(root), nil, nil, task.error)
+            if next.operation == nil or next.operation.unwrap().status != RUNTIME_STATUS_OK:
+                return HostPrimaryConnectionPlanningTurnV4(HostLocalRootV3.Windows(root), nil, nil, "host-primary-inspection-failed")
+            complete_v4(root, task)
+        case _: HostPrimaryConnectionPlanningTurnV4(local, Some(task), nil, "host-primary-inspection-owner-changed")

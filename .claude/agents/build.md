@@ -88,6 +88,14 @@ bin/simple test --only-slow              # Slow tests only
 | `simple` | `bin/simple` | CLI entry point |
 | `simple` | `bin/release/simple` | Release runtime (33MB) |
 
+## Cross-Compile
+
+Status, recipe, and target matrix (verified/unverified tagged):
+`doc/07_guide/infra/toolchain/cross_compile_status_2026-11-15.md`. Use the
+self-hosted phase-2 builder with `SIMPLE_BUILD_MEMORY_RESERVE_BYTES=2147483648`;
+after a seed rebuild add `--invalidate-cache=stage2`. No lint or test-runner
+cross artifact exists yet; landed fixes are verification-pending.
+
 ## See Also
 
 - `/release` - Full release guide with rollback procedures

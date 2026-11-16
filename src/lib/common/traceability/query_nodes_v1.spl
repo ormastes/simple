@@ -1,7 +1,8 @@
 # Typed node pages over the canonical graph. Existing one-hop queries are unchanged.
 # @req REQ-TRC-021 REQ-TRC-023
 use std.common.traceability.model.*
-use std.common.traceability.schema.{trace_id_valid}
+use std.common.traceability.trace_ids_v1.{TraceResultCountV1, TraceCursorV1, TracePageCompletenessV1}
+use std.common.traceability.schema.{trace_entity_id_parse_v1}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.sdn.value.{SdnValue}
 use std.common.sdn.encode.{sdn_encode_canonical}
@@ -33,10 +34,10 @@ pub fn trace_node_query_validate_v1(query: TraceNodeQueryV1) -> Result<bool, tex
         return Err("TRACE-QUERY-INVALID: limit must be between 1 and 200")
     if query.id_prefix.len() > 1024 or query.cursor.len() > 256 or query.visibility_context == "":
         return Err("TRACE-QUERY-INVALID: query field exceeds its bound or lacks visibility context")
-    if query.id_prefix != "" and not trace_id_valid(query.id_prefix):
+    if query.id_prefix != "" and trace_entity_id_parse_v1(query.id_prefix).is_none():
         return Err("TRACE-QUERY-INVALID: prefix must be a canonical identity prefix")
     if query.operation == "show":
-        if not trace_id_valid(query.selected_id) or query.id_prefix != "" or query.cursor != "":
+        if trace_entity_id_parse_v1(query.selected_id).is_none() or query.id_prefix != "" or query.cursor != "":
             return Err("TRACE-QUERY-INVALID: show needs one identity and accepts no prefix or cursor")
     elif query.selected_id != "":
         return Err("TRACE-QUERY-INVALID: list cannot select one identity")
@@ -64,7 +65,7 @@ pub fn query_trace_nodes_v1(graph: TraceGraph, query: TraceNodeQueryV1) -> Resul
     var by_id: Dict<text, TraceNode> = {}
     var ids: [text] = []
     for node in graph.nodes:
-        if not trace_id_valid(node.id) or by_id.contains_key(node.id):
+        if trace_entity_id_parse_v1(node.id).is_none() or by_id.contains_key(node.id):
             return Err("TRACE-QUERY-INVALID: invalid or duplicate canonical identity")
         by_id[node.id] = node
         if node.kind == kind and node.id.starts_with(query.id_prefix):
@@ -95,4 +96,4 @@ pub fn query_trace_nodes_v1(graph: TraceGraph, query: TraceNodeQueryV1) -> Resul
     for index in offset..end: nodes.push(by_id[ids[index]])
     val next = if end < ids.len(): prefix + end.to_text() else: ""
     Ok(TraceQueryResult(snapshot_id: graph.subject.snapshot_id, nodes: nodes, edges: [],
-        total_count: ids.len(), next_cursor: next, complete: next == "", diagnostics: graph.diagnostics))
+        total_count: TraceResultCountV1(value: ids.len()), next_cursor: TraceCursorV1(value: next), complete: (if next == "": TracePageCompletenessV1.Complete else: TracePageCompletenessV1.Partial), diagnostics: graph.diagnostics))

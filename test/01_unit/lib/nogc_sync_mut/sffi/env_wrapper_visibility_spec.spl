@@ -1,0 +1,30 @@
+# @cover src/lib/nogc_sync_mut/sffi/env.spl 30%
+"""
+# Env wrappers are importable by the modules that use them
+
+## Overview
+
+`std.sys.pty_shell` reads `SIMPLE_PTY_SHELL` / `SIMPLE_BINARY` and the cwd
+through `std.nogc_sync_mut.sffi.env`. Those wrappers were private, so the
+first call that resolved the default PTY shell (every smux `new`) failed with
+`semantic: private fn env_get_unchecked ... is not visible` and the smux owner
+dropped the connection ("empty smux response").
+
+Bug: doc/08_tracking/bug/smux_owner_new_fails_private_env_wrapper_2026-11-14.md
+"""
+use std.spec.{describe, it, expect, step}
+use std.sys.pty_shell.{pty_default_shell_v1, pty_shs_hosted_command_v1}
+use std.nogc_sync_mut.sffi.env.{env_get_unchecked, env_cwd_raw, env_set_cwd_raw}
+
+describe "env wrapper visibility":
+    it "resolves the default PTY shell, which reads env and cwd":
+        step("Resolve the host default shell the smux owner spawns for `new`")
+        expect(pty_default_shell_v1() != "").to_equal(true)
+        expect(pty_shs_hosted_command_v1() != "").to_equal(true)
+
+    it "lets product code import every env wrapper the tree imports":
+        step("Read the cwd, set it to itself, and read an always-set variable")
+        val here = env_cwd_raw()
+        expect(here != "").to_equal(true)
+        expect(env_set_cwd_raw(here)).to_equal(true)
+        expect((env_get_unchecked("PATH") ?? "") != "").to_equal(true)
