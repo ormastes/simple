@@ -1,0 +1,73 @@
+# Observation DATA only. These values never authorize admission or release.
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_host_scope_bytes_v2, container_scope_fence_id_v2}
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.build_manager.contracts.{builder_digest_valid_v1, builder_identifier_valid_v1}
+
+pub enum ContainerStatsCounterV1:
+    Observed(value: i64)
+    Unsupported(code: text)
+
+pub struct ContainerStatsIoCountersV1:
+    read_bytes: i64
+    write_bytes: i64
+    read_operations: i64
+    write_operations: i64
+    device_count: i64
+
+pub enum ContainerStatsIoV1:
+    Observed(counters: ContainerStatsIoCountersV1)
+    Unsupported(code: text)
+
+pub struct ContainerExecutionStatsObservationV1:
+    scope: ContainerHostScopeV2
+    runtime: RuntimeIdentityV1
+    request_digest: text
+    source: text
+    subject_identity_digest: text
+    sample_started_monotonic_ns: i64
+    sample_finished_monotonic_ns: i64
+    cpu_usage_usec: ContainerStatsCounterV1
+    memory_current_bytes: ContainerStatsCounterV1
+    pids_current: ContainerStatsCounterV1
+    io: ContainerStatsIoV1
+
+pub fn container_stats_counter_validate_v1(counter: ContainerStatsCounterV1) -> Result<(), text>:
+    match counter:
+        case ContainerStatsCounterV1.Observed(value):
+            if value < 0: return Err("container-stats-counter-negative")
+        case ContainerStatsCounterV1.Unsupported(code):
+            if code != "linux-cgroup2-counter-not-exposed" and code != "linux-cgroup2-usage-not-exposed":
+                return Err("container-stats-unsupported-code")
+    Ok(())
+
+pub fn container_stats_io_validate_v1(io: ContainerStatsIoV1) -> Result<(), text>:
+    match io:
+        case ContainerStatsIoV1.Observed(value):
+            if (value.read_bytes < 0 or value.write_bytes < 0 or value.read_operations < 0 or
+                    value.write_operations < 0 or value.device_count < 0 or value.device_count > 128):
+                return Err("container-stats-io-range")
+            if value.device_count == 0 and (value.read_bytes != 0 or value.write_bytes != 0 or
+                    value.read_operations != 0 or value.write_operations != 0):
+                return Err("container-stats-io-empty-inconsistent")
+        case ContainerStatsIoV1.Unsupported(code):
+            if code != "linux-cgroup2-io-not-exposed": return Err("container-stats-unsupported-code")
+    Ok(())
+
+# Shape/integrity validation only; callers still need the genuine owner producer.
+pub fn container_execution_stats_observation_validate_v1(value: ContainerExecutionStatsObservationV1) -> Result<(), text>:
+    val scope = container_host_scope_bytes_v2(value.scope)?
+    if (not builder_digest_valid_v1(value.request_digest) or not builder_digest_valid_v1(value.subject_identity_digest) or
+            value.source != "linux-cgroup2-original-container-root-and-descendants-v1"):
+        return Err("container-stats-observation-binding")
+    val runtime = value.runtime
+    if (runtime.engine != "podman" or not builder_digest_valid_v1(runtime.native_id) or
+            not builder_identifier_valid_v1(runtime.pod_uid) or not builder_identifier_valid_v1(runtime.operation_id) or
+            runtime.attempt < 1 or runtime.provider_generation != value.scope.provider_generation or
+            runtime.node_boot_id != container_scope_fence_id_v2(value.scope)?):
+        return Err("container-stats-observation-runtime")
+    if value.sample_started_monotonic_ns <= 0 or value.sample_finished_monotonic_ns < value.sample_started_monotonic_ns:
+        return Err("container-stats-observation-clock")
+    container_stats_counter_validate_v1(value.cpu_usage_usec)?
+    container_stats_counter_validate_v1(value.memory_current_bytes)?
+    container_stats_counter_validate_v1(value.pids_current)?
+    container_stats_io_validate_v1(value.io)

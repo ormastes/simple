@@ -1,0 +1,292 @@
+# Actual current-process principal only; never a daemon client's identity.
+# SOURCE_AUTHORED_NOT_RUN. Direct Win64 SDK/NT imports, no new rt export.
+# The NT boot-environment ABI is strict/unsupported-refusing and unqualified.
+use std.common.contracts.container.local_principal_v1.MachineLocalPrincipalSnapshotV1
+
+pub class WindowsLocalProcessPrincipalV1:
+    slot: i64
+    generation: i64
+
+    pub fn current_v1() -> Result<MachineLocalPrincipalSnapshotV1, text>:
+        @when(os="windows"):
+        unsafe(capabilities: [ffi, raw_ptr]): local_principal_current_v1(self.slot, self.generation)
+        @else:
+        Err("windows-local-process-principal-host-unsupported")
+        @end
+
+    pub fn close_v1() -> text:
+        @when(os="windows"):
+        unsafe(capabilities: [ffi, raw_ptr]): local_principal_close_v1(self.slot, self.generation)
+        @else:
+        "stale"
+        @end
+
+pub enum WindowsLocalProcessPrincipalOpenV1:
+    Rejected(reason: text)
+    CleanupRequired(owner: WindowsLocalProcessPrincipalV1, reason: text)
+    Ready(owner: WindowsLocalProcessPrincipalV1)
+
+pub fn windows_local_process_principal_open_v1() -> WindowsLocalProcessPrincipalOpenV1:
+    @when(os="windows"):
+    unsafe(capabilities: [ffi, raw_ptr]): local_principal_open_v1()
+    @else:
+    WindowsLocalProcessPrincipalOpenV1.Rejected("windows-local-process-principal-host-unsupported")
+    @end
+
+@when(os="windows"):
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree, CloseHandle, GetLastError}
+use std.nogc_sync_mut.io.windows_job_stream_abi_v2.{GetCurrentProcess, rt_windows_pty_owner_thread_guard_v1}
+use std.nogc_sync_mut.io.windows_pty_abi.GetCurrentProcessId
+use std.nogc_sync_mut.io.windows_machine_policy_abi_v1.{GetCurrentThread, OpenThreadToken}
+use std.nogc_sync_mut.io.windows_engine_pipe_abi_v1.IsValidSid
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u32, volatile_read_u64,
+    volatile_write_u32, volatile_write_u64}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+# Microsoft TOKEN_STATISTICS, TOKEN_USER, GetProcessTimes contracts; native boot
+# layout/class follows primary phnt/ntexapi.h, not a registry boot counter:
+# https://learn.microsoft.com/windows/win32/api/winnt/ns-winnt-token_statistics
+# https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes
+# https://github.com/winsiderss/phnt/blob/master/ntexapi.h
+@unsafe(reason: "query the actual current process primary token; caller identity arguments are impossible", capabilities: [ffi, raw_ptr])
+extern fn OpenProcessToken(process: i64, access: u32, token_out: i64) -> i32
+@unsafe(reason: "bounded TOKEN_USER and TOKEN_STATISTICS into retained private owner arena", capabilities: [ffi, raw_ptr])
+extern fn GetTokenInformation(token: i64, kind: i32, buffer: i64, length: u32, returned: i64) -> i32
+@unsafe(reason: "observe actual current thread identity, never accept a caller thread ID", capabilities: [ffi])
+extern fn GetCurrentThreadId() -> u32
+@unsafe(reason: "actual current process creation FILETIME into retained fixed offsets", capabilities: [ffi, raw_ptr])
+extern fn GetProcessTimes(process: i64, created: i64, exited: i64, kernel: i64, user: i64) -> i32
+@unsafe(reason: "strict Win64 SystemBootEnvironmentInformation query; unsupported/nil boot identifier refuses", capabilities: [ffi, raw_ptr])
+extern fn NtQuerySystemInformation(kind: i32, buffer: i64, length: u32, returned: i64) -> i32
+@unsafe(reason: "existing runtime mode gate refuses unsupported interpreted native-pointer calls", capabilities: [ffi])
+extern fn rt_is_interpreter_runtime() -> bool
+@unsafe(reason: "existing runtime mode gate refuses unsupported boxed-JIT native-pointer calls", capabilities: [ffi])
+extern fn rt_is_jit_runtime() -> bool
+
+# Arena1024: HANDLE-out0; TOKEN_USER32..287/length288;
+# TOKEN_STATISTICS304..359/length360; process FILETIMEs368..399;
+# boot environment416..447/length448. No caller pointer is stored.
+struct LocalProcessPrincipalStateV1:
+    generation: i64
+    heap: i64
+    process_id: i64
+    thread_id: i64
+    arena: i64 = 0
+    token: i64 = 0
+    temporary_token: i64 = 0
+    thread_token: i64 = 0
+    baseline_identity: text = ""
+    ready: bool = false
+    closing: bool = false
+    closed: bool = false
+
+var local_principal_slots_v1: [LocalProcessPrincipalStateV1] = []
+var local_principal_active_v1: i64 = 0
+
+@unsafe(reason: "all native ownership and registry accesses remain on actual canonical native thread", capabilities: [ffi])
+fn local_principal_entry_v1() -> Result<(), text>:
+    if rt_is_interpreter_runtime() or rt_is_jit_runtime():
+        return Err("windows-local-process-principal-native-required")
+    if rt_windows_pty_owner_thread_guard_v1() != 1:
+        return Err("windows-local-process-principal-canonical-thread-required")
+    Ok(())
+
+fn local_principal_slot_v1(slot: i64, generation: i64) -> Result<LocalProcessPrincipalStateV1, text>:
+    if slot < 0 or slot >= local_principal_slots_v1.len(): return Err("windows-local-process-principal-stale")
+    val state = local_principal_slots_v1[slot]
+    if state.generation != generation or state.closed: return Err("windows-local-process-principal-stale")
+    Ok(state)
+
+fn local_principal_quarantine_v1(slot: i64, reason: text) -> text:
+    var state = local_principal_slots_v1[slot]
+    state.ready = false
+    state.closing = true
+    local_principal_slots_v1[slot] = state
+    reason
+
+@unsafe(reason: "retain any thread-token output before rejecting impersonation; never revert or change security context", capabilities: [ffi, raw_ptr])
+fn local_principal_process_context_v1(slot: i64) -> Result<(), text>:
+    var state = local_principal_slots_v1[slot]
+    if state.thread_token != 0: return Err("windows-local-process-principal-thread-token-cleanup")
+    if (GetCurrentProcessId() as i64) != state.process_id or (GetCurrentThreadId() as i64) != state.thread_id:
+        return Err("windows-local-process-principal-process-thread-changed")
+    volatile_write_u64(state.arena, 0)
+    val status = OpenThreadToken(GetCurrentThread(), 8u32, 1, state.arena)
+    val error = GetLastError()
+    val observed_token = volatile_read_u64(state.arena)
+    state.thread_token = if observed_token == -1: 0 else: observed_token
+    local_principal_slots_v1[slot] = state
+    if observed_token == -1: return Err("windows-local-process-principal-thread-token-invalid")
+    if status != 0 or state.thread_token != 0:
+        return Err("windows-local-process-principal-impersonation-refused")
+    if error != 1008u32: return Err("windows-local-process-principal-thread-token-observation-failed")
+    Ok(())
+
+@unsafe(reason: "validate SID address/count entirely inside returned TOKEN_USER storage before reading bounded native fields", capabilities: [ffi, raw_ptr])
+fn local_principal_sid_v1(arena: i64, returned: i64) -> Result<text, text>:
+    if returned < 16 or returned > 256: return Err("windows-local-process-principal-token-user-size")
+    val start = arena + 32
+    val sid = volatile_read_u64(start)
+    if sid < start + 16 or sid > start + returned - 8:
+        return Err("windows-local-process-principal-token-user-sid-bound")
+    val count = volatile_read_u8(sid + 1) as i64
+    if volatile_read_u8(sid) != 1 or count > 15 or sid + 8 + count * 4 > start + returned:
+        return Err("windows-local-process-principal-token-user-sid-layout")
+    if IsValidSid(sid) == 0: return Err("windows-local-process-principal-token-user-sid-invalid")
+    var authority: i64 = 0
+    for index in 0..6: authority = authority * 256 + volatile_read_u8(sid + 2 + index) as i64
+    var principal = "windows:S-1-{authority}"
+    for index in 0..count:
+        val subauthority = volatile_read_u32(sid + 8 + index * 4) as i64
+        principal = principal + "-{subauthority}"
+    Ok(principal)
+
+@unsafe(reason: "sample actual retained token statistics, process creation time and kernel boot namespace into fixed arena", capabilities: [ffi, raw_ptr])
+fn local_principal_snapshot_v1(slot: i64, token: i64) -> Result<MachineLocalPrincipalSnapshotV1, text>:
+    val state = local_principal_slots_v1[slot]
+    val arena = state.arena
+    for index in 0..53: volatile_write_u64(arena + 32 + index * 8, 0)
+    if GetTokenInformation(token, 1, arena + 32, 256u32, arena + 288) == 0:
+        return Err("windows-local-process-principal-token-user-query")
+    val principal = local_principal_sid_v1(arena, volatile_read_u32(arena + 288) as i64)?
+    if GetTokenInformation(token, 10, arena + 304, 56u32, arena + 360) == 0:
+        return Err("windows-local-process-principal-token-statistics-query")
+    if volatile_read_u32(arena + 360) != 56 or volatile_read_u32(arena + 328) != 1:
+        return Err("windows-local-process-principal-token-statistics-layout")
+    if GetProcessTimes(GetCurrentProcess(), arena + 368, arena + 376, arena + 384, arena + 392) == 0:
+        return Err("windows-local-process-principal-process-creation-query")
+    val created = volatile_read_u64(arena + 368)
+    if created <= 0: return Err("windows-local-process-principal-process-creation-invalid")
+    if NtQuerySystemInformation(90, arena + 416, 32u32, arena + 448) != 0 or volatile_read_u32(arena + 448) != 32:
+        return Err("windows-local-process-principal-boot-namespace-unavailable")
+    val digits = "0123456789abcdef"
+    var boot = ""
+    var nonzero = false
+    for index in 0..16:
+        val byte = volatile_read_u8(arena + 416 + index) as i64
+        if byte != 0: nonzero = true
+        boot = boot + digits.substring(byte / 16, byte / 16 + 1) + digits.substring(byte % 16, byte % 16 + 1)
+    if not nonzero: return Err("windows-local-process-principal-boot-namespace-invalid")
+    val token_id = "{volatile_read_u32(arena + 308)}:{volatile_read_u32(arena + 304)}"
+    val authentication = "{volatile_read_u32(arena + 316)}:{volatile_read_u32(arena + 312)}"
+    val modified = "{volatile_read_u32(arena + 356)}:{volatile_read_u32(arena + 352)}"
+    val namespace_id = "windows-boot:{boot}/logon:{authentication}"
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("local-process-principal"),
+        "platform": SdnValue.String("windows"), "principalId": SdnValue.String(principal),
+        "processId": SdnValue.Int(state.process_id), "threadId": SdnValue.Int(state.thread_id),
+        "processCreated": SdnValue.Int(created), "tokenId": SdnValue.String(token_id),
+        "tokenModifiedId": SdnValue.String(modified), "namespace": SdnValue.String(namespace_id),
+        "generation": SdnValue.Int(state.generation)}
+    Ok(MachineLocalPrincipalSnapshotV1(platform: "windows", principal_id: principal,
+        process_id: state.process_id, thread_id: state.thread_id, authority_namespace_id: namespace_id,
+        identity_digest: sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))), generation: state.generation))
+
+@unsafe(reason: "record actual current process token output before interpreting success; no borrowed raw HANDLE escape", capabilities: [ffi, raw_ptr])
+fn local_principal_open_token_v1(slot: i64, temporary: bool) -> Result<(), text>:
+    var state = local_principal_slots_v1[slot]
+    if temporary and state.temporary_token != 0: return Err("windows-local-process-principal-token-cleanup")
+    volatile_write_u64(state.arena, 0)
+    val status = OpenProcessToken(GetCurrentProcess(), 8u32, state.arena)
+    val token = volatile_read_u64(state.arena)
+    val retained = if token == -1: 0 else: token
+    if temporary: state.temporary_token = retained
+    else: state.token = retained
+    local_principal_slots_v1[slot] = state
+    if status == 0 or token == 0 or token == -1:
+        return Err("windows-local-process-principal-token-open")
+    Ok(())
+
+@unsafe(reason: "zero-argument actual process principal factory retaining every native cleanup obligation", capabilities: [ffi, raw_ptr])
+fn local_principal_open_v1() -> WindowsLocalProcessPrincipalOpenV1:
+    val entry = local_principal_entry_v1()
+    if entry.is_err(): return WindowsLocalProcessPrincipalOpenV1.Rejected(entry.unwrap_err())
+    if local_principal_slots_v1.len() >= 100000 or local_principal_active_v1 >= 32:
+        return WindowsLocalProcessPrincipalOpenV1.Rejected("windows-local-process-principal-owner-bound")
+    val heap = GetProcessHeap()
+    val pid = GetCurrentProcessId() as i64
+    val tid = GetCurrentThreadId() as i64
+    if heap == 0 or pid <= 0 or tid <= 0:
+        return WindowsLocalProcessPrincipalOpenV1.Rejected("windows-local-process-principal-context-unavailable")
+    val slot = local_principal_slots_v1.len()
+    var state = LocalProcessPrincipalStateV1(generation: slot + 1, heap: heap, process_id: pid, thread_id: tid)
+    local_principal_slots_v1.push(state)
+    local_principal_active_v1 = local_principal_active_v1 + 1
+    val owner = WindowsLocalProcessPrincipalV1(slot: slot, generation: state.generation)
+    state.arena = HeapAlloc(heap, 8u32, 1024u64)
+    local_principal_slots_v1[slot] = state
+    if state.arena == 0:
+        return WindowsLocalProcessPrincipalOpenV1.CleanupRequired(owner, local_principal_quarantine_v1(slot, "windows-local-process-principal-arena-allocation"))
+    val context = local_principal_process_context_v1(slot)
+    if context.is_err(): return WindowsLocalProcessPrincipalOpenV1.CleanupRequired(owner, local_principal_quarantine_v1(slot, context.unwrap_err()))
+    val opened = local_principal_open_token_v1(slot, false)
+    if opened.is_err(): return WindowsLocalProcessPrincipalOpenV1.CleanupRequired(owner, local_principal_quarantine_v1(slot, opened.unwrap_err()))
+    val snapshot = local_principal_snapshot_v1(slot, local_principal_slots_v1[slot].token)
+    if snapshot.is_err(): return WindowsLocalProcessPrincipalOpenV1.CleanupRequired(owner, local_principal_quarantine_v1(slot, snapshot.unwrap_err()))
+    state = local_principal_slots_v1[slot]
+    val initial = snapshot.unwrap()
+    state.baseline_identity = initial.identity_digest
+    state.ready = true
+    local_principal_slots_v1[slot] = state
+    val current = local_principal_current_v1(slot, state.generation)
+    if current.is_err(): return WindowsLocalProcessPrincipalOpenV1.CleanupRequired(owner, current.unwrap_err())
+    WindowsLocalProcessPrincipalOpenV1.Ready(owner)
+
+@unsafe(reason: "recheck actual unchanged current process token and retained token under same native owner/thread", capabilities: [ffi, raw_ptr])
+fn local_principal_current_v1(slot: i64, generation: i64) -> Result<MachineLocalPrincipalSnapshotV1, text>:
+    val entry = local_principal_entry_v1()?
+    val state = local_principal_slot_v1(slot, generation)?
+    if not state.ready or state.closing: return Err("windows-local-process-principal-not-current")
+    val context = local_principal_process_context_v1(slot)
+    if context.is_err(): return Err(local_principal_quarantine_v1(slot, context.unwrap_err()))
+    val retained = local_principal_snapshot_v1(slot, state.token)
+    if retained.is_err(): return Err(local_principal_quarantine_v1(slot, retained.unwrap_err()))
+    val opened = local_principal_open_token_v1(slot, true)
+    if opened.is_err(): return Err(local_principal_quarantine_v1(slot, opened.unwrap_err()))
+    var current = local_principal_slots_v1[slot]
+    val observed = local_principal_snapshot_v1(slot, current.temporary_token)
+    if CloseHandle(current.temporary_token) == 0:
+        return Err(local_principal_quarantine_v1(slot, "windows-local-process-principal-token-close-retained"))
+    current.temporary_token = 0
+    local_principal_slots_v1[slot] = current
+    if observed.is_err(): return Err(local_principal_quarantine_v1(slot, observed.unwrap_err()))
+    val retained_value = retained.unwrap()
+    val observed_value = observed.unwrap()
+    if retained_value.identity_digest != state.baseline_identity or observed_value.identity_digest != state.baseline_identity:
+        return Err(local_principal_quarantine_v1(slot, "windows-local-process-principal-identity-changed"))
+    val after = local_principal_process_context_v1(slot)
+    if after.is_err(): return Err(local_principal_quarantine_v1(slot, after.unwrap_err()))
+    Ok(observed_value)
+
+@unsafe(reason: "same-process same-thread retryable close clears native resource fields only after exact successful release", capabilities: [ffi, raw_ptr])
+fn local_principal_close_v1(slot: i64, generation: i64) -> text:
+    if local_principal_entry_v1().is_err(): return "retained"
+    val loaded = local_principal_slot_v1(slot, generation)
+    if loaded.is_err(): return "stale"
+    var state = loaded.unwrap()
+    if (GetCurrentProcessId() as i64) != state.process_id or (GetCurrentThreadId() as i64) != state.thread_id: return "retained"
+    state.ready = false
+    state.closing = true
+    local_principal_slots_v1[slot] = state
+    if state.temporary_token != 0:
+        if CloseHandle(state.temporary_token) == 0: return "retained"
+        state.temporary_token = 0
+        local_principal_slots_v1[slot] = state
+    if state.thread_token != 0:
+        if CloseHandle(state.thread_token) == 0: return "retained"
+        state.thread_token = 0
+        local_principal_slots_v1[slot] = state
+    if state.token != 0:
+        if CloseHandle(state.token) == 0: return "retained"
+        state.token = 0
+        local_principal_slots_v1[slot] = state
+    if state.arena != 0:
+        if HeapFree(state.heap, 0u32, state.arena) == 0: return "retained"
+        state.arena = 0
+        local_principal_slots_v1[slot] = state
+    state.closed = true
+    local_principal_slots_v1[slot] = state
+    local_principal_active_v1 = local_principal_active_v1 - 1
+    "released"
+@end

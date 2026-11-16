@@ -1,0 +1,50 @@
+# One host-facing command owner. Platform selection belongs to this IO facade;
+# applications never receive platform tags, process IDs, raw handles or keys.
+# step is a synchronous bounded-wait poll (10ms scheduling quantum), not the
+# underlying Windows cooperative zero-wait step. It never retries a launch.
+pub use std.nogc_sync_mut.io.stdin_command_contract_v1.{StdinCommandRequestV1, StdinCommandResultV1,
+    StdinCommandProfileReadTurnV1, stdin_command_digest_valid_v1, stdin_command_path_valid_v1,
+    stdin_command_store_root_valid_v1}
+@when(os="windows"):
+use std.nogc_sync_mut.io.stdin_command_windows_v1.{StdinCommandPlatformOwnerV1,
+    stdin_command_platform_begin_v1, stdin_command_platform_step_v1,
+    stdin_command_platform_profile_read_v1, stdin_command_platform_files_admit_v1,
+    stdin_command_platform_file_no_follow_v1}
+@else:
+use std.nogc_sync_mut.io.stdin_command_posix_v1.{StdinCommandPlatformOwnerV1,
+    stdin_command_platform_begin_v1, stdin_command_platform_step_v1,
+    stdin_command_platform_profile_read_v1, stdin_command_platform_files_admit_v1,
+    stdin_command_platform_file_no_follow_v1}
+@end
+
+pub class StdinCommandOwnerV1:
+    platform: StdinCommandPlatformOwnerV1
+
+pub struct StdinCommandTurnV1:
+    owner: Option<StdinCommandOwnerV1>
+    result: Option<StdinCommandResultV1>
+    error: text
+
+pub fn stdin_command_begin_v1(request: StdinCommandRequestV1) -> StdinCommandTurnV1:
+    val opened = stdin_command_platform_begin_v1(request)
+    var owner: Option<StdinCommandOwnerV1> = nil
+    if val actual = opened.owner: owner = Some(StdinCommandOwnerV1(platform: actual))
+    StdinCommandTurnV1(owner, opened.result, opened.error)
+
+pub fn stdin_command_step_v1(owner: StdinCommandOwnerV1, cancel: bool) -> StdinCommandTurnV1:
+    val turn = stdin_command_platform_step_v1(owner.platform, cancel)
+    # Same opaque wrapper aliases the canonical retained platform owner.
+    StdinCommandTurnV1(if turn.owner == nil: nil else: Some(owner), turn.result, turn.error)
+
+pub fn stdin_command_profile_read_v1(path: text) -> StdinCommandProfileReadTurnV1:
+    stdin_command_platform_profile_read_v1(path)
+
+pub fn stdin_command_files_admit_v1(program: text, private_path: text, public_path: text,
+        expected_digest: text, protected_store: bool) -> Result<(), text>:
+    stdin_command_platform_files_admit_v1(program, private_path, public_path, expected_digest, protected_store)
+
+pub fn stdin_command_file_no_follow_v1(path: text, maximum: i64) -> bool:
+    stdin_command_platform_file_no_follow_v1(path, maximum)
+
+export StdinCommandOwnerV1, StdinCommandTurnV1, stdin_command_begin_v1, stdin_command_step_v1
+export stdin_command_profile_read_v1, stdin_command_files_admit_v1, stdin_command_file_no_follow_v1

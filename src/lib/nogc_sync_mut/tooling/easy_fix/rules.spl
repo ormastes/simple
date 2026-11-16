@@ -31,7 +31,7 @@ use std.nogc_sync_mut.io_runtime.{env_get, time_now_unix_micros}
 
 use std.tooling.easy_fix.types.{EasyFix, FixConfidence, Replacement}
 use std.tooling.easy_fix.rules_helpers.{
-    LineContext, EasyFixSourceView, line_contexts, easy_fix_source_view,
+    LineContext, EasyFixSourceView, line_contexts, line_contexts_from_lines, easy_fix_source_view,
     _split_top_level_csv, _find_top_level_colon, _find_matching_paren_on_line,
     easy_fix_contains_plain_identifier, easy_fix_replace_plain_identifier,
     easy_fix_replace_interpolation_identifier,
@@ -70,6 +70,11 @@ struct DuplicateTypedArgSignature:
     has_decl_rewrite: bool
     can_rewrite_calls: bool
 
+struct IndexedDuplicateCallReplacement:
+    sig_index: i64
+    sequence: i64
+    replacement: Replacement
+
 struct ShortGrammarMethodRefCandidate:
     method: text
     end_offset: i64
@@ -88,13 +93,18 @@ struct ShortGrammarPlaceholderCandidate:
 # Confidence: Uncertain
 # ============================================================================
 
-fn check_unnamed_duplicate_typed_args(source: String, file: String) -> [EasyFix]:
-    var _rt = _ez_prof_now()
-    val signatures = _collect_duplicate_typed_arg_signatures(source: source)
-    _rt = _ez_prof_mark("dup_args:collect_signatures", _rt)
-    var fixes: [EasyFix] = []
+pub fn check_unnamed_duplicate_typed_args(source: String, file: String) -> [EasyFix]:
+    val lines = source.split("\n")
+    check_unnamed_duplicate_typed_args_with_view(file, lines, line_contexts_from_lines(lines))
 
-    for sig in signatures:
+pub fn check_unnamed_duplicate_typed_args_with_view(file: String, lines: [String], contexts: [LineContext]) -> [EasyFix]:
+    val signatures = _collect_duplicate_typed_arg_signatures_from_contexts(contexts)
+    val indexed_calls = _collect_indexed_call_replacements(lines, file, signatures)
+    var fixes: [EasyFix] = []
+    var call_cursor = 0
+
+    for sig_index in 0..signatures.len():
+        val sig = signatures[sig_index]
         var replacements: [Replacement] = []
 
         if sig.has_decl_rewrite:
@@ -107,10 +117,9 @@ fn check_unnamed_duplicate_typed_args(source: String, file: String) -> [EasyFix]
                 new_text: sig.new_params_text
             ))
 
-        if sig.can_rewrite_calls and _is_unique_call_target(signatures: signatures, sig: sig):
-            val call_replacements = _collect_call_replacements_for_signature(source: source, file: file, sig: sig)
-            for rep in call_replacements:
-                replacements.push(rep)
+        while call_cursor < indexed_calls.len() and indexed_calls[call_cursor].sig_index == sig_index:
+            replacements.push(indexed_calls[call_cursor].replacement)
+            call_cursor = call_cursor + 1
 
         if not replacements.is_empty():
             val description = if sig.has_decl_rewrite:
@@ -126,12 +135,101 @@ fn check_unnamed_duplicate_typed_args(source: String, file: String) -> [EasyFix]
                 fix.add_replacement(rep)
             fixes.push(fix)
 
-    _rt = _ez_prof_mark("dup_args:fix_loop", _rt)
     fixes
 
-fn _collect_duplicate_typed_arg_signatures(source: text) -> [DuplicateTypedArgSignature]:
+fn _duplicate_call_key(name: text, arg_count: i64) -> text:
+    "{name}#{arg_count}"
+
+fn _collect_indexed_call_replacements(
+    lines: [text], file: text, signatures: [DuplicateTypedArgSignature]
+) -> [IndexedDuplicateCallReplacement]:
+    var key_counts: Dict<text, i64> = {}
+    var eligible_names: Dict<text, bool> = {}
+    for sig in signatures:
+        if not sig.can_rewrite_calls:
+            continue
+        val key = _duplicate_call_key(sig.name, sig.arg_count)
+        key_counts[key] = (key_counts[key] ?? 0) + 1
+        eligible_names[sig.name] = true
+
+    var target_by_key: Dict<text, i64> = {}
+    for sig_index in 0..signatures.len():
+        val sig = signatures[sig_index]
+        if not sig.can_rewrite_calls:
+            continue
+        val key = _duplicate_call_key(sig.name, sig.arg_count)
+        if key_counts[key] == 1:
+            target_by_key[key] = sig_index
+
+    var indexed: [IndexedDuplicateCallReplacement] = []
+    var sequence = 0
+    for ctx in line_contexts_from_lines(lines):
+        val line = ctx.line
+        var i = 0
+        while i < line.len():
+            val ch = line.slice(i, i + 1)
+            if not _is_identifier_char(ch) or _is_digit_char(ch):
+                i = i + 1
+                continue
+            val token_start = i
+            i = i + 1
+            while i < line.len() and _is_identifier_char(line.slice(i, i + 1)):
+                i = i + 1
+            val name = line.slice(token_start, i)
+            if not eligible_names.has(name) or _is_definition_context(line, token_start):
+                continue
+            val open_paren = _find_call_open_paren(line, i)
+            if open_paren < 0:
+                continue
+            val close_paren = _find_matching_paren_on_line(line, open_paren)
+            if close_paren <= open_paren:
+                continue
+            val args = _split_top_level_csv(line.slice(open_paren + 1, close_paren))
+            if _args_have_named_entries(args):
+                i = close_paren + 1
+                continue
+            val key = _duplicate_call_key(name, args.len())
+            if not target_by_key.has(key):
+                i = close_paren + 1
+                continue
+            val sig_index = target_by_key[key]
+            val sig = signatures[sig_index]
+            var named_args: [text] = []
+            for arg_index in 0..args.len():
+                named_args.push("{sig.param_names[arg_index]}: {args[arg_index].trim()}")
+            indexed.push(IndexedDuplicateCallReplacement(
+                sig_index: sig_index,
+                sequence: sequence,
+                replacement: Replacement.create(
+                    file: file,
+                    start: ctx.byte_offset + open_paren + 1,
+                    end: ctx.byte_offset + close_paren,
+                    line: ctx.line_num,
+                    column: open_paren + 2,
+                    new_text: named_args.join(", ")
+                )
+            ))
+            sequence = sequence + 1
+            i = close_paren + 1
+    # Stable insertion sort by (sig_index, sequence). `array.sort_by` is a
+    # seed builtin that the interpreter engine does not implement
+    # ("method `sort_by` not found on type `array`"), so the rule failed on
+    # every unit that reached this point; see
+    # doc/08_tracking/bug/seed_interpreter_array_sort_by_missing_2026-11-04.md
+    var ordered: [IndexedDuplicateCallReplacement] = []
+    for item in indexed:
+        var pos = ordered.len()
+        while pos > 0:
+            val prev: IndexedDuplicateCallReplacement = ordered[pos - 1]
+            val after = prev.sig_index < item.sig_index or (prev.sig_index == item.sig_index and prev.sequence <= item.sequence)
+            if after: break
+            pos = pos - 1
+        ordered.insert(pos, item)
+    ordered
+
+fn _collect_duplicate_typed_arg_signatures_from_contexts(contexts: [LineContext]) -> [DuplicateTypedArgSignature]:
     var signatures: [DuplicateTypedArgSignature] = []
-    for raw_ctx in line_contexts(source):
+    for raw_ctx in contexts:
         val ctx: LineContext = raw_ctx
         val sig = _parse_duplicate_typed_arg_signature(ctx)
         match sig:
@@ -142,24 +240,24 @@ fn _collect_duplicate_typed_arg_signatures(source: text) -> [DuplicateTypedArgSi
     signatures
 
 fn _parse_duplicate_typed_arg_signature(ctx: LineContext) -> DuplicateTypedArgSignature?:
-    if not _dup_is_fn_sig(trimmed: ctx.trimmed):
+    if not _is_fn_sig(ctx.trimmed):
         return nil
     if not ctx.trimmed.contains("("):
         return nil
 
-    val paren_start = _short_find_text_from(line: ctx.trimmed, needle: "(", search_from: 0)
+    val paren_start = ctx.trimmed.find("(")
     if paren_start < 0:
         return nil
-    val paren_end = _find_matching_paren_on_line(text: ctx.trimmed, open_paren: paren_start)
+    val paren_end = _find_matching_paren_on_line(ctx.trimmed, paren_start)
     if paren_end <= paren_start:
         return nil
 
-    val name = _extract_sig_name(trimmed: ctx.trimmed, paren_start: paren_start)
+    val name = _extract_sig_name(ctx.trimmed, paren_start)
     if name == "":
         return nil
 
     val params_str = ctx.trimmed.slice(paren_start + 1, paren_end)
-    val params = _split_top_level_csv(text: params_str)
+    val params = _split_top_level_csv(params_str)
     if params.is_empty():
         return nil
 
@@ -172,7 +270,7 @@ fn _parse_duplicate_typed_arg_signature(ctx: LineContext) -> DuplicateTypedArgSi
         val trimmed_param = param.trim()
         if trimmed_param == "":
             continue
-        val colon_pos = _find_top_level_colon(text: trimmed_param)
+        val colon_pos = _find_top_level_colon(trimmed_param)
         if colon_pos >= 0:
             raw_names.push(trimmed_param.slice(0, colon_pos).trim())
             raw_types.push(trimmed_param.slice(colon_pos + 1).trim())
@@ -180,7 +278,7 @@ fn _parse_duplicate_typed_arg_signature(ctx: LineContext) -> DuplicateTypedArgSi
             raw_names.push("")
             raw_types.push(trimmed_param)
             has_unnamed = true
-        normalized_types.push(raw_types[raw_types.len() - 1].trim())
+        normalized_types.push(_normalize_type_name(raw_types[raw_types.len() - 1]))
 
     if raw_types.len() < 2:
         return nil
@@ -198,8 +296,7 @@ fn _parse_duplicate_typed_arg_signature(ctx: LineContext) -> DuplicateTypedArgSi
     var resolved_names: [text] = []
     var rewritten_params: [text] = []
     var generated_counts: Dict<text, i64> = {}
-    var i = 0
-    while i < raw_types.len():
+    for i in 0..raw_types.len():
         val param_name = raw_names[i]
         val param_type = raw_types[i]
         var resolved_name = param_name
@@ -207,24 +304,27 @@ fn _parse_duplicate_typed_arg_signature(ctx: LineContext) -> DuplicateTypedArgSi
             val key = normalized_types[i]
             val next_count = (generated_counts[key] ?? 0) + 1
             generated_counts[key] = next_count
-            resolved_name = "{_type_name_to_identifier(text: param_type)}{next_count}"
+            resolved_name = "{_type_name_to_identifier(param_type)}{next_count}"
         rewritten_params.push("{resolved_name}: {param_type}")
         resolved_names.push(resolved_name)
-        i = i + 1
 
     var stable_names = true
     var seen_names: Dict<text, bool> = {}
-    i = 0
-    while i < resolved_names.len():
-        if type_counts[normalized_types[i]] >= 2:
-            val name_i = resolved_names[i]
-            if name_i == "" or name_i == "_" or name_i.starts_with("_"):
+    for i in 0..resolved_names.len():
+        if type_counts[normalized_types[i]] < 2:
+            continue
+        val name_i = resolved_names[i]
+        if name_i == "" or name_i == "_" or name_i.starts_with("_"):
+            stable_names = false
+            continue
+        if seen_names.has(name_i):
+            stable_names = false
+        else:
+            seen_names[name_i] = true
+    if stable_names:
+        for name in resolved_names:
+            if name == "":
                 stable_names = false
-            elif seen_names.has(name_i):
-                stable_names = false
-            else:
-                seen_names[name_i] = true
-        i = i + 1
 
     Some(DuplicateTypedArgSignature(
         name: name,
@@ -239,73 +339,7 @@ fn _parse_duplicate_typed_arg_signature(ctx: LineContext) -> DuplicateTypedArgSi
         can_rewrite_calls: stable_names
     ))
 
-fn _collect_call_replacements_for_signature(source: text, file: text, sig: DuplicateTypedArgSignature) -> [Replacement]:
-    var replacements: [Replacement] = []
-
-    for raw_ctx in line_contexts(source):
-        val ctx: LineContext = raw_ctx
-        val line_replacements = _collect_line_call_replacements(line: ctx.line, file: file, sig: sig, line_num: ctx.line_num, byte_offset: ctx.byte_offset)
-        for rep in line_replacements:
-            replacements.push(rep)
-
-    replacements
-
-fn _collect_line_call_replacements(line: text, file: text, sig: DuplicateTypedArgSignature, line_num: i64, byte_offset: i64) -> [Replacement]:
-    var replacements: [Replacement] = []
-    # Fast reject: most lines never mention the signature name at all.
-    if not line.contains(sig.name):
-        return replacements
-    var i = 0
-    while i < line.len():
-        if not _matches_identifier_at(line: line, start: i, name: sig.name):
-            # Jump to the next occurrence natively instead of stepping one
-            # character at a time through an interpreted loop.
-            val _tail: text = line.slice(i + 1)
-            val rel = _tail.find(sig.name)
-            if rel < 0:
-                break
-            i = i + 1 + rel
-            continue
-        if _is_definition_context(line: line, token_start: i):
-            i = i + sig.name.len()
-            continue
-        val open_paren = _find_call_open_paren(line: line, start: i + sig.name.len())
-        if open_paren < 0:
-            i = i + sig.name.len()
-            continue
-        val close_paren = _find_matching_paren_on_line(text: line, open_paren: open_paren)
-        if close_paren <= open_paren:
-            i = i + sig.name.len()
-            continue
-        val args_str = line.slice(open_paren + 1, close_paren)
-        val args = _split_top_level_csv(text: args_str)
-        if args.len() != sig.arg_count or _args_have_named_entries(args: args):
-            i = close_paren + 1
-            continue
-        var named_args: [text] = []
-        var arg_index = 0
-        while arg_index < args.len():
-            named_args.push("{sig.param_names[arg_index]}: {args[arg_index].trim()}")
-            arg_index = arg_index + 1
-        replacements.push(Replacement.create(
-            file: file,
-            start: byte_offset + open_paren + 1,
-            end: byte_offset + close_paren,
-            line: line_num,
-            column: open_paren + 2,
-            new_text: named_args.join(", ")
-        ))
-        i = close_paren + 1
-    replacements
-
-fn _is_unique_call_target(signatures: [DuplicateTypedArgSignature], sig: DuplicateTypedArgSignature) -> bool:
-    var matches = 0
-    for candidate in signatures:
-        if candidate.can_rewrite_calls and candidate.name == sig.name and candidate.arg_count == sig.arg_count:
-            matches = matches + 1
-    matches == 1
-
-fn _dup_is_fn_sig(trimmed: text) -> bool:
+fn _is_fn_sig(trimmed: text) -> bool:
     (trimmed.starts_with("fn ")
         or trimmed.starts_with("me ")
         or trimmed.starts_with("static fn ")
@@ -319,6 +353,9 @@ fn _extract_sig_name(trimmed: text, paren_start: i64) -> text:
     if parts.is_empty():
         return ""
     parts[parts.len() - 1].trim()
+
+fn _normalize_type_name(text: text) -> text:
+    text.trim()
 
 fn _type_name_to_identifier(text: text) -> text:
     var out = ""
@@ -343,18 +380,6 @@ fn _type_name_to_identifier(text: text) -> text:
         return "arg_{out}"
     out
 
-fn _matches_identifier_at(line: text, start: i64, name: text) -> bool:
-    if start < 0 or start + name.len() > line.len():
-        return false
-    if line.slice(start, start + name.len()) != name:
-        return false
-    if start > 0 and _is_identifier_char(line.slice(start - 1, start)):
-        return false
-    val end = start + name.len()
-    if end < line.len() and _is_identifier_char(line.slice(end, end + 1)):
-        return false
-    true
-
 fn _is_definition_context(line: text, token_start: i64) -> bool:
     val before = line.slice(0, token_start).trim()
     before.ends_with("fn") or before.ends_with("me")
@@ -373,9 +398,10 @@ fn _find_call_open_paren(line: text, start: i64) -> i64:
 
 fn _args_have_named_entries(args: [text]) -> bool:
     for arg in args:
-        if _find_top_level_colon(text: arg.trim()) >= 0:
+        if _find_top_level_colon(arg.trim()) >= 0:
             return true
     false
+
 
 # ============================================================================
 # Rule 12: stub_impl (text-scanning)
@@ -488,9 +514,14 @@ fn _stub_is_trivial(body: text) -> bool:
 # ============================================================================
 
 pub fn easy_fix_check_short_grammar_refactor(source: text, file: text) -> [EasyFix]:
+    easy_fix_check_short_grammar_refactor_with_contexts(file: file, contexts: line_contexts(source))
+
+# Single owner of the short-grammar rule. The compiler fix registry calls this
+# with the per-line contexts it already built, so no rule re-splits the source.
+pub fn easy_fix_check_short_grammar_refactor_with_contexts(file: text, contexts: [LineContext]) -> [EasyFix]:
     var fixes: [EasyFix] = []
     var in_multiline_string = false
-    for raw_ctx in line_contexts(source):
+    for raw_ctx in contexts:
         val ctx: LineContext = raw_ctx
         val starts_inside = in_multiline_string
         val quote_count = _short_count_triple_quotes(line: ctx.line)
@@ -516,12 +547,19 @@ fn _short_count_triple_quotes(line: text) -> i64:
 
 fn _check_short_grammar_line(ctx: LineContext, file: text) -> [EasyFix]:
     var fixes: [EasyFix] = []
+    val lambda_starts = _short_lambda_starts(line: ctx.line)
+    val functional_update_start = if lambda_starts.len() > 0:
+        _short_first_functional_update_start(line: ctx.line)
+    else:
+        -1
+    var candidate_index = 0
     var search_from = 0
-    while search_from < ctx.line.len():
-        val lambda_start = _find_next_collection_lambda_start(line: ctx.line, search_from: search_from)
-        if lambda_start < 0:
-            return fixes
-        if _short_line_has_functional_update_before(line: ctx.line, pos: lambda_start):
+    while candidate_index < lambda_starts.len():
+        val lambda_start = lambda_starts[candidate_index]
+        candidate_index = candidate_index + 1
+        if lambda_start < search_from:
+            continue
+        if functional_update_start >= 0 and functional_update_start < lambda_start:
             search_from = lambda_start + 1
             continue
         if _short_line_has_pipe_parenthesized_lambda_before(line: ctx.line, pos: lambda_start):
@@ -614,37 +652,33 @@ fn _check_short_grammar_line(ctx: LineContext, file: text) -> [EasyFix]:
                                         search_from = lambda_start + 1
     fixes
 
-fn _find_next_collection_lambda_start(line: text, search_from: i64) -> i64:
-    val candidate = _short_find_text_from(line: line, needle: "\\", search_from: search_from)
-    if candidate < 0:
-        return -1
-    if _short_line_has_comment_before(line: line, pos: candidate) or _short_position_is_inside_string(line: line, pos: candidate):
-        return _find_next_collection_lambda_start(line: line, search_from: candidate + 1)
-    if candidate + 1 >= line.len():
-        return -1
-    val next = line.slice(candidate + 1, candidate + 2)
-    if _short_is_identifier_start(next) or next == "(":
-        return candidate
-    _find_next_collection_lambda_start(line: line, search_from: candidate + 1)
-
-fn _short_line_has_comment_before(line: text, pos: i64) -> bool:
+fn _short_lambda_starts(line: text) -> [i64]:
+    var result: [i64] = []
     var i = 0
-    while i < pos:
-        if line.slice(i, i + 1) == "#":
-            return true
+    var in_string = false
+    while i < line.len():
+        val ch = line.slice(i, i + 1)
+        if ch == "#":
+            return result
+        if ch == "\"":
+            in_string = not in_string
+        elif not in_string and ch == "\\" and i + 1 < line.len():
+            val next = line.slice(i + 1, i + 2)
+            if _short_is_identifier_start(next) or next == "(":
+                result.push(i)
         i = i + 1
-    false
+    result
 
-fn _short_line_has_functional_update_before(line: text, pos: i64) -> bool:
+fn _short_first_functional_update_start(line: text) -> i64:
     var search_from = 0
-    while search_from < pos:
+    while search_from < line.len():
         val arrow = _short_find_text_from(line: line, needle: "->", search_from: search_from)
-        if arrow < 0 or arrow >= pos:
-            return false
+        if arrow < 0:
+            return -1
         if not _short_arrow_is_function_type_return(line: line, arrow_pos: arrow):
-            return true
+            return arrow
         search_from = arrow + 2
-    false
+    -1
 
 fn _short_line_has_pipe_parenthesized_lambda_before(line: text, pos: i64) -> bool:
     var before = pos - 1
@@ -693,16 +727,6 @@ fn _short_arrow_is_function_type_return(line: text, arrow_pos: i64) -> bool:
                 return line.slice(name_start, name_end) == "fn"
         i = i - 1
     false
-
-fn _short_position_is_inside_string(line: text, pos: i64) -> bool:
-    var i = 0
-    var in_string = false
-    while i < pos:
-        val ch = line.slice(i, i + 1)
-        if ch == "\"":
-            in_string = not in_string
-        i = i + 1
-    in_string
 
 fn _parse_method_ref_candidate(line: text, lambda_start: i64) -> Option<ShortGrammarMethodRefCandidate>:
     val colon_abs = _short_find_text_from(line: line, needle: ":", search_from: lambda_start)

@@ -1,5 +1,22 @@
+"""CLI traceability-check command: registration and enforcement profile selection.
+
+Purpose: pin that the command stays routed to the Simple app, that
+`--profile=<name>` selects a typed enforcement profile, that the default
+(no flag) result is the unchanged worktree behaviour, and that a profile
+the producer cannot yet certify reports an incomplete evaluation (exit 2),
+never success.
+Audience: traceability maintainers and CI owners.
+"""
+use std.spec.*
+use std.spec.step
 use app.cli.dispatch.{find_command}
 use app.cli.dispatch.table.{get_command_table}
+use app.traceability.cli_options_v1.{trace_cli_options_parse_v1}
+use app.traceability.structural_report_v1.{trace_qualification_from_structural_result_v1,
+    trace_qualification_profile_unavailable_v1}
+use std.common.traceability.profile_v1.{TraceProfile, trace_profile_parse_v1, trace_profile_name_v1}
+use std.common.traceability.types_v1.{trace_qualification_codec_limits_v1}
+use std.common.traceability.qualification_v1.{trace_qualification_encode_v1, trace_qualification_decode_v1}
 
 describe "CLI traceability-check command":
     it "is registered in the dispatch table":
@@ -23,3 +40,56 @@ describe "CLI traceability-check command":
         if val entry = result:
             has_simple_impl = entry.has_simple_impl()
         expect(has_simple_impl).to_equal(true)
+
+describe "traceability-check enforcement profiles":
+    it "parses every plan profile name and round-trips its canonical name":
+        # @req TRACE-003
+        step("Parse each documented profile name")
+        for name in ["worktree", "editor", "commit", "push", "remote", "audit", "ci", "release"]:
+            val parsed = trace_profile_parse_v1(name)
+            expect(parsed.is_ok()).to_equal(true)
+            expect(trace_profile_name_v1(parsed.unwrap())).to_equal(name)
+        step("Select a profile through the command line in both option forms")
+        val equals_form = trace_cli_options_parse_v1(["--profile=commit"]).unwrap()
+        expect(equals_form.profile).to_equal(TraceProfile.Commit)
+        val spaced_form = trace_cli_options_parse_v1(["--profile", "ci"]).unwrap()
+        expect(spaced_form.profile).to_equal(TraceProfile.Ci)
+
+    it "rejects an unknown or empty profile as a usage error":
+        # @req TRACE-003
+        step("Reject a name outside the closed profile set")
+        val unknown = trace_cli_options_parse_v1(["--profile=nightly"])
+        expect(unknown.is_err()).to_equal(true)
+        expect(unknown.unwrap_err().contains("unsupported profile: nightly")).to_equal(true)
+        step("Reject a case variant and a missing value")
+        expect(trace_cli_options_parse_v1(["--profile=Commit"]).is_err()).to_equal(true)
+        expect(trace_cli_options_parse_v1(["--profile"]).is_err()).to_equal(true)
+        expect(trace_profile_parse_v1("").is_err()).to_equal(true)
+
+    it "keeps the default evaluation exactly the worktree structural result":
+        # @req TRACE-004
+        step("Parse with no profile flag")
+        val options = trace_cli_options_parse_v1([]).unwrap()
+        expect(options.profile).to_equal(TraceProfile.Worktree)
+        step("Evaluate a clean structural result")
+        val document = trace_qualification_from_structural_result_v1("worktree:sha256:abc", options, [])
+        expect(document.evaluation.profile).to_equal("worktree")
+        expect(document.snapshot.kind).to_equal("worktree")
+        expect(document.evaluation.complete).to_equal(true)
+        expect(document.evaluation.exit_code).to_equal(0)
+
+    it "reports a profile it cannot certify as incomplete with exit 2":
+        # @req TRACE-004
+        step("Request the commit profile, whose exact input is the Git index")
+        val options = trace_cli_options_parse_v1(["--profile=commit"]).unwrap()
+        val document = trace_qualification_profile_unavailable_v1("worktree:sha256:abc", options)
+        expect(document.evaluation.profile).to_equal("commit")
+        expect(document.evaluation.complete).to_equal(false)
+        expect(document.evaluation.exit_code).to_equal(2)
+        expect(document.evaluation.qualification).to_equal("incomplete")
+        expect(document.diagnostics[0].code).to_equal("TRC-PROFILE-UNAVAILABLE")
+        step("The document survives the strict codec round trip with the new profile name")
+        val encoded = trace_qualification_encode_v1(document, trace_qualification_codec_limits_v1()).unwrap()
+        val decoded = trace_qualification_decode_v1(encoded, trace_qualification_codec_limits_v1()).unwrap()
+        expect(decoded.evaluation.profile).to_equal("commit")
+        expect(decoded.evaluation.exit_code).to_equal(2)

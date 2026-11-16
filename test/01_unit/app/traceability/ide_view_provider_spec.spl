@@ -1,0 +1,90 @@
+"""Traceability IDE view provider: unflattened evidence badges, structural banner, query parity."""
+# @req REQ-CARET-TRC-001 REQ-CARET-TRC-002 REQ-CARET-TRC-003
+use std.spec.*
+use std.common.traceability.model.*
+use std.common.traceability.evidence_model.*
+use std.common.traceability.query_nodes_v1.{TraceNodeQueryV1, query_trace_nodes_v1}
+use app.traceability.ide_view_provider.*
+
+fn view_graph() -> TraceGraph:
+    TraceGraph(subject: SnapshotSubject(repository_id: "repo:test", snapshot_id: "snapshot:one",
+        kind: "git_commit", revision_id: "commit:one", tree_id: "tree:one", object_format: "sha256"),
+        input_manifest_id: "inputs:one", generation_id: "generation:one", complete: true,
+        nodes: [TraceNode(id: "req:b", kind: TraceNodeKind.Requirement, title: "Second"),
+            TraceNode(id: "req:a", kind: TraceNodeKind.Requirement, title: "First")],
+        test_definitions: [], claims: [], edges: [], edge_origins: [], origins: [], locators: [], diagnostics: [])
+
+fn req_query() -> TraceNodeQueryV1:
+    TraceNodeQueryV1(snapshot_id: "snapshot:one", operation: "list", kind: "requirements", limit: 10)
+
+fn qual_for(req: text, status: TraceQualificationStatus) -> TraceQualification:
+    TraceQualification(subject_id: "snapshot:one", run_id: "run:1", complete: true,
+        structural_covered: 1, structural_total: 1, execution_covered: 0, execution_total: 1,
+        results: [TraceObligationResult(obligation_id: "ob:" + req, requirement_id: req, criterion_id: "ac:1",
+            test_kind: TraceTestKind.Unit, status: status, selected_observation_ids: [], reasons: [])])
+
+describe "evidence badges (REQ-CARET-TRC-001)":
+    it "gives every badge kind a distinct label":
+        val labels = [badge_label(EvidenceBadge.Linked), badge_label(EvidenceBadge.Missing),
+            badge_label(EvidenceBadge.NotRun), badge_label(EvidenceBadge.Pass),
+            badge_label(EvidenceBadge.Fail), badge_label(EvidenceBadge.Stale),
+            badge_label(EvidenceBadge.Incomplete)]
+        var seen: Dict<text, bool> = {}
+        for l in labels:
+            seen[l] = true
+        expect(seen.len()).to_equal(7)
+
+    it "does not show unexecuted the same as passing":
+        val unrun = badge_for(TraceQualificationStatus.NotRun)
+        val passed = badge_for(TraceQualificationStatus.Verified)
+        expect(badge_label(unrun) == badge_label(passed)).to_be(false)
+        expect(badge_is_green(unrun)).to_be(false)
+        expect(badge_is_green(passed)).to_be(true)
+
+    it "is green only for executed and passing":
+        expect(badge_is_green(badge_for(TraceQualificationStatus.Failed))).to_be(false)
+        expect(badge_is_green(badge_for(TraceQualificationStatus.Stale))).to_be(false)
+        expect(badge_is_green(badge_for(TraceQualificationStatus.Incomplete))).to_be(false)
+        expect(badge_is_green(EvidenceBadge.Linked)).to_be(false)
+
+    it "rolls mixed children up to the weakest state":
+        val mixed = rollup([EvidenceBadge.Pass, EvidenceBadge.NotRun, EvidenceBadge.Pass])
+        expect(badge_label(mixed)).to_equal(badge_label(EvidenceBadge.NotRun))
+        val failing = rollup([EvidenceBadge.Pass, EvidenceBadge.Fail, EvidenceBadge.Linked])
+        expect(badge_is_green(failing)).to_be(false)
+        expect(badge_label(failing)).to_equal(badge_label(EvidenceBadge.Fail))
+        expect(badge_is_green(rollup([EvidenceBadge.Pass, EvidenceBadge.Pass]))).to_be(true)
+
+    it "never rolls an empty list up to green":
+        expect(badge_is_green(rollup([]))).to_be(false)
+
+describe "structural-only banner (REQ-CARET-TRC-002)":
+    it "carries the banner when no row has executed evidence":
+        val rows = view_rows(query_trace_nodes_v1(view_graph(), req_query()).unwrap(), [])
+        expect(view_banner(rows)).to_equal("Structural only — verification not available")
+
+    it "drops the banner once a row has executed evidence":
+        val result = query_trace_nodes_v1(view_graph(), req_query()).unwrap()
+        val rows = view_rows(result, [qual_for("req:a", TraceQualificationStatus.Verified)])
+        expect(view_banner(rows)).to_equal("")
+
+    it "keeps the banner when evidence is only not-run":
+        val result = query_trace_nodes_v1(view_graph(), req_query()).unwrap()
+        val rows = view_rows(result, [qual_for("req:a", TraceQualificationStatus.NotRun)])
+        expect(view_banner(rows)).to_equal("Structural only — verification not available")
+
+describe "query parity (REQ-CARET-TRC-003)":
+    it "shows the same ids, order and count as the trace query":
+        val result = query_trace_nodes_v1(view_graph(), req_query()).unwrap()
+        val rows = view_rows(result, [])
+        expect(rows.len()).to_equal(result.nodes.len())
+        var i = 0
+        while i < rows.len():
+            expect(rows[i].id).to_equal(result.nodes[i].id)
+            i = i + 1
+
+    it "view_query calls the existing query":
+        val rows = view_query(view_graph(), req_query(), []).unwrap()
+        val result = query_trace_nodes_v1(view_graph(), req_query()).unwrap()
+        expect(rows.len()).to_equal(result.nodes.len())
+        expect(rows[0].id).to_equal("req:a")

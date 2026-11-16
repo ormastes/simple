@@ -1,0 +1,99 @@
+# Administrative composition only. The retained library owners perform all
+# platform selection, signed authorization, network IO and journal transitions.
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use std.nogc_sync_mut.orchestration.controller_local_root_v3.*
+use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v3.*
+use std.common.contracts.orchestration.controller_dispatch_request_v2.controller_dispatch_request_decode_v2
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.sosix.time.{sosix_time_now_monotonic_ms, sosix_sleep_ms}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub fn controller_service_shape_v3(args: [text]) -> text:
+    if args.len() == 0: return "controller-service-usage"
+    val command = args[0]
+    if command == "controller-service-install":
+        if args.len() != 4: return "controller-service-install-usage"
+    elif ["controller-service-dispatch", "controller-service-resume"].contains(command):
+        if args.len() != 5: return "controller-service-dispatch-usage"
+    elif ["controller-service-inspect", "controller-service-progress", "controller-service-cancel"].contains(command):
+        if args.len() != 4: return "controller-service-control-usage"
+    elif ["controller-service-status", "controller-service-stop"].contains(command):
+        if args.len() != 3: return "controller-service-status-usage"
+    else: return "controller-service-command-unsupported"
+    for value in args:
+        if value == "" or value.contains("\0") or value.contains("\n") or value.contains("\r"):
+            return "controller-service-argument"
+    if command != "controller-service-install":
+        if not builder_digest_valid_v1(args[2]): return "controller-service-config-pin"
+        if args.len() >= 4 and not builder_identifier_valid_v1(args[3]): return "controller-service-workload-id"
+    ""
+
+fn controller_service_reply_v3(code: i64, outcome: text, response: text, error: text,
+        root: Option<ControllerLocalRootV3> = nil, dispatch: Option<ControllerDispatchOwnerV3> = nil) -> OrchestratorValidationReplyV1:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3),
+        "kind": SdnValue.String("controller-service-route"), "outcome": SdnValue.String(outcome),
+        "response": SdnValue.String(response), "error": SdnValue.String(error),
+        "cleanupPending": SdnValue.Bool(root.is_some() or dispatch.is_some())}
+    OrchestratorValidationReplyV1(exit_code: code, output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n",
+        controller_root_cleanup: root, controller_dispatch_cleanup: dispatch)
+
+fn controller_install_command_v3(args: [text]) -> OrchestratorValidationReplyV1:
+    val config = file_read_regular_no_follow_bounded(args[2], 32768)
+    if config.is_err(): return controller_service_reply_v3(2, "refused", "", "controller-config-input-unavailable")
+    val policy = file_read_regular_no_follow_bounded(args[3], 1048576)
+    if policy.is_err(): return controller_service_reply_v3(2, "refused", "", "controller-policy-input-unavailable")
+    val installed = controller_local_root_install_v3(args[1], config.unwrap(), policy.unwrap())
+    var retained = installed.owner
+    var error = installed.error
+    var steps = 0
+    while retained.is_some() and error == "" and steps < 64:
+        val closed = controller_local_root_close_v3(retained.unwrap())
+        retained = closed.owner
+        steps = steps + 1
+        if closed.error != "": error = closed.error
+        if not closed.closed and retained.is_none() and error == "": error = "controller-install-close-unconfirmed"
+    if retained.is_some() and error == "": error = "controller-install-cleanup-pending"
+    val publication = if installed.ready: sha256_text(config.unwrap()) else: ""
+    controller_service_reply_v3(if installed.ready and error == "": 0 else: 2,
+        if installed.ready: "installed" else: "refused-or-partial", publication, error, retained)
+
+pub fn controller_service_command_v3(args: [text]) -> OrchestratorValidationReplyV1:
+    val invalid = controller_service_shape_v3(args)
+    if invalid != "": return controller_service_reply_v3(2, "refused", "", invalid)
+    if args[0] == "controller-service-install": return controller_install_command_v3(args)
+    val opened = controller_local_root_open_v3(args[1], args[2])
+    if not opened.ready or opened.owner.is_none() or opened.error != "":
+        return controller_service_reply_v3(2, "refused", "", opened.error, opened.owner)
+    val root = opened.owner.unwrap()
+    var begun: Option<ControllerDispatchOwnedTurnV3> = nil
+    if ["controller-service-dispatch", "controller-service-resume"].contains(args[0]):
+        val source = file_read_regular_no_follow_bounded(args[4], 2097152)
+        if source.is_err(): return controller_service_reply_v3(2, "refused", "", "controller-packet-input-unavailable", Some(root))
+        val packet = controller_dispatch_request_decode_v2(source.unwrap())
+        if packet.is_err(): return controller_service_reply_v3(2, "refused", "", packet.unwrap_err(), Some(root))
+        begun = Some(controller_dispatch_begin_v3(root, args[3], packet.unwrap(), args[0] == "controller-service-resume"))
+    elif ["controller-service-status", "controller-service-stop"].contains(args[0]):
+        begun = Some(controller_dispatch_service_begin_v3(root, if args[0] == "controller-service-status": "status" else: "service-stop"))
+    else:
+        val action = if args[0] == "controller-service-cancel": "cancel" else: if args[0] == "controller-service-progress": "progress" else: "inspect"
+        begun = Some(controller_dispatch_control_begin_v3(root, args[3], action))
+    var turn = begun.unwrap()
+    val started = sosix_time_now_monotonic_ms()
+    var steps = 0
+    while (turn.owner.is_some() and not turn.completed and turn.error == "" and steps < 2048 and
+            started >= 0 and sosix_time_now_monotonic_ms() - started <= 10000):
+        turn = controller_dispatch_step_v3(turn.owner.unwrap())
+        steps = steps + 1
+        if not turn.completed: sosix_sleep_ms(5)
+    # Ending a finite CLI wait closes LOCAL transport/root only. It does not
+    # grant another execute attempt or implicitly cancel the persistent Host.
+    var close_steps = 0
+    while turn.owner.is_some() and close_steps < 64:
+        turn = controller_dispatch_close_v3(turn.owner.unwrap())
+        close_steps = close_steps + 1
+        if turn.error != "": break
+    val failed = turn.error != "" or not turn.completed or turn.cleanup_pending or turn.owner.is_some() or turn.root_cleanup.is_some() or turn.outcome == "unknown"
+    controller_service_reply_v3(if failed: 2 else: 0, turn.outcome, turn.response, turn.error, turn.root_cleanup, turn.owner)

@@ -1,0 +1,56 @@
+# Filesystem scan for build-unit source inventory (plan section 4).
+#
+# The only I/O piece of the source-inventory pipeline: walks a library root
+# into a sorted list of root-relative `.spl` paths, skipping vendor, build,
+# target and hidden directories. The result is the `scanned` input of
+# source_inventory_resolve_unit_v1; digests and receipts stay pure elsewhere.
+
+use std.io_runtime.{dir_list_or_empty, is_dir}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.driver.driver_build.source_inventory_glob_v1.{source_inventory_resolve_unit_v1}
+
+# Directory names never descended into.
+# allow reason: yes/no predicate over a path segment; no domain type applies.
+@allow(primitive_api)
+pub fn source_inventory_scan_skip_dir_v1(name: text) -> bool:
+    if name.starts_with("."):
+        return true
+    name == "vendor" or name == "build" or name == "target" or name == "node_modules"
+
+# Listings may be bare names or full paths depending on host; keep the name.
+fn _scan_basename_v1(entry: text) -> text:
+    var s = entry.replace("\\", "/")
+    while s.ends_with("/"):
+        s = s[0:s.len() - 1]
+    val parts = s.split("/")
+    parts[parts.len() - 1]
+
+fn _scan_walk_v1(abs_dir: text, rel_dir: text, out: [text]) -> [text]:
+    var acc = out
+    for entry in dir_list_or_empty(abs_dir):
+        val name = _scan_basename_v1(entry)
+        if name == "" or name == "." or name == "..":
+            continue
+        val abs_path = abs_dir + "/" + name
+        val rel_path = if rel_dir == "": name else: rel_dir + "/" + name
+        if is_dir(abs_path):
+            if not source_inventory_scan_skip_dir_v1(name):
+                acc = _scan_walk_v1(abs_path, rel_path, acc)
+        elif name.ends_with(".spl"):
+            acc.push(rel_path)
+    acc
+
+# Root-relative `.spl` paths under `root`, sorted canonically. Missing root
+# yields an empty list.
+pub fn source_inventory_scan_v1(root: text) -> [text]:
+    var r = root.replace("\\", "/")
+    while r.len() > 1 and r.ends_with("/"):
+        r = r[0:r.len() - 1]
+    if not is_dir(r):
+        return []
+    canonical_identity_sort_texts(_scan_walk_v1(r, "", []))
+
+# Scan then apply a unit's include/exclude globs.
+pub fn source_inventory_scan_resolve_v1(root: text, includes: [text],
+        excludes: [text]) -> [text]:
+    source_inventory_resolve_unit_v1(includes, excludes, source_inventory_scan_v1(root))

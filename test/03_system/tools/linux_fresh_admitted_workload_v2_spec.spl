@@ -1,0 +1,213 @@
+# AUTHORED_NOT_RUN. Genuine administrator-installed fresh epoch B, real pinned
+# Podman/image/runtime/config and no-mount request are mandatory; no seed/skip.
+# @req REQ-LINUX-FRESH-WORKLOAD-001
+# @req REQ-LINUX-FRESH-WORKLOAD-002
+# @req REQ-LINUX-FRESH-WORKLOAD-003
+use std.spec.{describe, it, expect, step, fail}
+use std.nogc_async_mut.container.api_v2.*
+use std.nogc_async_mut.container.service_domain_v1.local_container_service_workload_open_v2
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.*
+use std.nogc_async_mut.container.providers.linux.request_v1.*
+use std.nogc_sync_mut.container.machine_authority_v1.*
+use std.nogc_sync_mut.container.machine_fresh_epoch_history_v1.machine_fresh_epoch_read_initial_v1
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.machine_fresh_epoch_record_bytes_v1
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.machine_local_process_principal_v1.*
+use std.nogc_sync_mut.io.machine_storage_owner_v1.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.effect_deadline_v1.*
+use std.common.contracts.container.execution_input_configuration_v1.container_execution_input_configuration_decode_v1
+use std.common.contracts.container.runtime_v1.*
+use std.common.build_manager.group_process_stream_protocol_v2.group_process_stream_template_decode_v3
+use std.nogc_sync_mut.io.env_ops.env_get
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+# Unique actual owners survive every failed expectation/native cleanup turn.
+var workload_fixture_open_v2: Option<SimpleContainerFreshOpenV2> = nil
+var workload_fixture_principal_owner_v2: Option<MachineLocalProcessPrincipalV1> = nil
+var workload_fixture_machine_cleanup_v2: Option<MachineContainerAuthorityCleanupV1> = nil
+
+fn workload_fixture_principal_v2() -> Result<MachineLocalProcessPrincipalV1, text>:
+    match machine_local_process_principal_open_v1():
+        case MachineLocalProcessPrincipalOpenV1.Rejected(reason): Err(reason)
+        case MachineLocalProcessPrincipalOpenV1.CleanupRequired(owner, reason):
+            workload_fixture_principal_owner_v2 = Some(owner)
+            Err(reason)
+        case MachineLocalProcessPrincipalOpenV1.Ready(owner):
+            workload_fixture_principal_owner_v2 = Some(owner)
+            Ok(owner)
+
+fn workload_fixture_source_v2(name: text, maximum: i64) -> Result<text, text>:
+    val path = env_get(name)
+    if path == "": return Err("genuine administrator fixture required: " + name)
+    file_read_regular_no_follow_bounded(path, maximum)
+
+fn workload_fixture_request_v2(scope: ContainerHostScopeV2, source: text) -> Result<ContainerExecutionRequestV2, text>:
+    val decoded = linux_oci_retained_request_decode_v1(source)?
+    val digest = linux_oci_request_digest_v1(decoded)?
+    val plan = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: decoded.pod_uid,
+        attempt: decoded.attempt, operation_id: decoded.operation_id, request_digest: digest,
+        physical_host_id: scope.physical_host_id, service_scope_id: scope.service_scope_id,
+        boot_id: scope.boot_id, provider_generation: scope.provider_generation, native_machine_id: scope.native_machine_id,
+        continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id)
+    Ok(ContainerExecutionRequestV2(plan, source))
+
+fn workload_fixture_window_v2(request: ContainerExecutionRequestV2) -> Result<ContainerEffectDeadlineV1, text>:
+    val now = time_sample_unix_micros_or_failure() / 1000
+    if now <= 0 or now > 9223372036854745807: return Err("actual launch clock unavailable")
+    # This is launch-window DATA, not a fabricated signed grant. The actual
+    # local principal and original-writer fresh owner admit the exact request.
+    container_effect_deadline_v1(request.plan.request_digest, request.plan.operation_id, ["create", "start"], now + 30000)
+
+fn workload_fixture_keep_v2(owner: SimpleContainerOwnerV2):
+    var retained = workload_fixture_open_v2.unwrap()
+    retained.owner = Some(owner)
+    workload_fixture_open_v2 = Some(retained)
+
+fn workload_fixture_fields_v2(source: text) -> Result<Dict<text, SdnValue>, text>:
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 1048576, max_depth: 4,
+        max_nodes: 512, max_rows: 0, max_cells: 0, max_columns: 32))?
+    match parsed.value:
+        case SdnValue.Dict(fields): Ok(fields)
+        case _: Err("actual WAL row must be structured data")
+
+fn workload_fixture_storage_v2() -> Result<MachineStorageOwnerV1, text>:
+    val reader = match machine_policy_open_v1():
+        case MachinePolicyOpenV1.Rejected(reason): return Err(reason)
+        case MachinePolicyOpenV1.CleanupRequired(owner, reason):
+            workload_fixture_machine_cleanup_v2 = Some(MachineContainerAuthorityCleanupV1.Reader(owner))
+            return Err(reason)
+        case MachinePolicyOpenV1.Ready(owner): owner
+    workload_fixture_machine_cleanup_v2 = Some(MachineContainerAuthorityCleanupV1.Reader(reader))
+    val bytes = reader.read_policy_v1()?
+    if not utf8_bytes_valid(bytes): return Err("actual installed policy must be UTF8")
+    val storage = match reader.open_storage_v1():
+        case MachineStorageOpenV1.Rejected(reason): return Err(reason)
+        case MachineStorageOpenV1.CleanupRequired(owner, reason):
+            workload_fixture_machine_cleanup_v2 = Some(MachineContainerAuthorityCleanupV1.Storage(owner))
+            return Err(reason)
+        case MachineStorageOpenV1.Ready(owner): owner
+    workload_fixture_machine_cleanup_v2 = Some(MachineContainerAuthorityCleanupV1.Storage(storage))
+    val bound = storage.bind_policy_v1(bytes_to_text(bytes))?
+    Ok(storage)
+
+describe "Actual CPU-only fresh workload uses the common Container API and original machine writer":
+    it "verifies created config before start, associates native workload, rejects copied create and conserves epoch charges after cleanup":
+        step("Read real administrator fixture inputs and retain the actual authenticated process principal")
+        val template_source = workload_fixture_source_v2("SIMPLE_LINUX_FRESH_WORKLOAD_TEMPLATE", 65536).unwrap()
+        val template = group_process_stream_template_decode_v3(template_source).unwrap()
+        val request_source = workload_fixture_source_v2("SIMPLE_LINUX_FRESH_WORKLOAD_REQUEST", 1048576).unwrap()
+        val principal = workload_fixture_principal_v2().unwrap()
+        step("Open genuine installed preparation and transfer its original writer into the common API")
+        val opened = local_container_service_workload_open_v2(principal, template)
+        workload_fixture_open_v2 = Some(opened)
+        if opened.error != "" or opened.owner.is_none():
+            val closed = simple_container_fresh_cleanup_v2(opened)
+            workload_fixture_open_v2 = closed.retained
+            fail("genuine installed fresh epoch required: " + opened.error + "; cleanup=" + closed.error)
+            return
+        val owner = opened.owner.unwrap()
+        val scope = simple_container_scope_v2(owner)
+        val request = workload_fixture_request_v2(scope, request_source).unwrap()
+        val window = workload_fixture_window_v2(request).unwrap()
+        step("Durably subdivide the existing usable charge before any create and retain every actual turn")
+        val prepared = simple_container_apply_v2(owner, "prepare", request, window)
+        workload_fixture_keep_v2(prepared.owner)
+        if prepared.operation.status != RUNTIME_STATUS_OK:
+            fail("actual reservation required: " + prepared.operation.reason)
+            return
+        val created = simple_container_apply_v2(prepared.owner, "create", request, window)
+        workload_fixture_keep_v2(created.owner)
+        if created.operation.status != RUNTIME_STATUS_OK or created.operation.state.phase != RUNTIME_PHASE_CREATED:
+            fail("actual created-config verification required before start: " + created.operation.reason)
+            return
+        expect(created.operation.operation).to_equal("create")
+        expect(created.operation.command.operation).to_equal("create")
+        expect(created.operation.command.program == "").to_equal(false)
+        expect(created.operation.state.identity.native_id.byte_len()).to_equal(64)
+        step("Refuse copied create without rearming it while the genuine original owner remains usable")
+        val alias = created.owner
+        val duplicate = simple_container_apply_v2(alias, "create", request, window)
+        workload_fixture_keep_v2(duplicate.owner)
+        if duplicate.operation.status == RUNTIME_STATUS_OK:
+            fail("copied admission unexpectedly permitted another create")
+            return
+        if duplicate.operation.reason != "machine-fresh-workload-action-already-attempted":
+            fail("duplicate refusal did not establish the canonical once-only guard: " + duplicate.operation.reason)
+            return
+        expect(duplicate.operation.reason).to_equal("machine-fresh-workload-action-already-attempted")
+        step("Capture real input configuration through same-writer container/image/container actions")
+        val input = simple_container_read_v2(duplicate.owner, "input-configuration", request)
+        workload_fixture_keep_v2(input.owner)
+        if input.operation.status != RUNTIME_STATUS_OK:
+            fail("actual fresh input configuration producer required: " + input.operation.reason)
+            return
+        val observed = container_execution_input_configuration_decode_v1(input.operation.stdout).unwrap()
+        expect(observed.configuration.runtime).to_equal(created.operation.state.identity)
+        expect(observed.configuration.request_digest).to_equal(request.plan.request_digest)
+        expect(observed.open_stdin).to_equal(false)
+        expect(observed.tty).to_equal(false)
+        expect(observed.stdin_once).to_equal(false)
+        step("Start the exact native ID only after sealed created verification and require actual PID/cgroup/namespace association")
+        val started = simple_container_apply_v2(input.owner, "start", request, workload_fixture_window_v2(request).unwrap())
+        workload_fixture_keep_v2(started.owner)
+        if started.operation.status != RUNTIME_STATUS_OK or started.operation.state.phase != RUNTIME_PHASE_RUNNING:
+            fail("actual running native association required: " + started.operation.reason)
+            return
+        expect(started.operation.state.identity).to_equal(created.operation.state.identity)
+        val inspected = simple_container_read_v2(started.owner, "inspect", request)
+        workload_fixture_keep_v2(inspected.owner)
+        if inspected.operation.status != RUNTIME_STATUS_OK or inspected.operation.state.phase != RUNTIME_PHASE_RUNNING:
+            fail("retained native running evidence unavailable: " + inspected.operation.reason)
+            return
+        step("Stop/remove only the retained native ID and settle only after actual absence, empty population and retired helpers")
+        val destroyed = simple_container_apply_v2(inspected.owner, "destroy", request, window)
+        workload_fixture_keep_v2(destroyed.owner)
+        if destroyed.operation.status != RUNTIME_STATUS_OK or destroyed.operation.state.phase != RUNTIME_PHASE_DESTROYED:
+            fail("actual cleanup/absence remains retained: " + destroyed.operation.reason)
+            return
+        val closed = simple_container_fresh_cleanup_v2(workload_fixture_open_v2.unwrap())
+        workload_fixture_open_v2 = closed.retained
+        if not closed.closed or closed.retained.is_some() or closed.error != "":
+            fail("actual native/writer cleanup retained or diagnostic: " + closed.error)
+            return
+        step("Reopen storage only after close and inspect actual durable settlement without seeding rows")
+        val storage = workload_fixture_storage_v2().unwrap()
+        val head = storage.wal_head_v1().unwrap()
+        var revision = storage.wal_revision_v1(head).unwrap()
+        val final_rows = storage.wal_segment_v1(revision).unwrap()
+        if final_rows.len() != 3:
+            fail("actual final settlement revision must contain its three exact rows")
+            return
+        var traversed = 0
+        while revision.parent != "" and traversed < 64:
+            revision = storage.wal_revision_v1(revision.parent).unwrap()
+            traversed = traversed + 1
+        if revision.parent != "":
+            fail("actual history exceeds the supported bounded chain")
+            return
+        val epoch = machine_fresh_epoch_read_initial_v1(storage, revision.digest).unwrap()
+        val workload = workload_fixture_fields_v2(final_rows[1].data).unwrap()
+        val remainder = workload_fixture_fields_v2(final_rows[2].data).unwrap()
+        expect(final_rows[1].table_name).to_equal("machine-container-reservations-v1")
+        expect(final_rows[2].row_key).to_equal("partition-" + sha256_text(machine_fresh_epoch_record_bytes_v1(epoch).unwrap()))
+        expect(workload["state"]).to_equal(SdnValue.String("released"))
+        expect(workload["cpuMillis"]).to_equal(SdnValue.Int(0))
+        expect(workload["memoryBytes"]).to_equal(SdnValue.Int(0))
+        expect(remainder["state"]).to_equal(SdnValue.String("uncertain"))
+        expect(remainder["cpuMillis"]).to_equal(SdnValue.Int(epoch.usable_cpu_millis))
+        expect(remainder["memoryBytes"]).to_equal(SdnValue.Int(epoch.usable_memory_bytes))
+        val machine_cleanup = workload_fixture_machine_cleanup_v2.unwrap()
+        val machine_closed = machine_container_authority_cleanup_v1(machine_cleanup)
+        if machine_closed == "released" or machine_closed == "consumed-error": workload_fixture_machine_cleanup_v2 = nil
+        if machine_closed != "released":
+            fail("actual final storage cleanup retained/diagnostic: " + machine_closed)
+            return
+        val principal_closed = principal.close_v1()
+        if principal_closed == "released" or principal_closed == "consumed-error": workload_fixture_principal_owner_v2 = nil
+        expect(principal_closed).to_equal("released")

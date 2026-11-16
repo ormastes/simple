@@ -1,0 +1,105 @@
+# Engine-declared Mounts configuration, not exhaustive target mount-namespace
+# evidence or filesystem/launch authority. JSON is the existing Podman wire.
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_get, json_value_keys, json_value_as_text}
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeCommandV1, RuntimeOperationV1}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.sha256_text
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_bounds_v1, linux_oci_request_digest_v1}
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.{LinuxOciEnginePolicyV1, linux_oci_engine_route_v1}
+
+pub struct LinuxWorkspaceMountInspectV1:
+    native_id: text
+    request_digest: text
+    source: text
+    destination: text
+    read_only: bool
+    engine_projection_digest: text
+
+pub fn linux_workspace_mount_inspect_command_v1(expected: RuntimeIdentityV1) -> Result<RuntimeCommandV1, text>:
+    if expected.engine != "podman" or not builder_digest_valid_v1(expected.native_id):
+        return Err("workspace-inspect-full-native-id-required")
+    # Trusted constant projection; no authored paths enter the Go template.
+    val format = "{\"id\":{{{{json .Id}}}},\"pod_uid\":{{{{json (index .Config.Labels \"io.simpleorch.pod_uid\")}}}},\"attempt\":{{{{json (index .Config.Labels \"io.simpleorch.attempt\")}}}},\"node_boot_id\":{{{{json (index .Config.Labels \"io.simpleorch.node_boot_id\")}}}},\"provider_generation\":{{{{json (index .Config.Labels \"io.simpleorch.provider_generation\")}}}},\"operation_id\":{{{{json (index .Config.Labels \"io.simpleorch.operation_id\")}}}},\"mounts\":[{{{{range $i, $m := .Mounts}}}}{{{{if $i}}}},{{{{end}}}}{\"type\":{{{{json $m.Type}}}},\"source\":{{{{json $m.Source}}}},\"destination\":{{{{json $m.Destination}}}},\"rw\":{{{{json $m.RW}}}}}{{{{end}}}}]}"
+    # Match existing runtime leaf commands: the retained provider applies its
+    # installed route once and records that configured query in the receipt.
+    Ok(RuntimeCommandV1(operation: "workspace-mount-inspect", program: "podman",
+        args: ["container", "inspect", "--format", format, expected.native_id]))
+
+fn mount_inspect_member_v1(value: JsonValue, key: text) -> Result<JsonValue, text>:
+    match json_value_get(value, key):
+        case Some(found): Ok(found)
+        case None: Err("workspace-inspect-field-missing:" + key)
+
+fn mount_inspect_text_v1(value: JsonValue, key: text) -> Result<text, text>:
+    match json_value_as_text(mount_inspect_member_v1(value, key)?):
+        case Some(found): Ok(found)
+        case None: Err("workspace-inspect-text-required:" + key)
+
+fn mount_inspect_bounded_json_v1(raw: text) -> Result<JsonValue, text>:
+    if raw.byte_len() == 0 or raw.byte_len() > 65536: return Err("workspace-inspect-source-bound")
+    var quoted = false
+    var escaped = false
+    var depth = 0
+    for byte in raw.bytes():
+        if quoted:
+            if escaped: escaped = false
+            elif byte == 92: escaped = true
+            elif byte == 34: quoted = false
+        else:
+            if byte == 34: quoted = true
+            elif byte == 123 or byte == 91:
+                depth = depth + 1
+                if depth > 3: return Err("workspace-inspect-depth-bound")
+            elif byte == 125 or byte == 93: depth = depth - 1
+    json_parse_value_strict(raw)
+
+pub fn linux_workspace_mount_inspect_parse_v1(raw: text, expected: RuntimeIdentityV1,
+        request: LinuxOciRequestV1) -> Result<LinuxWorkspaceMountInspectV1, text>:
+    linux_oci_request_bounds_v1(request)?
+    if request.mounts.len() != 1: return Err("workspace-inspect-one-mount-required")
+    if (expected.engine != "podman" or not builder_digest_valid_v1(expected.native_id) or
+            expected.provider_generation <= 0 or expected.node_boot_id == "" or
+            expected.pod_uid != request.pod_uid or expected.attempt != request.attempt or
+            expected.operation_id != request.operation_id): return Err("workspace-inspect-request-identity-mismatch")
+    val value = mount_inspect_bounded_json_v1(raw)?
+    if json_value_keys(value).len() != 7: return Err("workspace-inspect-fields")
+    if (mount_inspect_text_v1(value, "id")? != expected.native_id or
+            mount_inspect_text_v1(value, "pod_uid")? != expected.pod_uid or
+            mount_inspect_text_v1(value, "attempt")? != expected.attempt.to_text() or
+            mount_inspect_text_v1(value, "node_boot_id")? != expected.node_boot_id or
+            mount_inspect_text_v1(value, "provider_generation")? != expected.provider_generation.to_text() or
+            mount_inspect_text_v1(value, "operation_id")? != expected.operation_id):
+        return Err("workspace-inspect-identity-mismatch")
+    val mounts = match mount_inspect_member_v1(value, "mounts")?:
+        case JsonValue.Array(found): found
+        case _: return Err("workspace-inspect-mounts-type")
+    if mounts.len() != 1: return Err("workspace-inspect-extra-or-missing-mount")
+    val mount = mounts[0]
+    if json_value_keys(mount).len() != 4: return Err("workspace-inspect-mount-fields")
+    val planned = request.mounts[0]
+    if (mount_inspect_text_v1(mount, "type")? != "bind" or
+            mount_inspect_text_v1(mount, "source")? != planned.host_root or
+            mount_inspect_text_v1(mount, "destination")? != planned.guest_root or
+            mount_inspect_member_v1(mount, "rw")? != JsonValue.Bool(not planned.read_only)):
+        return Err("workspace-inspect-mapping-mismatch")
+    Ok(LinuxWorkspaceMountInspectV1(native_id: expected.native_id,
+        request_digest: linux_oci_request_digest_v1(request)?, source: planned.host_root,
+        destination: planned.guest_root, read_only: planned.read_only, engine_projection_digest: sha256_text(raw)))
+
+# Consumer seam for actual configured provider observations. The caller must
+# obtain the operation from its retained provider; copied records remain data.
+# This validates query/result correlation, not authenticity or namespace proof.
+pub fn linux_workspace_mount_inspect_observation_v1(observed: RuntimeOperationV1,
+        policy: LinuxOciEnginePolicyV1, expected: RuntimeIdentityV1,
+        request: LinuxOciRequestV1) -> Result<LinuxWorkspaceMountInspectV1, text>:
+    val query = linux_workspace_mount_inspect_command_v1(expected)?
+    val configured_args = linux_oci_engine_route_v1(policy, query.args)?
+    if (observed.status != "ok" or observed.exit_code != 0 or observed.operation != query.operation or
+            observed.command.operation != query.operation or observed.command.program != policy.executable_path or
+            observed.command.args != configured_args): return Err("workspace-inspect-observation-query-mismatch")
+    val identity = observed.state.identity
+    if (identity.native_id != expected.native_id or identity.engine != expected.engine or
+            identity.pod_uid != expected.pod_uid or identity.attempt != expected.attempt or
+            identity.operation_id != expected.operation_id or identity.node_boot_id != expected.node_boot_id or
+            identity.provider_generation != expected.provider_generation): return Err("workspace-inspect-observation-identity-mismatch")
+    linux_workspace_mount_inspect_parse_v1(observed.stdout, expected, request)

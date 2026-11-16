@@ -12,21 +12,29 @@ use std.tooling.easy_fix.rules_helpers.{LineContext, line_contexts}
 # Confidence: Likely
 # ============================================================================
 
-fn check_print_in_test_spec(source: String, file: String) -> [EasyFix]:
+pub fn check_print_in_test_spec(source: String, file: String) -> [EasyFix]:
+    if not file.ends_with("_spec.spl"):
+        return []
+    check_print_in_test_spec_with_contexts(file, line_contexts(source))
+
+pub fn check_print_in_test_spec_with_contexts(file: String, contexts: [LineContext]) -> [EasyFix]:
     # Only applies to spec files
     if not file.ends_with("_spec.spl"):
         return []
 
     var fixes: [EasyFix] = []
-
-    for raw_ctx in line_contexts(source):
+    for raw_ctx in contexts:
         val ctx: LineContext = raw_ctx
+
+        # Detect bare print(...) inside test context
         if ctx.trimmed.starts_with("print(") or ctx.trimmed.starts_with("print "):
             val start = ctx.byte_offset + ctx.indent
             val end = ctx.byte_offset + ctx.line.len()
 
+            # Extract the argument
             var arg = ""
             if ctx.trimmed.starts_with("print("):
+                # Find matching closing paren
                 val inner = ctx.trimmed.slice(6)
                 if inner.ends_with(")"):
                     arg = inner.slice(0, inner.byte_len() - 1)
@@ -58,25 +66,50 @@ fn check_print_in_test_spec(source: String, file: String) -> [EasyFix]:
 # Confidence: Uncertain
 # ============================================================================
 
-fn check_resource_leak(source: String, file: String) -> [EasyFix]:
-    var fixes: [EasyFix] = []
+pub fn check_resource_leak(source: String, file: String) -> [EasyFix]:
+    check_resource_leak_with_contexts(file, line_contexts(source))
 
-    for raw_ctx in line_contexts(source):
-        val ctx: LineContext = raw_ctx
+pub fn check_resource_leak_with_contexts(file: String, contexts: [LineContext]) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    for ci in 0..contexts.len():
+        val ctx: LineContext = contexts[ci]
+
         # Detect val x = open(...) or val x = connect(...) not inside with
         val is_resource_open = ctx.trimmed.contains("= open(") or ctx.trimmed.contains("= connect(") or ctx.trimmed.contains("= File.open(")
         if is_resource_open and ctx.trimmed.starts_with("val ") and not ctx.trimmed.starts_with("with"):
-            val eq_pos = _lint_find_text_from(ctx.trimmed, "=", 0)
+            # Check previous lines for `with` block context (simple heuristic)
+
+            # Extract variable name and expression
+            val eq_pos = ctx.trimmed.find("=")
             if eq_pos > 4:
                 val var_name = ctx.trimmed.slice(4, eq_pos).trim()
                 val expr = ctx.trimmed.slice(eq_pos + 1).trim()
 
+                # The edit starts after the line's indent, so the `with` header
+                # carries no indent of its own. Its body is the rest of the
+                # enclosing block (following lines at least as deep, up to the
+                # last non-blank one), re-indented one level; with no such
+                # lines the body is `pass`, so the edit always parses.
                 val start = ctx.byte_offset + ctx.indent
-                val end = ctx.byte_offset + ctx.line.len()
-
-                val spaces = " ".repeat(ctx.indent)
-                val inner_spaces = " ".repeat(ctx.indent + 4)
-                val new_text = "{spaces}with {var_name} = {expr}:\n{inner_spaces}# TODO: use {var_name} here"
+                var end = ctx.byte_offset + ctx.line.len()
+                var last = ci
+                var j = ci + 1
+                while j < contexts.len():
+                    val next: LineContext = contexts[j]
+                    if next.trimmed != "":
+                        if next.indent < ctx.indent:
+                            break
+                        last = j
+                    j = j + 1
+                var body: [text] = []
+                for k in (ci + 1)..(last + 1):
+                    val body_ctx: LineContext = contexts[k]
+                    body.push(if body_ctx.trimmed == "": "" else: "    " + body_ctx.line)
+                if last > ci:
+                    end = contexts[last].byte_offset + contexts[last].line.len()
+                else:
+                    body.push(" ".repeat(ctx.indent + 4) + "pass")
+                val new_text = "with {expr} as {var_name}:\n" + body.join("\n")
 
                 var fix = EasyFix.create(
                     id: "L:resource_leak:{ctx.line_num}",
@@ -101,33 +134,42 @@ fn check_resource_leak(source: String, file: String) -> [EasyFix]:
 # Confidence: Safe
 # ============================================================================
 
-fn check_spipe_missing_docstrings(source: String, file: String) -> [EasyFix]:
+pub fn check_spipe_missing_docstrings(source: String, file: String) -> [EasyFix]:
+    if not file.ends_with("_spec.spl"):
+        return []
+    check_spipe_missing_docstrings_with_lines(file, source.split("\n"))
+
+pub fn check_spipe_missing_docstrings_with_lines(file: String, lines: [String]) -> [EasyFix]:
     var fixes: [EasyFix] = []
 
     if not file.ends_with("_spec.spl"):
         return fixes
 
-    val lines = source.split("\n")
+    var line_num = 0
+    var byte_offset = 0
 
-    for raw_ctx in line_contexts(source):
-        val ctx: LineContext = raw_ctx
-        val is_describe = ctx.trimmed.starts_with("describe ")
-        val is_context = ctx.trimmed.starts_with("context ")
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+
+        val is_describe = trimmed.starts_with("describe ")
+        val is_context = trimmed.starts_with("context ")
 
         if is_describe or is_context:
-            val keyword = if is_describe: "describe" else: "context"
+            val keyword = if is_describe then "describe" else "context"
 
             # Extract the name string
-            val after_kw = ctx.trimmed.slice(keyword.len()).trim()
+            val after_kw = trimmed.slice(keyword.len()).trim()
             var block_name = after_kw
             if after_kw.starts_with("\""):
-                val close_quote = _lint_find_text_from(after_kw.slice(1), "\"", 0)
+                val close_quote = after_kw.slice(1).find("\"")
                 if close_quote >= 0:
                     block_name = after_kw.slice(1, close_quote + 1)
 
             # Check if next non-empty line is a docstring (""")
-            var next_idx = ctx.line_num  # 0-indexed for next line
+            var next_idx = line_num  # 0-indexed for next line
             var has_docstring = false
+            var check_offset = byte_offset + line.len() + 1
 
             if next_idx < lines.len():
                 val next_line = lines[next_idx]
@@ -136,14 +178,15 @@ fn check_spipe_missing_docstrings(source: String, file: String) -> [EasyFix]:
                     has_docstring = true
 
             if not has_docstring:
-                val insert_pos = ctx.byte_offset + ctx.line.len() + 1  # After newline
-                val spaces = " ".repeat(ctx.indent + 4)
-                val header = if is_describe: "##" else: "###"
-                val scenario = if is_describe: "" else: "Scenario: "
+                val indent = line.len() - trimmed.len()
+                val insert_pos = byte_offset + line.len() + 1  # After newline
+                val spaces = " ".repeat(indent + 4)
+                val header = if is_describe then "##" else "###"
+                val scenario = if is_describe then "" else "Scenario: "
                 val docstring = "{spaces}\"\"\"\n{spaces}{header} {scenario}{block_name}\n{spaces}\n{spaces}Description of this {keyword} block.\n{spaces}\"\"\"\n"
 
                 var fix = EasyFix.create(
-                    id: "L:spipe_missing_docstrings:{ctx.line_num}",
+                    id: "L:spipe_missing_docstrings:{line_num}",
                     description: "add template docstring to {keyword} block",
                     confidence: FixConfidence.Safe
                 )
@@ -151,11 +194,13 @@ fn check_spipe_missing_docstrings(source: String, file: String) -> [EasyFix]:
                     file: file,
                     start: insert_pos,
                     end: insert_pos,
-                    line: ctx.line_num + 1,
+                    line: line_num + 1,
                     column: 1,
                     new_text: docstring
                 ))
                 fixes.push(fix)
+
+        byte_offset = byte_offset + line.len() + 1
 
     fixes
 
@@ -165,18 +210,23 @@ fn check_spipe_missing_docstrings(source: String, file: String) -> [EasyFix]:
 # Confidence: Likely
 # ============================================================================
 
-fn check_spipe_manual_assertions(source: String, file: String) -> [EasyFix]:
+pub fn check_spipe_manual_assertions(source: String, file: String) -> [EasyFix]:
+    if not file.ends_with("_spec.spl"):
+        return []
+    check_spipe_manual_assertions_with_contexts(file, line_contexts(source))
+
+pub fn check_spipe_manual_assertions_with_contexts(file: String, contexts: [LineContext]) -> [EasyFix]:
     if not file.ends_with("_spec.spl"):
         return []
 
     var fixes: [EasyFix] = []
-
-    for raw_ctx in line_contexts(source):
+    for raw_ctx in contexts:
         val ctx: LineContext = raw_ctx
+
         # Pattern: if <cond>: fail(...) or if not <cond>: fail(...)
         if ctx.trimmed.starts_with("if ") and ctx.trimmed.contains("fail("):
             # Extract condition: between "if " and ":"
-            val colon_pos = _lint_find_text_from(ctx.trimmed, ":", 0)
+            val colon_pos = ctx.trimmed.find(":")
             if colon_pos > 3:
                 val condition = ctx.trimmed.slice(3, colon_pos).trim()
                 val after_colon = ctx.trimmed.slice(colon_pos + 1).trim()
@@ -209,12 +259,15 @@ fn check_spipe_manual_assertions(source: String, file: String) -> [EasyFix]:
 # ============================================================================
 # Rule 6: non_exhaustive_match
 # Detects match blocks without a catch-all `case _:` arm.
-# Confidence: Safe
+# Confidence: Likely (the inserted arm is a placeholder to replace)
 # ============================================================================
+
+pub fn check_non_exhaustive_match(source: String, file: String) -> [EasyFix]:
+    check_non_exhaustive_match_with_lines(file, source.split("\n"))
 
 # Arms are `case P:` or bare `P:`; either form may be the catch-all (`case _:` / `_:`).
 # Matches nest, so open matches live on a stack and a dedent closes them.
-fn check_non_exhaustive_match(source: String, file: String) -> [EasyFix]:
+pub fn check_non_exhaustive_match_with_lines(file: String, lines: [String]) -> [EasyFix]:
     var fixes: [EasyFix] = []
     var indents: [i64] = []
     var arm_indents: [i64] = []
@@ -222,82 +275,82 @@ fn check_non_exhaustive_match(source: String, file: String) -> [EasyFix]:
     var case_styles: [bool] = []
     var end_lines: [i64] = []
     var end_offsets: [i64] = []
+    var end_columns: [i64] = []
+    var line_num = 0
+    var byte_offset = 0
 
-    for raw_ctx in line_contexts(source):
-        val ctx: LineContext = raw_ctx
-        if ctx.trimmed == "":
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+        val indent = line.len() - trimmed.len()
+        val line_end = byte_offset + line.len()
+        byte_offset = byte_offset + line.len() + 1
+        if trimmed == "":
             continue
         # Dedent (or a sibling `match`) closes every open match at this indent or deeper.
-        while indents.len() > 0 and indents[indents.len() - 1] >= ctx.indent:
+        while indents.len() > 0 and indents[indents.len() - 1] >= indent:
             val top = indents.len() - 1
             if not catch_alls[top]:
-                _emit_non_exhaustive_fix(fixes: fixes, file: file, after_line: end_lines[top], after_offset: end_offsets[top], case_indent: arm_indents[top], bare: not case_styles[top])
+                _emit_non_exhaustive_fix(fixes, file, end_lines[top], end_offsets[top], end_columns[top], arm_indents[top], not case_styles[top])
             indents.pop()
             arm_indents.pop()
             catch_alls.pop()
             case_styles.pop()
             end_lines.pop()
             end_offsets.pop()
+            end_columns.pop()
         if indents.len() > 0:
             val top = indents.len() - 1
             if arm_indents[top] < 0:
-                arm_indents[top] = ctx.indent
-            if ctx.indent == arm_indents[top]:
-                if ctx.trimmed.starts_with("case "):
+                arm_indents[top] = indent
+            if indent == arm_indents[top]:
+                if trimmed.starts_with("case "):
                     case_styles[top] = true
-                if ctx.trimmed.starts_with("case _:") or ctx.trimmed.starts_with("case _ ") or ctx.trimmed.starts_with("case _(") or ctx.trimmed.starts_with("_:"):
+                if trimmed.starts_with("case _:") or trimmed.starts_with("case _ ") or trimmed.starts_with("case _(") or trimmed.starts_with("_:") or trimmed.starts_with("_("):
                     catch_alls[top] = true
-            if ctx.trimmed.starts_with("case ") or not case_styles[top]:
-                end_lines[top] = ctx.line_num
-                end_offsets[top] = ctx.byte_offset + ctx.line.len()
-        if ctx.trimmed.starts_with("match ") and ctx.trimmed.ends_with(":"):
-            indents.push(ctx.indent)
+            end_lines[top] = line_num
+            end_offsets[top] = line_end
+            end_columns[top] = line.len() + 1
+        if trimmed.starts_with("match ") and trimmed.ends_with(":"):
+            indents.push(indent)
             arm_indents.push(-1)
             catch_alls.push(false)
             case_styles.push(false)
-            end_lines.push(ctx.line_num)
-            end_offsets.push(ctx.byte_offset + ctx.line.len())
+            end_lines.push(line_num)
+            end_offsets.push(line_end)
+            end_columns.push(line.len() + 1)
 
     # Matches still open at end of file
     while indents.len() > 0:
         val top = indents.len() - 1
         if not catch_alls[top]:
-            _emit_non_exhaustive_fix(fixes: fixes, file: file, after_line: end_lines[top], after_offset: end_offsets[top], case_indent: arm_indents[top], bare: not case_styles[top])
+            _emit_non_exhaustive_fix(fixes, file, end_lines[top], end_offsets[top], end_columns[top], arm_indents[top], not case_styles[top])
         indents.pop()
         arm_indents.pop()
         catch_alls.pop()
         case_styles.pop()
         end_lines.pop()
         end_offsets.pop()
+        end_columns.pop()
 
     fixes
 
-fn _lint_find_text_from(line: text, needle: text, search_from: i64) -> i64:
-    if needle == "":
-        return search_from
-    var i = search_from
-    while i + needle.len() <= line.len():
-        if line.slice(i, i + needle.len()) == needle:
-            return i
-        i = i + 1
-    -1
-
-fn _emit_non_exhaustive_fix(fixes: [EasyFix], file: String, after_line: Int, after_offset: Int, case_indent: Int, bare: bool = false):
+fn _emit_non_exhaustive_fix(fixes: [EasyFix], file: String, after_line: i64, after_offset: i64, after_column: i64, case_indent: i64, bare: bool):
     val spaces = " ".repeat(case_indent)
     val inner_spaces = " ".repeat(case_indent + 4)
-    val arm_head = if bare: "_:" else: "case _:"
-    val new_arm = "\n{spaces}{arm_head}\n{inner_spaces}todo(\"handle remaining cases\")"
+    val arm_head = if bare: "_" else: "case _"
+    val new_arm = "\n{spaces}{arm_head}(\"remaining cases are not handled yet\"):\n{inner_spaces}todo(\"handle remaining cases\", \"replace this catch-all with explicit arms\")"
     var fix = EasyFix.create(
         id: "L:non_exhaustive_match:{after_line}",
         description: "add missing catch-all arm with todo()",
-        confidence: FixConfidence.Safe
+        confidence: FixConfidence.Likely
     )
     fix.add_replacement(Replacement.create(
         file: file,
         start: after_offset,
         end: after_offset,
         line: after_line,
-        column: 1,
+        column: after_column,
         new_text: new_arm
     ))
     fixes.push(fix)

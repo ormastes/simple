@@ -19,6 +19,7 @@ use compiler.mir._MirLoweringExpr.method_calls_literals.*
 use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.borrow.borrow_check.mod.{check_mir_module}
 use std.sffi.dynamic.{spl_wffi_try_call_i64_out, DynLib}
+use std.io_runtime.{file_read}
 
 extern fn rt_alloc(size: i64) -> i64
 extern fn rt_free(ptr: i64)
@@ -107,7 +108,60 @@ fn dlsym_address_shape() -> [text]:
         "    fptr"
     ]
 
+# Old sffi/dynamic.spl:149/176 shape: an early-return guard precedes the
+# `&mut local` out slot. The integ2 Stage 2 binary accepted exactly this shape
+# while rejecting the straight-line one; the checker source rejects both.
+fn dlopen_join_borrow_shape() -> [text]:
+    [
+        "@unsafe(reason: \"status/out ABI\", capabilities: [ffi, raw_ptr])",
+        "extern fn spl_dlopen_checked(path: text, out_handle: *mut i64) -> i64",
+        "@unsafe(reason: \"probe\", capabilities: [ffi, raw_ptr])",
+        "fn load(path: text) -> i64:",
+        "    if path == \"\":",
+        "        return 0",
+        "    var handle: i64 = 0",
+        "    val status = unsafe(capabilities: [ffi, raw_ptr]):",
+        "        spl_dlopen_checked(path, &mut handle)",
+        "    status + handle"
+    ]
+
+# The real loader/resolver pair from sffi/dynamic.spl: every `extern fn spl_dl*`
+# declaration plus `_sffi_dlopen_checked` and `_sffi_dlsym_checked`, with a
+# local stand-in for the imported `file_exists`.
+fn dynamic_loader_source() -> [text]:
+    val lines = file_read("src/lib/nogc_sync_mut/sffi/dynamic.spl").split("\n")
+    var out: [text] = ["fn file_exists(path: text) -> bool:", "    path != \"\""]
+    var in_body = false
+    var index = 0
+    while index < lines.len():
+        val line: text = lines[index]
+        val previous: text = if index > 0: lines[index - 1] else: ""
+        if in_body:
+            if line == "" or line.starts_with(" "):
+                out.push(line)
+            else:
+                in_body = false
+        if not in_body:
+            val wanted = line.starts_with("extern fn spl_dl") or line.starts_with("fn _sffi_dlopen_checked(") or line.starts_with("fn _sffi_dlsym_checked(")
+            if wanted:
+                if previous.starts_with("@unsafe"): out.push(previous)
+                out.push(line)
+                in_body = line.starts_with("fn ")
+        index = index + 1
+    out
+
 describe "extern status/out slot passed by address":
+    it "rejects a &mut local out slot after an early-return join (old dynamic.spl:149/176 shape)":
+        step("Lower the join shape and run the borrow checker over the module")
+        expect(borrow_messages(dlopen_join_borrow_shape()).join("\n")).to_contain("call argument requires a checked non-retaining short contract")
+
+    it "sffi/dynamic.spl loader and resolver pass the borrow checker":
+        step("Lower the real _sffi_dlopen_checked/_sffi_dlsym_checked bodies with their externs")
+        val source = dynamic_loader_source()
+        expect(source.join("\n")).to_contain("fn _sffi_dlopen_checked(")
+        expect(source.join("\n")).to_contain("fn _sffi_dlsym_checked(")
+        expect(borrow_messages(source).join("\n")).to_equal("")
+
     it "rejects a &mut local out slot handed to the try-call extern (census dynamic.spl:92 shape)":
         step("Lower the census-red shape and run the borrow checker over the module")
         expect(borrow_messages(try_call_borrow_shape()).join("\n")).to_contain("call argument requires a checked non-retaining short contract")

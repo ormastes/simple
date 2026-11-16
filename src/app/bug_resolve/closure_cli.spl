@@ -1,0 +1,137 @@
+# Shared CLI adapter for the pure bug closure gate (plan section 4.3).
+#
+# bug-resolve and closure-check both build the typed evaluator inputs here and
+# read the verdict from bug_closure_evaluate_v1, so the E-BUG-* codes and the
+# receipt are the single source of the decision. This module only reads: the
+# bug database, the workaround index, git HEAD and spec-file existence. It never
+# writes; the caller transitions the bug only on an Allowed receipt.
+#
+# Run evidence: the CLI has no TestDB run source yet, so the policy is
+# NotObserved and the receipt says so. Reproducer/prevention are checked for
+# existence and distinctness, never claimed as observed RED/GREEN.
+
+use app.bug.closure_gate.{BugIdV1, SnapshotDigestV1, TestCaseIdV1, ReviewerIdV1, ClosureRationaleV1,
+    BackendIdV1, BugClosureDispositionV1, BugClosureCandidateV1, BugClosureKindV1, bug_closure_disposition_kind_v1, BugClosurePolicyV1, BugRunEvidenceV1,
+    BugTestDbViewV1, BugClosureReceiptV1, BugClosureVerdictV1,
+    bug_closure_evaluate_v1, bug_closure_block_code_v1, bug_closure_disposition_text_v1,
+    bug_closure_kind_text_v1, bug_closure_run_evidence_text_v1}
+use app.bug_resolve.close_gate.{bug_close_gate}
+use app.bug.workaround_index.{WorkaroundIndex, empty_workaround_index}
+use app.bug.workaround_store.{load_workarounds, workaround_git}
+use nogc_sync_mut.database.bug.{Bug, BugStatus, load_bug_database}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+use std.nogc_sync_mut.io.env_ops.{cwd}
+
+struct BugDbPathV1:
+    value: text
+
+struct BugClosureRequestV1:
+    bug: BugIdV1
+    disposition: BugClosureDispositionV1
+    reproducer: TestCaseIdV1?
+    prevention: TestCaseIdV1?
+    rationale: ClosureRationaleV1
+    # None: use git HEAD of the working directory.
+    source_head: SnapshotDigestV1?
+    # The bug-record snapshot the caller started from (see bug_closure_bug_state_v1).
+    bug_state: SnapshotDigestV1
+
+struct BugClosureEvaluationV1:
+    receipt: BugClosureReceiptV1
+    notes: [text]
+
+fn _status_text(status: BugStatus) -> text:
+    match status:
+        case BugStatus.Open: "open"
+        case BugStatus.Investigating: "investigating"
+        case BugStatus.Confirmed: "confirmed"
+        case BugStatus.Fixed: "fixed"
+        case BugStatus.Closed: "closed"
+        case BugStatus.Wontfix: "wontfix"
+
+fn _read_bug(db_path: BugDbPathV1, bug: BugIdV1) -> Result<Bug, text>:
+    val db = match load_bug_database(db_path.value):
+        case Some(value): value
+        case None: return Err("could not load bug database at {db_path.value}")
+    match db.get_bug(bug.value):
+        case Some(found): Ok(found)
+        case None: Err("bug '{bug.value}' not found in database")
+
+pub fn bug_closure_state_of_v1(found: Bug) -> SnapshotDigestV1:
+    """Digest of the bug record's lifecycle state (status and last update)."""
+    SnapshotDigestV1(value: "{_status_text(found.status)}")
+
+pub fn bug_closure_bug_state_v1(db_path: BugDbPathV1, bug: BugIdV1) -> Result<SnapshotDigestV1, text>:
+    val found = _read_bug(db_path, bug)?
+    Ok(bug_closure_state_of_v1(found))
+
+fn _source_head(request: BugClosureRequestV1) -> Result<SnapshotDigestV1, text>:
+    match request.source_head:
+        case Some(head): return Ok(head)
+        case None: pass
+    val raw = workaround_git(cwd(), ["rev-parse", "HEAD"])?
+    val head = raw.trim()
+    if head == "":
+        return Err("cannot determine source head; pass --source-head=<rev>")
+    Ok(SnapshotDigestV1(value: head))
+
+fn _existing_cases(request: BugClosureRequestV1) -> [TestCaseIdV1]:
+    var out: [TestCaseIdV1] = []
+    match request.reproducer:
+        case Some(case_id):
+            if file_exists(case_id.value): out.push(case_id)
+        case None: pass
+    match request.prevention:
+        case Some(case_id):
+            if file_exists(case_id.value): out.push(case_id)
+        case None: pass
+    out
+
+pub fn bug_closure_argument_problem_v1(request: BugClosureRequestV1) -> text:
+    """Empty when the arguments are well formed: CU-015 spec checks for a fix, a rationale otherwise."""
+    if bug_closure_disposition_kind_v1(request.disposition) == BugClosureKindV1.NonFixDisposition:
+        if request.rationale.value == "":
+            return "a non-fix disposition needs --rationale=<text>; it is not recorded as a verified fix"
+        return ""
+    var reproducer = ""
+    match request.reproducer:
+        case Some(case_id): reproducer = case_id.value
+        case None: pass
+    var prevention = ""
+    match request.prevention:
+        case Some(case_id): prevention = case_id.value
+        case None: pass
+    bug_close_gate(reproducer, prevention,
+        reproducer != "" and file_exists(reproducer), prevention != "" and file_exists(prevention))
+
+pub fn bug_closure_cli_evaluate(request: BugClosureRequestV1, db_path: BugDbPathV1) -> Result<BugClosureEvaluationV1, text>:
+    """Read-only evaluation of one closure attempt; Err means the environment could not be read."""
+    val fresh_state = bug_closure_bug_state_v1(db_path, request.bug)?
+    val head = _source_head(request)?
+    var notes: [text] = []
+    val index: WorkaroundIndex = match load_workarounds():
+        case Ok(loaded): loaded
+        case Err(reason):
+            notes.push("workaround index unavailable: {reason}")
+            empty_workaround_index(head.value)
+    val candidate = BugClosureCandidateV1(bug_id: request.bug, disposition: request.disposition,
+        author: ReviewerIdV1(value: "bug-closure-cli"), head: head, bug_state: request.bug_state,
+        rationale: request.rationale, reproducer: request.reproducer, prevention: request.prevention,
+        prevention_exception: None, requirements: [])
+    val policy = BugClosurePolicyV1(required_backends: [], run_evidence: BugRunEvidenceV1.NotObserved)
+    val view = BugTestDbViewV1(head: head, bug_state: fresh_state, known_bugs: [request.bug],
+        known_cases: _existing_cases(request), known_requirements: [], runs: [])
+    val receipt = bug_closure_evaluate_v1(candidate, request.bug, policy, view, index)
+    Ok(BugClosureEvaluationV1(receipt: receipt, notes: notes))
+
+pub fn bug_closure_render_v1(evaluation: BugClosureEvaluationV1) -> [text]:
+    """Receipt summary line, one line per finding (code and exact proof), then notes."""
+    val receipt = evaluation.receipt
+    val verdict = if receipt.verdict == BugClosureVerdictV1.Allowed: "allowed" else: "blocked"
+    var lines: [text] = ["closure bug={receipt.bug_id.value} disposition={bug_closure_disposition_text_v1(receipt.disposition)} kind={bug_closure_kind_text_v1(receipt.kind)} verdict={verdict} run_evidence={bug_closure_run_evidence_text_v1(receipt.run_evidence)} head={receipt.head.value}"]
+    for finding in receipt.findings:
+        lines.push("  {bug_closure_block_code_v1(finding.reason)} proof={finding.proof.value}")
+    for note in evaluation.notes:
+        lines.push("  note: {note}")
+    lines
+

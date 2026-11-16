@@ -1,0 +1,164 @@
+# @req HOST-HELPER-04
+# AUTHORED SOURCE-ONLY NOT_RUN. Actual signed Linux journal fixture verifies
+# generic owned dispatch only; no native Windows root or qualification.
+use std.spec.*
+use test.fixtures.orchestration.host_parent_budget_fixture_v1.*
+use test.fixtures.orchestration.host_helper_fixture_v1.host_helper_clock_v1
+use test.fixtures.orchestration.host_local_resolver_fixture_v2.host_local_resolver_consumed_fixture_v2
+use std.nogc_sync_mut.orchestration.host_parent_budget_v1.*
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostReservationAuthorizationContextV1
+use std.common.contracts.orchestration.controller_parent_budget_v1.controller_parent_budget_digest_v1
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_read_required_v3
+use std.nogc_sync_mut.io.file_ops.file_exists
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_grant_v2
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{
+    distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
+
+fn owned_budget_expired_clock_v2() -> HostReservationAuthorizationContextV1:
+    var current = host_helper_clock_v1()
+    current.grant_clock = 190
+    current.monotonic_ms = 20
+    current
+
+fn owned_budget_changed_context_v2() -> HostReservationAuthorizationContextV1:
+    var current = host_helper_clock_v1()
+    current.policy_revision = current.policy_revision + 1
+    current
+
+fn owned_budget_regressed_clock_v2() -> HostReservationAuthorizationContextV1:
+    var current = host_helper_clock_v1()
+    current.grant_clock = current.grant_clock - 1
+    current.monotonic_ms = current.monotonic_ms - 1
+    current
+
+fn owned_budget_relative_v2(digest: text) -> text:
+    "host-parent-budget-records/" + digest + ".sdn"
+
+# These are the same deterministic test-only issuer and approver seed values
+# used by the real signed fixture. Production crypto signs both new messages;
+# no signature verifier or authorization result is mocked.
+fn owned_budget_resigned_record_v2(record: HostParentBudgetRecordV1) -> HostParentBudgetRecordV1:
+    var changed = record
+    changed.proof.signed.grant.id = "budget_owned_renewed_grant"
+    val issuer_seed: [u8] = [for index in 0..32: (index + 1) as u8]
+    val approver_seed: [u8] = [for index in 0..32: (index + 65) as u8]
+    changed.proof.signed.signature = pure_ed25519_sign_from_seed_v1(issuer_seed,
+        distributed_grant_signature_message_v2(changed.proof.signed).unwrap()).signature
+    changed.proof.approval.grant_digest = sha256_text(distributed_encode_grant_v2(changed.proof.signed.grant).unwrap())
+    changed.proof.approval.signature = pure_ed25519_sign_from_seed_v1(approver_seed,
+        distributed_approval_signature_message_v2(changed.proof.approval).unwrap()).signature
+    changed
+
+describe "Owned journal parent budget publication and reload":
+    it "stores and reloads the exact signed budget through the actual retained journal":
+        step("Roundtrip actual signed bytes with idempotent publication and no helper or provider effect")
+        val fixture = host_parent_budget_fixture_v1()
+        val local = fixture.local
+        val sequence = local.capacity.journal.sequence
+        val bytes = host_parent_budget_record_encode_v1(fixture.record).unwrap()
+        val digest = host_parent_budget_store_owned_v2(local.capacity, local.scope, local.policy,
+            fixture.record, host_helper_clock_v1(), host_helper_clock_v1).unwrap()
+        expect(digest).to_equal(controller_parent_budget_digest_v1(fixture.record.proof.budget).unwrap())
+        expect(distributed_operation_journal_read_required_v3(local.capacity.journal,
+            owned_budget_relative_v2(digest), 2097152).unwrap()).to_equal(bytes)
+        val loaded = host_parent_budget_load_owned_v2(local.capacity, local.scope, local.policy, digest,
+            fixture.record.proof.budget.parent_operation_id, host_helper_clock_v1(), host_helper_clock_v1).unwrap()
+        expect(host_parent_budget_record_encode_v1(loaded).unwrap()).to_equal(bytes)
+        expect(host_parent_budget_store_owned_v2(local.capacity, local.scope, local.policy,
+            fixture.record, host_helper_clock_v1(), host_helper_clock_v1).unwrap()).to_equal(digest)
+        expect(local.capacity.journal.sequence).to_equal(sequence)
+        expect(file_exists(local.capacity.journal.root + "/host-helper-requests")).to_equal(false)
+        expect(host_local_resolver_consumed_fixture_v2(local.container)).to_equal(0)
+        host_parent_budget_fixture_close_v1(fixture)
+
+    it "rejects forged issuer and approval signatures before publishing any record":
+        step("Tamper each real signature independently and require the private record directory to remain absent")
+        val fixture = host_parent_budget_fixture_v1()
+        val local = fixture.local
+        for signature in ["issuer", "approval"]:
+            var forged = fixture.record
+            if signature == "issuer": forged.proof.signed.signature = [0u8; 64]
+            else: forged.proof.approval.signature = [0u8; 64]
+            expect(host_parent_budget_store_owned_v2(local.capacity, local.scope, local.policy,
+                forged, host_helper_clock_v1(), host_helper_clock_v1).is_err()).to_equal(true)
+            expect(file_exists(local.capacity.journal.root + "/host-parent-budget-records")).to_equal(false)
+        expect(host_local_resolver_consumed_fixture_v2(local.container)).to_equal(0)
+        host_parent_budget_fixture_close_v1(fixture)
+
+    it "rechecks expiry authority context and monotonic clock before publication":
+        step("Refuse refreshed expired or changed authority without returning a planning reference or creating record bytes")
+        val fixture = host_parent_budget_fixture_v1()
+        val local = fixture.local
+        expect(host_parent_budget_store_owned_v2(local.capacity, local.scope, local.policy,
+            fixture.record, host_helper_clock_v1(), owned_budget_expired_clock_v2).unwrap_err()).to_equal("APPROVAL_EXPIRED")
+        expect(file_exists(local.capacity.journal.root + "/host-parent-budget-records")).to_equal(false)
+        expect(host_parent_budget_store_owned_v2(local.capacity, local.scope, local.policy,
+            fixture.record, host_helper_clock_v1(), owned_budget_changed_context_v2).unwrap_err()).to_equal("parent-budget-authority-context-changed")
+        expect(file_exists(local.capacity.journal.root + "/host-parent-budget-records")).to_equal(false)
+        expect(host_parent_budget_store_owned_v2(local.capacity, local.scope, local.policy,
+            fixture.record, host_helper_clock_v1(), owned_budget_regressed_clock_v2).unwrap_err()).to_equal("parent-budget-clock-invalid-or-regressed")
+        expect(file_exists(local.capacity.journal.root + "/host-parent-budget-records")).to_equal(false)
+        host_parent_budget_fixture_close_v1(fixture)
+
+    it "revalidates fresh authority on load without changing immutable retained bytes":
+        step("Publish once then refuse expiry context changes and clock regression during actual retained reload")
+        val fixture = host_parent_budget_fixture_v1()
+        val local = fixture.local
+        val bytes = host_parent_budget_record_encode_v1(fixture.record).unwrap()
+        val digest = host_parent_budget_store_owned_v2(local.capacity, local.scope, local.policy,
+            fixture.record, host_helper_clock_v1(), host_helper_clock_v1).unwrap()
+        val parent = fixture.record.proof.budget.parent_operation_id
+        expect(host_parent_budget_load_owned_v2(local.capacity, local.scope, local.policy, digest, parent,
+            host_helper_clock_v1(), owned_budget_expired_clock_v2).unwrap_err()).to_equal("APPROVAL_EXPIRED")
+        expect(host_parent_budget_load_owned_v2(local.capacity, local.scope, local.policy, digest, parent,
+            host_helper_clock_v1(), owned_budget_changed_context_v2).unwrap_err()).to_equal("parent-budget-authority-context-changed")
+        expect(host_parent_budget_load_owned_v2(local.capacity, local.scope, local.policy, digest, parent,
+            host_helper_clock_v1(), owned_budget_regressed_clock_v2).unwrap_err()).to_equal("parent-budget-clock-invalid-or-regressed")
+        expect(distributed_operation_journal_read_required_v3(local.capacity.journal,
+            owned_budget_relative_v2(digest), 2097152).unwrap()).to_equal(bytes)
+        host_parent_budget_fixture_close_v1(fixture)
+
+    it "refuses a different valid signed envelope at the same immutable budget key":
+        step("Verify a newly signed envelope is authorized then require conflicting publication to preserve the original record")
+        val fixture = host_parent_budget_fixture_v1()
+        val local = fixture.local
+        val original = host_parent_budget_record_encode_v1(fixture.record).unwrap()
+        val digest = host_parent_budget_store_owned_v2(local.capacity, local.scope, local.policy,
+            fixture.record, host_helper_clock_v1(), host_helper_clock_v1).unwrap()
+        val changed = owned_budget_resigned_record_v2(fixture.record)
+        expect(controller_parent_budget_digest_v1(changed.proof.budget).unwrap()).to_equal(digest)
+        expect(host_parent_budget_record_encode_v1(changed).unwrap() == original).to_equal(false)
+        expect(host_parent_budget_authorize_owned_v2(local.capacity, local.scope, local.policy,
+            changed, host_helper_clock_v1(), host_helper_clock_v1).unwrap()).to_equal(true)
+        expect(host_parent_budget_store_owned_v2(local.capacity, local.scope, local.policy,
+            changed, host_helper_clock_v1(), host_helper_clock_v1).is_err()).to_equal(true)
+        expect(distributed_operation_journal_read_required_v3(local.capacity.journal,
+            owned_budget_relative_v2(digest), 2097152).unwrap()).to_equal(original)
+        val loaded = host_parent_budget_load_owned_v2(local.capacity, local.scope, local.policy, digest,
+            fixture.record.proof.budget.parent_operation_id, host_helper_clock_v1(), host_helper_clock_v1).unwrap()
+        expect(host_parent_budget_record_encode_v1(loaded).unwrap()).to_equal(original)
+        host_parent_budget_fixture_close_v1(fixture)
+
+    it "binds reload to the selected parent digest and actual current host scope":
+        step("Refuse another parent an invalid reference and a valid but different host incarnation")
+        val fixture = host_parent_budget_fixture_v1()
+        val local = fixture.local
+        val bytes = host_parent_budget_record_encode_v1(fixture.record).unwrap()
+        val digest = host_parent_budget_store_owned_v2(local.capacity, local.scope, local.policy,
+            fixture.record, host_helper_clock_v1(), host_helper_clock_v1).unwrap()
+        val parent = fixture.record.proof.budget.parent_operation_id
+        expect(host_parent_budget_load_owned_v2(local.capacity, local.scope, local.policy, digest,
+            "different-parent", host_helper_clock_v1(), host_helper_clock_v1).unwrap_err()).to_equal("parent-budget-reference-mismatch")
+        expect(host_parent_budget_load_owned_v2(local.capacity, local.scope, local.policy, "invalid", parent,
+            host_helper_clock_v1(), host_helper_clock_v1).unwrap_err()).to_equal("parent-budget-reference-invalid")
+        var changed_scope = local.scope
+        changed_scope.boot_id = "different-boot"
+        changed_scope.continuity_id = "different-boot"
+        expect(host_parent_budget_load_owned_v2(local.capacity, changed_scope, local.policy, digest, parent,
+            host_helper_clock_v1(), host_helper_clock_v1).unwrap_err()).to_equal("helper-current-scope-mismatch")
+        expect(distributed_operation_journal_read_required_v3(local.capacity.journal,
+            owned_budget_relative_v2(digest), 2097152).unwrap()).to_equal(bytes)
+        expect(host_local_resolver_consumed_fixture_v2(local.container)).to_equal(0)
+        host_parent_budget_fixture_close_v1(fixture)

@@ -1,0 +1,289 @@
+# Genuine borrowed source custody only. No writer, grant, owning cleanup, registry
+# or caller-path constructor. Upper retains the SAME canonical source owner too.
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.linux_fresh_workspace_v3.*
+use std.common.contracts.container.linux_fresh_workload_v2.{LinuxFreshWorkloadActionV2, LinuxFreshWorkloadCommandV2}
+use std.common.contracts.container.linux_fresh_epoch_v1.LinuxFreshEpochProfileV1
+use std.common.contracts.container.linux_fresh_workspace_inspect_v3.*
+use std.common.contracts.container.linux_fresh_workload_inspect_v2.{linux_fresh_workload_inspect_strings_v2, linux_fresh_workload_inspect_text_v2}
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, group_process_child_argv_digest_v2}
+use std.nogc_sync_mut.io.linux_fresh_workspace_launch_v3.*
+use std.common.contracts.container.linux_workspace_profile_v1.*
+use std.common.contracts.container.linux_agent_workspace_profile_v1.*
+use std.common.contracts.container.linux_agent_workspace_profile_v2.*
+use std.common.contracts.container.agent_executable_profile_v1.*
+use std.common.contracts.container.agent_workspace_manifest_v1.*
+use std.common.contracts.orchestration.agent_workspace_invocation_v2.{AgentWorkspaceInvocationManifestV2, agent_workspace_invocation_manifest_decode_v2, agent_workspace_invocation_manifest_encode_v2}
+use std.common.contracts.container.machine_policy_v1.machine_container_policy_decode_v1
+use std.common.contracts.storage.workspace_storage_v1.workspace_storage_binding_v1
+use std.common.contracts.storage.linux_workspace_identity_v1.linux_workspace_retained_native_match_v1
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.*
+use std.nogc_sync_mut.io.linux_machine_workspace_exclusion_v1.LinuxMachineWorkspaceExclusionV1
+use std.nogc_sync_mut.io.retained_file.RetainedDirectoryOwnerV1
+use std.nogc_sync_mut.storage_roots.workspace_storage_owner_v1.{WorkspaceStorageLeaseV1, workspace_storage_observe_v1}
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+
+pub use std.common.contracts.container.linux_fresh_workspace_v3.LinuxFreshWorkspaceBindingSnapshotV3
+
+pub class LinuxFreshWorkspaceBindingV3:
+    reader: LinuxMachinePolicyOwnerV1
+    storage: LinuxMachineStorageV1
+    lease: WorkspaceStorageLeaseV1
+    exclusion: LinuxMachineWorkspaceExclusionV1
+    parent_directory: RetainedDirectoryOwnerV1
+    root_directory: RetainedDirectoryOwnerV1
+    request_source: text
+    manifest_source: text
+    invocation_digest: text
+    expected_binding: text
+
+    pub fn current_v3() -> Result<LinuxFreshWorkspaceBindingSnapshotV3, text>:
+        val observed = workspace_binding_observe_v3(self)?
+        Ok(observed.snapshot)
+
+    pub fn validate_command_v3(command: LinuxFreshWorkspaceCommandV3) -> Result<(), text>:
+        val observed = workspace_binding_observe_v3(self)?
+        if container_execution_request_encode_v2(command.command.request)? != self.request_source:
+            return Err("fresh-workspace-binding-request-differs")
+        linux_fresh_workspace_command_validate_v3(command, observed.workspace, observed.agent,
+            self.invocation_digest, observed.snapshot.service_uid, observed.snapshot.service_gid)
+
+    # Reconstruct fresh observation DATA from immutable canonical bytes, not
+    # caller-shared argv/maps. This does not grant an operation or retirement.
+    pub fn observation_command_v3(action: LinuxFreshWorkloadActionV2, native_id: text, helper_cpu_millis: i64,
+            helper_memory_bytes: i64) -> Result<LinuxFreshWorkspaceCommandV3, text>:
+        if action != LinuxFreshWorkloadActionV2.Inspect and action != LinuxFreshWorkloadActionV2.Absence:
+            return Err("fresh-workspace-observation-action-required")
+        val observed = workspace_binding_observe_v3(self)?
+        val request = container_execution_request_decode_v2(self.request_source)?
+        val projected = linux_fresh_workspace_request_v3(request, observed.workspace, observed.agent,
+            self.invocation_digest, observed.snapshot.service_uid, observed.snapshot.service_gid)?
+        val p = request.plan
+        val scope = ContainerHostScopeV2(physical_host_id: p.physical_host_id, service_scope_id: p.service_scope_id,
+            boot_id: p.boot_id, provider_generation: p.provider_generation, native_machine_id: p.native_machine_id,
+            continuity_mode: p.continuity_mode, continuity_id: p.continuity_id)
+        val command = LinuxFreshWorkspaceCommandV3(command: LinuxFreshWorkloadCommandV2(request: request, scope: scope,
+            action: action, native_id: native_id, image: projected.image, entrypoint: projected.entrypoint, args: projected.args,
+            cpu_millis: projected.cpu_millis, memory_bytes: projected.memory_bytes, pid_limit: projected.pid_limit,
+            timeout_ms: projected.timeout_ms, helper_cpu_millis: helper_cpu_millis, helper_memory_bytes: helper_memory_bytes))
+        self.validate_command_v3(command)?
+        Ok(command)
+
+    pub fn project_launch_v3(epoch: LinuxFreshEpochProfileV1, base: GroupProcessStreamLaunchV2,
+            command: LinuxFreshWorkspaceCommandV3) -> Result<GroupProcessStreamLaunchV2, text>:
+        self.validate_command_v3(command)?
+        val observed = workspace_binding_observe_v3(self)?
+        val result = linux_fresh_workspace_project_launch_v3(epoch, observed.workspace, observed.agent, self.invocation_digest,
+            observed.snapshot.service_uid, observed.snapshot.service_gid, base, command)?
+        val after = workspace_binding_observe_v3(self)?
+        if after.snapshot.binding_digest != observed.snapshot.binding_digest: return Err("fresh-workspace-projection-custody-changed")
+        Ok(result)
+
+    pub fn validate_created_v3(epoch: LinuxFreshEpochProfileV1, command: LinuxFreshWorkspaceCommandV3, raw: text) -> Result<(), text>:
+        self.validate_command_v3(command)?
+        val observed = workspace_binding_observe_v3(self)?
+        linux_fresh_workspace_created_config_validate_v3(observed.workspace, observed.agent, self.invocation_digest,
+            observed.snapshot.service_uid, observed.snapshot.service_gid, command, raw)?
+        val fields = linux_fresh_workspace_inspect_fields_v3(raw)?
+        if linux_fresh_workload_inspect_text_v2(fields, "cgroup_parent")? != epoch.text_v1("delegatedCgroup")?:
+            return Err("fresh-workspace-created-parent-not-held-delegation")
+        var create = command.command
+        create.action = LinuxFreshWorkloadActionV2.Create
+        create.native_id = ""
+        create.observed_image_id = ""
+        val expected = [epoch.text_v1("providerExecutable")?] + linux_fresh_workspace_argv_v3(epoch, observed.workspace, observed.agent,
+            self.invocation_digest, observed.snapshot.service_uid, observed.snapshot.service_gid, LinuxFreshWorkspaceCommandV3(command: create))?
+        if linux_fresh_workload_inspect_strings_v2(fields, "create_command", 65)? != expected:
+            return Err("fresh-workspace-created-command-not-exact-owned-projection")
+        val after = workspace_binding_observe_v3(self)?
+        if after.snapshot.binding_digest != observed.snapshot.binding_digest: return Err("fresh-workspace-created-custody-changed")
+        Ok(())
+
+    pub fn executable_profile_v3() -> Result<AgentExecutableProfileV1, text>:
+        val current = workspace_binding_observe_v3(self)?
+        Ok(current.executable_profile)
+
+    pub fn validate_invocation_v3(invocation_source: text, argv: [text]) -> Result<AgentWorkspaceInvocationManifestV2, text>:
+        val invocation = workspace_binding_invocation_v3(self, invocation_source)?
+        if argv != invocation.base.inner_argv: return Err("fresh-workspace-primary-not-exact-approved-native-agent")
+        Ok(invocation)
+
+    pub fn project_primary_attach_v3(epoch: LinuxFreshEpochProfileV1, base: GroupProcessStreamLaunchV2,
+            attach: LinuxFreshWorkspacePrimaryAttachCommandV3) -> Result<GroupProcessStreamLaunchV2, text>:
+        self.validate_command_v3(attach.workspace)?
+        if attach.workspace.command.action != LinuxFreshWorkloadActionV2.Inspect:
+            return Err("fresh-workspace-primary-attach-inspect-identity-required")
+        val invocation = workspace_binding_invocation_v3(self, attach.invocation_source)?
+        var projected = self.project_launch_v3(epoch, base, attach.workspace)?
+        var request = projected.request
+        request.args = linux_fresh_workspace_engine_prefix_v3(epoch)? + ["attach", "--detach-keys=", "--sig-proxy=false", "--no-stdin=false", "--", attach.workspace.command.native_id]
+        request.timeout_ms = invocation.base.workload_duration_ms # Signed transport bound, not payload completion.
+        request.child_argv_digest = group_process_child_argv_digest_v2(request.program, request.args)
+        projected.request = request
+        val after = workspace_binding_observe_v3(self)?
+        Ok(projected)
+
+    pub fn validate_primary_v3(invocation_source: text, executable_digest: text, argv: [text]) -> Result<(), text>:
+        val invocation = self.validate_invocation_v3(invocation_source, argv)?
+        val actual = workspace_binding_observe_v3(self)?
+        if executable_digest != actual.snapshot.agent_digest: return Err("fresh-workspace-primary-not-exact-approved-native-agent")
+        Ok(())
+
+    # Restrictive DATA comparison only. The subject privately supplies actual
+    # statx bytes from its retained guest mount, never a caller PID or receipt.
+    pub fn validate_guest_identity_v3(identity: [u8]) -> Result<(), text>:
+        val before = workspace_binding_observe_v3(self)?
+        val native = workspace_storage_observe_v1(self.lease)?
+        linux_workspace_retained_native_match_v1(identity, native.workspace_id)?
+        val after = workspace_binding_observe_v3(self)?
+        if after.snapshot.binding_digest != before.snapshot.binding_digest: return Err("fresh-workspace-guest-custody-changed")
+        Ok(())
+
+# Internal immutable observation values never cross as ownership or grants.
+struct WorkspaceBindingObservedV3:
+    snapshot: LinuxFreshWorkspaceBindingSnapshotV3
+    workspace: LinuxWorkspaceInstalledProfileV1
+    agent: LinuxAgentWorkspaceProfileV1
+    executable_profile: AgentExecutableProfileV1
+
+fn workspace_binding_invocation_v3(owner: LinuxFreshWorkspaceBindingV3, invocation_source: text) -> Result<AgentWorkspaceInvocationManifestV2, text>:
+    val before = workspace_binding_observe_v3(owner)?
+    if sha256_text(invocation_source) != owner.invocation_digest: return Err("fresh-workspace-primary-invocation-binding")
+    val invocation = agent_workspace_invocation_manifest_decode_v2(invocation_source)?
+    if agent_workspace_invocation_manifest_encode_v2(invocation)? != invocation_source or invocation.base.workspace_manifest != owner.manifest_source:
+        return Err("fresh-workspace-primary-canonical-invocation")
+    if agent_executable_profile_encode_v1(invocation.executable_profile)? != agent_executable_profile_encode_v1(before.executable_profile)?:
+        return Err("fresh-workspace-primary-executable-policy-mismatch")
+    val expected_image = if before.agent.image_config_id.starts_with("sha256:"): before.agent.image_config_id.substring(7, before.agent.image_config_id.byte_len()) else: before.agent.image_config_id
+    val observed_image = if invocation.base.image_config_id.starts_with("sha256:"): invocation.base.image_config_id.substring(7, invocation.base.image_config_id.byte_len()) else: invocation.base.image_config_id
+    if (invocation.base.inner_argv.len() < 2 or invocation.base.inner_argv[0] != before.agent.agent_program or expected_image != observed_image):
+        return Err("fresh-workspace-primary-not-exact-approved-native-agent")
+    val after = workspace_binding_observe_v3(owner)?
+    if after.snapshot.binding_digest != before.snapshot.binding_digest: return Err("fresh-workspace-primary-custody-changed")
+    Ok(invocation)
+
+
+fn workspace_binding_utf8_v3(bytes: [u8]) -> Result<text, text>:
+    if bytes.len() < 1 or not utf8_bytes_valid(bytes): return Err("fresh-workspace-profile-utf8")
+    Ok(bytes_to_text(bytes))
+
+fn workspace_binding_observe_v3(owner: LinuxFreshWorkspaceBindingV3) -> Result<WorkspaceBindingObservedV3, text>:
+    linux_machine_process_origin_check_v1()?
+    val before = owner.reader.actual_process_context_v1()?
+    val machine_source = workspace_binding_utf8_v3(owner.reader.read_policy_v1()?)?
+    if workspace_binding_utf8_v3(owner.storage.policy_bytes_v1()?)? != machine_source:
+        return Err("fresh-workspace-original-writer-policy-mismatch")
+    val machine_digest = sha256_text(machine_source)
+    val machine = machine_container_policy_decode_v1(machine_source)?
+    val workspace_source = workspace_binding_utf8_v3(owner.reader.read_workspace_profile_v1()?)?
+    val workspace = linux_workspace_installed_profile_decode_v1(workspace_source)?
+    val agent_source = owner.reader.read_agent_workspace_profile_v1()?
+    val approved = linux_agent_workspace_profile_decode_v2(agent_source)?
+    val agent = approved.base
+    val manifest = agent_workspace_manifest_decode_v1(owner.manifest_source)?
+    val request = container_execution_request_decode_v2(owner.request_source)?
+    if (workspace.machine_policy_digest != machine_digest or agent.machine_policy_digest != machine_digest or
+            agent.workspace_profile_digest != sha256_text(workspace_source) or manifest.profile_digest != sha256_text(agent_source)):
+        return Err("fresh-workspace-installed-profile-chain")
+    linux_agent_workspace_profile_match_v2(approved, manifest)?
+    if linux_workspace_paths_overlap_v1(agent.assets_root, linux_workspace_source_root_v1(workspace)):
+        return Err("fresh-workspace-assets-overlap")
+    var provider_digest = ""
+    for provider in machine.providers:
+        if provider.backend == "linux-podman": provider_digest = sha256_text(provider.policy_bytes)
+    if provider_digest == "" or provider_digest != workspace.provider_policy_digest:
+        return Err("fresh-workspace-installed-provider-binding")
+    val boot = owner.reader.actual_boot_id_v2()?
+    val plan = request.plan
+    if (plan.physical_host_id != machine.physical_host_id or plan.native_machine_id != machine.native_machine_id or
+            plan.boot_id != boot or plan.continuity_id != boot or plan.continuity_mode != "native-boot-incarnation-v1"):
+        return Err("fresh-workspace-installed-machine-scope")
+    if before.real_uid != before.effective_uid or before.effective_uid <= 0:
+        return Err("fresh-workspace-actual-service-uid")
+    # GID is derived from the actual Linux context, never from lease metadata.
+    val gid = workspace_binding_gid_v3()
+    if gid.is_err(): return Err(gid.unwrap_err())
+    val supported = linux_fresh_workspace_request_v3(request, workspace, agent, owner.invocation_digest, before.effective_uid, gid.unwrap())?
+    if supported.memory_bytes < agent_executable_profile_minimum_memory_v1(approved.executable_profile)?:
+        return Err("fresh-workspace-request-memory-below-approved-executable-profile")
+    val native = workspace_storage_observe_v1(owner.lease)?
+    val expected = workspace_storage_binding_v1(linux_workspace_storage_request_v1(workspace))?
+    if (workspace_storage_binding_v1(owner.lease.request)? != expected or native.binding_digest != expected or
+            native.state != "retained" or manifest.slot_binding_digest != expected):
+        return Err("fresh-workspace-live-native-lease-binding")
+    val excluded = owner.exclusion.current_v1()?
+    if excluded.machine_policy_digest != machine_digest or excluded.lease_binding_digest != expected:
+        return Err("fresh-workspace-original-exclusion-binding")
+    owner.parent_directory.stage_child_match_v1(workspace.leaf_name, owner.root_directory)?
+    val parent_identity = owner.parent_directory.stage_identity_v1()?
+    val root_identity = owner.root_directory.stage_identity_v1()?
+    linux_workspace_retained_native_match_v1(root_identity, native.workspace_id)?
+    val directory_digest = sha256_u8_hex(parent_identity + root_identity)
+    val image_id = if agent.image_config_id.starts_with("sha256:"): agent.image_config_id.substring(7, agent.image_config_id.byte_len()) else: agent.image_config_id
+    if not builder_digest_valid_v1(image_id): return Err("fresh-workspace-full-image-config-id-required")
+    var snapshot = LinuxFreshWorkspaceBindingSnapshotV3(binding_digest: "", machine_policy_digest: machine_digest,
+        provider_policy_digest: provider_digest, workspace_profile_digest: sha256_text(workspace_source),
+        agent_profile_digest: sha256_text(agent_source), request_digest: plan.request_digest,
+        manifest_digest: sha256_text(owner.manifest_source), invocation_digest: owner.invocation_digest,
+        lease_binding_digest: expected, workspace_identity_digest: excluded.workspace_identity_digest,
+        directory_binding_digest: directory_digest, source_manifest_digest: manifest.source_manifest_digest,
+        bootstrap_digest: manifest.bootstrap_digest, git_digest: manifest.git_digest, agent_digest: manifest.agent_digest,
+        image_config_id: agent.image_config_id, service_uid: before.effective_uid, service_gid: gid.unwrap())
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-fresh-workspace-binding"), "version": SdnValue.Int(3),
+        "machine": SdnValue.String(snapshot.machine_policy_digest), "provider": SdnValue.String(snapshot.provider_policy_digest),
+        "workspace": SdnValue.String(snapshot.workspace_profile_digest), "agent": SdnValue.String(snapshot.agent_profile_digest),
+        "request": SdnValue.String(owner.request_source), "manifest": SdnValue.String(owner.manifest_source),
+        "invocation": SdnValue.String(snapshot.invocation_digest), "lease": SdnValue.String(snapshot.lease_binding_digest),
+        "nativeRoot": SdnValue.String(snapshot.workspace_identity_digest), "directories": SdnValue.String(directory_digest),
+        "uid": SdnValue.Int(snapshot.service_uid), "gid": SdnValue.Int(snapshot.service_gid)}
+    snapshot.binding_digest = sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+    if owner.expected_binding != "" and snapshot.binding_digest != owner.expected_binding:
+        return Err("fresh-workspace-original-binding-changed")
+    owner.parent_directory.stage_child_match_v1(workspace.leaf_name, owner.root_directory)?
+    val after_native = workspace_storage_observe_v1(owner.lease)?
+    linux_workspace_retained_native_match_v1(owner.root_directory.stage_identity_v1()?, after_native.workspace_id)?
+    val after_excluded = owner.exclusion.current_v1()?
+    val after = owner.reader.actual_process_context_v1()?
+    if (after.identity_digest != before.identity_digest or after.generation != before.generation or
+            after_native.binding_digest != native.binding_digest or after_native.workspace_id != native.workspace_id or
+            after_native.state != "retained" or after_excluded != excluded or
+            owner.parent_directory.stage_identity_v1()? != parent_identity or owner.root_directory.stage_identity_v1()? != root_identity):
+        return Err("fresh-workspace-current-native-custody-changed")
+    if (workspace_binding_utf8_v3(owner.reader.read_workspace_profile_v1()?)? != workspace_source or
+            owner.reader.read_agent_workspace_profile_v1()? != agent_source or
+            workspace_binding_utf8_v3(owner.storage.policy_bytes_v1()?)? != machine_source):
+        return Err("fresh-workspace-installed-bytes-changed")
+    Ok(WorkspaceBindingObservedV3(snapshot: snapshot, workspace: workspace, agent: agent, executable_profile: approved.executable_profile))
+
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_machine_policy_abi_v1.{getgid, getegid}
+@unsafe(reason: "actual real/effective service GID; no caller-supplied identity", capabilities: [ffi])
+fn workspace_binding_gid_v3() -> Result<i64, text>:
+    val real = getgid() as i64
+    val effective = getegid() as i64
+    if real <= 0 or real != effective: return Err("fresh-workspace-actual-service-gid")
+    Ok(real)
+@else:
+fn workspace_binding_gid_v3() -> Result<i64, text>: Err("fresh-workspace-linux-required")
+@end
+
+pub fn linux_fresh_workspace_binding_open_v3(reader: LinuxMachinePolicyOwnerV1, storage: LinuxMachineStorageV1,
+        lease: WorkspaceStorageLeaseV1, exclusion: LinuxMachineWorkspaceExclusionV1,
+        parent_directory: RetainedDirectoryOwnerV1, root_directory: RetainedDirectoryOwnerV1,
+        request: ContainerExecutionRequestV2, manifest_bytes: text, invocation_digest: text) -> Result<LinuxFreshWorkspaceBindingV3, text>:
+    if not builder_digest_valid_v1(invocation_digest): return Err("fresh-workspace-invocation-digest")
+    val source = container_execution_request_encode_v2(request)?
+    val manifest = agent_workspace_manifest_decode_v1(manifest_bytes)?
+    if agent_workspace_manifest_encode_v1(manifest)? != manifest_bytes: return Err("fresh-workspace-manifest-canonical")
+    val candidate = LinuxFreshWorkspaceBindingV3(reader: reader, storage: storage, lease: lease, exclusion: exclusion,
+        parent_directory: parent_directory, root_directory: root_directory, request_source: source,
+        manifest_source: manifest_bytes, invocation_digest: invocation_digest, expected_binding: "")
+    val current = candidate.current_v3()?
+    Ok(LinuxFreshWorkspaceBindingV3(reader: reader, storage: storage, lease: lease, exclusion: exclusion,
+        parent_directory: parent_directory, root_directory: root_directory, request_source: source,
+        manifest_source: manifest_bytes, invocation_digest: invocation_digest, expected_binding: current.binding_digest))

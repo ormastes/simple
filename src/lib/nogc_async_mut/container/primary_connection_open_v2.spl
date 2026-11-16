@@ -1,0 +1,113 @@
+# Common provider connection lifecycle. Native owners never escape through
+# process-shaped compatibility fields, and every post-connect error retains one.
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_project_v2}
+use std.nogc_async_mut.container.terminal_session_v2.ContainerOwnedTerminalSessionV2
+use std.common.contracts.container.execution_v2.ContainerExecutionRequestV2
+use std.common.contracts.container.primary_connection_v2.ContainerPrimaryConnectionPlanV2
+use std.common.contracts.container.primary_connection_consumption_v2.ContainerPrimaryConnectionConsumptionV2
+use std.nogc_sync_mut.io.windows_primary_connection_admission_v2.WindowsPrimaryConnectionVerifiedV2
+use std.nogc_async_mut.container.providers.windows.docker_engine_exchange_v3.{WindowsDockerEngineExchangeV3,
+    WindowsDockerEngineExchangeOutcomeV3, WindowsDockerEngineExchangePhaseV3}
+use std.nogc_async_mut.container.providers.windows.primary_connection_v2.windows_primary_connection_take_v2
+
+use std.nogc_async_mut.container.primary_connection_attempt_v3.ContainerPrimaryConnectionAttemptTerminalV3
+
+pub enum ContainerPrimaryConnectionAuthorityV2:
+    WindowsVerified(admission: WindowsPrimaryConnectionVerifiedV2)
+
+enum ContainerPrimaryConnectionNativeV2:
+    Windows(exchange: WindowsDockerEngineExchangeV3)
+
+pub class ContainerPrimaryConnectionPendingV2:
+    plan: ContainerPrimaryConnectionPlanV2
+    native: ContainerPrimaryConnectionNativeV2
+
+pub struct ContainerPrimaryConnectionStepV2:
+    pending: ContainerPrimaryConnectionPendingV2?
+    session: ContainerOwnedTerminalSessionV2?
+    error: text
+    terminal: ContainerPrimaryConnectionAttemptTerminalV3? = nil
+
+pub struct ContainerPrimaryConnectionOpenTurnV2:
+    owner: SimpleContainerOwnerV2
+    turn: ContainerPrimaryConnectionStepV2
+
+pub fn container_primary_connection_pending_plan_v2(pending: ContainerPrimaryConnectionPendingV2) -> ContainerPrimaryConnectionPlanV2:
+    pending.plan
+
+fn connection_outcome_v2(plan: ContainerPrimaryConnectionPlanV2,
+        result: WindowsDockerEngineExchangeOutcomeV3) -> ContainerPrimaryConnectionStepV2:
+    match result:
+        case WindowsDockerEngineExchangeOutcomeV3.Rejected(error): ContainerPrimaryConnectionStepV2(None, None, error)
+        case WindowsDockerEngineExchangeOutcomeV3.CleanupRequired(exchange, error):
+            ContainerPrimaryConnectionStepV2(Some(ContainerPrimaryConnectionPendingV2(plan,
+                ContainerPrimaryConnectionNativeV2.Windows(exchange))), None, error)
+        case WindowsDockerEngineExchangeOutcomeV3.Ready(exchange):
+            if exchange.phase_v3() == WindowsDockerEngineExchangePhaseV3.Hijacked:
+                val taken = windows_primary_connection_take_v2(exchange, plan)
+                if val session = taken.session:
+                    return ContainerPrimaryConnectionStepV2(None,
+                        Some(ContainerOwnedTerminalSessionV2.WindowsConnection(session)), taken.error)
+                return ContainerPrimaryConnectionStepV2(Some(ContainerPrimaryConnectionPendingV2(plan,
+                    ContainerPrimaryConnectionNativeV2.Windows(taken.source))), None, taken.error)
+            ContainerPrimaryConnectionStepV2(Some(ContainerPrimaryConnectionPendingV2(plan,
+                ContainerPrimaryConnectionNativeV2.Windows(exchange))), None, "")
+
+pub fn simple_container_primary_connection_begin_v2(owner: SimpleContainerOwnerV2,
+        request: ContainerExecutionRequestV2, authority: ContainerPrimaryConnectionAuthorityV2) -> ContainerPrimaryConnectionOpenTurnV2:
+    val projected = simple_container_project_v2(owner, request)
+    if projected.is_err(): return ContainerPrimaryConnectionOpenTurnV2(owner,
+        ContainerPrimaryConnectionStepV2(None, None, projected.unwrap_err()))
+    match authority:
+        case ContainerPrimaryConnectionAuthorityV2.WindowsVerified(admission):
+            val record = admission.record_v2()
+            match owner:
+                case SimpleContainerOwnerV2.Windows(scope, original):
+                    var adapter = original
+                    val result = adapter.primary_connection_begin_v2(request, admission)
+                    ContainerPrimaryConnectionOpenTurnV2(SimpleContainerOwnerV2.Windows(scope, adapter),
+                        connection_outcome_v2(record.plan, result))
+                case _: ContainerPrimaryConnectionOpenTurnV2(owner,
+                    ContainerPrimaryConnectionStepV2(None, None, "container-primary-connection-authority-provider"))
+
+# The Host refreshes its protected signed authority before each progression.
+# Expiry is additionally enforced by the native write port immediately before IO.
+pub fn simple_container_primary_connection_begin_observed_v3(owner: SimpleContainerOwnerV2,
+        request: ContainerExecutionRequestV2, authority: ContainerPrimaryConnectionAuthorityV2) -> ContainerPrimaryConnectionOpenTurnV2:
+    val projected = simple_container_project_v2(owner, request)
+    if projected.is_err(): return ContainerPrimaryConnectionOpenTurnV2(owner,
+        ContainerPrimaryConnectionStepV2(nil, nil, projected.unwrap_err()))
+    match authority:
+        case ContainerPrimaryConnectionAuthorityV2.WindowsVerified(admission):
+            val record = admission.record_v2()
+            match owner:
+                case SimpleContainerOwnerV2.Windows(scope, original):
+                    var adapter = original
+                    val result = adapter.primary_connection_begin_observed_v3(request, admission)
+                    ContainerPrimaryConnectionOpenTurnV2(SimpleContainerOwnerV2.Windows(scope, adapter),
+                        connection_outcome_v2(record.plan, result))
+                case _: ContainerPrimaryConnectionOpenTurnV2(owner,
+                    ContainerPrimaryConnectionStepV2(nil, nil, "container-primary-connection-authority-provider"))
+
+pub fn simple_container_primary_connection_step_v2(pending: ContainerPrimaryConnectionPendingV2) -> ContainerPrimaryConnectionStepV2:
+    match pending.native:
+        case ContainerPrimaryConnectionNativeV2.Windows(original):
+            var exchange = original
+            connection_outcome_v2(pending.plan, exchange.poll_v3())
+
+pub fn simple_container_primary_connection_cancel_v2(pending: ContainerPrimaryConnectionPendingV2) -> ContainerPrimaryConnectionStepV2:
+    match pending.native:
+        case ContainerPrimaryConnectionNativeV2.Windows(original):
+            var exchange = original
+            val result = exchange.collect_v3()
+            match result:
+                case WindowsDockerEngineExchangeOutcomeV3.Ready(closed):
+                    if closed.phase_v3() == WindowsDockerEngineExchangePhaseV3.Closed and not closed.has_owned_pipe_v3():
+                        val proof = closed.primary_attempt_terminal_v3()
+                        if proof.is_err():
+                            return ContainerPrimaryConnectionStepV2(Some(ContainerPrimaryConnectionPendingV2(pending.plan,
+                                ContainerPrimaryConnectionNativeV2.Windows(closed))), nil, proof.unwrap_err())
+                        return ContainerPrimaryConnectionStepV2(nil, nil, "",
+                            Some(ContainerPrimaryConnectionAttemptTerminalV3.Attempt(proof.unwrap())))
+                    connection_outcome_v2(pending.plan, result)
+                case _: connection_outcome_v2(pending.plan, result)

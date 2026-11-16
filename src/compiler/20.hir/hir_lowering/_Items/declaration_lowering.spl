@@ -50,6 +50,15 @@ extern fn rt_env_get(key: text) -> text?
 fn hir_lower_env_get(key: text) -> text?:
     rt_env_get(key)
 
+fn hir_module_owns_core_string_aliases(module_filename: text) -> bool:
+    """True when the module is simple_core/core_string.spl, the owner of the
+    reserved `__simple_rt_string_*` text aliases. native-build lowers sources
+    from an absolute SCV snapshot path, so accept the repo-relative path itself
+    or any path ending in `/` + it (a lookalike `mysrc/...` stays rejected)."""
+    val owner = "src/runtime/simple_core/core_string.spl"
+    val path = module_filename.replace("\\", "/")
+    path == owner or path.ends_with("/" + owner)
+
 # Native-safe presence checks for the desugared `has_*` / value field pairs on
 # HirFunction. `opt.?` MUST NOT be used for these: it is the TryOperator, it has
 # no native lowering, and under SIMPLE_BOOTSTRAP=1 it silently yields the nil
@@ -196,11 +205,11 @@ impl HirLowering:
             jp_attr_names.push(jp_attr.name)
         join_point_attr_record(self.module_filename, fn_.name, jp_attr_names)
         if fn_.name == "__simple_rt_string_char_code_at":
-            val owns_alias = self.module_filename.replace("\\", "/") == "src/runtime/simple_core/core_string.spl"
+            val owns_alias = hir_module_owns_core_string_aliases(self.module_filename)
             if not owns_alias:
                 self.error("function name '__simple_rt_string_char_code_at' is reserved for compiler-generated text calls", fn_.span)
         if fn_.name == "__simple_rt_string_byte_at":
-            val owns_byte_at_alias = self.module_filename.replace("\\", "/") == "src/runtime/simple_core/core_string.spl"
+            val owns_byte_at_alias = hir_module_owns_core_string_aliases(self.module_filename)
             if not owns_byte_at_alias:
                 self.error("function name '__simple_rt_string_byte_at' is reserved for compiler-generated text calls", fn_.span)
         val bootstrap_diag = self.ambient_bootstrap_enabled() and hir_lower_diag_enabled()

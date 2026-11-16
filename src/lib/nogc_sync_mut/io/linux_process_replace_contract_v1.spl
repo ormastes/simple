@@ -1,0 +1,127 @@
+#![allow(primitive_api)]
+# primitive_api: reviewed Linux fd/syscall-level retained-directory and process-replace mechanism keeps raw fds, byte bounds, seals, deadlines and flags as i64/bool (milestone_0012 groupB review); no raw descriptor crosses Host/workspace public APIs.
+# DATA validation only; neither this request nor its digest mints execution authority.
+use std.common.text_bytes.utf8_bytes_valid
+use std.common.base_encoding.utilities.base_encoding_text_to_bytes
+
+pub struct LinuxProcessReplaceRequestV1:
+    program: text
+    expected_digest: text
+    expected_size_bytes: i64
+    max_image_bytes: i64
+    architecture: text
+    args: [text] # FULL argv, including exact approved argv[0].
+    environment: [text] # Complete explicit ordered NAME=value entries.
+    expires_at_unix_ms: i64
+    preparation_started_ns: i64
+    preparation_budget_ns: i64
+
+pub fn linux_process_replace_deadline_v1(expires: i64, started: i64,
+        budget: i64, unix_ms: i64, now_ns: i64) -> bool:
+    (expires > 0 and started >= 0 and budget > 0 and unix_ms >= 0 and
+        now_ns >= started and unix_ms < expires and now_ns - started < budget)
+
+pub fn linux_process_replace_first_error_v1(before: text, incoming: text) -> text:
+    if before != "": before else: incoming
+
+# Pure copy/decision helpers are DATA, never owner or native receipt factories.
+pub fn linux_process_replace_copy_texts_v1(values: [text]) -> [text]:
+    var saved: [text] = []
+    for value in values: saved.push(value)
+    saved
+
+pub fn linux_process_replace_signal_handler_v1(original: i64) -> i64:
+    if original == 1: 1 else: 0 # Preserve SIG_IGN; reset caught handlers/default.
+
+fn replacement_text_valid_v1(value: text) -> bool:
+    if value.byte_len() > 32768: return false
+    var bytes: [u8] = []
+    for byte in base_encoding_text_to_bytes(value):
+        if byte == 0: return false
+        bytes.push(byte as u8)
+    utf8_bytes_valid(bytes)
+
+pub fn linux_process_replace_request_validate_v1(request: LinuxProcessReplaceRequestV1) -> Result<(), text>:
+    if (not request.program.starts_with("/") or request.program.byte_len() > 4095 or
+            not replacement_text_valid_v1(request.program) or request.expected_digest.len() != 64 or
+            request.args.len() < 1 or request.args.len() > 256 or request.environment.len() > 256 or
+            request.expires_at_unix_ms <= 0 or request.preparation_started_ns < 0 or
+            request.preparation_budget_ns <= 0 or request.expected_size_bytes < 64 or
+            request.max_image_bytes < request.expected_size_bytes or request.max_image_bytes > 536870912 or
+            (request.architecture != "linux-x86_64" and request.architecture != "linux-aarch64")):
+        return Err("linux-replace-request-shape")
+    for character in request.expected_digest:
+        if not "0123456789abcdef".contains(character): return Err("linux-replace-digest-shape")
+    var size = 0
+    for argument in request.args:
+        if not replacement_text_valid_v1(argument): return Err("linux-replace-argv-shape")
+        size = size + argument.byte_len() + 1
+    var names: [text] = []
+    for entry in request.environment:
+        if not replacement_text_valid_v1(entry): return Err("linux-replace-environment-shape")
+        val split = entry.index_of("=")
+        if split <= 0: return Err("linux-replace-environment-shape")
+        val name = entry.substring(0, split)
+        if name.starts_with("LD_") or names.contains(name): return Err("linux-replace-environment-policy")
+        for character in name:
+            if not "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_".contains(character):
+                return Err("linux-replace-environment-name")
+        names.push(name)
+        size = size + entry.byte_len() + 1
+    if size > 1048576: return Err("linux-replace-argument-byte-bound")
+    Ok(())
+
+# Header DATA policy, used only on actual already-sealed private image bytes.
+# A valid header is NOT loader/library closure or execution-success evidence.
+fn replacement_le_v1(bytes: [u8], offset: i64, count: i64) -> u64:
+    var value = 0u64
+    for index in 0..count: value = value | ((bytes[offset + index] as u64) << (index * 8))
+    value
+
+pub fn linux_process_replace_elf_header_v1(bytes: [u8], size: i64, machine: i64) -> Result<(), text>:
+    if bytes.len() != 64 or size < 64 or (machine != 62 and machine != 183):
+        return Err("linux-replace-elf-header-bound")
+    if (bytes[0] != 127u8 or bytes[1] != 69u8 or bytes[2] != 76u8 or bytes[3] != 70u8 or
+            bytes[4] != 2u8 or bytes[5] != 1u8 or bytes[6] != 1u8):
+        return Err("linux-replace-elf-format")
+    val image_type = replacement_le_v1(bytes, 16, 2)
+    if image_type != 2u64 and image_type != 3u64: return Err("linux-replace-elf-type")
+    if replacement_le_v1(bytes, 18, 2) != machine as u64:
+        return Err("linux-replace-elf-machine-mismatch")
+    if replacement_le_v1(bytes, 20, 4) != 1u64 or replacement_le_v1(bytes, 52, 2) != 64u64:
+        return Err("linux-replace-elf-header-shape")
+    val phoff = replacement_le_v1(bytes, 32, 8)
+    val phsize = replacement_le_v1(bytes, 54, 2)
+    val phcount = replacement_le_v1(bytes, 56, 2)
+    if phoff < 64u64 or phoff > size as u64 or phsize != 56u64 or phcount < 1u64 or phcount > 1024u64:
+        return Err("linux-replace-elf-program-headers")
+    if phcount * phsize > size as u64 - phoff: return Err("linux-replace-elf-program-headers")
+    Ok(())
+
+# Production copy receipt arithmetic, DATA only. completed comes exclusively
+# from the actual pwrite return at the canonical native owner call site.
+pub struct LinuxProcessReplaceCopyProgressV1:
+    copied: i64
+    pending: i64
+    accepted: i64
+
+pub fn linux_process_replace_copy_accept_v1(before: LinuxProcessReplaceCopyProgressV1,
+        completed: i64) -> Result<LinuxProcessReplaceCopyProgressV1, text>:
+    if (before.copied < 0 or before.pending < 1 or before.pending > 65536 or
+            before.accepted < 0 or before.accepted >= before.pending or completed < 1 or
+            completed > before.pending - before.accepted or before.copied > 536870912 - before.pending):
+        return Err("linux-replace-image-write")
+    val accepted = before.accepted + completed
+    if accepted == before.pending:
+        return Ok(LinuxProcessReplaceCopyProgressV1(copied: before.copied + before.pending, pending: 0, accepted: 0))
+    Ok(LinuxProcessReplaceCopyProgressV1(copied: before.copied, pending: before.pending, accepted: accepted))
+
+pub fn linux_process_replace_seals_valid_v1(seals: i64) -> bool:
+    seals >= 0 and (seals & 15) == 15
+
+pub fn linux_process_replace_hash_ready_v1(copied: i64, expected: i64, pending: i64, seals: i64) -> bool:
+    (expected >= 64 and expected <= 536870912 and copied == expected and pending == 0 and
+        linux_process_replace_seals_valid_v1(seals))
+
+pub fn linux_process_replace_target_matches_v1(declared: text, actual: text) -> bool:
+    (declared == "linux-x86_64" or declared == "linux-aarch64") and declared == actual

@@ -2,6 +2,7 @@
 # phase, size, cursor, quota, root binding and cleanup state behind one lock.
 use std.nogc_sync_mut.io.windows_private_file_abi.*
 use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u16, volatile_write_u8, volatile_read_u8}
+use std.common.text_bytes.{boxed_text_bytes_checked, bytes_to_text, text_to_utf8_bytes, utf8_bytes_valid}
 
 pub struct WindowsPrivateErrorV1:
     message: text
@@ -47,6 +48,16 @@ fn _private_root_admit(token: i64) -> Result<WindowsPrivateRootV1, WindowsPrivat
 
 pub class WindowsPrivateRootV1:
     token: i64
+
+    # The only public journal factory. Its fixed native child is "journal";
+    # no caller-supplied path or claimed POSIX proof can mint store authority.
+    pub fn open_journal_store_v1() -> WindowsJournalStoreOpenV1:
+        val journal_token = rt_windows_journal_open_v1(self.token)
+        if journal_token <= 0:
+            return WindowsJournalStoreOpenV1.Rejected("WINDOWS_JOURNAL_OPEN")
+        val store = WindowsJournalStoreV1(token: journal_token, origin_root: self.token)
+        if store.live(): return WindowsJournalStoreOpenV1.Ready(store)
+        WindowsJournalStoreOpenV1.CleanupRequired(store, "WINDOWS_JOURNAL_OPEN_CLEANUP_REQUIRED")
 
     # Revalidate native root and retained ancestor privacy, never cached state.
     pub fn security_current() -> bool:
@@ -157,3 +168,179 @@ pub fn windows_private_root_open_v1(path: text) -> Result<WindowsPrivateRootV1, 
     @end
 
 export WindowsPrivateRootV1, WindowsPrivateFileV1, WindowsPrivateErrorV1, windows_private_root_open_v1
+
+# Defined in the same module as the root factory to keep native token
+# admission private. The journal facade re-exports only these opaque types.
+pub enum WindowsJournalStoreOpenV1:
+    Ready(store: WindowsJournalStoreV1)
+    Rejected(message: text)
+    CleanupRequired(store: WindowsJournalStoreV1, message: text)
+
+@unsafe(reason: "copies checked UTF8 into bounded infallibly freed native temporary", capabilities: [ffi, raw_ptr])
+fn _journal_payload(payload: text) -> Result<i64, text>:
+    if payload.byte_len() > 8388608: return Err("WINDOWS_JOURNAL_PAYLOAD_QUOTA")
+    val bytes: [u8] = match boxed_text_bytes_checked(payload):
+        case Ok(value): value
+        case Err(_): return Err("WINDOWS_JOURNAL_PAYLOAD_ENCODING")
+    if bytes.len() != payload.byte_len() or bytes.len() > 8388608 or not utf8_bytes_valid(bytes):
+        return Err("WINDOWS_JOURNAL_PAYLOAD_ENCODING")
+    val buffer = _journal_buffer(bytes.len() + 1)
+    if buffer == 0: return Err("WINDOWS_JOURNAL_MEMORY")
+    for index in 0..bytes.len(): volatile_write_u8(buffer + index, bytes[index] as i64)
+    Ok(buffer)
+
+fn _journal_buffer(size: i64) -> i64:
+    if size <= 0 or size > 8388609: return 0
+    rt_alloc(size)
+
+pub class WindowsJournalStoreV1:
+    token: i64
+    origin_root: i64
+
+    # Exact opaque factory provenance, not path equality. Both retained native
+    # generations must still be live when the deployment verifies this store.
+    pub fn belongs_to(root: WindowsPrivateRootV1) -> bool:
+        self.origin_root == root.token and self.live() and root.security_current()
+
+    # Identity only: callers must check live separately before using authority.
+    pub fn same_owner(other: WindowsJournalStoreV1) -> bool:
+        self.token == other.token
+
+    pub fn live() -> bool:
+        rt_windows_journal_live_v1(self.token) == 1
+
+    @unsafe(reason: "reads exact UTF8 bytes from bounded native journal operation", capabilities: [ffi, raw_ptr])
+    pub fn read(relative: text, maximum: i64) -> Result<Option<text>, text>:
+        if maximum < 0 or maximum > 8388608: return Err("WINDOWS_JOURNAL_READ_QUOTA")
+        if relative.byte_len() == 0 or relative.byte_len() > 512:
+            return Err("WINDOWS_JOURNAL_NAME")
+        val name = _private_path(relative)
+        if name == 0: return Err("WINDOWS_JOURNAL_NAME")
+        val buffer = _journal_buffer(maximum + 1)
+        if buffer == 0:
+            rt_windows_private_free_v1(name)
+            return Err("WINDOWS_JOURNAL_MEMORY")
+        val count = rt_windows_journal_read_v1(self.token, name, buffer, maximum)
+        rt_windows_private_free_v1(name)
+        if count == -2:
+            rt_free(buffer)
+            return Ok(None)
+        if count < 0 or count > maximum:
+            rt_free(buffer)
+            return Err("WINDOWS_JOURNAL_READ")
+        var bytes: [u8] = []
+        for index in 0..count: bytes.push(volatile_read_u8(buffer + index) as u8)
+        rt_free(buffer)
+        if not utf8_bytes_valid(bytes): return Err("WINDOWS_JOURNAL_UTF8")
+        val decoded = bytes_to_text(bytes)
+        val roundtrip = text_to_utf8_bytes(decoded)
+        if roundtrip.len() != bytes.len(): return Err("WINDOWS_JOURNAL_UTF8_ROUNDTRIP")
+        for index in 0..bytes.len():
+            if roundtrip[index] != bytes[index]: return Err("WINDOWS_JOURNAL_UTF8_ROUNDTRIP")
+        Ok(Some(decoded))
+
+    pub fn publish(relative: text, payload: text) -> Result<bool, text>:
+        self.write_record(relative, payload, 0, None)
+
+    # Only a new fixed consumption record can mint this capability. Existing
+    # records and ordinary reads/publishes cannot be converted into receipts.
+    pub fn publish_consumption(relative: text, payload: text) -> Result<WindowsJournalConsumptionV1, text>:
+        if relative.byte_len() == 0 or relative.byte_len() > 512:
+            return Err("WINDOWS_JOURNAL_CONSUMPTION_NAME")
+        val name = _private_path(relative)
+        if name == 0: return Err("WINDOWS_JOURNAL_CONSUMPTION_NAME")
+        val buffer = match _journal_payload(payload):
+            case Ok(value): value
+            case Err(message):
+                rt_windows_private_free_v1(name)
+                return Err(message)
+        val sequence = rt_windows_journal_publish_v1(self.token, name, buffer, payload.byte_len(), 1)
+        rt_windows_private_free_v1(name)
+        rt_free(buffer)
+        if sequence == 0: return Err("WINDOWS_JOURNAL_CONSUMPTION_ALREADY_EXISTS")
+        if sequence < 0: return Err("WINDOWS_JOURNAL_CONSUMPTION_UNCERTAIN")
+        Ok(WindowsJournalConsumptionV1(store_token: self.token, sequence: sequence, payload: payload))
+
+    # Replacing is limited to parent.lease; immutable entries never use it.
+    pub fn replace(relative: text, payload: text) -> Result<bool, text>:
+        self.write_record(relative, payload, 1, None)
+
+    # CURRENT compare/read/stage/rename holds one native lock across all steps.
+    # None means exact absence, Some("") means an actual empty file.
+    pub fn compare_replace(relative: text, payload: text, expected: Option<text>) -> Result<bool, text>:
+        self.write_record(relative, payload, 2, expected)
+
+    fn write_record(relative: text, payload: text, operation: i64, expected: Option<text>) -> Result<bool, text>:
+        if relative.byte_len() == 0 or relative.byte_len() > 512:
+            return Err("WINDOWS_JOURNAL_NAME")
+        if operation == 1 and relative != "parent.lease": return Err("WINDOWS_JOURNAL_REPLACE_NAME")
+        if operation == 2 and relative != "database-wal/CURRENT": return Err("WINDOWS_JOURNAL_CAS_NAME")
+        val name = _private_path(relative)
+        if name == 0: return Err("WINDOWS_JOURNAL_NAME")
+        val buffer = match _journal_payload(payload):
+            case Ok(value): value
+            case Err(message):
+                rt_windows_private_free_v1(name)
+                return Err(message)
+        var expected_buffer = 0
+        var expected_length = -1
+        if operation == 2:
+            if val previous = expected:
+                expected_buffer = match _journal_payload(previous):
+                    case Ok(value): value
+                    case Err(message):
+                        rt_windows_private_free_v1(name)
+                        rt_free(buffer)
+                        return Err(message)
+                expected_length = previous.byte_len()
+        val status = if operation == 0:
+            rt_windows_journal_publish_v1(self.token, name, buffer, payload.byte_len(), 0)
+        elif operation == 1:
+            rt_windows_journal_replace_v1(self.token, name, buffer, payload.byte_len())
+        else:
+            rt_windows_journal_compare_replace_v1(self.token, name, buffer, payload.byte_len(), expected_buffer, expected_length)
+        rt_windows_private_free_v1(name)
+        rt_free(buffer)
+        if expected_buffer != 0: rt_free(expected_buffer)
+        if status == 0: return Ok(false)
+        if status != 1: return Err("WINDOWS_JOURNAL_WRITE_UNCERTAIN")
+        Ok(true)
+
+    # Failure leaves the generation, all uncertain handles and parent lock
+    # owned by this value. A stale copied alias cannot operate after success.
+    pub me close_state() -> text:
+        val status = rt_windows_journal_close_v1(self.token)
+        if status == 1: return "released"
+        if status == -1: return "stale"
+        "retained"
+
+    pub me close() -> bool:
+        self.close_state() == "released"
+
+pub class WindowsJournalConsumptionV1:
+    store_token: i64
+    sequence: i64
+    payload: text
+
+    pub fn belongs_to(store: WindowsJournalStoreV1) -> bool:
+        self.store_token == store.token and store.live()
+
+    # Native state consumes the exact receipt before any fallible readback.
+    # Copying this value never creates another claim or revives an old one.
+    pub fn claim(expected_payload: text) -> Result<bool, text>:
+        val buffer = match _journal_payload(expected_payload):
+            case Ok(value): value
+            case Err(message):
+                # Even an encoding/quota/allocation error consumes this claim;
+                # the native invalid-input path performs no buffer access.
+                val consumed = rt_windows_journal_consumption_claim_v1(self.store_token, self.sequence, 0, -1)
+                return Err(message)
+        val status = rt_windows_journal_consumption_claim_v1(self.store_token, self.sequence,
+            buffer, expected_payload.byte_len())
+        rt_free(buffer)
+        if status == 0: return Ok(false)
+        if status != 1: return Err("WINDOWS_JOURNAL_CONSUMPTION_CLAIM_UNCERTAIN")
+        if expected_payload != self.payload: return Err("WINDOWS_JOURNAL_CONSUMPTION_INTEGRITY")
+        Ok(true)
+
+export WindowsJournalStoreV1, WindowsJournalStoreOpenV1, WindowsJournalConsumptionV1

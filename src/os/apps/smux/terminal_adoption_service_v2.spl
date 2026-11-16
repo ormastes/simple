@@ -9,6 +9,21 @@ pub fn terminal_transport_admit_v2(before: ServiceState, clock: ServiceRevisionS
         closing: bool, session_id: text, window_id: text, pane_id: text,
         expected_epoch: u64, expected_revision: u64, expected_child_incarnation: u64,
         reference: PipedProcessRefV1) -> Result<int, text>:
+    val pi = terminal_transport_metadata_admit_v3(before, clock, closing, session_id, window_id, pane_id,
+        expected_epoch, expected_revision, expected_child_incarnation)?
+    if reference.pid <= 0 or reference.generation <= 0: return Err("terminal transport reference invalid")
+    var index = 0
+    while index < before.pane_count:
+        if before.get_pane(index).same_terminal_ref(reference):
+            return Err("terminal transport already owned by a pane")
+        index = index + 1
+    Ok(pi)
+
+# Shared pane configuration checks. Actual owner validation belongs to each
+# native adopter; absence of a process reference never substitutes for it.
+pub fn terminal_transport_metadata_admit_v3(before: ServiceState, clock: ServiceRevisionState,
+        closing: bool, session_id: text, window_id: text, pane_id: text,
+        expected_epoch: u64, expected_revision: u64, expected_child_incarnation: u64) -> Result<int, text>:
     if not service_revision_writable(clock): return Err("service revision authority exhausted")
     if clock.epoch != expected_epoch or clock.value != expected_revision:
         return Err("terminal transport configuration changed")
@@ -25,12 +40,6 @@ pub fn terminal_transport_admit_v2(before: ServiceState, clock: ServiceRevisionS
             pane.terminal_ref != nil or pane.child_pid > 0 or pane.pty_fd >= 0):
         return Err("pane already owns a child or pending transport")
     if not pane.can_attach(): return Err("pane incarnation or content revision exhausted")
-    if reference.pid <= 0 or reference.generation <= 0: return Err("terminal transport reference invalid")
-    var index = 0
-    while index < before.pane_count:
-        if before.get_pane(index).same_terminal_ref(reference):
-            return Err("terminal transport already owned by a pane")
-        index = index + 1
     Ok(pi)
 
 pub fn terminal_transport_adopt_ref_v2(before: ServiceState, clock: ServiceRevisionState,
@@ -51,4 +60,7 @@ pub fn terminal_transport_adopt_owned_v2(before: ServiceState, clock: ServiceRev
     val pi = terminal_transport_admit_v2(before, clock, closing, session_id, window_id,
         pane_id, expected_epoch, expected_revision, expected_child_incarnation, transfer.reference)?
     sosix_process_validate_piped_owned_transfer_v2(transfer)?
-    Ok(before.replace_pane(pi, before.get_pane(pi).with_owned_terminal_transfer(transfer)))
+    val adopted = before.get_pane(pi).with_owned_terminal_transfer(transfer)
+    if not adopted.same_owned_terminal_transfer(Some(transfer)):
+        return Err("terminal transport owner adoption refused")
+    Ok(before.replace_pane(pi, adopted))

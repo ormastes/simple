@@ -458,6 +458,8 @@ Add parser/HIR/MIR/borrow/alias/async, interpreter/native, warning/error and LSP
 | P5 | Shared diagnostics, multiple LSP/CLI/MCP fixes, guide migration automation | Medium | Unsafe automatic rewrite -> semantic preconditions and cross-file preview |
 | P6 | Robust rule-by-rule Deny gate after SSpec/perf and false-positive evidence | Medium | Ecosystem breakage -> versioned adapters and sunset schedule |
 
+**Implementation status (2026-11-15):** `ROB-OPT-001`/`-002` (P1) and `ROB-OPT-003` for **public return types and top-level `pub type` aliases** are emitted by the single-pass source walker `robust_option_surface_rule.spl` (warning only; allow by default, warn in Robust/Critical). Not yet implemented: `ROB-OPT-003` for locals, non-public returns and nested expression types; `ROB-OPT-004`; the resolved cross-file export closure; the P2 source-`nil`/omitted-initializer split and `NotInit`. `NIL-UNSAFE-001` (`nil_outside_unsafe`, source scan) is allow by default and warn in Robust/Critical; it deliberately does not flag presence tests (`== nil`, `!= nil`, `case nil:`) because rewriting them to `None` changes native results.
+
 **Alternative considered:** annotate individual fields with `@required_after(State)` or a new `when State: field` grammar. It is compact (pro), but introduces parser/GPU grammar work, many implicit cross-file proof dependencies, and unclear field-layout rules (cons). **Decision:** defer. Start with existing generic type/enum syntax and private checked constructors (moderate parser work, medium–large semantic work), then introduce a declarative sugar only if real code and measurements justify it.
 
 **Alternative considered:** add only `assert`/runtime tags. Easy to prototype (pro), but cannot eliminate unsafe states in downstream public signatures and introduces per-use panic/branch risk (con). **Decision:** do not use as the safety basis.
@@ -475,6 +477,8 @@ Repository evidence inspected during preparation:
 - `src/compiler/35.semantics/lint/semantic_api/checker.spl`: primitive surface checker is documented as **standalone, not integrated into live lint**; it is not the proposed resolved optional walker.
 - `src/compiler/90.tools/lint/rules/nil_outside_unsafe_rule.spl`: a warning/lint path exists; it is a source scan, not sufficient as authoritative typed safety admission.
 - `doc/07_guide/language/type_system.md`, `error_handling.md`, and `robust_semantic_absence.md`: migration policy exists but contains historical optional/nil examples requiring clear compatibility labeling.
+
+**Partial implementation (2026-11-15):** the lint-level walker for `ROB-OPT-001`/`-002`/`-003` (public inputs, fields, returns, `pub type` aliases) and the `NIL-UNSAFE-001` Robust/Critical warn level exist; everything else in this list remains unimplemented.
 
 **What has not been implemented/proven:** `NotInit<T>` as a canonical runtime/type-system wrapper; type-level `NodeRef<Phase>` and transitions; resolved public `Option` checker and exemption receipts; all-path initialization/state proof; reliable full LSP code actions; mandatory robust Deny across both engines; NVMe pool zero-cost layout and end-to-end benchmarks. Do not mark any of these as done based on the design examples.
 

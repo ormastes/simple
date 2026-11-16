@@ -1,0 +1,288 @@
+# Opt-in Combined-profiled probe collector. Strict Separate V1 is unchanged.
+# Caller must already own a genuinely selected/started CPU probe. Every query,
+# wait and logs helper is issued through that SAME original canonical owner.
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_scope_v2, simple_container_action_project_v2}
+use std.nogc_async_mut.container.probe_api_v3.simple_container_probe_v3
+use std.nogc_sync_mut.container.machine_fresh_probe_owner_v3.{MachineFreshProbeCallV3, MachineFreshProbeReplyV3}
+use std.common.contracts.container.linux_fresh_workload_probe_v3.LinuxFreshWorkloadProbeActionV3
+use std.common.contracts.container.workspace_action_v3.ContainerWorkspaceActionV3
+use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, container_host_scope_bytes_v2}
+use std.common.contracts.container.execution_configuration_v1.{ContainerExecutionConfigurationObservationV1, container_execution_configuration_decode_v1}
+use std.common.contracts.provider_cli.adapter_types_v1.*
+use std.common.contracts.provider_cli.adapter_v1.{provider_cli_probe_count_v1, provider_cli_probe_argv_v1,
+    decode_provider_cli_version_v1, decode_provider_cli_help_v1, plan_provider_cli_action_v1}
+use std.nogc_async_mut.llm.provider_cli_container_probe_v1.{ProviderCliContainedProbeSnapshotV1, provider_cli_contained_probe_snapshot_copy_v1}
+use std.nogc_sync_mut.io.profiled_combined_capture_v1.ProfiledCombinedCaptureEvidenceV1
+use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.build_manager.contracts.builder_digest_valid_v1
+
+pub struct ProviderCliContainedProbeSnapshotV2:
+    base: ProviderCliContainedProbeSnapshotV1
+    layout: text
+    source_identity: text
+    source_launch_digest: text
+
+pub class ProviderCliContainedProbeReceiptV2:
+    base: ProviderCliContainedProbeSnapshotV1
+    evidence: ProfiledCombinedCaptureEvidenceV1
+    transcript: text
+
+    pub fn snapshot_v2() -> Result<ProviderCliContainedProbeSnapshotV2, text>:
+        val actual = self.evidence.current_v1()?
+        Ok(ProviderCliContainedProbeSnapshotV2(base: provider_cli_contained_probe_snapshot_copy_v1(self.base),
+            layout: self.evidence.layout_v1(), source_identity: self.evidence.source_identity_v1(),
+            source_launch_digest: self.evidence.source_launch_digest_v1()))
+
+pub class ProviderCliContainedSelectionV2:
+    provider: ProviderCliProviderV1
+    version: ProviderCliVersionDataV1
+    binding_digest: text
+    receipts: [ProviderCliContainedProbeReceiptV2]
+    pub fn version_data_v2() -> ProviderCliVersionDataV1: self.version
+    pub fn binding_digest_v2() -> text: self.binding_digest
+    pub fn plan_data_v2(request: ProviderCliRequestDataV1) -> Result<ProviderCliPlanDataV1, text>:
+        plan_provider_cli_action_v1(self.version, request)
+
+pub class ProviderCliContainedProbeOwnerV2:
+    container: SimpleContainerOwnerV2
+    request: ContainerExecutionRequestV2
+    provider: ProviderCliProviderV1
+    probe_index: i64
+    deadline_ns: i64
+    phase: text = "before-begin"
+    before: Option<ContainerExecutionConfigurationObservationV1> = nil
+    evidence: Option<ProfiledCombinedCaptureEvidenceV1> = nil
+    first_error: text = ""
+
+pub struct ProviderCliContainedProbeTurnV2:
+    owner: SimpleContainerOwnerV2
+    probe: Option<ProviderCliContainedProbeOwnerV2>
+    receipt: Option<ProviderCliContainedProbeReceiptV2>
+    error: text
+
+fn profiled_probe_reply_v2(state: ProviderCliContainedProbeOwnerV2, reason: text) -> ProviderCliContainedProbeTurnV2:
+    var retained = state
+    if retained.first_error == "" and reason != "": retained.first_error = reason
+    ProviderCliContainedProbeTurnV2(retained.container, Some(retained), nil, retained.first_error)
+
+fn profiled_probe_call_v2(state: ProviderCliContainedProbeOwnerV2, call: MachineFreshProbeCallV3) -> (ProviderCliContainedProbeOwnerV2, MachineFreshProbeReplyV3):
+    val actual = simple_container_probe_v3(state.container, state.request, call)
+    var retained = state
+    retained.container = actual.owner
+    (retained, actual.result)
+
+fn profiled_probe_completion_v2(reply: MachineFreshProbeReplyV3) -> Result<(), text>:
+    match reply:
+        case MachineFreshProbeReplyV3.Completion(actual): actual
+        case _: Err("provider-profiled-probe-turn-mismatch")
+
+pub fn provider_cli_profiled_probe_begin_v2(owner: SimpleContainerOwnerV2,
+        request: ContainerExecutionRequestV2, provider: ProviderCliProviderV1, index: i64,
+        original_deadline_ns: i64) -> ProviderCliContainedProbeTurnV2:
+    val state = ProviderCliContainedProbeOwnerV2(container: owner, request: request,
+        provider: provider, probe_index: index, deadline_ns: original_deadline_ns)
+    val now = time_sample_monotonic_nanos_or_failure()
+    if now <= 0 or original_deadline_ns <= now:
+        return ProviderCliContainedProbeTurnV2(owner, nil, nil, "provider-profiled-probe-original-deadline")
+    val checked = profiled_probe_call_v2(state, MachineFreshProbeCallV3.Profile(provider, index))
+    val valid = profiled_probe_completion_v2(checked.1)
+    if valid.is_err(): return profiled_probe_reply_v2(checked.0, valid.unwrap_err())
+    profiled_probe_reply_v2(checked.0, "")
+
+fn profiled_probe_configuration_v2(state: ProviderCliContainedProbeOwnerV2,
+        reply: MachineFreshProbeReplyV3) -> Result<Option<ContainerExecutionConfigurationObservationV1>, text>:
+    val operation = match reply:
+        case MachineFreshProbeReplyV3.Operation(actual): actual?
+        case _: return Err("provider-profiled-probe-query-turn")
+    if operation.is_none(): return Ok(nil)
+    val actual = operation.unwrap()
+    if actual.status != "ok" or actual.exit_code != 0: return Err("provider-profiled-probe-query-failed")
+    val observed = container_execution_configuration_decode_v1(actual.stdout)?
+    if (observed.request_digest != state.request.plan.request_digest or
+            observed.runtime != actual.state.identity or observed.runtime.native_id == "" or
+            container_host_scope_bytes_v2(observed.scope)? != container_host_scope_bytes_v2(simple_container_scope_v2(state.container))?):
+        return Err("provider-profiled-probe-query-binding")
+    Ok(Some(observed))
+
+fn profiled_probe_image_id_v2(value: text) -> Result<text, text>:
+    val digest = if value.starts_with("sha256:"): value.substring(7, value.byte_len()) else: value
+    if not builder_digest_valid_v1(digest): return Err("provider-profiled-probe-image-id")
+    Ok(digest)
+
+fn profiled_probe_program_v2(state: ProviderCliContainedProbeOwnerV2,
+        value: ContainerExecutionConfigurationObservationV1) -> Result<[text], text>:
+    val arguments = provider_cli_probe_argv_v1(state.provider, state.probe_index)?
+    if value.primary_argv.len() != arguments.len() + 1 or not value.primary_argv[0].starts_with("/"):
+        return Err("provider-profiled-probe-single-image-program-required")
+    if value.primary_argv[1:value.primary_argv.len()] != arguments: return Err("provider-profiled-probe-compiled-argv-mismatch")
+    if value.mounts.len() != 0 or not value.readonly_rootfs or value.working_directory == "" or value.configured_user == "":
+        return Err("provider-profiled-probe-unmounted-readonly-profile-required")
+    if (value.environment_digest != value.image_default_environment_digest or
+            value.environment_names != value.image_default_environment_names):
+        return Err("provider-profiled-probe-image-default-environment-required")
+    if value.requested_image_kind != "repository-digest" or not value.image_repo_digests.contains(value.requested_image_ref):
+        return Err("provider-profiled-probe-platform-manifest-correspondence-required")
+    if profiled_probe_image_id_v2(value.runtime_image_id)? != profiled_probe_image_id_v2(value.image_config_id)?:
+        return Err("provider-profiled-probe-image-config-mismatch")
+    val projected = simple_container_action_project_v2(state.container, state.request)?
+    if projected.argv != value.primary_argv or projected.working_directory != value.working_directory or projected.mounts.len() != 0:
+        return Err("provider-profiled-probe-original-action-mismatch")
+    Ok([value.primary_argv[0]])
+
+fn profiled_probe_program_binding_v2(value: ContainerExecutionConfigurationObservationV1, prefix: [text]) -> Result<text, text>:
+    var program: [SdnValue] = []
+    for part in prefix: program.push(SdnValue.String(part))
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("caret-contained-provider-program"),
+        "version": SdnValue.Int(2), "captureLayout": SdnValue.String("combined-profiled-v1"),
+        "scope": SdnValue.String(container_host_scope_bytes_v2(value.scope)?),
+        "requestedImage": SdnValue.String(value.requested_image_ref), "imageConfig": SdnValue.String(value.image_config_id),
+        "programPrefix": SdnValue.Array(program), "workdir": SdnValue.String(value.working_directory),
+        "user": SdnValue.String(value.configured_user), "environment": SdnValue.String(value.environment_digest),
+        "readonlyRoot": SdnValue.Bool(value.readonly_rootfs)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))))
+
+fn profiled_probe_transcript_v2(evidence: ProfiledCombinedCaptureEvidenceV1) -> Result<text, text>:
+    val actual = evidence.current_v1()?
+    if evidence.layout_v1() != "combined-profiled-v1" or evidence.exit_code_v1() != 0:
+        return Err("provider-profiled-probe-capture-layout-or-exit")
+    provider_cli_profiled_transcript_validate_v2(evidence.transcript_bytes_v1())
+
+# Public DATA parser only, used after actual current capture validation above.
+# No raw transcript can construct a receipt, native observation or grant.
+pub fn provider_cli_profiled_transcript_validate_v2(bytes: [u8]) -> Result<text, text>:
+    if bytes.len() < 1 or bytes.len() > 65536 or not utf8_bytes_valid(bytes): return Err("provider-profiled-probe-transcript-bound")
+    for byte in bytes:
+        if byte < 32 and byte != 9 and byte != 10 and byte != 13: return Err("provider-profiled-probe-transcript-control")
+    val value = bytes_to_text(bytes)
+    # Combined is explicit, never fabricated stderr-empty/reaped evidence.
+    # Whole-transcript version decoding and conservative help error rejection
+    # refuse mixed diagnostics rather than silently stripping them.
+    val lowered = value.lower()
+    for diagnostic in ["error:", "warning:", "fatal:", "permission denied", "panic:"]:
+        if lowered.contains(diagnostic): return Err("provider-profiled-probe-combined-diagnostic")
+    Ok(value)
+
+fn profiled_probe_finish_v2(state: ProviderCliContainedProbeOwnerV2,
+        after: ContainerExecutionConfigurationObservationV1) -> Result<ProviderCliContainedProbeReceiptV2, text>:
+    if state.before.is_none() or state.evidence.is_none(): return Err("provider-profiled-probe-obligations-missing")
+    val before = state.before.unwrap()
+    if before.configuration_digest != after.configuration_digest or before.runtime != after.runtime:
+        return Err("provider-profiled-probe-configuration-changed")
+    val prefix = profiled_probe_program_v2(state, after)?
+    val transcript = profiled_probe_transcript_v2(state.evidence.unwrap())?
+    val bytes = state.evidence.unwrap().transcript_bytes_v1()
+    Ok(ProviderCliContainedProbeReceiptV2(base: ProviderCliContainedProbeSnapshotV1(provider: state.provider,
+        probe_index: state.probe_index, configuration: after, program_prefix: prefix,
+        program_binding_digest: profiled_probe_program_binding_v2(after, prefix)?,
+        transcript_digest: sha256_u8_hex(bytes), transcript_bytes: bytes.len()),
+        evidence: state.evidence.unwrap(), transcript: transcript))
+
+# Phase after an ISSUED Wait/Logs Begin. An Err reply may follow the owner
+# retaining the actual capture, so it records only that Begin was issued
+# ("-begin-unresolved"); it never claims retention and never re-begins.
+pub fn provider_cli_profiled_probe_begun_phase_v2(phase: text, begun: Result<(), text>) -> text:
+    if begun.is_err(): return phase + "-unresolved"
+    phase.replace("-begin", "-step")
+
+# Closing route. Once a Wait/Logs Begin was issued, cancel goes through the
+# exact canonical capture Step; owner custody decides (name mismatch Err, no
+# capture no-op) and Pending alone decides drop. Unissued Begin keeps
+# WorkflowCancel.
+pub fn provider_cli_profiled_probe_cancel_call_v2(phase: text) -> MachineFreshProbeCallV3:
+    if phase == "wait-step" or phase == "wait-begin-unresolved":
+        return MachineFreshProbeCallV3.Step(LinuxFreshWorkloadProbeActionV3.Wait, true)
+    if phase == "logs-step" or phase == "logs-begin-unresolved":
+        return MachineFreshProbeCallV3.Step(LinuxFreshWorkloadProbeActionV3.Logs, true)
+    MachineFreshProbeCallV3.WorkflowCancel
+
+pub fn provider_cli_profiled_probe_step_v2(original: ProviderCliContainedProbeOwnerV2,
+        cancel: bool = false) -> ProviderCliContainedProbeTurnV2:
+    var state = original
+    val now = time_sample_monotonic_nanos_or_failure()
+    val closing = (cancel or state.first_error != "" or state.phase.ends_with("-unresolved") or
+        now <= 0 or now >= state.deadline_ns)
+    if closing:
+        # No future stage is launched after cancellation/expiry. The caller
+        # retains the original common owner and every actual pending helper.
+        # The cleanup reply is not inspected: sticky custody error makes each
+        # cancel Step Err while it still advances actual capture retirement.
+        val call = provider_cli_profiled_probe_cancel_call_v2(state.phase)
+        val cleaned = profiled_probe_call_v2(state, call)
+        state = cleaned.0
+        val pending = profiled_probe_call_v2(state, MachineFreshProbeCallV3.Pending)
+        state = pending.0
+        match pending.1:
+            case MachineFreshProbeReplyV3.Progress(Ok(false)):
+                # The original common owner still carries all execution/WAL
+                # charge obligations. Dropping this drained collector cursor
+                # grants neither OCI absence nor settlement/source release.
+                return ProviderCliContainedProbeTurnV2(state.container, nil, nil,
+                    if state.first_error != "": state.first_error else: "provider-profiled-probe-cancelled-or-expired")
+            case _: pass
+        return profiled_probe_reply_v2(state, "provider-profiled-probe-cancelled-or-expired")
+    var call = MachineFreshProbeCallV3.WorkflowStep
+    if state.phase == "before-begin" or state.phase == "after-begin":
+        call = MachineFreshProbeCallV3.WorkflowBegin(ContainerWorkspaceActionV3.Configuration, nil)
+    elif state.phase == "wait-begin": call = MachineFreshProbeCallV3.Begin(LinuxFreshWorkloadProbeActionV3.Wait)
+    elif state.phase == "logs-begin": call = MachineFreshProbeCallV3.Begin(LinuxFreshWorkloadProbeActionV3.Logs)
+    elif state.phase == "wait-step": call = MachineFreshProbeCallV3.Step(LinuxFreshWorkloadProbeActionV3.Wait, false)
+    elif state.phase == "logs-step": call = MachineFreshProbeCallV3.Step(LinuxFreshWorkloadProbeActionV3.Logs, false)
+    elif state.phase == "evidence": call = MachineFreshProbeCallV3.Evidence
+    val actual = profiled_probe_call_v2(state, call)
+    state = actual.0
+    if state.phase.ends_with("-begin"):
+        val begun = profiled_probe_completion_v2(actual.1)
+        state.phase = provider_cli_profiled_probe_begun_phase_v2(state.phase, begun)
+        if begun.is_err(): return profiled_probe_reply_v2(state, begun.unwrap_err())
+        return profiled_probe_reply_v2(state, "")
+    if state.phase == "before-step" or state.phase == "after-step":
+        val query = profiled_probe_configuration_v2(state, actual.1)
+        if query.is_err(): return profiled_probe_reply_v2(state, query.unwrap_err())
+        if query.unwrap().is_none(): return profiled_probe_reply_v2(state, "")
+        if state.phase == "before-step":
+            val profile = profiled_probe_program_v2(state, query.unwrap().unwrap())
+            if profile.is_err(): return profiled_probe_reply_v2(state, profile.unwrap_err())
+            state.before = query.unwrap()
+            state.phase = "wait-begin"
+            return profiled_probe_reply_v2(state, "")
+        val receipt = profiled_probe_finish_v2(state, query.unwrap().unwrap())
+        if receipt.is_err(): return profiled_probe_reply_v2(state, receipt.unwrap_err())
+        return ProviderCliContainedProbeTurnV2(state.container, nil, Some(receipt.unwrap()), "")
+    if state.phase == "wait-step" or state.phase == "logs-step":
+        val progressed = match actual.1:
+            case MachineFreshProbeReplyV3.Progress(result): result
+            case _: Err("provider-profiled-probe-progress-turn")
+        if progressed.is_err(): return profiled_probe_reply_v2(state, progressed.unwrap_err())
+        if progressed.unwrap(): state.phase = if state.phase == "wait-step": "logs-begin" else: "evidence"
+        return profiled_probe_reply_v2(state, "")
+    if state.phase == "evidence":
+        val evidence = match actual.1:
+            case MachineFreshProbeReplyV3.Evidence(value): value
+            case _: Err("provider-profiled-probe-evidence-turn")
+        if evidence.is_err(): return profiled_probe_reply_v2(state, evidence.unwrap_err())
+        state.evidence = Some(evidence.unwrap())
+        state.phase = "after-begin"
+        return profiled_probe_reply_v2(state, "")
+    profiled_probe_reply_v2(state, "provider-profiled-probe-phase")
+
+pub fn provider_cli_profiled_selection_v2(provider: ProviderCliProviderV1,
+        receipts: [ProviderCliContainedProbeReceiptV2]) -> Result<ProviderCliContainedSelectionV2, text>:
+    if receipts.len() != provider_cli_probe_count_v1(provider): return Err("provider-profiled-probe-set-incomplete")
+    val first = receipts[0]
+    val observed = first.snapshot_v2()?
+    val version = decode_provider_cli_version_v1(provider, profiled_probe_transcript_v2(first.evidence)?)?
+    for index in 0..receipts.len():
+        val receipt = receipts[index]
+        val current = receipt.snapshot_v2()?
+        if current.base.provider != provider or current.base.probe_index != index or current.layout != "combined-profiled-v1" or
+                current.base.program_binding_digest != observed.base.program_binding_digest:
+            return Err("provider-profiled-probe-sequence-or-binding")
+        val transcript = profiled_probe_transcript_v2(receipt.evidence)?
+        if index > 0:
+            val supported = decode_provider_cli_help_v1(version, index, transcript)?
+    Ok(ProviderCliContainedSelectionV2(provider: provider, version: version,
+        binding_digest: observed.base.program_binding_digest, receipts: receipts))

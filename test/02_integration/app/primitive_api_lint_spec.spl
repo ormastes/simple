@@ -17,9 +17,8 @@ and `pub me` / `pub static fn` variants are not exercised here.
 ## Verification guidance and troubleshooting
 A count failure means the rule's bare-primitive or pure-math classification
 changed — diff check_primitive_api_with_lines before editing an assertion.
-The `audits bool and text...` scenario is currently RED by design (see its
-NOTE): the rule emits a visible fix where the contract still expects an
-audit-only classification.
+The `does not flag or audit bare text` scenario pins the owner decision that
+bare text APIs carry no finding, fix, hint or audit entry; bool stays flagged.
 """
 # Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
 # doc/03_plan/sspec_modernization_plan.md ;
@@ -63,19 +62,12 @@ describe "primitive_api lint":
 
         expect(count_visible_primitive_api(source)).to_equal(0)  # oracle: a semantic newunit wrapper is not a bare primitive and must not be flagged
 
-    it "audits bool and text public primitives without changing lint count":
-        # NOTE: legitimately RED — product defect. check_primitive_api_with_lines
-        # (src/compiler/90.tools/fix/rules/impl_/lint_primitive_api.spl, the
-        # `if _is_bare_primitive_type(param_type)` emission after the
-        # is_pure_math split) emits a VISIBLE EasyFix for the bare `text`
-        # parameter of `pub fn enabled(name: text) -> bool` (count 1), while
-        # this scenario's contract — and the audit surface, which still
-        # classifies the same signature as audit-only entries
-        # needs_domain_text_type / needs_bool_wrapper_or_enum — expects the
-        # audit to record the finding WITHOUT changing the visible lint count
-        # (expected 0). The audit lane and the lint lane disagree on who owns
-        # bool/text primitives; the lint lane must stop emitting here until
-        # that is settled.
+    it "does not flag or audit bare text, only the bool return":
+        # Owner decision: requiring a unit for every `text` is too much, so a
+        # bare text API gets no finding, fix, hint or audit entry. bool stays a
+        # public-API primitive (canonical table, plan 2026-11-12 §1), so the
+        # bool return of this fixture is the one visible finding and the one
+        # audit entry.
         # @req REQ-COMPILER-LINT-PRIMITIVE-003
         # @capture(statistics): audit entries and visible count for the bool/text fixture
         step("Run the audit pair and the visible lint over a bool/text signature")
@@ -85,10 +77,10 @@ describe "primitive_api lint":
 
         val entries = primitive_api_audit_source(source, "sample.spl")
         val report = primitive_api_audit_report(source, "sample.spl")
-        expect(count_visible_primitive_api(source)).to_equal(0)  # oracle: bool/text primitives belong to the audit surface, not the visible lint
-        expect(entries.len()).to_equal(2)  # oracle: the audit records exactly needs_domain_text_type and needs_bool_wrapper_or_enum
-        expect(report).to_contain("needs_domain_text_type")
+        expect(count_visible_primitive_api(source)).to_equal(1)  # oracle: only the bool return is visible; the text param is not a finding
+        expect(entries.len()).to_equal(1)  # oracle: the audit records exactly needs_bool_wrapper_or_enum
         expect(report).to_contain("needs_bool_wrapper_or_enum")
+        expect(report.contains("needs_domain_text_type")).to_equal(false)  # oracle: text has no audit reason code
 
     it "does not flag pure math signatures":
         # @req REQ-COMPILER-LINT-PRIMITIVE-004

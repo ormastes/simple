@@ -11,11 +11,25 @@ describe "observer V1 early build route":
                 expect(route.target).to_equal(target)
 
     it "W3 rejects explicit Windows instrumentation rather than falling back to Linux":
-        for target in ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc", "x86_64-w64-windows-gnu"]:
+        for target in ["aarch64-pc-windows-msvc", "x86_64-w64-windows-gnu"]:
             for instrumentation in [TraceInstrumentationV1.Dynamic, TraceInstrumentationV1.AlwaysOn]:
                 for backend in [TraceBackendV1.Auto, TraceBackendV1.Llvm, TraceBackendV1.Simple]:
                     val route = trace_build_route_v1(target, instrumentation, backend)
                     expect(route).to_equal(Err(TraceFailureV1.UnsupportedTarget))
+
+    # @req REQ-XRAY-V1-API-01
+    it "routes canonical x86_64 Windows dynamic LLVM requests to the flag-guard candidate":
+        """The Windows flag-guard leaf (decision doc 2026-11-14, PROVISIONAL): only
+        Dynamic + Auto/Llvm on the two canonical x86_64 Windows triples."""
+        for target in ["x86_64-pc-windows-gnu", "x86_64-pc-windows-msvc"]:
+            for backend in [TraceBackendV1.Auto, TraceBackendV1.Llvm]:
+                val route = trace_build_route_v1(target, TraceInstrumentationV1.Dynamic, backend).unwrap()
+                expect(route.kind).to_equal(TraceBuildRouteKindV1.WindowsLlvmFlagGuardCandidate)
+                expect(route.backend).to_equal(TraceBackendV1.Llvm)
+                expect(route.target).to_equal(target)
+            step("Simple sleds and always-on have no Windows leaf")
+            expect(trace_build_route_v1(target, TraceInstrumentationV1.Dynamic, TraceBackendV1.Simple)).to_equal(Err(TraceFailureV1.UnsupportedTarget))
+            expect(trace_build_route_v1(target, TraceInstrumentationV1.AlwaysOn, TraceBackendV1.Llvm)).to_equal(Err(TraceFailureV1.UnsupportedTarget))
 
     it "W3 keeps SimpleOS and unknown targets off without host inference":
         for target in ["x86_64-unknown-simpleos", "aarch64-unknown-simpleos", "", "native", "unknown", "x86_64-apple-darwin"]:

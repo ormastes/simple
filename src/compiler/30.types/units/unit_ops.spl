@@ -10,8 +10,11 @@
 #
 # Facts come from the canonical UnitDecl pool (compiler.core.types):
 #   role "nominal"  — a count/quantity: U+U -> U, U-U -> U, U*int -> U,
-#                     int*U -> U, U/int -> U, U/U denied (ratio not enabled),
-#                     comparisons -> bool. No U+int, no U-int.
+#                     int*U -> U, U/int -> U, comparisons -> bool. U*U and
+#                     U/U are allowed (owner decision 2026-11-15) and yield
+#                     the unit's underlying scalar type (a ratio / raw
+#                     product; the author wraps it explicitly). No U+int,
+#                     no U-int.
 #   role "point"    — an absolute position whose delta type is `alias_of`
 #                     (Timestamp with Duration, ByteOffset with ByteCount):
 #                     P-P -> D, P+D -> P, D+P -> P, P-D -> P, P+P denied,
@@ -25,7 +28,9 @@
 # declares them.
 
 use compiler.core.types.{
-    unit_decl_find, unit_decl_role_at, unit_decl_alias_of_at, unit_decl_legacy_origin_at
+    unit_decl_find, unit_decl_role_at, unit_decl_alias_of_at, unit_decl_legacy_origin_at,
+    unit_decl_underlying_tag_at, TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64,
+    TYPE_I8, TYPE_I16, TYPE_I32, TYPE_F64
 }
 
 # Operator classes understood by the matrix. Callers map their own operator
@@ -88,6 +93,19 @@ fn unit_op_is_legacy_newtype(name: text) -> bool:
 fn unit_op_is_scalar(name: text) -> bool:
     name == UNIT_OPERAND_INT or name == UNIT_OPERAND_FLOAT
 
+fn unit_op_scalar_name(name: text) -> text:
+    """Underlying scalar type name of a unit: the result of U*U and U/U."""
+    val tag = unit_decl_underlying_tag_at(unit_decl_find(name))
+    if tag == TYPE_U8: return "u8"
+    if tag == TYPE_U16: return "u16"
+    if tag == TYPE_U32: return "u32"
+    if tag == TYPE_U64: return "u64"
+    if tag == TYPE_I8: return "i8"
+    if tag == TYPE_I16: return "i16"
+    if tag == TYPE_I32: return "i32"
+    if tag == TYPE_F64: return "f64"
+    "i64"
+
 fn unit_op_deny(op: text, lhs: text, rhs: text, why: text) -> UnitOpVerdict:
     UnitOpVerdict.Deny("SPL-UNIT-002: `" + lhs + " " + op + " " + rhs + "` is not an approved unit operation: " + why)
 
@@ -124,9 +142,9 @@ pub fn unit_op_verdict(op: text, lhs_in: text, rhs_in: text) -> UnitOpVerdict:
             if lrole == "nominal":
                 if op == UNIT_OP_ADD or op == UNIT_OP_SUB:
                     return UnitOpVerdict.Allow(lhs)
-                if op == UNIT_OP_DIV:
-                    return unit_op_deny(op, lhs, rhs, "unit/unit ratio is not enabled for `" + lhs + "`")
-                return unit_op_deny(op, lhs, rhs, "a count times a count has no declared dimension")
+                if op == UNIT_OP_MUL or op == UNIT_OP_DIV:
+                    return UnitOpVerdict.Allow(unit_op_scalar_name(lhs))
+                return unit_op_deny(op, lhs, rhs, "unsupported operator on `" + lhs + "`")
             if lrole == "point":
                 if op == UNIT_OP_SUB:
                     val d = unit_op_delta(lhs)

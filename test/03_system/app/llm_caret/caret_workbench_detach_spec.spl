@@ -1,0 +1,70 @@
+"""
+## Purpose and audience
+Purpose: closing or detaching the workbench view, or switching to another
+session, never stops an agent process; only an explicit stop does.
+Audience: caret-suite workbench engineers.
+## Operator workflow
+Run `bin/simple test test/03_system/app/llm_caret/caret_workbench_detach_spec.spl`.
+Uses the tracked stand-in agent `test/fixtures/caret_workbench/agent_stub.shs`.
+"""
+use std.spec.*
+use app.io.mod.{process_is_running}
+use app.llm_caret.agent_plan.{AgentLaunchRequest}
+use app.llm_caret.multi_caret_manager.{launch_multi_caret_manager,
+    poll_multi_caret_manager, stop_multi_caret_manager, list_multi_caret_agents}
+use app.llm_caret.workbench.session_source.{publish_manager_sessions,
+    live_sessions, clear_live_sessions, clear_pane_output}
+use app.llm_caret.cs_dashboard.{CsAgent, CsDashboard, cs_dashboard_new,
+    cs_handle_command}
+
+val AGENT_STUB: text = "test/fixtures/caret_workbench/agent_stub.shs"
+
+fn _request(agent_md: text) -> AgentLaunchRequest:
+    AgentLaunchRequest(provider: "claude", agent_md_path: agent_md,
+        skill_path: "", task_desc: "detach spec", model: "",
+        session_id: "", extra_args: [])
+
+fn _row(id: text, pid: i64) -> CsAgent:
+    CsAgent(agent_id: id, spec: "stub", status: "running", pid: pid, pane_id: "%" + id,
+        cpu_pct: -1.0, rss_mb: -1, detail: "")
+
+describe "detaching the workbench never stops an agent":
+    it "keeps both real children alive across view close and switch, until explicit stop":
+        # @req REQ-CARET-CU-004
+        step("launch a REAL two-child team")
+        clear_live_sessions()
+        clear_pane_output()
+        val manager = launch_multi_caret_manager("caret-detach",
+            [_request("agents/alpha.md"), _request("agents/beta.md")], 4,
+            AGENT_STUB, "", "", "", "")
+        val agents = list_multi_caret_agents(manager)
+        expect(agents.len()).to_equal(2)
+        expect(process_is_running(agents[0].pid)).to_equal(true)
+        expect(process_is_running(agents[1].pid)).to_equal(true)
+
+        step("attach the workbench view, then close it")
+        publish_manager_sessions(poll_multi_caret_manager(manager))
+        expect(live_sessions().len()).to_equal(2)
+        clear_live_sessions()
+        clear_pane_output()
+        expect(live_sessions().len()).to_equal(0)
+        expect(process_is_running(agents[0].pid)).to_equal(true)
+        expect(process_is_running(agents[1].pid)).to_equal(true)
+
+        step("switch away between the two live sessions in the dashboard")
+        var d = cs_dashboard_new("caret")
+        d = CsDashboard(session: d.session, manager_status: "connected",
+            agents: [_row("alpha", agents[0].pid), _row("beta", agents[1].pid)],
+            selected: 0, input: "", log: [], screen: [], pins: [], mru: [])
+        val (to_beta, _o1) = cs_handle_command(d, "/switch beta")
+        val (to_alpha, _o2) = cs_handle_command(to_beta, "/switch alp")
+        expect(to_beta.selected).to_equal(1)
+        expect(to_alpha.selected).to_equal(0)
+        expect(process_is_running(agents[0].pid)).to_equal(true)
+        expect(process_is_running(agents[1].pid)).to_equal(true)
+
+        step("only an explicit stop ends them")
+        val stopped = stop_multi_caret_manager(manager)
+        expect(stopped.status).to_equal("stopped")
+        expect(process_is_running(agents[0].pid)).to_equal(false)
+        expect(process_is_running(agents[1].pid)).to_equal(false)

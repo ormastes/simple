@@ -1,0 +1,61 @@
+use std.common.contracts.container.configuration_inspect_query_v1.{ContainerConfigurationInspectKindV1, container_configuration_inspect_command_v1}
+# Fixed queries and pure DATA parsing. Actual producers remain retained runtimes.
+use std.common.contracts.container.runtime_v1.{RuntimeCommandV1, RuntimeIdentityV1}
+use std.common.contracts.container.execution_v2.ContainerHostScopeV2
+use std.common.contracts.container.execution_configuration_v1.container_execution_configuration_decode_v1
+use std.common.contracts.container.execution_input_configuration_v1.*
+use std.common.json.value.{JsonValue, json_value_object_from, json_value_serialize}
+use std.nogc_async_mut.container.shared.configuration_json_v1.*
+use std.nogc_async_mut.container.shared.configuration_query_v1.{ConfigurationContainerDataV1,
+    configuration_container_parse_v1, configuration_observation_v1}
+
+pub struct ContainerInputFlagsV1:
+    open_stdin: bool
+    tty: bool
+    stdin_once: bool
+
+pub struct ConfigurationCaptureDataV2:
+    configuration: ConfigurationContainerDataV1
+    input: ContainerInputFlagsV1?
+
+pub fn configuration_selected_command_v2(expected: RuntimeIdentityV1, windows: bool,
+        include_input: bool) -> Result<RuntimeCommandV1, text>:
+    val kind = if include_input: ContainerConfigurationInspectKindV1.InputConfigurationBefore else: ContainerConfigurationInspectKindV1.ConfigurationBefore
+    container_configuration_inspect_command_v1(kind, expected, windows)
+
+fn input_configuration_native_bool_v1(value: JsonValue, key: text) -> Result<bool, text>:
+    match configuration_bool_v1(value, key):
+        case Ok(found): Ok(found)
+        case Err(_): Err("container-input-configuration-native-boolean-unavailable")
+
+pub fn configuration_selected_parse_v2(raw: text, expected: RuntimeIdentityV1,
+        scope: ContainerHostScopeV2, windows: bool, include_input: bool) -> Result<ConfigurationCaptureDataV2, text>:
+    if not include_input:
+        return Ok(ConfigurationCaptureDataV2(configuration: configuration_container_parse_v1(raw, expected, scope, windows)?, input: nil))
+    val value = configuration_json_v1(raw)?
+    # Mandatory typed facts: no missing/null/string value becomes false.
+    val flags = ContainerInputFlagsV1(open_stdin: input_configuration_native_bool_v1(value, "openStdin")?,
+        tty: input_configuration_native_bool_v1(value, "tty")?, stdin_once: input_configuration_native_bool_v1(value, "stdinOnce")?)
+    val core_keys = ["id", "pod", "attempt", "boot", "generation", "operation", "image", "path", "args", "workdir", "user", "readonly", "environment", "mounts"]
+    configuration_fields_v1(value, core_keys + ["openStdin", "tty", "stdinOnce"])?
+    var core_fields: [(text, JsonValue)] = []
+    for key in core_keys: core_fields.push((key, configuration_member_v1(value, key)?))
+    val core = json_value_serialize(json_value_object_from(core_fields))
+    Ok(ConfigurationCaptureDataV2(configuration: configuration_container_parse_v1(core, expected, scope, windows)?, input: Some(flags)))
+
+pub fn configuration_selected_observation_v2(before: ConfigurationCaptureDataV2, image_raw: text,
+        after: ConfigurationCaptureDataV2, scope: ContainerHostScopeV2, expected: RuntimeIdentityV1,
+        request_digest: text, requested_image: text, include_input: bool) -> Result<text, text>:
+    val core = configuration_observation_v1(before.configuration, image_raw, after.configuration,
+        scope, expected, request_digest, requested_image)?
+    if not include_input: return Ok(core)
+    if before.input.is_none() or after.input.is_none(): return Err("container-input-configuration-native-boolean-unavailable")
+    val first = before.input.unwrap()
+    val last = after.input.unwrap()
+    if first.open_stdin != last.open_stdin or first.tty != last.tty or first.stdin_once != last.stdin_once:
+        return Err("container-input-configuration-changed-during-observation")
+    var value = ContainerExecutionInputConfigurationObservationV1(configuration: container_execution_configuration_decode_v1(core)?,
+        open_stdin: first.open_stdin, tty: first.tty, stdin_once: first.stdin_once,
+        input_configuration_digest: "0000000000000000000000000000000000000000000000000000000000000000")
+    value.input_configuration_digest = container_execution_input_configuration_digest_v1(value)?
+    container_execution_input_configuration_encode_v1(value)

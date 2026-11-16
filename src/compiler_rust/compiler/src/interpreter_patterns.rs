@@ -10,7 +10,7 @@ use crate::error::CompileError;
 use crate::value::Value;
 use simple_parser::ast::{Expr, FStringPart, Pattern, Type};
 
-use super::{Classes, Enums, ImplMethods, BLOCK_SCOPED_ENUMS, MODULE_GLOBALS};
+use super::{Classes, Enums, ImplMethods, BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, MODULE_GLOBALS};
 
 fn pattern_enum_name_matches(pattern_name: &str, value_name: &str) -> bool {
     if pattern_name == "_" || pattern_name == value_name || matches!(pattern_name, "Option" | "Result") {
@@ -33,7 +33,10 @@ fn enum_declares_option_variant(enum_name: &str, enums: &Enums) -> bool {
     if let Some(def) = enums.get(enum_name) {
         return declares(def);
     }
-    BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).is_some_and(|def| declares(def)))
+    if BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).is_some_and(|def| declares(def))) {
+        return true;
+    }
+    GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).is_some_and(|def| declares(def)))
 }
 
 /// Number of times an Option pattern (`Some(..)` / `None` / `nil`) was tested
@@ -389,11 +392,12 @@ pub(crate) fn pattern_matches(
             } = value
             {
                 // Check if this identifier is a known variant of the enum
-                // Look in both module-level enums and block-scoped enums
+                // Look in module-level enums, block-scoped enums, and GLOBAL_ENUMS
                 let enum_def = enums
                     .get(enum_name)
                     .cloned()
-                    .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
+                    .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()))
+                    .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
                 if let Some(enum_def) = enum_def {
                     let is_variant = enum_def.variants.iter().any(|v| &v.name == name);
                     if is_variant {
@@ -980,11 +984,12 @@ pub(crate) fn check_enum_exhaustiveness(
     arm_patterns: &[&Pattern],
     enums: &Enums,
 ) -> Option<Vec<String>> {
-    // Get the enum definition from module-level or block-scoped enums
+    // Get the enum definition from module-level, block-scoped, or global enums
     let enum_def = enums
         .get(enum_name)
         .cloned()
-        .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()))?;
+        .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()))
+        .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()))?;
 
     // Get all variant names from the enum definition
     let all_variants: Vec<String> = enum_def.variants.iter().map(|v| v.name.clone()).collect();
@@ -1180,6 +1185,14 @@ pub(crate) fn merge_match_arm_subject_bindings(
     let mut current = subject_place
         .and_then(|place| crate::interpreter::place::place_slot_ref(env, place).cloned())
         .unwrap_or_else(|| subject_fallback.clone());
+    // The arm itself stored a new value into the subject place (e.g.
+    // `case Some(cur): var s = cur; s.xs.push(x); g = Some(s)`). That explicit
+    // store is the newer truth: merging the stale payload binding's containers
+    // over it would rewind the store. See
+    // doc/08_tracking/bug/executable_authority_registry_slots_lost_on_store_2026-11-15.md.
+    if subject_place.is_some() && current != *subject_fallback {
+        return;
+    }
     let mut changed = false;
     for (name, steps) in &paths {
         let Some((_, binding)) = binding_values.iter().find(|(n, _)| n == name) else {
@@ -1326,6 +1339,44 @@ mod tests {
     // Each asserts a VALUE, not just that an arm was taken: a test that only
     // checked "the Some arm fired" would pass even if the binding were garbage,
     // which is exactly the mistake the original report made about the JIT.
+
+    /// An arm that copies the payload, grows it, and stores it back into the
+    /// matched global must keep the store: the post-arm payload merge must not
+    /// overwrite it with the stale binding's (empty) array.
+    #[test]
+    fn match_arm_store_into_subject_global_is_not_rewound_by_payload_merge() {
+        let src = r#"
+struct S:
+    n: i64
+    xs: [i64]
+
+var g: S? = nil
+
+fn reset():
+    g = Some(S(n: 0, xs: []))
+
+fn add(x: i64):
+    match g:
+        case Some(cur):
+            var s = cur
+            s.xs.push(x)
+            s.n = s.n + 1
+            g = Some(s)
+        case None:
+            pass
+
+fn len_of() -> i64:
+    match g:
+        case Some(c): c.xs.len() * 10 + c.n
+        case None: -1
+
+reset()
+add(5)
+add(6)
+main = len_of() - 22
+"#;
+        assert_eq!(run(src), 0);
+    }
 
     #[test]
     fn some_pattern_matches_bare_value_at_nullable_param_and_binds_it() {

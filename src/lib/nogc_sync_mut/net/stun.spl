@@ -32,6 +32,8 @@
 # Constants
 # ============================================================================
 
+use std.common.types.{Offset, Length, PortNumber}
+
 # Magic cookie (RFC 8489 section 5)
 val STUN_MAGIC_COOKIE: i64 = 0x2112A442
 
@@ -78,7 +80,7 @@ val STUN_ADDR_FAMILY_IPV6: i64 = 0x02
 class StunHeader:
     """Parsed STUN message header."""
     msg_type: i64
-    msg_length: i64
+    msg_length: Length
     txn_id: [u8]       # 12 bytes
 
 enum StunHeaderResult:
@@ -103,7 +105,7 @@ enum StunMessageResult:
 class StunMappedAddr:
     """Decoded MAPPED-ADDRESS or XOR-MAPPED-ADDRESS."""
     family: i64        # 0x01 = IPv4, 0x02 = IPv6
-    port: i64
+    port: PortNumber
     ip_bytes: [u8]     # 4 bytes for IPv4, 16 for IPv6
 
 # ============================================================================
@@ -147,12 +149,13 @@ fn _stun_put_u32_be(out: [u8], val_: i64):
 # Header parse — RFC 8489 section 5
 # ============================================================================
 
-pub fn stun_parse_header(bytes: [u8], offset: i64) -> StunHeaderResult:
+pub fn stun_parse_header(bytes: [u8], header_offset: Offset) -> StunHeaderResult:
     """Parse a 20-byte STUN header starting at offset.
 
     Validates the magic cookie and the two zero bits in the message type.
     Returns Ok(StunHeader) or Err.
     """
+    val offset = header_offset.value
     if offset < 0:
         return StunHeaderResult.Err("negative STUN header offset")
     if offset > bytes.len() or STUN_HEADER_SIZE > bytes.len() - offset:
@@ -177,7 +180,7 @@ pub fn stun_parse_header(bytes: [u8], offset: i64) -> StunHeaderResult:
         i = i + 1
     return StunHeaderResult.Ok(StunHeader(
         msg_type: msg_type,
-        msg_length: msg_length,
+        msg_length: Length(value: msg_length),
         txn_id: txn_id
     ))
 
@@ -185,7 +188,7 @@ pub fn stun_parse_header(bytes: [u8], offset: i64) -> StunHeaderResult:
 # Header emit
 # ============================================================================
 
-pub fn stun_emit_header(msg_type: i64, msg_length: i64, txn_id: [u8]) -> [u8]:
+pub fn stun_emit_header(msg_type: i64, msg_length: Length, txn_id: [u8]) -> [u8]:
     """Build a 20-byte STUN header.
 
     msg_type: 14-bit message type (top 2 bits must be 0).
@@ -194,7 +197,7 @@ pub fn stun_emit_header(msg_type: i64, msg_length: i64, txn_id: [u8]) -> [u8]:
     """
     var out: [u8] = []
     _stun_put_u16_be(out, msg_type & 0x3fff)
-    _stun_put_u16_be(out, msg_length)
+    _stun_put_u16_be(out, msg_length.value)
     _stun_put_u32_be(out, STUN_MAGIC_COOKIE)
     var i = 0
     while i < 12:
@@ -225,9 +228,11 @@ pub fn stun_encode_attribute(attr_type: i64, value: [u8]) -> [u8]:
         p = p + 1
     return out
 
-pub fn stun_decode_attributes(bytes: [u8], offset: i64, length: i64) -> [StunAttribute]:
+pub fn stun_decode_attributes(bytes: [u8], attrs_offset: Offset, attrs_length: Length) -> [StunAttribute]:
     """Decode STUN attributes from bytes starting at offset, reading up to length bytes."""
     var attrs: [StunAttribute] = []
+    val offset = attrs_offset.value
+    val length = attrs_length.value
     if offset < 0 or length < 0:
         return attrs
     if offset > bytes.len() or length > bytes.len() - offset:
@@ -260,14 +265,14 @@ pub fn stun_decode_attributes(bytes: [u8], offset: i64, length: i64) -> [StunAtt
 
 pub fn stun_parse_message(bytes: [u8]) -> StunMessageResult:
     """Parse a complete STUN message (header + attributes)."""
-    val hdr_r = stun_parse_header(bytes, 0)
+    val hdr_r = stun_parse_header(bytes, Offset(value: 0))
     match hdr_r:
         case Err(msg):
             return StunMessageResult.Err(msg)
         case Ok(hdr):
-            if hdr.msg_length > bytes.len() - STUN_HEADER_SIZE:
+            if hdr.msg_length.value > bytes.len() - STUN_HEADER_SIZE:
                 return StunMessageResult.Err("message truncated")
-            val attrs = stun_decode_attributes(bytes, STUN_HEADER_SIZE, hdr.msg_length)
+            val attrs = stun_decode_attributes(bytes, Offset(value: STUN_HEADER_SIZE), hdr.msg_length)
             return StunMessageResult.Ok(StunMessage(
                 msg_type: hdr.msg_type,
                 txn_id: hdr.txn_id,
@@ -290,7 +295,7 @@ pub fn stun_emit_message(msg_type: i64, txn_id: [u8], attributes: [StunAttribute
         _stun_append(attr_bytes, encoded)
         i = i + 1
     # Build header
-    var out = stun_emit_header(msg_type, attr_bytes.len(), txn_id)
+    var out = stun_emit_header(msg_type, Length(value: attr_bytes.len()), txn_id)
     _stun_append(out, attr_bytes)
     return out
 
@@ -300,7 +305,7 @@ pub fn stun_emit_message(msg_type: i64, txn_id: [u8], attributes: [StunAttribute
 # The address and port are XORed with the magic cookie (and txn_id for IPv6).
 # ============================================================================
 
-pub fn stun_encode_xor_mapped_address_ipv4(port: i64, ip_a: i64, ip_b: i64, ip_c: i64, ip_d: i64, txn_id: [u8]) -> [u8]:
+pub fn stun_encode_xor_mapped_address_ipv4(port: PortNumber, ip_a: i64, ip_b: i64, ip_c: i64, ip_d: i64, txn_id: [u8]) -> [u8]:
     """Encode an XOR-MAPPED-ADDRESS attribute for IPv4.
 
     port: 16-bit port number.
@@ -314,7 +319,7 @@ pub fn stun_encode_xor_mapped_address_ipv4(port: i64, ip_a: i64, ip_b: i64, ip_c
     # Family
     out.push(STUN_ADDR_FAMILY_IPV4 & 0xff)
     # X-Port = port XOR (magic_cookie >> 16)
-    val xport = port ^ ((STUN_MAGIC_COOKIE >> 16) & 0xffff)
+    val xport = port.value.to_i64() ^ ((STUN_MAGIC_COOKIE >> 16) & 0xffff)
     _stun_put_u16_be(out, xport)
     # X-Address = address XOR magic_cookie
     val cookie_bytes_0 = (STUN_MAGIC_COOKIE >> 24) & 0xff
@@ -334,7 +339,7 @@ pub fn stun_decode_xor_mapped_address(value: [u8], txn_id: [u8]) -> StunMappedAd
     txn_id: 12-byte transaction ID (needed for IPv6 XOR).
     Returns: StunMappedAddr with decoded family, port, and IP bytes.
     """
-    val empty_addr = StunMappedAddr(family: 0, port: 0, ip_bytes: [])
+    val empty_addr = StunMappedAddr(family: 0, port: PortNumber(value: 0), ip_bytes: [])
     # Bounds: family+port need 4 bytes; IPv4 needs 8, IPv6 needs 20 + a 12-byte txn id.
     if value.len() < 4:
         return empty_addr
@@ -366,7 +371,7 @@ pub fn stun_decode_xor_mapped_address(value: [u8], txn_id: [u8]) -> StunMappedAd
         while j < 16:
             ip_bytes.push((value[4 + j] ^ xor_key[j]) & 0xff)
             j = j + 1
-    return StunMappedAddr(family: family, port: port, ip_bytes: ip_bytes)
+    return StunMappedAddr(family: family, port: PortNumber(value: port.to_i32()), ip_bytes: ip_bytes)
 
 # ============================================================================
 # Convenience: build a Binding Request
@@ -385,7 +390,7 @@ pub fn stun_binding_request(txn_id: [u8]) -> [u8]:
 # Convenience: build a Binding Success Response
 # ============================================================================
 
-pub fn stun_binding_success_response(txn_id: [u8], port: i64, ip_a: i64, ip_b: i64, ip_c: i64, ip_d: i64) -> [u8]:
+pub fn stun_binding_success_response(txn_id: [u8], port: PortNumber, ip_a: i64, ip_b: i64, ip_c: i64, ip_d: i64) -> [u8]:
     """Build a STUN Binding Success Response with XOR-MAPPED-ADDRESS (IPv4).
 
     txn_id: must match the request's transaction ID.

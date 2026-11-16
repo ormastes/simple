@@ -16,8 +16,14 @@ fn _containment_inspect_identity_v1() -> RuntimeIdentityV1:
 
 use test.fixtures.orchestration.containment_provider_fixture_v1.containment_inspect_payload_fixture_v1
 
+# Independent native-wire golden: raw text deliberately avoids ordinary
+# Simple brace escaping. Do not derive the expected value from the builder.
+fn _containment_expected_template_v1() -> text:
+    """{"id":{{json .Id}},"pod_uid":{{json (index .Config.Labels "io.simpleorch.pod_uid")}},"attempt":{{json (index .Config.Labels "io.simpleorch.attempt")}},"node_boot_id":{{json (index .Config.Labels "io.simpleorch.node_boot_id")}},"provider_generation":{{json (index .Config.Labels "io.simpleorch.provider_generation")}},"operation_id":{{json (index .Config.Labels "io.simpleorch.operation_id")}},"pid":{{json .State.Pid}},"cgroup":{{json .State.CgroupPath}},"status":{{json .State.Status}},"runtime":{{json .OCIRuntime}},"manager":{{json .HostConfig.CgroupManager}},"cgroup_mode":{{json .HostConfig.CgroupMode}},"cgroups":{{json .HostConfig.Cgroups}},"pid_mode":{{json .HostConfig.PidMode}},"privileged":{{json .HostConfig.Privileged}},"effective_caps":{{len .EffectiveCaps}},"bounding_caps":{{len .BoundingCaps}},"no_new_privileges":{{range .HostConfig.SecurityOpt}}{{if eq . "no-new-privileges"}}true{{end}}{{end}},"readonly_rootfs":{{json .HostConfig.ReadonlyRootfs}}}"""
+
 describe "exact configured containment inspect":
     it "builds only an exact Podman container query and refuses unqualified IDs":
+        step("Compare the complete native Go template against raw expected text")
         val command = linux_oci_containment_inspect_command_v1("c".repeat(64)).unwrap()
         expect(command.operation).to_equal("containment-inspect")
         expect(command.program).to_equal("podman")
@@ -26,10 +32,17 @@ describe "exact configured containment inspect":
         expect(command.args[1]).to_equal("inspect")
         expect(command.args[2]).to_equal("--format")
         expect(command.args[4]).to_equal("c".repeat(64))
-        expect(command.args[3]).to_contain("{{len .EffectiveCaps}}")
-        expect(command.args[3]).to_contain("{{json .HostConfig.Cgroups}}")
+        expect(command.args[3]).to_equal(_containment_expected_template_v1())
         for invalid in ["--all", "name", "abc", "C".repeat(64)]:
             expect(linux_oci_containment_inspect_command_v1(invalid).is_err()).to_equal(true)
+
+    it "keeps nested Go actions and the final JSON brace separate at runtime":
+        step("Preserve literal Go delimiter pairs through Simple string decoding")
+        val format = linux_oci_containment_inspect_command_v1("c".repeat(64)).unwrap().args[3]
+        expect(format.split("""{{""").len() - 1).to_equal(22)
+        expect(format.split("""}}""").len() - 1).to_equal(22)
+        expect(format).to_contain("""{{range .HostConfig.SecurityOpt}}{{if eq . "no-new-privileges"}}true{{end}}{{end}}""")
+        expect(format).to_end_with("""{{json .HostConfig.ReadonlyRootfs}}}""")
 
     it "accepts exact running identity selected profile and empty configured capability sets":
         var request = linux_container_leaf_fixture_v2()

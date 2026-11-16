@@ -1,0 +1,252 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_foundation.spl 1%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_decl_apply.spl 1%
+# @tag: unit, browser_engine, css, values
+#
+# The layout renderer's small CSS value parsers, called directly: gradient
+# angles (CSS Images 3 section 3.1.1: `to top` = 0deg, `to right` = 90deg,
+# the default is `to bottom` = 180deg; 1turn = 360deg = 400grad = 2pi rad),
+# line-height encodings (CSS 2.2 section 10.8.1: a percentage or `em` is a
+# factor of the element's own font-size), SVG `viewBox` numbers (SVG 2
+# section 8.6: a non-positive width or height disables the viewBox), flex
+# factors, and the invalid-colour-function rule (CSS Syntax: an invalid
+# declaration is dropped whole). Every expected value below is arithmetic
+# from those rules, not a captured renderer output.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
+    gradient_angle_token_deg, parse_gradient_angle_deg, parse_signed_leading_int,
+    line_height_value_is_normal, line_height_after_normal_keyword,
+    parse_line_height_value, parse_decimal_x10, svg_number_milli,
+    svg_view_box_milli, ws_tokens, margin_token_px,
+    _decl_invalid_color_function, _decl_ident_char
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_decl_apply.{
+    _decl_percent_sentinel_or_length_px, _decl_line_height_own_font_milli,
+    _decl_flex_factor, _color_alpha_zero, _decl_font_relative_length_px
+}
+
+describe "Gradient angle tokens":
+    """
+    A `<angle>` token in whole degrees, rounded half up and reduced to 0..359.
+    """
+
+    context "units":
+
+        it "reads deg, turn, grad and rad":
+            expect(gradient_angle_token_deg("45deg")).to_equal(45)
+            expect(gradient_angle_token_deg("0.25turn")).to_equal(90)
+            expect(gradient_angle_token_deg("100grad")).to_equal(90)
+            expect(gradient_angle_token_deg("3.14159rad")).to_equal(180)
+
+        it "stores whole degrees by design, rounding a fraction half up":
+            expect(gradient_angle_token_deg("12.5deg")).to_equal(13)
+            expect(gradient_angle_token_deg("12.4deg")).to_equal(12)
+
+    context "sign and reduction":
+
+        it "maps a negative angle into 0..359":
+            expect(gradient_angle_token_deg("-90deg")).to_equal(270)
+            expect(gradient_angle_token_deg("+30deg")).to_equal(30)
+
+        it "reduces whole turns so they never reach the corner codes":
+            expect(gradient_angle_token_deg("1080deg")).to_equal(0)
+            expect(gradient_angle_token_deg("3turn")).to_equal(0)
+            expect(gradient_angle_token_deg("450deg")).to_equal(90)
+
+describe "Linear-gradient direction":
+
+    it "uses the first argument when it is an angle":
+        expect(parse_gradient_angle_deg("linear-gradient(0.5turn, red, blue)")).to_equal(180)
+        expect(parse_gradient_angle_deg("linear-gradient(-45deg, red, blue)")).to_equal(315)
+
+    it "defaults to `to bottom` when no direction is given":
+        expect(parse_gradient_angle_deg("linear-gradient(red, blue)")).to_equal(180)
+
+    it "returns the default for a value that is not a gradient":
+        expect(parse_gradient_angle_deg("red")).to_equal(180)
+
+    it "maps the four side keywords to their angles":
+        expect(parse_gradient_angle_deg("linear-gradient(to top, red, blue)")).to_equal(0)
+        expect(parse_gradient_angle_deg("linear-gradient(to right, red, blue)")).to_equal(90)
+        expect(parse_gradient_angle_deg("linear-gradient(to bottom, red, blue)")).to_equal(180)
+        expect(parse_gradient_angle_deg("linear-gradient(to left, red, blue)")).to_equal(270)
+
+    it "encodes each corner in either word order as 1000 plus the square-box angle":
+        expect(parse_gradient_angle_deg("linear-gradient(to top right, red, blue)")).to_equal(1045)
+        expect(parse_gradient_angle_deg("linear-gradient(to right top, red, blue)")).to_equal(1045)
+        expect(parse_gradient_angle_deg("linear-gradient(to bottom right, red, blue)")).to_equal(1135)
+        expect(parse_gradient_angle_deg("linear-gradient(to right bottom, red, blue)")).to_equal(1135)
+        expect(parse_gradient_angle_deg("linear-gradient(to bottom left, red, blue)")).to_equal(1225)
+        expect(parse_gradient_angle_deg("linear-gradient(to left bottom, red, blue)")).to_equal(1225)
+        expect(parse_gradient_angle_deg("linear-gradient(to top left, red, blue)")).to_equal(1315)
+        expect(parse_gradient_angle_deg("linear-gradient(to left top, red, blue)")).to_equal(1315)
+
+describe "Signed leading integers":
+
+    it "keeps an explicit sign and stops at the first non-digit":
+        expect(parse_signed_leading_int("-12px")).to_equal(-12)
+        expect(parse_signed_leading_int("+7")).to_equal(7)
+        expect(parse_signed_leading_int("42abc")).to_equal(42)
+
+    it "reads a value with no leading digit as zero":
+        expect(parse_signed_leading_int("abc")).to_equal(0)
+        expect(parse_signed_leading_int("")).to_equal(0)
+
+describe "line-height encodings":
+    """
+    A positive value is px; minus ten times a factor is a font-relative factor;
+    0 is `normal`/unusable.
+    """
+
+    it "recognises the normal keyword case-insensitively":
+        expect(line_height_value_is_normal(" Normal ")).to_equal(true)
+        expect(line_height_value_is_normal("1.5")).to_equal(false)
+
+    it "resets to the face metric only on the measured host":
+        expect(line_height_after_normal_keyword(-15, true)).to_equal(0)
+        expect(line_height_after_normal_keyword(-15, false)).to_equal(-15)
+
+    it "reads a percentage as a factor of the font size":
+        expect(parse_line_height_value("150%")).to_equal(-15)
+        expect(parse_line_height_value("200%")).to_equal(-20)
+
+    it "reads px as a length":
+        expect(parse_line_height_value("20px")).to_equal(20)
+
+    it "encodes a unitless number in tenths by design":
+        expect(parse_line_height_value("1.5")).to_equal(-15)
+        expect(parse_line_height_value("2")).to_equal(-20)
+
+    it "encodes a decimal in tenths by design, truncating further digits":
+        expect(parse_decimal_x10("1.5")).to_equal(15)
+        expect(parse_decimal_x10("2")).to_equal(20)
+        expect(parse_decimal_x10("0.8")).to_equal(8)
+        expect(parse_decimal_x10("1.25em")).to_equal(12)
+
+describe "SVG numbers and viewBox":
+
+    it "reads numbers in thousandths of a user unit":
+        expect(svg_number_milli("12")).to_equal(12000)
+        expect(svg_number_milli("-3.5")).to_equal(-3500)
+        expect(svg_number_milli("0.125")).to_equal(125)
+        expect(svg_number_milli(".5")).to_equal(500)
+        expect(svg_number_milli(" 7 ")).to_equal(7000)
+
+    it "ignores a unit suffix":
+        expect(svg_number_milli("10px")).to_equal(10000)
+
+    it "reads four space- or comma-separated viewBox numbers":
+        val a = svg_view_box_milli(" viewBox=\"0 0 100 50\"")
+        expect(a.len()).to_equal(4)
+        expect(a[2]).to_equal(100000)
+        expect(a[3]).to_equal(50000)
+        val b = svg_view_box_milli(" viewBox=\"-1,2, 24,24\"")
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(-1000)
+        expect(b[1]).to_equal(2000)
+
+    it "accepts the lowercased attribute name an HTML parser produces":
+        val a = svg_view_box_milli(" viewbox=\"0 0 8 4\"")
+        expect(a.len()).to_equal(4)
+        expect(a[2]).to_equal(8000)
+
+    it "drops a viewBox that is absent, short or has a non-positive size":
+        expect(svg_view_box_milli(" width=\"10\"").len()).to_equal(0)
+        expect(svg_view_box_milli(" viewBox=\"0 0 10\"").len()).to_equal(0)
+        expect(svg_view_box_milli(" viewBox=\"0 0 0 10\"").len()).to_equal(0)
+        expect(svg_view_box_milli(" viewBox=\"0 0 10 -5\"").len()).to_equal(0)
+
+    it "splits on any ASCII whitespace and drops empty tokens":
+        val t = ws_tokens(" a\tb\n  c ")
+        expect(t.len()).to_equal(3)
+        expect(t[0]).to_equal("a")
+        expect(t[2]).to_equal("c")
+        expect(ws_tokens("   ").len()).to_equal(0)
+
+describe "Margin tokens":
+
+    it "encodes a percentage as the negative sentinel and px as itself":
+        expect(margin_token_px("10%")).to_equal(-10)
+        expect(margin_token_px("12px")).to_equal(12)
+
+describe "Invalid colour functions drop the declaration":
+
+    it "flags a malformed rgb or hsl on a colour property":
+        expect(_decl_invalid_color_function("color", "rgb(1,2)")).to_equal(true)
+        expect(_decl_invalid_color_function("background-color", "hsl(foo, bar, baz)")).to_equal(true)
+        expect(_decl_invalid_color_function("border", "3px solid hsl(foo,1%,2%)")).to_equal(true)
+
+    it "accepts a well-formed colour function":
+        expect(_decl_invalid_color_function("color", "rgb(1,2,3)")).to_equal(false)
+        expect(_decl_invalid_color_function("outline-color", "rgba(1, 2, 3, 0.5)")).to_equal(false)
+
+    it "does not judge properties that are not colours":
+        expect(_decl_invalid_color_function("width", "rgb(1,2)")).to_equal(false)
+
+    it "leaves substituted values to a later stage":
+        expect(_decl_invalid_color_function("color", "var(--c, rgb(1,2))")).to_equal(false)
+        expect(_decl_invalid_color_function("color", "calc(1px) rgb(1,2)")).to_equal(false)
+
+    it "ignores other functions and an unclosed parenthesis":
+        expect(_decl_invalid_color_function("background", "url(a.png) red")).to_equal(false)
+        expect(_decl_invalid_color_function("color", "rgb(1,2")).to_equal(false)
+        expect(_decl_invalid_color_function("color", "red")).to_equal(false)
+
+    it "treats lowercase letters and hyphen as identifier characters":
+        expect(_decl_ident_char("a")).to_equal(true)
+        expect(_decl_ident_char("-")).to_equal(true)
+        expect(_decl_ident_char("1")).to_equal(false)
+        expect(_decl_ident_char("(")).to_equal(false)
+
+describe "Declaration-level length helpers":
+
+    it "encodes a min/max percentage as the negative sentinel by design":
+        expect(_decl_percent_sentinel_or_length_px("50%", 16)).to_equal(-50)
+
+    it "resolves em against the element font and rem against 16px":
+        expect(_decl_percent_sentinel_or_length_px("2em", 10)).to_equal(20)
+        expect(_decl_font_relative_length_px("1.5rem", 40)).to_equal(24)
+        expect(_decl_font_relative_length_px("12px", 40)).to_equal(12)
+
+    it "encodes a percentage or em line-height in thousandths of the own font by design":
+        expect(_decl_line_height_own_font_milli("150%")).to_equal(1500)
+        expect(_decl_line_height_own_font_milli("1.5em")).to_equal(1500)
+        expect(_decl_line_height_own_font_milli("112.5%")).to_equal(1125)
+        expect(_decl_line_height_own_font_milli(".5em")).to_equal(500)
+        expect(_decl_line_height_own_font_milli("1.2345em")).to_equal(1234)
+
+    it "returns 0 for rem, px and malformed numbers":
+        expect(_decl_line_height_own_font_milli("2rem")).to_equal(0)
+        expect(_decl_line_height_own_font_milli("20px")).to_equal(0)
+        expect(_decl_line_height_own_font_milli("1.2.3em")).to_equal(0)
+        expect(_decl_line_height_own_font_milli("x1em")).to_equal(0)
+
+describe "Flex factors":
+    """
+    Fractional factors are kept out of this spec: the renderer rounds them to
+    integers (1.4 -> 1), Chrome keeps them; see
+    doc/08_tracking/bug/web_layout_flex_grid_table_chrome159_divergences_2026-11-15.md.
+    """
+
+    it "reads whole factors":
+        expect(_decl_flex_factor("2")).to_equal(2)
+        expect(_decl_flex_factor("0.0")).to_equal(0)
+
+    it "rejects a value that is not a non-negative number":
+        expect(_decl_flex_factor("abc")).to_equal(-1)
+        expect(_decl_flex_factor("1.2.3")).to_equal(-1)
+        expect(_decl_flex_factor("1.")).to_equal(-1)
+        expect(_decl_flex_factor("-1")).to_equal(-1)
+
+describe "Fully transparent colours":
+
+    it "detects a zero alpha channel":
+        expect(_color_alpha_zero("rgba(0, 0, 0, 0)")).to_equal(true)
+        expect(_color_alpha_zero(" RGBA(10,20,30,0) ")).to_equal(true)
+
+    it "is false for an opaque or unparseable colour":
+        expect(_color_alpha_zero("red")).to_equal(false)
+        expect(_color_alpha_zero("rgba(0,0,0,0.5)")).to_equal(false)
+        expect(_color_alpha_zero("nonsense")).to_equal(false)

@@ -1,0 +1,147 @@
+# AUTHORED_NOT_RUN. Execute ONLY inside a disposable administrator-provisioned
+# supported Host unit, with actual fresh graph/run roots and installed profiles.
+# No UID/cgroup provisioning, engine invocation, quota query or admission here.
+# @req REQ-LINUX-FRESH-EPOCH-001
+# @req REQ-LINUX-FRESH-EPOCH-002
+# @req REQ-LINUX-FRESH-EPOCH-003
+# @req REQ-LINUX-FRESH-EPOCH-004
+# @req REQ-LINUX-FRESH-EPOCH-005
+use std.spec.{describe, it, expect, step, fail}
+use std.common.contracts.container.linux_fresh_epoch_v1.*
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_owner_v1.*
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_profile_v1.*
+use std.nogc_sync_mut.io.file_ops.file_create_exclusive
+use std.nogc_sync_mut.io_runtime.{file_delete, file_exists}
+
+# Test custody remains reachable if native close reports retained/unknown.
+var epoch_fixture_preparations_v1: [LinuxInstalledFreshEpochOwnerV1] = []
+var epoch_fixture_successors_v1: [LinuxFreshEpochSuccessorCustodyV1] = []
+var epoch_fixture_profiles_v1: [LinuxInstalledFreshEpochProfileV1] = []
+
+fn epoch_fixture_open_v1() -> Result<LinuxInstalledFreshEpochOwnerV1, text>:
+    match linux_installed_fresh_epoch_open_v1():
+        case LinuxFreshEpochOpenV1.Ready(owner):
+            epoch_fixture_preparations_v1.push(owner)
+            Ok(owner)
+        case LinuxFreshEpochOpenV1.CleanupRequired(owner, reason):
+            epoch_fixture_preparations_v1.push(owner)
+            val turn = owner.close_v1()
+            Err(reason + ":closed=" + str(turn.closed) + ":" + turn.error)
+        case LinuxFreshEpochOpenV1.Rejected(reason): Err(reason)
+
+fn epoch_fixture_profile_v1() -> Result<LinuxInstalledFreshEpochProfileV1, text>:
+    match linux_installed_fresh_epoch_profile_open_v1():
+        case LinuxFreshEpochProfileOpenV1.Ready(owner):
+            epoch_fixture_profiles_v1.push(owner)
+            Ok(owner)
+        case LinuxFreshEpochProfileOpenV1.CleanupRequired(owner, reason):
+            epoch_fixture_profiles_v1.push(owner)
+            val turn = owner.close_v1()
+            Err(reason + ":closed=" + str(turn.closed) + ":" + turn.error)
+        case LinuxFreshEpochProfileOpenV1.Rejected(reason): Err(reason)
+
+fn epoch_fixture_competitor_v1() -> Result<bool, text>:
+    match linux_installed_fresh_epoch_open_v1():
+        case LinuxFreshEpochOpenV1.Ready(owner):
+            epoch_fixture_preparations_v1.push(owner)
+            val turn = owner.close_v1()
+            if not turn.closed: return Err("unexpected competitor cleanup retained:" + turn.error)
+            Ok(false)
+        case LinuxFreshEpochOpenV1.CleanupRequired(owner, reason):
+            epoch_fixture_preparations_v1.push(owner)
+            val turn = owner.close_v1()
+            if not turn.closed: return Err("competitor cleanup retained:" + turn.error)
+            Ok(reason == "FILE_LOCK_ACQUISITION_REJECTED")
+        case LinuxFreshEpochOpenV1.Rejected(reason): Err("competitor failed before lock:" + reason)
+
+describe "Actual installed Linux fresh provider preparation v1":
+    it "retains native preparation, contends and transfers only supporting custody":
+        step("Open the fixed installed profiles inside the actual dedicated Host system unit")
+        val opened = epoch_fixture_open_v1()
+        if opened.is_err():
+            fail("supported fixture unavailable:" + opened.unwrap_err())
+            return
+        val preparation = opened.unwrap()
+        val observed = preparation.current_v1().unwrap()
+        expect(observed.service_uid).to_be_greater_than(0)
+        expect(observed.service_gid).to_be_greater_than(0)
+        expect(observed.owner_generation).to_be_greater_than(0)
+        expect(observed.manager_unique_name).to_start_with(":")
+        expect(observed.partition_identity_digest.byte_len()).to_equal(64)
+        expect(observed.store_identity_digest.byte_len()).to_equal(64)
+        expect(observed.observed_cpu_millis).to_equal(observed.usable_cpu_millis + observed.reserved_cpu_millis)
+        expect(observed.observed_memory_bytes).to_equal(observed.usable_memory_bytes + observed.reserved_memory_bytes)
+        expect(observed.outside_cpu_millis).to_be_greater_than(0)
+        expect(observed.outside_memory_bytes).to_be_greater_than(0)
+        step("Contend on the actual fixed machine-state epoch lock without another writer")
+        expect(epoch_fixture_competitor_v1().unwrap()).to_equal(true)
+        expect(preparation.current_v1().unwrap().store_identity_digest).to_equal(observed.store_identity_digest)
+        step("Transfer the same retained native owners; this transition creates no durable admission")
+        val alias = preparation
+        val transition = preparation.consume_preparation_v1()
+        if transition.successor.is_none():
+            val closed = preparation.close_v1()
+            fail("supporting transition failed:" + transition.error + ":closed=" + str(closed.closed))
+            return
+        expect(transition.preparation.is_none()).to_equal(true)
+        val successor = transition.successor.unwrap()
+        epoch_fixture_successors_v1.push(successor)
+        expect(alias.current_v1().is_err()).to_equal(true)
+        expect(alias.close_v1().closed).to_equal(true)
+        expect(successor.current_v1().unwrap().store_identity_digest).to_equal(observed.store_identity_digest)
+        step("Close the actual successor once; copied aliases cannot revive preparation or a later lock")
+        val closed = successor.close_v1()
+        expect(closed.closed).to_equal(true)
+        expect(closed.owner.is_none()).to_equal(true)
+        expect(successor.current_v1().is_err()).to_equal(true)
+        expect(successor.close_v1().closed).to_equal(true)
+
+    it "refuses actual graph population before preparation is consumed":
+        step("Acquire real supported preparation before placing one uniquely owned fixture sentinel")
+        val opened = epoch_fixture_open_v1()
+        if opened.is_err():
+            fail("supported negative fixture unavailable:" + opened.unwrap_err())
+            return
+        val owner = opened.unwrap()
+        val profile_owner = epoch_fixture_profile_v1().unwrap()
+        val profile = profile_owner.current_v1().unwrap()
+        val observation = owner.current_v1().unwrap()
+        if profile.profile_digest != observation.profile_digest:
+            val profile_closed = profile_owner.close_v1()
+            val closed = owner.close_v1()
+            fail("fixed profile differs before fixture mutation")
+            return
+        val path = profile.profile.text_v1("graphRoot").unwrap() + "/sspec-fresh-" + str(observation.owner_generation)
+        if not file_create_exclusive(path, "owned fresh-epoch negative fixture\n"):
+            val profile_closed = profile_owner.close_v1()
+            val closed = owner.close_v1()
+            fail("exclusive negative fixture sentinel was not created")
+            return
+        step("Observe native nonemptiness refusal, remove only the fixture sentinel and preserve cleanup")
+        val refused = owner.current_v1()
+        expect(refused.is_err()).to_equal(true)
+        if refused.is_err(): expect(refused.unwrap_err()).to_equal("fresh-epoch-native-store-nonempty")
+        file_delete(path)
+        expect(file_exists(path)).to_equal(false)
+        expect(owner.consume_preparation_v1().successor.is_none()).to_equal(true)
+        expect(owner.close_v1().closed).to_equal(true)
+        expect(profile_owner.close_v1().closed).to_equal(true)
+
+    it "rejects unknown profile fields and contradictory pure budget metadata":
+        step("Read genuine installed bytes and vary data only; decoding creates no native custody")
+        val owner = epoch_fixture_profile_v1().unwrap()
+        val snapshot = owner.current_v1().unwrap()
+        var unknown = snapshot.profile.fields
+        unknown["callerSaysFresh"] = SdnValue.Bool(true)
+        val unknown_result = linux_fresh_epoch_profile_validate_v1(LinuxFreshEpochProfileV1(fields: unknown))
+        expect(unknown_result.is_err()).to_equal(true)
+        if unknown_result.is_err(): expect(unknown_result.unwrap_err()).to_equal("fresh-epoch-profile-fields")
+        var overrun = owner.current_v1().unwrap().profile.fields
+        overrun["reservedCpuMillis"] = SdnValue.Int(snapshot.profile.number_v1("partitionCpuMillis").unwrap())
+        val overrun_result = linux_fresh_epoch_profile_validate_v1(LinuxFreshEpochProfileV1(fields: overrun))
+        expect(overrun_result.is_err()).to_equal(true)
+        if overrun_result.is_err(): expect(overrun_result.unwrap_err()).to_equal("fresh-epoch-profile-capacity")
+        expect(owner.close_v1().closed).to_equal(true)
