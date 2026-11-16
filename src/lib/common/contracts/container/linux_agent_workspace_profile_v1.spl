@@ -1,0 +1,92 @@
+# Installed writable agent staging policy. Decoding DATA alone grants no mutation.
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.contracts.container.agent_workspace_manifest_v1.{AgentWorkspaceManifestV1, agent_workspace_field_text_v1}
+
+pub struct LinuxAgentWorkspaceProfileV1:
+    machine_policy_digest: text
+    workspace_profile_digest: text
+    assets_root: text
+    repository_ref: text
+    revision_oid: text
+    object_format: text
+    source_manifest_digest: text
+    bootstrap_digest: text
+    git_digest: text
+    agent_digest: text
+    bootstrap_program: text
+    image: text
+    agent_program: text
+    image_config_id: text
+
+#[allow(primitive_api)] reviewed DATA predicate/bound/umask word (milestone_0012 groupC)
+pub fn linux_agent_workspace_absolute_v1(value: text) -> bool:
+    if not value.starts_with("/") or value == "/" or value.ends_with("/") or value.byte_len() > 4095: return false
+    for part in value.substring(1, value.byte_len()).split("/"):
+        if part == "" or part == "." or part == "..": return false
+    not value.contains("\u0000") and not value.contains("\n") and not value.contains("\r") and not value.contains("\\")
+
+pub fn linux_agent_workspace_profile_encode_v1(value: LinuxAgentWorkspaceProfileV1) -> Result<text, text>:
+    for digest in [value.machine_policy_digest, value.workspace_profile_digest, value.source_manifest_digest,
+            value.bootstrap_digest, value.git_digest, value.agent_digest]:
+        if not builder_digest_valid_v1(digest): return Err("agent-profile-digest")
+    if not linux_agent_workspace_absolute_v1(value.assets_root) or not linux_agent_workspace_absolute_v1(value.bootstrap_program):
+        return Err("agent-profile-path")
+    if value.image == "" or value.image.byte_len() > 512: return Err("agent-profile-image")
+    if not linux_agent_workspace_absolute_v1(value.agent_program) or value.image_config_id == "" or value.image_config_id.byte_len() > 256:
+        return Err("agent-profile-agent-image-binding")
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-agent-workspace-profile"), "version": SdnValue.Int(1),
+        "machinePolicyDigest": SdnValue.String(value.machine_policy_digest),
+        "workspaceProfileDigest": SdnValue.String(value.workspace_profile_digest),
+        "assetsRoot": SdnValue.String(value.assets_root),
+        "repositoryRef": SdnValue.String(value.repository_ref),
+        "revisionOid": SdnValue.String(value.revision_oid),
+        "objectFormat": SdnValue.String(value.object_format),
+        "sourceManifestDigest": SdnValue.String(value.source_manifest_digest),
+        "bootstrapDigest": SdnValue.String(value.bootstrap_digest),
+        "gitDigest": SdnValue.String(value.git_digest),
+        "agentDigest": SdnValue.String(value.agent_digest),
+        "bootstrapProgram": SdnValue.String(value.bootstrap_program),
+        "image": SdnValue.String(value.image),
+        "agentProgram": SdnValue.String(value.agent_program), "imageConfigId": SdnValue.String(value.image_config_id)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn linux_agent_workspace_profile_decode_v1(source: text) -> Result<LinuxAgentWorkspaceProfileV1, text>:
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 16384,
+            max_depth: 2, max_nodes: 40, max_rows: 0, max_cells: 0, max_columns: 16)):
+        case Ok(value): value
+        case Err(_): return Err("agent-profile-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("agent-profile-object")
+    if fields.len() != 16 or not fields.contains_key("kind") or not fields.contains_key("version"): return Err("agent-profile-fields")
+    if fields["kind"] != SdnValue.String("linux-agent-workspace-profile") or fields["version"] != SdnValue.Int(1):
+        return Err("agent-profile-kind-version")
+    val value = LinuxAgentWorkspaceProfileV1(
+        machine_policy_digest: agent_workspace_field_text_v1(fields, "machinePolicyDigest")?,
+        workspace_profile_digest: agent_workspace_field_text_v1(fields, "workspaceProfileDigest")?,
+        assets_root: agent_workspace_field_text_v1(fields, "assetsRoot")?,
+        repository_ref: agent_workspace_field_text_v1(fields, "repositoryRef")?,
+        revision_oid: agent_workspace_field_text_v1(fields, "revisionOid")?,
+        object_format: agent_workspace_field_text_v1(fields, "objectFormat")?,
+        source_manifest_digest: agent_workspace_field_text_v1(fields, "sourceManifestDigest")?,
+        bootstrap_digest: agent_workspace_field_text_v1(fields, "bootstrapDigest")?,
+        git_digest: agent_workspace_field_text_v1(fields, "gitDigest")?,
+        agent_digest: agent_workspace_field_text_v1(fields, "agentDigest")?,
+        bootstrap_program: agent_workspace_field_text_v1(fields, "bootstrapProgram")?,
+        image: agent_workspace_field_text_v1(fields, "image")?,
+        agent_program: agent_workspace_field_text_v1(fields, "agentProgram")?,
+        image_config_id: agent_workspace_field_text_v1(fields, "imageConfigId")?)
+    if linux_agent_workspace_profile_encode_v1(value)? != source: return Err("agent-profile-noncanonical")
+    Ok(value)
+
+pub fn linux_agent_workspace_profile_match_v1(profile: LinuxAgentWorkspaceProfileV1,
+        manifest: AgentWorkspaceManifestV1) -> Result<(), text>:
+    if (profile.repository_ref != manifest.repository_ref or profile.revision_oid != manifest.revision_oid or
+            profile.object_format != manifest.object_format or profile.source_manifest_digest != manifest.source_manifest_digest or
+            profile.bootstrap_digest != manifest.bootstrap_digest or profile.git_digest != manifest.git_digest or
+            profile.agent_digest != manifest.agent_digest): return Err("agent-profile-manifest-mismatch")
+    Ok(())

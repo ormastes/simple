@@ -1,0 +1,79 @@
+# Fixed compiled profile linux-agent-worktree-bootstrap-v1; no free Git paths.
+use std.common.contracts.container.agent_workspace_manifest_v1.AgentWorkspaceManifestV1
+use std.common.process.observation_v4.*
+use std.nogc_sync_mut.io.process_observation_v4.*
+
+pub const AGENT_WORKSPACE_BOOTSTRAP_PROFILE_V1: text = "linux-agent-worktree-bootstrap-v1"
+pub const AGENT_WORKSPACE_GIT_V1: text = "/usr/bin/git"
+pub const AGENT_WORKSPACE_TEMPLATE_V1: text = "/opt/simple/empty-git-template"
+
+#[allow(primitive_api)] reviewed DATA predicate/bound/umask word (milestone_0012 groupC)
+pub fn agent_git_version_supported_v1(output: text) -> bool:
+    # Boolean core.fsmonitor support begins after2.35.1. Explicit supported range
+    # excludes vendor suffixes and unknown futuremajor behavior in this profile.
+    if not output.starts_with("git version ") or not output.ends_with("\n"): return false
+    val version = output.substring(12, output.byte_len() - 1)
+    val fields = version.split(".")
+    if fields.len() != 3: return false
+    var numbers: [i64] = []
+    for field in fields:
+        if field.byte_len() < 1 or field.byte_len() > 3: return false
+        if field.byte_len() > 1 and field.byte_at(0) == 48: return false
+        var value: i64 = 0
+        for byte in field.bytes():
+            if byte < 48 or byte > 57: return false
+            value = value * 10 + (byte - 48) as i64
+        numbers.push(value)
+    numbers[0] == 2 and numbers[1] >= 36 and numbers[1] <= 56 and numbers[2] <= 99
+
+pub fn agent_git_environment_v1(root: text, attempt: text) -> [ProcessObservationEnvironmentV4]:
+    val private = root + "/" + attempt
+    # Entire sorted environment, never overlay. No LD_*, askpass, config-count,
+    # credentials, alternates, replace refs or host HOME enter Git helpers.
+    [ProcessObservationEnvironmentV4(key: "GIT_ATTR_NOSYSTEM", value: "1"),
+     ProcessObservationEnvironmentV4(key: "GIT_CONFIG_GLOBAL", value: "/dev/null"),
+     ProcessObservationEnvironmentV4(key: "GIT_CONFIG_NOSYSTEM", value: "1"),
+     ProcessObservationEnvironmentV4(key: "GIT_CONFIG_SYSTEM", value: "/dev/null"),
+     ProcessObservationEnvironmentV4(key: "GIT_NO_REPLACE_OBJECTS", value: "1"),
+     ProcessObservationEnvironmentV4(key: "GIT_TERMINAL_PROMPT", value: "0"),
+     ProcessObservationEnvironmentV4(key: "HOME", value: private + "/home"),
+     ProcessObservationEnvironmentV4(key: "LANG", value: "C"),
+     ProcessObservationEnvironmentV4(key: "LC_ALL", value: "C"),
+     ProcessObservationEnvironmentV4(key: "PATH", value: "/nonexistent"),
+     ProcessObservationEnvironmentV4(key: "TMPDIR", value: private + "/tmp"),
+     ProcessObservationEnvironmentV4(key: "TZ", value: "UTC"),
+     ProcessObservationEnvironmentV4(key: "XDG_CONFIG_HOME", value: private + "/xdg-config")]
+
+#[allow(primitive_api)] reviewed DATA predicate/bound/umask word (milestone_0012 groupC)
+pub fn agent_git_command_v1(index: i64, root: text, manifest: AgentWorkspaceManifestV1) -> Result<[text], text>:
+    if index == 0: return Ok([AGENT_WORKSPACE_GIT_V1, "--version"])
+    val base = [AGENT_WORKSPACE_GIT_V1, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+        "-c", "core.attributesFile=/dev/null", "-c", "submodule.recurse=false", "-c", "protocol.allow=never"]
+    val repo = root + "/" + manifest.attempt_leaf + "/repo"
+    val checkout = root + "/" + manifest.attempt_leaf + "/worktree"
+    if index == 1:
+        return Ok(base + ["init", "--bare", "--template=" + AGENT_WORKSPACE_TEMPLATE_V1,
+            "--object-format=" + manifest.object_format, repo])
+    if index == 2: return Ok(base + ["--git-dir=" + repo, "fsck", "--full", "--strict", "--no-reflogs", "--no-dangling", manifest.revision_oid])
+    if index == 3: return Ok(base + ["--git-dir=" + repo, "cat-file", "-t", manifest.revision_oid])
+    if index == 4: return Ok(base + ["--git-dir=" + repo, "worktree", "add", "--detach", "--checkout", checkout, manifest.revision_oid])
+    if index == 5: return Ok(base + ["--git-dir=" + repo, "worktree", "list", "--porcelain", "-z"])
+    if index == 6: return Ok(base + ["-C", checkout, "rev-parse", "--verify", "HEAD"])
+    if index == 7: return Ok(base + ["-C", checkout, "rev-parse", "--path-format=absolute", "--git-common-dir"])
+    if index == 8: return Ok(base + ["-C", checkout, "rev-parse", "--path-format=absolute", "--git-dir"])
+    Err("agent-bootstrap-git-stage")
+
+pub fn agent_git_request_v1(argv: [text], root: text, manifest: AgentWorkspaceManifestV1,
+        capabilities: ProcessObservationCapabilitiesV4, remaining_ns: i64) -> Result<ProcessObservationRequestV4, text>:
+    if (not capabilities.available or capabilities.runtime_error != 0 or
+            process_observation_monitor_group_gap_v4(capabilities.capability_bits) != "" or
+            (capabilities.capability_bits & (POV4_CAP_PINNED_EXEC | POV4_CAP_PTRACE_EXEC | POV4_CAP_RLIMIT_AS)) != 69):
+        return Err("agent-bootstrap-contained-process-capabilities")
+    if remaining_ns <= 2000000000: return Err("agent-bootstrap-budget-exhausted")
+    Ok(ProcessObservationRequestV4(argv: argv, environment: agent_git_environment_v1(root, manifest.attempt_leaf),
+        canonical_cwd: root, canonical_pinned_directory: root, executable_pin: 0, executable_digest: [],
+        cwd_pin_claim: 0, cwd_identity_digest: [], capability_bits: capabilities.capability_bits,
+        wall_budget_ns: min(remaining_ns - 1000000000, 30000000000), term_grace_ns: 100000000,
+        cleanup_budget_ns: 1000000000, stdout_limit_bytes: 65536, stderr_limit_bytes: 65536,
+        memory_limit_bytes: 268435456, enforcement_kind: ProcessObservationEnforcementKindV4.RlimitAs,
+        descendant_policy: ProcessObservationDescendantPolicyV4.ProcessGroup, max_clock_resolution_ns: 1000000))
