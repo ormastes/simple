@@ -1,0 +1,73 @@
+"""
+## Purpose and audience
+I add the remaining plan §6 opt-in groups under `config/build/`: `runtime_gpu`,
+`cpu_tier_artifacts`, `cross_targets`. This spec proves each parses, is default-off,
+leaves the default host selection unchanged, and is selected only by name. It also
+proves provider admission mismatches carry `SPL-PROVIDER-ABI-001` (plan §7).
+
+## Operator workflow
+Run `bin/simple test test/01_unit/app/build/targets_optin_groups_spec.spl` from the repo root.
+
+## Compatibility and limitations
+`cpu_tier_artifacts` and `cross_targets` list no targets: the target schema has no
+tier/triple field yet, so no real per-tier or cross artifact can be declared.
+
+## Verification guidance and troubleshooting
+A `target-error: missing-entry:` means a group names a source that is not in the tree.
+"""
+# @manual_section: opt-in runtime gpu / cpu tier / cross groups
+# @req REQ-BUILD-GROUP-007 each new opt-in group parses, validates and is default-off
+# @req REQ-BUILD-GROUP-008 the default selection is unchanged by the new groups
+# @req REQ-BUILD-GROUP-009 naming a group selects exactly its members
+# @req REQ-BUILD-GROUP-010 provider admission mismatches carry SPL-PROVIDER-ABI-001
+
+use app.build.targets.build_targets.{
+    load_targets_file, validate_targets, default_group_targets, group_targets,
+    admit_backend_provider, BackendProviderDescriptor
+}
+use std.spec.step
+
+describe "opt-in runtime gpu, cpu tier and cross groups":
+    """
+    As a build owner, I keep GPU runtime, CPU tier and cross artifacts out of the
+    default build and select them only by group name.
+    """
+
+    it "parses and validates every new group file as default-off":
+        # @req REQ-BUILD-GROUP-007
+        for name in ["runtime_gpu", "cpu_tier_artifacts", "cross_targets"]:
+            step("Given config/build/" + name + ".sdn")
+            val ts = load_targets_file("config/build/" + name + ".sdn", ".")
+            expect(ts.errors.len()).to_equal(0)
+            expect(validate_targets(ts, ".").len()).to_equal(0)
+            expect(ts.groups.len()).to_equal(1)
+            expect(ts.groups[0].name).to_equal(name)
+            expect(ts.groups[0].is_default).to_equal(false)
+
+    it "keeps the default selection at the three host members":
+        # @req REQ-BUILD-GROUP-008
+        val ts = load_targets_file("targets.sdn", ".")
+        expect(validate_targets(ts, ".").len()).to_equal(0)
+        val sel = default_group_targets(ts)
+        expect(sel.len()).to_equal(3)
+        for s in sel:
+            expect(s.starts_with("//runtime_gpu:")).to_equal(false)
+
+    it "selects each new group only by name":
+        # @req REQ-BUILD-GROUP-009
+        val ts = load_targets_file("targets.sdn", ".")
+        val gpu = group_targets(ts, "runtime_gpu")
+        expect(gpu.len()).to_equal(1)
+        expect(gpu[0]).to_equal("//runtime_gpu:device")
+        expect(group_targets(ts, "cpu_tier_artifacts").len()).to_equal(0)
+        expect(group_targets(ts, "cross_targets").len()).to_equal(0)
+
+    it "tags provider ABI and target mismatches with SPL-PROVIDER-ABI-001":
+        # @req REQ-BUILD-GROUP-010
+        val host = "x86_64-unknown-linux-gnu"
+        val bad_abi = BackendProviderDescriptor(group: "backends_cuda", abi_version: 2, host_triple: host, capabilities: ["codegen"])
+        expect(admit_backend_provider(bad_abi, host, ["codegen"]).starts_with("SPL-PROVIDER-ABI-001: ")).to_equal(true)
+        val bad_triple = BackendProviderDescriptor(group: "backends_cuda", abi_version: 1, host_triple: "aarch64-unknown-linux-gnu", capabilities: ["codegen"])
+        expect(admit_backend_provider(bad_triple, host, ["codegen"]).starts_with("SPL-PROVIDER-ABI-001: ")).to_equal(true)
+        val ok = BackendProviderDescriptor(group: "backends_cuda", abi_version: 1, host_triple: host, capabilities: ["codegen"])
+        expect(admit_backend_provider(ok, host, ["codegen"])).to_equal("")
