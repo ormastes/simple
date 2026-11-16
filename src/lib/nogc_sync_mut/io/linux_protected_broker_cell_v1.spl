@@ -1,0 +1,77 @@
+# Package-internal encoding of the trailer in the ORIGINAL resource allocation.
+# These unsafe mechanisms allocate no root/registry and never expose an FD.
+use std.nogc_sync_mut.io.linux_protected_broker_state_v1.*
+use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text, utf8_bytes_valid}
+use std.common.crypto.sha256.sha256_text
+@when(os="linux"):
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_write_u8, volatile_read_u64, volatile_write_u64}
+
+@unsafe(reason: "bounded original protected resource trailer", capabilities: [ffi, raw_ptr])
+pub(package) fn broker_cell_int_v1(cell: i64, offset: i64) -> i64:
+    volatile_read_u64(cell + BROKER_CONTROL_CELL_OFFSET_V1 + offset)
+
+@unsafe(reason: "persist canonical transaction before effects", capabilities: [ffi, raw_ptr])
+pub(package) fn broker_cell_set_int_v1(cell: i64, offset: i64, value: i64):
+    volatile_write_u64(cell + BROKER_CONTROL_CELL_OFFSET_V1 + offset, value)
+
+@unsafe(reason: "bounded original protected resource trailer", capabilities: [ffi, raw_ptr])
+pub(package) fn broker_cell_text_v1(cell: i64, offset: i64, maximum: i64) -> Result<text, text>:
+    val base = cell + BROKER_CONTROL_CELL_OFFSET_V1 + offset
+    val count = volatile_read_u64(base)
+    if count < 0 or count > maximum or offset < 0 or offset + maximum + 8 > BROKER_CONTROL_CELL_BYTES_V1:
+        return Err("broker-control-cell-bound")
+    var bytes: [u8] = []
+    for at in 0..count: bytes.push(volatile_read_u8(base + 8 + at) as u8)
+    if not utf8_bytes_valid(bytes): return Err("broker-control-cell-text")
+    Ok(bytes_to_text(bytes))
+
+@unsafe(reason: "persist bounded exact transaction data before effects", capabilities: [ffi, raw_ptr])
+pub(package) fn broker_cell_set_text_v1(cell: i64, offset: i64, value: text, maximum: i64) -> Result<(), text>:
+    val bytes = text_to_utf8_bytes(value)
+    if bytes.len() > maximum or offset < 0 or offset + maximum + 8 > BROKER_CONTROL_CELL_BYTES_V1:
+        return Err("broker-control-cell-bound")
+    val base = cell + BROKER_CONTROL_CELL_OFFSET_V1 + offset
+    for at in 0..bytes.len(): volatile_write_u8(base + 8 + at, bytes[at] as i64)
+    volatile_write_u64(base, bytes.len())
+    Ok(())
+
+@unsafe(reason: "first nonsecret transaction failure is retained canonically", capabilities: [ffi, raw_ptr])
+pub(package) fn broker_cell_fail_v1(cell: i64, reason: text, uncertain: bool) -> LinuxProtectedBrokerStorageTurnV1:
+    val prior = broker_cell_text_v1(cell, 4256, 512)
+    if prior.is_ok() and prior.unwrap() == "":
+        val stored = broker_cell_set_text_v1(cell, 4256, reason, 512)
+    if uncertain: broker_cell_set_int_v1(cell, 0, BROKER_CONTROL_UNCERTAIN_V1)
+    var result = broker_cell_turn_v1(cell)
+    result.error = if prior.is_ok() and prior.unwrap() != "": prior.unwrap() else: reason
+    result
+
+@unsafe(reason: "DATA projection of canonical original transaction", capabilities: [ffi, raw_ptr])
+pub(package) fn broker_cell_turn_v1(cell: i64) -> LinuxProtectedBrokerStorageTurnV1:
+    val phase = broker_cell_int_v1(cell, 0)
+    val packet = broker_cell_text_v1(cell, 144, 4096)
+    val error = broker_cell_text_v1(cell, 4256, 512)
+    LinuxProtectedBrokerStorageTurnV1(facts_known: true, generation: broker_cell_int_v1(cell, 8),
+        request_digest: if packet.is_ok() and packet.unwrap() != "": sha256_text(packet.unwrap()) else: "",
+        publication: if broker_cell_int_v1(cell, 24) == 1: "Published" elif broker_cell_int_v1(cell, 24) == 2: "Uncertain" else: "NotAttempted",
+        pending: phase == BROKER_CONTROL_WAITING_V1,
+        consumed: phase == BROKER_CONTROL_CONSUMED_V1 or phase == BROKER_CONTROL_REAP_V1,
+        durable_required: phase == BROKER_CONTROL_DURABLE_V1,
+        error: if error.is_err(): error.unwrap_err() else: error.unwrap())
+
+# Existing descriptor/stage offsets are unchanged. The helper only persists
+# native acquisitions to the canonical owner's already-existing custody slots.
+@unsafe(reason: "persist acquired descriptor before any fallible operation", capabilities: [ffi, raw_ptr])
+pub(package) fn broker_existing_int_v1(cell: i64, offset: i64, value: i64):
+    volatile_write_u64(cell + offset, value)
+
+@unsafe(reason: "same original resource native field", capabilities: [ffi, raw_ptr])
+pub(package) fn broker_existing_read_v1(cell: i64, offset: i64) -> i64:
+    volatile_read_u64(cell + offset)
+
+@unsafe(reason: "persist stage identity in original resource custody", capabilities: [ffi, raw_ptr])
+pub(package) fn broker_existing_blob_v1(cell: i64, offset: i64, bytes: [u8], maximum: i64) -> Result<(), text>:
+    if bytes.len() > maximum: return Err("broker-control-native-identity-bound")
+    for at in 0..bytes.len(): volatile_write_u8(cell + offset + 8 + at, bytes[at] as i64)
+    volatile_write_u64(cell + offset, bytes.len())
+    Ok(())
+@end
