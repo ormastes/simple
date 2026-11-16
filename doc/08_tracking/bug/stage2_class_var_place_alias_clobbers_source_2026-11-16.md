@@ -74,6 +74,67 @@ Both binaries ran `native-build --backend=llvm` on the fixture:
 
 `diaglink/s3i2/gate.sh` passes on r17m (j4/sc/hello, compile + native-build).
 
+### Review follow-up (c5f4495d3a6)
+
+- **The predicate is no longer syntactic.** A record initializer is now copied
+  when it is a place read OR its local is already bound to a symbol
+  (`MirLowering.local_is_symbol_bound`). The case this adds is a `do:` block
+  whose tail is `a`: `lower_block` returns `a`'s own local, so the old place
+  check let it alias. Fixture `do_block.spl` (the seed has no `do:`, so its
+  expected output comes from the language semantics):
+  r16 `block a=tm t=tm`, r17m `block a=tm t=tm`, r17n (this fix) `block a=llvm t=tm`.
+- **The generic owner is carried.** `generic_instance_field_types` and
+  `_struct_names` are now copied onto the new local, the same way
+  `copy_struct_value_recursive` does. This is for parity only: there is no
+  native red. r17m already prints `generic ... t=beta len=4` and
+  `generic-struct a=4 before=4 t=8`.
+- **A bitfield-only word still aliases (known divergence, unchanged from r16).**
+  The interpreter prints `f=3,0 g=3,5` for `var g = f; g.hi = 5`. The results
+  for `bitfield_alias.spl` (top level and a fn) and for main.spl + v_bitfield:
+
+  | binary | `bitfield_alias.spl` | main.spl + v_bitfield |
+  |---|---|---|
+  | r16 | `f=3,5` | `f=3,5` |
+  | r17m (6e2e04a2956, copies) | `f=3,0` | SIGSEGV at address 0x3 |
+  | r17n (c5f4495d3a6, aliases) | `f=3,5` | `f=3,5` |
+
+  The copy is correct on its own but crashes in a module that also has classes
+  and generics, so this change keeps the r16 alias. Open: bitfield value
+  semantics, and the cause of that crash.
+- **A separate open divergence: a match initializer loses the class value.**
+  It reproduces on both r16 and r17m and is not fixed here:
+
+      fn v_block(a: Surf, all: [Surf], k: i64) -> text:
+          var t = match k:
+              case _: a
+          t = all[1]
+          "block a={a.name} t={t.name}"
+
+  The interpreter prints `block a=llvm t=tm`; native r16 and r17m print
+  `block a=llvm t=` (empty `t.name` after the reassign). It was moved out of
+  the fixture so the fixture keeps the "interpreter and fixed native agree"
+  contract.
+- **Sibling sites are not fixed and are recorded here.** They come from the review and have not been reproduced natively. These bind a pattern
+  name straight to the scrutinee's local, so `match a: case t: a = b; t.name`
+  sees the new `a`:
+  - `_MirLoweringExpr/switch_operators_calls.spl:3942`, the match catch-all;
+  - `:4066` `bind_catch_all_arm`;
+  - the if-val binding near `:4436`;
+  - the same shape at `:1850`, `:1994`, `:4195` and `:4352`.
+
+  The fix needs a "fresh local + copy + per-local metadata copy" helper. That
+  metadata is about 15 maps (record, generic, array, dict, enum, option,
+  presence...). That is larger than this fix, so it is left open.
+
+
+Native proof, r17n (sha256 78f71a3902de6982...). It is r16 plus both MIR
+objects (stmts and types) compiled by integ2 Stage 2, plus
+reexport_mat_fix.o. main.spl prints every interpreter line, do_block prints
+`block a=llvm t=tm`, and `gate.sh` passes. Cost: a typed `compile` of
+`aggregate_intrinsics.spl` ran in parallel took r17m 24:03 / 6.13 GB and
+r17n 24:01 / 6.15 GB, with an identical error set. The linear
+`local_is_symbol_bound` scan does not measurably cost anything.
+
 ## Workaround (Stage 3 source)
 
 `@workaround bug=stage2_class_var_place_alias_clobbers_source_2026-11-16` in
