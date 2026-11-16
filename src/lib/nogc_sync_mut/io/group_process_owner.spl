@@ -9,7 +9,7 @@ use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_ato
 use std.nogc_sync_mut.io.time_ops.{current_time_ms, sleep_ms}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, group_process_stream_launch_validate_profiled_v3, group_process_stream_launch_encode_profiled_v3, group_process_stream_launch_decode_profiled_v3, group_process_stream_identity_profiled_v3, group_process_stream_ready_encode_v2, group_process_stream_unlaunched_encode_v2}
-use std.common.build_manager.group_process_stream_protocol_v2.{group_process_stream_template_digest_v3}
+use std.common.build_manager.group_process_stream_reap_v3.{group_process_stream_reap_lease_validate_v3, group_process_stream_reap_bytes_v3}
 use std.common.build_manager.group_process_stream_profile_v3.{group_process_stream_resource_receipt_v3}
 
 struct GroupProcessOwnerV1:
@@ -265,11 +265,7 @@ fn group_process_stream_cleanup_proof_v2(owner: GroupProcessStreamOwnerV2) -> Re
 
 fn group_process_stream_collect_reap_v2(owner: GroupProcessStreamOwnerV2,
         lease: GroupedActionLeaseV1) -> Result<GroupedReapReceiptV1, text>:
-    if (lease.worker_id != owner.launch.worker_id or lease.generation != owner.launch.generation or
-            lease.snapshot_digest != owner.launch.snapshot_digest or lease.cache_identity != owner.launch.cache_identity):
-        return Err("stream reap lease differs from admitted broker request")
-    if lease.group_id == "" or lease.action_id == "" or lease.lease_id == "":
-        return Err("stream reap lease is incomplete")
+    group_process_stream_reap_lease_validate_v3(owner.launch, lease)?
     val terminal = group_process_stream_cleanup_proof_v2(owner)?
     var memory = ""
     var resources = ""
@@ -284,21 +280,7 @@ fn group_process_stream_collect_reap_v2(owner: GroupProcessStreamOwnerV2,
             observed.memory_peak_bytes, "linux")?
         if memory != expected_memory: return Err("stream memory receipt differs from admitted owner")
         resources = _group_process_stream_resources_v3(owner)?
-    var retained = "SIMPLE-GROUP-STREAM-REAP-2\n"
-    match owner.launch.profile_v3:
-        case Some(_profile): retained = "SIMPLE-GROUP-STREAM-REAP-3\n"
-        case None: pass
-    for field in [lease.group_id, lease.action_id, lease.worker_id, str(lease.generation),
-            lease.lease_id, lease.snapshot_digest, lease.cache_identity, owner.identity_digest,
-            str(owner.launch.transport_generation), owner.launch.request.child_argv_digest,
-            owner.launch.request.producer_digest, owner.launch.request.broker_digest]:
-        retained = retained + builder_wire_line_v1(field)
-    retained = retained + terminal + builder_wire_line_v1(memory)
-    match owner.launch.profile_v3:
-        case Some(_profile):
-            val template_digest = group_process_stream_template_digest_v3(owner.launch)?
-            retained = retained + builder_wire_line_v1(template_digest) + builder_wire_line_v1(resources)
-        case None: pass
+    val retained = group_process_stream_reap_bytes_v3(owner.launch, owner.identity_digest, lease, terminal, memory, resources)?
     val path = owner.launch.root + "/tree-reaped.sdn"
     if file_exists(path):
         val prior = file_read_regular_no_follow_bounded(path, 16384)?
