@@ -40,3 +40,37 @@ fn tuple_after_match_val() {
     assert_eq!(s.len(), 3, "{:?}", s);
     assert!(matches!(&s[2], Node::Expression(Expr::Tuple(_))), "{:?}", s[2]);
 }
+
+// Bug seed_parse_multiline_list_driver_compile_options_2026-11-15: the exact
+// driver_compile_options.spl shape (list continuing over lines) plus siblings.
+const MATCH_PREFIX: &str = "fn f(x: i64) -> [text]:\n    val a = 1\n    val r = match x:\n        case 1: \"a\"\n        case _: \"\"\n";
+
+fn last_after_match(tail: &str) -> Node {
+    let s = body(&format!("{MATCH_PREFIX}{tail}"));
+    assert_eq!(s.len(), 3, "{:?}", s);
+    s[2].clone()
+}
+
+#[test]
+fn multiline_continued_list_after_match_val() {
+    let n = last_after_match("    [\"s=1\", \"m=\" + r,\n        \"q=\" + r, \"t=\" + r,\n        \"z=\" + r]\n");
+    assert!(matches!(&n, Node::Expression(Expr::Array(v)) if v.len() == 5), "{:?}", n);
+}
+
+#[test]
+fn multiline_list_trailing_comma_after_match_val() {
+    let n = last_after_match("    [\"s=1\", \"m=\" + r,\n        \"z\",\n    ]\n");
+    assert!(matches!(&n, Node::Expression(Expr::Array(v)) if v.len() == 3), "{:?}", n);
+}
+
+#[test]
+fn multiline_nested_list_after_match_val() {
+    let n = last_after_match("    [[\"a\", r],\n        [\"b\" + r]]\n");
+    assert!(matches!(&n, Node::Expression(Expr::Array(v)) if v.len() == 2), "{:?}", n);
+}
+
+#[test]
+fn multiline_list_in_call_arg_after_match_val() {
+    let n = last_after_match("    g([\"s=1\", \"m=\" + r,\n        \"z\"])\n");
+    assert!(matches!(&n, Node::Expression(Expr::Call { .. })), "{:?}", n);
+}
