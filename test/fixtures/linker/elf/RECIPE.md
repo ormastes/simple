@@ -172,3 +172,5 @@ clang --target=i686-linux-gnu $CF -fPIC   elf32_helper.c -o elf32_helper_i386_pi
 clang --target=armv7-linux-gnueabihf $CF -fno-pic elf32_hello.c  -o elf32_hello_arm.o
 clang --target=armv7-linux-gnueabihf $CF -fno-pic elf32_helper.c -o elf32_helper_arm.o
 ```
+
+clang --target=i686-linux-gnu -c elf32_got32_nobase_i386.s -o elf32_got32_nobase_i386.o  # GOT32 without base register

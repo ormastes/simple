@@ -141,3 +141,15 @@ describe "ELF32 static links":
     it "rejects 32-bit objects against a 64-bit target":
         val r = elf_static_link([load("elf32_hello_i386.o")], [], "_start", RelocArch.X86_64)
         expect(r.is_err()).to_equal(true)
+
+    it "resolves base-register-less R_386_GOT32 to the absolute slot address (lld ModRM rule)":
+        val r = elf_static_link([load("elf32_got32_nobase_i386.o")], [], "_start", RelocArch.I386)
+        expect(r.is_ok()).to_equal(true)
+        val img = r.unwrap()
+        # phdr[1] is the RX PT_LOAD; its first bytes are `8b 0d <disp32>`.
+        val text_off = u_le(img, 52 + 32 + 4, 4)
+        expect(img[text_off]).to_equal(0x8b)
+        expect(img[text_off + 1]).to_equal(0x0d)
+        # Absolute G + A lands inside the image (>= 0x400000), not a small
+        # G - GOT offset as the base-register form would compute.
+        expect(u_le(img, text_off + 2, 4) >= 0x400000).to_equal(true)
