@@ -953,9 +953,15 @@ impl RenderBackend for SoftwareBackend:
                         val src_off = src_row_base + src_x
                         if self.native_simd_spans and native_pixel_rows_enabled():
                             record_simd_alpha_hit()
-                            self.buf = rt_engine2d_simd_blend_span_u32(
-                                self.buf, dst_off.to_i64(), pixels,
-                                src_off.to_i64(), count.to_i64())
+                            # Same kernel on span-sized scratch (sw_span_scratch):
+                            # the extern unpacks BOTH array arguments whole, so
+                            # the src row is windowed too.
+                            var dst_span = self.sw_span_scratch(dst_off, count)
+                            var src_span: [u32] = [0u32; count]
+                            src_span.write_span(pixels, 0, src_off.to_i64(), count.to_i64())
+                            dst_span = rt_engine2d_simd_blend_span_u32(
+                                dst_span, 0, src_span, 0, count.to_i64())
+                            self.buf.write_span(dst_span, dst_off.to_i64(), 0, count.to_i64())
                         else:
                             # cpu-lane-loop-ok: scalar fallback taken when SIMD spans are unavailable on this arch; this is the reference blend body the SIMD path is checked against
                             while col < count:
@@ -1426,22 +1432,27 @@ impl SoftwareBackend:
             self.ensure_kernel_table()
             record_simd_fill_hit()
             var batch = span_batch_new(1)
-            span_batch_push(batch, KERNEL_OP_FILL_CONST, offset as i64, 0, count as i64, color as i64, 0)
+            span_batch_push(batch, KERNEL_OP_FILL_CONST, 0, 0, count as i64, color as i64, 0)
             val empty_u32: [u32] = []
-            # Local-var binding + write-back: passing self.buf directly hands the
-            # executor a field-read COPY under the interpreter (same pitfall as the
-            # scalar fallback below), which left the SIMD lane's fills invisible —
-            # "readback center mismatch for cpu_simd" in the backend matrix spec.
-            var work_buf = self.buf
+            # The kernel runs on a span-sized scratch that is written back with
+            # write_span (see sw_span_scratch). Handing it the whole surface
+            # (`var work_buf = self.buf`) shared the Arc, so the kernel's first
+            # store deep-copied the ENTIRE framebuffer once per span — O(surface)
+            # per scanline, ~k^3 at device scale k. A fill_const store depends on
+            # nothing but (count, colour), so the scratch's initial content is
+            # irrelevant and the written span is byte-identical.
+            var work_buf: [u32] = [0u32; count]
             val executed = simd_span_batch_execute(batch, work_buf, empty_u32, empty_u32, self.kernel_table,
                                                    KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS)
             self.simd_batch_hits = self.simd_batch_hits + batch.non_scalar_lookups
             if executed == batch.length:
-                self.buf = work_buf
+                self.buf.write_span(work_buf, offset as i64, 0, count as i64)
                 return
             # Batch dispatcher refused (shouldn't happen for a single valid op) —
             # fall back to the direct native call rather than leave the span unfilled.
-            self.buf = rt_engine2d_simd_fill_span_u32(self.buf, offset as i64, count as i64, color)
+            var fill_span = self.sw_span_scratch(offset, count)
+            fill_span = rt_engine2d_simd_fill_span_u32(fill_span, 0, count as i64, color)
+            self.buf.write_span(fill_span, offset as i64, 0, count as i64)
             return
         # Scalar fallback writes through self.buf DIRECTLY (same idiom as
         # sw_copy_raw_span below). Passing the field to _scalar_fill_row(mut
@@ -1468,13 +1479,31 @@ impl SoftwareBackend:
             self.buf[offset + i] = color
             i = i + 1
 
+    # Span-sized copy of self.buf[offset, offset+count) for an extern span
+    # kernel. Interpreter externs unpack their array argument into a fresh
+    # Vec<u32> and repack the result (rt_engine2d_simd_* in the seed's
+    # interpreter_extern/simd.rs), so passing `self.buf` costs O(surface) per
+    # call. Measured 2026-11-16: a 3600x3040 (device scale 4) tab-bar paint
+    # spent minutes re-copying the frame once per scanline. The caller runs the
+    # SAME kernel on this scratch and writes it back with write_span, so the
+    # pixels are byte-identical and the cost is O(count).
+    me sw_span_scratch(offset: i32, count: i32) -> [u32]:
+        var scratch: [u32] = [0u32; count]
+        scratch.write_span(self.buf, 0, offset as i64, count as i64)
+        scratch
+
     me sw_copy_raw_span(dst_offset: i32, src: [u32], src_offset: i32, count: i32):
         val safe_count = _span_copy_safe_count(self.buf.len(), dst_offset, src.len(), src_offset, count)
         if safe_count <= 0:
             return
         if self.native_simd_spans and native_pixel_rows_enabled():
             record_simd_copy_hit()
-            self.buf = rt_engine2d_simd_copy_span_u32(self.buf, dst_offset as i64, src, src_offset as i64, safe_count as i64)
+            # A span copy is exactly what write_span does (memmove semantics
+            # included: an aliased src is snapshotted before the write, as the
+            # extern's unpacked copy was). The extern unpacked and repacked the
+            # whole surface AND the whole src per call — O(surface) per row.
+            # The hit counter now records this write_span copy, not SIMD work.
+            self.buf.write_span(src, dst_offset as i64, src_offset as i64, safe_count as i64)
             return
         # Bulk channel first — same rationale as sw_fill_raw_span above.
         if safe_count >= 32:
@@ -1492,8 +1521,10 @@ impl SoftwareBackend:
             return
         if self.native_simd_spans and native_pixel_rows_enabled():
             record_simd_alpha_hit()
-            self.buf = rt_engine2d_simd_blend_const_span_u32(
-                self.buf, offset.to_i64(), safe_count.to_i64(), color.to_i64())
+            var blend_span = self.sw_span_scratch(offset, safe_count)
+            blend_span = rt_engine2d_simd_blend_const_span_u32(
+                blend_span, 0, safe_count.to_i64(), color.to_i64())
+            self.buf.write_span(blend_span, offset.to_i64(), 0, safe_count.to_i64())
             return
         var i = 0
         # cpu-lane-loop-ok: scalar fallback inside sw_blend_const_raw_span when SIMD spans are unavailable; this IS the bulk span primitive
