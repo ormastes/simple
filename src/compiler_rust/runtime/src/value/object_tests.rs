@@ -218,6 +218,20 @@ fn test_result_unwrap_returns_payload() {
     }
 }
 
+/// #6953: a user enum's declared index is 0/1 for its first two variants
+/// (`MirConstValue.Int` = 0, `.Float` = 1). Unwrapping it — `rt_tuple_get<T>(..)
+/// .unwrap()` over a user-enum slot — must return the enum itself, not treat it
+/// as Result.Ok/Err (payload swap / "called unwrap on Err" abort).
+#[test]
+fn test_user_enum_with_ordinal_zero_or_one_is_not_a_result() {
+    let user_enum_id = 851_885_673;
+    for disc in [0, 1] {
+        let value = rt_enum_new(user_enum_id, disc, RuntimeValue::from_int(40));
+        assert_eq!(rt_enum_id(super::rt_unwrap_or_trap(value)), i64::from(user_enum_id));
+        assert_eq!(rt_enum_id(super::rt_expect_or_trap(value, RuntimeValue::NIL)), i64::from(user_enum_id));
+    }
+}
+
 #[test]
 fn test_option_unwrap_returns_positional_payload() {
     let result = rt_enum_new(super::OPTION_ENUM_ID, 0, RuntimeValue::from_int(42));
