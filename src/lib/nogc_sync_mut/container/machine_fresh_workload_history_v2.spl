@@ -15,9 +15,15 @@ pub struct MachineFreshWorkloadHistoryV2:
     epoch: MachineFreshEpochRecordV1
     initial_commit: text
     segments: [MachineFreshWorkloadSegmentV2]
+    # milestone_0021 3.2a: a successor lifecycle on the same transfer is ANCHORED after its closed, settled
+    # predecessor's last verified segment. "" keeps the unlinked replay from initial_commit byte-for-byte.
+    link_parent: text = ""
+    link_sequence: i64 = 0
 
 pub fn machine_fresh_workload_head_v2(history: MachineFreshWorkloadHistoryV2) -> text:
-    if history.segments.len() == 0: return history.initial_commit
+    if history.segments.len() == 0:
+        if history.link_parent != "": return history.link_parent
+        return history.initial_commit
     history.segments[history.segments.len() - 1].revision.digest
 
 pub fn machine_fresh_workload_history_verify_v2(storage: MachineStorageOwnerV1,
@@ -30,6 +36,12 @@ pub fn machine_fresh_workload_history_verify_v2(storage: MachineStorageOwnerV1,
         return Err("machine-fresh-workload-initial-binding")
     var parent = history.initial_commit
     var sequence = 5
+    if history.link_parent != "":
+        # Linked branch: the anchor must be a real store revision whose next sequence is exactly link_sequence.
+        val anchor = storage.wal_revision_v1(history.link_parent)?
+        if anchor.last_sequence + 1 != history.link_sequence: return Err("machine-fresh-workload-link-binding")
+        parent = history.link_parent
+        sequence = history.link_sequence
     for segment in history.segments:
         val revision = storage.wal_revision_v1(segment.revision.digest)?
         if (revision != segment.revision or revision.parent != parent or segment.entries.len() < 1 or

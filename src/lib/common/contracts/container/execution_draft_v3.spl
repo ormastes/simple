@@ -19,10 +19,18 @@ pub struct ContainerExecutionDraftV3:
     operation_id: text
     request_digest: text
     request_bytes: text
+    # milestone_0021: signed agent intent. Defaulted and emitted only when set, so
+    # every legacy draft keeps its exact bytes and digest. The read-only root is
+    # recorded here (not in the strict plan, whose digest every caller binds).
+    readonly_rootfs: bool = false
+    agent_invocation_manifest_digest: text = ""
+    agent_probe_list_digest: text = ""
 
 # Shared strict scalar-envelope helpers. Fixed callers supply safe field names;
 # no Host/domain/storage imports or native authority are introduced here.
-pub fn execution_associated_fields_v3(source: text, kind: text, names: [text]) -> Result<Dict<text, SdnValue>, text>:
+# `optional` names may be absent; they are emitted only when set, and the
+# caller's canonical re-encode refuses a present key holding its default.
+pub fn execution_associated_fields_v3(source: text, kind: text, names: [text], optional: [text] = []) -> Result<Dict<text, SdnValue>, text>:
     if source.byte_len() == 0 or source.byte_len() > CONTAINER_ASSOCIATED_WIRE_MAX_V3: return Err("associated-source-size")
     val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: CONTAINER_ASSOCIATED_WIRE_MAX_V3,
         max_depth: 2, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 16))
@@ -32,7 +40,7 @@ pub fn execution_associated_fields_v3(source: text, kind: text, names: [text]) -
         case SdnValue.Dict(value): value
         case _: return Err("associated-source-object")
     for name in fields.keys():
-        if not names.contains(name): return Err("associated-source-unknown-field")
+        if not names.contains(name) and not optional.contains(name): return Err("associated-source-unknown-field")
     for name in names:
         if not fields.contains_key(name): return Err("associated-source-missing-field")
     if execution_associated_int_v3(fields, "version")? != 3 or execution_associated_text_v3(fields, "kind")? != kind:
@@ -43,6 +51,31 @@ pub fn execution_associated_text_v3(fields: Dict<text, SdnValue>, name: text) ->
     match fields[name]:
         case SdnValue.String(value): Ok(value)
         case _: Err("associated-source-text")
+
+pub fn execution_agent_optional_fields_v3() -> [text]:
+    ["readonlyRootfs", "agentInvocationManifestDigest", "agentProbeListDigest"]
+
+pub fn execution_associated_optional_text_v3(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    if not fields.contains_key(name): return Ok("")
+    execution_associated_text_v3(fields, name)
+
+pub fn execution_associated_optional_bool_v3(fields: Dict<text, SdnValue>, name: text) -> Result<bool, text>:
+    if not fields.contains_key(name): return Ok(false)
+    match fields[name]:
+        case SdnValue.Bool(value): Ok(value)
+        case _: Err("associated-source-bool")
+
+# Emit-when-set for the three agent fields shared by the draft and the
+# association: absent keys keep legacy bytes; set digests must be valid.
+pub fn execution_agent_fields_put_v3(fields: Dict<text, SdnValue>, readonly_rootfs: bool, manifest_digest: text,
+        probe_list_digest: text) -> Result<Dict<text, SdnValue>, text>:
+    var out = fields
+    if manifest_digest != "" and not builder_digest_valid_v1(manifest_digest): return Err("associated-agent-digest")
+    if probe_list_digest != "" and not builder_digest_valid_v1(probe_list_digest): return Err("associated-agent-digest")
+    if readonly_rootfs: out["readonlyRootfs"] = SdnValue.Bool(true)
+    if manifest_digest != "": out["agentInvocationManifestDigest"] = SdnValue.String(manifest_digest)
+    if probe_list_digest != "": out["agentProbeListDigest"] = SdnValue.String(probe_list_digest)
+    Ok(out)
 
 pub fn execution_associated_int_v3(fields: Dict<text, SdnValue>, name: text) -> Result<i64, text>:
     match fields[name]:
@@ -56,6 +89,7 @@ pub fn execution_associated_encode_v3(fields: Dict<text, SdnValue>) -> Result<te
         val scalar = match fields[name]:
             case SdnValue.Int(value): value.to_text().byte_len()
             case SdnValue.String(value): sdn_encoded_text_size_v1(value)
+            case SdnValue.Bool(value): if value: 4 else: 5
             case _: return Err("associated-source-value")
         size = size + scalar
         if size > CONTAINER_ASSOCIATED_WIRE_MAX_V3: return Err("associated-source-size")
@@ -67,17 +101,21 @@ pub fn container_execution_draft_encode_v3(draft: ContainerExecutionDraftV3) -> 
             draft.attempt <= 0 or not builder_digest_valid_v1(draft.request_digest) or draft.request_bytes.byte_len() == 0 or
             draft.request_bytes.byte_len() > CONTAINER_EXECUTION_DRAFT_BODY_MAX_V3 or draft.request_bytes.contains("\0")):
         return Err("container-draft-fields")
-    execution_associated_encode_v3({"version": SdnValue.Int(3), "kind": SdnValue.String("container-execution-draft"),
+    execution_associated_encode_v3(execution_agent_fields_put_v3({"version": SdnValue.Int(3), "kind": SdnValue.String("container-execution-draft"),
         "backend": SdnValue.String(draft.backend), "workloadUid": SdnValue.String(draft.workload_uid), "attempt": SdnValue.Int(draft.attempt),
         "operationId": SdnValue.String(draft.operation_id), "requestDigest": SdnValue.String(draft.request_digest),
-        "requestBytes": SdnValue.String(draft.request_bytes)})
+        "requestBytes": SdnValue.String(draft.request_bytes)}, draft.readonly_rootfs, draft.agent_invocation_manifest_digest,
+        draft.agent_probe_list_digest)?)
 
 pub fn container_execution_draft_decode_v3(source: text) -> Result<ContainerExecutionDraftV3, text>:
     val fields = execution_associated_fields_v3(source, "container-execution-draft", ["version", "kind", "backend",
-        "workloadUid", "attempt", "operationId", "requestDigest", "requestBytes"])?
+        "workloadUid", "attempt", "operationId", "requestDigest", "requestBytes"], execution_agent_optional_fields_v3())?
     val draft = ContainerExecutionDraftV3(execution_associated_text_v3(fields, "backend")?, execution_associated_text_v3(fields, "workloadUid")?,
         execution_associated_int_v3(fields, "attempt")?, execution_associated_text_v3(fields, "operationId")?,
-        execution_associated_text_v3(fields, "requestDigest")?, execution_associated_text_v3(fields, "requestBytes")?)
+        execution_associated_text_v3(fields, "requestDigest")?, execution_associated_text_v3(fields, "requestBytes")?,
+        execution_associated_optional_bool_v3(fields, "readonlyRootfs")?,
+        execution_associated_optional_text_v3(fields, "agentInvocationManifestDigest")?,
+        execution_associated_optional_text_v3(fields, "agentProbeListDigest")?)
     if container_execution_draft_encode_v3(draft)? != source: return Err("container-draft-canonical")
     Ok(draft)
 
@@ -97,3 +135,5 @@ pub fn container_execution_draft_bind_v3(draft: ContainerExecutionDraftV3, scope
 export ContainerExecutionDraftV3, CONTAINER_EXECUTION_DRAFT_BODY_MAX_V3, CONTAINER_ASSOCIATED_WIRE_MAX_V3, CONTAINER_ASSOCIATED_ROUTE_BODY_MAX_V3
 export container_execution_draft_encode_v3, container_execution_draft_decode_v3, container_execution_draft_digest_v3, container_execution_draft_bind_v3
 export execution_associated_fields_v3, execution_associated_text_v3, execution_associated_int_v3, execution_associated_encode_v3
+export execution_associated_optional_text_v3, execution_associated_optional_bool_v3, execution_agent_fields_put_v3
+export execution_agent_optional_fields_v3
