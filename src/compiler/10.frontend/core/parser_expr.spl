@@ -1332,6 +1332,22 @@ fn parse_postfix_on(base_expr: i64) -> i64:
         return expr_compound_assign(61, base, right, 0)
     base
 
+# `f(n)_sfx` / `x.m(n)_sfx` / `a[i]_sfx`: a unit suffix glued to a call or
+# index result. Only a parenthesized group takes one (`(expr)_sfx`,
+# primary_expr.spl); otherwise `_sfx` became a confusing call argument.
+# Seed parity: postfix.rs reject_postfix_unit_suffix.
+# Bug: paren_expr_unit_suffix_parsed_as_call_2026-11-16.
+fn parser_expect_close_no_unit_suffix(close_kind: i64):
+    val close_line = par_line_get()
+    val close_col = par_col_get()
+    parser_expect(close_kind)
+    if par_kind_get() == 6 and par_line_get() == close_line and par_col_get() == close_col + 1:
+        val glued = par_text_get()
+        val g1 = if glued.len() > 1: glued[1:2] else: ""
+        val g1_alpha = (g1 >= "a" and g1 <= "z") or (g1 >= "A" and g1 <= "Z")
+        if glued.starts_with("_") and g1_alpha:
+            parser_error("unit suffix `{glued}` cannot follow a call, index or tuple result; wrap it in a group: `(...){glued}`")
+
 fn parse_postfix() -> i64:
     parser_expr_trace_step("postfix")
     var base = parse_primary_expr()
@@ -1459,7 +1475,7 @@ fn parse_postfix() -> i64:
                         call_args.push(next_arg.0)
                         call_arg_names.push(next_arg.1)
                         pp_after_lparen = par_kind_get()
-                parser_expect(141)
+                parser_expect_close_no_unit_suffix(141)
                 val pp_call_span = flat_span_new(pp_call_start, lex_token_start_get(), pp_call_line, pp_call_col)
                 base = expr_method_call_named(base, field_name, call_args, call_arg_names, pp_call_span)
             else:
@@ -1504,7 +1520,7 @@ fn parse_postfix() -> i64:
                         base = expr_slice(base, index_expr, end_idx, 0)
                 else:
                     if not validate_bracket_expr(index_expr, "index expression"): return base
-                    parser_expect(145)
+                    parser_expect_close_no_unit_suffix(145)
                     base = expr_index(base, index_expr, parser_postfix_span_from(base))
         elif kind == 140:
             # Function call: f(args)
@@ -1533,7 +1549,7 @@ fn parse_postfix() -> i64:
                     call_args.push(next_arg.0)
                     call_arg_names.push(next_arg.1)
                     pp_after_lparen = par_kind_get()
-            parser_expect(141)
+            parser_expect_close_no_unit_suffix(141)
             val pp_call_span = flat_span_new(pp_call_start, lex_token_start_get(), pp_call_line, pp_call_col)
             if pe_is_typed_empty_array_ctor(base, call_args.len()):
                 base = expr_array_lit([], pp_call_span)
