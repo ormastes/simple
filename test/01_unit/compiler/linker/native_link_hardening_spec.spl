@@ -857,3 +857,32 @@ describe "Native linker hardening":
         # same table. The native count includes its explanatory policy comment.
         expect(native.split("native_all_msvc_support_libraries").len() - 1).to_equal(4)
         expect(shared.split("native_all_msvc_support_libraries").len() - 1).to_equal(2)
+
+
+# AUTHORED_NOT_RUN: these argv regressions do not qualify SDK discovery,
+# linking or native execution. MsvcConfig.default uses real SDK discovery.
+describe "Windows machine-policy SDK dependencies on ordinary native links":
+    it "should include the Shell and COM allocation libraries without a native-all input":
+        step("Build ordinary MSVC arguments for the machine-policy object")
+        val config = MsvcConfig.default()
+        val objects = ["machine_policy.obj"]
+        expect(native_all_input_present(objects)).to_equal(false)
+        val args = config.build_args("machine_policy.exe", objects)
+        expect(args.contains("shell32.lib")).to_equal(true)
+        expect(args.contains("ole32.lib")).to_equal(true)
+        expect(args.contains("machine_policy.obj")).to_equal(true)
+
+    it "should preserve all policy-owner SDK dependencies across debug and subsystem settings":
+        step("Build both console and Windows subsystem argument sets")
+        for subsystem in ["console", "windows"]:
+            for debug in [false, true]:
+                var config = MsvcConfig.default()
+                config.subsystem = subsystem
+                config.debug = debug
+                val args = config.build_args("policy owner.exe", ["policy owner.obj"])
+                for library in ["kernel32.lib", "advapi32.lib", "ntdll.lib", "shell32.lib", "ole32.lib"]:
+                    var occurrences = 0
+                    for argument in args:
+                        if argument == library: occurrences = occurrences + 1
+                    expect(occurrences).to_equal(1)
+                expect(args.contains("/SUBSYSTEM:" + subsystem)).to_equal(true)

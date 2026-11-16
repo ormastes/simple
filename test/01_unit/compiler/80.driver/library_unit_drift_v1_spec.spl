@@ -1,0 +1,73 @@
+"""
+## Purpose and audience
+Purpose: Prove the library-unit drift check compares a declared inventory
+against the actual source set, reports added/removed paths, and fails closed.
+Audience: build and driver engineers maintaining library-unit planning.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Pure function over two path lists; no filesystem walking.
+Plan: doc/03_plan/release/1.0.0/robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md (section 4.2).
+"""
+# @req: REQ-BUILD-SRC-001
+
+use std.spec.*
+use std.spec.step
+use compiler.driver.driver_build.library_unit_drift_v1.{
+    library_unit_drift_v1, library_unit_drift_verdict_v1, library_unit_drift_exit_code_v1}
+
+# @manual_section: library_unit_drift
+describe "library unit drift check":
+    """Declared inventory vs actual source set."""
+
+    it "passes when sets match regardless of order and duplicates":
+        # @req: REQ-BUILD-SRC-001
+        step("Compare permuted equal sets")
+        val d = library_unit_drift_v1(["src/b.spl", "src/a.spl"], ["src/a.spl", "src/b.spl", "src/a.spl"])
+        expect(d.added.len()).to_equal(0)
+        expect(d.removed.len()).to_equal(0)
+        expect(d.checked).to_equal(2)
+        expect(library_unit_drift_exit_code_v1(d)).to_equal(0)
+        expect(library_unit_drift_verdict_v1(d)).to_start_with("PASS — 2 checked")
+
+    it "reports added files in sorted order and fails":
+        # @req: REQ-BUILD-SRC-001
+        step("Actual has files the manifest lacks")
+        val d = library_unit_drift_v1(["src/a.spl"], ["src/c.spl", "src/a.spl", "src/b.spl"])
+        expect(d.added).to_equal(["src/b.spl", "src/c.spl"])
+        expect(d.removed.len()).to_equal(0)
+        expect(library_unit_drift_exit_code_v1(d)).to_equal(1)
+        expect(library_unit_drift_verdict_v1(d)).to_contain("added: src/b.spl, src/c.spl")
+
+    it "reports removed files and fails":
+        # @req: REQ-BUILD-SRC-001
+        step("Manifest lists files that no longer exist")
+        val d = library_unit_drift_v1(["src/a.spl", "src/gone.spl"], ["src/a.spl"])
+        expect(d.removed).to_equal(["src/gone.spl"])
+        expect(d.added.len()).to_equal(0)
+        expect(library_unit_drift_exit_code_v1(d)).to_equal(1)
+        expect(library_unit_drift_verdict_v1(d)).to_start_with("FAIL — ")
+        expect(library_unit_drift_verdict_v1(d)).to_contain("removed: src/gone.spl")
+
+    it "reports a rename as both added and removed":
+        # @req: REQ-BUILD-SRC-001
+        step("Renamed file shows on both sides")
+        val d = library_unit_drift_v1(["src/old.spl"], ["src/new.spl"])
+        expect(d.added).to_equal(["src/new.spl"])
+        expect(d.removed).to_equal(["src/old.spl"])
+        expect(library_unit_drift_exit_code_v1(d)).to_equal(1)
+
+    it "is an error when nothing was checked":
+        # @req: REQ-BUILD-SRC-001
+        step("Both lists empty must not pass vacuously")
+        val d = library_unit_drift_v1([], [])
+        expect(d.checked).to_equal(0)
+        expect(library_unit_drift_exit_code_v1(d)).to_equal(2)
+        expect(library_unit_drift_verdict_v1(d)).to_start_with("ERROR — nothing was checked")
+
+    it "fails when the manifest is empty but sources exist":
+        # @req: REQ-BUILD-SRC-001
+        step("Empty manifest against real files is drift, not error")
+        val d = library_unit_drift_v1([], ["src/a.spl"])
+        expect(d.added).to_equal(["src/a.spl"])
+        expect(library_unit_drift_exit_code_v1(d)).to_equal(1)

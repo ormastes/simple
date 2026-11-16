@@ -1,0 +1,122 @@
+# Pure projection of TestDB attempt rows into passing evidence for the
+# `simple trace` status derivation. Read-only; it admits nothing by itself.
+# @req REQ-TRC-021
+use std.common.traceability.model.*
+use std.common.traceability.sidecar_v1.{TraceSidecarReferenceV1}
+use std.common.traceability.query_missing_v1.{TraceRequirementIdV1}
+use std.common.traceability.trace_ids_v1.{TraceSnapshotIdV1}
+use std.common.traceability.query_status_v1.{TracePassingEvidenceV1}
+use std.common.traceability.test_query.{TestQueryRow, TestQualification, TestPlannedCaseIdentity,
+    TestAttemptIdentity, TestAttemptOrdinal}
+
+# Position of a run in start order; a larger value is a later run.
+pub struct TraceRunOrderV1:
+    value: i64
+
+# One attempt row together with what the row itself does not carry: the snapshot
+# the run was frozen against (TraceRunPlan.subject_id) and the run's order.
+pub struct TraceAttemptObservationV1:
+    snapshot: TraceSnapshotIdV1
+    run_order: TraceRunOrderV1
+    row: TestQueryRow
+
+struct LatestAttemptV1:
+    run_order: i64
+    ordinal: i64
+    passed: bool
+
+fn _scope_key(path: text, name: text) -> text:
+    "{path.len()}:{path}{name}"
+
+fn _attempt_ordinal(attempt: TestAttemptIdentity) -> TestAttemptOrdinal?:
+    match attempt:
+        case TestAttemptIdentity.StreamOrder(ordinal): Some(ordinal)
+        case TestAttemptIdentity.Missing: None
+
+fn _has_plan_identity(planned: TestPlannedCaseIdentity) -> bool:
+    match planned:
+        case TestPlannedCaseIdentity.Recorded(_): true
+        case TestPlannedCaseIdentity.Missing: false
+
+fn _add_path(paths: Dict<text, [text]>, requirement: text, path: text) -> Dict<text, [text]>:
+    var out = paths
+    var list: [text] = []
+    if out.contains_key(requirement):
+        list = out[requirement]
+    if not list.contains(path):
+        list.push(path)
+    out[requirement] = list
+    out
+
+# Spec paths that verify each requirement: graph verified_by edges resolved
+# through their file locator, plus sidecar verified_by rows.
+fn _verifying_paths(graph: TraceGraph, sidecar: [TraceSidecarReferenceV1]) -> Dict<text, [text]>:
+    var file_of: Dict<text, text> = {}
+    for locator in graph.locators:
+        if locator.locator_kind == "file":
+            file_of[locator.entity_id] = locator.path
+    var paths: Dict<text, [text]> = {}
+    for edge in graph.edges:
+        if edge.relation == TraceRelation.VerifiedBy and file_of.contains_key(edge.to_id):
+            paths = _add_path(paths, edge.from_id, file_of[edge.to_id])
+    for row in sidecar:
+        if row.relation == "verified_by" and row.path != "":
+            paths = _add_path(paths, row.from_id, row.path)
+    paths
+
+pub fn trace_passing_evidence_from_attempts_v1(graph: TraceGraph, sidecar: [TraceSidecarReferenceV1],
+    observations: [TraceAttemptObservationV1]) -> [TracePassingEvidenceV1]:
+    """Requirements whose every verifying spec passed at the current snapshot.
+
+    Only observations frozen against `graph.subject.snapshot_id`, with a recorded
+    planned-case identity and an attempt identity, are considered. For each case
+    the latest attempt wins: the later run, then the higher attempt ordinal. A
+    case counts only when that attempt qualifies as Pass (skipped, cached,
+    failed, unfinished and unknown never do). A spec passes when it has at least
+    one observed case and all of them pass; a requirement is evidenced when it
+    has at least one verifying spec and all of them pass. Specs reached only
+    through other relations (acceptance criteria) are not evidenced here.
+    """
+    val current = graph.subject.snapshot_id
+    var latest: Dict<text, LatestAttemptV1> = {}
+    var cases_of: Dict<text, [text]> = {}
+    for obs in observations:
+        if obs.snapshot.value != current or not _has_plan_identity(obs.row.planned_case):
+            continue
+        val found_ordinal = _attempt_ordinal(obs.row.attempt)
+        if found_ordinal.is_none():
+            continue
+        val ordinal = found_ordinal.unwrap().value
+        val path = obs.row.case_key.path.value
+        val key = _scope_key(path, obs.row.case_key.name.value)
+        val passed = obs.row.qualification == TestQualification.Pass
+        var replace = true
+        if latest.contains_key(key):
+            val old = latest[key]
+            replace = obs.run_order.value > old.run_order or (obs.run_order.value == old.run_order and ordinal > old.ordinal)
+        else:
+            var known: [text] = []
+            if cases_of.contains_key(path):
+                known = cases_of[path]
+            known.push(key)
+            cases_of[path] = known
+        if replace:
+            latest[key] = LatestAttemptV1(run_order: obs.run_order.value, ordinal: ordinal, passed: passed)
+    val required = _verifying_paths(graph, sidecar)
+    var ids: [text] = []
+    for node in graph.nodes:
+        if node.kind == TraceNodeKind.Requirement and required.contains_key(node.id):
+            ids.push(node.id)
+    var out: [TracePassingEvidenceV1] = []
+    for id in trace_sorted_ids(ids):
+        var all_pass = true
+        for path in required[id]:
+            if not cases_of.contains_key(path):
+                all_pass = false
+                continue
+            for key in cases_of[path]:
+                if not latest[key].passed:
+                    all_pass = false
+        if all_pass:
+            out.push(TracePassingEvidenceV1(requirement_id: TraceRequirementIdV1(value: id)))
+    out

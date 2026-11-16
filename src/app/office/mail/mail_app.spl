@@ -43,11 +43,48 @@ impl MailApp:
         val compose_btn = button("btn_compose", "Compose", "compose")
         val nav = navigation_bar("nav", "Simple Mail", [], [compose_btn])
         val search = search_bar("search", "Search mail...", me.search_query)
-        val inbox_count = me.emails.len()
-        val summary = panel("mail_summary", "Messages", [
-            label("mail_summary_count", "{inbox_count} messages")
-        ])
-        var root_children: [WidgetNode] = [nav, search, summary]
+
+        val unread_counts = me._build_unread_counts()
+        val folder_col = with_flex(build_folder_list(me.folders, me.active_folder, unread_counts), 1)
+
+        val filtered = me.filtered_emails()
+        var msg_children: [WidgetNode] = [
+            label("mail_summary_count", "{filtered.len()} messages")
+        ]
+        var active_email: Email? = me._find_email(me.selected_email)
+        for email in filtered:
+            if active_email == nil:
+                active_email = email
+            val unread_mark = if not email.read: "[*] " else: ""
+            val star_mark = if email.starred: "+ " else: ""
+            val row_label = "{unread_mark}{star_mark}{email.subject} — {email.from_addr.name} ({email.date})"
+            msg_children = msg_children.push(
+                button("select_email_{email.id}", row_label, "select_email_{email.id}")
+            )
+        if filtered.len() == 0:
+            msg_children = msg_children.push(label("mail_empty", "No matching messages"))
+        val summary = panel("mail_summary", "Messages", msg_children)
+        val message_col = with_flex(scroll("mail_list_scroll", 0, [summary]), 2)
+
+        var detail_children: [WidgetNode] = []
+        if val Some(sel) = active_email:
+            detail_children = [
+                label("mail_detail_subject", sel.subject),
+                label("mail_detail_from", "From: " + email_address_display(sel.from_addr)),
+                label("mail_detail_date", "Date: " + sel.date),
+                label("mail_detail_body", sel.body),
+                row("mail_detail_actions", [
+                    button("btn_reply", "Reply", "reply"),
+                    button("btn_forward", "Forward", "forward"),
+                    button("btn_delete", "Delete", "delete_email")
+                ])
+            ]
+        else:
+            detail_children = [label("mail_detail_empty", "Select a message to read")]
+        val detail_col = with_flex(panel("mail_detail", "Reading Pane", detail_children), 3)
+        val columns = with_flex(row("mail_columns", [folder_col, message_col, detail_col]), 1)
+
+        var root_children: [WidgetNode] = [nav, search, columns]
         if me.composing:
             val compose_ui = build_compose_ui(new_draft())
             root_children = root_children.push(compose_ui)
@@ -140,11 +177,8 @@ impl MailApp:
         var counts: Dict<text, i32> = {}
         for email in me.emails:
             if not email.read:
-                val current = counts.get(email.folder)
-                if current != nil:
-                    counts = counts.set(email.folder, current + 1)
-                else:
-                    counts = counts.set(email.folder, 1)
+                val current: i32 = counts.get(email.folder) ?? 0
+                counts = counts.set(email.folder, current + 1)
         return counts
 
     me _mark_as_read(email_id: text):

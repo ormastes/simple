@@ -150,3 +150,22 @@ vs file-local helper precedence.
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 Not pursued in this lane: Defect 1 (impl-method dispatch, file-global) is a seed semantic-path defect live at tip under BOTH test and run per 2026-11-11 runner8 addendum; defects 2/3 closed. Owner: seed/compiler lane.
+## Addendum 2026-11-15 — root cause fixed in the seed
+
+The earlier "fixed" note did not hold: `test/01_unit/app/test_runner/core_spec.spl`
+still failed with ``method `feed` not found on type `object` ``. Cause: the
+seed interpreter runs top-level items in source order, and its first pass
+registers constructors but not `impl`-block methods, so a `describe` block
+that calls a method whose `impl` block is written further down found nothing.
+`evaluate_module_items` now registers type declarations that follow the first
+top-level expression before running it.
+
+- Repro `test/01_unit/bugs/impl_block_after_describe_spec.spl`: 0/2 -> 2/2.
+- `core_spec.spl`: 1/1. It also needed a one-line correction: it called a
+  function that does not exist (`complete_protocol_message_encode(msg, ...)`);
+  now `protocol_message_encode(complete_msg, ...)`.
+- 75-spec sweep, base vs fixed seed: only fail-to-pass changes.
+
+Not fixed: `test/03_system/app/tooling/feature/warning_allow_root_cause_cleanup_spec.spl`,
+also named above, is 20 lines of markdown prose with no test code, so it fails
+to parse. It needs real scenarios written or the file removed.

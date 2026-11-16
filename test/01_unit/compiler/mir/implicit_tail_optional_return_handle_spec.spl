@@ -1,0 +1,78 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+"""
+Implicit-tail `-> T?` returns must build the canonical Option handle.
+
+Bug: doc/08_tracking/bug/stage2_implicit_tail_optional_return_takes_scalar_arm_2026-11-15.md
+
+Under SIMPLE_BOOTSTRAP=1 (how native-build runs), HIR declaration lowering
+erases a declared `-> T?` in HirFunction.return_type to the bootstrap table's
+i64 default; only the symbol keeps `T?`. lower_function dispatched the
+implicit tail on fn_.return_type, so the tail took the Int arm and
+option_payload_for_int_sink unwrapped the freshly built Some handle again
+(`rt_enum_new` then `rt_unwrap_or_trap`). Cranelift refused
+`lib.common.sdn.value.SdnValue.as_f64` (`return v31: result 0 has type f64,
+must match function signature of i64`), LLVM returned fptosi(payload), `-> i64?`
+tails returned the raw payload and a None arm trapped. Explicit `return` was
+correct because lower_return_expr reads the declared type from the symbol.
+
+The bootstrap row lowers HIR with SIMPLE_BOOTSTRAP=1 (the erasing arm) and MIR
+without it, which reproduces the erased return type on the seed. The native
+oracles are test/fixtures/native_option_f64_enum_payload/main.spl and
+test/fixtures/native_option_scalar_tail_siblings/main.spl.
+"""
+
+use std.spec
+use std.io_runtime.{file_read, env_set}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+val FUNCTION_FILE: text = "src/compiler/50.mir/_MirLowering/function_lowering.spl"
+
+fn lower_module_json(src: text, bootstrap_hir: bool) -> Dict<text, text>:
+    val module = parse_full_frontend(src, "tail_opt.spl", "tail_opt.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("tail_opt.spl")
+    if bootstrap_hir:
+        env_set("SIMPLE_BOOTSTRAP", "1")
+    val hir = hir_lowering.lower_module(module)
+    if bootstrap_hir:
+        env_set("SIMPLE_BOOTSTRAP", "")
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var out: Dict<text, text> = {}
+    for function in mir.functions.values():
+        val dot = function.name.rfind(".")
+        val short = if dot >= 0: function.name.substring(dot + 1, function.name.len()) else: function.name
+        out[short] = serialize_mir_function(function)
+    out
+
+fn expect_handle_tails(fns: Dict<text, text>):
+    for name in ["as_f64", "some_f64", "cond_f64", "some_i64", "none_i64"]:
+        val mir = fns[name] ?? ""
+        expect(mir.len() > 0).to_equal(true)
+        expect(mir).to_contain("rt_enum_new")
+        expect(mir.contains("rt_unwrap_or_trap")).to_equal(false)
+
+val SOURCE: text = "enum Val:\n    Float(f64)\n    Int(i64)\n    Str(text)\n\n" +
+    "fn as_f64(v: Val) -> f64?:\n    match v:\n        case Val.Float(f): Some(f)\n        case Val.Int(i): Some(i.to_float())\n        case _: None\n\n" +
+    "fn some_f64(x: f64) -> f64?:\n    Some(x)\n\n" +
+    "fn cond_f64(b: bool) -> f64?:\n    if b:\n        Some(1.5)\n    else:\n        None\n\n" +
+    "fn some_i64(x: i64) -> i64?:\n    Some(x)\n\n" +
+    "fn none_i64() -> i64?:\n    None\n"
+
+describe "implicit-tail optional returns keep the Option handle":
+    it "builds rt_enum_new and never unwraps the tail (ordinary HIR)":
+        expect_handle_tails(lower_module_json(SOURCE, false))
+
+    it "builds rt_enum_new and never unwraps the tail (bootstrap HIR erases the declared T?)":
+        expect_handle_tails(lower_module_json(SOURCE, true))
+
+    it "decides the tail from the declared return type, as lower_return_expr does":
+        val source = file_read(FUNCTION_FILE)
+        expect(source).to_contain("if val declared_tail_return = self.resolved_call_hir_return_type(fn_.symbol):")
+        expect(source).to_contain("returned_tail_local = self.ensure_option_handle(returned_tail_local, tail_return_type)")

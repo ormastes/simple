@@ -1,0 +1,97 @@
+# System test: `devhub messenger doctor` over secured (sqlcipher4) targets.
+# Binary comes from env DEVHUB_NATIVE_BIN; HOME/USERPROFILE point at build/tmp.
+# @manual_section: messenger-native-doctor-secured
+
+"""
+## Purpose and audience
+Purpose: as a DevHub user, `messenger doctor` tells me truthfully whether my encrypted store is healthy, whether my passphrase is wrong, or whether the store file is missing — three distinguishable answers — without ever printing the passphrase.
+Audience: DevHub release reviewers. The passphrase is public synthetic data from dense_ground_truth.json.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get_opt, file_write}
+use std.env.{env_set}
+use test.support.devhub_messenger_dense.*
+use test.support.devhub_messenger_cli.*
+
+fn dr_native_bin() -> text:
+    match env_get_opt("DEVHUB_NATIVE_BIN"):
+        case Some(v): v
+        case None: ""
+
+# `secured` names the committed dense fixture; `gone` names a store that does not exist.
+fn dr_sdn(db_path: text) -> text:
+    val header = "messenger:\n    schema_version: 1\n    default_target: dense\n\n"
+    val gone_db = db_path.replace(DENSE_BASE, "missing_doctor.sqlcipher4")
+    val gone = cli_sdn_text(gone_db).replace(header, "").replace("messenger.dense", "messenger.gone")
+    val secured = cli_sdn_text(db_path).replace(header, "").replace("messenger.dense", "messenger.secured")
+    header.replace("default_target: dense", "default_target: secured") + secured + "\n" + gone
+
+fn dr_prepare(home: text) -> bool:
+    val _mk = process_run("mkdir", ["-p", home + "/.config/devhub"])
+    val cwd = process_run("pwd", []).0.trim()
+    val _f = file_write(home + "/.config/devhub/messenger.sdn", dr_sdn(cwd + "/" + dense_path(DENSE_BASE)))
+    val _h = env_set("HOME", cwd + "/" + home)
+    val _p = env_set("USERPROFILE", cwd + "/" + home)
+    true
+
+fn dr_run(bin: text, target: text) -> (text, text, i64):
+    if bin == "": ("", "", -1) else: process_run(bin, ["messenger", "doctor", "--target", target, "--json"])
+
+val dr_bin = dr_native_bin()
+val dr_truth = dense_truth()
+val dr_pass = truth_passphrase(dr_truth)
+val dr_wrong = "wrong-" + dr_pass
+val _home = dr_prepare("build/tmp/devhub_doctor_home")
+val _s = env_set(DENSE_ENV, dr_pass)
+val dr_ok = dr_run(dr_bin, "secured")
+val dr_gone = dr_run(dr_bin, "gone")
+val dr_unknown = dr_run(dr_bin, "nosuch")
+val _w = env_set(DENSE_ENV, dr_wrong)
+val dr_bad = dr_run(dr_bin, "secured")
+
+describe "devhub messenger doctor over a secured sqlcipher4 store":
+    it "reports a healthy secured store as ok with a ready read-only sqlcipher4 adapter":
+        # @req REQ-MSGR-DOCTOR-SEC-001
+        step("Run `devhub messenger doctor --target secured --json` with the correct passphrase")
+        expect(dr_bin != "").to_equal(true)
+        expect(dr_ok.2).to_equal(0)
+        val rec = payload_json(dr_ok.0)
+        expect(tf(rec, "target")).to_equal("secured")
+        expect(tf(rec, "status")).to_equal("ok")
+        expect(tf(rec, "read_provider")).to_equal("sqlcipher4_database")
+        expect(tf(rec, "adapter_status")).to_equal("ready")
+        expect(tf(rec, "schema_fingerprint")).to_equal("62672319")
+        step("No store-open or missing-store warning appears for the healthy store")
+        expect(dr_ok.0.contains("store open probe failed")).to_equal(false)
+        expect(dr_ok.0.contains("declared source database is not present")).to_equal(false)
+
+    it "warns that the store cannot be opened when the passphrase is wrong":
+        # @req REQ-MSGR-DOCTOR-SEC-002
+        step("Run doctor with a wrong passphrase in the target's secret env var")
+        expect(dr_bad.2).to_equal(0)
+        expect(tf(payload_json(dr_bad.0), "target")).to_equal("secured")
+        expect(dr_bad.0.contains("store open probe failed")).to_equal(true)
+        expect(dr_bad.0.contains("authentication-failed")).to_equal(true)
+        step("The wrong-key record differs from the healthy record")
+        expect(dr_bad.0 == dr_ok.0).to_equal(false)
+
+    it "warns that the declared store is missing, distinct from a wrong key":
+        # @req REQ-MSGR-DOCTOR-SEC-003
+        step("Run doctor against target `gone`, whose store file does not exist")
+        expect(dr_gone.2).to_equal(0)
+        expect(tf(payload_json(dr_gone.0), "target")).to_equal("gone")
+        expect(dr_gone.0.contains("declared source database is not present")).to_equal(true)
+        expect(dr_gone.0.contains("authentication-failed")).to_equal(false)
+
+    it "rejects an undeclared target with exit 2 and an error record naming it":
+        # @req REQ-MSGR-DOCTOR-SEC-004
+        step("Run doctor against an undeclared target name")
+        expect(dr_unknown.2).to_equal(2)
+        expect(tf(payload_json(dr_unknown.0), "status")).to_equal("error")
+        expect(tf(payload_json(dr_unknown.0), "target")).to_equal("nosuch")
+
+    it "never prints either passphrase":
+        # @req REQ-MSGR-DOCTOR-SEC-005
+        step("Search both streams of every doctor run for the correct and wrong passphrase")
+        expect(leaks_none(dr_ok.0 + dr_ok.1 + dr_bad.0 + dr_bad.1 + dr_gone.0 + dr_gone.1, [dr_pass, dr_wrong])).to_equal(true)

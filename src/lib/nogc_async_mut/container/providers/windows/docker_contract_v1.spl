@@ -1,8 +1,10 @@
 # Windows Docker process-only bridge. These values grant no runtime authority.
 # Qualification: source-only NOT_RUN. The administrator selects an exact
 # host/image version pair; matching observations do not prove compatibility.
+use std.common.contracts.container.execution_options_v1.OciEnvironmentEntryV1
+use std.nogc_async_mut.container.providers.windows.docker_server_environment_v5.windows_docker_server_environment_options_v5
 use std.common.crypto.sha256.sha256_text
-use std.common.contracts.container.runtime_v1.RuntimeCommandV1
+use std.common.contracts.container.runtime_v1.{RuntimeCommandV1, RuntimeProviderContractV1}
 use std.nogc_async_mut.container.shared.request_digest_v1.{container_digest_lines_v1,
     container_digest_vector_v1, container_args_equal_v1}
 
@@ -35,6 +37,9 @@ pub struct WindowsDockerPolicyV1:
     system_root: text
     temp_directory: text
     workspace_root: text = ""
+    # Optional exact administrator-selected pre-existing Windows NAT network.
+    network_id: text = ""
+    network_name: text = ""
 
 pub struct WindowsDockerMountV1:
     host_root: text
@@ -56,6 +61,8 @@ pub struct WindowsDockerRequestV1:
     mounts: [WindowsDockerMountV1] = []
     terminal_tty: bool = false
     stdin_open: bool = false
+    # Nonempty selects request wire/digest V5; only public discovery fields.
+    environment: [OciEnvironmentEntryV1] = []
 
 pub struct WindowsDockerScriptedResultV1:
     operation: text
@@ -128,6 +135,11 @@ pub fn windows_docker_policy_reason_v1(policy: WindowsDockerPolicyV1) -> text:
         return "docker-policy-workspace-root-invalid"
     if not absolute_windows_path(policy.system_root) or not absolute_windows_path(policy.temp_directory):
         return "docker-child-environment-invalid"
+    if policy.network_id != "" or policy.network_name != "":
+        if not windows_docker_id_v1(policy.network_id): return "docker-network-policy-id-invalid"
+        if (policy.network_name == "" or policy.network_name.len() > 128 or
+                not windows_docker_token_v1(policy.network_name) or policy.network_name.starts_with("-") or
+                policy.network_name.contains(":")): return "docker-network-policy-name-invalid"
     ""
 
 pub fn windows_docker_request_reason_v1(policy: WindowsDockerPolicyV1,
@@ -155,7 +167,9 @@ pub fn windows_docker_request_reason_v1(policy: WindowsDockerPolicyV1,
     if request.cpu_count <= 0 or request.cpu_count > 256 or
             request.memory_limit_bytes < 16777216 or request.memory_limit_bytes > 1099511627776:
         return "docker-resource-limit-invalid"
-    if request.network != "none": return "docker-network-none-required"
+    if request.network != "none":
+        if policy.network_id == "": return "docker-network-policy-required"
+        if request.network != policy.network_id: return "docker-network-not-authorized"
     if request.mounts.len() > 1: return "docker-workspace-mount-count-invalid"
     if request.mounts.len() == 1:
         val mount = request.mounts[0]
@@ -171,6 +185,9 @@ pub fn windows_docker_request_reason_v1(policy: WindowsDockerPolicyV1,
             return "docker-workspace-directory-outside-mount"
     if request.mounts.len() == 0 and request.working_directory != "" and not absolute_windows_path(request.working_directory):
         return "docker-working-directory-invalid"
+    match windows_docker_server_environment_options_v5(request.environment):
+        case Err(reason): return reason
+        case Ok(_): pass
     ""
 
 # Canonical SDN hashes every scalar separately and encodes array boundaries;
@@ -198,6 +215,11 @@ pub fn windows_docker_request_digest_v1(policy: WindowsDockerPolicyV1,
         fields.push(if request.terminal_tty: "true" else: "false")
         fields.push(if request.stdin_open: "true" else: "false")
         body = "version: 4\nkind: windows-docker-request\nfields:\n"
+    if request.environment.len() > 0: body = "version: 5\nkind: windows-docker-request\nfields:\n"
+    if request.network != "none":
+        fields.push(policy.network_id)
+        fields.push(policy.network_name)
+        body = "version: 6\nkind: windows-docker-request\nfields:\n"
     body = body + container_digest_lines_v1(fields)
     body = body + container_digest_vector_v1("commandCount", "command", request.command)
     body = body + container_digest_vector_v1("argumentCount", "arguments", request.args)
@@ -206,6 +228,10 @@ pub fn windows_docker_request_digest_v1(policy: WindowsDockerPolicyV1,
         for mount in request.mounts:
             body = body + container_digest_lines_v1([mount.host_root, mount.guest_root,
                 if mount.read_only: "true" else: "false"])
+    if request.environment.len() > 0:
+        body = body + "environmentCount: " + request.environment.len().to_text() + "\nenvironment:\n"
+        for entry in request.environment:
+            body = body + container_digest_lines_v1([entry.name, entry.value])
     Ok(sha256_text(body))
 
 pub fn windows_docker_name_v1(policy: WindowsDockerPolicyV1,
@@ -226,7 +252,7 @@ pub fn windows_docker_command_v1(policy: WindowsDockerPolicyV1,
 pub fn windows_docker_create_command_v1(policy: WindowsDockerPolicyV1,
         request: WindowsDockerRequestV1) -> Result<RuntimeCommandV1, text>:
     val digest = windows_docker_request_digest_v1(policy, request)?
-    var args = ["create", "--isolation=process", "--user", "ContainerUser", "--network", "none",
+    var args = ["create", "--isolation=process", "--user", "ContainerUser", "--network", request.network,
         "--cpu-count", request.cpu_count.to_text(), "--memory", request.memory_limit_bytes.to_text(),
         "--name", windows_docker_name_v1(policy, request)]
     val labels = ["simple.provider=" + WINDOWS_DOCKER_ENGINE_V1, "simple.pod=" + request.pod_uid,
@@ -241,6 +267,13 @@ pub fn windows_docker_create_command_v1(policy: WindowsDockerPolicyV1,
         var specification = "type=bind,source=" + mount.host_root + ",target=" + mount.guest_root
         if mount.read_only: specification = specification + ",readonly"
         args = args + ["--mount", specification]
+    val environment = windows_docker_server_environment_options_v5(request.environment)?
+    args = args + environment
+    # V5/V6 command semantics are exact argv: clear image ENTRYPOINT and pass
+    # executable after IMAGE, avoiding ENTRYPOINT JSON interpretation.
+    if request.environment.len() > 0 or request.network != "none":
+        args = args + ["--entrypoint", "", request.image] + request.command + request.args
+        return Ok(windows_docker_command_v1(policy, "create", args))
     args = args + ["--entrypoint", request.command[0], request.image]
     var index = 1
     while index < request.command.len():
@@ -251,3 +284,7 @@ pub fn windows_docker_create_command_v1(policy: WindowsDockerPolicyV1,
 
 pub fn windows_docker_args_equal_v1(left: [text], right: [text]) -> bool:
     container_args_equal_v1(left, right)
+
+pub fn windows_docker_provider_contract_v1() -> RuntimeProviderContractV1:
+    RuntimeProviderContractV1(provider_id: WINDOWS_DOCKER_ENGINE_V1, version: 1,
+        supports_recovery: true, supports_logs: true)

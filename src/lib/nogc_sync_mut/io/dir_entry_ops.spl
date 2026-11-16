@@ -12,6 +12,8 @@ extern fn rt_readdir_free(handle: i64)
 extern fn rt_mkdir(path: text, mode: i64) -> i64
 extern fn rt_remove(path: text) -> i64
 
+use std.nogc_sync_mut.io.linux_helper_root_v1.{linux_helper_root_adopt_v1, linux_helper_root_refusal_v1}
+
 fn directory_stream_open(path: text) -> i64:
     rt_readdir(path)
 
@@ -51,8 +53,22 @@ pub fn directory_create_private(path: text) -> bool:
         if made != 0 and made != -17: return false
     not first
 
+# Helper action directory of one fresh-workload begin (milestone_0021 3.4 step 4, r7 X-01): CREATE-OR-ADOPT-EMPTY.
+# An exclusive-only create would poison a fixed action name after an idle, retryable begin refusal, so EEXIST adopts
+# the directory only when it is provably unused: empty, euid-owned and exactly 040700 on one no-follow descriptor.
+# A used root always holds broker.claim, so it stays refused and cleanup authority is never shadowed. The final
+# component only; the parent must already exist (the pinned run root).
+pub fn dir_create_private_exclusive_v1(path: text) -> Result<(), text>:
+    if path == "" or not path.starts_with("/") or path.contains("\u{0}"): return Err("machine-fresh-helper-root-path")
+    val made = rt_mkdir(path, 0o700)
+    if made == 0: return Ok(())
+    # -17 = EEXIST (the dir_entry_ops convention above).
+    if made == -17: return linux_helper_root_adopt_v1(path)
+    Err(linux_helper_root_refusal_v1())
+
 fn directory_remove(path: text) -> i64:
     rt_remove(path)
 
 export directory_stream_open, directory_stream_count, directory_stream_entry
 export directory_stream_close, directory_create_mode, directory_remove, directory_create_private
+export dir_create_private_exclusive_v1

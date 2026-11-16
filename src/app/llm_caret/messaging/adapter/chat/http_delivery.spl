@@ -1,6 +1,6 @@
 """Shared authenticated HTTP delivery worker for prepared chat requests."""
 
-use app.io.http_ffi.{HttpMethod, HttpResponse, http_request}
+use std.nogc_sync_mut.io.http_client_core.{HttpMethod, HttpResponse, http_request}
 use app.llm_caret.messaging.adapter.chat.rest_common.{ChatHttpRequest, CredentialHttpRequestTemplate,
     credential_request_template, materialize_credential_request}
 use app.llm_caret.messaging.adapter.chat.credential_resolver.{resolve_transport_credential}
@@ -19,7 +19,8 @@ fn classify_http_delivery(status_code: i64, response_body: text, error: text) ->
     if status_code >= 200 and status_code < 300:
         return HttpDeliveryResult(accepted: true, retryable: false, permanent: false,
             status_code: status_code, response_body: response_body, error: "")
-    if status_code == 0 or status_code == 408 or status_code == 425 or status_code == 429 or status_code >= 500:
+    # http_client_core reports a transport failure (refused, reset, DNS) as -1.
+    if status_code <= 0 or status_code == 408 or status_code == 425 or status_code == 429 or status_code >= 500:
         return HttpDeliveryResult(accepted: false, retryable: true, permanent: false,
             status_code: status_code, response_body: response_body,
             error: if error != "": error else: "remote_retryable_status_" + status_code.to_string())
@@ -76,7 +77,10 @@ fn drain_transport_outbox(store: PureSqlMessagingStore, limit: i64, now: i64,
         retry_delay_ms: i64, max_attempts: i64) -> (i64, i64):
     var delivered = 0
     var failed = 0
-    for stored in store.queued_transport_requests(now, limit):
+    val queued = match store.queued_transport_requests(now, limit):
+        case Ok(found): found
+        case Err(_): return (0, 1)
+    for stored in queued:
         val credential = resolve_transport_credential(stored.credential_ref)
         if not credential.ok:
             store.mark_outbox_attempt(stored.delivery_id, credential.error,

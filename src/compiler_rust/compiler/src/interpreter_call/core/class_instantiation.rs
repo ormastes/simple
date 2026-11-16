@@ -114,6 +114,18 @@ pub(crate) fn instantiate_class(
         diagram_sffi::trace_method(class_name, "new");
     }
 
+    // Standalone unit constructor `Name(raw)` / `Name(value: raw)`: same
+    // Value::Unit as the `raw_sfx` literal, not the record-class object, so
+    // both construction forms agree. Bug:
+    // unit_from_primitive_construction_unsupported_runtime_2026-11-15.
+    if args.len() == 1 && args[0].name.as_deref().map_or(true, |n| n == "value") {
+        if let Some(suffix) = crate::interpreter_unit::standalone_unit_suffix(class_name) {
+            let raw = evaluate_expr(&args[0].value, env, functions, classes, enums, impl_methods)?;
+            return crate::interpreter_unit::construct_standalone_unit(class_name, &suffix, raw)
+                .map_err(|msg| CompileError::semantic_with_context(msg, ErrorContext::new().with_code(codes::TYPE_MISMATCH)));
+        }
+    }
+
     let class_def = crate::interpreter::resolve_class_in_scope(classes, class_name)?.ok_or_else(|| {
         let available_classes: Vec<&str> = classes.keys().map(|s| s.as_str()).collect();
         let suggestion = if !available_classes.is_empty() {

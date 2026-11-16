@@ -1,0 +1,118 @@
+# slang pure backend — generation-loop specs on the tiny synthetic Llama of
+# kv_cache_spec plus the tiny inline tokenizer of tokenizer_spec.
+
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values}
+use std.gc_async_mut.slang.model_executor.pure.llama_forward.{LlamaConfig, LlamaLayer, LlamaModel}
+use std.gc_async_mut.slang.model_executor.pure.kv_cache.{kv_session_new, kv_generate_greedy}
+use std.gc_async_mut.slang.model_executor.pure.tokenizer.{pure_tokenizer_from_json, pure_tokenizer_decode}
+use std.gc_async_mut.slang.model_executor.pure.sampler.{SamplerConfig, sampler_config_greedy}
+use std.gc_async_mut.slang.model_executor.pure.stop.{StopConfig}
+use std.gc_async_mut.slang.model_executor.pure.generate.{GenConfig, generate, gen_begin}
+
+fn _vals(n: i64, seed: i64) -> [f64]:
+    var out: [f64] = []
+    var i: i64 = 0
+    while i < n:
+        out.push((((i * 7 + seed * 13 + 3) % 11) - 5) as f64 / 10.0)
+        i = i + 1
+    out
+
+fn _mat(rows: i64, cols: i64, seed: i64) -> PureTensor:
+    tensor_from_values(_vals(rows * cols, seed), [rows, cols])
+
+fn _ones(n: i64) -> PureTensor:
+    var out: [f64] = []
+    var i: i64 = 0
+    while i < n:
+        out.push(1.0)
+        i = i + 1
+    tensor_from_values(out, [n])
+
+fn _layer(seed: i64) -> LlamaLayer:
+    LlamaLayer(
+        attn_norm: _ones(8), wq: _mat(8, 8, seed + 1), wk: _mat(8, 8, seed + 2), wv: _mat(8, 8, seed + 3), wo: _mat(8, 8, seed + 4),
+        ffn_norm: _ones(8), w_gate: _mat(16, 8, seed + 5), w_up: _mat(16, 8, seed + 6), w_down: _mat(8, 16, seed + 7)
+    )
+
+fn _model() -> LlamaModel:
+    val cfg = LlamaConfig(dim: 8, n_layers: 2, n_heads: 2, head_dim: 4, hidden_dim: 16, vocab_size: 16, max_pos: 32, eps: 0.00001, rope_theta: 10000.0, bos_id: 1, eos_id: 99)
+    val emb = _mat(16, 8, 20)
+    LlamaModel(config: cfg, embed: emb, layers: [_layer(0), _layer(30)], final_norm: _ones(8), lm_head: emb)
+
+fn _tok_json() -> text:
+    var s = "\{\n  \"model\": \{\n    \"type\": \"BPE\",\n    \"vocab\": \{\n"
+    s = s + "      \"<unk>\": 0,\n      \"<s>\": 1,\n      \"</s>\": 2,\n"
+    s = s + "      \"<0x0A>\": 3,\n      \"▁\": 4,\n      \"a\": 5,\n      \"b\": 6,\n      \"▁a\": 7,\n      \"ab\": 8,\n      \"▁ab\": 9,\n      \"c\": 10,\n      \"d\": 11,\n      \"e\": 12,\n      \"f\": 13,\n      \"g\": 14,\n      \"h\": 15\n"
+    s = s + "    \},\n    \"merges\": [\n      \"▁ a\",\n      \"a b\",\n      \"▁a b\"\n    ]\n  \}\n\}\n"
+    s
+
+fn _cfg(sampler: SamplerConfig, seed: i64, max_new: i64, eos: [i64], stops: [text]) -> GenConfig:
+    GenConfig(sampler: sampler, seed: seed, stop: StopConfig(eos_ids: eos, max_new_tokens: max_new, stop_strings: stops))
+
+fn _join(xs: [text]) -> text:
+    var out = ""
+    for x in xs:
+        out = out + x
+    out
+
+val PROMPT = [1, 5, 9, 3]
+
+describe "pure generation loop":
+    it "matches kv_generate_greedy at temperature 0 and reports counters":
+        val m = _model()
+        val tok = pure_tokenizer_from_json(_tok_json()).unwrap()
+        val ref = kv_generate_greedy(m, kv_session_new(m), PROMPT, 6)
+        val r = generate(m, tok, kv_session_new(m), PROMPT, _cfg(sampler_config_greedy(), 0, 6, [m.config.eos_id], [])).unwrap()
+        expect(r.ids).to_equal(ref.generated)
+        expect(r.finish_reason).to_equal("length")
+        expect(r.prompt_tokens).to_equal(4)
+        expect(r.completion_tokens).to_equal(6)
+        expect(r.positions_evaluated).to_equal(9)
+        expect(r.reused_positions).to_equal(0)
+        expect(r.text).to_equal(pure_tokenizer_decode(tok, r.ids))
+        expect(_join(r.pieces)).to_equal(r.text)
+
+    it "reuses the cached prefix but re-evaluates the last prompt token":
+        val m = _model()
+        val tok = pure_tokenizer_from_json(_tok_json()).unwrap()
+        val cfg = _cfg(sampler_config_greedy(), 0, 3, [], [])
+        val first = generate(m, tok, kv_session_new(m), PROMPT, cfg).unwrap()
+        val again = generate(m, tok, first.session, PROMPT, cfg).unwrap()
+        expect(again.ids).to_equal(first.ids)
+        expect(again.reused_positions).to_equal(3)
+        expect(again.positions_evaluated).to_equal(3)
+
+    it "rejects an empty prompt":
+        val m = _model()
+        val r = gen_begin(m, kv_session_new(m), [], _cfg(sampler_config_greedy(), 0, 3, [], []))
+        expect(r.is_err()).to_equal(true)
+
+    it "ends on EOS with finish reason stop":
+        val m = _model()
+        val tok = pure_tokenizer_from_json(_tok_json()).unwrap()
+        val ref = kv_generate_greedy(m, kv_session_new(m), PROMPT, 6)
+        val r = generate(m, tok, kv_session_new(m), PROMPT, _cfg(sampler_config_greedy(), 0, 6, [ref.generated[0]], [])).unwrap()
+        expect(r.finish_reason).to_equal("stop")
+        expect(r.ids).to_equal(ref.generated.slice(0, 1))
+
+    it "truncates at a stop string spanning tokens and streams only safe text":
+        val m = _model()
+        val tok = pure_tokenizer_from_json(_tok_json()).unwrap()
+        val full = generate(m, tok, kv_session_new(m), PROMPT, _cfg(sampler_config_greedy(), 0, 8, [], [])).unwrap()
+        print "full=[{full.text}] ids={full.ids}"
+        # a 3-char window over the decoded text, centred on the third token
+        val stop = full.text.substring(1, 4)
+        val cut = full.text.index_of(stop)
+        val r = generate(m, tok, kv_session_new(m), PROMPT, _cfg(sampler_config_greedy(), 0, 8, [], [stop])).unwrap()
+        expect(r.finish_reason).to_equal("stop")
+        expect(r.text).to_equal(full.text.substring(0, cut))
+        expect(_join(r.pieces)).to_equal(r.text)
+
+    it "is reproducible per seed when sampling":
+        val m = _model()
+        val tok = pure_tokenizer_from_json(_tok_json()).unwrap()
+        val s = SamplerConfig(temperature: 1.0, top_k: 0, top_p: 0.95, repetition_penalty: 1.1, penalty_window: 8)
+        val a = generate(m, tok, kv_session_new(m), PROMPT, _cfg(s, 5, 8, [], [])).unwrap()
+        val b = generate(m, tok, kv_session_new(m), PROMPT, _cfg(s, 5, 8, [], [])).unwrap()
+        expect(a.ids).to_equal(b.ids)
+        expect(a.completion_tokens).to_equal(8)

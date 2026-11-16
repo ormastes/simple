@@ -1,0 +1,55 @@
+# AUTHORED_NOT_RUN. Actual production cleanup transition data only; no native
+# close failure, descriptor, principal capability or machine owner is fabricated.
+# @req REQ-MACHINE-PAIRED-CLEANUP-001
+# @req REQ-MACHINE-PAIRED-CLEANUP-002
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.container.cleanup_progress_v1.*
+
+describe "Machine paired cleanup V1 production transition":
+    it "retains the first consumed error while retrying only a live partner":
+        step("Apply an actual production transition for closed-with-error storage")
+        var progress = machine_cleanup_progress_initial_v1()
+        progress = machine_cleanup_progress_record_v1(progress, MachineCleanupComponentV1.Machine, "consumed-error")
+        expect(progress.machine_consumed).to_equal(true)
+        expect(progress.principal_consumed).to_equal(false)
+        expect(progress.first_diagnostic).to_equal("machine-authority-storage-consumed-error")
+        step("A retained principal leaves only that component pending")
+        progress = machine_cleanup_progress_record_v1(progress, MachineCleanupComponentV1.Principal, "retained")
+        expect(machine_cleanup_progress_status_v1(progress)).to_equal("retained")
+        expect(progress.machine_consumed).to_equal(true)
+        expect(progress.principal_consumed).to_equal(false)
+        step("Later principal release completes cleanup without losing the original diagnostic")
+        progress = machine_cleanup_progress_record_v1(progress, MachineCleanupComponentV1.Principal, "released")
+        expect(progress.principal_consumed).to_equal(true)
+        expect(machine_cleanup_progress_status_v1(progress)).to_equal("consumed-error")
+        expect(progress.first_diagnostic).to_equal("machine-authority-storage-consumed-error")
+
+    it "keeps consumed progress and diagnostics idempotent across copied values":
+        step("Copy a recorded consumed component and apply late duplicate results")
+        val recorded = machine_cleanup_progress_record_v1(machine_cleanup_progress_initial_v1(),
+            MachineCleanupComponentV1.Machine, "consumed-error")
+        val copied = recorded
+        val duplicate = machine_cleanup_progress_record_v1(copied, MachineCleanupComponentV1.Machine, "released")
+        expect(duplicate.machine_consumed).to_equal(true)
+        expect(duplicate.first_diagnostic).to_equal(recorded.first_diagnostic)
+        val complete = machine_cleanup_progress_record_v1(duplicate, MachineCleanupComponentV1.Principal, "consumed-error")
+        expect(complete.first_diagnostic).to_equal("machine-authority-storage-consumed-error")
+        expect(machine_cleanup_progress_status_v1(complete)).to_equal("consumed-error")
+        val repeated = machine_cleanup_progress_record_v1(complete, MachineCleanupComponentV1.Principal, "retained")
+        expect(repeated.principal_consumed).to_equal(true)
+        expect(machine_cleanup_progress_status_v1(repeated)).to_equal("consumed-error")
+
+    it "keeps unknown and stale outcomes live until this pair records positive consumption":
+        step("Unknown native text must never manufacture a closed component")
+        val unknown = machine_cleanup_progress_record_v1(machine_cleanup_progress_initial_v1(),
+            MachineCleanupComponentV1.Machine, "unexpected-provider-state")
+        expect(unknown.machine_consumed).to_equal(false)
+        expect(machine_cleanup_progress_status_v1(unknown)).to_equal("retained")
+        step("A stale string cannot manufacture closed evidence even for an apparently matching owner")
+        val stale = machine_cleanup_progress_record_v1(unknown, MachineCleanupComponentV1.Machine, "stale")
+        expect(stale.machine_consumed).to_equal(false)
+        expect(machine_cleanup_progress_status_v1(stale)).to_equal("retained")
+        val machine = machine_cleanup_progress_record_v1(stale, MachineCleanupComponentV1.Machine, "released")
+        val complete = machine_cleanup_progress_record_v1(machine, MachineCleanupComponentV1.Principal, "released")
+        expect(machine_cleanup_progress_status_v1(complete)).to_equal("released")
+        expect(complete.first_diagnostic).to_equal("")

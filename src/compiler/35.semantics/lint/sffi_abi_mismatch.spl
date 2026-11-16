@@ -1,0 +1,218 @@
+# SPL-SFFI-ABI-001: an SFFI declaration maps a C scalar to a unit whose
+# underlying Simple primitive differs in width or signedness for the selected
+# target. Slice of doc/03_plan/release/1.0.0/robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md
+# section 3.2. C `int`/`long` are resolved through the target ABI table
+# (c_scalar_underlying in 30.types/custom_primitive_info.spl), never hardcoded.
+#
+# Declaration form (owner decision 3B, 2026-11-16): the C type is declared on
+# the unit itself, `@c_abi("int32_t") unit Fd: i32 as fd` (or the decorator on
+# the line above), and checked at every `extern fn` line naming that unit.
+# Deprecated alias for one release: a separate `@c_abi(Unit: "ctype")` line
+# above the extern fn; sffi_abi_deprecation_notes reports each use.
+
+use compiler.semantics.lint.lint_text.{code_line_snapshot, CodeLine}
+use compiler.types.custom_primitive_info.{c_scalar_underlying, c_target_data_model}
+
+pub struct SffiAbiFinding:
+    code: text
+    message: text
+    line_num: i64
+
+fn _sam_unit_decl(line: text) -> [text]:
+    # Returns [name, underlying] for `unit Name: prim ...`, else [].
+    var rest = line
+    if rest.starts_with("pub "):
+        rest = rest.substring(4, rest.byte_len())
+    if not rest.starts_with("unit "):
+        return []
+    rest = rest.substring(5, rest.byte_len())
+    val colon = rest.find(":")
+    if colon <= 0:
+        return []
+    val name = rest.substring(0, colon).trim()
+    val tail = rest.substring(colon + 1, rest.byte_len()).trim()
+    val parts = tail.split(" ")
+    [name, parts[0]]
+
+fn _sam_import_names(line: text) -> [text]:
+    # Names bound by `use a.b.{A, B as C}` / `use a.b.A [as C]`; the alias wins.
+    var rest = line
+    for prefix in ["pub use ", "export use ", "use "]:
+        if rest.starts_with(prefix):
+            rest = rest.substring(prefix.byte_len(), rest.byte_len()).trim()
+            var items: [text] = []
+            val open = rest.find("{")
+            if open >= 0:
+                val close = rest.find("}")
+                if close > open:
+                    items = rest.substring(open + 1, close).split(",")
+            else:
+                val dot = rest.rfind(".")
+                items = [rest.substring(dot + 1, rest.byte_len())]
+            var names: [text] = []
+            for item in items:
+                val parts = item.trim().split(" as ")
+                val n = parts[parts.len() - 1].trim()
+                if n != "":
+                    names.push(n)
+            return names
+    []
+
+fn _sam_width(prim: text) -> text:
+    prim.substring(1, prim.byte_len())
+
+fn _sam_unquote(s: text) -> text:
+    var v = s.trim()
+    if v.starts_with("\"") and v.ends_with("\""):
+        v = v.substring(1, v.byte_len() - 1)
+    v
+
+fn _sam_compare(unit_name: text, unit_prim: text, c_type: text, c_prim: text, triple: text) -> text:
+    if unit_prim == c_prim:
+        return ""
+    val head = "C `{c_type}` maps to {c_prim} on {triple} but unit `{unit_name}` is backed by {unit_prim}"
+    if _sam_width(unit_prim) != _sam_width(c_prim):
+        return head + " (width mismatch)"
+    if unit_prim.substring(0, 1) != c_prim.substring(0, 1):
+        return head + " (signedness mismatch)"
+    head + " (type class mismatch)"
+
+fn _sam_strip_decl_abi(line: text) -> [text]:
+    # `@c_abi("ctype") rest` -> ["ctype", rest]; `@c_abi("ctype")` alone -> ["ctype", ""].
+    # The alias form `@c_abi(Unit: "ctype")` is not this form -> [].
+    if not line.starts_with("@c_abi(\""):
+        return []
+    val close = line.find("\")")
+    if close < 8:
+        return []
+    val inner = line.substring(8, close)
+    if inner.contains(":") or inner.contains("\""):
+        return []
+    [inner, line.substring(close + 2, line.byte_len()).trim()]
+
+fn _sam_is_alias_line(t: text) -> bool:
+    t.starts_with("@c_abi(") and t.ends_with(")") and _sam_strip_decl_abi(t).len() == 0
+
+fn _sam_is_extern_line(t: text) -> bool:
+    t.starts_with("extern fn ") or t.starts_with("pub extern fn ")
+
+fn _sam_ident_char(c: text) -> bool:
+    c != "" and "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".contains(c)
+
+fn _sam_has_word(line: text, word: text) -> bool:
+    var start = 0
+    val n = line.byte_len()
+    while start < n:
+        val rel = line.substring(start, n).find(word)
+        if rel < 0:
+            return false
+        val at = start + rel
+        val end = at + word.byte_len()
+        val before_ok = at == 0 or not _sam_ident_char(line.substring(at - 1, at))
+        val after_ok = end >= n or not _sam_ident_char(line.substring(end, end + 1))
+        if before_ok and after_ok:
+            return true
+        start = at + 1
+    false
+
+pub fn sffi_abi_deprecation_notes(source: text) -> [SffiAbiFinding]:
+    # The separate `@c_abi(Unit: "ctype")` line is a deprecated alias for one
+    # release (owner decision 3B, 2026-11-16); declare the C type on the unit.
+    var notes: [SffiAbiFinding] = []
+    val lines = code_line_snapshot(source).lines
+    var i = 0
+    while i < lines.len():
+        if _sam_is_alias_line(lines[i].trimmed):
+            notes.push(SffiAbiFinding(code: "SPL-SFFI-ABI-001", message: "deprecated `@c_abi(Unit: \"ctype\")` form: declare the C type on the unit, e.g. `@c_abi(\"int32_t\") unit Fd: i32 as fd`", line_num: i + 1))
+        i = i + 1
+    notes
+
+pub fn check_sffi_abi_mismatch(source: text, file_path: text, triple: text) -> [SffiAbiFinding]:
+    var findings: [SffiAbiFinding] = []
+    if file_path.contains("/vendor/"):
+        return findings
+    val lines = code_line_snapshot(source).lines
+    var unit_names: [text] = []
+    var unit_prims: [text] = []
+    var imported: [text] = []
+    # Units carrying their C type on the declaration (`@c_abi("ctype") unit ...`).
+    var abi_names: [text] = []
+    var abi_prims: [text] = []
+    var abi_ctypes: [text] = []
+    var pending_ctype = ""
+    for line in lines:
+        for n in _sam_import_names(line.trimmed):
+            imported.push(n)
+        var decl_line = line.trimmed
+        var ctype = ""
+        val deco = _sam_strip_decl_abi(decl_line)
+        if deco.len() == 2:
+            ctype = deco[0]
+            decl_line = deco[1]
+            if decl_line == "":
+                pending_ctype = ctype
+                continue
+        elif pending_ctype != "":
+            ctype = pending_ctype
+        if decl_line != "":
+            pending_ctype = ""
+        val d = _sam_unit_decl(decl_line)
+        if d.len() == 2:
+            unit_names.push(d[0])
+            unit_prims.push(d[1])
+            if ctype != "":
+                abi_names.push(d[0])
+                abi_prims.push(d[1])
+                abi_ctypes.push(ctype)
+    var i = 0
+    while i < lines.len():
+        val t = lines[i].trimmed
+        if abi_names.len() > 0 and _sam_is_extern_line(t):
+            if c_target_data_model(triple) == "":
+                findings.push(SffiAbiFinding(code: "SPL-SFFI-ABI-001", message: "unknown target `{triple}`: cannot resolve the C ABI, refusing to default", line_num: i + 1))
+                i = i + 1
+                continue
+            var a = 0
+            while a < abi_names.len():
+                if _sam_has_word(t, abi_names[a]):
+                    val c_prim = c_scalar_underlying(abi_ctypes[a], triple)
+                    if c_prim == "":
+                        findings.push(SffiAbiFinding(code: "SPL-SFFI-ABI-001", message: "C type `{abi_ctypes[a]}` for unit `{abi_names[a]}` is not a known scalar on {triple}", line_num: i + 1))
+                    else:
+                        val msg = _sam_compare(abi_names[a], abi_prims[a], abi_ctypes[a], c_prim, triple)
+                        if msg != "":
+                            findings.push(SffiAbiFinding(code: "SPL-SFFI-ABI-001", message: msg, line_num: i + 1))
+                a = a + 1
+            i = i + 1
+            continue
+        if not _sam_is_alias_line(t):
+            i = i + 1
+            continue
+        if c_target_data_model(triple) == "":
+            findings.push(SffiAbiFinding(code: "SPL-SFFI-ABI-001", message: "unknown target `{triple}`: cannot resolve the C ABI, refusing to default", line_num: i + 1))
+            i = i + 1
+            continue
+        val inner = t.substring(7, t.byte_len() - 1)
+        for entry in inner.split(","):
+            val colon = entry.find(":")
+            if colon <= 0:
+                continue
+            val unit_name = entry.substring(0, colon).trim()
+            val c_type = _sam_unquote(entry.substring(colon + 1, entry.byte_len()))
+            val c_prim = c_scalar_underlying(c_type, triple)
+            if c_prim == "":
+                findings.push(SffiAbiFinding(code: "SPL-SFFI-ABI-001", message: "C type `{c_type}` for unit `{unit_name}` is not a known scalar on {triple}", line_num: i + 1))
+                continue
+            var declared = false
+            var k = 0
+            while k < unit_names.len():
+                if unit_names[k] == unit_name:
+                    declared = true
+                    val msg = _sam_compare(unit_name, unit_prims[k], c_type, c_prim, triple)
+                    if msg != "":
+                        findings.push(SffiAbiFinding(code: "SPL-SFFI-ABI-001", message: msg, line_num: i + 1))
+                k = k + 1
+            if not declared and not imported.contains(unit_name):
+                findings.push(SffiAbiFinding(code: "SPL-SFFI-ABI-001", message: "@c_abi names undeclared unit `{unit_name}` (no `unit {unit_name}: ...` declaration in this file)", line_num: i + 1))
+        i = i + 1
+    findings

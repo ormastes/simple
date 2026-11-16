@@ -81,7 +81,7 @@ fn is_valid_kind(kind: text) -> bool:
     """Supported independently publishable target kinds."""
     kind == "binary" or kind == "library" or kind == "shared" or kind == "test"
 
-fn parse_targets_text(src: text) -> TargetSet:
+pub fn parse_targets_text(src: text) -> TargetSet:
     """Parse the targets declarations out of a build.sdn/targets.sdn body.
 
     Pure text -> TargetSet. Does not touch the filesystem; entry-existence and
@@ -254,7 +254,7 @@ fn parse_targets_text(src: text) -> TargetSet:
 
     TargetSet(targets, errors, groups, includes)
 
-fn find_target(ts: TargetSet, name: text) -> i64:
+pub fn find_target(ts: TargetSet, name: text) -> i64:
     """Index of `name` in the target list, or -1."""
     var i = 0
     while i < ts.targets.len():
@@ -316,7 +316,7 @@ fn find_cycle(ts: TargetSet) -> text:
         start = start + 1
     ""
 
-fn validate_targets(ts: TargetSet, repo_root: text) -> [text]:
+pub fn validate_targets(ts: TargetSet, repo_root: text) -> [text]:
     """Full fail-closed validation. Returns every error found (never throws).
 
     Checks, each a distinct named error: parse errors carried in from the
@@ -377,7 +377,7 @@ fn validate_targets(ts: TargetSet, repo_root: text) -> [text]:
         errors.push("target-error: dependency-cycle: " + cycle)
     errors
 
-fn group_targets(ts: TargetSet, group: text) -> [text]:
+pub fn group_targets(ts: TargetSet, group: text) -> [text]:
     """Member target names of every group named `group` (empty if none)."""
     var out: [text] = []
     var g = 0
@@ -390,7 +390,7 @@ fn group_targets(ts: TargetSet, group: text) -> [text]:
         g = g + 1
     out
 
-fn default_group_targets(ts: TargetSet) -> [text]:
+pub fn default_group_targets(ts: TargetSet) -> [text]:
     """Targets a default build selects: members of `default: true` groups.
 
     A file that declares no group keeps the pre-group meaning: every target."""
@@ -411,7 +411,51 @@ fn default_group_targets(ts: TargetSet) -> [text]:
         g = g + 1
     out
 
-fn normalize_include_path(p: text) -> text:
+# --- Opt-in backend group provider admission (plan §6) ---------------------
+#
+# An opt-in backend group (config/build/backends_*.sdn) is selected only when a
+# provider descriptor is presented and admitted. This is a gate, not a claim
+# that any backend provider is production-ready. Default selection
+# (`default_group_targets`) never consults it, so the host build is unaffected.
+
+pub val BACKEND_PROVIDER_ABI_VERSION: i64 = 1
+
+pub struct BackendProviderDescriptor:
+    group: text
+    abi_version: i64
+    host_triple: text
+    capabilities: [text]
+
+pub fn admit_backend_provider(d: BackendProviderDescriptor, host_triple: text, required_caps: [text]) -> text:
+    """Empty text = admitted; otherwise the first stable refusal code."""
+    if d.abi_version != BACKEND_PROVIDER_ABI_VERSION:
+        return "backend-admission: abi-mismatch: " + d.group + ": " + d.abi_version.to_string() + " != " + BACKEND_PROVIDER_ABI_VERSION.to_string()
+    if d.host_triple != host_triple:
+        return "backend-admission: triple-mismatch: " + d.group + ": " + d.host_triple + " != " + host_triple
+    var i = 0
+    while i < required_caps.len():
+        var found = false
+        var j = 0
+        while j < d.capabilities.len():
+            if d.capabilities[j] == required_caps[i]:
+                found = true
+            j = j + 1
+        if not found:
+            return "backend-admission: missing-capability: " + d.group + ": " + required_caps[i]
+        i = i + 1
+    ""
+
+pub fn select_backend_group(ts: TargetSet, group: text, d: BackendProviderDescriptor, host_triple: text, required_caps: [text]) -> [text]:
+    """Members of an opt-in backend group, or empty when the descriptor is for
+    another group or is refused by `admit_backend_provider`."""
+    var none: [text] = []
+    if d.group != group:
+        return none
+    if admit_backend_provider(d, host_triple, required_caps).len() > 0:
+        return none
+    group_targets(ts, group)
+
+pub fn normalize_include_path(p: text) -> text:
     """Use `/` on every host so one config reads the same everywhere."""
     p.replace("\\", "/")
 
@@ -454,7 +498,7 @@ fn _resolve_include(including: text, inc: text) -> text:
         return _canonical_path(n)
     _canonical_path(_dir_of(including) + "/" + n)
 
-fn load_targets_file(path: text, repo_root: text) -> TargetSet:
+pub fn load_targets_file(path: text, repo_root: text) -> TargetSet:
     """Read and parse a targets file, following `include:` directives.
 
     A missing file yields a parse error, not an empty default — absence must

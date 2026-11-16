@@ -1,0 +1,51 @@
+# Per-file unit child front end must be file-scoped (bug
+# windows_phase3_baseline_zero_objects_two_pass_forced_2026-11-15, blocker 3).
+#
+# A unit child takes the PM3 TLDR route (parse only its picked files; imports
+# are summary surfaces) only when it has a frontend root. Runs with no
+# --cache-dir (every p3new runner) left the root empty, so the child silently
+# body-parsed the whole import closure of its pick (~2.4 GB, >10 min before
+# the first object). The parent now always hands the unit a root (the shared
+# HIR queue's frontend dir), and a unit child with no root fails closed instead
+# of falling back to the whole closure.
+use std.spec
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_unit_tldr_root_v1,
+    native_file_unit_tldr_route_error_v1, native_file_unit_spawn_tldr_root_v1}
+
+describe "per-file unit child front end":
+    """
+    # @req P3UNIT-001: a unit child spawned without --cache-dir still gets a TLDR root
+    """
+    it "parent hands a unit child the shared HIR queue frontend root when no cache dir is set":
+        step("no frontend env -> root under the shared HIR queue")
+        expect(native_file_unit_spawn_tldr_root_v1("", "C:/q/hir")).to_equal("C:/q/hir/frontend")
+        step("an explicit frontend cache dir wins")
+        expect(native_file_unit_spawn_tldr_root_v1("C:/c/frontend", "C:/q/hir")).to_equal("C:/c/frontend")
+        step("no queue and no env -> empty (not a unit lane)")
+        expect(native_file_unit_spawn_tldr_root_v1("", "")).to_equal("")
+
+    """
+    # @req P3UNIT-002: child resolves its TLDR root from either source
+    """
+    it "unit child resolves its root from the frontend env first, then the unit root env":
+        expect(native_file_unit_tldr_root_v1("C:/c/frontend", "C:/q/hir/frontend")).to_equal("C:/c/frontend")
+        expect(native_file_unit_tldr_root_v1("", "C:/q/hir/frontend")).to_equal("C:/q/hir/frontend")
+        expect(native_file_unit_tldr_root_v1("", "")).to_equal("")
+
+    """
+    # @req P3UNIT-003: no silent whole-closure fallback in a unit child
+    """
+    it "a unit child with the TLDR route on but no root fails closed":
+        val err = native_file_unit_tldr_route_error_v1(true, true, "")
+        assert_true(err.starts_with("FILE-UNIT-E-NO-TLDR-ROOT"))
+        expect(native_file_unit_tldr_route_error_v1(true, true, "C:/q/hir/frontend")).to_equal("")
+
+    """
+    # @req P3UNIT-004: generalisation -- the guard only binds unit children
+    # with the route enabled; explicit SIMPLE_UNIT_TLDR_IMPORTS=0 and non-unit
+    # children (HIR shard, MIR shard, parse shard) keep their behaviour.
+    """
+    it "the fail-closed guard does not touch non-unit children or an explicit opt-out":
+        expect(native_file_unit_tldr_route_error_v1(false, true, "")).to_equal("")
+        expect(native_file_unit_tldr_route_error_v1(true, false, "")).to_equal("")
+        expect(native_file_unit_tldr_route_error_v1(false, false, "")).to_equal("")

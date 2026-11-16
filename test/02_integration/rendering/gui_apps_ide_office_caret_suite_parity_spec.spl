@@ -1,0 +1,335 @@
+"""
+## IDE, Office & Caret Suite GUI Rendering Parity Spec
+
+Verifies that IDE, Office suite apps (Launcher, Word/Writer, Sheets/Calc,
+Slides, Mail, Planner), and Caret Suite render non-blank, well-spaced desktop
+GUI frames via Engine2D on both CPU `"software"` and GPU `"vulkan"` (with real
+Vulkan `device_readback` and `cpu_fallback_used == false`), and that HTML/CSS
+workbench layouts preserve valid non-collapsed box geometry without overlap.
+"""
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.engine2d.color.{color_r, color_g, color_b}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_element_geometry_lines}
+use std.editor.core.session.{EditSession}
+use app.editor.gui_shell_render.{IdeGuiFrame, ide_render_gui_frame}
+use app.ide.main.{run_ide_cli}
+use app.ide.feature_report.{ide_feature_check_report}
+use app.office.gui.{OfficeGuiFrame, office_gui_render_engine2d_frame, office_gui_build_tree}
+use app.office.gui_apps.{office_gui_launcher_engine2d_frame}
+use app.office.mod.{run_office}
+use app.office.md_wysiwyg_gui.{markdown_preview_html, RW, RH}
+use app.office.mail.mail_app.{MailApp}
+use app.office.sheets.calc_gui_host.{calc_gui_html}
+use app.office.sheets.access_controller.{calc_access_controller_with_sheet}
+use app.office.sheets.spreadsheet.{Sheet}
+use app.llm_caret.cs_gui.{CsAgent, CsDashboard, CsGuiFrame, cs_render_gui_html, cs_render_gui_frame, cs_resolve_ui_mode}
+use app.llm_caret.gui.{caret_gui_native_html}
+
+fn _abs_i32(x: i32) -> i32:
+    if x < 0: -x else: x
+
+fn _non_bg_and_distinct(pixels: [u32], bg: u32) -> [i64]:
+    var non_bg: i64 = 0
+    var seen: [u32] = []
+    var i: i64 = 0
+    val n = pixels.len()
+    while i < n:
+        val px = pixels[i]
+        if px != bg:
+            non_bg = non_bg + 1
+        if seen.len() < 16:
+            var found = false
+            var j: i64 = 0
+            while j < seen.len():
+                if seen[j] == px:
+                    found = true
+                    break
+                j = j + 1
+            if not found:
+                seen.push(px)
+        i = i + 2
+    [non_bg * 2, seen.len()]
+
+fn _region_has_variation(pixels: [u32], w: i32, h: i32, rx: i32, ry: i32, rw: i32, rh: i32) -> bool:
+    if pixels.len() == 0 or w <= 0 or h <= 0:
+        return false
+    val x0 = if rx < 0: 0 else: rx
+    val y0 = if ry < 0: 0 else: ry
+    val x1 = if rx + rw > w: w else: rx + rw
+    val y1 = if ry + rh > h: h else: ry + rh
+    if x1 <= x0 or y1 <= y0:
+        return false
+    val base = pixels[(y0 as i64) * (w as i64) + (x0 as i64)]
+    var y = y0
+    while y < y1:
+        var x = x0
+        while x < x1:
+            val px = pixels[(y as i64) * (w as i64) + (x as i64)]
+            if px != base:
+                return true
+            x = x + 3
+        y = y + 3
+    false
+
+fn _parity_pct(a: [u32], b: [u32], tol: i32) -> i64:
+    val n = if a.len() < b.len(): a.len() else: b.len()
+    if n <= 0:
+        return 0
+    var matched: i64 = 0
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < n:
+        val ca = a[i]
+        val cb = b[i]
+        if ca == cb:
+            matched = matched + 1
+        else:
+            val dr = _abs_i32(color_r(ca) - color_r(cb))
+            val dg = _abs_i32(color_g(ca) - color_g(cb))
+            val db = _abs_i32(color_b(ca) - color_b(cb))
+            if dr <= tol and dg <= tol and db <= tol:
+                matched = matched + 1
+        total = total + 1
+        i = i + 2
+    if total == 0: 0 else: (matched * 100) / total
+
+fn _assert_desktop_frame_ok(pixels: [u32], w: i32, h: i32, min_non_bg: i64, min_distinct: i64):
+    val expected_len = (w as i64) * (h as i64)
+    expect(pixels.len()).to_equal(expected_len)
+    val stats = _non_bg_and_distinct(pixels, pixels[0])
+    expect(stats[0] >= min_non_bg).to_be(true)
+    expect(stats[1] >= min_distinct).to_be(true)
+    # Top header/toolbar, left sidebar, main content pane, and bottom status bar must all paint content.
+    expect(_region_has_variation(pixels, w, h, 0, 0, w, 44)).to_be(true)
+    expect(_region_has_variation(pixels, w, h, 4, 48, w / 4, h - 96)).to_be(true)
+    expect(_region_has_variation(pixels, w, h, w / 3, 60, w / 2, h - 120)).to_be(true)
+    expect(_region_has_variation(pixels, w, h, 0, h - 30, w, 26)).to_be(true)
+
+fn _parse_i32_or(s: text, fallback: i32) -> i32:
+    val t = s.trim()
+    if t == "":
+        return fallback
+    val parsed = t.to_int() ?? fallback
+    parsed
+
+fn _assert_geom_valid(html: text, width: i32, height: i32, min_boxes: i64):
+    val lines = simple_web_layout_element_geometry_lines(html, width, height)
+    var valid_boxes: i64 = 0
+    for line in lines:
+        if not line.starts_with("GEOM|"):
+            continue
+        val parts = line.split("|")
+        if parts.len() < 7:
+            continue
+        val tag = parts[2].trim().to_lower()
+        if tag == "html" or tag == "body" or tag == "style" or tag == "head":
+            continue
+        val x = _parse_i32_or(parts[3], -1)
+        val y = _parse_i32_or(parts[4], -1)
+        val bw = _parse_i32_or(parts[5], 0)
+        val bh = _parse_i32_or(parts[6], 0)
+        if tag == "div" or tag == "aside" or tag == "header" or tag == "section" or tag == "main" or tag == "button" or tag == "textarea" or tag == "input" or tag == "pre":
+            expect(bw > 0).to_be(true)
+            expect(bh > 0).to_be(true)
+            expect(x >= 0).to_be(true)
+            expect(y >= 0).to_be(true)
+            expect(x + bw <= width + 6).to_be(true)
+            expect(y + bh <= height + 6).to_be(true)
+            valid_boxes = valid_boxes + 1
+    expect(valid_boxes >= min_boxes).to_be(true)
+
+describe "IDE GUI rendering (Software and Vulkan parity)":
+    it "renders 960x600 IDE desktop GUI cleanly on Software and Vulkan with pixel parity":
+        var session = EditSession.new()
+        session.open_file("src/app/ide/main.spl")
+        val sw = ide_render_gui_frame(session, "editor", 960, 600, "software")
+        val vk = ide_render_gui_frame(session, "editor", 960, 600, "vulkan")
+
+        expect(sw.resolved_backend).to_equal("software")
+        expect(vk.resolved_backend).to_equal("vulkan")
+        expect(vk.readback_source).to_equal("device_readback")
+        expect(vk.cpu_fallback_used).to_be(false)
+        expect(sw.checksum != 0).to_be(true)
+        expect(vk.checksum != 0).to_be(true)
+        expect(sw.active_file).to_contain("main.spl")
+        expect(vk.active_file).to_contain("main.spl")
+
+        _assert_desktop_frame_ok(sw.pixels, 960, 600, 30000, 6)
+        _assert_desktop_frame_ok(vk.pixels, 960, 600, 30000, 6)
+        expect(_parity_pct(sw.pixels, vk.pixels, 24) >= 92).to_be(true)
+
+    it "renders Caret IDE profile and routes --gui-frame-once and --feature-check CLI":
+        var session = EditSession.new()
+        session.open_empty()
+        val caret_vk = ide_render_gui_frame(session, "caret", 960, 600, "vulkan")
+        expect(caret_vk.profile).to_equal("caret")
+        expect(caret_vk.resolved_backend).to_equal("vulkan")
+        expect(caret_vk.readback_source).to_equal("device_readback")
+        expect(caret_vk.cpu_fallback_used).to_be(false)
+        _assert_desktop_frame_ok(caret_vk.pixels, 960, 600, 20000, 5)
+
+        val report = ide_feature_check_report("editor")
+        expect(report.len() > 0).to_be(true)
+        expect(run_ide_cli(["--feature-check", "--profile=editor"])).to_equal(0)
+        expect(run_ide_cli(["--gui-frame-once", "--backend=vulkan", "src/app/ide/main.spl"])).to_equal(0)
+
+describe "Office GUI rendering (Software and Vulkan parity across suite)":
+    it "wires all Office suite apps, Mail 3-column UI, Calc grid CSS, and 960x600 WYSIWYG":
+        val names = ["launcher", "word", "writer", "sheets", "calc", "slides", "mail", "planner", "counter"]
+        for name in names:
+            val tree = office_gui_build_tree(name)
+            expect(tree.root_id != "").to_be(true)
+
+        val mail = MailApp.new()
+        val mail_tree = mail.build_ui()
+        val mail_root = mail_tree.root_node()
+        expect(mail_root.find_by_id("mail_columns") != nil).to_be(true)
+        expect(mail_root.find_by_id("folder_panel") != nil).to_be(true)
+        expect(mail_root.find_by_id("mail_detail") != nil).to_be(true)
+        expect(mail_root.find_by_id("mail_summary_count") != nil).to_be(true)
+
+        expect(RW).to_equal(960)
+        expect(RH).to_equal(600)
+        val md_html = markdown_preview_html("# Office Report\n\nRendered in desktop WYSIWYG.")
+        expect(md_html).to_contain(".md-wysiwyg-page")
+        expect(md_html).to_contain("box-sizing:border-box")
+        _assert_geom_valid(md_html, 960, 600, 1)
+
+        var sheet = Sheet.new("gui")
+        sheet.set_value("A1", "48")
+        val calc_html = calc_gui_html(calc_access_controller_with_sheet(sheet))
+        expect(calc_html).to_contain("Simple Calc")
+        expect(calc_html).to_contain("position:relative")
+        expect(calc_html).to_contain("48")
+
+    it "renders Office Launcher, Word, Sheets, Slides, Mail, and Planner at 960x600 on Vulkan with Software parity":
+        val parity_apps = ["launcher", "word", "mail"]
+        for app_name in parity_apps:
+            val sw = office_gui_render_engine2d_frame(app_name, 960, 600, "software")
+            val vk = office_gui_render_engine2d_frame(app_name, 960, 600, "vulkan")
+            expect(sw.resolved_backend).to_equal("software")
+            expect(vk.resolved_backend).to_equal("vulkan")
+            expect(vk.readback_source).to_equal("device_readback")
+            expect(vk.cpu_fallback_used).to_be(false)
+            expect(sw.checksum != 0).to_be(true)
+            expect(vk.checksum != 0).to_be(true)
+            _assert_desktop_frame_ok(sw.pixels, 960, 600, 30000, 6)
+            _assert_desktop_frame_ok(vk.pixels, 960, 600, 30000, 6)
+            expect(_parity_pct(sw.pixels, vk.pixels, 24) >= 92).to_be(true)
+
+        val extra_apps = ["sheets", "slides", "planner"]
+        for app_name in extra_apps:
+            val vk = office_gui_render_engine2d_frame(app_name, 960, 600, "vulkan")
+            expect(vk.resolved_backend).to_equal("vulkan")
+            expect(vk.readback_source).to_equal("device_readback")
+            expect(vk.cpu_fallback_used).to_be(false)
+            _assert_desktop_frame_ok(vk.pixels, 960, 600, 30000, 6)
+
+        val writer_alias = office_gui_launcher_engine2d_frame("writer", 640, 420, "vulkan")
+        expect(writer_alias.canonical_app).to_equal("word")
+        expect(writer_alias.resolved_backend).to_equal("vulkan")
+        expect(writer_alias.readback_source).to_equal("device_readback")
+        expect(writer_alias.cpu_fallback_used).to_be(false)
+        _assert_desktop_frame_ok(writer_alias.pixels, 640, 420, 20000, 5)
+
+        expect(run_office(["calc", "--frame-once", "--backend=vulkan"])).to_equal(0)
+
+describe "Caret Suite GUI rendering (Software, Vulkan parity, and HTML layout geometry)":
+    it "renders Caret Suite workbench HTML with valid box geometry and GUI CLI mode routing":
+        val a1 = CsAgent(
+            agent_id: "agent-alpha",
+            spec: "claude",
+            status: "running",
+            pid: 4101,
+            pane_id: "%1",
+            cpu_pct: 12.5,
+            rss_mb: 184,
+            detail: "streaming response"
+        )
+        val a2 = CsAgent(
+            agent_id: "agent-beta",
+            spec: "codex",
+            status: "waiting_approval",
+            pid: 4102,
+            pane_id: "%2",
+            cpu_pct: 4.0,
+            rss_mb: 142,
+            detail: "awaiting approval"
+        )
+        val dash = CsDashboard(
+            session: "caret-suite",
+            manager_status: "running",
+            agents: [a1, a2],
+            selected: 0,
+            input: "verify vulkan",
+            log: ["[18:00] agent-alpha online", "[18:01] agent-beta waiting_approval"],
+            screen: ["Ready for review.", "All checks wired."],
+            pins: ["agent-alpha"],
+            mru: ["agent-alpha", "agent-beta"]
+        )
+        val html = cs_render_gui_html(dash, 960, 600)
+        expect(html).to_contain("Caret Workbench")
+        expect(html).to_contain("agent-alpha")
+        expect(html).to_contain("agent-beta")
+        expect(html).to_contain("Ready for review.")
+        expect(html).to_contain("position: relative")
+        expect(html).to_not_contain("1fr auto")
+        _assert_geom_valid(html, 960, 600, 6)
+
+        val native_html = caret_gui_native_html("Check layout", "Hello Caret", "All checks pass.", "vulkan", "ready")
+        _assert_geom_valid(native_html, 480, 320, 4)
+
+        expect(cs_resolve_ui_mode(["--gui"])).to_equal("gui")
+        expect(cs_resolve_ui_mode(["--gui-frame-once"])).to_equal("gui_frame_once")
+        expect(cs_resolve_ui_mode(["--tui"])).to_equal("tui")
+
+    it "renders 960x600 Caret Suite GUI cleanly on Software and Vulkan with pixel parity":
+        val a1 = CsAgent(
+            agent_id: "agent-alpha",
+            spec: "claude",
+            status: "running",
+            pid: 4101,
+            pane_id: "%1",
+            cpu_pct: 12.5,
+            rss_mb: 184,
+            detail: "streaming response"
+        )
+        val a2 = CsAgent(
+            agent_id: "agent-beta",
+            spec: "codex",
+            status: "waiting_approval",
+            pid: 4102,
+            pane_id: "%2",
+            cpu_pct: 4.0,
+            rss_mb: 142,
+            detail: "awaiting approval"
+        )
+        val dash = CsDashboard(
+            session: "caret-suite",
+            manager_status: "running",
+            agents: [a1, a2],
+            selected: 0,
+            input: "verify vulkan",
+            log: ["[18:00] agent-alpha online"],
+            screen: ["Ready for review.", "All checks wired."],
+            pins: ["agent-alpha"],
+            mru: ["agent-alpha", "agent-beta"]
+        )
+        val sw = cs_render_gui_frame(dash, 960, 600, "software")
+        val vk = cs_render_gui_frame(dash, 960, 600, "vulkan")
+
+        expect(sw.resolved_backend).to_equal("software")
+        expect(vk.resolved_backend).to_equal("vulkan")
+        expect(vk.readback_source).to_equal("device_readback")
+        expect(vk.cpu_fallback_used).to_be(false)
+        expect(sw.agent_count).to_equal(2)
+        expect(vk.agent_count).to_equal(2)
+        expect(sw.selected_agent).to_equal("agent-alpha")
+        expect(vk.selected_agent).to_equal("agent-alpha")
+        expect(sw.checksum != 0).to_be(true)
+        expect(vk.checksum != 0).to_be(true)
+
+        _assert_desktop_frame_ok(sw.pixels, 960, 600, 30000, 6)
+        _assert_desktop_frame_ok(vk.pixels, 960, 600, 30000, 6)
+        expect(_parity_pct(sw.pixels, vk.pixels, 24) >= 92).to_be(true)

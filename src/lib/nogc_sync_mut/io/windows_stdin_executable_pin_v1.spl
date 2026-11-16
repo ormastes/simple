@@ -1,0 +1,311 @@
+# Incremental exact-HANDLE pin. Retained ancestor directories deny deletion and
+# reject reparse points, so the pathname used by CreateProcess cannot move to a
+# replacement image while the pin is held. No synchronous whole-file hash.
+use std.nogc_sync_mut.io.windows_stdin_command_abi_v1.*
+use std.nogc_sync_mut.io.windows_stdin_command_contract_v1.{windows_stdin_absolute_path_v1, windows_stdin_native_anchor_v1}
+use std.nogc_sync_mut.io.windows_command_owner_v2.windows_command_thread_check_v2
+use std.nogc_sync_mut.io.windows_process_text.windows_process_wide_linear_v1
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32, volatile_read_u64}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.text_bytes.bytes_to_text
+
+pub class WindowsStdinExecutablePinV1:
+    slot: i64
+
+pub struct WindowsStdinPinTurnV1:
+    owner: WindowsStdinExecutablePinV1?
+    ready: bool
+    digest: text
+    image: text
+    directory: text
+    error: text
+
+struct PinState:
+    program: text
+    expected: text
+    directory: text
+    paths: [text]
+    roots: [text]
+    root_paths: [text] = []
+    root_ids: [[i64]] = []
+    root_index: i64 = 0
+    image: text = ""
+    cwd: text = ""
+    directory_index: i64 = 0
+    phase: text = "allocate"
+    heap: i64 = 0
+    arena: i64 = 0
+    resolve_buffer: i64 = 0
+    allocations: [i64] = []
+    handles: [i64] = []
+    file: i64 = 0
+    provider: i64 = 0
+    hash: i64 = 0
+    size: i64 = 0
+    offset: i64 = 0
+    digest: text = ""
+    error: text = ""
+
+var pins: [PinState?] = []
+
+pub fn windows_stdin_parent_paths_v1(program: text, directory: text) -> [text]:
+    var paths: [text] = []
+    for path_index in 0..2:
+        val path = (if path_index == 0: program else: directory).replace("/", "\\")
+        var prefix = path.substring(0, 3)
+        if not paths.contains(prefix): paths.push(prefix)
+        val parts = path.substring(3, path.byte_len()).split("\\")
+        val count = if path_index == 0: parts.len() - 1 else: parts.len()
+        for index in 0..count:
+            prefix = prefix + (if prefix.ends_with("\\"): "" else: "\\") + parts[index]
+            if not paths.contains(prefix): paths.push(prefix)
+    paths
+
+pub fn windows_stdin_native_parent_paths_v1(program: text, directory: text) -> [text]:
+    var paths: [text] = []
+    for path_index in 0..2:
+        val path = if path_index == 0: program else: directory
+        var boundary = "\\\\?\\GLOBALROOT\\Device\\HarddiskVolume".byte_len()
+        while boundary < path.byte_len() and path.byte_at(boundary) != 92: boundary = boundary + 1
+        var prefix = path.substring(0, boundary + 1)
+        if not paths.contains(prefix): paths.push(prefix)
+        val parts = path.substring(boundary + 1, path.byte_len()).split("\\")
+        val count = if path_index == 0: parts.len() - 1 else: parts.len()
+        for index in 0..count:
+            if parts[index] == "": continue
+            prefix = prefix + (if prefix.ends_with("\\"): "" else: "\\") + parts[index]
+            if not paths.contains(prefix): paths.push(prefix)
+    paths
+
+fn path_key(path: text) -> text:
+    (if path.ends_with("\\"): path.substring(0, path.byte_len() - 1) else: path).to_upper()
+
+pub fn windows_stdin_file_id_equal_v1(left: [i64], right: [i64]) -> bool:
+    left.len() == 3 and right.len() == 3 and left[0] == right[0] and left[1] == right[1] and left[2] == right[2]
+
+pub fn windows_stdin_pin_begin_v1(program: text, expected: text, directory: text) -> WindowsStdinPinTurnV1:
+    if not windows_stdin_absolute_path_v1(program) or not windows_stdin_absolute_path_v1(directory) or
+            not builder_digest_valid_v1(expected):
+        return WindowsStdinPinTurnV1(None, false, "", "", "", "windows-stdin-pin-request")
+    val entry = windows_command_thread_check_v2()
+    if entry.is_err(): return WindowsStdinPinTurnV1(None, false, "", "", "", entry.unwrap_err())
+    if pins.len() >= 100000: return WindowsStdinPinTurnV1(None, false, "", "", "", "windows-stdin-pin-slot-bound")
+    val slot = pins.len()
+    val program_root = program.substring(0, 3).replace("/", "\\").to_upper()
+    val cwd_root = directory.substring(0, 3).replace("/", "\\").to_upper()
+    pins.push(Some(PinState(program: program, directory: directory, expected: expected, paths: [],
+        roots: if program_root == cwd_root: [program_root] else: [program_root, cwd_root])))
+    WindowsStdinPinTurnV1(Some(WindowsStdinExecutablePinV1(slot: slot)), false, "", "", "", "")
+
+@unsafe(reason: "strictly decode the actual OS-returned UTF16 native path in owned bounded storage", capabilities: [ffi, raw_ptr])
+fn native_text(buffer: i64, units: i64) -> Result<text, text>:
+    var bytes: [u8] = []
+    var index = 0
+    while index < units:
+        var scalar = volatile_read_u16(buffer + index * 2)
+        index = index + 1
+        if scalar >= 55296 and scalar <= 56319:
+            if index >= units: return Err("windows-stdin-pin-native-unicode")
+            val low = volatile_read_u16(buffer + index * 2)
+            if low < 56320 or low > 57343: return Err("windows-stdin-pin-native-unicode")
+            scalar = 65536 + (scalar - 55296) * 1024 + low - 56320
+            index = index + 1
+        elif scalar >= 56320 and scalar <= 57343:
+            return Err("windows-stdin-pin-native-unicode")
+        if scalar == 0: return Err("windows-stdin-pin-native-unicode")
+        if scalar < 128:
+            bytes.push(scalar as u8)
+        elif scalar < 2048:
+            bytes.push((192 + (scalar >> 6)) as u8)
+            bytes.push((128 + (scalar & 63)) as u8)
+        elif scalar < 65536:
+            bytes.push((224 + (scalar >> 12)) as u8)
+            bytes.push((128 + ((scalar >> 6) & 63)) as u8)
+            bytes.push((128 + (scalar & 63)) as u8)
+        else:
+            bytes.push((240 + (scalar >> 18)) as u8)
+            bytes.push((128 + ((scalar >> 12) & 63)) as u8)
+            bytes.push((128 + ((scalar >> 6) & 63)) as u8)
+            bytes.push((128 + (scalar & 63)) as u8)
+    val value = bytes_to_text(bytes)
+    if value.byte_len() != bytes.len(): return Err("windows-stdin-pin-native-text-allocation")
+    Ok(value)
+
+@unsafe(reason: "actual volume serial plus 128-bit file identity from the same retained HANDLE", capabilities: [ffi, raw_ptr])
+fn file_id(state: PinState, handle: i64) -> Result<[i64], text>:
+    if GetFileInformationByHandleEx(handle, 18, state.arena + 96, 24u32) == 0:
+        return Err("windows-stdin-pin-file-id-unavailable")
+    Ok([volatile_read_u64(state.arena + 96), volatile_read_u64(state.arena + 104), volatile_read_u64(state.arena + 112)])
+
+fn pin_fail(state: PinState, reason: text) -> PinState:
+    var changed = state
+    if changed.error == "": changed.error = reason
+    changed.phase = "cleanup"
+    changed
+
+@unsafe(reason: "each exact open retains its handle and every temporary allocation, including failures", capabilities: [ffi, raw_ptr])
+fn open_path(state: PinState, path: text, directory: bool) -> PinState:
+    var changed = state
+    val wide = windows_process_wide_linear_v1(state.heap, path)
+    changed.allocations.push(wide)
+    if wide == 0: return pin_fail(changed, "windows-stdin-pin-wide-allocation")
+    val handle = CreateFileW(wide, if directory: 128u32 else: 2147483648u32,
+        if directory: 3u32 else: 1u32, 0, 3u32, if directory: 35651712u32 else: 2097280u32, 0)
+    if handle == -1 or handle == 0: return pin_fail(changed, "windows-stdin-pin-open")
+    changed.handles.push(handle)
+    if GetFileInformationByHandleEx(handle, 9, state.arena + 24, 8u32) == 0:
+        return pin_fail(changed, "windows-stdin-pin-metadata")
+    val flags = volatile_read_u32(state.arena + 24)
+    if (flags & 1024) != 0 or (directory and (flags & 16) == 0) or (not directory and (flags & 16) != 0):
+        return pin_fail(changed, "windows-stdin-pin-reparse-or-kind")
+    if directory:
+        for index in 0..state.root_paths.len():
+            if path_key(path) == path_key(state.root_paths[index]):
+                val actual = file_id(changed, handle)
+                if actual.is_err(): return pin_fail(changed, actual.unwrap_err())
+                if not windows_stdin_file_id_equal_v1(actual.unwrap(), state.root_ids[index]):
+                    return pin_fail(changed, "windows-stdin-pin-resolved-root-identity-changed")
+    if not directory:
+        changed.file = handle
+        if GetFileInformationByHandleEx(handle, 1, state.arena + 32, 24u32) == 0:
+            return pin_fail(changed, "windows-stdin-pin-size")
+        changed.size = volatile_read_u64(state.arena + 40)
+        if changed.size <= 0 or changed.size > 67108864: return pin_fail(changed, "windows-stdin-pin-file-bound")
+    changed
+
+@unsafe(reason: "one CNG/handle/allocation cleanup step; failed release keeps original identity", capabilities: [ffi, raw_ptr])
+fn pin_cleanup(state: PinState) -> PinState:
+    var changed = state
+    if changed.hash != 0:
+        if BCryptDestroyHash(changed.hash) == 0: changed.hash = 0
+        elif changed.error == "": changed.error = "windows-stdin-pin-hash-release-pending"
+        return changed
+    if changed.provider != 0:
+        if BCryptCloseAlgorithmProvider(changed.provider, 0u32) == 0: changed.provider = 0
+        elif changed.error == "": changed.error = "windows-stdin-pin-provider-release-pending"
+        return changed
+    for index in 0..changed.handles.len():
+        if changed.handles[index] != 0:
+            if CloseHandle(changed.handles[index]) != 0: changed.handles[index] = 0
+            elif changed.error == "": changed.error = "windows-stdin-pin-handle-release-pending"
+            return changed
+    for index in 0..changed.allocations.len():
+        if changed.allocations[index] != 0:
+            if HeapFree(changed.heap, 0u32, changed.allocations[index]) != 0: changed.allocations[index] = 0
+            elif changed.error == "": changed.error = "windows-stdin-pin-allocation-release-pending"
+            return changed
+    changed.phase = "closed"
+    changed
+
+@unsafe(reason: "one bounded directory/file/hash/cleanup stage on the same canonical Windows thread", capabilities: [ffi, raw_ptr])
+pub fn windows_stdin_pin_step_v1(owner: WindowsStdinExecutablePinV1, close: bool = false) -> WindowsStdinPinTurnV1:
+    val entry = windows_command_thread_check_v2()
+    if entry.is_err(): return WindowsStdinPinTurnV1(Some(owner), false, "", "", "", entry.unwrap_err())
+    if owner.slot < 0 or owner.slot >= pins.len(): return WindowsStdinPinTurnV1(Some(owner), false, "", "", "", "windows-stdin-pin-owner-invalid")
+    var state = match pins[owner.slot]:
+        case Some(value): value
+        case None: return WindowsStdinPinTurnV1(None, false, "", "", "", "windows-stdin-pin-owner-retired")
+    if close: state.phase = "cleanup"
+    match state.phase:
+        case "allocate":
+            state.heap = GetProcessHeap()
+            if state.heap == 0: state = pin_fail(state, "windows-stdin-pin-heap")
+            else:
+                state.arena = HeapAlloc(state.heap, 8u32, 65664u64)
+                state.allocations.push(state.arena)
+                if state.arena == 0: state = pin_fail(state, "windows-stdin-pin-arena")
+                else:
+                    state.resolve_buffer = HeapAlloc(state.heap, 8u32, 65536u64)
+                    state.allocations.push(state.resolve_buffer)
+                    if state.resolve_buffer == 0: state = pin_fail(state, "windows-stdin-pin-path-buffer")
+                    else: state.phase = "roots"
+        case "roots":
+            if state.root_index < state.roots.len():
+                state = open_path(state, state.roots[state.root_index], true)
+                if state.phase != "cleanup": state.phase = "resolve-root"
+            else:
+                val program_key = state.program.substring(0, 3).replace("/", "\\").to_upper()
+                val cwd_key = state.directory.substring(0, 3).replace("/", "\\").to_upper()
+                for index in 0..state.roots.len():
+                    if state.roots[index] == program_key:
+                        state.image = state.root_paths[index] + state.program.substring(3, state.program.byte_len()).replace("/", "\\")
+                    if state.roots[index] == cwd_key:
+                        state.cwd = state.root_paths[index] + state.directory.substring(3, state.directory.byte_len()).replace("/", "\\")
+                if state.image == "" or state.cwd == "": state = pin_fail(state, "windows-stdin-pin-native-binding-missing")
+                else:
+                    state.paths = windows_stdin_native_parent_paths_v1(state.image, state.cwd)
+                    if state.paths.len() > 512: state = pin_fail(state, "windows-stdin-pin-native-ancestor-bound")
+                    else: state.phase = "directories"
+        case "resolve-root":
+            val root = state.handles[state.handles.len() - 1]
+            val identity = file_id(state, root)
+            if identity.is_err(): state = pin_fail(state, identity.unwrap_err())
+            else:
+                val count = GetFinalPathNameByHandleW(root, state.resolve_buffer, 32768u32, 2u32)
+                if count == 0u32 or count >= 32768u32: state = pin_fail(state, "windows-stdin-pin-native-root-resolution")
+                else:
+                    val decoded = native_text(state.resolve_buffer, count as i64)
+                    if decoded.is_err(): state = pin_fail(state, decoded.unwrap_err())
+                    else:
+                        val anchored = windows_stdin_native_anchor_v1(decoded.unwrap())
+                        if anchored.is_err(): state = pin_fail(state, anchored.unwrap_err())
+                        else:
+                            state.root_paths.push(anchored.unwrap())
+                            state.root_ids.push(identity.unwrap())
+                            state.root_index = state.root_index + 1
+                            state.phase = "roots"
+        case "directories":
+            if state.directory_index < state.paths.len():
+                state = open_path(state, state.paths[state.directory_index], true)
+                if state.phase != "cleanup": state.directory_index = state.directory_index + 1
+            else: state.phase = "file"
+        case "file":
+            state = open_path(state, state.image, false)
+            if state.phase != "cleanup": state.phase = "hash-open"
+        case "hash-open":
+            val algorithm = windows_process_wide_linear_v1(state.heap, "SHA256")
+            state.allocations.push(algorithm)
+            if algorithm == 0: state = pin_fail(state, "windows-stdin-pin-algorithm-allocation")
+            else:
+                val opened = BCryptOpenAlgorithmProvider(state.arena, algorithm, 0, 0u32)
+                state.provider = volatile_read_u64(state.arena)
+                if opened != 0 or state.provider == 0: state = pin_fail(state, "windows-stdin-pin-algorithm")
+                else: state.phase = "hash-create"
+        case "hash-create":
+            val created = BCryptCreateHash(state.provider, state.arena + 8, 0, 0u32, 0, 0u32, 0u32)
+            state.hash = volatile_read_u64(state.arena + 8)
+            if created != 0 or state.hash == 0: state = pin_fail(state, "windows-stdin-pin-hash-create")
+            else: state.phase = "hash-read"
+        case "hash-read":
+            val remaining = state.size - state.offset
+            val count = if remaining > 65536: 65536 else: remaining
+            if count == 0: state.phase = "hash-finish"
+            elif ReadFile(state.file, state.arena + 128, count as u32, state.arena + 16, 0) == 0:
+                state = pin_fail(state, "windows-stdin-pin-read")
+            else:
+                val actual = volatile_read_u32(state.arena + 16)
+                if actual <= 0 or actual > count: state = pin_fail(state, "windows-stdin-pin-read-count")
+                elif BCryptHashData(state.hash, state.arena + 128, actual as u32, 0u32) != 0:
+                    state = pin_fail(state, "windows-stdin-pin-hash-data")
+                else: state.offset = state.offset + actual
+        case "hash-finish":
+            if GetFileInformationByHandleEx(state.file, 1, state.arena + 32, 24u32) == 0 or
+                    volatile_read_u64(state.arena + 40) != state.size:
+                state = pin_fail(state, "windows-stdin-pin-size-changed")
+            elif BCryptFinishHash(state.hash, state.arena + 64, 32u32, 0u32) != 0:
+                state = pin_fail(state, "windows-stdin-pin-hash-finish")
+            else:
+                val hex = "0123456789abcdef"
+                for index in 0..32:
+                    val byte = volatile_read_u8(state.arena + 64 + index)
+                    state.digest = state.digest + hex[byte / 16:byte / 16 + 1] + hex[byte % 16:byte % 16 + 1]
+                if state.digest != state.expected: state = pin_fail(state, "windows-stdin-pin-digest-mismatch")
+                else: state.phase = "ready"
+        case "ready": pass
+        case "cleanup": state = pin_cleanup(state)
+        case _: state = pin_fail(state, "windows-stdin-pin-stage")
+    if state.phase == "closed":
+        pins[owner.slot] = None
+        return WindowsStdinPinTurnV1(None, false, state.digest, state.image, state.cwd, state.error)
+    pins[owner.slot] = Some(state)
+    WindowsStdinPinTurnV1(Some(owner), state.phase == "ready", state.digest, state.image, state.cwd, state.error)

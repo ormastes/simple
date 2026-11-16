@@ -5,40 +5,53 @@
 # on a generated fixture that carries one known finding (REQC004) and asserts:
 #   1. every stdout finding line names the fixture, and the finding count
 #      equals the "Found <e> error(s), <w> warning(s)" summary;
-#   2. the default (scoped) run prints none of the seed loader's closure hints
-#      ('export use *', W-STR-BRACE-001, [gc-warning]) on stderr;
+#   2. the default (scoped) run prints none of the seed loader's closure
+#      diagnostics ('export use *', W-STR-BRACE-001, [gc-warning],
+#      [visibility-warning], co-compiled-definition warnings,
+#      warning[enum-bare-name-ambiguous]) on stderr;
 #   3. SIMPLE_LINT_CLOSURE_DIAGNOSTICS=1 restores them (non-vacuity of 2);
 #   4. --json: every stdout line before the wrapper verdict is one JSON object
 #      naming the fixture.
+#   5. a DIRECT `simple lint <fixture>` (no wrapper, no env) is equally quiet
+#      and prints the same stdout findings: the seed itself scopes the output.
 #
-# Where the remaining stderr comes from (measured 2026-11-14, release/1.0.0,
-# Rust seed bin/simple.exe). All of it is printed while the seed loads the
-# LINTER'S OWN import closure, eagerly, before lint_entry.spl's main runs;
-# setting an env var from main was tried and changes nothing (389 -> 389).
-#   gated by SIMPLE_NO_DEPRECATED_WARNINGS (set by lint-cached.shs):
+# Where the stderr comes from (measured 2026-11-14/15, release/1.0.0, Rust
+# seed). All of it is printed while the seed loads the LINTER'S OWN import
+# closure, eagerly, before lint_entry.spl's main runs, so no .spl code can
+# filter it. The seed driver (driver/src/main.rs dispatch_to_simple_app ->
+# common/src/tool_closure_quiet.rs) therefore sets two switches before it loads
+# src/app/cli/lint_entry.spl (lint|fix|fmt), unless
+# SIMPLE_LINT_CLOSURE_DIAGNOSTICS=1:
+#   SIMPLE_NO_DEPRECATED_WARNINGS=1 (only when unset; lint-cached.shs sets it too):
 #     parser hints  pipeline/module_loader.rs display_parser_hints
 #                   ("Avoid 'export use *'", stmt_parsing/module_system.rs;
 #                   W-STR-BRACE-001, lexer/strings.rs)
 #     [gc-warning]  interpreter_module/module_loader.rs enforce_gc_boundary_policy
-#   NOT gated (need a seed change; suggested: suppress closure-load diagnostics
-#   when exec_core.rs source_is_lint_entry() matches, unless asked for):
+#   SIMPLE_TOOL_CLOSURE_QUIET=1 (tool entries only; run/test/compile never set it):
 #     [visibility-warning]  interpreter_module/module_loader.rs check_private_use_names
-#                           (baselined pairs in scripts/check/private_import_baseline.txt)
-#     co-compiled summaries pipeline/module_loader.rs render_same_signature_summary /
-#                           differing-signature warning (SIMPLE_DIAG_SAME_SIGNATURE_COLLISION
-#                           only adds detail, never silences)
-#     [engine-demotion]     common/src/engine_receipt.rs record_demotion (by design unsilenceable)
-#     seed banner           driver/src/seed_warning.rs (SIMPLE_RUST_SEED_WARNING=0; left on:
-#                           it is a true statement about the tool, not a closure diagnostic)
+#                           (baselined pairs in scripts/check/private_import_baseline.txt;
+#                           the non-baselined hard error is never gated)
+#     co-compiled warnings  pipeline/module_loader.rs load_module_with_imports_for_target
+#                           (warn_duplicate_private_signatures and siblings)
+#     warning[enum-bare-name-ambiguous]
+#                           interpreter_module/module_evaluator/evaluation_helpers.rs
+#   Still printed, by design:
+#     [engine-demotion]     common/src/engine_receipt.rs record_demotion (unsilenceable)
+#     seed banner           driver/src/seed_warning.rs (a true statement about the tool)
+# Assertion 5 below runs the binary DIRECTLY (no wrapper) so the seed-side
+# switch is what is proven. A seed built before 2026-11-15 fails it: refresh
+# the seed, or point SIMPLE_LINT_BIN at a current build.
 #
 # Usage: sh scripts/check/check-lint-target-scoped-output.shs [--selftest]
+#        SIMPLE_LINT_BIN=<path> overrides the linter binary (default bin/simple).
 # Verdict (last stdout line): PASS — ... exit 0 | FAIL — ... exit 1 | ERROR — nothing was checked exit 2
 case "$0" in */*) . "${0%/*}/../lib/recursion_guard.shs" ;; *) . ./scripts/lib/recursion_guard.shs ;; esac
 set -u
 
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
 wrapper="$repo_root/scripts/check/lint-cached.shs"
-closure_re="Avoid 'export use \*'|W-STR-BRACE-001|\[gc-warning\]"
+closure_re="Avoid 'export use \*'|W-STR-BRACE-001|\[gc-warning\]|\[visibility-warning\]|co-compiled definitions|enum-bare-name-ambiguous"
+lint_bin="${SIMPLE_LINT_BIN:-$repo_root/bin/simple}"
 
 # check_text_findings <stdout-file> <target-basename> -> prints reason, rc 0 ok / 1 bad
 check_text_findings() {
@@ -112,10 +125,11 @@ run() { # run <tag> [env...] -- lint args...
     echo $?
 }
 
-unset SIMPLE_NO_DEPRECATED_WARNINGS
+unset SIMPLE_NO_DEPRECATED_WARNINGS SIMPLE_TOOL_CLOSURE_QUIET SIMPLE_LINT_CLOSURE_DIAGNOSTICS
 rc_s="$(run scoped SIMPLE_LINT_CACHE=0 sh "$wrapper" "$fixture")"
 rc_c="$(run closure SIMPLE_LINT_CACHE=0 SIMPLE_LINT_CLOSURE_DIAGNOSTICS=1 sh "$wrapper" "$fixture")"
 rc_j="$(run json SIMPLE_LINT_CACHE=0 sh "$wrapper" --json "$fixture")"
+rc_d="$(run direct "$lint_bin" lint "$fixture")"
 
 if ! grep -q 'REQC004' "$work/scoped.out"; then
     echo "ERROR — nothing was checked (linter did not run: rc=$rc_s, no REQC004 in stdout; stderr tail: $(tail -1 "$work/scoped.err"))"
@@ -131,12 +145,16 @@ restored="$(grep -c -E "$closure_re" "$work/closure.err")"
 [ "$restored" -gt 0 ] || fails="$fails; SIMPLE_LINT_CLOSURE_DIAGNOSTICS=1 did not restore closure hints"
 cmp -s "$work/scoped.out" "$work/closure.out" || fails="$fails; stdout differs between scoped and closure modes"
 jmsg="$(check_json_lines "$work/json.out" scope_fixture.spl)" || fails="$fails; json: $jmsg"
+dmsg="$(check_text_findings "$work/direct.out" scope_fixture.spl)" || fails="$fails; direct text (rc=$rc_d): $dmsg"
+dleak="$(grep -c -E "$closure_re" "$work/direct.err")"
+[ "$dleak" -eq 0 ] || fails="$fails; direct 'simple lint' stderr has $dleak closure diagnostic line(s) (seed predates the tool-closure quiet switch? refresh it or set SIMPLE_LINT_BIN)"
 
 s_err="$(wc -l < "$work/scoped.err" | tr -d ' ')"
+d_err="$(wc -l < "$work/direct.err" | tr -d ' ')"
 c_err="$(wc -l < "$work/closure.err" | tr -d ' ')"
 if [ -n "$fails" ]; then
-    echo "FAIL — 3 lint run(s) checked${fails}"
+    echo "FAIL — 4 lint run(s) checked${fails}"
     exit 1
 fi
-echo "PASS — 3 lint run(s) checked: $text_msg; $jmsg; stderr $s_err line(s) scoped vs $c_err with closure diagnostics ($restored closure hint line(s) restored)"
+echo "PASS — 4 lint run(s) checked: $text_msg; $jmsg; stderr $s_err line(s) scoped, $d_err direct, vs $c_err with closure diagnostics ($restored closure diagnostic line(s) restored)"
 exit 0

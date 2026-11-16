@@ -2,21 +2,21 @@
 # REQ-TRC-009, REQ-TRC-010; protocol unit coverage for AC-TRC-012/013/015.
 # These pure decoder tests do not claim a live Git/SJ publication ran.
 use std.spec
-use app.traceability.snapshot.push_refs.{parse_trace_push_refs, trace_remote_ref_valid, TraceRefUpdateKind, TraceRefKind}
+use app.traceability.snapshot.push_refs.{parse_trace_push_refs, trace_remote_ref_valid, TraceRemoteRefCheckV1, TracePushRefLimitV1, TraceRefUpdateKind, TraceRefKind}
 
 val old_oid = "1111111111111111111111111111111111111111"
 val new_oid = "2222222222222222222222222222222222222222"
 val zero_oid = "0000000000000000000000000000000000000000"
 
 fn push_error(input: text, limit: i64) -> text:
-    match parse_trace_push_refs(input, limit):
+    match parse_trace_push_refs(input, TracePushRefLimitV1(value: limit)):
         case Ok(_): "unexpected success"
         case Err(reason): reason
 
 describe "Captured push subjects":
     it "retains each outgoing ref and its exact object identities":
         val input = "refs/heads/work/a {new_oid} refs/heads/a {old_oid}\nrefs/heads/work/b {old_oid} refs/heads/b {new_oid}\n"
-        match parse_trace_push_refs(input, 8):
+        match parse_trace_push_refs(input, TracePushRefLimitV1(value: 8)):
             case Ok(rows):
                 expect(rows.len()).to_equal(2)
                 expect(rows[0].local_oid).to_equal(new_oid)
@@ -26,17 +26,17 @@ describe "Captured push subjects":
             case Err(reason): fail(reason)
 
     it "classifies creation without using a zero object as the baseline":
-        match parse_trace_push_refs("HEAD {new_oid} refs/heads/new {zero_oid}\n", 1):
+        match parse_trace_push_refs("HEAD {new_oid} refs/heads/new {zero_oid}\n", TracePushRefLimitV1(value: 1)):
             case Ok(rows): expect(rows[0].kind).to_equal(TraceRefUpdateKind.Create)
             case Err(reason): fail(reason)
 
     it "retains deletion as policy work without a candidate tree":
-        match parse_trace_push_refs("(delete) {zero_oid} refs/heads/old {old_oid}\n", 1):
+        match parse_trace_push_refs("(delete) {zero_oid} refs/heads/old {old_oid}\n", TracePushRefLimitV1(value: 1)):
             case Ok(rows): expect(rows[0].kind).to_equal(TraceRefUpdateKind.Delete)
             case Err(reason): fail(reason)
 
     it "keeps a tag subject distinct from branch tree admission":
-        match parse_trace_push_refs("refs/tags/v1 {new_oid} refs/tags/v1 {zero_oid}\n", 1):
+        match parse_trace_push_refs("refs/tags/v1 {new_oid} refs/tags/v1 {zero_oid}\n", TracePushRefLimitV1(value: 1)):
             case Ok(rows): expect(rows[0].ref_kind).to_equal(TraceRefKind.Tag)
             case Err(reason): fail(reason)
 
@@ -63,5 +63,5 @@ describe "Captured push subjects":
         # Braces are doubled so the spec literal passes the literal refname
         # "a@{1}" through instead of interpolating "{1}" away before the check.
         for ref in ["--help", "refs/heads/a..b", "refs/heads/.hidden", "refs/heads/a.lock", "refs/heads/a@{{1}}", "refs/heads/a b"]:
-            expect(trace_remote_ref_valid(ref)).to_equal(false)
-        expect(trace_remote_ref_valid("refs/heads/work/traceability")).to_equal(true)
+            expect(trace_remote_ref_valid(ref) == TraceRemoteRefCheckV1.Valid).to_equal(false)
+        expect(trace_remote_ref_valid("refs/heads/work/traceability") == TraceRemoteRefCheckV1.Valid).to_equal(true)

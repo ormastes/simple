@@ -25,7 +25,60 @@ Status as of 2026-11-14 after landing. "landed (pure core)" means the unit-teste
 | observer (core) | 6 | REQ-CARET-OBS-001..003 | landed (pure core); no IO wiring | #9203 |
 | trace-view-provider | 7 | REQ-CARET-TRC-001..003 | landed (pure core); no IDE view wiring | #9214 |
 
-Not started, still open TODO: P6 (review and CI gates), P7 (fleet and skills) and P8 (release qualification). Nothing in this program is release-qualified; the open PRs above are unmerged work and no acceptance row CU-001..CU-020 has execution evidence recorded here.
+### Waves 2-3 (2026-11-15) — wiring into production callers
+
+| Lane | Requirements | Status | PR |
+|---|---|---|---|
+| session identity | REQ-CARET-UI-001/002 | landed; real provider, restart ledger bumps generation, stale drafts rejected, terminal label from binding | #9233, #9287 |
+| key resolver | REQ-CARET-UI-004 | landed; `cs` keys routed through `route_workbench_key`, leader n/p/1-9 -> `/switch` | #9234 |
+| observer adapters | REQ-CARET-OBS-* | landed; observation builder, provider adapters, status text | #9237 |
+| extension lifecycle | REQ-CARET-EXT-* | landed; deactivate drops pending invocations, context keys, builtin caret ext | #9242 |
+| trace view render | REQ-CARET-TRC-* | landed; `trace_view_lines`, view state, impact edges | #9243 |
+| observer live (F) | CU-008/009/010 | landed; hook_bridge -> observer log -> TUI/GUI status; bridge_worker is a separate process (log not shared) | #9294 |
+| cs terminal surface (G) | CU-005 | landed; leader m, byte-safe chunk carry, guarded raw send | #9295 |
+| IDE trace views (H) | CU-006/011 | landed; `view.show trace.explorer`, keybinding `when`, caret.* -> `/switch`; controller holds no snapshot yet | #9301 |
+| roster (I) | CU-001/004 | landed; pin/MRU/fuzzy `/switch`, detach keeps real children alive | #9313 |
+| P6 gates (J) | CU-015/016 | bug-resolve + MCP close gate; workaround revert candidates in `check_dbs` | #9315 |
+| P7 checklist (K) | CU-020 | `/capabilities` in `cs` from live probes; remote/fleet blocked | #9317 |
+| cs generation (L) | CU-019/002 | live generation from the pid ledger in cs | #9330 |
+| editor snapshot (M) | CU-011/014 | lazy canonical snapshot in `view.show` | #9329 |
+| when + expires (N) | CU-006/016 | `when` on views/commands; `expires=` workarounds; check_dbs passes today | #9334 |
+| TUI captures (O) | CU-017 | cell-width captures; 3 visibility-blocked specs now execute | #9332 |
+| shell views (P) | CU-006 | TUI/GUI shells use `visible_view_ids` | #9343 |
+| trace staleness (Q) | CU-013/014 | staleness producers + exact-edge corpus | #9342 |
+| CI close gate (R) | CU-015 | blocking `check-bug-close-evidence.shs` | #9341 |
+
+### Acceptance CU-001..CU-020 (2026-11-15)
+
+All evidence is the seed interpreter on Windows. **No row is native-verified; every row is at best "met (interpreter)" and the program is not release-qualified.** P8 (release qualification) is open.
+
+| CU | Status | Evidence / gap | Resume |
+|---|---|---|---|
+| CU-001 | partial | `roster_order_spec` 8/8; `fleet_transport_spec` 5/5: loopback second host rows join the roster (snapshot poll via process); `fleet_gaps_spec` 6/6 (interpreter, loopback): 50 agents/5 hosts with attention-first grouping, input forwarded to a remote session (loopback only), credential-safe host row in the TUI roster; no real ssh run, ssh hosts cannot receive input, TUI roster clips 50 rows to region height | scale spec on a Linux host over ssh |
+| CU-002 | met (interpreter) | `caret_workbench_generation_spec`: 1,000 seeded ops, 3 sessions, >20 restarts, 0 wrong sends (#9330) | native run |
+| CU-003 | met (interpreter) | `caret_workbench_e2e_spec` 2/2 ("unbound terminal"), `caret_workbench_prod_spec` 2/2 | native run with `LLM_CARET_NATIVE_BIN` |
+| CU-004 | met (interpreter) | `caret_workbench_detach_spec` 1/1 (real children survive detach/switch) | native run |
+| CU-005 | met (interpreter) | `caret_terminal_bytes_live_spec` 1/1: ESC[A, Ctrl+B, Hangul, emoji, unknown chord through the production cs path onto a real Windows smux pane, child-computed hex exact (#9352); was RED on a stdin code-point/byte limit bug, fixed in #9353 | native run |
+| CU-006 | met (interpreter) | `caret_shell_visible_views_spec` 3/3: TUI and GUI shells list the same ids via `visible_view_ids`, false `when` hides in both, no eager load (#9343); `when_contribution_spec` 5/5 | native run; GUI/TUI shell loops call `profile_sync_context` (`caret_context_keys_spec` 2/2: focus + selected-session provider keys); cs_main publishes focus but cs does not host the extension host, so provider keys reflect only published sessions |
+| CU-007 | met (interpreter) | `deactivation_hygiene_spec` 10/10 | native run |
+| CU-008 | met (interpreter) | `caret_observer_silent_child_live_spec` (slow) 1/1, 626 s: real silent child with 22 heartbeats never classified as hang, ends "quiet" (#9352); heartbeats folded directly | native run; `provider_adapters` maps Claude PostToolUse/PostToolUseFailure to JobHeartbeat (`provider_heartbeat_spec` 3/3, RED 2 of 3 first); Codex has no heartbeat signal; a stale mapped heartbeat past stall_ms can read as suspected-stall on an idle session (unverified) |
+| CU-009 | met (interpreter) | `observer_live_spec` approval -> "needs you" in TUI+GUI, replay no dup | native run |
+| CU-010 | partial | lifecycle folded at render; `fleet_transport_spec`: failed host poll shows last rows Disconnected/Lost (loopback, interpreter); `fleet_gaps_spec`: bounded reconnect backoff returns a host to connected, and NotStarted/Starting/Running/Stopping/Exited/Failed round-trip over the fleet wire (interpreter, loopback; not classifier-verified per state, not native) | native + real ssh run |
+| CU-011 | met (interpreter) | `trace_view_snapshot_spec` 9/9: list/show/refs equal the canonical service for the same snapshot (#9329) | native run; UI selection of show/refs |
+| CU-012 | met (interpreter) | `ide_view_provider` badge rollup specs | native run |
+| CU-013 | met (interpreter) | `impact_corpus_spec` 3/3: exact incoming/outgoing reverse-impact edges over a feature→req→design→spec→code→bug corpus (#9342) | native run |
+| CU-014 | met (interpreter) | `trace_view_producer_spec` 4/4: `source_present` from pinned blob sha, `expected_generation` from the built graph; deleted/changed blob and bumped graph show one explicit line, no other-revision content (#9342) | native run; git-index/commit snapshots; reload path |
+| CU-015 | met (interpreter) | CLI + MCP gate (`bug_close_gate_spec` 5/5, `bugdb_close_gate_spec` 3/3, #9315) and blocking CI/push gate `check-bug-close-evidence.shs` with 8 selftest fixtures (#9341) | native run |
+| CU-016 | met (interpreter) | `workaround_revert_candidates_spec` 5/5 incl. `expires=` (#9334), `bug_linked_workarounds_spec` 10/10; candidates never applied | native run |
+| CU-017 | partial | `caret_workbench_tui_cells_spec` 4/4: 80x24 + 120x40 Korean/emoji, real key routing, captures in `build/test-artifacts/caret_workbench/` (#9332). GUI DPI scale (`gui_layout.workbench_mode_for_scaled_width`, `gui_page.render_workbench_page_scaled`, served via `/?w=<px>&scale=<permille>` in `main._gui_http_handle`) and per-widget role + accessible name (`workbench/gui_a11y.spl`, rendered by `gui_page`) are specced: `gui_dpi_a11y_spec` 12/12 (markup-level only). Still open: real high-DPI desktop capture, real screen-reader (NVDA/VoiceOver) run, browser sending `scale` automatically | GUI capture host |
+| CU-018 | blocked | no cold/warm CPU/RSS/frame measurements | perf lane on native build |
+| CU-019 | met (interpreter) | `caret_workbench_generation_spec`: real child restart bumps generation; gen-1 approval/draft/command receipts rejected (#9330) | native run |
+| CU-020 | partial | `provider_skill_report_spec` 4/4 (RED 3/3 first): Claude `PreToolUse` Skill calls (`tool_name=Skill`, `tool_input.skill`) drained by `hook_bridge` are recorded per session, shown on the TUI status line and as the `/capabilities` Skills row (met when a provider reported loaded skills); `capability_checklist_spec` 7/7 | first-use hint decays after 3 uses (`skill_hint_spec` 2/2, RED executed=0 first), shown on the TUI status line; per-session-count only, no cross-session decay; Codex reports none; loaded-vs-requested diff not built; native run |
+| CU-020 | partial | `provider_skill_report_spec` 4/4 (RED 3/3 first): Claude `PreToolUse` Skill calls (`tool_name=Skill`, `tool_input.skill`) drained by `hook_bridge` are recorded per session, shown on the TUI status line and as the `/capabilities` Skills row (met when a provider reported loaded skills); `capability_checklist_spec` 7/7 | first-use hint decay surface not built (other lane); Codex signal (`codex_skill_signal_spec` 4/4, RED 4/4 first: SKILL.md read via PreToolUse, `$name` prompt requests, Skills-row requested-vs-loaded diff) built against assumed hook payload shapes, no live Codex capture; native run |
+
+**Human/host checks** (blocked, not verifiable in CI): CU-001 remote fleet = todo 450; CU-017 screen reader = todo 451, high-DPI = todo 452; CU-020 live Codex skill signal = todo 453 (`doc/08_tracking/todo/todo_db.sdn`).
+
+Open TODOs: `activation_hook_spec` now executes (8/10) with 2 genuine failures — `doc/08_tracking/bug/activation_hook_builtin_registry_unreachable_2026-11-15.md`; `capability_truth_spec` 11/11 and `chat_tui_runtime_spec` 21/21 now execute. P8 release qualification is open: it needs a native/self-hosted build (resume: the sanctioned `scripts/bootstrap/bootstrap-from-scratch.sh`, then rerun every row above with the native binary). Pre-existing base failures in `agent_workspace_spec` (2/9), `lifecycle_spec` (1), `runtime_security_spec` (1).
 
 ## Plan sections 12 to 14
 

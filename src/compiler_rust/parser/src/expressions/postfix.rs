@@ -158,6 +158,14 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// True when the last consumed token closed a block (Dedent/Newline). Dedent
+    /// spans are zero-width at the next token's start, so span adjacency alone
+    /// would let `[`/`(` on the NEXT statement parse as index/call on a
+    /// block-ending expression such as a `match` value.
+    fn previous_ends_line(&self) -> bool {
+        matches!(self.previous.kind, TokenKind::Dedent | TokenKind::Newline)
+    }
+
     pub(crate) fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_primary()?;
         // Track indents consumed for multi-line method chaining
@@ -180,7 +188,7 @@ impl<'a> Parser<'a> {
                     // to print's return value, so callers only ever saw the
                     // un-rooted "16.0". See
                     // doc/08_tracking/bug/float_literal_receiver_method_call_returns_receiver_2026-08-10.md
-                    if self.previous.span.end != self.current.span.start {
+                    if self.previous.span.end != self.current.span.start || self.previous_ends_line() {
                         break;
                     }
                     expr = self.parse_call(expr)?;
@@ -223,7 +231,7 @@ impl<'a> Parser<'a> {
                     // (no whitespace between). This allows `expect [1, 2, 3]` to work
                     // where [1, 2, 3] is a separate argument, not indexing.
                     // Check: if previous token's end != current token's start, there's whitespace
-                    if self.previous.span.end != self.current.span.start {
+                    if self.previous.span.end != self.current.span.start || self.previous_ends_line() {
                         // Not adjacent - break to let no-paren call handling deal with it
                         break;
                     }
@@ -947,7 +955,36 @@ impl<'a> Parser<'a> {
             }
         }
 
+        self.reject_postfix_unit_suffix()?;
         Ok(expr)
+    }
+
+    /// `f(n)_sfx`, `x.m(n)_sfx`, `a[i]_sfx`, `(a, b)_sfx`: a unit suffix glued
+    /// to a call/index/tuple result. Only a parenthesized group takes a suffix
+    /// (`(expr)_sfx`, see collections.rs apply_paren_unit_suffix); otherwise
+    /// `_sfx` silently became a no-paren call argument. Fail with the fix.
+    /// Bug: paren_expr_unit_suffix_parsed_as_call_2026-11-16.
+    fn reject_postfix_unit_suffix(&self) -> Result<(), ParseError> {
+        if !matches!(self.previous.kind, TokenKind::RParen | TokenKind::RBracket)
+            || self.current.span.start != self.previous.span.end
+        {
+            return Ok(());
+        }
+        if let TokenKind::Identifier { name, .. } = &self.current.kind {
+            if name.len() > 1
+                && name.starts_with('_')
+                && name[1..].chars().next().map_or(false, |c| c.is_ascii_alphabetic())
+            {
+                return Err(ParseError::syntax_error_with_span(
+                    format!(
+                        "unit suffix `{}` cannot follow a call, index or tuple result; wrap it in a group: `(...){}`",
+                        name, name
+                    ),
+                    self.current.span,
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// True when `e` is spelled like a TYPE in element position of an array

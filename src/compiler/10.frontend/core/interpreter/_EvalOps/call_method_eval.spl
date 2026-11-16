@@ -9,6 +9,7 @@ use compiler.core.interpreter.eval.{eval_errdefer_depths, eval_errdefer_eids, ev
 use compiler.core.interpreter.eval.{eval_return_value, eval_returning, eval_set_error, eval_yield_stack}
 use compiler.core.interpreter.eval.{eval_caller_file, type_check_value, val_is_boxed_enum}
 use compiler.core.interpreter.eval_builtins.{eval_builtin_call}
+use compiler.core.interpreter.eval_units.{eval_unit_method, val_is_unit}
 use compiler.core.interpreter.eval_stmts.{eval_stmt}
 use compiler.core.interpreter.eval_tables.{enum_table_lookup, func_flat_lookup_for_caller, func_module_namespace_lookup, func_resolve_for_caller, func_resolve_module_member_for_caller, func_table_lookup, struct_table_lookup}
 use compiler.core.interpreter.eval_tables.{FUNC_LOOKUP_AMBIGUOUS, func_ambiguous_call_message, func_owners_of}
@@ -194,6 +195,9 @@ pub fn eval_call(eid: i64) -> i64:
                 val fn_decl = val_get_func_decl(fn_vid)
                 return eval_function_call(fn_decl, arg_eids, arg_names)
 
+        # Flat Option encoding: with no Option enum in scope, `Some(x)` IS x.
+        if name == "Some" and arg_eids.len() == 1:
+            return eval_expr(arg_eids[0])
         eval_set_error("undefined function: " + name)
         return -1
 
@@ -713,6 +717,12 @@ pub fn eval_method_call(eid: i64) -> i64:
 
     # Built-in methods on types
     val kind = val_get_kind(receiver)
+
+    # Unit values (`60_kmph`): value/to_text/to_i64 and scale-based
+    # to_<sfx> conversion; -2 means "not a unit method", fall through.
+    if arg_eids.len() == 0 and val_is_unit(receiver):
+        val unit_result = eval_unit_method(receiver, method_name)
+        if unit_result != -2: return unit_result
 
     # Boxed enum values carry Type::Variant, while impl methods are registered
     # under Type__method. Resolve the owner before built-in accessor dispatch

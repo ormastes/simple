@@ -1,0 +1,68 @@
+#!/bin/sh
+# Build the fw_xc NVMe FW slice as linked bare-metal ELF images for six targets.
+# Toolchain: Simple native-build (LLVM) + clang (crt0 only) + ld.lld. Never GCC.
+#
+# Usage: sh examples/09_embedded/simpleos_nvme_fw/fw_xc/build.shs [arch...]
+#   arch in: i686 x86_64 thumbv7em aarch64 riscv32 riscv64 (default: all)
+# Env: SIMPLE_BIN (default bin/simple), OUT_DIR (default build/nvme_fw_xc),
+#      CLANG (clang), LLD (ld.lld), XC_TIMEOUT_S (900)
+# Output: $OUT_DIR/nvme_fw_xc_<arch>.elf ; verify with
+#         sh scripts/check/check-nvme-fw-xc-elf.shs --dir $OUT_DIR
+set -u
+here=$(cd "$(dirname "$0")" && pwd)
+repo_root=$(cd "$here/../../../.." && pwd)
+SIMPLE_BIN=${SIMPLE_BIN:-$repo_root/bin/simple}
+OUT_DIR=${OUT_DIR:-$repo_root/build/nvme_fw_xc}
+CLANG=${CLANG:-clang}
+LLD=${LLD:-ld.lld}
+XC_TIMEOUT_S=${XC_TIMEOUT_S:-900}
+mkdir -p "$OUT_DIR"
+
+# arch -> Simple triple | clang triple + flags for crt0 | crt0 | ld emulation
+spec() {
+    case "$1" in
+        i686)      echo "i686-unknown-none-elf|--target=i686-unknown-none-elf|crt0_x86.S|elf_i386" ;;
+        x86_64)    echo "x86_64-unknown-none-elf|--target=x86_64-unknown-none-elf|crt0_x86.S|elf_x86_64" ;;
+        thumbv7em) echo "thumbv7em-none-eabihf|--target=thumbv7em-none-eabihf -mfloat-abi=hard -mfpu=fpv4-sp-d16|crt0_thumbv7em.S|armelf" ;;
+        aarch64)   echo "aarch64-unknown-none-elf|--target=aarch64-unknown-none-elf|crt0_aarch64.S|aarch64elf" ;;
+        riscv32)   echo "riscv32imac-unknown-none-elf|--target=riscv32-unknown-elf -march=rv32imac -mabi=ilp32|crt0_riscv.S|elf32lriscv" ;;
+        # TODO(baremetal_riscv_target_contract_not_applied_2026_11_16):
+        # WORKAROUND -- crt0 uses lp64 because the Simple object is
+        # emitted lp64 (base rv64i) -- see bug baremetal_riscv_target_contract_
+        # not_applied_2026_11_16. Switch back to -mabi=lp64d once fixed;
+        # check-nvme-fw-xc-elf.shs pins lp64d (0x5) and stays RED until then.
+        riscv64)   echo "riscv64gc-unknown-none-elf|--target=riscv64-unknown-elf -march=rv64gc -mabi=lp64|crt0_riscv.S|elf64lriscv" ;;
+        *) return 1 ;;
+    esac
+}
+
+arches=${*:-"i686 x86_64 thumbv7em aarch64 riscv32 riscv64"}
+ok=0; bad=""
+for a in $arches; do
+    s=$(spec "$a") || { echo "[$a] unknown arch"; bad="$bad $a(arch)"; continue; }
+    triple=$(echo "$s" | cut -d'|' -f1); cflags=$(echo "$s" | cut -d'|' -f2)
+    crt0=$(echo "$s" | cut -d'|' -f3); emu=$(echo "$s" | cut -d'|' -f4)
+    o="$OUT_DIR/$a"; mkdir -p "$o"; rm -f "$o"/*.o "$OUT_DIR/nvme_fw_xc_$a.elf"
+    # TODO(native_build_target_flag_not_propagated_to_env_target_2026_11_16):
+    # WORKAROUND -- `--target` alone emits an ARMv7-A, ARM-state object for
+    # thumbv7em-none-eabihf (Cortex-M HardFaults on the `blx`); exporting the
+    # triple keeps the M-profile. Remove once native-build propagates --target.
+    SIMPLE_NATIVE_BUILD_TARGET="$triple" SIMPLE_FILE_WORKERS=0 timeout "$XC_TIMEOUT_S" "$SIMPLE_BIN" native-build "$here/main.spl" \
+        --target "$triple" --emit-object -o "$o/main.o" > "$o/build.log" 2>&1
+    rc=$?
+    if [ $rc -ne 0 ] || [ ! -s "$o/main.o" ]; then
+        echo "[$a] compile failed rc=$rc ($o/build.log)"; bad="$bad $a(compile)"; continue
+    fi
+    # shellcheck disable=SC2086
+    "$CLANG" $cflags -c "$here/$crt0" -o "$o/crt0.o" > "$o/crt0.log" 2>&1 || {
+        echo "[$a] crt0 failed ($o/crt0.log)"; bad="$bad $a(crt0)"; continue; }
+    "$LLD" -m "$emu" -T "$here/link_$a.ld" --no-relax --gc-sections -e _start \
+        -o "$OUT_DIR/nvme_fw_xc_$a.elf" "$o/crt0.o" "$o/main.o" > "$o/link.log" 2>&1 || {
+        echo "[$a] link failed: $(head -3 "$o/link.log" | tr '\n' ' ')"; bad="$bad $a(link)"; continue; }
+    echo "[$a] linked $OUT_DIR/nvme_fw_xc_$a.elf"
+    ok=$((ok + 1))
+done
+if [ -n "$bad" ]; then echo "FAIL -- $ok linked; failed:$bad"; exit 1; fi
+[ $ok -gt 0 ] || { echo "ERROR -- nothing was built"; exit 2; }
+echo "PASS -- $ok image(s) linked"
+exit 0

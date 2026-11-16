@@ -1,0 +1,120 @@
+# Fixed signed installation under one original protected parent writer.
+# This creates no service incarnation, native provider, capacity reservation,
+# journal format, or launch authority. The supplied native loan and original
+# protected parent reader remain borrowed and are returned on every path.
+# Signing step 5: the writer is reachable only through the proof-gated
+# owner_health entry; this module calls no private owner_health function.
+use std.common.contracts.orchestration.host_linux_service_enrollment_v3.*
+use std.common.task_runner.distributed_operation_owner_health_v2.{OperationHealthLinuxInstallCleanupV1,
+    operation_health_linux_install_v1, operation_health_linux_install_close_v1}
+use std.nogc_sync_mut.io.linux_protected_root_reader_v1.*
+use std.nogc_sync_mut.io.linux_service_native_identity_v3.*
+use std.nogc_sync_mut.io.host_linux_service_records_v4.{LinuxServiceVerifiedEnrollmentV1,
+    linux_service_enrollment_verify_v1, host_linux_service_root_path_v4, host_linux_service_claim_name_v4}
+use std.nogc_sync_mut.io.host_enrollment_v1.HostEnrollmentCredentialV1
+use std.common.crypto.sha256.sha256_text
+
+pub struct HostLinuxServiceInstallRequestV3:
+    binding: HostLinuxServiceEnrollmentBindingV3
+    credential: HostEnrollmentCredentialV1
+    configuration_bytes: text
+    engine_policy_bytes: text
+    broker_policy_bytes: text
+    # milestone_0021 F15 (B): installed as agent-helper-template.sdn, pinned by the signed enrollment.
+    agent_helper_template_bytes: text
+
+# DATA about durable residue, never a cleanup/recovery permission.
+pub struct HostLinuxServiceInstallResidueV3:
+    root: text
+    claim_name: text
+    binding_digest: text
+    phase: text
+
+# `cleanup` is present only when the owner could not finish draining its own
+# descriptors; it admits only host_linux_service_install_close_v3.
+pub struct HostLinuxServiceInstallTurnV3:
+    cleanup: Option<OperationHealthLinuxInstallCleanupV1>
+    parent: LinuxProtectedRootReaderV1
+    native: LinuxServiceNativeIdentityBorrowV3
+    residue: Option<HostLinuxServiceInstallResidueV3>
+    installed: bool
+    duplicate: bool
+    error: text
+    # Owner close diagnostic, kept even when the install itself succeeded.
+    close_error: text = ""
+
+pub struct HostLinuxServiceInstallCloseV3:
+    cleanup: Option<OperationHealthLinuxInstallCleanupV1>
+    closed: bool
+    error: text
+
+fn service_install_policy_v3(parent: LinuxProtectedRootReaderV1,
+        binding: HostLinuxServiceEnrollmentBindingV3) -> Result<text, text>:
+    linux_protected_root_reader_require_root_v1(parent, binding.machine_parent)?
+    val source = linux_protected_root_reader_read_v1(parent, "authority-policy.sdn", 1048576)?
+    if source.is_none(): return Err("linux-service-install-parent-policy-missing")
+    if sha256_text(source.unwrap()) != binding.policy_digest:
+        return Err("linux-service-install-parent-policy-pin")
+    Ok(source.unwrap())
+
+# Native identity and the original parent reader both import owner_health, so
+# the owner cannot re-check them; they bracket the whole owner entry here.
+fn service_install_context_v3(parent: LinuxProtectedRootReaderV1, native: LinuxServiceNativeIdentityBorrowV3,
+        request: HostLinuxServiceInstallRequestV3, policy: text) -> Result<(), text>:
+    val observed = native.current_v3()?
+    if observed.native_machine_id != request.binding.native_machine_id:
+        return Err("linux-service-install-native-machine-mismatch")
+    if service_install_policy_v3(parent, request.binding)? != policy:
+        return Err("linux-service-install-parent-policy-changed")
+    linux_protected_root_reader_current_v1(parent)
+
+fn service_install_proof_v3(parent: LinuxProtectedRootReaderV1, request: HostLinuxServiceInstallRequestV3,
+        native: LinuxServiceNativeIdentityBorrowV3) -> Result<(LinuxServiceVerifiedEnrollmentV1, text), text>:
+    val binding = request.binding
+    host_linux_service_enrollment_encode_v3(binding)?
+    val observation = native.current_v3()?
+    if observation.native_machine_id != binding.native_machine_id:
+        return Err("linux-service-install-native-machine-mismatch")
+    val policy = service_install_policy_v3(parent, binding)?
+    val proof = linux_service_enrollment_verify_v1(policy, binding, request.credential,
+        request.configuration_bytes, request.engine_policy_bytes, request.broker_policy_bytes,
+        request.agent_helper_template_bytes)?
+    val repeated = native.current_v3()?
+    if repeated.native_machine_id != observation.native_machine_id or repeated.native_boot_id != observation.native_boot_id or
+            repeated.owner_generation != observation.owner_generation or repeated.process_identity_digest != observation.process_identity_digest or
+            repeated.process_generation != observation.process_generation or repeated.authority_namespace_id != observation.authority_namespace_id:
+        return Err("linux-service-install-native-changed")
+    linux_protected_root_reader_current_v1(parent)?
+    Ok((proof, policy))
+
+pub fn host_linux_service_install_v3(parent: LinuxProtectedRootReaderV1,
+        native: LinuxServiceNativeIdentityBorrowV3, request: HostLinuxServiceInstallRequestV3) -> HostLinuxServiceInstallTurnV3:
+    val verified = service_install_proof_v3(parent, request, native)
+    if verified.is_err(): return HostLinuxServiceInstallTurnV3(None, parent, native, None, false, false, verified.unwrap_err())
+    val digest = host_linux_service_enrollment_digest_v3(request.binding)
+    if digest.is_err(): return HostLinuxServiceInstallTurnV3(None, parent, native, None, false, false, digest.unwrap_err())
+    val root = host_linux_service_root_path_v4(request.binding)
+    if root.is_err(): return HostLinuxServiceInstallTurnV3(None, parent, native, None, false, false, root.unwrap_err())
+    val proof = verified.unwrap().0
+    val policy = verified.unwrap().1
+    # The owner opens writer=true/create_final=false, re-verifies the proof
+    # against policy read through its own writer before and after every
+    # publication, and drains its descriptors before returning.
+    val outcome = operation_health_linux_install_v1(proof)
+    val residue = HostLinuxServiceInstallResidueV3(root.unwrap(), host_linux_service_claim_name_v4(request.binding),
+        digest.unwrap(), outcome.phase)
+    var error = outcome.error
+    if error == "":
+        val after = service_install_context_v3(parent, native, request, policy)
+        if after.is_err(): error = after.unwrap_err()
+    # Close never undoes an install (an unfinished close is signalled by the
+    # returned carrier); a failed install keeps the close reason too.
+    if outcome.close_error != "" and error != "": error = error + ";close:" + outcome.close_error
+    HostLinuxServiceInstallTurnV3(outcome.cleanup, parent, native, Some(residue), outcome.installed and error == "",
+        outcome.duplicate and error == "", error, outcome.close_error)
+
+pub fn host_linux_service_install_close_v3(cleanup: OperationHealthLinuxInstallCleanupV1) -> HostLinuxServiceInstallCloseV3:
+    # Drains exact owned descriptors only. Claims and installed records remain
+    # durable residue; borrowed native/parent owners are untouched.
+    val closed = operation_health_linux_install_close_v1(cleanup)
+    HostLinuxServiceInstallCloseV3(closed.cleanup, closed.closed, closed.error)

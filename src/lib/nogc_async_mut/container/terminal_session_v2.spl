@@ -1,0 +1,115 @@
+# Canonical tagged terminal ownership. Dispatch preserves the returned owner;
+# correlation and platform projection create no native or control authority.
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.contracts.container.primary_connection_v2.ContainerTerminalChunkV2
+use std.common.text_bytes.boxed_text_bytes_checked
+use std.nogc_sync_mut.io.process_ops.{PipedProcessRefV1, process_read_stdout_ref_v1, process_is_piped_alive_ref_v1}
+use std.nogc_async_mut.container.terminal_session_v1.{ContainerOwnedTerminalSessionV1,
+    container_terminal_reference_v1, container_terminal_validate_v1,
+    container_terminal_cleanup_v1, container_terminal_identity_equal_v1}
+use std.nogc_async_mut.container.providers.windows.primary_connection_v2.{WindowsPrimaryConnectionV2,
+    windows_primary_connection_read_v2, windows_primary_connection_identity_v2,
+    windows_primary_connection_validate_v2, windows_primary_connection_cleanup_v2,
+    windows_primary_connection_absence_matches_v2, windows_primary_connection_transport_active_v2}
+
+pub enum ContainerOwnedTerminalSessionV2:
+    Legacy(session: ContainerOwnedTerminalSessionV1)
+    WindowsConnection(session: WindowsPrimaryConnectionV2)
+
+pub struct ContainerTerminalReadTurnV2:
+    session: ContainerOwnedTerminalSessionV2
+    chunks: [ContainerTerminalChunkV2]
+    eof: bool
+    error: text
+
+pub struct ContainerTerminalCleanupTurnV2:
+    session: ContainerOwnedTerminalSessionV2
+    cleaned: bool
+    error: text
+
+# No synthetic PipedProcessRef is available for a direct Engine connection.
+pub fn container_terminal_legacy_v2(session: ContainerOwnedTerminalSessionV2) -> Result<ContainerOwnedTerminalSessionV1, text>:
+    match session:
+        case ContainerOwnedTerminalSessionV2.Legacy(legacy): Ok(legacy)
+        case ContainerOwnedTerminalSessionV2.WindowsConnection(_): Err("container-terminal-windows-has-no-legacy-process")
+
+pub fn container_terminal_validate_v2(session: ContainerOwnedTerminalSessionV2) -> Result<(), text>:
+    match session:
+        case ContainerOwnedTerminalSessionV2.Legacy(legacy): container_terminal_validate_v1(legacy)
+        case ContainerOwnedTerminalSessionV2.WindowsConnection(connection): windows_primary_connection_validate_v2(connection)
+
+# Native process references are an optional capability. A direct connection
+# has none; callers must use the common read/active/cleanup operations.
+pub fn container_terminal_reference_v2(session: ContainerOwnedTerminalSessionV2) -> Result<PipedProcessRefV1?, text>:
+    match session:
+        case ContainerOwnedTerminalSessionV2.Legacy(legacy): Ok(Some(container_terminal_reference_v1(legacy)?))
+        case ContainerOwnedTerminalSessionV2.WindowsConnection(_): Ok(None)
+
+# Transport activity only: neither branch proves the container workload alive.
+pub fn container_terminal_transport_active_v2(session: ContainerOwnedTerminalSessionV2) -> Result<bool, text>:
+    match session:
+        case ContainerOwnedTerminalSessionV2.Legacy(legacy): process_is_piped_alive_ref_v1(container_terminal_reference_v1(legacy)?)
+        case ContainerOwnedTerminalSessionV2.WindowsConnection(connection): windows_primary_connection_transport_active_v2(connection)
+
+pub fn container_terminal_identity_equal_v2(left: ContainerOwnedTerminalSessionV2,
+        right: ContainerOwnedTerminalSessionV2) -> bool:
+    match left:
+        case ContainerOwnedTerminalSessionV2.Legacy(a):
+            match right:
+                case ContainerOwnedTerminalSessionV2.Legacy(b): container_terminal_identity_equal_v1(a, b)
+                case _: false
+        case ContainerOwnedTerminalSessionV2.WindowsConnection(a):
+            match right:
+                case ContainerOwnedTerminalSessionV2.WindowsConnection(b):
+                    val first = windows_primary_connection_identity_v2(a)
+                    val second = windows_primary_connection_identity_v2(b)
+                    (builder_digest_valid_v1(first) and builder_digest_valid_v1(second) and first == second)
+                case _: false
+
+pub fn container_terminal_read_v2(session: ContainerOwnedTerminalSessionV2) -> ContainerTerminalReadTurnV2:
+    match session:
+        case ContainerOwnedTerminalSessionV2.Legacy(legacy):
+            val reference = container_terminal_reference_v1(legacy)
+            if reference.is_err():
+                return ContainerTerminalReadTurnV2(session: session, chunks: [], eof: false, error: reference.unwrap_err())
+            val observed = process_read_stdout_ref_v1(reference.unwrap())
+            match observed:
+                case Ok(Some(value)):
+                    match boxed_text_bytes_checked(value):
+                        case Ok(bytes):
+                            ContainerTerminalReadTurnV2(session: session,
+                                chunks: [ContainerTerminalChunkV2(stream: "stdout", bytes: bytes)], eof: false, error: "")
+                        case Err(_):
+                            ContainerTerminalReadTurnV2(session: session, chunks: [], eof: false,
+                                error: "container-terminal-legacy-byte-extraction-failed")
+                case Ok(None): ContainerTerminalReadTurnV2(session: session, chunks: [], eof: false, error: "")
+                case Err(reason):
+                    if reason == "process_stdout_eof":
+                        ContainerTerminalReadTurnV2(session: session, chunks: [], eof: true, error: "")
+                    else:
+                        ContainerTerminalReadTurnV2(session: session, chunks: [], eof: false, error: reason)
+        case ContainerOwnedTerminalSessionV2.WindowsConnection(connection):
+            val turn = windows_primary_connection_read_v2(connection)
+            ContainerTerminalReadTurnV2(session: ContainerOwnedTerminalSessionV2.WindowsConnection(turn.session),
+                chunks: turn.chunks, eof: turn.eof, error: turn.error)
+
+pub fn container_terminal_cleanup_v2(session: ContainerOwnedTerminalSessionV2) -> ContainerTerminalCleanupTurnV2:
+    match session:
+        case ContainerOwnedTerminalSessionV2.Legacy(legacy):
+            val turn = container_terminal_cleanup_v1(legacy)
+            ContainerTerminalCleanupTurnV2(session: ContainerOwnedTerminalSessionV2.Legacy(turn.session),
+                cleaned: turn.cleaned, error: turn.error)
+        case ContainerOwnedTerminalSessionV2.WindowsConnection(connection):
+            val turn = windows_primary_connection_cleanup_v2(connection)
+            val retained = ContainerOwnedTerminalSessionV2.WindowsConnection(turn.session)
+            if turn.error != "":
+                return ContainerTerminalCleanupTurnV2(session: retained, cleaned: false, error: turn.error)
+            val absence = match turn.absence:
+                case Some(value): value
+                case None:
+                    return ContainerTerminalCleanupTurnV2(session: retained, cleaned: false,
+                        error: "container-terminal-windows-cleanup-absence-required")
+            val matched = windows_primary_connection_absence_matches_v2(turn.session, absence)
+            if matched.is_err():
+                return ContainerTerminalCleanupTurnV2(session: retained, cleaned: false, error: matched.unwrap_err())
+            ContainerTerminalCleanupTurnV2(session: retained, cleaned: true, error: "")

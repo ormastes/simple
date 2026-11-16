@@ -1,0 +1,209 @@
+"""
+## Purpose and audience
+Purpose: Pin that resolved-advance text drawn under a clip rect paints the same
+pixels on the Vulkan font-atlas composite as on the software raster. The Draw IR
+text branch (`draw_ir_adv.spl`) sets `Engine2D.set_clip` to the control box and
+then calls `draw_text_with_advances`; the Vulkan lane composited the whole
+glyph quad (`VulkanBackend.composite_font_batch`) and ignored the clip, so
+descenders of `<input value="Simple">` painted below the control box on the
+catalog forms page (62 px over 8 pages at 900x760).
+Audience: Engine2D font / Vulkan backend maintainers.
+"""
+
+"""
+Traceability: REQ-ENGINE2D-VULKAN-TEXT-CLIP-PARITY-001 — Vulkan resolved-advance text honours the clip rect exactly as the software lane does.
+"""
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{vulkan_bitmap_text_clip_quads, vulkan_font_quads_within_clip}
+use std.nogc_sync_mut.text_layout.font_types.{FontRenderQuad}
+use std.io_runtime.{file_exists}
+
+val W: i32 = 64
+val H: i32 = 32
+val CLIP_BOTTOM: i32 = 14
+val LVP_ICD: text = "/usr/share/vulkan/icd.d/lvp_icd.json"
+
+# A host without the llvmpipe ICD has no Vulkan device to compare against.
+# Such a row is NOT exercised there: it says so on stdout instead of passing
+# silently, so a green run on such a host is not read as Vulkan evidence.
+fn no_vulkan_device(row: text) -> bool:
+    if file_exists(LVP_ICD):
+        return false
+    print("[skip] {row}: no llvmpipe ICD at {LVP_ICD}; this Vulkan row was not exercised")
+    true
+
+fn diff_count(a: [u32], b: [u32]) -> i32:
+    var n = 0
+    var i = 0
+    while i < W * H:
+        if a[i] != b[i]:
+            n = n + 1
+        i = i + 1
+    n
+
+fn paint_at(backend: text, x: i32, y: i32, cx: i32, cy: i32, cw: i32, ch: i32) -> [u32]:
+    var e = Engine2D.create_with_backend_fast(W, H, backend)
+    e.clear(0xFFFFFFFFu32)
+    e.set_clip(cx, cy, cw, ch)
+    val advances: [i32] = [9, 9, 9, 9, 9]
+    e.draw_text_with_advances(x, y, "Hjpqg", advances, 0xFF000000u32, 16)
+    e.clear_clip()
+    e.submit_batch()
+    e.read_pixels()
+
+fn quad(dst_x: i32, dst_y: i32, w: i32, h: i32, ax: i32, ay: i32) -> FontRenderQuad:
+    FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: dst_x, dst_y: dst_y,
+        width: w, height: h, atlas_x: ax, atlas_y: ay, color: 0xFF000000u32, cluster: -1)
+
+fn draw(e: Engine2D, clip_h: i32):
+    e.clear(0xFFFFFFFFu32)
+    e.set_clip(0, 0, W, clip_h)
+    val advances: [i32] = [9, 9, 9, 9, 9]
+    e.draw_text_with_advances(2, 2, "jpqgy", advances, 0xFF000000u32, 16)
+    e.clear_clip()
+    e.submit_batch()
+
+fn ink_rows_from(pixels: [u32], y0: i32) -> i32:
+    var n = 0
+    var y = y0
+    while y < H:
+        var x = 0
+        while x < W:
+            if pixels[x + y * W] != 0xFFFFFFFFu32:
+                n = n + 1
+            x = x + 1
+        y = y + 1
+    n
+
+describe "Vulkan resolved-advance text under a clip rect":
+    it "paints no glyph pixel below the clip and matches the software lane byte for byte":
+        if no_vulkan_device("clip-bottom-parity"):
+            return
+        var se = Engine2D.create_with_backend_fast(W, H, "software")
+        draw(se, CLIP_BOTTOM)
+        val soft = se.read_pixels()
+        step("the software lane clips the descenders and still draws ink above the clip")
+        expect(ink_rows_from(soft, CLIP_BOTTOM)).to_equal(0)
+        expect(ink_rows_from(soft, 0) > 0).to_equal(true)
+        var ve = Engine2D.create_with_backend_fast(W, H, "vulkan")
+        step("the engine really selected Vulkan and the font composite ran on it")
+        expect(ve.backend_name()).to_equal("vulkan")
+        draw(ve, CLIP_BOTTOM)
+        expect(ve.font_execution_target()).to_equal("vulkan")
+        val vk = ve.read_pixels()
+        step("no Vulkan glyph pixel lands at or below the clip bottom")
+        expect(ink_rows_from(vk, CLIP_BOTTOM)).to_equal(0)
+        step("every pixel equals the software lane")
+        var diff = 0
+        var i = 0
+        while i < W * H:
+            if vk[i] != soft[i]:
+                diff = diff + 1
+            i = i + 1
+        expect(diff).to_equal(0)
+
+    it "admits a fully clipped run on Vulkan without a CPU redraw and draws nothing":
+        if no_vulkan_device("clipped-out-admission"):
+            return
+        var ve = Engine2D.create_with_backend_fast(W, H, "vulkan")
+        expect(ve.backend_name()).to_equal("vulkan")
+        ve.clear(0xFFFFFFFFu32)
+        step("a 1-row clip above the text (glyph tops start at y >= 2)")
+        ve.set_clip(0, 0, W, 1)
+        val advances: [i32] = [9, 9, 9, 9, 9]
+        expect(ve.draw_text_with_advances(2, 2, "jpqgy", advances, 0xFF000000u32, 16)).to_equal(true)
+        expect(ve.font_execution_target()).to_equal("vulkan")
+        step("the strict Vulkan-only entry point accepts it too")
+        expect(ve.draw_text_with_advances_vulkan_only(2, 2, "jpqgy", advances, 0xFF000000u32, 16)).to_equal(true)
+        ve.clear_clip()
+        ve.submit_batch()
+        expect(ink_rows_from(ve.read_pixels(), 0)).to_equal(0)
+
+    it "draws glyphs first staged under a full clip correctly once they are visible":
+        if no_vulkan_device("stale-atlas-after-clip"):
+            return
+        val advances: [i32] = [10, 10, 10]
+        var se = Engine2D.create_with_backend_fast(W, H, "software")
+        se.clear(0xFFFFFFFFu32)
+        se.draw_text_with_advances(2, 2, "KwX", advances, 0xFF000000u32, 16)
+        se.submit_batch()
+        val soft = se.read_pixels()
+        var ve = Engine2D.create_with_backend_fast(W, H, "vulkan")
+        ve.clear(0xFFFFFFFFu32)
+        step("the first draw of these glyphs is clipped out: their atlas cells are never uploaded")
+        ve.set_clip(0, 0, W, 1)
+        ve.draw_text_with_advances(2, 2, "KwX", advances, 0xFF000000u32, 16)
+        ve.clear_clip()
+        step("the same glyphs drawn visibly must not read stale atlas cells")
+        ve.draw_text_with_advances(2, 2, "KwX", advances, 0xFF000000u32, 16)
+        expect(ve.font_execution_target()).to_equal("vulkan")
+        ve.submit_batch()
+        val vk = ve.read_pixels()
+        expect(ink_rows_from(soft, 0) > 0).to_equal(true)
+        var diff = 0
+        var i = 0
+        while i < W * H:
+            if vk[i] != soft[i]:
+                diff = diff + 1
+            i = i + 1
+        expect(diff).to_equal(0)
+
+    it "matches the software lane when the clip trims the left and top of the glyphs":
+        if no_vulkan_device("clip-left-top-parity"):
+            return
+        step("clip from (6, 7): cuts into the first glyph and the cap/ascender rows")
+        val soft = paint_at("software", 2, 2, 6, 7, W - 6, H - 7)
+        val vk = paint_at("vulkan", 2, 2, 6, 7, W - 6, H - 7)
+        var outside = 0
+        var y = 0
+        while y < H:
+            var x = 0
+            while x < W:
+                if (x < 6 or y < 7) and vk[x + y * W] != 0xFFFFFFFFu32:
+                    outside = outside + 1
+                x = x + 1
+            y = y + 1
+        expect(outside).to_equal(0)
+        expect(ink_rows_from(soft, 7) > 0).to_equal(true)
+        expect(diff_count(vk, soft)).to_equal(0)
+
+    it "matches the software lane for a run whose origin is off the top-left of the surface":
+        if no_vulkan_device("negative-origin-parity"):
+            return
+        val soft = paint_at("software", -4, -3, 0, 0, W, H)
+        val vk = paint_at("vulkan", -4, -3, 0, 0, W, H)
+        expect(ink_rows_from(soft, 0) > 0).to_equal(true)
+        expect(diff_count(vk, soft)).to_equal(0)
+
+describe "vulkan font quad clipping (host geometry)":
+    it "keeps quads that lie wholly inside the clip and flags any that do not":
+        val inside = [quad(2, 2, 4, 5, 10, 20), quad(7, 2, 3, 5, 15, 20)]
+        expect(vulkan_font_quads_within_clip(inside, 10, 10, 10, 10, 20, 20)).to_equal(true)
+        step("touching the clip's right/bottom edge exactly is still inside (exclusive edges)")
+        expect(vulkan_font_quads_within_clip([quad(0, 0, 20, 20, 0, 0)], 10, 10, 10, 10, 20, 20)).to_equal(true)
+        expect(vulkan_font_quads_within_clip([quad(0, 0, 21, 20, 0, 0)], 10, 10, 10, 10, 20, 20)).to_equal(false)
+        expect(vulkan_font_quads_within_clip([quad(-1, 0, 4, 4, 0, 0)], 10, 10, 10, 10, 20, 20)).to_equal(false)
+        expect(vulkan_font_quads_within_clip(inside, 10, 10, 10, 10, 0, 20)).to_equal(false)
+
+    it "shifts the atlas read position by the amount trimmed off the left and top":
+        # quad at (origin 10,10) + (0,0) = (10,10), 8x6, atlas (40,50); clip from (13,12)
+        val out = vulkan_bitmap_text_clip_quads([quad(0, 0, 8, 6, 40, 50)], 10, 10, 13, 12, 20, 20)
+        expect(out.len()).to_equal(1)
+        expect(out[0].dst_x).to_equal(3)
+        expect(out[0].dst_y).to_equal(2)
+        expect(out[0].width).to_equal(5)
+        expect(out[0].height).to_equal(4)
+        expect(out[0].atlas_x).to_equal(43)
+        expect(out[0].atlas_y).to_equal(52)
+        step("a negative glyph origin trimmed by a clip at 0 reads from inside the cell")
+        val neg = vulkan_bitmap_text_clip_quads([quad(-3, -2, 8, 6, 40, 50)], 0, 0, 0, 0, 64, 32)
+        expect(neg[0].dst_x).to_equal(0)
+        expect(neg[0].dst_y).to_equal(0)
+        expect(neg[0].width).to_equal(5)
+        expect(neg[0].height).to_equal(4)
+        expect(neg[0].atlas_x).to_equal(43)
+        expect(neg[0].atlas_y).to_equal(52)
+        step("a quad wholly outside is dropped")
+        expect(vulkan_bitmap_text_clip_quads([quad(30, 0, 4, 4, 0, 0)], 0, 0, 0, 0, 20, 20).len()).to_equal(0)

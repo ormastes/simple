@@ -1,8 +1,54 @@
 
+use std.common.image.ppm_decode.{encode_ppm_p6}
+use std.io_runtime.{dir_create_all, file_write, file_write_bytes}
+use os.compositor.screenshot_compare.{generate_diff_image}
 use os.compositor.wm_consistency_runner.{ConsistencyReport}
 
-pub fn export_comparison_ppm(pixels: [u32], width: i32, height: i32, path: text) -> bool:
-    pixels.len() > 0 and width > 0 and height > 0 and pixels.len() == width * height and path.len() > 0
+fn _parent_dir(path: text) -> text:
+    val parts = path.split("/")
+    if parts.len() <= 1:
+        return ""
+    var dir = ""
+    var i = 0
+    while i < parts.len() - 1:
+        if i > 0:
+            dir = dir + "/"
+        dir = dir + parts[i]
+        i = i + 1
+    dir
 
-fn export_diff_artifacts(report: ConsistencyReport, out_dir: text) -> bool:
-    out_dir.len() > 0 and report.width > 0 and report.height > 0
+pub fn export_comparison_ppm(pixels: [u32], width: i32, height: i32, path: text) -> bool:
+    if width <= 0 or height <= 0 or path.len() == 0:
+        return false
+    val expected = width * height
+    if pixels.len() == 0 or pixels.len() != expected:
+        return false
+    val parent = _parent_dir(path)
+    if parent != "":
+        if not dir_create_all(parent):
+            return false
+    val ppm_bytes = encode_ppm_p6(width.to_u32(), height.to_u32(), pixels)
+    if ppm_bytes.len() == 0:
+        return false
+    file_write_bytes(path, ppm_bytes)
+
+# reason: compositor artifact exporter returns bool status matching export_comparison_ppm
+# @allow(primitive_api)
+pub fn export_diff_artifacts(report: ConsistencyReport, out_dir: text) -> bool:
+    if out_dir.len() == 0 or report.width <= 0 or report.height <= 0:
+        return false
+    if not dir_create_all(out_dir):
+        return false
+    val expected = report.width * report.height
+    val a = if report.source_a.len() == expected: report.source_a else: report.electron_capture.pixels
+    val b = if report.source_b.len() == expected: report.source_b else: report.qemu_capture.pixels
+    if a.len() != expected or b.len() != expected:
+        return false
+    val ok_a = export_comparison_ppm(a, report.width, report.height, out_dir + "/source_a.ppm")
+    val ok_b = export_comparison_ppm(b, report.width, report.height, out_dir + "/source_b.ppm")
+    val diff_pixels = generate_diff_image(a, b, report.width, report.height)
+    val ok_diff = export_comparison_ppm(diff_pixels, report.width, report.height, out_dir + "/diff.ppm")
+    val status = if report.passed: "PASS" else: "FAIL"
+    val summary = "scene={report.scene_name}\nsize={report.width}x{report.height}\nstatus={status}\nexact_match={report.overall.exact_match}\nmatch_percentage={report.overall.match_percentage}\ndifferent_pixels={report.overall.different_pixels}\nmax_channel_diff={report.overall.max_channel_diff}\n"
+    val ok_summary = file_write(out_dir + "/report.txt", summary)
+    ok_a and ok_b and ok_diff and ok_summary

@@ -37,6 +37,9 @@ describe "LLM Caret HTTP transport delivery classification":
         expect(classify_http_delivery(429, "", "rate limited").retryable).to_equal(true)
         expect(classify_http_delivery(503, "", "").retryable).to_equal(true)
         expect(classify_http_delivery(0, "", "connection failed").retryable).to_equal(true)
+        # http_client_core reports a refused/reset connection as status -1.
+        expect(classify_http_delivery(-1, "", "Connection Failed").retryable).to_equal(true)
+        expect(classify_http_delivery(-1, "", "Connection Failed").permanent).to_equal(false)
 
     it "dead-letters non-retryable client failures":
         # @req REQ-SSPEC-APP
@@ -59,10 +62,10 @@ describe "LLM Caret HTTP transport delivery classification":
         expect(request_template.credential_ref).to_equal("secret://slack/development")
         val materialized = materialize_credential_request(request_template, "resolved-secret")
         expect(materialized.headers.join(" | ")).to_contain("Authorization: Bearer resolved-secret")
-        val store = PureSqlMessagingStore.open_memory()
+        val store = PureSqlMessagingStore.open_memory().unwrap()
         expect(queue_prepared_transport_request(store, "delivery-safe", "message-safe", "binding-safe",
             prepared, "secret://slack/development", "bearer", "resolved-secret", 10).ok).to_equal(true)
-        val persisted = store.queued_transport_requests(10, 10)
+        val persisted = store.queued_transport_requests(10, 10).unwrap()
         expect(persisted.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(persisted[0].headers.join(" | ").contains("resolved-secret")).to_equal(false)
         expect(persisted[0].credential_ref).to_equal("secret://slack/development")
@@ -83,7 +86,7 @@ describe "LLM Caret HTTP transport delivery classification":
     it "dead-letters a queued request when its process-scoped secret is unavailable":
         # @req REQ-SSPEC-APP
         step("dead-letters a queued request when its process-scoped secret is unavailable")
-        val store = PureSqlMessagingStore.open_memory()
+        val store = PureSqlMessagingStore.open_memory().unwrap()
         val queued = StoredTransportRequest(delivery_id: "delivery-missing-secret",
             message_id: "message-1", binding_id: "binding-1", method: "POST",
             url_template: "https://chat.example/send", headers: ["Content-Type: application/json"],
@@ -93,4 +96,4 @@ describe "LLM Caret HTTP transport delivery classification":
         val drained = drain_transport_outbox(store, 10, 20, 1000, 1)
         expect(drained.0).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(drained.1).to_equal(1)  # oracle: 1 — named expected value from the requirement
-        expect(store.outbox_state("delivery-missing-secret")).to_equal("dead_letter")
+        expect(store.outbox_state("delivery-missing-secret").unwrap()).to_equal("dead_letter")

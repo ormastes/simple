@@ -153,3 +153,30 @@ describe "child tasks append MIR shape":
                         case _: ()
         expect(checked).to_equal(1)
         expect(violations).to_equal("")
+
+    # A `-> (A, B)` conditional tail is lowered against its declared tuple
+    # (is_plain_tuple_conditional_return_v1). A diverging unit arm (`die`)
+    # defines nothing, so the join slot needs its dominating default def
+    # there too (doc/08_tracking/bug/stage2_payload_bind_and_tail_option_wrap_2026-11-16.md).
+    it "defines a declared tuple tail's join slot on a diverging-arm edge":
+        val die_source = "fn die(m: text):\n    panic(m)\n\n" +
+            "fn die_arm(k: i64) -> (i64, bool):\n    if k > 0:\n        (k, true)\n    else:\n        die(\"neg\")\n\n" +
+            "fn chain_die(k: i64) -> (i64, bool):\n    if k > 1:\n        (k, true)\n    elif k > 0:\n        die(\"one\")\n    else:\n        (0, false)\n"
+        val filename = "tuple_die_shape.spl"
+        val parsed = parse_full_frontend(die_source, filename, "tuple_die_shape", Logger(level: 0))
+        var hir_owner = HirLowering.with_filename(filename)
+        val hir = hir_owner.lower_module(parsed)
+        var lowering = MirLowering.new(hir.symbols)
+        val mir = lowering.lower_module(hir)
+        expect(lowering.errors.len()).to_equal(0)
+        var checked = 0
+        var violations = ""
+        for function in mir.functions.values():
+            val is_target = function.name == "die_arm" or function.name == "chain_die" or function.name.ends_with(".die_arm") or function.name.ends_with(".chain_die")
+            if is_target:
+                checked = checked + 1
+                val found = undefined_join_edge(function)
+                if found != "":
+                    violations = violations + function.name + ": " + found + "; "
+        expect(checked).to_equal(2)
+        expect(violations).to_equal("")

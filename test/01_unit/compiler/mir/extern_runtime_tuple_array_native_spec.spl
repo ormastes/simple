@@ -1,0 +1,87 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+"""
+An extern returning `[(A, B)]` / `[(A, B)]?` hands back RUNTIME tuples.
+
+The runtime builds each pair with rt_tuple_new: a headered RtCoreArray flagged
+as a tuple (runtime_native.c rt_env_vars). Compiled code reads a tuple with
+`GetField` on a bare native block (an `Aggregate` of the fields), so
+`val (name, value) = pair`, `pair.0` and `snap[i]` all read the HEADER words:
+the environment snapshot of native_build_environment_snapshot_fingerprint_v1
+(80.driver/cache/native_build_environment_identity.spl) bound every name as
+"" and tripped `environment-field-duplicate`. Compiler-built tuples are not
+affected (test/fixtures/native_for_tuple_destructure/main.spl is all SAME).
+
+The array is converted ONCE at the extern call result with the same
+builtin_runtime_tuples_to_native helper `dict` entries and `enumerate` use,
+and a nil snapshot must stay nil (the conversion is guarded). Simple-defined
+callees already return native tuples and must not be converted. Native
+oracle: test/fixtures/native_extern_runtime_tuple_array/main.spl.
+"""
+
+use std.spec
+use std.io_runtime.{env_set}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+fn lower_module_json(src: text, bootstrap: bool) -> Dict<text, text>:
+    val module = parse_full_frontend(src, "rt_tuples.spl", "rt_tuples.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("rt_tuples.spl")
+    if bootstrap:
+        env_set("SIMPLE_BOOTSTRAP", "1")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    if bootstrap:
+        env_set("SIMPLE_BOOTSTRAP", "")
+    var out: Dict<text, text> = {}
+    for function in mir.functions.values():
+        val dot = function.name.rfind(".")
+        val short = if dot >= 0: function.name.substring(dot + 1, function.name.len()) else: function.name
+        out[short] = serialize_mir_function(function)
+    out
+
+val SOURCE: text = "@unsafe(reason: \"snapshot\", capabilities: [ffi])\n" +
+    "extern fn rt_env_vars() -> [(text, text)]?\n" +
+    "@unsafe(reason: \"pairs\", capabilities: [ffi])\n" +
+    "extern fn rt_fake_pairs() -> [(i64, text)]\n\n" +
+    "fn raw_env() -> [(text, text)]?:\n    unsafe(capabilities: [ffi]): rt_env_vars()\n\n" +
+    "fn names() -> i64:\n    val raw = unsafe(capabilities: [ffi]): rt_env_vars()\n    var n = 0\n" +
+    "    for pair in raw ?? []:\n        val (name, value) = pair\n        n = n + name.len() + value.len()\n    n\n\n" +
+    "fn plain_pairs() -> i64:\n    val ps = unsafe(capabilities: [ffi]): rt_fake_pairs()\n    var n = 0\n" +
+    "    for p in ps:\n        n = n + p.0\n    n\n\n" +
+    "fn local_pairs() -> [(text, text)]:\n    [(\"a\", \"b\")]\n\n" +
+    "fn local_use() -> i64:\n    var n = 0\n    for pair in local_pairs():\n        val (a, b) = pair\n        n = n + a.len() + b.len()\n    n\n"
+
+fn expect_converted_after_guard(mir: text):
+    expect(mir.len() > 0).to_equal(true)
+    val call_at = mir.index_of("\"rt_env_vars\"") ?? -1
+    val guard_at = mir.index_of("\"rt_is_some\"") ?? -1
+    val slot_at = mir.index_of("\"rt_tuple_get\"") ?? -1
+    expect(call_at >= 0).to_equal(true)
+    expect(guard_at > call_at).to_equal(true)
+    expect(slot_at > guard_at).to_equal(true)
+
+fn expect_extern_results_converted(fns: Dict<text, text>):
+    expect_converted_after_guard(fns["raw_env"] ?? "")
+    expect_converted_after_guard(fns["names"] ?? "")
+    # A non-optional `[(i64, text)]` extern converts without a nil guard.
+    val plain = fns["plain_pairs"] ?? ""
+    expect(plain).to_contain("rt_tuple_get")
+    expect((plain.index_of("\"rt_fake_pairs\"") ?? -1) < (plain.index_of("\"rt_tuple_get\"") ?? -1)).to_equal(true)
+    # Simple-defined callees already return native tuples.
+    val local_use = fns["local_use"] ?? ""
+    expect(local_use.len() > 0).to_equal(true)
+    expect(local_use.contains("rt_tuple_get")).to_equal(false)
+
+describe "extern arrays of runtime tuples are rebuilt as native tuples":
+    it "converts at the extern call result (ordinary lowering)":
+        expect_extern_results_converted(lower_module_json(SOURCE, false))
+
+    it "converts at the extern call result (SIMPLE_BOOTSTRAP=1 HIR and MIR)":
+        expect_extern_results_converted(lower_module_json(SOURCE, true))

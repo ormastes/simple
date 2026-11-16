@@ -19,7 +19,7 @@
 # with no Chrome is ERROR naming the path it looked for.
 #
 # Usage:
-#   sh scripts/check/check-chrome-catalog-pixel-diff.shs [--out DIR] [--pages "a b"]
+#   sh scripts/check/check-chrome-catalog-pixel-diff.shs [--out DIR] [--pages "a b"] [--device-scale K]
 #   sh scripts/check/check-chrome-catalog-pixel-diff.shs --selftest
 #   sh scripts/check/check-chrome-catalog-pixel-diff.shs --diff-only --out DIR
 #   sh scripts/check/check-chrome-catalog-pixel-diff.shs --simple-only --out DIR
@@ -28,6 +28,13 @@
 # cpu_simd; e.g. vulkan). The backend is requested STRICT: a host that cannot
 # provide it fails the page instead of silently rendering on the CPU.
 # --width/--height take any size, e.g. 3840 2160 for the 4K lane.
+#
+# --device-scale K (integer >= 1, default 1) renders both sides at K device px
+# per CSS px: Chrome gets --force-device-scale-factor=K, the Simple driver gets
+# PAGE_DEVICE_SCALE=K (layout in WIDTHxHEIGHT CSS px, paint and text raster at
+# K x). --width/--height stay CSS px; frames are (W*K)x(H*K). K=4 is the
+# 384-dpi lane the >=300-dpi parity rule asks for; it has its own baseline
+# (suffix .dprK), so the 1x ratchet is never judged against it.
 #
 # --baseline FILE is the per-page ratchet: lines of "<page> <mismatch_pct>".
 # A page whose mismatch exceeds its row by more than 0.25 points, or that has
@@ -57,6 +64,7 @@ CHROME_TIMEOUT=90
 BACKEND="cpu_simd"
 BASELINE=""
 RATCHET_TOLERANCE="0.25"
+DEVICE_SCALE=1
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -70,6 +78,7 @@ while [ $# -gt 0 ]; do
         --chrome-timeout) CHROME_TIMEOUT="$2"; shift 2 ;;
         --baseline) BASELINE="$2"; shift 2 ;;
         --backend) BACKEND="$2"; shift 2 ;;
+        --device-scale) DEVICE_SCALE="$2"; shift 2 ;;
         *) echo "ERROR — nothing was checked (unknown argument $1)"; exit 2 ;;
     esac
 done
@@ -96,6 +105,25 @@ find_simple() {
     return 1
 }
 
+# newest_playwright_chrome <home> -> the full Playwright Chromium with the
+# HIGHEST build number under <home>, or nothing. Compared as numbers: the glob
+# expands in name order, where chromium-999 sorts after chromium-1255.
+newest_playwright_chrome() {
+    np_best=""
+    np_best_n=-1
+    for np_c in "$1"/.cache/ms-playwright/chromium-*/chrome-linux*/chrome; do
+        [ -x "$np_c" ] || continue
+        np_n=${np_c#"$1"/.cache/ms-playwright/chromium-}
+        np_n=${np_n%%/*}
+        case "$np_n" in ''|*[!0-9]*) continue ;; esac
+        if [ "$np_n" -gt "$np_best_n" ]; then
+            np_best_n=$np_n
+            np_best=$np_c
+        fi
+    done
+    printf '%s' "$np_best"
+}
+
 find_chrome() {
     # CHROME_BIN wins when set. Playwright's Chromium (`npx playwright install
     # chromium`) is the no-root path on linux-arm64, where Google ships no Chrome.
@@ -108,10 +136,7 @@ find_chrome() {
     # Newest Playwright build wins: UA defaults change between Chrome versions
     # (Chromium 131 still shrinks `section h1`; Chrome 159 does not), so an old
     # reference browser is a wrong oracle, not a stricter one.
-    newest=""
-    for candidate in "$HOME"/.cache/ms-playwright/chromium-*/chrome-linux*/chrome; do
-        [ -x "$candidate" ] && newest="$candidate"
-    done
+    newest=$(newest_playwright_chrome "$HOME")
     [ -n "$newest" ] && { echo "$newest"; return 0; }
     for candidate in \
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
@@ -143,7 +168,7 @@ now_ms() {
 render_simple() {
     rs_page="$1"; rs_html="$2"; rs_try=1
     while :; do
-        SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_2D_BACKEND="$BACKEND" SIMPLE_2D_BACKEND_STRICT=1 \
+        SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 PAGE_DEVICE_SCALE="$DEVICE_SCALE" SIMPLE_2D_BACKEND="$BACKEND" SIMPLE_2D_BACKEND_STRICT=1 \
             "$SIMPLE_BIN" run examples/06_io/ui/web_render_page_ppm.spl \
             "$rs_html" "$OUT/$rs_page.simple.ppm" "$WIDTH" "$HEIGHT" > "$OUT/$rs_page.simple.log" 2>&1
         grep -q "unavailable (strict mode)" "$OUT/$rs_page.simple.log" || break
@@ -195,6 +220,22 @@ ppm_non_background_pixels() {
         END { print d + 0 }'
 }
 
+# valid_device_scale <k>: exit 0 only for a decimal integer >= 1.
+valid_device_scale() {
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$1" -ge 1 ]
+}
+
+# baseline_lane_suffix <w> <h> <backend> <k>: the baseline-file lane suffix.
+# The default lane (900x760, cpu_simd, k=1) has none; another size or backend
+# adds .<w>x<h>.<backend>, a device scale k>1 adds .dpr<k>.
+baseline_lane_suffix() {
+    bls=""
+    [ "$1" = 900 ] && [ "$2" = 760 ] && [ "$3" = cpu_simd ] || bls=".$1x$2.$3"
+    [ "$4" = 1 ] || bls="$bls.dpr$4"
+    printf '%s' "$bls"
+}
+
 # ratchet_offenders <baseline> <results>: both files are "<page> <pct>" lines.
 # Prints one "<page>:<pct>>base" or "<page>:unbaselined" word per offender.
 ratchet_offenders() {
@@ -221,6 +262,15 @@ run_selftest() {
     printf 'P6\n4 1\n255\n' > "$st_dir/diff.simple.ppm"
     printf '\0\0\377\0\0\377\0\0\377\0\0\377' >> "$st_dir/diff.simple.ppm"
     cp "$st_dir/same.simple.ppm" "$st_dir/diff.chrome.ppm"
+    # The newest Playwright build is chosen by NUMBER: chromium-999 must not
+    # beat chromium-1255 (it does in glob name order).
+    for st_b in 999 1255 1200; do
+        mkdir -p "$st_dir/home/.cache/ms-playwright/chromium-$st_b/chrome-linux-arm64"
+        printf '#!/bin/sh\n' > "$st_dir/home/.cache/ms-playwright/chromium-$st_b/chrome-linux-arm64/chrome"
+        chmod +x "$st_dir/home/.cache/ms-playwright/chromium-$st_b/chrome-linux-arm64/chrome"
+    done
+    st_pick=$(newest_playwright_chrome "$st_dir/home")
+    [ "$st_pick" = "$st_dir/home/.cache/ms-playwright/chromium-1255/chrome-linux-arm64/chrome" ] || { echo "selftest: newest Playwright build picked '$st_pick', want chromium-1255"; return 1; }
 
     same_out=$("$SIMPLE_BIN" run src/app/ui/chrome_showcase/pixel_diff.spl \
         --pair "$st_dir/same.chrome.ppm" "$st_dir/same.simple.ppm" 2>/dev/null)
@@ -265,6 +315,16 @@ run_selftest() {
     printf 'a 2.30\nb 4.00\nc 1.00\n' > "$st_dir/bad.txt"
     [ "$(ratchet_offenders "$st_dir/base.txt" "$st_dir/ok.txt")" = "" ] || { echo "selftest: ratchet flagged an in-tolerance run"; return 1; }
     [ "$(ratchet_offenders "$st_dir/base.txt" "$st_dir/bad.txt")" = "a:2.30>2.00 c:unbaselined " ] || { echo "selftest: ratchet missed a regression or an unbaselined page"; return 1; }
+    # --device-scale: only an integer >= 1 is accepted, and k>1 gets its own
+    # baseline lane while k=1 keeps the existing file names byte-for-byte.
+    for st_k in 0 -1 1.5 x ''; do
+        valid_device_scale "$st_k" && { echo "selftest: device scale '$st_k' was accepted"; return 1; }
+    done
+    valid_device_scale 4 || { echo "selftest: device scale 4 was rejected"; return 1; }
+    [ "$(baseline_lane_suffix 900 760 cpu_simd 1)" = "" ] || { echo "selftest: default lane gained a suffix"; return 1; }
+    [ "$(baseline_lane_suffix 3840 2160 vulkan 1)" = ".3840x2160.vulkan" ] || { echo "selftest: 4K vulkan lane suffix changed"; return 1; }
+    [ "$(baseline_lane_suffix 900 760 cpu_simd 4)" = ".dpr4" ] || { echo "selftest: k=4 lane is not .dpr4"; return 1; }
+    [ "$(baseline_lane_suffix 3840 2160 vulkan 4)" = ".3840x2160.vulkan.dpr4" ] || { echo "selftest: k=4 4K lane suffix wrong"; return 1; }
     return 0
 }
 
@@ -272,8 +332,12 @@ if ! run_selftest; then
     echo "ERROR — nothing was checked (selftest failed)"
     exit 2
 fi
+if ! valid_device_scale "$DEVICE_SCALE"; then
+    echo "ERROR — nothing was checked (--device-scale must be an integer >= 1, got '$DEVICE_SCALE')"
+    exit 2
+fi
 if [ "$SELFTEST" -eq 1 ]; then
-    echo "PASS — 9 selftest fixture(s) checked, differ discriminates, viewport crop is explicit, zero-pixel-render is named, ratchet names regressions"
+    echo "PASS — 15 selftest fixture(s) checked, newest Playwright build by number, differ discriminates, viewport crop is explicit, zero-pixel-render is named, ratchet names regressions, device scale is validated and lane-separated"
     exit 0
 fi
 
@@ -301,7 +365,7 @@ if [ "$DIFF_ONLY" -eq 0 ] && [ "$SIMPLE_ONLY" -eq 0 ]; then
         "$CHROME_BIN" --headless=new --disable-gpu --hide-scrollbars \
         ${CHROME_NO_SANDBOX:+--no-sandbox} \
         --no-first-run --no-default-browser-check --disable-extensions \
-        --force-device-scale-factor=1 --virtual-time-budget=3000 \
+        --force-device-scale-factor="$DEVICE_SCALE" --virtual-time-budget=3000 \
         --user-data-dir="$OUT/.viewport-probe-profile" --window-size="$WIDTH,$HEIGHT" \
         --dump-dom "file://$(cd "$OUT" && pwd)/.viewport-probe.html" 2>/dev/null \
         | sed -n 's/.*inner_h=\([0-9][0-9]*\).*/\1/p' | tail -1)
@@ -310,7 +374,7 @@ if [ "$DIFF_ONLY" -eq 0 ] && [ "$SIMPLE_ONLY" -eq 0 ]; then
     esac
     VIEWPORT_DEFICIT=$((HEIGHT - inner_h))
     [ "$VIEWPORT_DEFICIT" -ge 0 ] || VIEWPORT_DEFICIT=0
-    echo "chrome_viewport_deficit=$VIEWPORT_DEFICIT window=${WIDTH}x$((HEIGHT + VIEWPORT_DEFICIT)) viewport=${WIDTH}x$HEIGHT"
+    echo "chrome_viewport_deficit=$VIEWPORT_DEFICIT window=${WIDTH}x$((HEIGHT + VIEWPORT_DEFICIT)) viewport=${WIDTH}x$HEIGHT device_scale=$DEVICE_SCALE frame=$((WIDTH * DEVICE_SCALE))x$((HEIGHT * DEVICE_SCALE))"
 fi
 
 captured=0
@@ -338,7 +402,7 @@ for page in $PAGES; do
             "$CHROME_BIN" --headless=new --disable-gpu --hide-scrollbars \
             ${CHROME_NO_SANDBOX:+--no-sandbox} \
             --no-first-run --no-default-browser-check --disable-extensions \
-            --force-device-scale-factor=1 --virtual-time-budget=3000 \
+            --force-device-scale-factor="$DEVICE_SCALE" --virtual-time-budget=3000 \
             --user-data-dir="$c_profile" \
             --window-size="$WIDTH,$((HEIGHT + VIEWPORT_DEFICIT))" \
             --screenshot="$c_shot" "$c_url" >/dev/null 2>&1
@@ -384,7 +448,7 @@ fi
 # ---------------------------------------------------------------------------
 # Diff
 # ---------------------------------------------------------------------------
-diff_out=$("$SIMPLE_BIN" run src/app/ui/chrome_showcase/pixel_diff.spl --ref-viewport-rows "$HEIGHT" "$OUT" $PAGES 2>/dev/null)
+diff_out=$("$SIMPLE_BIN" run src/app/ui/chrome_showcase/pixel_diff.spl --ref-viewport-rows "$((HEIGHT * DEVICE_SCALE))" "$OUT" $PAGES 2>/dev/null)
 diff_rc=$?
 if [ "$diff_rc" -ne 0 ]; then
     echo "ERROR — nothing was checked (differ exited $diff_rc)"
@@ -429,11 +493,10 @@ if [ "$zero_count" -gt 0 ]; then
     exit 1
 fi
 
-# The default baseline describes the default lane only (900x760, cpu_simd);
-# another size or backend has its own file, so a 4K or Vulkan run is never
+# The default baseline describes the default lane only (900x760, cpu_simd, k=1);
+# another size, backend or device scale has its own file, so a 4K or Vulkan run is never
 # judged against rows it did not produce.
-lane=""
-[ "$WIDTH" = 900 ] && [ "$HEIGHT" = 760 ] && [ "$BACKEND" = cpu_simd ] || lane=".${WIDTH}x${HEIGHT}.$BACKEND"
+lane=$(baseline_lane_suffix "$WIDTH" "$HEIGHT" "$BACKEND" "$DEVICE_SCALE")
 [ -n "$BASELINE" ] || BASELINE="$repo_root/scripts/check/chrome_catalog_pixel_diff_baseline.$(uname -s)-$(uname -m)$lane.txt"
 case "$verdict" in
     PASS*)

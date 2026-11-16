@@ -601,6 +601,9 @@ impl Lowerer {
             Node::TypeAlias(ta) => {
                 self.register_type_alias(ta)?;
             }
+            Node::Unit(u) => {
+                self.register_record_unit_scalar(u);
+            }
             Node::ClassAlias(ca) => {
                 // Register class/struct/enum alias mapping
                 self.register_type_alias_mapping(ca.name.clone(), ca.target.clone());

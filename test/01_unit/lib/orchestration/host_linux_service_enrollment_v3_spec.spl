@@ -1,0 +1,101 @@
+# @req LINUX-SERVICE-ENROLLMENT-01 LINUX-SERVICE-CAPACITY-01
+# AUTHORED_NOT_RUN. Pure contract tests, not native enrollment or grant evidence.
+use std.common.contracts.orchestration.host_linux_service_enrollment_v3.*
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+fn linux_enrollment_fixture_v3() -> HostLinuxServiceEnrollmentBindingV3:
+    HostLinuxServiceEnrollmentBindingV3(physical_host_id: "worker_1", service_scope_id: "service_1",
+        config_digest: "b".repeat(64), policy_digest: "c".repeat(64), policy_revision: 4,
+        native_machine_id: "linux-machine-id-v1:0123456789abcdef", provider_identity_digest: "a".repeat(64),
+        engine_policy_digest: "e".repeat(64), machine_parent: "/var/lib/simple/hosts",
+        broker_policy_digest: "d".repeat(64), physical_cpu_millis: 2000, physical_memory_bytes: 536870912,
+        reserved_cpu_millis: 100, reserved_memory_bytes: 67108864, agent_helper_template_digest: "9".repeat(64))
+
+fn linux_enrollment_changed_field_v3(name: text, value: SdnValue) -> text:
+    val source = host_linux_service_enrollment_encode_v3(linux_enrollment_fixture_v3()).unwrap()
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 16384,
+        max_depth: 2, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 24)).unwrap()
+    var fields = match parsed.value:
+        case SdnValue.Dict(items): items
+        case _: panic("fixture must encode a dictionary")
+    fields[name] = value
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+describe "Explicit static Linux service enrollment DATA":
+    it "roundtrips canonical bytes and derives exact allocatable capacity":
+        step("roundtrips canonical bytes and derives exact allocatable capacity")
+        val binding = linux_enrollment_fixture_v3()
+        val source = host_linux_service_enrollment_encode_v3(binding).unwrap()
+        val decoded = host_linux_service_enrollment_decode_v3(source).unwrap()
+        expect(host_linux_service_enrollment_encode_v3(decoded).unwrap()).to_equal(source)
+        expect(host_linux_service_enrollment_digest_v3(decoded).unwrap()).to_equal(sha256_text(source))
+        val available = host_linux_service_allocatable_v3(decoded).unwrap()
+        expect(available.cpu_millis).to_equal(1900)
+        expect(available.memory_bytes).to_equal(469762048)
+
+    it "rejects Windows legacy and native-boot schema substitutions":
+        step("rejects Windows legacy and native-boot schema substitutions")
+        for pair in [("backend", "windows-docker-process"), ("kind", "host-service-enrollment-binding"),
+                ("continuityMode", "native-boot-incarnation-v1"), ("durabilityProfile", "power-loss-v1")]:
+            expect(host_linux_service_enrollment_decode_v3(linux_enrollment_changed_field_v3(pair.0,
+                SdnValue.String(pair.1))).unwrap_err()).to_equal("linux-host-service-enrollment-version-mode")
+        expect(host_linux_service_enrollment_decode_v3(linux_enrollment_changed_field_v3("version",
+            SdnValue.Int(2))).unwrap_err()).to_equal("linux-host-service-enrollment-version-mode")
+
+    it "does not admit boot epoch or generation as static enrollment fields":
+        step("does not admit boot epoch or generation as static enrollment fields")
+        for name in ["nativeBootId", "continuityId", "epochRecordDigest", "providerGeneration"]:
+            expect(host_linux_service_enrollment_decode_v3(linux_enrollment_changed_field_v3(name,
+                SdnValue.String("invented"))).unwrap_err()).to_equal("linux-host-service-enrollment-unknown-field:" + name)
+
+    it "rejects exhausted negative and overflow-shaped capacity before subtraction":
+        step("rejects exhausted negative and overflow-shaped capacity before subtraction")
+        for value in [0, -1, 2000, 9223372036854775807]:
+            var binding = linux_enrollment_fixture_v3()
+            binding.reserved_cpu_millis = value
+            expect(host_linux_service_allocatable_v3(binding).unwrap_err()).to_equal("linux-host-service-broker-partition-invalid")
+        for value in [0, -1, 536870912, 9223372036854775807]:
+            var binding = linux_enrollment_fixture_v3()
+            binding.reserved_memory_bytes = value
+            expect(host_linux_service_allocatable_v3(binding).unwrap_err()).to_equal("linux-host-service-broker-partition-invalid")
+
+    it "rejects traversal aliases and byte oversized installed parent paths":
+        step("rejects traversal aliases and byte oversized installed parent paths")
+        for path in ["relative", "/", "/a/../b", "/a/./b", "/a//b", "/a/", "C:\\hosts", "/a\\b", "/a\0b", "/" + "界".repeat(1366)]:
+            var binding = linux_enrollment_fixture_v3()
+            binding.machine_parent = path
+            expect(host_linux_service_enrollment_encode_v3(binding).unwrap_err()).to_equal("linux-host-service-enrollment-parent-invalid")
+        var boundary = linux_enrollment_fixture_v3()
+        boundary.machine_parent = "/" + "界".repeat(1365)
+        expect(boundary.machine_parent.byte_len()).to_equal(4096)
+        assert(host_linux_service_enrollment_encode_v3(boundary).is_ok())
+
+    it "rejects noncanonical oversized malformed and wrong typed input":
+        step("rejects noncanonical oversized malformed and wrong typed input")
+        val source = host_linux_service_enrollment_encode_v3(linux_enrollment_fixture_v3()).unwrap()
+        expect(host_linux_service_enrollment_decode_v3(source + "\n").unwrap_err()).to_equal("linux-host-service-enrollment-noncanonical")
+        expect(host_linux_service_enrollment_decode_v3("界".repeat(5462)).unwrap_err()).to_equal("linux-host-service-enrollment-size")
+        assert(host_linux_service_enrollment_decode_v3("{").is_err())
+        expect(host_linux_service_enrollment_decode_v3(linux_enrollment_changed_field_v3("physicalCpuMillis",
+            SdnValue.String("2000"))).unwrap_err()).to_equal("linux-host-service-enrollment-field-type:physicalCpuMillis")
+
+    it "binds engine provider capacity and policy changes into distinct digests":
+        step("binds engine provider capacity and policy changes into distinct digests")
+        val binding = linux_enrollment_fixture_v3()
+        val original = host_linux_service_enrollment_digest_v3(binding).unwrap()
+        var changed = binding
+        changed.engine_policy_digest = "f".repeat(64)
+        assert(host_linux_service_enrollment_digest_v3(changed).unwrap() != original)
+        changed = binding
+        changed.provider_identity_digest = "f".repeat(64)
+        assert(host_linux_service_enrollment_digest_v3(changed).unwrap() != original)
+        changed = binding
+        changed.reserved_memory_bytes = binding.reserved_memory_bytes + 1
+        assert(host_linux_service_enrollment_digest_v3(changed).unwrap() != original)
+        changed = binding
+        changed.policy_revision = binding.policy_revision + 1
+        assert(host_linux_service_enrollment_digest_v3(changed).unwrap() != original)

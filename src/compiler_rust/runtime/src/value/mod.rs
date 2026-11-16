@@ -253,7 +253,7 @@ pub use hpcollections::{
 
 // Re-export object SFFI functions
 pub use objects::{
-    hash_variant_discriminant, register_enum_variants, rt_closure_func_ptr, rt_closure_get_capture, rt_closure_new, rt_closure_release,
+    declared_variant_discriminant, hash_variant_discriminant, register_enum_variants, rt_closure_func_ptr, rt_closure_get_capture, rt_closure_new, rt_closure_release,
     rt_closure_retain, rt_closure_set_capture, closure_pin_stats,
     rt_enum_check_discriminant, rt_enum_check_variant, rt_enum_discriminant, rt_enum_id, rt_enum_new, rt_enum_payload,
     rt_try_is_absent,
@@ -896,6 +896,7 @@ pub use net::{
     rt_browser_http_job_take_error,
     rt_browser_http_job_take_response,
     rt_dns_lookup,
+    rt_dns_lookup_timeout_ms,
     rt_io_tcp_accept,
     rt_io_tcp_accept_timeout,
     rt_io_tcp_bind,

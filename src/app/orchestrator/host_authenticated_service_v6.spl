@@ -1,0 +1,46 @@
+# Explicit local administrator composition. V6 setup credentials are distinct
+# from legacy bearer files; the server retains the sole actual Host domain.
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use std.nogc_sync_mut.orchestration.host_service_installed_v3.{host_service_primary_installed_shape_v3,
+    host_service_domain_open_primary_v3}
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.HostServiceDomainOpenV3
+use os.apps.smux.server.smux_server_serve_runtime_authenticated_v6
+use os.apps.smux.runtime_connection_recovery_v5.{SmuxRuntimeServerTurnV5, smux_runtime_server_recovery_pending_v5}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub fn host_authenticated_service_shape_v6(args: [text]) -> text:
+    if args.len() != 8 or args[0] != "host-authenticated-service": return "host-authenticated-service-usage"
+    val invalid = host_service_primary_installed_shape_v3(args[1], args[2], args[3], args[4])
+    if invalid != "": return invalid
+    if args[5] != "127.0.0.1:0": return "host-authenticated-service-loopback-auto-required"
+    if (args[6] == "" or args[6].contains("\0") or args[6].contains("\n") or
+            args[6].contains("\r") or args[6].ends_with(".ready")):
+        return "host-authenticated-service-setup-required"
+    if not builder_digest_valid_v1(args[7]): return "host-authenticated-service-setup-pin-required"
+    ""
+
+fn authenticated_service_reply_v6(code: i64, error: text,
+        recovery: Option<SmuxRuntimeServerTurnV5>) -> OrchestratorValidationReplyV1:
+    val pending = recovery.is_some() and smux_runtime_server_recovery_pending_v5(recovery.unwrap())
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(6),
+        "kind": SdnValue.String("host-authenticated-service"), "mode": SdnValue.String("host-only-v6"),
+        "status": SdnValue.String(if code == 0: "stopped" else: "refused-or-cleanup-pending"),
+        "error": SdnValue.String(error), "recoveryRequired": SdnValue.Bool(pending),
+        "terminalSupported": SdnValue.Bool(false)}
+    OrchestratorValidationReplyV1(exit_code: code, output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n",
+        primary_service_recovery: recovery)
+
+pub fn host_authenticated_service_command_v6(args: [text]) -> OrchestratorValidationReplyV1:
+    val invalid = host_authenticated_service_shape_v6(args)
+    if invalid != "": return authenticated_service_reply_v6(2, invalid, nil)
+    match host_service_domain_open_primary_v3(args[1], args[2], args[3], args[4]):
+        case HostServiceDomainOpenV3.Rejected(error): authenticated_service_reply_v6(2, error, nil)
+        case HostServiceDomainOpenV3.CleanupRequired(cleanup, error):
+            authenticated_service_reply_v6(2, error, Some(SmuxRuntimeServerTurnV5(2, nil, nil, Some(cleanup), nil, error)))
+        case HostServiceDomainOpenV3.Pending(domain, error):
+            authenticated_service_reply_v6(2, error, Some(SmuxRuntimeServerTurnV5(2, nil, Some(domain), nil, nil, error)))
+        case HostServiceDomainOpenV3.Ready(domain):
+            val served = smux_server_serve_runtime_authenticated_v6(args[6], args[7], domain, args[5])
+            authenticated_service_reply_v6(served.exit_code, served.error, Some(served))

@@ -864,6 +864,174 @@ fn sfnt_render_glyph_into(blob: [u8], selector_kind: i64, selector_value: i64, s
     meta[9] = nonzero_alpha
     meta[8] = 310032
 
+# LCD subpixel glyph (Chrome 159 / Skia LCD16 parity, 2026-11-16).
+#
+# Measured against Chrome's headless screenshot (Liberation Sans 16 px, see
+# test/01_unit/browser_engine/lcd_subpixel_text_chrome159_spec.spl): Chrome
+# rasterises the outline at 3x horizontal resolution, subpixel order R,G,B
+# left to right, filters it with a symmetric 5-tap FIR and keeps 5 bits per
+# channel. The taps were fitted to the 16 px `l` stem at all four of Chrome's
+# quarter-pixel phases (48 subpixel samples): [0.090, 0.225, 0.370, 0.225,
+# 0.090] (x256 ~ [23, 58, 95, 58, 23]), rms 0.33/32 -- below one LCD16 step.
+# FreeType's default [8, 77, 86, 77, 8] / 256 fits at 0.91/32 and Skia's
+# gaussian-like [26, 67, 86, 67, 26] / 272 at 0.50/32, so neither is used.
+# Unlike the grayscale
+# path above, which snaps the glyph's left bbox edge onto a pixel boundary,
+# the outline keeps its true pen-relative position: column 0 of the bitmap is
+# pen-relative x `slg_bearing_x`, and `phase_q` shifts the outline right by
+# phase_q/4 px (Skia's quarter-pixel positions). One padding pixel on each side
+# holds the filter's 2-subpixel spread. Vertical geometry (height, bearing_y,
+# rows) is identical to sfnt_render_glyph_into, so the two paths only differ
+# horizontally.
+class SfntLcdGlyph:
+    slg_width: i64
+    slg_height: i64
+    slg_advance: i64
+    slg_bearing_x: i64
+    slg_bearing_y: i64
+    # width*height average coverage, the grayscale stand-in for consumers
+    # that read one alpha per pixel.
+    slg_gray: [u8]
+    # width*height*3 filtered subpixel coverage, R,G,B per pixel.
+    slg_rgb: [u8]
+
+val _SFNT_LCD_SAMPLE_ROWS: i64 = 4
+val _SFNT_LCD_TAP0: f64 = 0.370
+val _SFNT_LCD_TAP1: f64 = 0.225
+val _SFNT_LCD_TAP2: f64 = 0.090
+
+fn _floor_glyf(value: f64) -> i64:
+    val whole = value as i64
+    if (whole as f64) > value: whole - 1 else: whole
+
+fn _ceil_glyf(value: f64) -> i64:
+    val whole = value as i64
+    if (whole as f64) < value: whole + 1 else: whole
+
+# Adds the exact horizontal span coverage of one sample row to `acc`, in
+# subpixel units (one full subpixel = 1.0). Crossings are sorted and walked
+# with the same non-zero winding rule as _glyf_edge_coverage.
+fn _lcd_accumulate_row(edges: [_SfntEdge], sy: f64, subpixels: i64, mut acc: [f64]):
+    var xs: [f64] = []
+    var dirs: [i64] = []
+    for edge in edges:
+        if edge.y_top <= sy and sy < edge.y_bottom:
+            val crossing = edge.x_top + edge.dx_dy * (sy - edge.y_top)
+            # insertion sort: a glyph row has a handful of crossings
+            var at = xs.len()
+            xs.push(crossing)
+            dirs.push(edge.direction)
+            while at > 0 and xs[at - 1] > crossing:
+                xs[at] = xs[at - 1]
+                dirs[at] = dirs[at - 1]
+                at = at - 1
+            xs[at] = crossing
+            dirs[at] = edge.direction
+    var winding: i64 = 0
+    var i: i64 = 0
+    val limit = subpixels as f64
+    while i < xs.len():
+        winding = winding + dirs[i]
+        if winding != 0 and i + 1 < xs.len():
+            var a = xs[i] * 3.0
+            var b = xs[i + 1] * 3.0
+            if a < 0.0: a = 0.0
+            if b > limit: b = limit
+            if b > a:
+                var j = _floor_glyf(a)
+                while (j as f64) < b and j < subpixels:
+                    val lo = if a > (j as f64): a else: j as f64
+                    val hi = if b < ((j + 1) as f64): b else: (j + 1) as f64
+                    if hi > lo:
+                        acc[j] = acc[j] + (hi - lo)
+                    j = j + 1
+        i = i + 1
+
+fn sfnt_render_glyph_lcd(blob: [u8], selector_kind: i64, selector_value: i64, size_px: i64, phase_q: i64) -> Option<SfntLcdGlyph>:
+    if size_px <= 0 or size_px > 512 or phase_q < 0 or phase_q > 3:
+        return None
+    val font = match parse_offset_table(blob):
+        Some(value): value
+        None: return None
+    var glyph_id: u32 = 0
+    if selector_kind == SFNT_GLYPH_SELECTOR_CODEPOINT and selector_value >= 0 and selector_value <= 1114111:
+        glyph_id = sfnt_cmap_glyph_id(font, selector_value as u32)
+    else if selector_kind == SFNT_GLYPH_SELECTOR_INDEX and selector_value > 0 and selector_value <= 4294967295:
+        glyph_id = selector_value as u32
+    else:
+        return None
+    if glyph_id == 0:
+        return None
+    val head_table = match find_table(font, 1751474532):
+        Some(value): value
+        None: return None
+    val hhea_table = match find_table(font, 1751672161):
+        Some(value): value
+        None: return None
+    if not _table_is_bounded(font, head_table, 54) or not _table_is_bounded(font, hhea_table, 36):
+        return None
+    val units_per_em = read_u16_be(font.blob, head_table.offset as i64 + 18) as i64
+    val long_metrics = read_u16_be(font.blob, hhea_table.offset as i64 + 34) as i64
+    if units_per_em == 0 or long_metrics == 0:
+        return None
+    val parsed_outline = match parse_sfnt_glyf_outline(font, glyph_id):
+        Some(value): value
+        None: return None
+    val horizontal = match _hmtx(font, long_metrics, glyph_id):
+        Some(value): value
+        None: return None
+    val commands = parsed_outline.commands
+    val bounds = match _outline_bounds(commands):
+        Some(value): value
+        None: return None
+    val scale = size_px as f64 / units_per_em as f64
+    val phase = phase_q as f64 / 4.0
+    val height = _ceil_glyf_dimension((bounds.bottom - bounds.top) * scale)
+    val x0 = _floor_glyf(bounds.left * scale + phase) - 1
+    val x1 = _ceil_glyf(bounds.right * scale + phase) + 1
+    val width = x1 - x0
+    if width <= 0 or height <= 0 or width > 4096 or height > 4096:
+        return None
+    val subpixels = width * 3
+    val edges = _outline_edges(commands, scale, x0 as f64 - phase, -bounds.bottom * scale)
+    var gray: [u8] = [0u8; width * height]
+    var rgb: [u8] = [0u8; width * height * 3]
+    var y: i64 = 0
+    while y < height:
+        var acc: [f64] = [0.0; subpixels]
+        var s: i64 = 0
+        while s < _SFNT_LCD_SAMPLE_ROWS:
+            val sy = y as f64 + (s as f64 * 2.0 + 1.0) / (2.0 * _SFNT_LCD_SAMPLE_ROWS as f64)
+            _lcd_accumulate_row(edges, sy, subpixels, acc)
+            s = s + 1
+        var j: i64 = 0
+        while j < subpixels:
+            # Measured FIR [0.090, 0.225, 0.370, 0.225, 0.090] over neighbouring
+            # subpixels (see the header comment).
+            var f = _SFNT_LCD_TAP0 * acc[j]
+            if j >= 1: f = f + _SFNT_LCD_TAP1 * acc[j - 1]
+            if j + 1 < subpixels: f = f + _SFNT_LCD_TAP1 * acc[j + 1]
+            if j >= 2: f = f + _SFNT_LCD_TAP2 * acc[j - 2]
+            if j + 2 < subpixels: f = f + _SFNT_LCD_TAP2 * acc[j + 2]
+            var v = _round_glyf_metric(f * 255.0 / _SFNT_LCD_SAMPLE_ROWS as f64)
+            if v > 255: v = 255
+            if v < 0: v = 0
+            rgb[y * subpixels + j] = v as u8
+            j = j + 1
+        var x: i64 = 0
+        while x < width:
+            val base = y * subpixels + x * 3
+            val sum = rgb[base] as i64 + rgb[base + 1] as i64 + rgb[base + 2] as i64
+            gray[y * width + x] = ((sum + 1) / 3) as u8
+            x = x + 1
+        y = y + 1
+    Some(SfntLcdGlyph(
+        slg_width: width, slg_height: height,
+        slg_advance: _round_glyf_metric(horizontal[0] as f64 * scale),
+        slg_bearing_x: x0,
+        slg_bearing_y: _round_glyf_metric(bounds.top * scale),
+        slg_gray: gray, slg_rgb: rgb))
+
 # Blob-level batch glyph-id resolution: one table-directory parse and one cmap
 # parse for the whole `codepoints` array. See `sfnt_cmap_glyph_ids_into`.
 fn sfnt_blob_glyph_ids_into(blob: [u8], codepoints: [i64], mut out: [i64]):
@@ -968,3 +1136,198 @@ fn sfnt_blob_glyph_exists(blob: [u8], codepoint: i64) -> bool:
         Some(value): value
         None: return false
     sfnt_cmap_glyph_id(font, codepoint as u32) != 0
+
+pub class SfntBaselineGlyph:
+    width: i32
+    height: i32
+    x0_px: i32
+    y0_px: i32
+    x1_px: i32
+    y1_px: i32
+    advance_px: f64
+    pixels: [u8]
+
+fn _floor_glyf_px(value: f64) -> i64:
+    val whole = value as i64
+    val whole_f = whole as f64
+    if value < whole_f:
+        return whole - 1
+    whole
+
+fn _ceil_glyf_px(value: f64) -> i64:
+    val whole = value as i64
+    val whole_f = whole as f64
+    if value > whole_f:
+        return whole + 1
+    whole
+
+# reason: low-level SFNT font binary parser API (byte offsets, u16/i16/u32 table tags, glyph/pixel scalars)
+# @allow(primitive_api)
+pub fn sfnt_glyf_parse_offset_table(blob: [u8]) -> Option<OtFont>:
+    parse_offset_table(blob)
+
+# reason: low-level SFNT table tag lookup takes u32 big-endian SFNT tag
+# @allow(primitive_api)
+pub fn sfnt_glyf_find_table(font: OtFont, tag: u32) -> Option<OtTable>:
+    find_table(font, tag)
+
+# reason: low-level SFNT big-endian u16 reader returns u16 at byte offset i64
+# @allow(primitive_api)
+pub fn sfnt_glyf_read_u16_be(blob: [u8], offset: i64) -> u16:
+    read_u16_be(blob, offset)
+
+# reason: low-level SFNT big-endian i16 reader returns i16 at byte offset i64
+# @allow(primitive_api)
+pub fn sfnt_glyf_read_i16_be(blob: [u8], offset: i64) -> i16:
+    read_i16_be(blob, offset)
+
+# reason: low-level SFNT cmap glyph lookup writes glyph IDs into integer buffer
+# @allow(primitive_api)
+pub fn sfnt_glyf_cmap_ids_into(font: OtFont, codepoints: [i64], mut out: [i64]):
+    sfnt_cmap_glyph_ids_into(font, codepoints, out)
+
+# reason: low-level SFNT glyph outline decoder takes raw u32 glyph_id
+# @allow(primitive_api)
+pub fn sfnt_glyf_parse_outline(font: OtFont, glyph_id: u32) -> Option<SfntGlyfOutline>:
+    parse_sfnt_glyf_outline(font, glyph_id)
+
+# reason: low-level SFNT advance width measurer takes f64 size_px
+# @allow(primitive_api)
+pub fn sfnt_glyf_measure_codepoint_advances(blob: [u8], codepoints: [i64], size_px: f64) -> [f64]:
+    if codepoints.len() == 0 or blob.len() == 0 or size_px <= 0.0:
+        return []
+    val font = match parse_offset_table(blob):
+        Some(value): value
+        None: return []
+    val head_table = match find_table(font, 1751474532):
+        Some(value): value
+        None: return []
+    val hhea_table = match find_table(font, 1751672161):
+        Some(value): value
+        None: return []
+    val hmtx_table = match find_table(font, 1752003704):
+        Some(value): value
+        None: return []
+    if (not _table_is_bounded(font, head_table, 54)) or (not _table_is_bounded(font, hhea_table, 36)) or (not _table_is_bounded(font, hmtx_table, 4)):
+        return []
+    val units_per_em = read_u16_be(font.blob, head_table.offset as i64 + 18) as i64
+    val long_metrics = read_u16_be(font.blob, hhea_table.offset as i64 + 34) as i64
+    if units_per_em <= 0 or long_metrics <= 0:
+        return []
+    var gids: [i64] = [0; codepoints.len()]
+    sfnt_cmap_glyph_ids_into(font, codepoints, gids)
+    val scale = size_px / (units_per_em as f64)
+    val hmtx_off = hmtx_table.offset as i64
+    val hmtx_len = hmtx_table.length as i64
+    var advs: [f64] = []
+    var ci: i64 = 0
+    while ci < codepoints.len():
+        val raw_gid = gids[ci]
+        val gid = if raw_gid > 0: raw_gid else: 0
+        val idx = if gid < long_metrics: gid else: long_metrics - 1
+        val pos = hmtx_off + idx * 4
+        val adv = if pos >= 0 and pos + 2 <= font.blob.len() and idx * 4 + 2 <= hmtx_len:
+            ((read_u16_be(font.blob, pos) as i64) as f64) * scale
+        else:
+            size_px * 0.6
+        advs = advs.push(adv)
+        ci = ci + 1
+    advs
+
+# reason: low-level 4x4 supersampled SFNT glyph rasterizer takes raw glyph_id/size_px/subpixel_x
+# @allow(primitive_api)
+pub fn sfnt_rasterize_glyph_baseline_aligned(font: OtFont, glyph_id: u32, size_px: f64, subpixel_x: f64) -> Option<SfntBaselineGlyph>:
+    if size_px <= 0.0:
+        return None
+    val head_table = match find_table(font, 1751474532):
+        Some(value): value
+        None: return None
+    val hhea_table = match find_table(font, 1751672161):
+        Some(value): value
+        None: return None
+    val hmtx_table = match find_table(font, 1752003704):
+        Some(value): value
+        None: return None
+    if (not _table_is_bounded(font, head_table, 54)) or (not _table_is_bounded(font, hhea_table, 36)) or (not _table_is_bounded(font, hmtx_table, 4)):
+        return None
+    val units_per_em = read_u16_be(font.blob, head_table.offset as i64 + 18) as i64
+    val long_metrics = read_u16_be(font.blob, hhea_table.offset as i64 + 34) as i64
+    if units_per_em <= 0 or long_metrics <= 0:
+        return None
+    val gid = glyph_id as i64
+    var metric_end = (gid + 1) * 4
+    if gid >= long_metrics:
+        metric_end = long_metrics * 4 + (gid - long_metrics + 1) * 2
+    if metric_end > hmtx_table.length as i64:
+        return None
+    val horizontal = match _hmtx(font, long_metrics, glyph_id):
+        Some(value): value
+        None: return None
+    val scale = size_px / (units_per_em as f64)
+    val advance_px = (horizontal[0] as f64) * scale
+    val parsed_outline = match parse_sfnt_glyf_outline(font, glyph_id):
+        Some(value): value
+        None: return None
+    val commands = parsed_outline.commands
+    if commands.len() == 0:
+        return Some(SfntBaselineGlyph(
+            width: 0i32,
+            height: 0i32,
+            x0_px: 0i32,
+            y0_px: 0i32,
+            x1_px: 0i32,
+            y1_px: 0i32,
+            advance_px: advance_px,
+            pixels: []
+        ))
+    val bounds = match _outline_bounds(commands):
+        Some(value): value
+        None:
+            return Some(SfntBaselineGlyph(
+                width: 0i32,
+                height: 0i32,
+                x0_px: 0i32,
+                y0_px: 0i32,
+                x1_px: 0i32,
+                y1_px: 0i32,
+                advance_px: advance_px,
+                pixels: []
+            ))
+    val x0_px = _floor_glyf_px(subpixel_x + bounds.left * scale)
+    val x1_px = _ceil_glyf_px(subpixel_x + bounds.right * scale)
+    val y0_px = _floor_glyf_px(-bounds.bottom * scale)
+    val y1_px = _ceil_glyf_px(-bounds.top * scale)
+    val width = x1_px - x0_px
+    val height = y1_px - y0_px
+    if width <= 0 or height <= 0:
+        return Some(SfntBaselineGlyph(
+            width: 0i32,
+            height: 0i32,
+            x0_px: x0_px as i32,
+            y0_px: y0_px as i32,
+            x1_px: x1_px as i32,
+            y1_px: y1_px as i32,
+            advance_px: advance_px,
+            pixels: []
+        ))
+    if width > 4096 or height > 4096 or width > 16777216 / height:
+        return None
+    val edges = _outline_edges(commands, scale, (x0_px as f64) - subpixel_x, y0_px as f64)
+    var pixels: [u8] = []
+    var y: i64 = 0
+    while y < height:
+        var x: i64 = 0
+        while x < width:
+            pixels = pixels.push(_glyf_edge_coverage(edges, x as f64, y as f64))
+            x = x + 1
+        y = y + 1
+    Some(SfntBaselineGlyph(
+        width: width as i32,
+        height: height as i32,
+        x0_px: x0_px as i32,
+        y0_px: y0_px as i32,
+        x1_px: x1_px as i32,
+        y1_px: y1_px as i32,
+        advance_px: advance_px,
+        pixels: pixels
+    ))

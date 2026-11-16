@@ -1,0 +1,81 @@
+# SFFI Wrapper Generator - Constrained Unit Declaration Scanner
+#
+# Line-based feed for constrained_unit_gen. Recognised lines:
+#   unit Port: i32 as Pt                  unit declaration (name, ABI type)
+#   # @unit_range Port 1..65535           inclusive range; either side may be empty
+#   extern fn rt_net_port(fd: i32) -> Port
+# Each extern returning a declared unit becomes a facade (checked when the unit
+# has a range, a direct projection otherwise). Externs returning anything else
+# are ignored. There is no range syntax in the `unit` declaration itself yet,
+# so the range rides in the annotation comment.
+
+use compiler.tools.sffi_gen.constrained_unit_gen.{ConstrainedUnitReturn, UnitReturnFacade, generate_unit_return_facade}
+
+struct _UnitDecl:
+    name: text
+    abi_type: text
+    range_min: text
+    range_max: text
+
+fn _find_unit(units: [_UnitDecl], name: text) -> i64:
+    var i = 0
+    while i < units.len():
+        if units[i].name == name:
+            return i
+        i = i + 1
+    -1
+
+fn _scan_units(lines: [text]) -> [_UnitDecl]:
+    var units: [_UnitDecl] = []
+    for raw in lines:
+        val line = raw.trim()
+        if line.starts_with("unit ") and line.contains(":") and line.contains(" as "):
+            val head = line.split(":")
+            val name = head[0].replace("unit ", "").trim()
+            val abi = head[1].split(" as ")[0].trim()
+            units.push(_UnitDecl(name: name, abi_type: abi, range_min: "", range_max: ""))
+    for raw in lines:
+        val line = raw.trim()
+        if line.starts_with("# @unit_range "):
+            var parts: [text] = []
+            for tok in line.replace("# @unit_range ", "").trim().split(" "):
+                if tok != "":
+                    parts.push(tok)
+            if parts.len() == 2 and parts[1].contains(".."):
+                val idx = _find_unit(units, parts[0])
+                if idx >= 0:
+                    val bounds = parts[1].split("..")
+                    val lo = bounds[0].trim()
+                    val hi = if bounds.len() > 1: bounds[1].trim() else: ""
+                    units[idx] = _UnitDecl(name: units[idx].name, abi_type: units[idx].abi_type, range_min: lo, range_max: hi)
+    units
+
+fn _arg_names(params: text) -> text:
+    var names: [text] = []
+    if params.trim() == "":
+        return ""
+    for p in params.split(","):
+        names.push(p.split(":")[0].trim())
+    names.join(", ")
+
+# Generate facades for every extern fn returning a declared unit.
+pub fn generate_constrained_unit_facades(source: text) -> UnitReturnFacade:
+    val lines = source.split("\n")
+    val units = _scan_units(lines)
+    var out = ""
+    for raw in lines:
+        val line = raw.trim()
+        if line.starts_with("extern fn ") and line.contains(" -> ") and line.contains("("):
+            val name = line.replace("extern fn ", "").split("(")[0].trim()
+            val params = line.split("(")[1].split(")")[0]
+            val ret = line.split(" -> ")[1].split("#")[0].trim()
+            val idx = _find_unit(units, ret)
+            if idx >= 0:
+                val spec = ConstrainedUnitReturn(extern_name: name, params: params, arg_names: _arg_names(params), unit_name: ret, abi_type: units[idx].abi_type, range_min: units[idx].range_min, range_max: units[idx].range_max)
+                val r = generate_unit_return_facade(spec)
+                if r.diagnostic != "":
+                    return UnitReturnFacade(source: "", diagnostic: r.diagnostic)
+                out = out + r.source + "\n"
+    if out.contains("ConstraintError"):
+        out = "use std.common.constraint_error.{{ConstraintError}}\n\n" + out
+    UnitReturnFacade(source: out, diagnostic: "")

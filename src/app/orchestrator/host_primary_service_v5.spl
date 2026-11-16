@@ -1,0 +1,46 @@
+# Canonical foreground primary service composition. Startup arguments come from
+# the local administrator; authenticated request frames cannot select them.
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use std.nogc_sync_mut.orchestration.host_service_installed_v3.{host_service_primary_installed_shape_v3,
+    host_service_domain_open_primary_v3}
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.HostServiceDomainOpenV3
+use os.apps.smux.server.smux_server_serve_runtime_domain_v5
+use os.apps.smux.runtime_connection_recovery_v5.{SmuxRuntimeServerTurnV5, smux_runtime_server_recovery_pending_v5}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub fn host_primary_service_shape_v5(args: [text]) -> text:
+    if args.len() != 7 or args[0] != "host-primary-service": return "host-primary-service-usage"
+    val invalid = host_service_primary_installed_shape_v3(args[1], args[2], args[3], args[4])
+    if invalid != "": return invalid
+    # The signed-enrollment Linux service serves only through the
+    # authenticated V6 listener (host-authenticated-service). Refuse it here,
+    # before any fresh-epoch admission, journal open or current publication.
+    if args[1] == "linux-service": return "host-primary-service-linux-service-v6-only"
+    if args[5] != "127.0.0.1:0": return "host-primary-service-loopback-auto-required"
+    if args[6] == "" or args[6].contains("\u{0}"): return "host-primary-service-credential-required"
+    ""
+
+fn reply_v5(code: i64, error: text, recovery: SmuxRuntimeServerTurnV5?) -> OrchestratorValidationReplyV1:
+    val pending = recovery != nil and smux_runtime_server_recovery_pending_v5(recovery.unwrap())
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(5), "kind": SdnValue.String("host-primary-service"),
+        "status": SdnValue.String(if code == 0: "stopped" else: "refused"), "error": SdnValue.String(error),
+        "recoveryRequired": SdnValue.Bool(pending or (recovery != nil and recovery.unwrap().error != ""))}
+    OrchestratorValidationReplyV1(exit_code: code, output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n",
+        primary_service_recovery: recovery)
+
+pub fn host_primary_service_command_v5(args: [text]) -> OrchestratorValidationReplyV1:
+    val invalid = host_primary_service_shape_v5(args)
+    if invalid != "": return reply_v5(2, invalid, nil)
+    val opened = host_service_domain_open_primary_v3(args[1], args[2], args[3], args[4])
+    match opened:
+        case HostServiceDomainOpenV3.Rejected(error): reply_v5(2, error, nil)
+        case HostServiceDomainOpenV3.CleanupRequired(cleanup, error):
+            reply_v5(2, error, Some(SmuxRuntimeServerTurnV5(2, nil, nil, Some(cleanup), nil, error)))
+        case HostServiceDomainOpenV3.Pending(domain, error):
+            reply_v5(2, error, Some(SmuxRuntimeServerTurnV5(2, nil, Some(domain), nil, nil, error)))
+        case HostServiceDomainOpenV3.Ready(domain):
+            # Server is the only credential reader and publishes its actual
+            # loopback address only after native publication confirms success.
+            val served = smux_server_serve_runtime_domain_v5(args[6], domain, args[5])
+            reply_v5(served.exit_code, served.error, Some(served))

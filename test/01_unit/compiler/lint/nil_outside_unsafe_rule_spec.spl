@@ -4,7 +4,8 @@
 
 Safe code spells absence `None` (Option). The NIL-UNSAFE-001 lint flags a
 `nil` literal outside an `unsafe:` / `danger:` block. It skips comments,
-strings and docstrings, and a name that merely contains `nil`.
+strings and docstrings, and a name that merely contains `nil`. Presence
+tests (`== nil`, `!= nil`, `case nil`) are flagged as well.
 """
 
 # @tag: unit, compiler, lint
@@ -12,6 +13,7 @@ strings and docstrings, and a name that merely contains `nil`.
 use std.spec.*
 use compiler.tools.lint.static_rules.{LintParamsV1, LintUnit, StaticLintFinding, static_lint_rule_table, run_static_lint_rule_table}
 use compiler.tools.lint.rules.nil_outside_unsafe_rule.{nil_outside_unsafe_lint_rule}
+use compiler.tools.lint._LintMain.config_and_model.{build_default_levels, canonical_lint_rule_profile_descriptors}
 
 fn nil_findings(src: text) -> [StaticLintFinding]:
     val run = run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit("fixture.spl", src), [nil_outside_unsafe_lint_rule()])
@@ -46,10 +48,40 @@ describe "nil_outside_unsafe lint":
         expect(nil_findings("fn f():\n    val p = unsafe: nil\n").len()).to_equal(0)
         expect(nil_findings("fn f():\n    val q = nil; val p = unsafe: nil\n").len()).to_equal(1)
 
-    it "leaves presence tests alone (None and nil differ natively)":
-        expect(nil_findings("fn f(x: i64?) -> bool:\n    x != nil\n").len()).to_equal(0)
-        expect(nil_findings("fn f(x: i64?) -> bool:\n    nil == x\n").len()).to_equal(0)
-        expect(nil_findings("fn f(x: i64?) -> i64:\n    match x:\n        case nil: 0\n        case _: 1\n").len()).to_equal(0)
+    it "flags presence tests with an Option-presence hint":
+        val a = nil_findings("fn f(x: i64?) -> bool:\n    x != nil\n")
+        expect(a.len()).to_equal(1)
+        expect(a[0].hint.contains("is_some")).to_equal(true)
+        val b = nil_findings("fn f(x: i64?) -> bool:\n    nil == x\n")
+        expect(b.len()).to_equal(1)
+        expect(b[0].hint.contains("is_none")).to_equal(true)
+        expect(nil_findings("fn f(x: i64?) -> i64:\n    match x:\n        case nil: 0\n        case _: 1\n").len()).to_equal(1)
+        expect(nil_findings("fn f(x: i64?) -> bool:\n    unsafe:\n        x == nil\n").len()).to_equal(0)
 
     it "is registered in the static lint table":
         expect([r.id() for r in static_lint_rule_table()]).to_contain("nil_outside_unsafe")
+
+    it "flags nil in assignment, return, argument and collection positions":
+        expect(nil_findings("fn f():\n    var x = 1\n    x = nil\n").len()).to_equal(1)
+        expect(nil_findings("fn f() -> i64?:\n    return nil\n").len()).to_equal(1)
+        expect(nil_findings("fn f():\n    g(nil)\n    val xs = [1, nil]\n").len()).to_equal(2)
+
+    it "accepts the unit value: return nil in -> Nil, Ok(nil) in -> Result<Nil, E>":
+        expect(nil_findings("fn f() -> Nil:\n    return nil\n").len()).to_equal(0)
+        expect(nil_findings("fn f() -> Nil:\n    work()\n    nil\n").len()).to_equal(0)
+        expect(nil_findings("fn f(p: text) -> Result<Nil, text>:\n    if p == \"\":\n        return Err(\"empty\")\n    Ok(nil)\n").len()).to_equal(0)
+        expect(nil_findings("pub fn f() -> Result<(), E>:\n    Ok(nil)\n").len()).to_equal(0)
+
+    it "still flags every other nil inside a unit-returning function":
+        expect(nil_findings("fn f() -> Nil:\n    val x = nil\n    nil\n").len()).to_equal(1)
+        expect(nil_findings("fn f() -> Result<Nil, text>:\n    val x = nil\n    Ok(nil)\n").len()).to_equal(1)
+        expect(nil_findings("fn f() -> Result<i64, text>:\n    Ok(nil)\n").len()).to_equal(1)
+        expect(nil_findings("fn f() -> i64?:\n    return nil\nfn g() -> Nil:\n    nil\n").len()).to_equal(1)
+
+    it "is allow by default and warn in the Robust and Critical profiles":
+        expect(build_default_levels()["nil_outside_unsafe"]).to_equal("allow")
+        for rule in canonical_lint_rule_profile_descriptors():
+            if rule.name == "nil_outside_unsafe":
+                expect(rule.strict_level).to_equal("allow")
+                expect(rule.robust_level).to_equal("warn")
+                expect(rule.critical_level).to_equal("warn")

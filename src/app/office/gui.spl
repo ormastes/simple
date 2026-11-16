@@ -37,8 +37,14 @@ use common.ui.layout.{compute_layout, find_rect}
 use common.ui.spreadsheet_grid.{spreadsheet_grid_metrics, spreadsheet_grid_column_label}
 use common.ui.builder.{column, row, table_widget, build_tree_with_title, text_widget, progress, with_width, with_height}
 use app.ui.render.html_widgets.{render_html_tree}
+use app.office.launcher.{build_launcher_ui}
+use common.office.file_ops.{RecentFileStore}
 use app.office.counter.{CounterApp}
 use app.office.word.word_app.{WordApp}
+use app.office.sheets.sheets_app.{SheetsApp}
+use app.office.slides.slides_app.{SlidesApp}
+use app.office.mail.mail_app.{MailApp}
+use app.office.planner.planner_app.{PlannerApp}
 use app.office.sheets.spreadsheet.{Sheet}
 use app.office.sheets.cell.{cell_display_text, col_to_letter, parse_cell_ref, cell_ref_to_string, CellRef, letter_to_col, CellValue}
 use app.office.sheets.cell_ref.{offset_ref, parse_range}
@@ -50,6 +56,8 @@ use app.office.sheets.number_format.{cell_display_formatted}
 use app.office.sheets.validation.{ValidationRules, validation_check}
 use app.office.file_formats.{recalculate_formula_cells}
 use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{simple_web_engine2d_render_html_pixels}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D, engine2d_sfnt_resolve_path}
+use std.gc_async_mut.gpu.engine2d.color.{rgb, rgba}
 use app.office.slides.slide.{Slide, SlideElementKind}
 use app.office.slides.deck_format.{bullet_id_level, table_row_cells, is_table_separator_line}
 
@@ -68,14 +76,28 @@ fn office_gui_frame_height() -> i32:
     OFFICE_GUI_FRAME_HEIGHT
 
 fn office_gui_build_tree(app_name: text) -> UITree:
-    """Build the named office app's UITree. Pilot: only "counter" is wired;
-    future apps (word/sheets/slides/...) each add one match arm here."""
+    """Build the named office app's UITree."""
     match app_name:
-        "counter" =>
-            return CounterApp.new().build_ui()
+        "launcher" =>
+            val recent = RecentFileStore.new(20).get_recent(6)
+            return build_launcher_ui(recent)
         "word" =>
             return WordApp.new().build_ui()
-        case _("counter/word wired; unknown names fall back to counter"):
+        "writer" =>
+            return WordApp.new().build_ui()
+        "sheets" =>
+            return SheetsApp.new().build_ui()
+        "calc" =>
+            return SheetsApp.new().build_ui()
+        "slides" =>
+            return SlidesApp.new().build_ui()
+        "mail" =>
+            return MailApp.new().build_ui()
+        "planner" =>
+            return PlannerApp.new().build_ui()
+        "counter" =>
+            return CounterApp.new().build_ui()
+        case _("launcher/word/writer/sheets/calc/slides/mail/planner/counter wired; unknown names fall back to counter"):
             return CounterApp.new().build_ui()
 
 fn office_gui_minimal_css() -> text:
@@ -2208,3 +2230,329 @@ fn slide_gui_step(session: SlideGuiSession, key: text) -> SlideGuiStepResult:
     if digit > 0:
         return SlideGuiStepResult(session: slide_session_goto(session, digit), quit: false)
     SlideGuiStepResult(session: session, quit: false)
+
+# ---------------------------------------------------------------------------
+# Full-resolution Pure-Simple Engine2D Office GUI renderer (CPU & Vulkan)
+# ---------------------------------------------------------------------------
+
+struct OfficeGuiFrame:
+    pixels: [u32]
+    width: i32
+    height: i32
+    app_name: text
+    canonical_app: text
+    resolved_backend: text
+    readback_source: text
+    cpu_fallback_used: bool
+    cpu_fallback_reason: text
+    checksum: i64
+    root_id: text
+
+fn _office_fit_text(s: text, max_chars: i64) -> text:
+    if max_chars <= 0:
+        return ""
+    if s.len() <= max_chars:
+        return s
+    if max_chars <= 3:
+        return s[0:max_chars]
+    s[0:max_chars - 3] + "..."
+
+fn _office_draw_text(eng: Engine2D, sfnt_path: text, x: i32, y: i32, txt: text, color: u32, size_px: i32):
+    if txt == "":
+        return
+    if sfnt_path != "":
+        val baseline_y = y + (size_px * 4) / 5 + 2
+        eng.draw_text_sfnt_baseline_aa(x, baseline_y, txt, color, size_px as f64, sfnt_path)
+    else:
+        eng.draw_text(x, y, txt, color, size_px)
+
+fn _office_canonical_app(app_name: text) -> text:
+    if app_name == "writer":
+        return "word"
+    if app_name == "calc":
+        return "sheets"
+    app_name
+
+fn _office_accent_color(canonical: text) -> u32:
+    match canonical:
+        "word" => rgb(37, 99, 235)
+        "sheets" => rgb(22, 163, 74)
+        "slides" => rgb(217, 119, 6)
+        "mail" => rgb(2, 132, 199)
+        "planner" => rgb(124, 58, 237)
+        "launcher" => rgb(30, 41, 59)
+        _ => rgb(51, 65, 85)
+
+fn _office_title_for(canonical: text) -> text:
+    match canonical:
+        "launcher" => "Simple Office Suite"
+        "word" => "Simple Word"
+        "sheets" => "Simple Sheets"
+        "slides" => "Simple Slides"
+        "mail" => "Simple Mail"
+        "planner" => "Simple Planner"
+        "counter" => "Simple Counter"
+        _ => "Simple Office"
+
+fn _office_draw_launcher_body(eng: Engine2D, sfnt_path: text, body_x: i32, body_y: i32, body_w: i32, body_h: i32):
+    val recent = RecentFileStore.new(20).get_recent(6)
+    val left_w: i32 = (body_w * 2) / 3 - 14
+    val right_x: i32 = body_x + left_w + 16
+    val right_w: i32 = body_w - left_w - 16
+    val card_cols: i32 = 3
+    val gap: i32 = 12
+    val card_w: i32 = (left_w - (card_cols - 1) * gap) / card_cols
+    val card_h: i32 = 120
+    val names = ["Word", "Sheets", "Slides", "Mail", "Planner", "Counter"]
+    val subs = ["Documents", "Spreadsheets", "Decks", "Inbox & Threads", "Kanban Board", "Pilot Widget"]
+    val cols = [
+        rgb(37, 99, 235), rgb(22, 163, 74), rgb(217, 119, 6),
+        rgb(2, 132, 199), rgb(124, 58, 237), rgb(71, 85, 105)
+    ]
+    _office_draw_text(eng, sfnt_path, body_x, body_y + 4, "Suite Applications", rgb(15, 23, 42), 15)
+    var i: i64 = 0
+    while i < names.len():
+        val r: i32 = (i / 3) as i32
+        val c: i32 = (i % 3) as i32
+        val cx: i32 = body_x + c * (card_w + gap)
+        val cy: i32 = body_y + 32 + r * (card_h + gap)
+        eng.draw_rounded_rect(cx, cy, card_w, card_h, 8, rgb(255, 255, 255))
+        eng.draw_rounded_rect_outline(cx, cy, card_w, card_h, 8, rgb(203, 213, 225), 1)
+        eng.draw_rounded_rect(cx + 14, cy + 16, 36, 32, 6, cols[i])
+        _office_draw_text(eng, sfnt_path, cx + 14, cy + 62, names[i], rgb(15, 23, 42), 15)
+        _office_draw_text(eng, sfnt_path, cx + 14, cy + 86, subs[i], rgb(100, 116, 139), 11)
+        i = i + 1
+
+    eng.draw_rounded_rect(right_x, body_y + 32, right_w, body_h - 44, 8, rgba(255, 255, 255, 240))
+    eng.draw_rounded_rect_outline(right_x, body_y + 32, right_w, body_h - 44, 8, rgb(203, 213, 225), 1)
+    _office_draw_text(eng, sfnt_path, right_x + 16, body_y + 48, "Recent Files (" + recent.len().to_text() + ")", rgb(15, 23, 42), 14)
+    _office_draw_text(eng, sfnt_path, right_x + 16, body_y + 80, if recent.len() == 0: "No recent documents yet" else: recent[0].path, rgb(100, 116, 139), 12)
+
+fn _office_draw_word_body(eng: Engine2D, sfnt_path: text, body_x: i32, body_y: i32, body_w: i32, body_h: i32):
+    val app = WordApp.new()
+    val side_w: i32 = 200
+    eng.draw_rounded_rect(body_x, body_y, side_w, body_h - 10, 8, rgb(255, 255, 255))
+    eng.draw_rounded_rect_outline(body_x, body_y, side_w, body_h - 10, 8, rgb(203, 213, 225), 1)
+    _office_draw_text(eng, sfnt_path, body_x + 14, body_y + 14, "DOCUMENT OUTLINE", rgb(100, 116, 139), 11)
+    _office_draw_text(eng, sfnt_path, body_x + 14, body_y + 44, "1. Overview", rgb(37, 99, 235), 12)
+    _office_draw_text(eng, sfnt_path, body_x + 14, body_y + 70, "2. Draft Summary", rgb(51, 65, 85), 12)
+
+    val page_x: i32 = body_x + side_w + 24
+    val page_w: i32 = body_w - side_w - 48
+    eng.draw_rounded_rect(page_x, body_y, page_w, body_h - 10, 6, rgb(255, 255, 255))
+    eng.draw_rounded_rect_outline(page_x, body_y, page_w, body_h - 10, 6, rgb(203, 213, 225), 1)
+    _office_draw_text(eng, sfnt_path, page_x + 36, body_y + 34, "Quarterly Architecture Report", rgb(15, 23, 42), 20)
+    eng.draw_rect_filled(page_x + 36, body_y + 70, page_w - 72, 1, rgb(226, 232, 240))
+    _office_draw_text(eng, sfnt_path, page_x + 36, body_y + 90, "Rich document canvas with outline navigation and live stats.", rgb(51, 65, 85), 13)
+    _office_draw_text(eng, sfnt_path, page_x + 36, body_y + 118, "Words: " + app.word_count().to_text() + " | Mode: Page View | Theme: Light", rgb(100, 116, 139), 12)
+
+fn _office_draw_sheets_body(eng: Engine2D, sfnt_path: text, body_x: i32, body_y: i32, body_w: i32, body_h: i32):
+    val app = SheetsApp.new()
+    val active_ref = cell_ref_to_string(app.active_cell)
+    val fbar_h: i32 = 34
+    eng.draw_rounded_rect(body_x, body_y, body_w, fbar_h, 6, rgb(255, 255, 255))
+    eng.draw_rounded_rect_outline(body_x, body_y, body_w, fbar_h, 6, rgb(203, 213, 225), 1)
+    _office_draw_text(eng, sfnt_path, body_x + 12, body_y + 9, active_ref + "   fx   =SUM(D2:D4)", rgb(15, 23, 42), 13)
+
+    val grid_y: i32 = body_y + fbar_h + 10
+    val grid_h: i32 = body_h - fbar_h - 20
+    eng.draw_rounded_rect(body_x, grid_y, body_w, grid_h, 6, rgb(255, 255, 255))
+    eng.draw_rounded_rect_outline(body_x, grid_y, body_w, grid_h, 6, rgb(203, 213, 225), 1)
+
+    val cols_n: i32 = 5
+    val rows_n: i32 = 6
+    val row_hdr_w: i32 = 52
+    val cell_w: i32 = (body_w - row_hdr_w) / cols_n
+    val row_h: i32 = 34
+    eng.draw_rect_filled(body_x + 1, grid_y + 1, body_w - 2, row_h, rgb(241, 245, 249))
+    val col_titles = ["A", "B", "C", "D", "E"]
+    var ci: i64 = 0
+    while ci < col_titles.len():
+        val cx = body_x + row_hdr_w + (ci as i32) * cell_w
+        eng.draw_rect_filled(cx, grid_y, 1, rows_n * row_h, rgb(226, 232, 240))
+        _office_draw_text(eng, sfnt_path, cx + 14, grid_y + 9, col_titles[ci], rgb(71, 85, 105), 12)
+        ci = ci + 1
+    var ri: i32 = 1
+    while ri < rows_n:
+        val ry = grid_y + ri * row_h
+        eng.draw_rect_filled(body_x + 1, ry, body_w - 2, 1, rgb(226, 232, 240))
+        _office_draw_text(eng, sfnt_path, body_x + 18, ry + 9, ri.to_text(), rgb(100, 116, 139), 12)
+        ri = ri + 1
+    # Sample cells + active selection box
+    _office_draw_text(eng, sfnt_path, body_x + row_hdr_w + 12, grid_y + row_h + 9, "Revenue", rgb(15, 23, 42), 12)
+    _office_draw_text(eng, sfnt_path, body_x + row_hdr_w + cell_w + 12, grid_y + row_h + 9, "4200", rgb(15, 23, 42), 12)
+    _office_draw_text(eng, sfnt_path, body_x + row_hdr_w + 12, grid_y + 2 * row_h + 9, "Total", rgb(15, 23, 42), 12)
+    _office_draw_text(eng, sfnt_path, body_x + row_hdr_w + cell_w + 12, grid_y + 2 * row_h + 9, "8450", rgb(22, 163, 74), 12)
+    eng.draw_rect(body_x + row_hdr_w, grid_y + row_h, cell_w, row_h, rgb(22, 163, 74))
+
+fn _office_draw_slides_body(eng: Engine2D, sfnt_path: text, body_x: i32, body_y: i32, body_w: i32, body_h: i32):
+    val app = SlidesApp.new()
+    val rail_w: i32 = 186
+    eng.draw_rounded_rect(body_x, body_y, rail_w, body_h - 10, 8, rgb(255, 255, 255))
+    eng.draw_rounded_rect_outline(body_x, body_y, rail_w, body_h - 10, 8, rgb(203, 213, 225), 1)
+    var si: i32 = 0
+    while si < 3:
+        val ty = body_y + 14 + si * 94
+        val bdr = if si == 0: rgb(217, 119, 6) else: rgb(203, 213, 225)
+        eng.draw_rounded_rect(body_x + 14, ty, rail_w - 28, 80, 6, rgb(248, 250, 252))
+        eng.draw_rounded_rect_outline(body_x + 14, ty, rail_w - 28, 80, 6, bdr, 2)
+        _office_draw_text(eng, sfnt_path, body_x + 24, ty + 30, "Slide " + (si + 1).to_text(), rgb(51, 65, 85), 12)
+        si = si + 1
+
+    val stage_x: i32 = body_x + rail_w + 20
+    val stage_w: i32 = body_w - rail_w - 20
+    val notes_h: i32 = 66
+    val canvas_h: i32 = body_h - notes_h - 20
+    eng.draw_rounded_rect(stage_x, body_y, stage_w, canvas_h, 8, rgb(255, 255, 255))
+    eng.draw_rounded_rect_outline(stage_x, body_y, stage_w, canvas_h, 8, rgb(203, 213, 225), 1)
+    eng.draw_rect_filled(stage_x + 36, body_y + 38, 64, 5, rgb(217, 119, 6))
+    _office_draw_text(eng, sfnt_path, stage_x + 36, body_y + 56, _office_fit_text(app.presentation.title, 34), rgb(15, 23, 42), 22)
+    _office_draw_text(eng, sfnt_path, stage_x + 36, body_y + 104, "Slides: " + app.presentation.slides.len().to_text() + " | Native Engine2D Stage", rgb(100, 116, 139), 14)
+
+    val notes_y: i32 = body_y + canvas_h + 10
+    eng.draw_rounded_rect(stage_x, notes_y, stage_w, notes_h, 6, rgb(255, 255, 255))
+    eng.draw_rounded_rect_outline(stage_x, notes_y, stage_w, notes_h, 6, rgb(203, 213, 225), 1)
+    _office_draw_text(eng, sfnt_path, stage_x + 14, notes_y + 18, "Speaker Notes: Walk through architecture milestones.", rgb(71, 85, 105), 12)
+
+fn _office_draw_mail_body(eng: Engine2D, sfnt_path: text, body_x: i32, body_y: i32, body_w: i32, body_h: i32):
+    val app = MailApp.new()
+    val filtered = app.filtered_emails()
+    val f_w: i32 = 176
+    val m_w: i32 = 290
+    val d_x: i32 = body_x + f_w + m_w + 24
+    val d_w: i32 = body_w - f_w - m_w - 24
+    val col_h: i32 = body_h - 10
+
+    # Column 1: Folders
+    eng.draw_rounded_rect(body_x, body_y, f_w, col_h, 8, rgb(255, 255, 255))
+    eng.draw_rounded_rect_outline(body_x, body_y, f_w, col_h, 8, rgb(203, 213, 225), 1)
+    eng.draw_rounded_rect(body_x + 8, body_y + 40, f_w - 16, 28, 5, rgba(2, 132, 199, 32))
+    _office_draw_text(eng, sfnt_path, body_x + 14, body_y + 14, "FOLDERS", rgb(100, 116, 139), 11)
+    _office_draw_text(eng, sfnt_path, body_x + 16, body_y + 46, "Inbox (" + app.unread_count().to_text() + ")", rgb(2, 132, 199), 13)
+    _office_draw_text(eng, sfnt_path, body_x + 16, body_y + 80, "Sent  |  Drafts", rgb(71, 85, 105), 12)
+
+    # Column 2: Message list
+    val m_x: i32 = body_x + f_w + 12
+    eng.draw_rounded_rect(m_x, body_y, m_w, col_h, 8, rgb(255, 255, 255))
+    eng.draw_rounded_rect_outline(m_x, body_y, m_w, col_h, 8, rgb(203, 213, 225), 1)
+    _office_draw_text(eng, sfnt_path, m_x + 14, body_y + 14, "MESSAGES (" + filtered.len().to_text() + ")", rgb(100, 116, 139), 11)
+    var mi: i64 = 0
+    while mi < filtered.len() and mi < 2:
+        val email = filtered[mi]
+        val ry = body_y + 40 + (mi as i32) * 74
+        val fill = if mi == 0: rgba(2, 132, 199, 26) else: rgb(248, 250, 252)
+        eng.draw_rounded_rect(m_x + 10, ry, m_w - 20, 64, 6, fill)
+        eng.draw_rounded_rect_outline(m_x + 10, ry, m_w - 20, 64, 6, rgb(226, 232, 240), 1)
+        _office_draw_text(eng, sfnt_path, m_x + 18, ry + 10, _office_fit_text(email.subject, 28), rgb(15, 23, 42), 12)
+        _office_draw_text(eng, sfnt_path, m_x + 18, ry + 34, _office_fit_text(email.from_addr.name + "  " + email.date, 28), rgb(100, 116, 139), 11)
+        mi = mi + 1
+
+    # Column 3: Detail reading pane
+    eng.draw_rounded_rect(d_x, body_y, d_w, col_h, 8, rgb(255, 255, 255))
+    eng.draw_rounded_rect_outline(d_x, body_y, d_w, col_h, 8, rgb(203, 213, 225), 1)
+    if filtered.len() > 0:
+        val first = filtered[0]
+        _office_draw_text(eng, sfnt_path, d_x + 18, body_y + 20, _office_fit_text(first.subject, 32), rgb(15, 23, 42), 16)
+        _office_draw_text(eng, sfnt_path, d_x + 18, body_y + 52, _office_fit_text("From: " + first.from_addr.name + " <" + first.from_addr.address + ">", 40), rgb(100, 116, 139), 12)
+        eng.draw_rect_filled(d_x + 18, body_y + 78, d_w - 36, 1, rgb(226, 232, 240))
+        _office_draw_text(eng, sfnt_path, d_x + 18, body_y + 96, _office_fit_text(first.body, 44), rgb(51, 65, 85), 13)
+    else:
+        _office_draw_text(eng, sfnt_path, d_x + 18, body_y + 24, "No message selected", rgb(100, 116, 139), 14)
+
+fn _office_draw_planner_body(eng: Engine2D, sfnt_path: text, body_x: i32, body_y: i32, body_w: i32, body_h: i32):
+    val app = PlannerApp.new()
+    val gap: i32 = 14
+    val col_w: i32 = (body_w - 2 * gap) / 3
+    val titles = ["To Do", "In Progress", "Done"]
+    val tasks = ["Review GUI parity spec", "Render Vulkan frames", "Commit clean branch"]
+    var ci: i64 = 0
+    while ci < titles.len():
+        val cx = body_x + (ci as i32) * (col_w + gap)
+        eng.draw_rounded_rect(cx, body_y, col_w, body_h - 10, 8, rgb(241, 245, 249))
+        eng.draw_rounded_rect_outline(cx, body_y, col_w, body_h - 10, 8, rgb(203, 213, 225), 1)
+        _office_draw_text(eng, sfnt_path, cx + 14, body_y + 14, titles[ci], rgb(15, 23, 42), 14)
+        eng.draw_rounded_rect(cx + 12, body_y + 46, col_w - 24, 76, 6, rgb(255, 255, 255))
+        eng.draw_rounded_rect_outline(cx + 12, body_y + 46, col_w - 24, 76, 6, rgb(203, 213, 225), 1)
+        _office_draw_text(eng, sfnt_path, cx + 22, body_y + 62, tasks[ci], rgb(30, 41, 59), 12)
+        _office_draw_text(eng, sfnt_path, cx + 22, body_y + 88, _office_fit_text(app.project.title, 22), rgb(100, 116, 139), 11)
+        ci = ci + 1
+
+fn _office_draw_counter_body(eng: Engine2D, sfnt_path: text, body_x: i32, body_y: i32, body_w: i32, body_h: i32):
+    val app = CounterApp.new()
+    val card_w: i32 = 360
+    val card_h: i32 = 180
+    val cx: i32 = body_x + (body_w - card_w) / 2
+    val cy: i32 = body_y + (body_h - card_h) / 2
+    eng.draw_rounded_rect(cx, cy, card_w, card_h, 10, rgb(255, 255, 255))
+    eng.draw_rounded_rect_outline(cx, cy, card_w, card_h, 10, rgb(203, 213, 225), 1)
+    _office_draw_text(eng, sfnt_path, cx + 28, cy + 28, "Counter Value: " + app.value.to_text(), rgb(15, 23, 42), 20)
+    eng.draw_rounded_rect(cx + 28, cy + 96, 90, 38, 6, rgb(37, 99, 235))
+    _office_draw_text(eng, sfnt_path, cx + 64, cy + 107, "+1", rgb(255, 255, 255), 14)
+    eng.draw_rounded_rect(cx + 134, cy + 96, 90, 38, 6, rgb(226, 232, 240))
+    _office_draw_text(eng, sfnt_path, cx + 170, cy + 107, "-1", rgb(15, 23, 42), 14)
+
+fn office_gui_render_engine2d_frame(app_name: text, w: i32, h: i32, backend: text) -> OfficeGuiFrame:
+    val rw = if w < 640: 640 else: w
+    val rh = if h < 420: 420 else: h
+    val tree = office_gui_build_tree(app_name)
+    val canonical = _office_canonical_app(app_name)
+    val accent = _office_accent_color(canonical)
+    val title = _office_title_for(canonical)
+
+    var eng = Engine2D.create_with_backend(rw, rh, backend)
+    val sfnt_path = engine2d_sfnt_resolve_path("")
+
+    eng.clear(rgb(241, 245, 249))
+
+    val nav_h: i32 = 46
+    val tool_h: i32 = 34
+    val stat_h: i32 = 26
+    eng.draw_rect_filled(0, 0, rw, nav_h, accent)
+    _office_draw_text(eng, sfnt_path, 18, 12, title, rgb(255, 255, 255), 17)
+    _office_draw_text(eng, sfnt_path, rw - 170, 15, "Desktop GUI", rgba(255, 255, 255, 230), 12)
+
+    eng.draw_rect_filled(0, nav_h, rw, tool_h, rgb(255, 255, 255))
+    eng.draw_rect_filled(0, nav_h + tool_h - 1, rw, 1, rgb(203, 213, 225))
+    _office_draw_text(eng, sfnt_path, 18, nav_h + 9, "File    Edit    View    Insert    Format    Share", rgb(71, 85, 105), 12)
+
+    val body_x: i32 = 18
+    val body_y: i32 = nav_h + tool_h + 14
+    val body_w: i32 = rw - 36
+    val body_h: i32 = rh - body_y - stat_h - 10
+    eng.set_clip(body_x, body_y, body_w, body_h)
+    match canonical:
+        "launcher" => _office_draw_launcher_body(eng, sfnt_path, body_x, body_y, body_w, body_h)
+        "word" => _office_draw_word_body(eng, sfnt_path, body_x, body_y, body_w, body_h)
+        "sheets" => _office_draw_sheets_body(eng, sfnt_path, body_x, body_y, body_w, body_h)
+        "slides" => _office_draw_slides_body(eng, sfnt_path, body_x, body_y, body_w, body_h)
+        "mail" => _office_draw_mail_body(eng, sfnt_path, body_x, body_y, body_w, body_h)
+        "planner" => _office_draw_planner_body(eng, sfnt_path, body_x, body_y, body_w, body_h)
+        _ => _office_draw_counter_body(eng, sfnt_path, body_x, body_y, body_w, body_h)
+    eng.clear_clip()
+
+    val stat_y: i32 = rh - stat_h
+    eng.draw_rect_filled(0, stat_y, rw, stat_h, rgb(30, 41, 59))
+    _office_draw_text(eng, sfnt_path, 16, stat_y + 6, title + "  |  root=" + tree.root_id + "  |  Ready", rgb(226, 232, 240), 11)
+
+    val rb = eng.read_pixels_with_source()
+    var fallback_used = false
+    var fallback_reason = ""
+    if val Some(vb) = eng.vulkan_backend:
+        fallback_used = vb.cpu_fallback_used
+        fallback_reason = vb.cpu_fallback_reason
+    val resolved = eng.backend_name()
+    eng.present()
+    eng.shutdown()
+    OfficeGuiFrame(
+        pixels: rb.pixels,
+        width: rw,
+        height: rh,
+        app_name: app_name,
+        canonical_app: canonical,
+        resolved_backend: resolved,
+        readback_source: rb.source,
+        cpu_fallback_used: fallback_used,
+        cpu_fallback_reason: fallback_reason,
+        checksum: rb.checksum,
+        root_id: tree.root_id
+    )

@@ -1,0 +1,206 @@
+# Same retained Windows Host writer, signed helper and physical ledger.
+# No request decoder accepts a store handle or fabricated Linux local root.
+use std.nogc_sync_mut.orchestration.host_windows_local_root_v3.HostWindowsLocalRootV3
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostReservationAuthorizationContextV1
+use std.nogc_sync_mut.orchestration.host_helper_owner_v1.{HostHelperLeaseV1, host_helper_validate_execution_v2}
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.{host_helper_request_encode_v1,
+    host_helper_execution_proof_load_owned_v2, host_helper_execution_proof_decode_v1, host_helper_request_load_owned_v2}
+use std.nogc_sync_mut.orchestration.host_service_enrollment_v2.host_service_enrollment_payload_digest_v2
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.common.contracts.container.execution_v2.container_host_scope_bytes_v2
+use std.common.contracts.container.primary_connection_v2.*
+use std.common.contracts.container.primary_connection_consumption_v2.*
+use std.common.contracts.container.stream_v2.ContainerHelperAdmissionV2
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_consume_primary_v3
+use std.nogc_sync_mut.io.windows_primary_connection_admission_v2.{WindowsPrimaryConnectionVerifiedV2,
+    windows_primary_connection_authorize_v2, windows_primary_connection_abandon_v3}
+use std.nogc_sync_mut.io.windows_journal_store_v1.WindowsJournalConsumptionV1
+use std.nogc_async_mut.container.primary_connection_attempt_v3.ContainerPrimaryConnectionAttemptTerminalV3
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.contracts.orchestration.host_helper_plan_v1.host_helper_plan_bytes_v1
+use std.common.contracts.orchestration.host_reservation_codec_v1.{host_reservation_encode_intent_v1, host_helper_reservation_match_receipt_v1}
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.orchestration.host_primary_connection_parent_v2.host_primary_connection_parent_v2
+use std.nogc_async_mut.container.primary_connection_v2.simple_container_primary_connection_plan_v2
+use std.nogc_async_mut.container.primary_connection_open_v2.{ContainerPrimaryConnectionAuthorityV2,
+    ContainerPrimaryConnectionPendingV2, simple_container_primary_connection_begin_v2,
+    simple_container_primary_connection_step_v2, simple_container_primary_connection_cancel_v2}
+use std.nogc_async_mut.container.terminal_session_v2.{ContainerOwnedTerminalSessionV2, container_terminal_cleanup_v2}
+
+# Persistent service retains the complete turn even when error is nonempty.
+# An expired/revoked grant stops progression but never discards its native pipe.
+pub struct HostPrimaryConnectionTurnV2:
+    local: HostWindowsLocalRootV3
+    helper: HostHelperLeaseV1
+    plan: ContainerPrimaryConnectionPlanV2
+    record: ContainerPrimaryConnectionConsumptionV2? = nil
+    pending: ContainerPrimaryConnectionPendingV2? = nil
+    session: ContainerOwnedTerminalSessionV2? = nil
+    consumption_attempted: bool = false
+    error: text = ""
+    receipt: WindowsJournalConsumptionV1? = nil
+    terminal: ContainerPrimaryConnectionAttemptTerminalV3? = nil
+
+# Public metadata is checked against the actual current deployment and signed
+# retained execution. Revalidation never reconstructs a live receipt/session.
+pub fn host_primary_connection_validate_v2(local: HostWindowsLocalRootV3,
+        plan: ContainerPrimaryConnectionPlanV2, helper: HostHelperLeaseV1) -> Result<ContainerPrimaryConnectionConsumptionV2, text>:
+    if not local.ready_v3(): return Err("host-primary-connection-startup-quarantine")
+    val metadata = local.current_v3()?
+    val binding = local.binding_v3()
+    if (plan.installation_digest != host_service_enrollment_payload_digest_v2(binding)? or
+            plan.journal_lease_digest != local.capacity_v3().journal.lease_digest or
+            plan.policy_digest != binding.engine_policy_digest or plan.policy_digest != sha256_text(metadata.engine_policy_bytes) or
+            plan.provider_identity_digest != binding.provider_identity_digest or
+            container_host_scope_bytes_v2(container_primary_connection_scope_v2(plan))? != container_host_scope_bytes_v2(local.scope_v3())?):
+        return Err("host-primary-connection-protected-plan-mismatch")
+    val context = local.context_v3()
+    val retained = local
+    val refresh = fn() -> HostReservationAuthorizationContextV1: retained.context_v3()
+    val request = host_helper_validate_execution_v2(local.capacity_v3(), helper, metadata.policy,
+        local.scope_v3(), context, refresh)?
+    val parent = daemon_operation_exact_v2(local.capacity_v3().journal, request.parent_binding.host_operation)?
+    if parent.state != "executing": return Err("host-primary-connection-parent-executing-required")
+    val admission = ContainerHelperAdmissionV2(plan: helper.plan, intent: helper.intent,
+        operation: helper.operation, receipt: helper.receipt, deadline: helper.deadline,
+        grant_id: helper.grant_id, issuer_id: helper.issuer_id, approver_id: helper.approver_id,
+        cpu_millis: helper.cpu_millis, memory_bytes: helper.memory_bytes)
+    val record = ContainerPrimaryConnectionConsumptionV2(plan: plan, admission: admission,
+        packet_digest: sha256_text(host_helper_request_encode_v1(request)?),
+        execution_proof_digest: sha256_text(host_helper_execution_proof_load_owned_v2(local.capacity_v3().journal, helper.operation.id)?),
+        authority_policy_digest: binding.policy_digest, policy_revision: context.policy_revision,
+        revocation_epoch: context.revocation_epoch, session_generation: context.session_generation)
+    val encoded = container_primary_connection_consumption_bytes_v2(record)?
+    val current = local.current_v3()?
+    Ok(record)
+
+# Publication returns its native receipt even if later live authorization fails.
+# No cleanup path reconstructs that capability from an existing file.
+pub struct HostPrimaryConnectionConsumptionTurnV3:
+    record: ContainerPrimaryConnectionConsumptionV2?
+    receipt: WindowsJournalConsumptionV1?
+    authority: WindowsPrimaryConnectionVerifiedV2?
+    error: text
+    publication_attempted: bool = false
+
+pub fn host_primary_connection_consume_owned_v3(local: HostWindowsLocalRootV3,
+        plan: ContainerPrimaryConnectionPlanV2, helper: HostHelperLeaseV1) -> HostPrimaryConnectionConsumptionTurnV3:
+    val checked = host_primary_connection_validate_v2(local, plan, helper)
+    if checked.is_err(): return HostPrimaryConnectionConsumptionTurnV3(nil, nil, nil, checked.unwrap_err())
+    val record = checked.unwrap()
+    val encoded = container_primary_connection_consumption_bytes_v2(record)
+    if encoded.is_err(): return HostPrimaryConnectionConsumptionTurnV3(Some(record), nil, nil, encoded.unwrap_err())
+    val published = distributed_operation_journal_consume_primary_v3(local.capacity_v3().journal, helper.operation, encoded.unwrap())
+    if published.is_err(): return HostPrimaryConnectionConsumptionTurnV3(Some(record), nil, nil, published.unwrap_err(), true)
+    val receipt = published.unwrap()
+    val authority = windows_primary_connection_authorize_v2(local.deployment_authority_v3(),
+        local.capacity_v3().journal, record, receipt)
+    if authority.is_err(): return HostPrimaryConnectionConsumptionTurnV3(Some(record), Some(receipt), nil, authority.unwrap_err(), true)
+    HostPrimaryConnectionConsumptionTurnV3(Some(record), Some(receipt), Some(authority.unwrap()), "", true)
+
+# Build only cleanup metadata from the actual executing helper archive. Expired
+# launch signatures may be cleaned; this function grants no IO permission.
+pub fn host_primary_connection_cleanup_record_v3(local: HostWindowsLocalRootV3,
+        plan: ContainerPrimaryConnectionPlanV2, helper: HostHelperLeaseV1) -> Result<ContainerPrimaryConnectionConsumptionV2, text>:
+    val metadata = local.current_v3()?
+    val binding = local.binding_v3()
+    if (plan.installation_digest != host_service_enrollment_payload_digest_v2(binding)? or
+            plan.journal_lease_digest != local.capacity_v3().journal.lease_digest or
+            plan.policy_digest != binding.engine_policy_digest or plan.provider_identity_digest != binding.provider_identity_digest or
+            container_host_scope_bytes_v2(container_primary_connection_scope_v2(plan))? != container_host_scope_bytes_v2(local.scope_v3())?):
+        return Err("host-primary-connection-cleanup-owner-mismatch")
+    if daemon_operation_exact_v2(local.capacity_v3().journal, helper.operation)?.state != "executing":
+        return Err("host-primary-connection-executing-helper-required")
+    val request = host_helper_request_load_owned_v2(local.capacity_v3().journal, helper.operation.id)?
+    if (distributed_encode_operation_v2(request.operation)? != distributed_encode_operation_v2(helper.operation)? or
+            host_helper_plan_bytes_v1(request.plan)? != host_helper_plan_bytes_v1(helper.plan)? or
+            host_reservation_encode_intent_v1(request.intent)? != host_reservation_encode_intent_v1(helper.intent)?):
+        return Err("host-primary-connection-cleanup-helper-mismatch")
+    val matched = host_helper_reservation_match_receipt_v1(helper.receipt, request.intent, helper.operation)?
+    val proof_bytes = host_helper_execution_proof_load_owned_v2(local.capacity_v3().journal, helper.operation.id)?
+    val proof = host_helper_execution_proof_decode_v1(request, proof_bytes)?
+    var expiry = proof.signed.grant.expires_at
+    for bound in [proof.approval.expires_at, request.budget_proof.signed.grant.expires_at, request.budget_proof.approval.expires_at]:
+        if bound < expiry: expiry = bound
+    if (helper.grant_id != proof.signed.grant.id or helper.issuer_id != proof.signed.issuer_id or
+            helper.approver_id != proof.approval.approver_id or helper.deadline.expires_at_unix_ms != expiry):
+        return Err("host-primary-connection-cleanup-proof-mismatch")
+    val admission = ContainerHelperAdmissionV2(plan: helper.plan, intent: helper.intent,
+        operation: helper.operation, receipt: helper.receipt, deadline: helper.deadline,
+        grant_id: helper.grant_id, issuer_id: helper.issuer_id, approver_id: helper.approver_id,
+        cpu_millis: helper.cpu_millis, memory_bytes: helper.memory_bytes)
+    val context = local.context_v3()
+    val record = ContainerPrimaryConnectionConsumptionV2(plan, admission, sha256_text(host_helper_request_encode_v1(request)?),
+        sha256_text(proof_bytes), binding.policy_digest, context.policy_revision, context.revocation_epoch, context.session_generation)
+    val encoded = container_primary_connection_consumption_bytes_v2(record)?
+    Ok(record)
+
+fn connection_failed_v2(turn: HostPrimaryConnectionTurnV2, reason: text) -> HostPrimaryConnectionTurnV2:
+    var retained = turn
+    if retained.error == "": retained.error = reason
+    retained
+
+pub fn host_primary_connection_begin_v2(local: HostWindowsLocalRootV3,
+        plan: ContainerPrimaryConnectionPlanV2, helper: HostHelperLeaseV1) -> HostPrimaryConnectionTurnV2:
+    var turn = HostPrimaryConnectionTurnV2(local: local, helper: helper, plan: plan)
+    val initial = host_primary_connection_validate_v2(local, plan, helper)
+    if initial.is_err(): return connection_failed_v2(turn, initial.unwrap_err())
+    val resolved = host_primary_connection_parent_v2(local, plan.identity.parent_operation_id)
+    if resolved.is_err(): return connection_failed_v2(turn, resolved.unwrap_err())
+    val parent = resolved.unwrap()
+    val planned = simple_container_primary_connection_plan_v2(local.container_v3(), parent.execution, parent.runtime,
+        plan.identity, plan.resources, plan.installation_digest, local.capacity_v3().journal.lease_digest, plan.terminal_mode, plan.timeout_ms)
+    val retained = turn.local.retain_v3(local.capacity_v3(), planned.owner)
+    if retained.is_err(): return connection_failed_v2(turn, retained.unwrap_err())
+    if planned.error != "": return connection_failed_v2(turn, planned.error)
+    if planned.plan == nil or planned.plan.unwrap().request_digest != plan.request_digest:
+        return connection_failed_v2(turn, "host-primary-connection-fresh-plan-mismatch")
+    turn.consumption_attempted = true
+    val consumption = host_primary_connection_consume_owned_v3(turn.local, plan, helper)
+    turn.record = consumption.record
+    turn.receipt = consumption.receipt
+    turn.consumption_attempted = consumption.publication_attempted
+    if consumption.error != "" or consumption.authority == nil: return connection_failed_v2(turn, consumption.error)
+    # No fallible propagation beyond acquisition: save every returned owner.
+    val opened = simple_container_primary_connection_begin_v2(turn.local.container_v3(), parent.execution,
+        ContainerPrimaryConnectionAuthorityV2.WindowsVerified(consumption.authority.unwrap()))
+    turn.pending = opened.turn.pending
+    turn.session = opened.turn.session
+    turn.terminal = opened.turn.terminal
+    turn.error = opened.turn.error
+    val committed = turn.local.retain_v3(turn.local.capacity_v3(), opened.owner)
+    if committed.is_err(): return connection_failed_v2(turn, committed.unwrap_err())
+    turn
+
+pub fn host_primary_connection_cancel_v2(turn: HostPrimaryConnectionTurnV2) -> HostPrimaryConnectionTurnV2:
+    var retained = turn
+    if val pending = turn.pending:
+        val cancelled = simple_container_primary_connection_cancel_v2(pending)
+        retained.pending = cancelled.pending
+        if cancelled.terminal != nil: retained.terminal = cancelled.terminal
+        if cancelled.session != nil: retained.session = cancelled.session
+        if retained.error == "": retained.error = cancelled.error
+    if val session = retained.session:
+        val cleaned = container_terminal_cleanup_v2(session)
+        retained.session = Some(cleaned.session)
+        if retained.error == "": retained.error = cleaned.error
+    retained
+
+pub fn host_primary_connection_step_v2(turn: HostPrimaryConnectionTurnV2) -> HostPrimaryConnectionTurnV2:
+    if turn.error != "": return host_primary_connection_cancel_v2(turn)
+    if turn.pending == nil: return turn
+    val current = host_primary_connection_validate_v2(turn.local, turn.plan, turn.helper)
+    if current.is_err(): return host_primary_connection_cancel_v2(connection_failed_v2(turn, current.unwrap_err()))
+    if turn.record == nil:
+        return host_primary_connection_cancel_v2(connection_failed_v2(turn, "host-primary-connection-consumption-required"))
+    val original = container_primary_connection_consumption_bytes_v2(turn.record.unwrap())
+    val refreshed = container_primary_connection_consumption_bytes_v2(current.unwrap())
+    if original.is_err() or refreshed.is_err() or original.unwrap() != refreshed.unwrap():
+        return host_primary_connection_cancel_v2(connection_failed_v2(turn, "host-primary-connection-authority-changed"))
+    var retained = turn
+    val progressed = simple_container_primary_connection_step_v2(turn.pending.unwrap())
+    retained.pending = progressed.pending
+    retained.session = progressed.session
+    if progressed.terminal != nil: retained.terminal = progressed.terminal
+    retained.error = progressed.error
+    retained

@@ -1,0 +1,124 @@
+# AUTHORED_NOT_RUN. Pure record/accounting tests, no native proof or authority.
+# @req REQ-MACHINE-MANAGED-SCOPE-001
+# @req REQ-MACHINE-MANAGED-SCOPE-002
+# @req REQ-MACHINE-MANAGED-SCOPE-003
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.container.machine_claim_record_v1.*
+use std.nogc_sync_mut.database.wal.{WalEntry, WalEntryType}
+use std.common.contracts.orchestration.host_capacity_v1.{HostCapacityV1, HostReservationStateV1}
+use std.common.crypto.sha256.sha256_text
+
+fn machine_scope_fixture_v1() -> MachineManagedScopeRecordV1:
+    MachineManagedScopeRecordV1(policy_digest: sha256_text("installed machine policy"),
+        authority_policy_digest: sha256_text("installed trusted authority policy"), issuer_id: "controller:team.prod",
+        enrollment_digest: sha256_text("exact signed enrollment"), credential_digest: sha256_text("exact credential"),
+        physical_host_id: "physical-42", native_machine_id: "actual-native-fixture", service_scope_id: "service-42",
+        backend: "windows-docker-process", provider_identity_digest: sha256_text("actual-provider-fixture"),
+        provider_generation: 7, cpu_millis: 2000, memory_bytes: 4096, expires_at: 100)
+
+fn machine_scope_capacity_fixture_v1() -> HostCapacityV1:
+    HostCapacityV1(physical_host_id: "physical-42", authority_id: "installed-machine-authority",
+        boot_id: "observed-fence-fixture", provider_generation: 7,
+        cpu_millis: 3000, memory_bytes: 8192, exclusive_devices: [])
+
+# Model only the existing WAL writer's sequence assignment. This helper does
+# not open storage, publish data, manufacture a native proof or authorize work.
+fn machine_scope_numbered_fixture_v1(record: MachineManagedScopeRecordV1) -> [WalEntry]:
+    val pending = machine_managed_scope_entries_v1(record, 10).unwrap()
+    [WalEntry(1, pending[0].entry_type, pending[0].table_name, pending[0].row_key, pending[0].data, pending[0].timestamp),
+        WalEntry(2, pending[1].entry_type, pending[1].table_name, pending[1].row_key, pending[1].data, pending[1].timestamp)]
+
+describe "Machine managed scope V1 neutral durable records":
+    it "binds exact trust policy and credential separately from the issuer spelling":
+        step("Create the actual canonical data envelope; no owner or grant is created")
+        val record = machine_scope_fixture_v1()
+        val source = machine_managed_scope_record_bytes_v1(record).unwrap()
+        expect(source).to_contain("kind: machine-managed-scope")
+        expect(source).to_contain("mode: managed")
+        expect(source.contains("\n")).to_equal(false)
+        step("A different key policy under the same issuer changes durable binding")
+        var changed = machine_scope_fixture_v1()
+        changed.authority_policy_digest = sha256_text("different keys same issuer")
+        expect(machine_managed_scope_record_bytes_v1(changed).unwrap() == source).to_equal(false)
+        changed = machine_scope_fixture_v1()
+        changed.credential_digest = sha256_text("different credential same binding")
+        expect(machine_managed_scope_record_bytes_v1(changed).unwrap() == source).to_equal(false)
+
+    it "charges the complete ceiling through existing accounting without asserting continuity":
+        step("Project the signed whole-scope CPU and memory as an uncertain retained row")
+        val record = machine_scope_fixture_v1()
+        val row = machine_managed_scope_reservation_v1(record).unwrap()
+        expect(row.state).to_equal(HostReservationStateV1.Uncertain)
+        expect(row.cpu_millis).to_equal(2000)
+        expect(row.memory_bytes).to_equal(4096)
+        val available = machine_managed_scope_capacity_v1(machine_scope_capacity_fixture_v1(), record).unwrap()
+        expect(available.cpu_millis).to_equal(1000)
+        expect(available.memory_bytes).to_equal(4096)
+        step("The existing subtract-before-sum validator refuses either exceeded ceiling")
+        var capacity = machine_scope_capacity_fixture_v1()
+        capacity.cpu_millis = 1999
+        expect(machine_managed_scope_capacity_v1(capacity, record).unwrap_err()).to_equal("capacity-exceeded")
+        capacity = machine_scope_capacity_fixture_v1()
+        capacity.memory_bytes = 4095
+        expect(machine_managed_scope_capacity_v1(capacity, record).unwrap_err()).to_equal("capacity-exceeded")
+        step("A different physical host or provider generation cannot reuse the projection")
+        capacity = machine_scope_capacity_fixture_v1()
+        capacity.physical_host_id = "other-physical"
+        expect(machine_managed_scope_capacity_v1(capacity, record).unwrap_err()).to_equal("machine-managed-scope-capacity-binding")
+        capacity = machine_scope_capacity_fixture_v1()
+        capacity.provider_generation = 8
+        expect(machine_managed_scope_capacity_v1(capacity, record).unwrap_err()).to_equal("machine-managed-scope-capacity-binding")
+
+    it "publishes one pair of immutable records and replays only that exact binding":
+        step("Prepare one scope row and one full reservation row for a single WAL transaction")
+        val record = machine_scope_fixture_v1()
+        val pending = machine_managed_scope_entries_v1(record, 10).unwrap()
+        expect(pending.len()).to_equal(2)
+        expect(pending[0].table_name).to_equal("machine-container-scope-v1")
+        expect(pending[1].table_name).to_equal("machine-container-reservations-v1")
+        expect(pending[1].data).to_contain("state: uncertain")
+        val committed = machine_scope_numbered_fixture_v1(record)
+        expect(machine_managed_scope_replay_v1(committed, record).unwrap()).to_equal(true)
+        step("Changes to controller, keys, enrollment, credential, provider or budgets retain a mismatch")
+        var changed = machine_scope_fixture_v1()
+        changed.issuer_id = "controller:other"
+        expect(machine_managed_scope_replay_v1(committed, changed).is_err()).to_equal(true)
+        changed = machine_scope_fixture_v1()
+        changed.authority_policy_digest = sha256_text("wrong signing keys same issuer")
+        expect(machine_managed_scope_replay_v1(committed, changed).is_err()).to_equal(true)
+        changed = machine_scope_fixture_v1()
+        changed.enrollment_digest = sha256_text("other enrollment")
+        expect(machine_managed_scope_replay_v1(committed, changed).is_err()).to_equal(true)
+        changed = machine_scope_fixture_v1()
+        changed.credential_digest = sha256_text("other credential")
+        expect(machine_managed_scope_replay_v1(committed, changed).is_err()).to_equal(true)
+        changed = machine_scope_fixture_v1()
+        changed.provider_generation = 8
+        expect(machine_managed_scope_replay_v1(committed, changed).is_err()).to_equal(true)
+        changed = machine_scope_fixture_v1()
+        changed.cpu_millis = 1999
+        expect(machine_managed_scope_replay_v1(committed, changed).is_err()).to_equal(true)
+
+    it "refuses incomplete additional reordered or released histories":
+        step("Use the same production strict replay checker for each malformed data history")
+        val record = machine_scope_fixture_v1()
+        val committed = machine_scope_numbered_fixture_v1(record)
+        expect(machine_managed_scope_replay_v1([], record).unwrap_err()).to_equal("machine-managed-scope-unknown-record-count")
+        expect(machine_managed_scope_replay_v1([committed[0]], record).is_err()).to_equal(true)
+        expect(machine_managed_scope_replay_v1([committed[0], committed[1], committed[1]], record).is_err()).to_equal(true)
+        expect(machine_managed_scope_replay_v1([committed[1], committed[0]], record).is_err()).to_equal(true)
+        val released = WalEntry(2, WalEntryType.Update, committed[1].table_name,
+            committed[1].row_key, committed[1].data.replace("state: uncertain", "state: released"), 10)
+        expect(machine_managed_scope_replay_v1([committed[0], released], record).is_err()).to_equal(true)
+
+    it "refuses expired initial publication without treating retained expiry as release":
+        step("An initial transaction needs a positive authorization time strictly before its signed deadline")
+        val record = machine_scope_fixture_v1()
+        expect(machine_managed_scope_entries_v1(record, 0).unwrap_err()).to_equal("machine-managed-scope-authorization-clock")
+        expect(machine_managed_scope_entries_v1(record, 100).unwrap_err()).to_equal("machine-managed-scope-authorization-clock")
+        step("Retained replay uses the original transaction clock and keeps its full uncertain charge")
+        val committed = machine_scope_numbered_fixture_v1(record)
+        expect(machine_managed_scope_replay_v1(committed, record).unwrap()).to_equal(true)
+        val available = machine_managed_scope_capacity_v1(machine_scope_capacity_fixture_v1(), record).unwrap()
+        expect(available.cpu_millis).to_equal(1000)
+        expect(available.memory_bytes).to_equal(4096)

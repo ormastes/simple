@@ -1,0 +1,112 @@
+# Windows ring-mode end-to-end host (PROVISIONAL ring mode, decision doc
+# doc/08_tracking/bug/xray_llvm_windows_flag_guard_leaf_and_admission_decisions_2026-11-14.md).
+# Loads an `--xray --backend=llvm` DLL of xray_inprocess_prog.spl (XR_DLL), binds
+# the flag-guard leaf in ring mode (no handler), enables slots, calls the
+# exported functions, drains the in-DLL ring and checks entry/exit edges and
+# names. XR_OFF_DLL (optional) is the xray-off build, timed for comparison.
+use std.nogc_sync_mut.trace.observer_native_channel_v1.*
+use std.nogc_sync_mut.trace.xray_win_flag_leaf_v1.*
+
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
+extern fn rt_call_ptr_1(addr: i64, arg1: i64) -> i64
+extern fn rt_host_dynlib_open(path: text, mode: i64) -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+val CALLS: i64 = 5000
+val PFX: text = "test.fixtures.xray.xray_inprocess_prog."
+
+fn time_one(entry: i64) -> i64:
+    val t0 = rt_time_now_unix_micros()
+    var i = 0
+    while i < CALLS:
+        rt_call_ptr_1(entry, i)
+        i = i + 1
+    rt_time_now_unix_micros() - t0
+
+fn time_reps(entry: i64) -> text:
+    "{time_one(entry)}/{time_one(entry)}/{time_one(entry)}"
+
+fn site_of(port: XrayWinDynlibPortV1, name: text, count: i64) -> i64:
+    var id = 1
+    while id <= count:
+        val n = xray_win_site_name_v1(port, id)
+        if n == name or n.ends_with("." + name): return id
+        id = id + 1
+    0
+
+fn main():
+    val path = rt_env_get("XR_DLL") ?? ""
+    val handle = rt_host_dynlib_open(path, 2)
+    if handle == 0:
+        print "RING-E2E FAIL dlopen {path}"
+        return
+    val port = XrayWinDynlibPortV1(handle: handle)
+    val traced = port.symbol(PFX + "traced")
+    val scaled = port.symbol(PFX + "scaled")
+    if traced == 0 or scaled == 0:
+        print "RING-E2E FAIL exports traced={traced} scaled={scaled}"
+        return
+    var leaf = XrayWinFlagLeafV1.bind(port)
+    # Ring v2 ts are rdtsc ticks; calibrate once so drained ts are ns.
+    leaf.set_tick_hz(xray_win_calibrate_tick_hz_v1(10000000))
+    val count = leaf.max_function_id()
+    print "RING-E2E sites={count} ring={leaf.ring != 0} tick_hz={leaf.tick_hz}"
+    val bytes = trace_native_channel_bytes_v1(64)
+    val arena = rt_alloc(bytes)
+    unsafe(capabilities: [ffi]):
+        if trace_native_channel_initialize_v1(arena, bytes, 64, 7, 9) != 1:
+            print "RING-E2E FAIL channel"
+            return
+    if leaf.install(arena, 7u64, 9u64, 1u64) != 1:
+        print "RING-E2E FAIL install"
+        return
+    val off_ms = time_reps(traced)
+    val traced_id = site_of(port, "traced", count)
+    val add1_id = site_of(port, "add1", count)
+    print "RING-E2E ids traced={traced_id} add1={add1_id} drained_while_off={leaf.drain()}"
+    leaf.patch_function(traced_id)
+    leaf.patch_function(add1_id)
+    print "RING-E2E result traced(1)={rt_call_ptr_1(traced, 1)} scaled(0)={rt_call_ptr_1(scaled, 0)}"
+    val n = leaf.drain()
+    print "RING-E2E drained={n} dropped={leaf.ring_dropped()}"
+    val out = rt_alloc(96)
+    var seq = ""
+    var prev_ts = 0
+    var ts_ok = true
+    var ts_list = ""
+    unsafe(capabilities: [ffi]):
+        while trace_native_channel_poll_into_v1(arena, out, 96) == 1:
+            val code = (rt_ptr_read_i64(out, 0) >> 32) & 65535
+            val id = rt_ptr_read_i64(out, 24) & 4294967295
+            val tag = if code == 1: "E" else: "X"
+            val ts = rt_ptr_read_i64(out, 48)
+            if ts <= 0 or ts < prev_ts: ts_ok = false
+            prev_ts = ts
+            ts_list = ts_list + "{ts},"
+            seq = seq + "{tag}:{xray_win_site_name_v1(port, id).replace(PFX, "")},"
+    val want = "E:traced,E:add1,X:add1,X:traced,"
+    print "RING-E2E edges={seq}"
+    print "RING-E2E ts_ns={ts_list} nonzero_monotonic={ts_ok}"
+    print(if seq == want and n == 4 and ts_ok: "RING-E2E PASS" else: "RING-E2E FAIL edges want {want} with nonzero monotonic ts")
+    val on_ms = time_reps(traced)
+    leaf.unpatch_function(traced_id)
+    leaf.unpatch_function(add1_id)
+    print "RING-E2E timing calls={CALLS} slots_off_us={off_ms} slots_on_us={on_ms} dropped={leaf.ring_dropped()}"
+    # Per edge: traced(i) -> add1 is 4 edges per call (ring full -> drop path).
+    leaf.patch_function(traced_id)
+    leaf.patch_function(add1_id)
+    val on_us = time_one(traced)
+    leaf.unpatch_function(traced_id)
+    leaf.unpatch_function(add1_id)
+    val off_us = time_one(traced)
+    print "RING-E2E per_edge_ns={(on_us - off_us) * 1000 / (CALLS * 4)} on_us={on_us} off_us={off_us}"
+    val off_path = rt_env_get("XR_OFF_DLL") ?? ""
+    if off_path != "":
+        val off_handle = rt_host_dynlib_open(off_path, 2)
+        val off_traced = XrayWinDynlibPortV1(handle: off_handle).symbol(PFX + "traced")
+        if off_traced != 0:
+            print "RING-E2E timing xray_off_build_us={time_reps(off_traced)}"
+
+main()

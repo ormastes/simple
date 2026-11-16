@@ -21,6 +21,7 @@ use std.editor.view.md_editing.*
 use std.editor.view.wincmd.*
 use std.editor.extensions.builtin.md_commands.{md_buffer_content, md_commands_palette_entries}
 use app.editor.commands.*
+use app.editor.trace_view_host.{view_host_render, view_host_uses_trace, view_host_load_input}
 use app.editor.editor_path_text_helpers.*
 use app.editor.md_dispatch.*
 
@@ -903,6 +904,18 @@ fn ctrl_execute_palette_command(ctrl: mut EditorController, command_name: text, 
         return ctrl_markdown_table_cell_nav(ctrl, "next")
     if command_name == "markdown-table-cell-prev":
         return ctrl_markdown_table_cell_nav(ctrl, "prev")
+    if command_name == "view.show":
+        # The snapshot is loaded lazily, once, from the canonical traceability
+        # service; a failed load is remembered and reported, never retried silently.
+        if view_host_uses_trace(ctrl.extension_host, command_payload) and not ctrl.trace_view_input.? and ctrl.trace_load_error == "":
+            match view_host_load_input():
+                case Ok(loaded): ctrl.trace_view_input = Some(loaded)
+                case Err(reason): ctrl.trace_load_error = reason
+        if ctrl.trace_load_error != "" and not ctrl.trace_view_input.?:
+            ctrl.status_msg = "unavailable: " + ctrl.trace_load_error
+        else:
+            ctrl.status_msg = view_host_render(ctrl.extension_host, command_payload, ctrl.trace_view_input).join(" | ")
+        return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
     val registered_command = ctrl.extension_host.find_command(command_name)
     val registered_command_id = extension_command_entry_command_id(registered_command)
     if registered_command_id != "" and extension_command_entry_name(registered_command) == "markdown-language":

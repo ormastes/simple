@@ -1,0 +1,80 @@
+# BORROWED root access to the actual installed Linux reader and storage owner.
+# This capsule opens no reader/storage owner and owns no close or cleanup right.
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.{LinuxMachinePolicyOwnerV1, LinuxMachineStorageV1}
+use std.nogc_sync_mut.io.machine_storage_owner_v1.{MachineStorageOwnerV1, MachineStorageBackendV1}
+use std.nogc_sync_mut.storage_roots.workspace_storage_owner_v1.{WorkspaceStorageLeaseV1, workspace_storage_admit_v1}
+use std.common.contracts.container.machine_policy_v1.machine_container_policy_decode_v1
+use std.common.contracts.container.linux_workspace_profile_v1.{LinuxWorkspaceInstalledProfileV1,
+    linux_workspace_installed_profile_decode_v1, linux_workspace_storage_request_v1}
+use std.common.contracts.container.linux_agent_workspace_profile_v2.linux_agent_workspace_profile_decode_v2
+use std.common.crypto.sha256.sha256_text
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.nogc_async_mut.container.providers.linux.workspace_mount_owner_v1.{LinuxWorkspaceSourceOpenV1,
+    linux_workspace_source_open_v1}
+
+pub class LinuxWorkspaceRootBorrowV3:
+    reader: LinuxMachinePolicyOwnerV1
+    storage: LinuxMachineStorageV1
+
+    pub fn validate_profiles_v3() -> Result<(), text>:
+        val profile = workspace_root_borrow_profile_v3(self.reader, self.storage)?
+        Ok(())
+
+    # Validation finishes before quota admission. The returned lease is the
+    # real native owner from workspace_storage_admit_v1, never a copied receipt.
+    pub fn admit_lease_v3() -> Result<WorkspaceStorageLeaseV1, text>:
+        val profile = workspace_root_borrow_profile_v3(self.reader, self.storage)?
+        workspace_storage_admit_v1(linux_workspace_storage_request_v1(profile))
+
+    # The existing source owner retains the real reader, storage and lease on
+    # both observed and cleanup-required outcomes. Forward that full turn.
+    pub fn open_source_v3(actual_lease: WorkspaceStorageLeaseV1,
+            request_bytes: text) -> LinuxWorkspaceSourceOpenV1:
+        linux_workspace_source_open_v1(self.reader, self.storage, actual_lease, request_bytes)
+
+fn workspace_root_profile_text_v3(bytes: [u8], error: text) -> Result<text, text>:
+    if bytes.len() == 0 or bytes.len() > 1048576 or not utf8_bytes_valid(bytes): return Err(error)
+    Ok(bytes_to_text(bytes))
+
+fn workspace_root_borrow_profile_v3(reader: LinuxMachinePolicyOwnerV1,
+        storage: LinuxMachineStorageV1) -> Result<LinuxWorkspaceInstalledProfileV1, text>:
+    val machine_source = workspace_root_profile_text_v3(reader.read_policy_v1()?,
+        "workspace-root-machine-policy-utf8")?
+    val storage_source = workspace_root_profile_text_v3(storage.policy_bytes_v1()?,
+        "workspace-root-storage-policy-utf8")?
+    if storage_source != machine_source: return Err("workspace-root-reader-storage-policy-mismatch")
+    val machine = machine_container_policy_decode_v1(machine_source)?
+    val workspace_source = workspace_root_profile_text_v3(reader.read_workspace_profile_v1()?,
+        "workspace-root-workspace-profile-utf8")?
+    val workspace = linux_workspace_installed_profile_decode_v1(workspace_source)?
+    val agent_source = reader.read_agent_workspace_profile_v1()?
+    val agent = linux_agent_workspace_profile_decode_v2(agent_source)?
+    val machine_digest = sha256_text(machine_source)
+    if (workspace.machine_policy_digest != machine_digest or agent.base.machine_policy_digest != machine_digest or
+            agent.base.workspace_profile_digest != sha256_text(workspace_source)):
+        return Err("workspace-root-installed-profile-chain")
+    var linux_providers = 0
+    var selected_provider_digest = ""
+    for provider in machine.providers:
+        if provider.backend == "linux-podman":
+            linux_providers = linux_providers + 1
+            selected_provider_digest = sha256_text(provider.policy_bytes)
+    if (linux_providers != 1 or selected_provider_digest == "" or
+            selected_provider_digest != workspace.provider_policy_digest):
+        return Err("workspace-root-installed-provider-binding")
+    Ok(workspace)
+
+pub fn linux_workspace_root_borrow_v3(actual_reader: LinuxMachinePolicyOwnerV1,
+        actual_storage: LinuxMachineStorageV1) -> LinuxWorkspaceRootBorrowV3:
+    LinuxWorkspaceRootBorrowV3(reader: actual_reader, storage: actual_storage)
+
+# milestone_0021 3.1 (N-10): the ONE accessor for the V4 workspace-root loan. It lives here, not in the sync
+# machine_storage_owner_v1, so the import direction stays async provider -> sync io (no sync -> providers edge,
+# no cycle through fresh_epoch_workload_v2). It returns only the borrow capsule (no close right), never a bare
+# LinuxMachineStorageV1; the capsule aliases the facade's storage exactly as V7 does. Only caller:
+# machine_authority_v1 (structural pin; type/field privacy is unenforced on release).
+pub fn linux_workspace_root_borrow_from_storage_v3(storage: MachineStorageOwnerV1,
+        reader: LinuxMachinePolicyOwnerV1) -> Result<LinuxWorkspaceRootBorrowV3, text>:
+    match storage.backend:
+        case MachineStorageBackendV1.Linux(actual): Ok(linux_workspace_root_borrow_v3(reader, actual))
+        case MachineStorageBackendV1.Windows(_): Err("machine-storage-linux-required")

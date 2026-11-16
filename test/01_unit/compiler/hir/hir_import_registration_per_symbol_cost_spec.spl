@@ -73,14 +73,22 @@ val FIXTURE_ITEMS_PER_PACKAGE: i64 = 40
 # 62-68 ms. 3x the post-fix budget keeps a loaded box green and the pre-fix
 # cost red.
 val PER_REGISTRATION_BUDGET_US: i64 = 33000
-# One composite per package is registered TRANSITIVELY before its own explicit
-# import: `T{k}_8` is a field dependency of `T{k}_10` and `T{k}_11`, which sort
-# before it in `composite_names` (`composites.keys()` order, observed here as
-# lexical). The explicit registration then supersedes
-# that transitive bare binding (5a4e937a6d1, 44ae909f04b: an explicit import
-# wins and starts clean), so the RISDONE memo misses and that type's one impl
-# row is read a second time. Every other composite reads only its own row.
-val SUPERSEDED_TRANSITIVE_PER_PACKAGE: i64 = 1
+# Registration order is `composite_names`, i.e. `composites.keys()`, and a Dict
+# iterates in INSERTION order (the documented contract since 23e7ba475f9 /
+# e468d6cbe5f, 2026-11-06). The fixture declares every group leader
+# `T{k}_{prev}` before its dependents (prev <= i), so each composite is
+# registered EXPLICITLY before anything can pull it in as a field dependency,
+# and its one impl row is read exactly once.
+#
+# bdab970310e pinned one extra read per package instead. It was measured on a
+# seed whose Dict still iterated in sorted key order: there `T{k}_10` and
+# `T{k}_11` came before `T{k}_8`, registered it transitively, and the explicit
+# import then superseded that binding and re-read the row. That is real
+# behaviour (an explicit import wins and starts clean), but it only happens
+# when a dependent is registered before its dependency, which declaration
+# order never does here. The order premise is asserted below, so a change of
+# iteration order fails on the premise, not on a count.
+
 
 fn gen_module(k: i64, n: i64) -> text:
     var parts: [text] = []
@@ -122,6 +130,8 @@ describe("HIR first-time import registration cost", fn():
             val surf = registry.surfaces[idx]
             var i = 0
             while i < surf.composite_names.len():
+                # Premise of the impl-row pin: declaration order.
+                expect(surf.composite_names[i]).to_equal("T{k}_{i}")
                 lowering.register_imported_symbol(idx, "pkg.m{k}", surf.composite_names[i], surf.composite_names[i], span, true)
                 total_regs = total_regs + 1
                 i = i + 1
@@ -140,9 +150,11 @@ describe("HIR first-time import registration cost", fn():
         expect(lowering.symbols.next_symbol_id).to_equal(FIXTURE_PACKAGES * n * 4)
         # IMPLIDX: one sweep per surface, and only the matching impl row is
         # read per composite (N impls x N composites would be the old sweep),
-        # plus one re-read per superseded transitive registration.
+        # plus one re-read per superseded transitive registration -- none in
+        # declaration order, so nothing is skipped by the memo either.
+        expect(lowering.registered_import_skip_count).to_equal(0)
         expect(lowering.impl_index_build_count).to_equal(FIXTURE_PACKAGES)
-        expect(lowering.impl_rows_visited).to_equal(FIXTURE_PACKAGES * (n + SUPERSEDED_TRANSITIVE_PER_PACKAGE))
+        expect(lowering.impl_rows_visited).to_equal(FIXTURE_PACKAGES * n)
         # NAMEIDX: the six per-registration name scans are Dict probes against
         # an index built ONCE per surface, never per registration.
         expect(lowering.name_index_build_count).to_equal(FIXTURE_PACKAGES)

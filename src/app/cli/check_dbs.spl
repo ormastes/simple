@@ -19,9 +19,21 @@ use std.database.todo.{load_todo_database}
 use std.database.task.{load_task_database}
 use std.database.checker.{DbIssue, count_by_severity, format_issue}
 use std.io_runtime.{file_exists}
-use app.bug.workaround_store.{load_workarounds, refresh_workarounds}
+use app.bug.workaround_store.{load_workarounds, refresh_workarounds, WorkaroundScanV1}
 use app.bug.workaround_query.{workaround_issues, workaround_issue}
+use app.bug.workaround_autoretire.{workaround_closure_bypass_findings_v1, workaround_closure_bypass_message_v1}
+use app.bug.workaround_revert.{workaround_revert_candidates, revert_candidate_message}
 use common.text_advanced.{escape_json}
+use common.time_utils.{timestamp_get_year, timestamp_get_month, timestamp_get_day}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+
+fn _pad2(n: i64) -> text:
+    if n < 10: "0" + n.to_text() else: n.to_text()
+
+# Today as YYYY-MM-DD (UTC), for workaround expiry.
+fn _today_ymd() -> text:
+    val us = current_time_ms() * 1000
+    timestamp_get_year(us).to_text() + "-" + _pad2(timestamp_get_month(us)) + "-" + _pad2(timestamp_get_day(us))
 
 # ============================================================================
 # Database paths
@@ -46,11 +58,17 @@ fn check_bug_db(bug_filter: text, fullscan: bool) -> [DbIssue]:
     match db_opt:
         case Some(db):
             var issues = db.validate()
-            val indexed = if fullscan: refresh_workarounds(true, []) else: load_workarounds()
+            val indexed = if fullscan: refresh_workarounds(WorkaroundScanV1.Full, []) else: load_workarounds()
             match indexed:
                 case Ok(index):
                     for issue in workaround_issues(index, db, bug_filter):
                         issues.push(issue)
+                    for found in workaround_closure_bypass_findings_v1(index, db):
+                        if bug_filter != "" and found.site.bug_id.value != bug_filter: continue
+                        issues.push(workaround_issue("warning", "closure_gate_bypass", workaround_closure_bypass_message_v1(found)))
+                    for cand in workaround_revert_candidates(index, db, _today_ymd()):
+                        if bug_filter != "" and cand.bug_id != bug_filter: continue
+                        issues.push(workaround_issue("warning", "workaround_revert_candidate", revert_candidate_message(cand)))
                 case Err(reason):
                     val severity = if fullscan: "error" else: "warning"
                     issues.push(workaround_issue(severity, "workaround_index_unavailable", reason))

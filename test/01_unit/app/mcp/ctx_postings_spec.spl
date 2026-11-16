@@ -1,0 +1,247 @@
+"""
+# Context Index Postings Specification
+
+**Requirements:** CTX-004 (repeated query served from the cached generation), CTX-007 (postings built once per generation, bounded candidate scoring) — plan §3.4 / §9
+
+## Purpose
+
+Audience: maintainers of `app.mcp.main_lazy_ctx_tools` and of the pure scorer
+module `app.mcp.ctx_postings`.
+
+`simple_ctx_search` used to test every normalized chunk body against every
+query term. The cached index now carries postings (term -> chunks that contain
+it, with whole-word term frequency) built once per cache generation, and a
+query scores only those chunks. The full-scan scorer stays as the reference
+oracle.
+
+## Behavior
+
+- Postings record exactly the chunks containing a term, with the right term
+  frequency, in slot order.
+- For a fixture store the ranked results (ids, order, scores, matched counts)
+  from the postings path equal the full-scan path for single-term,
+  multi-term, repeated-term, stopword-only and zero-hit queries.
+- A term that is absent has no postings and scores nothing.
+"""
+
+# @feature mcp_ctx_postings
+# tag: unit
+
+use std.spec
+use app.mcp.ctx_postings.{CtxPostings, CtxTerm, CtxNormBodies, CtxResultLimit, CtxResultLimit, ctx_postings_build, ctx_postings_append, ctx_postings_for, ctx_postings_df, ctx_postings_doc_count, CtxGenerationHits, ctx_postings_decide, ctx_postings_decision_label}
+use app.mcp.main_lazy_ctx_tools.{CtxChunk, CtxIndex, CtxHit, ctx_prepare_index, ctx_bm25_search_index, ctx_bm25_search_index_scan, ctx_index_text, handle_simple_ctx_search, ctx_index_postings_builds, ctx_index_postings_increments, ctx_index_cache_rebuilds}
+use std.io_runtime.{env_set, env_get, dir_create, dir_remove_all, time_now_unix_micros}
+
+const _WORDS: [text] = ["linker", "parser", "lexer", "symbol", "relocation", "object", "archive", "runtime", "cache", "digest", "token", "chunk"]
+
+fn _fixture_chunks(count: i64) -> [CtxChunk]:
+    var out: [CtxChunk] = []
+    var i = 0
+    while i < count:
+        var body = "chunk " + str(i) + ": "
+        var j = 0
+        # Deterministic mix: 3..9 words, some repeated, varying doc length.
+        val n = 3 + (i * 7) % 7
+        while j < n:
+            body = body + _WORDS[(i * 3 + j * j) % 12] + " "
+            j = j + 1
+        if i % 5 == 0:
+            body = body + "linker linker rare_" + str(i % 4)
+        out.push(CtxChunk(id: i + 1, source: "doc:" + str(i % 3), ts: 1000 + i, bytes: body.len(), body: body))
+        i = i + 1
+    out
+
+fn _with_postings(chunks: [CtxChunk]) -> CtxIndex:
+    val base = ctx_prepare_index(chunks, "")
+    CtxIndex(docs: base.docs, norm: base.norm, avg_bytes: base.avg_bytes, postings: Some(ctx_postings_build(CtxNormBodies(bodies: base.norm))))
+
+fn _ids(hits: [CtxHit]) -> [i64]:
+    var out: [i64] = []
+    for h in hits:
+        out.push(h.chunk.id)
+    out
+
+fn _same_hits(a: [CtxHit], b: [CtxHit]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i].chunk.id != b[i].chunk.id or a[i].score != b[i].score or a[i].matched != b[i].matched or a[i].mode != b[i].mode:
+            return false
+        i = i + 1
+    true
+
+describe "ctx postings structure":
+    it "records the chunks containing a term with whole-word frequency":
+        # @req CTX-007
+        step("build postings over three normalized bodies")
+        val p = ctx_postings_build(CtxNormBodies(bodies: [" alpha  beta  alpha ", " beta ", " gamma  alpha "]))
+        assert_equal(ctx_postings_doc_count(p).count, 3)
+        step("alpha is in slots 0 and 2 with frequencies 2 and 1")
+        val alpha = ctx_postings_for(p, CtxTerm(word: "alpha"))
+        assert_equal(alpha.len(), 2)
+        assert_equal(alpha[0].slot.index, 0)
+        assert_equal(alpha[0].freq.count, 2)
+        assert_equal(alpha[1].slot.index, 2)
+        assert_equal(alpha[1].freq.count, 1)
+        step("document frequency matches the list length")
+        assert_equal(ctx_postings_df(p, CtxTerm(word: "beta")).count, 2)
+
+    it "adverse: an absent term has no postings and a one-letter token is not indexed":
+        # @req CTX-007
+        val p = ctx_postings_build(CtxNormBodies(bodies: [" alpha  x ", " beta "]))
+        step("absent term")
+        assert_equal(ctx_postings_for(p, CtxTerm(word: "zzz")).len(), 0)
+        assert_equal(ctx_postings_df(p, CtxTerm(word: "zzz")).count, 0)
+        step("tokens under two characters are skipped like ctx_tokenize")
+        assert_equal(ctx_postings_df(p, CtxTerm(word: "x")).count, 0)
+        step("empty store builds empty postings")
+        val empty = ctx_postings_build(CtxNormBodies(bodies: []))
+        assert_equal(ctx_postings_doc_count(empty).count, 0)
+
+describe "ctx postings parity with the full scan":
+    it "returns identical ranked hits for varied queries over 60 chunks":
+        # @req CTX-007
+        val chunks = _fixture_chunks(60)
+        val idx = _with_postings(chunks)
+        val queries = ["linker", "parser lexer", "linker linker symbol", "rare_2", "the linker", "relocation archive object digest", "chunk 7", "zzzabsent", "the of and"]
+        for q in queries:
+            step("query: " + q)
+            val fast = ctx_bm25_search_index(idx, q, CtxResultLimit(count: 10))
+            val slow = ctx_bm25_search_index_scan(idx, q, CtxResultLimit(count: 10))
+            assert_true(_same_hits(fast, slow))
+        step("the common term returns hits so the parity is not vacuous")
+        assert_true(ctx_bm25_search_index(idx, "linker", CtxResultLimit(count: 10)).len() > 3)
+
+    it "adverse: a zero-hit BM25 query falls back to substring identically on both paths":
+        # @req CTX-007
+        val idx = _with_postings(_fixture_chunks(30))
+        step("partial identifier matches only by substring")
+        val fast = ctx_bm25_search_index(idx, "rare_", CtxResultLimit(count: 5))
+        val slow = ctx_bm25_search_index_scan(idx, "rare_", CtxResultLimit(count: 5))
+        assert_true(_same_hits(fast, slow))
+        step("an index without postings answers through the scan path")
+        val plain = ctx_prepare_index(_fixture_chunks(30), "")
+        assert_equal(_ids(ctx_bm25_search_index(plain, "linker", CtxResultLimit(count: 5))), _ids(ctx_bm25_search_index_scan(plain, "linker", CtxResultLimit(count: 5))))
+
+describe "ctx postings build gate":
+    it "defers the build until the generation has served enough hits":
+        # @req CTX-007
+        step("a fresh generation scans")
+        assert_equal(ctx_postings_decision_label(ctx_postings_decide(CtxGenerationHits(count: 0))), "use_scan")
+        step("just below the threshold still scans")
+        assert_equal(ctx_postings_decision_label(ctx_postings_decide(CtxGenerationHits(count: 127))), "use_scan")
+        step("at the threshold postings are built")
+        assert_equal(ctx_postings_decision_label(ctx_postings_decide(CtxGenerationHits(count: 128))), "build_postings")
+
+    it "builds postings once for a long-lived generation and rebuilds nothing on append-free reuse":
+        # @req CTX-007
+        var base = env_get("SIMPLE_TEST_TMP") ?? ""
+        if base == "":
+            base = "build/tmp"
+        val dir = base + "/simple_ctx_postings_spec_" + str(time_now_unix_micros())
+        dir_remove_all(dir)
+        dir_create(dir, true)
+        env_set("SIMPLE_CTX_DIR", dir)
+        step("index two documents")
+        assert_equal(ctx_index_text("the linker resolves symbols", "doc:linker").count, 1)
+        assert_equal(ctx_index_text("the parser builds an ast", "doc:parser").count, 1)
+        val before = ctx_index_postings_builds().count
+        step("a handful of searches never builds postings")
+        var i = 0
+        while i < 5:
+            assert_contains(handle_simple_ctx_search("1", "{\"query\":\"linker\"}"), "source=doc:linker")
+            i = i + 1
+        assert_equal(ctx_index_postings_builds().count, before)
+        step("after the threshold exactly one build happens and answers stay correct")
+        while i < 140:
+            assert_contains(handle_simple_ctx_search("1", "{\"query\":\"parser\"}"), "source=doc:parser")
+            i = i + 1
+        assert_equal(ctx_index_postings_builds().count, before + 1)
+
+fn _terms_equal(a: CtxPostings, b: CtxPostings, terms: [text]) -> bool:
+    if ctx_postings_doc_count(a).count != ctx_postings_doc_count(b).count:
+        return false
+    for t in terms:
+        val pa = ctx_postings_for(a, CtxTerm(word: t))
+        val pb = ctx_postings_for(b, CtxTerm(word: t))
+        if pa.len() != pb.len():
+            return false
+        var i = 0
+        while i < pa.len():
+            if pa[i].slot.index != pb[i].slot.index or pa[i].freq.count != pb[i].freq.count:
+                return false
+            i = i + 1
+    true
+
+fn _hit_lines(out: text) -> [text]:
+    var lines: [text] = []
+    for l in out.replace("\\n", "\n").split("\n"):
+        for rank in [1, 2, 3, 4, 5]:
+            val at = l.index_of("[" + str(rank) + "] score=") ?? -1
+            if at >= 0:
+                lines.push(l.substring(at).split(" ts=")[0])
+    lines
+
+describe "ctx postings incremental update on append":
+    it "append over the old postings equals a full rebuild":
+        # @req CTX-007
+        val chunks = _fixture_chunks(40)
+        val old = ctx_prepare_index(chunks.slice(0, 30), "")
+        val all = ctx_prepare_index(chunks, "")
+        val added = ctx_prepare_index(chunks.slice(30, 40), "")
+        step("postings for 30 chunks plus an append of 10")
+        val grown = ctx_postings_append(ctx_postings_build(CtxNormBodies(bodies: old.norm)), CtxNormBodies(bodies: added.norm))
+        val rebuilt = ctx_postings_build(CtxNormBodies(bodies: all.norm))
+        step("every term has identical slots and frequencies")
+        assert_true(_terms_equal(grown, rebuilt, _WORDS + ["rare_0", "rare_1", "rare_2", "rare_3", "chunk"]))
+        step("ranked hits through the grown postings equal the scan oracle")
+        val idx = CtxIndex(docs: all.docs, norm: all.norm, avg_bytes: all.avg_bytes, postings: Some(grown))
+        for q in ["linker", "parser lexer", "rare_2", "relocation archive digest"]:
+            assert_true(_same_hits(ctx_bm25_search_index(idx, q, CtxResultLimit(count: 10)), ctx_bm25_search_index_scan(idx, q, CtxResultLimit(count: 10))))
+
+    it "adverse: appending nothing leaves the postings unchanged":
+        # @req CTX-007
+        val base = ctx_postings_build(CtxNormBodies(bodies: [" alpha  beta ", " beta "]))
+        val same = ctx_postings_append(base, CtxNormBodies(bodies: []))
+        assert_true(_terms_equal(base, same, ["alpha", "beta"]))
+
+    it "a search right after an append finds it without a rebuild or a postings build":
+        # @req CTX-007
+        var base = env_get("SIMPLE_TEST_TMP") ?? ""
+        if base == "":
+            base = "build/tmp"
+        val dir = base + "/simple_ctx_postings_incr_spec_" + str(time_now_unix_micros())
+        dir_remove_all(dir)
+        dir_create(dir, true)
+        env_set("SIMPLE_CTX_DIR", dir)
+        val docs = ["the linker resolves symbols", "the parser builds an ast", "the lexer emits tokens", "linker symbols relocation"]
+        for d in docs:
+            ctx_index_text(d, "doc:" + d.split(" ")[1])
+        var i = 0
+        while i < 135:
+            handle_simple_ctx_search("1", "{\"query\":\"linker\"}")
+            i = i + 1
+        val builds = ctx_index_postings_builds().count
+        val rebuilds = ctx_index_cache_rebuilds().count
+        val incs = ctx_index_postings_increments().count
+        assert_equal(builds >= 1, true)
+        step("append a chunk to the live generation")
+        assert_equal(ctx_index_text("the zulu quasar linker", "doc:zulu").count, 1)
+        val after = handle_simple_ctx_search("2", "{\"query\":\"quasar linker\"}")
+        step("found immediately, via the increment")
+        assert_contains(after, "source=doc:zulu")
+        assert_equal(ctx_index_postings_increments().count, incs + 1)
+        assert_equal(ctx_index_postings_builds().count, builds)
+        assert_equal(ctx_index_cache_rebuilds().count, rebuilds)
+        step("identical ranking to a store built in one go (fresh scan path)")
+        val ref_dir = base + "/simple_ctx_postings_incr_ref_" + str(time_now_unix_micros())
+        dir_remove_all(ref_dir)
+        dir_create(ref_dir, true)
+        env_set("SIMPLE_CTX_DIR", ref_dir)
+        for d in docs:
+            ctx_index_text(d, "doc:" + d.split(" ")[1])
+        ctx_index_text("the zulu quasar linker", "doc:zulu")
+        val ref = handle_simple_ctx_search("3", "{\"query\":\"quasar linker\"}")
+        assert_equal(_hit_lines(after), _hit_lines(ref))
+        assert_true(_hit_lines(ref).len() > 0)

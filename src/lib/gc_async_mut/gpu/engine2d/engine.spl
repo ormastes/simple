@@ -17,6 +17,7 @@
 
 use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, engine2d_readback_with_identity}
 use std.gpu.engine2d.color.{color_r, color_g, color_b, color_a, rgba}
+use std.common.math.math.{math_pow}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_text_bg,
     emu_draw_ellipse, emu_draw_ellipse_filled,
@@ -67,7 +68,7 @@ use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION,
 use std.common.crypto.sha256.{sha256_text}
 use std.gpu.engine2d.backend_capability.{BackendCapability, backend_capability_default}
 use std.gc_async_mut.io.mod_stub.{env_get}
-use std.io_runtime.{platform_name}
+use std.io_runtime.{platform_name, file_exists, file_read_bytes_result}
 use std.gc_async_mut.text_layout.font_renderer.{
     FontCacheStats, FontGlyphRun, FontRenderBatch, FontRenderConfig, FontRenderQuad, FontRenderer,
     FontExecutionPolicy,
@@ -95,6 +96,16 @@ use std.gc_async_mut.gpu.engine2d.vulkan_context_admission.{
     VulkanDrawIrAdmission, vulkan_context_admit,
     vulkan_context_admission_without_backend
 }
+use std.common.encoding.sfnt.{OtFont, OtTable}
+use std.common.encoding.sfnt_glyf.{
+    SFNT_GLYF_MOVE, SFNT_GLYF_LINE, SFNT_GLYF_QUAD, SFNT_GLYF_CLOSE,
+    SfntGlyfCommand, SfntGlyfOutline,
+    sfnt_glyf_parse_offset_table, sfnt_glyf_find_table,
+    sfnt_glyf_read_u16_be, sfnt_glyf_read_i16_be,
+    sfnt_glyf_cmap_ids_into, sfnt_glyf_parse_outline,
+    sfnt_rasterize_glyph_baseline_aligned
+}
+use std.common.encoding.utf8.{text_codepoints}
 
 # ============================================================================
 # Config / environment backend selection
@@ -113,7 +124,11 @@ pub fn engine2d_vulkan_font_batch_admits(status: text, quad_count: i64,
     nothing was recorded. "promoted" is an executed batch whose oracle
     parity and stage evidence were proven (`_vulkan_font_completion`); before
     it was admitted, the best outcome demoted the frame to the CPU lane.
+    "clipped-out" is the one zero-dispatch success: every quad lay outside the
+    clip rect, so there was nothing to draw (`composite_font_batch`).
     """
+    if status == "clipped-out":
+        return quad_count == batch_quads
     (status == "executed" or status == "recorded" or status == "promoted") and
         quad_count == batch_quads and dispatch_count > 0
 
@@ -201,7 +216,8 @@ pub fn engine2d_composite_region_milli(src: [u32], fb: [u32], fb_width: i32, fb_
                                    opacity_milli: i32) -> [u32]:
     """Canonical opacity_milli readback composite, per channel:
         a8  = opacity_milli * 255 / 1000            (floor)
-        out = (src*a8 + dst*(256 - a8)) >> 8        (truncate)
+        ea  = src_alpha * a8 / 255                   (floor; == a8 when opaque)
+        out = (src*ea + dst*(256 - ea)) >> 8        (truncate)
     This single truncating >>8 contract is what the spec oracles pin
     (half 500 -> 63, inactive 930 -> 117 for src=127 over dst=0); both the
     exact-/255 blend and a milli /1000 floor land one HIGH at 930 (118), and
@@ -209,7 +225,6 @@ pub fn engine2d_composite_region_milli(src: [u32], fb: [u32], fb_width: i32, fb_
     alpha-scale + draw_image_blend double-blend (see
     doc/08_tracking/bug/engine2d_parent_sampling_embed_opacity_one_ulp_parity_2026-08-16.md)."""
     val a8 = (opacity_milli * 255) / 1000
-    val inv8 = 256 - a8
     # i64 product: the i32 multiply wraps past ~46341^2 (same guard as
     # compositor.spl Layer.create). Only w*h entries are ever written here and
     # the sole caller (draw_ir_composite_readback) guarantees
@@ -228,14 +243,140 @@ pub fn engine2d_composite_region_milli(src: [u32], fb: [u32], fb_width: i32, fb_
             var d = 0u32
             if fx >= 0 and fx < fb_width and fy >= 0 and fy < fb_height:
                 d = fb[(fy * fb_width + fx).to_i64()]
-            val r = (color_r(s) * a8 + color_r(d) * inv8) >> 8
-            val g = (color_g(s) * a8 + color_g(d) * inv8) >> 8
-            val b = (color_b(s) * a8 + color_b(d) * inv8) >> 8
-            val a = (color_a(s) * a8 + color_a(d) * inv8) >> 8
+            # The layer's own per-pixel alpha scales the group opacity: a
+            # transparent child pixel leaves the parent untouched. ece10b378c8
+            # dropped this (the replaced alpha-scale path kept it), so a
+            # full-viewport opacity layer darkened every uncovered pixel.
+            # An opaque source keeps ea == a8, the pinned oracle values.
+            val ea = (color_a(s) * a8) / 255
+            val inv = 256 - ea
+            val r = (color_r(s) * ea + color_r(d) * inv) >> 8
+            val g = (color_g(s) * ea + color_g(d) * inv) >> 8
+            val b = (color_b(s) * ea + color_b(d) * inv) >> 8
+            val a = (color_a(s) * ea + color_a(d) * inv) >> 8
             out[idx] = rgba(r, g, b, a)
             col = col + 1
         row = row + 1
     out
+
+# LCD subpixel composite of one glyph quad over the destination pixels `dst`
+# (row-major w*h, read back from the frame). Returns w*h OPAQUE pixels, or []
+# when the quad carries no LCD cell or a destination pixel is not opaque (LCD
+# coverage needs a known opaque background; Chrome itself drops to grayscale
+# there), so the caller keeps the grayscale composite.
+#
+# Blend = Skia blend_lcd16 (Chrome 159): each channel's 8-bit coverage, scaled
+# by the text alpha, is cut to 5 bits like the LCD16 mask, upscaled 31 -> 32
+# (s + (s >> 4)), and mixed as dst + ((src - dst) * s >> 5) with a flooring
+# shift. Measured: black text over white gives exactly 255 - 8k per channel,
+# e.g. 0xf7 for s=1 and 0x07 for s=31.
+fn engine2d_lcd_quad_composite(atlas_pixels: [u32], atlas_width: i32, atlas_x: i32, atlas_y: i32,
+                               width: i32, height: i32, color: u32, dst: [u32]) -> [u32]:
+    val count = width.to_i64() * height.to_i64()
+    if width <= 0 or height <= 0 or dst.len() != count:
+        return []
+    val src_r = ((color >> 16) & 0xFFu32).to_i64()
+    val src_g = ((color >> 8) & 0xFFu32).to_i64()
+    val src_b = (color & 0xFFu32).to_i64()
+    # Coverage -> Skia s32 (0..32) per channel, preblend and text alpha folded
+    # in once per text colour, so the pixel loop is three lookups and blends.
+    val s_rgb = _engine2d_lcd_s32_tables(color)
+    val atlas_w = atlas_width.to_i64()
+    val quad_w = width.to_i64()
+    # Full coverage with an opaque colour: every s32 is 32, so the blend
+    # returns the text colour exactly.
+    val solid_ok = s_rgb[255] == 32 and s_rgb[511] == 32 and s_rgb[767] == 32
+    val solid = 0xFF000000u32 | (color & 0x00FFFFFFu32)
+    var out: [u32] = [0u32; count]
+    var has_lcd = false
+    var row = 0
+    while row < height:
+        var col = 0
+        val out_row = row.to_i64() * quad_w
+        val atlas_row = (atlas_y + row).to_i64() * atlas_w + atlas_x.to_i64()
+        while col < width:
+            val i = out_row + col.to_i64()
+            val d = dst[i]
+            if ((d >> 24) & 0xFFu32) != 0xFFu32:
+                return []
+            val cell = atlas_pixels[atlas_row + col.to_i64()]
+            if cell == 0u32 or cell == 0x00FFFFFFu32:
+                # zero coverage (LCD or gray cell): every s32 is 0, so the
+                # blend returns d, which is already opaque
+                out[i] = d
+                col = col + 1
+                continue
+            if cell == 0xFFFFFFFFu32 and solid_ok:
+                out[i] = solid
+                col = col + 1
+                continue
+            val a = ((cell >> 24) & 0xFFu32).to_i64()
+            var cr = a
+            var cg = a
+            var cb = a
+            if (cell & 0x00FFFFFFu32) != 0x00FFFFFFu32:
+                has_lcd = true
+                cr = ((cell >> 16) & 0xFFu32).to_i64()
+                cg = ((cell >> 8) & 0xFFu32).to_i64()
+                cb = (cell & 0xFFu32).to_i64()
+            val dr = ((d >> 16) & 0xFFu32).to_i64()
+            val dg = ((d >> 8) & 0xFFu32).to_i64()
+            val db = (d & 0xFFu32).to_i64()
+            val r = dr + (((src_r - dr) * s_rgb[cr]) >> 5)
+            val g = dg + (((src_g - dg) * s_rgb[256 + cg]) >> 5)
+            val b = db + (((src_b - db) * s_rgb[512 + cb]) >> 5)
+            out[i] = 0xFF000000u32 | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
+            col = col + 1
+        row = row + 1
+    if not has_lcd:
+        return []
+    out
+
+# Coverage preblend by the text colour channel (Skia SkMaskGamma, Chrome 159):
+# light text gets thicker coverage. Measured from the same 16 px glyphs drawn
+# white-on-black vs black-on-white (identical phases): mask steps 2->3, 8->10.5,
+# 17->19, 24->26, 28->29 of 32; red #c00000 R 2->3; navy #172033 B 17->18.
+# Modelled as cov' = cov^(1 - 0.22 * L / 255) for channel value L; black
+# (L = 0) is the identity, which is what the FIR fit above was measured on.
+var _engine2d_lcd_preblend_tables: Dict<i64, [i64]> = {}
+
+fn _engine2d_lcd_preblend(level: i64) -> [i64]:
+    if val Some(hit) = _engine2d_lcd_preblend_tables.get(level):
+        return hit
+    var table: [i64] = [0; 256]
+    val exponent = 1.0 - 0.22 * (level as f64) / 255.0
+    var i: i64 = 0
+    while i < 256:
+        if level == 0 or i == 0 or i == 255:
+            table[i] = i
+        else:
+            val v = math_pow((i as f64) / 255.0, exponent) * 255.0 + 0.5
+            table[i] = if v > 255.0: 255 else: v as i64
+        i = i + 1
+    _engine2d_lcd_preblend_tables[level] = table
+    table
+
+# Per text colour: coverage -> Skia s32 for R (0..255), G (256..511) and B
+# (512..767), preblend and text alpha folded in.
+var _engine2d_lcd_s32_cache: Dict<i64, [i64]> = {}
+
+fn _engine2d_lcd_s32_tables(color: u32) -> [i64]:
+    val key = color.to_i64()
+    if val Some(hit) = _engine2d_lcd_s32_cache.get(key):
+        return hit
+    val color_alpha = ((color >> 24) & 0xFFu32).to_i64()
+    var table: [i64] = [0; 768]
+    var ch: i64 = 0
+    while ch < 3:
+        val pre = _engine2d_lcd_preblend(((color >> (16 - 8 * ch).to_u32()) & 0xFFu32).to_i64())
+        var c: i64 = 0
+        while c < 256:
+            val s5 = (pre[c] * color_alpha / 255) >> 3
+            table[ch * 256 + c] = s5 + (s5 >> 4)
+            c = c + 1
+        ch = ch + 1
+    _engine2d_lcd_s32_cache[key] = table
+    table
 
 fn engine2d_font_atlas_subrect_pixels(atlas_pixels: [u32], atlas_width: i32, atlas_height: i32,
                                       atlas_x: i32, atlas_y: i32, width: i32, height: i32,
@@ -313,6 +454,712 @@ var _font_batch_receipt_count: i32 = 0
 # provenance readback) runs at most once per process; per-render cost is a
 # single text compare afterwards.
 var _viable_auto_backend_cache: text = ""
+
+# ============================================================================
+# Bounded 4-slot SFNT pixel-level AA text cache & 4x4 scanline rasterizer
+# ============================================================================
+
+val _E2D_SFNT_CACHE_CAP: i64 = 4
+val _E2D_TAG_HEAD: u32 = 1751474532u32
+val _E2D_TAG_HHEA: u32 = 1751672161u32
+val _E2D_TAG_HMTX: u32 = 1752003704u32
+
+class _E2dSfntSlot:
+    path: text
+    bytes: [u8]
+    font: OtFont
+    upem: i64
+    asc: i64
+    desc: i64
+    num_hm: i64
+    hmtx_off: i64
+    hmtx_len: i64
+
+pub class SfntRasterBitmap:
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    pixels: [u32]
+
+var _e2d_sfnt_cache: [_E2dSfntSlot] = []
+var _e2d_sfnt_cache_next: i64 = 0
+
+val _E2D_SFNT_RUN_CACHE_CAP: i64 = 64
+
+class _E2dSfntRunSlot:
+    hash: i64
+    text_val: text
+    color: u32
+    font_size: f64
+    font_path: text
+    use_ctm: bool
+    axis_unit_exact: bool
+    x: f64
+    baseline_y: f64
+    origin_x: f64
+    baseline_y_i: i32
+    m00: f64
+    m01: f64
+    m02: f64
+    m10: f64
+    m11: f64
+    m12: f64
+    bitmap: SfntRasterBitmap
+    image_key: i64
+
+var _e2d_sfnt_run_cache: [_E2dSfntRunSlot] = []
+var _e2d_sfnt_run_cache_next: i64 = 0
+var _e2d_sfnt_run_next_image_key: i64 = 0x53464E5400000001
+var _e2d_sfnt_last_run_key: i64 = 0
+
+fn _e2d_fnv_mix_i64(hash: i64, value: i64) -> i64:
+    ((hash ^ value) * 1099511628211)
+
+fn _e2d_sfnt_run_hash(text_val: text, color: u32, font_size: f64, font_path: text, use_ctm: bool, axis_unit_exact: bool, x: f64, baseline_y: f64, origin_x: f64, m00: f64, m01: f64, m02: f64, m10: f64, m11: f64, m12: f64) -> i64:
+    var h: i64 = 1469598103934665603
+    h = _e2d_fnv_mix_i64(h, text_val.len())
+    for ch in text_val.chars():
+        h = _e2d_fnv_mix_i64(h, ch.to_i64())
+    h = _e2d_fnv_mix_i64(h, color.to_i64())
+    h = _e2d_fnv_mix_i64(h, (font_size * 10000.0) as i64)
+    h = _e2d_fnv_mix_i64(h, font_path.len())
+    for ch in font_path.chars():
+        h = _e2d_fnv_mix_i64(h, ch.to_i64())
+    h = _e2d_fnv_mix_i64(h, if use_ctm: 1 else: 0)
+    h = _e2d_fnv_mix_i64(h, if axis_unit_exact: 1 else: 0)
+    if axis_unit_exact:
+        h = _e2d_fnv_mix_i64(h, (origin_x * 10000.0) as i64)
+    else:
+        h = _e2d_fnv_mix_i64(h, (x * 10000.0) as i64)
+        h = _e2d_fnv_mix_i64(h, (baseline_y * 10000.0) as i64)
+        h = _e2d_fnv_mix_i64(h, (m00 * 10000.0) as i64)
+        h = _e2d_fnv_mix_i64(h, (m01 * 10000.0) as i64)
+        h = _e2d_fnv_mix_i64(h, (m02 * 10000.0) as i64)
+        h = _e2d_fnv_mix_i64(h, (m10 * 10000.0) as i64)
+        h = _e2d_fnv_mix_i64(h, (m11 * 10000.0) as i64)
+        h = _e2d_fnv_mix_i64(h, (m12 * 10000.0) as i64)
+    if h == 0: 1 else: h
+
+# reason: returns monotonic GPU image key for last SFNT rasterized run
+# @allow(primitive_api)
+pub fn engine2d_sfnt_last_run_image_key() -> i64:
+    _e2d_sfnt_last_run_key
+
+fn _e2d_floor_i32(v: f64) -> i32:
+    val iv = v as i64
+    val r = if (iv as f64) > v: iv - 1 else: iv
+    r as i32
+
+fn _e2d_ceil_i32(v: f64) -> i32:
+    val iv = v as i64
+    val r = if (iv as f64) < v: iv + 1 else: iv
+    r as i32
+
+fn _e2d_abs_f64(v: f64) -> f64:
+    if v < 0.0: 0.0 - v else: v
+
+pub fn engine2d_sfnt_resolve_path(font_path: text) -> text:
+    if font_path != "":
+        if file_exists(font_path):
+            return font_path
+        return ""
+    val reg_path = selected_font_asset_local_path_for_identity("NOTOSANS")
+    if reg_path != "" and file_exists(reg_path):
+        return reg_path
+    val mono_path = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
+    if file_exists(mono_path):
+        return mono_path
+    val bungee_path = "assets/fonts/google-fonts/ofl/bungee/Bungee-Regular.ttf"
+    if file_exists(bungee_path):
+        return bungee_path
+    ""
+
+fn _e2d_sfnt_load_slot(path: text) -> i64:
+    if path == "":
+        return -1
+    var ci: i64 = 0
+    while ci < _e2d_sfnt_cache.len():
+        if _e2d_sfnt_cache[ci].path == path:
+            return ci
+        ci = ci + 1
+    var blob: [u8] = []
+    match file_read_bytes_result(path):
+        Ok(b):
+            blob = b
+        Err(_):
+            return -1
+    if blob.len() < 12:
+        return -1
+    val font_opt = sfnt_glyf_parse_offset_table(blob)
+    var parsed_font = OtFont(blob: [], tables: [])
+    var has_font = false
+    match font_opt:
+        Some(f):
+            parsed_font = f
+            has_font = true
+        None:
+            return -1
+    if not has_font:
+        return -1
+    var upem: i64 = 1000
+    var asc: i64 = 800
+    var desc: i64 = -200
+    var num_hm: i64 = 0
+    var hmtx_off: i64 = -1
+    var hmtx_len: i64 = 0
+    match sfnt_glyf_find_table(parsed_font, _E2D_TAG_HEAD):
+        Some(t):
+            val toff = t.offset as i64
+            if toff + 20 <= blob.len():
+                val u = sfnt_glyf_read_u16_be(blob, toff + 18) as i64
+                if u > 0:
+                    upem = u
+        None: ()
+    match sfnt_glyf_find_table(parsed_font, _E2D_TAG_HHEA):
+        Some(t):
+            val toff = t.offset as i64
+            if toff + 36 <= blob.len():
+                asc = sfnt_glyf_read_i16_be(blob, toff + 4) as i64
+                desc = sfnt_glyf_read_i16_be(blob, toff + 6) as i64
+                num_hm = sfnt_glyf_read_u16_be(blob, toff + 34) as i64
+        None: ()
+    match sfnt_glyf_find_table(parsed_font, _E2D_TAG_HMTX):
+        Some(t):
+            hmtx_off = t.offset as i64
+            hmtx_len = t.length as i64
+        None: ()
+    val slot = _E2dSfntSlot(
+        path: path,
+        bytes: blob,
+        font: parsed_font,
+        upem: upem,
+        asc: asc,
+        desc: desc,
+        num_hm: num_hm,
+        hmtx_off: hmtx_off,
+        hmtx_len: hmtx_len
+    )
+    if _e2d_sfnt_cache.len() < _E2D_SFNT_CACHE_CAP:
+        _e2d_sfnt_cache.push(slot)
+        return _e2d_sfnt_cache.len() - 1
+    val idx = _e2d_sfnt_cache_next
+    _e2d_sfnt_cache[idx] = slot
+    _e2d_sfnt_cache_next = (_e2d_sfnt_cache_next + 1) % _E2D_SFNT_CACHE_CAP
+    idx
+
+# reason: low-level SFNT ascender metric takes f64 pixel font_size matching Engine2D draw_text_sfnt_aa
+# @allow(primitive_api)
+pub fn engine2d_sfnt_ascender_px(font_size: f64, font_path: text) -> f64:
+    val resolved = engine2d_sfnt_resolve_path(font_path)
+    val slot_idx = _e2d_sfnt_load_slot(resolved)
+    if slot_idx < 0:
+        return font_size * 0.8
+    val slot = _e2d_sfnt_cache[slot_idx]
+    (slot.asc as f64) * font_size / (slot.upem as f64)
+
+fn _e2d_sfnt_glyph_advance_fu(slot: _E2dSfntSlot, gid: i64) -> i64:
+    if slot.hmtx_off < 0 or slot.num_hm <= 0:
+        return slot.upem / 2
+    val metric_idx = if gid < 0: 0 else: if gid < slot.num_hm: gid else: slot.num_hm - 1
+    val byte_off = slot.hmtx_off + metric_idx * 4
+    if byte_off < slot.hmtx_off or byte_off + 2 > slot.hmtx_off + slot.hmtx_len or byte_off + 2 > slot.bytes.len():
+        return slot.upem / 2
+    sfnt_glyf_read_u16_be(slot.bytes, byte_off) as i64
+
+fn _e2d_sfnt_xform_x(lx: f64, ly: f64, use_ctm: bool, m00: f64, m01: f64, m02: f64) -> f64:
+    if use_ctm:
+        m00 * lx + m01 * ly + m02
+    else:
+        lx
+
+fn _e2d_sfnt_xform_y(lx: f64, ly: f64, use_ctm: bool, m10: f64, m11: f64, m12: f64) -> f64:
+    if use_ctm:
+        m10 * lx + m11 * ly + m12
+    else:
+        ly
+
+fn _e2d_sfnt_rasterize_edges_cov(ex0: [f64], ey0: [f64], ex1: [f64], ey1: [f64], gx0: i32, gy0: i32, gw: i32, gh: i32) -> [i32]:
+    val total = (gw as i64) * (gh as i64)
+    var cov: [i32] = [0i32; total]
+    if gw <= 0 or gh <= 0 or ex0.len() == 0:
+        return cov
+    val edge_count = ex0.len()
+    var row: i32 = 0
+    while row < gh:
+        val row_off = (row as i64) * (gw as i64)
+        var sub_y: i32 = 0
+        while sub_y < 4:
+            val sy_px = ((gy0 + row) as f64) + ((sub_y as f64) + 0.5) * 0.25
+            var xs: [f64] = []
+            var dirs: [i32] = []
+            var ei: i64 = 0
+            while ei < edge_count:
+                val y0 = ey0[ei]
+                val y1 = ey1[ei]
+                var dir: i32 = 0
+                if y0 <= sy_px and y1 > sy_px:
+                    dir = 1
+                elif y1 <= sy_px and y0 > sy_px:
+                    dir = -1
+                if dir != 0:
+                    val x0 = ex0[ei]
+                    val x1 = ex1[ei]
+                    val xi = x0 + (sy_px - y0) * (x1 - x0) / (y1 - y0)
+                    xs.push(xi)
+                    dirs.push(dir)
+                ei = ei + 1
+            val n_cross = xs.len()
+            if n_cross >= 2:
+                var si: i64 = 1
+                while si < n_cross:
+                    val key_x = xs[si]
+                    val key_d = dirs[si]
+                    var sj: i64 = si - 1
+                    while sj >= 0 and xs[sj] > key_x:
+                        xs[sj + 1] = xs[sj]
+                        dirs[sj + 1] = dirs[sj]
+                        sj = sj - 1
+                    xs[sj + 1] = key_x
+                    dirs[sj + 1] = key_d
+                    si = si + 1
+                var winding: i32 = 0
+                var ki: i64 = 0
+                while ki + 1 < n_cross:
+                    winding = winding + dirs[ki]
+                    if winding != 0:
+                        val span_l = xs[ki]
+                        val span_r = xs[ki + 1]
+                        if span_r > span_l:
+                            var c_start = _e2d_floor_i32(span_l) - gx0
+                            var c_end = _e2d_ceil_i32(span_r) - gx0
+                            if c_start < 0: c_start = 0
+                            if c_end > gw: c_end = gw
+                            var col = c_start
+                            while col < c_end:
+                                val cell_x0 = (gx0 + col) as f64
+                                var sub_x: i32 = 0
+                                while sub_x < 4:
+                                    val sx_px = cell_x0 + ((sub_x as f64) + 0.5) * 0.25
+                                    if sx_px >= span_l and sx_px < span_r:
+                                        val ci = row_off + (col as i64)
+                                        if cov[ci] < 16:
+                                            cov[ci] = cov[ci] + 1
+                                    sub_x = sub_x + 1
+                                col = col + 1
+                    ki = ki + 1
+            sub_y = sub_y + 1
+        row = row + 1
+    cov
+
+# reason: low-level SFNT 4x4 supersampled text rasterizer takes affine matrix/color/size scalars
+# @allow(primitive_api)
+pub fn engine2d_sfnt_rasterize_run(x: f64, baseline_y: f64, text_val: text, color: u32, font_size: f64, font_path: text, use_ctm: bool, m00: f64, m01: f64, m02: f64, m10: f64, m11: f64, m12: f64) -> SfntRasterBitmap:
+    if text_val.len() == 0 or font_size <= 0.0:
+        _e2d_sfnt_last_run_key = 0
+        return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    if color_a(color) <= 0:
+        _e2d_sfnt_last_run_key = 0
+        return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    val axis_unit_exact = (not use_ctm) or (m00 == 1.0 and m01 == 0.0 and m10 == 0.0 and m11 == 1.0)
+    val origin_x = if axis_unit_exact: (if use_ctm: x + m02 else: x) else: x
+    val origin_y = if axis_unit_exact: (if use_ctm: baseline_y + m12 else: baseline_y) else: baseline_y
+    val baseline_y_i = _e2d_floor_i32(origin_y + 0.5)
+    val h = _e2d_sfnt_run_hash(
+        text_val, color, font_size, font_path, use_ctm, axis_unit_exact,
+        x, baseline_y, origin_x, m00, m01, m02, m10, m11, m12
+    )
+    var ci: i64 = 0
+    val clen = _e2d_sfnt_run_cache.len()
+    while ci < clen:
+        val slot = _e2d_sfnt_run_cache[ci]
+        if (slot.hash == h and slot.axis_unit_exact == axis_unit_exact and
+            slot.color == color and slot.font_size == font_size and
+            slot.text_val == text_val and slot.font_path == font_path):
+            if axis_unit_exact:
+                if slot.origin_x == origin_x:
+                    _e2d_sfnt_last_run_key = slot.image_key
+                    if slot.bitmap.width <= 0 or slot.bitmap.height <= 0 or baseline_y_i == slot.baseline_y_i:
+                        return slot.bitmap
+                    val dy = baseline_y_i - slot.baseline_y_i
+                    return SfntRasterBitmap(
+                        x: slot.bitmap.x,
+                        y: slot.bitmap.y + dy,
+                        width: slot.bitmap.width,
+                        height: slot.bitmap.height,
+                        pixels: slot.bitmap.pixels
+                    )
+            else:
+                if (slot.use_ctm == use_ctm and slot.x == x and slot.baseline_y == baseline_y and
+                    slot.m00 == m00 and slot.m01 == m01 and slot.m02 == m02 and
+                    slot.m10 == m10 and slot.m11 == m11 and slot.m12 == m12):
+                    _e2d_sfnt_last_run_key = slot.image_key
+                    return slot.bitmap
+        ci = ci + 1
+
+    val rb = _engine2d_sfnt_rasterize_run_uncached(
+        x, baseline_y, text_val, color, font_size, font_path,
+        use_ctm, m00, m01, m02, m10, m11, m12
+    )
+    var img_key: i64 = 0
+    if rb.width > 0 and rb.height > 0:
+        img_key = _e2d_sfnt_run_next_image_key
+        _e2d_sfnt_run_next_image_key = _e2d_sfnt_run_next_image_key + 1
+        if _e2d_sfnt_run_next_image_key == 0:
+            _e2d_sfnt_run_next_image_key = 1
+    _e2d_sfnt_last_run_key = img_key
+    val new_slot = _E2dSfntRunSlot(
+        hash: h,
+        text_val: text_val,
+        color: color,
+        font_size: font_size,
+        font_path: font_path,
+        use_ctm: use_ctm,
+        axis_unit_exact: axis_unit_exact,
+        x: x,
+        baseline_y: baseline_y,
+        origin_x: origin_x,
+        baseline_y_i: baseline_y_i,
+        m00: m00,
+        m01: m01,
+        m02: m02,
+        m10: m10,
+        m11: m11,
+        m12: m12,
+        bitmap: rb,
+        image_key: img_key
+    )
+    if _e2d_sfnt_run_cache.len() < _E2D_SFNT_RUN_CACHE_CAP:
+        _e2d_sfnt_run_cache.push(new_slot)
+    else:
+        val dst = _e2d_sfnt_run_cache_next
+        _e2d_sfnt_run_cache[dst] = new_slot
+        _e2d_sfnt_run_cache_next = (_e2d_sfnt_run_cache_next + 1) % _E2D_SFNT_RUN_CACHE_CAP
+    rb
+
+fn _engine2d_sfnt_rasterize_run_uncached(x: f64, baseline_y: f64, text_val: text, color: u32, font_size: f64, font_path: text, use_ctm: bool, m00: f64, m01: f64, m02: f64, m10: f64, m11: f64, m12: f64) -> SfntRasterBitmap:
+    if text_val.len() == 0 or font_size <= 0.0:
+        return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    val cr = color_r(color)
+    val cg = color_g(color)
+    val cb = color_b(color)
+    val ca = color_a(color)
+    if ca <= 0:
+        return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    val resolved = engine2d_sfnt_resolve_path(font_path)
+    val slot_idx = _e2d_sfnt_load_slot(resolved)
+    if slot_idx < 0:
+        return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    val slot = _e2d_sfnt_cache[slot_idx]
+    val scale = font_size / (slot.upem as f64)
+    val cps = text_codepoints(text_val)
+    if cps.len() == 0:
+        return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    var gids: [i64] = [0i64; cps.len()]
+    sfnt_glyf_cmap_ids_into(slot.font, cps, gids)
+
+    val is_axis_unit = (not use_ctm) or (_e2d_abs_f64(m00 - 1.0) <= 0.0001 and _e2d_abs_f64(m01) <= 0.0001 and _e2d_abs_f64(m10) <= 0.0001 and _e2d_abs_f64(m11 - 1.0) <= 0.0001)
+    if is_axis_unit:
+        val origin_x = if use_ctm: m00 * x + m01 * baseline_y + m02 else: x
+        val origin_y = if use_ctm: m10 * x + m11 * baseline_y + m12 else: baseline_y
+        val baseline_y_i = _e2d_floor_i32(origin_y + 0.5)
+        var ag_off: [i64] = []
+        var ag_x0: [i32] = []
+        var ag_y0: [i32] = []
+        var ag_w: [i32] = []
+        var ag_h: [i32] = []
+        var ag_cov: [u8] = []
+        var has_au = false
+        var aux0: i32 = 0
+        var auy0: i32 = 0
+        var aux1: i32 = 0
+        var auy1: i32 = 0
+        var pen_x_a = origin_x
+        var ai: i64 = 0
+        while ai < cps.len():
+            val gid = gids[ai]
+            val pen_base = _e2d_floor_i32(pen_x_a)
+            val sub_x = pen_x_a - (pen_base as f64)
+            var adv_px = (_e2d_sfnt_glyph_advance_fu(slot, gid) as f64) * scale
+            if gid >= 0:
+                match sfnt_rasterize_glyph_baseline_aligned(slot.font, gid as u32, font_size, sub_x):
+                    Some(g):
+                        adv_px = g.advance_px
+                        if g.width > 0 and g.height > 0:
+                            val gx0 = pen_base + g.x0_px
+                            val gy0 = baseline_y_i + g.y0_px
+                            val gx1 = gx0 + g.width
+                            val gy1 = gy0 + g.height
+                            ag_off.push(ag_cov.len())
+                            ag_x0.push(gx0)
+                            ag_y0.push(gy0)
+                            ag_w.push(g.width)
+                            ag_h.push(g.height)
+                            var gp_i: i64 = 0
+                            while gp_i < g.pixels.len():
+                                ag_cov.push(g.pixels[gp_i])
+                                gp_i = gp_i + 1
+                            if not has_au:
+                                aux0 = gx0
+                                auy0 = gy0
+                                aux1 = gx1
+                                auy1 = gy1
+                                has_au = true
+                            else:
+                                if gx0 < aux0: aux0 = gx0
+                                if gy0 < auy0: auy0 = gy0
+                                if gx1 > aux1: aux1 = gx1
+                                if gy1 > auy1: auy1 = gy1
+                    None: ()
+            pen_x_a = pen_x_a + adv_px
+            ai = ai + 1
+        if not has_au:
+            return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+        val auw = aux1 - aux0
+        val auh = auy1 - auy0
+        if auw <= 0 or auh <= 0 or auw > 8192 or auh > 8192:
+            return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+        val autotal = (auw as i64) * (auh as i64)
+        var a_acc: [i32] = [0i32; autotal]
+        var ak: i64 = 0
+        while ak < ag_off.len():
+            val off = ag_off[ak]
+            val gx0 = ag_x0[ak]
+            val gy0 = ag_y0[ak]
+            val gw = ag_w[ak]
+            val gh = ag_h[ak]
+            var r: i32 = 0
+            while r < gh:
+                val dst_y = (gy0 - auy0 + r) as i64
+                var c: i32 = 0
+                while c < gw:
+                    val cov = ag_cov[off + (r as i64) * (gw as i64) + (c as i64)] as i32
+                    if cov > 0:
+                        val g_a = if ca == 255: cov else: (cov * ca + 127) / 255
+                        if g_a > 0:
+                            val dst_x = (gx0 - aux0 + c) as i64
+                            val dst_idx = dst_y * (auw as i64) + dst_x
+                            val prev_a = a_acc[dst_idx]
+                            var next_a = if prev_a == 0: g_a else: prev_a + ((g_a * (255 - prev_a) + 127) / 255)
+                            if next_a > 255: next_a = 255
+                            a_acc[dst_idx] = next_a
+                    c = c + 1
+                r = r + 1
+            ak = ak + 1
+        var apixels: [u32] = [0u32; autotal]
+        var api: i64 = 0
+        while api < autotal:
+            val a_val = a_acc[api]
+            if a_val > 0:
+                apixels[api] = rgba(cr, cg, cb, a_val)
+            api = api + 1
+        return SfntRasterBitmap(x: aux0, y: auy0, width: auw, height: auh, pixels: apixels)
+
+    val base_ox = if use_ctm: x else: 0.0
+    val base_oy = if use_ctm: baseline_y else: 0.0
+    val out_dx: i32 = if use_ctm: 0 else: _e2d_floor_i32(x + 0.5)
+    val out_dy: i32 = if use_ctm: 0 else: _e2d_floor_i32(baseline_y + 0.5)
+
+    var all_cov: [i32] = []
+    var g_off: [i64] = []
+    var g_x0: [i32] = []
+    var g_y0: [i32] = []
+    var g_w: [i32] = []
+    var g_h: [i32] = []
+    var has_union = false
+    var ux0: i32 = 0
+    var uy0: i32 = 0
+    var ux1: i32 = 0
+    var uy1: i32 = 0
+
+    var pen_x: f64 = 0.0
+    var gi: i64 = 0
+    while gi < cps.len():
+        val gid = gids[gi]
+        val adv_fu = _e2d_sfnt_glyph_advance_fu(slot, gid)
+        if gid >= 0:
+            match sfnt_glyf_parse_outline(slot.font, gid as u32):
+                Some(outline):
+                    if outline.commands.len() > 0:
+                        var ex0: [f64] = []
+                        var ey0: [f64] = []
+                        var ex1: [f64] = []
+                        var ey1: [f64] = []
+                        var cur_x: f64 = 0.0
+                        var cur_y: f64 = 0.0
+                        var start_x: f64 = 0.0
+                        var start_y: f64 = 0.0
+                        var has_contour = false
+                        var min_x: f64 = 0.0
+                        var min_y: f64 = 0.0
+                        var max_x: f64 = 0.0
+                        var max_y: f64 = 0.0
+                        var has_pt = false
+                        var oi: i64 = 0
+                        while oi < outline.commands.len():
+                            val cmd = outline.commands[oi]
+                            if cmd.verb == SFNT_GLYF_CLOSE:
+                                if has_contour and (cur_x != start_x or cur_y != start_y):
+                                    ex0.push(cur_x)
+                                    ey0.push(cur_y)
+                                    ex1.push(start_x)
+                                    ey1.push(start_y)
+                                    cur_x = start_x
+                                    cur_y = start_y
+                            else:
+                                val lx1 = base_ox + pen_x + cmd.x1 * scale
+                                val ly1 = base_oy - cmd.y1 * scale
+                                val px1 = _e2d_sfnt_xform_x(lx1, ly1, use_ctm, m00, m01, m02)
+                                val py1 = _e2d_sfnt_xform_y(lx1, ly1, use_ctm, m10, m11, m12)
+                                if cmd.verb == SFNT_GLYF_MOVE:
+                                    if has_contour and (cur_x != start_x or cur_y != start_y):
+                                        ex0.push(cur_x)
+                                        ey0.push(cur_y)
+                                        ex1.push(start_x)
+                                        ey1.push(start_y)
+                                    cur_x = px1
+                                    cur_y = py1
+                                    start_x = px1
+                                    start_y = py1
+                                    has_contour = true
+                                    if not has_pt:
+                                        min_x = px1
+                                        max_x = px1
+                                        min_y = py1
+                                        max_y = py1
+                                        has_pt = true
+                                    else:
+                                        if px1 < min_x: min_x = px1
+                                        if px1 > max_x: max_x = px1
+                                        if py1 < min_y: min_y = py1
+                                        if py1 > max_y: max_y = py1
+                                elif cmd.verb == SFNT_GLYF_LINE:
+                                    ex0.push(cur_x)
+                                    ey0.push(cur_y)
+                                    ex1.push(px1)
+                                    ey1.push(py1)
+                                    cur_x = px1
+                                    cur_y = py1
+                                    if not has_pt:
+                                        min_x = px1
+                                        max_x = px1
+                                        min_y = py1
+                                        max_y = py1
+                                        has_pt = true
+                                    else:
+                                        if px1 < min_x: min_x = px1
+                                        if px1 > max_x: max_x = px1
+                                        if py1 < min_y: min_y = py1
+                                        if py1 > max_y: max_y = py1
+                                elif cmd.verb == SFNT_GLYF_QUAD:
+                                    val lx2 = base_ox + pen_x + cmd.x2 * scale
+                                    val ly2 = base_oy - cmd.y2 * scale
+                                    val px2 = _e2d_sfnt_xform_x(lx2, ly2, use_ctm, m00, m01, m02)
+                                    val py2 = _e2d_sfnt_xform_y(lx2, ly2, use_ctm, m10, m11, m12)
+                                    val dev = _e2d_abs_f64(0.5 * (cur_x + px2) - px1) + _e2d_abs_f64(0.5 * (cur_y + py2) - py1)
+                                    val steps: i64 = if dev < 1.0: 4 elif dev < 6.0: 8 elif dev < 24.0: 16 else: 24
+                                    var prev_qx = cur_x
+                                    var prev_qy = cur_y
+                                    var step: i64 = 1
+                                    while step <= steps:
+                                        val t = (step as f64) / (steps as f64)
+                                        val it = 1.0 - t
+                                        val qx = it * it * cur_x + 2.0 * it * t * px1 + t * t * px2
+                                        val qy = it * it * cur_y + 2.0 * it * t * py1 + t * t * py2
+                                        ex0.push(prev_qx)
+                                        ey0.push(prev_qy)
+                                        ex1.push(qx)
+                                        ey1.push(qy)
+                                        if qx < min_x: min_x = qx
+                                        if qx > max_x: max_x = qx
+                                        if qy < min_y: min_y = qy
+                                        if qy > max_y: max_y = qy
+                                        prev_qx = qx
+                                        prev_qy = qy
+                                        step = step + 1
+                                    cur_x = px2
+                                    cur_y = py2
+                            oi = oi + 1
+                        if has_contour and (cur_x != start_x or cur_y != start_y):
+                            ex0.push(cur_x)
+                            ey0.push(cur_y)
+                            ex1.push(start_x)
+                            ey1.push(start_y)
+                        if has_pt and ex0.len() > 0:
+                            val gx0 = _e2d_floor_i32(min_x)
+                            val gy0 = _e2d_floor_i32(min_y)
+                            val gx1 = _e2d_ceil_i32(max_x)
+                            val gy1 = _e2d_ceil_i32(max_y)
+                            val gw = gx1 - gx0
+                            val gh = gy1 - gy0
+                            if gw > 0 and gh > 0 and gw <= 4096 and gh <= 4096:
+                                val g_cov = _e2d_sfnt_rasterize_edges_cov(ex0, ey0, ex1, ey1, gx0, gy0, gw, gh)
+                                val off = all_cov.len()
+                                g_off.push(off)
+                                g_x0.push(gx0)
+                                g_y0.push(gy0)
+                                g_w.push(gw)
+                                g_h.push(gh)
+                                var ci: i64 = 0
+                                while ci < g_cov.len():
+                                    all_cov.push(g_cov[ci])
+                                    ci = ci + 1
+                                if not has_union:
+                                    ux0 = gx0
+                                    uy0 = gy0
+                                    ux1 = gx1
+                                    uy1 = gy1
+                                    has_union = true
+                                else:
+                                    if gx0 < ux0: ux0 = gx0
+                                    if gy0 < uy0: uy0 = gy0
+                                    if gx1 > ux1: ux1 = gx1
+                                    if gy1 > uy1: uy1 = gy1
+                None: ()
+        pen_x = pen_x + (adv_fu as f64) * scale
+        gi = gi + 1
+
+    if not has_union:
+        return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    val uw = ux1 - ux0
+    val uh = uy1 - uy0
+    if uw <= 0 or uh <= 0 or uw > 8192 or uh > 8192:
+        return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    val utotal = (uw as i64) * (uh as i64)
+    var alpha_acc: [i32] = [0i32; utotal]
+    var k: i64 = 0
+    while k < g_off.len():
+        val off = g_off[k]
+        val gx0 = g_x0[k]
+        val gy0 = g_y0[k]
+        val gw = g_w[k]
+        val gh = g_h[k]
+        var r: i32 = 0
+        while r < gh:
+            val dst_y = (gy0 - uy0 + r) as i64
+            var c: i32 = 0
+            while c < gw:
+                val c16 = all_cov[off + (r as i64) * (gw as i64) + (c as i64)]
+                if c16 > 0:
+                    val g_a = (c16 * ca + 8) / 16
+                    if g_a > 0:
+                        val dst_x = (gx0 - ux0 + c) as i64
+                        val dst_idx = dst_y * (uw as i64) + dst_x
+                        val prev_a = alpha_acc[dst_idx]
+                        var next_a = if prev_a == 0: g_a else: prev_a + ((g_a * (255 - prev_a) + 127) / 255)
+                        if next_a > 255: next_a = 255
+                        alpha_acc[dst_idx] = next_a
+                c = c + 1
+            r = r + 1
+        k = k + 1
+    var pixels: [u32] = [0u32; utotal]
+    var pi: i64 = 0
+    while pi < utotal:
+        val a_val = alpha_acc[pi]
+        if a_val > 0:
+            pixels[pi] = rgba(cr, cg, cb, a_val)
+        pi = pi + 1
+    SfntRasterBitmap(x: out_dx + ux0, y: out_dy + uy0, width: uw, height: uh, pixels: pixels)
 # ============================================================================
 # Engine2D
 # ============================================================================
@@ -374,6 +1221,10 @@ class Engine2D with DrawIrRenderTarget:
     last_font_execution_attempts: [text] = []
     last_font_execution_target: text = ""
     last_font_plan_admitted: bool = false
+    # LCD subpixel text (Chrome LCD16 parity). Off by default; the Draw IR
+    # web lane turns it on. Applies only on CPU-composited backends, whose
+    # font composite blends per channel (_draw_font_batch_cpu_suffix).
+    lcd_text: bool = false
     last_font_size_is_100: bool = false
     # Acceptance item 4 of
     # doc/08_tracking/bug/macos_vulkan_2d_vector_font_empty_batch_native_fault_2026-07-26.md:
@@ -1872,10 +2723,6 @@ class Engine2D with DrawIrRenderTarget:
         var quad_index = if submitted < 0 or submitted > batch.quads.len(): 0 else: submitted
         while quad_index < batch.quads.len():
             val quad = batch.quads[quad_index]
-            val pixels = engine2d_font_atlas_subrect_pixels(
-                batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
-                quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color
-            )
             # See doc/08_tracking/bug/font_render_batch_transform_identity_default_not_applied_2026-07-19.md
             # (BLOCKER B): the Option<i32>-returning font_destination_origin(...).?
             # round-trip decoded to a CONSTANT (1, 1) for every quad of every
@@ -1896,6 +2743,29 @@ class Engine2D with DrawIrRenderTarget:
                 dst_x_end >= -2147483648 and dst_x_end <= 2147483647 and
                 dst_y_i64 >= -2147483648 and dst_y_i64 <= 2147483647 and
                 dst_y_end >= -2147483648 and dst_y_end <= 2147483647)
+            # LCD first: the grayscale subrect below is built only when the LCD
+            # composite declines (no LCD cell, translucent destination, or a
+            # quad outside the atlas or the surface).
+            var lcd_drawn = false
+            if dst_in_range and self._lcd_text_active() and
+                    quad.atlas_x >= 0 and quad.atlas_y >= 0 and
+                    quad.atlas_x.to_i64() + quad.width.to_i64() <= batch.atlas_width.to_i64() and
+                    quad.atlas_y.to_i64() + quad.height.to_i64() <= batch.atlas_height.to_i64() and
+                    batch.atlas_pixels.len() >= batch.atlas_width.to_i64() * batch.atlas_height.to_i64():
+                val dst = self.read_pixels_region(dst_x_i64 as i32, dst_y_i64 as i32, quad.width, quad.height).pixels
+                val lcd_pixels = engine2d_lcd_quad_composite(
+                    batch.atlas_pixels, batch.atlas_width, quad.atlas_x, quad.atlas_y,
+                    quad.width, quad.height, quad.color, dst)
+                if lcd_pixels.len() > 0:
+                    self.draw_image_blend(dst_x_i64 as i32, dst_y_i64 as i32, quad.width, quad.height, lcd_pixels)
+                    lcd_drawn = true
+            if lcd_drawn:
+                quad_index = quad_index + 1
+                continue
+            val pixels = engine2d_font_atlas_subrect_pixels(
+                batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
+                quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color
+            )
             if _VEC_TEXT_PROBE and _vec_blit_probe_count < 8:
                 _vec_blit_probe_count = _vec_blit_probe_count + 1
                 var pnz = 0
@@ -1914,6 +2784,18 @@ class Engine2D with DrawIrRenderTarget:
                 self.draw_image_blend(dst_x_i64 as i32, dst_y_i64 as i32, quad.width, quad.height, pixels)
             quad_index = quad_index + 1
         quad_index
+
+    me set_lcd_text(enabled: bool):
+        """Request LCD subpixel text (Chrome's default for text <= 48 device
+        px). Takes effect only on CPU-composited backends; GPU font kernels
+        read one coverage alpha per atlas cell and keep grayscale."""
+        self.lcd_text = enabled
+
+    fn _lcd_text_active() -> bool:
+        if not self.lcd_text:
+            return false
+        val name = self.selected_backend_name
+        name == "cpu" or name == "cpu_simd" or name == "software"
 
     me _font_batch_receipt(source: text, content_count: i64):
         """Print only when a staged batch lost its payload (see _font_batch_receipt_count)."""
@@ -2182,6 +3064,7 @@ class Engine2D with DrawIrRenderTarget:
         # nested in-place mutation form relies on reference semantics that the
         # interpreter lane does not guarantee for nested element receivers.
         var run_fonts = self.font_owner.active[0]
+        run_fonts.set_lcd_text(self._lcd_text_active())
         run_fonts.stage_glyph_run(run, color, font_size)
         self._install_active_fonts(run_fonts)
         self._font_batch_receipt("glyph-run", run.glyph_ids.len())
@@ -2273,6 +3156,7 @@ class Engine2D with DrawIrRenderTarget:
         self.last_font_plan_admitted = true
         self.ensure_font_renderer()
         var fonts: FontRenderer = self.font_owner.active[0]
+        fonts.set_lcd_text(self._lcd_text_active())
         fonts.stage_text_configured(text_val, color, config)
         self._install_active_fonts(fonts)
         self._font_batch_receipt("text", text_val.len())
@@ -2355,6 +3239,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         self.ensure_font_renderer()
         var fonts: FontRenderer = self.font_owner.active[0]
+        fonts.set_lcd_text(self._lcd_text_active())
         fonts.stage_text_with_advances_configured(text_val, advance_widths, color, config)
         self._install_active_fonts(fonts)
         self._font_batch_receipt("text-advances", text_val.len())
@@ -2389,6 +3274,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         self.ensure_font_renderer()
         var fonts: FontRenderer = self.font_owner.active[0]
+        fonts.set_lcd_text(self._lcd_text_active())
         fonts.stage_selected_glyph_run_configured(glyph_run, color, config)
         self._install_active_fonts(fonts)
         self._font_batch_receipt("shaped", glyph_run.glyph_ids.len())
@@ -3031,6 +3917,16 @@ class Engine2D with DrawIrRenderTarget:
             # also flags the `self.backend.<method>` trait-object call as a
             # bare 28-candidate ambiguity (2026-07-18).
             emu_draw_image_blend(self.backend, x, y, w, h, pixels)
+
+    me hint_image_key(key: i64):
+        """Attach a producer-supplied cache key to the next draw_image_blend."""
+        if key == 0:
+            return
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            var vulkan_typed: VulkanBackend = vulkan
+            vulkan_typed.hint_image_key(key)
+            self.vulkan_backend = Some(vulkan_typed)
+            self.backend = vulkan_typed
 
     me draw_engine(dst_x: i32, dst_y: i32, src: Engine2D):
         """Composite an embedded render target (typically an offscreen Engine2D
@@ -3713,3 +4609,21 @@ class Engine2D with DrawIrRenderTarget:
     fn get_frame_pacing() -> FramePacingCounters:
         """Return the current accumulated frame-pacing counters."""
         self.pacing
+
+    me draw_text_sfnt_baseline_aa(x: i32, baseline_y: i32, text_val: text, color: u32, font_size: f64, font_path: text):
+        """Draw TrueType SFNT text at exact baseline_y with 4x4 subpixel winding AA."""
+        val rb = engine2d_sfnt_rasterize_run(
+            x as f64, baseline_y as f64, text_val, color, font_size, font_path,
+            false, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0
+        )
+        if rb.width > 0 and rb.height > 0:
+            val img_key = engine2d_sfnt_last_run_image_key()
+            if img_key != 0:
+                self.hint_image_key(img_key)
+            self.draw_image_blend(rb.x, rb.y, rb.width, rb.height, rb.pixels)
+
+    me draw_text_sfnt_aa(x: i32, y: i32, text_val: text, color: u32, font_size: f64, font_path: text):
+        """Draw TrueType SFNT text top-aligned at y with 4x4 subpixel winding AA."""
+        val asc_px = engine2d_sfnt_ascender_px(font_size, font_path)
+        val base_y = y + ((asc_px + 0.5) as i32)
+        self.draw_text_sfnt_baseline_aa(x, base_y, text_val, color, font_size, font_path)

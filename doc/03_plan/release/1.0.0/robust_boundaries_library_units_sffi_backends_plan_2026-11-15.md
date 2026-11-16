@@ -1,0 +1,203 @@
+# Simple Robust Boundaries, Library Units, SFFI, and Optional Backend Hardening
+
+**Integrated architecture, source audit, migration, implementation, and verification plan**
+**Date:** 2026-11-15
+**Branch:** `release/1.0.0` (audit inspected `830879893c3`)
+**Status:** Design and source-inspection plan. "Existing" = source inspected; "proposed" = to implement and validate. Not a build/test claim.
+
+## Implementation log
+
+| Date | Slice | What landed | Evidence |
+|---|---|---|---|
+| 2026-11-16 | rb6-derived (decision 4A) | `unit Speed = Meter / Second` / `unit Area = Meter * Meter` parse to UnitDecl role `derived` (formula in alias_of); `unit_ops`: U*V / U/V yield the declared derived unit (product commutative); undeclared same-unit product = SPL-UNIT-004 warning (strict/robust via `unit_op_set_strict` = error), undeclared distinct-unit product stays denied naming the missing declaration; SPL-UNIT-004 policy row (5C schedule) | unit_derived_decl_spec 7/7, unit_op_matrix_spec 10/10, diagnostic_rule_policy_spec 18/18 |
+| 2026-11-16 | rb6-ratchet (§7 ratified, 5C) | `diagnostic_policy.sdn`: BOUND-001..003 + new `SPL-UNIT-003` row get `error_since_lang_version: "2027.2"`, robust/critical/verified deny; illustrative-dates header removed. `diagnostic_rule_policy.spl`: unset `error_not_before_date` no longer blocks edition promotion (`date_gate_open`). SFFI rules unchanged (deny now) | `diagnostic_rule_policy_spec.spl` 18/18 |
+| 2026-11-16 | rb5-backend (§6 admission slice) | `src/app/build/targets/build_targets.spl`: `BackendProviderDescriptor` + `admit_backend_provider` (ABI v1 / host triple / declared capabilities, stable `backend-admission:` codes) + `select_backend_group` (refuses unadmitted descriptors); `default_group_targets` untouched. Gate only — no backend is production-ready; still missing: `provider_entry.spl`, `runtime_gpu.sdn`, real exporters, wiring to `70.backend/backend_plugin/admission.spl` + `simple_backend_plugin_v1.h` | `test/01_unit/app/build/backend_provider_admission_spec.spl` |
+| 2026-11-16 | rb4-unitmethod | Seed `call_method_on_value` gains a `Value::Unit` arm: chained `opt.unwrap().value()` / `.to_i64()` work (bug `seed_unit_value_nested_method_dispatch_2026-11-16.md`, verification-pending); pure-Simple parity not audited | `test/01_unit/compiler/interpreter/unit_nested_method_dispatch_spec.spl` |
+| 2026-11-16 | Library Units (sources CLI) | `simple build sources [<lib dir>]` in `src/app/build/sources_cli.spl`, wired in `build/cli_entry.spl`: walks the dir, relativizes, selects via `source_inventory_resolve_unit_v1(["**/*.spl"])`, prints one sorted path per line. Include set is a seam until the simple.sdn unit parser lands | `test/01_unit/app/build/build_sources_cli_spec.spl` |
+| 2026-11-16 | 4 (source scan, rb4-luscan) | `source_inventory_scan_v1(root)` walks a library root into sorted root-relative `.spl` paths (skips `vendor`/`build`/`target`/`node_modules`/dot dirs), `source_inventory_scan_resolve_v1(root, includes, excludes)` composes it with the glob resolver; callable by simple.sdn/digest/CLI/drift lanes | `test/01_unit/compiler/80.driver/source_inventory_scan_v1_spec.spl` 6/6 |
+| 2026-11-16 | H (stdlib, rb4-boundconv) | `nogc_async_mut/fs/flat.spl` `rt_file_size` redeclared `-> i64` (was `usize?`, ABI mismatch vs sync twin) and `File.size` now builds the Optional from the `-1` sentinel. fs dir census 13 -> 12. Remaining 12 are Option/bool passthroughs (`-> text?`/`-> bool` externs forwarded as-is) — named as a detector gap, not silenced | `test/01_unit/lib/nogc_async_mut/fs/flat_file_size_sentinel_spec.spl` 3/3 |
+| 2026-11-16 | rb4-seedlist | Multi-line list after `val = match` seed parse bug: fix was already in source (`eb9ed832623`), verified with a fresh seed build; added 4 Rust parser tests + spl spec; bug -> verification-pending (needs seed redeploy) | `test/01_unit/compiler/parser/multiline_list_after_match_spec.spl` |
+| 2026-11-15 | D (policy scaffold) | `SPL-BOUND-001..003` (warn, no ratified error date), `SPL-SFFI-ABI-001`, `SPL-SFFI-RANGE-001` (deny now via the `security` stage, `exception_policy: forbidden`) registered in `config/policy/diagnostic_policy.sdn`. Policy only: no detector emits these codes yet (slices B/C) | `test/01_unit/compiler/diagnostics/diagnostic_rule_policy_spec.spl` |
+| 2026-11-15 | B (bound001) | `SPL-BOUND-001` (raw extern result returned unconverted from a non-boundary fn: `return raw` / final bare `raw`, declared non-Nil return) and `x as Unit` form for `SPL-BOUND-002`, in `bound_late_cast.spl`; same lint row and code mapping. Function-local only. The old no-leak spec fixture now returns `text` via `format_num(raw)` because a bare `raw` return is exactly what 001 flags | `test/01_unit/compiler/lint/bound_late_cast_spec.spl` |
+| 2026-11-15 | 3.2 (SFFI ABI width) | `SPL-SFFI-ABI-001` detector `check_sffi_abi_mismatch(source, path, triple)` over `@c_abi(Unit: "ctype")` annotations; target C ABI table (`c_target_data_model`, `c_scalar_underlying`: lp64/llp64/ilp32) in `30.types/custom_primitive_info.spl`; unknown target/C type rejected. Not yet in lint registry (triple is an input) | `test/01_unit/compiler/lint/sffi_abi_mismatch_spec.spl` (6/6) |
+| 2026-11-15 | B1 (SPL-BOUND-002 detector) | `src/compiler/35.semantics/lint/bound_late_cast.spl` + lint row `bound_late_cast` (warn): function-local foreign origin (raw extern result + `val` copies) cast to a file-declared or `use unit.`-imported unit outside an `@unsafe(capabilities: [ffi])` adapter. Limits: no cross-function/cross-file return summaries (needs typed HIR, slice B2); `x as Unit` form not yet matched | `test/01_unit/compiler/lint/bound_late_cast_spec.spl` 19/19, `static_rule_dispatch_identity_spec.spl` 5/5 |
+| 2026-11-15 | B2 step 1 (same-file cross-function origin) | `bound_late_cast.spl`: per-file fixpoint summaries; a non-boundary fn returning a bare foreign call / plain copy makes calls to it foreign for SPL-BOUND-002 (one/two hops, recursion terminates, `@unsafe` ffi adapter returning a unit breaks the chain). GAP: cross-file and typed-HIR summaries, and conversion-through-wrapper precision, remain open. | `bound_late_cast_spec.spl` 38/38 passed |
+| 2026-11-15 | A1 (source inventory receipt) | `src/compiler/80.driver/driver_build/source_inventory_v1.spl`: pure `source_inventory_receipt_v1` (sorted, sha256-digested, `completeness: complete`) and `source_inventory_ownership_check_v1` (duplicate owners + orphans as `SPL-BUILD-SRC-001`). Gap: no glob resolver wired in, no CLI (`build sources`/`doctor`), no manifest-drift check. | `test/01_unit/compiler/80.driver/source_inventory_v1_spec.spl` |
+| 2026-11-15 | F2 (unit glob resolution) | `driver_build/source_inventory_glob_v1.spl`: pure `source_inventory_glob_match_v1` (`*`, `?`, `**`) and `source_inventory_resolve_unit_v1` (includes minus excludes over a frozen scanned list, sorted, de-duplicated). Gap: no filesystem scan, no simple.sdn unit-manifest parser, no digest attach, no `build sources` CLI. | `test/01_unit/compiler/80.driver/source_inventory_glob_v1_spec.spl` (4/4) |
+| 2026-11-16 | rb4-lusdn (unit manifest parser) | `driver_build/library_unit_manifest_v1.spl`: `library_unit_manifest_parse_v1` -> typed `LibraryUnitManifestV1` (name/version/type/deps via shared decl parser + `project.sources` include/exclude globs, default `**/*.spl`); fails closed on missing version, non-list or missing include, absolute/escaping globs, malformed SDN. Reuses `std.common.sdn`. Gap: not yet fed into scan/receipt/CLI. | `test/01_unit/compiler/80.driver/library_unit_manifest_v1_spec.spl` (8/8) |
+| 2026-11-15 | B3 (SPL-BOUND-003 detector) | `src/compiler/35.semantics/lint/bound_unit_reassert.spl` + lint row `bound_unit_reassert` (warn): function-local unit A erased via `.value`/`.raw()`/`.to_f64()`/`.to_i64()` (origin: unit-typed params, `Unit(...)` locals, copies/arithmetic) then cast to a different unit B. Same-unit recast allowed. Spec `test/01_unit/compiler/lint/bound_unit_reassert_spec.spl`. Gap: no cross-function summaries, no `as` casts. |
+| 2026-11-16 | B2 step 2 (cross-file origin) | `bound_late_cast.spl`: `BoundModuleSummary{module, raw_fns}` + `bound_raw_return_summary[_cross]` export the `pub fn`s of a module that return a raw extern value unconverted; `check_bound_late_casts_cross(src, path, deps)` seeds those names (via `use <module>.{a, b as c}`) as foreign callees for SPL-BOUND-002 and chains through re-exporting pub fns. GAP: no driver yet builds deps from the import graph (callers pass summaries); typed-HIR summaries open. | `test/01_unit/compiler/lint/bound_cross_file_spec.spl` 5/5, `bound_late_cast_spec.spl` 44/44 |
+| 2026-11-15 | 7.3 (SPL-BOUND-002 autofix) | `src/compiler/90.tools/fix/rules/impl_/bound_late_cast_fix.spl`: review-required (Uncertain, never Safe) `FixCandidate` creating/reusing an `@unsafe(reason: "TODO verify C ABI", capabilities: [ffi])` adapter `<extern>_as_<unit>` and rewriting the late cast site; aborts when extern args are not literals (locals) or the cast wraps a local copy. Reuses `check_bound_late_casts`; applies via `EditTransaction` preconditions. Gaps: not yet registered in the fix CLI/LSP producer; single-file, direct `Unit(ext(lit))` only | `test/01_unit/app/fix/bound_late_cast_fix_spec.spl` 7/7 |
+| 2026-11-15 | 7.3 (SPL-BOUND-002 autofix) | `src/compiler/90.tools/fix/rules/impl_/bound_late_cast_fix.spl`: review-required (Uncertain, never Safe) `FixCandidate` creating/reusing an `@unsafe(reason: "TODO verify C ABI", capabilities: [ffi])` adapter `<extern>_as_<unit>` and rewriting the late cast site; aborts when extern args are not literals (locals) or the cast wraps a local copy. Reuses `check_bound_late_casts`; applies via `EditTransaction` preconditions. Registered as fix producer `SPL-BOUND-002` in `rules/registry.spl` (+ `impl_/__init__.spl`), spec `test/01_unit/compiler/tools/fix/bound_late_cast_registry_spec.spl` 3/3. Gaps: single-file, direct `Unit(ext(lit))` only | `test/01_unit/app/fix/bound_late_cast_fix_spec.spl` 7/7 |
+| 2026-11-15 | F prereq 2 (deterministic canonical type ids) | `canonical_type_symbol_id_v1` digest ids replace the insertion counter in `canonical_mir_type_symbol_for_key_v1`; collision re-hash; MC/DC ids and cross-process byte-identity still open (see slice5 prerequisites bug) | `test/01_unit/compiler/mir/canonical_type_symbol_id_spec.spl` 4/4 |
+| 2026-11-15 | G (§6.1 backend groups) | Opt-in `config/build/backends_{c,vhdl,cuda,rocm,vulkan}.sdn` (`default: false`, one `kind: shared` target each, entry = existing `*_backend.spl`), included from `targets.sdn`; default host selection unchanged. `build_targets.spl` parse/select fns made `pub` (sibling spec was ERROR on visibility). Gaps: no `provider_entry.spl` anywhere; `runtime_gpu.sdn` not added (no Simple entry source); no `backend_rocm` dir (HIP used) | `test/01_unit/app/build/targets_backend_groups_spec.spl` 3/3, `targets_include_group_spec.spl` 10/10 |
+| 2026-11-15 | C1 (constrained unit SFFI return) | `src/compiler/90.tools/sffi_gen/constrained_unit_gen.spl`: input model `ConstrainedUnitReturn` (integer range_min/range_max) -> validating facade `Result<Unit, ConstraintError>` over a private `__raw_` extern; unconstrained unit = direct projection; non-integer ABI or non-literal bound emits `SPL-SFFI-RANGE-001`. Gaps: no unit range syntax or parser feed, `ConstraintError` not yet defined in stdlib, not wired into module_gen | `test/01_unit/compiler/sffi_gen/constrained_unit_return_spec.spl` |
+| 2026-11-15 | E1 (unit verdict loader parity) | `test/01_unit/compiler/units/unit_loader_parity_spec.spl`: unit_op verdict matrix (nominal/point/index/alias/legacy newtype) and interpreter `unit_value_binop` results identical after `flat_type_pools_dump` / `flat_type_pools_restore` (the loader/cache pool path). Also removed dead `next_canonical_type_symbol` field + sync copies. Gaps: loader iface_digest/ABI/capability validation not covered; no real SMF file round trip | `unit_loader_parity_spec.spl` |
+| 2026-11-15 | boundfollow (SPL-BOUND review follow-ups) | bound_late_cast: compound assignment keeps taint, unit return type skips BOUND-001, multi-line fn headers, parenthesised/wrapped and if/else branch-final raw returns, Nil spec now returns raw; bound_unit_reassert: multi-line headers + non-ASCII line guard | bound_late_cast_spec 37/37, bound_unit_reassert_spec 11/11 (spec cases for the 3 reassert-side items 2/11 pass; non-ASCII case does not prove red-before) |
+| 2026-11-15 | boundfollow (SPL-BOUND review follow-ups) | bound_late_cast: compound assignment keeps taint, unit return type skips BOUND-001, multi-line fn headers, parenthesised/wrapped and if/else branch-final raw returns, Nil spec now returns raw; bound_unit_reassert: multi-line headers + non-ASCII line guard | bound_late_cast_spec 37/37, bound_unit_reassert_spec 11/11 (red-before not separately observed for the non-ASCII case) |
+| 2026-11-15 | C1b (rangewire) | `src/lib/common/constraint_error.spl` real `ConstraintError` (unit_name/value/min_text/max_text/message, `out_of_range`); `sffi_gen/constrained_unit_scan.spl` scans `unit X: T as S` + `# @unit_range X lo..hi` + `extern fn ... -> X` text into facades via constrained_unit_gen. Gaps: range is an annotation comment (no `unit` range syntax); not yet a CLI flag/module_gen step; facade run in interpreter via hand-copied shape, not eval of generated source | `test/01_unit/compiler/sffi_gen/constraint_error_spec.spl`, `constrained_unit_facade_wire_spec.spl` |
+| 2026-11-15 | C1b (rangewire) | `src/lib/common/constraint_error.spl` real `ConstraintError` (unit_name/value/min_text/max_text/message, `out_of_range`); `sffi_gen/constrained_unit_scan.spl` scans `unit X: T as S` + `# @unit_range X lo..hi` + `extern fn ... -> X` text into facades via constrained_unit_gen. Gaps: range is an annotation comment (no `unit` range syntax); not yet a CLI flag/module_gen step; facade run in interpreter via hand-copied shape, not eval of generated source; emitted `Ok(Unit(raw))` cannot run today (doc/08_tracking/bug/unit_from_primitive_construction_unsupported_runtime_2026-11-15.md), form left unchanged pending owner decision | `test/01_unit/compiler/sffi_gen/constraint_error_spec.spl`, `constrained_unit_facade_wire_spec.spl` |
+| 2026-11-16 | rb4-parensuffix | `(expr)_sfx` unit suffix on a group desugars to `expr * 1_sfx` in seed + pure-Simple parsers | paren_expr_unit_suffix_spec 6/6; bug paren_expr_unit_suffix_parsed_as_call_2026-11-16 verification-pending |
+
+Reconcile with (do not fork): `unit_primitive_api_lane_plan_2026-11-12.md`,
+`doc/05_design/compiler/incremental_build/library_unit_build_and_link.md`,
+`doc/08_tracking/bug/library_unit_build_slice5_prerequisites_2026-11-13.md`,
+`doc/05_design/compiler/backend_dynamic_plugin_build_groups.md`,
+`doc/07_guide/platform/ffi/sffi.md`, `doc/03_plan/agent_tasks/sffi_v2_hardening.md`.
+
+## 0. Executive decisions
+
+1. `text` stays a built-in general-purpose type, never automatically a semantic `unit`. Numeric primitives stay legal in private arithmetic and general math APIs.
+2. A semantic `unit` is an intentional guarantee with four independent facts: nominal identity, representation/ABI, dimension/scale, invariant.
+3. Establish a semantic unit at the origin boundary (typed SFFI return / generated adapter, HAL wrapper, or admitted binary-provider ABI adapter). Late raw-to-unit casts on foreign-origin data warn, ratcheting to error in robust. No repeat casts across library calls.
+4. SFFI may project an ABI-identical C primitive directly as an unconstrained unit. A constrained unit is checked before it is trusted; the safe facade is fallible (`Result<Unit, ConstraintError>`) unless a verified producer contract proves the constraint. C `int` is checked against the target ABI, never assumed `i32`.
+5. Dimensionally sound synthesis (`1km / 2hr` -> `0.5km/h`) is not a foreign cast; numeric promotion and scale are defined. Nominal domain mixing is rejected unless declared in `unit_ops`.
+6. Robust enforcement is scoped per build unit (library/runtime/application/shared). Each unit has a generated, sorted, hashed source-membership receipt resolved from canonical config; no handwritten path copies.
+7. Compiler, interpreter, loader, runtime and stdlib families become separately built units linked via validated interfaces. Keep the single-closure bootstrap until library-unit parity is proven.
+8. Default bootstrap builds only essential host components. Cross-OS/CPU codegen, VHDL, CUDA, ROCm/HIP, Vulkan/SPIR-V, runtime GPU providers and SIMD tiers are opt-in groups, loaded on demand after ABI/capability admission.
+9. Extend `DiagnosticV1`, `DiagnosticRulePolicy`, the semantic exported-type checker and the revision-checked fix transaction. Ranked, previewable boundary-return fixes; never a no-op or a falsely-Safe unsafe conversion.
+10. Compatibility first: inventory + warnings, then CI blocks new violations, then robust errors in a ratified edition. Fatal ABI, invalid arithmetic and security violations are never demoted to warnings.
+
+Not in scope: new keywords for text/casts/build; global replacement of every `text`/`i64`; a second type system for interpreter/LSP/loader/SFFI; activating all backends in host bootstrap; calling a plugin production-ready because a header/stub exists.
+
+## 1. Source audit
+
+| Area | Evidence | Finding | Required work |
+|---|---|---|---|
+| Primitive classification | `35.semantics/lint/primitive_types.spl`, `semantic_api/tag_walk.spl` | Numeric/bool leaves flagged; `text`/`char` classified but not flagged by default | Keep; add contextual boundary findings, no blanket `text` ban. **Updated 2026-11-16:** semantic-domain public `text` is flagged (SPL-TEXT-001) and public `bool` incl. `is_*` is not exempt (SPL-BOOL-001), see [unit_semantic_text_bool_public_api_plan_2026-11-16.md](unit_semantic_text_bool_public_api_plan_2026-11-16.md) |
+| Public API traversal | `semantic_api/exported_graph.spl` | Exported graph over interned tags, visibility, nested types; re-export limits noted | Add build-unit policy + semantic-origin facts |
+| Primitive autofix | `90.tools/fix/rules/impl_/lint_primitive_api.spl` | No-op EasyFix already removed; ranked substitutions are review-required | Add boundary-move multi-file actions |
+| Diagnostic policy | `00.common/diagnostics/diagnostic_rule_policy.spl`, `config/policy/diagnostic_policy.sdn` | Per-rule/profile edition+date severity; dates illustrative | Add origin/cast/boundary rules (done: see log); ratify schedule |
+| Diagnostics/edits | `src/lib/common/diagnostics/diagnostic_v1.spl`, `fix_transaction.spl` | Rich diagnostics + hash-checked edit transactions | Wire all paths to the same IDs/policy snapshot |
+| Units | `30.types/units/unit_registry.spl`, `unit_ops.spl`, `src/app/interpreter/expr/arithmetic.spl` | Catalog + shared op matrix + interpreter wiring | Test dimension vs nominal, scale, promotion, constrained construction, parity |
+| SFFI | `sffi_custom_primitive.spl`, `30.types/custom_primitive_info.spl`, `90.tools/sffi_gen/type_mapping.spl` | Transparent ABI mapping exists; checked fallible constrained return not established | Constrained return contract, stub gen, provenance, real ABI fixtures |
+| Raw extern calls | `35.semantics/lint/raw_sffi_call.spl` | Raw externs + `@unsafe(capabilities:[ffi])` linted | Boundary rule independent but co-reported |
+| Compiler ownership | `src/compiler/simple.sdn` | One application owns all layers; critical profile with broad exception string | Extract libraries; audited expiring permissions |
+| Library units | `driver_build/library_unit_{plan,iface,archive,graph,link}_v1.spl` | Pure slices exist; unit-scoped lowering/link unwired | Lower from dependency interfaces, deterministic IDs, archive/link |
+| Library-unit blockers | `library_unit_build_slice5_prerequisites_2026-11-13.md` | Independent lowering; order-dependent `canonical_type_symbols`/MCDC IDs; manifest dependency drift | Solve before `--library-units` in production |
+| Targets/groups | `targets.sdn`, `src/app/build/targets/build_targets.spl`, `config/build/*` | `include:`/`group` supported; host default group; opt-in stdlib static | Consolidate optional configs |
+| Dynamic backends | `70.backend/backend_plugin/*`, `simple_backend_plugin_v1.h` | Versioned ABI + checked staging; CUDA placement still `static` | Real provider exporters/descriptors/admission before selection |
+| Runtime GPU provider | `src/runtime/runtime_dynload.c` | Separate lifecycle, partly present | Share identity/admission, not the codegen ABI |
+| Loader split | `99.loader/loader/module_loader.spl`, `10.frontend/core/interpreter/module_loader_core.spl` | Separate lifecycles; shared-core refactor planned | One ABI/interface/receipt contract |
+
+## 2. Type and conversion semantics
+
+| Usage | Normal | Robust |
+|---|---|---|
+| local `text`, formatting, logging | allow | allow |
+| `fn echo(message: text) -> text` | allow | allow (genuinely arbitrary text) |
+| `fn read_user(id: text)` across a declared semantic boundary | diagnostic | error after ratification |
+| `fn sum(a: i64, b: i64)` in a math module | allow | allow / targeted exemption |
+| public `lba: u64`, `timeout_ms: i64` | `SPL-TYPE-001` | existing deny |
+| `static const NAME: text = "Simple"` | allow | allow |
+| `static const NAME: AppName = "Simple"` | const-eval validated | compile error on violation |
+| `UnitX -> primitive -> UnitY` in app code | `SPL-BOUND-003` | error after ratchet |
+| typed unit across library calls | allow | allow |
+
+Checked domain constructors on genuine Simple-origin data stay legal. The restriction is: foreign-origin semantic assertions only at approved, auditable trust boundaries.
+
+**Owner decision 2 (2026-11-16) — unit construction form.** The default way to build a unit from a raw primitive is the cast `raw as Unit`. The constructor form `Unit(raw)` is allowed only (a) when manipulating/deriving a value, or (b) at the same-location origin boundary (the SFFI facade / generated adapter that receives the foreign value). `sffi_gen` constrained-unit facades emit `Ok(raw as Unit)`. SPL-BOUND-002 treats a generated facade `fn N` that casts the value of its own `extern fn __raw_N` as the origin boundary (no finding); a cast of a foreign value anywhere else, in either form, is still a late cast.
+
+## 3. Boundary and SFFI contracts
+
+SFFI decision matrix:
+
+| C ABI return | Simple return | Verdict | Generated behaviour |
+|---|---|---|---|
+| `int32_t` | unconstrained `i32` unit | compatible if CC/target agree | direct projection, zero cost |
+| `int32_t` | constrained `i32` unit | layout-compatible, not value-valid | validate in stub, return `Result` |
+| C `int` | `i32` unit | target-dependent | resolve from target ABI; reject unknown |
+| `int64_t` | `i32` unit | not identical | explicit checked narrowing |
+| `float`/`double` | `f32`/`f64` unit | exact match only | no implicit precision change |
+| `_Bool`, enum, bitfield | restricted unit | invalid reprs possible | validate discriminant |
+| `char*` | `text` / text unit | not transparent | ownership, length, encoding adapter |
+| pointer/handle | managed ref / numeric | not compatible | explicit handle/capability adapter |
+
+Compare ABI class, register/stack passing, alignment, ownership and triple; `sizeof` equality is insufficient. Returning `Result` from the facade does not change the C ABI.
+
+Proposed HIR facts: `ValueSemanticOrigin` (InternalTyped | CompileTimeLiteral | InternalRaw | ForeignRaw | HalValidated | BinaryProviderValidated), `SemanticUnitInfo`, `BoundaryPermit`. Compact intern IDs + SSA def-use + function return summaries; no runtime origin tags.
+
+Boundary permission is a build-unit capability (sffi adapter, tagged hal impl, admitted binary provider, audited narrow `unsafe`) — never a file or folder name. `unsafe` never bypasses ABI mismatch, invalid representation or artifact admission.
+
+## 4. Build-unit inventory
+
+Each build unit declares name, kind, source roots, includes/excludes, interface, dependencies, variants, target ABI and policy role. Globs are resolved once against a frozen snapshot into a sorted, digested `source_inventory` receipt. CI requires exactly one logical owner per in-scope file. Proposed CLI: `simple build units list|show`, `simple build sources --json`, `simple robust inventory|boundaries`, `simple build doctor --source-ownership`.
+
+Repair order before library mode: manifest parser/diagnostic -> source ownership graph -> unit interface -> isolated objects -> archive -> link. Never guess an unresolved dependency path.
+
+## 5. Compiler / interpreter / loader migration
+
+Logical targets: `simple-core`, `simple-compiler-core`, `simple-compiler-host`, `simple-interpreter`, `simple-loader-core`, `simple-diagnostics`, `simple-runtime`, `simple-std-<family>`, `simple-tools-*`, `simple-backend-<name>`. Keep coarse boundaries first; split further only with measured benefit.
+
+Link/cache contract: ResolvedSourceSet + DependencyInterfaceDigests + PolicySnapshot + Target/ABI + Toolchain digests + SemanticUnitCatalog -> objects + `lib<unit>.a` + `iface.sdn` + `receipt.sdn` -> link. Prerequisites: real manifest deps, lowering against dependency interfaces, deterministic type/MCDC IDs, archive admission from current keys, generics/macros/aspects across interfaces, full object registration, Stage 3 archive reuse in Stage 4, whole-closure rollback until parity.
+
+Interpreter uses the same policy and unit graph; raw foreign values never survive outside the adapter frame. Loader validates `iface_digest`, unit/ABI contract digest, triple, policy and capability before exposing symbols; hot swap pins in-flight sessions to old bytes.
+
+Hardening waves: P0 SOSIX/HAL, filesystem, NVMe, byte cursors, crypto, network wire; P1 toolchain IDs/spans/LSP/SFFI gen; P2 GPU/tensor/SIMD/VHDL; P3 apps (keep `text` for user strings).
+
+## 6. Optional cross-target and accelerator groups
+
+`targets.sdn` stays host-only. Opt-in configs under `config/build/` (`backends_{c,vhdl,cuda,rocm,vulkan}.sdn`, `runtime_gpu.sdn`, `cpu_tiers.sdn`, `cpu_tier_artifacts.sdn`, `cross_targets.sdn`), `default: false`, never resolved by the default target set. Codegen providers are host-ABI libraries whose `targets_wire` may list foreign targets. CUDA dynamic placement only after PTX export + real provider spec. SIMD tiers dispatch on CPUID/HWCAP with baseline fallback; SVE/RVV need vector-length contracts.
+
+Provider admission receipt: name, semver, ABI major/minor, roles, targets, toolchain identity, host + foreign triples, features, MIR ABI digest, semantic interface digest, capability policy, SHA-256, boundary contract digest, provenance. Compiler codegen and runtime GPU ABIs stay distinct. Stage 0-4 bootstrap needs no GPU/HDL SDK.
+
+## 7. Diagnostics and ratchet
+
+| Code | Trigger | Edition 2026.11 default | Robust profile (now) / edition 2027.2 default |
+|---|---|---|---|
+| `SPL-BOUND-001` | foreign raw primitive escapes adapter | warn | error |
+| `SPL-BOUND-002` | late primitive->unit cast on foreign-origin value | warn | error |
+| `SPL-BOUND-003` | unit erased/modified/reasserted without validated construction | warn | error |
+| `SPL-SFFI-ABI-001` | ABI class/CC/width/ownership mismatch | **error now** | error |
+| `SPL-SFFI-RANGE-001` | restricted unit returned without proof or validation | **error now** | error |
+| `SPL-UNIT-003` | numeric newtype auto-derives arithmetic (derived-unit) | warn | error |
+| `SPL-BUILD-SRC-001` | unowned/overlapping source, manifest drift | warn (inventory) | error |
+| `SPL-BUILD-ROLE-001` | unapproved boundary role / expired exception | error in release | error |
+| `SPL-PROVIDER-ABI-001` | provider signature/target/receipt mismatch | error | error |
+
+**Ratified (owner decision 5C, 2026-11-16).** Promotion is by language edition + profile, never wall-clock dates: `SPL-BOUND-001..003` and `SPL-UNIT-003` warn in edition 2026.11 default, deny now in `robust`/`critical`/`verified`, and deny by default from edition 2027.2 (`error_since_lang_version: "2027.2"`, no `error_not_before_date`; an unset date never blocks the edition). `SPL-SFFI-ABI-001`/`SPL-SFFI-RANGE-001` stay error now (security stage). Ratchet: inventory -> new-code gate -> migration -> edition error -> cleanup. Pinned by `test/01_unit/compiler/diagnostics/diagnostic_rule_policy_spec.spl`.
+
+Boundary-return autofix variants: reuse typed HAL facade; generate SFFI adapter; generate checked constrained adapter + error propagation; move late cast to the boundary and update callers; scoped exemption with reason/expiry; no fix when ambiguous. All via atomic, revision-checked multi-file `fix_transaction`, rechecked after apply, never inserting `unwrap`/panic.
+
+## 8. Slices and order
+
+A source inventory -> D diagnostics scaffold -> B semantic boundary HIR -> C SFFI return projection -> E compiler/interpreter/loader parity -> F true library units. G (opt-in backends) after A/D, default only after F. H (stdlib/tool remediation) progressively after B/C. Small independent PRs.
+
+## 9. Verification matrix (proposed IDs)
+
+RB-TEXT-01, RB-PRIM-02, RB-ORIGIN-01..03, RB-SFFI-01..04, RB-UNIT-01..02, RB-BUILD-01..04, RB-LOAD-01..02, RB-PLUGIN-01..03, RB-SIMD-01, RB-FIX-01..02, RB-DIAG-01, RB-RATCHET-01 — semantics as in the original consolidated plan (ordinary text not flagged; late casts flagged at origin; one boundary check; real C ABI fixtures for int/int32_t/bool/enum/char*; `1km/2hr` parity; orphan/duplicate source ownership errors; archive reuse; hot-swap pinning; host bootstrap without GPU SDKs; guarded SIMD dispatch; atomic fixes; same rule ID across CLI/LSP/interpreter; reproducible ratchet).
+
+Evidence classes per host/target: compile-only, link, load provider, execute. Perf targets: cold compile <= +3% CPU / +2% RSS, warm <= +1%; zero added runtime work for unconstrained ABI-compatible SFFI returns.
+
+## 10. Stop conditions
+
+Unresolved target ABI, unproven constrained foreign return, unknown plugin symbol/target, unowned source, stale interface digest, nondeterministic unit symbol identity, stale autofix revisions, unqualified Stage 3 links, compiler/interpreter/loader disagreement — reported as failures, never bypassed with global `unsafe`, wildcard exceptions or silent host fallback.
+
+## 11. Execution checklist
+
+P0 baseline + inventory + manifest drift; P1 shared diagnostics (scaffold landed); P2 SFFI/HAL constrained returns + real C fixtures; P3 origin summaries + autofix; P4 library units; P5 optional variants; P6 library/tool hardening; P7 ratchet + release.
+
+## References
+
+- F# units of measure: https://fsharp.github.io/fslang-spec/units-of-measure/
+- Rust type layout / `repr(transparent)`: https://doc.rust-lang.org/reference/type-layout.html
+- Clang taint analysis configuration: https://clang.llvm.org/docs/analyzer/user-docs/TaintAnalysisConfiguration.html
+- Bazel build concepts: https://bazel.build/concepts/build-ref
+| 2026-11-15 | RB-UNIT-01/02 (unit parity spec) | `test/01_unit/compiler/units/unit_dimension_parity_spec.spl`: km/hr scale 5/18, exact 1/2, `km+kg` deny, same-storage nominal deny all GREEN; Distance/Duration -> velocity through unit_ops RED (no dimension quotient in unit_ops, bug record `unit_ops_no_dimension_quotient_velocity_2026-11-15.md`) | spec 4/5 pass, 1 expected RED |
+| 2026-11-15 | RB-SFFI-ABI wiring (lane abiwire) | `sffi_abi_mismatch` lint row (SPL-SFFI-ABI-001, deny) registered in static_rules/config_and_model; triple = `SIMPLE_TARGET_TRIPLE` else host, unresolvable host with no explicit target -> no findings, unknown explicit target -> unknown-target deny; host triples incl. FreeBSD and arm linux; plain `char` unsigned on aarch64/arm/riscv linux; x86_64 gnux32 = ilp32; undeclared `@c_abi` unit flagged unless imported via `use` (imported units skip the width check). Gap: no lint target field in LintParamsV1 | specs 13/13, 8/8, 7/7 pass |
+| 2026-11-15 | unitctor (bug fix) | Primitive-to-unit construction: `Name(raw)` and `raw as Name` build the same unit value as `raw_sfx` in the seed (plus `.value` field, `to_f64`/`to_i64`); pure-Simple HIR lowers `raw as Name` to the unit record `StructLit`. Bug: unit_from_primitive_construction_unsupported_runtime_2026-11-15 (verification-pending) | `test/01_unit/compiler/unit_from_primitive_construction_spec.spl` |
+| 2026-11-16 | RB-SFFI-02 CLI wiring (lane rb4-sffiwire) | `simple ffi-gen <file> --gen-units [--dry-run] [--output=<dir>]` runs constrained_unit_scan over the input and writes `<dir>/<base>_units.spl` (or prints on dry-run); range/ABI diagnostic or unreadable input -> exit 1 (`sffi_gen_units` in `_SffiGenMain/cli_and_generate.spl`) | `constrained_unit_cli_spec.spl` 4/4, facade_wire 8/8 |
+| 2026-11-16 | Library Units remainder 3/5 (lane rb4-ludigest) | `driver_build/library_unit_digest_v1.spl`: `library_unit_source_digest_v1([SourceInventoryFileV1])` -> sha256 over sorted, deduped, length-framed (path with `\` -> `/`, content hash) entries; order-independent, separator-normalized, content/path-sensitive. Input list only (fs scan is another lane) | `test/01_unit/compiler/80.driver/library_unit_digest_v1_spec.spl` 6/6 |
+| 2026-11-16 | Library Units drift check (lane rb4-ludrift) | `driver_build/library_unit_drift_v1.spl`: `library_unit_drift_v1(declared, actual)` -> sorted added/removed; verdict PASS/FAIL/ERROR, exit 0/1/2 (two empty sets = ERROR). No `.shs` gate yet: needs the manifest SDN format from the parallel sdn lane | `test/01_unit/compiler/80.driver/library_unit_drift_v1_spec.spl` 6/6 |
+| 2026-11-16 | unitwrap (bug fix) | Pure-Simple HIR: `u as Unit` where `u` is already that unit (HIR type or declared type, same `SymbolId`) lowers to identity instead of a second `Unit { value: Unit{...} }` wrap (seed parity). Name-keyed unit table filed separately. Bugs: unit_cast_identity_double_wrap_2026-11-16 (verification-pending), unit_decl_table_name_keyed_2026-11-16 (open) | `test/01_unit/compiler/unit_from_primitive_construction_spec.spl` (+3 identity cases; deployed seed predates #9585, all 8 fail there) |
+| 2026-11-16 | unitsym (bug fix, lane rb5-unitsym) | Pure-Simple HIR `x as T` takes the unit path only when the resolved target symbol is a Struct that is a declared unit; same-named class in another module no longer lowered as unit construction. Bug unit_decl_table_name_keyed_2026-11-16 -> verification-pending (struct-vs-unit same-name residual noted) | `test/01_unit/compiler/20.hir/unit_cast_target_resolution_spec.spl` 4/4 (helper level) |
+| 2026-11-16 | Library Units drift gate (lane rb5-driftgate) | `scripts/check/check-library-unit-drift.shs [--selftest] <lib dir>`: shell twin of `library_unit_drift_v1`; recorded inventory = `<dir>/source_inventory.lock` (one root-relative path per line), actual = `*.spl` scan with the `source_inventory_scan_v1` skip rules. PASS/FAIL/ERROR, exit 0/1/2, fatal selftest (clean, added, removed, empty, no-lock). Not in the push tier. Gap: shell twin, not yet calling the Simple function or reading the simple.sdn manifest includes | `sh scripts/check/check-library-unit-drift.shs --selftest` |
+| 2026-11-16 | SPL-BOUND-001 false positives (lane rb4-boundfp) | `35.semantics/lint/bound_late_cast.spl`: SPL-BOUND-001 keyed only on externs whose declared return is a raw numeric primitive; already-safe returns (`text?`, `[u8]?`, Option, Result, bool, unit) pass through without a finding. stdlib re-census 465 -> 249 findings (144 -> 93 files) = false-positive correction, not conversions | `bound_late_cast_spec` 47/47 (+3), `bound_cross_file_spec` 5/5, `robust_boundary_stdlib_census_2026-11-15.md` |
+| 2026-11-16 | unitcmp (bug fix, lane rb4-unitcmp) | Seed `interpreter/expr/ops.rs`: unit/unit comparison (`== != < <= > >=`) returns plain bool instead of `true_fbytes`; pure-Simple `unit_ops.spl` already types comparisons as bool. Bug: seed_unit_comparison_returns_unit_wrapped_bool_2026-11-16 (verification-pending) | `test/01_unit/compiler/interpreter/unit_comparison_plain_bool_spec.spl` 7/7 on rebuilt seed (1/7 on deployed) |
+| 2026-11-16 | Library Units: build sources wired (lane rb5-srcwire) | `simple build sources [--digest] [dir]` now reads `<dir>/simple.sdn` via `library_unit_manifest_parse_v1` (invalid -> exit 2; absent -> default globs), lists via `source_inventory_scan_resolve_v1`, `--digest` prints `library_unit_source_digest_v1`. Spec 14/14. |
+| 2026-11-16 | Unit cast form (lane rb6-unitcast, owner decision 2) | `sffi_gen/constrained_unit_gen.spl` facade emits `Ok(raw as Unit)` instead of `Ok(Unit(raw))`; `35.semantics/lint/bound_late_cast.spl` treats `fn N` casting its own `extern fn __raw_N` value as origin boundary; late `as` casts elsewhere still reported. Rule recorded in §2 | `constrained_unit_return_spec` 11/11, `constrained_unit_facade_wire_spec` 9/9, `bound_late_cast_spec` 50/50 |
+| 2026-11-16 | Chained unit to_<sfx> parity, pure Simple (lane rb6-chainto) | GAP, not landed as code: the pure-Simple core interpreter has no unit runtime (every unit literal -> `unsupported expression kind: SuffixedLit`; `use unit.velocity.{kmph}` fails to parse on the `unit` keyword); MIR erases suffixed literals to `<lit> as <sfx>` casts, so there is no to_<sfx> dispatch to bring to #9797 parity. Added in-development spec pinning base + chained semantics; needs a core unit runtime (suffixed-lit eval + family scale table from `30.types/units/unit_registry.spl`) first | `core_unit_chained_conversion_spec` 0/6 (in-development, expected RED); `call_result_unit_suffix_spec` (#9801) 7/7 unchanged |
+| 2026-11-16 | 3B unit-decl @c_abi (lane rb6-cabi) | `@c_abi("ctype") unit Fd: i32 as fd` (same line or line above) is the canonical C ABI declaration; SPL-SFFI-ABI-001 checks it at every `extern fn` line naming the unit; `@c_abi(Unit: "ctype")` kept as deprecated alias for one release (`sffi_abi_deprecation_notes`, Warn in lint row). Seed parser accepts a decorator before `unit` (items.rs); pure-Simple parser already passes unknown decorators through | `sffi_abi_unit_decl_spec` 8/8 (was 2/8), `sffi_abi_mismatch_spec` 13/13, `sffi_abi_mismatch_rule_spec` 9/9 |
+| 2026-11-16 | SPL-UNIT-004 profile wiring (lane rb6-unitwire) | `80.driver/driver_unit_profile.spl`: SPL-UNIT-004 policy row (deny baseline for the active `SIMPLE_TYPECHECK_PROFILE`) selects unit_ops strict mode, no hardcoded profile names; `hir_typecheck_consumer_v1` applies it before inference and drains `unit_op_take_warnings()` as `[unit SPL-UNIT-004] <module>: ...` typecheck warnings (log-only at Advisory) | `unit_derived_profile_wiring_spec` 4/4 (was ERROR), `unit_derived_decl_spec` 7/7, `diagnostic_rule_policy_spec` 18/18 |
+| 2026-11-16 | Core unit runtime + chained to_<sfx> (lane rb6-unitrt) | New `core/interpreter/eval_units.spl`: SuffixedLit evaluates to a `__unit__` value (value+suffix); `value/to_text/to_i64/to_f64`, and `to_<sfx>` converts via exact scales from `std.common.units` `parse_unit_expression` (dimension-checked; returns a new unit value so chains compose). Flat-Option `Some(x)` builtin when no Option enum is in scope. `use unit.X` parse not needed by the spec (left as-is) | `core_unit_chained_conversion_spec` 8/8 (in-development tag dropped); `call_result_unit_suffix_spec` 7/7 |
+| 2026-11-16 | `use unit.X` import in pure-Simple core (lane rb6-useunit) | No code change needed: `use unit.velocity.{kmph}`, `.{km, m}`, `.*`, and bare `use unit.velocity` already parse (`parser_use_path.spl`) and resolve via `module_loader_resolve.spl` unit routing (`src/unit/<org>/...`); unknown family errors. The earlier "fails to parse on `unit`" note was a spec artifact: a plain "...{kmph}..." string interpolates in the spec itself — use r"...". Pinned with new spec | `use_unit_import_spec` 6/6; `core_unit_chained_conversion_spec` 8/8; `call_result_unit_suffix_spec` 7/7 |

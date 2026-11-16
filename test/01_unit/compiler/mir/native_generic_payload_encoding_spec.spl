@@ -1,0 +1,188 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+"""
+Erased generic payloads keep one encoding across the generic/concrete boundary.
+
+Bug: doc/08_tracking/bug/native_generic_payload_encoding_2026-11-15.md
+
+M1: a free generic fn receives `T` as a TAGGED word (the caller boxes it)
+and its `Some(x)` / `Ok(x)` store that word. The caller matched the result
+as the concrete `i64?` / `Result<i64, E>` (raw payload), so `wrap(7)` read
+56 natively. The caller now decodes the Some/Ok payload and rebuilds the
+enum (decode_erased_scalar_call_payload) when an argument in a bare `T` /
+`[T]` slot binds T to an integer, float or bool. Text and generic-class
+METHODS (plain values in and out on this branch) are untouched.
+
+M2: writers of a `Dict<K, T>` disagree (MIR dumps): concrete code encodes
+on write, a free generic fn stores its already-encoded `T` word, a
+generic-class METHOD stores its plain `T` argument raw. A free generic body
+reads the word unchanged (T is encoded there; the caller decodes, binding T
+from the `Dict<K, T>` argument too); a method decodes on read (T is plain
+there), as before this branch. The method-written-and-read hash row stays
+wrong (known_wrong fixture): only encoding method arguments fixes it.
+
+HIR is lowered with SIMPLE_BOOTSTRAP=1 and SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1
+(how native-build lowers a module); MIR without them. Seed specs are
+regression guards only: the native oracles are
+test/fixtures/native_generic_payload_encoding/{free_fn_payload,erased_dict_value}/main.spl.
+"""
+
+use std.spec
+use std.io_runtime.{env_set}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+val SOURCE: text = "fn first<T>(xs: [T]) -> T?:\n    if xs.len() == 0:\n        return None\n    Some(xs[0])\n\n" +
+    "fn wrap<T>(x: T) -> Result<T, text>:\n    Ok(x)\n\n" +
+    "fn int_result() -> i64:\n    match wrap(7):\n        case Ok(v): v\n        case Err(_): -1\n\n" +
+    "fn int_option() -> i64:\n    first([-5, 1]) ?? 0\n\n" +
+    "fn float_option() -> f64:\n    match first([2.25]):\n        case Some(v): v\n        case None: -1.0\n\n" +
+    "fn text_option() -> text:\n    match first([\"x\"]):\n        case Some(v): v\n        case None: \"none\"\n\n" +
+    "class Store<T>:\n    hash: Dict<i64, T>\n\n" +
+    "impl Store<T>:\n    fn get(node: i64) -> Result<T, text>:\n        if self.hash.contains_key(node):\n            return Ok(self.hash[node])\n        Err(\"absent\")\n\n" +
+    "    me put(node: i64, value: T):\n        self.hash[node] = value\n\n" +
+    "fn method_get(s: Store<i64>) -> i64:\n    match s.get(1):\n        case Ok(v): v\n        case Err(_): -1\n" +
+    "\nstruct Holder:\n    n: i64\n\n" +
+    "fn try_result() -> Result<i64, text>:\n    val v = wrap(7)?\n    Ok(v + 1)\n\n" +
+    "fn try_option() -> i64?:\n    val v = first([4])?\n    Some(v + 1)\n\n" +
+    "fn rewrap_ok() -> Result<i64, text>:\n    match wrap(20):\n        case Ok(v): Ok(v)\n        case Err(e): Err(e)\n\n" +
+    "fn regeneric() -> i64:\n    match wrap(40):\n        case Ok(v):\n            match wrap(v + 1):\n                case Ok(w): w\n                case Err(_): -1\n        case Err(_): -1\n\n" +
+    "fn field() -> i64:\n    match wrap(50):\n        case Ok(v): Holder(n: v).n\n        case Err(_): -1\n\n" +
+    "fn if_val() -> i64:\n    if val x = first([3]):\n        return x\n    -1\n" +
+    "\nclass Bag<T>:\n    m: Dict<text, T>\n\n" +
+    "impl Bag<T>:\n    fn lookup(k: text) -> Result<T, text>:\n        Ok(self.m[k])\n\n" +
+    "fn lookup_res<T>(d: Dict<text, T>, k: text) -> Result<T, text>:\n    Ok(d[k])\n\n" +
+    "fn dict_arg(d: Dict<text, i64>) -> i64:\n    match lookup_res(d, \"a\"):\n        case Ok(v): v\n        case Err(_): -1\n\n" +
+    "fn mk<T, E>(v: T, e: E, ok: bool) -> Result<T, E>:\n    if ok:\n        return Ok(v)\n    Err(e)\n\n" +
+    "fn two_params() -> i64:\n    match mk(9, \"bad\", true):\n        case Ok(v): v\n        case Err(_): -1\n" +
+    "\nfn lookup_opt<T>(d: Dict<text, T>, k: text) -> T?:\n    Some(d[k])\n\n" +
+    "fn dict_unannotated() -> i64:\n    val d = {\"a\": 40}\n    match lookup_res(d, \"a\"):\n        case Ok(v): v\n        case Err(_): -1\n\n" +
+    "fn dict_inline() -> i64:\n    lookup_opt({\"a\": 40}, \"a\") ?? -1\n\n" +
+    "fn dict_mutated() -> i64:\n    var d = {\"a\": 1}\n    d[\"a\"] = 40\n    match lookup_res(d, \"a\"):\n        case Ok(v): v\n        case Err(_): -1\n"
+
+fn count_of(haystack: text, needle: text) -> i64:
+    haystack.split(needle).len() - 1
+
+fn lower_bootstrap_mir() -> Dict<text, text>:
+    val module = parse_and_build_module(SOURCE, "generic_payload.spl")
+    var hir_lowering = HirLowering.with_filename("generic_payload.spl")
+    env_set("SIMPLE_BOOTSTRAP", "1")
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+    val hir = hir_lowering.lower_module(module)
+    env_set("SIMPLE_BOOTSTRAP", "")
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "")
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var out: Dict<text, text> = {}
+    var errors = ""
+    for error in mir_lowering.errors:
+        errors = errors + error.message + "\n"
+    out["__errors__"] = errors
+    for function in mir.functions.values():
+        val prefix = "generic_payload."
+        val short = if function.name.starts_with(prefix): function.name.substring(prefix.len(), function.name.len()) else: function.name
+        out[short] = serialize_mir_function(function)
+    out
+
+describe "erased generic payload encoding (bootstrap HIR)":
+    it "lowers the probe module without MIR errors":
+        val fns = lower_bootstrap_mir()
+        expect(fns["__errors__"] ?? "missing").to_equal("")
+
+    it "M1: decodes and rebuilds an integer Ok payload of a free generic call":
+        val mir = lower_bootstrap_mir()["int_result"] ?? ""
+        expect(mir).to_contain("erased_payload_decode")
+        expect(mir).to_contain("rt_value_as_int_wide")
+        expect(mir).to_contain("rt_enum_new")
+
+    it "M1: decodes an integer Some payload bound from a negative literal array":
+        val mir = lower_bootstrap_mir()["int_option"] ?? ""
+        expect(mir).to_contain("erased_payload_decode")
+
+    it "M1: decodes a float Some payload with rt_value_as_float":
+        val mir = lower_bootstrap_mir()["float_option"] ?? ""
+        expect(mir).to_contain("erased_payload_decode")
+        expect(mir).to_contain("rt_value_as_float")
+
+    it "M1: leaves a text instantiation untouched":
+        val mir = lower_bootstrap_mir()["text_option"] ?? ""
+        expect(mir.len() > 0).to_equal(true)
+        expect(mir.contains("erased_payload_decode")).to_equal(false)
+
+    it "M1: leaves generic-class method results untouched (plain values in and out)":
+        val mir = lower_bootstrap_mir()["method_get"] ?? ""
+        expect(mir.len() > 0).to_equal(true)
+        expect(mir.contains("erased_payload_decode")).to_equal(false)
+
+    it "M2: a generic METHOD decodes its Dict<K, T> read (T is plain in a method)":
+        val mir = lower_bootstrap_mir()["Store.get"] ?? ""
+        expect(mir).to_contain("rt_dict_get")
+        expect(mir).to_contain("rt_value_as_int_wide")
+
+    it "M2 b08: a method reading a concretely built Dict<K, T> decodes":
+        val mir = lower_bootstrap_mir()["Bag.lookup"] ?? ""
+        expect(mir).to_contain("rt_value_as_int_wide")
+
+    it "M2: a free generic fn keeps the Dict<K, T> word (T is encoded there)":
+        val mir = lower_bootstrap_mir()["lookup_res"] ?? ""
+        expect(mir).to_contain("rt_dict_get")
+        expect(mir.contains("rt_value_as_int_wide")).to_equal(false)
+
+    it "M2 b05: a Dict<K, T> argument binds T, so the caller decodes":
+        val mir = lower_bootstrap_mir()["dict_arg"] ?? ""
+        expect(count_of(mir, "erased_payload_decode")).to_equal(1)
+
+    it "r07: two bound type parameters (T from 9, E from text) decode without a MIR error":
+        val fns = lower_bootstrap_mir()
+        expect(fns["__errors__"] ?? "missing").to_equal("")
+        expect(count_of(fns["two_params"] ?? "", "erased_payload_decode")).to_equal(1)
+
+describe "erased generic payload consumers decode exactly once (bootstrap HIR)":
+    it "`?` on a free generic Result call: one decode (stage2 printed `ok 1` for 8)":
+        val mir = lower_bootstrap_mir()["try_result"] ?? ""
+        expect(count_of(mir, "rt_value_as_int_wide")).to_equal(1)
+
+    it "`?` on a free generic Option call: one decode":
+        val mir = lower_bootstrap_mir()["try_option"] ?? ""
+        expect(count_of(mir, "rt_value_as_int_wide")).to_equal(1)
+
+    it "a payload re-wrapped in Ok from a concrete fn: one decode, no re-encode":
+        val mir = lower_bootstrap_mir()["rewrap_ok"] ?? ""
+        expect(count_of(mir, "rt_value_as_int_wide")).to_equal(1)
+        expect(count_of(mir, "rt_value_int_wide")).to_equal(1)
+
+    it "a payload passed into another generic call: re-encoded once, both results decoded":
+        val mir = lower_bootstrap_mir()["regeneric"] ?? ""
+        expect(count_of(mir, "erased_payload_decode")).to_equal(2)
+        expect(count_of(mir, "rt_value_int_wide")).to_equal(2)
+
+    it "a payload stored in a struct field: one decode":
+        val mir = lower_bootstrap_mir()["field"] ?? ""
+        expect(count_of(mir, "rt_value_as_int_wide")).to_equal(1)
+
+    it "`if val` re-tags the decoded payload so the nil test stays real":
+        val mir = lower_bootstrap_mir()["if_val"] ?? ""
+        # The nil test is the Option's presence bit (`rt_is_some`), read by
+        # the binder's `!= nil`, not an `rt_native_eq` of the re-tagged word
+        # against nil (native_if_val_presence_test_dropped_2026-11-15).
+        expect(count_of(mir, "rt_value_int_wide")).to_equal(2)
+        expect(count_of(mir, "rt_value_as_int_wide")).to_equal(2)
+        expect(mir).to_contain("rt_is_some")
+        expect(mir.contains("\"value\":true,\"type\":\"Bool\"")).to_equal(false)
+
+describe "an unannotated Dict<K, T> argument still binds T (bootstrap HIR)":
+    it "b05: an unannotated dict local binds T, so the caller decodes":
+        val mir = lower_bootstrap_mir()["dict_unannotated"] ?? ""
+        expect(count_of(mir, "erased_payload_decode")).to_equal(1)
+
+    it "f05: an inline dict literal binds T":
+        val mir = lower_bootstrap_mir()["dict_inline"] ?? ""
+        expect(count_of(mir, "erased_payload_decode")).to_equal(1)
+
+    it "f04: a mutated unannotated dict local binds T":
+        val mir = lower_bootstrap_mir()["dict_mutated"] ?? ""
+        expect(count_of(mir, "erased_payload_decode")).to_equal(1)

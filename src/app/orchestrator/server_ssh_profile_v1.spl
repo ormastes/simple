@@ -1,0 +1,103 @@
+# Strict SDN reference-only profile. Loading never reads private-key contents.
+# Paths must be in trusted, private configuration directories: the current
+# no-follow predicates and OpenSSH's later opens cannot close path-swap races.
+use app.orchestrator.server_ssh_types_v1.{ServerSshProfileV1, ServerSshProfileLoadTurnV1}
+use std.common.config_core.server_context_types_v1.{ServerRecordV1, server_record_validate_v1}
+use std.common.string_core.str_len
+use std.common.text_bytes.{boxed_text_bytes_checked, bytes_to_text, utf8_bytes_valid}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.nogc_sync_mut.io.stdin_command_v1.{stdin_command_path_valid_v1, stdin_command_digest_valid_v1,
+    stdin_command_profile_read_v1, stdin_command_file_no_follow_v1, stdin_command_store_root_valid_v1}
+
+pub fn server_ssh_path_valid_v1(path: text) -> bool:
+    stdin_command_path_valid_v1(path)
+
+fn server_ssh_atom_valid_v1(value: text) -> bool:
+    if str_len(value) < 1 or str_len(value) > 128: return false
+    if value.starts_with("-") or value.starts_with("."): return false
+    for c in value.chars():
+        if ((c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+                (c >= "0" and c <= "9") or c == "_" or c == "-" or c == "."):
+            continue
+        return false
+    true
+
+pub fn server_ssh_profile_validate_v1(profile: ServerSshProfileV1) -> Result<(), text>:
+    if not server_ssh_atom_valid_v1(profile.user): return Err("server-ssh-user-invalid")
+    if not server_ssh_atom_valid_v1(profile.host_key_alias): return Err("server-ssh-host-key-alias-invalid")
+    if (not server_ssh_path_valid_v1(profile.ssh_executable) or
+            not server_ssh_path_valid_v1(profile.identity_path) or
+            not server_ssh_path_valid_v1(profile.known_hosts_path)):
+        return Err("server-ssh-path-invalid")
+    if profile.ssh_digest != "" and not stdin_command_digest_valid_v1(profile.ssh_digest):
+        return Err("server-ssh-executable-digest")
+    if profile.store_root != "" and not stdin_command_store_root_valid_v1(profile.store_root):
+        return Err("server-ssh-store-root")
+    # Reuse the common reference grammar; keys/tokens are never inline values.
+    server_record_validate_v1(ServerRecordV1(name: "profile", transport: "ssh", host: "localhost",
+        port: 22, container_host: "", auth_ref: profile.auth_ref, tls_ref: profile.trust_ref,
+        remote_executable: "/bin/true"))?
+    Ok(())
+
+fn server_ssh_profile_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("server-ssh-profile-text:" + key)
+
+pub fn server_ssh_profile_decode_v1(source: text) -> Result<ServerSshProfileV1, text>:
+    if str_len(source) < 1 or str_len(source) > 65536: return Err("server-ssh-profile-size")
+    val bytes = match boxed_text_bytes_checked(source):
+        case Ok(value): value
+        case Err(_): return Err("server-ssh-profile-allocation")
+    if not utf8_bytes_valid(bytes): return Err("server-ssh-profile-utf8")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 65536,
+            max_depth: 2, max_nodes: 40, max_rows: 0, max_cells: 0, max_columns: 11)):
+        case Ok(value): value
+        case Err(_): return Err("server-ssh-profile-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("server-ssh-profile-object")
+    val names = ["kind", "version", "authRef", "trustRef", "user", "sshExecutable",
+        "identityPath", "knownHostsPath", "hostKeyAlias"]
+    val optional = ["sshDigest", "storeRoot"]
+    for key in fields.keys():
+        if not names.contains(key) and not optional.contains(key): return Err("server-ssh-profile-unknown:" + key)
+    for key in names:
+        if not fields.contains_key(key): return Err("server-ssh-profile-missing:" + key)
+    if server_ssh_profile_text_v1(fields, "kind")? != "server-ssh-profile":
+        return Err("server-ssh-profile-kind")
+    match fields["version"]:
+        case SdnValue.Int(version):
+            if version != 1: return Err("server-ssh-profile-version")
+        case _: return Err("server-ssh-profile-version")
+    var profile = ServerSshProfileV1(auth_ref: server_ssh_profile_text_v1(fields, "authRef")?,
+        trust_ref: server_ssh_profile_text_v1(fields, "trustRef")?, user: server_ssh_profile_text_v1(fields, "user")?,
+        ssh_executable: server_ssh_profile_text_v1(fields, "sshExecutable")?,
+        identity_path: server_ssh_profile_text_v1(fields, "identityPath")?,
+        known_hosts_path: server_ssh_profile_text_v1(fields, "knownHostsPath")?,
+        host_key_alias: server_ssh_profile_text_v1(fields, "hostKeyAlias")?)
+    if fields.contains_key("sshDigest"): profile.ssh_digest = server_ssh_profile_text_v1(fields, "sshDigest")?
+    if fields.contains_key("storeRoot"): profile.store_root = server_ssh_profile_text_v1(fields, "storeRoot")?
+    server_ssh_profile_validate_v1(profile)?
+    Ok(profile)
+
+# Check every parent rather than only the leaf. These separate observations
+# require a trusted namespace; they are not an anchored open/fstat proof.
+pub fn server_ssh_file_no_follow_v1(path: text, max_bytes: i64) -> bool:
+    stdin_command_file_no_follow_v1(path, max_bytes)
+
+pub fn server_ssh_profile_load_v1(path: text) -> ServerSshProfileLoadTurnV1:
+    val read = stdin_command_profile_read_v1(path)
+    if read.error != "" or read.owner != nil or read.bytes == nil:
+        return ServerSshProfileLoadTurnV1(nil, read.owner,
+            if read.error == "": "server-ssh-profile-cleanup-unconfirmed" else: "server-ssh-profile-unreadable")
+    val bytes = read.bytes.unwrap()
+    if not utf8_bytes_valid(bytes): return ServerSshProfileLoadTurnV1(nil, nil, "server-ssh-profile-utf8")
+    match server_ssh_profile_decode_v1(bytes_to_text(bytes)):
+        case Ok(profile): ServerSshProfileLoadTurnV1(Some(profile), nil, "")
+        case Err(reason): ServerSshProfileLoadTurnV1(nil, nil, reason)
+
+export server_ssh_path_valid_v1, server_ssh_profile_validate_v1, server_ssh_profile_decode_v1
+export server_ssh_file_no_follow_v1, server_ssh_profile_load_v1
