@@ -365,11 +365,15 @@ fn flex_item_min_content_w(nodes: [HNode], styles: [Style], child_index: HtmlChi
 
 # Outer width below which a zero-basis item does not go: its automatic
 # minimum size (CSS Flexbox 4.5, `min-width: auto`) -- the min-content width,
-# capped by a specified `width`. No automatic minimum when `min-width` is
-# declared (the explicit clamp applies instead) or the item scrolls/clips.
+# capped by a specified `width`. A declared `min-width`
+# replaces it: the floor is that min-width as an outer size, so the freeze
+# loop re-shares the rest (Flexbox 9.7). No floor when the item scrolls/clips.
 fn flex_zero_basis_floor_w(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, item: i32, st: Style, container_w: i32) -> i32:
     val frame = flex_item_frame_w(st)
-    if st.min_width_set or st.overflow_hidden or st.overflow_auto_y or st.overflow_scroll_y:
+    if st.min_width_set:
+        val min_outer = if st.border_box: st.min_width_px else: st.min_width_px + frame
+        return if min_outer > frame: min_outer else: frame
+    if st.overflow_hidden or st.overflow_auto_y or st.overflow_scroll_y:
         return frame
     var content = flex_item_min_content_w(nodes, styles, child_index, item)
     val authored = flex_item_authored_outer_w(nodes[item], st, container_w)
@@ -397,6 +401,166 @@ fn flex_item_definite_base_w(node: HNode, st: Style, container_w: i32) -> i32:
     if st.flex_basis_px > 0:
         return st.flex_basis_px
     flex_item_authored_outer_w(node, st, container_w)
+
+# Outer height below which a column flex item does not shrink: a declared
+# min-height, else its automatic minimum (Flexbox 4.5). -1 = never shrink.
+# ponytail: the min-content height is known only for an empty item (frame)
+# and a lone text child (one line); an item with element children, and an
+# anonymous text item, are never shrunk. Measure the content to lift this.
+fn col_flex_shrink_floor_h(nodes: [HNode], child_index: HtmlChildIndex, item: i32, st: Style) -> i32:
+    if nodes[item].tag == "#text":
+        return -1
+    val frame = st.pad_t + st.pad_b + st.border_t + st.border_b
+    if st.min_height_px > 0:
+        val min_outer = if st.border_box: st.min_height_px else: st.min_height_px + frame
+        return if min_outer > frame: min_outer else: frame
+    if st.overflow_hidden or st.overflow_auto_y or st.overflow_scroll_y:
+        return frame
+    val first = child_index.first_child[item]
+    if first < 0:
+        return frame
+    if nodes[first].tag == "#text" and child_index.next_sibling[first] < 0:
+        return frame + style_line_h(st)
+    -1
+
+# Outer flex base size of a column flex item (Flexbox 9.2.3): a zero basis is
+# its frame, a px basis follows box-sizing, a definite height is that height.
+# An auto height is its content: the frame when empty, one line for a lone
+# text child. -1 = not known (element children): the caller gives up.
+fn col_flex_base_h(nodes: [HNode], child_index: HtmlChildIndex, item: i32, st: Style) -> i32:
+    val frame = st.pad_t + st.pad_b + st.border_t + st.border_b
+    if flex_item_zero_basis(st):
+        return frame
+    if st.flex_basis_px > 0:
+        return if st.border_box: st.flex_basis_px else: st.flex_basis_px + frame
+    if st.height_px > 0 or nodes[item].tag == "#text":
+        return flex_item_outer_height(nodes[item], st)
+    val first = child_index.first_child[item]
+    if first < 0:
+        return frame
+    if nodes[first].tag == "#text" and child_index.next_sibling[first] < 0:
+        return frame + style_line_h(st)
+    -1
+
+# Used outer heights of the children of column flex container `i`, in sibling
+# order (-1 = keep the hypothetical height), when its main size is definite:
+# a `height`, or a max-/min-height that clamps the summed bases (Flexbox 9.7).
+# Grow shares positive free space by flex-grow; shrink shares a deficit by
+# flex-shrink x base and freezes an item at its floor. Empty = nothing to do.
+fn col_flex_target_heights(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, st: Style, iw: i32, content_height_limit: i32, legacy_widget_box: bool) -> [i32]:
+    if st.height_px <= 0 and st.max_height_px <= 0 and st.min_height_px <= 0:
+        return []
+    val frame_y = st.pad_t + st.pad_b + st.border_t + st.border_b
+    val outer_is_box = legacy_widget_box or st.border_box
+    var base: [i32] = []
+    var grow: [i32] = []
+    var shrink: [i32] = []
+    var floor: [i32] = []
+    var fixed = 0
+    var items = 0
+    var c = child_index.first_child[i]
+    while c >= 0:
+        val kst = style_with_resolved_percent_min_max(styles[c], iw, content_height_limit)
+        if kst.position_absolute or simple_web_style_hot_is_display_none(computed_style_hot_from(kst)):
+            base = base.push(-1)
+            grow = grow.push(0)
+            shrink = shrink.push(0)
+            floor = floor.push(-1)
+        else:
+            val kh = resolve_percent_height_px(kst.height_px, content_height_limit)
+            val rst = if kh > 0 and kh != kst.height_px: style_with_height(kst, kh) else: kst
+            val kbase = col_flex_base_h(nodes, child_index, c, rst)
+            # ponytail: an auto-height item with element children has no
+            # measured content height here, so the whole container keeps its
+            # hypothetical heights. Measure the subtree to lift this.
+            if kbase < 0:
+                return []
+            base = base.push(kbase)
+            grow = grow.push(rst.flex_grow)
+            shrink = shrink.push(rst.flex_shrink)
+            floor = floor.push(col_flex_shrink_floor_h(nodes, child_index, c, rst))
+            if not rst.margin_t_auto:
+                fixed = fixed + rst.margin_t
+            if not rst.margin_b_auto:
+                fixed = fixed + rst.margin_b
+            items = items + 1
+        c = child_index.next_sibling[c]
+    if items > 1:
+        fixed = fixed + st.row_gap_px * (items - 1)
+    val n = base.len()
+    var sum = fixed
+    var k = 0
+    while k < n:
+        if base[k] >= 0:
+            sum = sum + base[k]
+        k = k + 1
+    var main = -1
+    if st.height_px > 0:
+        main = if outer_is_box: st.height_px - frame_y else: st.height_px
+    elif st.max_height_px > 0:
+        val max_main = if outer_is_box: st.max_height_px - frame_y else: st.max_height_px
+        if sum > max_main:
+            main = max_main
+    if main < 0 and st.height_px <= 0 and st.min_height_px > 0:
+        val min_main = if outer_is_box: st.min_height_px - frame_y else: st.min_height_px
+        if sum < min_main:
+            main = min_main
+    if main < 0 or main == sum:
+        return []
+    var target: [i32] = [-1; n]
+    if main > sum:
+        var grow_total = 0
+        k = 0
+        while k < n:
+            if base[k] >= 0:
+                grow_total = grow_total + grow[k]
+            k = k + 1
+        if grow_total == 0:
+            return []
+        val free = main - sum
+        var used = 0
+        var assigned = 0
+        k = 0
+        while k < n:
+            if base[k] >= 0 and grow[k] > 0:
+                val after = free * (used + grow[k]) / grow_total
+                target[k] = base[k] + after - assigned
+                used = used + grow[k]
+                assigned = after
+            k = k + 1
+        return target
+    var frozen: [bool] = [false; n]
+    var changed = true
+    while changed:
+        changed = false
+        var avail = main - fixed
+        var scaled = 0
+        k = 0
+        while k < n:
+            if base[k] >= 0:
+                if frozen[k]:
+                    avail = avail - target[k]
+                elif shrink[k] > 0 and floor[k] >= 0:
+                    avail = avail - base[k]
+                    scaled = scaled + shrink[k] * base[k]
+                else:
+                    avail = avail - base[k]
+            k = k + 1
+        if scaled == 0 or avail >= 0:
+            changed = false
+        else:
+            k = 0
+            while k < n:
+                if base[k] >= 0 and not frozen[k] and shrink[k] > 0 and floor[k] >= 0:
+                    val t = base[k] + avail * shrink[k] * base[k] / scaled
+                    if t < floor[k]:
+                        target[k] = floor[k]
+                        frozen[k] = true
+                        changed = true
+                    else:
+                        target[k] = t
+                k = k + 1
+    target
 
 # A flex item's percentage min-/max- sizes are of the flex container's
 # content box; an abspos child resolves its own in absolute_child_style.
@@ -2290,6 +2454,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             col_measure = child_index.next_sibling[col_measure]
         if col_nonabs_count > 1:
             col_run_h = col_run_h + st.row_gap_px * (col_nonabs_count - 1)
+        val col_targets = col_flex_target_heights(nodes, styles, child_index, i, st, iw, content_height_limit, legacy_widget_box)
+        var col_k = 0
         val col_container_main = if st.height_px > 0:
             if legacy_widget_box or st.border_box: st.height_px - st.pad_t - st.pad_b - border_y else: st.height_px
         else:
@@ -2371,7 +2537,26 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 elif (col_item_align == "flex-end" or col_item_align == "end") and iw > col_child_margin_w:
                     child_x = ix + cml + iw - col_child_margin_w
                     child_w = col_child_outer_w
-                val child = layout_with_style(nodes, styles, child_index, flex_c, child_x, cy_flex, child_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
+                # A definite main size grows or shrinks the item (Flexbox 9.7). An
+                # auto-height item with content never ends below its content.
+                val col_t = if col_k < col_targets.len(): col_targets[col_k] else: -1
+                var item_cst = resolved_cst
+                var natural_first = false
+                if col_t >= 0:
+                    val col_frame = resolved_cst.pad_t + resolved_cst.pad_b + resolved_cst.border_t + resolved_cst.border_b
+                    var col_tc = if nodes[flex_c].has_widget_class or nodes[flex_c].has_icon_image_class or resolved_cst.border_box: col_t else: col_t - col_frame
+                    if col_tc < 1:
+                        col_tc = 1
+                    item_cst = style_with_height(resolved_cst, col_tc)
+                    natural_first = resolved_cst.height_px == 0 and child_index.first_child[flex_c] >= 0
+                val col_float_n = float_ctx_count()
+                val col_float_max = g_float_max_y1
+                var child = layout_with_style(nodes, styles, child_index, flex_c, child_x, cy_flex, child_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, if natural_first: resolved_cst else: item_cst)
+                if natural_first and child.height < col_t:
+                    # The natural pass placed this subtree's floats; drop them.
+                    float_ctx_truncate(col_float_n)
+                    g_float_max_y1 = col_float_max
+                    child = layout_with_style(nodes, styles, child_index, flex_c, child_x, cy_flex, child_w, viewport_w, viewport_h, child.bx, child.by, child.bw, child.bh, child.wrap_starts, child.wrap_ends, child.intrinsic_widths, item_cst)
                 out_bx = child.bx
                 out_by = child.by
                 out_bw = child.bw
@@ -2381,6 +2566,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 out_intrinsic_widths = child.intrinsic_widths
                 cy_flex = cy_flex + child.height + (if resolved_cst.margin_b_auto: col_auto_main_margin_px else: resolved_cst.margin_b)
                 flex_child_count_col = flex_child_count_col + 1
+            col_k = col_k + 1
             flex_c = child_index.next_sibling[flex_c]
         var flex_h_col = (cy_flex - y) + st.pad_b + st.border_b
         val explicit_flex_h_col = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
