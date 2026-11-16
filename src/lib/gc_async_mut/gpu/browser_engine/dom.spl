@@ -88,6 +88,129 @@ impl StyleProps:
 # `set_attr` for its render-cache sentinels; DOM consumers filter that prefix.
 val CSS_SET_MARKER_PREFIX: text = "\u0000simple-css-set:"
 
+val DOM_INLINE_ATTR_CAP: i64 = 8
+
+# Tier 1 BeDomNode attribute presence + overflow bits (lower 16 bits of attr_mask).
+val DOM_ATTR_ID_BIT: u32 = 1u32
+val DOM_ATTR_CLASS_BIT: u32 = 2u32
+val DOM_ATTR_STYLE_BIT: u32 = 4u32
+val DOM_ATTR_HIDDEN_BIT: u32 = 8u32
+val DOM_ATTR_DISABLED_BIT: u32 = 16u32
+val DOM_ATTR_CHECKED_BIT: u32 = 32u32
+val DOM_ATTR_SELECTED_BIT: u32 = 64u32
+val DOM_ATTR_OPEN_BIT: u32 = 128u32
+val DOM_ATTR_ROLE_BIT: u32 = 256u32
+val DOM_ATTR_TYPE_BIT: u32 = 512u32
+val DOM_ATTR_NAME_BIT: u32 = 1024u32
+val DOM_ATTR_HREF_BIT: u32 = 2048u32
+val DOM_ATTR_SRC_BIT: u32 = 4096u32
+val DOM_ATTR_ARIA_BIT: u32 = 8192u32
+val DOM_ATTR_DATA_BIT: u32 = 16384u32
+val DOM_ATTR_OVERFLOW_BIT: u32 = 32768u32
+
+# Bitmask flags for `BeDomNode.css_declared_mask` (bits 0..30).
+val DOM_CSS_DECL_COLOR: u32 = 1u32
+val DOM_CSS_DECL_FONT_FAMILY: u32 = 2u32
+val DOM_CSS_DECL_FONT_SIZE: u32 = 4u32
+val DOM_CSS_DECL_FONT_WEIGHT: u32 = 8u32
+val DOM_CSS_DECL_LINE_HEIGHT: u32 = 16u32
+val DOM_CSS_DECL_TEXT_ALIGN: u32 = 32u32
+val DOM_CSS_DECL_DISPLAY: u32 = 64u32
+val DOM_CSS_DECL_WIDTH: u32 = 128u32
+val DOM_CSS_DECL_HEIGHT: u32 = 256u32
+val DOM_CSS_DECL_BACKGROUND_COLOR: u32 = 512u32
+val DOM_CSS_DECL_FLOAT: u32 = 1024u32
+val DOM_CSS_DECL_CLEAR: u32 = 2048u32
+val DOM_CSS_DECL_OVERFLOW: u32 = 4096u32
+val DOM_CSS_DECL_POSITION: u32 = 8192u32
+val DOM_CSS_DECL_TEXT_DECORATION: u32 = 16384u32
+val DOM_CSS_DECL_TEXT_DECORATION_LINE: u32 = 32768u32
+val DOM_CSS_DECL_FLEX_DIRECTION: u32 = 65536u32
+val DOM_CSS_DECL_BORDER_COLOR: u32 = 131072u32
+val DOM_CSS_DECL_BORDER_STYLE: u32 = 262144u32
+val DOM_CSS_DECL_TOP: u32 = 524288u32
+val DOM_CSS_DECL_LEFT: u32 = 1048576u32
+val DOM_CSS_DECL_FLEX_GROW: u32 = 2097152u32
+val DOM_CSS_DECL_Z_INDEX: u32 = 4194304u32
+val DOM_CSS_DECL_MARGIN: u32 = 8388608u32
+val DOM_CSS_DECL_MARGIN_TOP: u32 = 16777216u32
+val DOM_CSS_DECL_MARGIN_RIGHT: u32 = 33554432u32
+val DOM_CSS_DECL_MARGIN_BOTTOM: u32 = 67108864u32
+val DOM_CSS_DECL_MARGIN_LEFT: u32 = 134217728u32
+val DOM_CSS_DECL_PADDING: u32 = 268435456u32
+val DOM_CSS_DECL_BORDER: u32 = 536870912u32
+val DOM_CSS_DECL_BORDER_WIDTH: u32 = 1073741824u32
+
+# reason: 32-bit Bloom filter mask aligned with GPU DomArena u32 bitmask column
+# @allow(primitive_api)
+pub fn dom_attr_bloom_bit(attr_lower: text) -> u32:
+    """Compute single upper-16-bit Bloom filter bit for a lowercase attribute name."""
+    var h: u32 = 5381u32
+    var i = 0
+    val n = attr_lower.byte_len()
+    while i < n:
+        val b = attr_lower.byte_at(i).to_u32()
+        h = ((h << 5) + h + b) & 65535u32
+        i = i + 1
+    val slot = (h ^ (h >> 4)) & 15u32
+    1u32 << (16u32 + slot)
+
+fn _dom_attr_hot_bit(attr_lower: text) -> u32:
+    if attr_lower == "id": return DOM_ATTR_ID_BIT
+    if attr_lower == "class": return DOM_ATTR_CLASS_BIT
+    if attr_lower == "style": return DOM_ATTR_STYLE_BIT
+    if attr_lower == "hidden": return DOM_ATTR_HIDDEN_BIT
+    if attr_lower == "disabled": return DOM_ATTR_DISABLED_BIT
+    if attr_lower == "checked": return DOM_ATTR_CHECKED_BIT
+    if attr_lower == "selected": return DOM_ATTR_SELECTED_BIT
+    if attr_lower == "open": return DOM_ATTR_OPEN_BIT
+    if attr_lower == "role": return DOM_ATTR_ROLE_BIT
+    if attr_lower == "type": return DOM_ATTR_TYPE_BIT
+    if attr_lower == "name": return DOM_ATTR_NAME_BIT
+    if attr_lower == "href": return DOM_ATTR_HREF_BIT
+    if attr_lower == "src": return DOM_ATTR_SRC_BIT
+    if attr_lower.starts_with("aria-"): return DOM_ATTR_ARIA_BIT
+    if attr_lower.starts_with("data-"): return DOM_ATTR_DATA_BIT
+    0u32
+
+fn _dom_attr_mask_bits(name: text) -> u32:
+    val lower = name.lower()
+    _dom_attr_hot_bit(lower) | dom_attr_bloom_bit(lower)
+
+fn _dom_css_decl_bit(prop: text) -> u32:
+    if prop == "color": return DOM_CSS_DECL_COLOR
+    if prop == "font-family": return DOM_CSS_DECL_FONT_FAMILY
+    if prop == "font-size": return DOM_CSS_DECL_FONT_SIZE
+    if prop == "font-weight": return DOM_CSS_DECL_FONT_WEIGHT
+    if prop == "line-height": return DOM_CSS_DECL_LINE_HEIGHT
+    if prop == "text-align": return DOM_CSS_DECL_TEXT_ALIGN
+    if prop == "display": return DOM_CSS_DECL_DISPLAY
+    if prop == "width": return DOM_CSS_DECL_WIDTH
+    if prop == "height": return DOM_CSS_DECL_HEIGHT
+    if prop == "background-color": return DOM_CSS_DECL_BACKGROUND_COLOR
+    if prop == "float": return DOM_CSS_DECL_FLOAT
+    if prop == "clear": return DOM_CSS_DECL_CLEAR
+    if prop == "overflow": return DOM_CSS_DECL_OVERFLOW
+    if prop == "position": return DOM_CSS_DECL_POSITION
+    if prop == "text-decoration": return DOM_CSS_DECL_TEXT_DECORATION
+    if prop == "text-decoration-line": return DOM_CSS_DECL_TEXT_DECORATION_LINE
+    if prop == "flex-direction": return DOM_CSS_DECL_FLEX_DIRECTION
+    if prop == "border-color": return DOM_CSS_DECL_BORDER_COLOR
+    if prop == "border-style": return DOM_CSS_DECL_BORDER_STYLE
+    if prop == "top": return DOM_CSS_DECL_TOP
+    if prop == "left": return DOM_CSS_DECL_LEFT
+    if prop == "flex-grow": return DOM_CSS_DECL_FLEX_GROW
+    if prop == "z-index": return DOM_CSS_DECL_Z_INDEX
+    if prop == "margin": return DOM_CSS_DECL_MARGIN
+    if prop == "margin-top": return DOM_CSS_DECL_MARGIN_TOP
+    if prop == "margin-right": return DOM_CSS_DECL_MARGIN_RIGHT
+    if prop == "margin-bottom": return DOM_CSS_DECL_MARGIN_BOTTOM
+    if prop == "margin-left": return DOM_CSS_DECL_MARGIN_LEFT
+    if prop == "padding": return DOM_CSS_DECL_PADDING
+    if prop == "border": return DOM_CSS_DECL_BORDER
+    if prop == "border-width": return DOM_CSS_DECL_BORDER_WIDTH
+    0u32
+
 fn css_split_ws(value: text) -> [text]:
     """Split a CSS value on runs of whitespace, dropping empty parts."""
     val norm = value.trim().replace("\t", " ").replace("\n", " ").replace("\r", " ")
@@ -195,13 +318,26 @@ class BeDomNode:
     node_id: i64
     tag_name: text          # e.g. "div", "span", "#text", "#document"
     data: text              # text content for #text nodes
-    attributes: Dict<text, text>
+    # Tier 1: embedded presence/bloom bitmasks + hot attribute slots
+    attr_mask: u32 = 0u32
+    css_declared_mask: u32 = 0u32
+    id_attr: text = ""
+    class_attr: text = ""
+    style_attr: text = ""
+    src_attr: text = ""
+    role_attr: text = ""
+    # Tier 2: bounded parallel arrays (<= DOM_INLINE_ATTR_CAP cold attrs) + rare custom CSS props
+    attr_keys: [text] = []
+    attr_vals: [text] = []
+    css_declared_extra: [text] = []
+    # Tier 3: host-only Dict overflow (> DOM_INLINE_ATTR_CAP cold attrs or internal \u0000 render keys)
+    attributes: Dict<text, text> = {}
     style: StyleProps
     children: [BeDomNode]
     parent_id: i64          # -1 for root
-    event_listener_types: [text]
-    event_listener_actions: [text]
-    event_listener_capture: [bool]
+    event_listener_types: [text] = []
+    event_listener_actions: [text] = []
+    event_listener_capture: [bool] = []
 
     me add_event_listener_with_capture(event_type: text, action: text, capture: bool):
         """Register a listener, reusing a removed listener tombstone."""
@@ -354,26 +490,497 @@ fn normalize_dom_event_type(event_type: text) -> text:
         return normalized.substring(2, normalized.byte_len())
     normalized
 
-fn be_dom_find_by_id(node: BeDomNode, id_value: text) -> BeDomNode?:
-    # Explicit parens: without them this parses as `get("id") ?? ("" == id_value)`.
-    if (node.attributes.get("id") ?? "") == id_value:
+class _BeAttrPred:
+    name: text
+    name_lower: text
+    presence_bit: u32
+    bloom_bit: u32
+    op: u32               # 0=[attr], 1==, 2=~=, 3=|=, 4=^=, 5=$=, 6=*=
+    expected: text
+    case_insensitive: bool
+
+class _BeCompoundSel:
+    tag: text             # "" or "*" means any element
+    req_ids: [text]
+    req_classes: [text]
+    attr_preds: [_BeAttrPred]
+    valid: bool
+
+class _BeSelectorChain:
+    compounds: [_BeCompoundSel]
+    combinators: [text]   # length = compounds.len() - 1 (" " or ">")
+
+fn _css_attr_op_matches(actual: text, op: u32, expected: text, case_insensitive: bool) -> bool:
+    if op == 0u32:
+        return true
+    val a = if case_insensitive: actual.lower() else: actual
+    val e = if case_insensitive: expected.lower() else: expected
+    if op == 1u32:
+        return a == e
+    if op == 2u32:
+        if e == "" or e.contains(" ") or e.contains("\t") or e.contains("\n") or e.contains("\r"):
+            return false
+        val words = css_split_ws(a)
+        var i = 0
+        while i < words.len():
+            if words[i] == e:
+                return true
+            i = i + 1
+        return false
+    if op == 3u32:
+        if a == e:
+            return true
+        return e != "" and a.starts_with(e + "-")
+    if op == 4u32:
+        return e != "" and a.starts_with(e)
+    if op == 5u32:
+        return e != "" and a.ends_with(e)
+    if op == 6u32:
+        return e != "" and a.contains(e)
+    false
+
+fn _be_parse_attr_pred(raw_expr: text) -> _BeAttrPred?:
+    val s = raw_expr.trim()
+    val slen = s.byte_len()
+    if slen == 0:
+        return None
+    var pos = 0
+    while pos < slen:
+        val ch = s.substring(pos, pos + 1)
+        if (
+            ch == " " or ch == "\t" or ch == "\n" or ch == "\r" or
+            ch == "=" or ch == "~" or ch == "|" or ch == "^" or ch == "$" or ch == "*"
+        ):
+            break
+        pos = pos + 1
+    val name = s.substring(0, pos).trim()
+    if name == "":
+        return None
+    val name_lower = name.lower()
+    val presence_bit = _dom_attr_hot_bit(name_lower)
+    val bloom_bit = dom_attr_bloom_bit(name_lower)
+    while pos < slen:
+        val ws = s.substring(pos, pos + 1)
+        if ws != " " and ws != "\t" and ws != "\n" and ws != "\r":
+            break
+        pos = pos + 1
+    if pos >= slen:
+        return Some(_BeAttrPred(
+            name: name,
+            name_lower: name_lower,
+            presence_bit: presence_bit,
+            bloom_bit: bloom_bit,
+            op: 0u32,
+            expected: "",
+            case_insensitive: false
+        ))
+    var op = 0u32
+    val c0 = s.substring(pos, pos + 1)
+    if c0 == "=":
+        op = 1u32
+        pos = pos + 1
+    elif pos + 2 <= slen and s.substring(pos, pos + 2) == "~=":
+        op = 2u32
+        pos = pos + 2
+    elif pos + 2 <= slen and s.substring(pos, pos + 2) == "|=":
+        op = 3u32
+        pos = pos + 2
+    elif pos + 2 <= slen and s.substring(pos, pos + 2) == "^=":
+        op = 4u32
+        pos = pos + 2
+    elif pos + 2 <= slen and s.substring(pos, pos + 2) == "$=":
+        op = 5u32
+        pos = pos + 2
+    elif pos + 2 <= slen and s.substring(pos, pos + 2) == "*=":
+        op = 6u32
+        pos = pos + 2
+    else:
+        return None
+    while pos < slen:
+        val ws = s.substring(pos, pos + 1)
+        if ws != " " and ws != "\t" and ws != "\n" and ws != "\r":
+            break
+        pos = pos + 1
+    var expected = ""
+    if pos < slen and (s.substring(pos, pos + 1) == "\"" or s.substring(pos, pos + 1) == "'"):
+        val quote = s.substring(pos, pos + 1)
+        pos = pos + 1
+        val val_start = pos
+        var closed = false
+        while pos < slen:
+            val qc = s.substring(pos, pos + 1)
+            if qc == "\\" and pos + 1 < slen:
+                pos = pos + 2
+                continue
+            if qc == quote:
+                closed = true
+                break
+            pos = pos + 1
+        if not closed:
+            return None
+        expected = s.substring(val_start, pos)
+        pos = pos + 1
+    else:
+        val val_start = pos
+        while pos < slen:
+            val vc = s.substring(pos, pos + 1)
+            if vc == " " or vc == "\t" or vc == "\n" or vc == "\r":
+                break
+            pos = pos + 1
+        expected = s.substring(val_start, pos)
+    val flag = s.substring(pos, slen).trim().lower()
+    var ci = false
+    if flag == "i":
+        ci = true
+    elif flag != "" and flag != "s":
+        return None
+    Some(_BeAttrPred(
+        name: name,
+        name_lower: name_lower,
+        presence_bit: presence_bit,
+        bloom_bit: bloom_bit,
+        op: op,
+        expected: expected,
+        case_insensitive: ci
+    ))
+
+fn _be_parse_compound_sel(raw: text) -> _BeCompoundSel:
+    val s = raw.trim()
+    val slen = s.byte_len()
+    if slen == 0:
+        return _BeCompoundSel(tag: "", req_ids: [], req_classes: [], attr_preds: [], valid: false)
+    var tag = ""
+    var req_ids: [text] = []
+    var req_classes: [text] = []
+    var attr_preds: [_BeAttrPred] = []
+    var pos = 0
+    val first = s.substring(0, 1)
+    if first != "." and first != "#" and first != "[":
+        while pos < slen:
+            val ch = s.substring(pos, pos + 1)
+            if ch == "." or ch == "#" or ch == "[":
+                break
+            pos = pos + 1
+        tag = s.substring(0, pos).trim()
+    while pos < slen:
+        val ch = s.substring(pos, pos + 1)
+        if ch == "#" or ch == ".":
+            pos = pos + 1
+            val start = pos
+            while pos < slen:
+                val c2 = s.substring(pos, pos + 1)
+                if c2 == "#" or c2 == "." or c2 == "[":
+                    break
+                pos = pos + 1
+            val ident = s.substring(start, pos).trim()
+            if ident == "":
+                return _BeCompoundSel(tag: "", req_ids: [], req_classes: [], attr_preds: [], valid: false)
+            if ch == "#":
+                req_ids.push(ident)
+            else:
+                req_classes.push(ident)
+        elif ch == "[":
+            pos = pos + 1
+            val start = pos
+            var quote = ""
+            var found_close = false
+            while pos < slen:
+                val c2 = s.substring(pos, pos + 1)
+                if quote != "":
+                    if c2 == "\\" and pos + 1 < slen:
+                        pos = pos + 2
+                        continue
+                    if c2 == quote:
+                        quote = ""
+                else:
+                    if c2 == "\"" or c2 == "'":
+                        quote = c2
+                    elif c2 == "]":
+                        found_close = true
+                        break
+                pos = pos + 1
+            if not found_close:
+                return _BeCompoundSel(tag: "", req_ids: [], req_classes: [], attr_preds: [], valid: false)
+            val parsed_opt = _be_parse_attr_pred(s.substring(start, pos))
+            match parsed_opt:
+                case Some(pred):
+                    attr_preds.push(pred)
+                case nil:
+                    return _BeCompoundSel(tag: "", req_ids: [], req_classes: [], attr_preds: [], valid: false)
+            pos = pos + 1
+        else:
+            return _BeCompoundSel(tag: "", req_ids: [], req_classes: [], attr_preds: [], valid: false)
+    _BeCompoundSel(tag: tag, req_ids: req_ids, req_classes: req_classes, attr_preds: attr_preds, valid: true)
+
+fn _be_split_selector_list(selector: text) -> [text]:
+    var groups: [text] = []
+    val slen = selector.byte_len()
+    var start = 0
+    var pos = 0
+    var bracket_depth = 0
+    var quote = ""
+    while pos < slen:
+        val ch = selector.substring(pos, pos + 1)
+        if quote != "":
+            if ch == "\\" and pos + 1 < slen:
+                pos = pos + 2
+                continue
+            if ch == quote:
+                quote = ""
+        else:
+            if ch == "\"" or ch == "'":
+                quote = ch
+            elif ch == "[":
+                bracket_depth = bracket_depth + 1
+            elif ch == "]" and bracket_depth > 0:
+                bracket_depth = bracket_depth - 1
+            elif ch == "," and bracket_depth == 0:
+                val part = selector.substring(start, pos).trim()
+                if part != "":
+                    groups.push(part)
+                start = pos + 1
+        pos = pos + 1
+    val tail = selector.substring(start, slen).trim()
+    if tail != "":
+        groups.push(tail)
+    groups
+
+fn _be_parse_selector_chain(raw_chain: text) -> _BeSelectorChain?:
+    val s = raw_chain.trim()
+    val slen = s.byte_len()
+    if slen == 0:
+        return None
+    var compounds: [_BeCompoundSel] = []
+    var combinators: [text] = []
+    var pos = 0
+    var bracket_depth = 0
+    var quote = ""
+    var tok_start = 0
+    while pos < slen:
+        val ch = s.substring(pos, pos + 1)
+        if quote != "":
+            if ch == "\\" and pos + 1 < slen:
+                pos = pos + 2
+                continue
+            if ch == quote:
+                quote = ""
+            pos = pos + 1
+            continue
+        if ch == "\"" or ch == "'":
+            quote = ch
+            pos = pos + 1
+            continue
+        if ch == "[":
+            bracket_depth = bracket_depth + 1
+            pos = pos + 1
+            continue
+        if ch == "]" and bracket_depth > 0:
+            bracket_depth = bracket_depth - 1
+            pos = pos + 1
+            continue
+        if bracket_depth == 0 and (ch == " " or ch == "\t" or ch == "\n" or ch == "\r" or ch == ">"):
+            if pos > tok_start:
+                val c = _be_parse_compound_sel(s.substring(tok_start, pos))
+                if not c.valid:
+                    return None
+                compounds.push(c)
+            var comb = " "
+            while pos < slen:
+                val wc = s.substring(pos, pos + 1)
+                if wc == ">":
+                    comb = ">"
+                    pos = pos + 1
+                elif wc == " " or wc == "\t" or wc == "\n" or wc == "\r":
+                    pos = pos + 1
+                else:
+                    break
+            if compounds.len() == 0:
+                return None
+            if combinators.len() < compounds.len():
+                combinators.push(comb)
+            tok_start = pos
+            continue
+        pos = pos + 1
+    if tok_start < slen:
+        val c = _be_parse_compound_sel(s.substring(tok_start, slen))
+        if not c.valid:
+            return None
+        compounds.push(c)
+    if compounds.len() == 0 or combinators.len() != compounds.len() - 1:
+        return None
+    Some(_BeSelectorChain(compounds: compounds, combinators: combinators))
+
+fn _be_parse_selector_chains(selector: text) -> [_BeSelectorChain]:
+    var chains: [_BeSelectorChain] = []
+    val groups = _be_split_selector_list(selector)
+    var i = 0
+    while i < groups.len():
+        val chain_opt = _be_parse_selector_chain(groups[i])
+        match chain_opt:
+            case Some(chain):
+                chains.push(chain)
+            case nil:
+                val _noop = 0
+        i = i + 1
+    chains
+
+fn _be_node_matches_compound(node: BeDomNode, sel: _BeCompoundSel) -> bool:
+    if not sel.valid:
+        return false
+    if sel.tag != "" and sel.tag != "*":
+        if node.tag_name != sel.tag:
+            return false
+    elif not node.is_element():
+        return false
+    val allow_mask_reject = node.attributes.len() == 0 or (node.attr_mask & DOM_ATTR_OVERFLOW_BIT) != 0u32
+    if sel.req_ids.len() > 0:
+        if allow_mask_reject and (node.attr_mask & DOM_ATTR_ID_BIT) == 0u32:
+            return false
+        val actual_id = node.get_attr("id")
+        var ii = 0
+        while ii < sel.req_ids.len():
+            if actual_id != sel.req_ids[ii]:
+                return false
+            ii = ii + 1
+    if sel.req_classes.len() > 0:
+        if allow_mask_reject and (node.attr_mask & DOM_ATTR_CLASS_BIT) == 0u32:
+            return false
+        val cls_str = node.get_attr("class")
+        if cls_str == "":
+            return false
+        val cls_words = css_split_ws(cls_str)
+        var ci = 0
+        while ci < sel.req_classes.len():
+            val want = sel.req_classes[ci]
+            var found_cls = false
+            var wi = 0
+            while wi < cls_words.len():
+                if cls_words[wi] == want:
+                    found_cls = true
+                    break
+                wi = wi + 1
+            if not found_cls:
+                return false
+            ci = ci + 1
+    var ai = 0
+    while ai < sel.attr_preds.len():
+        val pred = sel.attr_preds[ai]
+        if allow_mask_reject:
+            if (node.attr_mask & pred.bloom_bit) == 0u32:
+                return false
+            if pred.presence_bit != 0u32 and (node.attr_mask & pred.presence_bit) == 0u32:
+                return false
+        var actual = ""
+        var present = false
+        if node.has_attr(pred.name):
+            present = true
+            actual = node.get_attr(pred.name)
+        elif pred.name != pred.name_lower and node.has_attr(pred.name_lower):
+            present = true
+            actual = node.get_attr(pred.name_lower)
+        if not present:
+            return false
+        if not _css_attr_op_matches(actual, pred.op, pred.expected, pred.case_insensitive):
+            return false
+        ai = ai + 1
+    true
+
+fn _be_node_matches_chain(node: BeDomNode, ancestors: [BeDomNode], chain: _BeSelectorChain) -> bool:
+    val clen = chain.compounds.len()
+    if clen == 0:
+        return false
+    if not _be_node_matches_compound(node, chain.compounds[clen - 1]):
+        return false
+    if clen == 1:
+        return true
+    var ci = clen - 2
+    var anc_idx = ancestors.len() - 1
+    while ci >= 0:
+        val comb = chain.combinators[ci]
+        if comb == ">":
+            if anc_idx < 0:
+                return false
+            if not _be_node_matches_compound(ancestors[anc_idx], chain.compounds[ci]):
+                return false
+            anc_idx = anc_idx - 1
+        else:
+            var matched = false
+            while anc_idx >= 0:
+                val candidate = ancestors[anc_idx]
+                anc_idx = anc_idx - 1
+                if _be_node_matches_compound(candidate, chain.compounds[ci]):
+                    matched = true
+                    break
+            if not matched:
+                return false
+        ci = ci - 1
+    true
+
+fn _be_node_matches_any_chain(node: BeDomNode, ancestors: [BeDomNode], chains: [_BeSelectorChain]) -> bool:
+    var i = 0
+    while i < chains.len():
+        if _be_node_matches_chain(node, ancestors, chains[i]):
+            return true
+        i = i + 1
+    false
+
+fn _be_walk_first_match(node: BeDomNode, ancestors: [BeDomNode], chains: [_BeSelectorChain]) -> BeDomNode?:
+    if _be_node_matches_any_chain(node, ancestors, chains):
         return Some(node)
+    if node.children.len() == 0:
+        return None
+    var next_ancestors = ancestors
+    next_ancestors.push(node)
+    var i = 0
+    while i < node.children.len():
+        val found = _be_walk_first_match(node.children[i], next_ancestors, chains)
+        if found.?:
+            return found
+        i = i + 1
+    None
+
+fn _be_walk_all_matches(node: BeDomNode, ancestors: [BeDomNode], chains: [_BeSelectorChain], out: [BeDomNode]):
+    if _be_node_matches_any_chain(node, ancestors, chains):
+        out.push(node)
+    if node.children.len() == 0:
+        return
+    var next_ancestors = ancestors
+    next_ancestors.push(node)
+    var i = 0
+    while i < node.children.len():
+        _be_walk_all_matches(node.children[i], next_ancestors, chains, out)
+        i = i + 1
+
+fn be_dom_find_by_id(node: BeDomNode, id_value: text) -> BeDomNode?:
+    val allow_mask_reject = node.attributes.len() == 0 or (node.attr_mask & DOM_ATTR_OVERFLOW_BIT) != 0u32
+    if not (allow_mask_reject and (node.attr_mask & DOM_ATTR_ID_BIT) == 0u32):
+        if node.get_attr("id") == id_value:
+            return Some(node)
     for child in node.children:
         val found = be_dom_find_by_id(child, id_value)
         if found.?:
             return found
-    nil
+    None
 
 fn be_dom_query_selector(node: BeDomNode, selector: text) -> BeDomNode?:
-    if selector.starts_with("#"):
-        return be_dom_find_by_id(node, selector.substring(1, selector.byte_len()))
-    if node.tag_name == selector:
-        return Some(node)
-    for child in node.children:
-        val found = be_dom_query_selector(child, selector)
-        if found.?:
-            return found
-    nil
+    val trimmed = selector.trim()
+    if trimmed == "":
+        return None
+    val chains = _be_parse_selector_chains(trimmed)
+    if chains.len() == 0:
+        return None
+    _be_walk_first_match(node, [], chains)
+
+pub fn be_dom_query_selector_all(root: BeDomNode, selector: text) -> [BeDomNode]:
+    val trimmed = selector.trim()
+    if trimmed == "":
+        return []
+    val chains = _be_parse_selector_chains(trimmed)
+    if chains.len() == 0:
+        return []
+    var out: [BeDomNode] = []
+    _be_walk_all_matches(root, [], chains, out)
+    out
 
 pub fn be_dom_debug_manual_tree_dump() -> text:
     """Permanent debug entry point: builds a tiny BeDomNode tree by hand
@@ -420,6 +1027,16 @@ impl BeDomNode:
             node_id: 0,
             tag_name: tag_name,
             data: "",
+            attr_mask: 0u32,
+            css_declared_mask: 0u32,
+            id_attr: "",
+            class_attr: "",
+            style_attr: "",
+            src_attr: "",
+            role_attr: "",
+            attr_keys: [],
+            attr_vals: [],
+            css_declared_extra: [],
             attributes: {},
             style: StyleProps.empty(),
             children: [],
@@ -447,6 +1064,16 @@ impl BeDomNode:
             node_id: node_id,
             tag_name: tag_name,
             data: "",
+            attr_mask: 0u32,
+            css_declared_mask: 0u32,
+            id_attr: "",
+            class_attr: "",
+            style_attr: "",
+            src_attr: "",
+            role_attr: "",
+            attr_keys: [],
+            attr_vals: [],
+            css_declared_extra: [],
             attributes: {},
             style: StyleProps.empty(),
             children: [],
@@ -462,6 +1089,16 @@ impl BeDomNode:
             node_id: node_id,
             tag_name: "#text",
             data: data,
+            attr_mask: 0u32,
+            css_declared_mask: 0u32,
+            id_attr: "",
+            class_attr: "",
+            style_attr: "",
+            src_attr: "",
+            role_attr: "",
+            attr_keys: [],
+            attr_vals: [],
+            css_declared_extra: [],
             attributes: {},
             style: StyleProps.empty(),
             children: [],
@@ -481,6 +1118,16 @@ impl BeDomNode:
             node_id: 0,
             tag_name: "#document",
             data: "",
+            attr_mask: 0u32,
+            css_declared_mask: 0u32,
+            id_attr: "",
+            class_attr: "",
+            style_attr: "",
+            src_attr: "",
+            role_attr: "",
+            attr_keys: [],
+            attr_vals: [],
+            css_declared_extra: [],
             attributes: {},
             style: StyleProps.empty(),
             children: [],
@@ -497,28 +1144,216 @@ impl BeDomNode:
         self.tag_name == "#text"
 
     fn get_attr(name: text) -> text:
-        self.attributes.get(name) ?? ""
+        if self.attributes.len() > 0 and self.attributes.contains_key(name):
+            return self.attributes[name]
+        if name == "id":
+            if (self.attr_mask & DOM_ATTR_ID_BIT) != 0u32:
+                return self.id_attr
+            return ""
+        if name == "class":
+            if (self.attr_mask & DOM_ATTR_CLASS_BIT) != 0u32:
+                return self.class_attr
+            return ""
+        if name == "style":
+            if (self.attr_mask & DOM_ATTR_STYLE_BIT) != 0u32:
+                return self.style_attr
+            return ""
+        if name == "src":
+            if (self.attr_mask & DOM_ATTR_SRC_BIT) != 0u32:
+                return self.src_attr
+            return ""
+        if name == "role":
+            if (self.attr_mask & DOM_ATTR_ROLE_BIT) != 0u32:
+                return self.role_attr
+            return ""
+        if self.attr_keys.len() == 0:
+            return ""
+        val need_bit = dom_attr_bloom_bit(name.lower())
+        if (self.attr_mask & need_bit) == 0u32:
+            return ""
+        var i = 0
+        while i < self.attr_keys.len():
+            if self.attr_keys[i] == name:
+                return self.attr_vals[i]
+            i = i + 1
+        ""
 
     fn has_attr(name: text) -> bool:
-        self.attributes.has(name)
+        if self.attributes.len() > 0 and self.attributes.contains_key(name):
+            return true
+        if name == "id":
+            return (self.attr_mask & DOM_ATTR_ID_BIT) != 0u32
+        if name == "class":
+            return (self.attr_mask & DOM_ATTR_CLASS_BIT) != 0u32
+        if name == "style":
+            return (self.attr_mask & DOM_ATTR_STYLE_BIT) != 0u32
+        if name == "src":
+            return (self.attr_mask & DOM_ATTR_SRC_BIT) != 0u32
+        if name == "role":
+            return (self.attr_mask & DOM_ATTR_ROLE_BIT) != 0u32
+        if self.attr_keys.len() == 0:
+            return false
+        val need_bit = dom_attr_bloom_bit(name.lower())
+        if (self.attr_mask & need_bit) == 0u32:
+            return false
+        var i = 0
+        while i < self.attr_keys.len():
+            if self.attr_keys[i] == name:
+                return true
+            i = i + 1
+        false
+
+    fn attr_names() -> [text]:
+        """Return all authored attribute names (excluding internal NUL-prefixed keys)."""
+        var names: [text] = []
+        if (self.attr_mask & DOM_ATTR_ID_BIT) != 0u32:
+            names.push("id")
+        if (self.attr_mask & DOM_ATTR_CLASS_BIT) != 0u32:
+            names.push("class")
+        if (self.attr_mask & DOM_ATTR_STYLE_BIT) != 0u32:
+            names.push("style")
+        if (self.attr_mask & DOM_ATTR_SRC_BIT) != 0u32:
+            names.push("src")
+        if (self.attr_mask & DOM_ATTR_ROLE_BIT) != 0u32:
+            names.push("role")
+        var i = 0
+        while i < self.attr_keys.len():
+            val k = self.attr_keys[i]
+            if not k.starts_with("\u0000"):
+                names.push(k)
+            i = i + 1
+        if self.attributes.len() > 0:
+            for k in self.attributes.keys():
+                if not k.starts_with("\u0000"):
+                    var seen = false
+                    var ni = 0
+                    while ni < names.len():
+                        if names[ni] == k:
+                            seen = true
+                            break
+                        ni = ni + 1
+                    if not seen:
+                        names.push(k)
+        names
+
+    me _recompute_attr_mask():
+        var m: u32 = 0u32
+        if (self.attr_mask & DOM_ATTR_ID_BIT) != 0u32:
+            m = m | DOM_ATTR_ID_BIT | dom_attr_bloom_bit("id")
+        if (self.attr_mask & DOM_ATTR_CLASS_BIT) != 0u32:
+            m = m | DOM_ATTR_CLASS_BIT | dom_attr_bloom_bit("class")
+        if (self.attr_mask & DOM_ATTR_STYLE_BIT) != 0u32:
+            m = m | DOM_ATTR_STYLE_BIT | dom_attr_bloom_bit("style")
+        if (self.attr_mask & DOM_ATTR_SRC_BIT) != 0u32:
+            m = m | DOM_ATTR_SRC_BIT | dom_attr_bloom_bit("src")
+        if (self.attr_mask & DOM_ATTR_ROLE_BIT) != 0u32:
+            m = m | DOM_ATTR_ROLE_BIT | dom_attr_bloom_bit("role")
+        var i = 0
+        while i < self.attr_keys.len():
+            m = m | _dom_attr_mask_bits(self.attr_keys[i])
+            i = i + 1
+        if self.attributes.len() > 0:
+            var has_user_overflow = false
+            for k in self.attributes.keys():
+                if not k.starts_with("\u0000"):
+                    m = m | _dom_attr_mask_bits(k)
+                    has_user_overflow = true
+            if has_user_overflow:
+                m = m | DOM_ATTR_OVERFLOW_BIT
+        self.attr_mask = m
 
     me set_attr(name: text, value: text):
+        if self.attributes.len() > 0:
+            if name == "src":
+                self.attributes.remove("\u0000simple-render-image-src")
+            elif name == "poster":
+                self.attributes.remove("\u0000simple-render-image-poster")
+            elif name == "style":
+                self.attributes.remove("\u0000simple-render-image-style")
+        if name.starts_with("\u0000"):
+            self.attributes[name] = value
+            return
+        if self.attributes.len() > 0 and self.attributes.contains_key(name):
+            self.attributes.remove(name)
+        self.attr_mask = self.attr_mask | _dom_attr_mask_bits(name)
+        if name == "id":
+            self.id_attr = value
+            return
+        if name == "class":
+            self.class_attr = value
+            return
+        if name == "style":
+            self.style_attr = value
+            return
         if name == "src":
-            self.attributes.remove("\u0000simple-render-image-src")
-        elif name == "poster":
-            self.attributes.remove("\u0000simple-render-image-poster")
-        elif name == "style":
-            self.attributes.remove("\u0000simple-render-image-style")
+            self.src_attr = value
+            return
+        if name == "role":
+            self.role_attr = value
+            return
+        var i = 0
+        while i < self.attr_keys.len():
+            if self.attr_keys[i] == name:
+                var vals = self.attr_vals
+                vals[i] = value
+                self.attr_vals = vals
+                return
+            i = i + 1
+        if self.attr_keys.len() < DOM_INLINE_ATTR_CAP:
+            var keys = self.attr_keys
+            keys.push(name)
+            self.attr_keys = keys
+            var vals = self.attr_vals
+            vals.push(value)
+            self.attr_vals = vals
+            return
+        self.attr_mask = self.attr_mask | DOM_ATTR_OVERFLOW_BIT
         self.attributes[name] = value
 
     me remove_attr(name: text):
-        if name == "src":
-            self.attributes.remove("\u0000simple-render-image-src")
-        elif name == "poster":
-            self.attributes.remove("\u0000simple-render-image-poster")
+        if self.attributes.len() > 0:
+            if name == "src":
+                self.attributes.remove("\u0000simple-render-image-src")
+            elif name == "poster":
+                self.attributes.remove("\u0000simple-render-image-poster")
+            elif name == "style":
+                self.attributes.remove("\u0000simple-render-image-style")
+            if self.attributes.contains_key(name):
+                self.attributes.remove(name)
+        if name.starts_with("\u0000"):
+            return
+        if name == "id":
+            self.id_attr = ""
+            if (self.attr_mask & DOM_ATTR_ID_BIT) != 0u32:
+                self.attr_mask = self.attr_mask ^ DOM_ATTR_ID_BIT
+        elif name == "class":
+            self.class_attr = ""
+            if (self.attr_mask & DOM_ATTR_CLASS_BIT) != 0u32:
+                self.attr_mask = self.attr_mask ^ DOM_ATTR_CLASS_BIT
         elif name == "style":
-            self.attributes.remove("\u0000simple-render-image-style")
-        self.attributes.remove(name)
+            self.style_attr = ""
+            if (self.attr_mask & DOM_ATTR_STYLE_BIT) != 0u32:
+                self.attr_mask = self.attr_mask ^ DOM_ATTR_STYLE_BIT
+        elif name == "src":
+            self.src_attr = ""
+            if (self.attr_mask & DOM_ATTR_SRC_BIT) != 0u32:
+                self.attr_mask = self.attr_mask ^ DOM_ATTR_SRC_BIT
+        elif name == "role":
+            self.role_attr = ""
+            if (self.attr_mask & DOM_ATTR_ROLE_BIT) != 0u32:
+                self.attr_mask = self.attr_mask ^ DOM_ATTR_ROLE_BIT
+        else:
+            var new_keys: [text] = []
+            var new_vals: [text] = []
+            var i = 0
+            while i < self.attr_keys.len():
+                if self.attr_keys[i] != name:
+                    new_keys.push(self.attr_keys[i])
+                    new_vals.push(self.attr_vals[i])
+                i = i + 1
+            self.attr_keys = new_keys
+            self.attr_vals = new_vals
+        self._recompute_attr_mask()
 
     me add_child(child: BeDomNode):
         var c = child
@@ -527,11 +1362,32 @@ impl BeDomNode:
 
     me mark_css_declared(prop: text):
         """Record that `prop` was explicitly declared on this node."""
-        self.attributes[CSS_SET_MARKER_PREFIX + prop] = "1"
+        val p = prop.trim().lower()
+        val bit = _dom_css_decl_bit(p)
+        if bit != 0u32:
+            self.css_declared_mask = self.css_declared_mask | bit
+            return
+        var i = 0
+        while i < self.css_declared_extra.len():
+            if self.css_declared_extra[i] == p:
+                return
+            i = i + 1
+        var extra = self.css_declared_extra
+        extra.push(p)
+        self.css_declared_extra = extra
 
     fn css_declared(prop: text) -> bool:
         """True when `prop` was explicitly declared on this node."""
-        self.attributes.has(CSS_SET_MARKER_PREFIX + prop)
+        val p = prop.trim().lower()
+        val bit = _dom_css_decl_bit(p)
+        if bit != 0u32:
+            return (self.css_declared_mask & bit) != 0u32
+        var i = 0
+        while i < self.css_declared_extra.len():
+            if self.css_declared_extra[i] == p:
+                return true
+            i = i + 1
+        false
 
     me set_style(prop: text, value: text):
         """Set a CSS property on this node's inline style by name.
@@ -705,10 +1561,22 @@ pub fn apply_style_inheritance(root: BeDomNode) -> BeDomNode:
 
 export StyleProps
 export BeDomNode
+export DOM_INLINE_ATTR_CAP
+export DOM_ATTR_ID_BIT, DOM_ATTR_CLASS_BIT, DOM_ATTR_STYLE_BIT
+export DOM_ATTR_HIDDEN_BIT, DOM_ATTR_DISABLED_BIT, DOM_ATTR_CHECKED_BIT
+export DOM_ATTR_SELECTED_BIT, DOM_ATTR_OPEN_BIT, DOM_ATTR_ROLE_BIT
+export DOM_ATTR_TYPE_BIT, DOM_ATTR_NAME_BIT, DOM_ATTR_HREF_BIT
+export DOM_ATTR_SRC_BIT, DOM_ATTR_ARIA_BIT, DOM_ATTR_DATA_BIT
+export DOM_ATTR_OVERFLOW_BIT, dom_attr_bloom_bit
+export DOM_CSS_DECL_COLOR, DOM_CSS_DECL_FONT_FAMILY, DOM_CSS_DECL_FONT_SIZE
+export DOM_CSS_DECL_FONT_WEIGHT, DOM_CSS_DECL_LINE_HEIGHT, DOM_CSS_DECL_TEXT_ALIGN
+export DOM_CSS_DECL_DISPLAY, DOM_CSS_DECL_WIDTH, DOM_CSS_DECL_HEIGHT
+export DOM_CSS_DECL_BACKGROUND_COLOR
 export apply_style_inheritance
 export BeDomEvent
 export BeDomEventDispatch
 export normalize_dom_event_type
 export be_dom_find_by_id
 export be_dom_query_selector
+export be_dom_query_selector_all
 export be_dom_get_text_content

@@ -19,7 +19,7 @@ surfaced LBAs, 4 i64 words/page. `ppn = ((((ch*2+bank)*2+plane)*2+block)*8+page)
 ## Modules
 | file | role |
 |------|------|
-| `nvme_ct.spl` | locked interface: domain **newtypes** (Lba/Ppn/Ch/Bank/Plane/Block/Page/Cid/Qid/Addr), geometry, address codec, Command/Completion |
+| `nvme_ct.spl` | locked interface: domain **units** (`unit Name: i64`) (Lba/Ppn/Ch/Bank/Plane/Block/Page/Cid/Qid/Addr), geometry, address codec, Command/Completion |
 | `nand_onfi.spl` | `NandArray` — ONFI command/address/data handshake per channel, RAM-backed media, OOB, bad-block + fault injection |
 | `nvme_shared.spl` | `SharedMem` — the RAM-backed DMA region (owned-field store/load) |
 | `nvme_memcpy.spl` | `Dma` — the **settable** memcpy seam (`set_copy`, default + fault-injecting copies) |

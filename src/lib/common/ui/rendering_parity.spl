@@ -10,6 +10,7 @@
 # policies are only legal when scoped to a fixture ("fixture:<id>").
 
 use common.ui.pixel_diff_core.{argb_channel_max_delta, argb_alpha_delta}
+use common.ui.compare_view.{compare_view_is_comparable_size}
 
 val RENDERING_PARITY_SCHEMA_VERSION: text = "rendering-parity-v1"
 
@@ -373,18 +374,11 @@ fn _unpremultiply(c: i64, a: i64) -> i64:
     val v = (c * 255 + a / 2) / a
     if v > 255: 255 else: v
 
-fn _push_straight(out: [u8], r: i64, g: i64, b: i64, a: i64, premultiplied: bool) -> [u8]:
-    var o = out
+fn _straight_channel(c: i64, a: i64, premultiplied: bool) -> u8:
     if premultiplied:
-        o.push(_unpremultiply(r, a) as u8)
-        o.push(_unpremultiply(g, a) as u8)
-        o.push(_unpremultiply(b, a) as u8)
+        _unpremultiply(c, a) as u8
     else:
-        o.push(r as u8)
-        o.push(g as u8)
-        o.push(b as u8)
-    o.push(a as u8)
-    o
+        c as u8
 
 fn _source_row(y: i64, height: i64, d: PixelFormatDescriptor) -> i64:
     if d.origin == PIXEL_ORIGIN_BOTTOM_LEFT: height - 1 - y else: y
@@ -402,14 +396,20 @@ fn argb_u32_to_straight_rgba8(words: [u32], width: i64, height: i64, d: PixelFor
     if words.len() < row_words * (height - 1) + width:
         return Err("argb buffer too short: " + words.len().to_string() + " words")
     val premul = d.alpha_mode == PIXEL_ALPHA_PREMULTIPLIED
-    var out: [u8] = []
+    var out: [u8] = [0u8; width * height * 4]
+    var dst: i64 = 0
     var y: i64 = 0
     while y < height:  # cpu-lane-loop-ok: one iteration per row
         val base = _source_row(y, height, d) * row_words
         var x: i64 = 0
         while x < width:  # cpu-lane-loop-ok: one iteration per pixel
             val w = words[base + x]
-            out = _push_straight(out, ((w >> 16u32) & 0xFFu32) as i64, ((w >> 8u32) & 0xFFu32) as i64, (w & 0xFFu32) as i64, ((w >> 24u32) & 0xFFu32) as i64, premul)
+            val a = ((w >> 24u32) & 0xFFu32) as i64
+            out[dst] = _straight_channel(((w >> 16u32) & 0xFFu32) as i64, a, premul)
+            out[dst + 1] = _straight_channel(((w >> 8u32) & 0xFFu32) as i64, a, premul)
+            out[dst + 2] = _straight_channel((w & 0xFFu32) as i64, a, premul)
+            out[dst + 3] = a as u8
+            dst = dst + 4
             x = x + 1
         y = y + 1
     Ok(out)
@@ -427,7 +427,8 @@ fn byte_pixels_to_straight_rgba8(bytes: [u8], width: i64, height: i64, d: PixelF
         return Err("pixel buffer too short: " + bytes.len().to_string() + " bytes")
     val premul = d.alpha_mode == PIXEL_ALPHA_PREMULTIPLIED
     val bgra = d.format == PIXEL_FORMAT_BGRA8
-    var out: [u8] = []
+    var out: [u8] = [0u8; width * height * 4]
+    var dst: i64 = 0
     var y: i64 = 0
     while y < height:  # cpu-lane-loop-ok: one iteration per row
         val base = _source_row(y, height, d) * d.stride_bytes
@@ -438,10 +439,13 @@ fn byte_pixels_to_straight_rgba8(bytes: [u8], width: i64, height: i64, d: PixelF
             val c1 = bytes[o + 1] as i64
             val c2 = bytes[o + 2] as i64
             val a = bytes[o + 3] as i64
-            if bgra:
-                out = _push_straight(out, c2, c1, c0, a, premul)
-            else:
-                out = _push_straight(out, c0, c1, c2, a, premul)
+            val r = if bgra: c2 else: c0
+            val b = if bgra: c0 else: c2
+            out[dst] = _straight_channel(r, a, premul)
+            out[dst + 1] = _straight_channel(c1, a, premul)
+            out[dst + 2] = _straight_channel(b, a, premul)
+            out[dst + 3] = a as u8
+            dst = dst + 4
             x = x + 1
         y = y + 1
     Ok(out)
@@ -581,12 +585,19 @@ fn _scan_rgba8(expected: [u8], actual: [u8], width: i64, height: i64) -> RenderD
         i = i + 1
     diag
 
+fn compare_rgba8_check_dimensions(expected_w: i64, expected_h: i64, actual_w: i64, actual_h: i64) -> text:
+    if expected_w <= 0 or expected_h <= 0 or actual_w <= 0 or actual_h <= 0:
+        return "non-positive comparison size"
+    if expected_w != actual_w or expected_h != actual_h:
+        return "dimension mismatch: expected " + expected_w.to_string() + "x" + expected_h.to_string() + ", got " + actual_w.to_string() + "x" + actual_h.to_string()
+    ""
+
 fn _check_rgba_inputs(expected: [u8], actual: [u8], width: i64, height: i64) -> text:
     if width <= 0 or height <= 0:
         return "non-positive comparison size"
     val need = width * height * 4
     if expected.len() != need or actual.len() != need:
-        return "rgba length mismatch: expected " + expected.len().to_string() + " actual " + actual.len().to_string() + " need " + need.to_string()
+        return "rgba length mismatch (" + width.to_string() + "x" + height.to_string() + "): expected " + expected.len().to_string() + " actual " + actual.len().to_string() + " need " + need.to_string()
     ""
 
 fn rgba8_is_uniform(rgba: [u8]) -> bool:
@@ -606,7 +617,7 @@ fn _blank_relative(expected: [u8], actual: [u8]) -> bool:
     rgba8_is_blank(actual) and not rgba8_is_blank(expected)
 
 fn _compare_core(expected: [u8], actual: [u8], width: i64, height: i64, expected_lane: text, actual_lane: text, stage: text, policy: text, policy_id: text, max_channel: i64, max_pixels: i64) -> RenderComparison:
-    val diag = _scan_rgba8(expected, actual, width, height)
+    var diag = _scan_rgba8(expected, actual, width, height)
     val blank_actual = _blank_relative(expected, actual)
     var equal = diag.mismatch_count == 0
     var status = "exact"
@@ -619,6 +630,13 @@ fn _compare_core(expected: [u8], actual: [u8], width: i64, height: i64, expected
             status = "accepted-with-policy"
         else:
             status = "divergent"
+    val dims = width.to_string() + "x" + height.to_string()
+    val small_note = if not compare_view_is_comparable_size(width.to_i32(), height.to_i32()): " small-buffer (<128x96)" else: ""
+    diag.expected_summary = expected_lane + " " + dims + small_note
+    var actual_sum = actual_lane + " " + dims + " mismatches=" + diag.mismatch_count.to_string() + " max_delta=" + diag.max_channel_delta.to_string()
+    if blank_actual:
+        actual_sum = actual_sum + " blank-or-uniform"
+    diag.actual_summary = actual_sum + small_note
     var first = ""
     if not equal:
         first = stage
@@ -627,6 +645,17 @@ fn _compare_core(expected: [u8], actual: [u8], width: i64, height: i64, expected
         expected_lane: expected_lane, actual_lane: actual_lane, first_divergent_stage: first,
         max_differing_pixels: max_pixels, max_channel_delta_allowed: max_channel,
         blank_actual: blank_actual, diagnostic: diag)
+
+fn rendering_parity_diagnostic_summary(cmp: RenderComparison) -> text:
+    val d = cmp.diagnostic
+    var msg = cmp.status + " (" + cmp.expected_lane + " vs " + cmp.actual_lane + ")"
+    if _nonempty(cmp.first_divergent_stage):
+        msg = msg + " stage=" + cmp.first_divergent_stage
+    if d.mismatch_count > 0:
+        msg = msg + " mismatches=" + d.mismatch_count.to_string() + " max_delta=" + d.max_channel_delta.to_string() + " bbox=(" + d.min_x.to_string() + "," + d.min_y.to_string() + ")-(" + d.max_x.to_string() + "," + d.max_y.to_string() + ")"
+    if cmp.blank_actual:
+        msg = msg + " [blank-actual]"
+    msg
 
 # Context-free comparison. Tolerance is rejected here: it is only legal through
 # compare_rgba8_with_policy with a fixture-scoped policy id.
@@ -689,15 +718,10 @@ fn compare_rgba8_for_fixture_with_diagnostics(fixture: RenderingFixture, expecte
 
 # Same comparison, with the evidence paths and repro command a failing case must retain.
 fn compare_rgba8_with_policy_and_diagnostics(expected: [u8], actual: [u8], width: i64, height: i64, expected_lane: text, actual_lane: text, stage: text, policy: text, policy_id: text, policy_version: i64, max_channel_delta: i64, max_differing_pixels: i64, expected_evidence_path: text, actual_evidence_path: text, diff_path: text, reproduction_command: text) -> Result<RenderComparison, text>:
-    if not _nonempty(expected_evidence_path) or not _nonempty(actual_evidence_path) or not _nonempty(diff_path) or not _nonempty(reproduction_command):
+    if _diagnostics_missing(expected_evidence_path, actual_evidence_path, diff_path, reproduction_command):
         return Err("diagnostics: evidence paths and reproduction command are required")
     val base = compare_rgba8_with_policy(expected, actual, width, height, expected_lane, actual_lane, stage, policy, policy_id, policy_version, max_channel_delta, max_differing_pixels)?
-    var r = base
-    r.diagnostic.expected_evidence_path = expected_evidence_path
-    r.diagnostic.actual_evidence_path = actual_evidence_path
-    r.diagnostic.diff_path = diff_path
-    r.diagnostic.reproduction_command = reproduction_command
-    Ok(r)
+    Ok(_attach_diagnostics(base, expected_evidence_path, actual_evidence_path, diff_path, reproduction_command))
 
 # Attach the single tolerance a fixture is allowed to use. Policy ids must be
 # fixture-scoped and bounds sane; this is the only place bounds are declared.

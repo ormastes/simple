@@ -237,23 +237,44 @@ fn hir_cache_closure_digest(surfaces: ModuleSurfacesByName) -> text:
     val content_rows = (sosix_env_get_nullable("SIMPLE_HIR_CACHE_CLOSURE_KEY") ?? "") != "interface"
     var rows: [text] = []
     var tokens: [text] = []
+    var sort_keys: [text] = []
+    var order: [i64] = []
     var fallbacks = 0
     var i = 0
     while i < surfaces.surfaces.len():
         val s = surfaces.surfaces[i]
         # Repo-relative: the sharded route reads an absolute SCV snapshot, the
         # direct route the checkout; the same closure must digest equally.
+        # Only physical path + content identify a row. Alias spellings and the
+        # order they were registered are worker-local and must not move the key.
         val rel = module_source_relative_path(s.canonical_path)
         if content_rows:
-            rows = rows.push(rel + "|" + "{s.content_hash}" + "|" + "{s.content_length}" + "|" + s.module_name + "|" + s.logical_name)
+            rows = rows.push(rel + "|" + "{s.content_hash}" + "|" + "{s.content_length}")
         elif s.frozen and s.semantic_cacheable:
-            rows = rows.push(rel + "|S:{s.semantic_hash0}:{s.semantic_hash1}:{s.semantic_hash2}:{s.semantic_hash3}|" + s.module_name + "|" + s.logical_name)
+            rows = rows.push(rel + "|S:{s.semantic_hash0}:{s.semantic_hash1}:{s.semantic_hash2}:{s.semantic_hash3}")
         else:
             fallbacks = fallbacks + 1
-            rows = rows.push(rel + "|C:{s.content_hash}:{s.content_length}|" + s.module_name + "|" + s.logical_name)
+            rows = rows.push(rel + "|C:{s.content_hash}:{s.content_length}")
         tokens = tokens.push(hir_cache_surface_neutral_token(s.content_hash))
+        sort_keys = sort_keys.push(rel)
+        order = order.push(i)
         i = i + 1
-    val digest = hir_cache_closure_digest_from_rows(rows, tokens)
+    var left = 0
+    while left < order.len():
+        var right = left + 1
+        while right < order.len():
+            if sort_keys[order[right]] < sort_keys[order[left]]:
+                val held = order[left]
+                order[left] = order[right]
+                order[right] = held
+            right = right + 1
+        left = left + 1
+    var sorted_rows: [text] = []
+    var sorted_tokens: [text] = []
+    for index in order:
+        sorted_rows = sorted_rows.push(rows[index])
+        sorted_tokens = sorted_tokens.push(tokens[index])
+    val digest = hir_cache_closure_digest_from_rows(sorted_rows, sorted_tokens)
     # Several build stages re-derive the same closure digest (archive schedule,
     # managed-runtime selection per source, body surfaces): count and print
     # once per distinct closure, i.e. once per build.
@@ -1354,12 +1375,15 @@ fn hir_shard_complete() -> bool:
     if _hir_shard_queue_dir() == "": return true
     hir_shard_recovery_complete(_hir_shard_queue_dir(), hir_shard_owner())
 
-fn hir_shard_inventory(identity: text, paths: [text]) -> bool:
-    if not hir_shard_active() or _hir_shard_queue_dir() == "": return true
-    if hir_shard_recovery_inventory(_hir_shard_queue_dir(), identity, paths): return true
+# "" = published (or not sharded); otherwise the mismatch reason, which the
+# caller folds into the BLOCKED record so the aggregate failure can quote it.
+fn hir_shard_inventory(identity: text, paths: [text]) -> text:
+    if not hir_shard_active() or _hir_shard_queue_dir() == "": return ""
+    if hir_shard_recovery_inventory(_hir_shard_queue_dir(), identity, paths): return ""
     val stored = file_read_nullable("{_hir_shard_queue_dir()}/inventory") ?? ""
-    eprint("[hir-shard] owner={hir_shard_owner()} inventory publication failed: {hir_shard_recovery_inventory_mismatch_v1(stored, identity, paths)}")
-    false
+    val why = hir_shard_recovery_inventory_mismatch_v1(stored, identity, paths)
+    eprint("[hir-shard] owner={hir_shard_owner()} inventory publication failed: {why}")
+    if why == "": "unknown mismatch" else: why
 
 fn hir_shard_guard_block(reason: text):
     if hir_shard_active():

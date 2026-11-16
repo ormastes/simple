@@ -15,6 +15,22 @@ bin/simple run scripts/census/bound_census.spl list.txt`
 - SPL-BOUND-002 (late foreign-origin unit cast): 0 (stdlib declares no `unit` types and has no `use unit.` imports)
 - SPL-BOUND-reassert: 0
 
+## Re-census 2026-11-16 (SPL-BOUND-001 false-positive correction)
+
+SPL-BOUND-001 now fires only when the extern's declared return is a raw
+numeric primitive (`i8..i64`, `u8..u64`, `isize`/`usize`, `f32`/`f64`).
+Pass-through of an already-safe extern return (`text?`, `[u8]?`, `Option<..>`,
+`Result<..>`, `bool`, `text`, a declared unit, or none) no longer reports.
+
+- files scanned: 486
+- SPL-BOUND-001: **249 findings in 93 files** (was 465 in 144)
+- The drop of 216 is a false-positive correction in the detector, **not**
+  boundary conversions; no library code changed.
+- Top areas now: nogc_sync_mut/gpu 44, nogc_sync_mut/io 30, gc_async_mut/gpu 28,
+  nogc_sync_mut/gpu_driver 17, common/cache_host_authority_v1.spl 17,
+  nogc_async_mut/concurrent 10, common/string_core.spl 9, nogc_sync_mut/jit 7.
+  (The baseline tables below are the 2026-11-15 snapshot.)
+
 Most 001 findings are thin forwarders (`fn gpu_memory_alloc(size) -> i64: rt_alloc(size)`),
 i.e. a raw extern wrapped without an `@unsafe(capabilities: [ffi])` adapter.
 

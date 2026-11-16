@@ -22,7 +22,7 @@ use std.nogc_sync_mut.io_runtime.{env_set}
 use compiler.core.types.{reset_all_pools}
 use compiler.core.parser.{parser_init_with_path}
 use compiler.core.parser_decls.{parse_module_body}
-use compiler.core.ast.{expr_attr_apply_config, expr_attr_apply_sdn, expr_attr_extra_placement, expr_attr_extra_present, expr_attr_s_val_placement, expr_attr_s_val_present, expr_count, expr_get_tag, expr_get_span, expr_get_int, expr_get_left, expr_get_right, expr_get_extra, expr_get_args, expr_get_str}
+use compiler.core.ast.{expr_attr_apply_config, expr_attr_apply_sdn, expr_attr_extra_placement, expr_attr_extra_present, expr_attr_s_val_placement, expr_attr_s_val_present, expr_attr_side_layout, expr_count, expr_get_tag, expr_get_span, expr_get_int, expr_get_left, expr_get_right, expr_get_extra, expr_get_args, expr_get_str}
 
 val FIXED_INPUT = "src/compiler/00.common/data/data_schema_resolver.spl"
 # Fingerprint of the parse of FIXED_INPUT on the code BEFORE this change.
@@ -112,6 +112,33 @@ describe "node attributes applied to the real AST":
     it "rejects an unknown placement token and keeps the switch off":
         expect(expr_attr_apply_config("extra=bogus").is_err()).to_equal(true)
         expect(expr_attr_extra_placement()).to_equal("direct")
+
+    it "answers identical values and presence for extra and s_val on array_index":
+        # @req NODEATTR-LAYOUT-02
+        val off_fp = parse_with("")
+        val off_extras = extras()
+        expect(parse_with("extra=array_index,s_val=array_index")).to_equal(off_fp)
+        expect(expr_attr_extra_placement()).to_equal("array_index")
+        expect(expr_attr_s_val_placement()).to_equal("array_index")
+        expect(extras()).to_equal(off_extras)
+        expect(expr_attr_extra_present()).to_equal(nondefault(off_extras))
+
+    it "fails fast on a pointer layout and keeps the switch off":
+        # @req NODEATTR-LAYOUT-04
+        expect(expr_attr_apply_config("extra=array_ptr").is_err()).to_equal(true)
+        expect(expr_attr_extra_placement()).to_equal("direct")
+        expect(expr_attr_apply_config("s_val=hash_ptr").is_err()).to_equal(true)
+        expect(expr_attr_s_val_placement()).to_equal("direct")
+
+    it "selects the side-array data layout by config, SoA by default":
+        # @req NODEATTR-LAYOUT-05
+        expect(expr_attr_apply_config("").is_ok()).to_equal(true)
+        expect(expr_attr_side_layout()).to_equal("soa")
+        val off_fp = parse_with("")
+        expect(parse_with("extra=column,layout=aos")).to_equal(off_fp)
+        expect(expr_attr_side_layout()).to_equal("aos")
+        expect(expr_attr_apply_config("layout=rows").is_err()).to_equal(true)
+        expect(expr_attr_side_layout()).to_equal("soa")
 
 fn strs() -> [text]:
     var out: [text] = []
