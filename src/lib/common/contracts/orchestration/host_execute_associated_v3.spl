@@ -1,0 +1,60 @@
+# New explicit associated action. Never silently converted to HostExecuteV2.
+use std.common.contracts.container.execution_draft_v3.*
+use std.common.contracts.orchestration.host_prepare_associated_v3.*
+use std.common.contracts.orchestration.host_execution_association_v3.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.HostPreparedReservationReceiptV1
+use std.common.contracts.orchestration.host_prepare_response_v1.{host_prepare_response_encode_v1, host_prepare_response_decode_v1}
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2, distributed_grant_digest_v2}
+use std.common.contracts.distributed_authority_codec_v2.{distributed_encode_signed_grant_v2, distributed_decode_signed_grant_v2,
+    distributed_encode_signed_approval_v2, distributed_decode_signed_approval_v2}
+use std.common.sdn.value.SdnValue
+use std.common.crypto.sha256.sha256_text
+
+pub struct HostExecuteAssociatedRequestV3:
+    prepare: HostPrepareAssociatedRequestV3
+    receipt: HostPreparedReservationReceiptV1
+    association: HostExecutionAssociationV3
+    operation: OperationEnvelopeV2
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+
+pub fn host_execute_associated_operation_v3(original: OperationEnvelopeV2,
+        association: HostExecutionAssociationV3) -> Result<OperationEnvelopeV2, text>:
+    var operation = original
+    operation.operation = "host_execute_associated_v3"
+    operation.payload_digest = host_execution_association_digest_v3(association)?
+    val valid = distributed_encode_operation_v2(operation)?
+    Ok(operation)
+
+pub fn host_execute_associated_encode_v3(request: HostExecuteAssociatedRequestV3) -> Result<text, text>:
+    host_execution_association_match_v3(request.association, request.prepare, request.receipt)?
+    val expected = host_execute_associated_operation_v3(request.prepare.prepare.operation, request.association)?
+    if distributed_encode_operation_v2(request.operation)? != distributed_encode_operation_v2(expected)?:
+        return Err("associated-execute-operation-mismatch")
+    if (not request.signed.grant.operations.contains("host_execute_associated_v3") or
+            request.approval.request_digest != sha256_text(distributed_encode_operation_v2(expected)?) or
+            request.approval.grant_digest != distributed_grant_digest_v2(request.signed.grant)?):
+        return Err("associated-execute-proof-binding")
+    execution_associated_encode_v3({"version": SdnValue.Int(3), "kind": SdnValue.String("host-execute-associated-request"),
+        "prepare": SdnValue.String(host_prepare_associated_encode_v3(request.prepare)?),
+        "receipt": SdnValue.String(host_prepare_response_encode_v1(request.receipt, request.prepare.prepare.intent, request.prepare.prepare.operation)?),
+        "association": SdnValue.String(host_execution_association_encode_v3(request.association)?),
+        "operation": SdnValue.String(distributed_encode_operation_v2(request.operation)?),
+        "signed": SdnValue.String(distributed_encode_signed_grant_v2(request.signed)?),
+        "approval": SdnValue.String(distributed_encode_signed_approval_v2(request.approval)?)})
+
+pub fn host_execute_associated_decode_v3(source: text) -> Result<HostExecuteAssociatedRequestV3, text>:
+    val fields = execution_associated_fields_v3(source, "host-execute-associated-request", ["version", "kind", "prepare", "receipt", "association", "operation", "signed", "approval"])?
+    val prepare = host_prepare_associated_decode_v3(execution_associated_text_v3(fields, "prepare")?)?
+    val request = HostExecuteAssociatedRequestV3(prepare,
+        host_prepare_response_decode_v1(execution_associated_text_v3(fields, "receipt")?, prepare.prepare.intent, prepare.prepare.operation)?,
+        host_execution_association_decode_v3(execution_associated_text_v3(fields, "association")?)?,
+        distributed_decode_operation_v2(execution_associated_text_v3(fields, "operation")?)?,
+        distributed_decode_signed_grant_v2(execution_associated_text_v3(fields, "signed")?)?,
+        distributed_decode_signed_approval_v2(execution_associated_text_v3(fields, "approval")?)?)
+    if host_execute_associated_encode_v3(request)? != source: return Err("associated-execute-canonical")
+    Ok(request)
+
+export HostExecuteAssociatedRequestV3, host_execute_associated_operation_v3, host_execute_associated_encode_v3, host_execute_associated_decode_v3
