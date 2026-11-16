@@ -1,0 +1,294 @@
+"""
+## Purpose and audience
+
+Purpose: pin the pure bug closure gate `bug_closure_evaluate_v1`. A bug may be
+recorded as a verified fix only when an exact reproducer was observed RED
+before the fix, a distinct adjacent prevention case (or an independently
+reviewed exception) exists, both are GREEN on every required backend at the
+candidate source snapshot, no workaround for the bug is still live, every
+reference resolves, and nothing moved between candidate and admission. Each
+blocked scenario mutates exactly one input of a fully evidenced fixture and
+asserts the exact set of diagnostic codes. Non-fix dispositions (duplicate,
+invalid, wontfix, deferred, triage) are admitted without fix evidence and the
+receipt says they are not a verified fix.
+
+Audience: engineers wiring the gate into `bug-resolve`, `check-dbs` or CI, who
+need the exact diagnostic a closure attempt produces.
+
+## Operator workflow
+
+1. Run `SIMPLE_LIB=$PWD/src bin/simple test test/01_unit/app/bug/bug_closure_gate_spec.spl`.
+2. Every scenario must pass. Diagnostic codes are part of the closure contract.
+
+## Fixture ID mapping
+
+BUG-001 E-BUG-REPRO-001, BUG-002 E-BUG-PREVENT-002, BUG-003
+E-BUG-EVIDENCE-003, BUG-004 E-BUG-WR-004, BUG-005 E-BUG-LINK-005, BUG-006
+E-BUG-RACE-006. The positive controls carry the IDs they discharge.
+
+## Compatibility and limitations
+
+Pure value evaluation: no file, database, clock or process access. Identical
+on every host. Wiring into `bug-resolve` is not covered here.
+"""
+
+use std.spec.*
+use app.bug.closure_gate.*
+use app.bug.workaround_index.{WorkaroundIndex, WorkaroundLink}
+
+val HEAD = "0123456789abcdef0123456789abcdef01234567"
+val OTHER_HEAD = "fedcba9876543210fedcba9876543210fedcba98"
+
+fn case_id(name: text) -> TestCaseIdV1:
+    TestCaseIdV1(value: name)
+
+fn backend(name: text) -> BackendIdV1:
+    BackendIdV1(value: name)
+
+fn digest(value: text) -> SnapshotDigestV1:
+    SnapshotDigestV1(value: value)
+
+fn run(name: text, on: text, phase: BugRunPhaseV1, outcome: BugRunOutcomeV1, source: text) -> BugTestRunV1:
+    BugTestRunV1(case_id: case_id(name), backend: backend(on), phase: phase,
+        outcome: outcome, source: digest(source))
+
+fn green_runs(on: text) -> [BugTestRunV1]:
+    [run("repro_case", on, BugRunPhaseV1.PostFix, BugRunOutcomeV1.Passed, HEAD),
+     run("adjacent_case", on, BugRunPhaseV1.PostFix, BugRunOutcomeV1.Passed, HEAD)]
+
+fn pre_fix_red() -> BugTestRunV1:
+    run("repro_case", "interp", BugRunPhaseV1.PreFix, BugRunOutcomeV1.Failed, OTHER_HEAD)
+
+fn candidate() -> BugClosureCandidateV1:
+    BugClosureCandidateV1(bug_id: BugIdV1(value: "bug_parser_nesting"),
+        disposition: BugClosureDispositionV1.Fixed,
+        author: ReviewerIdV1(value: "alice"),
+        head: digest(HEAD), bug_state: digest("state-7"),
+        rationale: ClosureRationaleV1(value: "root cause: nested indent lost"),
+        reproducer: Some(case_id("repro_case")),
+        prevention: Some(case_id("adjacent_case")),
+        prevention_exception: None,
+        requirements: [RequirementIdV1(value: "REQ-PARSE-001")])
+
+fn view_with(runs: [BugTestRunV1]) -> BugTestDbViewV1:
+    BugTestDbViewV1(head: digest(HEAD), bug_state: digest("state-7"),
+        known_bugs: [BugIdV1(value: "bug_parser_nesting")],
+        known_cases: [case_id("repro_case"), case_id("adjacent_case")],
+        known_requirements: [RequirementIdV1(value: "REQ-PARSE-001")],
+        runs: runs)
+
+fn view() -> BugTestDbViewV1:
+    var runs = [pre_fix_red()]
+    for r in green_runs("interp"): runs.push(r)
+    view_with(runs)
+
+fn policy() -> BugClosurePolicyV1:
+    BugClosurePolicyV1(required_backends: [backend("interp")], run_evidence: BugRunEvidenceV1.Observed)
+
+fn clean_index() -> WorkaroundIndex:
+    WorkaroundIndex(revision: HEAD, complete: true,
+        links: [WorkaroundLink(bug_id: "bug_other", path: "src/a.spl", line: 4, recover: "", reason: "unrelated")])
+
+fn bug() -> BugIdV1:
+    BugIdV1(value: "bug_parser_nesting")
+
+fn codes(receipt: BugClosureReceiptV1) -> text:
+    bug_closure_receipt_codes_v1(receipt).join(",")
+
+describe "bug closure gate: verified fix admission":
+    it "allows a fully evidenced fix and records it as a verified fix":
+        # @req BUG-001
+        # @req BUG-002
+        # @req BUG-003
+        # @req BUG-004
+        # @req BUG-005
+        # @req BUG-006
+        step("Positive control: pre-fix RED, post-fix GREEN exact and adjacent cases, no workaround")
+        val receipt = bug_closure_evaluate_v1(candidate(), bug(), policy(), view(), clean_index())
+        expect(receipt.verdict == BugClosureVerdictV1.Allowed).to_equal(true)
+        expect(receipt.kind == BugClosureKindV1.VerifiedFix).to_equal(true)
+        expect(codes(receipt)).to_equal("")
+        step("The receipt names the bug and the exact source snapshot it admitted")
+        expect(receipt.bug_id.value).to_equal("bug_parser_nesting")
+        expect(receipt.head.value).to_equal(HEAD)
+
+    it "requires GREEN on every required backend, not just one":
+        # @req BUG-003
+        step("Two required backends, both GREEN: allowed")
+        val two = BugClosurePolicyV1(required_backends: [backend("interp"), backend("native")], run_evidence: BugRunEvidenceV1.Observed)
+        var runs = [pre_fix_red()]
+        for r in green_runs("interp"): runs.push(r)
+        for r in green_runs("native"): runs.push(r)
+        val ok = bug_closure_evaluate_v1(candidate(), bug(), two, view_with(runs), clean_index())
+        expect(codes(ok)).to_equal("")
+        step("Adverse: the native adjacent case fails, so evidence is incomplete")
+        var bad_runs = [pre_fix_red()]
+        for r in green_runs("interp"): bad_runs.push(r)
+        bad_runs.push(run("repro_case", "native", BugRunPhaseV1.PostFix, BugRunOutcomeV1.Passed, HEAD))
+        bad_runs.push(run("adjacent_case", "native", BugRunPhaseV1.PostFix, BugRunOutcomeV1.Failed, HEAD))
+        val blocked = bug_closure_evaluate_v1(candidate(), bug(), two, view_with(bad_runs), clean_index())
+        expect(blocked.verdict == BugClosureVerdictV1.Blocked).to_equal(true)
+        expect(codes(blocked)).to_equal("E-BUG-EVIDENCE-003")
+        expect(blocked.findings[0].proof.value).to_equal("adjacent_case@native")
+
+describe "bug closure gate: blocked diagnostics":
+    it "blocks a fix with no exact reproducer or no observed pre-fix RED":
+        # @req BUG-001
+        step("Adverse: no reproducer case at all")
+        val c = candidate()
+        val no_repro = BugClosureCandidateV1(bug_id: c.bug_id, disposition: c.disposition,
+            author: c.author, head: c.head, bug_state: c.bug_state, rationale: c.rationale,
+            reproducer: None, prevention: c.prevention, prevention_exception: None,
+            requirements: c.requirements)
+        val r1 = bug_closure_evaluate_v1(no_repro, bug(), policy(), view(), clean_index())
+        expect(codes(r1)).to_equal("E-BUG-REPRO-001")
+        expect(r1.verdict == BugClosureVerdictV1.Blocked).to_equal(true)
+        step("Adverse: the reproducer exists but was never observed RED before the fix")
+        val r2 = bug_closure_evaluate_v1(candidate(), bug(), policy(), view_with(green_runs("interp")), clean_index())
+        expect(codes(r2)).to_equal("E-BUG-REPRO-001")
+
+    it "blocks a missing, duplicate or self-approved prevention case":
+        # @req BUG-002
+        val c = candidate()
+        step("Adverse: no adjacent prevention case and no exception")
+        val none = BugClosureCandidateV1(bug_id: c.bug_id, disposition: c.disposition,
+            author: c.author, head: c.head, bug_state: c.bug_state, rationale: c.rationale,
+            reproducer: c.reproducer, prevention: None, prevention_exception: None,
+            requirements: c.requirements)
+        expect(codes(bug_closure_evaluate_v1(none, bug(), policy(), view(), clean_index()))).to_equal("E-BUG-PREVENT-002")
+        step("Adverse: the prevention case is the literal reproducer")
+        val same = BugClosureCandidateV1(bug_id: c.bug_id, disposition: c.disposition,
+            author: c.author, head: c.head, bug_state: c.bug_state, rationale: c.rationale,
+            reproducer: c.reproducer, prevention: Some(case_id("repro_case")), prevention_exception: None,
+            requirements: c.requirements)
+        expect(codes(bug_closure_evaluate_v1(same, bug(), policy(), view(), clean_index()))).to_equal("E-BUG-PREVENT-002")
+        step("Adverse: a not-applicable exception approved by the fix author")
+        val self_ex = BugPreventionExceptionV1(reason: ClosureRationaleV1(value: "no adjacent family"),
+            review: ReviewIdV1(value: "RV-9"), reviewer: ReviewerIdV1(value: "alice"))
+        val self_approved = BugClosureCandidateV1(bug_id: c.bug_id, disposition: c.disposition,
+            author: c.author, head: c.head, bug_state: c.bug_state, rationale: c.rationale,
+            reproducer: c.reproducer, prevention: None, prevention_exception: Some(self_ex),
+            requirements: c.requirements)
+        expect(codes(bug_closure_evaluate_v1(self_approved, bug(), policy(), view(), clean_index()))).to_equal("E-BUG-PREVENT-002")
+        step("Positive control: the same exception reviewed by someone else is accepted")
+        val other_ex = BugPreventionExceptionV1(reason: ClosureRationaleV1(value: "no adjacent family"),
+            review: ReviewIdV1(value: "RV-9"), reviewer: ReviewerIdV1(value: "bob"))
+        val reviewed = BugClosureCandidateV1(bug_id: c.bug_id, disposition: c.disposition,
+            author: c.author, head: c.head, bug_state: c.bug_state, rationale: c.rationale,
+            reproducer: c.reproducer, prevention: None, prevention_exception: Some(other_ex),
+            requirements: c.requirements)
+        expect(codes(bug_closure_evaluate_v1(reviewed, bug(), policy(), view(), clean_index()))).to_equal("")
+
+    it "blocks stale, skipped or cached evidence and an empty backend policy":
+        # @req BUG-003
+        step("Adverse: the post-fix run executed against a different source snapshot")
+        val stale = view_with([pre_fix_red(),
+            run("repro_case", "interp", BugRunPhaseV1.PostFix, BugRunOutcomeV1.Passed, OTHER_HEAD),
+            run("adjacent_case", "interp", BugRunPhaseV1.PostFix, BugRunOutcomeV1.Passed, HEAD)])
+        val r1 = bug_closure_evaluate_v1(candidate(), bug(), policy(), stale, clean_index())
+        expect(codes(r1)).to_equal("E-BUG-EVIDENCE-003")
+        expect(r1.findings[0].proof.value).to_equal("repro_case@interp")
+        step("Adverse: a skipped or cached run is not a PASS")
+        val skipped = view_with([pre_fix_red(),
+            run("repro_case", "interp", BugRunPhaseV1.PostFix, BugRunOutcomeV1.Skipped, HEAD),
+            run("adjacent_case", "interp", BugRunPhaseV1.PostFix, BugRunOutcomeV1.Cached, HEAD)])
+        expect(codes(bug_closure_evaluate_v1(candidate(), bug(), policy(), skipped, clean_index()))).to_equal("E-BUG-EVIDENCE-003,E-BUG-EVIDENCE-003")
+        step("Adverse: a policy naming no backend cannot certify anything")
+        val empty = BugClosurePolicyV1(required_backends: [], run_evidence: BugRunEvidenceV1.Observed)
+        expect(codes(bug_closure_evaluate_v1(candidate(), bug(), empty, view(), clean_index()))).to_equal("E-BUG-EVIDENCE-003")
+
+    it "blocks while a workaround for the bug is live or coverage is incomplete":
+        # @req BUG-004
+        step("Adverse: a live workaround marker still names this bug")
+        val live = WorkaroundIndex(revision: HEAD, complete: true,
+            links: [WorkaroundLink(bug_id: "bug_parser_nesting", path: "src/p.spl", line: 12, recover: "", reason: "shim")])
+        val r1 = bug_closure_evaluate_v1(candidate(), bug(), policy(), view(), live)
+        expect(codes(r1)).to_equal("E-BUG-WR-004")
+        expect(r1.findings[0].proof.value).to_equal("src/p.spl:12")
+        step("Adverse: an incomplete workaround index cannot prove absence")
+        val partial = WorkaroundIndex(revision: HEAD, complete: false, links: [])
+        expect(codes(bug_closure_evaluate_v1(candidate(), bug(), policy(), view(), partial))).to_equal("E-BUG-WR-004")
+
+    it "blocks broken bug, requirement and test references":
+        # @req BUG-005
+        val c = candidate()
+        step("Adverse: the candidate names a requirement the tracking DB does not know")
+        val bad_req = BugClosureCandidateV1(bug_id: c.bug_id, disposition: c.disposition,
+            author: c.author, head: c.head, bug_state: c.bug_state, rationale: c.rationale,
+            reproducer: c.reproducer, prevention: c.prevention, prevention_exception: None,
+            requirements: [RequirementIdV1(value: "REQ-GONE-404")])
+        val r1 = bug_closure_evaluate_v1(bad_req, bug(), policy(), view(), clean_index())
+        expect(codes(r1)).to_equal("E-BUG-LINK-005")
+        expect(r1.findings[0].proof.value).to_equal("REQ-GONE-404")
+        step("Adverse: the candidate is for a different bug than the one being closed")
+        val r2 = bug_closure_evaluate_v1(candidate(), BugIdV1(value: "bug_unrelated"), policy(), view(), clean_index())
+        expect(codes(r2).contains("E-BUG-LINK-005")).to_equal(true)
+        expect(r2.verdict == BugClosureVerdictV1.Blocked).to_equal(true)
+
+    it "blocks when the bug, head or workaround snapshot moved during admission":
+        # @req BUG-006
+        step("Adverse: the bug record changed after the candidate was computed")
+        val moved_bug = BugTestDbViewV1(head: digest(HEAD), bug_state: digest("state-8"),
+            known_bugs: view().known_bugs, known_cases: view().known_cases,
+            known_requirements: view().known_requirements, runs: view().runs)
+        expect(codes(bug_closure_evaluate_v1(candidate(), bug(), policy(), moved_bug, clean_index()))).to_equal("E-BUG-RACE-006")
+        step("Adverse: the workaround index was read at another revision")
+        val other_rev = WorkaroundIndex(revision: OTHER_HEAD, complete: true, links: [])
+        expect(codes(bug_closure_evaluate_v1(candidate(), bug(), policy(), view(), other_rev))).to_equal("E-BUG-RACE-006")
+
+describe "bug closure gate: non-fix dispositions":
+    it "admits a duplicate without fix evidence and never calls it a verified fix":
+        # @req BUG-001
+        # @req BUG-002
+        step("A duplicate disposition with no reproducer, no prevention and no runs")
+        val c = candidate()
+        val dup = BugClosureCandidateV1(bug_id: c.bug_id, disposition: BugClosureDispositionV1.Duplicate,
+            author: c.author, head: c.head, bug_state: c.bug_state,
+            rationale: ClosureRationaleV1(value: "duplicate of bug_parser_indent"),
+            reproducer: None, prevention: None, prevention_exception: None, requirements: [])
+        val receipt = bug_closure_evaluate_v1(dup, bug(), policy(), view_with([]), clean_index())
+        expect(receipt.verdict == BugClosureVerdictV1.Allowed).to_equal(true)
+        expect(receipt.kind == BugClosureKindV1.NonFixDisposition).to_equal(true)
+        expect(receipt.kind == BugClosureKindV1.VerifiedFix).to_equal(false)
+        step("Adverse: the same evidence-free candidate claiming Fixed is blocked")
+        val fixed = BugClosureCandidateV1(bug_id: c.bug_id, disposition: BugClosureDispositionV1.Fixed,
+            author: c.author, head: c.head, bug_state: c.bug_state, rationale: dup.rationale,
+            reproducer: None, prevention: None, prevention_exception: None, requirements: [])
+        val blocked = bug_closure_evaluate_v1(fixed, bug(), policy(), view_with([]), clean_index())
+        expect(codes(blocked)).to_equal("E-BUG-REPRO-001,E-BUG-PREVENT-002")
+        step("Adverse: a non-fix disposition is still refused on a raced snapshot")
+        val raced = BugTestDbViewV1(head: digest(OTHER_HEAD), bug_state: digest("state-7"),
+            known_bugs: view().known_bugs, known_cases: [], known_requirements: [], runs: [])
+        expect(codes(bug_closure_evaluate_v1(dup, bug(), policy(), raced, clean_index()))).to_equal("E-BUG-RACE-006")
+
+describe "bug closure gate: run evidence mode and disposition vocabulary":
+    it "NotObserved skips run checks, still enforces workaround and links, and says so":
+        # @req BUG-001
+        # @req BUG-003
+        # @req BUG-004
+        step("No run source: the policy marks run evidence as not observed")
+        val unobserved = BugClosurePolicyV1(required_backends: [], run_evidence: BugRunEvidenceV1.NotObserved)
+        val ok = bug_closure_evaluate_v1(candidate(), bug(), unobserved, view_with([]), clean_index())
+        expect(ok.verdict == BugClosureVerdictV1.Allowed).to_equal(true)
+        expect(bug_closure_run_evidence_text_v1(ok.run_evidence)).to_equal("not_observed")
+        step("Adverse: a live workaround for the bug still blocks without run evidence")
+        val live = WorkaroundIndex(revision: HEAD, complete: true,
+            links: [WorkaroundLink(bug_id: "bug_parser_nesting", path: "src/a.spl", line: 9, recover: "", reason: "temp")])
+        expect(codes(bug_closure_evaluate_v1(candidate(), bug(), unobserved, view_with([]), live))).to_equal("E-BUG-WR-004")
+        step("Adverse: an unknown test case still blocks as a broken link")
+        val no_cases = BugTestDbViewV1(head: digest(HEAD), bug_state: digest("state-7"),
+            known_bugs: view().known_bugs, known_cases: [], known_requirements: view().known_requirements, runs: [])
+        expect(codes(bug_closure_evaluate_v1(candidate(), bug(), unobserved, no_cases, clean_index()))).to_equal("E-BUG-LINK-005,E-BUG-LINK-005")
+
+    it "round-trips every disposition name and rejects an unknown one":
+        # @req BUG-001
+        step("Every disposition parses from its own text")
+        for name in ["fixed", "closed", "triage", "duplicate", "invalid", "wontfix", "deferred"]:
+            match bug_closure_disposition_parse_v1(name):
+                case Some(parsed): expect(bug_closure_disposition_text_v1(parsed)).to_equal(name)
+                case None: expect(name).to_equal("parsed")
+        step("Adverse: an unknown disposition is None, not a default")
+        expect(bug_closure_disposition_parse_v1("resolved").?).to_equal(false)
+        step("Only fixed and closed are verified-fix kinds")
+        expect(bug_closure_disposition_kind_v1(BugClosureDispositionV1.Wontfix) == BugClosureKindV1.NonFixDisposition).to_equal(true)
+        expect(bug_closure_disposition_kind_v1(BugClosureDispositionV1.Closed) == BugClosureKindV1.VerifiedFix).to_equal(true)

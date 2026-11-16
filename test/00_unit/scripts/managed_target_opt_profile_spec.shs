@@ -1,0 +1,44 @@
+#!/bin/sh
+# Exact production selector execution plus actual command/digest wiring checks.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+script="$repo/scripts/bootstrap/bootstrap-phase4-grouped.shs"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+sed -n '/^managed_optimization_flag() {$/,/^}$/p' "$script" > "$work/selector.sh"
+[ -s "$work/selector.sh" ]
+. "$work/selector.sh"
+target=aarch64-unknown-linux-gnu
+write_config() {
+  printf '%s\n' "phase=$1" 'backend=llvm' "target=$target" \
+    "variant_normalized_option_4=opt_level=$2" > "$work/config"
+}
+checks=0
+write_config phase3 0
+[ "$(managed_optimization_flag "$work/config" phase3 llvm)" = none ]
+checks=$((checks + 1))
+write_config phase4 2
+[ "$(managed_optimization_flag "$work/config" phase4 llvm)" = standard ]
+checks=$((checks + 1))
+for fault in missing duplicate wrong_level wrong_phase wrong_backend wrong_target malformed; do
+  write_config phase3 0
+  case "$fault" in
+    missing) sed '/opt_level=/d' "$work/config" > "$work/new"; mv "$work/new" "$work/config" ;;
+    duplicate) printf '%s\n' 'variant_normalized_option_7=opt_level=0' >> "$work/config" ;;
+    wrong_level) write_config phase3 3 ;;
+    wrong_phase) write_config phase4 0 ;;
+    wrong_backend) printf '%s\n' 'backend=cranelift' >> "$work/config" ;;
+    wrong_target) printf '%s\n' 'target=x86_64-unknown-linux-gnu' >> "$work/config" ;;
+    malformed) write_config phase3 '0=ignored' ;;
+  esac
+  if managed_optimization_flag "$work/config" phase3 llvm > "$work/out"; then
+    echo "FAIL: selector accepted $fault" >&2; exit 1
+  fi
+  checks=$((checks + 1))
+done
+[ "$(grep -Fc -- '--opt-level="$target_opt"' "$script")" -eq 1 ]
+[ "$(grep -Fc -- '--opt-level=standard' "$repo/scripts/bootstrap/build-phase4-direct-product.shs")" -eq 2 ]
+[ "$(grep -Fc -- '--opt-level="$target_opt" --low-memory' "$script")" -eq 1 ]
+[ "$(grep -Fc -- '--opt-level=standard --low-memory' "$repo/scripts/bootstrap/build-phase4-direct-product.shs")" -eq 2 ]
+checks=$((checks + 4))
+printf 'PASS managed optimization: %s actual selector/wiring checks\n' "$checks"

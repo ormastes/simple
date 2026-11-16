@@ -16,6 +16,7 @@ use std.spec
 use std.spec.step
 use std.editor.extensions.host.*
 use std.editor.extensions.manifest.*
+use std.editor.extensions.builtin.index.{builtin_manifest_providers, builtin_activation_hooks}
 use app.office.sheets.function_registry.{sheet_function_registry_has, sheet_function_registry_reset}
 use app.office.slides.layout_registry.{slide_layout_registry_has, slide_layout_registry_reset}
 
@@ -118,6 +119,8 @@ describe "extension activation hooks (L6b)":
         sheet_function_registry_reset()
         expect(sheet_function_registry_has("DOUBLE")).to_equal(false)
         val host = extension_host_with_builtins()
+        expect(host.is_active("sheets-function-registry-demo")).to_equal(false)
+        expect(host.activate_command("sheets.function.double")).to_equal(1)
         expect(host.is_active("sheets-function-registry-demo")).to_equal(true)
         expect(sheet_function_registry_has("DOUBLE")).to_equal(true)
 
@@ -125,6 +128,8 @@ describe "extension activation hooks (L6b)":
         slide_layout_registry_reset()
         expect(slide_layout_registry_has("title_diagram")).to_equal(false)
         val host = extension_host_with_builtins()
+        expect(host.is_active("slides-layout-registry-demo")).to_equal(false)
+        expect(host.activate_command("slides.layout.titleDiagram")).to_equal(1)
         expect(host.is_active("slides-layout-registry-demo")).to_equal(true)
         expect(slide_layout_registry_has("title_diagram")).to_equal(true)
 
@@ -160,6 +165,20 @@ describe "the sheets/slides registry builtins are lazily reachable through their
         expect(slide_layout_registry_has("title_diagram")).to_equal(true)
         # Idempotent: nothing left to activate the second time.
         expect(host.activate_command("sheets.function.double")).to_equal(0)
+
+    # Prevention: every builtin that ships an activation hook must be reachable
+    # through an onCommand event for one of its OWN contributed commands.
+    it "every builtin with an activation hook runs it when one of its own contributed commands activates":
+        val host = extension_host_with_builtins()
+        for entry in builtin_activation_hooks():
+            expect(host.activation_hook_ran(entry.name)).to_equal(false)
+            var cmd_id = ""
+            for m in builtin_manifest_providers():
+                if m.name == entry.name and m.contributes_commands.len() > 0:
+                    cmd_id = m.contributes_commands[0].id
+            expect(cmd_id == "").to_equal(false)
+            expect(host.activate_command(cmd_id)).to_equal(1)
+            expect(host.activation_hook_ran(entry.name)).to_equal(true)
 
     it "a lazily-reachable builtin runs its hook only once its own event fires":
         sheet_function_registry_reset()

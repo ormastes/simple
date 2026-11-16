@@ -109,6 +109,60 @@ SPipe lane. Never replace explicit fail placeholders with false-green passes.
   anywhere, so `<metadata name="vkCmdDispatch">` passed as a dispatch.
   Real capture check (web7 `overview.simple.rdc` → 1.8 MB XML, 1637 chunks):
   pass, 205 dispatches, 5 pipelines, 5 shaders, 33 resources, 8.8 s wall.
-- `renderdoc_simple_gate_spec` needs a runnable inspector binary: in a
-  worktree with no `bin/simple` set `RDOC_REPLAY_SIMPLE_BIN`, otherwise every
-  replay reason is `simple-replay-inspector-missing`.
+- `renderdoc_simple_gate_spec` needs a runnable inspector binary to exercise
+  a real replay: in a worktree with no `bin/simple` set
+  `RDOC_REPLAY_SIMPLE_BIN`. Since 2026-11-15 the gate checks `renderdoccmd`
+  BEFORE the inspector binary (as `inspect_renderdoc_capture` does), so a host
+  with no RenderDoc reports `renderdoccmd-missing` in any checkout; before
+  that, the "synthetic magic file" case failed in every worktree with
+  `simple-replay-inspector-missing` (10/11 -> 11/11 without the env var).
+  `renderdoc_replay_inspect_spec` is 8/8 at `fa2dd425635` (default mode and
+  `--mode=interpreter`); the earlier 7/8 did not reproduce.
+
+## Finding which dispatch wrote a pixel — Vulkan text clip, 2026-11-15
+
+Bug `web_vulkan_lane_control_text_one_row_past_clip_2026-11-15.md`: llvmpipe
+painted `<input value="Simple">` glyph rows below the control box that the CPU
+lane clips. Captured the 300x120 repro with the fix and with the base
+`backend_vulkan_font.spl`, same seed, lvp ICD.
+
+- **Installed-tree shim for a RenderDoc build tree** (no `etc/`, so the
+  layer never loads): make a directory with `bin -> $RDOC_BUILD/bin`,
+  `lib -> $RDOC_BUILD/lib` and
+  `etc/vulkan/implicit_layer.d/renderdoc_capture.json` copied from the
+  build's layer manifest, and pass it as the RenderDoc home.
+- Capture: source `scripts/lib/renderdoc-evidence-common.shs`, set
+  `RDOC_SIMPLE_PROG=src/app/test/renderdoc_web_page_capture.spl`,
+  `RDOC_HTML_PATH`, `PAGE_W`/`PAGE_H`, `RDOC_SIMPLE_BIN`,
+  `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json`, and call
+  `rdoc_capture_simple_vulkan "$ROOT" "$SHIM" "$OUT"` under
+  `systemd-run --user --scope -p MemoryMax=8G`. Both runs: `num_captures=1`,
+  `rdoc_capture_status=pass`, ~91 KB `.rdc`.
+- `renderdoccmd convert -f X.rdc -c zip.xml -o cap.zip.xml` gives the chunk
+  XML plus a zip of buffer contents. Before vs after: identical chunk
+  structure (34 `vkCmdDispatch`, same pipelines and group counts); only two
+  114720-byte buffer payloads differ, 7 bytes each.
+- **Identify the dispatch by role, not by id** (ids differ per capture): the
+  font-atlas composite pipeline is the one whose dispatch is
+  `(ceil(max_quad_px/64), glyph_count, 1)`; here the last dispatch, groups
+  `(2,6,1)` for the six glyphs of `Simple`. Its params buffer is
+  `vulkan_font_packed_params`: 8 header words (`max_pixels` at byte 28), then
+  7 words per glyph `atlas_x, atlas_y, w, h, dst_x, dst_y, color`.
+
+| glyph | before (h, rows)  | after (h, rows) |
+|-------|-------------------|-----------------|
+| S     | 10, y 23-32       | 9, y 23-31      |
+| i     | 10, y 23-32       | 9, y 23-31      |
+| m     | 7, y 26-32        | 6, y 26-31      |
+| p     | 10, y 26-35       | 6, y 26-31      |
+| l     | 10, y 23-32       | 9, y 23-31      |
+| e     | 8, y 25-32        | 7, y 25-31      |
+
+  Header `max_pixels` 80 -> 72. So the vector-face composite dispatched whole
+  glyph quads through a clip whose bottom is y 31: the clip was ignored
+  entirely ('p' was 4 rows over), not off by one edge.
+- The other font batchers do not share the defect by construction: CUDA,
+  OpenCL, ROCm and Metal `draw_font_batch` return 0 (CPU fallback) whenever a
+  clip or mask is set (source read only; no such device on this host).
+  Vulkan now bakes the clip into the quads (`composite_font_batch`) and
+  reports a fully clipped batch as the admitted status `clipped-out`.

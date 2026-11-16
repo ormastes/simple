@@ -1,0 +1,52 @@
+# Metadata-only production codec cases. No native owner or Host grant is minted.
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v3.*
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.{ControllerDispatchConfigV1, controller_dispatch_config_encode_v1}
+use test.fixtures.orchestration.host_windows_deployment_v2.windows_deployment_binding_data_v2
+
+fn route_config_v3() -> ControllerDispatchConfigV3:
+    ControllerDispatchConfigV3("controller_1", 3, "a".repeat(64), windows_deployment_binding_data_v2(),
+        "\\GLOBAL??\\C:\\controller-private\\host-auth-v6.sdn", "b".repeat(64),
+        "\\GLOBAL??\\C:\\host-private\\deployment")
+
+describe "Explicit retained Host route metadata":
+    it "round trips the native locator and public credential pin without admitting native authority":
+        val original = route_config_v3()
+        val wire = controller_dispatch_config_encode_v3(original).unwrap()
+        val decoded = controller_dispatch_config_decode_v3(wire).unwrap()
+        expect(decoded.setup_credential_path).to_equal(original.setup_credential_path)
+        expect(decoded.host_deployment_root).to_equal(original.host_deployment_root)
+        expect(decoded.setup_credential_digest).to_equal(original.setup_credential_digest)
+        expect(controller_dispatch_config_encode_v3(decoded).unwrap()).to_equal(wire)
+        expect(wire.contains("retained-host-service-v1")).to_equal(true)
+
+    it "rejects relabeling transport as the existing local in-process route":
+        val wire = controller_dispatch_config_encode_v3(route_config_v3()).unwrap()
+        expect(controller_dispatch_config_decode_v3(wire.replace("retained-host-service-v1", "local-inprocess")).is_err()).to_equal(true)
+
+    it "preserves legacy config refusal of the new route":
+        val legacy = ControllerDispatchConfigV1("controller_1", 3, "retained-host-service-v1",
+            "/private/host", "host_1", "a".repeat(64), "b".repeat(64))
+        expect(controller_dispatch_config_encode_v1(legacy).unwrap_err()).to_equal("dispatch-target-unsupported")
+
+    it "refuses a legacy ready locator and missing public pin":
+        var config = route_config_v3()
+        config.setup_credential_path = "\\GLOBAL??\\C:\\controller-private\\host.ready"
+        expect(controller_dispatch_config_encode_v3(config).unwrap_err()).to_equal("controller-local-config-setup-locator")
+        config = route_config_v3()
+        config.setup_credential_digest = ""
+        expect(controller_dispatch_config_encode_v3(config).is_err()).to_equal(true)
+
+    it "requires a stable protected Host root locator without accepting an old ready field":
+        var config = route_config_v3()
+        config.host_deployment_root = ""
+        expect(controller_dispatch_config_encode_v3(config).unwrap_err()).to_equal("controller-local-config-host-root-locator")
+        val wire = controller_dispatch_config_encode_v3(route_config_v3()).unwrap()
+        expect(controller_dispatch_config_decode_v3(wire.replace("setupCredentialPath", "readyCredentialPath")).is_err()).to_equal(true)
+
+    it "refuses a changed backend and noncanonical record spelling":
+        var config = route_config_v3()
+        config.host_binding.backend = "linux-podman"
+        expect(controller_dispatch_config_encode_v3(config).is_err()).to_equal(true)
+        val wire = controller_dispatch_config_encode_v3(route_config_v3()).unwrap()
+        expect(controller_dispatch_config_decode_v3(wire + "\n").is_err()).to_equal(true)

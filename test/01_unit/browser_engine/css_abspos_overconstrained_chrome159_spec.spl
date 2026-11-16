@@ -1,0 +1,69 @@
+"""
+## Purpose and audience
+Purpose: Pin an over-constrained absolutely positioned box (both insets and
+a definite size): CSS 2.2 10.3.7 ignores `right` when the containing block
+is ltr and `left` when it is rtl; 10.6.4 ignores `bottom`.
+Audience: browser-engine abspos layout maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless shell, `getBoundingClientRect()`
+of ABS_PAGE at 900 px wide; each container is a 100x100 relative block):
+- `#ltr` `left:5px;right:5px;width:10px`: x 5.
+- `#rtl` the same inside `direction:rtl`: x 85.
+- `#tb` `top:5px;bottom:5px;height:10px`: y 205 (container at 200).
+- `#rtll` `left:7px` alone inside `direction:rtl`: x 7.
+
+STRETCH_PAGE (same capture; 200x50 relative containers): `width:auto` with
+both insets stretches in either direction -- `#st1` `left:0;right:0` x 0
+w 200, `#st2` the same in rtl x 0 w 200, `#st3` `inset:0` 200 wide, `#st4`
+rtl `left:10px;right:20px` x 10 w 170. The direction is the CONTAINING
+block's: `#cb1` (rtl block, ltr non-positioned wrapper) x 185, `#cb2` (ltr
+block, rtl wrapper) x 5. `#pc` rtl `width:50%` x 95. Replaced guard: a
+`<canvas>` with `inset:0` keeps 300x150. (`#st3` is 50 tall and an
+`<input>` with `inset:0` 200x50 in Chrome; vertical stretch and the input's
+stretch are not modelled -- residue record.)
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-ABSPOS-OVERCONSTRAINED-001 — an over-constrained abspos box drops the end inset of its containing block's direction, as Chrome 159.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_geometry.{simple_web_layout_debug_layout_by_id}
+
+val ABS_PAGE: text = "<!doctype html><html><head><style>body{{margin:0}}.c{{position:relative;width:100px;height:100px}}</style></head><body><div class=c><div id=ltr style=\"position:absolute;left:5px;right:5px;width:10px;height:10px\"></div></div><div class=c style=\"direction:rtl\"><div id=rtl style=\"position:absolute;left:5px;right:5px;width:10px;height:10px\"></div></div><div class=c><div id=tb style=\"position:absolute;top:5px;bottom:5px;height:10px;width:10px\"></div></div><div class=c style=\"direction:rtl\"><div id=rtll style=\"position:absolute;left:7px;width:10px;height:10px\"></div></div></body></html>"
+
+val STRETCH_PAGE: text = "<!doctype html><html><head><style>body{{margin:0}}.c{{position:relative;width:200px;height:50px}}</style></head><body><div class=c><div id=st1 style=\"position:absolute;left:0;right:0;top:0\">t</div></div><div class=c style=\"direction:rtl\"><div id=st2 style=\"position:absolute;left:0;right:0;top:0\">t</div></div><div class=c><div id=st3 style=\"position:absolute;inset:0\">t</div></div><div class=c style=\"direction:rtl\"><div id=st4 style=\"position:absolute;left:10px;right:20px;top:0\">t</div></div><div class=c style=\"direction:rtl\"><div style=\"direction:ltr\"><div id=cb1 style=\"position:absolute;left:5px;right:5px;width:10px;height:10px\"></div></div></div><div class=c><div style=\"direction:rtl\"><div id=cb2 style=\"position:absolute;left:5px;right:5px;width:10px;height:10px\"></div></div></div><div class=c style=\"direction:rtl\"><div id=pc style=\"position:absolute;left:5px;right:5px;width:50%;height:10px\"></div></div><div class=c><canvas id=cv style=\"position:absolute;inset:0\"></canvas></div><div class=c><input id=in style=\"position:absolute;inset:0\"></div></body></html>"
+
+fn st(id: text, field: text) -> text:
+    simple_web_layout_debug_layout_by_id(STRETCH_PAGE, 900, 600, id, field)
+
+fn at(id: text, field: text) -> text:
+    simple_web_layout_debug_layout_by_id(ABS_PAGE, 900, 400, id, field)
+
+describe "over-constrained abspos":
+    it "AC-1: ltr drops right, rtl drops left":
+        step("Chrome 159: ltr x 5, rtl x 85, rtll x 7")
+        expect(at("ltr", "x")).to_equal("5")
+        expect(at("rtl", "x")).to_equal("85")
+        expect(at("rtll", "x")).to_equal("7")
+
+    it "AC-2: bottom is dropped when top and height are set":
+        step("Chrome 159: tb y 205")
+        expect(at("tb", "y")).to_equal("205")
+
+    it "AC-3: width:auto with both insets stretches; the direction is the containing block's":
+        step("Chrome 159: st1 0/200, st2 0/200, st3 w 200, st4 10/170")
+        expect(st("st1", "x")).to_equal("0")
+        expect(st("st1", "w")).to_equal("200")
+        expect(st("st2", "x")).to_equal("0")
+        expect(st("st2", "w")).to_equal("200")
+        expect(st("st3", "w")).to_equal("200")
+        expect(st("st4", "x")).to_equal("10")
+        expect(st("st4", "w")).to_equal("170")
+        step("Chrome 159: cb1 x 185, cb2 x 5, rtl width:50% pc x 95")
+        expect(st("cb1", "x")).to_equal("185")
+        expect(st("cb2", "x")).to_equal("5")
+        expect(st("pc", "x")).to_equal("95")
+        step("Chrome 159 guard: canvas inset:0 keeps 300x150")
+        expect(st("cv", "w")).to_equal("300")
+        expect(st("cv", "h")).to_equal("150")

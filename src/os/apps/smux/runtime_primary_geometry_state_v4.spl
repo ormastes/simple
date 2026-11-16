@@ -1,0 +1,41 @@
+# Separate Geometry receipt/continuation registry. Input metadata stays separate.
+use os.apps.smux.runtime_primary_control_request_v4.SmuxPrimaryControlRequestV4
+use std.nogc_async_mut.container.primary_geometry_v1.ContainerPrimaryGeometryOwnerV1
+
+pub struct SmuxPrimaryGeometryRecordV4:
+    binding_uid: text
+    request_digest: text
+    session_identity: text
+    revision: i64
+    sequence: i64
+    request: SmuxPrimaryControlRequestV4
+    exchange: ContainerPrimaryGeometryOwnerV1? = nil
+    phase: text = "reserved"
+    disposition: text = "pending"
+    error: text = ""
+
+pub fn smux_primary_geometry_index_v4(records: [SmuxPrimaryGeometryRecordV4], uid: text) -> int:
+    var index = 0
+    while index < records.len():
+        if records[index].binding_uid == uid: return index
+        index = index + 1
+    -1
+
+pub fn smux_primary_geometry_blocks_v4(records: [SmuxPrimaryGeometryRecordV4], uid: text) -> bool:
+    val index = smux_primary_geometry_index_v4(records, uid)
+    if index < 0: return false
+    val record = records[index]
+    record.exchange != nil or ["pending", "unknown"].contains(record.disposition)
+
+pub fn smux_primary_geometry_replay_v4(record: SmuxPrimaryGeometryRecordV4,
+        identity: text, revision: i64, sequence: i64, digest: text) -> Result<bool, text>:
+    if record.session_identity == identity and record.revision == revision:
+        if sequence < record.sequence: return Err("primary-geometry-old-attempt")
+        if sequence == record.sequence:
+            if digest != record.request_digest: return Err("primary-geometry-attempt-changed")
+            return Ok(true)
+    if record.exchange != nil or ["pending", "unknown"].contains(record.disposition):
+        return Err("primary-geometry-prior-unresolved")
+    val expected = if record.session_identity == identity and record.revision == revision: record.sequence + 1 else: 1
+    if sequence != expected: return Err("primary-geometry-attempt-not-next")
+    Ok(false)

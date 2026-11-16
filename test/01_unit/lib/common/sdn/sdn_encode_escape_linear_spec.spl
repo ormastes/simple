@@ -1,0 +1,30 @@
+# SDN canonical string escaping stays linear and byte-exact.
+# Bug: doc/08_tracking/bug/sdn_encode_escape_quadratic_2mb_string_2026-11-15.md
+use std.spec.*
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.string_core.str_len
+
+describe "SDN canonical string escaping":
+    it "encodes a 2 MB multibyte string without quadratic blow-up":
+        """Repro: a 2 MB quoted string used to be OOM-killed by per-byte appends."""
+        step("Encode 1048577 copies of a two-byte character")
+        val big = "é".repeat(1048577)
+        val enc = sdn_encode_canonical(SdnValue.String(big))
+        expect(str_len(enc)).to_equal(2097156)
+        expect(enc.starts_with("\"é")).to_equal(true)
+        expect(enc.ends_with("é\"")).to_equal(true)
+
+    it "escapes every control and quote byte at run boundaries":
+        """Generalization: escapes at the start, middle, end and back to back."""
+        step("Encode strings mixing escapes with unescaped runs")
+        expect(sdn_encode_canonical(SdnValue.String("\"a\\b\nc\td\re\""))).to_equal("\"\\\"a\\\\b\\nc\\td\\re\\\"\"")
+        expect(sdn_encode_canonical(SdnValue.String("\n\n"))).to_equal("\"\\n\\n\"")
+        expect(sdn_encode_canonical(SdnValue.String("a b"))).to_equal("\"a b\"")
+        expect(sdn_encode_canonical(SdnValue.String("é\né"))).to_equal("\"é\\né\"")
+
+    it "escapes a large string full of escapes in linear time":
+        """Generalization: the worst case where every byte needs an escape."""
+        step("Encode 200000 newlines")
+        val enc = sdn_encode_canonical(SdnValue.String("\n".repeat(200000)))
+        expect(str_len(enc)).to_equal(400002)

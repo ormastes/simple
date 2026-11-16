@@ -1,8 +1,9 @@
 # Primary container input through smux V4
 
 Status: consumed source implementation, **NOT_RUN**. This slice adds Linux
-primary input. Geometry, Caret migration, Windows primary transport, and native
-qualification remain pending.
+primary input. A subsequent Linux geometry source slice is described in
+`container_primary_geometry_v1.md`; Caret, Windows and native qualification
+remain pending.
 
 ## Authority and consumed route
 
@@ -23,8 +24,10 @@ rights; an uncertain Input attempt does not revoke Geometry metadata authority.
 The V4 envelope has exactly six fields: `version: 4`,
 `kind: smux-primary-control-request`, canonical V1 `controlRequest` text,
 `attemptSequence`, `offset`, and `maxBytes`. Input requires an explicit positive
-attempt, byte offset inside the payload, and bounded prefix length. Other
-actions require zero attempt metadata. SDN is limited to 2800 bytes, its token
+attempt, byte offset inside the payload, and bounded prefix length. The later
+Geometry extension accepts positive resize attempts with zero offset/maxBytes;
+legacy resize zero is decoded but cannot execute. Other actions require zero
+attempt metadata. SDN is limited to 2800 bytes, its token
 to 3734, and the existing complete authenticated frame to 4096 bytes.
 
 ## Current target and effect ownership
@@ -124,8 +127,8 @@ bounded in-memory issuer/journal checks, fixed-size native state queries, and
 one write; it does not probe the provider or read policy files per byte. The
 bounded synchronization sweep visits at most eight panes and sixteen leases.
 
-Actual Linux primary geometry still needs a typed container-resize exchange,
-fresh exact-parent/TTY observation, and authorized bounded Unix-socket provider
-operation. Exec resize or helper terminal resize is not a substitute. Windows
+The subsequent Linux geometry slice implements a typed container-resize
+exchange, fresh exact-parent/TTY observation, and authorized bounded Unix-socket
+provider operation in source; runtime qualification remains pending. Windows
 still needs its real primary attach broker. Caret can consume this protocol only
 after the complete lifecycle and these native effects are qualified.

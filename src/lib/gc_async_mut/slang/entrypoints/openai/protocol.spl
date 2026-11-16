@@ -205,22 +205,127 @@ fn parse_chat_request(body: text) -> Result<ChatRequest, text>:
         stream: false
     ))
 
+# One typed piece of a message's content. `kind` is "text", "image", "audio"
+# or "video". Media parts carry the still-encoded payload: `data` is the
+# base64 text exactly as the client sent it (already checked to be strict
+# base64) and `format` is the subtype the client named ("jpeg", "png", "wav",
+# "mp3", "mp4", ...). Decoding is left to whoever can actually consume the
+# medium, so a part is never decoded only to be refused.
+struct ChatPart:
+    kind: text
+    text: text
+    data: text
+    format: text
+
 struct ChatMessage:
     role: text
     content: text
+    parts: [ChatPart]
+
+# Why a body's content parts were refused. `code` is the OpenAI error code the
+# HTTP layer reports, so the two cannot drift apart.
+struct ChatPartError:
+    code: text
+    message: text
+
+fn _part_error(code: text, message: text) -> ChatPartError:
+    ChatPartError(code: code, message: message)
+
+# String value of `key` in a parsed JSON object, or "" when absent or not a
+# string.
+fn _json_text(obj: any, key: text) -> text:
+    match json_object_get(obj, key):
+        case Some(value):
+            if value.0 == "string": value.1 else: ""
+        case None:
+            ""
+
+# Strict RFC 4648 base64: non-empty, a multiple of four, only the standard
+# alphabet, and '=' only as one or two trailing pad bytes. The std decoder is
+# deliberately lenient (it skips stray bytes), which would turn a truncated or
+# corrupted upload into a smaller, plausible-looking payload.
+fn base64_payload_is_strict(payload: text) -> bool:
+    val bytes = payload.bytes()
+    val n = bytes.len()
+    if n == 0 or n % 4 != 0:
+        return false
+    var i = 0
+    while i < n:
+        val c = bytes[i] as i64
+        val alpha = (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or (c >= 48 and c <= 57) or c == 43 or c == 47
+        if not alpha:
+            if c != 61 or i < n - 2:
+                return false
+            if i == n - 2 and (bytes[n - 1] as i64) != 61:
+                return false
+        i = i + 1
+    true
+
+# A media part from `data:<kind>/<format>;base64,<payload>`. Remote URLs are
+# refused by name: slang has no network owner for fetching client media, and
+# answering without the medium would be the silent drop this parser removes.
+fn _media_part_from_url(kind: text, url: text) -> Result<ChatPart, ChatPartError>:
+    if url.starts_with("http://") or url.starts_with("https://"):
+        return Err(_part_error("unsupported_media_url", kind + " URLs are not fetched by slang; send the " + kind + " inline as a data:" + kind + "/<format>;base64,... URL"))
+    val prefix = "data:" + kind + "/"
+    val marker = ";base64,"
+    val at = url.find(marker)
+    if not url.starts_with(prefix) or at < 0:
+        return Err(_part_error("invalid_media", kind + " part must be a data:" + kind + "/<format>;base64,... URL"))
+    val format = url.slice(prefix.byte_len(), at)
+    val payload = url.slice(at + marker.byte_len(), url.byte_len())
+    if format == "" or not base64_payload_is_strict(payload):
+        return Err(_part_error("invalid_media", kind + " part carries malformed base64 data"))
+    Ok(ChatPart(kind: kind, text: "", data: payload, format: format))
+
+# The URL of an OpenAI `image_url` / `video_url` part, which may be a bare
+# string or an object with a "url" field.
+fn _part_url(part: any, field: text) -> text:
+    match json_object_get(part, field):
+        case Some(value):
+            if value.0 == "string":
+                value.1
+            elif value.0 == "object":
+                _json_text(value, "url")
+            else:
+                ""
+        case None:
+            ""
+
+fn _content_part(part: any) -> Result<ChatPart, ChatPartError>:
+    val kind = _json_text(part, "type")
+    if kind == "text" or (kind == "" and _json_text(part, "text") != ""):
+        return Ok(ChatPart(kind: "text", text: _json_text(part, "text"), data: "", format: ""))
+    if kind == "image_url":
+        return _media_part_from_url("image", _part_url(part, "image_url"))
+    if kind == "video_url":
+        return _media_part_from_url("video", _part_url(part, "video_url"))
+    if kind == "input_audio":
+        match json_object_get(part, "input_audio"):
+            case Some(audio):
+                val data = _json_text(audio, "data")
+                val format = _json_text(audio, "format")
+                if format == "" or not base64_payload_is_strict(data):
+                    return Err(_part_error("invalid_media", "input_audio part needs a format and strict base64 data"))
+                return Ok(ChatPart(kind: "audio", text: "", data: data, format: format))
+            case None:
+                return Err(_part_error("invalid_media", "input_audio part has no input_audio object"))
+    Err(_part_error("invalid_request", "unsupported content part type '" + kind + "'"))
 
 # Every message of the request, in order, through the std JSON parser (so
 # escapes including \uXXXX are decoded). `content` may be a string, null (read
-# as empty) or an array of {"type":"text","text":...} parts, which are joined.
-# A body that does not parse, or has no messages array, yields no messages.
-fn chat_messages_from_body(body: text) -> [ChatMessage]:
+# as empty) or an array of typed parts. Text parts are joined into `content`;
+# every part, media included, is kept in `parts` in client order. A media part
+# that cannot be carried faithfully is an Err, never a dropped part. A body that
+# does not parse, or has no messages array, yields no messages.
+fn chat_messages_parse(body: text) -> Result<[ChatMessage], ChatPartError>:
     var messages: [ChatMessage] = []
     val parsed = json_parse_with_error(body)
     if parsed.1 != "":
-        return messages
+        return Ok(messages)
     val list = json_object_get(parsed.0, "messages")
     if list == nil or list.0 != "array":
-        return messages
+        return Ok(messages)
     val count = json_array_length(list)
     var i = 0
     while i < count:
@@ -233,21 +338,41 @@ fn chat_messages_from_body(body: text) -> [ChatMessage]:
             continue
         val content = json_object_get(entry, "content")
         var body_text = ""
+        var parts: [ChatPart] = []
         if content != nil and content.0 == "string":
             body_text = content.1
+            parts.push(ChatPart(kind: "text", text: body_text, data: "", format: ""))
         elif content != nil and content.0 == "array":
-            val parts = json_array_length(content)
+            val n_parts = json_array_length(content)
             var p = 0
-            while p < parts:
+            while p < n_parts:
                 val part = json_array_get(content, p)
                 p = p + 1
                 if part == nil or part.0 != "object":
                     continue
-                val part_text = json_object_get(part, "text")
-                if part_text != nil and part_text.0 == "string":
-                    body_text = body_text + part_text.1
-        messages.push(ChatMessage(role: role.1, content: body_text))
-    messages
+                match _content_part(part):
+                    Err(error):
+                        return Err(error)
+                    Ok(typed):
+                        if typed.kind == "text":
+                            body_text = body_text + typed.text
+                        parts.push(typed)
+        messages.push(ChatMessage(role: role.1, content: body_text, parts: parts))
+    Ok(messages)
+
+# Text-only view kept for callers that predate media parts. A body whose media
+# parts are refused yields no messages, so it can never be answered as text.
+fn chat_messages_from_body(body: text) -> [ChatMessage]:
+    match chat_messages_parse(body):
+        Ok(messages): messages
+        Err(_): []
+
+fn chat_message_media_count(message: ChatMessage) -> i64:
+    var n = 0
+    for part in message.parts:
+        if part.kind != "text":
+            n = n + 1
+    n
 
 # OpenAI chat-completion envelope. Only emitted for text that a model actually
 # produced: nothing in this file fabricates a completion, and the stub path in
@@ -280,3 +405,4 @@ export ApiResponse, ChatRequest
 export json_string_field, json_int_field, json_bool_field_is_true, json_array_object_count
 export parse_chat_request, openai_error_response, openai_models_response
 export ChatMessage, chat_messages_from_body, openai_chat_completion_response
+export ChatPart, ChatPartError, chat_messages_parse, chat_message_media_count, base64_payload_is_strict

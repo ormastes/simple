@@ -1,0 +1,254 @@
+# Native oracle, mechanism M1 of
+# doc/08_tracking/bug/native_generic_payload_encoding_2026-11-15.md:
+# a free generic fn returning `T?` / `Result<T, E>` stores the TAGGED `T`
+# word its caller boxed; the caller must decode the Some/Ok payload when the
+# instantiation is an integer or float. Before the fix 7 read back as 56,
+# 9000000000 as a heap-box pointer, 2.25 as a pointer (llvm) or a Cranelift
+# verifier error (`f64, expected i64`).
+# Build: SIMPLE_BOOTSTRAP=1 native-build main.spl --entry-closure (cranelift, llvm).
+# Expected stdout (seed `simple run main.spl`):
+# a 7
+# b 7
+# c 3
+# d none
+# e 9000000000
+# f -5
+# g x
+# h 2.25
+# i 2.25
+# j ok 8
+# k err empty
+# l some 7
+# m true
+# n some 5
+# o ok 20
+# p some 30
+# q 41
+# r 50
+# s 60
+# t 70
+# u ok 160
+# v 90
+# w 3
+# x -1
+# r07a ok 7
+# r07b err bad
+# r07c 9
+# d04c ok 33
+# d04p ok 34
+# d04f ok 35
+# d04l ok 36
+# d04a 33
+#
+# Rows n-x cover each consumer of a decoded payload once: `?` (n Option,
+# j/u Result), re-wrap from a concrete fn (o, p), re-encode into another
+# generic call (q arithmetic, v straight), a struct field (r), nesting (s)
+# and `if val` (t; w payload 3 vs the nil sentinel; x None).
+# r07a-c bind two type parameters (`mk<T, E>`); d04c-a bind T from a
+# non-literal argument (call result, parameter, field, local).
+
+fn first<T>(xs: [T]) -> T?:
+    if xs.len() == 0:
+        return None
+    Some(xs[0])
+
+fn wrap<T>(x: T) -> Result<T, text>:
+    Ok(x)
+
+fn nonempty<T>(xs: [T]) -> Result<T, text>:
+    if xs.len() == 0:
+        return Err("empty")
+    Ok(xs[xs.len() - 1])
+
+fn a_match_result() -> i64:
+    match wrap(7):
+        case Ok(v): v
+        case Err(_): -1
+
+fn b_match_option() -> i64:
+    match first([7, 3]):
+        case Some(v): v
+        case None: -1
+
+fn c_bound() -> i64:
+    val r = first([3])
+    match r:
+        case Some(v): v
+        case None: -1
+
+fn d_none() -> text:
+    val empty: [i64] = []
+    match first(empty):
+        case Some(v): "some {v}"
+        case None: "none"
+
+fn e_wide() -> i64:
+    match wrap(9000000000):
+        case Ok(v): v
+        case Err(_): -1
+
+fn f_negative() -> i64:
+    first([-5, 1]) ?? 0
+
+fn g_text() -> text:
+    match first(["x", "y"]):
+        case Some(v): v
+        case None: "none"
+
+fn h_float_option() -> f64:
+    match first([2.25, 1.5]):
+        case Some(v): v
+        case None: -1.0
+
+fn i_float_result() -> f64:
+    match wrap(2.25):
+        case Ok(v): v
+        case Err(_): -1.0
+
+fn j_try() -> Result<i64, text>:
+    val v = nonempty([1, 7])?
+    Ok(v + 1)
+
+fn k_show(r: Result<i64, text>) -> text:
+    match r:
+        case Ok(v): "ok {v}"
+        case Err(e): "err {e}"
+
+fn m_show(v: i64?) -> text:
+    match v:
+        case Some(x): "some {x}"
+        case None: "none"
+
+struct Holder:
+    n: i64
+
+fn n_option_try() -> i64?:
+    val v = first([4])?
+    Some(v + 1)
+
+fn o_rewrap_ok() -> Result<i64, text>:
+    match wrap(20):
+        case Ok(v): Ok(v)
+        case Err(e): Err(e)
+
+fn p_rewrap_some() -> i64?:
+    match first([30]):
+        case Some(v): Some(v)
+        case None: None
+
+fn q_regeneric() -> i64:
+    match wrap(40):
+        case Ok(v):
+            match wrap(v + 1):
+                case Ok(w): w
+                case Err(_): -1
+        case Err(_): -1
+
+fn r_field() -> i64:
+    match wrap(50):
+        case Ok(v): Holder(n: v).n
+        case Err(_): -1
+
+fn s_nested() -> i64:
+    match wrap(wrap(60)):
+        case Ok(inner):
+            match inner:
+                case Ok(v): v
+                case Err(_): -1
+        case Err(_): -2
+
+fn t_if_val() -> i64:
+    if val x = first([70]):
+        return x
+    -1
+
+fn u_try_bound() -> Result<i64, text>:
+    val r = wrap(80)
+    val v = r?
+    Ok(v * 2)
+
+fn v_regeneric_straight() -> i64:
+    match first([90]):
+        case Some(x):
+            match wrap(x):
+                case Ok(w): w
+                case Err(_): -1
+        case None: -1
+
+fn w_if_val_three() -> i64:
+    if val x = first([3]):
+        return x
+    -1
+
+fn x_if_val_none() -> i64:
+    val empty: [i64] = []
+    if val x = first(empty):
+        return x
+    -1
+
+fn mk<T, E>(v: T, e: E, ok: bool) -> Result<T, E>:
+    if ok:
+        return Ok(v)
+    Err(e)
+
+fn r07a() -> text:
+    match mk(7, "bad", true):
+        case Ok(v): "ok {v}"
+        case Err(e): "err {e}"
+
+fn r07c() -> i64:
+    match mk(9, "bad", true):
+        case Ok(v): v
+        case Err(_): -1
+
+fn thirty_three() -> i64:
+    33
+
+fn d04_param(n: i64) -> text:
+    k_show(wrap(n))
+
+fn d04_field() -> text:
+    val h = Holder(n: 35)
+    k_show(wrap(h.n))
+
+fn d04_local() -> text:
+    var n = 30
+    n = n + 6
+    k_show(wrap(n))
+
+fn run_all():
+    print "a {a_match_result()}"
+    print "b {b_match_option()}"
+    print "c {c_bound()}"
+    print "d {d_none()}"
+    print "e {e_wide()}"
+    print "f {f_negative()}"
+    print "g {g_text()}"
+    print "h {h_float_option()}"
+    print "i {i_float_result()}"
+    print "j {k_show(j_try())}"
+    val none_list: [i64] = []
+    print "k {k_show(nonempty(none_list))}"
+    print "l {m_show(first([7]))}"
+    print "m {first([true]) ?? false}"
+    print "n {m_show(n_option_try())}"
+    print "o {k_show(o_rewrap_ok())}"
+    print "p {m_show(p_rewrap_some())}"
+    print "q {q_regeneric()}"
+    print "r {r_field()}"
+    print "s {s_nested()}"
+    print "t {t_if_val()}"
+    print "u {k_show(u_try_bound())}"
+    print "v {v_regeneric_straight()}"
+    print "w {w_if_val_three()}"
+    print "x {x_if_val_none()}"
+    print "r07a {r07a()}"
+    print "r07b {k_show(mk(8, "bad", false))}"
+    print "r07c {r07c()}"
+    print "d04c {k_show(wrap(thirty_three()))}"
+    print "d04p {d04_param(34)}"
+    print "d04f {d04_field()}"
+    print "d04l {d04_local()}"
+    print "d04a {first([thirty_three()]) ?? -1}"
+
+run_all()

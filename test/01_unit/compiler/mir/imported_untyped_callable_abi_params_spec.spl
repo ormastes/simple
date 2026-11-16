@@ -1,0 +1,175 @@
+# Imported callables WITHOUT `->` whose params name a provider-local type.
+# Their surface symbol carries no callable type, and the name-keyed param
+# registries reject any list holding a provider-local SymbolId, so the call
+# operand reached Cranelift with "callee signature unknown" and every float
+# argument was refused. Stage 3 run 32 (2026-11-14) died on
+# `PtxBuilder.emit_const_float(dest: text, ty: PrimitiveType, value: f64)`.
+# These examples drive the real provider prescan and the real consumer
+# `symbol_to_operand`; the native fixture is
+# test/fixtures/native_method_named_f64_call_abi/.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.core.types.{TYPE_F64, custom_primitive_register, custom_primitive_bind_symbol}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instruction_support.{MirOperandKind}
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir._MirLowering.module_lowering.*
+
+val ABI_PROVIDER_SOURCE = "enum Prim:\n    F32\n    F64\nclass Bld:\n    total: f64\n    me emit_cf(dest: text, ty: Prim, value: f64):\n        self.total = self.total + value\n    me emit_all(tys: [Prim], value: f64):\n        self.total = self.total + value\n    me emit_opt(ty: Prim?, value: f64):\n        self.total = self.total + value\n    static fn bump(ty: Prim, value: f64):\n        ()\nfn free_emit(dest: text, ty: Prim, value: f64):\n    ()\n"
+
+fn abi_spec_provider(path: text) -> HirModule:
+    val ast = parse_full_frontend(ABI_PROVIDER_SOURCE, path, path, Logger(level: 0))
+    var frontend = HirLowering.with_filename(path)
+    val module = frontend.lower_module(ast)
+    expect(frontend.errors.len()).to_equal(0)
+    module
+
+fn abi_spec_prescan(provider: HirModule) -> MirLowering:
+    var lowering = MirLowering.new(provider.symbols)
+    for key in provider.functions.keys():
+        val function: HirFunction = provider.functions[key]
+        lowering.prescan_one_function_v1(provider.name, provider.symbols,
+            function.symbol, function.name, function.is_extern, function.is_method,
+            function.is_static, function.has_export_attr, function.func_attr,
+            function.return_type, function.params)
+    expect(lowering.errors.len()).to_equal(0)
+    lowering
+
+fn abi_spec_declared(operand: MirOperand) -> [MirType]:
+    match operand.kind:
+        case MirOperandKind.Const(_, type_):
+            match type_.kind:
+                case MirTypeKind.FuncPtr(signature):
+                    if signature.declared_params_known:
+                        return signature.declared_params
+                case _: ()
+        case _: ()
+    []
+
+fn abi_spec_class(type_: MirType) -> text:
+    match type_.kind:
+        case MirTypeKind.F64: "f64"
+        case MirTypeKind.F32: "f32"
+        case _: "word"
+
+fn abi_spec_classes(types: [MirType]) -> text:
+    var classes: [text] = []
+    for type_ in types:
+        classes.push(abi_spec_class(type_))
+    classes.join(",")
+
+fn abi_spec_named(id: i64) -> HirType:
+    HirType(kind: HirTypeKind.Named(SymbolId(id: id), []), span: Span.empty())
+
+describe "imported untyped callable ABI params":
+    it "carries the declared f64 of a method whose tail names a provider enum":
+        val provider = abi_spec_provider("src/abi_params/method_owner.spl")
+        val _prescan = abi_spec_prescan(provider)
+        # The consumer's table spells the method by its link and holds an
+        # unrelated declaration at the provider enum's id.
+        var consumer = SymbolTable.new()
+        val _unrelated = consumer.define("Unrelated", SymbolKind.Trait, nil, Span.empty(), Visibility.Public, false, "abi_params.consumer")
+        val method = consumer.define("abi_params.method_owner.Bld::emit_cf", SymbolKind.Method, nil, Span.empty(), Visibility.Public, false, "abi_params.method_owner")
+        var caller = MirLowering.new(consumer)
+        val declared = abi_spec_declared(caller.symbol_to_operand(method))
+        expect(abi_spec_classes(declared)).to_equal("word,word,word,f64")
+
+    it "keeps the record when every consumer prescans the provider again":
+        # Each consumer module prescans its providers, so the same declaration
+        # registers once per consumer with freshly built stand-ins. An
+        # unequal re-registration would reject the key (unknown signature).
+        val provider = abi_spec_provider("src/abi_params/repeat_owner.spl")
+        val _first = abi_spec_prescan(provider)
+        val _second = abi_spec_prescan(provider)
+        val _third = abi_spec_prescan(abi_spec_provider("src/abi_params/repeat_owner.spl"))
+        var consumer = SymbolTable.new()
+        val method = consumer.define("abi_params.repeat_owner.Bld::emit_cf", SymbolKind.Method, nil, Span.empty(), Visibility.Public, false, "abi_params.repeat_owner")
+        val static_method = consumer.define("abi_params.repeat_owner.Bld::bump", SymbolKind.Method, nil, Span.empty(), Visibility.Public, false, "abi_params.repeat_owner")
+        var caller = MirLowering.new(consumer)
+        expect(abi_spec_classes(abi_spec_declared(caller.symbol_to_operand(method)))).to_equal("word,word,word,f64")
+        expect(abi_spec_classes(abi_spec_declared(caller.symbol_to_operand(static_method)))).to_equal("word,f64")
+
+    it "keeps an array-of-enum or optional-enum tail param pointer class and the f64 after it":
+        val provider = abi_spec_provider("src/abi_params/array_owner.spl")
+        val _prescan = abi_spec_prescan(provider)
+        var consumer = SymbolTable.new()
+        val array_method = consumer.define("abi_params.array_owner.Bld::emit_all", SymbolKind.Method, nil, Span.empty(), Visibility.Public, false, "abi_params.array_owner")
+        val optional_method = consumer.define("abi_params.array_owner.Bld::emit_opt", SymbolKind.Method, nil, Span.empty(), Visibility.Public, false, "abi_params.array_owner")
+        var caller = MirLowering.new(consumer)
+        expect(abi_spec_classes(abi_spec_declared(caller.symbol_to_operand(array_method)))).to_equal("word,word,f64")
+        expect(abi_spec_classes(abi_spec_declared(caller.symbol_to_operand(optional_method)))).to_equal("word,word,f64")
+
+    it "carries the declared f64 of a static method and a free function":
+        val provider = abi_spec_provider("src/abi_params/plain_owner.spl")
+        val _prescan = abi_spec_prescan(provider)
+        var consumer = SymbolTable.new()
+        val static_method = consumer.define("abi_params.plain_owner.Bld::bump", SymbolKind.Method, nil, Span.empty(), Visibility.Public, false, "abi_params.plain_owner")
+        val free_function = consumer.define("abi_params.plain_owner.free_emit", SymbolKind.Function, nil, Span.empty(), Visibility.Public, false, "abi_params.plain_owner")
+        var caller = MirLowering.new(consumer)
+        expect(abi_spec_classes(abi_spec_declared(caller.symbol_to_operand(static_method)))).to_equal("word,f64")
+        expect(abi_spec_classes(abi_spec_declared(caller.symbol_to_operand(free_function)))).to_equal("word,word,f64")
+        expect(abi_spec_classes(caller.callable_abi_declared_params_v1("abi_params.plain_owner.free_emit"))).to_equal("word,word,f64")
+        # The plain record still drives argument slot lowering and must not
+        # hold a stand-in for the provider's enum.
+        expect(bootstrap_fn_param_hir_types_lookup("abi_params.plain_owner.free_emit") == nil).to_equal(true)
+
+describe "provider-side ABI stand-ins":
+    it "stands a class, struct or enum in as the handle word and keeps scalars":
+        var provider = SymbolTable.new()
+        val class_id = provider.define("abi.stand.Owner", SymbolKind.Class, nil, Span.empty(), Visibility.Public, false, "abi.stand")
+        val struct_id = provider.define("abi.stand.Rec", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "abi.stand")
+        val enum_id = provider.define("abi.stand.Kind", SymbolKind.Enum, nil, Span.empty(), Visibility.Public, false, "abi.stand")
+        val stood = mir_abi_param_stand_ins_v1([abi_spec_named(class_id.id), abi_spec_named(struct_id.id),
+            abi_spec_named(enum_id.id), HirType.named("f64")], 0, provider)
+        expect(stood.len()).to_equal(4)
+        for stand_in in stood:
+            expect(hir_type_metadata_symbol_free(stand_in)).to_equal(true)
+        if stood.len() == 4:
+            match stood[3].kind:
+                case HirTypeKind.Float(bits): expect(bits).to_equal(64)
+                case _: fail("a declared f64 param must stay f64")
+            match stood[2].kind:
+                case HirTypeKind.Int(bits, _): expect(bits).to_equal(64)
+                case _: fail("an enum param must stand in as the handle word")
+
+    it "stands a unit/newtype in as its underlying scalar":
+        var provider = SymbolTable.new()
+        val meters = provider.define("abi.stand.AbiSpecMeters", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "abi.stand")
+        custom_primitive_register("AbiSpecMeters", TYPE_F64)
+        custom_primitive_bind_symbol("AbiSpecMeters", meters.id)
+        val stood = mir_abi_param_stand_in_v1(abi_spec_named(meters.id), provider)
+        match stood.kind:
+            case HirTypeKind.Float(bits): expect(bits).to_equal(64)
+            case _: fail("an f64 newtype must stand in as f64, never the handle word")
+
+    it "leaves what the provider table does not prove symbol-bearing":
+        var provider = SymbolTable.new()
+        val trait_id = provider.define("abi.stand.Shape", SymbolKind.Trait, nil, Span.empty(), Visibility.Public, false, "abi.stand")
+        # A unit/newtype name bound to ANOTHER table's id: the two records disagree.
+        val stray = provider.define("abi.stand.AbiSpecStray", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "abi.stand")
+        custom_primitive_register("AbiSpecStray", TYPE_F64)
+        custom_primitive_bind_symbol("AbiSpecStray", stray.id + 1000)
+        val dyn_trait = HirType(kind: HirTypeKind.DynTrait(SymbolId(id: trait_id.id)), span: Span.empty())
+        val type_param = HirType(kind: HirTypeKind.TypeParam("T", []), span: Span.empty())
+        for unproven in [abi_spec_named(trait_id.id), abi_spec_named(stray.id), abi_spec_named(987654), dyn_trait, type_param]:
+            expect(hir_type_metadata_symbol_free(mir_abi_param_stand_in_v1(unproven, provider))).to_equal(false)
+
+    it "keeps a method whose tail stays symbol-bearing unknown":
+        var provider = SymbolTable.new()
+        val trait_id = provider.define("abi.stand.Sink", SymbolKind.Trait, nil, Span.empty(), Visibility.Public, false, "abi.stand")
+        val owner_id = provider.define("abi.stand.W", SymbolKind.Class, nil, Span.empty(), Visibility.Public, false, "abi.stand")
+        mir_register_callable_abi_params_v1("abi.stand.W::put_dyn", true, true,
+            [abi_spec_named(owner_id.id), abi_spec_named(trait_id.id), HirType.named("f64")], provider)
+        expect(bootstrap_method_receiver_tail_params_lookup_v1("abi.stand.W.put_dyn") == nil).to_equal(true)
+        # A receiver that is not the handle word publishes nothing at all.
+        mir_register_callable_abi_params_v1("abi.stand.W::put_raw", true, false,
+            [abi_spec_named(owner_id.id), HirType.named("f64")], provider)
+        expect(bootstrap_method_receiver_tail_params_lookup_v1("abi.stand.W.put_raw") == nil).to_equal(true)

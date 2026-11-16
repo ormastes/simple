@@ -1058,6 +1058,10 @@ pub(crate) fn warn_on_ambiguous_bare_enum_name(
     if names(prev) == names(new_def) {
         return false;
     }
+    if simple_common::tool_closure_quiet::tool_closure_quiet() {
+        // The colliding enums belong to the lint tool's own closure.
+        return true;
+    }
     eprintln!(
         "warning[enum-bare-name-ambiguous]: enum `{}` is registered again with a different variant set \
          ([{}] replaces [{}]); enum lookup is keyed by bare name and the last registration wins. \

@@ -1,0 +1,251 @@
+# Direct same-process Container API stream. No child process, Job, agent socket
+# or reconstructed PipedProcessRef. SOURCE-ONLY NOT_RUN. Keep the canonical
+# returned owner after every turn; copied metadata is not another reader.
+use std.common.contracts.container.primary_connection_v2.*
+use std.common.contracts.mux.session_runtime_control_v1.{SessionRuntimeControlTargetV1,
+    SessionRuntimeControlLeaseV1, SessionRuntimeControlKindV1, session_runtime_control_target_digest_v1,
+    session_runtime_control_lease_check_v1}
+use std.nogc_async_mut.container.terminal_session_v1.ContainerPrimaryAttachAdoptionV1
+use std.nogc_async_mut.container.providers.windows.docker_engine_exchange_v3.{WindowsDockerEngineExchangeV3,
+    WindowsDockerEngineTransferOutcomeV3, windows_docker_engine_exchange_serialize_v3}
+use std.nogc_async_mut.container.providers.windows.docker_engine_codec_v3.{WindowsEngineMuxStateV3,
+    WINDOWS_ENGINE_FRAME_MAX_V3, windows_engine_mux_open_v3, windows_engine_mux_feed_v3, windows_engine_attach_v3}
+use std.nogc_sync_mut.io.windows_engine_pipe_owner_v1.*
+use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub class WindowsPrimaryConnectionAbsenceV2:
+    identity: text
+    request_digest: text
+    slot: i32
+    generation: i64
+
+pub class WindowsPrimaryConnectionV2:
+    plan: ContainerPrimaryConnectionPlanV2
+    lease: WindowsEnginePipeLeaseV1
+    identity: text
+    mux: WindowsEngineMuxStateV3
+    leftover: [u8]
+    leftover_offset: i64
+    adoption: ContainerPrimaryAttachAdoptionV1?
+    stable_binding: text
+    closing: bool
+    closed: bool
+    error: text
+
+pub struct WindowsPrimaryConnectionTakeV2:
+    source: WindowsDockerEngineExchangeV3
+    session: WindowsPrimaryConnectionV2?
+    error: text
+
+pub struct WindowsPrimaryConnectionReadTurnV2:
+    session: WindowsPrimaryConnectionV2
+    chunks: [ContainerTerminalChunkV2]
+    eof: bool
+    error: text
+
+pub struct WindowsPrimaryConnectionCleanupTurnV2:
+    session: WindowsPrimaryConnectionV2
+    absence: WindowsPrimaryConnectionAbsenceV2?
+    error: text
+
+pub struct WindowsPrimaryConnectionAdoptionTurnV2:
+    session: WindowsPrimaryConnectionV2
+    error: text
+
+pub fn windows_primary_connection_identity_v2(session: WindowsPrimaryConnectionV2) -> text: session.identity
+pub fn windows_primary_connection_plan_v2(session: WindowsPrimaryConnectionV2) -> ContainerPrimaryConnectionPlanV2: session.plan
+pub fn windows_primary_connection_adoption_v2(session: WindowsPrimaryConnectionV2) -> ContainerPrimaryAttachAdoptionV1?: session.adoption
+
+pub fn windows_primary_connection_validate_v2(session: WindowsPrimaryConnectionV2) -> Result<(), text>:
+    if session.closed or session.closing or session.error != "": return Err("windows-primary-connection-unavailable")
+    val observed = windows_engine_pipe_poll_v1(session.lease)?
+    if observed.closed or observed.closing: return Err("windows-primary-connection-native-closed")
+    Ok(())
+
+pub fn windows_primary_connection_transport_active_v2(session: WindowsPrimaryConnectionV2) -> Result<bool, text>:
+    windows_primary_connection_validate_v2(session)?
+    Ok(not session.mux.closed)
+
+# A real closed exact slot/generation is connection absence only. No container
+# completion, process reap or physical reservation release is implied here.
+pub fn windows_primary_connection_absence_matches_v2(session: WindowsPrimaryConnectionV2,
+        absence: WindowsPrimaryConnectionAbsenceV2) -> Result<(), text>:
+    if (not session.closed or absence.identity != session.identity or
+            absence.request_digest != session.plan.request_digest or absence.slot != session.lease.slot or
+            absence.generation != session.lease.generation): return Err("windows-primary-connection-absence-mismatch")
+    val native = windows_engine_pipe_poll_v1(session.lease)?
+    if not native.closed or native.read_pending or native.write_pending:
+        return Err("windows-primary-connection-absence-unconfirmed")
+    Ok(())
+
+# Protected settlement publication calls this on the exact retained, already
+# cleaned owner. Persisting these facts never restores a pipe or proves exit.
+pub fn windows_primary_connection_closed_bytes_v2(session: WindowsPrimaryConnectionV2) -> Result<text, text>:
+    val absence = WindowsPrimaryConnectionAbsenceV2(identity: session.identity,
+        request_digest: session.plan.request_digest, slot: session.lease.slot, generation: session.lease.generation)
+    windows_primary_connection_absence_matches_v2(session, absence)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("container-primary-connection-closed"),
+        "resourceDomain": SdnValue.String("engine-attach-connection"), "provider": SdnValue.String("windows-docker-process"),
+        "requestDigest": SdnValue.String(session.plan.request_digest), "identityDigest": SdnValue.String(session.identity),
+        "pipeSlot": SdnValue.Int(session.lease.slot as i64), "pipeGeneration": SdnValue.Int(session.lease.generation),
+        "closed": SdnValue.Bool(true), "readPending": SdnValue.Bool(false), "writePending": SdnValue.Bool(false)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn windows_primary_connection_cleanup_v2(session: WindowsPrimaryConnectionV2) -> WindowsPrimaryConnectionCleanupTurnV2:
+    var retained = session
+    retained.closing = true
+    val observed = match windows_engine_pipe_collect_v1(retained.lease):
+        case Err(reason): return WindowsPrimaryConnectionCleanupTurnV2(retained, None, reason)
+        case Ok(value): value
+    if not observed.closed or observed.read_pending or observed.write_pending:
+        return WindowsPrimaryConnectionCleanupTurnV2(retained, None, "windows-primary-connection-cleanup-pending")
+    retained.closed = true
+    retained.leftover = []
+    retained.leftover_offset = 0
+    val absence = WindowsPrimaryConnectionAbsenceV2(identity: retained.identity,
+        request_digest: retained.plan.request_digest, slot: retained.lease.slot, generation: retained.lease.generation)
+    WindowsPrimaryConnectionCleanupTurnV2(retained, Some(absence), "")
+
+fn read_failed(session: WindowsPrimaryConnectionV2, reason: text) -> WindowsPrimaryConnectionReadTurnV2:
+    var retained = session
+    if retained.error == "": retained.error = reason
+    # Do not discard the stream or pending storage; caller drives exact cleanup.
+    WindowsPrimaryConnectionReadTurnV2(retained, [], false, reason)
+
+pub fn windows_primary_connection_read_v2(session: WindowsPrimaryConnectionV2) -> WindowsPrimaryConnectionReadTurnV2:
+    val valid = windows_primary_connection_validate_v2(session)
+    if valid.is_err(): return read_failed(session, valid.unwrap_err())
+    if session.mux.closed: return WindowsPrimaryConnectionReadTurnV2(session, [], true, "")
+    var retained = session
+    var bytes: [u8] = []
+    var eof = false
+    # 8192 bytes bounds even zero-length mux headers to <=1024 per decoder turn.
+    if retained.leftover_offset < retained.leftover.len():
+        val remaining = retained.leftover.len() - retained.leftover_offset
+        val count = if remaining > 8192: 8192 else: remaining
+        bytes = [for index in retained.leftover_offset..(retained.leftover_offset + count): retained.leftover[index]]
+        retained.leftover_offset = retained.leftover_offset + count
+        if retained.leftover_offset == retained.leftover.len():
+            retained.leftover = []
+            retained.leftover_offset = 0
+    else:
+        match windows_engine_pipe_read_some_v1(retained.lease, 8192):
+            case WindowsEnginePipeReadV1.Pending: return WindowsPrimaryConnectionReadTurnV2(retained, [], false, "")
+            case WindowsEnginePipeReadV1.Failed(reason): return read_failed(retained, reason)
+            case WindowsEnginePipeReadV1.End: eof = true
+            case WindowsEnginePipeReadV1.Data(value):
+                if value.len() <= 0 or value.len() > 8192: return read_failed(retained, "windows-primary-connection-read-bound")
+                bytes = value
+    val decoded = match windows_engine_mux_feed_v3(retained.mux, bytes, eof):
+        case Err(reason): return read_failed(retained, reason)
+        case Ok(value): value
+    retained.mux = decoded.state
+    val chunks = [for chunk in decoded.chunks: ContainerTerminalChunkV2(stream: chunk.stream, bytes: chunk.bytes)]
+    WindowsPrimaryConnectionReadTurnV2(retained, chunks, decoded.state.closed, "")
+
+fn adoption_match(adoption: ContainerPrimaryAttachAdoptionV1, target: SessionRuntimeControlTargetV1) -> bool:
+    (adoption.binding_uid == target.binding_uid and adoption.service_incarnation == target.service_incarnation and
+        adoption.session_id == target.session_id and adoption.window_id == target.window_id and adoption.pane_id == target.pane_id and
+        adoption.service_epoch == target.service_epoch and adoption.child_incarnation == target.child_incarnation)
+
+pub fn windows_primary_connection_adopt_v2(session: WindowsPrimaryConnectionV2,
+        adoption: ContainerPrimaryAttachAdoptionV1, target: SessionRuntimeControlTargetV1) -> WindowsPrimaryConnectionAdoptionTurnV2:
+    val valid = windows_primary_connection_validate_v2(session)
+    if valid.is_err(): return WindowsPrimaryConnectionAdoptionTurnV2(session, valid.unwrap_err())
+    val matched = container_primary_connection_target_match_v2(session.plan, target)
+    if matched.is_err(): return WindowsPrimaryConnectionAdoptionTurnV2(session, matched.unwrap_err())
+    if not adoption_match(adoption, target): return WindowsPrimaryConnectionAdoptionTurnV2(session, "windows-primary-adoption-target")
+    val digest = container_primary_connection_binding_digest_v2(target)
+    if digest.is_err(): return WindowsPrimaryConnectionAdoptionTurnV2(session, digest.unwrap_err())
+    if val current = session.adoption:
+        if not adoption_match(current, target) or session.stable_binding != digest.unwrap():
+            return WindowsPrimaryConnectionAdoptionTurnV2(session, "windows-primary-adoption-rebind")
+        return WindowsPrimaryConnectionAdoptionTurnV2(session, "")
+    val bound = windows_engine_pipe_bind_control_v2(session.lease, WindowsEnginePipeControlBindingV2(
+        target_digest: digest.unwrap(), kind: "input", payload_digest: ""))
+    if bound.is_err(): return WindowsPrimaryConnectionAdoptionTurnV2(session, bound.unwrap_err())
+    var retained = session
+    retained.adoption = Some(adoption)
+    retained.stable_binding = digest.unwrap()
+    WindowsPrimaryConnectionAdoptionTurnV2(retained, "")
+
+# Actual common issuer refresh is required before these trusted-local calls,
+# just as with the V1 process input boundary. No serialized lease is accepted.
+fn input_control(session: WindowsPrimaryConnectionV2, lease: SessionRuntimeControlLeaseV1,
+        target: SessionRuntimeControlTargetV1, principal: text, nonce: text) -> Result<WindowsEnginePipeControlV2, text>:
+    windows_primary_connection_validate_v2(session)?
+    container_primary_connection_target_match_v2(session.plan, target)?
+    val adoption = match session.adoption:
+        case Some(value): value
+        case None: return Err("windows-primary-input-not-adopted")
+    if not adoption_match(adoption, target): return Err("windows-primary-input-adoption-mismatch")
+    val binding = container_primary_connection_binding_digest_v2(target)?
+    if binding != session.stable_binding: return Err("windows-primary-input-binding-mismatch")
+    val now = time_sample_monotonic_nanos_or_failure()
+    if now <= 0: return Err("windows-primary-input-clock")
+    if nonce == "" or nonce.byte_len() > 256: return Err("windows-primary-input-nonce-bound")
+    val nonce_digest = sha256_text(nonce)
+    session_runtime_control_lease_check_v1(lease, target, SessionRuntimeControlKindV1.Input,
+        principal, nonce_digest, lease.revision, now / 1000000)?
+    if lease.expires_monotonic_ms > 9223372036854: return Err("windows-primary-input-deadline-bound")
+    Ok(WindowsEnginePipeControlV2(target_digest: session_runtime_control_target_digest_v1(target)?,
+        binding_digest: binding, kind: "input", nonce_digest: nonce_digest,
+        revision: lease.revision, expires_monotonic_ns: lease.expires_monotonic_ms * 1000000))
+
+pub fn windows_primary_connection_input_install_v2(session: WindowsPrimaryConnectionV2,
+        lease: SessionRuntimeControlLeaseV1, target: SessionRuntimeControlTargetV1,
+        principal: text, nonce: text) -> Result<WindowsEnginePipeControlStateV2, text>:
+    val control = input_control(session, lease, target, principal, nonce)?
+    windows_engine_pipe_install_control_v2(session.lease, control)
+
+pub fn windows_primary_connection_input_write_v2(session: WindowsPrimaryConnectionV2,
+        lease: SessionRuntimeControlLeaseV1, target: SessionRuntimeControlTargetV1,
+        principal: text, nonce: text, sequence: i64, frame_sequence: i64,
+        payload: [u8], offset: i64, max_bytes: i64) -> Result<WindowsEnginePipeWriteReceiptV2, text>:
+    val control = input_control(session, lease, target, principal, nonce)?
+    if payload.len() <= 0 or payload.len() > 65536: return Err("windows-primary-input-payload-bound")
+    windows_engine_pipe_write_controlled_v2(session.lease, WindowsEnginePipeAttemptV2(control: control,
+        sequence: sequence, frame_sequence: frame_sequence, payload_digest: sha256_u8_hex(payload),
+        payload_bytes: payload.len(), offset: offset, requested_bytes: max_bytes), payload)
+
+pub fn windows_primary_connection_input_state_v2(session: WindowsPrimaryConnectionV2) -> Result<WindowsEnginePipeControlStateV2, text>:
+    windows_engine_pipe_control_state_v2(session.lease)
+
+pub fn windows_primary_connection_input_revoke_v2(session: WindowsPrimaryConnectionV2) -> Result<(), text>:
+    val state = windows_engine_pipe_control_state_v2(session.lease)?
+    if val current = state.current:
+        val revoked = windows_engine_pipe_revoke_control_v2(session.lease, current)?
+    Ok(())
+
+# Only a genuinely completed existing exchange can transfer its pipe. Exact
+# canonical request comparison prevents relabeling another target's connection.
+# This constructor does not open attach: the signed one-use factory must do so.
+pub fn windows_primary_connection_take_v2(exchange: WindowsDockerEngineExchangeV3,
+        plan: ContainerPrimaryConnectionPlanV2) -> WindowsPrimaryConnectionTakeV2:
+    val digest = container_primary_connection_plan_digest_v2(plan)
+    if digest.is_err(): return WindowsPrimaryConnectionTakeV2(exchange, None, digest.unwrap_err())
+    if digest.unwrap() != plan.request_digest: return WindowsPrimaryConnectionTakeV2(exchange, None, "windows-primary-plan-digest")
+    val expected = windows_engine_attach_v3("1.48", plan.runtime.native_id, plan.terminal_mode == "tty", true)
+    if expected.is_err(): return WindowsPrimaryConnectionTakeV2(exchange, None, expected.unwrap_err())
+    val wire = windows_docker_engine_exchange_serialize_v3(expected.unwrap())
+    if wire.is_err(): return WindowsPrimaryConnectionTakeV2(exchange, None, wire.unwrap_err())
+    var original = exchange
+    match original.take_hijack_v3():
+        case WindowsDockerEngineTransferOutcomeV3.Retained(source, reason): WindowsPrimaryConnectionTakeV2(source, None, reason)
+        case WindowsDockerEngineTransferOutcomeV3.Transferred(source, stream):
+            val identity = sha256_text("windows-primary-connection-v2\n" + plan.request_digest + "\n" +
+                stream.lease.slot.to_text() + "\n" + stream.lease.generation.to_text() + "\n" + sha256_u8_hex(wire.unwrap()))
+            var session = WindowsPrimaryConnectionV2(plan: plan, lease: stream.lease, identity: identity,
+                mux: windows_engine_mux_open_v3(plan.terminal_mode == "tty"), leftover: stream.response.leftover,
+                leftover_offset: 0, adoption: None, stable_binding: "", closing: false, closed: false, error: "")
+            val actual = windows_docker_engine_exchange_serialize_v3(stream.request)
+            if (actual.is_err() or actual.unwrap() != wire.unwrap() or stream.operation != "attach" or
+                    stream.primary_plan_digest != plan.request_digest or
+                    stream.tty != (plan.terminal_mode == "tty") or stream.response.body.len() != 0 or
+                    stream.response.leftover.len() > WINDOWS_ENGINE_FRAME_MAX_V3 or
+                    stream.response.stream_mode != (if plan.terminal_mode == "tty": "raw" else: "multiplexed")):
+                session.error = "windows-primary-transferred-request-mismatch"
+            WindowsPrimaryConnectionTakeV2(source, Some(session), session.error)

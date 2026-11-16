@@ -1,0 +1,79 @@
+# AUTHORED_NOT_RUN. The real Linux origin guard protects the production slot;
+# these slots contain no native process or machine/epoch admission capability.
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.container.machine_fresh_epoch_lifecycle_v1.*
+use std.nogc_sync_mut.container.machine_fresh_epoch_process_progress_v1.*
+
+describe "Canonical fresh creator progress cannot reuse one launch permit":
+    it "consumes before a creator and rejects the copied token's second consume":
+        step("Record a modeled committed intent in the actual production lifecycle")
+        val owner = machine_fresh_epoch_lifecycle_open_v1().unwrap()
+        val alias = owner
+        val begun = owner.begin_intent_v1("a".repeat(64), "modeled-template-data", 2000, 1000)
+        val committed = owner.commit_intent_v1("b".repeat(64))
+        val first = owner.consume_launch_v1()
+        val second = alias.consume_launch_v1()
+        expect(begun.is_ok()).to_equal(true)
+        expect(committed.is_ok()).to_equal(true)
+        expect(first.is_ok()).to_equal(true)
+        expect(second.is_err()).to_equal(true)
+        expect(second.unwrap_err()).to_equal("machine-fresh-epoch-launch-permit-consumed")
+        val phase = owner.phase_v1()
+        expect(phase.unwrap()).to_equal("launch-attempted")
+
+    it "keeps an ambiguous attempt nonreusable and preserves its first diagnostic through close":
+        step("An uncertain commit cannot be reset to admitted or retried as genesis")
+        val owner = machine_fresh_epoch_lifecycle_open_v1().unwrap()
+        val begun = owner.begin_intent_v1("c".repeat(64), "modeled-template-data", 2000, 1000)
+        val unknown = owner.unknown_v1("actual-attempt-uncertain")
+        val repeated = owner.begin_intent_v1("d".repeat(64), "different-template-data", 3000, 1000)
+        val closing = owner.closing_v1()
+        val process = owner.close_process_v1()
+        val closed = owner.closed_v1("later-close-diagnostic")
+        val diagnostic = owner.diagnostic_v1()
+        expect(begun.is_ok()).to_equal(true)
+        expect(unknown.is_ok()).to_equal(true)
+        expect(repeated.is_err()).to_equal(true)
+        expect(repeated.unwrap_err()).to_equal("machine-fresh-epoch-creator-already-attempted")
+        expect(closing.is_ok()).to_equal(true)
+        expect(process.is_ok()).to_equal(true)
+        expect(closed.is_ok()).to_equal(true)
+        expect(diagnostic.unwrap()).to_equal("actual-attempt-uncertain")
+
+    it "stores the first modeled close diagnostic canonically before another alias finishes":
+        step("Use the same immediate diagnostic transition called by actual cleanup")
+        val owner = machine_fresh_epoch_lifecycle_open_v1().unwrap()
+        val alias = owner
+        val closing = owner.closing_v1()
+        val first = owner.retain_diagnostic_v1("modeled-first-native-close-error")
+        val next = alias.retain_diagnostic_v1("modeled-later-close-error")
+        val process = alias.close_process_v1()
+        val finished = alias.closed_v1("")
+        val retained = owner.diagnostic_v1()
+        expect(closing.is_ok()).to_equal(true)
+        expect(first.unwrap()).to_equal("modeled-first-native-close-error")
+        expect(next.unwrap()).to_equal("modeled-first-native-close-error")
+        expect(process.is_ok()).to_equal(true)
+        expect(finished.is_ok()).to_equal(true)
+        expect(retained.unwrap()).to_equal("modeled-first-native-close-error")
+
+    it "models exact-owned fallback consumption without interpreting raw stale as closed":
+        step("Exercise the production candidate reducer without inventing a native process or OS fault")
+        val initial = MachineFreshEpochProcessProgressV1("unresolved", "", "")
+        val bound = machine_fresh_epoch_process_progress_v1(initial, "native-scope-A", "bind").unwrap()
+        val transferred = machine_fresh_epoch_process_progress_v1(bound, "native-scope-A", "transferred").unwrap()
+        val pending = machine_fresh_epoch_process_progress_v1(bound, "native-scope-A", "retained", "modeled-first-close-error").unwrap()
+        val consumed = machine_fresh_epoch_process_progress_v1(pending, "native-scope-A", "consumed").unwrap()
+        val alias = machine_fresh_epoch_process_progress_v1(consumed, "native-scope-A", "retained", "modeled-later-error").unwrap()
+        val foreign = machine_fresh_epoch_process_progress_v1(consumed, "native-scope-B", "consumed")
+        val stale = machine_fresh_epoch_process_progress_v1(bound, "native-scope-A", "stale").unwrap()
+        val no_owner = machine_fresh_epoch_process_progress_v1(initial, "", "no-owner").unwrap()
+        expect(transferred.phase).to_equal("transferred")
+        expect(pending.phase).to_equal("unresolved")
+        expect(consumed.phase).to_equal("consumed")
+        expect(alias.phase).to_equal("consumed")
+        expect(alias.error).to_equal("modeled-first-close-error")
+        expect(foreign.is_err()).to_equal(true)
+        expect(stale.phase).to_equal("unresolved")
+        expect(stale.error).to_equal("machine-fresh-epoch-process-close:stale")
+        expect(no_owner.phase).to_equal("no-owner")

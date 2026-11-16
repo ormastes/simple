@@ -1,0 +1,104 @@
+use std.common.contracts.distributed_operation_state_v2.*
+use std.common.contracts.distributed_operation_history_v2.*
+use std.common.contracts.distributed_operation_retention_v2.*
+use std.common.task_runner.distributed_operation_checkpoint_v2.*
+use std.common.task_runner.distributed_operation_owner_health_v2.*
+use std.common.task_runner.distributed_operation_journal_rows_v2.*
+use std.nogc_sync_mut.database.wal_segmented.*
+use std.nogc_sync_mut.database.wal.{WalEntry, WalEntryType}
+use std.nogc_sync_mut.io.windows_journal_store_v1.WindowsJournalStoreV1
+use std.nogc_sync_mut.io.journal_storage_backend_v3.*
+use std.common.crypto.sha256.sha256_text
+
+struct OperationReplaySnapshotV2:
+    rows: {text: DistributedOperationStateV2}
+    history: DistributedOperationJournalHistoryBatchV2
+    checkpoint_sequence: i64 = 0
+
+fn operation_replay_snapshot_v2(root: text, authority_digest: text,
+        maximum_events: i64, store: Option<WindowsJournalStoreV1> = nil,
+        retention_profile: Option<DistributedOperationRetentionProfileV2> = nil,
+        turn: Option<OperationJournalHealthTurnV2> = nil,
+        expected_digest: text = "") -> Result<OperationReplaySnapshotV2, text>:
+    operation_replay_snapshot_stored_v3(root, authority_digest, maximum_events, journal_storage_backend_windows_v3(store),
+        retention_profile, turn, expected_digest)
+
+fn operation_replay_snapshot_stored_v3(root: text, authority_digest: text,
+        maximum_events: i64, backend: JournalStorageBackendV3,
+        retention_profile: Option<DistributedOperationRetentionProfileV2> = nil,
+        turn: Option<OperationJournalHealthTurnV2> = nil,
+        expected_digest: text = "") -> Result<OperationReplaySnapshotV2, text>:
+    val latest = operation_stored_result_v2(database_wal_current_stored_v3(root + "/database-wal",
+        authority_digest, backend), turn, expected_digest)?
+    if latest == "" and expected_digest != "":
+        return operation_stored_result_v2(Err("OPERATION_WAL_CURRENT_MISSING"), turn, expected_digest)
+    var cursor = latest
+    var sequence: i64 = 0
+    var expected_last: i64 = -1
+    var history: [WalEntry] = []
+    var commits: [text] = []
+    var endpoints: Dict<text, i64> = {}
+    var rows: {text: DistributedOperationStateV2} = {}
+    var origins: Dict<text, DistributedOperationHistoryV2> = {}
+    var checkpoint_sequence: i64 = 0
+    while cursor != "":
+        val revision: DatabaseWalRevisionV1 = operation_stored_result_v2(database_wal_revision_open_stored_v3(
+            root + "/database-wal", cursor, backend), turn, cursor)?
+        if revision.database_identity != authority_digest: return Err("OPERATION_WAL_AUTHORITY_CHANGED")
+        if expected_last >= 0 and revision.last_sequence != expected_last: return Err("OPERATION_WAL_SEQUENCE_GAP")
+        if expected_last < 0:
+            sequence = revision.last_sequence
+            if sequence > maximum_events: return Err("OPERATION_WAL_REPLAY_BOUND_EXCEEDED")
+        if revision.checkpoint_digest != "":
+            if retention_profile.is_none(): return Err("OPERATION_CHECKPOINT_PROFILE_REQUIRED")
+            val profile = retention_profile.unwrap()
+            val manifest: text = operation_stored_result_v2(database_wal_object_stored_v3(root + "/database-wal",
+                revision.checkpoint_digest, backend), turn, revision.checkpoint_digest)?
+            val checkpoint: OperationCheckpointSnapshotV2 = operation_stored_result_v2(distributed_operation_checkpoint_decode_v2(manifest,
+                \digest: operation_stored_result_v2(database_wal_object_stored_v3(root + "/database-wal",
+                    digest, backend), turn, digest)), turn, revision.checkpoint_digest)?
+            if (checkpoint.authority_digest != authority_digest or checkpoint.base_commit != revision.parent or
+                    checkpoint.base_sequence != revision.last_sequence):
+                return Err("OPERATION_CHECKPOINT_BINDING_INVALID")
+            if not distributed_operation_retention_profile_equal_v2(profile, checkpoint.retention_profile):
+                return Err("OPERATION_CHECKPOINT_PROFILE_MISMATCH")
+            val policy_checked = distributed_operation_retention_profile_validate_v2(profile, maximum_events)?
+            if history.len() > profile.maximum_tail_events: return Err("OPERATION_WAL_REPLAY_BOUND_EXCEEDED")
+            rows = checkpoint.rows
+            origins = checkpoint.history.operations
+            for digest in checkpoint.history.revision_endpoints.keys():
+                if endpoints.contains_key(digest): return Err("OPERATION_CHECKPOINT_HISTORY_OVERLAP")
+                endpoints[digest] = checkpoint.history.revision_endpoints[digest]
+            if endpoints.contains_key(revision.digest): return Err("OPERATION_CHECKPOINT_HISTORY_OVERLAP")
+            endpoints[revision.digest] = revision.last_sequence
+            checkpoint_sequence = revision.last_sequence
+            expected_last = 0
+            break
+        val entries: [WalEntry] = operation_stored_result_v2(database_wal_segment_read_strict_stored_v3(
+            root + "/database-wal", revision, backend), turn, revision.segment_digest)?
+        endpoints[revision.digest] = revision.last_sequence
+        var index = entries.len()
+        while index > 0:
+            index = index - 1
+            history = history.push(entries[index])
+            commits = commits.push(revision.digest)
+            if history.len() > maximum_events: return Err("OPERATION_WAL_REPLAY_BOUND_EXCEEDED")
+        expected_last = revision.first_sequence - 1
+        cursor = revision.parent
+    if latest != "" and expected_last != 0: return Err("OPERATION_WAL_HISTORY_INCOMPLETE")
+    var index = history.len()
+    while index > 0:
+        index = index - 1
+        val entry = history[index]
+        if entry.entry_type != WalEntryType.Insert or entry.table_name != "distributed_operations_v2":
+            return Err("OPERATION_WAL_EVENT_INVALID")
+        val row = operation_event_decode_v2(entry.data)?
+        if entry.row_key != row.operation_id: return Err("OPERATION_WAL_IDENTITY_CHANGED")
+        val from_state = if rows.contains_key(row.operation_id): rows[row.operation_id].state else: ""
+        val admitted_sequence = if origins.contains_key(row.operation_id): origins[row.operation_id].admitted_sequence else: entry.sequence
+        rows = operation_event_apply_v2(rows, row)?
+        origins[row.operation_id] = DistributedOperationHistoryV2(row.envelope_digest, admitted_sequence,
+            from_state, row.state, row.outcome_digest, entry.sequence, commits[index])
+    Ok(OperationReplaySnapshotV2(rows: rows, history: DistributedOperationJournalHistoryBatchV2(
+        authority_digest: authority_digest, head_commit_digest: latest, head_sequence: sequence,
+        revision_endpoints: endpoints, operations: origins), checkpoint_sequence: checkpoint_sequence))

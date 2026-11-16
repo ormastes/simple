@@ -247,3 +247,16 @@ concurrent deletes (24 h generations/membership, 600 s snapshots/fragments).
 Design: `doc/05_design/compiler/scv/lockless_refresh.md`. Ratchet:
 `scripts/check/check-no-refresh-file-lock.shs`. Stress:
 `test/01_unit/app/compiler_entrypoint/lockless_refresh_stress_test.shs`.
+
+## Snapshot reader leases vs named pins (REV-01, 2026-11-15)
+
+`src/lib/scv/compile_snapshot_retention_v1.spl`. Builds use ONE moving lease
+per process (`scv_compile_snapshot_lease_acquire_v1`, file
+`receipts/<rev>.lease.<pid>`); acquiring moves it. A process holding several
+revisions (LSP) uses named pins (`scv_compile_snapshot_lease_pin_v1` /
+`..._unpin_v1`, file `receipts/<rev>.pin.<pid>`), which never move and are
+reaped when the owner pid is gone. Cap `SIMPLE_SCV_PIN_MAX` (default 16):
+beyond it pin returns `Err`, never evicts a pin. One stderr warning when pins
+reach the cap or exceed `SIMPLE_SCV_SNAPSHOT_MAX`
+(`scv_compile_snapshot_pin_warning_v1`). Spec:
+`test/01_unit/lib/scv/rev01_pinned_revision_lease_spec.spl`.

@@ -14,6 +14,8 @@ use compiler.backend.env.{EvalContext, Environment}
 use compiler.backend.interpreter_calls.*
 use compiler.backend.interpreter_expr.*
 use compiler.backend.interpreter_binop.*
+use compiler.backend.interpreter_control.*
+use compiler.backend.interpreter_optional.*
 use compiler.borrow.borrow_check.hir_ownership.{check_hir_ownership_module_v1, check_hir_ownership_with_live_providers_v1}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io_runtime.{env_get_opt}
@@ -137,8 +139,14 @@ impl InterpreterBackendImpl:
         self.process_direct_owned_module(module)
 
     # Only the live driver closure preflight may supply this verified index.
-    pub(package) fn interpret_hir_module_with_live_providers(module: HirModule, providers: Dict<text, HirModule>) -> Result<BackendResult, BackendError>:
-        self.process_module_with_ownership_context(module, providers)
+    # `program_modules` is every retained module the entry may call into. It is
+    # wider than `providers`, which holds only the nogc-strict modules the
+    # ownership check verified.
+    pub(package) fn interpret_hir_module_with_live_providers(module: HirModule, providers: Dict<text, HirModule>, program_modules: Dict<text, HirModule>) -> Result<BackendResult, BackendError>:
+        val ownership_errors = check_hir_ownership_with_live_providers_v1(module, 1000000, providers)
+        if ownership_errors.len() > 0:
+            return Err(BackendError.compile_error(ownership_errors.join("\n"), nil))
+        self.process_verified_module_with_providers(module, program_modules, true)
 
     fn process_module(module: HirModule) -> Result<BackendResult, BackendError>:
         self.process_direct_owned_module(module)
@@ -149,13 +157,12 @@ impl InterpreterBackendImpl:
             return Err(BackendError.compile_error(ownership_errors.join("\n"), nil))
         self.process_verified_module(module)
 
-    fn process_module_with_ownership_context(module: HirModule, providers: Dict<text, HirModule>) -> Result<BackendResult, BackendError>:
-        val ownership_errors = check_hir_ownership_with_live_providers_v1(module, 1000000, providers)
-        if ownership_errors.len() > 0:
-            return Err(BackendError.compile_error(ownership_errors.join("\n"), nil))
-        self.process_verified_module(module)
 
     fn process_verified_module(module: HirModule) -> Result<BackendResult, BackendError>:
+        val no_providers: Dict<text, HirModule> = {}
+        self.process_verified_module_with_providers(module, no_providers, false)
+
+    fn process_verified_module_with_providers(module: HirModule, providers: Dict<text, HirModule>, has_providers: bool) -> Result<BackendResult, BackendError>:
         # Create evaluation context
         val env = Environment.new()
         # Build the id -> name map (bug doc iteration 21, target (a)). The
@@ -180,7 +187,18 @@ impl InterpreterBackendImpl:
             val fidx_f: HirFunction = fidx_fn_
             fn_index[fidx_f.name] = fidx_f
         val strict_mem_on = interp_strict_mem_enabled()
-        val ctx = EvalContext(env: env, module: module, backend: self, names: names_map, fn_by_name: fn_index, has_fn_index: true, strict_mem: strict_mem_on)
+        # Imported functions: the first provider defining a name owns it; the
+        # entry module's own definitions always win (they are never indexed).
+        var fn_owner: Dict<text, HirModule> = {}
+        if has_providers:
+            for pm_ in providers.values():
+                val pm: HirModule = pm_
+                if pm.name != module.name:
+                    for pf_ in pm.functions.values():
+                        val pf: HirFunction = pf_
+                        if not fn_index.has(pf.name) and not fn_owner.has(pf.name):
+                            fn_owner[pf.name] = pm
+        val ctx = EvalContext(env: env, module: module, backend: self, names: names_map, fn_by_name: fn_index, has_fn_index: true, fn_owner: fn_owner, has_fn_owner: has_providers, strict_mem: strict_mem_on)
 
         # Locate `main` by symbol name via the symbol table. The cranelift seed
         # miscompiles two things on the single-file / synthetic-main HIR module:
@@ -223,6 +241,17 @@ impl InterpreterBackendImpl:
             # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
             ctx.env.define_global(f.name, backend_value_function_v1(g_fv2))
 
+        # Module-level `val`/`var` (imported providers first, then the entry
+        # module): without a binding a NamedVar read fell back to a Function
+        # value, so `_aggregate_ledger_paths.len()` in std.spec failed with
+        # "unresolved method call: len (receiver kind function)".
+        if has_providers:
+            for pm2_ in providers.values():
+                val pm2: HirModule = pm2_
+                if pm2.name != module.name:
+                    self.bind_module_constants(pm2, ctx)?
+        self.bind_module_constants(module, ctx)?
+
         for fn_ in module.functions.values():
             val f: HirFunction = fn_
             # Match main by the function's own name. Requiring a duplicate symbol
@@ -232,6 +261,13 @@ impl InterpreterBackendImpl:
                 val result: Value = self.call_hir_function(f, [], ctx)?
                 return Ok(BackendResult.Value(result))
         Err(BackendError.runtime_error("module has no main function", nil))
+
+    fn bind_module_constants(m: HirModule, ctx: EvalContext) -> Result<(), BackendError>:
+        for c_ in m.constants.values():
+            val c: HirConst = c_
+            val cv: Value = self.eval_expr(c.value, ctx)?
+            ctx.env.define_global(c.name, cv)
+        Ok(())
 
     fn process_function(fn_: HirFunction) -> Result<BackendResult, BackendError>:
         Ok(BackendResult.Unit)
@@ -321,8 +357,8 @@ impl InterpreterBackendImpl:
         # by a real discriminant; Expr then legitimately takes Expr stmts; Block
         # stays last (shadowed too).
         match stmt.kind:
-            case HirStmtKind.Let(symbol, _, init):
-                val value = self.eval_expr(init, ctx)?
+            case HirStmtKind.Let(symbol, let_type, init):
+                val value = self.eval_let_init(let_type, init, ctx)?
                 # Env is name-keyed (iteration 21, target (a)). The Let's `symbol`
                 # is define-fresh (readable `.id`); resolve to its name.
                 val let_name = resolve_sym_name(symbol, ctx)

@@ -1,0 +1,33 @@
+# Native discard accepts only actual retained root/stage generations. A
+# rejected or failed deletion keeps the stage; stale authority is explicit.
+use std.nogc_sync_mut.io.windows_private_file_v1.{WindowsPrivateRootV1, WindowsPrivateFileV1}
+
+@unsafe(reason: "discards exact created-stage origin by retained identity and retryable native close", capabilities: [ffi])
+extern fn rt_windows_private_stage_discard_v2(root: i64, stage: i64) -> i64
+
+pub struct WindowsPrivateStageDiscardTurnV2:
+    stage: WindowsPrivateFileV1?
+    completed: bool
+    consumed: bool
+    discarded: bool
+    state: text
+    error: text
+
+pub fn windows_private_stage_discard_v2(root: WindowsPrivateRootV1, stage: WindowsPrivateFileV1) -> WindowsPrivateStageDiscardTurnV2:
+    val status = rt_windows_private_stage_discard_v2(root.token, stage.token)
+    if status == 1:
+        return WindowsPrivateStageDiscardTurnV2(stage: nil, completed: true, consumed: true, discarded: true, state: "discarded", error: "")
+    if status == 2:
+        return WindowsPrivateStageDiscardTurnV2(stage: nil, completed: true, consumed: true, discarded: false, state: "published-preserved", error: "")
+    if status == 3:
+        return WindowsPrivateStageDiscardTurnV2(stage: nil, completed: true, consumed: true, discarded: false, state: "no-stage-acquired", error: "")
+    if status == -2:
+        # No positive retirement receipt exists for this caller. Keep its
+        # stale typed value quarantined so an outer retry cannot forget it
+        # and turn a later unrelated close into fabricated consumption.
+        return WindowsPrivateStageDiscardTurnV2(stage: Some(stage), completed: false, consumed: false, discarded: false, state: "stale", error: "private-stage-discard-stale")
+    WindowsPrivateStageDiscardTurnV2(stage: Some(stage), completed: false, consumed: false, discarded: false,
+        state: if status == -1: "rejected" else: "retained",
+        error: if status == -1: "private-stage-discard-rejected" else: "private-stage-discard-retained")
+
+export WindowsPrivateStageDiscardTurnV2, windows_private_stage_discard_v2

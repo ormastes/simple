@@ -1,8 +1,8 @@
 """Whole-document preflight precedes indexes and all override semantics."""
 use std.common.traceability.envelope_types_v1.{TraceCodecIssueV1, trace_codec_issue_v1}
-use std.common.traceability.declarations_types_v1.{TraceDeclarationsCodecLimitsV1}
+use std.common.traceability.declarations_types_v1.{TraceDeclarationsCodecLimitsV1, TraceDeclarationsPurposeV1}
 use std.common.traceability.declarations_types_v2.*
-use std.common.traceability.declarations_schema_v1.{trace_declarations_limits_valid_v1, trace_declarations_validate_v1}
+use std.common.traceability.declarations_schema_v1.{trace_declarations_limits_check_v1, trace_declarations_validate_v1}
 use std.common.traceability.declarations_wire_v2.*
 use std.common.traceability.codec_fields_v1.*
 use std.common.traceability.codec_text_budget_v1.{TraceCodecTextBudgetV1}
@@ -11,8 +11,8 @@ fn trace_operation_relation_check_v2(item: text, path: text) -> Result<bool, Tra
     trace_codec_enum_check_v1(item, ["specifies", "decomposes_to", "accepted_by", "verified_by", "targets", "implemented_by", "motivated_by",
         "described_by", "belongs_to", "generated_from", "observed_in", "produced", "depends_on", "supersedes"], path)
 
-pub fn trace_declarations_validate_v2(document: TraceDeclarationsV2, limits: TraceDeclarationsCodecLimitsV1, for_encoding: bool = false) -> Result<bool, TraceCodecIssueV1>:
-    if not trace_declarations_limits_valid_v1(limits): return Err(trace_codec_issue_v1("invalid_limits", "", "Codec limits outside hard bounds"))
+pub fn trace_declarations_validate_v2(document: TraceDeclarationsV2, limits: TraceDeclarationsCodecLimitsV1, purpose: TraceDeclarationsPurposeV1 = TraceDeclarationsPurposeV1.Decode) -> Result<(), TraceCodecIssueV1>:
+    trace_declarations_limits_check_v1(limits)?
     val base = document.base
     val counts = [base.claims.len(), base.aliases.len(), base.exceptions.len(), base.origins.len(), document.explicit_links.len(), document.replacement_scopes.len()]
     val widths = [5, 4, 10, 7, 10, 4]
@@ -40,7 +40,7 @@ pub fn trace_declarations_validate_v2(document: TraceDeclarationsV2, limits: Tra
     for item in document.explicit_links: budget.charge(trace_link_fields_v2(item), "explicit_links")?
     for item in document.replacement_scopes: budget.charge(trace_replacement_fields_v2(item), "replacement_scopes")?
     val cap = if limits.max_output_bytes < limits.sdn.max_source_bytes: limits.max_output_bytes else: limits.sdn.max_source_bytes
-    if for_encoding and trace_declarations_output_size_v2(document) > cap:
+    if purpose == TraceDeclarationsPurposeV1.Encode and trace_declarations_output_size_v2(document).value > cap:
         return Err(trace_codec_issue_v1("output_limit", "", "Exact output exceeds budget before indexes or rows"))
     trace_declarations_validate_v1(base, limits)?
     var origins: Dict<text, bool> = {}
@@ -89,6 +89,6 @@ pub fn trace_declarations_validate_v2(document: TraceDeclarationsV2, limits: Tra
         index = index + 1
     for item in document.explicit_links:
         if item.operation == "replace" and not scopes.contains_key(item.id): return Err(trace_codec_issue_v1("missing_reference", "replacement_scopes", "Replacement requires an exact original tuple"))
-    Ok(true)
+    Ok(())
 
 export trace_declarations_validate_v2

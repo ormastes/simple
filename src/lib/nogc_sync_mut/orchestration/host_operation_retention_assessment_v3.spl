@@ -1,0 +1,83 @@
+# Consumed host-status diagnostics, never expiry, release or GC permission.
+# Deterministically examine the smallest four actual ledger operation IDs.
+use std.common.contracts.distributed_operation_assessment_v3.*
+use std.common.contracts.orchestration.host_capacity_v1.HostReservationStateV1
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_assessment_v3
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostCapacityOwnerV1
+use std.common.sdn.value.SdnValue
+
+fn host_retention_sample_ids_v3(owner: HostCapacityOwnerV1) -> [text]:
+    var selected: [text] = []
+    for reservation in owner.ledger.reservations:
+        val id = reservation.operation_id
+        if selected.contains(id): continue
+        var ordered: [text] = []
+        var inserted = false
+        for prior in selected:
+            if not inserted and operation_assessment_id_before_v3(id, prior):
+                ordered.push(id)
+                inserted = true
+            ordered.push(prior)
+        if not inserted: ordered.push(id)
+        selected = []
+        for item in ordered:
+            if selected.len() < 4: selected.push(item)
+    selected
+
+pub fn host_operation_retention_assessment_v3(owner: HostCapacityOwnerV1) -> Result<SdnValue, text>:
+    if owner.journal.owned_lock.is_none() and owner.journal.windows_store.is_none():
+        # Compatibility-only owners get no unfenced observation or fake ticket.
+        val total = owner.ledger.reservations.len()
+        return Ok(SdnValue.Dict({"version": SdnValue.Int(1), "kind": SdnValue.String("host-retention-diagnostic"),
+            "state": SdnValue.String("Incomplete"), "scope": SdnValue.String("reservation-sample"),
+            "examinedReservations": SdnValue.Int(0), "totalReservations": SdnValue.Int(total),
+            "omittedReservations": SdnValue.Int(total), "samplePinnedReservations": SdnValue.Int(0),
+            "sampleActiveOperations": SdnValue.Int(0), "sampleUncertainOperations": SdnValue.Int(0),
+            "validatedReservationPayloads": SdnValue.Int(0), "snapshotSequence": SdnValue.Int(owner.journal.sequence),
+            "reasons": SdnValue.Array([SdnValue.String("owned-assessment-required"),
+                SdnValue.String("reference-release-index-unavailable")])}))
+    val ids = host_retention_sample_ids_v3(owner)
+    val snapshot = distributed_operation_journal_assessment_v3(owner.journal,
+        DistributedOperationAssessmentRequestV3(ids))?
+    var reasons: [text] = ["reference-release-index-unavailable", "retained-recovery-evidence-unassessed",
+        "terminal-retention-clock-unqualified"]
+    var pinned: i64 = 0
+    var active: i64 = 0
+    var uncertain: i64 = 0
+    for id in ids:
+        var known_pin = false
+        if snapshot.operations.contains_key(id):
+            val state = snapshot.operations[id].state
+            if ["admitted", "executing", "outcome-unknown"].contains(state):
+                active = active + 1
+                known_pin = true
+            if state == "outcome-unknown": uncertain = uncertain + 1
+        else:
+            known_pin = true
+            if not reasons.contains("ledger-operation-missing"): reasons.push("ledger-operation-missing")
+        for reservation in owner.ledger.reservations:
+            if reservation.operation_id == id and reservation.state != HostReservationStateV1.Released:
+                known_pin = true
+                if not reasons.contains("capacity-charge-retained"): reasons.push("capacity-charge-retained")
+                if reservation.state == HostReservationStateV1.Uncertain:
+                    if not reasons.contains("capacity-continuity-uncertain"): reasons.push("capacity-continuity-uncertain")
+        if known_pin: pinned = pinned + 1
+    val total = owner.ledger.reservations.len()
+    val omitted = total - ids.len()
+    if omitted > 0: reasons.push("reservation-sample-incomplete")
+    if ids.len() == 0: reasons.push("no-reservation-subjects")
+    if active > 0: reasons.push("active-operation-retained")
+    if uncertain > 0: reasons.push("operation-outcome-unknown")
+    if not owner.ledger.continuity_proven: reasons.push("provider-continuity-unproven")
+    if owner.ledger.revision != snapshot.sequence + 1: reasons.push("ledger-journal-revision-mismatch")
+    var encoded_reasons: [SdnValue] = []
+    for reason in reasons: encoded_reasons.push(SdnValue.String(reason))
+    # Incomplete remains explicit even when every sampled reservation is pinned.
+    # No ID, envelope, proof byte, native identity or ownership loan is disclosed.
+    Ok(SdnValue.Dict({"version": SdnValue.Int(1), "kind": SdnValue.String("host-retention-diagnostic"),
+        "state": SdnValue.String("Incomplete"), "scope": SdnValue.String("reservation-sample"),
+        "examinedReservations": SdnValue.Int(ids.len()), "totalReservations": SdnValue.Int(total),
+        "omittedReservations": SdnValue.Int(omitted), "samplePinnedReservations": SdnValue.Int(pinned),
+        "sampleActiveOperations": SdnValue.Int(active), "sampleUncertainOperations": SdnValue.Int(uncertain),
+        "validatedReservationPayloads": SdnValue.Int(snapshot.records.len()),
+        "snapshotSequence": SdnValue.Int(snapshot.sequence), "reasons": SdnValue.Array(encoded_reasons)}))

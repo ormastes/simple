@@ -1,0 +1,124 @@
+# Generation-keyed cache decision for the trace reverse index. Pure.
+#
+# The caller reads the snapshot's CURRENT key (path, presence, byte length,
+# SHA-256 digest) and passes the graph it decoded; only an identical key reuses
+# the cached index. mtime is never part of the key (plan 3.4: advisory only,
+# never a trust proof) and a present snapshot whose digest is unusable is never
+# a hit. Mirrors app.mcp.ctx_index_cache.
+# @req REQ-TRC-017
+use std.common.traceability.model.*
+use std.common.traceability.reverse_index_v1.{TraceReverseIndexV1, trace_reverse_index_build_v1}
+
+pub struct TraceSnapshotPathV1:
+    value: text
+
+pub struct TraceSnapshotLengthV1:
+    bytes: i64
+
+# Lowercase hex SHA-256 of the snapshot content; empty when it could not be read.
+pub struct TraceSnapshotDigestV1:
+    sha256: text
+
+pub enum TraceSnapshotPresenceV1:
+    Missing
+    Present
+
+pub struct TraceGenerationKeyV1:
+    path: TraceSnapshotPathV1
+    presence: TraceSnapshotPresenceV1
+    length: TraceSnapshotLengthV1
+    digest: TraceSnapshotDigestV1
+
+# Why the cached index was (not) reused. Every variant except Hit rebuilds.
+pub enum TraceCacheDecisionV1:
+    Hit
+    ColdStart
+    SnapshotMoved
+    SnapshotCreated
+    SnapshotDeleted
+    SnapshotGrew
+    SnapshotShrank
+    SnapshotRewritten
+    DigestUnavailable
+
+pub struct TraceReverseCacheEntryV1:
+    key: TraceGenerationKeyV1
+    index: TraceReverseIndexV1
+
+pub struct TraceReverseCacheResultV1:
+    entry: TraceReverseCacheEntryV1
+    decision: TraceCacheDecisionV1
+
+const _TRACE_SHA256_HEX_LEN: i64 = 64
+
+pub fn trace_generation_key_missing_v1(path: TraceSnapshotPathV1) -> TraceGenerationKeyV1:
+    TraceGenerationKeyV1(path: path, presence: TraceSnapshotPresenceV1.Missing, length: TraceSnapshotLengthV1(bytes: 0), digest: TraceSnapshotDigestV1(sha256: ""))
+
+pub fn trace_generation_key_present_v1(path: TraceSnapshotPathV1, length: TraceSnapshotLengthV1, digest: TraceSnapshotDigestV1) -> TraceGenerationKeyV1:
+    TraceGenerationKeyV1(path: path, presence: TraceSnapshotPresenceV1.Present, length: length, digest: digest)
+
+fn _key_is_missing(key: TraceGenerationKeyV1) -> bool:
+    match key.presence:
+        case TraceSnapshotPresenceV1.Missing: true
+        case TraceSnapshotPresenceV1.Present: false
+
+fn _key_digest_usable(key: TraceGenerationKeyV1) -> bool:
+    key.digest.sha256.len() == _TRACE_SHA256_HEX_LEN
+
+pub fn trace_cache_decide_v1(cached: TraceGenerationKeyV1?, current: TraceGenerationKeyV1) -> TraceCacheDecisionV1:
+    if not _key_is_missing(current) and not _key_digest_usable(current):
+        return TraceCacheDecisionV1.DigestUnavailable
+    val prev = match cached:
+        case Some(k): k
+        case None: return TraceCacheDecisionV1.ColdStart
+    if prev.path.value != current.path.value:
+        return TraceCacheDecisionV1.SnapshotMoved
+    val prev_missing = _key_is_missing(prev)
+    val cur_missing = _key_is_missing(current)
+    if prev_missing and cur_missing:
+        return TraceCacheDecisionV1.Hit
+    if cur_missing:
+        return TraceCacheDecisionV1.SnapshotDeleted
+    if prev_missing:
+        return TraceCacheDecisionV1.SnapshotCreated
+    if current.length.bytes > prev.length.bytes:
+        return TraceCacheDecisionV1.SnapshotGrew
+    if current.length.bytes < prev.length.bytes:
+        return TraceCacheDecisionV1.SnapshotShrank
+    if current.digest.sha256 != prev.digest.sha256:
+        return TraceCacheDecisionV1.SnapshotRewritten
+    TraceCacheDecisionV1.Hit
+
+# Stable snake_case label of a decision (specs and diagnostics).
+pub fn trace_cache_decision_label_v1(decision: TraceCacheDecisionV1) -> text:
+    match decision:
+        case TraceCacheDecisionV1.Hit: "hit"
+        case TraceCacheDecisionV1.ColdStart: "cold_start"
+        case TraceCacheDecisionV1.SnapshotMoved: "snapshot_moved"
+        case TraceCacheDecisionV1.SnapshotCreated: "snapshot_created"
+        case TraceCacheDecisionV1.SnapshotDeleted: "snapshot_deleted"
+        case TraceCacheDecisionV1.SnapshotGrew: "snapshot_grew"
+        case TraceCacheDecisionV1.SnapshotShrank: "snapshot_shrank"
+        case TraceCacheDecisionV1.SnapshotRewritten: "snapshot_rewritten"
+        case TraceCacheDecisionV1.DigestUnavailable: "digest_unavailable"
+
+# Reuse the cached index on a Hit, otherwise rebuild it from `graph` and store
+# the current key. A DigestUnavailable result is rebuilt but must not be kept by
+# the caller as a trusted entry (its key can never produce a later Hit).
+pub fn trace_reverse_index_cached_v1(cached: TraceReverseCacheEntryV1?, current: TraceGenerationKeyV1, graph: TraceGraph) -> TraceReverseCacheResultV1:
+    var prior_key: TraceGenerationKeyV1? = None
+    match cached:
+        case Some(entry): prior_key = Some(entry.key)
+        case None: prior_key = None
+    val decision = trace_cache_decide_v1(prior_key, current)
+    match cached:
+        case Some(entry):
+            if decision == TraceCacheDecisionV1.Hit:
+                return TraceReverseCacheResultV1(entry: entry, decision: decision)
+        case None: pass
+    TraceReverseCacheResultV1(entry: TraceReverseCacheEntryV1(key: current, index: trace_reverse_index_build_v1(graph)), decision: decision)
+
+export TraceSnapshotPathV1, TraceSnapshotLengthV1, TraceSnapshotDigestV1, TraceSnapshotPresenceV1
+export TraceGenerationKeyV1, TraceCacheDecisionV1, TraceReverseCacheEntryV1, TraceReverseCacheResultV1
+export trace_generation_key_missing_v1, trace_generation_key_present_v1, trace_cache_decide_v1
+export trace_cache_decision_label_v1, trace_reverse_index_cached_v1

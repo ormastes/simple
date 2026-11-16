@@ -141,3 +141,22 @@ describe "Bug-linked source workarounds":
         expect(issues[0].message).to_contain("--fullscan")
         expect(issues[2].issue_type).to_equal("workaround_unknown_bug")
         expect(issues[2].severity).to_equal("error")
+
+    it "parses expires=YYYY-MM-DD and rejects malformed dates":
+        # @req CU-016
+        step("marker with expires")
+        val links = require_links("# @workaround bug=bug_alpha expires=2026-12-31 reason=temp shim\nfn x(): 1")
+        expect(links[0].expires).to_equal("2026-12-31")
+        expect(links[0].reason).to_equal("temp shim")
+        expect(marker_rejected("# @workaround bug=bug_alpha expires=2026-13-01\nfn x(): 1")).to_equal(true)
+        expect(marker_rejected("# @workaround bug=bug_alpha expires=tomorrow\nfn x(): 1")).to_equal(true)
+        expect(marker_rejected("# @workaround bug=bug_alpha expires=2026-01-01 expires=2026-02-02\nfn x(): 1")).to_equal(true)
+
+    it "expires survives the SDN index round trip; legacy 5-column rows still decode":
+        # @req CU-016
+        step("encode and decode")
+        val link = WorkaroundLink(bug_id: "bug_alpha", path: "src/a.spl", line: 3, recover: "", reason: "r", expires: "2026-12-31")
+        val decoded = require_index(encode_workaround_index(WorkaroundIndex(revision: "abcdef0", complete: true, links: [link])))
+        expect(decoded.links[0].expires).to_equal("2026-12-31")
+        val legacy = require_index("workaround_index |schema, revision, complete|\n    1, \"abcdef0\", true\nworkarounds |bug_id, path, line, recover, reason|\n    \"bug_alpha\", \"src/a.spl\", 4, \"\", \"legacy\"\n")
+        expect(legacy.links[0].expires).to_equal("")

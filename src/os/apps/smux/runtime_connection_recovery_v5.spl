@@ -1,0 +1,67 @@
+# Process-local recovery carrier only. No owner/token is encoded in CLI replies.
+use os.apps.smux.runtime_connection_owner_v5.{SmuxRuntimeConnectionOwnerV5,
+    smux_runtime_connection_recover_v5, smux_runtime_connection_close_v5,
+    smux_runtime_connection_stop_allowed_v5}
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.{HostServiceDomainV3, HostServiceCleanupV3,
+    host_service_domain_close_v3, host_service_cleanup_v3}
+use std.sosix.host.{RetainedPrivateCredentialV2, retained_private_credential_close_v2}
+use std.nogc_sync_mut.io.host_service_ready_reader_v1.{HostServiceReadyReaderV1, host_service_ready_reader_close_v1}
+use std.nogc_sync_mut.io.host_service_auth_connection_v6.{HostServiceAuthConnectionV6, host_service_auth_connection_close_v6}
+
+pub struct SmuxRuntimeServerTurnV5:
+    exit_code: i64
+    owner: SmuxRuntimeConnectionOwnerV5?
+    domain: HostServiceDomainV3?
+    cleanup: HostServiceCleanupV3?
+    credential: RetainedPrivateCredentialV2?
+    error: text = ""
+    auth_reader: Option<HostServiceReadyReaderV1> = nil
+    auth_connections: [HostServiceAuthConnectionV6] = []
+
+pub fn smux_runtime_server_recovery_pending_v5(turn: SmuxRuntimeServerTurnV5) -> bool:
+    (turn.owner != nil or turn.domain != nil or turn.cleanup != nil or turn.credential != nil or
+        turn.auth_reader.is_some() or turn.auth_connections.len() != 0)
+
+# One bounded retained-owner step per invocation; no detached cleanup worker,
+# wait loop or retry against a copied native generation. Earlier error persists.
+pub fn smux_runtime_server_recover_v5(original: SmuxRuntimeServerTurnV5) -> SmuxRuntimeServerTurnV5:
+    var turn = original
+    if val owner = turn.owner:
+        val progressed = smux_runtime_connection_recover_v5(owner)
+        turn.owner = Some(progressed)
+        if smux_runtime_connection_stop_allowed_v5(progressed):
+            val closed = smux_runtime_connection_close_v5(progressed)
+            turn.owner = closed.owner
+            turn.cleanup = closed.cleanup
+            if (not closed.closed or closed.error != "") and turn.error == "": turn.error = "primary-service-host-cleanup:" + closed.error
+    elif val domain = turn.domain:
+        val closed = host_service_domain_close_v3(domain)
+        turn.domain = nil
+        turn.cleanup = closed.cleanup
+        if (not closed.closed or closed.error != "") and turn.error == "": turn.error = "primary-service-host-cleanup:" + closed.error
+    elif val cleanup = turn.cleanup:
+        val closed = host_service_cleanup_v3(cleanup)
+        turn.cleanup = closed.cleanup
+        if (not closed.closed or closed.error != "") and turn.error == "": turn.error = "primary-service-host-cleanup:" + closed.error
+    # Credential remains until Host ownership is actually absent. No cleanup
+    # completion is allowed to stand in for a successful ready publication.
+    if turn.owner == nil and turn.domain == nil and turn.cleanup == nil:
+        var pending_connections: [HostServiceAuthConnectionV6] = []
+        for connection in turn.auth_connections:
+            val retired = host_service_auth_connection_close_v6(connection)
+            if retired.is_err():
+                pending_connections.push(connection)
+                if turn.error == "": turn.error = retired.unwrap_err()
+        turn.auth_connections = pending_connections
+        if turn.auth_connections.len() == 0 and turn.auth_reader.is_some():
+            val closed = host_service_ready_reader_close_v1(turn.auth_reader.unwrap())
+            turn.auth_reader = closed.owner
+            if not closed.completed or closed.error != "":
+                if turn.error == "": turn.error = "primary-service-auth-reader-cleanup:" + closed.error
+        if val credential = turn.credential:
+            val closed = retained_private_credential_close_v2(credential)
+            turn.credential = Some(closed.owner)
+            if closed.completed and closed.consumed and closed.error == "": turn.credential = nil
+            elif turn.error == "": turn.error = "primary-service-credential-cleanup:" + closed.error
+    if smux_runtime_server_recovery_pending_v5(turn) or turn.error != "": turn.exit_code = 2
+    turn

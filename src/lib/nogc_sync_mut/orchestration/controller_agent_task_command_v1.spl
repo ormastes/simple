@@ -1,0 +1,195 @@
+# Finite composition of existing Controller owners; no new journal or registry.
+# Raw task bytes stay process-local. Final invocation must reverify its own grant.
+use std.common.contracts.orchestration.agent_task_command_v1.*
+use std.common.contracts.orchestration.agent_task_object_v1.*
+use std.common.contracts.orchestration.agent_task_use_v1.*
+use std.common.contracts.orchestration.agent_invocation_binding_v1.AgentTaskInputV1
+use std.common.contracts.distributed_control_v2.ExecutionGrantV2
+use std.common.task_runner.distributed_operation_journal_v2.DistributedOperationJournalOpenCleanupV2
+use std.common.crypto.sha256.sha256_text
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.*
+use std.nogc_sync_mut.orchestration.controller_local_root_v3.*
+use std.nogc_sync_mut.orchestration.controller_agent_task_authority_v1.*
+use std.nogc_sync_mut.orchestration.workload_store_v1.*
+use std.nogc_sync_mut.io.file_lock_owned_v2.FileLockReleaseStateV2
+use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
+
+pub struct ControllerAgentTaskTurnV1:
+    output: text = ""
+    # Trusted application code may consume the bytes; this value is NOT a grant.
+    task: Option<AgentTaskInputV1> = nil
+    error: text = ""
+    effect_attempted: bool = false
+    closed: bool = true
+    journal_cleanup: Option<DistributedOperationJournalOpenCleanupV2> = nil
+    cleanup_state: Option<FileLockReleaseStateV2> = nil
+    windows_cleanup: Option<ControllerLocalRootV3> = nil
+
+fn task_response_v1(controller: text, packet: AgentTaskCommandV1) -> Result<text, text>:
+    var fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("controller-agent-task-result"),
+        "controllerId": SdnValue.String(controller), "action": SdnValue.String(packet.action),
+        "executionAuthorized": SdnValue.Bool(false), "contentDisclosed": SdnValue.Bool(false)}
+    if packet.action == "retain":
+        val task = agent_task_object_decode_v1(packet.body)?
+        fields["status"] = SdnValue.String("task-retained")
+        fields["namespace"] = SdnValue.String(task.ns)
+        fields["taskRef"] = SdnValue.String(task.reference)
+        fields["taskDigest"] = SdnValue.String(task.content_digest)
+    else:
+        val binding = agent_task_use_decode_v1(packet.body)?
+        fields["status"] = SdnValue.String("task-use-verified")
+        fields["sessionUid"] = SdnValue.String(binding.session_uid)
+        fields["attempt"] = SdnValue.Int(binding.attempt)
+        fields["taskDigest"] = SdnValue.String(binding.task_digest)
+        fields["useDigest"] = SdnValue.String(sha256_text(packet.body))
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+fn task_write_v1(owner: ControllerWorkloadStoreV1, packet: AgentTaskCommandV1) -> ControllerTaskStoreTurnV1:
+    if packet.action == "retain":
+        val task = agent_task_object_decode_v1(packet.body)
+        if task.is_err(): return ControllerTaskStoreTurnV1(owner: owner, error: task.unwrap_err(), effect_attempted: false)
+        return controller_workload_store_task_retain_v1(owner, task.unwrap())
+    val binding = agent_task_use_decode_v1(packet.body)
+    if binding.is_err(): return ControllerTaskStoreTurnV1(owner: owner, error: binding.unwrap_err(), effect_attempted: false)
+    controller_workload_store_task_use_v1(owner, binding.unwrap())
+
+fn task_read_v1(owner: ControllerWorkloadStoreV1, packet: AgentTaskCommandV1) -> Result<AgentTaskInputV1, text>:
+    if packet.action != "use": return Err("agent-task-read-action")
+    controller_workload_store_task_materialize_v1(owner, agent_task_use_decode_v1(packet.body)?)
+
+fn task_linux_context_v1(root: text, controller: text, config_digest: text) -> Result<ControllerDispatchContextV1, text>:
+    val context = controller_dispatch_context_load_v1(root, controller)?
+    if sha256_text(controller_dispatch_config_encode_v1(context.config)?) != config_digest:
+        return Err("agent-task-config-pin")
+    Ok(context)
+
+fn task_linux_authorize_v1(root: text, controller: text, config_digest: text,
+        packet: AgentTaskCommandV1) -> Result<ExecutionGrantV2, text>:
+    val context = task_linux_context_v1(root, controller, config_digest)?
+    val now = controller_dispatch_grant_clock_v1()?
+    controller_agent_task_authorize_v1(context, config_digest, packet, now)
+
+fn task_linux_finish_v1(owner: ControllerWorkloadStoreV1, original: ControllerAgentTaskTurnV1) -> ControllerAgentTaskTurnV1:
+    var turn = original
+    val closed = controller_workload_store_close_owned_v2(owner)
+    turn.journal_cleanup = closed.cleanup
+    turn.cleanup_state = Some(closed.state)
+    turn.closed = closed.closed and closed.cleanup.is_none() and closed.error == "" and closed.state == FileLockReleaseStateV2.Released
+    if not turn.closed:
+        turn.task = nil
+        turn.output = ""
+        turn.error = "agent-task-journal-close-unconfirmed:" + closed.error
+    if turn.error != "":
+        turn.task = nil
+        turn.output = ""
+    turn
+
+fn task_linux_command_v1(root: text, controller: text, config_digest: text,
+        packet: AgentTaskCommandV1) -> ControllerAgentTaskTurnV1:
+    # Verify the installed root/context before journal acquisition and replay.
+    val checked = task_linux_authorize_v1(root, controller, config_digest, packet)
+    if checked.is_err(): return ControllerAgentTaskTurnV1(error: checked.unwrap_err())
+    val entropy = sosix_random_hex(32)
+    if entropy.is_none(): return ControllerAgentTaskTurnV1(error: "agent-task-owner-entropy")
+    var owner = match controller_workload_store_open_owned_v2(root + "/journal", controller, entropy.unwrap(), 100000):
+        case ControllerWorkloadStoreOpenV2.Ready(value): value
+        case ControllerWorkloadStoreOpenV2.Rejected(reason): return ControllerAgentTaskTurnV1(error: reason, closed: false)
+        case ControllerWorkloadStoreOpenV2.CleanupRequired(cleanup, reason):
+            return ControllerAgentTaskTurnV1(error: reason, closed: false, journal_cleanup: Some(cleanup))
+    # Acquisition/replay can take time. Do not reuse the earlier freshness check.
+    val authorized = task_linux_authorize_v1(root, controller, config_digest, packet)
+    if authorized.is_err(): return task_linux_finish_v1(owner, ControllerAgentTaskTurnV1(error: authorized.unwrap_err()))
+    val written = task_write_v1(owner, packet)
+    owner = written.owner
+    var turn = ControllerAgentTaskTurnV1(error: written.error, effect_attempted: written.effect_attempted)
+    if turn.error == "" and packet.action == "use":
+        # A committed use-binding is identity evidence, never a cached access grant.
+        val access = task_linux_authorize_v1(root, controller, config_digest, packet)
+        if access.is_err():
+            turn.error = access.unwrap_err()
+        else:
+            match task_read_v1(owner, packet):
+                case Ok(task): turn.task = Some(task)
+                case Err(reason): turn.error = reason
+    if turn.error == "":
+        match task_response_v1(controller, packet):
+            case Ok(output): turn.output = output
+            case Err(reason): turn.error = reason
+    task_linux_finish_v1(owner, turn)
+
+fn task_windows_authorize_v1(owner: ControllerLocalRootV3, controller: text,
+        config_digest: text, packet: AgentTaskCommandV1) -> Result<ExecutionGrantV2, text>:
+    val context = owner.current_v3()?
+    if context.config.controller_id != controller: return Err("agent-task-controller-mismatch")
+    val now = controller_dispatch_grant_clock_v1()?
+    controller_agent_task_authorize_v1(context, config_digest, packet, now)
+
+fn task_windows_finish_v1(owner: ControllerLocalRootV3, original: ControllerAgentTaskTurnV1) -> ControllerAgentTaskTurnV1:
+    var turn = original
+    val closed = controller_local_root_close_v3(owner)
+    turn.windows_cleanup = closed.owner
+    turn.closed = closed.closed and closed.owner.is_none() and closed.error == ""
+    if not turn.closed:
+        turn.task = nil
+        turn.output = ""
+        turn.error = "agent-task-root-close-unconfirmed:" + closed.error
+    if turn.error != "":
+        turn.task = nil
+        turn.output = ""
+    turn
+
+fn task_windows_command_v1(root: text, controller: text, config_digest: text,
+        packet: AgentTaskCommandV1) -> ControllerAgentTaskTurnV1:
+    val opened = controller_local_root_open_v3(root, config_digest)
+    if opened.owner.is_none(): return ControllerAgentTaskTurnV1(error: "agent-task-root-open:" + opened.error, closed: false)
+    var owner = opened.owner.unwrap()
+    if not opened.ready or opened.error != "":
+        return task_windows_finish_v1(owner, ControllerAgentTaskTurnV1(error: "agent-task-root-unavailable:" + opened.error))
+    val authorized = task_windows_authorize_v1(owner, controller, config_digest, packet)
+    if authorized.is_err(): return task_windows_finish_v1(owner, ControllerAgentTaskTurnV1(error: authorized.unwrap_err()))
+    val stored = owner.workload_v3()
+    if stored.is_err(): return task_windows_finish_v1(owner, ControllerAgentTaskTurnV1(error: stored.unwrap_err()))
+    val written = task_write_v1(stored.unwrap(), packet)
+    # This retains the exact returned writer even when a later check failed.
+    val retained = owner.retain_v3(written.owner)
+    var turn = ControllerAgentTaskTurnV1(error: written.error, effect_attempted: written.effect_attempted)
+    if retained.is_err(): turn.error = retained.unwrap_err()
+    if turn.error == "" and packet.action == "use":
+        val access = task_windows_authorize_v1(owner, controller, config_digest, packet)
+        if access.is_err():
+            turn.error = access.unwrap_err()
+        else:
+            val current = owner.workload_v3()
+            if current.is_err():
+                turn.error = current.unwrap_err()
+            else:
+                match task_read_v1(current.unwrap(), packet):
+                    case Ok(task): turn.task = Some(task)
+                    case Err(reason): turn.error = reason
+    if turn.error == "":
+        match task_response_v1(controller, packet):
+            case Ok(output): turn.output = output
+            case Err(reason): turn.error = reason
+    task_windows_finish_v1(owner, turn)
+
+pub fn controller_agent_task_command_v1(root: text, controller: text, config_digest: text,
+        packet: AgentTaskCommandV1) -> ControllerAgentTaskTurnV1:
+    if (root.byte_len() == 0 or root.byte_len() > 4096 or root.contains("\0") or
+            root.contains("\n") or root.contains("\r") or not builder_identifier_valid_v1(controller) or
+            not builder_digest_valid_v1(config_digest)):
+        return ControllerAgentTaskTurnV1(error: "agent-task-owner-arguments")
+    val checked = agent_task_command_encode_v1(packet)
+    if checked.is_err(): return ControllerAgentTaskTurnV1(error: checked.unwrap_err())
+    @when(os="windows"):
+    return task_windows_command_v1(root, controller, config_digest, packet)
+    @else:
+    @when(os="linux"):
+    return task_linux_command_v1(root, controller, config_digest, packet)
+    @else:
+    return ControllerAgentTaskTurnV1(error: "agent-task-platform-unsupported")
+    @end
+    @end

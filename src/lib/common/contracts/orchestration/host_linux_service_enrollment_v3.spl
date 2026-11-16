@@ -1,0 +1,134 @@
+# Linux static installed service enrollment DATA only. No boot, epoch,
+# process incarnation or owner generation is minted by this codec. Actual Host
+# activation verifies the signed canonical bytes against retained installed
+# policy, genuine native identity and the original protected journal.
+# Windows HostServiceEnrollmentBindingV2 and its wire bytes remain unchanged.
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.crypto.sha256.sha256_text
+
+pub struct HostLinuxServiceEnrollmentBindingV3:
+    physical_host_id: text
+    service_scope_id: text
+    config_digest: text
+    policy_digest: text
+    policy_revision: i64
+    native_machine_id: text
+    provider_identity_digest: text
+    engine_policy_digest: text
+    machine_parent: text
+    broker_policy_digest: text
+    physical_cpu_millis: i64
+    physical_memory_bytes: i64
+    reserved_cpu_millis: i64
+    reserved_memory_bytes: i64
+
+pub struct HostLinuxServiceAllocatableV3:
+    cpu_millis: i64
+    memory_bytes: i64
+
+pub fn host_linux_service_allocatable_v3(binding: HostLinuxServiceEnrollmentBindingV3) -> Result<HostLinuxServiceAllocatableV3, text>:
+    # Validate before subtracting. No upward rounding and no per-helper debit
+    # of this shared service-broker partition.
+    if (binding.physical_cpu_millis <= 0 or binding.physical_memory_bytes <= 0 or
+            binding.reserved_cpu_millis <= 0 or binding.reserved_memory_bytes <= 0 or
+            binding.reserved_cpu_millis >= binding.physical_cpu_millis or
+            binding.reserved_memory_bytes >= binding.physical_memory_bytes):
+        return Err("linux-host-service-broker-partition-invalid")
+    Ok(HostLinuxServiceAllocatableV3(binding.physical_cpu_millis - binding.reserved_cpu_millis,
+        binding.physical_memory_bytes - binding.reserved_memory_bytes))
+
+fn host_linux_service_parent_valid_v3(path: text) -> bool:
+    if (path.byte_len() < 2 or path.byte_len() > 4096 or path.contains("\0") or path.contains("\n") or
+            path.contains("\r") or path.contains("\t")): return false
+    # Canonical native absolute path spelling is independently checked by the
+    # installed-root filesystem owner. This codec rejects relative traversal.
+    if not path.starts_with("/"): return false
+    if path.ends_with("/") or path.contains("\\"): return false
+    val parts = path.split("/")
+    var index = 1
+    while index < parts.len():
+        if parts[index] == "" or parts[index] == "." or parts[index] == "..": return false
+        index = index + 1
+    true
+
+pub fn host_linux_service_enrollment_encode_v3(binding: HostLinuxServiceEnrollmentBindingV3) -> Result<text, text>:
+    for digest in [binding.config_digest, binding.policy_digest, binding.provider_identity_digest, binding.engine_policy_digest, binding.broker_policy_digest]:
+        if digest.byte_len() != 64 or not builder_digest_valid_v1(digest): return Err("linux-host-service-enrollment-digest-invalid")
+    for identifier in [binding.physical_host_id, binding.service_scope_id]:
+        if identifier.byte_len() > 128 or not builder_identifier_valid_v1(identifier): return Err("linux-host-service-enrollment-identity-invalid")
+    # Native identity is an observed namespaced value, not a host alias.
+    # The actual retained owner must match it before enrollment activation.
+    if binding.native_machine_id.byte_len() == 0 or binding.native_machine_id.byte_len() > 256:
+        return Err("linux-host-service-enrollment-identity-invalid")
+    for index in 0..binding.native_machine_id.byte_len():
+        val code = binding.native_machine_id.byte_at(index) as i64
+        if not ((code >= 48 and code <= 57) or (code >= 65 and code <= 90) or
+                (code >= 97 and code <= 122) or code == 45 or code == 95 or code == 58 or code == 46):
+            return Err("linux-host-service-enrollment-identity-invalid")
+    if binding.policy_revision < 0: return Err("linux-host-service-enrollment-mode-invalid")
+    if not host_linux_service_parent_valid_v3(binding.machine_parent): return Err("linux-host-service-enrollment-parent-invalid")
+    val capacity = host_linux_service_allocatable_v3(binding)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("linux-host-service-enrollment-binding"),
+        "physicalHostId": SdnValue.String(binding.physical_host_id), "serviceScopeId": SdnValue.String(binding.service_scope_id),
+        "configDigest": SdnValue.String(binding.config_digest), "policyDigest": SdnValue.String(binding.policy_digest),
+        "policyRevision": SdnValue.Int(binding.policy_revision), "nativeMachineId": SdnValue.String(binding.native_machine_id),
+        "providerIdentityDigest": SdnValue.String(binding.provider_identity_digest), "enginePolicyDigest": SdnValue.String(binding.engine_policy_digest), "machineParent": SdnValue.String(binding.machine_parent),
+        "backend": SdnValue.String("linux-podman"), "continuityMode": SdnValue.String("service-incarnation-v1"),
+        "durabilityProfile": SdnValue.String("process-crash-v1"), "brokerPolicyDigest": SdnValue.String(binding.broker_policy_digest),
+        "physicalCpuMillis": SdnValue.Int(binding.physical_cpu_millis), "physicalMemoryBytes": SdnValue.Int(binding.physical_memory_bytes),
+        "reservedCpuMillis": SdnValue.Int(binding.reserved_cpu_millis), "reservedMemoryBytes": SdnValue.Int(binding.reserved_memory_bytes)}
+    val encoded = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if encoded.byte_len() > 16384: return Err("linux-host-service-enrollment-size")
+    Ok(encoded)
+
+pub fn host_linux_service_enrollment_digest_v3(binding: HostLinuxServiceEnrollmentBindingV3) -> Result<text, text>:
+    Ok(sha256_text(host_linux_service_enrollment_encode_v3(binding)?))
+
+fn host_linux_service_text_v3(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("linux-host-service-enrollment-field-type:" + name)
+
+fn host_linux_service_int_v3(fields: Dict<text, SdnValue>, name: text) -> Result<i64, text>:
+    match fields[name]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("linux-host-service-enrollment-field-type:" + name)
+
+pub fn host_linux_service_enrollment_decode_v3(source: text) -> Result<HostLinuxServiceEnrollmentBindingV3, text>:
+    if source.byte_len() == 0 or source.byte_len() > 16384: return Err("linux-host-service-enrollment-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 16384, max_depth: 2,
+            max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 24)):
+        case Ok(value): value
+        case Err(issue): return Err("linux-host-service-enrollment-syntax:" + issue.code)
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("linux-host-service-enrollment-object-required")
+    val names = ["version", "kind", "physicalHostId", "serviceScopeId", "configDigest", "policyDigest", "policyRevision",
+        "nativeMachineId", "providerIdentityDigest", "enginePolicyDigest", "machineParent", "backend", "continuityMode", "durabilityProfile",
+        "brokerPolicyDigest", "physicalCpuMillis", "physicalMemoryBytes", "reservedCpuMillis", "reservedMemoryBytes"]
+    for name in fields.keys():
+        if not names.contains(name): return Err("linux-host-service-enrollment-unknown-field:" + name)
+    for name in names:
+        if not fields.contains_key(name): return Err("linux-host-service-enrollment-missing-field:" + name)
+    if (host_linux_service_int_v3(fields, "version")? != 3 or
+            host_linux_service_text_v3(fields, "kind")? != "linux-host-service-enrollment-binding" or
+            host_linux_service_text_v3(fields, "backend")? != "linux-podman" or
+            host_linux_service_text_v3(fields, "continuityMode")? != "service-incarnation-v1" or
+            host_linux_service_text_v3(fields, "durabilityProfile")? != "process-crash-v1"):
+        return Err("linux-host-service-enrollment-version-mode")
+    val binding = HostLinuxServiceEnrollmentBindingV3(
+        physical_host_id: host_linux_service_text_v3(fields, "physicalHostId")?, service_scope_id: host_linux_service_text_v3(fields, "serviceScopeId")?,
+        config_digest: host_linux_service_text_v3(fields, "configDigest")?, policy_digest: host_linux_service_text_v3(fields, "policyDigest")?,
+        policy_revision: host_linux_service_int_v3(fields, "policyRevision")?, native_machine_id: host_linux_service_text_v3(fields, "nativeMachineId")?,
+        provider_identity_digest: host_linux_service_text_v3(fields, "providerIdentityDigest")?,
+        engine_policy_digest: host_linux_service_text_v3(fields, "enginePolicyDigest")?, machine_parent: host_linux_service_text_v3(fields, "machineParent")?,
+        broker_policy_digest: host_linux_service_text_v3(fields, "brokerPolicyDigest")?,
+        physical_cpu_millis: host_linux_service_int_v3(fields, "physicalCpuMillis")?, physical_memory_bytes: host_linux_service_int_v3(fields, "physicalMemoryBytes")?,
+        reserved_cpu_millis: host_linux_service_int_v3(fields, "reservedCpuMillis")?, reserved_memory_bytes: host_linux_service_int_v3(fields, "reservedMemoryBytes")?)
+    if host_linux_service_enrollment_encode_v3(binding)? != source: return Err("linux-host-service-enrollment-noncanonical")
+    Ok(binding)
+

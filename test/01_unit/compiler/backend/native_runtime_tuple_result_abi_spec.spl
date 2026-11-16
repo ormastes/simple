@@ -1,0 +1,174 @@
+# @req REQ-SSPEC-COMPILER
+# A stdlib `extern fn rt_process_run*` call must reach the runtime's raw
+# result-block facade on BOTH pure-Simple AOT backends, whatever its MIR call
+# origin.
+#
+# The process-run owners return a registered SplArray. MIR destructures the
+# (stdout, stderr, code) result with GetField 0/1/2 -- raw word loads -- so a
+# backend must call the `*_tuple` facade, which re-packs the result into the
+# raw 3-word block those loads expect. Both backends redirected only
+# RUNTIME-origin calls (Cranelift: the redirects sit after the non-runtime
+# early return; LLVM: `call_origin != Runtime` resets the callee), and a
+# stdlib `extern fn` declaration is FOREIGN origin (MIR provider registry: an
+# actual extern), which goes through the generic import path. Natively
+# the destructure then read the array header: shell_output("uname -m") was "",
+# exit codes were wrong, host_arch() fell back to "x86_64" on aarch64.
+#
+# Native oracle: test/fixtures/native_process_run_tuple_abi/main.spl.
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{env_set}
+use compiler.common.config.{Logger}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_instruction_support.{mir_call_origin_text}
+use compiler.backend.backend.backend_types.{CodegenTarget, compileoptions_default_options}
+use compiler.backend.cranelift_codegen_adapter.{cranelift_compile_module_direct}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+
+val EXTERN_SOURCE: text = "extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)\n\n" +
+    "fn run_it(cmd: text) -> i64:\n    val (o, e, c) = rt_process_run(cmd, [\"x\"])\n    c\n"
+
+fn rp_function_calls(src: text) -> [text]:
+    """`callee origin=<origin> argc=<n>` for every named call, plus
+    `getfield <index>` for every field read, in MIR order (bootstrap HIR)."""
+    val module = parse_full_frontend(src, "procrun.spl", "procrun.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("procrun.spl")
+    env_set("SIMPLE_BOOTSTRAP", "1")
+    val hir = hir_lowering.lower_module(module)
+    env_set("SIMPLE_BOOTSTRAP", "")
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var out: [text] = []
+    for function in mir.functions.values():
+        for block in function.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case MirInstKind.Call(_, func, args):
+                        match func.kind:
+                            case MirOperandKind.Const(value, _):
+                                match value:
+                                    case MirConstValue.Str(name):
+                                        out = out.push("{name} origin={mir_call_origin_text(func.call_origin)} argc={args.len()}")
+                                    case _: ()
+                            case _: ()
+                    case MirInstKind.GetField(_, _, index):
+                        out = out.push("getfield {index}")
+                    case _: ()
+    out
+
+fn rp_fn_ptr(argc: i64) -> MirType:
+    var params: [MirType] = []
+    for _i in 0..argc:
+        params = params.push(MirType.i64())
+    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: params, return_type: MirType.i64(), is_variadic: false)))
+
+# One function calling `name` with `argc` already-split words and the given
+# origin, the way MIR hands a stdlib extern call to the backend.
+fn rp_call_module(module_name: text, name: text, argc: i64, origin: MirCallOrigin) -> MirModule:
+    var args: [MirOperand] = []
+    for i in 0..argc:
+        args = args.push(mir_operand_const_int(i + 1))
+    val callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name), rp_fn_ptr(argc)), call_origin: origin)
+    val func = MirFunction(
+        symbol: SymbolId(id: 1), name: "rp_caller",
+        signature: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
+        locals: [MirLocal(id: LocalId(id: 0), name: nil, type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false)],
+        blocks: [MirBlock(id: BlockId.entry(), label: Some("entry"),
+            instructions: [MirInst(kind: MirInstKind.Call(Some(LocalId(id: 0)), callee, args), span: nil)],
+            terminator: MirTerminator.Ret(Some(mir_operand_copy(LocalId(id: 0)))))],
+        entry_block: BlockId.entry(), span: Span.empty(), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {},
+        layout_phase: nil, is_kernel: false, gpu_target: "", gpu_backend_order: "",
+        is_export_c: false, export_name: "", has_driver_manifest_attr: false,
+        driver_manifest_attr: nil, has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false)
+    MirModule(name: module_name, functions: {SymbolId(id: 1): func}, statics: {}, constants: {}, types: {})
+
+fn rp_has_symbol(bytes: [u8], symbol: text) -> bool:
+    """True when `symbol` occurs NUL-terminated in the object (a string-table
+    entry), so `rt_process_run` does not match inside `rt_process_run_tuple`."""
+    val needle = symbol.bytes()
+    val n = needle.len()
+    var i = 0
+    while i + n < bytes.len():
+        var j = 0
+        while j < n and bytes[i + j] == needle[j]:
+            j = j + 1
+        if j == n and bytes[i + n] == 0:
+            return true
+        i = i + 1
+    false
+
+fn rp_ir_calls(ir: text, symbol: text) -> bool:
+    """True when an IR `call` instruction (not the emitted `declare`) targets `@symbol(`."""
+    for line in ir.split("\n"):
+        if line.contains("call ") and line.contains("@{symbol}("):
+            return true
+    false
+
+fn rp_cranelift_object(module: MirModule) -> [u8]:
+    match cranelift_compile_module_direct(compileoptions_default_options(), module):
+        case Ok(output): output.object_code
+        case Err(_): []
+
+# (extern name, post-split word count, raw-block facade)
+fn rp_facade_cases() -> [(text, i64, text)]:
+    [("rt_process_run", 3, "rt_process_run_tuple"),
+        ("rt_process_run_timeout", 4, "rt_process_run_timeout_tuple"),
+        ("rt_process_run_bounded", 5, "rt_process_run_bounded_tuple"),
+        ("rt_process_run_bounded_bytes", 5, "rt_process_run_bounded_bytes_tuple"),
+        ("rt_process_run_owned_observed_bounded_value", 5, "rt_process_run_owned_observed_bounded_text"),
+        ("rt_cpuid_tuple", 2, "rt_cpuid_tuple_block")]
+
+describe "stdlib process-run extern call reaches the raw result block":
+    it "is a FOREIGN-origin call whose result MIR reads as raw words 0/1/2":
+        step("Mechanism: the origin that skipped the Cranelift redirect")
+        val calls = rp_function_calls(EXTERN_SOURCE)
+        expect(calls).to_contain("rt_process_run origin=foreign argc=3")
+        expect(calls).to_contain("getfield 0")
+        expect(calls).to_contain("getfield 1")
+        expect(calls).to_contain("getfield 2")
+
+    it "Cranelift imports the facade, not the array owner, for a foreign-origin call":
+        for case_ in rp_facade_cases():
+            step("foreign {case_.0}")
+            val object = rp_cranelift_object(rp_call_module("rp_foreign_{case_.0}", case_.0, case_.1, MirCallOrigin.Foreign))
+            expect(object.len() > 0).to_equal(true)
+            expect(rp_has_symbol(object, case_.2)).to_equal(true)
+            expect(rp_has_symbol(object, case_.0)).to_equal(false)
+
+    it "Cranelift keeps the facade for a runtime-origin call":
+        for case_ in rp_facade_cases():
+            val object = rp_cranelift_object(rp_call_module("rp_runtime_{case_.0}", case_.0, case_.1, MirCallOrigin.Runtime))
+            expect(rp_has_symbol(object, case_.2)).to_equal(true)
+
+    it "Cranelift keeps a different-arity import of the same name on its own callee":
+        # wasm-style `rt_process_run(cmd) -> i64`: one word, not the C owner.
+        val object = rp_cranelift_object(rp_call_module("rp_foreign_one_word", "rt_process_run", 1, MirCallOrigin.Foreign))
+        expect(rp_has_symbol(object, "rt_process_run")).to_equal(true)
+        expect(rp_has_symbol(object, "rt_process_run_tuple")).to_equal(false)
+
+    it "LLVM calls the facade for a foreign-origin call":
+        for case_ in rp_facade_cases():
+            step("foreign {case_.0}")
+            var generator = MirToLlvm.create("rp.llvm.{case_.0}", CodegenTarget.X86_64, nil)
+            generator.set_group_bootstrap_mode(true)
+            val ir = generator.translate_module(rp_call_module("rp.llvm.{case_.0}", case_.0, case_.1, MirCallOrigin.Foreign))
+            expect(rp_ir_calls(ir, case_.2)).to_equal(true)
+            expect(rp_ir_calls(ir, case_.0)).to_equal(false)
+
+    it "both backends keep a source-origin callee of the same name":
+        # A local Simple function named like an owner is not the C owner.
+        val object = rp_cranelift_object(rp_call_module("rp_source_named", "rt_process_run", 3, MirCallOrigin.Source))
+        expect(rp_has_symbol(object, "rt_process_run_tuple")).to_equal(false)
+        var generator = MirToLlvm.create("rp.llvm.source", CodegenTarget.X86_64, nil)
+        generator.set_group_bootstrap_mode(true)
+        val ir = generator.translate_module(rp_call_module("rp.llvm.source", "rt_process_run", 3, MirCallOrigin.Source))
+        expect(rp_ir_calls(ir, "rt_process_run_tuple")).to_equal(false)

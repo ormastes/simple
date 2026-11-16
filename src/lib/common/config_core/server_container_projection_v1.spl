@@ -1,0 +1,86 @@
+# Public, selected endpoint snapshot only. No secret lookup, mounts, sockets,
+# environment inheritance or native reachability claims occur in this codec.
+use std.common.config_core.server_context_types_v1.*
+use std.common.config_core.server_context_decode_v1.decode_server_config_v1
+use std.common.config_core.server_context_resolve_v1.resolve_server_context_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub fn server_container_snapshot_v1(selection: ResolvedServerV1) -> Result<text, text>:
+    # Validate constructed selections too, then resolve in container scope.
+    val refs: Dict<text, text> = {}
+    val context = ServerContextV1(name: selection.context,
+        shared_server: selection.record.name, consumer_refs: refs)
+    val config = ServerConfigV1(current_context: context.name,
+        servers: [selection.record], contexts: [context])
+    val selected = resolve_server_context_v1(config, selection.consumer, "", "", true)?
+    val record = selected.record
+    val fields: Dict<text, SdnValue> = {
+        "transport": SdnValue.String(record.transport),
+        "host": SdnValue.String(record.host), "port": SdnValue.Int(record.port),
+        "containerHost": SdnValue.String(record.host),
+        "authRef": SdnValue.String(record.auth_ref), "tlsRef": SdnValue.String(record.tls_ref),
+        "remoteExecutable": SdnValue.String(record.remote_executable)}
+    var server_fields: Dict<text, SdnValue> = {}
+    server_fields[record.name] = SdnValue.Dict(fields)
+    val context_body: Dict<text, SdnValue> = {"sharedServer": SdnValue.String(record.name)}
+    var context_fields: Dict<text, SdnValue> = {}
+    context_fields[context.name] = SdnValue.Dict(context_body)
+    val document: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "currentContext": SdnValue.String(context.name), "servers": SdnValue.Dict(server_fields),
+        "contexts": SdnValue.Dict(context_fields)}
+    val source = sdn_encode_canonical(SdnValue.Dict(document))
+    if source.byte_len() > 4096: return Err("container-server-snapshot-too-large")
+    server_container_snapshot_validate_v1(source)?
+    Ok(source)
+
+pub fn server_container_snapshot_validate_v1(source: text) -> Result<bool, text>:
+    if source.byte_len() < 1 or source.byte_len() > 4096:
+        return Err("container-server-snapshot-size")
+    val config = decode_server_config_v1(source)?
+    if config.servers.len() != 1 or config.contexts.len() != 1:
+        return Err("container-server-snapshot-not-selected")
+    if config.contexts[0].consumer_refs.len() != 0:
+        return Err("container-server-snapshot-consumer-overrides")
+    val selected = resolve_server_context_v1(config, "simple", "", "", true)?
+    if selected.record.host != config.servers[0].host:
+        return Err("container-server-snapshot-host-not-projected")
+    Ok(true)
+
+# Called by the actual workload environment encoder before request digests and
+# native argv creation. Unrelated environment remains ordinary explicit data.
+pub fn server_container_environment_validate_v1(names: [text], values: [text]) -> Result<bool, text>:
+    if names.len() != values.len(): return Err("container-server-environment-shape")
+    var marker = ""
+    var source = ""
+    var marker_count = 0
+    var source_count = 0
+    var config_count = 0
+    var config_path = ""
+    var canonical_names = true
+    var index = 0
+    for name in names:
+        val folded = name.lower()
+        if folded == "simple_server_client_scope":
+            marker = values[index]
+            marker_count = marker_count + 1
+            if name != "SIMPLE_SERVER_CLIENT_SCOPE": canonical_names = false
+        if folded == "simple_servers_sdn":
+            source = values[index]
+            source_count = source_count + 1
+            if name != "SIMPLE_SERVERS_SDN": canonical_names = false
+        if folded == "simple_servers_config":
+            config_count = config_count + 1
+            config_path = values[index]
+            if name != "SIMPLE_SERVERS_CONFIG": canonical_names = false
+        index = index + 1
+    if marker_count == 0 and source_count == 0: return Ok(true)
+    if not canonical_names or marker_count != 1 or source_count != 1 or marker != "container":
+        return Err("container-server-environment-scope")
+    # Clear image-inherited config so it cannot shadow the pinned snapshot.
+    if config_count != 1 or config_path != "":
+        return Err("container-server-environment-config-conflict")
+    server_container_snapshot_validate_v1(source)
+
+export server_container_snapshot_v1, server_container_snapshot_validate_v1
+export server_container_environment_validate_v1

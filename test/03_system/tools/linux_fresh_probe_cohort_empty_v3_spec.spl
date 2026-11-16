@@ -1,0 +1,69 @@
+# AUTHORED_NOT_RUN. Actual installed profile and actual retained kernel owner;
+# no request/native PID/Subject/absence DTO is fabricated. No engine execution.
+# This mechanism fixture is separate from upper real Wait/Remove settlement.
+use std.spec.{describe, it, expect, step, fail}
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_profile_v1.*
+use std.nogc_sync_mut.io.linux_fresh_epoch_native_v1.*
+
+var probe_profiles_empty_v3: [LinuxInstalledFreshEpochProfileV1] = []
+var probe_native_empty_v3: [LinuxFreshEpochNativeOwnerV1] = []
+
+fn probe_profile_empty_open_v3() -> Option<LinuxInstalledFreshEpochProfileV1>:
+    match linux_installed_fresh_epoch_profile_open_v1():
+        case LinuxFreshEpochProfileOpenV1.Rejected(reason):
+            fail("real installed cohort profile unavailable:" + reason)
+            nil
+        case LinuxFreshEpochProfileOpenV1.CleanupRequired(owner, reason):
+            probe_profiles_empty_v3.push(owner)
+            val closed = owner.close_v1()
+            if closed.owner.is_some(): probe_profiles_empty_v3.push(closed.owner.unwrap())
+            fail("real profile setup cleanup required:" + reason + ":" + closed.error)
+            nil
+        case LinuxFreshEpochProfileOpenV1.Ready(owner):
+            probe_profiles_empty_v3.push(owner)
+            Some(owner)
+
+fn probe_empty_cleanup_v3(profile: LinuxInstalledFreshEpochProfileV1, native: LinuxFreshEpochNativeOwnerV1):
+    val closed = native.close_v1()
+    if closed.owner.is_some(): probe_native_empty_v3.push(closed.owner.unwrap())
+    if not closed.closed:
+        fail("real native cleanup retained:" + closed.error)
+        return
+    val ended = profile.close_v1()
+    if ended.owner.is_some(): probe_profiles_empty_v3.push(ended.owner.unwrap())
+    expect(ended.closed).to_equal(true)
+    expect(closed.error).to_equal("")
+    expect(ended.error).to_equal("")
+
+describe "Actual installed probe cohort empty mechanism":
+    it "observes only the genuine original Host in its enforced partition":
+        step("Require separately provisioned empty topology; setup failures never skip/pass")
+        val opened = probe_profile_empty_open_v3()
+        if opened.is_none(): return
+        val profile = opened.unwrap()
+        val native = match linux_fresh_epoch_native_open_v1(profile):
+            case LinuxFreshEpochNativeOpenV1.Rejected(reason):
+                val ended = profile.close_v1()
+                if ended.owner.is_some(): probe_profiles_empty_v3.push(ended.owner.unwrap())
+                fail("actual native kernel custody unavailable:" + reason)
+                return
+            case LinuxFreshEpochNativeOpenV1.CleanupRequired(owner, reason):
+                probe_native_empty_v3.push(owner)
+                probe_empty_cleanup_v3(profile, owner)
+                fail("actual native acquisition incomplete:" + reason)
+                return
+            case LinuxFreshEpochNativeOpenV1.Ready(owner):
+                probe_native_empty_v3.push(owner)
+                owner
+        val before = native.successor_v1()
+        if before.is_err():
+            probe_empty_cleanup_v3(profile, native)
+            fail("actual retained native context unavailable:" + before.unwrap_err())
+            return
+        val observed = native.observe_probe_absence_v3()
+        probe_empty_cleanup_v3(profile, native)
+        match observed:
+            case Err(reason): fail("actual enforced cohort was not empty:" + reason)
+            case Ok(value):
+                expect(value.partition_identity_digest).to_equal(before.unwrap().partition_identity_digest)
+                expect(value.store_identity_digest).to_equal(before.unwrap().store_identity_digest)
