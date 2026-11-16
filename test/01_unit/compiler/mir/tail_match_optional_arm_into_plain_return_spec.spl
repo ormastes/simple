@@ -73,7 +73,9 @@ val TUPLE_SOURCE: text = "fn pick_pair(n: i64) -> (i64, text)?:\n    if n < 0:\n
 # tail and as an explicit return.
 val TUPLE_JOIN_SOURCE: text = "fn pick_ok(n: i64) -> (i64, bool)?:\n    if n < 0:\n        return None\n    Some((n, true))\n\n" +
     "fn tok_tail(n: i64, k: i64) -> (i64, bool):\n    if k > 0:\n        pick_ok(n)\n    else:\n        (0, false)\n\n" +
-    "fn tok_ret(n: i64, k: i64) -> (i64, bool):\n    return if k > 0: pick_ok(n) else: (0, false)\n"
+    "fn tok_ret(n: i64, k: i64) -> (i64, bool):\n    return if k > 0: pick_ok(n) else: (0, false)\n\n" +
+    "enum EK2:\n    A(v: i64)\n    B\n\n" +
+    "fn em_tail(e: EK2) -> (i64, bool):\n    match e:\n        case A(v): pick_ok(v)\n        case B: (0, false)\n"
 # A tuple payload with no native slot proof (f32) must fail closed.
 val TUPLE_F32_SOURCE: text = "fn pick_f(n: i64) -> (f32, i64)?:\n    if n < 0:\n        return None\n    Some((1.5, n))\n\n" +
     "fn tf(n: i64) -> (f32, i64):\n    return pick_f(n)\n"
@@ -142,6 +144,32 @@ fn returned_local_type(mir: text) -> text:
     val type_tail = local_tail.substring(local_tail.index_of("\"type\":") + 7, local_tail.len())
     type_tail.substring(0, type_tail.index_of(",\"kind\""))
 
+fn count_of(haystack: text, needle: text) -> i64:
+    haystack.split(needle).len() - 1
+
+fn first_aggregate_dest(mir: text) -> text:
+    val at = mir.index_of("""{"Aggregate":{"dest":""")
+    if at < 0:
+        return ""
+    val rest = mir.substring(at + 21, mir.len())
+    rest.substring(0, rest.index_of(","))
+
+fn expect_narrowed_tuple_join(mir: text):
+    """Exactly one unwrap (the `(A, B)?` arm), recovered by a pointer cast;
+    the Return was found and is not the Option envelope; and the raw
+    `(0, false)` arm's Aggregate is copied into the returned join untouched."""
+    expect(mir.len() > 0).to_equal(true)
+    expect(count_of(mir, "\"rt_unwrap_or_trap\"")).to_equal(1)
+    expect(mir).to_contain(PTR_TUPLE_I64_BOOL)
+    val ret_id = returned_local_id(mir)
+    expect(ret_id != "").to_equal(true)
+    val ret_type = returned_local_type(mir)
+    expect(ret_type != "").to_equal(true)
+    expect(is_option_envelope_type(ret_type)).to_equal(false)
+    val raw_arm = first_aggregate_dest(mir)
+    expect(raw_arm != "").to_equal(true)
+    expect(mir).to_contain("""{"Copy":{"dest":""" + ret_id + ",\"src\":" + raw_arm + "}")
+
 
 describe "tail match with an optional arm into a plain declared return":
     it "does not return the joined Option handle as the plain record":
@@ -173,18 +201,13 @@ describe "tail match with an optional arm into a plain declared return":
         expect(returns_tuple_from_ptr_cast(mir)).to_equal(true)
 
     it "narrows an if tail joining a tuple T? arm with a raw tuple arm":
-        val mir = lower_module_json(TUPLE_JOIN_SOURCE)["tok_tail"] ?? ""
-        expect(mir.len() > 0).to_equal(true)
-        expect(mir).to_contain("rt_unwrap_or_trap")
-        expect(mir).to_contain(PTR_TUPLE_I64_BOOL)
-        expect(is_option_envelope_type(returned_local_type(mir))).to_equal(false)
+        expect_narrowed_tuple_join(lower_module_json(TUPLE_JOIN_SOURCE)["tok_tail"] ?? "")
 
     it "narrows an explicit return of that tuple join the same way":
-        val mir = lower_module_json(TUPLE_JOIN_SOURCE)["tok_ret"] ?? ""
-        expect(mir.len() > 0).to_equal(true)
-        expect(mir).to_contain("rt_unwrap_or_trap")
-        expect(mir).to_contain(PTR_TUPLE_I64_BOOL)
-        expect(is_option_envelope_type(returned_local_type(mir))).to_equal(false)
+        expect_narrowed_tuple_join(lower_module_json(TUPLE_JOIN_SOURCE)["tok_ret"] ?? "")
+
+    it "narrows an enum-scrutinee match tail joining a tuple T? arm":
+        expect_narrowed_tuple_join(lower_module_json(TUPLE_JOIN_SOURCE)["em_tail"] ?? "")
 
     it "fails closed on a tuple T? payload with an unsupported element":
         val errors = lower_module_errors(TUPLE_F32_SOURCE)
