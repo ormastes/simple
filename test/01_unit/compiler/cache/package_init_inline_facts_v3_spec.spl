@@ -1,0 +1,134 @@
+# @req REQ-DTA-B3 REQ-DTA-H2 REQ-DTA-H4
+# Authored structural codec tests; no current-source admission is asserted.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.aspect_match_shard_v1.{JoinPointFactV1,
+    DirectoryJoinPointFactsV1, directory_join_point_facts_v1, directory_facts_key_v1}
+use compiler.common.cache_contract.package_init_tld_v1.{PackageInitTldV1,
+    package_init_tld_schema_v1, package_init_tld_valid_v1,
+    package_init_tld_encode_v1, package_init_tld_decode_v1,
+    package_init_tld_encode_v3, package_init_tld_decode_v3}
+use compiler.common.cache_contract.directory_join_point_table_v3.{directory_join_point_table_budget_v3}
+use compiler.common.cache_contract.physical_tld_v1.{three_payload_contract_budget_v1,
+    three_payload_contract_max_items_v1}
+
+fn inline_facts() -> DirectoryJoinPointFactsV1:
+    directory_join_point_facts_v1("pkg", ["pkg/δ.spl"],
+        [JoinPointFactV1(id: "pkg.δ.f", kind: "forward", symbol: "δ",
+            attrs: ["a", "β"], owner_file: "pkg/δ.spl", base_body_digest: "")], [], true)
+
+fn inline_package(table: DirectoryJoinPointFactsV1) -> PackageInitTldV1:
+    val root = sha256_text("actual structural fixture root")
+    PackageInitTldV1(package_id: "pkg", parent_scope_digest: nil,
+        membership_root_digest: root, ordered_member_ids: table.sorted_member_files,
+        aspect_root_digest: root, trait_root_digest: root, macro_root_digest: root,
+        extension_root_digest: root, template_root_digest: root,
+        initializer_contract_digest: root, ordered_initializer_refs: [],
+        file_tldr_root_digest: Some(root), join_point_facts_digest: Some(table.facts_key),
+        compiler_provider_id: Some("compiler/fixture"), active_guard_root_digest: Some(table.active_guard_root),
+        inline_join_point_facts: Some(table))
+
+describe "PackageInit explicit inline facts schema3":
+    it "roundtrips UTF8 facts and an unavailable base body without losing fields":
+        val value = inline_package(inline_facts())
+        expect(package_init_tld_schema_v1(value)).to_equal(3)
+        val bytes = package_init_tld_encode_v3(value)
+        expect(bytes.len() > 0).to_equal(true)
+        val decoded = package_init_tld_decode_v3(bytes)
+        expect(decoded.ok).to_equal(true)
+        val point = decoded.value.unwrap().inline_join_point_facts.unwrap().sorted_join_points[0]
+        expect(point.symbol).to_equal("δ")
+        expect(point.attrs).to_equal(["a", "β"])
+        expect(point.base_body_digest).to_equal("")
+        expect(package_init_tld_encode_v3(decoded.value.unwrap())).to_equal(bytes)
+
+    it "requires explicit current APIs and preserves legacy schema2 bytes":
+        val value = inline_package(inline_facts())
+        expect(package_init_tld_encode_v1(value)).to_equal([])
+        expect(package_init_tld_decode_v1(package_init_tld_encode_v3(value)).ok).to_equal(false)
+        val old = PackageInitTldV1(..value, inline_join_point_facts: nil)
+        expect(package_init_tld_schema_v1(old)).to_equal(2)
+        expect(package_init_tld_encode_v1(old)).to_equal(package_init_tld_encode_v3(old))
+        expect(package_init_tld_decode_v3(package_init_tld_encode_v1(old)).ok).to_equal(true)
+
+    it "binds scope membership guard and facts root to the containing package":
+        val value = inline_package(inline_facts())
+        expect(package_init_tld_valid_v1(PackageInitTldV1(..value, package_id: "other"))).to_equal(false)
+        expect(package_init_tld_valid_v1(PackageInitTldV1(..value, ordered_member_ids: ["pkg/other.spl"]))).to_equal(false)
+        expect(package_init_tld_valid_v1(PackageInitTldV1(..value, join_point_facts_digest: Some("sha256:" + sha256_text("other"))))).to_equal(false)
+        expect(package_init_tld_valid_v1(PackageInitTldV1(..value, active_guard_root_digest: Some("sha256:" + sha256_text("other"))))).to_equal(false)
+        expect(package_init_tld_valid_v1(PackageInitTldV1(..value, compiler_provider_id: nil))).to_equal(false)
+
+    it "rejects incomplete or noncanonical attributes despite a recomputed facts key":
+        val original = inline_facts()
+        val point = original.sorted_join_points[0]
+        val duplicate = DirectoryJoinPointFactsV1(..original,
+            sorted_join_points: [JoinPointFactV1(..point, attrs: ["a", "a"])])
+        val sealed_duplicate = DirectoryJoinPointFactsV1(..duplicate, facts_key: directory_facts_key_v1(duplicate))
+        expect(package_init_tld_encode_v3(inline_package(sealed_duplicate))).to_equal([])
+        val unsorted = DirectoryJoinPointFactsV1(..original,
+            sorted_join_points: [JoinPointFactV1(..point, attrs: ["β", "a"])])
+        val sealed_unsorted = DirectoryJoinPointFactsV1(..unsorted, facts_key: directory_facts_key_v1(unsorted))
+        expect(package_init_tld_encode_v3(inline_package(sealed_unsorted))).to_equal([])
+        expect(package_init_tld_encode_v3(inline_package(DirectoryJoinPointFactsV1(..original, complete: false)))).to_equal([])
+
+    it "rejects unknown kinds and foreign owners even with self-consistent digests":
+        val original = inline_facts()
+        val point = original.sorted_join_points[0]
+        for changed in [JoinPointFactV1(..point, kind: "unknown"), JoinPointFactV1(..point, owner_file: "other.spl")]:
+            val raw = DirectoryJoinPointFactsV1(..original, sorted_join_points: [changed])
+            val sealed = DirectoryJoinPointFactsV1(..raw, facts_key: directory_facts_key_v1(raw))
+            expect(package_init_tld_encode_v3(inline_package(sealed))).to_equal([])
+
+    it "rejects truncation trailing bytes and mismatched inline keys":
+        val bytes = package_init_tld_encode_v3(inline_package(inline_facts()))
+        var short: [u8] = []
+        var index = 0
+        while index + 1 < bytes.len():
+            short.push(bytes[index])
+            index = index + 1
+        expect(package_init_tld_decode_v3(short).ok).to_equal(false)
+        var extra = bytes
+        extra.push(0u8)
+        expect(package_init_tld_decode_v3(extra).ok).to_equal(false)
+        val raw = DirectoryJoinPointFactsV1(..inline_facts(), facts_key: "sha256:" + sha256_text("wrong"))
+        expect(package_init_tld_encode_v3(inline_package(raw))).to_equal([])
+
+    it "charges nested facts against the already used package item budget":
+        val budget = three_payload_contract_budget_v1()
+        budget.add_items(three_payload_contract_max_items_v1())
+        expect(directory_join_point_table_budget_v3(inline_facts(), budget)).to_equal(false)
+        expect(budget.ok).to_equal(false)
+
+    it "rejects duplicate point ids and duplicate child roots":
+        val original = inline_facts()
+        val point = original.sorted_join_points[0]
+        val duplicate_points = DirectoryJoinPointFactsV1(..original, sorted_join_points: [point, point])
+        val sealed_points = DirectoryJoinPointFactsV1(..duplicate_points, facts_key: directory_facts_key_v1(duplicate_points))
+        expect(package_init_tld_encode_v3(inline_package(sealed_points))).to_equal([])
+        val child = "sha256:" + sha256_text("child")
+        val duplicate_children = DirectoryJoinPointFactsV1(..original, sorted_child_roots: [child, child])
+        val sealed_children = DirectoryJoinPointFactsV1(..duplicate_children, facts_key: directory_facts_key_v1(duplicate_children))
+        expect(package_init_tld_encode_v3(inline_package(sealed_children))).to_equal([])
+
+    it "keeps schema1 encoding unchanged and refuses inline data without roots":
+        val value = inline_package(inline_facts())
+        val legacy = PackageInitTldV1(..value, inline_join_point_facts: nil,
+            file_tldr_root_digest: nil, join_point_facts_digest: nil,
+            compiler_provider_id: nil, active_guard_root_digest: nil)
+        expect(package_init_tld_schema_v1(legacy)).to_equal(1)
+        expect(package_init_tld_encode_v1(legacy)).to_equal(package_init_tld_encode_v3(legacy))
+        expect(package_init_tld_decode_v3(package_init_tld_encode_v1(legacy)).ok).to_equal(true)
+        val partial = PackageInitTldV1(..legacy, inline_join_point_facts: Some(inline_facts()))
+        expect(package_init_tld_schema_v1(partial)).to_equal(0)
+        expect(package_init_tld_encode_v3(partial)).to_equal([])
+
+    it "retains an explicitly complete empty table instead of omitting it":
+        val empty = directory_join_point_facts_v1("pkg", [], [], [], true)
+        val value = inline_package(empty)
+        val bytes = package_init_tld_encode_v3(value)
+        expect(bytes.len() > 0).to_equal(true)
+        val decoded = package_init_tld_decode_v3(bytes)
+        expect(decoded.ok).to_equal(true)
+        expect(decoded.value.unwrap().inline_join_point_facts != nil).to_equal(true)
+        expect(decoded.value.unwrap().inline_join_point_facts.unwrap().sorted_join_points.len()).to_equal(0)

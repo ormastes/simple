@@ -14,7 +14,7 @@
 
 use compiler.common.cache_contract.generic_tldr_view_v1.{GenericParamV1,
     GenericTemplateFieldV1, GenericTemplateEntryV1, GenericBoundV1,
-    GENERIC_TLDR_VIEW_SCHEMA_V1, GENERIC_PARAM_KIND_TYPE, GENERIC_PARAM_KIND_CONST}
+    GENERIC_TLDR_VIEW_SCHEMA_V2, generic_template_entry_valid_v2, GENERIC_TLDR_VIEW_SCHEMA_V1, GENERIC_PARAM_KIND_TYPE, GENERIC_PARAM_KIND_CONST}
 
 pub struct GenericFieldInputV1:
     name: text
@@ -32,21 +32,26 @@ pub struct GenericDeclInputV1:
     # Facet inputs (design generic_rr_hir_variant_obj.md): trailing, defaulted.
     bounds: [GenericBoundV1] = []
     body_digest: text = ""
+    # V2 callers supply real typed-projection roots; V1 does not promote them.
+    declaration_kind: text = ""
+    signature_digest: text = ""
+    instantiation_digest: text = ""
 
 val _PRIMITIVES = ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
     "f32", "f64", "bool", "text", "char", "unit", "Any"]
 
-fn _frame(value: text) -> text:
-    "{value.len()}:" + value
+fn _frame(value: text, byte_framed: bool = false) -> text:
+    val length = if byte_framed: value.byte_len() else: value.len()
+    "{length}:" + value
 
-fn _key_var(name: text) -> text:
-    "v" + _frame(name)
+fn _key_var(name: text, byte_framed: bool = false) -> text:
+    "v" + _frame(name, byte_framed)
 
-fn _key_con(name: text) -> text:
-    "c" + _frame(name)
+fn _key_con(name: text, byte_framed: bool = false) -> text:
+    "c" + _frame(name, byte_framed)
 
-fn _key_app(ctor: text, args: [text]) -> text:
-    "a" + _frame(ctor) + "l{args.len()}:" + args.join("")
+fn _key_app(ctor: text, args: [text], byte_framed: bool = false) -> text:
+    "a" + _frame(ctor, byte_framed) + "l{args.len()}:" + args.join("")
 
 struct _TyParse:
     key: text
@@ -66,13 +71,13 @@ fn _skip_ws(s: text, pos: i64) -> i64:
 fn _is_ident(ch: text) -> bool:
     (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_" or ch == "."
 
-fn _parse_args(s: text, pos: i64, d: GenericDeclInputV1, close: text) -> [_TyParse]:
+fn _parse_args(s: text, pos: i64, d: GenericDeclInputV1, close: text, byte_framed: bool = false) -> [_TyParse]:
     """Comma-separated type list up to `close`; last element carries the
     position after `close` (or an error)."""
     var out: [_TyParse] = []
     var i = _skip_ws(s, pos)
     while true:
-        val t = _parse_type(s, i, d)
+        val t = _parse_type(s, i, d, byte_framed)
         if t.error != "":
             return [t]
         out = out.push(t)
@@ -86,24 +91,24 @@ fn _parse_args(s: text, pos: i64, d: GenericDeclInputV1, close: text) -> [_TyPar
         return [_fail("expected '" + close + "' in type '" + s + "'")]
     out
 
-fn _parse_postfix(s: text, base: _TyParse) -> _TyParse:
+fn _parse_postfix(s: text, base: _TyParse, byte_framed: bool = false) -> _TyParse:
     var t = base
     while t.pos < s.len() and s.char_at(t.pos) == "?":
-        t = _TyParse(key: _key_app("Optional", [t.key]), pos: t.pos + 1, error: "", generic: t.generic)
+        t = _TyParse(key: _key_app("Optional", [t.key], byte_framed), pos: t.pos + 1, error: "", generic: t.generic)
     t
 
-fn _parse_type(s: text, pos: i64, d: GenericDeclInputV1) -> _TyParse:
+fn _parse_type(s: text, pos: i64, d: GenericDeclInputV1, byte_framed: bool = false) -> _TyParse:
     var i = _skip_ws(s, pos)
     if i >= s.len():
         return _fail("empty type in '" + s + "'")
     if s.char_at(i) == "[":
-        val parts = _parse_args(s, i + 1, d, "]")
+        val parts = _parse_args(s, i + 1, d, "]", byte_framed)
         if parts.len() != 2:
             if parts.len() == 1:
                 return parts[0]
             return _fail("array type takes one element type")
-        return _parse_postfix(s, _TyParse(key: _key_app("Array", [parts[0].key]), pos: parts[1].pos,
-            error: "", generic: parts[0].generic))
+        return _parse_postfix(s, _TyParse(key: _key_app("Array", [parts[0].key], byte_framed), pos: parts[1].pos,
+            error: "", generic: parts[0].generic), byte_framed)
     var j = i
     while j < s.len() and _is_ident(s.char_at(j)):
         j = j + 1
@@ -115,7 +120,7 @@ fn _parse_type(s: text, pos: i64, d: GenericDeclInputV1) -> _TyParse:
     var generic = false
     var has_args = false
     if k < s.len() and s.char_at(k) == "<":
-        val parts = _parse_args(s, k + 1, d, ">")
+        val parts = _parse_args(s, k + 1, d, ">", byte_framed)
         if parts.len() == 1 and parts[0].error != "":
             return parts[0]
         var a = 0
@@ -130,17 +135,17 @@ fn _parse_type(s: text, pos: i64, d: GenericDeclInputV1) -> _TyParse:
         if d.params[p] == name:
             if has_args:
                 return _fail("higher-kinded binder '" + name + "' is unsupported")
-            return _parse_postfix(s, _TyParse(key: _key_var(_binder_id(d, p)), pos: k, error: "", generic: true))
+            return _parse_postfix(s, _TyParse(key: _key_var(_binder_id(d, p), byte_framed), pos: k, error: "", generic: true), byte_framed)
         p = p + 1
     var key = ""
     if not has_args and _PRIMITIVES.contains(name):
-        key = _key_con(name)
+        key = _key_con(name, byte_framed)
     elif name == "Array" or name == "Dict" or name == "Optional" or name == "Result":
-        key = _key_app(name, arg_keys)
+        key = _key_app(name, arg_keys, byte_framed)
     else:
         val qualified = if name.contains("."): name else: d.module_path + "." + name
-        key = _key_app("Named:" + qualified, arg_keys)
-    _parse_postfix(s, _TyParse(key: key, pos: k, error: "", generic: generic))
+        key = _key_app("Named:" + qualified, arg_keys, byte_framed)
+    _parse_postfix(s, _TyParse(key: key, pos: k, error: "", generic: generic), byte_framed)
 
 fn _symbol_id(d: GenericDeclInputV1) -> text:
     d.module_path + "." + d.name
@@ -156,26 +161,25 @@ pub fn generic_type_text_key_v1(d: GenericDeclInputV1, type_text: text) -> Resul
         return Err("trailing text in type '" + type_text + "'")
     Ok(t.key)
 
-pub fn project_generic_template_v1(d: GenericDeclInputV1) -> Result<GenericTemplateEntryV1, text>:
+fn _project_generic_template_framed_v2(d: GenericDeclInputV1, byte_framed: bool) -> Result<GenericTemplateEntryV1, text>:
     if d.params.len() != d.param_kinds.len():
         return Err("generic parameter kind list does not match parameter list")
     var params: [GenericParamV1] = []
+    var seen_params: Dict<text, bool> = {}
     var i = 0
     while i < d.params.len():
         val kind = d.param_kinds[i]
         if kind != GENERIC_PARAM_KIND_TYPE and kind != GENERIC_PARAM_KIND_CONST:
             return Err("unsupported generic parameter kind '" + kind + "'")
-        var j = 0
-        while j < i:
-            if d.params[j] == d.params[i]:
-                return Err("duplicate generic parameter '" + d.params[i] + "'")
-            j = j + 1
+        if seen_params.contains_key(d.params[i]):
+            return Err("duplicate generic parameter '" + d.params[i] + "'")
+        seen_params[d.params[i]] = true
         params = params.push(GenericParamV1(index: i, kind: kind, binder_id: _binder_id(d, i), display_name: d.params[i]))
         i = i + 1
     var fields: [GenericTemplateFieldV1] = []
     for f in d.fields:
         val ff: GenericFieldInputV1 = f
-        val t = _parse_type(ff.type_text, 0, d)
+        val t = _parse_type(ff.type_text, 0, d, byte_framed)
         if t.error != "":
             return Err(t.error)
         if _skip_ws(ff.type_text, t.pos) != ff.type_text.len():
@@ -189,3 +193,59 @@ pub fn project_generic_template_v1(d: GenericDeclInputV1) -> Result<GenericTempl
         visibility_root: d.visibility_root, active_guard_root: d.active_guard_root,
         language_schema: GENERIC_TLDR_VIEW_SCHEMA_V1, params: params, fields: fields,
         bounds: d.bounds, body_digest: d.body_digest))
+
+# Identity projection only: the caller owns complete typed signature/default/
+# capture extraction and guard provenance. Missing metadata is not known-empty.
+fn _generic_input_bounded_v2(d: GenericDeclInputV1) -> bool:
+    if d.params.len() > 65536 or d.fields.len() > 65536 or d.bounds.len() > 65536: return false
+    val symbol_bytes = d.module_path.byte_len() + d.name.byte_len() + 1
+    if symbol_bytes > 1048576: return false
+    # Binder IDs repeat the qualified symbol; nominal nodes repeat the module
+    # prefix. Charge expansion before constructing either kind of key.
+    var budget: i64 = symbol_bytes + d.visibility_root.byte_len() + d.active_guard_root.byte_len()
+    budget = budget + (symbol_bytes + 32) * d.params.len()
+    if budget > 16777216: return false
+    for name in d.params:
+        budget = budget + name.byte_len() + 32
+        if budget > 16777216: return false
+    for bound in d.bounds:
+        budget = budget + bound.bound_key.byte_len() + 32
+        if budget > 16777216: return false
+    var type_work: i64 = 0
+    val binder_work = (if d.params.len() == 0: 1 else: d.params.len()) + symbol_bytes + 32
+    for field in d.fields:
+        type_work = type_work + field.type_text.byte_len() * binder_work
+        if type_work > 16777216: return false
+        budget = budget + field.name.byte_len() + field.type_text.byte_len() + 32
+        if budget > 16777216 or field.type_text.byte_len() > 65536: return false
+        var depth = 0
+        var nodes = 0
+        var i = 0
+        while i < field.type_text.byte_len():
+            val ch = field.type_text.byte_at(i)
+            if ch == 60u8 or ch == 91u8:
+                depth = depth + 1
+                nodes = nodes + 1
+            elif ch == 62u8 or ch == 93u8:
+                depth = depth - 1
+            elif ch == 63u8 or ch == 44u8:
+                nodes = nodes + 1
+            if depth < 0 or depth > 64 or nodes > 4096: return false
+            i = i + 1
+        if depth != 0: return false
+    budget <= 16777216
+
+pub fn project_generic_template_v2(d: GenericDeclInputV1) -> Result<GenericTemplateEntryV1, text>:
+    if not _generic_input_bounded_v2(d): return Err("generic V2 type input bounds exceeded")
+    val base = _project_generic_template_framed_v2(d, true)
+    if base.is_err(): return Err(base.unwrap_err())
+    var entry = base.unwrap()
+    entry.language_schema = GENERIC_TLDR_VIEW_SCHEMA_V2
+    entry.declaration_kind = d.declaration_kind
+    entry.signature_digest = d.signature_digest
+    entry.instantiation_digest = d.instantiation_digest
+    if not generic_template_entry_valid_v2(entry): return Err("incomplete or invalid generic V2 identity projection")
+    Ok(entry)
+
+pub fn project_generic_template_v1(d: GenericDeclInputV1) -> Result<GenericTemplateEntryV1, text>:
+    _project_generic_template_framed_v2(d, false)

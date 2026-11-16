@@ -2,7 +2,8 @@
 # This returns the live compiler owner so the caller can publish only actual
 # typed HIR/MIR and package artifacts.  It does not publish an index or claim
 # that any native module output has completed.
-use compiler.common.driver_compile_options.{CompileOptions}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1}
+use compiler.driver.cache.native_full_index_variant_v1.{native_full_index_variant_admit_v1}
 use compiler.common.driver_core_modes.{CompileMode, OutputFormat}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
@@ -22,7 +23,8 @@ struct NativeFullIndexSemanticRequestV1:
     scv_receipt_digest: text
     expected_spl_count: i64
     artifact_root: text
-    options: CompileOptions
+    phase: text
+    variant: ConfigVariantKeyV1
 
 fn native_full_index_pin_env_v1(key: text, value: text) -> bool:
     value != "" and env_set_process(key, value) and
@@ -66,7 +68,8 @@ fn native_full_index_pin_cold_environment_v1(
 fn native_full_index_compile_semantics_v1(
     request: NativeFullIndexSemanticRequestV1
 ) -> Result<CompilerDriver, text>:
-    val options = request.options
+    val admitted_variant = native_full_index_variant_admit_v1(request.phase, request.variant)?
+    val options = admitted_variant.options
     if request.artifact_root == "" or
             options.mode != CompileMode.Aot or
             options.cli_mode_text != "aot" or
@@ -86,6 +89,7 @@ fn native_full_index_compile_semantics_v1(
     if not native_full_index_pin_cold_environment_v1(request):
         return Err("full-index-compiler-environment-unavailable")
     val driver = compiler_driver_create(options)
+    driver.ctx.directory_semantic_variant_v3 = Some(admitted_variant.variant)
     driver.ctx.runtime_std_full_inventory_selection = Some(
         RuntimeStdFullInventorySelectionV1(
             request.artifact_root, request.snapshot_inventory_digest,

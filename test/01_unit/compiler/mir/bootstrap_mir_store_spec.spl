@@ -4,6 +4,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.mir.mir_data.*
 use compiler.mir.mir.*
 use compiler.common._Attributes.decl_attrs.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
+use compiler.common.cache_contract.mir_initializer_plan_v1.{MirInitializerStepV1, MirInitializerPlanV1}
 use compiler.mir._MirLowering.bootstrap_mir_store.{BootstrapMirStore, MirPublishPort, bootstrap_mir_store_with_port, BOOTSTRAP_MIR_STORE_OUTER_COUNT}
 
 # BSM P3: the flat bootstrap MIR registries are one owner. With a session
@@ -34,6 +35,7 @@ fn store_test_function(name: text, param_count: i64) -> MirFunction:
 var _fake_log: [text] = []
 var _fake_scope_running: bool = true
 var _fake_adopt_ok: bool = true
+var _fake_reject_text: text = ""
 var _fake_nodes_adopted: i64 = 0
 var _fake_committed_probe: i64 = 0
 
@@ -45,7 +47,7 @@ fn fake_adopt_function(name: text, function: MirFunction) -> bool:
 fn fake_adopt_text(value: text) -> bool:
     _fake_nodes_adopted = _fake_nodes_adopted + 1
     _fake_log = _fake_log.push("adopt_text:{value}")
-    _fake_adopt_ok
+    _fake_adopt_ok and (_fake_reject_text == "" or value != _fake_reject_text)
 
 fn fake_alloc_begin() -> bool:
     _fake_log = _fake_log.push("alloc_begin")
@@ -62,6 +64,7 @@ fn fake_session_store() -> BootstrapMirStore:
     _fake_log = []
     set_fake_scope_running(true)
     _fake_adopt_ok = true
+    _fake_reject_text = ""
     _fake_nodes_adopted = 0
     var store = bootstrap_mir_store_with_port(MirPublishPort(
         adopt_function: fake_adopt_function, adopt_text: fake_adopt_text,
@@ -213,3 +216,82 @@ describe "BootstrapMirStore publish cost":
             m = m + 1
         expect(legacy.legacy_outer_walks).to_equal(modules * BOOTSTRAP_MIR_STORE_OUTER_COUNT)
         expect(legacy.function_count()).to_equal(session.function_count())
+
+fn store_test_initializer_plan(index: i64, owner: text) -> MirInitializerPlanV1:
+    MirInitializerPlanV1(module_identity: owner, bootstrap_module_index: index,
+        ordered_steps: [MirInitializerStepV1(symbol_id: 9, name: "first"),
+            MirInitializerStepV1(symbol_id: 4, name: "second")],
+        emitted_init_symbol: "__simple_module_init_test")
+
+describe "Bootstrap MIR initializer receipt transport":
+    it "publishes ordered receipt only after all payload adoption succeeds":
+        var store = fake_session_store()
+        store.add_initializer_plan(store_test_initializer_plan(0, "app.one"))
+        stage_module(store, 0, 0)
+        expect(store.initializer_plan_at(0, "app.one")).to_be_nil()
+        set_fake_scope_running(false)
+        expect(store.publish_pending()).to_equal(true)
+        val plan = store.initializer_plan_at(0, "app.one").unwrap()
+        expect(plan.ordered_steps[0].symbol_id).to_equal(9)
+        expect(plan.ordered_steps[1].symbol_id).to_equal(4)
+        expect(plan.emitted_init_symbol).to_equal("__simple_module_init_test")
+        expect(_fake_log.contains("adopt_text:app.one")).to_equal(true)
+        expect(_fake_log.contains("adopt_text:first")).to_equal(true)
+        expect(_fake_log.contains("adopt_text:second")).to_equal(true)
+        expect(store.initializer_plan_at(0, "app.other")).to_be_nil()
+        expect(store.initializer_plan_at(1, "app.one")).to_be_nil()
+
+    it "does not publish a receipt on adoption failure or abort":
+        var store = fake_session_store()
+        store.add_initializer_plan(store_test_initializer_plan(0, "app.one"))
+        stage_module(store, 0, 0)
+        set_fake_scope_running(false)
+        _fake_reject_text = "second"
+        expect(store.publish_pending()).to_equal(false)
+        expect(_fake_log.contains("adopt_text:first")).to_equal(true)
+        expect(_fake_log.contains("alloc_begin")).to_equal(false)
+        expect(store.initializer_plans.len()).to_equal(0)
+        expect(store.initializer_plan_at(0, "app.one")).to_be_nil()
+        store.discard_pending()
+        expect(store.pending_initializer_plans.len()).to_equal(0)
+
+    it "keeps missing and confirmed empty distinct and clears receipts on reset":
+        var store = fake_session_store()
+        val empty = MirInitializerPlanV1(module_identity: "app.empty", bootstrap_module_index: 0,
+            ordered_steps: [], emitted_init_symbol: "")
+        store.add_initializer_plan(empty)
+        stage_module(store, 0, 0)
+        set_fake_scope_running(false)
+        expect(store.publish_pending()).to_equal(true)
+        expect(store.initializer_plan_at(0, "app.empty").unwrap().ordered_steps.len()).to_equal(0)
+        set_fake_scope_running(true)
+        stage_module(store, 1, 0)
+        set_fake_scope_running(false)
+        expect(store.publish_pending()).to_equal(true)
+        expect(store.initializer_plan_at(1, "app.missing")).to_be_nil()
+        store.reset()
+        expect(store.initializer_plan_at(0, "app.empty")).to_be_nil()
+        expect(store.initializer_plans.len()).to_equal(0)
+
+    it "rejects duplicate and conflicting receipts for a committed module index":
+        var store = fake_session_store()
+        store.add_initializer_plan(store_test_initializer_plan(0, "app.one"))
+        store.add_initializer_plan(store_test_initializer_plan(0, "app.other"))
+        stage_module(store, 0, 0)
+        set_fake_scope_running(false)
+        expect(store.publish_pending()).to_equal(true)
+        expect(store.initializer_plan_at(0, "app.one")).to_be_nil()
+        expect(store.initializer_plan_at(0, "app.other")).to_be_nil()
+
+    it "retains prior module receipts while aborting a later module":
+        var store = fake_session_store()
+        store.add_initializer_plan(store_test_initializer_plan(0, "app.one"))
+        stage_module(store, 0, 0)
+        set_fake_scope_running(false)
+        expect(store.publish_pending()).to_equal(true)
+        set_fake_scope_running(true)
+        store.add_initializer_plan(store_test_initializer_plan(1, "app.two"))
+        stage_module(store, 1, 0)
+        store.discard_pending()
+        expect(store.initializer_plan_at(0, "app.one").unwrap().module_identity).to_equal("app.one")
+        expect(store.initializer_plan_at(1, "app.two")).to_be_nil()

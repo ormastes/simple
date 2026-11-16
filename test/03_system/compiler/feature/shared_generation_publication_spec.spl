@@ -1,12 +1,14 @@
 # @cover src/compiler/80.driver/cache/shared_generation_store.spl 80%
 use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{env_get}
 use compiler.driver.cache.shared_generation_store.{
     shared_generation_publish_v1, shared_generation_publish_fault_v1,
     shared_generation_pin_current_v1, shared_generation_pin_current_owned_v1,
     shared_generation_release_v1, shared_generation_gc_v1,
     shared_generation_reclaim_dead_leases_v1, shared_generation_delete_v1,
-    shared_generation_publish_bounded_v1
+    shared_generation_publish_bounded_v1, shared_generation_quarantine_v2,
+    shared_generation_lease_matches_v2
 }
 
 extern fn rt_dir_create_all(path: text) -> bool
@@ -203,3 +205,70 @@ describe "MBH-NFR-006 shared publication lifecycle":
         expect(shared_generation_publish_bounded_v1(
             root, generation, 2, "next", 64)).to_equal(
             "publication-exceeds-bound")
+
+
+describe "Directory store lease preservation and corruption quarantine":
+    it "does not delete an existing lease when another pin collides":
+        val root = shared_generation_test_root("pin-collision-v2")
+        val _ = rt_dir_remove_all(root)
+        val generation = shared_generation_publish_v1(root, "", 1, "complete")
+        val first = shared_generation_pin_current_owned_v1(root, "collision", "owner", 9223372036854775807)
+        expect(first.valid).to_equal(true)
+        val second = shared_generation_pin_current_owned_v1(root, "collision", "other", 9223372036854775807)
+        expect(second.valid).to_equal(false)
+        expect(second.reason).to_equal("lease-create-failed")
+        expect(shared_generation_lease_matches_v2(root, "collision", generation, "owner")).to_equal(true)
+        expect(shared_generation_release_v1(root, "collision")).to_equal(true)
+
+    it "preserves pinned corrupt bytes then quarantines after release":
+        val root = shared_generation_test_root("quarantine-pinned-v2")
+        val _ = rt_dir_remove_all(root)
+        val generation = shared_generation_publish_v1(root, "", 1, "complete")
+        val reader = shared_generation_pin_current_v1(root, "held")
+        expect(reader.valid).to_equal(true)
+        expect(rt_file_write("{root}/generations/{generation}.generation", "corrupt")).to_equal(true)
+        expect(shared_generation_quarantine_v2(root, generation).is_err()).to_equal(true)
+        expect(rt_file_exists("{root}/generations/{generation}.generation")).to_equal(true)
+        expect(shared_generation_release_v1(root, "held")).to_equal(true)
+        expect(shared_generation_quarantine_v2(root, generation).is_ok()).to_equal(true)
+        expect(rt_file_exists("{root}/quarantine/{generation}.generation")).to_equal(true)
+        expect(rt_file_exists("{root}/CURRENT")).to_equal(false)
+        expect(shared_generation_pin_current_v1(root, "after").valid).to_equal(false)
+
+    it "refuses quarantine when lease enumeration fails or evidence conflicts":
+        val root = shared_generation_test_root("quarantine-refusal-v2")
+        val _ = rt_dir_remove_all(root)
+        val generation = shared_generation_publish_v1(root, "", 1, "complete")
+        expect(rt_dir_remove_all("{root}/leases")).to_equal(true)
+        expect(shared_generation_quarantine_v2(root, generation).is_err()).to_equal(true)
+        expect(rt_file_exists("{root}/CURRENT")).to_equal(true)
+        expect(rt_dir_create_all("{root}/leases")).to_equal(true)
+        expect(rt_dir_create_all("{root}/quarantine")).to_equal(true)
+        expect(rt_file_write("{root}/quarantine/{generation}.generation", "earlier-evidence")).to_equal(true)
+        expect(shared_generation_quarantine_v2(root, generation).is_err()).to_equal(true)
+        expect(rt_file_exists("{root}/generations/{generation}.generation")).to_equal(true)
+
+    it "retains newline payloads without treating payload lines as header rows":
+        val root = shared_generation_test_root("newline-payload-v2")
+        val _ = rt_dir_remove_all(root)
+        val payload = "line\n".repeat(4096)
+        val generation = shared_generation_publish_v1(root, "", 1, payload)
+        expect(generation.len()).to_equal(64)
+        val reader = shared_generation_pin_current_v1(root, "newlines")
+        expect(reader.valid).to_equal(true)
+        expect(reader.payload).to_equal(payload)
+        expect(shared_generation_release_v1(root, "newlines")).to_equal(true)
+        val bad_header = "not-a-schema\n".repeat(4096)
+        val bad_digest = sha256_text(bad_header)
+        expect(rt_file_write("{root}/generations/{bad_digest}.generation", bad_header)).to_equal(true)
+        expect(rt_file_write("{root}/CURRENT", bad_digest)).to_equal(true)
+        expect(shared_generation_pin_current_v1(root, "bad-header").valid).to_equal(false)
+
+    it "charges retained quarantine evidence to the publication budget":
+        val root = shared_generation_test_root("quarantine-budget-v2")
+        val _ = rt_dir_remove_all(root)
+        val generation = shared_generation_publish_v1(root, "", 1, "before")
+        expect(rt_file_write("{root}/generations/{generation}.generation", "corrupt".repeat(512))).to_equal(true)
+        expect(shared_generation_quarantine_v2(root, generation).is_ok()).to_equal(true)
+        expect(shared_generation_publish_bounded_v1(root, "", 1, "small", 512)).to_equal("publication-exceeds-bound")
+        expect(rt_file_exists("{root}/quarantine/{generation}.generation")).to_equal(true)

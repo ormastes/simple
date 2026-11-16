@@ -1,0 +1,87 @@
+use std.spec.{describe, it, expect}
+use compiler.common.cache_contract.aspect_plugin_model_v1.*
+use compiler.common.cache_contract.aspect_match_shard_v1.{pointcut_selector_parse_v1}
+
+fn plugin_test_definition() -> PluginDefinitionV1:
+    PluginDefinitionV1(code_digest: "sha256:" + "1".repeat(64), fields: [
+        PluginConfigFieldV1(name: "directory", role: PluginFieldRoleV1.Scope),
+        PluginConfigFieldV1(name: "matcher", role: PluginFieldRoleV1.Scope),
+        PluginConfigFieldV1(name: "level", role: PluginFieldRoleV1.Instance)])
+
+fn plugin_test_values(directory: text, matcher: text, level: text) -> [PluginConfigValueV1]:
+    [PluginConfigValueV1(name: "directory", value: directory),
+     PluginConfigValueV1(name: "matcher", value: matcher),
+     PluginConfigValueV1(name: "level", value: level)]
+
+describe "typed plugin identity and predicate contracts":
+    it "compiles a predicate through the existing canonical parser":
+        val actual = SelectorPointcutV1(source: " attr ( logged ) ").compile()
+        val expected = pointcut_selector_parse_v1("attr(logged)")
+        expect(actual.selector_digest).to_equal(expected.selector_digest)
+        expect(actual.supported).to_equal(true)
+        expect(actual.nodes.len()).to_equal(expected.nodes.len())
+        expect(SelectorPointcutV1(source: "call(f)").compile().supported).to_equal(false)
+
+    it "shares one descriptor across directories without retaining scoped values":
+        val pool = PluginInstancePoolV1.create(2).unwrap()
+        val first = pool.acquire(plugin_test_definition(), plugin_test_values("src/a", "attr(a)", "debug")).unwrap()
+        val second = pool.acquire(plugin_test_definition(), plugin_test_values("src/b", "attr(b)", "debug")).unwrap()
+        expect(first.hit).to_equal(false)
+        expect(second.hit).to_equal(true)
+        expect(second.instance.key).to_equal(first.instance.key)
+        expect(second.instance.values.len()).to_equal(1)
+        expect(second.instance.values[0].name).to_equal("level")
+        expect(second.instance.values[0].value).to_equal("debug")
+        expect(pool.created_count).to_equal(1)
+
+    it "normalizes input order and keeps code, schema roles and semantic config in identity":
+        val definition = plugin_test_definition()
+        val values = plugin_test_values("src/a", "attr(a)", "debug")
+        val first = plugin_instance_descriptor_v1(definition, values).unwrap()
+        val reordered = PluginDefinitionV1(code_digest: definition.code_digest,
+            fields: [definition.fields[2], definition.fields[0], definition.fields[1]])
+        val order = plugin_instance_descriptor_v1(reordered, [values[1], values[2], values[0]]).unwrap()
+        expect(order.key).to_equal(first.key)
+        val changed = plugin_instance_descriptor_v1(definition, plugin_test_values("src/a", "attr(a)", "info")).unwrap()
+        expect(changed.key == first.key).to_equal(false)
+        val code = PluginDefinitionV1(code_digest: "sha256:" + "2".repeat(64), fields: definition.fields)
+        expect(plugin_instance_descriptor_v1(code, values).unwrap().key == first.key).to_equal(false)
+        val roles = PluginDefinitionV1(code_digest: definition.code_digest, fields: [
+            PluginConfigFieldV1(name: "directory", role: PluginFieldRoleV1.Instance),
+            definition.fields[1], definition.fields[2]])
+        expect(plugin_instance_descriptor_v1(roles, values).unwrap().key == first.key).to_equal(false)
+
+    it "refuses unknown, missing and duplicate fields rather than dropping them":
+        val definition = plugin_test_definition()
+        val values = plugin_test_values("src/a", "attr(a)", "debug")
+        expect(plugin_instance_descriptor_v1(definition, [values[0], values[1]]).is_err()).to_equal(true)
+        expect(plugin_instance_descriptor_v1(definition, [values[0], values[1], values[1]]).is_err()).to_equal(true)
+        expect(plugin_instance_descriptor_v1(definition, [values[0], values[1],
+            PluginConfigValueV1(name: "undeclared", value: "x")]).is_err()).to_equal(true)
+        val duplicate = PluginDefinitionV1(code_digest: definition.code_digest,
+            fields: [definition.fields[0], definition.fields[0], definition.fields[2]])
+        expect(plugin_instance_descriptor_v1(duplicate, values).is_err()).to_equal(true)
+
+    it "rejects missing code identity and bounded-resource excess without evicting live identities":
+        val definition = plugin_test_definition()
+        val missing = PluginDefinitionV1(code_digest: "", fields: definition.fields)
+        expect(plugin_instance_descriptor_v1(missing, plugin_test_values("a", "b", "c")).is_err()).to_equal(true)
+        expect(plugin_instance_descriptor_v1(definition, plugin_test_values("a", "b", "x".repeat(65536))).is_err()).to_equal(true)
+        expect(PluginInstancePoolV1.create(0).is_err()).to_equal(true)
+        expect(PluginInstancePoolV1.create(4097).is_err()).to_equal(true)
+        val pool = PluginInstancePoolV1.create(1).unwrap()
+        val first = pool.acquire(definition, plugin_test_values("a", "b", "debug")).unwrap()
+        expect(pool.acquire(definition, plugin_test_values("a", "b", "info")).is_err()).to_equal(true)
+        expect(pool.acquire(definition, plugin_test_values("other", "different", "debug")).unwrap().hit).to_equal(true)
+        expect(pool.instances[first.instance.key].canonical_identity).to_equal(first.instance.canonical_identity)
+        expect(pool.created_count).to_equal(1)
+
+    it "checks canonical identity at a digest hit instead of trusting the hash alone":
+        val definition = plugin_test_definition()
+        val values = plugin_test_values("a", "b", "debug")
+        val wanted = plugin_instance_descriptor_v1(definition, values).unwrap()
+        val pool = PluginInstancePoolV1.create(1).unwrap()
+        pool.instances[wanted.key] = PluginInstanceDescriptorV1(key: wanted.key,
+            canonical_identity: "different identity", values: [])
+        expect(pool.acquire(definition, values).is_err()).to_equal(true)
+        expect(pool.hits).to_equal(0)
